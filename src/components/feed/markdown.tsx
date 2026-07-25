@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, memo, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import { CopyButton, copyText } from "./CopyButton";
@@ -224,6 +224,28 @@ function fenceLang(line: string): string | null {
   return line.match(/^\s*```+\s*([A-Za-z0-9+#_-]+)/)?.[1] ?? null;
 }
 
+/* One line that is not part of a multi-line block: a styled heading or
+   blockquote, otherwise the inline pass. */
+function lineNode(line: string, key: number | string): ReactNode {
+  const heading = line.match(/^#{1,6}\s+(.*)$/);
+  if (heading) {
+    return (
+      <span key={key} className="text-[14px] font-bold">
+        {md(heading[1])}
+      </span>
+    );
+  }
+  const quote = line.match(/^>\s?(.*)$/);
+  if (quote) {
+    return (
+      <span key={key} className="border-l-2 border-border pl-2 text-muted">
+        {md(quote[1])}
+      </span>
+    );
+  }
+  return <Fragment key={key}>{md(line)}</Fragment>;
+}
+
 /* Block-level pass over `lines[from, to)`, appended to `out`. `lines` may be a
    TAIL of the document starting at absolute line `base`: every node is keyed by
    its absolute index and the trailing-newline bookkeeping reads `out` rather
@@ -266,24 +288,7 @@ function pushBlocks(out: ReactNode[], lines: string[], from: number, to: number,
       out.push(<MdImageRow key={`i${base + start}`} images={images} />);
       continue;
     }
-    const line = lines[i];
-    const heading = line.match(/^#{1,6}\s+(.*)$/);
-    const quote = line.match(/^>\s?(.*)$/);
-    if (heading) {
-      out.push(
-        <span key={base + i} className="text-[14px] font-bold">
-          {md(heading[1])}
-        </span>,
-      );
-    } else if (quote) {
-      out.push(
-        <span key={base + i} className="border-l-2 border-border pl-2 text-muted">
-          {md(quote[1])}
-        </span>,
-      );
-    } else {
-      out.push(<Fragment key={base + i}>{md(line)}</Fragment>);
-    }
+    out.push(lineNode(lines[i], base + i));
     i++;
     /* The newline belongs to the document, not to the slice: a slice that stops
        short of the end is followed by more lines, so it keeps its separator. */
@@ -301,231 +306,385 @@ export function mdBlocks(text: string): ReactNode {
   return out;
 }
 
-/* How far the block extending from `lines[i]` reaches, and whether a line
-   arriving after `limit` could still be swallowed by it. */
-function blockSpan(lines: string[], i: number, limit: number): { end: number; extendable: boolean } {
-  if (FENCE_OPEN_RE.test(lines[i])) {
-    let j = i + 1;
-    while (j < limit && !FENCE_CLOSE_RE.test(lines[j])) j++;
-    /* A closed fence is finished; an open one keeps eating whatever comes. */
-    return j < limit ? { end: j + 1, extendable: false } : { end: limit, extendable: true };
-  }
-  const run = TABLE_ROW_RE.test(lines[i]) ? TABLE_ROW_RE : IMAGE_LINE_RE.test(lines[i]) ? IMAGE_LINE_RE : null;
-  if (run) {
-    let j = i;
-    while (j < limit && run.test(lines[j])) j++;
-    return { end: j, extendable: true };
-  }
-  return { end: i + 1, extendable: false };
-}
 
-/**
- * How many leading lines of a still-arriving message can no longer change
- * meaning. The last line has no terminating newline yet, so it is always
- * volatile; and a construct that runs up against it — an unclosed fence, a
- * table or image run that the next line may join — is volatile with it.
- * Everything before that point is final: later deltas cannot reinterpret it.
- */
-export function settledLineCount(lines: string[]): number {
-  const complete = lines.length - 1;
-  let i = 0;
-  while (i < complete) {
-    const span = blockSpan(lines, i, complete);
-    if (span.extendable && span.end >= complete) return i;
-    i = span.end;
-  }
-  return Math.max(complete, 0);
-}
+/* ---------------------------------------------------------------------------
+   Streaming.
 
-/* Lines the agent is still writing, rendered so that nothing ever re-interprets
-   itself on a later delta — the message must not twitch as it is typed. The
-   inline pass alone already degrades to plain text for any construct whose
-   closer has not arrived (`**bol`, a half-written row), and the block grammar
-   runs only where the answer can no longer change. Returns whether it opened
-   with a block element, which the caller answers by dropping the newline the
-   settled slice left pending — exactly what the settled pass will do when these
-   lines eventually freeze. */
-function pushPending(out: ReactNode[], lines: string[], from: number, base: number): boolean {
-  const last = lines.length - 1;
-  if (FENCE_OPEN_RE.test(lines[from] ?? "")) {
-    /* A message may stop exactly ON its closing fence: that line has no newline
-       yet, but the code between the fences is complete, and leaving the last
-       block of an answer raw until the turn settles is the visible defect. The
-       cost is the rare delta that continues the line and takes the block back. */
-    if (last > from && FENCE_CLOSE_RE.test(lines[last])) {
-      out.push(
-        <CodeBlock key={`c${base + from}`} code={lines.slice(from + 1, last).join("\n")} lang={fenceLang(lines[from])} />,
-      );
-      return true;
-    }
-    /* An open fence stays verbatim. Its body is code, and a growing <pre> would
-       re-run highlight.js on every delta. */
-    for (let i = from; i <= last; i++) {
-      out.push(<Fragment key={`p${base + i}`}>{lines[i]}</Fragment>);
-      if (i < last) out.push("\n");
-    }
-    return false;
-  }
-  /* The closed lines of a trailing table or image run do render — that is how a
-     message ENDING in a table looks like its settled self while it streams. A
-     table waits for its second row: until that row lands the header/body split
-     is still open, and deciding it early is exactly the kind of
-     re-interpretation this avoids. Rows only ever append after. */
-  const closed = lines.slice(from, last);
-  const rows = closed.length >= 2 && closed.every((line) => TABLE_ROW_RE.test(line)) ? closed : null;
-  const matches = rows ? [] : closed.map((line) => line.match(IMAGE_LINE_RE));
-  const images = matches.length && matches.every((m) => m !== null)
-    ? matches.map((m) => ({ alt: m![1], src: m![2] }))
-    : null;
-  let i = from;
-  let block = false;
-  if (rows || images) {
-    /* Same key the settled pass will give this block, so it is reconciled in
-       place — the table does not blink out and back when the run terminates. */
-    out.push(rows
-      ? <MdTable key={`t${base + from}`} rows={rows} />
-      : <MdImageRow key={`i${base + from}`} images={images!} />);
-    i = last;
-    block = true;
-  }
-  for (; i <= last; i++) {
-    out.push(<Fragment key={`p${base + i}`}>{md(lines[i])}</Fragment>);
-    if (i < last) out.push("\n");
-  }
-  return block;
-}
+   A live turn row re-renders on every delta, so the renderer above cannot just
+   be re-run: the message would be re-parsed hundreds of times. The machine
+   below consumes a message the way it arrives — one complete line at a time —
+   and appends the nodes it produces to a list it never re-walks. A delta only
+   ever touches the line still being written and the construct that line is
+   inside, so its cost is the delta's, not the accumulated message's.
+--------------------------------------------------------------------------- */
 
-/* How much text before the cached boundary is compared to detect a rewrite. */
+/** Nodes per chunk: the ceiling on what one settled line can make React redo. */
+const CHUNK = 48;
+/** Text kept before the boundary to recognise the message on the next delta. */
 const ANCHOR = 128;
 
+/* A run of already-rendered nodes. A chunk's element is re-created only when
+   its own nodes change, so React skips every untouched chunk on element
+   identity alone — it never walks what the message has already shown. */
+function MdChunk({ nodes }: { nodes: ReactNode[] }): ReactNode {
+  return nodes;
+}
+
+interface MdChunk {
+  key: number;
+  /** Char offset of the chunk's first line, and the separator owed at it —
+      a chunk always begins at a line where no construct is open, so this is
+      all the context needed to re-parse from here. */
+  from: number;
+  sep: boolean;
+  /** Lines consumed into this chunk, so a trim can recount what survived. */
+  lines: number;
+  nodes: ReactNode[];
+  element: ReactNode;
+}
+
+interface MdRegion {
+  chunks: MdChunk[];
+  keys: number;
+}
+
+function newRegion(): MdRegion {
+  return { chunks: [], keys: 0 };
+}
+
+/** The chunk to append to, cutting a new one when the current is full. Only
+    ever called where no construct is open, so a chunk boundary is always a
+    point the message can be re-parsed from. */
+function chunkFor(region: MdRegion, from: number, sep: boolean): MdChunk {
+  const last = region.chunks[region.chunks.length - 1];
+  if (last && last.nodes.length < CHUNK) return last;
+  const chunk: MdChunk = { key: region.keys++, from, sep, lines: 0, nodes: [], element: null };
+  region.chunks.push(chunk);
+  return chunk;
+}
+
+/** Re-creates the live chunk's element; every frozen chunk keeps its own. */
+function seal(region: MdRegion): void {
+  const chunk = region.chunks[region.chunks.length - 1];
+  chunk.element = <MdChunk key={chunk.key} nodes={chunk.nodes} />;
+}
+
+function regionNodes(region: MdRegion): ReactNode[] {
+  return region.chunks.map((chunk) => chunk.element);
+}
+
+/* The construct currently swallowing lines. It owns exactly one node slot in
+   the live chunk, so it can change shape — a row count deciding a table, a
+   fence closing — by re-emitting that slot, never by moving anything. */
+type MdRun =
+  | { kind: "fence"; slot: number; sep: boolean; key: number; lang: string | null; code: string[]; joined: string | null; body: MdRegion; shown: number }
+  | { kind: "table"; slot: number; sep: boolean; key: number; rows: string[] }
+  | { kind: "images"; slot: number; sep: boolean; key: number; images: { alt: string; src: string }[] };
+
 export interface MdStreamState {
-  /** Chars already parsed into `blocks`, at a line start unless `lineStart`. */
-  settledChars: number;
-  /** Absolute index of the first unparsed line — the key base for the next slice. */
-  settledLines: number;
-  /** Whether `settledChars` sits at a line start (false only once a completed
-      item has consumed its final, unterminated line). */
+  /** Chars consumed into nodes: the start of the line still being written.
+      Everything a delta does begins here. */
+  stableChars: number;
+  /** Lines consumed into nodes. */
+  stableLines: number;
+  /** False once a completed message has consumed its final, unterminated line. */
   lineStart: boolean;
-  blocks: ReactNode[];
-  /** Bumped whenever `blocks` changes: `blocks` is grown in place, so this is
-      what tells the memoized prefix that it has to re-render. */
-  revision: number;
-  /** Whether the prefix's trailing newline was dropped for a pending block, and
-      so has to come back if that block turns out not to be one after all. */
-  droppedNewline: boolean;
-  /** Text ending at `settledChars`, compared per delta instead of the prefix. */
+  region: MdRegion;
+  run: MdRun | null;
+  /** A newline owed to the next node, dropped if that node is a block —
+      which is how the separator bookkeeping stays local to one append. */
+  sep: boolean;
+  /** Whether the volatile line is currently being shown as a closing fence. */
+  provisional: boolean;
   anchor: string;
-  /** Inputs and output of the last advance, to make a repeated render free. */
   source: string;
   streaming: boolean;
   rendered: ReactNode;
-  /** Chars scanned so far. A delta adds only the text from the last stable
-      boundary — never the accumulated message. */
-  scannedChars: number;
-  /** Lines block-parsed so far: every line is parsed exactly once. */
-  parsedLines: number;
+  keys: number;
 }
 
 export function createMdStream(): MdStreamState {
   return {
-    settledChars: 0,
-    settledLines: 0,
+    stableChars: 0,
+    stableLines: 0,
     lineStart: true,
-    blocks: [],
-    revision: 0,
-    droppedNewline: false,
+    region: newRegion(),
+    run: null,
+    sep: false,
+    provisional: false,
     anchor: "",
     source: "",
     streaming: false,
     rendered: null,
-    scannedChars: 0,
-    parsedLines: 0,
+    keys: 0,
   };
 }
 
-/**
- * Whether what was parsed still describes the head of `text`.
- *
- * Deltas append; anything else — a completed item replacing its draft, the
- * bounded projection trimming its head — has to invalidate the cache. Comparing
- * the whole prefix would put the accumulated length back into every delta, so
- * while streaming the check is the anchor window ending at the boundary plus
- * monotone length. The completion call, which is the one that can legitimately
- * carry rewritten text, is checked exactly — it happens once per item.
- */
-function reusable(state: MdStreamState, text: string, streaming: boolean): boolean {
-  if (state.settledChars === 0) return true;
-  if (text.length < state.settledChars) return false;
-  if (!state.lineStart && text.length !== state.settledChars) return false;
-  if (!streaming) return text.startsWith(state.source.slice(0, state.settledChars));
-  return text.length >= state.source.length
-    && text.slice(Math.max(0, state.settledChars - ANCHOR), state.settledChars) === state.anchor;
+function resetMdStream(state: MdStreamState): void {
+  state.stableChars = 0;
+  state.stableLines = 0;
+  state.lineStart = true;
+  state.region = newRegion();
+  state.run = null;
+  state.sep = false;
+  state.provisional = false;
+  state.anchor = "";
 }
 
-/* The parsed prefix, isolated behind memo: a delta that settles nothing leaves
-   `revision` alone and React skips this subtree without walking it. */
-const SettledPrefix = memo(function SettledPrefix({ nodes }: { nodes: ReactNode[]; revision: number }) {
-  return nodes;
-});
+/** What an open run looks like right now, and whether that is a block element. */
+function runNode(run: MdRun, closing: boolean): { node: ReactNode; block: boolean } {
+  if (run.kind === "images") return { node: <MdImageRow key={`i${run.key}`} images={run.images} />, block: true };
+  if (run.kind === "table") {
+    /* One row cannot say whether it is a header: rendering it as a table now
+       would move it into the header when the separator row lands. */
+    if (!closing && run.rows.length < 2) return { node: lineNode(run.rows[0], `p${run.key}`), block: false };
+    return { node: <MdTable key={`t${run.key}`} rows={run.rows} />, block: true };
+  }
+  if (closing) {
+    run.joined ??= run.code.join("\n");
+    return { node: <CodeBlock key={`c${run.key}`} code={run.joined} lang={run.lang} />, block: true };
+  }
+  /* An open fence stays verbatim: its body is code, and a growing <pre> would
+     re-run highlight.js on every delta. The lines already written accumulate
+     in their own region, so a new one costs one node, not a re-render. */
+  return { node: <MdChunk key={`f${run.key}`} nodes={regionNodes(run.body)} />, block: false };
+}
+
+/* Re-emits the open run's slot in place. Truncating back to the slot is what
+   lets a run change shape without leaving anything behind — and because the
+   slot never moves, a block that is already on screen is never remounted. */
+function paintRun(state: MdStreamState, closing: boolean): void {
+  const run = state.run!;
+  const chunk = state.region.chunks[state.region.chunks.length - 1];
+  chunk.nodes.length = run.slot;
+  const { node, block } = runNode(run, closing);
+  if (!block && run.sep) chunk.nodes.push("\n");
+  chunk.nodes.push(node);
+  state.sep = !block;
+  seal(state.region);
+}
+
+function closeRun(state: MdStreamState): void {
+  paintRun(state, true);
+  state.run = null;
+  state.provisional = false;
+}
+
+/** One more verbatim line of an open fence, appended to its own region. */
+function pushFenceLine(run: Extract<MdRun, { kind: "fence" }>, line: string, key: number): void {
+  const chunk = chunkFor(run.body, 0, false);
+  if (run.shown++ > 0) chunk.nodes.push("\n");
+  chunk.nodes.push(<Fragment key={key}>{line}</Fragment>);
+  seal(run.body);
+}
+
+/** Appends one finished line's node, honouring the owed separator. */
+function emitNode(state: MdStreamState, node: ReactNode, block: boolean): void {
+  const chunk = state.region.chunks[state.region.chunks.length - 1];
+  if (!block && state.sep) chunk.nodes.push("\n");
+  chunk.nodes.push(node);
+  state.sep = !block;
+  seal(state.region);
+}
+
+/* Consumes one COMPLETE line — a line whose newline has arrived, so neither its
+   text nor (given the run it lands in) its meaning can change again. */
+function consume(state: MdStreamState, line: string, from: number): void {
+  const run = state.run;
+  if (run) {
+    /* A line the run swallows belongs to the chunk the run lives in. */
+    const held = state.region.chunks[state.region.chunks.length - 1];
+    if (run.kind === "fence") {
+      held.lines++;
+      if (FENCE_CLOSE_RE.test(line)) {
+        closeRun(state);
+        return;
+      }
+      run.code.push(line);
+      run.joined = null;
+      pushFenceLine(run, line, state.keys++);
+      paintRun(state, false);
+      return;
+    }
+    if (run.kind === "table" && TABLE_ROW_RE.test(line)) {
+      held.lines++;
+      run.rows.push(line);
+      paintRun(state, false);
+      return;
+    }
+    if (run.kind === "images") {
+      const more = line.match(IMAGE_LINE_RE);
+      if (more) {
+        held.lines++;
+        run.images.push({ alt: more[1], src: more[2] });
+        paintRun(state, false);
+        return;
+      }
+    }
+    /* The run ends here; this line is whatever it is on its own. */
+    closeRun(state);
+  }
+  /* No run is open, so this is a point the message can be re-parsed from: the
+     only place a chunk may be cut. */
+  const chunk = chunkFor(state.region, from, state.sep);
+  chunk.lines++;
+  if (FENCE_OPEN_RE.test(line)) {
+    state.run = {
+      kind: "fence",
+      slot: chunk.nodes.length,
+      sep: state.sep,
+      key: state.keys++,
+      lang: fenceLang(line),
+      code: [],
+      joined: null,
+      body: newRegion(),
+      shown: 0,
+    };
+    pushFenceLine(state.run, line, state.keys++);
+    paintRun(state, false);
+    return;
+  }
+  if (TABLE_ROW_RE.test(line)) {
+    state.run = { kind: "table", slot: chunk.nodes.length, sep: state.sep, key: state.keys++, rows: [line] };
+    paintRun(state, false);
+    return;
+  }
+  const image = line.match(IMAGE_LINE_RE);
+  if (image) {
+    state.run = {
+      kind: "images",
+      slot: chunk.nodes.length,
+      sep: state.sep,
+      key: state.keys++,
+      images: [{ alt: image[1], src: image[2] }],
+    };
+    paintRun(state, false);
+    return;
+  }
+  emitNode(state, lineNode(line, state.keys++), false);
+}
+
+/**
+ * Whether what has been consumed still describes the head of `text`.
+ *
+ * Deltas append, and re-reading the message to prove it would put the
+ * accumulated length back into every delta. While streaming the proof is the
+ * anchor window ending at the boundary plus monotone length; the completion
+ * call, the one that can legitimately carry rewritten text, is checked exactly.
+ */
+function reusable(state: MdStreamState, text: string, streaming: boolean): boolean {
+  if (state.stableChars === 0) return true;
+  if (!state.lineStart || text.length < state.stableChars) return false;
+  if (!streaming) return text.startsWith(state.source.slice(0, state.stableChars));
+  return text.length >= state.source.length
+    && text.slice(Math.max(0, state.stableChars - ANCHOR), state.stableChars) === state.anchor;
+}
+
+/**
+ * Recovers the shift when the live projection trims a message's head, which it
+ * does on EVERY delta once a turn passes its 64 KiB bound — exactly the long
+ * answers where re-parsing the whole window per delta hurts most.
+ *
+ * Chunks the trim reached are dropped and the lines in front of the first
+ * survivor are parsed again; everything behind it is context-free (a chunk
+ * begins where no construct is open) and is kept as it is. If that head parse
+ * ends inside a construct, the trim has changed how the rest reads, and nothing
+ * is reused.
+ *
+ * Only a streaming delta is recovered: the completion call is the one that can
+ * legitimately carry rewritten text, and a rewrite that happened to keep the
+ * anchor would be mistaken for a shift. A caller MUST reset the stream when
+ * this returns false — it shifts the chunk offsets before it can know.
+ */
+function recoverTrim(state: MdStreamState, text: string, streaming: boolean): boolean {
+  if (!streaming || !state.anchor || !state.lineStart) return false;
+  const at = text.lastIndexOf(state.anchor);
+  if (at < 0) return false;
+  const stable = at + state.anchor.length;
+  const shift = state.stableChars - stable;
+  if (shift <= 0) return false;
+  const chunks = state.region.chunks;
+  for (const chunk of chunks) chunk.from -= shift;
+  const keep = chunks.findIndex((chunk) => chunk.from >= 0);
+  if (keep < 0) return false;
+  const survivors = chunks.slice(keep);
+  const head = createMdStream();
+  const kept = survivors[0].from;
+  const lines = text.slice(0, kept).split("\n");
+  let from = 0;
+  /* The head ends where the first survivor begins, so its last line is
+     complete and split leaves a trailing empty entry to drop. */
+  for (let i = 0; i < lines.length - 1; i++) {
+    consume(head, lines[i], from);
+    from += lines[i].length + 1;
+  }
+  if (head.run || head.sep !== survivors[0].sep) return false;
+  for (const chunk of head.region.chunks) {
+    chunk.key = state.region.keys++;
+    chunk.element = <MdChunk key={chunk.key} nodes={chunk.nodes} />;
+  }
+  state.region.chunks = [...head.region.chunks, ...survivors];
+  state.stableChars = stable;
+  state.stableLines = state.region.chunks.reduce((total, chunk) => total + chunk.lines, 0);
+  return true;
+}
 
 /**
  * Advances a streaming prose body to `text` and returns its tree.
  *
- * Work per call is proportional to what arrived, not to what has accumulated:
- * only the text after the last stable boundary is sliced, split and scanned, the
- * lines that just settled are parsed once and appended to the cached prefix, and
- * the volatile tail is re-rendered — normally one line, at most the open
- * construct. Re-parsing the accumulated text on every delta would be quadratic
- * over a long answer; this is linear over the whole stream.
+ * The cost of a call is the cost of what arrived: the text is sliced, split and
+ * scanned only from the line still being written, each complete line is parsed
+ * once into an append-only chunk list, and an open construct accumulates its
+ * lines the same way instead of being re-read. Nothing already rendered is
+ * re-parsed, re-walked or moved.
  */
 export function advanceMdStream(state: MdStreamState, text: string, streaming: boolean): ReactNode {
   if (state.rendered !== null && text === state.source && streaming === state.streaming) return state.rendered;
-  if (!reusable(state, text, streaming)) {
-    state.settledChars = 0;
-    state.settledLines = 0;
-    state.lineStart = true;
-    state.blocks = [];
-    state.droppedNewline = false;
-    state.revision++;
-  }
-  const base = state.settledLines;
-  const rest = text.slice(state.settledChars);
+  if (!reusable(state, text, streaming) && !recoverTrim(state, text, streaming)) resetMdStream(state);
+
+  const rest = text.slice(state.stableChars);
   const lines = rest.split("\n");
-  const settled = streaming ? settledLineCount(lines) : lines.length;
-  state.scannedChars += rest.length;
-  if (settled > 0) {
-    pushBlocks(state.blocks, lines, 0, settled, base);
-    let chars = 0;
-    for (let i = 0; i < settled; i++) chars += lines[i].length + 1;
-    /* The last line of a completed item ends the text instead of a newline. */
-    state.lineStart = state.settledChars + chars <= text.length;
-    state.settledChars = Math.min(state.settledChars + chars, text.length);
-    state.settledLines += settled;
-    state.anchor = text.slice(Math.max(0, state.settledChars - ANCHOR), state.settledChars);
-    state.parsedLines += settled;
-    /* pushBlocks has re-established the separator itself. */
-    state.droppedNewline = false;
-    state.revision++;
+  const complete = streaming ? lines.length - 1 : lines.length;
+  let from = state.stableChars;
+  for (let i = 0; i < complete; i++) {
+    consume(state, lines[i], from);
+    from += lines[i].length + 1;
+    state.provisional = false;
   }
-  let pending: ReactNode[] | null = null;
-  if (settled < lines.length) {
-    pending = [];
-    const block = pushPending(pending, lines, settled, base);
-    /* A pending block element sheds the separator the prefix left behind — and
-       takes it back if the next delta turns it into ordinary text again, which
-       is what an unfinished line reopening a fence does. */
-    if (block && state.blocks[state.blocks.length - 1] === "\n") {
-      state.blocks.pop();
-      state.droppedNewline = true;
-      state.revision++;
-    } else if (!block && state.droppedNewline) {
-      state.blocks.push("\n");
-      state.droppedNewline = false;
-      state.revision++;
+  if (complete > 0) {
+    state.lineStart = from <= text.length;
+    state.stableChars = Math.min(from, text.length);
+    state.stableLines += complete;
+    state.anchor = text.slice(Math.max(0, state.stableChars - ANCHOR), state.stableChars);
+  }
+  /* A completed message ends where it ends: an unclosed fence or a trailing run
+     becomes its block, exactly as the transcript pass renders it. */
+  if (!streaming && state.run) closeRun(state);
+
+  let volatile_: ReactNode = null;
+  if (streaming) {
+    const last = lines[lines.length - 1];
+    /* A message can stop ON its closing fence: that line has no newline yet,
+       but the code between the fences is complete, and leaving the last block
+       of an answer raw until the turn settles is the visible defect. */
+    const closes = state.run?.kind === "fence" && FENCE_CLOSE_RE.test(last);
+    if (closes !== state.provisional) {
+      paintRun(state, closes);
+      state.provisional = closes;
+    }
+    if (!closes) {
+      const parts: ReactNode[] = [];
+      if (state.sep) parts.push("\n");
+      /* Inside a fence the tail is code; elsewhere the inline pass renders it,
+         degrading to plain text for anything whose closer has not arrived. */
+      parts.push(state.run?.kind === "fence"
+        ? <Fragment key="v">{last}</Fragment>
+        : <Fragment key="v">{md(last)}</Fragment>);
+      volatile_ = parts;
     }
   }
-  let tree: ReactNode = <SettledPrefix nodes={state.blocks} revision={state.revision} />;
-  if (pending) tree = <>{tree}{pending}</>;
+
+  const tree = <>{regionNodes(state.region)}{volatile_}</>;
   state.source = text;
   state.streaming = streaming;
   state.rendered = tree;
@@ -538,9 +697,9 @@ export function advanceMdStream(state: MdStreamState, text: string, streaming: b
  * live turn lands.
  */
 export function StreamingMd({ text, streaming }: { text: string; streaming: boolean }): ReactNode {
-  /* A memo of the props, held in state because it is grown across renders and
-     must survive every one of them. Advancing it is idempotent, so a repeated
-     render of the same text yields the same tree. */
+  /* Held in state because it is grown across renders and must survive every one
+     of them. Advancing it is idempotent, so a repeated render of the same text
+     returns the same tree. */
   const [stream] = useState(createMdStream);
   return advanceMdStream(stream, text, streaming);
 }

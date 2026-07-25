@@ -6,7 +6,7 @@ import type { ReactNode } from "react";
 
 import { setLocale } from "@/lib/i18n";
 import type { RuntimeLiveTurnItem, RuntimeLiveTurnItemPhase } from "@/lib/runtime/liveTurn";
-import { advanceMdStream, createMdStream, mdBlocks, settledLineCount } from "@/components/feed/markdown";
+import { advanceMdStream, createMdStream, mdBlocks, type MdStreamState } from "@/components/feed/markdown";
 
 import { LiveTurnRows } from "./LiveTurnRows";
 
@@ -223,22 +223,34 @@ test("a completed item that rewrites its draft is re-rendered from scratch", () 
   expect(liveRow(host).innerHTML).toBe(settledHtml(authoritative));
 });
 
-test("settled lines are frozen once written: the boundary only moves forward", () => {
-  const text = SAMPLE;
-  let previous = 0;
-  for (let end = 1; end <= text.length; end++) {
-    const settled = settledLineCount(text.slice(0, end).split("\n"));
-    expect(settled).toBeGreaterThanOrEqual(previous);
-    previous = settled;
+test("only the line still being written is volatile: the boundary is its start", () => {
+  /* Everything behind the boundary has been consumed into nodes, so a delta can
+     never reach back into it — including inside an open construct. */
+  const stream = createMdStream();
+  for (let end = 1; end <= SAMPLE.length; end++) {
+    const text = SAMPLE.slice(0, end);
+    advanceMdStream(stream, text, true);
+    expect(stream.stableChars).toBe(text.lastIndexOf("\n") + 1);
   }
-  /* The volatile region is the open construct, never the whole document. */
-  expect(settledLineCount("a\nb\nc".split("\n"))).toBe(2);
-  expect(settledLineCount("a\n| x |\n| y".split("\n"))).toBe(1);
-  expect(settledLineCount("a\n```ts\ncode".split("\n"))).toBe(1);
-  expect(settledLineCount("a\n```ts\ncode\n```\ntail".split("\n"))).toBe(4);
 });
 
-test("per-delta work stays proportional to the delta, not to the accumulated message", () => {
+/** The chars the next advance will have to look at. */
+function pending(stream: MdStreamState, text: string): number {
+  return text.length - stream.stableChars;
+}
+
+/** Streams `body` in `step`-sized deltas, returning the worst per-delta scan. */
+function worstScan(stream: MdStreamState, body: string, step: number): number {
+  let worst = 0;
+  for (let end = 1; end <= body.length; end += step) {
+    const text = body.slice(0, end);
+    worst = Math.max(worst, pending(stream, text));
+    advanceMdStream(stream, text, true);
+  }
+  return worst;
+}
+
+test("per-delta work stays proportional to the delta, not to the accumulated prose", () => {
   const body = Array.from(
     { length: 400 },
     (_, i) => `line ${i} with **bold** and a [link](https://example.com/${i}).`,
@@ -246,48 +258,149 @@ test("per-delta work stays proportional to the delta, not to the accumulated mes
   expect(body.length).toBeGreaterThan(20_000);
 
   const stream = createMdStream();
-  let worst = 0;
-  let scanned = 0;
-  for (let end = 1; end <= body.length; end += 37) {
-    advanceMdStream(stream, body.slice(0, end), true);
-    worst = Math.max(worst, stream.scannedChars - scanned);
-    scanned = stream.scannedChars;
-  }
+  const worst = worstScan(stream, body, 37);
   const tree = advanceMdStream(stream, body, false);
-  /* One volatile line plus the delta that just arrived — never the 20k+ behind it. */
+  /* One volatile line plus the delta that just arrived — never the 20k behind it. */
   expect(worst).toBeLessThan(256);
-  expect(stream.parsedLines).toBe(400);
+  expect(stream.stableLines).toBe(400);
 
-  /* …and the rendering it arrived at is still the transcript pass, exactly. */
   const { host, root } = mount();
   paint(root, <div className="whitespace-pre-wrap">{tree}</div>);
   expect((host.firstElementChild as HTMLElement).innerHTML).toBe(settledHtml(body));
 });
 
-test("a long stream block-parses every line exactly once, never the whole message", () => {
-  /* Re-parsing the accumulated text per delta would cost ~180k line parses for
-     this message; the settled prefix is parsed once, so it costs 600. */
+test("a long OPEN code fence does not re-scan itself on every delta", () => {
+  /* The case that matters most here: an agent streaming a patch. Freezing the
+     boundary at the fence's opening line made every token re-read the whole
+     block — 19 KB scanned per delta by the end. */
+  const body = [
+    "Patch:",
+    "",
+    "```ts",
+    ...Array.from({ length: 900 }, (_, i) => `const line${i} = ${i};`),
+    "```",
+  ].join("\n");
+  expect(body.length).toBeGreaterThan(18_000);
+
+  const stream = createMdStream();
+  const worst = worstScan(stream, body, 13);
+  const tree = advanceMdStream(stream, body, false);
+  expect(worst).toBeLessThan(64);
+  expect(stream.stableLines).toBe(904);
+
+  const { host, root } = mount();
+  paint(root, <div className="whitespace-pre-wrap">{tree}</div>);
+  expect((host.firstElementChild as HTMLElement).innerHTML).toBe(settledHtml(body));
+});
+
+test("a long OPEN table does not re-scan itself on every delta", () => {
+  const body = [
+    "| step | result |",
+    "| --- | --- |",
+    ...Array.from({ length: 300 }, (_, i) => `| step ${i} | ok ${i} |`),
+  ].join("\n");
+
+  const stream = createMdStream();
+  const worst = worstScan(stream, body, 11);
+  const tree = advanceMdStream(stream, body, false);
+  expect(worst).toBeLessThan(64);
+  expect(stream.stableLines).toBe(302);
+
+  const { host, root } = mount();
+  paint(root, <div className="whitespace-pre-wrap">{tree}</div>);
+  expect((host.firstElementChild as HTMLElement).innerHTML).toBe(settledHtml(body));
+});
+
+test("a line consumed by an earlier delta is never consumed again", () => {
   const lines = Array.from({ length: 600 }, (_, i) => `line ${i} with **bold** text`);
   const body = lines.join("\n");
   const stream = createMdStream();
-  for (let end = 1; end <= body.length; end += 3) {
-    advanceMdStream(stream, body.slice(0, end), true);
-  }
+  for (let end = 1; end <= body.length; end += 3) advanceMdStream(stream, body.slice(0, end), true);
   advanceMdStream(stream, body, true);
-  expect(stream.parsedLines).toBe(lines.length - 1);
+  expect(stream.stableLines).toBe(lines.length - 1);
   /* The echo settles the last, still-volatile line — and nothing before it. */
   advanceMdStream(stream, body, false);
-  expect(stream.parsedLines).toBe(lines.length);
+  expect(stream.stableLines).toBe(lines.length);
 });
 
-test("a fenced block that has closed is never re-parsed by later deltas", () => {
-  const head = ["intro", "```ts", "const x = 1;", "```", ""].join("\n");
-  const stream = createMdStream();
-  advanceMdStream(stream, `${head}\n`, true);
-  const afterFence = stream.parsedLines;
-  expect(afterFence).toBeGreaterThan(0);
-  for (const tail of ["t", "ta", "tai", "tail"]) {
-    advanceMdStream(stream, `${head}\n${tail}`, true);
+test("a block already on screen is not remounted when it settles", () => {
+  const { host, root } = mount();
+  const table = ["Here:", "", "| col | val |", "| --- | --- |", "| a | 1 |"];
+  paint(root, <LiveTurnRows items={[item([...table, "| b"].join("\n"), "streaming")]} />);
+  const painted = liveRow(host).querySelector("table");
+  expect(painted).not.toBeNull();
+
+  /* The run ends: the same table, in the same place, must survive the settling. */
+  paint(root, <LiveTurnRows items={[item([...table, "| b | 2 |", "", "done"].join("\n"), "streaming")]} />);
+  expect(liveRow(host).querySelector("table")).toBe(painted);
+  paint(root, <LiveTurnRows items={[item([...table, "| b | 2 |", "", "done"].join("\n"), "awaiting-echo")]} />);
+  expect(liveRow(host).querySelector("table")).toBe(painted);
+
+  /* Same for a code block first shown when the message stopped on its fence. */
+  const fence = ["Patch:", "", "```", "const x = 1;", "```"];
+  paint(root, <LiveTurnRows items={[item(fence.join("\n"), "streaming")]} />);
+  const pre = liveRow(host).querySelector("pre");
+  expect(pre).not.toBeNull();
+  paint(root, <LiveTurnRows items={[item([...fence, "", "done"].join("\n"), "awaiting-echo")]} />);
+  expect(liveRow(host).querySelector("pre")).toBe(pre);
+});
+
+test("a boundary closer to the start than the anchor window still recognises the message", () => {
+  /* A short opening line followed by a long paragraph: the boundary sits inside
+     the window the cache compares, and a message must not be re-parsed from
+     scratch just because it has not produced 128 chars of settled text yet. */
+  const { host, root } = mount();
+  const head = "Note **one**\n";
+  paint(root, <LiveTurnRows items={[item(`${head}and then a much longer paragraph `, "streaming")]} />);
+  const bold = liveRow(host).querySelector("b");
+  expect(bold).not.toBeNull();
+  let tail = "and then a much longer paragraph ";
+  for (let delta = 0; delta < 12; delta++) {
+    tail += "that keeps on going and going ";
+    paint(root, <LiveTurnRows items={[item(head + tail, "streaming")]} />);
   }
-  expect(stream.parsedLines).toBe(afterFence);
+  expect(head.length + tail.length).toBeGreaterThan(300);
+  expect(liveRow(host).querySelector("b")).toBe(bold);
+});
+
+test("the consumed-line count stays exact across runs and a trim", () => {
+  const lines = [
+    ...Array.from({ length: 60 }, (_, i) => `line ${i} with **bold** text`),
+    "| col | val |",
+    "| --- | --- |",
+    "| a | 1 |",
+    "",
+    "```ts",
+    "const x = 1;",
+    "```",
+    ...Array.from({ length: 60 }, (_, i) => `tail ${i}`),
+  ];
+  const body = lines.join("\n");
+  const stream = createMdStream();
+  advanceMdStream(stream, body, true);
+  expect(stream.stableLines).toBe(lines.length - 1);
+
+  const trimmed = body.slice(700);
+  advanceMdStream(stream, trimmed, true);
+  expect(stream.stableLines).toBe(trimmed.split("\n").length - 1);
+});
+
+test("a head-trimmed projection keeps what it has already rendered", () => {
+  /* Past its 64 KiB bound the projection drops chars off the front on every
+     delta. Re-reading the whole window each time is what makes the longest
+     answers crawl, so the shift is followed instead: what the trim did not
+     reach stays exactly as it is, down to the DOM nodes on screen. */
+  const full = Array.from({ length: 400 }, (_, i) => `line ${i} with **bold** text`).join("\n");
+  const { host, root } = mount();
+  paint(root, <LiveTurnRows items={[item(full, "streaming")]} />);
+  const deep = liveRow(host).querySelectorAll("b")[350];
+  expect(deep).toBeDefined();
+
+  const trimmed = full.slice(600);
+  paint(root, <LiveTurnRows items={[item(trimmed, "streaming")]} />);
+  expect(liveRow(host).contains(deep)).toBe(true);
+
+  paint(root, <LiveTurnRows items={[item(trimmed, "awaiting-echo")]} />);
+  expect(liveRow(host).contains(deep)).toBe(true);
+  expect(liveRow(host).innerHTML).toBe(settledHtml(trimmed));
 });
