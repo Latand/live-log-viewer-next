@@ -27,17 +27,56 @@ export function windowKeyForMinutes(minutes: number | null | undefined): WindowK
   return minutes <= SESSION_MAX_WINDOW_MINUTES ? "session" : "weekly";
 }
 
+/** How far a declared length may sit from a canonical horizon and still mean
+    it. Providers round: a week is reported as both 10080 and 10081 minutes.
+    One percent is far below the distance between any two real horizons
+    (a day is 8640 minutes from a week), so no distinct window is absorbed. */
+const CANONICAL_TOLERANCE = 0.01;
+
+/** Snap a declared length onto the canonical horizon it is reporting, or null
+    when it is a horizon of its own (a day, a month) and should keep its length. */
+export function canonicalWindowMinutes(minutes: number | null | undefined): number | null {
+  if (typeof minutes !== "number" || !Number.isFinite(minutes) || minutes <= 0) return null;
+  for (const canonical of [SESSION_WINDOW_MINUTES, WEEKLY_WINDOW_MINUTES]) {
+    if (Math.abs(minutes - canonical) <= canonical * CANONICAL_TOLERANCE) return canonical;
+  }
+  return null;
+}
+
 export interface DeclaredWindow {
   windowMinutes?: number | null;
+  resetsAt?: number | null;
+}
+
+/** Seconds a 5-hour window may still have on its clock, with room for
+    provider/clock skew. Beyond this the value cannot belong to a 5h window. */
+const SESSION_HORIZON_GRACE_S = 30 * 60;
+
+/** True when a window's reset lies further out than a 5-hour window can ever
+    reach, so it cannot be a session window whatever slot it arrived in. Only
+    meaningful for a window that declared no length of its own, and only when
+    both the capture moment and the reset moment are known. */
+function exceedsSessionHorizon(window: DeclaredWindow, capturedAt: number | null): boolean {
+  if (window.windowMinutes != null || capturedAt === null || window.resetsAt == null) return false;
+  return window.resetsAt - capturedAt > SESSION_WINDOW_MINUTES * 60 + SESSION_HORIZON_GRACE_S;
 }
 
 /** File a provider's two rate-limit slots onto the horizons their data carries.
-    A window that declares its length claims that horizon; one that declares
-    none keeps its conventional slot (primary = session, secondary = weekly) and
-    never displaces a window that named its own horizon. */
+ *
+ * A window that declares its length claims that horizon. One that declares none
+ * keeps its own conventional slot (primary = session, secondary = weekly) when
+ * that slot is still free, and is dropped when it is not: with no declared
+ * length and its conventional slot already claimed by a window that named the
+ * same horizon, there is no evidence left for filing it anywhere, and guessing
+ * is what put weekly numbers under the 5h label in the first place.
+ *
+ * `capturedAt` (Unix seconds, when known) adds the last piece of evidence for a
+ * window that declared no length: a reset further out than a 5-hour window can
+ * reach belongs to the weekly horizon. */
 export function routeWindowsByHorizon<T extends DeclaredWindow>(
   primary: T | null | undefined,
   secondary: T | null | undefined,
+  capturedAt: number | null = null,
 ): { session: T | null; weekly: T | null } {
   const routed: { session: T | null; weekly: T | null } = { session: null, weekly: null };
   const undeclared: { slot: WindowKey; window: T }[] = [];
@@ -48,16 +87,11 @@ export function routeWindowsByHorizon<T extends DeclaredWindow>(
     else undeclared.push({ slot, window });
   }
   for (const { slot, window } of undeclared) {
-    const other: WindowKey = slot === "session" ? "weekly" : "session";
-    if (!routed[slot]) routed[slot] = window;
-    else if (!routed[other]) routed[other] = window;
+    const key: WindowKey = slot === "session" && exceedsSessionHorizon(window, capturedAt) ? "weekly" : slot;
+    if (!routed[key]) routed[key] = window;
   }
   return routed;
 }
-
-/** Seconds a cached 5-hour window may still have on its clock, with room for
-    provider/clock skew. Beyond this the value cannot belong to a 5h window. */
-const SESSION_HORIZON_GRACE_S = 30 * 60;
 
 /** Repair a snapshot cached before the horizon fix: a Codex weekly window
     stored under `session` with no declared length, whose reset is further out
@@ -66,9 +100,6 @@ const SESSION_HORIZON_GRACE_S = 30 * 60;
     this the wrong "5h" label survives the fix. */
 export function relabelCachedWindows(limits: EngineLimits | null): EngineLimits | null {
   if (!limits?.session || limits.weekly) return limits;
-  const { session, capturedAt } = limits;
-  if (session.windowMinutes != null || capturedAt === null || session.resetsAt === null) return limits;
-  const horizon = session.resetsAt - capturedAt;
-  if (horizon <= SESSION_WINDOW_MINUTES * 60 + SESSION_HORIZON_GRACE_S) return limits;
-  return { ...limits, session: null, weekly: session };
+  if (!exceedsSessionHorizon(limits.session, limits.capturedAt)) return limits;
+  return { ...limits, session: null, weekly: limits.session };
 }

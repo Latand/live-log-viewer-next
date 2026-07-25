@@ -1,6 +1,6 @@
 import type { WindowKey } from "@/lib/burndown";
 import { getLocale, translate, type TFunction, type Locale } from "@/lib/i18n";
-import { SESSION_WINDOW_MINUTES, WEEKLY_WINDOW_MINUTES } from "@/lib/limitWindows";
+import { canonicalWindowMinutes, SESSION_WINDOW_MINUTES, WEEKLY_WINDOW_MINUTES } from "@/lib/limitWindows";
 import type { RateLimitState } from "@/lib/types";
 
 /** BCP-47 tag for the two supported locales, used by every time formatter here. */
@@ -40,8 +40,11 @@ export function windowLabel(t: TFunction, key: WindowKey, windowMinutes: number 
   if (typeof windowMinutes !== "number" || !Number.isFinite(windowMinutes) || windowMinutes <= 0) {
     return t(key === "weekly" ? "limits.week" : "limits.5h");
   }
-  if (windowMinutes === WEEKLY_WINDOW_MINUTES) return t("limits.week");
-  if (windowMinutes === SESSION_WINDOW_MINUTES) return t("limits.5h");
+  // Providers round: a week arrives as both 10080 and 10081 minutes, and both
+  // mean "Week" rather than "168h".
+  const canonical = canonicalWindowMinutes(windowMinutes) ?? windowMinutes;
+  if (canonical === WEEKLY_WINDOW_MINUTES) return t("limits.week");
+  if (canonical === SESSION_WINDOW_MINUTES) return t("limits.5h");
   if (windowMinutes % 1440 === 0) return t("limits.windowDays", { n: windowMinutes / 1440 });
   if (windowMinutes >= 60) return t("limits.windowHours", { n: Math.round(windowMinutes / 60) });
   return t("limits.windowMinutes", { n: Math.round(windowMinutes) });

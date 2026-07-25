@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { relabelCachedWindows, routeWindowsByHorizon, windowKeyForMinutes } from "./limitWindows";
+import { canonicalWindowMinutes, relabelCachedWindows, routeWindowsByHorizon, windowKeyForMinutes } from "./limitWindows";
 
 /** Shapes below mirror the Codex rate-limit payloads seen in the wild: until
     mid-July 2026 a plan reported a 300-minute primary plus a 10080-minute
@@ -47,10 +47,44 @@ test("windows that declare no length keep their conventional slots", () => {
   expect(routed.weekly).toEqual(win(61));
 });
 
-test("an undeclared window never displaces one that named its horizon", () => {
+test("an undeclared window whose slot is taken is dropped rather than guessed at", () => {
+  // The secondary declares nothing and its conventional slot is already held by
+  // a window that named the weekly horizon. Parking it on the session tab would
+  // present it as a 5h figure on no evidence at all — the very bug of #606.
   const routed = routeWindowsByHorizon(win(15, 10_080), win(61));
   expect(routed.weekly).toEqual(win(15, 10_080));
-  expect(routed.session).toEqual(win(61));
+  expect(routed.session).toBeNull();
+});
+
+test("an undeclared window whose reset outruns 5 hours is filed as weekly", () => {
+  // Finding 2: the same reset-horizon evidence the cache repair uses, applied
+  // at ingestion, so a live snapshot with no declared length is never labelled
+  // 5h when its reset is a week out.
+  const capturedAt = 1_784_914_879;
+  const weeklyHorizon = routeWindowsByHorizon({ usedPercent: 15, windowMinutes: null, resetsAt: capturedAt + 7 * 86_400 }, null, capturedAt);
+  expect(weeklyHorizon.weekly?.usedPercent).toBe(15);
+  expect(weeklyHorizon.session).toBeNull();
+
+  const sessionHorizon = routeWindowsByHorizon({ usedPercent: 15, windowMinutes: null, resetsAt: capturedAt + 3 * 3_600 }, null, capturedAt);
+  expect(sessionHorizon.session?.usedPercent).toBe(15);
+  expect(sessionHorizon.weekly).toBeNull();
+});
+
+test("without a capture time or a reset, an undeclared window keeps its slot", () => {
+  const capturedAt = 1_784_914_879;
+  expect(routeWindowsByHorizon({ usedPercent: 15, windowMinutes: null, resetsAt: capturedAt + 7 * 86_400 }, null).session?.usedPercent).toBe(15);
+  expect(routeWindowsByHorizon({ usedPercent: 15, windowMinutes: null, resetsAt: null }, null, capturedAt).session?.usedPercent).toBe(15);
+});
+
+test("a declared length is snapped to the horizon it is reporting, and only that", () => {
+  // Real transcripts report a week as 10080 and as 10081 minutes.
+  expect(canonicalWindowMinutes(10_081)).toBe(10_080);
+  expect(canonicalWindowMinutes(10_080)).toBe(10_080);
+  expect(canonicalWindowMinutes(299)).toBe(300);
+  // Horizons of their own keep their length.
+  expect(canonicalWindowMinutes(1440)).toBeNull();
+  expect(canonicalWindowMinutes(43_200)).toBeNull();
+  expect(canonicalWindowMinutes(null)).toBeNull();
 });
 
 test("a cached weekly-horizon value stored under session is relabelled on read", () => {

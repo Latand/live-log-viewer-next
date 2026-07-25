@@ -130,6 +130,27 @@ test("a weekly-only account labels its one window by the horizon it carries", ()
   expect(detail).toContain("85%"); // weekly remaining (100 - 15)
 });
 
+test("a weekly-horizon window in the session field is labelled by its horizon, not its slot", () => {
+  // The row label must follow the window's declared length. With a weekly
+  // window sitting in the session field — the shape #606 was reported against —
+  // the row reads "Week"; a static per-slot label would print "5h" here.
+  const nowS = Math.floor(Date.now() / 1000);
+  const html = render(base({
+    accounts: [
+      {
+        id: "main", label: "Main", kind: "legacy", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null,
+        limits: { freshness: "fresh", session: { usedPercent: 15, resetsAt: nowS + 437_631, windowMinutes: 10_080 }, weekly: null },
+      },
+    ],
+    active: "main",
+  }));
+  const detail = html.match(/<dl[^>]*Quota windows[^>]*>[\s\S]*?<\/dl>/)?.[0] ?? "";
+  expect(detail).not.toBe("");
+  expect(detail).toContain(`<dt class="w-8 shrink-0 font-semibold">${translate("en", "limits.week")}</dt>`);
+  expect(detail).not.toContain(translate("en", "limits.5h"));
+  expect(detail).toContain("85%"); // 100 - 15, under the weekly label
+});
+
 test("dims and labels a stale account limits read and omits a missing reset time", () => {
   const html = render(base({
     accounts: [

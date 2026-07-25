@@ -386,7 +386,7 @@ interface CodexRateLimits {
 export function mapAppServerRateLimits(rateLimits: AppServerRateLimits, capturedAt = Math.round(Date.now() / 1000)): EngineLimits {
   const toLimitWindow = (w: AppServerRateLimits["primary"]): LimitWindow | null =>
     w ? { usedPercent: w.usedPercent, resetsAt: w.resetsAt, windowMinutes: w.windowDurationMins } : null;
-  const routed = routeWindowsByHorizon(toLimitWindow(rateLimits.primary), toLimitWindow(rateLimits.secondary));
+  const routed = routeWindowsByHorizon(toLimitWindow(rateLimits.primary), toLimitWindow(rateLimits.secondary), capturedAt);
   return {
     session: routed.session,
     weekly: routed.weekly,
@@ -507,7 +507,11 @@ function lastRateLimits(file: string): EngineLimits | null {
       if (!rl) continue;
       const ts = typeof row.timestamp === "string" ? Date.parse(row.timestamp) : NaN;
       const capturedAt = Number.isFinite(ts) ? Math.round(ts / 1000) : null;
-      const routed = routeWindowsByHorizon(codexWindow(rl.primary, capturedAt), codexWindow(rl.secondary, capturedAt));
+      const routed = routeWindowsByHorizon(codexWindow(rl.primary, capturedAt), codexWindow(rl.secondary, capturedAt), capturedAt);
+      // Codex also emits `rate_limits` events carrying no windows at all (other
+      // limit families, e.g. credit balances). They say nothing about the
+      // account's quota, so keep looking back for one that does.
+      if (!routed.session && !routed.weekly) continue;
       return {
         session: routed.session,
         weekly: routed.weekly,
@@ -588,11 +592,14 @@ export function collectCodexRateLimitSeries(sessionsDir: string, sinceUnix: numb
         if (!Number.isFinite(ts)) continue;
         const t = Math.round(ts / 1000);
         if (t < sinceUnix || seen.has(t)) continue;
-        seen.add(t);
         // Each event's windows go to the horizon their own `window_minutes`
         // names, so a plan that reports only a weekly window backfills the
         // weekly curve instead of the 5h one (issue #606).
-        const routed = routeWindowsByHorizon(codexWindow(rl.primary, t), codexWindow(rl.secondary, t));
+        const routed = routeWindowsByHorizon(codexWindow(rl.primary, t), codexWindow(rl.secondary, t), t);
+        // A windowless event (another limit family) contributes no sample, and
+        // must not become the newest event that fixes the window definitions.
+        if (!routed.session && !routed.weekly) continue;
+        seen.add(t);
         if (routed.session) session.push({ t, remaining: clampPercent(100 - routed.session.usedPercent) });
         if (routed.weekly) weekly.push({ t, remaining: clampPercent(100 - routed.weekly.usedPercent) });
         if (t > latestT) {
@@ -642,6 +649,12 @@ function buildEngineBurndown(
   backfill: CodexTranscriptSeries | null,
 ): EngineBurndown {
   const forward = (window: WindowKey) => historySamples(engine, accountId, window, now);
+  // Only a snapshot that reports some window is evidence about horizons: it
+  // shows what the plan has, so a horizon missing from it is one the plan does
+  // not report. A snapshot with no windows at all (a failed read, or a
+  // transcript event from another limit family) says nothing, and its windows
+  // fall through to the ordinary series so existing history still charts.
+  const snapshotNamesAWindow = Boolean(limits?.session || limits?.weekly);
   const seriesFor = (
     key: WindowKey,
     backfillSamples: LimitSample[],
@@ -650,11 +663,11 @@ function buildEngineBurndown(
   ): BurndownSeries => {
     const live = limits?.[key] ?? null;
     const windowSeconds = windowSecondsOf(live) ?? backfillWindowSeconds ?? WINDOW_SECONDS[key];
-    // A snapshot that reports no window of this horizon has nothing to chart:
-    // the forward history under this key predates the horizon fix (issue #606)
-    // and belongs to the other window, so it is not drawn here. The panel names
+    // A plan that reports no window of this horizon has nothing to chart: the
+    // forward history under this key predates the horizon fix (issue #606) and
+    // belongs to the other window, so it is not drawn here. The panel names
     // that reason rather than claiming there is no history at all.
-    if (limits && !live && backfillSamples.length === 0) {
+    if (snapshotNamesAWindow && !live && backfillSamples.length === 0) {
       return { windowStart: null, resetsAt: null, windowSeconds, samples: [], windowUnreported: true };
     }
     return buildSeries(forward(key), backfillSamples, live, now, windowSeconds, backfillResetsAt);

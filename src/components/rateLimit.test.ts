@@ -21,6 +21,18 @@ test("an undeclared horizon falls back to the slot's nominal name", () => {
   expect(windowLabel(en, "session", 0)).toBe("5h");
 });
 
+test("a rounded week still reads as a week, not as 168 hours", () => {
+  // Real transcripts report the same weekly window as 10080 and as 10081
+  // minutes; both name the week.
+  expect(windowLabel(en, "weekly", 10_081)).toBe("Week");
+  expect(windowLabel(en, "session", 10_081)).toBe("Week");
+  expect(windowLabel(uk, "weekly", 10_081)).toBe("Тиждень");
+  expect(windowLabel(en, "session", 299)).toBe("5h");
+  // A horizon of its own is never absorbed into a canonical one.
+  expect(windowLabel(en, "weekly", 43_200)).toBe("30d");
+  expect(windowLabel(en, "session", 1440)).toBe("1d");
+});
+
 test("other declared lengths are spelled out in the reader's units", () => {
   expect(windowLabel(en, "session", 60)).toBe("1h");
   expect(windowLabel(en, "session", 45)).toBe("45m");

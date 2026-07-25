@@ -14,8 +14,13 @@ versions follow [SemVer](https://semver.org/) (0.x — the API may still move).
   label while the weekly window stayed empty and its chart said "no history
   yet". Windows are now routed by their declared length everywhere they enter —
   the app-server snapshot, the transcript fallback and the transcript backfill —
-  snapshots cached before the fix are relabelled on read, and a horizon the plan
-  does not report says so instead of showing a generic empty chart.
+  with the reset horizon as the fallback evidence when a window declares no
+  length, and a rounded length (a week reported as 10081 minutes) still reading
+  as its horizon. Snapshots cached before the fix are relabelled on read.
+  Rate-limit events carrying no windows at all — other limit families — no
+  longer stand in for the account's snapshot, and only a snapshot that names
+  some window can claim a horizon is unreported, so a windowless read still
+  charts the history it has instead of a generic empty state.
 - Multi-gigabyte active transcripts no longer starve the Viewer (#287). One
   process-wide scan coordinator now owns every catalog generation: the HTTP
   files cache, the pipeline watchdog, and the account controller join or queue
