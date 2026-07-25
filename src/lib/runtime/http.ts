@@ -9,7 +9,7 @@ import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { RuntimeHostUnavailableError, runtimeHostClient, type RuntimeHostClient } from "./client";
 import { parseRuntimeCommand } from "./commands";
 import { runtimePresentationReceipt, type RuntimeOperationKind } from "./contracts";
-import { runtimeEventsEnabled } from "./flags";
+import { runtimeEventsEnabled, structuredHostsEnabled } from "./flags";
 import { republishStructuredDeliveryHost } from "./structuredDeliveryController";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
@@ -30,7 +30,7 @@ export interface RuntimeHttpDependencies {
 const DEFAULT_DEPENDENCIES: RuntimeHttpDependencies = {
   enabled: runtimeEventsEnabled,
   client: runtimeHostClient,
-  structuredEnabled: () => process.env.LLV_STRUCTURED_HOSTS === "1",
+  structuredEnabled: () => structuredHostsEnabled(),
   registry: agentRegistry,
   enqueue: enqueueStructuredMessage,
   kick: kickStructuredDeliveryQueue,
@@ -51,7 +51,7 @@ async function republishStructuredConversation(conversationId: string): Promise<
 }
 
 const DEFAULT_RETRY_DEPENDENCIES: RuntimeRetryHttpDependencies = {
-  enabled: () => process.env.LLV_STRUCTURED_HOSTS === "1",
+  enabled: () => structuredHostsEnabled(),
   client: runtimeHostClient,
   kick: kickStructuredDeliveryQueue,
   republish: republishStructuredConversation,
@@ -69,7 +69,7 @@ export async function handleRuntimeCommand(
   const rejection = rejectCrossOrigin(request);
   if (rejection) return rejection;
   if (!dependencies.enabled()) return NextResponse.json({ error: "runtime events are disabled" }, { status: 503 });
-  if (!(dependencies.structuredEnabled ?? (() => process.env.LLV_STRUCTURED_HOSTS === "1"))()) {
+  if (!(dependencies.structuredEnabled ?? (() => structuredHostsEnabled()))()) {
     return NextResponse.json({ error: "structured hosts are disabled" }, { status: 503 });
   }
   let value: unknown;
@@ -118,7 +118,7 @@ export async function handleRuntimeCommand(
         ...(rawImages ? { images: rawImages } : command.images?.length ? { imageRefs: command.images } : {}),
         ...(command.runtime ? { runtime: command.runtime } : {}),
       }, {
-        enabled: dependencies.structuredEnabled ?? (() => process.env.LLV_STRUCTURED_HOSTS === "1"),
+        enabled: dependencies.structuredEnabled ?? (() => structuredHostsEnabled()),
         client: () => client,
         registry: dependencies.registry ?? agentRegistry,
         kick: dependencies.kick ?? kickStructuredDeliveryQueue,

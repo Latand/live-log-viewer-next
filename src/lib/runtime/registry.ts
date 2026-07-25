@@ -11,10 +11,9 @@ import { procBackend } from "@/lib/proc";
 import { CodexAppServerHost, type CodexAppServerHostOptions } from "./codexAppServerHost";
 import { ClaudeStreamBrokerHost, type ClaudeStreamBrokerHostOptions } from "./claudeStreamBrokerHost";
 import { StructuredHostAdoptionCleanupError, type HostState } from "./engineHost";
+import { structuredHostsEnabled } from "./flags";
 
-export function structuredHostsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.LLV_STRUCTURED_HOSTS === "1";
-}
+export { structuredHostsEnabled };
 
 export async function startCodexStructuredHost(
   options: CodexAppServerHostOptions,

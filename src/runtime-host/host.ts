@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { RuntimeIdempotencyConflictError, type RuntimeEvent, type RuntimeEventInput, type RuntimeOperationCommand, type RuntimeReceiptStatus, type RuntimeSocketRequest, type RuntimeSocketResponse } from "@/lib/runtime/contracts";
+import { structuredHostsEnabled } from "@/lib/runtime/flags";
 import { consumeRuntimeEvent, type RuntimeConsumerPorts } from "@/lib/runtime/consumers";
 import { procBackend } from "@/lib/proc";
 
@@ -48,7 +49,7 @@ export class RuntimeHost {
     readonly journal: RuntimeJournal,
     private readonly consumers?: RuntimeConsumerPorts,
     private readonly deployments?: ViewerDeploymentCoordinator,
-    private readonly structuredHosts = process.env.LLV_STRUCTURED_HOSTS === "1",
+    private readonly structuredHosts = structuredHostsEnabled(),
     private readonly signalFlowPipelineProgress?: () => void,
   ) {}
 

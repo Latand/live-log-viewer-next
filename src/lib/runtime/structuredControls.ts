@@ -1,3 +1,4 @@
+import { structuredHostsEnabled } from "./flags";
 import { agentRegistry, type AgentRegistry, type ProcessIdentity } from "@/lib/agent/registry";
 import { reconfigurationFromBody, type AgentReconfiguration } from "@/lib/agent/reconfigure";
 import { listClaudeAccounts } from "@/lib/accounts/claude";
@@ -39,7 +40,7 @@ export async function dispatchStructuredControl(
   } = {},
 ): Promise<StructuredControlResult | null> {
   if (!request.action) return null;
-  if (!(dependencies.enabled ?? (() => process.env.LLV_STRUCTURED_HOSTS === "1"))()) return null;
+  if (!(dependencies.enabled ?? (() => structuredHostsEnabled()))()) return null;
   const registry = dependencies.registry ?? agentRegistry();
   const conversation = request.path
     ? registry.conversationForPath(request.path)

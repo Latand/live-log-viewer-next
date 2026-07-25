@@ -259,7 +259,9 @@ test("issue 51 keeps tool work running until authoritative turn completion", () 
 
 test("send operations converge by idempotency key and persist one receipt and effect", () => {
   const dir = sandbox("operation-dedupe");
-  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 100, now: () => 100 });
+  // Legacy (non-structured) receipt shape: opt out explicitly now that
+  // structured hosting is the default.
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: false, maxEvents: 100, now: () => 100 });
   journal.append({
     scope: runtimeScope("session", "conv-one"),
     kind: "session-status",
@@ -1781,7 +1783,8 @@ test("Unix socket host isolates a singleton writer and serves a fake Viewer clie
   const fence = new RuntimeHostFence(`${socketPath}.lock`);
   fence.acquire();
   expect(() => new RuntimeHostFence(`${socketPath}.lock`).acquire()).toThrow("singleton fence");
-  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"));
+  // Legacy receipt shape over the socket; the structured path has its own cases.
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: false });
   const server = serveRuntimeHost(socketPath, new RuntimeHost(journal));
   await new Promise<void>((resolve) => server.once("listening", resolve));
   const client = new UnixRuntimeHostClient(socketPath);

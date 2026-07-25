@@ -6,6 +6,7 @@ import {
   type AgentRegistry,
   type RegistryConversation,
 } from "@/lib/agent/registry";
+import { structuredHostsEnabled } from "./flags";
 import { withAccountMutationLockAsync } from "@/lib/accounts/accountMutation";
 import { deliveryFence } from "@/lib/accounts/migration/coordinator";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
@@ -107,10 +108,6 @@ export interface HeldStructuredMessageDependencies {
 }
 
 export type HeldStructuredMessageOutcome = "delivered" | "failed" | "delivery-uncertain" | "held" | null;
-
-function structuredHostsEnabled(): boolean {
-  return process.env.LLV_STRUCTURED_HOSTS === "1";
-}
 
 function ownershipUnavailable(): StructuredMessageResult {
   return {
