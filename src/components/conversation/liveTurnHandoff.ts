@@ -2,6 +2,7 @@
 
 import type { FeedEntry } from "@/components/feed/parse";
 import { newestTranscriptInstant } from "@/components/feed/transcriptOrder";
+import type { RuntimeTurnAxis } from "@/lib/runtime/contracts";
 import { useSyncExternalStore } from "react";
 import {
   LIVE_TURN_ITEM_LIMIT,
@@ -147,20 +148,35 @@ function canonicalAssistantItems(feed: readonly FeedEntry[]): CanonicalAssistant
  * Canonical transcript rows claim completed live items by response identity.
  * Older engine records without ids use a timestamp-fenced text echo.
  *
- * These overlay rows render BELOW every transcript row, so a completed item the
- * transcript has already moved past would sit under records written after it
+ * These overlay rows render BELOW every transcript row, so an item the
+ * transcript has already moved past sits under records written after it
  * (issue #674): the session's opening answer pinned beneath tool cards from
  * minutes later, permanently, because its own transcript row is far above the
- * window the pane keeps and no claim can ever be made from it. A completed item
- * older than the newest record in the window is therefore dropped — the
- * transcript is demonstrably past it, so it belongs above, where the transcript
- * already renders it. In-flight (`streaming`) items are always the newest thing
- * in the conversation and stay.
+ * window the pane keeps and no claim can ever be made from it.
+ *
+ * An unclaimed item older than the newest record in the window is therefore
+ * dropped. What that comparison proves is narrow: the transcript has advanced
+ * past this instant. It cannot prove the item's own row is in the file, and it
+ * never could — eviction of that row is the very case being handled, so there is
+ * nothing left here to check it against. The trade is deliberate: an item the
+ * transcript never recorded at all is dropped too when it predates the newest
+ * record. Keeping it would put an old line below fresher ones, which is the
+ * reported defect; the transcript stays the authority on what was said.
+ *
+ * `sessionTurn` fences the in-flight exemption. A `streaming` item is the newest
+ * thing in the conversation only while the turn is actually running — nothing
+ * flips a lingering `streaming` item to `awaiting-echo` (`turn-ended` leaves item
+ * phases alone and no path clears `liveTurn`), so a broker that dies mid-stream
+ * would otherwise pin a stale partial answer at the bottom forever. Once the turn
+ * is `idle` a streaming item faces the same staleness rule. `running`,
+ * `interrupt_requested`, `unknown` (a recovering host) and an absent turn all
+ * keep it, so a genuinely in-flight item is never dropped.
  */
 export function visibleRuntimeLiveTurnItems(
   liveTurn: RuntimeLiveTurn | null | undefined,
   feed: readonly FeedEntry[],
   persistedClaims: ReadonlySet<string> = EMPTY_CLAIMS,
+  sessionTurn: RuntimeTurnAxis | null = null,
 ): RuntimeLiveTurnItem[] {
   const overlay = runtimeLiveTurnItems(liveTurn);
   if (!overlay.length) return overlay;
@@ -168,8 +184,13 @@ export function visibleRuntimeLiveTurnItems(
   const currentClaims = new Set(canonical.flatMap((item) => item.sourceId ? [item.sourceId] : []));
   const transcriptAt = newestTranscriptInstant(feed);
   const claimed = new Set<number>();
+  /** The transcript has moved past this item, so the tail must not show it. */
+  const transcriptMovedPast = (live: RuntimeLiveTurnItem): boolean => {
+    const liveAt = timestamp(live.completedAt) ?? timestamp(live.startedAt);
+    return transcriptAt !== null && liveAt !== null && liveAt <= transcriptAt;
+  };
   return overlay.filter((live) => {
-    if (live.phase === "streaming") return true;
+    if (live.phase === "streaming") return sessionTurn !== "idle" || !transcriptMovedPast(live);
     if (live.itemId && (persistedClaims.has(live.itemId) || currentClaims.has(live.itemId))) return false;
     let owner = live.itemId
       ? canonical.findIndex((item, index) => !claimed.has(index) && item.sourceId === live.itemId)
@@ -183,10 +204,7 @@ export function visibleRuntimeLiveTurnItems(
         && (startedAt === null || item.at === null || item.at >= startedAt),
       );
     }
-    if (owner < 0) {
-      const liveAt = timestamp(live.completedAt) ?? timestamp(live.startedAt);
-      return transcriptAt === null || liveAt === null || liveAt > transcriptAt;
-    }
+    if (owner < 0) return !transcriptMovedPast(live);
     claimed.add(owner);
     return false;
   });

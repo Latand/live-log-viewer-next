@@ -113,23 +113,57 @@ test("issue 674: a live item newer than every transcript record still renders in
     .toEqual(["item-674-fresh"]);
 });
 
-test("issue 674: a streaming item and an empty transcript keep their overlay rows", () => {
-  const streaming: RuntimeLiveTurn = {
-    turnId: "turn-674-streaming",
+/** A partial answer the host was still streaming when the transcript moved on:
+    nothing ever flips it to `awaiting-echo`, so a broker that dies mid-stream
+    leaves it in this shape forever. */
+const strandedStream: RuntimeLiveTurn = {
+  turnId: "turn-674-streaming",
+  text: "Reading src/components/feed",
+  items: [{
+    itemId: null,
     text: "Reading src/components/feed",
-    items: [{
-      itemId: null,
-      text: "Reading src/components/feed",
-      phase: "streaming",
-      startedAt: "2026-07-25T10:00:03.000Z",
-      completedAt: null,
-    }],
-  };
+    phase: "streaming",
+    startedAt: "2026-07-25T10:00:03.000Z",
+    completedAt: null,
+  }],
+};
 
+test("issue 674: a streaming item and an empty transcript keep their overlay rows", () => {
   /* In flight: newer than anything the transcript can hold, whatever its dates. */
-  expect(visibleRuntimeLiveTurnItems(streaming, feedOf(TRANSCRIPT)).map((item) => item.phase))
+  expect(visibleRuntimeLiveTurnItems(strandedStream, feedOf(TRANSCRIPT), undefined, "running")
+    .map((item) => item.phase))
     .toEqual(["streaming"]);
   /* Mid-launch, before the transcript flushes a single record. */
   expect(visibleRuntimeLiveTurnItems(staleOpening, []).map((item) => item.itemId))
     .toEqual(["item-674-opening"]);
+});
+
+test("issue 674: a streaming item stranded by a dead broker is fenced once the turn is idle", () => {
+  const paneWindow = feedOf(TRANSCRIPT);
+
+  /* The turn ended without the item/turn events that would have settled it. */
+  expect(visibleRuntimeLiveTurnItems(strandedStream, paneWindow, undefined, "idle")).toEqual([]);
+
+  /* The same row while the turn is genuinely running stays put — an in-flight
+     answer is never dropped for being older than a record already written. */
+  expect(visibleRuntimeLiveTurnItems(strandedStream, paneWindow, undefined, "running")
+    .map((item) => item.text))
+    .toEqual(["Reading src/components/feed"]);
+  /* A recovering host reports `unknown`, and a pane with no hosted session
+     reports nothing at all; neither is proof the turn stopped. */
+  for (const turn of ["unknown", "interrupt_requested", null] as const) {
+    expect(visibleRuntimeLiveTurnItems(strandedStream, paneWindow, undefined, turn)).toHaveLength(1);
+  }
+});
+
+test("issue 674: an idle turn still keeps a streaming item the transcript has not reached", () => {
+  const fresh: RuntimeLiveTurn = {
+    ...strandedStream,
+    items: [{ ...strandedStream.items![0]!, startedAt: "2026-07-25T10:20:00.000Z" }],
+  };
+
+  expect(visibleRuntimeLiveTurnItems(fresh, feedOf(TRANSCRIPT), undefined, "idle"))
+    .toHaveLength(1);
+  /* And a launch tail with no transcript at all is untouched by liveness. */
+  expect(visibleRuntimeLiveTurnItems(strandedStream, [], undefined, "idle")).toHaveLength(1);
 });
