@@ -1,14 +1,26 @@
 import type { AgentEngine } from "@/lib/agent/cli";
 import { codexModelSupportsImages } from "@/lib/agent/models";
-import { runtimeEventsEnabled, runtimeHostSocket, structuredHostsEnabled } from "./flags";
+import {
+  runtimeEventsEnabled,
+  runtimeEventsRolledBack,
+  runtimeHostSocket,
+  runtimeUiEnabled,
+  structuredHostsEnabled,
+} from "./flags";
 import { CODEX_STRUCTURED_IMAGE_REASON } from "./structuredContent";
 
 export type SpawnTransport = "tmux" | "structured";
 
 /** A deployment that carries a runtime host is structured-capable: no tmux
-    server sits between the viewer and the agent. */
+    server sits between the viewer and the agent. Every rollback switch that can
+    block a structured spawn is read here, so the implicit default and
+    {@link structuredSpawnGap} agree on the same env record — a switch that
+    fails the gap but not this predicate would decide `structured` and then
+    reject every spawn with the gap, taking tmux down with it. */
 function structuredTransportAvailable(env: Readonly<Record<string, string | undefined>>): boolean {
-  return structuredHostsEnabled(env as NodeJS.ProcessEnv) && runtimeEventsEnabled(env as NodeJS.ProcessEnv);
+  return structuredHostsEnabled(env)
+    && runtimeEventsEnabled(env)
+    && runtimeUiEnabled(env);
 }
 
 /** Structured is the default wherever it can actually run: pane-less spawns are
@@ -30,10 +42,10 @@ export function structuredSpawnGap(
   request: { engine: AgentEngine; model: string | null; hasImages: boolean; fast: boolean | null },
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): string | null {
-  if (!structuredHostsEnabled(env as NodeJS.ProcessEnv)) return "structured spawn is rolled back by LLV_STRUCTURED_HOSTS=0";
-  if (env.LLV_RUNTIME_EVENTS === "0") return "structured spawn is rolled back by LLV_RUNTIME_EVENTS=0";
-  if (!runtimeHostSocket(env as NodeJS.ProcessEnv)) return "structured spawn requires a runtime host socket (LLV_RUNTIME_HOST_SOCKET)";
-  if (env.NEXT_PUBLIC_RUNTIME_UI === "0") return "structured spawn requires the runtime UI (NEXT_PUBLIC_RUNTIME_UI=0 removes the viewer controls)";
+  if (!structuredHostsEnabled(env)) return "structured spawn is rolled back by LLV_STRUCTURED_HOSTS=0";
+  if (runtimeEventsRolledBack(env)) return "structured spawn is rolled back by LLV_RUNTIME_EVENTS=0";
+  if (!runtimeHostSocket(env)) return "structured spawn requires a runtime host socket (LLV_RUNTIME_HOST_SOCKET)";
+  if (!runtimeUiEnabled(env)) return "structured spawn requires the runtime UI (NEXT_PUBLIC_RUNTIME_UI=0 removes the viewer controls)";
   if (request.hasImages && request.engine === "codex" && !codexModelSupportsImages(request.model)) {
     return CODEX_STRUCTURED_IMAGE_REASON;
   }

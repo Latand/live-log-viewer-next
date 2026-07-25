@@ -26,6 +26,7 @@ import {
   type RuntimeSnapshot,
   type RuntimeStore,
 } from "@/components/runtime/runtimeModel";
+import { rolledBack, RUNTIME_PLANE_ABSENT } from "@/lib/runtime/flags";
 
 export const SNAPSHOT_URL = "/api/runtime/snapshot";
 export const STREAM_URL = "/api/runtime/stream";
@@ -73,6 +74,11 @@ export interface EventSourceLike {
  *  so tests can supply a simple mock. */
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
+/** The deployment carries no runtime plane at all. Distinct from every other
+ *  transport failure: reconnecting cannot fix it, and a bus that kept claiming
+ *  authority would leave every conversation `unresolved` forever. */
+class RuntimePlaneAbsentError extends Error {}
+
 export interface RuntimeBusDeps {
   fetch: FetchLike;
   createEventSource: (url: string) => EventSourceLike;
@@ -116,6 +122,7 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
   let generation = 0; // bumps on every teardown so stale callbacks no-op
   let joining = false;
   let hasSnapshot = false; // a full snapshot has been installed at least once
+  let planeAbsent = false; // this deployment serves no runtime plane at all
   let reconnectAttempts = 0;
   let firstFailureAt: number | null = null;
 
@@ -186,6 +193,61 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
     markOpen();
   }
 
+  /** Snapshot fetch that tells a plane-absent deployment (no runtime host in
+      this deployment at all) apart from a declared host that is failing. */
+  async function fetchSnapshot(): Promise<RuntimeSnapshot> {
+    const res = await deps.fetch(SNAPSHOT_URL, { headers: { accept: "application/json" } });
+    if (res.ok) return (await res.json()) as RuntimeSnapshot;
+    if (res.status === 503) {
+      let code: unknown = null;
+      try {
+        code = ((await res.json()) as { code?: unknown } | null)?.code ?? null;
+      } catch {
+        code = null;
+      }
+      if (code === RUNTIME_PLANE_ABSENT) throw new RuntimePlaneAbsentError("runtime plane absent");
+    }
+    throw new Error(`snapshot ${res.status}`);
+  }
+
+  /** Tear everything down and go inert. Shared by `stop()` and the plane-absent
+      path so both leave exactly the same observable state. */
+  function goInert(): void {
+    closeSource();
+    clearFallback();
+    reconnectTimer = clearTimer(reconnectTimer);
+    resyncedTimer = clearTimer(resyncedTimer);
+    hasSnapshot = false;
+    reconnectAttempts = 0;
+    firstFailureAt = null;
+    state = {
+      store: emptyStore(),
+      connection: "offline",
+      resyncedAt: null,
+      lastEventAt: null,
+      enabled: false,
+      structuredHostsEnabled: false,
+    };
+    emit();
+  }
+
+  /**
+   * The runtime routes answered that this deployment has no runtime plane.
+   * The UI flag ships on, so a tmux-only viewer lands here — and a bus that
+   * stayed `enabled` with an empty store would make the plane authoritative
+   * but blind, resolving every running conversation to `unresolved` (Send
+   * disabled, Stop/kill/terminal hidden) for the life of the tab. Going inert
+   * hands authority back to `file.proc`, i.e. the legacy path. Latched: the
+   * answer is deployment configuration, not an outage, so remounting consumers
+   * must not restart the join loop. A *declared* host that is merely down never
+   * reaches here — that stays a reconnectable transport failure, and the
+   * `unresolved` fail-safe keeps applying while its snapshot is outstanding.
+   */
+  function markPlaneAbsent(): void {
+    planeAbsent = true;
+    goInert();
+  }
+
   function noteResynced(): void {
     setState({ resyncedAt: deps.now() });
     resyncedTimer = clearTimer(resyncedTimer);
@@ -201,9 +263,7 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
     joining = true;
     const myGen = generation;
     try {
-      const res = await deps.fetch(SNAPSHOT_URL, { headers: { accept: "application/json" } });
-      if (!res.ok) throw new Error(`snapshot ${res.status}`);
-      const snapshot = (await res.json()) as RuntimeSnapshot;
+      const snapshot = await fetchSnapshot();
       if (myGen !== generation) return; // superseded while awaiting
       hasSnapshot = true;
       setState({
@@ -213,7 +273,8 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
       });
       if (afterCursorReset) noteResynced();
       openStream(snapshot.snapshotSeq);
-    } catch {
+    } catch (error) {
+      if (error instanceof RuntimePlaneAbsentError) return markPlaneAbsent();
       if (myGen !== generation) return;
       onTransportLost();
     } finally {
@@ -331,13 +392,12 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
   async function refreshGateAndResume(): Promise<void> {
     const myGen = generation;
     try {
-      const res = await deps.fetch(SNAPSHOT_URL, { headers: { accept: "application/json" } });
-      if (!res.ok) throw new Error(`snapshot ${res.status}`);
-      const snapshot = (await res.json()) as RuntimeSnapshot;
+      const snapshot = await fetchSnapshot();
       if (myGen !== generation) return;
       setState({ structuredHostsEnabled: snapshot.structuredHostsEnabled === true });
       openStream(state.store.cursor);
-    } catch {
+    } catch (error) {
+      if (error instanceof RuntimePlaneAbsentError) return markPlaneAbsent();
       if (myGen !== generation) return;
       onTransportLost();
     }
@@ -363,9 +423,7 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
   async function pollFallback(myEpoch: number): Promise<void> {
     const myPollSerial = ++fallbackPollSerial;
     try {
-      const res = await deps.fetch(SNAPSHOT_URL, { headers: { accept: "application/json" } });
-      if (!res.ok) throw new Error(`snapshot ${res.status}`);
-      const snapshot = (await res.json()) as RuntimeSnapshot;
+      const snapshot = await fetchSnapshot();
       if (
         myEpoch !== fallbackEpoch
         || snapshot.snapshotSeq < state.store.cursor
@@ -382,7 +440,8 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
       if (snapshot.filesRevision > prevFiles) {
         for (const listener of filesListeners) listener(snapshot.filesRevision);
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof RuntimePlaneAbsentError) return markPlaneAbsent();
       if (myEpoch !== fallbackEpoch) return;
       // Still down. If nothing has been served for long enough, go offline.
       const last = state.lastEventAt;
@@ -403,34 +462,20 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
       return () => filesListeners.delete(listener);
     },
     start() {
-      if (state.enabled) return;
+      // A plane-absent deployment stays inert for the tab: every remounting
+      // consumer calls start(), and re-joining would only re-learn the same
+      // 503 while flipping authority back on in between.
+      if (planeAbsent || state.enabled) return;
       setState({ enabled: true, connection: "reconnecting" });
       void join(false);
     },
     stop() {
-      closeSource();
-      clearFallback();
-      reconnectTimer = clearTimer(reconnectTimer);
-      resyncedTimer = clearTimer(resyncedTimer);
-      hasSnapshot = false;
-      reconnectAttempts = 0;
-      firstFailureAt = null;
-      state = {
-        store: emptyStore(),
-        connection: "offline",
-        resyncedAt: null,
-        lastEventAt: null,
-        enabled: false,
-        structuredHostsEnabled: false,
-      };
-      emit();
+      goInert();
     },
     async refresh() {
       const myGen = generation;
       try {
-        const res = await deps.fetch(SNAPSHOT_URL, { headers: { accept: "application/json" } });
-        if (!res.ok) return false;
-        const snapshot = (await res.json()) as RuntimeSnapshot;
+        const snapshot = await fetchSnapshot();
         // A newer generation already superseded us (reconnect/stop raced): the
         // fetch itself succeeded and fresher state is live, so report success.
         if (myGen !== generation) return true;
@@ -450,7 +495,8 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
           structuredHostsEnabled: snapshot.structuredHostsEnabled === true,
         });
         return true;
-      } catch {
+      } catch (error) {
+        if (error instanceof RuntimePlaneAbsentError) markPlaneAbsent();
         return false;
       }
     },
@@ -464,11 +510,18 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
 /**
  * The runtime UI ships on: structured hosting is the default transport, and
  * its controls are what operators drive it with. `NEXT_PUBLIC_RUNTIME_UI=0` is
- * the build-time rollback; a `llv_runtime_ui=1` localStorage override still
- * turns the surface back on for local UX evidence on an isolated dev port.
+ * the build-time rollback (read through the same normalisation as the
+ * server-side switches, so a quoted or padded value still rolls back); a
+ * `llv_runtime_ui=1` localStorage override still turns the surface back on for
+ * local UX evidence on an isolated dev port.
+ *
+ * Turning the surface on is not a claim that a runtime host exists — this value
+ * is inlined at build time and cannot know. The bus resolves that at runtime and
+ * goes inert on a plane-absent deployment (see `markPlaneAbsent`).
  */
 export function isRuntimeUiEnabled(): boolean {
-  if (process.env.NEXT_PUBLIC_RUNTIME_UI !== "0") return true;
+  // The literal member expression is what Next inlines at build time; keep it.
+  if (!rolledBack(process.env.NEXT_PUBLIC_RUNTIME_UI)) return true;
   if (typeof window === "undefined") return false;
   try {
     return window.localStorage.getItem("llv_runtime_ui") === "1";

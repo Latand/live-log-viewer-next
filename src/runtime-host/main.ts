@@ -18,8 +18,15 @@ const {
   RUNTIME_HOST_CONTAINER_ENV,
 } = await import("./hostRelease");
 
+const { runtimeHostActivationRefusal } = await import("@/lib/runtime/flags");
+
 const socketPath = process.env.LLV_RUNTIME_HOST_SOCKET || statePath("runtime-host.sock");
-if (process.env.LLV_RUNTIME_EVENTS !== "1") throw new Error("runtime host activation requires LLV_RUNTIME_EVENTS=1");
+/* A started runtime-host is always an events host. The guard survives; it keys
+   on the same reader the viewer uses, so a deployment that merely drops the
+   variable no longer gets a viewer that believes events are live and a host
+   that exits at boot. Only the explicit rollback refuses. */
+const activationRefusal = runtimeHostActivationRefusal();
+if (activationRefusal) throw new Error(activationRefusal);
 if (process.env.LLV_RUNTIME_LEGACY_SCHEDULER === "1" && process.env.LLV_ACCOUNT_CONTROLLER_DISABLED !== "1") {
   throw new Error("runtime legacy scheduler requires LLV_ACCOUNT_CONTROLLER_DISABLED=1 to preserve single-writer reconciliation");
 }

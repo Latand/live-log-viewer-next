@@ -25,7 +25,7 @@ import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
 import { persistHandoffLineage, rememberHandoffChild } from "@/lib/handoffLineage";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
-import { runtimeHostClient } from "@/lib/runtime/client";
+import { runtimeHostClient, RuntimeHostUnavailableError } from "@/lib/runtime/client";
 import { runtimeScope } from "@/lib/runtime/contracts";
 import { publishFilesRevision } from "@/lib/runtime/filesRevision";
 import { runtimeEventsEnabled } from "@/lib/runtime/flags";
@@ -476,6 +476,22 @@ export async function executeSpawnRequest(
             conversationId: receipt.conversationId,
             error,
           });
+          /* Structured is the default transport now, so "socket configured,
+             host unreachable" is a default-path failure — and the one failure
+             nothing else can terminalize: `spawnStructuredConversation` marks
+             the receipt failed only when it can project the dead spawn through
+             that same dead socket, and the stale-spawn reaper reconciles
+             through it too. Without this the operator sees an accepted 202
+             that never becomes a conversation. Retry-safe:
+             `failStructuredSpawn` no-ops on an already-terminal receipt, and a
+             failed launch is claimable for retry under the same launch id, so
+             a transient blip cannot become a second launch. */
+          if (error instanceof RuntimeHostUnavailableError) {
+            registry.failStructuredSpawn(
+              receipt.launchId,
+              `structured spawn transport failed: ${error.message}`.slice(0, 240),
+            );
+          }
           return;
         }
         if (parentArtifactPath && response.path) {

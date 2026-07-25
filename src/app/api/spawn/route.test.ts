@@ -12,7 +12,7 @@ import { spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdenti
 import { rotateOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { spawnReplayStatus, spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
 import { resolveSpawnLineage, resolveSpawnLineageParent, resolveSpawnParent, SpawnParentError } from "@/lib/agent/spawnParent";
-import type { RuntimeHostClient } from "@/lib/runtime/client";
+import { RuntimeHostUnavailableError, type RuntimeHostClient } from "@/lib/runtime/client";
 import { StructuredRuntimeRequirementError } from "@/lib/proc/darwinIdentity";
 import { authenticatedAgentSpawnCaller, isAgentInitiatedSpawn, spawnLineageSelectorForCaller } from "./admission";
 import { POST } from "./route";
@@ -2082,4 +2082,119 @@ test("spawn replay keeps its identity after parent alias adoption", () => {
     parentSessionKey: secondEvidence.sessionKey,
     parentArtifactPath: secondEvidence.artifactPath,
   })).toMatchObject({ kind: "replay", receipt: { launchId: first.receipt.launchId } });
+});
+
+/* A rollback switch is reached for during an incident, so it must leave the
+   deployment able to spawn. `NEXT_PUBLIC_RUNTIME_UI=0` used to leave the
+   implicit choice on `structured` while still failing the capability gap, so
+   every spawn — tmux included — came back 409. The request below carries a
+   directory that does not exist: the cwd check sits *after* the transport
+   decision and the gap, so a 400 naming the directory proves the route got
+   past both, and the 409 gap proves it did not. */
+test("the runtime-UI rollback leaves a default spawn on a transport that can still spawn", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "runtime-ui-rollback-"));
+  const missing = path.join(cwd, "no-such-directory");
+  const previous = {
+    transport: process.env.LLV_SPAWN_TRANSPORT,
+    hosts: process.env.LLV_STRUCTURED_HOSTS,
+    events: process.env.LLV_RUNTIME_EVENTS,
+    socket: process.env.LLV_RUNTIME_HOST_SOCKET,
+    ui: process.env.NEXT_PUBLIC_RUNTIME_UI,
+  };
+  delete process.env.LLV_SPAWN_TRANSPORT;
+  delete process.env.LLV_STRUCTURED_HOSTS;
+  delete process.env.LLV_RUNTIME_EVENTS;
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "0";
+  try {
+    const response = await POST(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1:8898",
+        origin: "http://127.0.0.1:8898",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ engine: "codex", cwd: missing, prompt: "smoke" }),
+    }));
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: `directory does not exist: ${missing}` });
+  } finally {
+    if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previous.transport;
+    if (previous.hosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous.hosts;
+    if (previous.events === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previous.events;
+    if (previous.socket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previous.socket;
+    if (previous.ui === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previous.ui;
+  }
+});
+
+/* Socket configured, host unreachable — the default path now, since the
+   transport is chosen from declared capability. The deferred launch is the only
+   owner of the receipt's outcome: the host that would project the dead spawn is
+   the one that is down, and the stale-spawn reaper reconciles through the same
+   socket. Without a terminal state the operator sees an accepted 202 that never
+   becomes a conversation. */
+test("a structured launch that dies on an unreachable host terminalizes its receipt", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "structured-host-down-"));
+  const previous = {
+    transport: process.env.LLV_SPAWN_TRANSPORT,
+    hosts: process.env.LLV_STRUCTURED_HOSTS,
+    events: process.env.LLV_RUNTIME_EVENTS,
+    socket: process.env.LLV_RUNTIME_HOST_SOCKET,
+    ui: process.env.NEXT_PUBLIC_RUNTIME_UI,
+  };
+  delete process.env.LLV_SPAWN_TRANSPORT;
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  const store = new AgentRegistry(path.join(cwd, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+  let deferred: (() => Promise<void>) | null = null;
+  const dependencies = {
+    ...structuredRouteDependencies(cwd),
+    registry: () => store,
+    defer: (work: () => Promise<void>) => { deferred = work; },
+    spawnStructuredConversation: async () => {
+      throw new RuntimeHostUnavailableError("runtime host is unavailable");
+    },
+  } as Parameters<typeof POST.withDependencies>[1];
+  try {
+    const response = await POST.withDependencies(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1:8898",
+        origin: "http://127.0.0.1:8898",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ engine: "claude", cwd, prompt: "spawn against a dead host" }),
+    }), dependencies);
+
+    expect(response.status).toBe(202);
+    const accepted = await response.json() as { launchId: string };
+    expect(store.readOnlySnapshot().receipts[accepted.launchId]?.state).toBe("starting");
+
+    await runDeferred(deferred);
+
+    const settled = store.readOnlySnapshot().receipts[accepted.launchId];
+    expect(settled?.state).toBe("failed");
+    expect(settled?.error).toContain("runtime host is unavailable");
+  } finally {
+    if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previous.transport;
+    if (previous.hosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous.hosts;
+    if (previous.events === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previous.events;
+    if (previous.socket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previous.socket;
+    if (previous.ui === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previous.ui;
+  }
 });
