@@ -90,7 +90,7 @@ export type PipelineStageStopResult =
 export type PipelineCloseReport = {
   /** Hosts this close terminated, with termination evidenced. */
   stopped: PipelineStageHostRef[];
-  /** Non-terminal stages whose host was already gone. */
+  /** Launched stages — settled or parked included — whose host was already gone. */
   alreadyStopped: PipelineStageHostRef[];
   /** Kills the runtime accepted without confirming termination in time. The
       operation id keeps the possible survivor addressable. */
@@ -2047,26 +2047,53 @@ async function orphanAgentPane(
   return { error: `stage agent may still be running in pane ${attempt.paneId}; wait for it to exit or kill the pane first`, status: 409 };
 }
 
-/** Stage attempts that may still own a live agent host: every current round
-    that has not reached a terminal state and named a conversation. Historical
-    (lineage-adopted) evidence never owns a host this pipeline may terminate. */
-function liveStageHosts(pipeline: Pipeline): PipelineStageHostRef[] {
-  const targets: PipelineStageHostRef[] = [];
+/**
+ * Every host this pipeline ever launched, as a close must consider it.
+ *
+ * A terminal attempt state says nothing about whether its host is still
+ * resident: `park()` writes `needs_decision` precisely when a hosted session
+ * went idle, produced an unparseable verdict, or stopped reporting — the agent
+ * process is still there, still holding the account's quota. Those parked lanes
+ * are the orphans #670 was filed for, so residency is decided downstream from
+ * evidence about the host (the registry, then the pane), never from the attempt
+ * state machine. Lineage-adopted (`historical`) evidence is left alone: those
+ * conversations belong to their own lineage, and a close must not reach outside
+ * this pipeline's own stage launches.
+ */
+function launchedStageHosts(pipeline: Pipeline): StageHostCandidate[] {
+  const candidates: StageHostCandidate[] = [];
+  const seen = new Set<string>();
   for (const run of pipeline.runs) {
     for (const attempt of run.attempts) {
-      if (attempt.historical || TERMINAL_ATTEMPT_STATES.has(attempt.state)) continue;
-      if (!attempt.conversationId && !attempt.agentPath) continue;
-      targets.push({
-        stageId: run.stageId,
-        attempt: attempt.n,
-        conversationId: attempt.conversationId,
-        agentPath: attempt.agentPath,
-        paneId: attempt.paneId,
+      if (attempt.historical) continue;
+      if (!attempt.conversationId && !attempt.agentPath && !attempt.paneId) continue;
+      /* Rounds can share a host identity (a review round re-reads its reviewer
+         conversation); probing one host once keeps the counts truthful. */
+      const identity = `${attempt.conversationId ?? ""}|${attempt.agentPath ?? ""}|${attempt.paneId ?? ""}`;
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      candidates.push({
+        target: {
+          stageId: run.stageId,
+          attempt: attempt.n,
+          conversationId: attempt.conversationId,
+          agentPath: attempt.agentPath,
+          paneId: attempt.paneId,
+        },
+        /* Same reading orphanAgentPane uses: a verdict or a completion stamp
+           means the turn ended, so what is left in the pane is an idle CLI. A
+           parked attempt has neither (park writes only state and error), which
+           is why the pane heuristic still applies to it. */
+        turnSettled: Boolean(attempt.verdict || attempt.completedAt),
       });
     }
   }
-  return targets;
+  return candidates;
 }
+
+/** A launched host plus whether its attempt's turn ended, which decides only
+    whether the pane heuristic may speak for it. */
+type StageHostCandidate = { target: PipelineStageHostRef; turnSettled: boolean };
 
 function stageHostLabel(target: PipelineStageHostRef): string {
   return `stage ${target.stageId} attempt ${target.attempt} (${target.conversationId ?? target.agentPath ?? "unknown host"})`;
@@ -2542,16 +2569,17 @@ export async function patchPipeline(
          what was stopped. Nothing on disk is touched — uncommitted stage work
          stays in the worktree and is named in the report instead. */
       const close: PipelineCloseReport = { stopped: [], alreadyStopped: [], unconfirmed: [], stillRunning: [], worktree: null };
-      for (const target of liveStageHosts(pipeline)) {
+      for (const { target, turnSettled } of launchedStageHosts(pipeline)) {
         const result = await ports.stopStageAgent(target);
         if (result.outcome === "stopped") close.stopped.push(target);
         else if (result.outcome === "failed") close.stillRunning.push({ ...target, error: result.error });
         else if (result.outcome === "unconfirmed") {
           close.unconfirmed.push({ ...target, operationId: result.operationId, detail: result.detail });
-        } else if (target.paneId && await ports.paneAgentAlive(target.paneId)) {
-          /* The registry knows no host, but an agent is still running in the
-             attempt's pane — the same evidence orphanAgentPane refuses a retry
-             on. Surface it rather than closing cleanly over a live agent. */
+        } else if (!turnSettled && target.paneId && await ports.paneAgentAlive(target.paneId)) {
+          /* The registry knows no host, but the attempt never finished its turn
+             and an agent is still running in its pane — the same evidence
+             orphanAgentPane refuses a retry on. Surface it rather than closing
+             cleanly over a live agent. */
           close.stillRunning.push({
             ...target,
             error: `an agent is still running in pane ${target.paneId}; kill the pane, then close again`,
@@ -2592,7 +2620,22 @@ export async function patchPipeline(
       pipeline.pausedState = null;
       pipeline.stateDetail = closeSummary(close);
       pipeline.closedAt = ports.now();
-      pipeline.hiddenAt = pipeline.closedAt;
+      /* An unconfirmed kill may have left a resident host. Hiding the lane would
+         make that survivor invisible on the board, which is the opposite of
+         surfacing it, so the closed record stays visible (and durable) until a
+         later close confirms the host is gone and clears it. */
+      pipeline.unconfirmedHosts = close.unconfirmed.length > 0
+        ? close.unconfirmed.map((item) => ({
+            stageId: item.stageId,
+            attempt: item.attempt,
+            conversationId: item.conversationId,
+            agentPath: item.agentPath,
+            operationId: item.operationId,
+            detail: item.detail,
+            at: pipeline.closedAt!,
+          }))
+        : undefined;
+      pipeline.hiddenAt = pipeline.unconfirmedHosts ? null : pipeline.closedAt;
       persist();
       return { pipeline, close };
     } else {

@@ -9,6 +9,7 @@ import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
 import { viewerMcpBindings } from "./bindings";
+import { createMcpToolService, type McpToolResult } from "./server";
 
 const sandboxes: string[] = [];
 const originalStateDir = process.env.LLV_STATE_DIR;
@@ -599,4 +600,47 @@ test("conversation_migration delegates to the revision-fenced migration command 
   });
   expect(migrationOperationId).toMatch(/^mcp_conversation_migration_[0-9a-f]{24}$/);
   expect((result.receipt as { operationId: string }).operationId).toBe(migrationOperationId);
+});
+
+test("a refused pipeline close exposes its host report through MCP, not only prose (#670)", async () => {
+  const close = {
+    stopped: [{ stageId: "plan", attempt: 1, conversationId: "conversation_plan", agentPath: null, paneId: null }],
+    alreadyStopped: [],
+    unconfirmed: [],
+    stillRunning: [{ stageId: "build", attempt: 2, conversationId: "conversation_build", agentPath: null, paneId: "%7", error: "structured runtime host is unavailable" }],
+    worktree: { dir: "/repo-pipeline-1", uncommitted: ["notes.md"], truncated: false },
+  };
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    patchPipeline: async (_id: string, request: { action?: string }) => (request.action === "close"
+      ? { error: "could not stop stage build attempt 2 (conversation_build): structured runtime host is unavailable", status: 409, close }
+      : { pipeline: { id: "pipeline_1", state: "paused" } }),
+  } as never);
+  const results = new Map<string, McpToolResult>();
+  const service = createMcpToolService(bindings, {
+    claim: async (key: string) => (results.has(key) ? { kind: "replay" as const, result: results.get(key)! } : { kind: "fresh" as const }),
+    complete: async (key: string, _digest: string, result: McpToolResult) => { results.set(key, result); },
+  } as never);
+
+  const refused = await service.callTool("pipeline_action", {
+    clientRequestId: "close-refused",
+    pipelineId: "pipeline_1",
+    action: "close",
+  });
+
+  expect(refused.ok).toBeFalse();
+  /* An agent driving the board gets the structured evidence an HTTP caller
+     gets — which host survived and where to find it — not just the prose. */
+  expect(refused).toMatchObject({
+    code: "tool_failed",
+    error: "could not stop stage build attempt 2 (conversation_build): structured runtime host is unavailable",
+    details: { close: { stillRunning: [{ stageId: "build", attempt: 2, conversationId: "conversation_build", paneId: "%7" }] } },
+  });
+
+  const paused = await service.callTool("pipeline_action", {
+    clientRequestId: "pause-ok",
+    pipelineId: "pipeline_1",
+    action: "pause",
+  });
+  expect(paused).toMatchObject({ ok: true, pipelineId: "pipeline_1" });
+  expect((paused as { details?: unknown }).details).toBeUndefined();
 });

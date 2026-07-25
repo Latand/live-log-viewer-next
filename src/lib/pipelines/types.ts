@@ -161,6 +161,19 @@ export type PipelineCursorState = "pending" | "spawning" | "running" | "reviewin
 
 export type PipelineState = "draft" | "provisioning" | "running" | "needs_decision" | "paused" | "completed" | "closed";
 
+/** A stage host a close asked the runtime to kill without confirming that it
+    died (#670). Durable, so the possible survivor stays addressable: the board
+    keeps showing the closed lane until a later close settles it. */
+export type PipelineUnconfirmedHost = {
+  stageId: string;
+  attempt: number;
+  conversationId: string | null;
+  agentPath: string | null;
+  operationId: string | null;
+  detail: string;
+  at: string;
+};
+
 export type PipelineCreationIntent = {
   kind: "task-spawn";
   taskId: string;
@@ -198,7 +211,11 @@ export type Pipeline = {
   createdAt: string;
   closedAt: string | null;
   hiddenAt?: string | null;
-  /** Read-model marker set when a hidden container is projected for a pinned member. */
+  /** Hosts the last close could not confirm terminated. Present only while one
+      is outstanding; a close that confirms every kill clears it. */
+  unconfirmedHosts?: PipelineUnconfirmedHost[];
+  /** Read-model marker set when a hidden container is projected for a pinned
+      member, or for a closed lane still holding an unconfirmed host. */
   restored?: boolean;
   /** Durable user pin for the desktop board's world-space pipeline group. */
   pos?: { x: number; y: number };

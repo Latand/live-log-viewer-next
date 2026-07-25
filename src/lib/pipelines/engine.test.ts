@@ -3134,29 +3134,69 @@ test("closing a running pipeline terminates its stage host and reports the stop 
   });
 });
 
-test("closing stops every non-terminal stage host and leaves settled rounds alone (#670)", async () => {
+test("closing probes every host the pipeline launched, settled rounds included (#670)", async () => {
   const h = harness();
   const pipeline = await create(h.ports);
   await tickPipelines([], h.ports);
   await tickPipelines([], h.ports);
-  /* A second lane whose round already settled must not be touched, while its
-     live successor round must be: the close targets hosts, not stages. */
+  /* A settled round's attempt state says nothing about its host: the passed
+     round below is still resident, and a close that trusted the state machine
+     would leave it burning quota. */
   const stored = loadPipelines();
   const buildRun = stored[0]!.runs.find((run) => run.stageId === "build")!;
   const template = stored[0]!.runs[0]!.attempts[0]!;
   buildRun.attempts.push(
-    { ...structuredClone(template), n: 1, state: "passed", conversationId: "conversation_stage_settled", agentPath: "/codex/stage-settled.jsonl", completedAt: h.ports.now() },
+    { ...structuredClone(template), n: 1, state: "passed", verdict: { status: "pass" }, conversationId: "conversation_stage_settled", agentPath: "/codex/stage-settled.jsonl", completedAt: h.ports.now() },
     { ...structuredClone(template), n: 2, state: "running", conversationId: "conversation_stage_2", agentPath: "/codex/stage-2.jsonl" },
   );
   savePipelines(stored);
   h.setStageHost("conversation_stage_1", { outcome: "stopped" });
+  h.setStageHost("conversation_stage_settled", { outcome: "stopped" });
   h.setStageHost("conversation_stage_2", { outcome: "stopped" });
 
   const closed = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
 
-  expect(closed.close?.stopped.map((item) => `${item.stageId}:${item.attempt}`)).toEqual(["plan:1", "build:2"]);
-  expect(h.calls).not.toContain("stop-host:build:1:conversation_stage_settled");
-  expect(loadPipelines()[0]!.stateDetail).toBe("closed; stopped 2 stage hosts");
+  expect(h.calls).toContain("stop-host:build:1:conversation_stage_settled");
+  expect(closed.close?.stopped.map((item) => `${item.stageId}:${item.attempt}`)).toEqual(["plan:1", "build:1", "build:2"]);
+  expect(loadPipelines()[0]!.stateDetail).toBe("closed; stopped 3 stage hosts");
+});
+
+test("a parked stage whose host is still resident is stopped, not read as terminal (#670)", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  /* park() writes needs_decision while the agent process is still there — the
+     7.5-hour orphans of #670 were exactly this shape. */
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "needs_decision", "operator choice")], h.ports);
+  const parked = loadPipelines()[0]!.runs[0]!.attempts[0]!;
+  expect(parked.state).toBe("needs_decision");
+  h.setStageHost("conversation_stage_1", { outcome: "stopped" });
+
+  const closed = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+  expect(h.calls).toContain("stop-host:plan:1:conversation_stage_1");
+  expect(closed.close?.stopped).toMatchObject([{ stageId: "plan", attempt: 1, conversationId: "conversation_stage_1" }]);
+  expect(loadPipelines()[0]).toMatchObject({ state: "closed", stateDetail: "closed; stopped 1 stage host" });
+});
+
+test("a parked stage with no resident host still reports nothing was running (#670)", async () => {
+  const h = harness();
+  h.setPaneAlive(false);
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "needs_decision", "operator choice")], h.ports);
+  expect(loadPipelines()[0]!.runs[0]!.attempts[0]!.state).toBe("needs_decision");
+
+  const closed = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+  expect(closed.close).toMatchObject({
+    stopped: [],
+    alreadyStopped: [{ stageId: "plan", attempt: 1, conversationId: "conversation_stage_1" }],
+    stillRunning: [],
+  });
+  expect(loadPipelines()[0]).toMatchObject({ state: "closed", stateDetail: null });
 });
 
 test("closing a pipeline whose host is already gone reports that nothing was running (#670)", async () => {
@@ -3202,6 +3242,38 @@ test("an accepted but unconfirmed kill never counts as a clean stop (#670)", asy
   expect(loadPipelines()[0]!.stateDetail).toBe(
     "closed; kill accepted as queued but termination was not confirmed for stage plan attempt 1 (conversation_stage_1) (operation kill-op-1)",
   );
+  /* The possible survivor stays addressable: the lane is not hidden, and the
+     durable record names the operation to chase. */
+  const parked = loadPipelines()[0]!;
+  expect(parked.hiddenAt).toBeNull();
+  expect(parked.unconfirmedHosts).toMatchObject([{ stageId: "plan", attempt: 1, operationId: "kill-op-1" }]);
+
+  /* Closing again once the kill is confirmed settles the lane and hides it. */
+  h.setStageHost("conversation_stage_1", { outcome: "stopped" });
+  const settled = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+  expect(settled.close?.unconfirmed).toEqual([]);
+  expect(loadPipelines()[0]!.unconfirmedHosts).toBeUndefined();
+  expect(loadPipelines()[0]!.hiddenAt).toBe(loadPipelines()[0]!.closedAt);
+});
+
+test("a settled attempt with an idle CLI in its pane does not block the close (#670)", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  /* A verdict means the turn ended, so what is left in the pane is an idle CLI —
+     the exemption orphanAgentPane applies to a retry. The pane stays alive here. */
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  const settled = loadPipelines()[0]!.runs[0]!.attempts[0]!;
+  expect(settled.verdict).toMatchObject({ status: "pass" });
+  expect(settled.paneId).toBe("%1");
+
+  const closed = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+  expect(closed.error).toBeUndefined();
+  expect(closed.close?.stillRunning).toEqual([]);
+  expect(closed.close?.alreadyStopped).toMatchObject([{ stageId: "plan", attempt: 1 }]);
+  expect(loadPipelines()[0]!.state).toBe("closed");
 });
 
 test("a live pane behind a host the registry does not know refuses the close (#670)", async () => {

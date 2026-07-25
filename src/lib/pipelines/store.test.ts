@@ -262,3 +262,51 @@ test("v3 validation: acyclic pass edges, valid fail edges, 1–8 stage bounds (#
     expect(() => savePipelines([orphanReview])).toThrow("malformed pipeline record");
   });
 });
+
+test("an unconfirmed host record survives a round trip and rejects a malformed one (#670)", () => {
+  const previous = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipelines-unconfirmed-"));
+  process.env.LLV_STATE_DIR = sandbox;
+  try {
+    const pipeline = buildPipeline({
+      id: "abcdef13",
+      task: "task",
+      taskIds: [],
+      project: "viewer",
+      repoDir: "/repo",
+      stages: [{ id: "build", kind: "run" as const, role: { roleId: "builder" as const }, engine: "codex" as const, model: "gpt-5.6-sol", effort: "medium", access: "read-write" as const, prompt: "build", next: null, effectiveRole: { roleId: "builder" as const, engine: "codex" as const, model: "gpt-5.6-sol", effort: "medium", access: "read-write" as const, promptScaffold: "builder" } }],
+      srcPath: null,
+      srcConversationId: "conversation_creator",
+      now: "now",
+    });
+    pipeline.state = "closed";
+    pipeline.cursor = null;
+    pipeline.closedAt = "2026-07-25T00:00:00.000Z";
+    pipeline.hiddenAt = null;
+    pipeline.unconfirmedHosts = [{
+      stageId: "build",
+      attempt: 1,
+      conversationId: "conversation_build",
+      agentPath: null,
+      operationId: "kill-op-1",
+      detail: "kill accepted as queued but termination was not confirmed",
+      at: "2026-07-25T00:00:00.000Z",
+    }];
+    savePipelines([pipeline]);
+
+    expect(loadPipelines()[0]!.unconfirmedHosts).toEqual(pipeline.unconfirmedHosts);
+
+    /* An empty list normalizes away, so a settled lane carries no marker. */
+    savePipelines([{ ...pipeline, unconfirmedHosts: [] }]);
+    expect(loadPipelines()[0]!.unconfirmedHosts).toBeUndefined();
+
+    expect(() => savePipelines([{
+      ...pipeline,
+      unconfirmedHosts: [{ stageId: "build", attempt: "one" } as never],
+    }])).toThrow();
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+    if (previous === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previous;
+  }
+});
