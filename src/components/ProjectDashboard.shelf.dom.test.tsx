@@ -188,10 +188,15 @@ test("mobile: the project name takes priority in the header and the shelf stays 
   const ready = await waitFor(() => trigger(host) !== null);
   expect(ready).toBe(true);
   /* The project title is content-width priority (never flex-1 that compresses
-     «atlas» to «a…»), capped so a long name truncates instead of overflowing. */
+     «atlas» to «a…»), capped so a long name truncates instead of overflowing.
+     It IS allowed to shrink as the last resort (issue #613): the empty filler
+     beside it collapses first, and only a row that would otherwise push its
+     controls off a 390px screen makes the name give up pixels — short names
+     like «atlas» still show in full. */
   const h1 = q(host, "h1")!;
   expect(h1.textContent).toBe("atlas");
-  expect(h1.className).toContain("shrink-0");
+  expect(h1.className).toContain("min-w-0");
+  expect(h1.className).toContain("truncate");
   expect(h1.className).toContain("max-w-[45vw]");
   expect(h1.className).not.toContain("flex-1");
   /* One-tap shelf access is preserved: exactly one trigger, a 44px target. */
