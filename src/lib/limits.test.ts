@@ -14,7 +14,8 @@ fs.mkdirSync(process.env.LLV_CLAUDE_HOME, { recursive: true });
 fs.writeFileSync(path.join(process.env.LLV_CLAUDE_HOME, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "test-token", subscriptionType: "max" } }), { mode: 0o600 });
 
 const { createManagedCodexAccount, setActiveCodexAccount } = await import("@/lib/accounts/codex");
-const { fetchClaudeLimits, mapAppServerRateLimits, readCodexLimits, readLimits } = await import("./limits");
+const { fetchClaudeLimits, mapAppServerRateLimits, readBurndown, readCodexLimits, readLimits } = await import("./limits");
+const { recordLimitSample } = await import("@/lib/limitsHistoryStore");
 
 afterAll(() => {
   if (OLD_STATE === undefined) delete process.env.LLV_STATE_DIR;
@@ -90,11 +91,55 @@ test("structured app-server windows map directly to the account-panel limits sha
     secondary: { usedPercent: 55, resetsAt: 200, windowDurationMins: 10_080 },
     planType: "pro",
   }, 77)).toEqual({
-    session: { usedPercent: 12, resetsAt: 100 },
-    weekly: { usedPercent: 55, resetsAt: 200 },
+    session: { usedPercent: 12, resetsAt: 100, windowMinutes: 300 },
+    weekly: { usedPercent: 55, resetsAt: 200, windowMinutes: 10_080 },
     plan: "pro",
     capturedAt: 77,
   });
+});
+
+test("a weekly-only app-server snapshot maps to the weekly window, never the 5h one", () => {
+  // A Codex plan with no 5-hour limit sends its weekly window in the primary
+  // slot and leaves the secondary null (issue #606).
+  const capturedAt = 1_784_914_879;
+  expect(mapAppServerRateLimits({
+    primary: { usedPercent: 15, resetsAt: capturedAt + 437_631, windowDurationMins: 10_080 },
+    secondary: null,
+    planType: "pro",
+  }, capturedAt)).toEqual({
+    session: null,
+    weekly: { usedPercent: 15, resetsAt: capturedAt + 437_631, windowMinutes: 10_080 },
+    plan: "pro",
+    capturedAt,
+  });
+});
+
+test("a weekly-only transcript event feeds the weekly window of the fallback read", async () => {
+  const weeklyOnly = createManagedCodexAccount("Weekly only");
+  const session = path.join(weeklyOnly.sessionsDir, "2026", "07", "13", "weekly.jsonl");
+  fs.mkdirSync(path.dirname(session), { recursive: true });
+  fs.writeFileSync(session, JSON.stringify({
+    timestamp: "2026-07-13T21:04:47.943Z",
+    payload: { rate_limits: { primary: { used_percent: 15, window_minutes: 10_080, resets_at: 1_784_574_264 }, secondary: null, plan_type: "pro" } },
+  }) + "\n");
+  const result = await readCodexLimits({ account: weeklyOnly, liveReader: async () => { throw new Error("offline"); } });
+  expect(result.data?.session).toBeNull();
+  expect(result.data?.weekly).toEqual({ usedPercent: 15, resetsAt: 1_784_574_264, windowMinutes: 10_080 });
+});
+
+test("a newer windowless rate-limits event does not mask the account's real windows", async () => {
+  // Codex emits `rate_limits` events for other limit families with both windows
+  // null; taking the newest line regardless left the account looking windowless.
+  const masked = createManagedCodexAccount("Windowless newest");
+  const session = path.join(masked.sessionsDir, "2026", "07", "24", "masked.jsonl");
+  fs.mkdirSync(path.dirname(session), { recursive: true });
+  fs.writeFileSync(session, [
+    JSON.stringify({ timestamp: "2026-07-24T06:00:00.000Z", payload: { rate_limits: { limit_id: "codex", primary: { used_percent: 15, window_minutes: 10_080, resets_at: 1_785_000_000 }, secondary: null, plan_type: "pro" } } }),
+    JSON.stringify({ timestamp: "2026-07-24T13:05:43.423Z", payload: { rate_limits: { limit_id: "premium", primary: null, secondary: null, plan_type: null } } }),
+  ].join("\n") + "\n");
+  const result = await readCodexLimits({ account: masked, liveReader: async () => { throw new Error("offline"); } });
+  expect(result.data?.weekly).toEqual({ usedPercent: 15, resetsAt: 1_785_000_000, windowMinutes: 10_080 });
+  expect(result.data?.plan).toBe("pro");
 });
 
 test("managed transcript fallback reports per-engine provenance without account cross-contamination", async () => {
@@ -379,4 +424,88 @@ test("concurrent Claude refreshes share one provider request at each retry bound
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+test("a weekly-only Codex account charts its weekly window and names the missing 5h one", async () => {
+  // The production shape behind issue #606: the provider reports a single
+  // 10080-minute window in the primary slot. The weekly chart must draw from
+  // the transcript backfill plus the live value, and the 5h tab must say the
+  // plan reports no such window instead of "no history yet".
+  resetLimitsCache();
+  const account = createManagedCodexAccount("Weekly burndown");
+  setActiveCodexAccount(account.id);
+  const nowS = Math.round(Date.now() / 1000);
+  const resetsAt = nowS + 2 * 86_400;
+  const event = (agoS: number, usedPercent: number) => JSON.stringify({
+    timestamp: new Date((nowS - agoS) * 1000).toISOString(),
+    payload: { rate_limits: { primary: { used_percent: usedPercent, window_minutes: 10_080, resets_at: resetsAt }, secondary: null, plan_type: "pro" } },
+  });
+  const transcript = path.join(account.sessionsDir, "2026", "07", "20", "weekly-burndown.jsonl");
+  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  fs.writeFileSync(transcript, [event(7_200, 30), event(3_600, 45)].join("\n") + "\n");
+
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(null, { status: 503 })) as unknown as typeof fetch;
+  try {
+    const burndown = await readBurndown({
+      codexLiveReader: async () => ({
+        primary: { usedPercent: 52, resetsAt, windowDurationMins: 10_080 },
+        secondary: null,
+        planType: "pro",
+      }),
+    });
+    expect(burndown.codexAccountId).toBe(account.id);
+    const weekly = burndown.codex!.weekly;
+    expect(weekly.samples.map((sample) => sample.remaining)).toEqual([70, 55, 48]);
+    expect(weekly.windowSeconds).toBe(10_080 * 60);
+    expect(weekly.resetsAt).toBe(resetsAt);
+    expect(weekly.windowUnreported).toBeFalsy();
+
+    const session = burndown.codex!.session;
+    expect(session.samples).toEqual([]);
+    expect(session.windowUnreported).toBeTrue();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("a snapshot with no windows at all charts the forward history and claims nothing about horizons", async () => {
+  // Codex answers with a windowless snapshot for limit families that carry no
+  // quota window (both slots null). That is not evidence that a horizon is
+  // unreported: the recorded poll history must still chart, and neither tab may
+  // claim the plan has no such window.
+  resetLimitsCache();
+  const account = createManagedCodexAccount("Windowless snapshot");
+  setActiveCodexAccount(account.id);
+  const nowS = Math.round(Date.now() / 1000);
+  const weekly = (usedPercent: number) => ({ session: null, weekly: { usedPercent, resetsAt: nowS + 2 * 86_400, windowMinutes: 10_080 }, plan: "pro", capturedAt: nowS });
+  recordLimitSample("codex", account.id, weekly(30), (nowS - 7_200) * 1000);
+  recordLimitSample("codex", account.id, weekly(45), (nowS - 3_600) * 1000);
+
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(null, { status: 503 })) as unknown as typeof fetch;
+  try {
+    const burndown = await readBurndown({
+      codexLiveReader: async () => ({ primary: null, secondary: null, planType: "pro" }),
+    });
+    expect(burndown.codex!.weekly.samples.map((sample) => sample.remaining)).toEqual([70, 55]);
+    expect(burndown.codex!.weekly.windowUnreported).toBeFalsy();
+    expect(burndown.codex!.session.windowUnreported).toBeFalsy();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("a transcript left with only windowless events reports no snapshot rather than an empty one", async () => {
+  const account = createManagedCodexAccount("Windowless transcript");
+  const nowS = Math.round(Date.now() / 1000);
+  const transcript = path.join(account.sessionsDir, "2026", "07", "24", "windowless.jsonl");
+  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  fs.writeFileSync(transcript, [
+    JSON.stringify({ timestamp: new Date((nowS - 1_800) * 1000).toISOString(), payload: { rate_limits: { limit_id: "premium", primary: null, secondary: null, plan_type: null } } }),
+    JSON.stringify({ timestamp: new Date((nowS - 600) * 1000).toISOString(), payload: { rate_limits: { limit_id: "premium", primary: null, secondary: null, plan_type: null } } }),
+  ].join("\n") + "\n");
+  const result = await readCodexLimits({ account, liveReader: async () => { throw new Error("offline"); } });
+  expect(result.data).toBeNull();
+  expect(result.source).toBe("unavailable");
 });

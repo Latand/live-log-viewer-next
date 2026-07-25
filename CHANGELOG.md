@@ -7,6 +7,20 @@ versions follow [SemVer](https://semver.org/) (0.x — the API may still move).
 ## [Unreleased]
 
 ### Fixed
+- The limits widget labels each quota window by the horizon its data actually
+  carries (#606). Codex reports every rate-limit window with its own length, and
+  a plan without a 5-hour limit sends its weekly window in the `primary` slot;
+  ingestion filed windows by slot, so a weekly number was drawn under the "5h"
+  label while the weekly window stayed empty and its chart said "no history
+  yet". Windows are now routed by their declared length everywhere they enter —
+  the app-server snapshot, the transcript fallback and the transcript backfill —
+  with the reset horizon as the fallback evidence when a window declares no
+  length, and a rounded length (a week reported as 10081 minutes) still reading
+  as its horizon. Snapshots cached before the fix are relabelled on read.
+  Rate-limit events carrying no windows at all — other limit families — no
+  longer stand in for the account's snapshot, and only a snapshot that names
+  some window can claim a horizon is unreported, so a windowless read still
+  charts the history it has instead of a generic empty state.
 - Multi-gigabyte active transcripts no longer starve the Viewer (#287). One
   process-wide scan coordinator now owns every catalog generation: the HTTP
   files cache, the pipeline watchdog, and the account controller join or queue

@@ -297,7 +297,7 @@ test("quota windows render as labeled meters with remaining capacity", async () 
   const initial = state(login({ phase: "authenticated" }), {
     accounts: [{
       id: "acc", label: "Acc", kind: "managed", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null, login: null,
-      limits: { freshness: "fresh", session: { usedPercent: 33, resetsAt: null }, weekly: { usedPercent: 80, resetsAt: null } },
+      limits: { freshness: "fresh", session: { usedPercent: 33, resetsAt: null, windowMinutes: 300 }, weekly: { usedPercent: 80, resetsAt: null, windowMinutes: 10_080 } },
     }],
   });
   const view = await mount(initial);
