@@ -7,6 +7,8 @@ const closeReport = {
   stopped: [{ stageId: "build", attempt: 1, conversationId: "conversation_stage_1", agentPath: null, paneId: null }],
   alreadyStopped: [],
   unconfirmed: [],
+  acknowledged: [],
+  reviewers: [],
   stillRunning: [],
   worktree: { dir: "/repo-pipeline-1", uncommitted: ["notes.md"], truncated: false },
 };
@@ -110,5 +112,23 @@ test("pipeline PATCH forwards repository-admission fields from final revalidatio
     code: "git_metadata_unwritable",
     field: "repoDir",
     path: "/blocked/.git",
+  });
+});
+
+test("pipeline close forwards the operator's host acknowledgement to the engine (#670)", async () => {
+  const response = await PATCH(
+    new NextRequest("http://127.0.0.1/api/pipelines/pipeline-1", {
+      method: "PATCH",
+      headers: { host: "127.0.0.1" },
+      body: JSON.stringify({ action: "close", acknowledgeHosts: true }),
+    }),
+    { params: Promise.resolve({ id: "pipeline-1" }) },
+  );
+  expect(response.status).toBe(200);
+  /* The dismissal has to survive the route, or the operator's only way out of
+     an unidentifiable pane never reaches the close. */
+  expect(await response.json()).toMatchObject({
+    ok: true,
+    pipeline: { body: { action: "close", acknowledgeHosts: true } },
   });
 });

@@ -72,6 +72,9 @@ export type PipelineStageHostRef = {
   conversationId: string | null;
   agentPath: string | null;
   paneId: string | null;
+  /** Set for a conversation a stage agent spawned and the pipeline adopted, so
+      the report distinguishes it from the stage's own launch. */
+  adopted?: true;
 };
 
 export type PipelineStageStopResult =
@@ -101,6 +104,8 @@ export type PipelineCloseReport = {
       Headless reviewers are child processes with no registry entry, so they are
       counted here rather than in `stopped`. */
   reviewers: Array<{ stageId: string; attempt: number; flowId: string; round: number }>;
+  /** Unconfirmed hosts the operator explicitly dismissed on this close. */
+  acknowledged: Array<PipelineStageHostRef & { detail: string }>;
   /** Hosts that survived teardown, so the close cannot claim to be clean. */
   stillRunning: Array<PipelineStageHostRef & { error: string }>;
   /** Uncommitted stage work preserved in the worktree; null when unprovisioned. */
@@ -389,7 +394,8 @@ async function stageHostProbe(target: PipelineStageHostRef): Promise<StageHostPr
 
 export type StagePaneProbes = {
   killHostIfMatches?: (host: TmuxHostEvidence) => Promise<boolean>;
-  paneAgentAlive?: (paneId: string) => Promise<boolean>;
+  /** What the pane shows right now. Null when tmux has no such pane. */
+  paneSnapshot?: (paneId: string) => Promise<{ windowName: string; command: string } | null>;
 };
 
 /**
@@ -411,28 +417,32 @@ export async function stopPipelineStagePane(
 ): Promise<{ outcome: "stopped" | "not-running" } | { outcome: "unknown"; detail: string } | { outcome: "failed"; error: string }> {
   const paneId = target.paneId;
   if (!paneId) return { outcome: "not-running" };
-  const alive = probes.paneAgentAlive ?? (async (id: string) => {
-    const info = await paneInfo(id);
-    return info !== null && !isShellCommand(info.command);
-  });
+  const snapshot = probes.paneSnapshot ?? paneInfo;
+  /* Name what the pane actually shows. An operator handed "pane %3 now runs
+     codex in window review" can find it in tmux and decide; "it could not be
+     identified" alone leaves them nothing to act on. */
+  const describe = (info: { windowName: string; command: string } | null): string =>
+    info ? `pane ${paneId} now runs ${info.command} in window ${info.windowName}` : `pane ${paneId}`;
   try {
     const probe = await stageHostProbe(target);
     const host = probe?.host() ?? null;
     if (!host || host.paneId !== paneId) {
       /* No durable evidence ties this id to this agent. Report what is there,
          but never signal it. */
-      if (!(await alive(paneId))) return { outcome: "not-running" };
+      const info = await snapshot(paneId);
+      if (!info || isShellCommand(info.command)) return { outcome: "not-running" };
       return {
         outcome: "unknown",
-        detail: `pane ${paneId} runs an agent that cannot be identified as this stage's; stop it by hand if it is the orphan`,
+        detail: `${describe(info)} and cannot be identified as this stage's agent; stop it yourself if it is the orphan, or close again with acknowledgeHosts to dismiss it`,
       };
     }
     const killed = await (probes.killHostIfMatches ?? killTmuxHostIfMatches)(host);
     if (killed) return { outcome: "stopped" };
-    if (!(await alive(paneId))) return { outcome: "not-running" };
+    const info = await snapshot(paneId);
+    if (!info || isShellCommand(info.command)) return { outcome: "not-running" };
     return {
       outcome: "unknown",
-      detail: `pane ${paneId} changed or its agent did not exit; it was left running`,
+      detail: `${describe(info)}; it changed or its agent did not exit, so it was left running`,
     };
   } catch (error) {
     return { outcome: "failed", error: error instanceof Error ? error.message : String(error) };
@@ -2201,16 +2211,20 @@ async function orphanAgentPane(
  * process is still there, still holding the account's quota. Those parked lanes
  * are the orphans #670 was filed for, so residency is decided downstream from
  * evidence about the host (the registry, then the pane), never from the attempt
- * state machine. Lineage-adopted (`historical`) evidence is left alone: those
- * conversations belong to their own lineage, and a close must not reach outside
- * this pipeline's own stage launches.
+ * state machine.
+ *
+ * Adopted (`historical`) attempts count too. They are not passive evidence: a
+ * stage agent spawned that conversation through the viewer, adoptAttempt seats
+ * it running with its own launch, conversation and pane, and the tick tracks it
+ * as a live host until it produces a verdict. Skipping them let a helper the
+ * pipeline started keep burning quota behind a lane that had already left the
+ * board — this issue again, through another door.
  */
 function launchedStageHosts(pipeline: Pipeline): StageHostCandidate[] {
   const candidates: StageHostCandidate[] = [];
   const seen = new Set<string>();
   for (const run of pipeline.runs) {
     for (const attempt of run.attempts) {
-      if (attempt.historical) continue;
       if (!attempt.conversationId && !attempt.agentPath && !attempt.paneId) continue;
       /* Rounds can share a host identity (a review round re-reads its reviewer
          conversation); probing one host once keeps the counts truthful. */
@@ -2224,6 +2238,7 @@ function launchedStageHosts(pipeline: Pipeline): StageHostCandidate[] {
           conversationId: attempt.conversationId,
           agentPath: attempt.agentPath,
           paneId: attempt.paneId,
+          ...(attempt.historical ? { adopted: true as const } : {}),
         },
         /* Same reading orphanAgentPane uses: a verdict or a completion stamp
            means the turn ended, so what is left in the pane is an idle CLI. A
@@ -2244,7 +2259,8 @@ type StageHostCandidate = { target: PipelineStageHostRef; turnSettled: boolean }
 const CLOSE_TEARDOWN_BUDGET_MS = 10_000;
 
 function stageHostLabel(target: PipelineStageHostRef): string {
-  return `stage ${target.stageId} attempt ${target.attempt} (${target.conversationId ?? target.agentPath ?? "unknown host"})`;
+  const what = target.adopted ? "adopted agent of stage" : "stage";
+  return `${what} ${target.stageId} attempt ${target.attempt} (${target.conversationId ?? target.agentPath ?? "unknown host"})`;
 }
 
 /** Reads the uncommitted work a close leaves behind. Skipped while the pipeline
@@ -2265,14 +2281,18 @@ function closeWorktreeReport(pipeline: Pipeline, ports: PipelinePorts): Pipeline
     that a verified-clean worktree produces. */
 function closeSummary(report: PipelineCloseReport): string | null {
   const parts: string[] = [];
-  if (report.stopped.length > 0) {
-    parts.push(`stopped ${report.stopped.length} stage host${report.stopped.length === 1 ? "" : "s"}`);
-  }
+  const adopted = report.stopped.filter((item) => item.adopted).length;
+  const launched = report.stopped.length - adopted;
+  if (launched > 0) parts.push(`stopped ${launched} stage host${launched === 1 ? "" : "s"}`);
+  if (adopted > 0) parts.push(`stopped ${adopted} adopted agent${adopted === 1 ? "" : "s"}`);
   if (report.reviewers.length > 0) {
     parts.push(`stopped ${report.reviewers.length} review round${report.reviewers.length === 1 ? "" : "s"}`);
   }
   for (const item of report.unconfirmed) {
     parts.push(`${item.detail} for ${stageHostLabel(item)}${item.operationId ? ` (operation ${item.operationId})` : ""}`);
+  }
+  if (report.acknowledged.length > 0) {
+    parts.push(`dismissed ${report.acknowledged.length} unconfirmed host${report.acknowledged.length === 1 ? "" : "s"} on the operator's word`);
   }
   if (report.worktree?.error) {
     parts.push(`could not read the worktree at ${report.worktree.dir}: ${report.worktree.error}`);
@@ -2722,7 +2742,10 @@ export async function patchPipeline(
          the hosts down before the flow and the state write, and report exactly
          what was stopped. Nothing on disk is touched — uncommitted stage work
          stays in the worktree and is named in the report instead. */
-      const close: PipelineCloseReport = { stopped: [], alreadyStopped: [], unconfirmed: [], reviewers: [], stillRunning: [], worktree: null };
+      if (req.acknowledgeHosts !== undefined && typeof req.acknowledgeHosts !== "boolean") {
+        return { error: "acknowledgeHosts must be a boolean", status: 400 };
+      }
+      const close: PipelineCloseReport = { stopped: [], alreadyStopped: [], unconfirmed: [], acknowledged: [], reviewers: [], stillRunning: [], worktree: null };
       /* Each host's confirmation is bounded, but N of them multiply, and this
          whole loop holds the pipelines file transaction — every other pipeline
          mutation and the controller tick queue behind it. So the aggregate is
@@ -2808,6 +2831,15 @@ export async function patchPipeline(
       pipeline.state = "closed";
       pipeline.cursor = null;
       pipeline.pausedState = null;
+      /* The operator's way out of an unresolvable host (#670): a pane whose id
+         was recycled can look alive forever, so the lane would otherwise stay
+         pinned to the board with no dismissal. An acknowledgement clears only
+         hosts that are unconfirmed — anything proven to be still running has
+         already refused this close above. */
+      if (req.acknowledgeHosts === true && close.unconfirmed.length > 0) {
+        close.acknowledged.push(...close.unconfirmed.map((item) => ({ ...item, detail: item.detail })));
+        close.unconfirmed.length = 0;
+      }
       pipeline.stateDetail = closeSummary(close);
       pipeline.closedAt = ports.now();
       /* An unconfirmed kill may have left a resident host. Hiding the lane would

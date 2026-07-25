@@ -607,6 +607,8 @@ test("a refused pipeline close exposes its host report through MCP, not only pro
     stopped: [{ stageId: "plan", attempt: 1, conversationId: "conversation_plan", agentPath: null, paneId: null }],
     alreadyStopped: [],
     unconfirmed: [],
+    acknowledged: [],
+    reviewers: [],
     stillRunning: [{ stageId: "build", attempt: 2, conversationId: "conversation_build", agentPath: null, paneId: "%7", error: "structured runtime host is unavailable" }],
     worktree: { dir: "/repo-pipeline-1", uncommitted: ["notes.md"], truncated: false },
   };

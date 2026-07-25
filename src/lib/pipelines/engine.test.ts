@@ -3350,6 +3350,109 @@ test("an unconfirmed host record retires once its host is demonstrably gone (#67
   expect(h.calls.filter((call) => call.startsWith("stop-host:")).length).toBe(1);
 });
 
+test("an adopted stage child is stopped and counted, never silently left running (#670)", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  /* The build agent spawned a helper through the viewer; adoptAttempt seats it
+     on the stage run as historical and running, with its own live host. */
+  const stored = loadPipelines();
+  const run = stored[0]!.runs[0]!;
+  run.attempts.push({
+    ...structuredClone(run.attempts[0]!),
+    n: 2,
+    historical: true,
+    state: "running",
+    conversationId: "conversation_helper",
+    agentPath: "/codex/helper.jsonl",
+    paneId: "%9",
+  });
+  savePipelines(stored);
+  h.setStageHost("conversation_stage_1", { outcome: "stopped" });
+  h.setStageHost("conversation_helper", { outcome: "stopped" });
+
+  const closed = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+  expect(h.calls).toContain("stop-host:plan:2:conversation_helper");
+  expect(closed.close?.stopped).toMatchObject([
+    { attempt: 1, conversationId: "conversation_stage_1" },
+    { attempt: 2, conversationId: "conversation_helper", adopted: true },
+  ]);
+  expect(loadPipelines()[0]!.stateDetail).toBe("closed; stopped 1 stage host; stopped 1 adopted agent");
+});
+
+test("an adopted child that cannot be stopped keeps the lane visible (#670)", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  const stored = loadPipelines();
+  const run = stored[0]!.runs[0]!;
+  run.attempts.push({
+    ...structuredClone(run.attempts[0]!),
+    n: 2,
+    historical: true,
+    state: "running",
+    conversationId: "conversation_helper",
+    agentPath: "/codex/helper.jsonl",
+    paneId: null,
+  });
+  savePipelines(stored);
+  h.setStageHost("conversation_stage_1", { outcome: "stopped" });
+  h.setStageHost("conversation_helper", { outcome: "failed", error: "structured host ownership is unavailable" });
+
+  const refused = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+  expect(refused.status).toBe(409);
+  expect(refused.error).toContain("adopted agent of stage plan attempt 2");
+  expect(loadPipelines()[0]!.state).not.toBe("closed");
+});
+
+test("an unidentifiable pane can be dismissed by the operator once judged (#670)", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  h.setPaneAlive(true);
+  h.setPaneStop({
+    outcome: "unknown",
+    detail: "pane %1 now runs codex in window other and cannot be identified as this stage's agent",
+  });
+
+  const pinned = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+  expect(pinned.close?.unconfirmed).toHaveLength(1);
+  expect(loadPipelines()[0]!.hiddenAt).toBeNull();
+  /* The detail names what the pane actually shows, so the operator can find it. */
+  expect(loadPipelines()[0]!.stateDetail).toContain("now runs codex in window other");
+
+  /* Their judgement is the way out: the lane stops claiming a host it could
+     never identify, and leaves the board. */
+  const dismissed = await patchPipeline(pipeline.id, { action: "close", acknowledgeHosts: true }, h.ports);
+
+  expect(dismissed.error).toBeUndefined();
+  expect(dismissed.close?.acknowledged).toMatchObject([{ stageId: "plan", attempt: 1, paneId: "%1" }]);
+  expect(dismissed.close?.unconfirmed).toEqual([]);
+  const settled = loadPipelines()[0]!;
+  expect(settled.unconfirmedHosts).toBeUndefined();
+  expect(settled.hiddenAt).toBe(settled.closedAt);
+  expect(settled.stateDetail).toContain("dismissed 1 unconfirmed host");
+});
+
+test("an acknowledgement never dismisses a host that is provably still running (#670)", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  h.setStageHost("conversation_stage_1", { outcome: "failed", error: "structured host ownership is unavailable" });
+
+  const refused = await patchPipeline(pipeline.id, { action: "close", acknowledgeHosts: true }, h.ports);
+
+  expect(refused.status).toBe(409);
+  expect(refused.close?.acknowledged).toEqual([]);
+  expect(loadPipelines()[0]!.state).not.toBe("closed");
+});
+
 test("closing mid-review counts the reviewer it stopped (#670)", async () => {
   const h = harness();
   const stages = [

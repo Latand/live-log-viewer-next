@@ -278,7 +278,7 @@ test("a stage pane is killed only when its recorded identity still matches (#670
     { stageId: "build", attempt: 1, conversationId: fixture.conversationId, agentPath: null, paneId: "%3" },
     {
       killHostIfMatches: async (host) => { attempted.push(host); return true; },
-      paneAgentAlive: async () => true,
+      paneSnapshot: async () => ({ windowName: "stage-build", command: "codex" }),
     },
   );
 
@@ -298,7 +298,7 @@ test("a recycled pane id is reported unknown and never signalled (#670)", async 
     { stageId: "build", attempt: 1, conversationId: changed.conversationId, agentPath: null, paneId: "%3" },
     {
       killHostIfMatches: async () => { signalled += 1; return false; },
-      paneAgentAlive: async () => true,
+      paneSnapshot: async () => ({ windowName: "stage-build", command: "codex" }),
     },
   );
   expect(mismatch).toMatchObject({ outcome: "unknown" });
@@ -311,7 +311,7 @@ test("a recycled pane id is reported unknown and never signalled (#670)", async 
     { stageId: "build", attempt: 1, conversationId: unknown.conversationId, agentPath: null, paneId: "%3" },
     {
       killHostIfMatches: async () => { signalled += 1; return true; },
-      paneAgentAlive: async () => true,
+      paneSnapshot: async () => ({ windowName: "stage-build", command: "codex" }),
     },
   );
   expect(orphan).toMatchObject({ outcome: "unknown" });
@@ -322,7 +322,7 @@ test("a recycled pane id is reported unknown and never signalled (#670)", async 
   /* Nothing running in the pane at all is simply nothing to stop. */
   const quiet = await stopPipelineStagePane(
     { stageId: "build", attempt: 1, conversationId: unknown.conversationId, agentPath: null, paneId: "%3" },
-    { killHostIfMatches: async () => { signalled += 1; return true; }, paneAgentAlive: async () => false },
+    { killHostIfMatches: async () => { signalled += 1; return true; }, paneSnapshot: async () => null },
   );
   expect(quiet).toEqual({ outcome: "not-running" });
   expect(signalled).toBe(1);

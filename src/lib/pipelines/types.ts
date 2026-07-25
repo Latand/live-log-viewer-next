@@ -291,6 +291,12 @@ export type PatchPipelineRequest = {
   index?: number;
   stageIds?: string[];
   toIndex?: number;
+  /** for close: dismiss the hosts a previous close could not confirm, once the
+      operator has judged them (a recycled pane id can look alive forever, so an
+      unidentifiable host would otherwise pin the closed lane to the board).
+      Only unconfirmed hosts are dismissed; one proven to be still running still
+      refuses the close. */
+  acknowledgeHosts?: boolean;
   /** for set-edge (#353): rewires `stageId`'s pass or fail edge. `to: null`
       clears it (a cleared pass edge makes the stage terminal). A stage that has
       already run keeps its pass edge frozen (history names its successor); a
