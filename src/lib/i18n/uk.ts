@@ -1126,6 +1126,10 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelineSlot.reviewHint": "Цикл рев’ю попереднього етапу — його раунди з’являться тут.",
   "pipelineSlot.frozen": "Етап уже виконувався — конфігурацію заморожено.",
   "pipelineSlot.saved": "Збережено",
+  // згорнуті завершені стадії в один рядок статусу (#658)
+  "pipelineSlot.rowAria": "Завершений етап {title}",
+  "pipelineSlot.rowExpand": "Показати повну картку етапу",
+  "pipelineSlot.rowCollapse": "Згорнути назад до рядка статусу",
   "pipelineTemplates.planBuildReview": "План → Збірка → Рев’ю",
   "pipelineTemplates.buildReview": "Збірка → Рев’ю",
   "pipelineTemplates.buildVerify": "Збірка → Перевірка",

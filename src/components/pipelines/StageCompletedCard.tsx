@@ -15,6 +15,7 @@ import {
   attemptStateLabel,
   stageChipLabel,
   stageChipState,
+  stagePaneTitle,
   verdictStatusLabel,
 } from "./pipelineModel";
 
@@ -35,6 +36,8 @@ export function StageCompletedCard({ slot, onOpen }: { slot: StageSlot; onOpen?:
   const state = stageChipState(pipeline, stage);
   const tone = STAGE_TONES[state];
   const label = stageChipLabel(t, stage);
+  /* Role · stage · position, never the prompt's shared preamble (#658). */
+  const title = stagePaneTitle(t, stage, slot.index, slot.total);
   const review = stage.kind === "review-loop";
   const tint = engineTintOf(stage.effectiveRole.engine);
   const model = stage.effectiveRole.model ?? "";
@@ -60,8 +63,8 @@ export function StageCompletedCard({ slot, onOpen }: { slot: StageSlot; onOpen?:
         <span className="shrink-0 rounded-full border border-border bg-card/70 px-1.5 py-0.5 text-caption font-bold capitalize text-muted">
           {stage.effectiveRole.engine}
         </span>
-        <span className="min-w-0 flex-1 truncate text-ui font-semibold text-muted" title={label}>
-          {label} · {t("pipelineSlot.stageOf", { k: slot.index + 1, n: slot.total })}
+        <span className="min-w-0 flex-1 truncate text-ui font-semibold text-muted" title={title}>
+          {title}
         </span>
         <span className="shrink-0 rounded-full border border-border bg-card/70 px-1.5 py-0.5 text-caption font-bold uppercase tracking-wide text-muted">
           {review ? `⟳ ${t("groupOverride.reviewKind")}` : t("groupOverride.runKind")}

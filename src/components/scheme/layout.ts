@@ -20,7 +20,7 @@ import {
   type AgentLink,
   type SchemeGroupSpec,
 } from "./agentLinks";
-import { PIPELINE_PLACEHOLDER_STATES, latestAttempt, pipelinePlaceholderStages, stageAttempts } from "@/components/pipelines/pipelineModel";
+import { PIPELINE_PLACEHOLDER_STATES, latestAttempt, pipelinePlaceholderStages, stageAttempts, stageRowCollapsible } from "@/components/pipelines/pipelineModel";
 import { linkedPipelineTasks } from "./pipelineAnchor";
 import { TASK_W, isPlacedTask, taskBoxHeight } from "./taskGeometry";
 import { type BranchGroup, descendantsOf, isChildConversation, kidsIndex, projectDescendantsOf } from "@/components/projectModel";
@@ -79,11 +79,19 @@ const MEMBERLESS_PIPELINE_GAP = GROUP_PAD * 2 + GROUP_STRIP_HEADROOM + 24;
 export const SLOT_W = NODE_W;
 export const SLOT_H = 620;
 export const SLOT_GAP = 72;
+/* A settled stage (skipped, or completed evidence) collapses to ONE status row
+   (#658): finished work reserves a row of board, not a full card's footprint, so
+   the chain no longer reads as if everything in it were still ahead. The row is
+   expandable — the shell floats the full card over the board on demand, which is
+   why the reserved geometry stays this row. */
+export const SLOT_ROW_H = 96;
 /* Completed stage cards (#507 F2): a terminal stage of an ACTIVE pipeline whose
    idle transcript is not surfaced as a live node still stands in at its stage
-   position as a FULL conversation card — same footprint (SLOT_H) as the live
-   and placeholder cards, so a five-stage graph reads as five real/placeholder
-   cards, not one live pane beside compact history stubs. */
+   position with the live cards' width, so a five-stage graph reads as five
+   real/placeholder cards, not one live pane beside compact history stubs. Its
+   HEIGHT is now the status row above (#658) — the full card is the row's
+   disclosure, so finished work keeps its position without keeping a pending
+   stage's weight. */
 /* Quiet-branch mini cards stacked under their parent pane. */
 const MINI_W = 360;
 const MINI_H = 52;
@@ -186,6 +194,11 @@ export interface StageSlot extends SchemeRect {
   presentation: "placeholder" | "completed";
   /** Completed slots: the terminal attempt whose transcript the card opens. */
   attempt?: PipelineStageAttempt;
+  /** This stage is settled (skipped/completed evidence) and reserves ONE status
+      row instead of a full card (#658, `stageRowCollapsible`). The layout owns the
+      decision so the reserved geometry and the rendered surface can never
+      disagree; the shell floats the full card over the board when expanded. */
+  collapsedRow?: true;
   /** Render an incoming handoff badge on this slot's left edge: set when the
       previous stage's slot sits directly beside it in the same row. */
   incoming?: "run" | "review-loop";
@@ -527,6 +540,9 @@ export function buildSchemeLayout(
     /* The handoff badge renders only between chain-adjacent slots — a gap (a
        live pane between them) breaks the visual chain. */
     const adjacent = previous !== null && plan.pipeline.stages[index - 1]?.id === previous.stage.id;
+    /* Settled work reserves ONE row (#658); everything still ahead — pending,
+       active, or a parked decision — keeps the full card footprint. */
+    const collapsedRow = stageRowCollapsible(plan.pipeline, stage, presentation);
     const slot: StageSlot = {
       key: stageSlotKey(plan.pipeline.id, stage.id),
       pipeline: plan.pipeline,
@@ -536,12 +552,14 @@ export function buildSchemeLayout(
       presentation,
       ...(attempt ? { attempt } : {}),
       ...(adjacent ? { incoming: stage.kind } : {}),
+      ...(collapsedRow ? { collapsedRow: true as const } : {}),
       x,
       y,
       w: SLOT_W,
-      /* Every slot is a full-size card — completed and placeholder alike share
-         the live conversation's footprint (#507 F2). */
-      h: SLOT_H,
+      /* A pending/active slot is a full-size card — placeholder and completed
+         alike share the live conversation's footprint (#507 F2); a settled stage
+         collapses to its status row (#658). */
+      h: collapsedRow ? SLOT_ROW_H : SLOT_H,
     };
     slots.push(slot);
     regionKeys(plan.pipeline.id).push(slot.key);
@@ -1033,18 +1051,43 @@ export function buildSchemeLayout(
      exactly the cluster's span. Keyless trees stay single-item runs in their
      original order. A tree carrying keys of several clusters bridges them —
      their halos interlock through it, so the clusters merge into one run. */
-  type RestItem = { keys: ReadonlySet<string>; place: (top: number) => void };
+  /* Execution order inside a pipeline cluster (#658): the band ranks trees by
+     activity and recency, so a pipeline whose stages surfaced as separate roots
+     placed its LIVE later stage first and pushed the earlier, already-finished
+     one rightwards — or, on an overflowing row, down onto the next row. Reading
+     order then fought execution order: stage 1/3 ended up below the active 2/3.
+     A stage member tree carries its stage's position, and the cluster below lays
+     its ranked trees out in that order, so a pipeline always reads
+     stage 1 → stage 2 → stage 3 along the band. Ranking spans plans (a cluster
+     may bridge two pipelines) by keying on the plan first, the stage second. */
+  const stageRankByPath = new Map<string, number>();
+  stageChainPlans.forEach((plan, planIndex) => {
+    for (const entry of plan.entries) {
+      if (entry.kind !== "node" || stageRankByPath.has(entry.path)) continue;
+      stageRankByPath.set(entry.path, planIndex * 10_000 + entry.index);
+    }
+  });
+  const stageRankOf = (paths: readonly string[]): number | null => {
+    const ranks = paths.flatMap((path) => {
+      const rank = stageRankByPath.get(path);
+      return rank === undefined ? [] : [rank];
+    });
+    return ranks.length ? Math.min(...ranks) : null;
+  };
+  type RestItem = { keys: ReadonlySet<string>; stageRank: number | null; place: (top: number) => void };
   const restItems: RestItem[] = [
     ...restGroups
       .filter((group) => !chainForeignTrees.has(group.key))
       .map((group) => ({
         keys: new Set(group.columns.flatMap((column) => [...subtreeGroups(column.file)])),
+        stageRank: stageRankOf(group.columns.map((column) => column.file.path)),
         place: (top: number) => placeGroup(group, top),
       })),
     ...restManual
       .filter((file) => !chainForeignTrees.has(file.path))
       .map((file) => ({
         keys: subtreeGroups(file),
+        stageRank: stageRankOf([file.path]),
         place: (top: number) => placeManual(file, top),
       })),
   ];
@@ -1069,7 +1112,17 @@ export function buildSchemeLayout(
       restClusters.splice(restClusters.indexOf(extra), 1);
     }
   }
-  for (const cluster of restClusters) placeRestRun(cluster.items.map((item) => item.place));
+  /* Stage member trees take execution order among themselves while every other
+     tree keeps the position activity+recency gave it: the ranked trees are sorted
+     and dealt back into exactly the slots ranked trees already occupied, so a
+     cluster's foreign or flow-owned members never shift. */
+  const inExecutionOrder = (items: readonly RestItem[]): RestItem[] => {
+    const ranked = items.filter((item) => item.stageRank !== null).sort((a, b) => a.stageRank! - b.stageRank!);
+    if (ranked.length < 2) return [...items];
+    let next = 0;
+    return items.map((item) => (item.stageRank === null ? item : ranked[next++]!));
+  };
+  for (const cluster of restClusters) placeRestRun(inExecutionOrder(cluster.items).map((item) => item.place));
 
   /* Remaining drafts join the same bounded band as fresh top-level cards. */
   for (const id of draftIds) {

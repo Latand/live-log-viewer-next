@@ -23,7 +23,8 @@ import { PipelineStrip } from "@/components/pipelines/PipelineStrip";
 import { PipelineTemplatePicker } from "@/components/pipelines/PipelineTemplatePicker";
 import { StagePlaceholderPane } from "@/components/pipelines/StagePlaceholderPane";
 import { StageCompletedCard } from "@/components/pipelines/StageCompletedCard";
-import { STAGE_TONES, attemptNavTarget, canSourcePipeline, createDraftPipeline, latestAttempt, optimisticAddStage, patchPipeline, pipelineStagePosition, pipelineStateLabel, renderableFlowIds, resolveStageNavFile, reviewLoopChainValid, stageChipLabel, stageChipState } from "@/components/pipelines/pipelineModel";
+import { StageStatusRow } from "@/components/pipelines/StageStatusRow";
+import { STAGE_TONES, attemptNavTarget, canSourcePipeline, createDraftPipeline, latestAttempt, optimisticAddStage, patchPipeline, pipelineStagePosition, pipelineStateLabel, renderableFlowIds, resolveStageNavFile, reviewLoopChainValid, stageChipLabel, stageChipState, stagePaneTitle } from "@/components/pipelines/pipelineModel";
 import { pushTaskToast } from "@/components/tasks/taskToast";
 import type { TaskRelation } from "@/components/tasks/taskRelations";
 import { MAX_PIPELINE_STAGES } from "@/lib/pipelines/limits";
@@ -52,6 +53,7 @@ import {
   LOOP_GAP,
   NODE_W,
   SLOT_GAP,
+  SLOT_H,
   type DeckNode,
   type DraftNode,
   type FlowLoop,
@@ -941,6 +943,11 @@ function NodeShell({
           isRoot={node.isRoot}
           dormant={dormant}
           showFavorite
+          /* A live stage pane is titled by its place in the chain, not by the
+             first line of its prompt — every stage prompt opens with the same
+             shared preamble, so prompt-derived titles named every pane on the
+             board identically (#658). */
+          titleOverride={pipelineStage ? stagePaneTitle(t, pipelineStage.stage, pipelineStage.index, pipelineStage.total) : undefined}
           onClose={() => onClose(node.file.path)}
           onToggleExpand={() => onExpand(node.file.path)}
           onSpawnRetry={onSpawnRetry}
@@ -1061,8 +1068,45 @@ function DraftShell({
 function StageSlotShell({ slot, lite, dimmed, files, onSelect }: { slot: StageSlot; lite: boolean; dimmed: boolean; files: FileEntry[]; onSelect: (file: FileEntry) => void }) {
   const { t } = useLocale();
   const [busy, setBusy] = useState(false);
+  const [rowOpen, setRowOpen] = useState(false);
   const tone = STAGE_TONES[stageChipState(slot.pipeline, slot.stage)];
   const { pipeline } = slot;
+  /* Settled work — skipped, or completed evidence — collapses to ONE status row
+     at its stage position (#658): the layout reserved exactly that row, and the
+     disclosure floats the full card over the board on demand, so the operator can
+     still read the prompt and open the transcript without the finished stage
+     claiming a pending card's weight. */
+  if (slot.collapsedRow) {
+    const target = slot.attempt ? attemptNavTarget(slot.attempt) : null;
+    const file = target ? resolveStageNavFile(target, files) : null;
+    return (
+      <div
+        data-scheme-node={slot.key}
+        className={`scheme-enter absolute${dimClass(dimmed)} ${rowOpen ? "z-30" : ""}`}
+        style={{ transform: `translate(${slot.x}px, ${slot.y}px)`, width: slot.w, height: slot.h, transition: MOVE_TRANSITION }}
+      >
+        {slot.incoming ? (
+          <span
+            aria-hidden
+            className="absolute top-1/2 z-[2] inline-flex h-6 -translate-x-1/2 -translate-y-1/2 items-center rounded-full border bg-card px-1.5 text-[12px] font-bold shadow-1"
+            style={{ left: -SLOT_GAP / 2, borderColor: tone.color, color: tone.color }}
+          >
+            {slot.incoming === "review-loop" ? "⟳" : "→"}
+          </span>
+        ) : null}
+        <StageStatusRow slot={slot} expanded={rowOpen} onToggle={lite ? undefined : () => setRowOpen((open) => !open)} />
+        {rowOpen ? (
+          <div className="absolute left-0 top-[calc(100%+8px)] z-30 flex" style={{ width: slot.w, height: SLOT_H }}>
+            {slot.presentation === "completed" ? (
+              <StageCompletedCard slot={slot} onOpen={file && !lite ? () => onSelect(file) : undefined} />
+            ) : (
+              <StagePlaceholderPane slot={slot} interactive={!lite} />
+            )}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
   /* A completed stage of an active pipeline renders as a full conversation card
      at its stage position — same footprint as the live and placeholder cards, so
      the group reads as real cards rather than compact history stubs (#507 F2). */

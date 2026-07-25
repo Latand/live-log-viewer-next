@@ -27,6 +27,7 @@ import {
   stageAttempts,
   stageChipLabel,
   stageChipState,
+  stagePaneTitle,
   stagePromptExtra,
   stageReceivesPrevOutput,
 } from "./pipelineModel";
@@ -67,6 +68,9 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
   const state = stageChipState(pipeline, stage);
   const tone = STAGE_TONES[state];
   const label = stageChipLabel(t, stage);
+  /* Role first, then the stage id, then the position (#658) — never the prompt's
+     first line, which is the same shared preamble on every stage. */
+  const title = stagePaneTitle(t, stage, slot.index, slot.total);
   const review = stage.kind === "review-loop";
   const draft = pipeline.state === "draft";
   /* Only a stage that has never run can be re-configured — the engine snapshots
@@ -265,8 +269,8 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
             {engine}
           </span>
         )}
-        <span className="min-w-0 flex-1 truncate text-ui font-semibold text-muted" title={label}>
-          {label} · {t("pipelineSlot.stageOf", { k: slot.index + 1, n: slot.total })}
+        <span className="min-w-0 flex-1 truncate text-ui font-semibold text-muted" title={title}>
+          {title}
         </span>
         <span className="shrink-0 rounded-full border border-border bg-card/70 px-1.5 py-0.5 text-caption font-bold uppercase tracking-wide text-muted">
           {review ? `⟳ ${t("groupOverride.reviewKind")}` : t("groupOverride.runKind")}

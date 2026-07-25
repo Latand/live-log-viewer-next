@@ -750,6 +750,69 @@ export function stageChipLabel(t: TFunction, stage: PipelineStage): string {
   return stage.id;
 }
 
+/**
+ * The title a stage's surface carries on the board (#658): role first, then the
+ * stage id, then the chain position — «Builder · integrate_v3_voice · stage 2/3».
+ * Every stage surface (live pane, completed card, placeholder, collapsed status
+ * row) reads this ONE derivation, so a pane is never titled by the first line of
+ * its prompt: every stage prompt opens with the same shared preamble, which made
+ * every pane on the board carry the identical meaningless title. The identity a
+ * title must answer — which role, which stage, how far along — comes from the
+ * declared chain instead, so it stays meaningful whatever the prompt says.
+ * A role-less stage falls back to its id (stageChipLabel), which the id segment
+ * would then repeat — so it is emitted once.
+ */
+export function stagePaneTitle(t: TFunction, stage: PipelineStage, index: number, total: number): string {
+  const role = stageChipLabel(t, stage);
+  const position = t("pipelineSlot.stageOf", { k: index + 1, n: total });
+  return role === stage.id ? `${role} · ${position}` : `${role} · ${stage.id} · ${position}`;
+}
+
+/**
+ * Whether a stage's board surface collapses to a one-line status row (#658).
+ * Skipped and completed work is BEHIND the operator: rendering it at the same
+ * weight as a pending or active stage — full stage-prompt block included — made
+ * the board read as if finished work were still ahead. Such a stage collapses to
+ * a badge + title + why-it-ended row, expandable on demand.
+ * `needs_decision` never collapses: it is the one settled state that asks the
+ * operator to act, so it keeps its full card.
+ */
+export function stageRowCollapsible(pipeline: Pipeline, stage: PipelineStage, presentation: "placeholder" | "completed"): boolean {
+  const state = stageChipState(pipeline, stage);
+  if (state === "skipped") return true;
+  return presentation === "completed" && (state === "passed" || state === "failed");
+}
+
+/** First non-empty line of a multi-line record, bounded for a one-line row. */
+function firstLine(value: string | null | undefined, max = 120): string {
+  const line = (value ?? "").split("\n").map((part) => part.trim()).find((part) => part.length > 0) ?? "";
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
+
+/**
+ * Why a settled stage ended the way it did, in one line (#658) — the substance
+ * the collapsed status row carries in place of the stage prompt. The record the
+ * engine actually wrote wins, in order: a recorded error, the verdict's first
+ * finding, then the attempt's output summary (a skip writes its own). Without any
+ * of those the row states the attempt's raw state, so the row is never blank.
+ */
+export function stageOutcomeReason(
+  t: TFunction,
+  pipeline: Pipeline,
+  stage: PipelineStage,
+  attempt: PipelineStageAttempt | null = latestAttempt(pipeline, stage.id),
+): string {
+  const error = firstLine(attempt?.error);
+  if (error) return error;
+  const finding = firstLine(attempt?.verdict?.findings?.[0]);
+  if (finding) return `${verdictStatusLabel(t, attempt!.verdict!.status)} — ${finding}`;
+  const output = firstLine(attempt?.output);
+  if (output) return output;
+  if (attempt?.verdict) return verdictStatusLabel(t, attempt.verdict.status);
+  if (attempt) return attemptStateLabel(t, attempt.state);
+  return t(`pipelineChipState.${stageChipState(pipeline, stage)}`);
+}
+
 /* A cursorless pipeline rests on its last in-flight stage; the live attempt states
    that mark it are exactly {@link LIVE_ATTEMPT_STATES}. */
 const CURSORLESS_LIVE_STATES = LIVE_ATTEMPT_STATES;
