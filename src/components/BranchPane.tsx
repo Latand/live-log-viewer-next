@@ -135,9 +135,27 @@ interface Props {
   /** Opens/centers a related task card — the conversation-side half of the
       bidirectional task↔agent navigation. The strip renders only when wired. */
   onOpenTask?: (task: BoardTask) => void;
+  /** Title imposed by whatever owns this pane's identity, replacing the
+      transcript-derived one (#658). A pipeline stage pane passes «role · stage ·
+      position»: the scanner titles a conversation by the first line of its
+      opening prompt, and every stage prompt opens with the same shared preamble,
+      so every stage pane on the board carried the identical meaningless title.
+      The transcript's own title stays reachable as the header tooltip, and the
+      prompt itself is the transcript's first message.
+
+      RENAME, deliberately: an imposed title replaces the inline `SessionTitle`
+      editor, so a stage card carries no hover pencil — renaming a transcript
+      whose own title is the preamble is not what that affordance is for, and a
+      rename would not change what the card shows anyway. The rename path stays
+      open where it is meaningful: F2 on the selected node expands it, and the
+      board's overlay drops the override while that rename token is pending
+      (SchemeBoard `stageTitle`), mounting the real editor. Any surface that
+      passes an override on a renamable conversation owes the operator the same
+      escape hatch. */
+  titleOverride?: string;
 }
 
-export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noComposer, banner, headerActions, onToggleExpand, expanded, dormant, autoEditToken, showFavorite, onSpawnRetry, relatedTasks, onOpenTask }: Props) {
+export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noComposer, banner, headerActions, onToggleExpand, expanded, dormant, autoEditToken, showFavorite, onSpawnRetry, relatedTasks, onOpenTask, titleOverride }: Props) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
   const paneRef = useRef<HTMLElement | null>(null);
@@ -271,7 +289,18 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
         >
           <div className="flex min-w-0 items-center gap-1.5">
             <span className={`h-2 w-2 shrink-0 rounded-full ${activityDot(file.activity)}`} title={t(`branch.${state}`)} />
-            {file.renamable ? (
+            {titleOverride ? (
+              /* The owner names this pane (#658). The transcript's own title —
+                 the first line of the prompt it opened with — stays in the
+                 tooltip, so nothing is lost by leading with the identity. */
+              <span
+                className="min-w-0 flex-1 truncate text-[12px] font-semibold"
+                data-pane-title-override
+                title={`${titleOverride} — ${cleanTitle(file.title)}`}
+              >
+                {titleOverride}
+              </span>
+            ) : file.renamable ? (
               <SessionTitle file={file} displayMax={90} titleClassName="text-[12px] font-semibold" alwaysVisible={isMobile} autoEditToken={autoEditToken} />
             ) : (
               <span className="min-w-0 flex-1 truncate text-[12px] font-semibold" title={cleanTitle(file.title)}>

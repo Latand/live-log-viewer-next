@@ -56,6 +56,9 @@ import {
   optimisticReorderStage,
   stagePromptExtra,
   stageReceivesPrevOutput,
+  stagePaneTitle,
+  stageRowCollapsible,
+  stageOutcomeReason,
 } from "./pipelineModel";
 import { foldClaimedReviewers } from "../flows/flowModel";
 import type { Flow } from "@/lib/flows/types";
@@ -1549,5 +1552,94 @@ describe("stage-graph attempt navigation (path-only + current generation — PR 
   test("resolveStageNavFile stays a no-op when the id is only an archived predecessor and no path is recorded", () => {
     const files = [fileAt("/old.jsonl", { conversationId: "c1", migratedTo: "/new.jsonl" })];
     expect(resolveStageNavFile({ conversationId: "c1", agentPath: null }, files)).toBeNull();
+  });
+});
+
+describe("stage surface titles and settled rows (#658)", () => {
+  const buildStage = stage("integrate_v3_voice", "run", "builder");
+  const rawStage = stage("stage-2");
+
+  test("stagePaneTitle leads with the role, then the stage id, then the position — never the prompt", () => {
+    /* Every stage prompt opens with the same shared preamble, so a
+       prompt-derived title named every pane identically. The title answers
+       which role, which stage, how far along. */
+    expect(stagePaneTitle(fakeT, buildStage, 1, 3)).toBe(
+      'roleCopy.builder.name · integrate_v3_voice · pipelineSlot.stageOf:{"k":2,"n":3}',
+    );
+  });
+
+  test("stagePaneTitle emits a role-less stage's id once, never twice", () => {
+    expect(stagePaneTitle(fakeT, rawStage, 0, 2)).toBe('stage-2 · pipelineSlot.stageOf:{"k":1,"n":2}');
+  });
+
+  test("stageRowCollapsible collapses skipped and completed work, never pending, active, or a parked decision", () => {
+    const stages = [buildStage, stage("verify")];
+    const skipped = pipeline({
+      stages,
+      runs: [{ stageId: "integrate_v3_voice", attempts: [{ n: 1, state: "skipped" } as never] }],
+      cursor: { stageId: "verify", state: "running", input: null, activatedBy: null },
+    });
+    expect(stageRowCollapsible(skipped, buildStage, "placeholder")).toBe(true);
+    expect(stageRowCollapsible(skipped, buildStage, "completed")).toBe(true);
+    /* The active cursor stage keeps its full card. */
+    expect(stageRowCollapsible(skipped, stages[1]!, "placeholder")).toBe(false);
+
+    const passed = pipeline({ stages, runs: [{ stageId: "integrate_v3_voice", attempts: [{ n: 1, state: "passed" } as never] }] });
+    expect(stageRowCollapsible(passed, buildStage, "completed")).toBe(true);
+    const failed = pipeline({ stages, runs: [{ stageId: "integrate_v3_voice", attempts: [{ n: 1, state: "failed" } as never] }] });
+    expect(stageRowCollapsible(failed, buildStage, "completed")).toBe(true);
+    /* A parked decision is the one settled state the operator must act on. */
+    const parked = pipeline({
+      stages,
+      state: "needs_decision",
+      runs: [{ stageId: "integrate_v3_voice", attempts: [{ n: 1, state: "needs_decision" } as never] }],
+    });
+    expect(stageRowCollapsible(parked, buildStage, "completed")).toBe(false);
+    /* A never-launched future stage is ahead, not behind — full card. */
+    expect(stageRowCollapsible(pipeline({ stages }), buildStage, "placeholder")).toBe(false);
+  });
+
+  test("stageOutcomeReason states why a settled stage ended: error, then verdict finding, then output", () => {
+    const stages = [buildStage];
+    const withError = pipeline({
+      stages,
+      runs: [{ stageId: "integrate_v3_voice", attempts: [{ n: 1, state: "failed", error: "worktree is dirty\nsecond line" } as never] }],
+    });
+    expect(stageOutcomeReason(fakeT, withError, buildStage)).toBe("worktree is dirty");
+
+    const withFinding = pipeline({
+      stages,
+      runs: [{
+        stageId: "integrate_v3_voice",
+        attempts: [{ n: 1, state: "failed", verdict: { status: "fail", findings: ["the relay drops the persona"] } } as never],
+      }],
+    });
+    expect(stageOutcomeReason(fakeT, withFinding, buildStage)).toBe("pipelineVerdict.fail — the relay drops the persona");
+
+    /* A skip is narrated by the engine in a hardcoded English sentence stamped
+       into `output`; the row reads the catalogue instead, so a localized badge
+       and title never sit beside an English line. */
+    const skipped = pipeline({
+      stages,
+      runs: [{ stageId: "integrate_v3_voice", attempts: [{ n: 1, state: "skipped", output: "Skipped by operator." } as never] }],
+    });
+    expect(stageOutcomeReason(fakeT, skipped, buildStage)).toBe("pipelineSlot.reasonSkipped");
+    /* A skip that recorded a real error still leads with the error. */
+    const skippedWithError = pipeline({
+      stages,
+      runs: [{ stageId: "integrate_v3_voice", attempts: [{ n: 1, state: "skipped", output: "Skipped by operator.", error: "worktree reset failed" } as never] }],
+    });
+    expect(stageOutcomeReason(fakeT, skippedWithError, buildStage)).toBe("worktree reset failed");
+    /* Free-form agent output on a settled non-skip stage stays verbatim. */
+    const finished = pipeline({
+      stages,
+      runs: [{ stageId: "integrate_v3_voice", attempts: [{ n: 1, state: "passed", output: "Relay wired, 14 tests green." } as never] }],
+    });
+    expect(stageOutcomeReason(fakeT, finished, buildStage)).toBe("Relay wired, 14 tests green.");
+
+    const bare = pipeline({ stages, runs: [{ stageId: "integrate_v3_voice", attempts: [{ n: 1, state: "passed" } as never] }] });
+    expect(stageOutcomeReason(fakeT, bare, buildStage)).toBe("pipelineChipState.passed");
+    /* Attemptless: the chip state itself, so the row is never blank. */
+    expect(stageOutcomeReason(fakeT, pipeline({ stages }), buildStage)).toBe("pipelineChipState.pending");
   });
 });

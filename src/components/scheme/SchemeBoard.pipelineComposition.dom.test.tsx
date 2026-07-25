@@ -154,11 +154,13 @@ test("the production scene keeps EVERY current stage a full real card and shells
   expect(host.querySelector("[data-pipeline-stage-graph]")).toBeNull();
 });
 
-test("an idle completed stage still renders as a full conversation card inside the halo, not a compact stub (#507 F2)", async () => {
+test("an idle completed stage stands at its stage position as ONE status row, expandable to the full card (#658)", async () => {
   /* Realistic scene: the two passed stages have gone idle, so the board's
-     activity gate would not surface them as live nodes. They must still stand in
-     at their stage positions as FULL conversation cards (the completed slot), so
-     the five-stage graph stays five real/placeholder cards. */
+     activity gate would not surface them as live nodes. They still own their
+     stage positions, but as collapsed status rows — finished work may not carry
+     a pending stage's weight (#658 narrows #507 F2, which gave them the full
+     card footprint). The full completed card, prompt and transcript link
+     included, is one disclosure away. */
   const idleArchitect = { ...architect, activity: "idle" as const };
   const idleBuilder = { ...builder, activity: "idle" as const };
   const files = [idleArchitect, idleBuilder, verify];
@@ -166,21 +168,29 @@ test("an idle completed stage still renders as a full conversation card inside t
   await settle();
 
   expect(host.querySelectorAll('[data-scheme-group="pipeline"]')).toHaveLength(1);
-  /* The live cursor stage is a full board node; the idle passed stages are full
-     completed cards at their slot positions. */
+  /* The live cursor stage is a full board node; the idle passed stages are
+     collapsed rows at their slot positions. */
   expect(host.querySelector('[data-scheme-node="/verify"]')).toBeTruthy();
-  const completed = [...host.querySelectorAll('[data-pipeline-stage-completed="true"]')];
-  expect(completed).toHaveLength(2);
+  const rows = [...host.querySelectorAll('[data-pipeline-stage-row="true"]')];
+  expect(rows).toHaveLength(2);
+  expect(host.querySelectorAll('[data-pipeline-stage-completed="true"]')).toHaveLength(0);
   expect(host.querySelector('[data-scheme-node="slot::pipe-1::architect"]')).toBeTruthy();
   expect(host.querySelector('[data-scheme-node="slot::pipe-1::builder"]')).toBeTruthy();
-  /* The completed card is full-size (the live/placeholder footprint), NOT the
-     old 168px compact stub. */
+  /* One row of board, not a full card's footprint. */
   const archSlot = host.querySelector('[data-scheme-node="slot::pipe-1::architect"]') as HTMLElement;
-  expect(Number.parseInt(archSlot.style.height, 10)).toBeGreaterThan(400);
-  /* It shows the real prompt that was sent (minimal visual difference from the
-     eventual live conversation) and opens the transcript. */
+  expect(Number.parseInt(archSlot.style.height, 10)).toBeLessThan(200);
+  /* Each row states which stage it was and how it ended. */
+  expect(rows[0]!.textContent).toContain("architect");
+  expect(rows[0]!.textContent).toContain("passed");
+  /* Expanding one reveals the real conversation card: the prompt that was sent
+     and the affordance that opens the transcript. */
+  const toggle = archSlot.querySelector("button[data-stage-row-toggle]") as HTMLButtonElement;
+  flushSync(() => toggle.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  await settle();
+  const completed = [...host.querySelectorAll('[data-pipeline-stage-completed="true"]')];
+  expect(completed).toHaveLength(1);
   expect(completed[0]!.textContent).toContain("Pinned task:");
-  expect(completed.some((card) => card.textContent?.includes("Open conversation"))).toBe(true);
+  expect(completed[0]!.textContent).toContain("Open conversation");
 
   /* Still exactly five stage cards, one per declared stage. */
   const stageCards = [...host.querySelectorAll('[data-pipeline-stage-card^="pipe-1::"]')];
