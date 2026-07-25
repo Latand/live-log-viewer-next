@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import type { FileEntry } from "@/lib/types";
+import { epochSeconds, type FileEntry } from "@/lib/types";
 
 import {
   badgeState,
@@ -63,7 +63,7 @@ function baseInput(entries: FileEntry[], hostParentIds: string[], overrides: Par
     hiddenPaths: new Set(),
     claimedPaths: new Set(),
     hostEligibleParentIds: new Set(hostParentIds),
-    now: 1_000_000,
+    now: epochSeconds(NOW),
     ...overrides,
   };
 }
@@ -150,6 +150,29 @@ test("badgeState closes a returned subagent whose turn ended, without waiting ou
   expect(badgeState(stillOwned, NOW)).toBe("running");
 });
 
+test("badgeState keeps a busy in-harness subagent alive through a long tool call", () => {
+  /* A Claude in-harness subagent is written by its PARENT's process and never
+     owns a pid — the scanner's isTopLevelTranscript skips both `agent-`
+     basenames and the subagents directory — so process evidence is absent for
+     its whole life, and it writes nothing while a tool call runs. A six-minute
+     test run must read silent, never finished. */
+  const toolCall = (seconds: number) =>
+    badgeState(entry({
+      path: "/proj/parent/subagents/agent-abc.jsonl",
+      conversationId: "a",
+      engine: "claude",
+      proc: null,
+      activity: "stalled",
+      mtime: wrote(seconds),
+      authoritativeTurn: { state: "busy", source: "assistant", terminalAt: null },
+    }), NOW);
+  expect(toolCall(240)).toBe("live");
+  expect(toolCall(600)).toBe("silent");
+  /* Hours of silence stay silent: an open turn is evidence of a live owner,
+     never a reason to claim work is still happening. */
+  expect(toolCall(7.5 * 3600)).toBe("silent");
+});
+
 test("badgeState closes a silent transcript with nothing alive behind it, and an exit wins over freshness", () => {
   const abandoned = entry({ path: "/a", conversationId: "a", proc: null, activity: "recent", mtime: wrote(SILENT_AFTER_SECONDS) });
   expect(badgeState(abandoned, NOW)).toBe("closed");
@@ -204,7 +227,7 @@ test("engineChildNeedsAttention fires on question, spawn failure and killed host
 
 // ── precedence matrix (§1.2 / presence policy) ──────────────────────────────
 
-const ctx = { folded: false, pinned: false, now: 1_000_000 };
+const ctx = { folded: false, pinned: false, now: epochSeconds(NOW) };
 
 test("attention promotes ahead of an explicit fold", () => {
   const c = entry({ path: "/a", conversationId: "a", pendingQuestion: { toolUseId: "t", prompt: "?" } as never });
@@ -331,7 +354,7 @@ test("buildSubagentTrays reads its clock in epoch seconds, the unit `mtime` and 
   });
   const projection = buildSubagentTrays(baseInput([parent, wedged, writing], ["parent"], {
     foldedEngineChildIds: new Set(["wedged", "writing"]),
-    now,
+    now: epochSeconds(now),
   }));
   const tray = projection.traysByParent.get("parent")!;
   expect(tray.members.map((member) => [member.id, member.state])).toEqual([
@@ -357,7 +380,7 @@ test("buildSubagentTrays promotes a stalled live child inside the attention TTL 
   });
   const projection = buildSubagentTrays(baseInput([parent, stalled], ["parent"], {
     foldedEngineChildIds: new Set(["stalled"]),
-    now,
+    now: epochSeconds(now),
   }));
   expect(projection.promotedPaths).toEqual(new Set(["/stalled"]));
   expect(projection.foldedPaths.size).toBe(0);

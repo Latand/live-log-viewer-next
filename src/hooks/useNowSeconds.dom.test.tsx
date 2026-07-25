@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
+import { renderToStaticMarkup } from "react-dom/server";
 
 import { useNowSeconds } from "./useNowSeconds";
 
@@ -60,4 +61,30 @@ test("the clock advances on its own so an age-derived surface never needs a relo
   await Bun.sleep(150);
   const later = Number((host.querySelector("span") as HTMLElement).dataset.now);
   expect(later).toBeGreaterThan(first);
+});
+
+test("the first client render already carries the real time — no undemoted first frame", () => {
+  /* Reading 0 on the first frame would paint every age-derived chip
+     undemoted (a rail of pulsing green) and correct it a frame later, the
+     exact lie issue #669 exists to remove. #172 forbids that flash. */
+  const seen: number[] = [];
+  const element = dom.document.createElement("div");
+  dom.document.body.append(element);
+  const root = createRoot(element as unknown as HTMLElement);
+  roots.add(root);
+  function Reader() {
+    seen.push(useNowSeconds(90_000));
+    return null;
+  }
+  flushSync(() => root.render(<Reader />));
+
+  expect(seen.length).toBeGreaterThan(0);
+  expect(seen[0]).toBeGreaterThan(1_700_000_000);
+});
+
+test("the server render still reads 0, so hydration markup agrees", () => {
+  function Reader() {
+    return <span>{String(useNowSeconds(120_000))}</span>;
+  }
+  expect(renderToStaticMarkup(<Reader />)).toBe("<span>0</span>");
 });

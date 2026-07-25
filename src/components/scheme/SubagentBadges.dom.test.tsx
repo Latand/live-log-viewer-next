@@ -336,3 +336,28 @@ test("a batch status change settles every chip in place", () => {
   render([parent, ...killed], NOW + 1);
   expect(ids.map(stateOf)).toEqual(["closed", "closed", "closed"]);
 });
+
+test("a busy in-harness subagent gone quiet keeps a lit chip: ringed, not greyed out", () => {
+  /* No pid of its own (its parent's process writes the transcript) and no
+     record for ten minutes because a tool call is running. Reading that as
+     finished is the #669 bug on a five-minute clock. */
+  const parent = entry({ path: "/parent", conversationId: "parent" });
+  const subagent = entry({
+    path: "/proj/parent/subagents/agent-abc.jsonl",
+    conversationId: "sub",
+    parent: parent.path,
+    title: "Tool-call worker",
+    engine: "claude",
+    proc: null,
+    activity: "stalled",
+    mtime: NOW - 600,
+    authoritativeTurn: { state: "busy", source: "assistant", terminalAt: null },
+  });
+  const { host } = mountWithClock([parent, subagent], NOW);
+  const badge = host.querySelector('[data-subagent-badge="sub"]') as HTMLButtonElement;
+
+  expect(badge.dataset.subagentState).toBe("silent");
+  expect(badge.querySelector('[data-subagent-ring="silent"]')).toBeTruthy();
+  expect(badge.className).not.toContain("opacity-45");
+  expect(badge.className).not.toContain("grayscale");
+});

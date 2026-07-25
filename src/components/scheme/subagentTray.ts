@@ -1,6 +1,6 @@
 import { attentionId } from "@/components/attention";
 import { conversationIdentity, isArchivedPredecessor } from "@/lib/accounts/identity";
-import type { Engine, FileEntry } from "@/lib/types";
+import type { EpochSeconds, Engine, FileEntry } from "@/lib/types";
 
 /*
  * Engine-native subagent tray — the single presence projection for issue #142
@@ -60,12 +60,30 @@ export type PresenceReason =
   | "quiet"
   | "fail-visible";
 
-/** A launch that is still binding its host owns no transcript yet, so its
-    silence carries no meaning — it counts as alive, never as silent. */
+/** A process of this conversation's own, or a launch still binding one. A
+    launch wedged in `binding` counts as hosted, so it surfaces as silent
+    rather than as finished. */
 function hostAlive(entry: FileEntry): boolean {
   if (entry.proc === "running") return true;
   const spawn = entry.spawn?.state;
   return spawn === "starting" || spawn === "binding" || spawn === "queued";
+}
+
+/**
+ * Whether anything could still write to this transcript — the question silence
+ * has to answer before it may mean "finished".
+ *
+ * A mapped process is not the only evidence, and for the population that fills
+ * this surface it is never available: a Claude in-harness subagent is written
+ * by its PARENT's process and never gets a pid of its own (the scanner's
+ * `isTopLevelTranscript` excludes `agent-*` basenames and anything under
+ * `subagents/`), so `proc` stays null for its whole life. Its open
+ * authoritative turn is the only liveness it will ever carry — and a subagent
+ * writes nothing at all while a tool call is in flight, so a six-minute test
+ * run must not be read as a finished agent.
+ */
+function couldStillWrite(entry: FileEntry): boolean {
+  return hostAlive(entry) || entry.authoritativeTurn?.state === "busy";
 }
 
 /**
@@ -89,22 +107,31 @@ export function transcriptSilence(entry: FileEntry, now: number): number | null 
  * only decides which side of the ladder the entry falls on — exited is
  * terminal, alive-and-silent is wedged, alive-and-writing is working.
  *
- * Freshness is only evidence of work while something could still write. A
- * closed turn with no host behind it is finished the moment it lands: its last
- * record is the answer, not a sign of life. Note that this reads the turn's
- * SHAPE, never its age — an ageing snapshot cannot flip that judgement, which
- * is what let a lane writing every two seconds render as finished.
+ * Silence only means "finished" once nothing could still write
+ * ({@link couldStillWrite}); short of that it means "silent", never "done". A
+ * closed turn with no host behind it, on the other hand, is finished the moment
+ * it lands: its last record is the answer, not a sign of life. Both readings of
+ * the turn take its SHAPE, never its age — an ageing snapshot cannot flip
+ * either judgement, which is what let a lane writing every two seconds render
+ * as finished.
+ *
+ * A closed turn does NOT close a chip whose host is still alive, deliberately:
+ * a terminal Claude turn under a live host can be recovery bookkeeping rather
+ * than a finished agent (issue #516 — `lib/scanner/activity.ts` keeps that
+ * release behind a live-host fence for the same reason). Such a chip leaves
+ * the working state on transcript silence like any other, which costs at most
+ * one silence window of green and never claims completion on weak evidence.
  */
 export function badgeState(entry: FileEntry, now: number): SubagentBadgeState {
   if (entry.path.startsWith("spawn:")) return "dead";
   if (entry.spawn?.state === "failed") return "dead";
   if (entry.proc === "done" || entry.proc === "killed" || entry.supersededBy) return "closed";
-  const alive = hostAlive(entry);
+  const hosted = hostAlive(entry);
   const turn = entry.authoritativeTurn?.state;
-  if (!alive && (turn === "terminal" || turn === "idle")) return "closed";
+  if (!hosted && (turn === "terminal" || turn === "idle")) return "closed";
   const silence = transcriptSilence(entry, now);
-  if (silence === null || silence < SILENT_AFTER_SECONDS) return alive ? "running" : "live";
-  return alive ? "silent" : "closed";
+  if (silence === null || silence < SILENT_AFTER_SECONDS) return hosted ? "running" : "live";
+  return couldStillWrite(entry) ? "silent" : "closed";
 }
 
 function spawnTime(entry: FileEntry): number {
@@ -207,8 +234,8 @@ export interface EngineChildContext {
   folded: boolean;
   /** The child is manually placed / expanded / pinned on the board. */
   pinned: boolean;
-  /** Epoch SECONDS — the same clock `mtime` and `attentionId` are measured on. */
-  now: number;
+  /** The same clock `mtime` and `attentionId` are measured on. */
+  now: EpochSeconds;
 }
 
 export interface EngineChildClassification {
@@ -278,9 +305,9 @@ export interface SubagentTrayInput {
       whose host is missing (hidden, deleted, cross-project, deck-claimed,
       compacted) stays visible through the existing full-node path. */
   hostEligibleParentIds: ReadonlySet<string>;
-  /** Epoch SECONDS — transcript freshness and attention TTLs share this clock
-      with `mtime`, so a caller holding milliseconds must divide first. */
-  now: number;
+  /** Transcript freshness and attention TTLs share this clock with `mtime`;
+      the branded type keeps a millisecond clock from landing here silently. */
+  now: EpochSeconds;
 }
 
 export interface SubagentTrayProjection {
