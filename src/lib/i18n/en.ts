@@ -88,6 +88,9 @@ export const en = {
   "dash.emptyHint": "Open the switchboard in the bottom-right corner and click a conversation — it will appear here",
   "dash.viewScheme": "scheme",
   "dash.viewList": "conversations",
+  "dash.viewSchemeMenu": "View: scheme",
+  "dash.viewListMenu": "View: conversations",
+  "dash.viewMenuGroup": "Board view",
   "dash.hiddenShelf": "Hidden",
 
   // ProjectTrash

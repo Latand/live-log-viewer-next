@@ -82,6 +82,9 @@ export const uk: Record<keyof typeof en, Message> = {
   "dash.emptyHint": "Відкрий пульт у правому нижньому куті і клікни розмову — вона з'явиться тут",
   "dash.viewScheme": "схема",
   "dash.viewList": "розмови",
+  "dash.viewSchemeMenu": "Вигляд: схема",
+  "dash.viewListMenu": "Вигляд: розмови",
+  "dash.viewMenuGroup": "Вигляд дошки",
   "dash.hiddenShelf": "Приховане",
 
   "trash.title": "Кореневі розмови",
