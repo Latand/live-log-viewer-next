@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { commitPipelineStage, provisionPipelineWorktree, resetPipelineStage, resolvePipelineBase, synchronizePipelineRetryHead } from "./git";
+import { commitPipelineStage, pipelineWorktreeChanges, provisionPipelineWorktree, resetPipelineStage, resolvePipelineBase, synchronizePipelineRetryHead } from "./git";
 import type { Pipeline } from "./types";
 import { realExec, type ExecPort } from "@/lib/workflows/provision";
 
@@ -215,4 +215,52 @@ test("issue 533: manual review retry never resets clean remote 8232d71 to stale 
   expect(synchronizePipelineRetryHead(subject, exec)).toEqual({ ok: true, sha: synchronizedHead });
   expect(calls.some((call) => call.includes("reset --hard"))).toBe(false);
   expect(calls.some((call) => call.startsWith("git merge "))).toBe(false);
+});
+
+test("a real dirty worktree reports its uncommitted paths and keeps every one of them", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-close-"));
+  const repo = path.join(root, "repo");
+  try {
+    fs.mkdirSync(repo);
+    git(repo, "init", "--initial-branch=main");
+    git(repo, "config", "user.email", "pipeline-test@example.com");
+    git(repo, "config", "user.name", "Pipeline Test");
+    git(repo, "config", "commit.gpgSign", "false");
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "base\n");
+    fs.writeFileSync(path.join(repo, "renamed.txt"), "moved\n");
+    git(repo, "add", "-A");
+    git(repo, "commit", "-m", "base");
+
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "stage work in progress\n");
+    fs.writeFileSync(path.join(repo, "untracked.txt"), "never discard me\n");
+    git(repo, "mv", "renamed.txt", "moved.txt");
+
+    const subject = pipeline();
+    subject.worktreeDir = repo;
+    const changes = pipelineWorktreeChanges(subject, realExec);
+
+    expect(changes).toEqual({ ok: true, paths: ["moved.txt", "tracked.txt", "untracked.txt"], truncated: false });
+    /* Reading the worktree must never mutate it: the close preserves the work. */
+    expect(fs.readFileSync(path.join(repo, "untracked.txt"), "utf8")).toBe("never discard me\n");
+    expect(fs.readFileSync(path.join(repo, "tracked.txt"), "utf8")).toBe("stage work in progress\n");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("worktree change reporting truncates long lists and surfaces an unreadable worktree", () => {
+  const many: ExecPort = () => ({
+    code: 0,
+    stdout: Array.from({ length: 22 }, (_, index) => `?? file-${index}.txt`).join("\n"),
+    stderr: "",
+  });
+  const reported = pipelineWorktreeChanges(pipeline(), many, 20);
+  expect(reported).toMatchObject({ ok: true, truncated: true });
+  expect(reported.ok && reported.paths).toHaveLength(20);
+
+  const missing: ExecPort = () => ({ code: 128, stdout: "", stderr: "fatal: not a git repository" });
+  expect(pipelineWorktreeChanges(pipeline(), missing)).toEqual({
+    ok: false,
+    error: "checking the pipeline worktree: fatal: not a git repository",
+  });
 });

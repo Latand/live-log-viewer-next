@@ -299,7 +299,14 @@ export async function cancelRound(id: string): Promise<{ flow?: Flow; error?: st
  * still run and close the loop. The implementer session is untouched — only
  * the reviewer side goes away.
  */
-export async function closeFlow(id: string): Promise<{ flow?: Flow; error?: string; status?: number }> {
+export async function closeFlow(id: string): Promise<{
+  flow?: Flow;
+  error?: string;
+  status?: number;
+  /** The round whose live reviewer this close terminated, so a caller can report
+      what it stopped instead of claiming nothing was running (#670). */
+  stoppedReviewer?: { round: number } | null;
+}> {
   const flows = loadFlows();
   const flow = flows.find((item) => item.id === id);
   if (!flow) return { error: "flow not found", status: 404 };
@@ -312,10 +319,11 @@ export async function closeFlow(id: string): Promise<{ flow?: Flow; error?: stri
       return { error: "reviewer process group did not terminate", status: 409 };
     }
   }
+  const stoppedReviewer = stoppedRound === null ? null : { round: stoppedRound.n };
   return await withFlowMutation((current, persist) => {
     const currentFlow = current.find((item) => item.id === id);
     if (!currentFlow) return { error: "flow not found", status: 404 };
-    if (currentFlow.state === "closed") return { flow: currentFlow };
+    if (currentFlow.state === "closed") return { flow: currentFlow, stoppedReviewer };
     const currentRound = lastRound(currentFlow);
     if (stoppedRound !== null
       && (currentRound?.n !== stoppedRound.n
@@ -330,7 +338,7 @@ export async function closeFlow(id: string): Promise<{ flow?: Flow; error?: stri
     currentFlow.closedAt = isoNow();
     currentFlow.stateDetail = null;
     persist();
-    return { flow: currentFlow };
+    return { flow: currentFlow, stoppedReviewer };
   });
 }
 
