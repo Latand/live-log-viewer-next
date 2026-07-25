@@ -3,6 +3,7 @@ import { Window } from "happy-dom";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
+import { setLocale, translate } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
 import { SubagentBadges } from "./SubagentBadges";
@@ -360,4 +361,64 @@ test("a busy in-harness subagent gone quiet keeps a lit chip: ringed, not greyed
   expect(badge.querySelector('[data-subagent-ring="silent"]')).toBeTruthy();
   expect(badge.className).not.toContain("opacity-45");
   expect(badge.className).not.toContain("grayscale");
+});
+
+test("a finished agent whose host stayed attached reads done: dimmed, no ring", () => {
+  /* The counterpart of the wedged chip above — same live process, same hour of
+     silence, opposite turn. They must not paint the same. */
+  const parent = entry({ path: "/parent", conversationId: "parent" });
+  const finished = entry({
+    path: "/finished",
+    conversationId: "finished",
+    parent: parent.path,
+    title: "Delivered worker",
+    proc: "running",
+    mtime: NOW - 3_600,
+    authoritativeTurn: { state: "terminal", source: "assistant", terminalAt: "2026-07-25T00:00:00Z" },
+  });
+  const wedged = entry({
+    path: "/wedged",
+    conversationId: "wedged",
+    parent: parent.path,
+    title: "Wedged worker",
+    proc: "running",
+    mtime: NOW - 3_600,
+    authoritativeTurn: { state: "busy", source: "assistant", terminalAt: null },
+  });
+  const { host } = mountWithClock([parent, finished, wedged], NOW);
+  const badge = (id: string) => host.querySelector(`[data-subagent-badge="${id}"]`) as HTMLButtonElement;
+
+  expect(badge("finished").dataset.subagentState).toBe("closed");
+  expect(badge("finished").querySelector("[data-subagent-ring]")).toBeNull();
+  expect(badge("finished").className).toContain("opacity-45");
+  expect(badge("wedged").dataset.subagentState).toBe("silent");
+  expect(badge("wedged").querySelector('[data-subagent-ring="silent"]')).toBeTruthy();
+});
+
+test("the unavailable note comes from the catalogue, so the tooltip is not half-translated", () => {
+  const parent = entry({ path: "/parent", conversationId: "parent" });
+  const dead = entry({
+    path: "/dead",
+    conversationId: "dead",
+    parent: parent.path,
+    title: "Removed worker",
+    spawn: {
+      launchId: "launch-dead",
+      clientAttemptId: null,
+      accountId: null,
+      state: "failed",
+      initialMessage: "failed",
+      retrySafe: false,
+      error: "no host",
+    },
+  });
+  setLocale("uk");
+  try {
+    const { host } = mountWithClock([parent, dead], NOW);
+    const badge = host.querySelector('[data-subagent-badge="dead"]') as HTMLButtonElement;
+    expect(badge.title).toContain(translate("uk", "subagentTray.state.dead"));
+    expect(badge.title).not.toContain("unavailable");
+  } finally {
+    setLocale("en");
+  }
 });

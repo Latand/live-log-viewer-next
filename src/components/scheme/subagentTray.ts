@@ -87,6 +87,23 @@ function couldStillWrite(entry: FileEntry): boolean {
 }
 
 /**
+ * The transcript's last turn ended on its own terms — the agent answered and
+ * stopped, as opposed to going quiet mid-turn.
+ *
+ * Shape only, never age: both signals describe what the tail RECORDS say. The
+ * scanner's `jsonl_turn_completed` reason is fixed by the turn projection
+ * before any clock is consulted (only the recent/idle split that follows it is
+ * age-derived, and that split is exactly what must not come back in here).
+ * This is the same reading `isTerminalOrIdle` folds a child on, so the
+ * projection's "quiet, fold it" and the chip it emits for that row agree.
+ */
+function turnEndedCleanly(entry: FileEntry): boolean {
+  const turn = entry.authoritativeTurn?.state;
+  if (turn === "terminal" || turn === "idle") return true;
+  return entry.activityReason === "jsonl_turn_completed";
+}
+
+/**
  * Seconds since the conversation's last transcript record, or `null` when the
  * caller has no clock yet (the server render and the first client render pass
  * `0` so their markup agrees — see {@link useNowSeconds}). A null age never
@@ -107,30 +124,36 @@ export function transcriptSilence(entry: FileEntry, now: number): number | null 
  * only decides which side of the ladder the entry falls on — exited is
  * terminal, alive-and-silent is wedged, alive-and-writing is working.
  *
- * Silence only means "finished" once nothing could still write
- * ({@link couldStillWrite}); short of that it means "silent", never "done". A
- * closed turn with no host behind it, on the other hand, is finished the moment
- * it lands: its last record is the answer, not a sign of life. Both readings of
- * the turn take its SHAPE, never its age — an ageing snapshot cannot flip
- * either judgement, which is what let a lane writing every two seconds render
- * as finished.
+ * What silence MEANS is settled by the turn, and only by its shape:
+ * - a turn that ended cleanly ({@link turnEndedCleanly}) — the agent answered
+ *   and stopped. With no host behind it that is finished the moment it lands:
+ *   the last record is the answer, not a sign of life. With a host still
+ *   attached it is finished as soon as the transcript goes quiet — an attached
+ *   host is how a worker waits for follow-ups, so keeping such a chip amber
+ *   forever would leave nothing to tell a wedged agent from a done one.
+ * - a turn still open, or no turn evidence at all — the agent went quiet
+ *   mid-work. That is what `silent` is for, and something must still be able to
+ *   write ({@link couldStillWrite}) for the chip to claim it.
  *
- * A closed turn does NOT close a chip whose host is still alive, deliberately:
- * a terminal Claude turn under a live host can be recovery bookkeeping rather
- * than a finished agent (issue #516 — `lib/scanner/activity.ts` keeps that
- * release behind a live-host fence for the same reason). Such a chip leaves
- * the working state on transcript silence like any other, which costs at most
- * one silence window of green and never claims completion on weak evidence.
+ * Age is not an input to either branch — an ageing snapshot cannot flip these
+ * judgements, which is what let a lane writing every two seconds render as
+ * finished.
+ *
+ * The cost of closing a hosted clean turn is bounded by #516: a terminal
+ * Claude turn under a live host can be recovery bookkeeping rather than a
+ * finished agent. That chip greys out only after a full silence window, and
+ * the next record it writes returns it to working on the following poll.
  */
 export function badgeState(entry: FileEntry, now: number): SubagentBadgeState {
   if (entry.path.startsWith("spawn:")) return "dead";
   if (entry.spawn?.state === "failed") return "dead";
   if (entry.proc === "done" || entry.proc === "killed" || entry.supersededBy) return "closed";
   const hosted = hostAlive(entry);
-  const turn = entry.authoritativeTurn?.state;
-  if (!hosted && (turn === "terminal" || turn === "idle")) return "closed";
+  const ended = turnEndedCleanly(entry);
+  if (!hosted && ended) return "closed";
   const silence = transcriptSilence(entry, now);
   if (silence === null || silence < SILENT_AFTER_SECONDS) return hosted ? "running" : "live";
+  if (ended) return "closed";
   return couldStillWrite(entry) ? "silent" : "closed";
 }
 

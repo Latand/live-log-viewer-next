@@ -173,6 +173,75 @@ test("badgeState keeps a busy in-harness subagent alive through a long tool call
   expect(toolCall(7.5 * 3600)).toBe("silent");
 });
 
+test("badgeState tells a finished agent from a wedged one while both keep a host attached", () => {
+  /* An attached host is how a worker waits for follow-ups, so liveness cannot
+     be what separates these two — the turn is. Side by side, an hour silent,
+     same process state. */
+  const finished = entry({
+    path: "/a",
+    conversationId: "a",
+    proc: "running",
+    mtime: wrote(3_600),
+    authoritativeTurn: { state: "terminal", source: "assistant", terminalAt: "2026-07-25T00:00:00Z" },
+  });
+  const wedged = entry({
+    path: "/b",
+    conversationId: "b",
+    proc: "running",
+    mtime: wrote(3_600),
+    authoritativeTurn: { state: "busy", source: "assistant", terminalAt: null },
+  });
+  expect(badgeState(finished, NOW)).toBe("closed");
+  expect(badgeState(wedged, NOW)).toBe("silent");
+
+  /* The scanner's completion reason carries the same shape for an entry whose
+     authoritative projection did not complete — and it is fixed before any
+     clock is consulted, so this stays a shape test, not an age test. */
+  const scannerSaysCompleted = entry({
+    path: "/c",
+    conversationId: "c",
+    proc: "running",
+    mtime: wrote(3_600),
+    activity: "recent",
+    activityReason: "jsonl_turn_completed",
+  });
+  const scannerSaysStalled = entry({
+    path: "/d",
+    conversationId: "d",
+    proc: "running",
+    mtime: wrote(3_600),
+    activity: "stalled",
+    activityReason: "jsonl_turn_stalled",
+  });
+  expect(badgeState(scannerSaysCompleted, NOW)).toBe("closed");
+  expect(badgeState(scannerSaysStalled, NOW)).toBe("silent");
+
+  /* A clean turn still keeps its chip working while the transcript is fresh:
+     completion is what silence MEANS here, not a state of its own. */
+  expect(badgeState({ ...finished, mtime: wrote(4) }, NOW)).toBe("running");
+});
+
+test("a tray of finished children with attached hosts rolls up closed, not silent", () => {
+  const now = epochSeconds(NOW);
+  const parent = entry({ path: "/parent", conversationId: "parent", activity: "live" });
+  const done = (id: string) => child({
+    path: `/${id}`,
+    conversationId: id,
+    parentId: "parent",
+    parent: parent.path,
+    proc: "running",
+    mtime: wrote(3_600),
+    authoritativeTurn: { state: "terminal", source: "assistant", terminalAt: "2026-07-25T00:00:00Z" },
+  });
+  const projection = buildSubagentTrays(baseInput([parent, done("one"), done("two")], ["parent"], {
+    foldedEngineChildIds: new Set(["one", "two"]),
+    now,
+  }));
+  const tray = projection.traysByParent.get("parent")!;
+  expect(tray.members.map((member) => member.state)).toEqual(["closed", "closed"]);
+  expect(tray.hottest).toBe("closed");
+});
+
 test("badgeState closes a silent transcript with nothing alive behind it, and an exit wins over freshness", () => {
   const abandoned = entry({ path: "/a", conversationId: "a", proc: null, activity: "recent", mtime: wrote(SILENT_AFTER_SECONDS) });
   expect(badgeState(abandoned, NOW)).toBe("closed");

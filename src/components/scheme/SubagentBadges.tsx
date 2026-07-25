@@ -104,9 +104,11 @@ export function SubagentBadges({ conversationId, entries, cardRect, onNavigate, 
            host that is alive but has gone quiet, and no ring at all for the
            dimmed finished/unavailable states. */
         const working = child.state === "running" || child.state === "live";
-        const stateNote = child.state === "silent"
-          ? ` · ${t("subagentTray.state.silent")}`
-          : unavailable ? " · unavailable" : "";
+        /* Both notes come from the catalogue: a half-translated tooltip is a
+           bug in the one locale that is not English. */
+        const stateNote = child.state === "silent" || unavailable
+          ? ` · ${t(`subagentTray.state.${child.state}` as "subagentTray.state.silent")}`
+          : "";
         const tooltip = `${child.title} · ${child.engine}${child.model ? ` / ${child.model}` : ""}${stateNote}`;
         return (
           <span key={child.id} className="contents">

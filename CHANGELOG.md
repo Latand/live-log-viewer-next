@@ -14,11 +14,14 @@ versions follow [SemVer](https://semver.org/) (0.x — the API may still move).
   verdict has become, and a host that stayed alive with nothing to say gets its
   own state — «alive but silent» after five minutes of transcript silence, a
   steady warning ring and its own tray dot, told apart from both working and
-  finished. Silence never claims completion while anything could still write:
-  an in-harness subagent owns no process of its own, so its open turn keeps a
-  six-minute tool call reading as silent instead of finished. The chips carry a
-  ticking clock, so a state change settles in place: a wedged host leaves the
-  working state with no reload and no new scan, and a batch change (several
+  finished. What the silence means is settled by the transcript's last turn,
+  never by its age: a turn still open keeps the chip amber (an in-harness
+  subagent owns no process of its own, so its open turn is what carries a
+  six-minute tool call through), while a turn that ended cleanly reads as done
+  even with the host still attached — so a delivered worker greys out instead
+  of sitting amber beside a genuinely wedged one. The chips carry a ticking
+  clock, so a state change settles in place: a wedged host leaves the working
+  state with no reload and no new scan, and a batch change (several
   conversations killed at once) settles every chip from the one poll that
   carries it.
 - Multi-gigabyte active transcripts no longer starve the Viewer (#287). One
