@@ -5,10 +5,11 @@ import { badgeState, currentGenerationChildrenOf, type SubagentBadgeState } from
 
 export type { SubagentBadgeState } from "./subagentTray";
 
-/** Badge display rank: active leads, every quiet/dead state trails together —
-    ties break by spawn time, unchanged from the pre-#142 ordering. */
+/** Badge display rank: active leads, a silent-but-alive host follows, every
+    quiet/dead state trails together — ties break by spawn time. */
 function activeRank(state: SubagentBadgeState): number {
-  return state === "running" || state === "live" ? 0 : 1;
+  if (state === "running" || state === "live") return 0;
+  return state === "silent" ? 1 : 2;
 }
 
 export interface SubagentBadge {
@@ -33,16 +34,19 @@ function spawnTime(entry: FileEntry): number {
  * Direct spawned children of one stable conversation, ordered for bottom-up
  * display. `exclude` drops any child already placed on another surface — a tray
  * member folded into the parent card must not also enumerate as a promoted
- * badge (issue #142: a card renders in exactly one place).
+ * badge (issue #142: a card renders in exactly one place). `now` is epoch
+ * SECONDS: chip state is a function of transcript freshness, so it moves with
+ * the clock and not only with the next scan (issue #669).
  */
 export function subagentsOf(
   conversationId: string,
   entries: readonly FileEntry[],
   exclude: ReadonlySet<string> = new Set(),
+  now = 0,
 ): SubagentBadge[] {
   return currentGenerationChildrenOf(conversationId, entries)
     .filter((entry) => !exclude.has(entry.path) && !exclude.has(conversationIdentity(entry)))
-    .map((entry) => ({ entry, state: badgeState(entry) }))
+    .map((entry) => ({ entry, state: badgeState(entry, now) }))
     .sort((left, right) =>
       activeRank(left.state) - activeRank(right.state)
       || spawnTime(left.entry) - spawnTime(right.entry)

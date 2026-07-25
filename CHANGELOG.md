@@ -7,6 +7,23 @@ versions follow [SemVer](https://semver.org/) (0.x — the API may still move).
 ## [Unreleased]
 
 ### Fixed
+- Agent chips on the conversation canvas report the agent's real output, not
+  the state of its process (#669). Chip activity now derives from how long ago
+  the conversation's transcript last grew, so a lane appending records every
+  few seconds reads as working however stale the snapshot's own activity
+  verdict has become, and a host that stayed alive with nothing to say gets its
+  own state — «alive but silent» after five minutes of transcript silence, a
+  steady warning ring and its own tray dot, told apart from both working and
+  finished. What the silence means is settled by the transcript's last turn,
+  never by its age: a turn still open keeps the chip amber (an in-harness
+  subagent owns no process of its own, so its open turn is what carries a
+  six-minute tool call through), while a turn that ended cleanly reads as done
+  even with the host still attached — so a delivered worker greys out instead
+  of sitting amber beside a genuinely wedged one. The chips carry a ticking
+  clock, so a state change settles in place: a wedged host leaves the working
+  state with no reload and no new scan, and a batch change (several
+  conversations killed at once) settles every chip from the one poll that
+  carries it.
 - The limits widget labels each quota window by the horizon its data actually
   carries (#606). Codex reports every rate-limit window with its own length, and
   a plan without a 5-hour limit sends its weekly window in the `primary` slot;

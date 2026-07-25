@@ -8,6 +8,7 @@ import { queueColumnOpen, useBoardState } from "@/hooks/useBoardState";
 import { FavoritesProvider, type FavoritesApi } from "./favorites/FavoritesContext";
 import { resolveFavoriteRows } from "./favorites/favoriteRows";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useNowSeconds } from "@/hooks/useNowSeconds";
 import { viewBus } from "@/hooks/viewPresenceBus";
 import { projectDisplayName } from "@/lib/displayNames";
 import type { Flow } from "@/lib/flows/types";
@@ -70,6 +71,10 @@ import { ResidualStrip } from "./TreeAside";
 
 /** How long an opened node keeps its highlight ring on the scheme. */
 const HIGHLIGHT_MS = 1800;
+
+/** Cadence of the board's wall clocks — the idle windows they drive are
+    minutes wide, so both the millisecond and the seconds clock tick here. */
+const BOARD_CLOCK_MS = 30_000;
 
 interface Props {
   files: FileEntry[];
@@ -406,6 +411,12 @@ export function ProjectDashboard({
      the first tick lands the real time, and reviewer verdicts collapse without
      waiting on the clock at all. */
   const [nowMs, setNowMs] = useState(0);
+  /* The subagent-tray projection measures transcript freshness and attention
+     TTLs against `mtime`, which is SECONDS. It takes the seconds clock
+     straight from the shared hook rather than a conversion of `nowMs` — the
+     unit is then carried by the type (`EpochSeconds`), so a millisecond clock
+     cannot reach it by an edit that reads plausibly (issue #669). */
+  const nowSeconds = useNowSeconds(BOARD_CLOCK_MS);
   const projectCwdFallbacks = useMemo(() => [
     ...pipelines.filter((pipeline) => pipeline.project === project).map((pipeline) => pipeline.repoDir),
     ...workflows.filter((workflow) => workflow.project === project).map((workflow) => workflow.repoDir),
@@ -421,7 +432,7 @@ export function ProjectDashboard({
   useEffect(() => {
     const tick = () => setNowMs(Date.now());
     tick();
-    const id = window.setInterval(tick, 30_000);
+    const id = window.setInterval(tick, BOARD_CLOCK_MS);
     return () => window.clearInterval(id);
   }, []);
 
@@ -690,9 +701,9 @@ export function ProjectDashboard({
       hiddenPaths,
       claimedPaths,
       hostEligibleParentIds,
-      now: nowMs,
+      now: nowSeconds,
     });
-  }, [baseGroups, prefs.hidden, prefs.manual, board.prefs.foldedEngineChildIds, board.prefs.expandedEngineTrayParentIds, filesByPath, project, files, compactPipelinePaths, collapsedPaths, launchHistoryPaths, pinnedPaths, nowMs]);
+  }, [baseGroups, prefs.hidden, prefs.manual, board.prefs.foldedEngineChildIds, board.prefs.expandedEngineTrayParentIds, filesByPath, project, files, compactPipelinePaths, collapsedPaths, launchHistoryPaths, pinnedPaths, nowSeconds]);
   const groups = useMemo(
     () => (engineProjection.promotedPaths.size || engineProjection.foldedPaths.size
       ? buildBranchGroups(sceneFiles, project, {

@@ -1045,6 +1045,7 @@ export const en = {
   "subagentTray.unfold": "Restore {name} to a full card",
   "subagentTray.state.running": "working",
   "subagentTray.state.live": "live",
+  "subagentTray.state.silent": "alive but silent",
   "subagentTray.state.closed": "idle",
   "subagentTray.state.dead": "unavailable",
 

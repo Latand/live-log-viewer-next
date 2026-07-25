@@ -1015,6 +1015,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "subagentTray.unfold": "Повернути {name} як повну картку",
   "subagentTray.state.running": "працює",
   "subagentTray.state.live": "наживо",
+  "subagentTray.state.silent": "живий, але мовчить",
   "subagentTray.state.closed": "простій",
   "subagentTray.state.dead": "недоступний",
 

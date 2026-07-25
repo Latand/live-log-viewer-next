@@ -40,6 +40,9 @@ const MAX_DOTS = 6;
 
 function dotClass(state: SubagentBadgeState): string {
   if (state === "running" || state === "live") return "bg-success";
+  /* Alive but not writing: its own colour, so a wedged member neither reads as
+     working (green) nor as finished (grey) — issue #669. */
+  if (state === "silent") return "bg-warning";
   if (state === "closed") return "bg-muted";
   return "bg-danger";
 }
