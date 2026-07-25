@@ -1,6 +1,6 @@
 import { attentionId } from "@/components/attention";
 import { conversationIdentity, isArchivedPredecessor } from "@/lib/accounts/identity";
-import type { Engine, FileEntry } from "@/lib/types";
+import type { EpochSeconds, Engine, FileEntry } from "@/lib/types";
 
 /*
  * Engine-native subagent tray — the single presence projection for issue #142
@@ -19,7 +19,34 @@ import type { Engine, FileEntry } from "@/lib/types";
  * only their exclusion sets so a card is never placed in two surfaces at once.
  */
 
-export type SubagentBadgeState = "running" | "live" | "closed" | "dead";
+/**
+ * Chip states, hottest first (issue #669):
+ * - `running` — a live host whose transcript is still producing records.
+ * - `live` — no process evidence, but the transcript is producing records.
+ * - `silent` — the host is alive and the transcript has said nothing for
+ *   {@link SILENT_AFTER_SECONDS}. Its own state: a wedged host must not keep
+ *   masquerading as working, and it is not finished either.
+ * - `closed` — the host exited, was superseded, or nothing is alive behind a
+ *   transcript that stopped writing.
+ * - `dead` — a spawn placeholder or a failed launch: no conversation to open.
+ */
+export type SubagentBadgeState = "running" | "live" | "silent" | "closed" | "dead";
+
+/**
+ * Transcript silence (seconds) after which a still-alive agent leaves the
+ * working state for `silent`.
+ *
+ * Five minutes. The gaps a healthy agent legitimately leaves between records
+ * are tool calls that block the turn — a type-check, a test run, a fetch, a
+ * long thinking block — and those land inside a couple of minutes; the scanner
+ * already calls an open turn `stalled` at 180s (`lib/scanner/activity.ts`), so
+ * 300s is deliberately the more forgiving of the two and a two-minute think
+ * cannot flicker the chip. The pathology this catches ran for hours (issue
+ * #669: four hosts silent for 7.5h while their chips read as working), so
+ * every threshold in minutes catches it — the only question is how much
+ * headroom to leave the honest agent, and this leaves 2.5x the scanner's.
+ */
+export const SILENT_AFTER_SECONDS = 300;
 
 /** Presence surface an engine-native child renders on (§1.2 ladder). */
 export type TrayPresence = "promoted" | "folded";
@@ -33,14 +60,101 @@ export type PresenceReason =
   | "quiet"
   | "fail-visible";
 
-export function badgeState(entry: FileEntry): SubagentBadgeState {
+/** A process of this conversation's own, or a launch still binding one. A
+    launch wedged in `binding` counts as hosted, so it surfaces as silent
+    rather than as finished. */
+function hostAlive(entry: FileEntry): boolean {
+  if (entry.proc === "running") return true;
+  const spawn = entry.spawn?.state;
+  return spawn === "starting" || spawn === "binding" || spawn === "queued";
+}
+
+/**
+ * Whether anything could still write to this transcript — the question silence
+ * has to answer before it may mean "finished".
+ *
+ * A mapped process is not the only evidence, and for the population that fills
+ * this surface it is never available: a Claude in-harness subagent is written
+ * by its PARENT's process and never gets a pid of its own (the scanner's
+ * `isTopLevelTranscript` excludes `agent-*` basenames and anything under
+ * `subagents/`), so `proc` stays null for its whole life. Its open
+ * authoritative turn is the only liveness it will ever carry — and a subagent
+ * writes nothing at all while a tool call is in flight, so a six-minute test
+ * run must not be read as a finished agent.
+ */
+function couldStillWrite(entry: FileEntry): boolean {
+  return hostAlive(entry) || entry.authoritativeTurn?.state === "busy";
+}
+
+/**
+ * The transcript's last turn ended on its own terms — the agent answered and
+ * stopped, as opposed to going quiet mid-turn.
+ *
+ * Shape only, never age: both signals describe what the tail RECORDS say. The
+ * scanner's `jsonl_turn_completed` reason is fixed by the turn projection
+ * before any clock is consulted (only the recent/idle split that follows it is
+ * age-derived, and that split is exactly what must not come back in here).
+ * This is the same reading `isTerminalOrIdle` folds a child on, so the
+ * projection's "quiet, fold it" and the chip it emits for that row agree.
+ */
+function turnEndedCleanly(entry: FileEntry): boolean {
+  const turn = entry.authoritativeTurn?.state;
+  if (turn === "terminal" || turn === "idle") return true;
+  return entry.activityReason === "jsonl_turn_completed";
+}
+
+/**
+ * Seconds since the conversation's last transcript record, or `null` when the
+ * caller has no clock yet (the server render and the first client render pass
+ * `0` so their markup agrees — see {@link useNowSeconds}). A null age never
+ * demotes a chip: an unknown age is not evidence of silence.
+ */
+export function transcriptSilence(entry: FileEntry, now: number): number | null {
+  if (!Number.isFinite(now) || now <= 0) return null;
+  return Math.max(0, now - entry.mtime);
+}
+
+/**
+ * The chip state of one conversation. `now` is epoch SECONDS.
+ *
+ * Activity is read off the transcript, not off the process (issue #669): a
+ * host that is alive but has written nothing for {@link SILENT_AFTER_SECONDS}
+ * reads `silent`, and a transcript that is still writing reads active however
+ * stale the snapshot's own `activity` verdict has become. Process evidence
+ * only decides which side of the ladder the entry falls on — exited is
+ * terminal, alive-and-silent is wedged, alive-and-writing is working.
+ *
+ * What silence MEANS is settled by the turn, and only by its shape:
+ * - a turn that ended cleanly ({@link turnEndedCleanly}) — the agent answered
+ *   and stopped. With no host behind it that is finished the moment it lands:
+ *   the last record is the answer, not a sign of life. With a host still
+ *   attached it is finished as soon as the transcript goes quiet — an attached
+ *   host is how a worker waits for follow-ups, so keeping such a chip amber
+ *   forever would leave nothing to tell a wedged agent from a done one.
+ * - a turn still open, or no turn evidence at all — the agent went quiet
+ *   mid-work. That is what `silent` is for, and something must still be able to
+ *   write ({@link couldStillWrite}) for the chip to claim it.
+ *
+ * Age is not an input to either branch — an ageing snapshot cannot flip these
+ * judgements, which is what let a lane writing every two seconds render as
+ * finished.
+ *
+ * The cost of closing a hosted clean turn is bounded by #516: a terminal
+ * Claude turn under a live host can be recovery bookkeeping rather than a
+ * finished agent. That chip greys out only after a full silence window, and
+ * the next record it writes returns it to working on the following poll.
+ */
+export function badgeState(entry: FileEntry, now: number): SubagentBadgeState {
   if (entry.path.startsWith("spawn:")) return "dead";
   if (entry.spawn?.state === "failed") return "dead";
-  if (entry.proc === "done" || entry.proc === "killed" || entry.supersededBy || entry.activity === "idle") return "closed";
-  if (entry.proc === "running" || entry.spawn?.state === "starting" || entry.spawn?.state === "binding" || entry.spawn?.state === "queued") {
-    return "running";
-  }
-  return "live";
+  if (entry.proc === "done" || entry.proc === "killed" || entry.supersededBy) return "closed";
+  const hosted = hostAlive(entry);
+  const ended = turnEndedCleanly(entry);
+  if (!hosted && ended) return "closed";
+  const silence = transcriptSilence(entry, now);
+  if (silence === null || silence < SILENT_AFTER_SECONDS) return hosted ? "running" : "live";
+  if (ended) return "closed";
+  return couldStillWrite(entry) ? "silent" : "closed";
 }
 
 function spawnTime(entry: FileEntry): number {
@@ -48,11 +162,14 @@ function spawnTime(entry: FileEntry): number {
   return Number.isFinite(started) ? started : entry.mtime * 1_000;
 }
 
-/** Activity rank for ordering + tray roll-up: lower is hotter. */
+/** Activity rank for ordering + tray roll-up: lower is hotter. A silent host
+    is still alive, so it outranks a closed one — a wedged agent must surface
+    through a folded row rather than hide behind finished siblings. */
 export function activeRank(state: SubagentBadgeState): number {
   if (state === "running" || state === "live") return 0;
-  if (state === "closed") return 1;
-  return 2;
+  if (state === "silent") return 1;
+  if (state === "closed") return 2;
+  return 3;
 }
 
 /** The hottest (most-active) state across a set of members — the tray badge
@@ -140,7 +257,8 @@ export interface EngineChildContext {
   folded: boolean;
   /** The child is manually placed / expanded / pinned on the board. */
   pinned: boolean;
-  now: number;
+  /** The same clock `mtime` and `attentionId` are measured on. */
+  now: EpochSeconds;
 }
 
 export interface EngineChildClassification {
@@ -210,7 +328,9 @@ export interface SubagentTrayInput {
       whose host is missing (hidden, deleted, cross-project, deck-claimed,
       compacted) stays visible through the existing full-node path. */
   hostEligibleParentIds: ReadonlySet<string>;
-  now: number;
+  /** Transcript freshness and attention TTLs share this clock with `mtime`;
+      the branded type keeps a millisecond clock from landing here silently. */
+  now: EpochSeconds;
 }
 
 export interface SubagentTrayProjection {
@@ -235,7 +355,7 @@ export function engineChildParentId(entry: FileEntry, byPath: ReadonlyMap<string
   return entry.parentRemoved?.conversationId ?? null;
 }
 
-function toMember(entry: FileEntry): TrayMember {
+function toMember(entry: FileEntry, now: number): TrayMember {
   const id = conversationIdentity(entry);
   return {
     id,
@@ -243,7 +363,7 @@ function toMember(entry: FileEntry): TrayMember {
     title: entry.title,
     engine: entry.engine,
     model: entry.model,
-    state: badgeState(entry),
+    state: badgeState(entry, now),
     avatarSeed: id,
   };
 }
@@ -309,7 +429,7 @@ export function buildSubagentTrays(input: SubagentTrayInput): SubagentTrayProjec
     foldedIds.add(id);
     spawnByChildId.set(id, spawnTime(entry));
     const list = membersByParent.get(parentId) ?? [];
-    list.push(toMember(entry));
+    list.push(toMember(entry, input.now));
     membersByParent.set(parentId, list);
   }
 

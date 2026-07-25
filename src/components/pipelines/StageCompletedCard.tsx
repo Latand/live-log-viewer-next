@@ -13,8 +13,8 @@ import {
   STAGE_TONES,
   VERDICT_TONES,
   attemptStateLabel,
-  stageChipLabel,
   stageChipState,
+  stagePaneTitle,
   verdictStatusLabel,
 } from "./pipelineModel";
 
@@ -34,7 +34,10 @@ export function StageCompletedCard({ slot, onOpen }: { slot: StageSlot; onOpen?:
   const { pipeline, stage, attempt } = slot;
   const state = stageChipState(pipeline, stage);
   const tone = STAGE_TONES[state];
-  const label = stageChipLabel(t, stage);
+  /* Role · stage · position, never the prompt's shared preamble (#658) — the
+     visible title and the card's accessible name are the same string, so two
+     stages sharing a role are still told apart by assistive tech. */
+  const title = stagePaneTitle(t, stage, slot.index, slot.total);
   const review = stage.kind === "review-loop";
   const tint = engineTintOf(stage.effectiveRole.engine);
   const model = stage.effectiveRole.model ?? "";
@@ -50,7 +53,7 @@ export function StageCompletedCard({ slot, onOpen }: { slot: StageSlot; onOpen?:
       data-pipeline-stage-card={`${pipeline.id}::${stage.id}`}
       data-pipeline-stage-state={state}
       data-pipeline-stage-completed="true"
-      aria-label={t("pipelineSlot.completedAria", { role: label })}
+      aria-label={t("pipelineSlot.completedAria", { title })}
       className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-control border-2 bg-card shadow-1"
       style={{ borderColor: tone.color }}
     >
@@ -60,8 +63,8 @@ export function StageCompletedCard({ slot, onOpen }: { slot: StageSlot; onOpen?:
         <span className="shrink-0 rounded-full border border-border bg-card/70 px-1.5 py-0.5 text-caption font-bold capitalize text-muted">
           {stage.effectiveRole.engine}
         </span>
-        <span className="min-w-0 flex-1 truncate text-ui font-semibold text-muted" title={label}>
-          {label} · {t("pipelineSlot.stageOf", { k: slot.index + 1, n: slot.total })}
+        <span className="min-w-0 flex-1 truncate text-ui font-semibold text-muted" title={title}>
+          {title}
         </span>
         <span className="shrink-0 rounded-full border border-border bg-card/70 px-1.5 py-0.5 text-caption font-bold uppercase tracking-wide text-muted">
           {review ? `⟳ ${t("groupOverride.reviewKind")}` : t("groupOverride.runKind")}

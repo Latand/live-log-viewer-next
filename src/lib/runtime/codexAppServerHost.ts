@@ -25,6 +25,7 @@ import {
   type RuntimeEventCursorRecoveryReporter,
   type RuntimeEventStore,
 } from "./eventStore";
+import { voicePersona } from "./voicePersona";
 
 type JsonObject = Record<string, unknown>;
 type PendingRpc = {
@@ -151,6 +152,13 @@ const MIN_LATE_THREAD_READ_RESPONSE_TTL_MS = 1_000;
 const MAX_LATE_THREAD_READ_RESPONSES = 32;
 const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
 const REALTIME_START_TIMEOUT_MS = 90_000;
+/* The persona is optional; never let it hold the microphone waiting. An
+   app-server that rejects the method answers immediately, so this bound only
+   covers one that accepts it and then stalls. */
+const REALTIME_PERSONA_TIMEOUT_MS = 3_000;
+/* Releasing the host must not block on a wedged app-server, but the hangup is
+   worth a moment: skipping it strands the account's realtime slot. */
+const REALTIME_HANGUP_TIMEOUT_MS = 2_000;
 /**
  * The live model to ask for by name (#664). Sending none let the backend pick
  * `gpt-live-1-boulder-alpha`, and every such call was cut at 9.0–9.4 seconds
@@ -688,6 +696,22 @@ export class CodexAppServerHost implements EngineHost {
     });
     void answer.catch(() => undefined);
 
+    /* The persona reaches the call through the THREAD, never through the live
+       session: `includeStartupContext` pulls the thread in at start, while an
+       initial item on the session made codex open the sideband channel that
+       every 9-second kill arrived on. Best effort by construction — a rejected
+       injection must never cost the operator their call, so the failure is
+       swallowed and the start proceeds with whatever the thread already holds. */
+    try {
+      await this.rpc("thread/inject_items", {
+        threadId: this.identity.threadId,
+        items: [{ role: "developer", text: voicePersona() }],
+      }, REALTIME_PERSONA_TIMEOUT_MS);
+    } catch {
+      /* Swallowed on purpose: the app-server records the rejected RPC in its
+         own log, which is where a wrong item shape gets diagnosed, and the
+         operator gets their call either way. */
+    }
     try {
       await this.rpc("thread/realtime/start", {
         threadId: this.identity.threadId,
@@ -698,6 +722,12 @@ export class CodexAppServerHost implements EngineHost {
         clientManagedHandoffs: true,
         codexResponsesAsItems: true,
         includeStartupContext: true,
+        /* NO initial items. Sending any made codex open the sideband channel
+           `wss://api.openai.com/v1/live/<call-id>`, and every call that opened
+           it was killed 9 seconds later with rate_limit_error, while calls
+           without it ran for tens of minutes on the same build, account, and
+           model. The persona has to reach the call through the thread instead,
+           which `includeStartupContext` already pulls in. */
       }, REALTIME_START_TIMEOUT_MS);
     } catch (error) {
       this.rejectRealtimeStart(error instanceof Error ? error : new Error(safeError(error)));
@@ -800,6 +830,18 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   private async releaseAndReap(): Promise<void> {
+    /* Hang up before the process goes away. A realtime call the backend still
+       believes is open holds the account's concurrent slot, and every later
+       call is refused with "You have reached your usage limit." — the same
+       sentence an exhausted window produces, on an account at 10% of it. That
+       is what a deploy replacing the runtime host mid-call cost the operator:
+       one orphaned session, then nothing worked until it expired an hour on.
+       Best effort and bounded: a wedged app-server must not delay teardown. */
+    if (this.realtimeSessionId) {
+      const hangup = this.rpc("thread/realtime/stop", { threadId: this.identity.threadId }, REALTIME_HANGUP_TIMEOUT_MS);
+      await hangup.catch(() => undefined);
+      this.realtimeSessionId = null;
+    }
     this.releasing = true;
     this.rejectRealtimeStart(new Error("Codex app-server host released"));
     this.rejectPendingAnswers(new Error("Codex app-server host released"));

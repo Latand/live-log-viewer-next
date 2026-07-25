@@ -14,6 +14,14 @@ export interface CodexRealtimeSnapshot {
   phase: CodexRealtimePhase;
   lines: readonly CodexRealtimeLine[];
   error: string | null;
+  /** Epoch ms the call went live, for the panel's call timer; null until then.
+      Kept in the snapshot rather than derived in the view so a remounted
+      composer resumes the same clock instead of restarting it. */
+  startedAt: number | null;
+  /** Microphone held open but not transmitting. */
+  micMuted: boolean;
+  /** Agent audio silenced locally; the call keeps running. */
+  outputMuted: boolean;
 }
 
 export type ParsedRealtimeEvent =
@@ -155,7 +163,7 @@ async function waitForIceGathering(peer: RTCPeerConnection): Promise<void> {
 }
 
 class CodexRealtimeClient {
-  private snapshot: CodexRealtimeSnapshot = { phase: "idle", lines: [], error: null };
+  private snapshot: CodexRealtimeSnapshot = { phase: "idle", lines: [], error: null, startedAt: null, micMuted: false, outputMuted: false };
   private readonly listeners = new Set<() => void>();
   private peer: RTCPeerConnection | null = null;
   private events: RTCDataChannel | null = null;
@@ -166,6 +174,7 @@ class CodexRealtimeClient {
   private pendingWorkerText = "";
   private pendingFinalText = "";
   private handoffTimer: number | null = null;
+  private unloadHangup: (() => void) | null = null;
   private lineSequence = 0;
   private epoch = 0;
 
@@ -178,6 +187,28 @@ class CodexRealtimeClient {
 
   getSnapshot = (): CodexRealtimeSnapshot => this.snapshot;
 
+  /** The live microphone stream, for the panel's level meter. Deliberately
+      outside the snapshot: the meter animates per frame and must not push
+      React re-renders through the composer. */
+  micStream = (): MediaStream | null => this.media;
+
+  /** Muting is a track-level gate, never a teardown: the peer connection and
+      the backend session stay up, so unmuting resumes the same call instead of
+      paying for a fresh admission. */
+  toggleMic = (): void => {
+    const micMuted = !this.snapshot.micMuted;
+    for (const track of this.media?.getAudioTracks() ?? []) track.enabled = !micMuted;
+    this.update({ micMuted });
+  };
+
+  /** Local playback only — the agent keeps talking, the operator stops hearing
+      it. Useful when the room has someone else in it. */
+  toggleOutput = (): void => {
+    const outputMuted = !this.snapshot.outputMuted;
+    if (this.audio) this.audio.muted = outputMuted;
+    this.update({ outputMuted });
+  };
+
   async start(): Promise<void> {
     if (this.snapshot.phase === "connecting" || this.snapshot.phase === "live") return;
     if (!navigator.mediaDevices?.getUserMedia || typeof RTCPeerConnection === "undefined") {
@@ -185,7 +216,7 @@ class CodexRealtimeClient {
       return;
     }
     this.cleanupTransport();
-    this.update({ phase: "connecting", error: null });
+    this.update({ phase: "connecting", error: null, startedAt: null, micMuted: false, outputMuted: false });
     const epoch = ++this.epoch;
     try {
       const media = await navigator.mediaDevices.getUserMedia({
@@ -212,8 +243,25 @@ class CodexRealtimeClient {
         if (epoch === this.epoch) this.acceptWireMessage(message.data);
       };
       events.onopen = () => {
-        if (epoch === this.epoch) this.update({ phase: "live", error: null });
+        if (epoch === this.epoch) this.update({ phase: "live", error: null, startedAt: Date.now() });
       };
+      /* Closing the tab must hang up too. A call the backend still believes is
+         open holds the account's one concurrent slot, and the next call is
+         refused with "You have reached your usage limit." — indistinguishable
+         from an exhausted window. `keepalive` is what lets the request outlive
+         the page; `pagehide` fires where `beforeunload` does not, notably on
+         mobile Safari. */
+      this.unloadHangup = () => {
+        try {
+          void fetch("/api/runtime/realtime", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ action: "stop", conversationId: this.conversationId }),
+            keepalive: true,
+          });
+        } catch { /* the page is going away regardless */ }
+      };
+      window.addEventListener("pagehide", this.unloadHangup);
       events.onclose = () => {
         /* A channel lost before it ever opened is a failed admission too: the
            call lands in the error state so the UI can offer a restart instead
@@ -379,6 +427,8 @@ class CodexRealtimeClient {
   }
 
   private cleanupTransport(): void {
+    if (this.unloadHangup) window.removeEventListener("pagehide", this.unloadHangup);
+    this.unloadHangup = null;
     if (this.handoffTimer !== null) window.clearTimeout(this.handoffTimer);
     this.handoffTimer = null;
     this.events?.close();

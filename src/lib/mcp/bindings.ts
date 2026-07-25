@@ -28,7 +28,7 @@ import { collectSnapshot } from "@/lib/view/collect";
 import { hardenedRedact } from "@/lib/view/compactText";
 import { validateSnapshotRequest } from "@/lib/view/validation";
 
-import type { McpToolArgs, McpToolBindings, McpToolPayload } from "./server";
+import { McpToolRefusal, type McpToolArgs, type McpToolBindings, type McpToolPayload } from "./server";
 
 const PIPELINE_CONTROLLER_ACTIONS = new Set<PipelineAction>(["start", "resume", "retry-stage", "skip-stage"]);
 
@@ -86,6 +86,7 @@ export interface ViewerMcpDomainDependencies {
   cancelRound: typeof cancelRound;
   closeFlow: typeof closeFlow;
   getPipelines: typeof getPipelines;
+  patchPipeline: typeof patchPipeline;
   loadTasks: typeof loadTasks;
   collectSnapshot: typeof collectSnapshot;
   runtimeEventsEnabled: typeof runtimeEventsEnabled;
@@ -104,6 +105,7 @@ const productionDomainDependencies: ViewerMcpDomainDependencies = {
   cancelRound,
   closeFlow,
   getPipelines,
+  patchPipeline,
   loadTasks,
   collectSnapshot,
   runtimeEventsEnabled,
@@ -228,14 +230,21 @@ async function createPipeline(args: McpToolArgs): Promise<McpToolPayload> {
   return { pipelineId: result.pipeline.id, pipeline: result.pipeline };
 }
 
-async function pipelineAction(args: McpToolArgs): Promise<McpToolPayload> {
+async function pipelineAction(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): Promise<McpToolPayload> {
   const pipelineId = required(args, "pipelineId");
   const action = required(args, "action") as PipelineAction;
   const request = withoutKeys(args, ["pipelineId", "clientRequestId"]);
-  const result = await patchPipeline(pipelineId, request as PatchPipelineRequest);
-  if (!result.pipeline) throw new Error(result.error ?? "could not update pipeline");
+  const result = await dependencies.patchPipeline(pipelineId, request as PatchPipelineRequest);
+  if (!result.pipeline) {
+    const message = result.error ?? "could not update pipeline";
+    /* A refused close carries the hosts it stopped and the one it could not
+       (#670); an agent driving the board must not get less than an HTTP caller. */
+    throw result.close ? new McpToolRefusal(message, { close: result.close }) : new Error(message);
+  }
   if (PIPELINE_CONTROLLER_ACTIONS.has(action)) requestPipelineTick();
-  return { pipelineId, pipeline: result.pipeline };
+  /* A close reports the stage hosts it terminated and the uncommitted work it
+     left behind (#670), so an agent driving the board sees it too. */
+  return { pipelineId, pipeline: result.pipeline, ...(result.close ? { close: result.close } : {}) };
 }
 
 async function linkTaskToPipeline(args: McpToolArgs, dependencies: LinkTaskToPipelineDependencies): Promise<McpToolPayload> {
@@ -559,7 +568,7 @@ export function viewerMcpBindings(
     create_task: createBoardTask,
     update_task: updateBoardTask,
     create_pipeline: createPipeline,
-    pipeline_action: pipelineAction,
+    pipeline_action: (args) => pipelineAction(args, domainDependencies),
     link_task_to_pipeline: (args) => linkTaskToPipeline(args, linkTaskDependencies),
     list_conversations: listConversations,
     get_conversation: (args) => getConversation(args, domainDependencies),

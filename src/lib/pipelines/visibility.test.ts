@@ -136,3 +136,29 @@ test("a resumed member keeps its pipeline rail, halo, and open target on the cur
   expect(stageOpenTarget(projected.stages[1]!, currentAttempt, undefined, new Set(currentFiles.map((entry) => entry.path))))
     .toEqual({ kind: "path", path: resumed.path });
 });
+
+test("a closed lane holding an unconfirmed host stays on the board (#670)", () => {
+  const conversationId = "conversation_019f4906-3f67-7b72-9fbc-9ec3b5ad1327";
+  const pipeline = hiddenPipeline(conversationId);
+  pipeline.hiddenAt = null;
+  pipeline.unconfirmedHosts = [{
+    stageId: "build",
+    attempt: 1,
+    conversationId,
+    agentPath: "/old.jsonl",
+    paneId: null,
+    operationId: "kill-op-1",
+    detail: "kill accepted as queued but termination was not confirmed",
+    at: "2026-01-01T01:00:00.000Z",
+  }];
+
+  /* Nothing is pinned and neither repo nor worktree exists — without the
+     unconfirmed host this lane would be dropped from the read model. */
+  const projected = filterPipelinesForFileScan([pipeline], []);
+  expect(projected).toHaveLength(1);
+  /* `restored` is what the client read model honours for a closed pipeline. */
+  expect(projected[0]).toMatchObject({ id: "pipeline-hidden", restored: true });
+
+  pipeline.unconfirmedHosts = undefined;
+  expect(filterPipelinesForFileScan([pipeline], [])).toEqual([]);
+});

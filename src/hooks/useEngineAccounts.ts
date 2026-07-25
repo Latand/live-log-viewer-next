@@ -94,8 +94,10 @@ export function claudeLoginErrKey(code: string | null | undefined): ClaudeLoginE
 
 /** One quota window (5h session or weekly) of an account, projected for the
     Accounts panel: how much is spent and when it resets. `resetsAt` is Unix
-    seconds, or null when the engine did not report it. */
-export type AccountLimitWindow = { usedPercent: number; resetsAt: number | null };
+    seconds, or null when the engine did not report it. `windowMinutes` is the
+    horizon the engine declared for this window, which the row is labelled by
+    (issue #606); null when the engine did not declare one. */
+export type AccountLimitWindow = { usedPercent: number; resetsAt: number | null; windowMinutes: number | null };
 
 /** Per-account quota detail surfaced in the Accounts panel (issue #40): the
     session and weekly windows with reset times, plus how fresh the read is. The
@@ -134,7 +136,8 @@ function parseLimitWindow(raw: unknown): AccountLimitWindow | null {
   const record = raw as Record<string, unknown>;
   if (typeof record.usedPercent !== "number" || !Number.isFinite(record.usedPercent)) return null;
   const resetsAt = typeof record.resetsAt === "number" && Number.isFinite(record.resetsAt) ? record.resetsAt : null;
-  return { usedPercent: record.usedPercent, resetsAt };
+  const windowMinutes = typeof record.windowMinutes === "number" && Number.isFinite(record.windowMinutes) ? record.windowMinutes : null;
+  return { usedPercent: record.usedPercent, resetsAt, windowMinutes };
 }
 
 /** Crash-safe projection of the route's per-account `limits` block. An `unavailable`
