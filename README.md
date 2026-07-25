@@ -124,7 +124,20 @@ Structured host mode also requires Bun on macOS so process ownership uses the
 kernel's microsecond start token. The Docker runtime and `agent-log-viewer` CLI
 select Bun automatically whenever `LLV_AGENT_REGISTRY_SQLITE` or
 `LLV_STRUCTURED_HOSTS` is enabled. Local source checkouts should use the
-explicit `bun --bun` command above during the rollout.
+explicit `bun --bun` command above.
+
+### Spawn transport
+
+Agents launch through a structured runtime host — no tmux pane between the
+Viewer and the agent — wherever a deployment can serve one. The transport is
+chosen by capability: a deployment that declares `LLV_RUNTIME_HOST_SOCKET`
+spawns structured, and one without a host still spawns through tmux instead of
+failing. Structured hosting itself is on by default; `LLV_STRUCTURED_HOSTS=0`,
+`LLV_RUNTIME_EVENTS=0`, and `NEXT_PUBLIC_RUNTIME_UI=0` are rollback switches.
+
+`LLV_SPAWN_TRANSPORT=tmux|structured` overrides the choice. An explicit
+`structured` without a reachable host returns a gap naming what is missing
+rather than quietly downgrading the request.
 
 ### Connect an orchestrator through MCP
 

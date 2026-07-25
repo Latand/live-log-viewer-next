@@ -462,13 +462,13 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
  * ------------------------------------------------------------------ */
 
 /**
- * Slice-one ships disabled by default (Sol phase 1: "runtime-host, journal,
- * routes, and UI ship disabled"). The flag turns on via the build-time env or,
- * for local UX evidence on an isolated dev port, a `llv_runtime_ui=1`
- * localStorage override.
+ * The runtime UI ships on: structured hosting is the default transport, and
+ * its controls are what operators drive it with. `NEXT_PUBLIC_RUNTIME_UI=0` is
+ * the build-time rollback; a `llv_runtime_ui=1` localStorage override still
+ * turns the surface back on for local UX evidence on an isolated dev port.
  */
 export function isRuntimeUiEnabled(): boolean {
-  if (process.env.NEXT_PUBLIC_RUNTIME_UI === "1") return true;
+  if (process.env.NEXT_PUBLIC_RUNTIME_UI !== "0") return true;
   if (typeof window === "undefined") return false;
   try {
     return window.localStorage.getItem("llv_runtime_ui") === "1";

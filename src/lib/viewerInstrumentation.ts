@@ -1,6 +1,7 @@
 import fs from "node:fs";
 
 import { statePath } from "@/lib/configDir";
+import { structuredHostsEnabled } from "@/lib/runtime/flags";
 import { markStructuredHostStartupFailed, markStructuredHostStartupReady } from "@/lib/runtime/startupStatus";
 import { StructuredRuntimeRequirementError } from "@/lib/proc/darwinIdentity";
 import { discardWakatimeEnvironmentCredential } from "@/lib/wakatime/credential";
@@ -227,7 +228,7 @@ export async function registerViewerRuntime(): Promise<void> {
   await activateViewerRuntimeWhenCurrent(async () => {
     await initializeOperatorSpawnCapabilityAtStartup();
     await startWakatimeIntegrationIfEnabled();
-    if (process.env.LLV_STRUCTURED_HOSTS === "1") {
+    if (structuredHostsEnabled()) {
       const { adoptStructuredHostsAtStartup } = await import("@/lib/runtime/startup");
       await runStructuredHostStartup(adoptStructuredHostsAtStartup);
     }

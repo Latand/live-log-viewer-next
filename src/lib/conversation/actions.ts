@@ -7,6 +7,7 @@ import {
   resumeConversation,
   type DeliveryOutcome,
 } from "@/lib/delivery";
+import { structuredHostsEnabled } from "@/lib/runtime/flags";
 import { dispatchStructuredControl } from "@/lib/runtime/structuredControls";
 
 export const CONVERSATION_ACTIONS = ["interrupt", "kill", "resume", "compact", "dialog-key"] as const;
@@ -44,7 +45,7 @@ export interface ConversationActionDependencies {
 
 const productionDependencies: ConversationActionDependencies = {
   registry: agentRegistry,
-  structuredEnabled: () => process.env.LLV_STRUCTURED_HOSTS === "1",
+  structuredEnabled: () => structuredHostsEnabled(),
   dispatchStructuredControl,
   interruptConversation,
   killConversation,

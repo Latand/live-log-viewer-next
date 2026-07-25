@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
 
+import { structuredHostsEnabled } from "@/lib/runtime/flags";
 import { Database } from "bun:sqlite";
 
 import {
@@ -256,7 +257,7 @@ export class RuntimeJournal {
     this.db = new Database(filename, { create: true, strict: true });
     this.maxEvents = options.maxEvents ?? 20_000;
     this.now = options.now ?? (() => Date.now());
-    this.structuredHosts = options.structuredHosts ?? process.env.LLV_STRUCTURED_HOSTS === "1";
+    this.structuredHosts = options.structuredHosts ?? structuredHostsEnabled();
     this.secretKey = loadSecretKey(filename);
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA auto_vacuum = INCREMENTAL;");
     if (filename !== ":memory:") {

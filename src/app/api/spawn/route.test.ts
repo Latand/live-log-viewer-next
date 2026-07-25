@@ -1333,7 +1333,7 @@ test("structured spawn flag reaches the pane-less capability gate", async () => 
     }));
 
     expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({ error: "structured spawn requires LLV_STRUCTURED_HOSTS=1" });
+    expect(await response.json()).toEqual({ error: "structured spawn is rolled back by LLV_STRUCTURED_HOSTS=0" });
   } finally {
     if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
     else process.env.LLV_SPAWN_TRANSPORT = previousTransport;

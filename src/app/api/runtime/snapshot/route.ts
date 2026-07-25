@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { runtimeHostClient } from "@/lib/runtime/client";
-import { runtimeEventsEnabled } from "@/lib/runtime/flags";
+import { runtimeEventsEnabled, structuredHostsEnabled } from "@/lib/runtime/flags";
 import { structuredStartupAxis } from "@/lib/runtime/startupStatus";
 
 export const runtime = "nodejs";
@@ -16,7 +16,7 @@ export async function GET(request: Request): Promise<NextResponse> {
       // The request signal reaches the runtime host, so a disconnected caller
       // cancels its socket wait instead of leaving late host work behind.
       ...await client.snapshot(request.signal),
-      structuredHostsEnabled: process.env.LLV_STRUCTURED_HOSTS === "1",
+      structuredHostsEnabled: structuredHostsEnabled(),
       structuredStartup: structuredStartupAxis(),
     }, { headers: { "cache-control": "no-store" } });
   } catch (error) {

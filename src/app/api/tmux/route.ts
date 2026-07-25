@@ -5,6 +5,7 @@ import {
   reconfigureConversation,
   type DeliveryOutcome,
 } from "@/lib/delivery";
+import { structuredHostsEnabled } from "@/lib/runtime/flags";
 import { applyConversationAction, CONVERSATION_ACTIONS } from "@/lib/conversation/actions";
 import { canonicalTranscriptTarget, readTranscriptHosts } from "@/lib/agent/transcriptHost";
 import { reconfigurationFromBody } from "@/lib/agent/reconfigure";
@@ -220,7 +221,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     return NextResponse.json(result.body, { status: result.status });
   }
 
-  const structuredControl = explicitAction === "reconfigure" && process.env.LLV_STRUCTURED_HOSTS === "1"
+  const structuredControl = explicitAction === "reconfigure" && structuredHostsEnabled()
     ? await dispatchStructuredControl({
         path: filePath,
         conversationId,
@@ -255,7 +256,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     return NextResponse.json({ error: "empty message" }, { status: 400 });
   }
 
-  if (process.env.LLV_STRUCTURED_HOSTS === "1") {
+  if (structuredHostsEnabled()) {
     const { enqueueStructuredMessage } = await import("@/lib/runtime/structuredMessageDelivery");
     const structured = await enqueueStructuredMessage({
       path: filePath,

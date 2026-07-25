@@ -1,3 +1,5 @@
+import { structuredHostsEnabled } from "./flags";
+
 const startupStore = process as typeof process & {
   __llvStructuredHostStartupFailed?: boolean;
 };
@@ -21,7 +23,7 @@ export function didStructuredHostStartupFail(): boolean {
 export function structuredStartupAxis(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): "ready" | "failed" | "pending" | null {
-  if (env.LLV_STRUCTURED_HOSTS !== "1") return null;
+  if (!structuredHostsEnabled(env as NodeJS.ProcessEnv)) return null;
   const failed = startupStore.__llvStructuredHostStartupFailed;
   if (failed === undefined) return "pending";
   return failed ? "failed" : "ready";

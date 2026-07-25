@@ -25,7 +25,10 @@ test("issue 367: the structured startup axis never reports ready before adoption
     expect(structuredStartupAxis({ LLV_STRUCTURED_HOSTS: "1" })).toBe("failed");
     markStructuredHostStartupReady();
     expect(structuredStartupAxis({ LLV_STRUCTURED_HOSTS: "1" })).toBe("ready");
-    expect(structuredStartupAxis({})).toBeNull();
+    // Structured hosting is the default, so a bare environment still reports a
+    // real axis; only the explicit rollback drops the axis to null.
+    expect(structuredStartupAxis({})).toBe("ready");
+    expect(structuredStartupAxis({ LLV_STRUCTURED_HOSTS: "0" })).toBeNull();
   } finally {
     if (previous === undefined) delete store.__llvStructuredHostStartupFailed;
     else store.__llvStructuredHostStartupFailed = previous;
