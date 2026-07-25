@@ -647,6 +647,9 @@ function mergeResumeLaunchProfile(current: LaunchProfile, requested: LaunchProfi
     readOnly: requested.readOnly ?? current.readOnly,
     allowSubagents: current.allowSubagents || requested.allowSubagents,
     mcpServers: current.mcpServers,
+    /* The plugin grant was decided at spawn from the session's origin; a
+       resume replays the durable value and can never widen it (issue #687). */
+    plugins: current.plugins ?? [],
     title: requested.title ?? current.title,
     project: requested.project ?? current.project,
     parentConversationId: requested.parentConversationId ?? current.parentConversationId,
@@ -2252,6 +2255,7 @@ function compactLaunchProfile(profile: LaunchProfile): Partial<LaunchProfile> {
   if (compact.role === "worker") delete compact.role;
   if (compact.allowSubagents === false) delete compact.allowSubagents;
   if (compact.mcpServers?.length === 1 && compact.mcpServers[0] === "viewer") delete compact.mcpServers;
+  if (compact.plugins?.length === 0) delete compact.plugins;
   return compact;
 }
 
@@ -3134,6 +3138,10 @@ export class AgentRegistry {
          corrupted profile are both overridden here, so restart adoption and
          resume successors re-derive their launch flags from a denying profile. */
       if (isSpawnDeniedRole(existingConversation?.agentRole)) profile.allowSubagents = false;
+      /* A delegated conversation never acquires a plugin grant (#687): a role
+         preset or a lineage parent denies it on resume, successor and restart
+         adoption alike, whatever a stored or requested profile claims. */
+      if (existingConversation?.agentRole || parentConversationId) profile.plugins = [];
       if (existingConversation && existingConversation.engine !== input.engine) {
         throw new Error("spawn conversation ownership is invalid");
       }

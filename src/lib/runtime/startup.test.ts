@@ -150,6 +150,7 @@ test("server startup delegates managed rows with file credentials and their laun
       readOnly: true,
       allowSubagents: true,
       mcpServers: ["viewer"],
+      plugins: [],
       title: null,
       project: null,
       parentConversationId: null,

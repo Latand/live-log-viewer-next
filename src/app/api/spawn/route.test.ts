@@ -134,6 +134,87 @@ test("spawn admission persists Viewer-only defaults and normalized custom MCP al
   }
 });
 
+test("spawn admission grants Computer Use to an operator root Codex session only (#687)", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "plugin-grant-"));
+  const store = registry();
+  const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
+  const previousHosts = process.env.LLV_STRUCTURED_HOSTS;
+  const previousEvents = process.env.LLV_RUNTIME_EVENTS;
+  const previousSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
+  const previousUi = process.env.NEXT_PUBLIC_RUNTIME_UI;
+  const previousBinary = process.env.LLV_CODEX_BINARY;
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  /* Codex MCP enumeration shells out to the real CLI; a stub keeps this test
+     off the operator's Codex installation and its account state. */
+  const codexStub = path.join(cwd, "codex-stub.sh");
+  fs.writeFileSync(codexStub, "#!/bin/sh\nprintf '[]'\n", { mode: 0o700 });
+  process.env.LLV_CODEX_BINARY = codexStub;
+  try {
+    const base = structuredRouteDependencies(cwd);
+    const codexAccount = {
+      engine: "codex" as const,
+      accountId: "codex-test",
+      kind: "managed" as const,
+      home: path.join(cwd, "account"),
+      transcriptRoot: path.join(cwd, "sessions"),
+      env: { CODEX_HOME: path.join(cwd, "account"), NODE_ENV: "test" as const },
+    };
+    const dependencies = {
+      ...base,
+      registry: () => store,
+      resolveHealthySpawnAccount: async () => codexAccount,
+      resolveSpawnAccount: () => codexAccount,
+    };
+    const capability = rotateOperatorSpawnCapability();
+    const post = async (clientAttemptId: string, extra: Record<string, unknown>) => POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+      method: "POST",
+      headers: {
+        origin: "http://127.0.0.1",
+        host: "127.0.0.1",
+        "content-type": "application/json",
+        "sec-fetch-site": "same-origin",
+        "x-llv-spawn-capability": capability,
+      },
+      body: JSON.stringify({ engine: "codex", cwd, prompt: "inspect", clientAttemptId, ...extra }),
+    }), dependencies);
+
+    const rootResponse = await post("plugins_root_20260726", {});
+    expect({ status: rootResponse.status, body: await rootResponse.clone().json() }).toMatchObject({ status: 202 });
+    expect((await post("plugins_role_20260726", { role: "builder" })).status).toBe(202);
+    expect((await post("plugins_optout_20260726", { plugins: [] })).status).toBe(202);
+
+    /* Default-on for the operator's own root session… */
+    expect(store.spawnReceiptForClientAttempt("plugins_root_20260726")?.launchProfile.plugins).toEqual(["computer-use"]);
+    /* …off for a delegated helper, even from the operator's own lane… */
+    expect(store.spawnReceiptForClientAttempt("plugins_role_20260726")?.launchProfile.plugins).toEqual([]);
+    /* …and off when the operator opts this root session out. */
+    expect(store.spawnReceiptForClientAttempt("plugins_optout_20260726")?.launchProfile.plugins).toEqual([]);
+
+    const widened = await post("plugins_widened_20260726", { plugins: ["browser"] });
+    expect(widened.status).toBe(400);
+    expect(await widened.json()).toMatchObject({ error: expect.stringContaining("browser") });
+    const everything = await post("plugins_star_20260726", { plugins: ["*"] });
+    expect(everything.status).toBe(400);
+  } finally {
+    if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
+    if (previousHosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previousHosts;
+    if (previousEvents === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previousEvents;
+    if (previousSocket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previousSocket;
+    if (previousUi === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previousUi;
+    if (previousBinary === undefined) delete process.env.LLV_CODEX_BINARY;
+    else process.env.LLV_CODEX_BINARY = previousBinary;
+  }
+});
+
 test("a materialized structured child is offered for pipeline attempt adoption", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "pipeline-adoption-"));
   const store = registry();
