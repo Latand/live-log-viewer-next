@@ -1925,11 +1925,6 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       return;
     }
     if (obj.type === "assistant" && obj.message) {
-      const attributedServer = textPart(obj.attributionMcpServer);
-      const attributedTool = textPart(obj.attributionMcpTool);
-      const attributedMcp = attributedServer && attributedTool && isViewerMcpServer(attributedServer)
-        ? { serverName: attributedServer, toolName: attributedTool }
-        : null;
       for (const part of arr(rec(obj.message).content)) {
         if (part.type === "text" && textPart(part.text).trim()) {
           addProse(ts, textPart(part.text), textPart(obj.uuid) || undefined);
@@ -1970,12 +1965,14 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
           } else {
             const command = familyOf(name) === "shell" ? textPart(input.command) : undefined;
             const lang = familyOf(name) === "read" ? extLang(textPart(input.file_path)) : undefined;
-            /* Claude may stamp an entire assistant record with the MCP tool that
-             * supplied context. That provenance is useful only for an actual
-             * MCP call. Applying it to a sibling Bash/Read call turns a real
-             * command into an unrelated MCP card (for example, `gh pr view`
-             * rendered as "Reading deployment status"). */
-            const mcpIdentity = viewerMcpToolUse(name) ?? (name.startsWith("mcp__") ? attributedMcp : null);
+            /* A card's identity is the call's own `mcp__<server>__<tool>` name
+             * and nothing else (issue #650). Claude stamps whole assistant
+             * records with `attributionMcpServer`/`attributionMcpTool` — the
+             * MCP tool that supplied the turn's context — and every sibling
+             * tool_use inherits that stamp, so honouring it renders a Bash
+             * command or an agent-browser call as "MCP · viewer · Updating
+             * pipeline" with the wrong tool's payload underneath. */
+            const mcpIdentity = viewerMcpToolUse(name);
             const mcp = mcpIdentity
               ? { ...mcpIdentity, args: input, result: null }
               : undefined;

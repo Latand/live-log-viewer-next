@@ -82,6 +82,9 @@ export const uk: Record<keyof typeof en, Message> = {
   "dash.emptyHint": "Відкрий пульт у правому нижньому куті і клікни розмову — вона з'явиться тут",
   "dash.viewScheme": "схема",
   "dash.viewList": "розмови",
+  "dash.viewSchemeMenu": "Вигляд: схема",
+  "dash.viewListMenu": "Вигляд: розмови",
+  "dash.viewMenuGroup": "Вигляд дошки",
   "dash.hiddenShelf": "Приховане",
 
   "trash.title": "Кореневі розмови",
@@ -1335,6 +1338,10 @@ export const uk: Record<keyof typeof en, Message> = {
   "limits.stale": "дані застарілі: {stale}",
   "limits.5h": "5 год",
   "limits.week": "Тиждень",
+  // Підписи вікон за горизонтом, який повідомляє сам провайдер (issue #606).
+  "limits.windowMinutes": "{n} хв",
+  "limits.windowHours": "{n} год",
+  "limits.windowDays": "{n} д",
   "limits.accountsOpenAria": "Акаунти Codex — змінити або додати",
   "limits.noDataYet": "поки немає даних",
   "limits.rateLimited": "Провайдер обмежує частоту запитів.",
@@ -1351,6 +1358,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "burndown.loading": "Завантаження історії…",
   "burndown.failed": "Не вдалося завантажити історію.",
   "burndown.empty": "Історії ще немає — графік заповнюється в міру збору даних.",
+  "burndown.windowUnreported": "Цей план не повідомляє вікно «{window}», тож малювати тут нічого.",
   "burndown.buildsFrom": "історія від {date}",
   "burndown.fast": "на {pct}% швидше за рівний темп — витрачаєте зашвидко",
   "burndown.slow": "на {pct}% повільніше за рівний темп — є запас",
