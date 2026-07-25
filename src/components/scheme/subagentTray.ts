@@ -19,7 +19,34 @@ import type { Engine, FileEntry } from "@/lib/types";
  * only their exclusion sets so a card is never placed in two surfaces at once.
  */
 
-export type SubagentBadgeState = "running" | "live" | "closed" | "dead";
+/**
+ * Chip states, hottest first (issue #669):
+ * - `running` — a live host whose transcript is still producing records.
+ * - `live` — no process evidence, but the transcript is producing records.
+ * - `silent` — the host is alive and the transcript has said nothing for
+ *   {@link SILENT_AFTER_SECONDS}. Its own state: a wedged host must not keep
+ *   masquerading as working, and it is not finished either.
+ * - `closed` — the host exited, was superseded, or nothing is alive behind a
+ *   transcript that stopped writing.
+ * - `dead` — a spawn placeholder or a failed launch: no conversation to open.
+ */
+export type SubagentBadgeState = "running" | "live" | "silent" | "closed" | "dead";
+
+/**
+ * Transcript silence (seconds) after which a still-alive agent leaves the
+ * working state for `silent`.
+ *
+ * Five minutes. The gaps a healthy agent legitimately leaves between records
+ * are tool calls that block the turn — a type-check, a test run, a fetch, a
+ * long thinking block — and those land inside a couple of minutes; the scanner
+ * already calls an open turn `stalled` at 180s (`lib/scanner/activity.ts`), so
+ * 300s is deliberately the more forgiving of the two and a two-minute think
+ * cannot flicker the chip. The pathology this catches ran for hours (issue
+ * #669: four hosts silent for 7.5h while their chips read as working), so
+ * every threshold in minutes catches it — the only question is how much
+ * headroom to leave the honest agent, and this leaves 2.5x the scanner's.
+ */
+export const SILENT_AFTER_SECONDS = 300;
 
 /** Presence surface an engine-native child renders on (§1.2 ladder). */
 export type TrayPresence = "promoted" | "folded";
@@ -33,14 +60,51 @@ export type PresenceReason =
   | "quiet"
   | "fail-visible";
 
-export function badgeState(entry: FileEntry): SubagentBadgeState {
+/** A launch that is still binding its host owns no transcript yet, so its
+    silence carries no meaning — it counts as alive, never as silent. */
+function hostAlive(entry: FileEntry): boolean {
+  if (entry.proc === "running") return true;
+  const spawn = entry.spawn?.state;
+  return spawn === "starting" || spawn === "binding" || spawn === "queued";
+}
+
+/**
+ * Seconds since the conversation's last transcript record, or `null` when the
+ * caller has no clock yet (the server render and the first client render pass
+ * `0` so their markup agrees — see {@link useNowSeconds}). A null age never
+ * demotes a chip: an unknown age is not evidence of silence.
+ */
+export function transcriptSilence(entry: FileEntry, now: number): number | null {
+  if (!Number.isFinite(now) || now <= 0) return null;
+  return Math.max(0, now - entry.mtime);
+}
+
+/**
+ * The chip state of one conversation. `now` is epoch SECONDS.
+ *
+ * Activity is read off the transcript, not off the process (issue #669): a
+ * host that is alive but has written nothing for {@link SILENT_AFTER_SECONDS}
+ * reads `silent`, and a transcript that is still writing reads active however
+ * stale the snapshot's own `activity` verdict has become. Process evidence
+ * only decides which side of the ladder the entry falls on — exited is
+ * terminal, alive-and-silent is wedged, alive-and-writing is working.
+ *
+ * Freshness is only evidence of work while something could still write. A
+ * closed turn with no host behind it is finished the moment it lands: its last
+ * record is the answer, not a sign of life. Note that this reads the turn's
+ * SHAPE, never its age — an ageing snapshot cannot flip that judgement, which
+ * is what let a lane writing every two seconds render as finished.
+ */
+export function badgeState(entry: FileEntry, now: number): SubagentBadgeState {
   if (entry.path.startsWith("spawn:")) return "dead";
   if (entry.spawn?.state === "failed") return "dead";
-  if (entry.proc === "done" || entry.proc === "killed" || entry.supersededBy || entry.activity === "idle") return "closed";
-  if (entry.proc === "running" || entry.spawn?.state === "starting" || entry.spawn?.state === "binding" || entry.spawn?.state === "queued") {
-    return "running";
-  }
-  return "live";
+  if (entry.proc === "done" || entry.proc === "killed" || entry.supersededBy) return "closed";
+  const alive = hostAlive(entry);
+  const turn = entry.authoritativeTurn?.state;
+  if (!alive && (turn === "terminal" || turn === "idle")) return "closed";
+  const silence = transcriptSilence(entry, now);
+  if (silence === null || silence < SILENT_AFTER_SECONDS) return alive ? "running" : "live";
+  return alive ? "silent" : "closed";
 }
 
 function spawnTime(entry: FileEntry): number {
@@ -48,11 +112,14 @@ function spawnTime(entry: FileEntry): number {
   return Number.isFinite(started) ? started : entry.mtime * 1_000;
 }
 
-/** Activity rank for ordering + tray roll-up: lower is hotter. */
+/** Activity rank for ordering + tray roll-up: lower is hotter. A silent host
+    is still alive, so it outranks a closed one — a wedged agent must surface
+    through a folded row rather than hide behind finished siblings. */
 export function activeRank(state: SubagentBadgeState): number {
   if (state === "running" || state === "live") return 0;
-  if (state === "closed") return 1;
-  return 2;
+  if (state === "silent") return 1;
+  if (state === "closed") return 2;
+  return 3;
 }
 
 /** The hottest (most-active) state across a set of members — the tray badge
@@ -140,6 +207,7 @@ export interface EngineChildContext {
   folded: boolean;
   /** The child is manually placed / expanded / pinned on the board. */
   pinned: boolean;
+  /** Epoch SECONDS — the same clock `mtime` and `attentionId` are measured on. */
   now: number;
 }
 
@@ -210,6 +278,8 @@ export interface SubagentTrayInput {
       whose host is missing (hidden, deleted, cross-project, deck-claimed,
       compacted) stays visible through the existing full-node path. */
   hostEligibleParentIds: ReadonlySet<string>;
+  /** Epoch SECONDS — transcript freshness and attention TTLs share this clock
+      with `mtime`, so a caller holding milliseconds must divide first. */
   now: number;
 }
 
@@ -235,7 +305,7 @@ export function engineChildParentId(entry: FileEntry, byPath: ReadonlyMap<string
   return entry.parentRemoved?.conversationId ?? null;
 }
 
-function toMember(entry: FileEntry): TrayMember {
+function toMember(entry: FileEntry, now: number): TrayMember {
   const id = conversationIdentity(entry);
   return {
     id,
@@ -243,7 +313,7 @@ function toMember(entry: FileEntry): TrayMember {
     title: entry.title,
     engine: entry.engine,
     model: entry.model,
-    state: badgeState(entry),
+    state: badgeState(entry, now),
     avatarSeed: id,
   };
 }
@@ -309,7 +379,7 @@ export function buildSubagentTrays(input: SubagentTrayInput): SubagentTrayProjec
     foldedIds.add(id);
     spawnByChildId.set(id, spawnTime(entry));
     const list = membersByParent.get(parentId) ?? [];
-    list.push(toMember(entry));
+    list.push(toMember(entry, input.now));
     membersByParent.set(parentId, list);
   }
 

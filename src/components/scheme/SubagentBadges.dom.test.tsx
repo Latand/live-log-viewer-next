@@ -72,6 +72,34 @@ function mount(entries: FileEntry[], onNavigate: (id: string) => void) {
   return host;
 }
 
+/** Mount with an explicit clock (epoch seconds) and keep the handle to
+    re-render — the surface must settle on new state in place, never through a
+    remount or a reload (issue #669). */
+function mountWithClock(entries: FileEntry[], now: number) {
+  const element = dom.document.createElement("div");
+  dom.document.body.append(element);
+  const host = element as unknown as HTMLElement;
+  const root = createRoot(host);
+  roots.add(root);
+  const render = (nextEntries: FileEntry[], nextNow: number) => {
+    flushSync(() => {
+      root.render(
+        <SubagentBadges
+          conversationId="parent"
+          entries={nextEntries}
+          cardRect={{ x: 100, y: 200, w: 600, h: 70 }}
+          onNavigate={() => undefined}
+          now={nextNow}
+        />,
+      );
+    });
+  };
+  render(entries, now);
+  const stateOf = (id: string) =>
+    (host.querySelector(`[data-subagent-badge="${id}"]`) as HTMLButtonElement | null)?.dataset.subagentState;
+  return { host, render, stateOf };
+}
+
 test("hover expands a subagent circle to its title and click navigates by current transcript path", async () => {
   const navigated: string[] = [];
   const parent = entry({ path: "/parent", conversationId: "parent" });
@@ -244,4 +272,67 @@ test("removing the expanded child releases the parent card foreground layer", as
   await Bun.sleep(0);
   await Bun.sleep(0);
   expect(expandedStates.at(-1)).toBe(false);
+});
+
+// ── chip activity from transcript freshness (issue #669) ────────────────────
+
+const NOW = 1_800_000_000;
+
+test("each chip renders its own reading: writing pulses, alive-but-silent rings steady, finished dims", () => {
+  const parent = entry({ path: "/parent", conversationId: "parent" });
+  /* All three hosts look identical to a liveness check — the transcript is the
+     only thing that tells them apart. */
+  const writing = entry({ path: "/writing", conversationId: "writing", parent: parent.path, title: "Writing worker", proc: "running", activity: "idle", mtime: NOW - 3 });
+  const wedged = entry({ path: "/wedged", conversationId: "wedged", parent: parent.path, title: "Wedged worker", proc: "running", activity: "stalled", mtime: NOW - 7.5 * 3600 });
+  const finished = entry({ path: "/finished", conversationId: "finished", parent: parent.path, title: "Finished worker", proc: "done", mtime: NOW - 60 });
+  const { host } = mountWithClock([parent, writing, wedged, finished], NOW);
+  const badge = (id: string) => host.querySelector(`[data-subagent-badge="${id}"]`) as HTMLButtonElement;
+
+  expect(badge("writing").dataset.subagentState).toBe("running");
+  expect(badge("writing").querySelector('[data-subagent-ring="working"]')).toBeTruthy();
+  expect(badge("writing").className).not.toContain("opacity-45");
+
+  expect(badge("wedged").dataset.subagentState).toBe("silent");
+  const silentRing = badge("wedged").querySelector('[data-subagent-ring="silent"]') as HTMLElement;
+  expect(silentRing).toBeTruthy();
+  /* Distinct from working: a steady warning ring, no pulse. */
+  expect(silentRing.className).toContain("ring-warning");
+  expect(silentRing.className).not.toContain("animate-pulse");
+  expect(badge("wedged").querySelector('[data-subagent-ring="working"]')).toBeNull();
+  /* Distinct from finished: still lit, and it says why. */
+  expect(badge("wedged").className).not.toContain("opacity-45");
+  expect(badge("wedged").title).toContain("alive but silent");
+
+  expect(badge("finished").dataset.subagentState).toBe("closed");
+  expect(badge("finished").querySelector("[data-subagent-ring]")).toBeNull();
+  expect(badge("finished").className).toContain("opacity-45");
+});
+
+test("the chip leaves the working state on transcript silence alone — no new scan, no reload", () => {
+  const parent = entry({ path: "/parent", conversationId: "parent" });
+  const worker = entry({ path: "/worker", conversationId: "worker", parent: parent.path, title: "Worker", proc: "running", activity: "live", mtime: NOW - 10 });
+  const entries = [parent, worker];
+  const { render, stateOf } = mountWithClock(entries, NOW);
+  expect(stateOf("worker")).toBe("running");
+
+  /* A two-minute think must not flicker the chip. */
+  render(entries, NOW + 120);
+  expect(stateOf("worker")).toBe("running");
+
+  /* The very same snapshot, only the clock moved past the silence threshold. */
+  render(entries, NOW + 600);
+  expect(stateOf("worker")).toBe("silent");
+});
+
+test("a batch status change settles every chip in place", () => {
+  const parent = entry({ path: "/parent", conversationId: "parent" });
+  const ids = ["a", "b", "c"];
+  const running = ids.map((id) => entry({ path: `/${id}`, conversationId: id, parent: parent.path, title: `Worker ${id}`, proc: "running", mtime: NOW - 5 }));
+  const { render, stateOf } = mountWithClock([parent, ...running], NOW);
+  expect(ids.map(stateOf)).toEqual(["running", "running", "running"]);
+
+  /* Several conversations killed at once — one poll carries them all. */
+  const killed = running.map((file) => ({ ...file, proc: "killed" as const }));
+  render([parent, ...killed], NOW + 1);
+  expect(ids.map(stateOf)).toEqual(["closed", "closed", "closed"]);
 });

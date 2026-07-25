@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { useNowSeconds } from "@/hooks/useNowSeconds";
 import type { FileEntry } from "@/lib/types";
 import { useLocale } from "@/lib/i18n";
 
@@ -25,6 +26,10 @@ export interface SubagentBadgesProps {
   exclude?: ReadonlySet<string>;
   /** Hand-fold a promoted child into the parent tray (a durable fold pin). */
   onFold?: (id: string, path: string) => void;
+  /** Epoch SECONDS, for chip activity. Omitted outside tests: the component
+      then owns a ticking clock so a chip leaves the working state on transcript
+      silence alone, with no reload and no new scan (issue #669). */
+  now?: number;
 }
 
 function seedHue(seed: string): number {
@@ -38,12 +43,14 @@ function initials(title: string): string {
   return (words.length > 1 ? words[0]![0]! + words.at(-1)![0]! : words[0]?.slice(0, 2) || "AI").toUpperCase();
 }
 
-export function SubagentBadges({ conversationId, entries, cardRect, onNavigate, onExpandedChange, anchorRegistry, exclude, onFold }: SubagentBadgesProps) {
+export function SubagentBadges({ conversationId, entries, cardRect, onNavigate, onExpandedChange, anchorRegistry, exclude, onFold, now }: SubagentBadgesProps) {
   const { t } = useLocale();
   const foldLabel = (name: string) => t("subagentTray.fold", { name });
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const suppressTouchClick = useRef(false);
-  const children = useMemo(() => subagentsOf(conversationId, entries, exclude), [conversationId, entries, exclude]);
+  const clock = useNowSeconds();
+  const at = now ?? clock;
+  const children = useMemo(() => subagentsOf(conversationId, entries, exclude, at), [conversationId, entries, exclude, at]);
   const positions = useMemo(() => layoutBadges(children, cardRect), [children, cardRect]);
   const hasExpandedChild = expandedId !== null && children.some((child) => child.id === expandedId);
 
@@ -92,7 +99,15 @@ export function SubagentBadges({ conversationId, entries, cardRect, onNavigate, 
         const unavailable = child.state === "dead";
         const dimmed = unavailable || child.state === "closed";
         const hue = seedHue(child.avatarSeed);
-        const tooltip = `${child.title} · ${child.engine}${child.model ? ` / ${child.model}` : ""}${unavailable ? " · unavailable" : ""}`;
+        /* Three visually distinct readings (issue #669): a pulsing success ring
+           for a transcript still producing records, a steady warning ring for a
+           host that is alive but has gone quiet, and no ring at all for the
+           dimmed finished/unavailable states. */
+        const working = child.state === "running" || child.state === "live";
+        const stateNote = child.state === "silent"
+          ? ` · ${t("subagentTray.state.silent")}`
+          : unavailable ? " · unavailable" : "";
+        const tooltip = `${child.title} · ${child.engine}${child.model ? ` / ${child.model}` : ""}${stateNote}`;
         return (
           <span key={child.id} className="contents">
           {expanded && onFold && !unavailable ? (
@@ -163,8 +178,11 @@ export function SubagentBadges({ conversationId, entries, cardRect, onNavigate, 
               aria-hidden
             >
               {initials(child.title)}
-              {child.state === "running" ? (
-                <span className="absolute inset-[-2px] rounded-full ring-2 ring-success/70 animate-pulse motion-reduce:animate-none" />
+              {working ? (
+                <span data-subagent-ring="working" className="absolute inset-[-2px] rounded-full ring-2 ring-success/70 animate-pulse motion-reduce:animate-none" />
+              ) : null}
+              {child.state === "silent" ? (
+                <span data-subagent-ring="silent" className="absolute inset-[-2px] rounded-full ring-2 ring-warning" />
               ) : null}
             </span>
             <span className={`min-w-0 truncate px-2.5 text-[11px] font-semibold text-primary ${expanded ? "opacity-100" : "opacity-0"}`}>

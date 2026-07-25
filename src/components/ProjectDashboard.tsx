@@ -689,7 +689,9 @@ export function ProjectDashboard({
       hiddenPaths,
       claimedPaths,
       hostEligibleParentIds,
-      now: nowMs,
+      /* Epoch SECONDS: the projection compares this against transcript `mtime`
+         (chip freshness, attention TTLs), which is seconds. */
+      now: nowMs / 1000,
     });
   }, [baseGroups, prefs.hidden, prefs.manual, board.prefs.foldedEngineChildIds, board.prefs.expandedEngineTrayParentIds, filesByPath, project, files, compactPipelinePaths, collapsedPaths, launchHistoryPaths, pinnedPaths, nowMs]);
   const groups = useMemo(

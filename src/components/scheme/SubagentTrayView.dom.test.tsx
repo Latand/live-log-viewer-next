@@ -148,3 +148,20 @@ test("the inline (mobile) variant uses 44px targets and a full-width block witho
   expect(unfoldButton.className).toContain("min-h-11");
   expect(unfoldButton.className).toContain("min-w-11");
 });
+
+test("a silent-but-alive member carries its own dot colour and label (issue #669)", () => {
+  const host = mount(tray({
+    members: [member({ id: "wedged", title: "Wedged worker", state: "silent" }), member({ id: "done", title: "Finished worker" })],
+    hottest: "silent",
+    expanded: true,
+  }));
+  const row = host.querySelector('[data-subagent-tray-member="wedged"]') as HTMLButtonElement;
+  const finished = host.querySelector('[data-subagent-tray-member="done"]') as HTMLButtonElement;
+
+  expect(row.dataset.subagentState).toBe("silent");
+  expect((row.querySelector("span") as HTMLElement).className).toContain("bg-warning");
+  /* Neither working green nor finished grey. */
+  expect((row.querySelector("span") as HTMLElement).className).not.toContain("bg-success");
+  expect((finished.querySelector("span") as HTMLElement).className).toContain("bg-muted");
+  expect(row.title).toContain("alive but silent");
+});

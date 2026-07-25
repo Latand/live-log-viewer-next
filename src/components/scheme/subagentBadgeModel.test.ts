@@ -214,3 +214,43 @@ test("subagentsOf marks an unscanned structured-spawn placeholder unavailable", 
     expect.objectContaining({ id: "child", state: "dead" }),
   ]);
 });
+
+test("subagentsOf ranks a writing child above a silent-but-alive one above a finished one (issue #669)", () => {
+  const now = 1_000_000;
+  const parent = entry({ path: "/parent", conversationId: "parent" });
+  /* Spawn order is the reverse of activity order, so only the state ranking can
+     produce the expected sequence. */
+  const finished = entry({
+    path: "/finished",
+    conversationId: "finished",
+    parent: parent.path,
+    sessionStartedAt: "2026-07-19T08:00:00Z",
+    proc: "done",
+    mtime: now - 4,
+  });
+  const wedged = entry({
+    path: "/wedged",
+    conversationId: "wedged",
+    parent: parent.path,
+    sessionStartedAt: "2026-07-19T09:00:00Z",
+    activity: "stalled",
+    proc: "running",
+    mtime: now - 3_600,
+  });
+  const writing = entry({
+    path: "/writing",
+    conversationId: "writing",
+    parent: parent.path,
+    sessionStartedAt: "2026-07-19T10:00:00Z",
+    /* The scan verdict has gone stale; the transcript says otherwise. */
+    activity: "idle",
+    proc: "running",
+    mtime: now - 9,
+  });
+
+  expect(subagentsOf("parent", [finished, wedged, writing, parent], new Set(), now).map((badge) => [badge.id, badge.state])).toEqual([
+    ["writing", "running"],
+    ["wedged", "silent"],
+    ["finished", "closed"],
+  ]);
+});
