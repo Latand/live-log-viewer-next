@@ -246,38 +246,39 @@ function lineNode(line: string, key: number | string): ReactNode {
   return <Fragment key={key}>{md(line)}</Fragment>;
 }
 
-/* Block-level pass over `lines[from, to)`, appended to `out`. `lines` may be a
-   TAIL of the document starting at absolute line `base`: every node is keyed by
-   its absolute index and the trailing-newline bookkeeping reads `out` rather
-   than local state, so a document can be rendered in several append-only slices
-   and still come out identical to a single pass. That is what lets the
-   streaming renderer below parse only what has just arrived. */
-function pushBlocks(out: ReactNode[], lines: string[], from: number, to: number, base = 0): void {
-  let i = from;
-  while (i < to) {
+/* Block-level pass for whole prose messages rendered inside whitespace-pre-wrap:
+   newlines survive as text; tables group into real <table>, headings and
+   blockquotes are styled per line, everything else goes through the inline pass.
+   This is the settled rendering — the one a transcript row shows and the one
+   the streaming machine below has to arrive at exactly. */
+export function mdBlocks(text: string): ReactNode {
+  const lines = text.split("\n");
+  const out: ReactNode[] = [];
+  let i = 0;
+  while (i < lines.length) {
     if (FENCE_OPEN_RE.test(lines[i])) {
       const start = i;
       const lang = fenceLang(lines[i]);
       i++;
-      while (i < to && !FENCE_CLOSE_RE.test(lines[i])) i++;
+      while (i < lines.length && !FENCE_CLOSE_RE.test(lines[i])) i++;
       const code = lines.slice(start + 1, i).join("\n");
-      if (i < to) i++;
+      if (i < lines.length) i++;
       if (out[out.length - 1] === "\n") out.pop();
-      out.push(<CodeBlock key={`c${base + start}`} code={code} lang={lang} />);
+      out.push(<CodeBlock key={`c${start}`} code={code} lang={lang} />);
       continue;
     }
     if (TABLE_ROW_RE.test(lines[i])) {
       const start = i;
-      while (i < to && TABLE_ROW_RE.test(lines[i])) i++;
+      while (i < lines.length && TABLE_ROW_RE.test(lines[i])) i++;
       /* The table div is a block element: the pending newline would add an empty row. */
       if (out[out.length - 1] === "\n") out.pop();
-      out.push(<MdTable key={`t${base + start}`} rows={lines.slice(start, i)} />);
+      out.push(<MdTable key={`t${start}`} rows={lines.slice(start, i)} />);
       continue;
     }
     if (IMAGE_LINE_RE.test(lines[i])) {
       const start = i;
       const images: { alt: string; src: string }[] = [];
-      while (i < to) {
+      while (i < lines.length) {
         const m = lines[i].match(IMAGE_LINE_RE);
         if (!m) break;
         images.push({ alt: m[1], src: m[2] });
@@ -285,24 +286,13 @@ function pushBlocks(out: ReactNode[], lines: string[], from: number, to: number,
       }
       /* The row is a block element: drop the pending newline before it. */
       if (out[out.length - 1] === "\n") out.pop();
-      out.push(<MdImageRow key={`i${base + start}`} images={images} />);
+      out.push(<MdImageRow key={`i${start}`} images={images} />);
       continue;
     }
-    out.push(lineNode(lines[i], base + i));
+    out.push(lineNode(lines[i], i));
     i++;
-    /* The newline belongs to the document, not to the slice: a slice that stops
-       short of the end is followed by more lines, so it keeps its separator. */
     if (i < lines.length) out.push("\n");
   }
-}
-
-/* Block-level pass for whole prose messages rendered inside whitespace-pre-wrap:
-   newlines survive as text; tables group into real <table>, headings and
-   blockquotes are styled per line, everything else goes through the inline pass. */
-export function mdBlocks(text: string): ReactNode {
-  const lines = text.split("\n");
-  const out: ReactNode[] = [];
-  pushBlocks(out, lines, 0, lines.length);
   return out;
 }
 
@@ -320,7 +310,8 @@ export function mdBlocks(text: string): ReactNode {
 
 /** Nodes per chunk: the ceiling on what one settled line can make React redo. */
 const CHUNK = 48;
-/** Text kept before the boundary to recognise the message on the next delta. */
+/** Text kept before the boundary, to PROPOSE where a head-trim moved it to.
+    Never evidence on its own — every proposal is verified against the text. */
 const ANCHOR = 128;
 
 /* A run of already-rendered nodes. A chunk's element is re-created only when
@@ -565,19 +556,22 @@ function consume(state: MdStreamState, line: string, from: number): void {
 }
 
 /**
- * Whether what has been consumed still describes the head of `text`.
+ * Whether what has been rendered still describes the head of `text`.
  *
- * Deltas append, and re-reading the message to prove it would put the
- * accumulated length back into every delta. While streaming the proof is the
- * anchor window ending at the boundary plus monotone length; the completion
- * call, the one that can legitimately carry rewritten text, is checked exactly.
+ * This is checked EXACTLY, against the whole text the nodes were built from.
+ * A fixed window is not evidence: 128 chars of repeated log lines, boilerplate
+ * or a spinner alias trivially, and a message that matched at a stale offset
+ * would keep rendering lines it no longer contains — a divergence that grows
+ * and never heals. One native comparison per delta is the price, and it is the
+ * comparison, not a re-parse: what a reused frame costs stays flat.
  */
-function reusable(state: MdStreamState, text: string, streaming: boolean): boolean {
+function reusable(state: MdStreamState, text: string): boolean {
   if (state.stableChars === 0) return true;
-  if (!state.lineStart || text.length < state.stableChars) return false;
-  if (!streaming) return text.startsWith(state.source.slice(0, state.stableChars));
-  return text.length >= state.source.length
-    && text.slice(Math.max(0, state.stableChars - ANCHOR), state.stableChars) === state.anchor;
+  if (!state.lineStart || text.length < state.source.length) return false;
+  /* The boundary is a line start by construction; if it is not, the state is
+     not describing this text and nothing may be reused from it. */
+  if (text.charCodeAt(state.stableChars - 1) !== 10) return false;
+  return text.startsWith(state.source);
 }
 
 /**
@@ -591,10 +585,12 @@ function reusable(state: MdStreamState, text: string, streaming: boolean): boole
  * ends inside a construct, the trim has changed how the rest reads, and nothing
  * is reused.
  *
- * Only a streaming delta is recovered: the completion call is the one that can
- * legitimately carry rewritten text, and a rewrite that happened to keep the
- * anchor would be mistaken for a shift. A caller MUST reset the stream when
- * this returns false — it shifts the chunk offsets before it can know.
+ * The anchor only PROPOSES a shift — a window can alias, so the proposal is
+ * then verified exactly against the text it claims to describe, and a shift
+ * that does not hold up is no shift at all. Only a streaming delta is
+ * recovered: the completion call is the one that can legitimately carry
+ * rewritten text. A caller MUST reset the stream when this returns false — it
+ * shifts the chunk offsets before it can know.
  */
 function recoverTrim(state: MdStreamState, text: string, streaming: boolean): boolean {
   if (!streaming || !state.anchor || !state.lineStart) return false;
@@ -603,6 +599,7 @@ function recoverTrim(state: MdStreamState, text: string, streaming: boolean): bo
   const stable = at + state.anchor.length;
   const shift = state.stableChars - stable;
   if (shift <= 0) return false;
+  if (!text.startsWith(state.source.slice(shift))) return false;
   const chunks = state.region.chunks;
   for (const chunk of chunks) chunk.from -= shift;
   const keep = chunks.findIndex((chunk) => chunk.from >= 0);
@@ -640,7 +637,7 @@ function recoverTrim(state: MdStreamState, text: string, streaming: boolean): bo
  */
 export function advanceMdStream(state: MdStreamState, text: string, streaming: boolean): ReactNode {
   if (state.rendered !== null && text === state.source && streaming === state.streaming) return state.rendered;
-  if (!reusable(state, text, streaming) && !recoverTrim(state, text, streaming)) resetMdStream(state);
+  if (!reusable(state, text) && !recoverTrim(state, text, streaming)) resetMdStream(state);
 
   const rest = text.slice(state.stableChars);
   const lines = rest.split("\n");
@@ -676,10 +673,12 @@ export function advanceMdStream(state: MdStreamState, text: string, streaming: b
       const parts: ReactNode[] = [];
       if (state.sep) parts.push("\n");
       /* Inside a fence the tail is code; elsewhere the inline pass renders it,
-         degrading to plain text for anything whose closer has not arrived. */
-      parts.push(state.run?.kind === "fence"
-        ? <Fragment key="v">{last}</Fragment>
-        : <Fragment key="v">{md(last)}</Fragment>);
+         degrading to plain text for anything whose closer has not arrived.
+         A line that is nothing BUT an image is left as text too: it becomes a
+         thumbnail row when its newline lands, and embedding it inline first
+         would only mount the image to throw it away a moment later. */
+      const verbatim = state.run?.kind === "fence" || IMAGE_LINE_RE.test(last);
+      parts.push(<Fragment key="v">{verbatim ? last : md(last)}</Fragment>);
       volatile_ = parts;
     }
   }

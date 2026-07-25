@@ -385,6 +385,76 @@ test("the consumed-line count stays exact across runs and a trim", () => {
   expect(stream.stableLines).toBe(trimmed.split("\n").length - 1);
 });
 
+/** Renders a streaming tree on its own root, for per-frame comparison. */
+function frameHtml(tree: ReactNode): string {
+  const { host, root } = mount();
+  paint(root, <div className="whitespace-pre-wrap">{tree}</div>);
+  return (host.firstElementChild as HTMLElement).innerHTML;
+}
+
+test("a head-trimmed message of repeated lines renders its source on every delta", () => {
+  /* The writing frontier sits inside 128+ chars of identical content — ordinary
+     for repeated log lines, boilerplate or a spinner — and the head-trim shift
+     is a whole number of those lines, so a fixed anchor window matches at the
+     STALE offset. Trusting that window renders a head the message no longer
+     contains, and because nothing re-checks it the drift only grows: this same
+     walk leaves 82 of its 98 frames wrong. Distinctive lines ahead of the
+     repeats are what makes the stale head visible. */
+  const unique = Array.from({ length: 30 }, (_, i) => `unique line ${i} of the answer`);
+  const repeat = "repeating tail line";
+  const source = [...unique, ...Array.from({ length: 90 }, () => repeat)].join("\n");
+  const WINDOW = 600;
+  const PERIOD = repeat.length + 1;
+  const stream = createMdStream();
+  let frames = 0;
+  for (let end = 700; end <= source.length; end += PERIOD) {
+    /* What the bounded projection hands the row: a sliding window, trimmed at
+       the head by exactly what each delta appends. */
+    const text = source.slice(0, end).slice(-WINDOW);
+    expect(frameHtml(advanceMdStream(stream, text, true))).toBe(settledHtml(text));
+    frames++;
+  }
+  expect(frames).toBeGreaterThan(90);
+});
+
+test("a message whose head changed under an unchanged anchor is re-rendered", () => {
+  /* The evidence a reused frame rests on has to identify the reused region.
+     Here the last 128+ chars before the boundary are untouched while the head
+     is rewritten — which is what a completed item replacing its draft looks
+     like — so anything keyed on a window alone keeps rendering the old head. */
+  const tail = Array.from({ length: 12 }, () => "identical tail line").join("\n");
+  const first = `opening line one\n${tail}\n`;
+  const second = `opening line two\n${tail}\n`;
+  expect(second.length).toBe(first.length);
+
+  const stream = createMdStream();
+  advanceMdStream(stream, first, true);
+  expect(frameHtml(advanceMdStream(stream, second, true))).toBe(settledHtml(second));
+  /* …and the frame after it, so nothing absorbed the divergence. */
+  const grown = `${second}and on it goes`;
+  expect(frameHtml(advanceMdStream(stream, grown, true))).toBe(settledHtml(grown));
+
+  /* A boundary that is no longer a line start is not evidence either. */
+  stream.stableChars -= 7;
+  expect(frameHtml(advanceMdStream(stream, `${grown} further`, true)))
+    .toBe(settledHtml(`${grown} further`));
+});
+
+test("a whole-line image is mounted once, when its line lands", () => {
+  const { host, root } = mount();
+  const shot = "![shot](data:image/gif;base64,R0lGODlhAQABAAAAACw=)";
+  paint(root, <LiveTurnRows items={[item(`Here:\n\n${shot}`, "streaming")]} />);
+  /* Still being written: readable text, not an image mounted to be thrown away. */
+  expect(liveRow(host).querySelector("img")).toBeNull();
+  expect(liveRow(host).textContent).toContain(shot);
+
+  paint(root, <LiveTurnRows items={[item(`Here:\n\n${shot}\n\ndone`, "streaming")]} />);
+  const img = liveRow(host).querySelector("img");
+  expect(img).not.toBeNull();
+  paint(root, <LiveTurnRows items={[item(`Here:\n\n${shot}\n\ndone`, "awaiting-echo")]} />);
+  expect(liveRow(host).querySelector("img")).toBe(img);
+});
+
 test("a head-trimmed projection keeps what it has already rendered", () => {
   /* Past its 64 KiB bound the projection drops chars off the front on every
      delta. Re-reading the whole window each time is what makes the longest
