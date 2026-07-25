@@ -402,6 +402,9 @@ export async function adoptStructuredHostsAtStartup(
         effort: entry.launchProfile?.effort ?? undefined,
         allowSubagents: entry.launchProfile?.allowSubagents ?? false,
         mcpServers: entry.launchProfile?.mcpServers ?? ["viewer"],
+        /* Re-adoption replays the durable grant (issue #687) — a session never
+           gains or loses Computer Use by being picked up again at startup. */
+        plugins: entry.launchProfile?.plugins ?? [],
         env: {
           ...startupEnvironment,
           ...(capability ? { [VIEWER_SPAWN_CAPABILITY_ENV]: capability } : {}),

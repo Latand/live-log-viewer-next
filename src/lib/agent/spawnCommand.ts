@@ -12,6 +12,7 @@ import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
 import { agentRegistry, SpawnChildLimitError } from "@/lib/agent/registry";
 import { reasoningFromBody } from "@/lib/agent/efforts";
 import { normalizeSpawnMcpServers } from "@/lib/agent/mcpAllowlist";
+import { normalizeSpawnPlugins, pluginAllowlistForSession, sessionOriginFor } from "@/lib/agent/pluginAllowlist";
 import { codexModelSupportsImages, modelFromBody } from "@/lib/agent/models";
 import { resolveSpawnRole } from "@/lib/roles/registry";
 import { assertDarwinStructuredRuntime } from "@/lib/proc/darwinIdentity";
@@ -140,7 +141,7 @@ export async function executeSpawnRequest(
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
-  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown; parent?: unknown; parentConversationId?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; clientAttemptId?: unknown; role?: unknown; roleParams?: unknown; confirm?: unknown; reviews?: unknown; allowSubagents?: unknown; mcpServers?: unknown; project?: unknown; supersedes?: unknown };
+  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown; parent?: unknown; parentConversationId?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; clientAttemptId?: unknown; role?: unknown; roleParams?: unknown; confirm?: unknown; reviews?: unknown; allowSubagents?: unknown; mcpServers?: unknown; plugins?: unknown; project?: unknown; supersedes?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -149,6 +150,11 @@ export async function executeSpawnRequest(
 
   const mcpServers = normalizeSpawnMcpServers(body.mcpServers);
   if (!mcpServers.ok) return NextResponse.json({ error: mcpServers.error }, { status: 400 });
+  /* Requested plugin grant (issue #687). Absent leaves the decision to policy;
+     `[]` is the operator's explicit opt-out for this root session. Anything
+     outside the grantable set is rejected here, never trimmed silently. */
+  const requestedPlugins = normalizeSpawnPlugins(body.plugins);
+  if (!requestedPlugins.ok) return NextResponse.json({ error: requestedPlugins.error }, { status: 400 });
 
   const lineageError = agentSpawnLineageError(req, body);
   if (lineageError) return NextResponse.json({ error: lineageError }, { status: 400 });
@@ -326,6 +332,19 @@ export async function executeSpawnRequest(
       : null;
     const parentSessionKey = parent?.sessionKey ?? null;
     const parentArtifactPath = parent?.artifactPath ?? null;
+    /* Session-origin policy (issue #687): an operator-launched root session —
+       no agent caller, no lineage parent, no role preset — carries the Computer
+       Use grant by default; every delegated launch carries none, and the
+       request can only narrow that, never widen it. */
+    const plugins = pluginAllowlistForSession({
+      engine,
+      origin: sessionOriginFor({
+        origin: { kind: authenticatedCaller?.kind === "agent" ? "agent" : "operator" },
+        parentConversationId,
+        agentRole: role.value?.role ?? null,
+      }),
+      requested: requestedPlugins.value,
+    });
     const digest = spawnRequestDigest({
       engine,
       cwd,
@@ -335,6 +354,7 @@ export async function executeSpawnRequest(
       accountId: account.accountId,
       role: role.value?.role ?? null,
       mcpServers: mcpServers.value,
+      ...(plugins.length ? { plugins } : {}),
       ...(body.allowSubagents === true ? { allowSubagents: true } : {}),
       ...(explicitProject ? { project: explicitProject } : {}),
       parent: spawnParentSelector({ parentConversationId: parentConversationId ?? undefined }),
@@ -372,6 +392,7 @@ export async function executeSpawnRequest(
         parentConversationId,
         allowSubagents: body.allowSubagents === true,
         mcpServers: mcpServers.value,
+        plugins,
         permissionMode,
         ...(explicitProject ? { project: explicitProject } : {}),
       }),
