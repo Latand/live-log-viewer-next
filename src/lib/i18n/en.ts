@@ -1147,8 +1147,8 @@ export const en = {
   "pipelineGroup.openHistory": "Open pipeline history for {task}",
 
   // pipeline stage placeholders + template picker (#196)
-  "pipelineSlot.paneAria": "Planned stage {role}",
-  "pipelineSlot.completedAria": "Completed stage {role} — open to review",
+  "pipelineSlot.paneAria": "Planned stage {title}",
+  "pipelineSlot.completedAria": "Completed stage {title} — open to review",
   "pipelineSlot.openTranscript": "Open conversation",
   "pipelineSlot.stageOf": "stage {k}/{n}",
   "pipelineSlot.promptLabel": "Stage prompt",
@@ -1160,6 +1160,11 @@ export const en = {
   "pipelineSlot.reviewHint": "Review cycle over the previous stage — its rounds land here.",
   "pipelineSlot.frozen": "This stage already ran — its configuration is locked.",
   "pipelineSlot.saved": "Saved",
+  // settled stages collapsed to one status row (#658)
+  "pipelineSlot.rowAria": "Finished stage {title}",
+  "pipelineSlot.reasonSkipped": "Skipped by the operator — the chain moved on",
+  "pipelineSlot.rowExpand": "Show the full stage card",
+  "pipelineSlot.rowCollapse": "Collapse back to the status row",
   "pipelineTemplates.planBuildReview": "Plan → Build → Review",
   "pipelineTemplates.buildReview": "Build → Review",
   "pipelineTemplates.buildVerify": "Build → Verify",

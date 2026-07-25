@@ -1,7 +1,7 @@
 "use client";
 
 import { Check, Layers } from "lucide-react";
-import { memo, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 
 import { ChevronRight } from "@/components/icons";
 import { conversationIdentity } from "@/lib/accounts/identity";
@@ -23,7 +23,8 @@ import { PipelineStrip } from "@/components/pipelines/PipelineStrip";
 import { PipelineTemplatePicker } from "@/components/pipelines/PipelineTemplatePicker";
 import { StagePlaceholderPane } from "@/components/pipelines/StagePlaceholderPane";
 import { StageCompletedCard } from "@/components/pipelines/StageCompletedCard";
-import { STAGE_TONES, attemptNavTarget, canSourcePipeline, createDraftPipeline, latestAttempt, optimisticAddStage, patchPipeline, pipelineStagePosition, pipelineStateLabel, renderableFlowIds, resolveStageNavFile, reviewLoopChainValid, stageChipLabel, stageChipState } from "@/components/pipelines/pipelineModel";
+import { StageStatusRow } from "@/components/pipelines/StageStatusRow";
+import { STAGE_TONES, attemptNavTarget, canSourcePipeline, createDraftPipeline, optimisticAddStage, patchPipeline, pipelineStagePosition, pipelineStateLabel, renderableFlowIds, resolveStageNavFile, reviewLoopChainValid, stageChipLabel, stageChipState, pipelineStageByAgentPath, stagePaneTitleOf, type PipelineStagePane } from "@/components/pipelines/pipelineModel";
 import { pushTaskToast } from "@/components/tasks/taskToast";
 import type { TaskRelation } from "@/components/tasks/taskRelations";
 import { MAX_PIPELINE_STAGES } from "@/lib/pipelines/limits";
@@ -49,9 +50,11 @@ import { SubagentBadges } from "./SubagentBadges";
 import { SubagentTray, type SubagentTrayApi } from "./SubagentTrayView";
 import type { SubagentBadgeAnchorRegistry } from "./subagentBadgeAnchors";
 import {
+  HANDOFF_BADGE_Y,
   LOOP_GAP,
   NODE_W,
   SLOT_GAP,
+  SLOT_H,
   type DeckNode,
   type DraftNode,
   type FlowLoop,
@@ -795,7 +798,7 @@ function NodeShell({
       review-loop (the FlowStrip owns that slot). */
   pipeline: Pipeline | null;
   /** The exact pipeline stage represented by this real conversation pane. */
-  pipelineStage: { pipeline: Pipeline; stage: Pipeline["stages"][number]; index: number; total: number } | null;
+  pipelineStage: PipelineStagePane | null;
   /** All flows, for the strip's review-loop round counters + open-review. */
   flows: Flow[];
   files: readonly FileEntry[];
@@ -941,6 +944,11 @@ function NodeShell({
           isRoot={node.isRoot}
           dormant={dormant}
           showFavorite
+          /* A live stage pane is titled by its place in the chain, not by the
+             first line of its prompt — every stage prompt opens with the same
+             shared preamble, so prompt-derived titles named every pane on the
+             board identically (#658). */
+          titleOverride={stagePaneTitleOf(t, pipelineStage)}
           onClose={() => onClose(node.file.path)}
           onToggleExpand={() => onExpand(node.file.path)}
           onSpawnRetry={onSpawnRetry}
@@ -1047,6 +1055,29 @@ function DraftShell({
 }
 
 /**
+ * Escape for a board disclosure (#658). Mounted only while its disclosure is
+ * open, capture-phase so the innermost open thing wins, and it stops propagation
+ * so the same key does not also clear the canvas selection underneath. Text
+ * fields keep their own Escape — the disclosed stage card carries a prompt
+ * editor.
+ */
+function EscapeToClose({ onClose }: { onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      const el = event.target as HTMLElement | null;
+      if (el && (["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName) || el.isContentEditable)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [onClose]);
+  return null;
+}
+
+/**
  * A planned pipeline stage's dashed placeholder window as a scheme citizen
  * (issue #196): the SAME draft-agent window recipe, plus the handoff badge
  * riding the gap to its left when the previous stage's slot sits directly
@@ -1061,8 +1092,64 @@ function DraftShell({
 function StageSlotShell({ slot, lite, dimmed, files, onSelect }: { slot: StageSlot; lite: boolean; dimmed: boolean; files: FileEntry[]; onSelect: (file: FileEntry) => void }) {
   const { t } = useLocale();
   const [busy, setBusy] = useState(false);
+  const [rowOpen, setRowOpen] = useState(false);
   const tone = STAGE_TONES[stageChipState(slot.pipeline, slot.stage)];
   const { pipeline } = slot;
+  /* Settled work — skipped, or completed evidence — collapses to ONE status row
+     at its stage position (#658): the layout reserved exactly that row, and the
+     disclosure floats the full card over the board on demand, so the operator can
+     still read the prompt and open the transcript without the finished stage
+     claiming a pending card's weight. */
+  if (slot.collapsedRow) {
+    const target = slot.attempt ? attemptNavTarget(slot.attempt) : null;
+    const file = target ? resolveStageNavFile(target, files) : null;
+    const cardId = `${slot.key}::card`;
+    return (
+      <div
+        data-scheme-node={slot.key}
+        className={`scheme-enter absolute${dimClass(dimmed)} ${rowOpen ? "z-30" : ""}`}
+        style={{ transform: `translate(${slot.x}px, ${slot.y}px)`, width: slot.w, height: slot.h, transition: MOVE_TRANSITION }}
+      >
+        {slot.incoming ? (
+          <span
+            aria-hidden
+            className="absolute z-[2] inline-flex h-6 -translate-x-1/2 -translate-y-1/2 items-center rounded-full border bg-card px-1.5 text-[12px] font-bold shadow-1"
+            style={{ left: -SLOT_GAP / 2, top: slot.incomingAnchorY ?? HANDOFF_BADGE_Y, borderColor: tone.color, color: tone.color }}
+          >
+            {slot.incoming === "review-loop" ? "⟳" : "→"}
+          </span>
+        ) : null}
+        {/* At map zoom the row is a label, not a control: card text is unreadable
+            there anyway and the transcript link is already inert, so the
+            disclosure asks the operator to zoom in rather than opening a 620px
+            card nobody can read. */}
+        <StageStatusRow
+          slot={slot}
+          expanded={rowOpen}
+          controls={cardId}
+          onToggle={lite ? undefined : () => setRowOpen((open) => !open)}
+        />
+        {rowOpen ? (
+          /* The disclosed card floats over whatever the board placed below, so it
+             behaves like the overlay it is: Escape closes it, same as the
+             full-window pane and the canvas selection. */
+          <div
+            id={cardId}
+            data-stage-row-card
+            className="absolute left-0 top-[calc(100%+8px)] z-30 flex"
+            style={{ width: slot.w, height: SLOT_H }}
+          >
+            <EscapeToClose onClose={() => setRowOpen(false)} />
+            {slot.presentation === "completed" ? (
+              <StageCompletedCard slot={slot} onOpen={file && !lite ? () => onSelect(file) : undefined} />
+            ) : (
+              <StagePlaceholderPane slot={slot} interactive={!lite} />
+            )}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
   /* A completed stage of an active pipeline renders as a full conversation card
      at its stage position — same footprint as the live and placeholder cards, so
      the group reads as real cards rather than compact history stubs (#507 F2). */
@@ -1078,8 +1165,8 @@ function StageSlotShell({ slot, lite, dimmed, files, onSelect }: { slot: StageSl
         {slot.incoming ? (
           <span
             aria-hidden
-            className="absolute top-[110px] z-[2] inline-flex h-6 -translate-x-1/2 -translate-y-1/2 items-center rounded-full border bg-card px-1.5 text-[12px] font-bold shadow-1"
-            style={{ left: -SLOT_GAP / 2, borderColor: tone.color, color: tone.color }}
+            className="absolute z-[2] inline-flex h-6 -translate-x-1/2 -translate-y-1/2 items-center rounded-full border bg-card px-1.5 text-[12px] font-bold shadow-1"
+            style={{ left: -SLOT_GAP / 2, top: slot.incomingAnchorY ?? HANDOFF_BADGE_Y, borderColor: tone.color, color: tone.color }}
           >
             {slot.incoming === "review-loop" ? "⟳" : "→"}
           </span>
@@ -1120,8 +1207,8 @@ function StageSlotShell({ slot, lite, dimmed, files, onSelect }: { slot: StageSl
       {slot.incoming ? (
         <span
           aria-hidden
-          className="absolute top-[110px] z-[2] inline-flex h-6 -translate-x-1/2 -translate-y-1/2 items-center rounded-full border bg-card px-1.5 text-[12px] font-bold shadow-1"
-          style={{ left: -SLOT_GAP / 2, borderColor: tone.color, color: tone.color }}
+          className="absolute z-[2] inline-flex h-6 -translate-x-1/2 -translate-y-1/2 items-center rounded-full border bg-card px-1.5 text-[12px] font-bold shadow-1"
+          style={{ left: -SLOT_GAP / 2, top: slot.incomingAnchorY ?? HANDOFF_BADGE_Y, borderColor: tone.color, color: tone.color }}
         >
           {slot.incoming === "review-loop" ? "⟳" : "→"}
         </span>
@@ -1293,19 +1380,9 @@ export const NodesLayer = memo(function NodesLayer({
   /* Paths still in the scan; a run stage action is disabled once its transcript
      leaves the file set (AC4). */
   const renderablePaths = useMemo(() => new Set(files.map((entry) => entry.path)), [files]);
-  const pipelineStageByPath = useMemo(() => {
-    const map = new Map<string, { pipeline: Pipeline; stage: Pipeline["stages"][number]; index: number; total: number }>();
-    for (const pipeline of pipelines) {
-      if (pipeline.state === "closed") continue;
-      for (let index = 0; index < pipeline.stages.length; index += 1) {
-        const stage = pipeline.stages[index]!;
-        const attempt = latestAttempt(pipeline, stage.id);
-        if (!attempt?.agentPath) continue;
-        map.set(attempt.agentPath, { pipeline, stage, index, total: pipeline.stages.length });
-      }
-    }
-    return map;
-  }, [pipelines]);
+  /* Which stage each live transcript runs — the shared index (#658), so the
+     board node and the full-window overlay name a stage pane identically. */
+  const pipelineStageByPath = useMemo(() => pipelineStageByAgentPath(pipelines), [pipelines]);
   /* Activity ranking reaches the screen through each host's x/y transform.
      Stable sibling order keeps React from moving stateful hosts in the DOM,
      preserving scroll, focus, selection, and draft/deck state. */

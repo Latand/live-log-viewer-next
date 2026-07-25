@@ -1116,8 +1116,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelineGroup.openHistory": "Відкрити історію пайплайна {task}",
 
   // плейсхолдери етапів пайплайна + вибір шаблону (#196)
-  "pipelineSlot.paneAria": "Запланований етап {role}",
-  "pipelineSlot.completedAria": "Завершений етап {role} — відкрийте для перегляду",
+  "pipelineSlot.paneAria": "Запланований етап {title}",
+  "pipelineSlot.completedAria": "Завершений етап {title} — відкрийте для перегляду",
   "pipelineSlot.openTranscript": "Відкрити розмову",
   "pipelineSlot.stageOf": "етап {k}/{n}",
   "pipelineSlot.promptLabel": "Промпт стадії",
@@ -1129,6 +1129,11 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelineSlot.reviewHint": "Цикл рев’ю попереднього етапу — його раунди з’являться тут.",
   "pipelineSlot.frozen": "Етап уже виконувався — конфігурацію заморожено.",
   "pipelineSlot.saved": "Збережено",
+  // згорнуті завершені стадії в один рядок статусу (#658)
+  "pipelineSlot.rowAria": "Завершений етап {title}",
+  "pipelineSlot.reasonSkipped": "Пропущено оператором — ланцюжок пішов далі",
+  "pipelineSlot.rowExpand": "Показати повну картку етапу",
+  "pipelineSlot.rowCollapse": "Згорнути назад до рядка статусу",
   "pipelineTemplates.planBuildReview": "План → Збірка → Рев’ю",
   "pipelineTemplates.buildReview": "Збірка → Рев’ю",
   "pipelineTemplates.buildVerify": "Збірка → Перевірка",
