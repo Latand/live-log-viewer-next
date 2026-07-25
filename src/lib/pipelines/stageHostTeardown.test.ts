@@ -35,14 +35,14 @@ mock.module("@/lib/conversation/actions", () => ({
 const { AgentRegistry, setAgentRegistryForTests } = await import("@/lib/agent/registry");
 const { procBackend } = await import("@/lib/proc");
 const { sessionKeyId } = await import("@/lib/agent/sessionKey");
-const { defaultPipelinePorts, stopPipelineStageAgent } = await import("./engine");
+const { defaultPipelinePorts, stopPipelineStageAgent, stopPipelineStagePane } = await import("./engine");
 type RuntimeHostClient = import("@/lib/runtime/client").RuntimeHostClient;
 
 type Registry = InstanceType<typeof AgentRegistry>;
 
 /** Seats a structured conversation whose host process is this test process, so
     the liveness probe reports a resident host without spawning anything. */
-function hostedConversation(options: { status?: "live" | "dead"; hosted?: boolean } = {}): {
+function hostedConversation(options: { status?: "live" | "dead"; hosted?: boolean; pane?: TmuxHostEvidence | null } = {}): {
   registry: Registry;
   conversationId: string;
   path: string;
@@ -59,7 +59,7 @@ function hostedConversation(options: { status?: "live" | "dead"; hosted?: boolea
     cwd: sandbox,
     accountId: "codex-subscription",
     status: options.status ?? "live",
-    host: null,
+    host: options.pane ?? null,
     structuredHost: options.hosted === false ? null : {
       kind: "codex-app-server",
       endpoint: "fake:stdio",
@@ -249,6 +249,83 @@ test("the residency probe reads host state without dispatching anything (#670)",
   live.registry.terminateStructuredHost(live.key);
   expect(await ports.stageHostResident(target(live.conversationId))).toBeFalse();
   expect(await ports.stageHostResident(target("conversation_never_seen"))).toBeFalse();
+  expect(killed).toEqual([]);
+  setAgentRegistryForTests(null);
+});
+
+type TmuxHostEvidence = import("@/lib/agent/registry").TmuxHostEvidence;
+
+/** Durable tmux evidence shaped like a real spawn record. */
+function paneEvidence(paneId: string): TmuxHostEvidence {
+  const identity = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
+  return {
+    kind: "tmux",
+    endpoint: { tmuxTmpdir: path.join(sandbox, "tmux"), socketName: "default" },
+    windowName: "stage-build",
+    server: identity,
+    agent: identity,
+    paneId,
+    panePid: identity,
+    target: paneId,
+  } as unknown as TmuxHostEvidence;
+}
+
+test("a stage pane is killed only when its recorded identity still matches (#670)", async () => {
+  const fixture = hostedConversation({ status: "dead", hosted: false, pane: paneEvidence("%3") });
+  const attempted: TmuxHostEvidence[] = [];
+
+  const stopped = await stopPipelineStagePane(
+    { stageId: "build", attempt: 1, conversationId: fixture.conversationId, agentPath: null, paneId: "%3" },
+    {
+      killHostIfMatches: async (host) => { attempted.push(host); return true; },
+      paneAgentAlive: async () => true,
+    },
+  );
+
+  expect(stopped).toEqual({ outcome: "stopped" });
+  expect(attempted).toHaveLength(1);
+  expect(attempted[0]!.paneId).toBe("%3");
+  setAgentRegistryForTests(null);
+});
+
+test("a recycled pane id is reported unknown and never signalled (#670)", async () => {
+  /* The tmux server restarted and %3 now belongs to someone else's window, so
+     the identity check refuses. Nothing may be killed here. */
+  const changed = hostedConversation({ status: "dead", hosted: false, pane: paneEvidence("%3") });
+  let signalled = 0;
+
+  const mismatch = await stopPipelineStagePane(
+    { stageId: "build", attempt: 1, conversationId: changed.conversationId, agentPath: null, paneId: "%3" },
+    {
+      killHostIfMatches: async () => { signalled += 1; return false; },
+      paneAgentAlive: async () => true,
+    },
+  );
+  expect(mismatch).toMatchObject({ outcome: "unknown" });
+  expect((mismatch as { detail: string }).detail).toContain("%3");
+  setAgentRegistryForTests(null);
+
+  /* No durable evidence at all: the stored id names a pane we cannot claim. */
+  const unknown = hostedConversation({ status: "dead", hosted: false });
+  const orphan = await stopPipelineStagePane(
+    { stageId: "build", attempt: 1, conversationId: unknown.conversationId, agentPath: null, paneId: "%3" },
+    {
+      killHostIfMatches: async () => { signalled += 1; return true; },
+      paneAgentAlive: async () => true,
+    },
+  );
+  expect(orphan).toMatchObject({ outcome: "unknown" });
+  /* The mismatching kill probe ran once and refused; the evidence-less case
+     never reached a kill at all. */
+  expect(signalled).toBe(1);
+
+  /* Nothing running in the pane at all is simply nothing to stop. */
+  const quiet = await stopPipelineStagePane(
+    { stageId: "build", attempt: 1, conversationId: unknown.conversationId, agentPath: null, paneId: "%3" },
+    { killHostIfMatches: async () => { signalled += 1; return true; }, paneAgentAlive: async () => false },
+  );
+  expect(quiet).toEqual({ outcome: "not-running" });
+  expect(signalled).toBe(1);
   expect(killed).toEqual([]);
   setAgentRegistryForTests(null);
 });

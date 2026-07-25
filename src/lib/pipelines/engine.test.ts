@@ -106,7 +106,8 @@ function harness() {
   /* Panes the harness considers killable, and the clock the teardown budget
      reads. Both default to the benign case so existing tests are unaffected. */
   const killedPanes: string[] = [];
-  let paneKill: { ok: true } | { ok: false; error: string } = { ok: true };
+  let paneStop: Awaited<ReturnType<PipelinePorts["stopStagePane"]>> = { outcome: "stopped" };
+  let worktreePresent = true;
   let residentHosts = false;
   let monotonic: () => number = () => Date.now();
   const ports: PipelinePorts = {
@@ -151,19 +152,20 @@ function harness() {
       calls.push(`stop-host:${target.stageId}:${target.attempt}:${target.conversationId ?? "none"}`);
       return stageHosts.get(target.conversationId ?? "") ?? { outcome: "not-running" };
     },
-    killStagePane: async (paneId) => {
-      calls.push(`kill-pane:${paneId}`);
-      if (paneKill.ok) {
-        killedPanes.push(paneId);
+    stopStagePane: async (target) => {
+      calls.push(`stop-pane:${target.stageId}:${target.attempt}:${target.paneId ?? "none"}`);
+      if (paneStop.outcome === "stopped" && target.paneId) {
+        killedPanes.push(target.paneId);
         paneAlive = false;
       }
-      return paneKill;
+      return paneStop;
     },
     stageHostResident: async (target) => {
       calls.push(`host-resident:${target.stageId}:${target.attempt}`);
       return residentHosts;
     },
     monotonicNow: () => monotonic(),
+    worktreePresent: () => worktreePresent,
     conversationAgentActive: async () => conversationActive,
     durableTurnEvidence: async (_engine, transcriptPath) => durableTurns.get(transcriptPath) ?? null,
     headCwd: () => loadPipelines()[0]?.worktreeDir ?? null,
@@ -211,7 +213,8 @@ function harness() {
     setBuilderEffort: (effort: string) => { builderEffort = effort; },
     setPaneAlive: (alive: boolean) => { paneAlive = alive; },
     setStageHost: (conversationId: string, result: PipelineStageStopResult) => { stageHosts.set(conversationId, result); },
-    setPaneKill: (result: { ok: true } | { ok: false; error: string }) => { paneKill = result; },
+    setPaneStop: (result: Awaited<ReturnType<PipelinePorts["stopStagePane"]>>) => { paneStop = result; },
+    setWorktreePresent: (present: boolean) => { worktreePresent = present; },
     setHostsResident: (resident: boolean) => { residentHosts = resident; },
     setMonotonicClock: (clock: () => number) => { monotonic = clock; },
     killedPanes,
@@ -2782,7 +2785,12 @@ test("retry parks without synchronizing when reviewer termination cannot be veri
   /* The close carries its host-teardown report (#670) even when the flow refuses
      to close, so nothing it already stopped is swallowed by the rejection. */
   expect(closed).toMatchObject({ error: "reviewer process group did not terminate", status: 409 });
-  expect(closed.close).toMatchObject({ stopped: [], stillRunning: [] });
+  /* A reviewer that would not die leaves through the same report a surviving
+     stage host does, not only through the prose error (#670). */
+  expect(closed.close).toMatchObject({
+    stopped: [],
+    stillRunning: [{ stageId: "review", attempt: 1, error: "reviewer process group did not terminate" }],
+  });
   expect(loadPipelines()[0]).toMatchObject({ state: "needs_decision", closedAt: null, stateDetail: "reviewer process group did not terminate" });
 });
 
@@ -3225,6 +3233,7 @@ test("a parked stage with no resident host still reports nothing was running (#6
 test("closing a pipeline whose host is already gone reports that nothing was running (#670)", async () => {
   const h = harness();
   h.setPaneAlive(false);
+  h.setPaneStop({ outcome: "not-running" });
   const pipeline = await create(h.ports);
   await tickPipelines([], h.ports);
   await tickPipelines([], h.ports);
@@ -3341,6 +3350,55 @@ test("an unconfirmed host record retires once its host is demonstrably gone (#67
   expect(h.calls.filter((call) => call.startsWith("stop-host:")).length).toBe(1);
 });
 
+test("closing mid-review counts the reviewer it stopped (#670)", async () => {
+  const h = harness();
+  const stages = [
+    { id: "build", kind: "run", ["prompt"]: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, ["prompt"]: "review", next: null },
+  ] as const;
+  const pipeline = await create(h.ports, stages as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  h.setPaneAlive(false);
+  h.setPaneStop({ outcome: "not-running" });
+  /* A headless reviewer is a child process with no registry entry, so the host
+     teardown cannot see it — closeFlow is what stops it. */
+  h.ports.closeFlow = async (id) => {
+    h.calls.push(`flow-close:${id}`);
+    return { flow: h.flows.get(id), stoppedReviewer: { round: 1 } };
+  };
+
+  const closed = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+  expect(closed.error).toBeUndefined();
+  expect(closed.close?.reviewers).toMatchObject([{ stageId: "review", flowId: "flow-1", round: 1 }]);
+  /* The lane must not report "closed, nothing was running" after killing one. */
+  expect(loadPipelines()[0]!.stateDetail).toBe("closed; stopped 1 review round");
+});
+
+test("a worktree removed after a merge closes tidily, with no error text (#670)", async () => {
+  const h = harness();
+  h.setPaneAlive(false);
+  h.setPaneStop({ outcome: "not-running" });
+  const baseExec = h.ports.exec;
+  h.ports.exec = (command, args, cwd) => {
+    /* What realExec answers for a missing cwd. It must never be reached. */
+    if (command === "git" && args[0] === "status") return { code: 1, stdout: "", stderr: "spawnSync git ENOENT" };
+    return baseExec(command, args, cwd);
+  };
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  h.setWorktreePresent(false);
+
+  const closed = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+  expect(closed.close?.worktree).toBeNull();
+  expect(loadPipelines()[0]).toMatchObject({ state: "closed", stateDetail: null });
+});
+
 test("a settled attempt with an idle CLI in its pane does not block the close (#670)", async () => {
   const h = harness();
   const pipeline = await create(h.ports);
@@ -3361,44 +3419,48 @@ test("a settled attempt with an idle CLI in its pane does not block the close (#
   expect(loadPipelines()[0]!.state).toBe("closed");
 });
 
-test("a live pane behind a host the registry does not know is killed, not refused (#670)", async () => {
+test("a pane the teardown can identify as this stage's is stopped, not refused (#670)", async () => {
   const h = harness();
   const pipeline = await create(h.ports);
   await tickPipelines([], h.ports);
   await tickPipelines([], h.ports);
-  /* The registry entry is gone (stopStageAgent says not-running) but the pane
-     still runs a mid-turn agent. Refusing would hand the operator a card that
-     never closes and a host to kill by hand. */
+  /* The registry has no resident host but the pane's recorded identity still
+     matches, so the orphan is stopped instead of handed back to the operator. */
   h.setPaneAlive(true);
+  h.setPaneStop({ outcome: "stopped" });
 
   const closed = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
 
   expect(closed.error).toBeUndefined();
-  expect(h.calls).toContain("kill-pane:%1");
+  expect(h.calls).toContain("stop-pane:plan:1:%1");
   expect(h.killedPanes).toEqual(["%1"]);
   expect(closed.close?.stopped).toMatchObject([{ stageId: "plan", attempt: 1, paneId: "%1" }]);
   expect(loadPipelines()[0]).toMatchObject({ state: "closed", stateDetail: "closed; stopped 1 stage host" });
 });
 
-test("a pane that survives its kill still refuses the close (#670)", async () => {
+test("a pane that cannot be identified is reported, never killed (#670)", async () => {
   const h = harness();
   const pipeline = await create(h.ports);
   await tickPipelines([], h.ports);
   await tickPipelines([], h.ports);
   h.setPaneAlive(true);
-  h.setPaneKill({ ok: false, error: "no server running on /tmp/tmux-1000/default" });
+  h.setPaneStop({ outcome: "unknown", detail: "pane %1 runs an agent that cannot be identified as this stage's" });
 
-  const refused = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+  const closed = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
 
-  expect(refused.status).toBe(409);
-  expect(refused.error).toContain("could not kill pane %1");
-  expect(refused.close?.stillRunning).toMatchObject([{ stageId: "plan", attempt: 1, paneId: "%1" }]);
-  expect(loadPipelines()[0]!.state).not.toBe("closed");
+  /* Unidentifiable is neither a stop nor a silent pass: nothing was signalled,
+     and the lane stays visible with the pane named. */
+  expect(h.killedPanes).toEqual([]);
+  expect(closed.close?.stopped).toEqual([]);
+  expect(closed.close?.unconfirmed).toMatchObject([{ stageId: "plan", attempt: 1, paneId: "%1", operationId: null }]);
+  expect(loadPipelines()[0]!.hiddenAt).toBeNull();
+  expect(loadPipelines()[0]!.stateDetail).toContain("cannot be identified");
 });
 
 test("an unreadable worktree is reported instead of closing as if nothing was left (#670)", async () => {
   const h = harness();
   h.setPaneAlive(false);
+  h.setPaneStop({ outcome: "not-running" });
   const baseExec = h.ports.exec;
   let failStatus = false;
   h.ports.exec = (command, args, cwd) => {

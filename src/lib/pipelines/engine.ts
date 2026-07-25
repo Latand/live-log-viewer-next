@@ -1,10 +1,11 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 
 import { accountManager } from "@/lib/accounts/manager";
 import { emptyLaunchProfile, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor } from "@/lib/agent/cli";
-import { agentRegistry, type DurableMembershipInput } from "@/lib/agent/registry";
+import { agentRegistry, type DurableMembershipInput, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { transcriptAllowed } from "@/lib/agent/spawnParent";
 import { sessionKeyFromTranscript, sessionKeyId } from "@/lib/agent/sessionKey";
 import { headCwd } from "@/lib/agent/transcript";
@@ -20,7 +21,7 @@ import { loadTasks } from "@/lib/tasks/store";
 import type { BoardTask } from "@/lib/tasks/types";
 import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
 import { isShellCommand } from "@/lib/status";
-import { killPane, paneInfo } from "@/lib/tmux";
+import { killTmuxHostIfMatches, paneInfo } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 import { realExec, type ExecPort } from "@/lib/workflows/provision";
 
@@ -96,6 +97,10 @@ export type PipelineCloseReport = {
   /** Kills the runtime accepted without confirming termination in time. The
       operation id keeps the possible survivor addressable. */
   unconfirmed: Array<PipelineStageHostRef & { operationId: string | null; detail: string }>;
+  /** Review rounds whose live reviewer this close terminated through the flow.
+      Headless reviewers are child processes with no registry entry, so they are
+      counted here rather than in `stopped`. */
+  reviewers: Array<{ stageId: string; attempt: number; flowId: string; round: number }>;
   /** Hosts that survived teardown, so the close cannot claim to be clean. */
   stillRunning: Array<PipelineStageHostRef & { error: string }>;
   /** Uncommitted stage work preserved in the worktree; null when unprovisioned. */
@@ -132,15 +137,23 @@ export interface PipelinePorts {
   /** Terminates the host that owns a stage attempt's agent. `not-running` means
       no host was resident, so a close can tell an idle lane from one it stopped. */
   stopStageAgent(target: PipelineStageHostRef): Promise<PipelineStageStopResult>;
-  /** Terminates a stage attempt's tmux pane. The teardown's last resort for a
-      pane-hosted agent the registry cannot address. */
-  killStagePane(paneId: string): Promise<{ ok: true } | { ok: false; error: string }>;
+  /** Identity-verified teardown of a stage attempt's tmux pane, for a
+      pane-hosted agent the registry can no longer address. `unknown` means the
+      pane could not be proven to be this stage's, so nothing was signalled. */
+  stopStagePane(target: PipelineStageHostRef): Promise<
+    | { outcome: "stopped" | "not-running" }
+    | { outcome: "unknown"; detail: string }
+    | { outcome: "failed"; error: string }
+  >;
   /** Residency read with no side effects: `false` means the host is
       demonstrably gone. Used to retire an unconfirmed kill without re-killing. */
   stageHostResident(target: PipelineStageHostRef): Promise<boolean>;
   /** Monotonic milliseconds, kept apart from `now()` so a teardown budget can be
       bounded independently of the ISO timestamps written to the record. */
   monotonicNow(): number;
+  /** Whether the pipeline worktree is still on disk. A checkout removed after a
+      merge is a tidy close, not an unreadable worktree. */
+  worktreePresent(dir: string): boolean;
   conversationAgentActive(conversationId: string): Promise<boolean | null>;
   durableTurnEvidence(engine: EffectivePipelineRole["engine"], transcriptPath: string): Promise<StageTurnEvidence | null>;
   headCwd(transcriptPath: string): string | null;
@@ -151,7 +164,12 @@ export interface PipelinePorts {
   pipelineAdoptionCandidates(pipelineId: string): PipelineAdoptionCandidate[];
   createFlow(req: CreateFlowRequest, entries: FileEntry[]): Promise<{ flow?: Flow; error?: string }>;
   patchFlow(id: string, action: "advance" | "pause" | "resume", note?: string): { error?: string; status?: number };
-  closeFlow(id: string): Promise<{ flow?: Flow; error?: string; status?: number } | void>;
+  closeFlow(id: string): Promise<{
+    flow?: Flow;
+    error?: string;
+    status?: number;
+    stoppedReviewer?: { round: number } | null;
+  } | void>;
   getFlow(id: string): Flow | null;
   findFlow(implementerPath: string, implementerConversationId: string | null, baseRef: string, targetSha: string): Flow | null;
   projectForCwd(cwd: string): string | null;
@@ -337,6 +355,9 @@ type StageHostProbe = {
   conversationId: ViewerConversationId;
   transcriptPath: string;
   resident(): boolean;
+  /** Durable tmux evidence recorded for this session, if any. It is the only
+      thing that can identify a stored pane id as still being this agent's. */
+  host(): TmuxHostEvidence | null;
 };
 
 async function stageHostProbe(target: PipelineStageHostRef): Promise<StageHostProbe | null> {
@@ -362,7 +383,60 @@ async function stageHostProbe(target: PipelineStageHostRef): Promise<StageHostPr
       if (!entry || entry.status === "dead" || entry.status === "unhosted") return false;
       return structuredHostProcessAlive(entry.structuredHost?.process ?? null) || Boolean(entry.host);
     },
+    host: () => registry.readOnlySnapshot().entries[sessionKey]?.host ?? null,
   };
+}
+
+export type StagePaneProbes = {
+  killHostIfMatches?: (host: TmuxHostEvidence) => Promise<boolean>;
+  paneAgentAlive?: (paneId: string) => Promise<boolean>;
+};
+
+/**
+ * Last resort for a pane-hosted stage agent, gated on identity rather than
+ * liveness. A tmux pane id is unique only within one server lifetime and
+ * restarts at %0, while the attempt's stored id outlives that — and this path
+ * runs exactly when the registry has no resident host, which is when a stale id
+ * is most likely. "This pane runs something that is not a shell" would therefore
+ * happily kill an unrelated agent, so the kill goes through
+ * killTmuxHostIfMatches, which verifies the tmux server, the pane pid, the
+ * window name and the agent's process start identity before signalling. Without
+ * durable evidence to match, nothing is killed: the host is reported unknown so
+ * the operator decides. A refused close is a nuisance; killing someone else's
+ * agent is not recoverable.
+ */
+export async function stopPipelineStagePane(
+  target: PipelineStageHostRef,
+  probes: StagePaneProbes = {},
+): Promise<{ outcome: "stopped" | "not-running" } | { outcome: "unknown"; detail: string } | { outcome: "failed"; error: string }> {
+  const paneId = target.paneId;
+  if (!paneId) return { outcome: "not-running" };
+  const alive = probes.paneAgentAlive ?? (async (id: string) => {
+    const info = await paneInfo(id);
+    return info !== null && !isShellCommand(info.command);
+  });
+  try {
+    const probe = await stageHostProbe(target);
+    const host = probe?.host() ?? null;
+    if (!host || host.paneId !== paneId) {
+      /* No durable evidence ties this id to this agent. Report what is there,
+         but never signal it. */
+      if (!(await alive(paneId))) return { outcome: "not-running" };
+      return {
+        outcome: "unknown",
+        detail: `pane ${paneId} runs an agent that cannot be identified as this stage's; stop it by hand if it is the orphan`,
+      };
+    }
+    const killed = await (probes.killHostIfMatches ?? killTmuxHostIfMatches)(host);
+    if (killed) return { outcome: "stopped" };
+    if (!(await alive(paneId))) return { outcome: "not-running" };
+    return {
+      outcome: "unknown",
+      detail: `pane ${paneId} changed or its agent did not exit; it was left running`,
+    };
+  } catch (error) {
+    return { outcome: "failed", error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 export async function stopPipelineStageAgent(
@@ -443,14 +517,7 @@ export function defaultPipelinePorts(): PipelinePorts {
       return info !== null && !isShellCommand(info.command);
     },
     stopStageAgent: (target) => stopPipelineStageAgent(target),
-    killStagePane: async (paneId) => {
-      try {
-        await killPane(paneId);
-        return { ok: true };
-      } catch (error) {
-        return { ok: false, error: error instanceof Error ? error.message : String(error) };
-      }
-    },
+    stopStagePane: (target) => stopPipelineStagePane(target),
     stageHostResident: async (target) => {
       try {
         const probe = await stageHostProbe(target);
@@ -461,6 +528,7 @@ export function defaultPipelinePorts(): PipelinePorts {
       }
     },
     monotonicNow: () => Date.now(),
+    worktreePresent: (dir) => Boolean(dir) && fs.existsSync(dir),
     conversationAgentActive: async (conversationId) => {
       const client = runtimeHostClient();
       if (!client) return null;
@@ -2175,26 +2243,6 @@ type StageHostCandidate = { target: PipelineStageHostRef; turnSettled: boolean }
 /** Ceiling on a close's whole host teardown, holding the pipelines transaction. */
 const CLOSE_TEARDOWN_BUDGET_MS = 10_000;
 
-/**
- * Last resort for a pane-hosted agent the registry cannot address: kill the
- * pane, then confirm it stopped running one. Refusing instead would leave the
- * operator with a card that never closes and a host they have to kill by hand —
- * the very chore #670 exists to end.
- */
-async function stopStagePaneAgent(
-  paneId: string,
-  ports: PipelinePorts,
-): Promise<{ outcome: "stopped" } | { outcome: "failed"; error: string }> {
-  const killed = await ports.killStagePane(paneId);
-  if (!killed.ok) {
-    return { outcome: "failed", error: `could not kill pane ${paneId}: ${killed.error}` };
-  }
-  if (await ports.paneAgentAlive(paneId)) {
-    return { outcome: "failed", error: `pane ${paneId} still runs an agent after its kill; stop it, then close again` };
-  }
-  return { outcome: "stopped" };
-}
-
 function stageHostLabel(target: PipelineStageHostRef): string {
   return `stage ${target.stageId} attempt ${target.attempt} (${target.conversationId ?? target.agentPath ?? "unknown host"})`;
 }
@@ -2203,6 +2251,9 @@ function stageHostLabel(target: PipelineStageHostRef): string {
     has no provisioned worktree to read. */
 function closeWorktreeReport(pipeline: Pipeline, ports: PipelinePorts): PipelineCloseReport["worktree"] {
   if (pipeline.state === "provisioning" || !pipeline.lastPassedCommit) return null;
+  /* A worktree cleaned up after a merge has nothing to preserve and nothing to
+     report; only a checkout that is present but unreadable is a finding. */
+  if (!ports.worktreePresent(pipeline.worktreeDir)) return null;
   const changes = pipelineWorktreeChanges(pipeline, ports.exec);
   if (!changes.ok) return { dir: pipeline.worktreeDir, uncommitted: [], truncated: false, error: changes.error };
   return { dir: pipeline.worktreeDir, uncommitted: changes.paths, truncated: changes.truncated };
@@ -2216,6 +2267,9 @@ function closeSummary(report: PipelineCloseReport): string | null {
   const parts: string[] = [];
   if (report.stopped.length > 0) {
     parts.push(`stopped ${report.stopped.length} stage host${report.stopped.length === 1 ? "" : "s"}`);
+  }
+  if (report.reviewers.length > 0) {
+    parts.push(`stopped ${report.reviewers.length} review round${report.reviewers.length === 1 ? "" : "s"}`);
   }
   for (const item of report.unconfirmed) {
     parts.push(`${item.detail} for ${stageHostLabel(item)}${item.operationId ? ` (operation ${item.operationId})` : ""}`);
@@ -2668,7 +2722,7 @@ export async function patchPipeline(
          the hosts down before the flow and the state write, and report exactly
          what was stopped. Nothing on disk is touched — uncommitted stage work
          stays in the worktree and is named in the report instead. */
-      const close: PipelineCloseReport = { stopped: [], alreadyStopped: [], unconfirmed: [], stillRunning: [], worktree: null };
+      const close: PipelineCloseReport = { stopped: [], alreadyStopped: [], unconfirmed: [], reviewers: [], stillRunning: [], worktree: null };
       /* Each host's confirmation is bounded, but N of them multiply, and this
          whole loop holds the pipelines file transaction — every other pipeline
          mutation and the controller tick queue behind it. So the aggregate is
@@ -2694,14 +2748,15 @@ export async function patchPipeline(
         else if (result.outcome === "failed") close.stillRunning.push({ ...target, error: result.error });
         else if (result.outcome === "unconfirmed") {
           close.unconfirmed.push({ ...target, operationId: result.operationId, detail: result.detail });
-        } else if (!turnSettled && target.paneId && await ports.paneAgentAlive(target.paneId)) {
+        } else if (!turnSettled && target.paneId) {
           /* The registry knows no host, but the attempt never finished its turn
-             and an agent is still running in its pane. Killing the pane is the
-             last resort the operator would otherwise reach for by hand, so the
-             teardown does it here and confirms the pane went with it. */
-          const pane = await stopStagePaneAgent(target.paneId, ports);
+             and its pane may still hold the agent. The teardown kills it only
+             when durable evidence proves the pane is still this stage's. */
+          const pane = await ports.stopStagePane(target);
           if (pane.outcome === "stopped") close.stopped.push(target);
-          else close.stillRunning.push({ ...target, error: pane.error });
+          else if (pane.outcome === "failed") close.stillRunning.push({ ...target, error: pane.error });
+          else if (pane.outcome === "unknown") close.unconfirmed.push({ ...target, operationId: null, detail: pane.detail });
+          else close.alreadyStopped.push(target);
         } else close.alreadyStopped.push(target);
       }
       close.worktree = closeWorktreeReport(pipeline, ports);
@@ -2717,9 +2772,26 @@ export async function patchPipeline(
       if (flow && flow.state !== "closed") {
         const closed = await ports.closeFlow(flow.id);
         if (closed?.error) {
+          /* A reviewer that would not die is a survivor like any other, so it
+             leaves through the same report the host teardown uses. */
+          if (stage && attempt) close.stillRunning.push({
+            stageId: stage.id,
+            attempt: attempt.n,
+            conversationId: attempt.conversationId,
+            agentPath: attempt.agentPath,
+            paneId: attempt.paneId,
+            error: closed.error,
+          });
           pipeline.stateDetail = closed.error;
           persist();
           return { error: closed.error, status: closed.status ?? 409, close };
+        }
+        /* closeFlow terminates a live reviewer itself; counting what it stopped
+           is what keeps a mid-review close from reporting "nothing was running"
+           (#670). Headless reviewers never reach the agent registry, so the host
+           teardown above cannot see them. */
+        if (closed?.stoppedReviewer && stage && attempt) {
+          close.reviewers.push({ stageId: stage.id, attempt: attempt.n, flowId: flow.id, round: closed.stoppedReviewer.round });
         }
       }
       /* A cursor can rest at state pending before its round's attempt
