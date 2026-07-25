@@ -13,7 +13,7 @@ import { applyBoardMutations } from "@/lib/board/mutations";
 import { autoTaskSlotPosition } from "@/lib/tasks/lattice";
 
 import { deckKey, flowLinkKey, stageSlotKey } from "./agentLinks";
-import { REST_BAND_MAX_W, buildSchemeLayout } from "./layout";
+import { HANDOFF_BADGE_Y, REST_BAND_MAX_W, SLOT_H, SLOT_ROW_H, buildSchemeLayout } from "./layout";
 import { TASK_W, taskWorldBounds } from "./taskGeometry";
 
 function entry(overrides: Partial<FileEntry> & { path: string }): FileEntry {
@@ -559,9 +559,16 @@ describe("every current stage keeps a full real card under production compaction
     expect(layout.nodes.map((node) => node.file.path)).not.toContain("/build");
     const slotByStage = new Map(layout.slots.map((slot) => [slot.stage.id, slot]));
     expect(slotByStage.get("builder")?.presentation).toBe("completed");
-    /* Full-size footprint, shared with the live/placeholder cards (#507 F2). */
-    expect(slotByStage.get("builder")?.h).toBe(slotByStage.get("future")!.h);
+    /* The completed stage keeps its stage position and its full-width footprint,
+       but reserves ONE status row rather than the pending card's height (#658
+       narrows #507 F2's equal footprint): finished work may not read as if it were
+       still ahead. The full card stays available on the row's disclosure. */
+    expect(slotByStage.get("builder")?.collapsedRow).toBe(true);
+    expect(slotByStage.get("builder")?.h).toBe(SLOT_ROW_H);
+    expect(slotByStage.get("builder")?.w).toBe(slotByStage.get("future")!.w);
     expect(slotByStage.get("future")?.presentation).toBe("placeholder");
+    expect(slotByStage.get("future")?.collapsedRow).toBeUndefined();
+    expect(slotByStage.get("future")?.h).toBe(SLOT_H);
 
     const builderSlot = stageSlotKey("p", "builder");
     const futureSlot = stageSlotKey("p", "future");
@@ -966,5 +973,127 @@ describe("direct one-shot review groups on the scheme (issue #325)", () => {
     expect(layout.links.some((link) => link.key === flowLinkKey("flow-managed"))).toBe(true);
     expect(layout.groups.some((halo) => halo.id === "flow-managed")).toBe(true);
     expect(layout.groups.some((halo) => halo.id === projected[0]!.id)).toBe(false);
+  });
+});
+
+describe("a pipeline's stages read in execution order (#658)", () => {
+  /* Three stages, each transcript surfacing as its OWN root (structured
+     continuations — no placed lineage host): stage 1 skipped and idle, stage 2
+     live, stage 3 not launched. */
+  const threeStage = (): Pipeline =>
+    ({
+      id: "p658", task: "Voice", project: "demo", repoDir: "/r", worktreeDir: "/w", branch: "b", baseBranch: "main",
+      baseRef: "a", lastPassedCommit: "a",
+      stages: [
+        { id: "plan_v3_voice", kind: "run", prompt: "", next: "integrate_v3_voice" },
+        { id: "integrate_v3_voice", kind: "run", prompt: "", next: "verify_v3_voice" },
+        { id: "verify_v3_voice", kind: "run", prompt: "", next: null },
+      ],
+      runs: [
+        { stageId: "plan_v3_voice", attempts: [{ n: 1, state: "skipped", agentPath: "/plan", flowId: null, output: "Skipped by operator." }] },
+        { stageId: "integrate_v3_voice", attempts: [{ n: 1, state: "running", agentPath: "/integrate", flowId: null }] },
+      ],
+      cursor: { stageId: "integrate_v3_voice", state: "running", input: null, activatedBy: null },
+      state: "running", pausedState: null, stateDetail: null,
+      srcPath: null, srcConversationId: null, createdAt: "1970", closedAt: null,
+    }) as unknown as Pipeline;
+
+  const rootGroup = (file: FileEntry): BranchGroup =>
+    ({ key: file.path, columns: [{ file, tasks: [] }], returnable: [], finished: [], smt: file.mtime, orphanTask: false });
+
+  test("separate stage roots place stage 1 before the fresher live stage 2, not after it", () => {
+    /* The band ranks trees by activity+recency, which put the LIVE stage 2 first
+       and pushed the earlier stage 1 rightwards (or onto the next row): reading
+       order fought execution order. Execution order now wins inside the region. */
+    const p = threeStage();
+    const plan = entry({ path: "/plan", mtime: 1_000, activity: "idle" });
+    const integrate = entry({ path: "/integrate", mtime: 9_000, activity: "live", proc: "running" });
+    const layout = buildSchemeLayout([rootGroup(plan), rootGroup(integrate)], [], [plan, integrate], [], [], [p], [p]);
+
+    const byPath = new Map(layout.nodes.map((node) => [node.file.path, node] as const));
+    expect(byPath.has("/plan")).toBe(true);
+    expect(byPath.has("/integrate")).toBe(true);
+    expect(byPath.get("/plan")!.x).toBeLessThan(byPath.get("/integrate")!.x);
+    expect(byPath.get("/plan")!.y).toBe(byPath.get("/integrate")!.y);
+    /* The unlaunched last stage still trails the chain, inside the same halo. */
+    const future = layout.slots.find((slot) => slot.stage.id === "verify_v3_voice")!;
+    expect(future.x).toBeGreaterThan(byPath.get("/integrate")!.x);
+    const halo = layout.groups.find((group) => group.kind === "pipeline" && group.id === "p658")!;
+    expect(byPath.get("/plan")!.x).toBeGreaterThanOrEqual(halo.x);
+    expect(future.x + future.w).toBeLessThanOrEqual(halo.x + halo.w);
+  });
+
+  test("the handoff badge into a full card sits on the seam it shares with a collapsed row", () => {
+    /* Adjacent slots are top-aligned, so a 96px row beside a 620px card share
+       only the row's own span: anchoring the arrow at the card's header level
+       (110px) floated it below the row it visually leaves. */
+    const p = threeStage();
+    const layout = buildSchemeLayout([], [], [], [], [], [p], [p]);
+    const slotByStage = new Map(layout.slots.map((slot) => [slot.stage.id, slot]));
+    const skipped = slotByStage.get("plan_v3_voice")!;
+    const live = slotByStage.get("integrate_v3_voice")!;
+    const future = slotByStage.get("verify_v3_voice")!;
+    /* Row → full card: the badge stays inside the row's vertical span. */
+    expect(skipped.h).toBe(SLOT_ROW_H);
+    expect(live.incoming).toBe("run");
+    expect(live.incomingAnchorY).toBe(SLOT_ROW_H / 2);
+    expect(live.incomingAnchorY!).toBeGreaterThan(skipped.y - live.y);
+    expect(live.incomingAnchorY!).toBeLessThan(skipped.y + skipped.h - live.y);
+    /* Two full cards keep the header-level anchor. */
+    expect(future.incomingAnchorY).toBe(HANDOFF_BADGE_Y);
+  });
+
+  test("all three stages launched — zero slots — still read stage 1 → 2 → 3 in one halo", () => {
+    /* The configuration this ordering exists for, at its END state: every stage
+       transcript surfaced as its own root, so there is no lineage host, and the
+       last stage has launched, so there is no slot left either. The chain plan is
+       dropped for having nothing to emit — and with it (round 2 regression) went
+       every stage rank, leaving the band to fall back on activity+recency:
+       newest stage leftmost, i.e. the whole chain backwards. Ranks come from the
+       declared pipeline now, so the order survives the plan being dropped. */
+    const p = threeStage();
+    (p as unknown as { runs: unknown }).runs = [
+      { stageId: "plan_v3_voice", attempts: [{ n: 1, state: "passed", agentPath: "/s1", flowId: null }] },
+      { stageId: "integrate_v3_voice", attempts: [{ n: 1, state: "passed", agentPath: "/s2", flowId: null }] },
+      { stageId: "verify_v3_voice", attempts: [{ n: 1, state: "running", agentPath: "/s3", flowId: null }] },
+    ];
+    (p as unknown as { cursor: unknown }).cursor = { stageId: "verify_v3_voice", state: "running", input: null, activatedBy: null };
+    /* The freshest, liveliest tree is the LAST stage — what the band would put first. */
+    const s1 = entry({ path: "/s1", mtime: 1_000, activity: "idle" });
+    const s2 = entry({ path: "/s2", mtime: 2_000, activity: "idle" });
+    const s3 = entry({ path: "/s3", mtime: 9_000, activity: "live", proc: "running" });
+    const layout = buildSchemeLayout(
+      [rootGroup(s1), rootGroup(s2), rootGroup(s3)], [], [s1, s2, s3], [], [], [p], [p],
+    );
+
+    expect(layout.slots).toHaveLength(0);
+    const byPath = new Map(layout.nodes.map((node) => [node.file.path, node] as const));
+    expect([...byPath.keys()].sort()).toEqual(["/s1", "/s2", "/s3"]);
+    expect(byPath.get("/s1")!.x).toBeLessThan(byPath.get("/s2")!.x);
+    expect(byPath.get("/s2")!.x).toBeLessThan(byPath.get("/s3")!.x);
+    /* One row: execution order reads left→right, never bottom-up. */
+    expect(byPath.get("/s1")!.y).toBe(byPath.get("/s2")!.y);
+    expect(byPath.get("/s2")!.y).toBe(byPath.get("/s3")!.y);
+    /* The halo still spans exactly the three stage panes — ranking emits nothing. */
+    const halos = layout.groups.filter((group) => group.kind === "pipeline" && group.id === "p658");
+    expect(halos).toHaveLength(1);
+    expect([...halos[0]!.members].sort()).toEqual(["/s1", "/s2", "/s3"]);
+    for (const path of ["/s1", "/s2", "/s3"]) {
+      const node = byPath.get(path)!;
+      expect(node.x).toBeGreaterThanOrEqual(halos[0]!.x);
+      expect(node.x + node.w).toBeLessThanOrEqual(halos[0]!.x + halos[0]!.w);
+    }
+  });
+
+  test("a skipped stage with no placed transcript reserves one status row, not a full card", () => {
+    /* Stage 1 was skipped and its transcript never reached the board: it surfaces
+       as a slot, and a skipped slot is settled work — one row. */
+    const p = threeStage();
+    const integrate = entry({ path: "/integrate", activity: "live", proc: "running" });
+    const layout = buildSchemeLayout([rootGroup(integrate)], [], [integrate], [], [], [p], [p]);
+    const slotByStage = new Map(layout.slots.map((slot) => [slot.stage.id, slot]));
+    expect(slotByStage.get("plan_v3_voice")?.collapsedRow).toBe(true);
+    expect(slotByStage.get("plan_v3_voice")?.h).toBe(SLOT_ROW_H);
+    expect(slotByStage.get("verify_v3_voice")?.h).toBe(SLOT_H);
   });
 });

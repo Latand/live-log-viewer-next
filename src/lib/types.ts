@@ -14,6 +14,29 @@ export type Engine = "codex" | "claude" | "shell";
 export type Activity = "live" | "recent" | "stalled" | "idle";
 export type Fmt = "codex" | "claude" | "plain";
 
+declare const epochSecondsBrand: unique symbol;
+/**
+ * A wall clock in epoch SECONDS — the unit {@link FileEntry.mtime} and every
+ * age comparison drawn against it are measured in.
+ *
+ * Branded on purpose: a millisecond clock is the same primitive and reads the
+ * same at a glance, and feeding one to a seconds comparison is silent (an age
+ * 1000x too large, every TTL blown, every transcript "ancient"). Passing a
+ * plain `number` where this is asked for is a type error, so the conversion
+ * has to happen where it can be seen.
+ */
+export type EpochSeconds = number & { readonly [epochSecondsBrand]: true };
+
+/** Declare that a number already IS epoch seconds (a fixture, a parsed field). */
+export function epochSeconds(value: number): EpochSeconds {
+  return value as EpochSeconds;
+}
+
+/** Convert a millisecond wall clock (`Date.now()`) to epoch seconds. */
+export function epochSecondsFromMs(ms: number): EpochSeconds {
+  return (ms / 1000) as EpochSeconds;
+}
+
 export interface StructuredSpawnCardState {
   launchId: string;
   clientAttemptId: string | null;
@@ -483,6 +506,11 @@ export interface LimitWindow {
   usedPercent: number;
   /** Unix seconds when the window resets, or null when unknown. */
   resetsAt: number | null;
+  /** The window's own length in minutes as the provider declared it (Codex
+      `windowDurationMins` / `window_minutes`; 300 and 10080 for Claude's two
+      windows). This is the horizon the number carries, and labels are taken
+      from it. Absent on snapshots cached before issue #606. */
+  windowMinutes?: number | null;
 }
 
 /** Plan rate limits of one engine, returned by GET /api/limits. */
@@ -542,6 +570,10 @@ export interface BurndownSeries {
   windowSeconds: number;
   /** Remaining-quota samples inside the current window, oldest first. */
   samples: LimitSample[];
+  /** True when the current snapshot carries no window of this horizon at all —
+      e.g. a Codex plan that reports only a weekly limit. The chart then names
+      that reason instead of the generic "no history yet" (issue #606). */
+  windowUnreported?: boolean;
 }
 
 /** Both windows' burndown series for one engine. */

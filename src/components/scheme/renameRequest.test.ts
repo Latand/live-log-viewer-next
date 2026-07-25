@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { autoEditTokenFor, clearStaleRename, requestRename, type RenameRequest } from "./renameRequest";
+import { autoEditTokenFor, clearStaleRename, requestRename, titleUnderRename, type RenameRequest } from "./renameRequest";
 
 test("F2 opens the expanded node, and a plain re-expand after close does not replay", () => {
   let request: RenameRequest = null;
@@ -36,4 +36,20 @@ test("a request for one node never leaks to another expanded node", () => {
 test("a matching request survives an unrelated re-render (still expanded)", () => {
   const request = requestRename(null, "A");
   expect(clearStaleRename(request, "A")).toBe(request);
+});
+
+test("an imposed stage title yields to a pending rename, so the F2 editor still mounts (#658)", () => {
+  const stageTitle = "Builder · integrate_v3_voice · stage 2/3";
+  /* No rename in flight: the expanded stage pane carries its imposed identity
+     instead of the prompt-derived transcript title. */
+  expect(titleUnderRename(stageTitle, undefined)).toBe(stageTitle);
+  /* F2 replayed into this overlay: the override steps aside for exactly as long
+     as the token lives, so SessionTitle — the last rename path a stage
+     transcript has — is mounted and editable. */
+  const request: RenameRequest = requestRename(null, "/integrate");
+  expect(titleUnderRename(stageTitle, autoEditTokenFor(request, "/integrate"))).toBeUndefined();
+  /* A rename aimed at another node never suppresses this pane's identity. */
+  expect(titleUnderRename(stageTitle, autoEditTokenFor(request, "/other"))).toBe(stageTitle);
+  /* A non-stage pane has no imposed title either way. */
+  expect(titleUnderRename(undefined, undefined)).toBeUndefined();
 });

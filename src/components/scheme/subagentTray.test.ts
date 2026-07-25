@@ -1,13 +1,16 @@
 import { expect, test } from "bun:test";
 
-import type { FileEntry } from "@/lib/types";
+import { epochSeconds, type FileEntry } from "@/lib/types";
 
 import {
+  badgeState,
   buildSubagentTrays,
   classifyEngineChild,
   currentGenerationChildrenOf,
   engineChildNeedsAttention,
   rollUpState,
+  SILENT_AFTER_SECONDS,
+  transcriptSilence,
   type SubagentTrayInput,
 } from "./subagentTray";
 
@@ -60,7 +63,7 @@ function baseInput(entries: FileEntry[], hostParentIds: string[], overrides: Par
     hiddenPaths: new Set(),
     claimedPaths: new Set(),
     hostEligibleParentIds: new Set(hostParentIds),
-    now: 1_000_000,
+    now: epochSeconds(NOW),
     ...overrides,
   };
 }
@@ -84,12 +87,202 @@ test("currentGenerationChildrenOf honours the provenance filter", () => {
   expect(rows.map((row) => row.path)).toEqual(["/engine"]);
 });
 
+// ── chip activity from transcript freshness (issue #669) ────────────────────
+
+const NOW = 1_000_000;
+/** A transcript record written `seconds` ago. */
+const wrote = (seconds: number) => NOW - seconds;
+
+test("badgeState reads a writing transcript as working however stale the snapshot verdict is", () => {
+  /* The false-finished half of #669: the scan's own activity verdict has gone
+     idle while the lane keeps appending records every few seconds. */
+  const busy = entry({ path: "/a", conversationId: "a", proc: "running", activity: "idle", mtime: wrote(2) });
+  expect(badgeState(busy, NOW)).toBe("running");
+  const unmapped = entry({ path: "/b", conversationId: "b", proc: null, activity: "idle", mtime: wrote(13) });
+  expect(badgeState(unmapped, NOW)).toBe("live");
+});
+
+test("badgeState keeps a thinking agent working right up to the silence threshold", () => {
+  const thinking = (seconds: number) =>
+    badgeState(entry({ path: "/a", conversationId: "a", proc: "running", activity: "live", mtime: wrote(seconds) }), NOW);
+  expect(thinking(0)).toBe("running");
+  expect(thinking(120)).toBe("running");
+  expect(thinking(SILENT_AFTER_SECONDS - 1)).toBe("running");
+  expect(thinking(SILENT_AFTER_SECONDS)).toBe("silent");
+});
+
+test("badgeState gives an alive-but-silent host its own state instead of working or finished", () => {
+  /* The false-active half of #669: a closed pipeline's host never exits and
+     never writes again. Its process is alive, so it is not finished either. */
+  const wedged = entry({ path: "/a", conversationId: "a", proc: "running", activity: "stalled", mtime: wrote(7.5 * 3600) });
+  expect(badgeState(wedged, NOW)).toBe("silent");
+  const starting = entry({
+    path: "/b",
+    conversationId: "b",
+    proc: null,
+    mtime: wrote(7.5 * 3600),
+    spawn: { launchId: "l", clientAttemptId: null, accountId: null, state: "binding", initialMessage: "pending", retrySafe: true, error: null },
+  });
+  expect(badgeState(starting, NOW)).toBe("silent");
+});
+
+test("badgeState closes a returned subagent whose turn ended, without waiting out the silence window", () => {
+  /* A Claude in-harness child owns no process: freshness alone would keep its
+     final answer pulsing for minutes. The turn's shape settles it — and being
+     shape, not age, a stale snapshot cannot flip a busy turn to finished. */
+  const returned = entry({
+    path: "/a",
+    conversationId: "a",
+    proc: null,
+    activity: "recent",
+    mtime: wrote(4),
+    authoritativeTurn: { state: "terminal", source: "assistant", terminalAt: "2026-07-25T00:00:00Z" },
+  });
+  expect(badgeState(returned, NOW)).toBe("closed");
+  const stillOwned = entry({
+    path: "/b",
+    conversationId: "b",
+    proc: "running",
+    activity: "idle",
+    mtime: wrote(4),
+    authoritativeTurn: { state: "terminal", source: "assistant", terminalAt: "2026-07-25T00:00:00Z" },
+  });
+  expect(badgeState(stillOwned, NOW)).toBe("running");
+});
+
+test("badgeState keeps a busy in-harness subagent alive through a long tool call", () => {
+  /* A Claude in-harness subagent is written by its PARENT's process and never
+     owns a pid — the scanner's isTopLevelTranscript skips both `agent-`
+     basenames and the subagents directory — so process evidence is absent for
+     its whole life, and it writes nothing while a tool call runs. A six-minute
+     test run must read silent, never finished. */
+  const toolCall = (seconds: number) =>
+    badgeState(entry({
+      path: "/proj/parent/subagents/agent-abc.jsonl",
+      conversationId: "a",
+      engine: "claude",
+      proc: null,
+      activity: "stalled",
+      mtime: wrote(seconds),
+      authoritativeTurn: { state: "busy", source: "assistant", terminalAt: null },
+    }), NOW);
+  expect(toolCall(240)).toBe("live");
+  expect(toolCall(600)).toBe("silent");
+  /* Hours of silence stay silent: an open turn is evidence of a live owner,
+     never a reason to claim work is still happening. */
+  expect(toolCall(7.5 * 3600)).toBe("silent");
+});
+
+test("badgeState tells a finished agent from a wedged one while both keep a host attached", () => {
+  /* An attached host is how a worker waits for follow-ups, so liveness cannot
+     be what separates these two — the turn is. Side by side, an hour silent,
+     same process state. */
+  const finished = entry({
+    path: "/a",
+    conversationId: "a",
+    proc: "running",
+    mtime: wrote(3_600),
+    authoritativeTurn: { state: "terminal", source: "assistant", terminalAt: "2026-07-25T00:00:00Z" },
+  });
+  const wedged = entry({
+    path: "/b",
+    conversationId: "b",
+    proc: "running",
+    mtime: wrote(3_600),
+    authoritativeTurn: { state: "busy", source: "assistant", terminalAt: null },
+  });
+  expect(badgeState(finished, NOW)).toBe("closed");
+  expect(badgeState(wedged, NOW)).toBe("silent");
+
+  /* The scanner's completion reason carries the same shape for an entry whose
+     authoritative projection did not complete — and it is fixed before any
+     clock is consulted, so this stays a shape test, not an age test. */
+  const scannerSaysCompleted = entry({
+    path: "/c",
+    conversationId: "c",
+    proc: "running",
+    mtime: wrote(3_600),
+    activity: "recent",
+    activityReason: "jsonl_turn_completed",
+  });
+  const scannerSaysStalled = entry({
+    path: "/d",
+    conversationId: "d",
+    proc: "running",
+    mtime: wrote(3_600),
+    activity: "stalled",
+    activityReason: "jsonl_turn_stalled",
+  });
+  expect(badgeState(scannerSaysCompleted, NOW)).toBe("closed");
+  expect(badgeState(scannerSaysStalled, NOW)).toBe("silent");
+
+  /* A clean turn still keeps its chip working while the transcript is fresh:
+     completion is what silence MEANS here, not a state of its own. */
+  expect(badgeState({ ...finished, mtime: wrote(4) }, NOW)).toBe("running");
+});
+
+test("a tray of finished children with attached hosts rolls up closed, not silent", () => {
+  const now = epochSeconds(NOW);
+  const parent = entry({ path: "/parent", conversationId: "parent", activity: "live" });
+  const done = (id: string) => child({
+    path: `/${id}`,
+    conversationId: id,
+    parentId: "parent",
+    parent: parent.path,
+    proc: "running",
+    mtime: wrote(3_600),
+    authoritativeTurn: { state: "terminal", source: "assistant", terminalAt: "2026-07-25T00:00:00Z" },
+  });
+  const projection = buildSubagentTrays(baseInput([parent, done("one"), done("two")], ["parent"], {
+    foldedEngineChildIds: new Set(["one", "two"]),
+    now,
+  }));
+  const tray = projection.traysByParent.get("parent")!;
+  expect(tray.members.map((member) => member.state)).toEqual(["closed", "closed"]);
+  expect(tray.hottest).toBe("closed");
+});
+
+test("badgeState closes a silent transcript with nothing alive behind it, and an exit wins over freshness", () => {
+  const abandoned = entry({ path: "/a", conversationId: "a", proc: null, activity: "recent", mtime: wrote(SILENT_AFTER_SECONDS) });
+  expect(badgeState(abandoned, NOW)).toBe("closed");
+  const justExited = entry({ path: "/b", conversationId: "b", proc: "done", activity: "live", mtime: wrote(2) });
+  expect(badgeState(justExited, NOW)).toBe("closed");
+  const killed = entry({ path: "/c", conversationId: "c", proc: "killed", activity: "live", mtime: wrote(2) });
+  expect(badgeState(killed, NOW)).toBe("closed");
+});
+
+test("badgeState keeps spawn placeholders and failed launches unavailable", () => {
+  const placeholder = entry({ path: "spawn:launch-1", conversationId: "a", proc: "running", mtime: wrote(1) });
+  expect(badgeState(placeholder, NOW)).toBe("dead");
+  const failed = entry({
+    path: "/b",
+    conversationId: "b",
+    mtime: wrote(1),
+    spawn: { launchId: "l", clientAttemptId: null, accountId: null, state: "failed", initialMessage: "failed", retrySafe: false, error: "no host" },
+  });
+  expect(badgeState(failed, NOW)).toBe("dead");
+});
+
+test("badgeState leaves every chip undemoted while the client has no clock yet", () => {
+  /* The server render and the first client render pass 0 (no hydration skew):
+     an unknown age is not evidence of silence. */
+  const wedged = entry({ path: "/a", conversationId: "a", proc: "running", mtime: wrote(7.5 * 3600) });
+  expect(badgeState(wedged, 0)).toBe("running");
+  expect(transcriptSilence(wedged, 0)).toBeNull();
+  expect(transcriptSilence(wedged, NOW)).toBe(7.5 * 3600);
+});
+
 // ── roll-up ─────────────────────────────────────────────────────────────────
 
 test("rollUpState returns the hottest state", () => {
   expect(rollUpState(["closed", "running", "dead"])).toBe("running");
   expect(rollUpState(["closed", "dead"])).toBe("closed");
   expect(rollUpState([])).toBe("dead");
+});
+
+test("rollUpState ranks a silent-but-alive member above a closed one", () => {
+  expect(rollUpState(["closed", "silent", "dead"])).toBe("silent");
+  expect(rollUpState(["silent", "running"])).toBe("running");
 });
 
 // ── attention detection ─────────────────────────────────────────────────────
@@ -103,7 +296,7 @@ test("engineChildNeedsAttention fires on question, spawn failure and killed host
 
 // ── precedence matrix (§1.2 / presence policy) ──────────────────────────────
 
-const ctx = { folded: false, pinned: false, now: 1_000_000 };
+const ctx = { folded: false, pinned: false, now: epochSeconds(NOW) };
 
 test("attention promotes ahead of an explicit fold", () => {
   const c = entry({ path: "/a", conversationId: "a", pendingQuestion: { toolUseId: "t", prompt: "?" } as never });
@@ -182,7 +375,7 @@ test("buildSubagentTrays leaves viewer, hidden and claimed children to their own
 
 test("buildSubagentTrays reflects the durable fold pin and tray-disclosure intent", () => {
   const parent = entry({ path: "/parent", conversationId: "parent", activity: "live" });
-  const live = child({ path: "/live", conversationId: "live", parentId: "parent", parent: parent.path, activity: "live", proc: "running" });
+  const live = child({ path: "/live", conversationId: "live", parentId: "parent", parent: parent.path, activity: "live", proc: "running", mtime: 999_990 });
   const projection = buildSubagentTrays(baseInput([parent, live], ["parent"], {
     foldedEngineChildIds: new Set(["live"]),
     expandedTrayParentIds: new Set(["parent"]),
@@ -196,10 +389,68 @@ test("buildSubagentTrays reflects the durable fold pin and tray-disclosure inten
 test("buildSubagentTrays orders tray members hottest first", () => {
   const parent = entry({ path: "/parent", conversationId: "parent", activity: "live" });
   const doneOld = child({ path: "/done", conversationId: "done", parentId: "parent", parent: parent.path, activity: "idle", proc: "done", sessionStartedAt: "2026-07-19T08:00:00Z" });
-  const liveFolded = child({ path: "/livef", conversationId: "livef", parentId: "parent", parent: parent.path, activity: "live", proc: "running", sessionStartedAt: "2026-07-19T09:00:00Z" });
+  const liveFolded = child({ path: "/livef", conversationId: "livef", parentId: "parent", parent: parent.path, activity: "live", proc: "running", mtime: 999_990, sessionStartedAt: "2026-07-19T09:00:00Z" });
   const projection = buildSubagentTrays(baseInput([parent, doneOld, liveFolded], ["parent"], {
     foldedEngineChildIds: new Set(["done", "livef"]),
   }));
   const tray = projection.traysByParent.get("parent")!;
   expect(tray.members.map((member) => member.id)).toEqual(["livef", "done"]);
+});
+
+test("buildSubagentTrays reads its clock in epoch seconds, the unit `mtime` and attention TTLs use", () => {
+  const now = 1_800_000_000;
+  const parent = entry({ path: "/parent", conversationId: "parent", activity: "live" });
+  /* Alive, no attention signal, and silent for an hour — a folded row that
+     must read silent rather than working. */
+  const wedged = child({
+    path: "/wedged",
+    conversationId: "wedged",
+    parentId: "parent",
+    parent: parent.path,
+    activity: "recent",
+    proc: "running",
+    mtime: now - 3_600,
+  });
+  const writing = child({
+    path: "/writing",
+    conversationId: "writing",
+    parentId: "parent",
+    parent: parent.path,
+    /* The scan verdict has gone stale; the transcript says otherwise. */
+    activity: "idle",
+    proc: "running",
+    mtime: now - 2,
+  });
+  const projection = buildSubagentTrays(baseInput([parent, wedged, writing], ["parent"], {
+    foldedEngineChildIds: new Set(["wedged", "writing"]),
+    now: epochSeconds(now),
+  }));
+  const tray = projection.traysByParent.get("parent")!;
+  expect(tray.members.map((member) => [member.id, member.state])).toEqual([
+    ["writing", "running"],
+    ["wedged", "silent"],
+  ]);
+  expect(tray.hottest).toBe("running");
+});
+
+test("buildSubagentTrays promotes a stalled live child inside the attention TTL (seconds, not milliseconds)", () => {
+  /* Feeding this clock milliseconds put every child hours past the attention
+     TTL, so an interrupted agent could never surface out of the tray. */
+  const now = 1_800_000_000;
+  const parent = entry({ path: "/parent", conversationId: "parent", activity: "live" });
+  const stalled = child({
+    path: "/stalled",
+    conversationId: "stalled",
+    parentId: "parent",
+    parent: parent.path,
+    activity: "stalled",
+    proc: "running",
+    mtime: now - 600,
+  });
+  const projection = buildSubagentTrays(baseInput([parent, stalled], ["parent"], {
+    foldedEngineChildIds: new Set(["stalled"]),
+    now: epochSeconds(now),
+  }));
+  expect(projection.promotedPaths).toEqual(new Set(["/stalled"]));
+  expect(projection.foldedPaths.size).toBe(0);
 });
