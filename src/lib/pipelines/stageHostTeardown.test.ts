@@ -11,6 +11,9 @@ import { afterAll, beforeEach, expect, mock, test } from "bun:test";
    state directory and can never dispatch a real kill. */
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-stop-host-"));
 process.env.LLV_STATE_DIR = path.join(sandbox, "state");
+/* Pinned, never inherited: with structured hosting off, even a bypassed module
+   mock could not reach the operator's runtime host. */
+process.env.LLV_STRUCTURED_HOSTS = "0";
 fs.mkdirSync(process.env.LLV_STATE_DIR, { recursive: true });
 afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
@@ -18,18 +21,22 @@ type KillRequest = { conversationId: string; transcriptPath: string; action: str
 const killed: KillRequest[] = [];
 let killResult: { status: number; body: Record<string, unknown> } = { status: 200, body: { ok: true, structured: true } };
 
+/** Marks every answer this suite produces, so a test can prove the stubbed
+    action — never the real one — served the kill. */
+const MOCK_MARKER = "stub-conversation-action";
 mock.module("@/lib/conversation/actions", () => ({
   CONVERSATION_ACTIONS: ["interrupt", "kill", "resume", "compact", "dialog-key"] as const,
   applyConversationAction: async (request: KillRequest) => {
     killed.push(request);
-    return killResult;
+    return { status: killResult.status, body: { ...killResult.body, target: MOCK_MARKER } };
   },
 }));
 
 const { AgentRegistry, setAgentRegistryForTests } = await import("@/lib/agent/registry");
 const { procBackend } = await import("@/lib/proc");
 const { sessionKeyId } = await import("@/lib/agent/sessionKey");
-const { defaultPipelinePorts } = await import("./engine");
+const { defaultPipelinePorts, stopPipelineStageAgent } = await import("./engine");
+type RuntimeHostClient = import("@/lib/runtime/client").RuntimeHostClient;
 
 type Registry = InstanceType<typeof AgentRegistry>;
 
@@ -39,6 +46,7 @@ function hostedConversation(options: { status?: "live" | "dead"; hosted?: boolea
   registry: Registry;
   conversationId: string;
   path: string;
+  key: { engine: "codex"; sessionId: string };
 } {
   const id = crypto.randomUUID();
   const pathname = path.join(sandbox, `${id}.jsonl`);
@@ -74,7 +82,7 @@ function hostedConversation(options: { status?: "live" | "dead"; hosted?: boolea
   if (!entry) throw new Error("registry fixture did not record the session entry");
   expect(entry.status).toBe(options.status ?? "live");
   setAgentRegistryForTests(registry);
-  return { registry, conversationId: begun.receipt.conversationId, path: pathname };
+  return { registry, conversationId: begun.receipt.conversationId, path: pathname, key: { engine: "codex", sessionId: id } };
 }
 
 function target(conversationId: string | null, agentPath: string | null = null) {
@@ -87,12 +95,119 @@ beforeEach(() => {
 });
 
 test("a resident stage host is terminated through the conversation kill control (#670)", async () => {
+  /* Prove the seam this suite depends on: the kill control resolves to the stub,
+     so no test here can reach the operator's runtime host. */
+  const { applyConversationAction } = await import("@/lib/conversation/actions");
+  const probe = await applyConversationAction({ conversationId: "", transcriptPath: "", action: "kill" });
+  expect((probe.body as { target?: string }).target).toBe(MOCK_MARKER);
+  killed.length = 0;
+
   const fixture = hostedConversation();
+  /* Delivered on the spot, the shape a legacy pane kill and a replayed terminal
+     kill both produce. */
+  killResult = { status: 200, body: { ok: true, structured: true, operationId: "kill-op-1", receipt: { status: "delivered" } } };
 
   const result = await defaultPipelinePorts().stopStageAgent(target(fixture.conversationId));
 
   expect(result).toEqual({ outcome: "stopped" });
   expect(killed).toEqual([{ conversationId: fixture.conversationId, transcriptPath: fixture.path, action: "kill" }]);
+  setAgentRegistryForTests(null);
+});
+
+test("an attempt whose conversation id no longer resolves is found by its transcript (#670)", async () => {
+  const fixture = hostedConversation();
+
+  const result = await stopPipelineStageAgent({
+    stageId: "build",
+    attempt: 1,
+    conversationId: "conversation_retired_alias",
+    agentPath: fixture.path,
+    paneId: null,
+  });
+
+  expect(result).toEqual({ outcome: "stopped" });
+  expect(killed).toMatchObject([{ conversationId: fixture.conversationId, action: "kill" }]);
+  setAgentRegistryForTests(null);
+});
+
+/** A queued receipt is what the runtime answers first; these cover what the
+    close may conclude from it. */
+function queuedKill() {
+  killResult = { status: 202, body: { ok: true, structured: true, operationId: "kill-op-queued", receipt: { status: "queued" } } };
+}
+
+function confirmationProbes(overrides: Partial<Parameters<typeof stopPipelineStageAgent>[1]> = {}) {
+  let clock = 0;
+  return {
+    now: () => clock,
+    sleep: async (ms: number) => { clock += ms; },
+    client: null,
+    ...overrides,
+  };
+}
+
+function statusClient(receipt: { status: string; reason?: string | null }): RuntimeHostClient {
+  return {
+    operationStatus: async (operationId: string) => ({ operationId, receipt: { ...receipt, at: "now" }, replayed: false }),
+  } as unknown as RuntimeHostClient;
+}
+
+test("a queued kill with no evidence of termination is unconfirmed, never a clean stop (#670)", async () => {
+  const fixture = hostedConversation();
+  queuedKill();
+
+  const result = await stopPipelineStageAgent(target(fixture.conversationId), confirmationProbes());
+
+  expect(result).toEqual({
+    outcome: "unconfirmed",
+    operationId: "kill-op-queued",
+    detail: "kill accepted as queued but termination was not confirmed",
+  });
+  expect(killed).toHaveLength(1);
+  setAgentRegistryForTests(null);
+});
+
+test("a queued kill confirmed by the host leaving the registry is a stop (#670)", async () => {
+  const fixture = hostedConversation();
+  queuedKill();
+  /* The runtime tears the host down while the close waits — exactly what the
+     durable projection records after a delivered kill. */
+  const probes = confirmationProbes();
+  const result = await stopPipelineStageAgent(target(fixture.conversationId), {
+    ...probes,
+    sleep: async (ms: number) => {
+      await probes.sleep(ms);
+      fixture.registry.terminateStructuredHost(fixture.key);
+    },
+  });
+
+  expect(result).toEqual({ outcome: "stopped" });
+  setAgentRegistryForTests(null);
+});
+
+test("a queued kill confirmed by its durable receipt is a stop (#670)", async () => {
+  const fixture = hostedConversation();
+  queuedKill();
+
+  const result = await stopPipelineStageAgent(
+    target(fixture.conversationId),
+    confirmationProbes({ client: statusClient({ status: "delivered" }) }),
+  );
+
+  expect(result).toEqual({ outcome: "stopped" });
+  setAgentRegistryForTests(null);
+});
+
+test("a queued kill whose operation terminally failed leaves the host still running (#670)", async () => {
+  const fixture = hostedConversation();
+  queuedKill();
+
+  const result = await stopPipelineStageAgent(
+    target(fixture.conversationId),
+    confirmationProbes({ client: statusClient({ status: "failed", reason: "host process did not exit" }) }),
+  );
+
+  expect(result).toEqual({ outcome: "failed", error: "host process did not exit" });
   setAgentRegistryForTests(null);
 });
 

@@ -13,7 +13,7 @@ import { lastAssistantMessage } from "@/lib/flows/findings";
 import { loadFlows } from "@/lib/flows/store";
 import type { CreateFlowRequest, Flow, RoleConfig } from "@/lib/flows/types";
 import { persistHandoffLineage, rememberHandoffChild } from "@/lib/handoffLineage";
-import { runtimeHostClient } from "@/lib/runtime/client";
+import { runtimeHostClient, type RuntimeHostClient } from "@/lib/runtime/client";
 import { spawnStructuredConversation } from "@/lib/runtime/structuredSpawn";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { loadTasks } from "@/lib/tasks/store";
@@ -73,8 +73,13 @@ export type PipelineStageHostRef = {
 };
 
 export type PipelineStageStopResult =
+  /** Termination is evidenced: the kill was delivered, or the host is gone. */
   | { outcome: "stopped" }
   | { outcome: "not-running" }
+  /** The kill was accepted (a `queued` receipt is the normal first answer) but
+      termination was not evidenced inside the confirmation budget. The host may
+      still be alive, so a close carrying one of these never claims a clean stop. */
+  | { outcome: "unconfirmed"; operationId: string | null; detail: string }
   | { outcome: "failed"; error: string };
 
 /**
@@ -83,10 +88,13 @@ export type PipelineStageStopResult =
  * was burning quota; a non-empty `stillRunning` means the close was refused.
  */
 export type PipelineCloseReport = {
-  /** Hosts this close terminated. */
+  /** Hosts this close terminated, with termination evidenced. */
   stopped: PipelineStageHostRef[];
   /** Non-terminal stages whose host was already gone. */
   alreadyStopped: PipelineStageHostRef[];
+  /** Kills the runtime accepted without confirming termination in time. The
+      operation id keeps the possible survivor addressable. */
+  unconfirmed: Array<PipelineStageHostRef & { operationId: string | null; detail: string }>;
   /** Hosts that survived teardown, so the close cannot claim to be clean. */
   stillRunning: Array<PipelineStageHostRef & { error: string }>;
   /** Uncommitted stage work preserved in the worktree; null when unprovisioned. */
@@ -276,6 +284,26 @@ async function spawnPipelineAgent(
   };
 }
 
+/** Confirmation window for an accepted kill. The whole close runs inside the
+    pipelines file transaction, so this stays short enough that a slow host
+    cannot stall every other pipeline mutation and the controller tick. */
+const KILL_CONFIRMATION_BUDGET_MS = 1_500;
+const KILL_CONFIRMATION_INTERVAL_MS = 250;
+const KILL_CONFIRMATION_MAX_POLLS = 8;
+/** Receipt states that terminally settle a kill operation: the delivery queue
+    transitions a terminated host to `delivered` and a refused termination to
+    `failed`; everything else (`queued`, `delivering`, …) is still in flight. */
+const KILL_DELIVERED_STATES = new Set(["delivered"]);
+const KILL_REFUSED_STATES = new Set(["failed", "rejected"]);
+
+export type StageStopProbes = {
+  client?: RuntimeHostClient | null;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+  budgetMs?: number;
+  intervalMs?: number;
+};
+
 /**
  * Terminates the agent host a stage attempt owns, through the same control path
  * an operator's kill uses — structured hosts go over the runtime command
@@ -283,30 +311,83 @@ async function spawnPipelineAgent(
  * worktree, including uncommitted stage work, is left exactly as the agent left
  * it. Residency is read from the durable registry first so a lane whose host is
  * already gone reports `not-running` instead of a manufactured kill.
+ *
+ * A structured kill answers `queued` before the host has gone anywhere, so an
+ * accepted receipt is not termination. Within a bounded window this re-reads
+ * host residency (the registry file signature invalidates the read cache, so a
+ * teardown written by the host process is visible here) and the durable
+ * operation receipt. Kills are idempotent, so re-checking is free of side
+ * effects. Only evidence yields `stopped`; a terminally refused operation
+ * yields `failed`; anything still in flight yields `unconfirmed` with its
+ * operation id, and the close reports that instead of a clean stop.
  */
-async function stopPipelineStageAgent(target: PipelineStageHostRef): Promise<PipelineStageStopResult> {
+export async function stopPipelineStageAgent(
+  target: PipelineStageHostRef,
+  probes: StageStopProbes = {},
+): Promise<PipelineStageStopResult> {
   const registry = agentRegistry();
-  const conversation = target.conversationId?.startsWith("conversation_")
+  /* applyConversationAction resolves by id or by path; residency must too, or a
+     prefixed id the registry cannot resolve short-circuits to not-running while
+     the attempt's transcript would have found the live conversation. */
+  const byId = target.conversationId?.startsWith("conversation_")
     ? registry.conversation(target.conversationId as ViewerConversationId)
-    : target.agentPath
-      ? registry.conversationForPath(target.agentPath)
-      : null;
+    : null;
+  const conversation = byId ?? (target.agentPath ? registry.conversationForPath(target.agentPath) : null);
   const generation = conversation?.generations.at(-1) ?? null;
   if (!conversation || !generation) return { outcome: "not-running" };
-  const entry = registry.readOnlySnapshot().entries[sessionKeyId({ engine: conversation.engine, sessionId: generation.id })];
-  if (!entry || entry.status === "dead" || entry.status === "unhosted") return { outcome: "not-running" };
+  const sessionKey = sessionKeyId({ engine: conversation.engine, sessionId: generation.id });
   try {
     const { structuredHostProcessAlive } = await import("@/lib/runtime/structuredRecovery");
-    if (!structuredHostProcessAlive(entry.structuredHost?.process ?? null) && !entry.host) return { outcome: "not-running" };
+    const resident = (): boolean => {
+      const entry = registry.readOnlySnapshot().entries[sessionKey];
+      if (!entry || entry.status === "dead" || entry.status === "unhosted") return false;
+      return structuredHostProcessAlive(entry.structuredHost?.process ?? null) || Boolean(entry.host);
+    };
+    if (!resident()) return { outcome: "not-running" };
+
     const { applyConversationAction } = await import("@/lib/conversation/actions");
     const result = await applyConversationAction({
       conversationId: conversation.id,
       transcriptPath: generation.path,
       action: "kill",
     });
-    const body = result.body as { ok?: boolean; error?: string };
-    if (result.status < 400 && body.ok === true) return { outcome: "stopped" };
-    return { outcome: "failed", error: body.error ?? `stage host kill was refused with status ${result.status}` };
+    const body = result.body as { ok?: boolean; error?: string; operationId?: string; receipt?: { status?: string } };
+    if (result.status >= 400 || body.ok !== true) {
+      return { outcome: "failed", error: body.error ?? `stage host kill was refused with status ${result.status}` };
+    }
+    /* No receipt means the control settled synchronously — the legacy pane
+       ladder, or a replayed terminal kill on an already-dead host. */
+    const receiptStatus = body.receipt?.status ?? null;
+    if (!receiptStatus || KILL_DELIVERED_STATES.has(receiptStatus)) return { outcome: "stopped" };
+
+    const operationId = body.operationId ?? null;
+    const client = probes.client === undefined ? runtimeHostClient() : probes.client;
+    const now = probes.now ?? Date.now;
+    const sleep = probes.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+    const deadline = now() + (probes.budgetMs ?? KILL_CONFIRMATION_BUDGET_MS);
+    const interval = probes.intervalMs ?? KILL_CONFIRMATION_INTERVAL_MS;
+    for (let poll = 0; poll < KILL_CONFIRMATION_MAX_POLLS; poll += 1) {
+      if (!resident()) return { outcome: "stopped" };
+      if (operationId && client) {
+        const durable = await client.operationStatus(operationId).catch(() => null);
+        const status = durable?.receipt.status ?? null;
+        if (status && KILL_DELIVERED_STATES.has(status)) return { outcome: "stopped" };
+        if (status && KILL_REFUSED_STATES.has(status)) {
+          return {
+            outcome: "failed",
+            error: durable?.receipt.reason ?? `stage host kill ${status} (operation ${operationId})`,
+          };
+        }
+      }
+      if (now() >= deadline) break;
+      await sleep(interval);
+    }
+    if (!resident()) return { outcome: "stopped" };
+    return {
+      outcome: "unconfirmed",
+      operationId,
+      detail: `kill accepted as ${receiptStatus} but termination was not confirmed`,
+    };
   } catch (error) {
     return { outcome: "failed", error: error instanceof Error ? error.message : String(error) };
   }
@@ -336,7 +417,7 @@ export function defaultPipelinePorts(): PipelinePorts {
       const info = await paneInfo(paneId);
       return info !== null && !isShellCommand(info.command);
     },
-    stopStageAgent: stopPipelineStageAgent,
+    stopStageAgent: (target) => stopPipelineStageAgent(target),
     conversationAgentActive: async (conversationId) => {
       const client = runtimeHostClient();
       if (!client) return null;
@@ -2001,15 +2082,24 @@ function closeWorktreeReport(pipeline: Pipeline, ports: PipelinePorts): Pipeline
 }
 
 /** Durable one-line account of a close, so the board and the API agree on
-    whether anything was stopped and what was preserved. */
+    whether anything was stopped, what could not be confirmed, and what was
+    preserved. An unreadable worktree is reported as such — never as the silence
+    that a verified-clean worktree produces. */
 function closeSummary(report: PipelineCloseReport): string | null {
   const parts: string[] = [];
   if (report.stopped.length > 0) {
     parts.push(`stopped ${report.stopped.length} stage host${report.stopped.length === 1 ? "" : "s"}`);
   }
-  const kept = report.worktree?.uncommitted.length ?? 0;
-  if (kept > 0) {
-    parts.push(`kept ${kept}${report.worktree?.truncated ? "+" : ""} uncommitted path${kept === 1 ? "" : "s"} in the worktree`);
+  for (const item of report.unconfirmed) {
+    parts.push(`${item.detail} for ${stageHostLabel(item)}${item.operationId ? ` (operation ${item.operationId})` : ""}`);
+  }
+  if (report.worktree?.error) {
+    parts.push(`could not read the worktree at ${report.worktree.dir}: ${report.worktree.error}`);
+  } else {
+    const kept = report.worktree?.uncommitted.length ?? 0;
+    if (kept > 0) {
+      parts.push(`kept ${kept}${report.worktree?.truncated ? "+" : ""} uncommitted path${kept === 1 ? "" : "s"} in the worktree`);
+    }
   }
   return parts.length > 0 ? `closed; ${parts.join("; ")}` : null;
 }
@@ -2451,12 +2541,22 @@ export async function patchPipeline(
          the hosts down before the flow and the state write, and report exactly
          what was stopped. Nothing on disk is touched — uncommitted stage work
          stays in the worktree and is named in the report instead. */
-      const close: PipelineCloseReport = { stopped: [], alreadyStopped: [], stillRunning: [], worktree: null };
+      const close: PipelineCloseReport = { stopped: [], alreadyStopped: [], unconfirmed: [], stillRunning: [], worktree: null };
       for (const target of liveStageHosts(pipeline)) {
         const result = await ports.stopStageAgent(target);
         if (result.outcome === "stopped") close.stopped.push(target);
-        else if (result.outcome === "not-running") close.alreadyStopped.push(target);
-        else close.stillRunning.push({ ...target, error: result.error });
+        else if (result.outcome === "failed") close.stillRunning.push({ ...target, error: result.error });
+        else if (result.outcome === "unconfirmed") {
+          close.unconfirmed.push({ ...target, operationId: result.operationId, detail: result.detail });
+        } else if (target.paneId && await ports.paneAgentAlive(target.paneId)) {
+          /* The registry knows no host, but an agent is still running in the
+             attempt's pane — the same evidence orphanAgentPane refuses a retry
+             on. Surface it rather than closing cleanly over a live agent. */
+          close.stillRunning.push({
+            ...target,
+            error: `an agent is still running in pane ${target.paneId}; kill the pane, then close again`,
+          });
+        } else close.alreadyStopped.push(target);
       }
       close.worktree = closeWorktreeReport(pipeline, ports);
       if (close.stillRunning.length > 0) {

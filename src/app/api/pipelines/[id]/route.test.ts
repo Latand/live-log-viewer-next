@@ -6,6 +6,7 @@ const pipeline = { id: "pipeline-1" };
 const closeReport = {
   stopped: [{ stageId: "build", attempt: 1, conversationId: "conversation_stage_1", agentPath: null, paneId: null }],
   alreadyStopped: [],
+  unconfirmed: [],
   stillRunning: [],
   worktree: { dir: "/repo-pipeline-1", uncommitted: ["notes.md"], truncated: false },
 };

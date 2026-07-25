@@ -3089,6 +3089,9 @@ test("retry and skip recover a completed pane-hosted semantic contradiction", as
 
 test("closing a mid-run or parked pipeline persists a record that loads back", async () => {
   const h = harness();
+  /* No host and no live pane behind these stages: the close has nothing to stop
+     and records the closed pipeline. A live pane is covered separately (#670). */
+  h.setPaneAlive(false);
   const running = await create(h.ports);
   await tickPipelines([], h.ports);
   await tickPipelines([], h.ports);
@@ -3158,6 +3161,7 @@ test("closing stops every non-terminal stage host and leaves settled rounds alon
 
 test("closing a pipeline whose host is already gone reports that nothing was running (#670)", async () => {
   const h = harness();
+  h.setPaneAlive(false);
   const pipeline = await create(h.ports);
   await tickPipelines([], h.ports);
   await tickPipelines([], h.ports);
@@ -3167,10 +3171,80 @@ test("closing a pipeline whose host is already gone reports that nothing was run
   expect(closed.close).toMatchObject({
     stopped: [],
     alreadyStopped: [{ stageId: "plan", attempt: 1, conversationId: "conversation_stage_1" }],
+    unconfirmed: [],
     stillRunning: [],
   });
   /* "closed, nothing was running" carries no stop claim of any kind. */
   expect(loadPipelines()[0]).toMatchObject({ state: "closed", stateDetail: null });
+});
+
+test("an accepted but unconfirmed kill never counts as a clean stop (#670)", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  h.setStageHost("conversation_stage_1", {
+    outcome: "unconfirmed",
+    operationId: "kill-op-1",
+    detail: "kill accepted as queued but termination was not confirmed",
+  });
+
+  const closed = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+  /* A queued receipt is the normal first answer, so this still closes — but it
+     records no stop and names the operation that may have left a survivor. */
+  expect(closed.error).toBeUndefined();
+  expect(closed.close).toMatchObject({
+    stopped: [],
+    stillRunning: [],
+    unconfirmed: [{ stageId: "plan", attempt: 1, operationId: "kill-op-1" }],
+  });
+  expect(loadPipelines()[0]!.stateDetail).toBe(
+    "closed; kill accepted as queued but termination was not confirmed for stage plan attempt 1 (conversation_stage_1) (operation kill-op-1)",
+  );
+});
+
+test("a live pane behind a host the registry does not know refuses the close (#670)", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  /* The registry entry is gone (stopStageAgent says not-running) but the pane
+     still runs an agent — closing here would hide a live agent. */
+  h.setPaneAlive(true);
+
+  const refused = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+  expect(refused.status).toBe(409);
+  expect(refused.close?.stillRunning).toMatchObject([{ stageId: "plan", attempt: 1, paneId: "%1" }]);
+  expect(refused.error).toContain("an agent is still running in pane %1");
+  expect(loadPipelines()[0]!.state).not.toBe("closed");
+});
+
+test("an unreadable worktree is reported instead of closing as if nothing was left (#670)", async () => {
+  const h = harness();
+  h.setPaneAlive(false);
+  const baseExec = h.ports.exec;
+  let failStatus = false;
+  h.ports.exec = (command, args, cwd) => {
+    if (failStatus && command === "git" && args[0] === "status") {
+      return { code: 128, stdout: "", stderr: "fatal: not a git repository" };
+    }
+    return baseExec(command, args, cwd);
+  };
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  failStatus = true;
+
+  const closed = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+  expect(closed.error).toBeUndefined();
+  expect(closed.close?.worktree).toMatchObject({ uncommitted: [], error: "checking the pipeline worktree: fatal: not a git repository" });
+  /* An unreadable worktree must not look like a verified-clean one. */
+  expect(loadPipelines()[0]!.stateDetail).toBe(
+    `closed; could not read the worktree at ${loadPipelines()[0]!.worktreeDir}: checking the pipeline worktree: fatal: not a git repository`,
+  );
 });
 
 test("a stage host that cannot be stopped refuses the close instead of hiding it (#670)", async () => {
