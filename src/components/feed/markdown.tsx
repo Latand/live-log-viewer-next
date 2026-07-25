@@ -214,31 +214,34 @@ function MdTable({ rows }: { rows: string[] }) {
   );
 }
 
-/* Block-level pass for whole prose messages rendered inside whitespace-pre-wrap:
-   newlines survive as text; tables group into real <table>, headings and
-   blockquotes are styled per line, everything else goes through the inline pass. */
-export function mdBlocks(text: string): ReactNode {
-  const lines = text.split("\n");
-  const out: ReactNode[] = [];
-  let i = 0;
-  while (i < lines.length) {
-    if (/^\s*```/.test(lines[i])) {
+const FENCE_OPEN_RE = /^\s*```/;
+const FENCE_CLOSE_RE = /^\s*```\s*$/;
+
+/* Block-level pass over `lines[from, to)`, appended to `out`. Every node is
+   keyed by its ABSOLUTE line index, and the trailing-newline bookkeeping reads
+   `out` rather than local state, so one document can be rendered in several
+   append-only slices and still come out identical to a single pass — that is
+   what lets the streaming renderer below freeze what it has already parsed. */
+function pushBlocks(out: ReactNode[], lines: string[], from: number, to: number): void {
+  let i = from;
+  while (i < to) {
+    if (FENCE_OPEN_RE.test(lines[i])) {
       const start = i;
       /* The opening fence's info string (```ts, ```python, …) is the language
          hint highlight.js resolves; fence-only names like `python`/`shell` have
          no file-extension equivalent, so this is their only entry point. */
       const lang = lines[i].match(/^\s*```+\s*([A-Za-z0-9+#_-]+)/)?.[1] ?? null;
       i++;
-      while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) i++;
+      while (i < to && !FENCE_CLOSE_RE.test(lines[i])) i++;
       const code = lines.slice(start + 1, i).join("\n");
-      if (i < lines.length) i++;
+      if (i < to) i++;
       if (out[out.length - 1] === "\n") out.pop();
       out.push(<CodeBlock key={`c${start}`} code={code} lang={lang} />);
       continue;
     }
     if (TABLE_ROW_RE.test(lines[i])) {
       const start = i;
-      while (i < lines.length && TABLE_ROW_RE.test(lines[i])) i++;
+      while (i < to && TABLE_ROW_RE.test(lines[i])) i++;
       /* The table div is a block element: the pending newline would add an empty row. */
       if (out[out.length - 1] === "\n") out.pop();
       out.push(<MdTable key={`t${start}`} rows={lines.slice(start, i)} />);
@@ -247,7 +250,7 @@ export function mdBlocks(text: string): ReactNode {
     if (IMAGE_LINE_RE.test(lines[i])) {
       const start = i;
       const images: { alt: string; src: string }[] = [];
-      while (i < lines.length) {
+      while (i < to) {
         const m = lines[i].match(IMAGE_LINE_RE);
         if (!m) break;
         images.push({ alt: m[1], src: m[2] });
@@ -277,7 +280,154 @@ export function mdBlocks(text: string): ReactNode {
       out.push(<Fragment key={i}>{md(line)}</Fragment>);
     }
     i++;
+    /* The newline belongs to the document, not to the slice: a slice that stops
+       short of the end is followed by more lines, so it keeps its separator. */
     if (i < lines.length) out.push("\n");
   }
+}
+
+/* Block-level pass for whole prose messages rendered inside whitespace-pre-wrap:
+   newlines survive as text; tables group into real <table>, headings and
+   blockquotes are styled per line, everything else goes through the inline pass. */
+export function mdBlocks(text: string): ReactNode {
+  const lines = text.split("\n");
+  const out: ReactNode[] = [];
+  pushBlocks(out, lines, 0, lines.length);
   return out;
+}
+
+/* How far the block extending from `lines[i]` reaches, and whether a line
+   arriving after `limit` could still be swallowed by it. */
+function blockSpan(lines: string[], i: number, limit: number): { end: number; extendable: boolean } {
+  if (FENCE_OPEN_RE.test(lines[i])) {
+    let j = i + 1;
+    while (j < limit && !FENCE_CLOSE_RE.test(lines[j])) j++;
+    /* A closed fence is finished; an open one keeps eating whatever comes. */
+    return j < limit ? { end: j + 1, extendable: false } : { end: limit, extendable: true };
+  }
+  const run = TABLE_ROW_RE.test(lines[i]) ? TABLE_ROW_RE : IMAGE_LINE_RE.test(lines[i]) ? IMAGE_LINE_RE : null;
+  if (run) {
+    let j = i;
+    while (j < limit && run.test(lines[j])) j++;
+    return { end: j, extendable: true };
+  }
+  return { end: i + 1, extendable: false };
+}
+
+/**
+ * How many leading lines of a still-arriving message can no longer change
+ * meaning. The last line has no terminating newline yet, so it is always
+ * volatile; and a construct that runs up against it — an unclosed fence, a
+ * table or image run that the next line may join — is volatile with it.
+ * Everything before that point is final: later deltas cannot reinterpret it.
+ */
+export function settledLineCount(lines: string[]): number {
+  const complete = lines.length - 1;
+  let i = 0;
+  while (i < complete) {
+    const span = blockSpan(lines, i, complete);
+    if (span.extendable && span.end >= complete) return i;
+    i = span.end;
+  }
+  return Math.max(complete, 0);
+}
+
+/* Lines the agent is still writing, rendered so that nothing ever re-interprets
+   itself on a later delta — the message must not twitch as it is typed. The
+   inline pass alone already degrades to plain text for any construct whose
+   closer has not arrived (`**bol`, a half-written row), and the block grammar
+   runs only where the answer can no longer change: */
+function pushPending(out: ReactNode[], lines: string[], from: number): void {
+  /* …never inside an open fence. Its body is code, must stay verbatim, and a
+     growing <pre> would re-run highlight.js on every delta. */
+  if (FENCE_OPEN_RE.test(lines[from] ?? "")) {
+    for (let i = from; i < lines.length; i++) {
+      out.push(<Fragment key={`p${i}`}>{lines[i]}</Fragment>);
+      if (i < lines.length - 1) out.push("\n");
+    }
+    return;
+  }
+  /* …but yes for the closed lines of a trailing table or image run, which is
+     how a message that ENDS with a table gets to look like its settled self
+     while it streams. A table waits for its second row: until that row lands,
+     the header/body split is still open, and deciding it early is exactly the
+     kind of re-interpretation this is avoiding. Rows only ever append after. */
+  const complete = lines.length - 1;
+  const closed = lines.slice(from, complete);
+  const rows = closed.length >= 2 && closed.every((line) => TABLE_ROW_RE.test(line)) ? closed : null;
+  const matches = rows ? [] : closed.map((line) => line.match(IMAGE_LINE_RE));
+  const images = matches.length && matches.every((m) => m !== null)
+    ? matches.map((m) => ({ alt: m![1], src: m![2] }))
+    : null;
+  let i = from;
+  if (rows || images) {
+    /* Block element: drop the newline the settled slice left pending. */
+    if (out[out.length - 1] === "\n") out.pop();
+    /* Same key the settled pass will give this block, so it is reconciled in
+       place — the table does not blink out and back when the run terminates. */
+    out.push(rows
+      ? <MdTable key={`t${from}`} rows={rows} />
+      : <MdImageRow key={`i${from}`} images={images!} />);
+    i = complete;
+  }
+  for (; i < lines.length; i++) {
+    out.push(<Fragment key={`p${i}`}>{md(lines[i])}</Fragment>);
+    if (i < lines.length - 1) out.push("\n");
+  }
+}
+
+export interface MdStreamState {
+  source: string;
+  settled: number;
+  blocks: ReactNode[];
+  /** Lines block-parsed so far. A delta must not grow this by more than the
+      lines it just settled — that is the whole point of the cache. */
+  parsedLines: number;
+}
+
+export function createMdStream(): MdStreamState {
+  return { source: "", settled: 0, blocks: [], parsedLines: 0 };
+}
+
+/**
+ * Advances a streaming prose body to `text` and returns its nodes.
+ *
+ * The settled prefix is parsed ONCE and kept in `state`: a call parses only the
+ * lines that just became final, and re-renders the volatile tail — normally one
+ * line, at most the open construct. The cached nodes keep their element
+ * identity, so React skips those subtrees and highlight.js never re-runs for a
+ * fence that is already closed. Re-parsing the accumulated text on every delta
+ * would be quadratic over a long answer; this is linear over the whole stream.
+ */
+export function advanceMdStream(state: MdStreamState, text: string, streaming: boolean): ReactNode[] {
+  const lines = text.split("\n");
+  const settled = streaming ? settledLineCount(lines) : lines.length;
+  /* Deltas append; anything else (a completed item replacing its draft, a
+     bounded projection trimming its head) invalidates what was parsed. */
+  if (!text.startsWith(state.source) || settled < state.settled) {
+    state.blocks = [];
+    state.settled = 0;
+  }
+  if (settled > state.settled) {
+    pushBlocks(state.blocks, lines, state.settled, settled);
+    state.parsedLines += settled - state.settled;
+    state.settled = settled;
+  }
+  state.source = text;
+  const out = state.blocks.slice();
+  if (settled < lines.length) pushPending(out, lines, settled);
+  return out;
+}
+
+/**
+ * A prose body that may still be streaming, rendered by the same grammar as a
+ * settled transcript message — so nothing changes appearance when the echo of a
+ * live turn lands.
+ */
+export function StreamingMd({ text, streaming }: { text: string; streaming: boolean }): ReactNode {
+  /* A memo of the props, held in state because it is grown across renders and
+     must survive every one of them. Advancing it is idempotent, so a repeated
+     render of the same text yields the same tree. */
+  const [stream] = useState(createMdStream);
+  return advanceMdStream(stream, text, streaming);
 }
