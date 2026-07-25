@@ -235,7 +235,9 @@ async function pipelineAction(args: McpToolArgs): Promise<McpToolPayload> {
   const result = await patchPipeline(pipelineId, request as PatchPipelineRequest);
   if (!result.pipeline) throw new Error(result.error ?? "could not update pipeline");
   if (PIPELINE_CONTROLLER_ACTIONS.has(action)) requestPipelineTick();
-  return { pipelineId, pipeline: result.pipeline };
+  /* A close reports the stage hosts it terminated and the uncommitted work it
+     left behind (#670), so an agent driving the board sees it too. */
+  return { pipelineId, pipeline: result.pipeline, ...(result.close ? { close: result.close } : {}) };
 }
 
 async function linkTaskToPipeline(args: McpToolArgs, dependencies: LinkTaskToPipelineDependencies): Promise<McpToolPayload> {

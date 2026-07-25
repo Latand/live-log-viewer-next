@@ -6,7 +6,7 @@ import { emptyLaunchProfile, type ViewerConversationId } from "@/lib/accounts/mi
 import { freshSpecFor } from "@/lib/agent/cli";
 import { agentRegistry, type DurableMembershipInput } from "@/lib/agent/registry";
 import { transcriptAllowed } from "@/lib/agent/spawnParent";
-import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
+import { sessionKeyFromTranscript, sessionKeyId } from "@/lib/agent/sessionKey";
 import { headCwd } from "@/lib/agent/transcript";
 import { MAX_FLOW_NOTE_LENGTH, closeFlow, createFlowFromRequest, patchFlow } from "@/lib/flows/commands";
 import { lastAssistantMessage } from "@/lib/flows/findings";
@@ -26,7 +26,7 @@ import { realExec, type ExecPort } from "@/lib/workflows/provision";
 
 import { requestPipelineTick } from "./controllerSignal";
 import { durableStageTurnEvidence, type StageTurnEvidence } from "./durableEvidence";
-import { commitPipelineStage, currentPipelineBranchHead, currentPipelineRemoteBranchHead, provisionPipelineWorktree, resetPipelineStage, resolvePipelineBase, synchronizePipelineRetryHead } from "./git";
+import { commitPipelineStage, currentPipelineBranchHead, currentPipelineRemoteBranchHead, pipelineWorktreeChanges, provisionPipelineWorktree, resetPipelineStage, resolvePipelineBase, synchronizePipelineRetryHead } from "./git";
 import {
   DEFAULT_FAIL_EDGE_ROUNDS,
   MAX_FAIL_EDGE_ROUNDS,
@@ -63,6 +63,36 @@ export type PipelineStageSpawn = {
   paneId: string | null;
 };
 
+/** Identity of the agent host a stage attempt owns, as a close reports it. */
+export type PipelineStageHostRef = {
+  stageId: string;
+  attempt: number;
+  conversationId: string | null;
+  agentPath: string | null;
+  paneId: string | null;
+};
+
+export type PipelineStageStopResult =
+  | { outcome: "stopped" }
+  | { outcome: "not-running" }
+  | { outcome: "failed"; error: string };
+
+/**
+ * What closing a pipeline did to its stage hosts, and what it left on disk
+ * (#670). `stopped` is empty and `alreadyStopped` may be populated when nothing
+ * was burning quota; a non-empty `stillRunning` means the close was refused.
+ */
+export type PipelineCloseReport = {
+  /** Hosts this close terminated. */
+  stopped: PipelineStageHostRef[];
+  /** Non-terminal stages whose host was already gone. */
+  alreadyStopped: PipelineStageHostRef[];
+  /** Hosts that survived teardown, so the close cannot claim to be clean. */
+  stillRunning: Array<PipelineStageHostRef & { error: string }>;
+  /** Uncommitted stage work preserved in the worktree; null when unprovisioned. */
+  worktree: { dir: string; uncommitted: string[]; truncated: boolean; error?: string } | null;
+};
+
 export type PipelineStageLaunchReservation = Pick<PipelineStageSpawn, "launchId" | "conversationId">;
 export type PipelineSpawnReceipt = PipelineStageSpawn & {
   state: "starting" | "pane-bound" | "host-verified" | "prompt-delivered" | "path-pending" | "completed" | "failed" | "conflicted";
@@ -90,6 +120,9 @@ export interface PipelinePorts {
   spawnReceipt(launchId: string): PipelineSpawnReceipt | null;
   claimSpawnRetry(launchId: string, claimId: string): "claimed" | "settled" | "conflict";
   paneAgentAlive(paneId: string): Promise<boolean>;
+  /** Terminates the host that owns a stage attempt's agent. `not-running` means
+      no host was resident, so a close can tell an idle lane from one it stopped. */
+  stopStageAgent(target: PipelineStageHostRef): Promise<PipelineStageStopResult>;
   conversationAgentActive(conversationId: string): Promise<boolean | null>;
   durableTurnEvidence(engine: EffectivePipelineRole["engine"], transcriptPath: string): Promise<StageTurnEvidence | null>;
   headCwd(transcriptPath: string): string | null;
@@ -243,6 +276,42 @@ async function spawnPipelineAgent(
   };
 }
 
+/**
+ * Terminates the agent host a stage attempt owns, through the same control path
+ * an operator's kill uses — structured hosts go over the runtime command
+ * channel, legacy panes down the tmux ladder. Nothing on disk is touched: the
+ * worktree, including uncommitted stage work, is left exactly as the agent left
+ * it. Residency is read from the durable registry first so a lane whose host is
+ * already gone reports `not-running` instead of a manufactured kill.
+ */
+async function stopPipelineStageAgent(target: PipelineStageHostRef): Promise<PipelineStageStopResult> {
+  const registry = agentRegistry();
+  const conversation = target.conversationId?.startsWith("conversation_")
+    ? registry.conversation(target.conversationId as ViewerConversationId)
+    : target.agentPath
+      ? registry.conversationForPath(target.agentPath)
+      : null;
+  const generation = conversation?.generations.at(-1) ?? null;
+  if (!conversation || !generation) return { outcome: "not-running" };
+  const entry = registry.readOnlySnapshot().entries[sessionKeyId({ engine: conversation.engine, sessionId: generation.id })];
+  if (!entry || entry.status === "dead" || entry.status === "unhosted") return { outcome: "not-running" };
+  try {
+    const { structuredHostProcessAlive } = await import("@/lib/runtime/structuredRecovery");
+    if (!structuredHostProcessAlive(entry.structuredHost?.process ?? null) && !entry.host) return { outcome: "not-running" };
+    const { applyConversationAction } = await import("@/lib/conversation/actions");
+    const result = await applyConversationAction({
+      conversationId: conversation.id,
+      transcriptPath: generation.path,
+      action: "kill",
+    });
+    const body = result.body as { ok?: boolean; error?: string };
+    if (result.status < 400 && body.ok === true) return { outcome: "stopped" };
+    return { outcome: "failed", error: body.error ?? `stage host kill was refused with status ${result.status}` };
+  } catch (error) {
+    return { outcome: "failed", error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 export function defaultPipelinePorts(): PipelinePorts {
   let runtimeSnapshot: ReturnType<NonNullable<ReturnType<typeof runtimeHostClient>>["snapshot"]> | null = null;
   return {
@@ -267,6 +336,7 @@ export function defaultPipelinePorts(): PipelinePorts {
       const info = await paneInfo(paneId);
       return info !== null && !isShellCommand(info.command);
     },
+    stopStageAgent: stopPipelineStageAgent,
     conversationAgentActive: async (conversationId) => {
       const client = runtimeHostClient();
       if (!client) return null;
@@ -1669,13 +1739,15 @@ function replaceDraftStages(
   return {};
 }
 
-type PipelineMutationResult = {
+export type PipelineMutationResult = {
   pipeline?: Pipeline;
   error?: string;
   status?: number;
   code?: PipelineRepoPreflightErrorCode;
   field?: "repoDir";
   path?: string;
+  /** Set by the close action: what its host teardown stopped and preserved. */
+  close?: PipelineCloseReport;
 };
 
 type PipelineCreatorLineage = {
@@ -1892,6 +1964,54 @@ async function orphanAgentPane(
   if (!attempt || attempt.verdict || attempt.completedAt || !attempt.paneId) return null;
   if (!(await ports.paneAgentAlive(attempt.paneId))) return null;
   return { error: `stage agent may still be running in pane ${attempt.paneId}; wait for it to exit or kill the pane first`, status: 409 };
+}
+
+/** Stage attempts that may still own a live agent host: every current round
+    that has not reached a terminal state and named a conversation. Historical
+    (lineage-adopted) evidence never owns a host this pipeline may terminate. */
+function liveStageHosts(pipeline: Pipeline): PipelineStageHostRef[] {
+  const targets: PipelineStageHostRef[] = [];
+  for (const run of pipeline.runs) {
+    for (const attempt of run.attempts) {
+      if (attempt.historical || TERMINAL_ATTEMPT_STATES.has(attempt.state)) continue;
+      if (!attempt.conversationId && !attempt.agentPath) continue;
+      targets.push({
+        stageId: run.stageId,
+        attempt: attempt.n,
+        conversationId: attempt.conversationId,
+        agentPath: attempt.agentPath,
+        paneId: attempt.paneId,
+      });
+    }
+  }
+  return targets;
+}
+
+function stageHostLabel(target: PipelineStageHostRef): string {
+  return `stage ${target.stageId} attempt ${target.attempt} (${target.conversationId ?? target.agentPath ?? "unknown host"})`;
+}
+
+/** Reads the uncommitted work a close leaves behind. Skipped while the pipeline
+    has no provisioned worktree to read. */
+function closeWorktreeReport(pipeline: Pipeline, ports: PipelinePorts): PipelineCloseReport["worktree"] {
+  if (pipeline.state === "provisioning" || !pipeline.lastPassedCommit) return null;
+  const changes = pipelineWorktreeChanges(pipeline, ports.exec);
+  if (!changes.ok) return { dir: pipeline.worktreeDir, uncommitted: [], truncated: false, error: changes.error };
+  return { dir: pipeline.worktreeDir, uncommitted: changes.paths, truncated: changes.truncated };
+}
+
+/** Durable one-line account of a close, so the board and the API agree on
+    whether anything was stopped and what was preserved. */
+function closeSummary(report: PipelineCloseReport): string | null {
+  const parts: string[] = [];
+  if (report.stopped.length > 0) {
+    parts.push(`stopped ${report.stopped.length} stage host${report.stopped.length === 1 ? "" : "s"}`);
+  }
+  const kept = report.worktree?.uncommitted.length ?? 0;
+  if (kept > 0) {
+    parts.push(`kept ${kept}${report.worktree?.truncated ? "+" : ""} uncommitted path${kept === 1 ? "" : "s"} in the worktree`);
+  }
+  return parts.length > 0 ? `closed; ${parts.join("; ")}` : null;
 }
 
 export async function patchPipeline(
@@ -2326,12 +2446,34 @@ export async function patchPipeline(
         persist();
         return { pipeline };
       }
+      /* #670: a close used to leave the stage host resident, so the agent kept
+         executing on a paid quota and the board kept a live-looking chip. Tear
+         the hosts down before the flow and the state write, and report exactly
+         what was stopped. Nothing on disk is touched — uncommitted stage work
+         stays in the worktree and is named in the report instead. */
+      const close: PipelineCloseReport = { stopped: [], alreadyStopped: [], stillRunning: [], worktree: null };
+      for (const target of liveStageHosts(pipeline)) {
+        const result = await ports.stopStageAgent(target);
+        if (result.outcome === "stopped") close.stopped.push(target);
+        else if (result.outcome === "not-running") close.alreadyStopped.push(target);
+        else close.stillRunning.push({ ...target, error: result.error });
+      }
+      close.worktree = closeWorktreeReport(pipeline, ports);
+      if (close.stillRunning.length > 0) {
+        /* A host that survived teardown must not be reported as a clean close:
+           the pipeline keeps its state so the survivor stays visible and
+           addressable instead of hiding behind a closed lane. */
+        const detail = `could not stop ${close.stillRunning.map((item) => `${stageHostLabel(item)}: ${item.error}`).join("; ")}`;
+        pipeline.stateDetail = detail;
+        persist();
+        return { error: detail, status: 409, close };
+      }
       if (flow && flow.state !== "closed") {
         const closed = await ports.closeFlow(flow.id);
         if (closed?.error) {
           pipeline.stateDetail = closed.error;
           persist();
-          return { error: closed.error, status: closed.status ?? 409 };
+          return { error: closed.error, status: closed.status ?? 409, close };
         }
       }
       /* A cursor can rest at state pending before its round's attempt
@@ -2348,9 +2490,11 @@ export async function patchPipeline(
       pipeline.state = "closed";
       pipeline.cursor = null;
       pipeline.pausedState = null;
-      pipeline.stateDetail = null;
+      pipeline.stateDetail = closeSummary(close);
       pipeline.closedAt = ports.now();
       pipeline.hiddenAt = pipeline.closedAt;
+      persist();
+      return { pipeline, close };
     } else {
       return { error: "unknown pipeline action", status: 400 };
     }

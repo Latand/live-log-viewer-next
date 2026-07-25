@@ -21,6 +21,7 @@ const { registerPipelineTick } = await import("./controllerSignal");
 const { loadPipelines, savePipelines } = await import("./store");
 const { saveTasks } = await import("@/lib/tasks/store");
 type PipelinePorts = import("./engine").PipelinePorts;
+type PipelineStageStopResult = import("./engine").PipelineStageStopResult;
 type StageTurnEvidence = import("./durableEvidence").StageTurnEvidence;
 
 /* tickPipelines self-schedules a follow-up tick when a pass leaves a pending
@@ -99,6 +100,9 @@ function harness() {
   let builderEffort = "medium";
   let paneAlive = true;
   let conversationActive: boolean | null = null;
+  /* Stage hosts are "not running" unless a test seats one; nothing in this
+     suite may reach a real host or the operator's registry. */
+  const stageHosts = new Map<string, PipelineStageStopResult>();
   const ports: PipelinePorts = {
     exec: (command, args) => {
       calls.push(`${command} ${args.join(" ")}`);
@@ -137,6 +141,10 @@ function harness() {
       return { launchId: `launch-${spawn}`, conversationId: `conversation_stage_${spawn}`, sessionId: `session-${spawn}`, transcript: `/codex/stage-${spawn}.jsonl`, paneId: `%${spawn}` };
     },
     paneAgentAlive: async () => paneAlive,
+    stopStageAgent: async (target) => {
+      calls.push(`stop-host:${target.stageId}:${target.attempt}:${target.conversationId ?? "none"}`);
+      return stageHosts.get(target.conversationId ?? "") ?? { outcome: "not-running" };
+    },
     conversationAgentActive: async () => conversationActive,
     durableTurnEvidence: async (_engine, transcriptPath) => durableTurns.get(transcriptPath) ?? null,
     headCwd: () => loadPipelines()[0]?.worktreeDir ?? null,
@@ -183,6 +191,7 @@ function harness() {
     finish,
     setBuilderEffort: (effort: string) => { builderEffort = effort; },
     setPaneAlive: (alive: boolean) => { paneAlive = alive; },
+    setStageHost: (conversationId: string, result: PipelineStageStopResult) => { stageHosts.set(conversationId, result); },
     setConversationActive: (active: boolean | null) => { conversationActive = active; },
   };
 }
@@ -2747,7 +2756,10 @@ test("retry parks without synchronizing when reviewer termination cannot be veri
   expect(loadPipelines()[0]).toMatchObject({ state: "needs_decision", stateDetail: "reviewer process group did not terminate" });
 
   const closed = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
-  expect(closed).toEqual({ error: "reviewer process group did not terminate", status: 409 });
+  /* The close carries its host-teardown report (#670) even when the flow refuses
+     to close, so nothing it already stopped is swallowed by the rejection. */
+  expect(closed).toMatchObject({ error: "reviewer process group did not terminate", status: 409 });
+  expect(closed.close).toMatchObject({ stopped: [], stillRunning: [] });
   expect(loadPipelines()[0]).toMatchObject({ state: "needs_decision", closedAt: null, stateDetail: "reviewer process group did not terminate" });
 });
 
@@ -3094,6 +3106,119 @@ test("closing a mid-run or parked pipeline persists a record that loads back", a
   expect(loadPipelines()[0]!.state).toBe("needs_decision");
   await patchPipeline(parked.id, { action: "close" }, h.ports);
   expect(loadPipelines()[0]!).toMatchObject({ state: "closed", cursor: null });
+});
+
+test("closing a running pipeline terminates its stage host and reports the stop (#670)", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  h.setStageHost("conversation_stage_1", { outcome: "stopped" });
+
+  const closed = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+  expect(h.calls).toContain("stop-host:plan:1:conversation_stage_1");
+  expect(closed.error).toBeUndefined();
+  expect(closed.close).toMatchObject({
+    stopped: [{ stageId: "plan", attempt: 1, conversationId: "conversation_stage_1", agentPath: "/codex/stage-1.jsonl" }],
+    alreadyStopped: [],
+    stillRunning: [],
+  });
+  expect(loadPipelines()[0]).toMatchObject({
+    state: "closed",
+    cursor: null,
+    stateDetail: "closed; stopped 1 stage host",
+  });
+});
+
+test("closing stops every non-terminal stage host and leaves settled rounds alone (#670)", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  /* A second lane whose round already settled must not be touched, while its
+     live successor round must be: the close targets hosts, not stages. */
+  const stored = loadPipelines();
+  const buildRun = stored[0]!.runs.find((run) => run.stageId === "build")!;
+  const template = stored[0]!.runs[0]!.attempts[0]!;
+  buildRun.attempts.push(
+    { ...structuredClone(template), n: 1, state: "passed", conversationId: "conversation_stage_settled", agentPath: "/codex/stage-settled.jsonl", completedAt: h.ports.now() },
+    { ...structuredClone(template), n: 2, state: "running", conversationId: "conversation_stage_2", agentPath: "/codex/stage-2.jsonl" },
+  );
+  savePipelines(stored);
+  h.setStageHost("conversation_stage_1", { outcome: "stopped" });
+  h.setStageHost("conversation_stage_2", { outcome: "stopped" });
+
+  const closed = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+  expect(closed.close?.stopped.map((item) => `${item.stageId}:${item.attempt}`)).toEqual(["plan:1", "build:2"]);
+  expect(h.calls).not.toContain("stop-host:build:1:conversation_stage_settled");
+  expect(loadPipelines()[0]!.stateDetail).toBe("closed; stopped 2 stage hosts");
+});
+
+test("closing a pipeline whose host is already gone reports that nothing was running (#670)", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+
+  const closed = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+  expect(closed.close).toMatchObject({
+    stopped: [],
+    alreadyStopped: [{ stageId: "plan", attempt: 1, conversationId: "conversation_stage_1" }],
+    stillRunning: [],
+  });
+  /* "closed, nothing was running" carries no stop claim of any kind. */
+  expect(loadPipelines()[0]).toMatchObject({ state: "closed", stateDetail: null });
+});
+
+test("a stage host that cannot be stopped refuses the close instead of hiding it (#670)", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  h.setStageHost("conversation_stage_1", { outcome: "failed", error: "structured host ownership is unavailable" });
+
+  const refused = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+  expect(refused.status).toBe(409);
+  expect(refused.error).toBe(
+    "could not stop stage plan attempt 1 (conversation_stage_1): structured host ownership is unavailable",
+  );
+  expect(refused.close?.stillRunning).toMatchObject([{ stageId: "plan", conversationId: "conversation_stage_1" }]);
+  const stored = loadPipelines()[0]!;
+  expect(stored.state).not.toBe("closed");
+  expect(stored.closedAt).toBeNull();
+  expect(stored.stateDetail).toContain("structured host ownership is unavailable");
+});
+
+test("closing preserves uncommitted stage work and names what it left behind (#670)", async () => {
+  const h = harness();
+  const baseExec = h.ports.exec;
+  h.ports.exec = (command, args, cwd) => {
+    if (command === "git" && args[0] === "status") {
+      return { code: 0, stdout: " M src/lib/app.ts\n?? notes.md\n", stderr: "" };
+    }
+    return baseExec(command, args, cwd);
+  };
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  h.setStageHost("conversation_stage_1", { outcome: "stopped" });
+
+  const closed = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+  expect(closed.close?.worktree).toEqual({
+    dir: loadPipelines()[0]!.worktreeDir,
+    uncommitted: ["src/lib/app.ts", "notes.md"],
+    truncated: false,
+  });
+  /* The whole point of the report: the work stays on disk. */
+  expect(h.calls.some((call) => call.includes("reset --hard"))).toBeFalse();
+  expect(h.calls.some((call) => call.startsWith("git clean"))).toBeFalse();
+  expect(h.calls.some((call) => call.startsWith("git checkout"))).toBeFalse();
+  expect(loadPipelines()[0]!.stateDetail).toBe("closed; stopped 1 stage host; kept 2 uncommitted paths in the worktree");
 });
 
 test("a lost advance on a fresh review flow is re-issued instead of waiting forever", async () => {
