@@ -153,6 +153,37 @@ test("an unclosed code fence renders verbatim instead of swallowing the tail", (
   expect(liveRow(host).textContent).not.toContain("```");
 });
 
+test("a message that ends on its closing fence renders the block right away", () => {
+  const { host, root } = mount();
+  const ends = ["Patch:", "", "```ts", "const x = 1;", "```"].join("\n");
+  stream(root, ends, 6);
+  expect(liveRow(host).querySelector("pre")?.textContent).toBe("const x = 1;");
+  expect(liveRow(host).textContent).not.toContain("```");
+
+  /* Settling it changes nothing but the caret. */
+  paint(root, <LiveTurnRows items={[item(ends, "awaiting-echo")]} />);
+  expect(liveRow(host).innerHTML).toBe(settledHtml(ends));
+
+  /* A fence that has NOT closed still degrades to readable text. */
+  paint(root, <LiveTurnRows items={[item("Patch:\n\n```ts\nconst x = 1;", "streaming")]} />);
+  expect(liveRow(host).querySelector("pre")).toBeNull();
+  expect(liveRow(host).textContent).toContain("```ts");
+});
+
+test("a closing fence the next delta reopens goes back to text, separator intact", () => {
+  const { host, root } = mount();
+  const open = ["Patch:", "", "```ts", "const x = 1;"];
+  paint(root, <LiveTurnRows items={[item([...open, "```"].join("\n"), "streaming")]} />);
+  expect(liveRow(host).querySelector("pre")).not.toBeNull();
+
+  /* That line was not a closing fence after all: the block goes back to text,
+     and the separator it had shed has to come back with it. */
+  const reopened = [...open, "```json"].join("\n");
+  paint(root, <LiveTurnRows items={[item(reopened, "streaming")]} />);
+  expect(liveRow(host).querySelector("pre")).toBeNull();
+  expect(liveRow(host).textContent).toContain(reopened);
+});
+
 test("an unterminated bold run stays literal until its closer arrives", () => {
   const { host, root } = mount();
   paint(root, <LiveTurnRows items={[item("Result: **bol", "streaming")]} />);
@@ -205,6 +236,32 @@ test("settled lines are frozen once written: the boundary only moves forward", (
   expect(settledLineCount("a\n| x |\n| y".split("\n"))).toBe(1);
   expect(settledLineCount("a\n```ts\ncode".split("\n"))).toBe(1);
   expect(settledLineCount("a\n```ts\ncode\n```\ntail".split("\n"))).toBe(4);
+});
+
+test("per-delta work stays proportional to the delta, not to the accumulated message", () => {
+  const body = Array.from(
+    { length: 400 },
+    (_, i) => `line ${i} with **bold** and a [link](https://example.com/${i}).`,
+  ).join("\n");
+  expect(body.length).toBeGreaterThan(20_000);
+
+  const stream = createMdStream();
+  let worst = 0;
+  let scanned = 0;
+  for (let end = 1; end <= body.length; end += 37) {
+    advanceMdStream(stream, body.slice(0, end), true);
+    worst = Math.max(worst, stream.scannedChars - scanned);
+    scanned = stream.scannedChars;
+  }
+  const tree = advanceMdStream(stream, body, false);
+  /* One volatile line plus the delta that just arrived — never the 20k+ behind it. */
+  expect(worst).toBeLessThan(256);
+  expect(stream.parsedLines).toBe(400);
+
+  /* …and the rendering it arrived at is still the transcript pass, exactly. */
+  const { host, root } = mount();
+  paint(root, <div className="whitespace-pre-wrap">{tree}</div>);
+  expect((host.firstElementChild as HTMLElement).innerHTML).toBe(settledHtml(body));
 });
 
 test("a long stream block-parses every line exactly once, never the whole message", () => {

@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, memo, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import { CopyButton, copyText } from "./CopyButton";
@@ -217,26 +217,31 @@ function MdTable({ rows }: { rows: string[] }) {
 const FENCE_OPEN_RE = /^\s*```/;
 const FENCE_CLOSE_RE = /^\s*```\s*$/;
 
-/* Block-level pass over `lines[from, to)`, appended to `out`. Every node is
-   keyed by its ABSOLUTE line index, and the trailing-newline bookkeeping reads
-   `out` rather than local state, so one document can be rendered in several
-   append-only slices and still come out identical to a single pass — that is
-   what lets the streaming renderer below freeze what it has already parsed. */
-function pushBlocks(out: ReactNode[], lines: string[], from: number, to: number): void {
+/* The opening fence's info string (```ts, ```python, …) is the language hint
+   highlight.js resolves; fence-only names like `python`/`shell` have no
+   file-extension equivalent, so this is their only entry point. */
+function fenceLang(line: string): string | null {
+  return line.match(/^\s*```+\s*([A-Za-z0-9+#_-]+)/)?.[1] ?? null;
+}
+
+/* Block-level pass over `lines[from, to)`, appended to `out`. `lines` may be a
+   TAIL of the document starting at absolute line `base`: every node is keyed by
+   its absolute index and the trailing-newline bookkeeping reads `out` rather
+   than local state, so a document can be rendered in several append-only slices
+   and still come out identical to a single pass. That is what lets the
+   streaming renderer below parse only what has just arrived. */
+function pushBlocks(out: ReactNode[], lines: string[], from: number, to: number, base = 0): void {
   let i = from;
   while (i < to) {
     if (FENCE_OPEN_RE.test(lines[i])) {
       const start = i;
-      /* The opening fence's info string (```ts, ```python, …) is the language
-         hint highlight.js resolves; fence-only names like `python`/`shell` have
-         no file-extension equivalent, so this is their only entry point. */
-      const lang = lines[i].match(/^\s*```+\s*([A-Za-z0-9+#_-]+)/)?.[1] ?? null;
+      const lang = fenceLang(lines[i]);
       i++;
       while (i < to && !FENCE_CLOSE_RE.test(lines[i])) i++;
       const code = lines.slice(start + 1, i).join("\n");
       if (i < to) i++;
       if (out[out.length - 1] === "\n") out.pop();
-      out.push(<CodeBlock key={`c${start}`} code={code} lang={lang} />);
+      out.push(<CodeBlock key={`c${base + start}`} code={code} lang={lang} />);
       continue;
     }
     if (TABLE_ROW_RE.test(lines[i])) {
@@ -244,7 +249,7 @@ function pushBlocks(out: ReactNode[], lines: string[], from: number, to: number)
       while (i < to && TABLE_ROW_RE.test(lines[i])) i++;
       /* The table div is a block element: the pending newline would add an empty row. */
       if (out[out.length - 1] === "\n") out.pop();
-      out.push(<MdTable key={`t${start}`} rows={lines.slice(start, i)} />);
+      out.push(<MdTable key={`t${base + start}`} rows={lines.slice(start, i)} />);
       continue;
     }
     if (IMAGE_LINE_RE.test(lines[i])) {
@@ -258,7 +263,7 @@ function pushBlocks(out: ReactNode[], lines: string[], from: number, to: number)
       }
       /* The row is a block element: drop the pending newline before it. */
       if (out[out.length - 1] === "\n") out.pop();
-      out.push(<MdImageRow key={`i${start}`} images={images} />);
+      out.push(<MdImageRow key={`i${base + start}`} images={images} />);
       continue;
     }
     const line = lines[i];
@@ -266,18 +271,18 @@ function pushBlocks(out: ReactNode[], lines: string[], from: number, to: number)
     const quote = line.match(/^>\s?(.*)$/);
     if (heading) {
       out.push(
-        <span key={i} className="text-[14px] font-bold">
+        <span key={base + i} className="text-[14px] font-bold">
           {md(heading[1])}
         </span>,
       );
     } else if (quote) {
       out.push(
-        <span key={i} className="border-l-2 border-border pl-2 text-muted">
+        <span key={base + i} className="border-l-2 border-border pl-2 text-muted">
           {md(quote[1])}
         </span>,
       );
     } else {
-      out.push(<Fragment key={i}>{md(line)}</Fragment>);
+      out.push(<Fragment key={base + i}>{md(line)}</Fragment>);
     }
     i++;
     /* The newline belongs to the document, not to the slice: a slice that stops
@@ -336,87 +341,195 @@ export function settledLineCount(lines: string[]): number {
    itself on a later delta — the message must not twitch as it is typed. The
    inline pass alone already degrades to plain text for any construct whose
    closer has not arrived (`**bol`, a half-written row), and the block grammar
-   runs only where the answer can no longer change: */
-function pushPending(out: ReactNode[], lines: string[], from: number): void {
-  /* …never inside an open fence. Its body is code, must stay verbatim, and a
-     growing <pre> would re-run highlight.js on every delta. */
+   runs only where the answer can no longer change. Returns whether it opened
+   with a block element, which the caller answers by dropping the newline the
+   settled slice left pending — exactly what the settled pass will do when these
+   lines eventually freeze. */
+function pushPending(out: ReactNode[], lines: string[], from: number, base: number): boolean {
+  const last = lines.length - 1;
   if (FENCE_OPEN_RE.test(lines[from] ?? "")) {
-    for (let i = from; i < lines.length; i++) {
-      out.push(<Fragment key={`p${i}`}>{lines[i]}</Fragment>);
-      if (i < lines.length - 1) out.push("\n");
+    /* A message may stop exactly ON its closing fence: that line has no newline
+       yet, but the code between the fences is complete, and leaving the last
+       block of an answer raw until the turn settles is the visible defect. The
+       cost is the rare delta that continues the line and takes the block back. */
+    if (last > from && FENCE_CLOSE_RE.test(lines[last])) {
+      out.push(
+        <CodeBlock key={`c${base + from}`} code={lines.slice(from + 1, last).join("\n")} lang={fenceLang(lines[from])} />,
+      );
+      return true;
     }
-    return;
+    /* An open fence stays verbatim. Its body is code, and a growing <pre> would
+       re-run highlight.js on every delta. */
+    for (let i = from; i <= last; i++) {
+      out.push(<Fragment key={`p${base + i}`}>{lines[i]}</Fragment>);
+      if (i < last) out.push("\n");
+    }
+    return false;
   }
-  /* …but yes for the closed lines of a trailing table or image run, which is
-     how a message that ENDS with a table gets to look like its settled self
-     while it streams. A table waits for its second row: until that row lands,
-     the header/body split is still open, and deciding it early is exactly the
-     kind of re-interpretation this is avoiding. Rows only ever append after. */
-  const complete = lines.length - 1;
-  const closed = lines.slice(from, complete);
+  /* The closed lines of a trailing table or image run do render — that is how a
+     message ENDING in a table looks like its settled self while it streams. A
+     table waits for its second row: until that row lands the header/body split
+     is still open, and deciding it early is exactly the kind of
+     re-interpretation this avoids. Rows only ever append after. */
+  const closed = lines.slice(from, last);
   const rows = closed.length >= 2 && closed.every((line) => TABLE_ROW_RE.test(line)) ? closed : null;
   const matches = rows ? [] : closed.map((line) => line.match(IMAGE_LINE_RE));
   const images = matches.length && matches.every((m) => m !== null)
     ? matches.map((m) => ({ alt: m![1], src: m![2] }))
     : null;
   let i = from;
+  let block = false;
   if (rows || images) {
-    /* Block element: drop the newline the settled slice left pending. */
-    if (out[out.length - 1] === "\n") out.pop();
     /* Same key the settled pass will give this block, so it is reconciled in
        place — the table does not blink out and back when the run terminates. */
     out.push(rows
-      ? <MdTable key={`t${from}`} rows={rows} />
-      : <MdImageRow key={`i${from}`} images={images!} />);
-    i = complete;
+      ? <MdTable key={`t${base + from}`} rows={rows} />
+      : <MdImageRow key={`i${base + from}`} images={images!} />);
+    i = last;
+    block = true;
   }
-  for (; i < lines.length; i++) {
-    out.push(<Fragment key={`p${i}`}>{md(lines[i])}</Fragment>);
-    if (i < lines.length - 1) out.push("\n");
+  for (; i <= last; i++) {
+    out.push(<Fragment key={`p${base + i}`}>{md(lines[i])}</Fragment>);
+    if (i < last) out.push("\n");
   }
+  return block;
 }
 
+/* How much text before the cached boundary is compared to detect a rewrite. */
+const ANCHOR = 128;
+
 export interface MdStreamState {
-  source: string;
-  settled: number;
+  /** Chars already parsed into `blocks`, at a line start unless `lineStart`. */
+  settledChars: number;
+  /** Absolute index of the first unparsed line — the key base for the next slice. */
+  settledLines: number;
+  /** Whether `settledChars` sits at a line start (false only once a completed
+      item has consumed its final, unterminated line). */
+  lineStart: boolean;
   blocks: ReactNode[];
-  /** Lines block-parsed so far. A delta must not grow this by more than the
-      lines it just settled — that is the whole point of the cache. */
+  /** Bumped whenever `blocks` changes: `blocks` is grown in place, so this is
+      what tells the memoized prefix that it has to re-render. */
+  revision: number;
+  /** Whether the prefix's trailing newline was dropped for a pending block, and
+      so has to come back if that block turns out not to be one after all. */
+  droppedNewline: boolean;
+  /** Text ending at `settledChars`, compared per delta instead of the prefix. */
+  anchor: string;
+  /** Inputs and output of the last advance, to make a repeated render free. */
+  source: string;
+  streaming: boolean;
+  rendered: ReactNode;
+  /** Chars scanned so far. A delta adds only the text from the last stable
+      boundary — never the accumulated message. */
+  scannedChars: number;
+  /** Lines block-parsed so far: every line is parsed exactly once. */
   parsedLines: number;
 }
 
 export function createMdStream(): MdStreamState {
-  return { source: "", settled: 0, blocks: [], parsedLines: 0 };
+  return {
+    settledChars: 0,
+    settledLines: 0,
+    lineStart: true,
+    blocks: [],
+    revision: 0,
+    droppedNewline: false,
+    anchor: "",
+    source: "",
+    streaming: false,
+    rendered: null,
+    scannedChars: 0,
+    parsedLines: 0,
+  };
 }
 
 /**
- * Advances a streaming prose body to `text` and returns its nodes.
+ * Whether what was parsed still describes the head of `text`.
  *
- * The settled prefix is parsed ONCE and kept in `state`: a call parses only the
- * lines that just became final, and re-renders the volatile tail — normally one
- * line, at most the open construct. The cached nodes keep their element
- * identity, so React skips those subtrees and highlight.js never re-runs for a
- * fence that is already closed. Re-parsing the accumulated text on every delta
- * would be quadratic over a long answer; this is linear over the whole stream.
+ * Deltas append; anything else — a completed item replacing its draft, the
+ * bounded projection trimming its head — has to invalidate the cache. Comparing
+ * the whole prefix would put the accumulated length back into every delta, so
+ * while streaming the check is the anchor window ending at the boundary plus
+ * monotone length. The completion call, which is the one that can legitimately
+ * carry rewritten text, is checked exactly — it happens once per item.
  */
-export function advanceMdStream(state: MdStreamState, text: string, streaming: boolean): ReactNode[] {
-  const lines = text.split("\n");
-  const settled = streaming ? settledLineCount(lines) : lines.length;
-  /* Deltas append; anything else (a completed item replacing its draft, a
-     bounded projection trimming its head) invalidates what was parsed. */
-  if (!text.startsWith(state.source) || settled < state.settled) {
+function reusable(state: MdStreamState, text: string, streaming: boolean): boolean {
+  if (state.settledChars === 0) return true;
+  if (text.length < state.settledChars) return false;
+  if (!state.lineStart && text.length !== state.settledChars) return false;
+  if (!streaming) return text.startsWith(state.source.slice(0, state.settledChars));
+  return text.length >= state.source.length
+    && text.slice(Math.max(0, state.settledChars - ANCHOR), state.settledChars) === state.anchor;
+}
+
+/* The parsed prefix, isolated behind memo: a delta that settles nothing leaves
+   `revision` alone and React skips this subtree without walking it. */
+const SettledPrefix = memo(function SettledPrefix({ nodes }: { nodes: ReactNode[]; revision: number }) {
+  return nodes;
+});
+
+/**
+ * Advances a streaming prose body to `text` and returns its tree.
+ *
+ * Work per call is proportional to what arrived, not to what has accumulated:
+ * only the text after the last stable boundary is sliced, split and scanned, the
+ * lines that just settled are parsed once and appended to the cached prefix, and
+ * the volatile tail is re-rendered — normally one line, at most the open
+ * construct. Re-parsing the accumulated text on every delta would be quadratic
+ * over a long answer; this is linear over the whole stream.
+ */
+export function advanceMdStream(state: MdStreamState, text: string, streaming: boolean): ReactNode {
+  if (state.rendered !== null && text === state.source && streaming === state.streaming) return state.rendered;
+  if (!reusable(state, text, streaming)) {
+    state.settledChars = 0;
+    state.settledLines = 0;
+    state.lineStart = true;
     state.blocks = [];
-    state.settled = 0;
+    state.droppedNewline = false;
+    state.revision++;
   }
-  if (settled > state.settled) {
-    pushBlocks(state.blocks, lines, state.settled, settled);
-    state.parsedLines += settled - state.settled;
-    state.settled = settled;
+  const base = state.settledLines;
+  const rest = text.slice(state.settledChars);
+  const lines = rest.split("\n");
+  const settled = streaming ? settledLineCount(lines) : lines.length;
+  state.scannedChars += rest.length;
+  if (settled > 0) {
+    pushBlocks(state.blocks, lines, 0, settled, base);
+    let chars = 0;
+    for (let i = 0; i < settled; i++) chars += lines[i].length + 1;
+    /* The last line of a completed item ends the text instead of a newline. */
+    state.lineStart = state.settledChars + chars <= text.length;
+    state.settledChars = Math.min(state.settledChars + chars, text.length);
+    state.settledLines += settled;
+    state.anchor = text.slice(Math.max(0, state.settledChars - ANCHOR), state.settledChars);
+    state.parsedLines += settled;
+    /* pushBlocks has re-established the separator itself. */
+    state.droppedNewline = false;
+    state.revision++;
   }
+  let pending: ReactNode[] | null = null;
+  if (settled < lines.length) {
+    pending = [];
+    const block = pushPending(pending, lines, settled, base);
+    /* A pending block element sheds the separator the prefix left behind — and
+       takes it back if the next delta turns it into ordinary text again, which
+       is what an unfinished line reopening a fence does. */
+    if (block && state.blocks[state.blocks.length - 1] === "\n") {
+      state.blocks.pop();
+      state.droppedNewline = true;
+      state.revision++;
+    } else if (!block && state.droppedNewline) {
+      state.blocks.push("\n");
+      state.droppedNewline = false;
+      state.revision++;
+    }
+  }
+  let tree: ReactNode = <SettledPrefix nodes={state.blocks} revision={state.revision} />;
+  if (pending) tree = <>{tree}{pending}</>;
   state.source = text;
-  const out = state.blocks.slice();
-  if (settled < lines.length) pushPending(out, lines, settled);
-  return out;
+  state.streaming = streaming;
+  state.rendered = tree;
+  return tree;
 }
 
 /**
