@@ -1287,6 +1287,43 @@ test("merge evidence persistence cannot roll back a concurrent flow transition",
   expect(stored[0]?.mergeEvidence?.mergedAt).toBeNull();
 });
 
+test("merge evidence moving underneath the refresh is not a concurrent transition", async () => {
+  /* The other side of the concurrency check: the revision compared against the
+     store deliberately EXCLUDES mergeEvidence, because the evidence is the very
+     thing this pass rewrites. A revision that included it would see the refresh's
+     own subject as somebody else's edit and drop every probe result on the floor
+     — silently, since the pass reports the merge either way. */
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  const reviewedSha = "4".repeat(40);
+  const identity = { repository: "owner/repo", headRef: "feature/evidence-only", headSha: reviewedSha };
+  const stale = {
+    ...headlessFlow(now),
+    id: "flow-evidence-only",
+    rounds: [{ ...headlessFlow(now).rounds[0]!, reviewHeadSha: reviewedSha }],
+    mergeEvidence: { ...identity, prNumber: null, mergedAt: null, checkedAt: null, source: null },
+  } satisfies Flow;
+  let stored: Flow[] = structuredClone([stale]);
+
+  const merged = await refreshMergedFlowIds([structuredClone(stale)], {
+    now: () => now,
+    resolveMergeIdentity: () => identity,
+    probePullRequest: async () => {
+      /* Only the evidence differs by the time the write lands — a checkedAt
+         stamp from a neighbouring pass, and nothing about the flow's state. */
+      stored[0]!.mergeEvidence = { ...identity, prNumber: null, mergedAt: null, checkedAt: new Date(now - 1_000).toISOString(), source: null };
+      return { number: 701, mergedAt: new Date(now - 60_000).toISOString(), headRefOid: reviewedSha };
+    },
+    localBranchMerged: () => false,
+    loadFlows: () => structuredClone(stored),
+    saveFlows: (flows) => { stored = structuredClone(flows); },
+  });
+
+  expect(merged).toEqual(new Set([stale.id]));
+  /* Persisted, not discarded. */
+  expect(stored[0]?.mergeEvidence).toMatchObject({ prNumber: 701, source: "github-pr" });
+  expect(stored[0]?.mergeEvidence?.mergedAt).toBe(new Date(now - 60_000).toISOString());
+});
+
 test("an existing checkout with unverified cleanliness loses merge authorization", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-unverified-checkout-"));
   const now = Date.parse("2026-07-12T12:00:00.000Z");

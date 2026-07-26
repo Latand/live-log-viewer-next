@@ -12,7 +12,14 @@ import {
   renderFixtureTemplate,
 } from "./demo-capture";
 
-const { assertPixelMetrics, measurePixelMetrics, waitForVisibleElements } = require("./demo-capture-browser.cjs") as {
+/* The browser script stays CommonJS on purpose — it runs under plain `node`
+   inside the pinned puppeteer image, where `puppeteer` and `sharp` resolve
+   through NODE_PATH, and NODE_PATH applies to `require` only. Bun's CJS interop
+   hands its named exports to this ESM import, so the contract can be asserted
+   here without the file changing module system. */
+import browserContract from "./demo-capture-browser.cjs";
+
+const { assertPixelMetrics, measurePixelMetrics, waitForVisibleElements } = browserContract as {
   assertPixelMetrics: (
     metrics: {
       nearBlackRatio: number;
@@ -39,6 +46,35 @@ const { assertPixelMetrics, measurePixelMetrics, waitForVisibleElements } = requ
     shot: (typeof SHOTS)[number],
   ) => Promise<void>;
 };
+
+describe("container script module system", () => {
+  /* These four run under plain `node` inside the pinned puppeteer image, which
+     resolves `puppeteer` and `sharp` through NODE_PATH — and Node honours
+     NODE_PATH for `require` only. Rewriting any of them as an ES module would
+     leave the capture failing inside the container, where nothing here would
+     catch it, so the CommonJS choice is pinned rather than left to style. */
+  const containerScripts = [
+    "demo-capture-browser.cjs",
+    "demo-motion-browser.cjs",
+    "demo-motion-question-pane.cjs",
+  ];
+
+  test.each(containerScripts)("%s stays CommonJS", async (name) => {
+    const source = await Bun.file(path.join(import.meta.dir, name)).text();
+    const withoutComments = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    expect(withoutComments).toMatch(/\brequire\(/);
+    expect(withoutComments).not.toMatch(/^\s*import\s/m);
+    expect(withoutComments).not.toMatch(/^\s*export\s/m);
+  });
+
+  test("the browser script exports the pixel contract the capture and motion runs share", () => {
+    /* demo-motion-browser.cjs requires these two out of the same file, so an
+       export renamed on one side breaks the motion run and not the capture. */
+    expect(typeof assertPixelMetrics).toBe("function");
+    expect(typeof measurePixelMetrics).toBe("function");
+    expect(typeof waitForVisibleElements).toBe("function");
+  });
+});
 
 describe("demo capture contract", () => {
   test("publishes one deterministic still for every stage A feature", () => {
