@@ -121,6 +121,31 @@ describe("MCP tool service", () => {
     await first;
   });
 
+  test("agent_activity keeps a durable receipt: it appends to the same journal lifecycle_events does", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-receipts-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [toolName, async () => ({})])) as unknown as McpToolBindings;
+    const service = createMcpToolService(bindings, new FileMcpReceiptStore(receiptPath));
+
+    await service.callTool("agent_activity", { clientRequestId: "activity-durable" });
+    await service.callTool("lifecycle_events", { clientRequestId: "events-durable" });
+    await service.callTool("list_pipelines", { clientRequestId: "pipelines-bounded" });
+
+    const stored = JSON.parse(fs.readFileSync(receiptPath, "utf8")) as {
+      readReceipts: Record<string, unknown>;
+      mutationReceipts: Record<string, unknown>;
+    };
+    /* Both journal-appending tools are durable; a genuinely read-only one is
+       not. A bounded receipt for a tool that writes lets a replayed
+       clientRequestId re-run the append after the MCP process restarts. */
+    expect(Object.keys(stored.mutationReceipts).sort()).toEqual([
+      "agent_activity:activity-durable",
+      "lifecycle_events:events-durable",
+    ]);
+    expect(Object.keys(stored.readReceipts)).toEqual(["list_pipelines:pipelines-bounded"]);
+  });
+
   test("a future receipt file fails closed before a mutation binding runs", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-receipts-"));
     scratch.push(directory);
@@ -1087,6 +1112,9 @@ describe("MCP tool service", () => {
         "deployment_status",
         "resources",
         "conversation_migration",
+        "agent_activity",
+        "lifecycle_events",
+        "request_attention",
       ]);
       for (const tool of listed.tools) {
         expect(tool.inputSchema.required).toContain("clientRequestId");

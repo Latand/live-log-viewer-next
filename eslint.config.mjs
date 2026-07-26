@@ -19,6 +19,17 @@ const eslintConfig = defineConfig([
     // Research artifacts dropped by tmux-multi-agent sessions; third-party code.
     ".tmux-multi-agent/**",
   ]),
+  {
+    // `.cjs` names CommonJS, and these files mean it: they are mounted into the
+    // pinned puppeteer image and run by plain `node`, where `puppeteer` and
+    // `sharp` resolve through NODE_PATH — which Node honours for `require` and
+    // not for ESM `import`. Rewriting them as modules would break resolution in
+    // the container, so `require()` is the correct module style here rather than
+    // a lapse, and the rule that forbids it does not apply.
+    files: ["**/*.cjs"],
+    languageOptions: { sourceType: "commonjs" },
+    rules: { "@typescript-eslint/no-require-imports": "off" },
+  },
 ]);
 
 export default eslintConfig;

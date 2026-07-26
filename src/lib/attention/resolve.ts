@@ -31,8 +31,45 @@ export interface FocusFrameIndex {
   boardRevision: number | null;
   /** The anchor's rect in the CURRENT layout, or null when it is gone. */
   rectFor(anchorKey: string): FocusRect | null;
+  /**
+   * Optional: the layout key this anchor actually resolves THROUGH, when the
+   * board holds it under a different name than the target asks for.
+   *
+   * Only aliased anchors need it, and today that means one: a pipeline stage is
+   * a placeholder slot until it launches, and afterwards the layout holds it as
+   * the conversation card of the agent running it. A camera never notices —
+   * `rectFor` already returns the right rectangle. A surface that navigates by
+   * KEY rather than by coordinate does: told only `slot::<pipeline>::<stage>`,
+   * it finds nothing on its own list and reports a target it is in fact
+   * displaying as lost.
+   *
+   * Returns the key itself when no alias applies, and null when the anchor is
+   * not in the layout at all.
+   */
+  concreteAnchorKey?(anchorKey: string): string | null;
   /** Optional: named objects, used only to phrase a geometric destination. */
   named?: readonly NamedFrame[];
+}
+
+/**
+ * The keys a key-navigating surface may pin for this anchor, best first.
+ *
+ * The concrete key leads, because it is the one the board is actually drawing;
+ * the anchor's own key follows so a surface that lists targets under the
+ * requested name still matches. Anchors the layout does not hold at all are
+ * dropped — that is what makes an empty result mean "there is nothing on this
+ * board to land on" rather than "nobody looked".
+ */
+export function navigableAnchorKeys(index: FocusFrameIndex, anchorKeys: readonly string[]): string[] {
+  const navigable: string[] = [];
+  for (const key of anchorKeys) {
+    if (index.rectFor(key) === null) continue;
+    const concrete = index.concreteAnchorKey?.(key) ?? key;
+    for (const candidate of concrete && concrete !== key ? [concrete, key] : [key]) {
+      if (!navigable.includes(candidate)) navigable.push(candidate);
+    }
+  }
+  return navigable;
 }
 
 export interface FocusResolutionResult {

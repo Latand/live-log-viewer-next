@@ -6,7 +6,7 @@ import path from "node:path";
 import { readAttentionFile } from "./store";
 import { answerAttentionRequest, attentionForDevice, autoFollowEligible, raiseAttentionRequest } from "./service";
 import { AttentionRequestError, validateAttentionCreate, validateAttentionEvent } from "./validation";
-import { OFFER_TTL_MS, RETURN_WINDOW_MS, type FocusFrame, type ReturnPoint } from "./types";
+import { FOLLOW_HOLD_MS, OFFER_TTL_MS, RETURN_WINDOW_MS, type FocusFrame, type ReturnPoint } from "./types";
 
 let sandbox = "";
 let previousStateDir: string | undefined;
@@ -104,6 +104,89 @@ test("the return control collapses after its window while the record stays put",
   expect(answerAttentionRequest("attention_1", { kind: "return", deviceId: DEVICE, via: "control" }, { now: later(RETURN_WINDOW_MS + 1) }).ok).toBe(true);
 });
 
+/** Drive one request all the way to `following` at this device. */
+function followAt(id: string, now = T0) {
+  answerAttentionRequest(id, { kind: "offer", deviceId: DEVICE }, { now });
+  answerAttentionRequest(id, { kind: "accept", deviceId: DEVICE }, { now });
+  answerAttentionRequest(id, {
+    kind: "arrive",
+    deviceId: DEVICE,
+    returnPoint: { ...whereIWas, capturedAt: now.toISOString() },
+    resolution: "exact",
+  }, { now });
+}
+
+test("a follow the operator never closes stops being this device's only offer", () => {
+  raise();
+  followAt("attention_1");
+
+  /* The whole defect, at the surface it is felt on. `following` admits no event
+     but Return, so an operator who walks away instead leaves this request live
+     forever; as the oldest live entry it is what the device renders, and the
+     request raised after it never reaches a screen at all. */
+  const second = raiseAttentionRequest({
+    origin: "root-agent",
+    target: { kind: "conversation", path: "/tmp/verifier.jsonl" },
+    frameAtCreation: frame,
+    intent: "show",
+    reason: "The verifier is blocked on you.",
+  }, { now: later(RETURN_WINDOW_MS + 1), id: "attention_2" });
+
+  /* Raising it is what collapses the stale follow: one speaker, and its way
+     back had already gone. */
+  expect(second.superseded).toEqual(["attention_1"]);
+
+  /* And it reaches the screen — the device renders it exactly as the polling
+     surface does, and the record moves pending → offered. */
+  answerAttentionRequest("attention_2", { kind: "offer", deviceId: DEVICE }, { now: later(RETURN_WINDOW_MS + 1) });
+
+  const view = attentionForDevice(DEVICE, { now: later(RETURN_WINDOW_MS + 1) });
+  expect(view.offer!.request.id).toBe("attention_2");
+  expect(view.offer!.status).toBe("actionable");
+});
+
+test("a follow is bounded even when nothing is ever raised after it", () => {
+  raise();
+  followAt("attention_1");
+
+  /* Nothing supersedes it, nobody presses Return: the clock is the only thing
+     left, and without it this record is live for the life of the file. */
+  const view = attentionForDevice(DEVICE, { now: later(FOLLOW_HOLD_MS) });
+
+  expect(view.expired).toEqual(["attention_1"]);
+  expect(view.offer).toBeNull();
+  expect(view.live).toEqual([]);
+  /* Ended as what it was: seen, agreed to, and never closed. */
+  expect(readAttentionFile().requests[0]!.expiredCause).toBe("follow-elapsed");
+});
+
+test("an operator still mid-handoff keeps the return control, and the newer request waits", () => {
+  raise();
+  followAt("attention_1");
+
+  const second = raiseAttentionRequest({
+    origin: "root-agent",
+    target: { kind: "conversation", path: "/tmp/verifier.jsonl" },
+    frameAtCreation: frame,
+    intent: "show",
+    reason: "The verifier is blocked on you.",
+  }, { now: later(RETURN_WINDOW_MS - 1), id: "attention_2" });
+
+  /* Inside the window the way back is still the operator's, so nothing takes it
+     from them — the newer request queues rather than evicting a live handoff. */
+  expect(second.superseded).toEqual([]);
+  answerAttentionRequest("attention_2", { kind: "offer", deviceId: DEVICE }, { now: later(RETURN_WINDOW_MS - 1) });
+
+  const view = attentionForDevice(DEVICE, { now: later(RETURN_WINDOW_MS - 1) });
+  expect(view.offer!.request.id).toBe("attention_1");
+  expect(view.offer!.returnAvailable).toBe(true);
+
+  /* And it is a wait, not a loss: the moment the control collapses the newer
+     request is what this device is shown. */
+  const after = attentionForDevice(DEVICE, { now: later(RETURN_WINDOW_MS) });
+  expect(after.offer!.request.id).toBe("attention_2");
+});
+
 test("reading sweeps the clock, so an unacknowledged request cannot linger as a live card", () => {
   raise();
   answerAttentionRequest("attention_1", { kind: "offer", deviceId: DEVICE }, { now: T0 });
@@ -164,4 +247,45 @@ test("a phone in a pocket never auto-follows, even where consent exists", () => 
   expect(autoFollowEligible({ visibility: "hidden", freshness: "active" })).toBe(false);
   expect(autoFollowEligible({ visibility: "visible", freshness: "background" })).toBe(false);
   expect(autoFollowEligible(null)).toBe(false);
+});
+
+test("a conversation target resolves to the durable conversation's current transcript", () => {
+  const abandonedFork = "/tmp/sessions/rollout-fork.jsonl";
+  const currentPath = "/tmp/sessions/rollout-root.jsonl";
+  const conversations = {
+    conversationForPath: (artifactPath: string) => artifactPath === abandonedFork || artifactPath === currentPath
+      ? { generations: [{ path: "/tmp/sessions/rollout-archived.jsonl" }, { path: currentPath }] } as never
+      : null,
+    canonicalConversationId: (id: never) => id,
+    conversation: () => null,
+  };
+
+  const raised = raiseAttentionRequest({
+    origin: "root-agent",
+    target: { kind: "conversation", path: abandonedFork },
+    frameAtCreation: frame,
+    intent: "open",
+    reason: "The root conversation answered.",
+  }, { now: T0, id: "attention_fork", conversations });
+
+  expect(raised.request.target).toEqual({ kind: "conversation", path: currentPath });
+});
+
+test("a conversation target with no durable owner is left exactly as raised", () => {
+  const unknown = "/tmp/sessions/rollout-unknown.jsonl";
+  const conversations = {
+    conversationForPath: () => null,
+    canonicalConversationId: (id: never) => id,
+    conversation: () => null,
+  };
+
+  const raised = raiseAttentionRequest({
+    origin: "root-agent",
+    target: { kind: "conversation", path: unknown },
+    frameAtCreation: frame,
+    intent: "show",
+    reason: "An unregistered transcript still has a card.",
+  }, { now: T0, id: "attention_unknown", conversations });
+
+  expect(raised.request.target).toEqual({ kind: "conversation", path: unknown });
 });

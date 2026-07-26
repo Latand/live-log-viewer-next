@@ -206,6 +206,13 @@ export type Pipeline = {
   cursor: { stageId: string; state: PipelineCursorState; input: string | null; activatedBy: PipelineEdgeActivation | null } | null;
   state: PipelineState;
   pausedState: Exclude<PipelineState, "paused" | "draft"> | null;
+  /** When the pipeline was last paused, and when it was last resumed. Durable
+      because they are the only record a pause/resume transition leaves: the
+      lifecycle journal (#686) derives its `stage_paused`/`stage_resumed` events
+      from them, and a key built on the timestamp is what lets a second pause
+      after a resume be a genuinely new event instead of a replay of the first. */
+  pausedAt?: string | null;
+  resumedAt?: string | null;
   stateDetail: string | null;
   srcPath: string | null;
   srcConversationId: string | null;

@@ -1,4 +1,6 @@
 import {
+  ACCEPTED_LANDING_GRACE_MS,
+  FOLLOW_HOLD_MS,
   isTerminalAttentionState,
   OFFER_TTL_MS,
   RETURN_WINDOW_MS,
@@ -26,6 +28,9 @@ export type AttentionEvent =
   | { kind: "accept"; deviceId: string; via?: "operator" | "auto-follow" }
   /** The view reached the target; the pre-move viewport comes with it. */
   | { kind: "arrive"; deviceId: string; returnPoint: ReturnPoint; resolution: FocusResolutionKind }
+  /** The device that agreed could not land: there was nowhere to go. Its own
+      close for a handoff that never happened — see the `abandon` case. */
+  | { kind: "abandon"; deviceId: string }
   | { kind: "decline"; deviceId: string }
   /** Looked, and stayed put. */
   | { kind: "dismiss"; deviceId: string }
@@ -76,12 +81,58 @@ function advance(
 }
 
 /**
- * Whether the clock alone has run this request out. Only pre-acceptance states
- * expire: once the operator has agreed, the view has moved or is moving, and a
- * timer taking the return point away with it would strand them.
+ * How the clock alone would end this request, or null while it may still run.
+ *
+ * Two different clocks, because they answer two different questions. Before
+ * acceptance it is the TTL: nobody answered. After acceptance it is the landing
+ * grace: somebody agreed and the move never completed, which is the one state a
+ * request could otherwise never leave — `arrive` refuses a lost landing, and
+ * `return` needs a follow that never began. And after landing it is the follow
+ * hold: the only way out of `following` is the operator pressing Return, so an
+ * operator who walks away instead leaves it live forever, holding the device's
+ * one offer slot against every request raised after it.
+ *
+ * The hold runs far past the return window on purpose. Within that window the
+ * card still names where the operator came from and a clock taking it away
+ * would strand them; long after it, the control has already collapsed and the
+ * record is holding a slot on behalf of a card with nothing left to press.
  */
+export function expiryCauseByClock(request: AttentionRequestV1, now: Date): ExpiryCause | null {
+  if (PRE_ACCEPTANCE.includes(request.state)) {
+    return Date.parse(request.expiresAt) <= now.getTime() ? "ttl" : null;
+  }
+  if (request.state === "accepted") {
+    return now.getTime() - Date.parse(request.stateChangedAt) >= ACCEPTED_LANDING_GRACE_MS ? "lost" : null;
+  }
+  if (request.state === "following") {
+    return now.getTime() - Date.parse(request.stateChangedAt) >= FOLLOW_HOLD_MS ? "follow-elapsed" : null;
+  }
+  return null;
+}
+
+/**
+ * Whether a follow is still inside the window in which the way back is live.
+ *
+ * The device-agnostic counterpart to {@link returnControlIsLive}, because the
+ * one thing that may end a follow early — a newer request from the same agent —
+ * has no device to ask about. It means the same thing by it: is there still a
+ * live way back that dropping this record would take away.
+ *
+ * Measured from `stateChangedAt`, which the SERVER wrote when the arrival
+ * landed, and never from a return point's `capturedAt`, which is the client's
+ * own clock. A device whose clock reads far ahead would otherwise keep its
+ * follow permanently un-evictable — the wedge this bound exists to close,
+ * reintroduced by trusting the wedged party for the time. `capturedAt` is at or
+ * before the arrival, so this window closes no earlier than the control the
+ * operator can actually see.
+ */
+export function followReturnWindowOpen(request: AttentionRequestV1, now: Date): boolean {
+  return request.state === "following" && now.getTime() - Date.parse(request.stateChangedAt) < RETURN_WINDOW_MS;
+}
+
+/** Whether the clock alone has run this request out. */
 export function isExpiredByClock(request: AttentionRequestV1, now: Date): boolean {
-  return PRE_ACCEPTANCE.includes(request.state) && Date.parse(request.expiresAt) <= now.getTime();
+  return expiryCauseByClock(request, now) !== null;
 }
 
 /** Whether the return control still names where the operator came from. Past
@@ -90,6 +141,13 @@ export function returnControlIsLive(request: AttentionRequestV1, deviceId: strin
   if (request.state !== "following" || request.acknowledgedBy !== deviceId) return false;
   const captured = request.returnPoints.find((point) => point.deviceId === deviceId);
   return captured !== undefined && now.getTime() - Date.parse(captured.capturedAt) < RETURN_WINDOW_MS;
+}
+
+/** Whether this request is still holding the screen for something the operator
+    can act on, as opposed to a follow they have long since wandered away from.
+    A collapsed follow yields the device's one offer slot to a live request. */
+export function offerStillActionable(request: AttentionRequestV1, now: Date): boolean {
+  return request.state !== "following" || followReturnWindowOpen(request, now);
 }
 
 /**
@@ -168,14 +226,29 @@ export function applyAttentionEvent(
     case "arrive": {
       if (request.state !== "accepted") return refuse(request, "invalid-transition");
       if (request.acknowledgedBy !== event.deviceId) return refuse(request, "not-acknowledger");
-      /* Nowhere to land is not a follow. The caller expires the request, which
-         writes one line to the conversation rather than a silent no-op. */
+      /* Nowhere to land is not a follow. The device that agreed closes it with
+         `abandon` instead, which writes one line to the conversation rather
+         than a silent no-op — and never records a follow that did not happen. */
       if (event.resolution === "lost") return refuse(request, "lost-target");
       const returnPoints = [
         ...request.returnPoints.filter((point) => point.deviceId !== event.deviceId),
         event.returnPoint,
       ];
       return advance(request, "following", now, { returnPoints, resolution: event.resolution });
+    }
+
+    /* The accepting device's own way out of a handoff that found nowhere to go.
+       It is deliberately none of the other three endings: nobody refused
+       anything, so it is not `declined`; the offer was seen and agreed to, so
+       it is not a TTL expiry; and the view never moved, so it is not a follow
+       that was returned from. The cause on the record says which it was, and
+       the request becomes terminal at once — otherwise it stays `accepted`
+       forever and, being the oldest live entry, hides every later offer on that
+       device behind a card nothing renders. */
+    case "abandon": {
+      if (request.state !== "accepted") return refuse(request, "invalid-transition");
+      if (request.acknowledgedBy !== event.deviceId) return refuse(request, "not-acknowledger");
+      return advance(request, "expired", now, { expiredCause: "lost" });
     }
 
     case "decline": {
@@ -197,7 +270,16 @@ export function applyAttentionEvent(
     }
 
     case "expire": {
-      if (!PRE_ACCEPTANCE.includes(request.state)) return refuse(request, "invalid-transition");
+      /* The clock's own event, and never a client's — see `validateAttentionEvent`.
+         From `accepted` it is only ever the landing grace running out, so the
+         cause is checked rather than trusted: nothing may end an agreed request
+         by calling it a TTL expiry, which would say the operator never saw it. */
+      const landingLost = request.state === "accepted" && event.cause === "lost";
+      /* And from `following` it is only ever the follow hold, for the same
+         reason: a follow the operator saw and agreed to may not be closed as a
+         TTL expiry, which would report it to the agent as never seen. */
+      const followElapsed = request.state === "following" && event.cause === "follow-elapsed";
+      if (!PRE_ACCEPTANCE.includes(request.state) && !landingLost && !followElapsed) return refuse(request, "invalid-transition");
       /* The cause is kept, not just acted on: the caller that dropped a request
          to make room is gone as soon as its response is written, and the record
          still has to be able to say which kind of ending this was. */
@@ -205,11 +287,19 @@ export function applyAttentionEvent(
     }
 
     case "supersede": {
-      /* One speaker, so a second request means it changed its mind. It may not
-         supersede a request the operator already agreed to: the view has moved,
-         and taking the record away would take the return point with it. */
-      if (!PRE_ACCEPTANCE.includes(request.state)) return refuse(request, "invalid-transition");
-      return advance(request, "superseded", now, { supersededBy: event.by });
+      /* One speaker, so a second request means it changed its mind. */
+      if (PRE_ACCEPTANCE.includes(request.state)) return advance(request, "superseded", now, { supersededBy: event.by });
+      /* A follow may be replaced once its way back has collapsed, and never
+         before. While the return control still names where the operator came
+         from, superseding would take that point away from someone who is mid-
+         handoff — so it is refused, and the newer request waits the window out.
+         Afterwards the record holds nothing the operator can still use, and
+         letting it shadow the newer request is how a live agent goes unheard.
+         `accepted` is never superseded either way: the move is in flight. */
+      if (request.state === "following" && !followReturnWindowOpen(request, now)) {
+        return advance(request, "superseded", now, { supersededBy: event.by });
+      }
+      return refuse(request, "invalid-transition");
     }
   }
 }

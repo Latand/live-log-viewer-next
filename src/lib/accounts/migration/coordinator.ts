@@ -7,14 +7,17 @@ import { listCodexAccounts } from "@/lib/accounts/codex";
 import { agentRegistry, type AgentRegistry, type ConversationObservation, type MigrationScope, type RegistryConversation } from "@/lib/agent/registry";
 import { headCwd, headSessionStartedAt } from "@/lib/agent/transcript";
 import {
+  boardFor,
   remapBoardPaths as remapDurableBoardPaths,
   transferBoardPathPlacements as transferDurableBoardPathPlacements,
 } from "@/lib/board/store";
 import { forEachCooperatively, yieldToRuntime } from "@/lib/cooperative";
 import { listFiles } from "@/lib/scanner";
 import { recordTranscriptComposerRelease, transcriptTurnResult, type TranscriptTurnResult } from "@/lib/scanner/activity";
+import { nativeCodexForkSourceThreadId } from "@/lib/scanner/codexNative";
 import { writingHolders } from "@/lib/scanner/process";
 import type { FileEntry } from "@/lib/types";
+import type { BoardProjectStateV1 } from "@/lib/view/types";
 import { isStructuredDeliveryControllerUnavailable } from "@/lib/runtime/structuredDeliveryController";
 
 import {
@@ -149,6 +152,13 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
       launchProfileByPath.set(receipt.artifactPath, receipt.launchProfile);
     }
   });
+  /* The root marker is a conversation identity, so it is resolved through the
+     alias chain (#708): adopting a lookalike fork conversation into its source
+     must not leave the configured root naming a merged-away id. */
+  const configuredRootId = process.env.LLV_ROOT_CONVERSATION_ID;
+  const configuredRoot = configuredRootId?.startsWith("conversation_")
+    ? registry.canonicalConversationId(configuredRootId as ViewerConversationId)
+    : configuredRootId;
   const observations: ConversationObservation[] = [];
   await forEachCooperatively(files, (entry) => {
     const engine = engineOf(entry);
@@ -171,7 +181,6 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
     const turn = projectedInventoryTurn(entry, parsed, existing, hostedPath);
     const currentProfile = launchProfileByPath.get(entry.path)
       ?? existing?.generations.find((generation) => generation.path === entry.path)?.launchProfile;
-    const configuredRoot = process.env.LLV_ROOT_CONVERSATION_ID;
     const transcriptIdentity = { size: entry.size, mtimeMs };
     observations.push({
       engine,
@@ -198,6 +207,18 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
       // lineage edge against the post-admission index, even for a parent first
       // discovered in this same inventory cycle.
       parentArtifactPath: entry.parent,
+      // Provider-fork history (issue #708). The scanner resolved this from the
+      // FIRST `session_meta` row — a fork replays its ancestor's header as row
+      // two — and carries it on the entry, including through the persisted scan
+      // snapshot. Reconciliation reads it there instead of opening the
+      // transcript again; only an entry no scanner has described (an absent
+      // field, not a null one) falls back to the header, which is what still
+      // adopts forks discovered outside a scan.
+      forkSourceThreadId: engine === "codex"
+        ? entry.nativeForkSourceThreadId === undefined
+          ? nativeCodexForkSourceThreadId(entry.path, entry.size, mtimeMs)
+          : entry.nativeForkSourceThreadId
+        : null,
       expectedTurnObservedAt: existing?.turn.observedAt ?? null,
       startedAt: entry.sessionStartedAt ?? headSessionStartedAt(entry.path, transcriptIdentity),
       observedAt: !observedTurn.complete && existing?.turn.observedAt
@@ -208,9 +229,97 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
   return observations;
 }
 
-export async function reconcileMigrationInventory(registry: AgentRegistry = agentRegistry(), files?: FileEntry[]): Promise<ReturnType<AgentRegistry["snapshot"]>> {
+/**
+ * Follow an adopted provider fork's board placement onto the conversation that
+ * now owns it (#708).
+ *
+ * The fork used to render as its own card, so the operator's `manual` and
+ * `expanded` entries name its transcript path. Aliasing that path to the
+ * conversation's current generation keeps those decisions attached to the
+ * surviving card instead of stranding them on a path that no longer renders.
+ *
+ * Pairs the board already records are dropped here, against the same read that
+ * resolves `hidden`. `remapBoardPaths` would reach the same answer, but only
+ * after taking the board write lock and re-reading the file — every 60s
+ * controller tick and every reaper pass, per project with an adopted fork. A
+ * project whose forks are all aliased is skipped outright, so a replay costs one
+ * board read and no lock at all.
+ *
+ * The remap runs with the target's placement authoritative, because here the
+ * survivor is not a successor generation of the fork — it is the conversation
+ * the fork was always a duplicate of. A fork adopted before it ever rendered
+ * carries no membership at all, and a default remap would read that absence as
+ * "this card is not placed" and strip the root's own pin, taking the operator's
+ * canonical card off the board with no way back.
+ *
+ * A fork the operator had already hidden is deliberately left unaliased. Hiding
+ * a duplicate card is a statement about the duplicate, and an alias would carry
+ * it onto the survivor and take the real conversation off the board. The hidden
+ * entry stays on file untouched; it simply names a path that no longer draws.
+ */
+async function repairAdoptedForkBoardPlacements(
+  conversations: readonly RegistryConversation[],
+  remapPaths: typeof remapDurableBoardPaths,
+): Promise<void> {
+  const byProject = new Map<string, { from: string; to: string }[]>();
+  const boards = new Map<string, BoardProjectStateV1 | null>();
+  await forEachCooperatively(conversations, (conversation) => {
+    if (conversation.engine !== "codex" || conversation.providerForkPaths.length === 0) return;
+    const current = conversation.generations.at(-1);
+    if (!current) return;
+    const project = conversation.projectOwnership?.project || current.launchProfile.project;
+    if (!project) return;
+    if (!boards.has(project)) {
+      try {
+        boards.set(project, boardFor(project));
+      } catch (error) {
+        /* One project's board being malformed or unreadable used to abort the
+           whole reconciliation cycle, taking every other project's inventory
+           down with it. Skip this project's placement repair and carry on. */
+        boards.set(project, null);
+        console.warn("[account-migration] adopted fork board placement skipped", {
+          project,
+          error: safeProviderDiagnostic(error),
+        });
+      }
+    }
+    const board = boards.get(project);
+    if (!board) return;
+    const hidden = new Set(board.prefs.hidden);
+    const aliases = board.pathAliases ?? {};
+    const pairs = conversation.providerForkPaths
+      .filter((pathname) => pathname !== current.path && !hidden.has(pathname) && aliases[pathname] !== current.path)
+      .map((from) => ({ from, to: current.path }));
+    if (pairs.length === 0) return;
+    byProject.set(project, [...(byProject.get(project) ?? []), ...pairs]);
+  });
+  await forEachCooperatively([...byProject], ([project, pairs]) => {
+    try {
+      remapPaths(project, pairs, { targetPlacementAuthoritative: true });
+    } catch (error) {
+      console.warn("[account-migration] adopted fork board placement deferred", {
+        project,
+        paths: pairs.length,
+        error: safeProviderDiagnostic(error),
+      });
+    }
+  });
+}
+
+export async function reconcileMigrationInventory(
+  registry: AgentRegistry = agentRegistry(),
+  files?: FileEntry[],
+  options: MigrationCoordinatorOptions = {},
+): Promise<ReturnType<AgentRegistry["snapshot"]>> {
   const entries = files ?? await listFiles();
-  return registry.reconcileConversations(await inventory(entries, registry));
+  const snapshot = registry.reconcileConversations(await inventory(entries, registry));
+  if (!options.deferBoardRepair) {
+    await repairAdoptedForkBoardPlacements(
+      Object.values(snapshot.conversations),
+      options.remapBoardPaths ?? remapDurableBoardPaths,
+    );
+  }
+  return snapshot;
 }
 
 function previewFromSnapshot(engine: MigrationEngine, targetId: string, registry: AgentRegistry): MigrationPreview {
