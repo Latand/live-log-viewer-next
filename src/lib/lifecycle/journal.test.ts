@@ -7,6 +7,7 @@ import {
   appendLifecycleEvents,
   lifecycleEventId,
   lifecycleJournalPath,
+  LifecycleJournalCorruptError,
   queryLifecycleEvents,
   readLifecycleJournal,
   type LifecycleEventInput,
@@ -106,6 +107,68 @@ test("events are queryable by project, pipeline, conversation and cursor", () =>
   expect(page.events.map((event) => event.seq)).toEqual([3]);
   expect(page.cursor).toBe(3);
   expect(queryLifecycleEvents({ afterSeq: 3 }).count).toBe(0);
+});
+
+test("a truncated journal surfaces the problem instead of silently resetting to empty", () => {
+  sandbox();
+  appendLifecycleEvents(reviewerStage);
+  const journalPath = lifecycleJournalPath();
+  const intact = fs.readFileSync(journalPath, "utf8");
+  expect(readLifecycleJournal().lastSeq).toBe(2);
+
+  /* The half-written file a crash between write and flush leaves behind. */
+  fs.writeFileSync(journalPath, intact.slice(0, Math.floor(intact.length / 2)), "utf8");
+
+  /* Resetting to `lastSeq 0` here is silent data loss with a second victim:
+     every durable subscriber sits above the reset cursor and never matches
+     another event again. */
+  expect(() => readLifecycleJournal()).toThrow(LifecycleJournalCorruptError);
+  expect(() => readLifecycleJournal()).toThrow(journalPath);
+  expect(() => appendLifecycleEvents(reviewerStage)).toThrow(LifecycleJournalCorruptError);
+  expect(() => queryLifecycleEvents({})).toThrow(LifecycleJournalCorruptError);
+  /* Nothing overwrote the damaged file, so the operator can still recover it. */
+  expect(fs.readFileSync(journalPath, "utf8")).not.toContain('"lastSeq": 0');
+
+  /* A structurally intact file with one malformed row is damage too. */
+  const damaged = JSON.parse(intact) as { events: unknown[] };
+  damaged.events[1] = { id: "evt_partial", at: "2026-07-26T09:20:00.000Z" };
+  fs.writeFileSync(journalPath, JSON.stringify(damaged), "utf8");
+  expect(() => readLifecycleJournal()).toThrow(/recorded event 2 of 2 is malformed/);
+
+  /* Restoring the file restores the surface: nothing was lost by failing. */
+  fs.writeFileSync(journalPath, intact, "utf8");
+  expect(readLifecycleJournal().lastSeq).toBe(2);
+});
+
+test("the journal is written durably: flushed before the rename publishes it", () => {
+  const dir = sandbox();
+  const journalPath = path.join(dir, "state", "lifecycle-journal.json");
+  const realFsync = fs.fsyncSync;
+  const realRename = fs.renameSync;
+  const steps: string[] = [];
+  (fs as { fsyncSync: typeof fs.fsyncSync }).fsyncSync = ((descriptor: number) => {
+    steps.push("fsync");
+    return realFsync(descriptor);
+  }) as typeof fs.fsyncSync;
+  (fs as { renameSync: typeof fs.renameSync }).renameSync = ((from: fs.PathLike, to: fs.PathLike) => {
+    steps.push(String(to) === journalPath ? "publish-journal" : "rename");
+    return realRename(from, to);
+  }) as typeof fs.renameSync;
+  try {
+    appendLifecycleEvents(reviewerStage);
+  } finally {
+    (fs as { fsyncSync: typeof fs.fsyncSync }).fsyncSync = realFsync;
+    (fs as { renameSync: typeof fs.renameSync }).renameSync = realRename;
+  }
+
+  /* Content flushed, then published, then the directory entry flushed. A rename
+     that publishes unflushed bytes leaves a valid name over a truncated file —
+     exactly the corruption the test above has to fail loudly on. */
+  const publish = steps.indexOf("publish-journal");
+  expect(publish).toBeGreaterThanOrEqual(0);
+  expect(steps.slice(0, publish)).toContain("fsync");
+  expect(steps.slice(publish + 1)).toContain("fsync");
+  expect(fs.existsSync(journalPath)).toBe(true);
 });
 
 /* The synthetic secret shapes are assembled at runtime: a literal token in this

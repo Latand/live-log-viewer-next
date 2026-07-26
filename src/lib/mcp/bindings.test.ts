@@ -8,6 +8,9 @@ import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
+import { queryLifecycleEvents } from "@/lib/lifecycle/journal";
+import { refreshLifecycleJournal } from "@/lib/lifecycle/projector";
+
 import { viewerMcpBindings } from "./bindings";
 import { createMcpToolService, type McpToolResult } from "./server";
 
@@ -668,7 +671,8 @@ test("agent_activity reports the liveness snapshot and journals the stalls it fi
       }],
       registrySnapshot: () => ({ entries: {}, conversations: {} }),
       pipelines: () => [],
-      durableTurnEvidence: async () => ({ turn: "busy", message: { text: "mid turn", ts: Date.parse("2026-07-26T02:27:33.000Z") } }),
+      describeTranscript: async () => null,
+      transcriptEvidence: async () => ({ turn: "busy", lastRecordTs: Date.parse("2026-07-26T02:27:33.000Z") }),
     }),
     refreshLifecycleJournal: (input: unknown) => {
       journaled.push(input);
@@ -688,12 +692,68 @@ test("agent_activity reports the liveness snapshot and journals the stalls it fi
   expect(journaled).toHaveLength(1);
 });
 
+test("lifecycle_events projects the runtime deployment ledger into the journal (#686)", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-deploy-events-"));
+  sandboxes.push(sandbox);
+  process.env.LLV_STATE_DIR = sandbox;
+  /* Real projector, real journal — only the runtime host is stubbed, because a
+     deploy event has no other durable source. */
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    registrySnapshot: () => ({ heldDeliveries: {} }),
+    getPipelines: () => ({ pipelines: [] }),
+    refreshLifecycleJournal,
+    queryLifecycleEvents,
+    runtimeEventsEnabled: () => true,
+    runtimeHostClient: () => ({
+      snapshot: async () => ({
+        deployments: [
+          {
+            deploymentId: "deployment_ready",
+            phase: "admitted",
+            revision: "b".repeat(40),
+            updatedAt: "2026-07-26T10:00:00.000Z",
+            error: null,
+          },
+          {
+            deploymentId: "deployment_done",
+            phase: "succeeded",
+            revision: "c".repeat(40),
+            updatedAt: "2026-07-26T10:05:00.000Z",
+            error: null,
+          },
+          {
+            deploymentId: "deployment_bad",
+            phase: "failed",
+            revision: "d".repeat(40),
+            updatedAt: "2026-07-26T10:09:00.000Z",
+            error: "the health gate never went green",
+          },
+        ],
+      }),
+    }),
+  } as never);
+
+  const result = await bindings.lifecycle_events({ clientRequestId: "deploy-events-686", type: "deploy_succeeded" });
+
+  expect(result).toMatchObject({ mode: "query", journaled: 3 });
+  expect((result.events as Array<Record<string, unknown>>).map((event) => event.type)).toEqual(["deploy_succeeded"]);
+  const journal = JSON.parse(fs.readFileSync(path.join(sandbox, "lifecycle-journal.json"), "utf8")) as {
+    events: Array<{ type: string; state: string; summary: string }>;
+  };
+  expect(journal.events.map((event) => event.type)).toEqual(["deploy_ready", "deploy_succeeded", "deploy_failed"]);
+  expect(journal.events.map((event) => event.state)).toEqual(["waiting", "completed", "failed"]);
+  expect(journal.events[2]!.summary).toBe("the health gate never went green");
+});
+
 test("lifecycle_events queries the journal by lineage and polls the bounded digest (#686)", async () => {
   const queries: unknown[] = [];
   const digests: unknown[] = [];
   const bindings = viewerMcpBindings(undefined, undefined, {
     registrySnapshot: () => ({ heldDeliveries: {} }),
     getPipelines: () => ({ pipelines: [] }),
+    /* No runtime host: the deploy projection contributes nothing and must not
+       fail the journal read. */
+    runtimeEventsEnabled: () => false,
     refreshLifecycleJournal: () => ({ appended: 2, skipped: 5, throttled: false }),
     queryLifecycleEvents: (query: unknown) => {
       queries.push(query);

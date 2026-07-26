@@ -58,6 +58,10 @@ const MUTATING_MCP_TOOL_NAMES = new Set<McpToolName>([
      survive the MCP process: a replayed clientRequestId has to return the same
      relay rather than skip past events the caller never saw. */
   "lifecycle_events",
+  /* Reads liveness, but appends the stalls and exits it finds to the same
+     durable journal — for exactly the reason `lifecycle_events` is here, so it
+     is classified the same way rather than looking read-only by name. */
+  "agent_activity",
 ]);
 
 export type McpToolArgs = Record<string, unknown> & { clientRequestId?: unknown };

@@ -173,6 +173,86 @@ test("a seeded subscriber starts at the journal head and never relays history", 
   expect(pollLifecycleDigest({ subscriberId: "conversation_late", now: T0 + 3_600_000 }).relay).toBeNull();
 });
 
+test("a payload that overflows its bound still relays the terminal event, and the cursor does not skip it", () => {
+  sandbox();
+  /* Six distinct routine shapes, then the one event the waiting agent cannot
+     decide without. A bound of three cannot carry all seven. */
+  appendLifecycleEvents([
+    ...Array.from({ length: 6 }, (_, index) => routine(1, T0 + index * 1_000, `stage-${index}`)),
+    {
+      key: "pipeline:pipeline_a:stage:review:attempt:1:verdict:fail",
+      type: "review_verdict",
+      at: new Date(T0 + 7_000).toISOString(),
+      project: "viewer",
+      pipelineId: "pipeline_a",
+      stageId: "review",
+      attempt: 1,
+      role: "reviewer",
+      summary: "fail: the relay drops the event it exists to deliver",
+    },
+  ]);
+  const verdictSeq = 7;
+
+  const bounded = pollLifecycleDigest({ subscriberId: SUBSCRIBER, now: T0 + 10_000, maxItems: 3 });
+  expect(bounded.relay).not.toBeNull();
+  expect(bounded.relay!.items).toHaveLength(3);
+  expect(bounded.relay!.omitted).toBe(4);
+  /* The terminal event is IN the bounded payload: trimming may drop routine
+     progress, never the verdict. */
+  expect(bounded.relay!.items.map((item) => item.type)).toContain("review_verdict");
+  expect(bounded.relay!.reason).toBe("terminal");
+  /* And the cursor stopped at the contiguous prefix it actually carried, well
+     short of the verdict — so nothing between was skipped. */
+  expect(bounded.cursor).toBeLessThan(verdictSeq);
+  expect(readDigestSubscriber(SUBSCRIBER)!.cursorSeq).toBe(bounded.cursor);
+  expect(bounded.pending).toBe(7 - bounded.cursor);
+
+  /* Draining the rest reaches every routine event that did not fit, in order,
+     and the cursor ends past the verdict having relayed it. */
+  const seen: string[] = [...bounded.relay!.items.map((item) => item.stageId ?? "")];
+  let cursor = bounded.cursor;
+  for (let poll = 0; poll < 6 && cursor < verdictSeq; poll += 1) {
+    const next = pollLifecycleDigest({ subscriberId: SUBSCRIBER, now: T0 + 20_000 + poll * 1_000, maxItems: 3 });
+    expect(next.relay).not.toBeNull();
+    expect(next.cursor).toBeGreaterThan(cursor);
+    cursor = next.cursor;
+    seen.push(...next.relay!.items.map((item) => item.stageId ?? ""));
+  }
+  expect(cursor).toBe(verdictSeq);
+  for (let index = 0; index < 6; index += 1) expect(seen).toContain(`stage-${index}`);
+  expect(seen).toContain("review");
+  expect(pollLifecycleDigest({ subscriberId: SUBSCRIBER, now: T0 + 40_000 }).relay).toBeNull();
+});
+
+test("a terminal event older than the bounded window is still relayed, never trimmed away", () => {
+  sandbox();
+  /* The verdict arrives FIRST, then six routine shapes bury it. A payload that
+     keeps only its newest items drops the verdict and advances the cursor past
+     it in the same breath — relayed zero times, forever. */
+  appendLifecycleEvents([{
+    key: "pipeline:pipeline_b:stage:review:attempt:1:verdict:fail",
+    type: "review_verdict",
+    at: new Date(T0).toISOString(),
+    project: "viewer",
+    pipelineId: "pipeline_b",
+    stageId: "review",
+    attempt: 1,
+    role: "reviewer",
+    summary: "fail: three findings block the merge",
+  }]);
+  appendLifecycleEvents(Array.from({ length: 6 }, (_, index) => routine(1, T0 + (index + 1) * 1_000, `late-${index}`)));
+
+  const bounded = pollLifecycleDigest({ subscriberId: "conversation_buried", now: T0 + 10_000, maxItems: 3 });
+  const relayed = bounded.relay!.items;
+  expect(relayed.map((item) => item.type)).toContain("review_verdict");
+  expect(relayed.find((item) => item.type === "review_verdict")!.summary).toBe("fail: three findings block the merge");
+  /* The verdict is seq 1, so relaying it is exactly what lets the cursor move
+     at all; everything it did not carry stays pending. */
+  expect(bounded.cursor).toBeGreaterThanOrEqual(1);
+  expect(bounded.cursor).toBeLessThan(7);
+  expect(bounded.pending).toBe(7 - bounded.cursor);
+});
+
 test("acknowledge=false polls without moving the durable cursor", () => {
   sandbox();
   appendLifecycleEvents([{

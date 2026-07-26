@@ -22,6 +22,7 @@ import type { CreatePipelineRequest, PatchPipelineRequest, PipelineAction } from
 import { listFiles } from "@/lib/scanner";
 import { readResources } from "@/lib/resources";
 import { runtimeHostClient, type RuntimeHostClient } from "@/lib/runtime/client";
+import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
 import { runtimeEventsEnabled } from "@/lib/runtime/flags";
 import { readSession } from "@/lib/session/reader";
 import { applyAssignmentPatches, createTask, patchTask, type CreateTaskInput, type PatchTaskInput } from "@/lib/tasks/commands";
@@ -605,6 +606,24 @@ function lifecycleEventType(value: unknown): LifecycleEventQuery["type"] {
  * Both refresh the projection first, so a stage that finished since the last
  * call is already recorded — no background notification service.
  */
+/**
+ * Viewer deployments as the journal's deploy events see them. The runtime host
+ * owns the deployment ledger, so a disabled or unreachable host simply
+ * contributes no deploy events — it must never fail the whole journal read.
+ */
+async function deploymentsForProjection(
+  dependencies: ViewerMcpDomainDependencies,
+): Promise<ViewerDeploymentStatus[]> {
+  if (!dependencies.runtimeEventsEnabled()) return [];
+  const client = dependencies.runtimeHostClient();
+  if (!client) return [];
+  try {
+    return (await client.snapshot()).deployments;
+  } catch {
+    return [];
+  }
+}
+
 async function lifecycleEvents(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): Promise<McpToolPayload> {
   const mode = text(args.mode) || "query";
   if (mode !== "query" && mode !== "digest") throw new Error('mode must be "query" or "digest"');
@@ -612,6 +631,7 @@ async function lifecycleEvents(args: McpToolArgs, dependencies: ViewerMcpDomainD
   const refreshed = dependencies.refreshLifecycleJournal({
     pipelines: dependencies.getPipelines().pipelines,
     deliveries: Object.values(registry.heldDeliveries),
+    deployments: await deploymentsForProjection(dependencies),
   });
   if (mode === "digest") {
     const subscriberId = text(args.subscriberId) || text(args.conversationId);

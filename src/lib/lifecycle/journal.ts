@@ -1,8 +1,8 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
-import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
+import { writeJsonDurably } from "@/lib/state/durableJson";
 import { withFileTransactionSync } from "@/lib/state/fileTransaction";
 
 import {
@@ -100,6 +100,25 @@ export function lifecycleJournalPath(): string {
   return statePath("lifecycle-journal.json");
 }
 
+/**
+ * Raised when the journal file exists but cannot be read as a journal. It is
+ * deliberately fatal to the lifecycle surfaces: an append-only record of what
+ * happened is worthless if a truncated write can silently restart it at
+ * `lastSeq 0`. A durable subscriber whose cursor sits above a reset `lastSeq`
+ * would then never match another event again — permanently deaf, with nothing
+ * anywhere saying so. Surfacing the path lets the operator move the file aside
+ * deliberately, which is the only way durable history is ever discarded.
+ */
+export class LifecycleJournalCorruptError extends Error {
+  readonly journalPath: string;
+
+  constructor(journalPath: string, detail: string) {
+    super(`the lifecycle journal at ${journalPath} is unreadable (${detail}); move it aside to start a new one`);
+    this.name = "LifecycleJournalCorruptError";
+    this.journalPath = journalPath;
+  }
+}
+
 export function lifecycleEventId(key: string): string {
   return `evt_${crypto.createHash("sha256").update(key).digest("hex").slice(0, 24)}`;
 }
@@ -133,12 +152,24 @@ function normalizeEvent(value: unknown): LifecycleEvent | null {
   };
 }
 
-function normalizeJournal(value: unknown): LifecycleJournalFile {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return emptyJournal();
+/** Every recorded row must survive the round trip. A row that does not is
+    damage, not noise: dropping it silently would rewrite history on the next
+    append, so it stops the read instead. */
+function normalizeJournal(value: unknown, journalPath: string): LifecycleJournalFile {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new LifecycleJournalCorruptError(journalPath, "its contents are not a journal object");
+  }
   const file = value as Partial<LifecycleJournalFile>;
-  const events = Array.isArray(file.events)
-    ? file.events.map(normalizeEvent).filter((event): event is LifecycleEvent => event !== null)
-    : [];
+  if (file.events !== undefined && !Array.isArray(file.events)) {
+    throw new LifecycleJournalCorruptError(journalPath, "its events field is not an array");
+  }
+  const raw = file.events ?? [];
+  const events: LifecycleEvent[] = [];
+  for (const [index, candidate] of raw.entries()) {
+    const event = normalizeEvent(candidate);
+    if (!event) throw new LifecycleJournalCorruptError(journalPath, `recorded event ${index + 1} of ${raw.length} is malformed`);
+    events.push(event);
+  }
   events.sort((left, right) => left.seq - right.seq);
   const retired = Array.isArray(file.retired) ? file.retired.filter((id): id is string => typeof id === "string") : [];
   const highest = events.at(-1)?.seq ?? 0;
@@ -147,22 +178,27 @@ function normalizeJournal(value: unknown): LifecycleJournalFile {
 }
 
 function readJournalFile(): LifecycleJournalFile {
+  const journalPath = lifecycleJournalPath();
+  let contents: string;
   try {
-    return normalizeJournal(JSON.parse(fs.readFileSync(lifecycleJournalPath(), "utf8")) as unknown);
+    contents = fs.readFileSync(journalPath, "utf8");
   } catch (error) {
+    /* Absent is a genuine "nothing recorded yet"; anything else is a journal
+       the Viewer has but cannot read, which is never the same thing. */
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return emptyJournal();
-    /* A corrupt journal must never take the Viewer down with it: the surface
-       degrades to "nothing recorded yet" and the next append rewrites it. */
-    return emptyJournal();
+    throw new LifecycleJournalCorruptError(journalPath, `it could not be read: ${(error as Error).message}`);
   }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contents) as unknown;
+  } catch {
+    throw new LifecycleJournalCorruptError(journalPath, "it is not valid JSON — the last write was truncated");
+  }
+  return normalizeJournal(parsed, journalPath);
 }
 
 function writeJournalFile(file: LifecycleJournalFile): void {
-  const target = lifecycleJournalPath();
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  const temp = path.join(path.dirname(target), `.${path.basename(target)}.${process.pid}.${crypto.randomUUID()}.tmp`);
-  fs.writeFileSync(temp, `${JSON.stringify(file, null, 2)}\n`, "utf8");
-  fs.renameSync(temp, target);
+  writeJsonDurably(lifecycleJournalPath(), file);
 }
 
 /** The durable journal exactly as stored. */

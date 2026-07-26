@@ -4,11 +4,11 @@ import os from "node:os";
 import path from "node:path";
 
 import type { AgentRegistryEntry, RegistryFile } from "@/lib/agent/registry";
-import type { StageTurnEvidence } from "@/lib/pipelines/durableEvidence";
 import type { Pipeline, PipelineStageAttempt } from "@/lib/pipelines/types";
 import type { FileEntry } from "@/lib/types";
 
 import { agentLivenessSnapshot, evaluateLiveness, type AgentLivenessSources } from "./liveness";
+import { readLivenessTranscriptEvidence, type LivenessTranscript, type LivenessTranscriptEvidence } from "./transcript";
 
 const sandboxes: string[] = [];
 
@@ -119,7 +119,10 @@ function zombiePipeline(conversationId: string, agentPath: string): Pipeline {
   } as unknown as Pipeline;
 }
 
-function sources(overrides: Partial<AgentLivenessSources> & Pick<AgentLivenessSources, "listFiles" | "registrySnapshot" | "pipelines" | "durableTurnEvidence">): AgentLivenessSources {
+function sources(
+  overrides: Partial<AgentLivenessSources>
+    & Pick<AgentLivenessSources, "listFiles" | "registrySnapshot" | "pipelines" | "transcriptEvidence">,
+): AgentLivenessSources {
   return {
     now: () => NOW,
     probe: {
@@ -127,6 +130,9 @@ function sources(overrides: Partial<AgentLivenessSources> & Pick<AgentLivenessSo
       /* Nothing answers: the structured host process is gone. */
       pidAlive: () => false,
       processIdentity: () => null,
+    },
+    describeTranscript: async () => {
+      throw new Error("a request with no named conversation must not describe one");
     },
     ...overrides,
   };
@@ -148,9 +154,9 @@ test("a pane-less structured attempt with a dead host and a mid-turn transcript 
     registrySnapshot: () => registry,
     pipelines: () => [pipeline],
     /* Durable transcript evidence: the turn never closed. */
-    durableTurnEvidence: async (): Promise<StageTurnEvidence> => ({
+    transcriptEvidence: async (): Promise<LivenessTranscriptEvidence> => ({
       turn: "busy",
-      message: { text: "working on it", ts: FROZEN_AT },
+      lastRecordTs: FROZEN_AT,
     }),
   }));
 
@@ -190,7 +196,7 @@ test("a live host with a fresh turn is running, and a live host with a settled t
     listFiles: async () => [fileEntry({ path: agentPath, mtime: Math.floor((NOW - 30_000) / 1000), activity: "live" })],
     registrySnapshot: () => registry,
     pipelines: () => [],
-    durableTurnEvidence: async () => ({ turn: "busy", message: { text: "still going", ts: NOW - 30_000 } }),
+    transcriptEvidence: async () => ({ turn: "busy" as const, lastRecordTs: NOW - 30_000 }),
   }));
   expect(running.conversations[0]!.lifecycle).toBe("running");
   expect(running.stalledCount).toBe(0);
@@ -200,11 +206,128 @@ test("a live host with a fresh turn is running, and a live host with a settled t
     listFiles: async () => [fileEntry({ path: agentPath, mtime: Math.floor((NOW - 30_000) / 1000), activity: "idle" })],
     registrySnapshot: () => registry,
     pipelines: () => [],
-    durableTurnEvidence: async () => ({ turn: "terminal", message: { text: "done", ts: NOW - 30_000 } }),
+    transcriptEvidence: async () => ({ turn: "idle" as const, lastRecordTs: NOW - 30_000 }),
   }));
   expect(waiting.conversations[0]!.lifecycle).toBe("waiting");
   expect(waiting.conversations[0]!.reason).toBe("host_alive_turn_idle");
   expect(waiting.conversations[0]!.stalledForMs).toBeNull();
+});
+
+/** A Claude transcript replayed from the shape this got wrong: one prose
+    message hours ago, then an unbroken tool stretch that is still going. */
+function toolStretchTranscript(target: string): void {
+  const rows = [
+    {
+      type: "assistant",
+      timestamp: new Date(FROZEN_AT).toISOString(),
+      message: { content: [{ type: "text", text: "starting the migration sweep" }], stop_reason: null },
+    },
+    {
+      type: "assistant",
+      timestamp: new Date(NOW - 120_000).toISOString(),
+      message: { content: [{ type: "tool_use", id: "tool_a", name: "Bash", input: { command: "bun test" } }], stop_reason: "tool_use" },
+    },
+    {
+      type: "user",
+      timestamp: new Date(NOW - 90_000).toISOString(),
+      message: { content: [{ type: "tool_result", tool_use_id: "tool_a", content: "ok" }] },
+    },
+    {
+      type: "assistant",
+      timestamp: new Date(NOW - 45_000).toISOString(),
+      message: { content: [{ type: "tool_use", id: "tool_b", name: "Read", input: { file: "a.ts" } }], stop_reason: "tool_use" },
+    },
+    {
+      type: "user",
+      timestamp: new Date(NOW - 20_000).toISOString(),
+      message: { content: [{ type: "tool_result", tool_use_id: "tool_b", content: "ok" }] },
+    },
+  ];
+  fs.writeFileSync(target, rows.map((row) => JSON.stringify(row)).join("\n") + "\n", "utf8");
+}
+
+test("a live agent deep in a tool stretch is running: freshness is the newest RECORD, not the last prose message", async () => {
+  const dir = sandbox();
+  const agentPath = path.join(dir, "session-tools.jsonl");
+  toolStretchTranscript(agentPath);
+
+  /* Read for real: this is the production evidence path, not a stub. */
+  const evidence = await readLivenessTranscriptEvidence("claude", agentPath);
+  expect(evidence).not.toBeNull();
+  expect(evidence!.turn).toBe("busy");
+  /* Twenty seconds old — the last tool result — and NOT the six-hour-old prose. */
+  expect(evidence!.lastRecordTs).toBe(NOW - 20_000);
+  expect(evidence!.lastRecordTs).not.toBe(FROZEN_AT);
+
+  const registry = {
+    entries: { "claude:session-tools": structuredEntry(agentPath, 4242) },
+    conversations: {},
+  } as unknown as RegistryFile;
+  const snapshot = await agentLivenessSnapshot({}, sources({
+    probe: { now: () => NOW, pidAlive: () => true, processIdentity: () => "start-token-of-a-dead-host" },
+    listFiles: async () => [fileEntry({ path: agentPath, engine: "claude", mtime: (NOW - 20_000) / 1000 })],
+    registrySnapshot: () => registry,
+    pipelines: () => [],
+    transcriptEvidence: readLivenessTranscriptEvidence,
+  }));
+
+  const record = snapshot.conversations[0]!;
+  expect(record.lastRecordAt).toBe(new Date(NOW - 20_000).toISOString());
+  expect(record.silentForMs).toBe(20_000);
+  expect(record.lifecycle).toBe("running");
+  expect(snapshot.stalledCount).toBe(0);
+});
+
+test("a single-conversation query does no inventory sweep and reads the tail once (#645)", async () => {
+  const agentPath = "/transcripts/named-session.jsonl";
+  const described: string[] = [];
+  const tailReads: string[] = [];
+  const registry = {
+    entries: {},
+    conversations: {
+      conversation_named: {
+        id: "conversation_named",
+        generations: [{ path: "/transcripts/old-generation.jsonl" }, { path: agentPath }],
+        continuityPaths: [],
+      },
+    },
+  } as unknown as RegistryFile;
+
+  const snapshot = await agentLivenessSnapshot({ conversationId: "conversation_named" }, sources({
+    /* Root discovery, the process-table sweep and the tmux pane map all live
+       behind this one call. Reaching it at all is the finding. */
+    listFiles: async () => {
+      throw new Error("a single-conversation query must not run the inventory sweep");
+    },
+    describeTranscript: async (transcriptPath): Promise<LivenessTranscript> => {
+      described.push(transcriptPath);
+      return {
+        path: transcriptPath,
+        project: "viewer",
+        title: "named agent",
+        engine: "claude",
+        mtimeMs: NOW - 60_000,
+        conversationId: null,
+        activity: null,
+        activityReason: null,
+      };
+    },
+    transcriptEvidence: async (_engine, transcriptPath) => {
+      tailReads.push(transcriptPath);
+      return { turn: "busy" as const, lastRecordTs: NOW - 60_000 };
+    },
+    registrySnapshot: () => registry,
+    pipelines: () => [],
+  }));
+
+  /* Only the conversation's CURRENT generation, described once, tail read once. */
+  expect(described).toEqual([agentPath]);
+  expect(tailReads).toEqual([agentPath]);
+  expect(snapshot.count).toBe(1);
+  const record = snapshot.conversations[0]!;
+  expect(record.transcriptPath).toBe(agentPath);
+  /* The registry snapshot the query already read supplies the owner. */
+  expect(record.conversationId).toBe("conversation_named");
 });
 
 test("a live host whose transcript goes silent past the threshold is stalled", () => {
@@ -217,5 +340,23 @@ test("a live host whose transcript goes silent past the threshold is stalled", (
     .toEqual({ lifecycle: "gone", reason: "host_gone_turn_settled" });
   /* No host evidence yet inside the launch grace is a start, not a stall. */
   expect(evaluateLiveness({ host: { state: "unknown" }, turnState: "unknown", silentForMs: 1_000, stallAfterMs: 10 * 60_000 }))
+    .toEqual({ lifecycle: "starting", reason: "launch_unproven" });
+});
+
+test("an unregistered transcript is aged: past the grace it has stopped starting up", () => {
+  const stallAfterMs = 10 * 60_000;
+  /* Four minutes in, with nothing registered yet: still a launch. */
+  expect(evaluateLiveness({ host: { state: "unknown" }, turnState: "busy", silentForMs: 4 * 60_000, stallAfterMs }))
+    .toEqual({ lifecycle: "starting", reason: "launch_unproven" });
+  /* Six hours in, mid-turn, still nothing registered: an orphan, not a launch.
+     Reporting `starting` here tells an orchestrator to keep waiting for an
+     agent that was never proven to exist. */
+  expect(evaluateLiveness({ host: { state: "unknown" }, turnState: "busy", silentForMs: 6 * 3_600_000, stallAfterMs }))
+    .toEqual({ lifecycle: "stalled", reason: "launch_unproven_expired" });
+  /* The same age with a settled turn is simply over. */
+  expect(evaluateLiveness({ host: { state: "unknown" }, turnState: "idle", silentForMs: 6 * 3_600_000, stallAfterMs }))
+    .toEqual({ lifecycle: "gone", reason: "launch_unproven_expired" });
+  /* Nothing to age it by keeps the benefit of the doubt. */
+  expect(evaluateLiveness({ host: { state: "unknown" }, turnState: "unknown", silentForMs: null, stallAfterMs }))
     .toEqual({ lifecycle: "starting", reason: "launch_unproven" });
 });
