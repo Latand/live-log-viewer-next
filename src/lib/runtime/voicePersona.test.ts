@@ -28,13 +28,13 @@ const FOREIGN_SCRIPT =
  * defers the choice to the operator's locale at runtime and names no language
  * anywhere, so no sentence shape can be the thing being asserted.
  *
- * The name is stripped first — it is a proper noun the operator chose, not
- * prose, and it is allowed to be in its own script.
+ * Nothing is exempt, the name included. An exemption is a hole the size of
+ * whatever is exempt, and a name in another script is read aloud in that
+ * script's language just as surely as a sentence in it would be.
  */
 function languagePins(persona: string): string[] {
-  const body = persona.split(PERSONA_NAME).join("");
-  const pins: string[] = LANGUAGE_NAMES.filter((name) => new RegExp(`\\b${name}\\b`, "iu").test(body));
-  if (FOREIGN_SCRIPT.test(body)) pins.push("non-Latin script");
+  const pins: string[] = LANGUAGE_NAMES.filter((name) => new RegExp(`\\b${name}\\b`, "iu").test(persona));
+  if (FOREIGN_SCRIPT.test(persona)) pins.push("non-Latin script");
   return pins;
 }
 
@@ -82,22 +82,38 @@ test("appending a hard pin to any language is caught", () => {
   }
 });
 
+/* Adversarial samples built from bare codepoint numbers rather than written out
+   as foreign words, so this file's own text stays English while still proving
+   the guard reacts to each script it claims to cover. */
+function nonLatin(...codePoints: number[]): string {
+  return String.fromCodePoint(...codePoints);
+}
+
 test("a persona rewritten in another script is caught", () => {
-  /* Bare codepoints rather than foreign sentences, so this file itself carries
-     no non-English content: the guard has to notice body text in another
-     script, which is how a persona translated back into one arrives. */
-  for (const sample of ["Аб", "中", "א", "あ"]) {
+  /* Body text in another script is how a persona translated back into one
+     arrives, and it pins the spoken locale as hard as naming the language. */
+  for (const sample of [nonLatin(0x0410, 0x0431), nonLatin(0x4e2d), nonLatin(0x05d0), nonLatin(0x3042)]) {
     expect(languagePins(`${DEFAULT_VOICE_PERSONA}\n\n${sample}`)).toContain("non-Latin script");
   }
 });
 
-test("the name survives the guard, because a proper noun is not prose", () => {
-  /* The name is the operator's decision and stays in its own script. If
-     stripping it ever stops working, the guard would fail the shipped persona
-     and the next reader would "fix" the name. */
-  expect(DEFAULT_VOICE_PERSONA).toContain(PERSONA_NAME);
-  expect(FOREIGN_SCRIPT.test(PERSONA_NAME)).toBeTrue();
+test("the name is English too, so the guard carves out no exception for it", () => {
+  /* The name used to be the one token stripped before the guard ran, which left
+     the only spelling in the file that could pin a locale sitting outside the
+     only check that would catch it. It is Latin now and goes through the guard
+     with the rest of the prose. */
+  expect(PERSONA_NAME).toBe("Alik");
+  expect(PERSONA_NAME).toMatch(/^[A-Za-z]+$/);
+  expect(DEFAULT_VOICE_PERSONA).toContain(`Your name is ${PERSONA_NAME}.`);
   expect(languagePins(PERSONA_NAME)).toEqual([]);
+});
+
+test("a name in another script is caught like any other foreign text", () => {
+  /* The regression that made this a defect: a name respelled in a non-Latin
+     script has to fail the language guard rather than slip past it. */
+  const renamed = DEFAULT_VOICE_PERSONA.replace(PERSONA_NAME, nonLatin(0x0410, 0x043b, 0x0438, 0x043a));
+  expect(renamed).not.toBe(DEFAULT_VOICE_PERSONA);
+  expect(languagePins(renamed)).toContain("non-Latin script");
 });
 
 test("the persona hands the spoken language to the operator's locale", () => {
