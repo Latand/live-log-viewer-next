@@ -1117,7 +1117,7 @@ test("approved uncommitted work cannot inherit merge status from its base HEAD",
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   try {
     expect(spawnSync("git", ["init", "-b", "main"], { cwd: directory }).status).toBe(0);
-    expect(spawnSync("git", ["config", "user.email", "reaper@example.test"], { cwd: directory }).status).toBe(0);
+    expect(spawnSync("git", ["config", "user.email", "noreply"], { cwd: directory }).status).toBe(0);
     expect(spawnSync("git", ["config", "user.name", "Reaper Test"], { cwd: directory }).status).toBe(0);
     fs.writeFileSync(path.join(directory, "tracked.txt"), "base\n");
     expect(spawnSync("git", ["add", "tracked.txt"], { cwd: directory }).status).toBe(0);
@@ -1159,7 +1159,7 @@ test("a clean detached checkout cannot retain stale merge authorization", async 
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   try {
     expect(spawnSync("git", ["init", "-b", "main"], { cwd: directory }).status).toBe(0);
-    expect(spawnSync("git", ["config", "user.email", "reaper@example.test"], { cwd: directory }).status).toBe(0);
+    expect(spawnSync("git", ["config", "user.email", "noreply"], { cwd: directory }).status).toBe(0);
     expect(spawnSync("git", ["config", "user.name", "Reaper Test"], { cwd: directory }).status).toBe(0);
     fs.writeFileSync(path.join(directory, "tracked.txt"), "reviewed\n");
     expect(spawnSync("git", ["add", "tracked.txt"], { cwd: directory }).status).toBe(0);
