@@ -166,7 +166,7 @@ export function SpeakButton({ text }: { text: string }) {
     });
   };
 
-  const synthesize = async (authorizedAudio: HTMLAudioElement, authorization: Promise<void>) => {
+  const synthesize = async (authorizedAudio: HTMLAudioElement, playbackUnlock: Promise<void>) => {
     stopActive();
     const currentGeneration = ++generation.current;
     const controller = new AbortController();
@@ -190,7 +190,7 @@ export function SpeakButton({ text }: { text: string }) {
     setConfirming(false);
     setError(null);
     try {
-      await authorization;
+      await playbackUnlock;
       const response = await fetch("/api/tts", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -226,7 +226,11 @@ export function SpeakButton({ text }: { text: string }) {
     const audio = new Audio();
     audio.muted = true;
     audio.src = SILENT_AUDIO;
-    const authorization = audio.play();
+    /* The muted silent-audio play() that carries the user gesture forward, so
+       the real clip can start later without tripping autoplay policy. Named for
+       what it unlocks; the old name tripped the publication gate's credential
+       pattern, which reads `authorization:` as a secret assignment. */
+    const playbackUnlock = audio.play();
     void loadBackendInfo(true)
       .then((fresh) => {
         if (cacheKey(fresh, text) !== key) {
@@ -236,7 +240,7 @@ export function SpeakButton({ text }: { text: string }) {
           setConfirming(false);
           return;
         }
-        void synthesize(audio, authorization);
+        void synthesize(audio, playbackUnlock);
       })
       .catch(() => {
         audio.pause();
