@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Hint } from "@/components/Hint";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useLocale } from "@/lib/i18n";
+import { cleanTitle } from "@/lib/title";
 import { useAgentCapabilities } from "./useAgentCapabilities";
 import type { FileEntry } from "@/lib/types";
 
@@ -112,6 +113,8 @@ export function ProcessStatusControls({
 
   const killDisabled = killCap.state === "disabled";
   const killReason = killDisabled ? t(killCap.reason) : "";
+  /* What the destructive action will stop, by name (issue #700). */
+  const killTargetName = cleanTitle(file.title, 48) || t("task.confirmKillUntitled");
   return (
     <span className={`inline-flex min-w-0 flex-wrap items-center gap-1.5 ${compact ? "text-[10.5px]" : "text-xs"}`}>
       {hideChip ? null : chip}
@@ -133,18 +136,30 @@ export function ProcessStatusControls({
         </Hint>
       ) : killCap.state === "enabled" ? (
         confirming ? (
-          <span className="inline-flex max-w-full items-center gap-1 rounded-[8px] border border-danger/30 bg-danger-soft px-1.5 py-0.5">
-            {compact ? null : (
-              <span className="truncate px-1 text-[11px] font-semibold text-danger">{t("task.confirmKill", { pid: file.pid ?? "" })}</span>
+          /* Issue #700: compact mode used to render NO question at all — the
+             confirm read "Kill 908010 / No", so "No" negated nothing and the
+             only identifier was a PID. Both layouts now pose the question and
+             name the conversation, with the PID demoted to a secondary chip.
+             `compact` is passed unconditionally by every canvas card and branch
+             pane, so this was every width, not only the phone. */
+          <span className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-[8px] border border-danger/30 bg-danger-soft px-1.5 py-0.5">
+            <span
+              className="min-w-0 flex-1 truncate px-1 text-[11px] font-semibold text-danger"
+              title={file.pid === null ? undefined : t("task.confirmKill", { pid: file.pid })}
+            >
+              {t("task.confirmKillNamed", { name: killTargetName })}
+            </span>
+            {file.pid === null ? null : (
+              <span className="hidden shrink-0 text-[10px] tabular-nums text-muted sm:inline">PID {file.pid}</span>
             )}
             <button
-              className={`inline-flex items-center whitespace-nowrap rounded-lg bg-danger text-[11px] font-bold tabular-nums text-white disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/50 ${
+              className={`inline-flex shrink-0 items-center whitespace-nowrap rounded-lg bg-danger text-[11px] font-bold tabular-nums text-white disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/50 ${
                 isMobile ? "min-h-11 px-3" : "px-2 py-0.5"
               }`}
               disabled={killing}
               onClick={kill}
             >
-              {forceNext ? "SIGKILL" : compact ? t("task.killPid", { pid: file.pid ?? "" }) : t("task.confirmKillYes")}
+              {forceNext ? "SIGKILL" : compact ? t("common.yes") : t("task.confirmKillYes")}
             </button>
             <button
               className={`inline-flex items-center whitespace-nowrap rounded-lg border border-border bg-card text-[11px] font-semibold text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${

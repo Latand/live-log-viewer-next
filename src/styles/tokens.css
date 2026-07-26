@@ -59,7 +59,11 @@
   /* ── §1.5 Color roles ──────────────────────────────────────────────────── */
   --color-primary: #1c1c22; /*   text-primary  */
   --color-secondary: #55555f; /* text-secondary */
-  --color-muted: #8b8b95; /*     text-muted     */
+  /* Issue #700: state text carried this role at 3.37:1 on the card and 3.05:1
+     on the canvas — below the 4.5:1 small-text floor, on the labels an operator
+     reads to decide what needs attention. Darkened to clear it on all three
+     light surfaces (5.17 / 4.67 / 4.84). */
+  --color-muted: #6c6c79; /*     text-muted     */
   /* Border roles: literals on the doc-canonical `--border-*` names (design doc
      §1.5); `--color-*` aliases keep border-border/border-strong utilities. */
   --border-default: #e6e6ea;
@@ -69,9 +73,12 @@
 
   --color-accent: #5a51e0;
   --color-accent-soft: #ecebfb;
-  --color-success: #1a8a3e;
+  /* Same floor, same reason (issue #700): "working…"/"live tail" measured
+     4.42:1 and "waiting"/"waiting for a reply" 4.30:1, both also used as text
+     on their own -soft fills. Now 4.83:1 and 5.17:1 at their worst surface. */
+  --color-success: #177a37;
   --color-success-soft: #e5f6ea;
-  --color-warning: #9a6b00;
+  --color-warning: #8a5f00;
   --color-warning-soft: #fff4dd;
   /* Crown favorites accent (issue #224): a true gold/yellow, distinct from the
      browny `--color-warning`, so a crowned card reads as regal, not as a
@@ -140,7 +147,7 @@
 
     --color-primary: #e8e8ec;
     --color-secondary: #a2a2ae;
-    --color-muted: #6f6f7a;
+    --color-muted: #8b8b98; /* issue #700: 3.60:1 on the dark card → 5.31:1 */
     --border-default: #26262e;
     --border-strong: #3a3a44;
 
@@ -189,7 +196,7 @@
 
   --color-primary: #e8e8ec;
   --color-secondary: #a2a2ae;
-  --color-muted: #6f6f7a;
+  --color-muted: #8b8b98; /* issue #700: 3.60:1 on the dark card → 5.31:1 */
   --border-default: #26262e;
   --border-strong: #3a3a44;
 

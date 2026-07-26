@@ -1601,7 +1601,9 @@ export const en = {
   "task.signalSent": "sent {signal} to PID {pid}",
   "task.killRequested": "kill requested",
   "task.confirmKill": "Really kill PID {pid}?",
-  "task.killPid": "Kill {pid}",
+  /* Issue #700: compact confirmations name the conversation, not the PID. */
+  "task.confirmKillNamed": "Stop {name}?",
+  "task.confirmKillUntitled": "this agent",
   "task.confirmKillYes": "Yes, kill",
   "task.stopAria": "Stop process PID {pid}",
   "task.kill": "Kill",
