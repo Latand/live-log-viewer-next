@@ -1494,6 +1494,13 @@ export const en = {
   "overview.quiet": "quiet · last activity {age}",
   "overview.empty": "No logs yet",
 
+  // Catalog fetch failure (issue #696) — never the idle empty-state copy
+  "catalog.unreachable": "catalog unavailable",
+  "catalog.errorTitle": "Couldn't load the session catalog",
+  "catalog.errorBody": "The viewer server did not answer, so what is running is unknown.",
+  "catalog.retry": "Retry",
+  "catalog.attempts": { one: "{count} failed attempt", other: "{count} failed attempts" },
+
   // OrchestratorChatButton
   "orch.chat": "Orchestrator",
   "orch.open": "Open the orchestrator chat",

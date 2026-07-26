@@ -5,6 +5,7 @@ import { useMemo, useState } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { projectDisplayName, projectMatchesQuery } from "@/lib/displayNames";
+import { requestFilesRefresh } from "@/lib/filesEvents";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -31,13 +32,16 @@ interface Props {
   archivedProjects: ReadonlySet<string>;
   selected: string;
   loaded: boolean;
+  /** Consecutive `/api/files` failures (issue #696) — a rail that never loaded
+      says the fetch failed instead of spinning "loading…" indefinitely. */
+  catalogFailures?: number;
   /** Attention clock owned by Viewer — advances when a stalled entry crosses
       its TTL, so the rail badges expire together with the queue. */
   now: number;
   onSelect: (project: string) => void;
 }
 
-export function ProjectRail({ files, projectCatalog, pipelines, workflows, archivedProjects, selected, loaded, now, onSelect }: Props) {
+export function ProjectRail({ files, projectCatalog, pipelines, workflows, archivedProjects, selected, loaded, catalogFailures = 0, now, onSelect }: Props) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
   const [query, setQuery] = useState("");
@@ -174,6 +178,20 @@ export function ProjectRail({ files, projectCatalog, pipelines, workflows, archi
         {!activeRows.length && !archivedRows.length ? (
           loaded ? (
             <div className="px-3 py-4 text-center text-[12px] text-muted">{t("common.nothingFound")}</div>
+          ) : catalogFailures > 0 ? (
+            /* Issue #696: an unreachable server stops reading as "still
+               loading" — the rail names the failure and offers the retry. */
+            <div role="alert" data-catalog-error="true" className="flex flex-col items-center gap-1.5 px-3 py-4 text-center">
+              <span className="text-[12px] font-semibold text-danger">{t("catalog.errorTitle")}</span>
+              <span className="text-[11px] tabular-nums text-muted">{t("catalog.attempts", { count: catalogFailures })}</span>
+              <button
+                type="button"
+                className="mt-1 inline-flex min-h-11 items-center rounded-full border border-border bg-card px-3 text-[12px] font-semibold text-primary hover:border-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                onClick={() => requestFilesRefresh()}
+              >
+                {t("catalog.retry")}
+              </button>
+            </div>
           ) : (
             <div className="flex items-center justify-center gap-2 px-3 py-4 text-[12px] text-muted">
               <Loader2 className="h-4 w-4 animate-spin" aria-hidden />

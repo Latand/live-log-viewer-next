@@ -1458,6 +1458,17 @@ export const uk: Record<keyof typeof en, Message> = {
   "overview.quiet": "тихо · остання активність {age}",
   "overview.empty": "Логів поки нема",
 
+  "catalog.unreachable": "каталог недоступний",
+  "catalog.errorTitle": "Не вдалося завантажити каталог сесій",
+  "catalog.errorBody": "Сервер вʼювера не відповів, тож невідомо, що зараз працює.",
+  "catalog.retry": "Спробувати ще",
+  "catalog.attempts": {
+    one: "{count} невдала спроба",
+    few: "{count} невдалі спроби",
+    many: "{count} невдалих спроб",
+    other: "{count} невдалих спроб",
+  },
+
   "orch.chat": "Оркестратор",
   "orch.open": "Відкрити чат оркестратора",
   "orch.starting": "Запускаю…",

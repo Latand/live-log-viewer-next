@@ -1,10 +1,11 @@
 "use client";
 
-import { Menu } from "lucide-react";
+import { Menu, RotateCw, TriangleAlert } from "lucide-react";
 import { useMemo } from "react";
 
 import { useColumns } from "@/hooks/useColumns";
 import { projectDisplayName } from "@/lib/displayNames";
+import { requestFilesRefresh } from "@/lib/filesEvents";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -24,6 +25,9 @@ interface Props {
   archivedProjects: ReadonlySet<string>;
   /** Attention clock owned by Viewer — keeps summary badges in step with the queue. */
   now: number;
+  /** Consecutive `/api/files` failures (issue #696). Above zero the board is
+      showing an unconfirmed catalog, so the idle empty-state copy is a lie. */
+  catalogFailures?: number;
   onSelectProject: (project: string) => void;
   onSelectFile: (file: FileEntry) => void;
   /** Mobile shell: the rail hides behind a drawer, this opens it. */
@@ -33,8 +37,9 @@ interface Props {
   attention?: React.ReactNode;
 }
 
-export function OverviewBoard({ files, projectCatalog, pipelines, workflows, archivedProjects, now, onSelectProject, onSelectFile, onMenu, attention }: Props) {
+export function OverviewBoard({ files, projectCatalog, pipelines, workflows, archivedProjects, now, catalogFailures = 0, onSelectProject, onSelectFile, onMenu, attention }: Props) {
   const { t } = useLocale();
+  const degraded = catalogFailures > 0;
   const cols = useColumns();
   const allSummaries = useMemo(() => buildProjectSummaries(files, now, workflows, projectCatalog, pipelines), [files, now, workflows, projectCatalog, pipelines]);
   const summaries = useMemo(
@@ -74,11 +79,18 @@ export function OverviewBoard({ files, projectCatalog, pipelines, workflows, arc
           </button>
         ) : null}
         <h1 className="text-[13.5px] font-bold">{t("rail.overview")}</h1>
-        <span className="text-[11.5px] text-muted">
-          {totalLive
-            ? t("overview.branchesLiveIn", { count: totalLive, projects: t("overview.projects", { count: liveProjects }) })
-            : t("common.nothingRunning")}
-          {archivedCount ? ` ${t("overview.archived", { count: archivedCount })}` : ""}
+        <span
+          className={`text-[11.5px] ${degraded ? "font-semibold text-danger" : "text-muted"}`}
+          data-degraded={degraded ? "true" : undefined}
+        >
+          {/* Issue #696: a failed catalog fetch never borrows the affirmative
+              "nothing is running right now" copy. */}
+          {degraded
+            ? t("catalog.unreachable")
+            : totalLive
+              ? t("overview.branchesLiveIn", { count: totalLive, projects: t("overview.projects", { count: liveProjects }) })
+              : t("common.nothingRunning")}
+          {!degraded && archivedCount ? ` ${t("overview.archived", { count: archivedCount })}` : ""}
         </span>
         <span className="ml-auto flex shrink-0 items-center gap-2">
           <OrchestratorChatButton />
@@ -145,7 +157,34 @@ export function OverviewBoard({ files, projectCatalog, pipelines, workflows, arc
             </button>
           );
         })}
-        {!summaries.length ? (
+        {/* Issue #696: a failed fetch and a genuinely empty installation must
+            not render the same screen. While the catalog is unreachable the
+            board states the failure and offers the recovery action; the idle
+            "No logs yet" copy is held back until a fetch actually succeeds. */}
+        {degraded ? (
+          <div
+            role="alert"
+            data-catalog-error="true"
+            className={`col-span-full mx-auto flex max-w-[420px] flex-col items-center gap-2 rounded-[10px] border border-danger/35 bg-danger-soft px-4 py-4 text-center ${
+              summaries.length ? "mt-1" : "mt-[12vh]"
+            }`}
+          >
+            <span className="inline-flex items-center gap-1.5 text-[13px] font-bold text-danger">
+              <TriangleAlert className="h-4 w-4 shrink-0" aria-hidden /> {t("catalog.errorTitle")}
+            </span>
+            <span className="text-[12px] text-secondary">{t("catalog.errorBody")}</span>
+            <span className="text-[11px] font-semibold tabular-nums text-muted">
+              {t("catalog.attempts", { count: catalogFailures })}
+            </span>
+            <button
+              type="button"
+              className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-border bg-card px-4 text-[13px] font-semibold text-primary hover:border-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              onClick={() => requestFilesRefresh()}
+            >
+              <RotateCw className="h-4 w-4" aria-hidden /> {t("catalog.retry")}
+            </button>
+          </div>
+        ) : !summaries.length ? (
           <div className="col-span-full mt-[20vh] text-center text-muted">{t("overview.empty")}</div>
         ) : null}
       </div>
