@@ -918,6 +918,44 @@ exec "$LLV_TEST_REAL_GIT" "$@"
     expect(result.stderr.toString()).toBe("");
   });
 
+  test("skips text inspection for signature-verified MP3 and WAV assets", () => {
+    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(directory);
+    const mp3 = join(directory, "cue.mp3");
+    const wav = join(directory, "ambient.wav");
+    writeFileSync(mp3, Buffer.concat([
+      Buffer.from("ID3"),
+      Buffer.from([0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
+      Buffer.from([0xff, 0xfb, 0x90, 0x64]),
+    ]));
+    writeFileSync(wav, Buffer.concat([
+      Buffer.from("RIFF"),
+      Buffer.from([0x24, 0x00, 0x00, 0x00]),
+      Buffer.from("WAVEfmt "),
+      Buffer.from([0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02, 0x00]),
+    ]));
+
+    const result = runGate([mp3, wav]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toBe("PRIVACY GATE: PASS\n");
+    expect(result.stderr.toString()).toBe("");
+  });
+
+  test("does not trust an audio extension without an audio signature", () => {
+    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(directory);
+    const fakeAudio = join(directory, "cue.mp3");
+    const credentialKey = ["pass", "word"].join("");
+    writeFileSync(fakeAudio, `${credentialKey}="synthetic-fixture-value-123456"\n`);
+
+    const result = runGate([fakeAudio]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout.toString()).toBe("PRIVACY GATE: FAIL\ncredential: 1\n");
+    expect(result.stderr.toString()).toBe("");
+  });
+
   test("fails closed for binary content renamed with a text extension", () => {
     const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
     temporaryDirectories.push(directory);
