@@ -1,0 +1,180 @@
+import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "bun:test";
+import { Window } from "happy-dom";
+import { createRoot, type Root } from "react-dom/client";
+import { flushSync } from "react-dom";
+
+import { expiryFrom } from "@/lib/attention/machine";
+import type { DeviceAttentionView } from "@/lib/attention/service";
+import type { AttentionRequestV1, ReturnPoint } from "@/lib/attention/types";
+
+import { useAttentionOffers, type AttentionOffersHandle } from "./useAttentionOffers";
+
+/*
+ * #688 slice 3, client side. The record is the authority; this hook only reads
+ * it and posts answers back. Two behaviours are worth pinning here because
+ * neither is visible from the server tests: that rendering an offer is itself
+ * reported, and that the return point is captured from THIS device immediately
+ * before the move.
+ */
+
+const dom = new Window({ url: "http://localhost/" });
+const G = globalThis as Record<string, unknown>;
+const OVERRIDES: Record<string, unknown> = {
+  window: dom,
+  document: dom.document,
+  navigator: dom.navigator,
+  Node: dom.Node,
+  HTMLElement: dom.HTMLElement,
+};
+const HAS: Record<string, boolean> = {};
+const SAVED: Record<string, unknown> = {};
+const settle = async () => { for (let i = 0; i < 6; i += 1) await new Promise((r) => setTimeout(r, 0)); };
+
+beforeAll(() => {
+  for (const key of Object.keys(OVERRIDES)) { HAS[key] = key in G; SAVED[key] = G[key]; G[key] = OVERRIDES[key]; }
+});
+afterAll(async () => {
+  await settle();
+  for (const key of Object.keys(OVERRIDES)) { if (HAS[key]) G[key] = SAVED[key]; else delete G[key]; }
+});
+
+let roots: Root[] = [];
+beforeEach(() => { dom.document.body.replaceChildren(); roots = []; });
+afterEach(async () => { for (const root of roots) flushSync(() => root.unmount()); roots = []; await settle(); });
+
+const DEVICE = "device-a";
+const created = new Date("2026-07-01T10:00:00.000Z");
+
+function request(state: AttentionRequestV1["state"]): AttentionRequestV1 {
+  return {
+    id: "attention_1",
+    createdAt: created.toISOString(),
+    requestedBy: { rootId: "root_fixed" },
+    origin: "root-agent",
+    target: { kind: "conversation", path: "/tmp/reviewer.jsonl" },
+    frameAtCreation: { project: "demo", rect: { x: 0, y: 0, w: 600, h: 780 }, boardRevision: 4 },
+    intent: "show",
+    zoom: "situate",
+    reason: "The reviewer finished with request-changes.",
+    state,
+    stateChangedAt: created.toISOString(),
+    expiresAt: expiryFrom(created),
+    offeredTo: state === "pending" ? [] : [DEVICE],
+    returnPoints: [],
+    revision: 1,
+  };
+}
+
+function view(state: AttentionRequestV1["state"]): DeviceAttentionView {
+  const entry = { request: request(state), status: state === "pending" ? "none" as const : "actionable" as const, returnAvailable: false };
+  return { rootId: "root_fixed", offer: state === "pending" ? null : entry, live: [entry], expired: [] };
+}
+
+interface Call { url: string; body: unknown }
+
+/** A server that hands out `pending` until the device reports rendering it. */
+function fakeServer(): { fetchFn: typeof fetch; calls: Call[] } {
+  const calls: Call[] = [];
+  let state: AttentionRequestV1["state"] = "pending";
+  const fetchFn = (async (url: string, init?: { body?: string }) => {
+    const body = init?.body ? JSON.parse(init.body) as { kind?: string } : null;
+    calls.push({ url, body });
+    if (body?.kind === "offer") state = "offered";
+    if (body?.kind === "accept") state = "accepted";
+    return { ok: true, status: 200, json: async () => view(state) };
+  }) as unknown as typeof fetch;
+  return { fetchFn, calls };
+}
+
+const viewport: Pick<ReturnPoint, "mode" | "camera" | "focusedPath"> = {
+  mode: "scheme",
+  camera: { x: 120, y: 340, zoom: 0.55 },
+  focusedPath: "/tmp/what-i-was-reading.jsonl",
+};
+
+function mount(fetchFn: typeof fetch): { current: AttentionOffersHandle | null } {
+  const box: { current: AttentionOffersHandle | null } = { current: null };
+  function Harness() {
+    box.current = useAttentionOffers({ deviceId: DEVICE, captureViewport: () => viewport, fetchFn, pollMs: 100_000 });
+    return null;
+  }
+  const host = dom.document.createElement("div");
+  dom.document.body.appendChild(host);
+  const root = createRoot(host as unknown as Element);
+  flushSync(() => root.render(<Harness />));
+  roots.push(root);
+  return box;
+}
+
+test("rendering an offer is reported, so silence and never-seen stay different facts", async () => {
+  const server = fakeServer();
+  const handle = mount(server.fetchFn);
+  await settle();
+
+  const posts = server.calls.filter((call) => call.body !== null);
+  expect(posts).toHaveLength(1);
+  expect(posts[0]!.body).toEqual({ kind: "offer", deviceId: DEVICE });
+  /* And the second read reflects the transition, so the card is answerable. */
+  expect(handle.current!.offer?.request.state).toBe("offered");
+});
+
+test("accepting posts the operator's own agreement", async () => {
+  const server = fakeServer();
+  const handle = mount(server.fetchFn);
+  await settle();
+
+  await handle.current!.accept(request("offered"));
+  await settle();
+
+  expect(server.calls.at(-2)!.body).toEqual({ kind: "accept", deviceId: DEVICE, via: "operator" });
+});
+
+test("landing captures the viewport this device is leaving, and nobody else's", async () => {
+  const server = fakeServer();
+  const handle = mount(server.fetchFn);
+  await settle();
+
+  await handle.current!.arrive(request("accepted"), "exact");
+  await settle();
+
+  const arrival = server.calls.map((call) => call.body).find((body) => (body as { kind?: string })?.kind === "arrive") as {
+    returnPoint: ReturnPoint;
+    resolution: string;
+  };
+  expect(arrival.resolution).toBe("exact");
+  /* Mode, camera and focused path, recorded against this device — presence is
+     per-device and two devices in the same seat do not share a framing. */
+  expect(arrival.returnPoint.deviceId).toBe(DEVICE);
+  expect(arrival.returnPoint.mode).toBe("scheme");
+  expect(arrival.returnPoint.camera).toEqual(viewport.camera);
+  expect(arrival.returnPoint.focusedPath).toBe(viewport.focusedPath);
+  expect(typeof arrival.returnPoint.capturedAt).toBe("string");
+});
+
+test("going back and declining each post their own answer", async () => {
+  const server = fakeServer();
+  const handle = mount(server.fetchFn);
+  await settle();
+
+  await handle.current!.goBack(request("following"));
+  await handle.current!.decline(request("offered"));
+  await handle.current!.preview(request("offered"));
+  await settle();
+
+  const kinds = server.calls.map((call) => (call.body as { kind?: string } | null)?.kind).filter(Boolean);
+  /* And the offer is reported exactly once: once the record says a device has
+     rendered it, later refreshes find nothing pending and post nothing, which
+     is what keeps the read loop from feeding itself. */
+  expect(kinds).toEqual(["offer", "return", "decline", "preview"]);
+});
+
+test("a server that cannot be reached leaves the last known offer on screen", async () => {
+  const failing = (async () => { throw new Error("offline"); }) as unknown as typeof fetch;
+  const handle = mount(failing);
+  await settle();
+
+  /* The record is durable, so the answer is still valid when the connection
+     returns; nothing here invents an empty state to render. */
+  expect(handle.current!.view).toBeNull();
+  expect(handle.current!.offer).toBeNull();
+});
