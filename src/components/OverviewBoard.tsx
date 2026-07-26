@@ -67,7 +67,13 @@ export function OverviewBoard({ files, projectCatalog, pipelines, workflows, arc
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div className="flex h-10 shrink-0 items-center gap-2.5 overflow-hidden border-b border-border bg-card px-4">
+      {/* Issue #701 kept the 320px reflow out; the clip is x-only so it cannot
+          take the y axis with it. The bar's own mobile children are 44px tall
+          against this 40px row (the Orchestrator pill and the attention badge),
+          and a plain `overflow-hidden` sliced 2px off both — on the exact
+          surface #701 was meant to make usable. `overflow-x-clip` leaves the y
+          axis visible, so the pills overhang as they did before. */}
+      <div className="flex h-10 shrink-0 items-center gap-2.5 overflow-x-clip border-b border-border bg-card px-4">
         {onMenu ? (
           <button
             type="button"
