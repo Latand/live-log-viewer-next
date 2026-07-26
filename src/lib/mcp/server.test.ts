@@ -1114,6 +1114,7 @@ describe("MCP tool service", () => {
         "conversation_migration",
         "agent_activity",
         "lifecycle_events",
+        "request_attention",
       ]);
       for (const tool of listed.tools) {
         expect(tool.inputSchema.required).toContain("clientRequestId");

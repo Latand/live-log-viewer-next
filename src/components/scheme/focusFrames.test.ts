@@ -3,7 +3,9 @@ import { expect, test } from "bun:test";
 import { resolveFocusTarget } from "@/lib/attention/resolve";
 import type { FileEntry } from "@/lib/types";
 
-import { buildFocusFrameIndex, type FocusLayoutSlice } from "./focusFrames";
+import type { Pipeline } from "@/lib/pipelines/types";
+
+import { buildFocusFrameIndex, stageAnchorAliases, type FocusLayoutSlice } from "./focusFrames";
 import type { SchemeGroup, SchemeNode, SchemeRect } from "./layout";
 
 const rect = (x: number, y: number, w = 600, h = 780): SchemeRect => ({ x, y, w, h });
@@ -66,6 +68,25 @@ test("a stage that has launched resolves through its live card under the same ke
 
   expect(resolved.resolution).toBe("exact");
   expect(resolved.frame!.rect).toEqual({ x: 4_000, y: 4_000, w: 600, h: 780 });
+});
+
+test("a launched stage's alias follows the attempt the operator would be taken to", () => {
+  /* A retried stage has several attempts; the slot it dissolved into belongs to
+     the newest one with a transcript, not the first one that ever ran. */
+  const pipelines = [{
+    id: "p1",
+    runs: [
+      { stageId: "s1", attempts: [{ agentPath: "/tmp/first.jsonl" }, { agentPath: "/tmp/retry.jsonl" }] },
+      { stageId: "s2", attempts: [{ agentPath: null }] },
+    ],
+  }] as unknown as Pipeline[];
+
+  const aliases = stageAnchorAliases(pipelines);
+
+  expect(aliases.get("slot::p1::s1")).toBe("/tmp/retry.jsonl");
+  /* A stage that never launched has no alias — its own slot is still on the
+     board, and the frame index resolves it directly. */
+  expect(aliases.has("slot::p1::s2")).toBe(false);
 });
 
 test("a point borrows the name of the nearest card for the spoken sentence", () => {

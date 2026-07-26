@@ -1,7 +1,9 @@
 import type { FocusFrameIndex, NamedFrame } from "@/lib/attention/resolve";
 import type { FocusRect } from "@/lib/attention/types";
+import type { Pipeline } from "@/lib/pipelines/types";
 import { cleanTitle } from "@/lib/title";
 
+import { stageSlotKey } from "./agentLinks";
 import type { SchemeLayout, SchemeRect } from "./layout";
 
 /**
@@ -34,6 +36,26 @@ export interface FocusFrameIndexOptions {
    */
   aliases?: ReadonlyMap<string, string>;
   boardRevision?: number | null;
+}
+
+/**
+ * Stage anchor → the layout key that holds it once the stage has launched.
+ *
+ * A planned stage IS its slot and resolves directly; a launched one dissolved
+ * its slot into the live conversation card of the agent running it. The newest
+ * attempt with a transcript wins, so a retried stage points at the attempt the
+ * operator would actually be taken to. Everything this reads is already on the
+ * pipeline record, so the frame index never has to learn the pipeline model.
+ */
+export function stageAnchorAliases(pipelines: readonly Pipeline[]): Map<string, string> {
+  const aliases = new Map<string, string>();
+  for (const pipeline of pipelines) {
+    for (const run of pipeline.runs) {
+      const path = [...run.attempts].reverse().find((attempt) => attempt.agentPath)?.agentPath;
+      if (path) aliases.set(stageSlotKey(pipeline.id, run.stageId), path);
+    }
+  }
+  return aliases;
 }
 
 /** Everything on the board that has a name a spoken sentence can borrow. */

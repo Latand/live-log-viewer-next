@@ -54,6 +54,8 @@ describe("describeMcpCall", () => {
       ["agent_activity", { project: "viewer" }, "conversation", "Checking agent activity"],
       ["lifecycle_events", { pipelineId: "pipe-a" }, "pipeline", "Reading lifecycle events"],
       ["lifecycle_events", { mode: "digest", subscriberId: "conversation_a" }, "pipeline", "Polling lifecycle digest"],
+      ["request_attention", { target: { kind: "conversation", path: "/tmp/a.jsonl" }, reason: "The reviewer finished." }, "conversation", "Asking to show a conversation"],
+      ["request_attention", { target: { kind: "task", taskId: "task-a" }, intent: "open", reason: "This is blocked." }, "conversation", "Asking to open a task"],
     ] as const;
 
     for (const [tool, args, icon, prefix] of cases) {

@@ -92,7 +92,7 @@ const viewport: Pick<ReturnPoint, "mode" | "camera" | "focusedPath"> = {
   focusedPath: "/tmp/what-i-was-reading.jsonl",
 };
 
-function mount(fetchFn: typeof fetch, surfaceVisible?: () => boolean): { current: AttentionOffersHandle | null } {
+function mount(fetchFn: typeof fetch, surfaceVisible?: () => boolean, refusalTtlMs?: number): { current: AttentionOffersHandle | null } {
   const box: { current: AttentionOffersHandle | null } = { current: null };
   function Harness() {
     box.current = useAttentionOffers({
@@ -100,6 +100,7 @@ function mount(fetchFn: typeof fetch, surfaceVisible?: () => boolean): { current
       captureViewport: () => viewport,
       fetchFn,
       pollMs: 100_000,
+      ...(refusalTtlMs === undefined ? {} : { refusalTtlMs }),
       ...(surfaceVisible ? { surfaceVisible } : {}),
     });
     return null;
@@ -231,6 +232,56 @@ test("a refused answer re-reads the record and is visible, rather than passing f
   await handle.current!.preview(request("offered"));
   await settle();
   expect(handle.current!.refusal).toBeNull();
+});
+
+test("a refusal takes itself off screen, and can be taken off sooner", async () => {
+  const refusing = (async () => ({
+    ok: false,
+    status: 409,
+    json: async () => ({ error: "invalid-transition", state: "previewing" }),
+  })) as unknown as typeof fetch;
+
+  const handle = mount(refusing, undefined, 20);
+  await settle();
+  await handle.current!.decline(request("previewing"));
+  await settle();
+  expect(handle.current!.refusal).not.toBeNull();
+
+  /* A one-off race must not leave a warning band standing for the rest of the
+     session — nothing else ever clears it if no further answer is sent. */
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  await settle();
+  expect(handle.current!.refusal).toBeNull();
+
+  await handle.current!.decline(request("previewing"));
+  await settle();
+  expect(handle.current!.refusal).not.toBeNull();
+  handle.current!.dismissRefusal();
+  await settle();
+  expect(handle.current!.refusal).toBeNull();
+});
+
+test("a handoff with nowhere to land closes the request rather than reporting an arrival", async () => {
+  const posted: unknown[] = [];
+  const fetchFn = (async (_url: string, init?: { body?: string }) => {
+    if (init?.body) posted.push(JSON.parse(init.body));
+    return { ok: true, status: 200, json: async () => view("offered") };
+  }) as unknown as typeof fetch;
+
+  const handle = mount(fetchFn);
+  await settle();
+  posted.length = 0;
+
+  await handle.current!.arrive(request("accepted"), "lost");
+  await settle();
+
+  /* `arrive` with a lost resolution is refused by the machine and leaves the
+     request agreed-to forever, so this device closes it instead — and never
+     sends a return point for a move that did not happen. */
+  expect(posted).toEqual([{ kind: "abandon", deviceId: DEVICE }]);
+  /* The operator pressed a control and the view stayed put; the surface says so
+     on the same band a refusal uses. */
+  expect(handle.current!.refusal).toEqual({ requestId: "attention_1", reason: "lost-target", state: null });
 });
 
 test("a server that cannot be reached is not a refusal", async () => {

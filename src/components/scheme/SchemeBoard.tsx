@@ -24,7 +24,10 @@ import { cleanTitle } from "@/components/utils";
 import { taskDeliveryText } from "@/lib/tasks/helpers";
 
 import { compactPipelineLayoutFlows, compactPipelineOpenTarget, pipelineAnnouncement, pipelineLinkedTasks, pipelineStageByAgentPath, pipelineStripByPath, renderableFlowIds, stagePaneTitleOf } from "@/components/pipelines/pipelineModel";
+import { focusHandoffBus } from "@/components/attention/focusHandoffBus";
+import { INSPECT_ZOOM } from "@/components/attention/navigate";
 import { BulkActionBar } from "./BulkActionBar";
+import { buildFocusFrameIndex, stageAnchorAliases } from "./focusFrames";
 import { EdgeChips } from "./EdgeChips";
 import { nodesInRect, pruneSelection, selectionBBox } from "./lasso";
 import { resolveExpandedNode } from "./expandedNode";
@@ -717,6 +720,7 @@ export function SchemeBoard({
     manualNonce,
     glideBy,
     glideFrame,
+    glideToCamera,
   } = useSchemeCamera({
     project,
     layout,
@@ -739,6 +743,37 @@ export function SchemeBoard({
     onZoomKey: navZoomRef,
     onFit: announceFit,
   });
+
+  /* #688: the board half of a focus handoff. The index is rebuilt from the
+     layout on every relayout on purpose — an accepted request resolves its
+     anchor against the board as it is NOW, never against the rect recorded when
+     the request was raised. The map instance stays out of it: a phone's
+     full-screen map is a transient overlay, not the surface a handoff lands on. */
+  const stageAliases = useMemo(() => stageAnchorAliases(pipelines), [pipelines]);
+  const focusIndex = useMemo(
+    () => buildFocusFrameIndex(layout, project, { extraRects: taskRects, aliases: stageAliases }),
+    [layout, project, taskRects, stageAliases],
+  );
+  useEffect(() => {
+    if (mapMode) return;
+    return focusHandoffBus.setBoard({
+      project,
+      index: focusIndex,
+      /* Zoom follows intent (D8): `inspect` goes in until the target reads,
+         `situate` fits the frame with context around it. A camera can go
+         anywhere, including to where a vanished card used to be, so this
+         surface never refuses a destination. */
+      moveTo: ({ rect, zoom }) => {
+        if (zoom === "inspect") glideFrame({ ...rect }, INSPECT_ZOOM);
+        else fitRect({ ...rect });
+        return true;
+      },
+      restoreCamera: (camera) => {
+        glideToCamera(camera);
+        return true;
+      },
+    });
+  }, [mapMode, project, focusIndex, glideFrame, fitRect, glideToCamera]);
 
   /* Screen-space boxes of fixed board chrome an edge chip must never paint over
      — the subagent avatar/round stack and the composer/input, tagged

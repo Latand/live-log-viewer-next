@@ -399,6 +399,24 @@ export function describeMcpCall(
     };
   }
 
+  if (toolName === "request_attention") {
+    /* The operator reads this line about a request made ABOUT them, so it says
+       what was asked and which of show/open it was — the same two facts the
+       card itself puts in front of them before they agree. */
+    const target = record(args.target);
+    const kind = string(target.kind) || "target";
+    const opening = string(args.intent) === "open";
+    return {
+      icon: "conversation",
+      verb: "Asking",
+      title: `Asking to ${opening ? "open" : "show"} a ${kind}`,
+      subtitle: replaySubtitle(result, compact(string(args.reason))),
+      links: kind === "conversation" && string(target.path)
+        ? []
+        : entityLink(kind === "task" ? "task" : "pipeline", string(target.taskId) || string(target.pipelineId)),
+    };
+  }
+
   return {
     icon: "tool",
     verb: "Running",
