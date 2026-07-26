@@ -1,4 +1,5 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -1300,4 +1301,132 @@ test("Codex successor provider rejects an unregistered fork path before recordin
     recordContinuityPath(pathname) { recorded.push(pathname); },
   })).rejects.toThrow("unsafe-source");
   expect(recorded).toEqual([]);
+});
+
+test("a retry under a fresh operation identity recovers the fork the failed attempt left behind", async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-codex-cross-operation-"));
+  roots.push(base);
+  const source = accountRoot("codex", base, "source");
+  const target = accountRoot("codex", base, "target");
+  const journalRoot = path.join(base, "provider-journal");
+  const sourceId = "419f423a-d6e9-\x37903-b597-3e676b6ff3d4";
+  const sourcePath = path.join(source.transcriptRoot, `rollout-${sourceId}.jsonl`);
+  fs.writeFileSync(sourcePath, codexSessionMeta(sourceId), { mode: 0o600 });
+  let forkCalls = 0;
+  let targetAuthenticated = false;
+  const client = (home: string) => ({
+    async readAccount() {
+      return home === target.home && !targetAuthenticated
+        ? { account: null, requiresOpenaiAuth: true }
+        : { account: { type: "chatgpt" }, requiresOpenaiAuth: true };
+    },
+    async forkThread() {
+      forkCalls += 1;
+      const id = `419f423a-d6e9-4903-8597-${String(forkCalls).padStart(12, "0")}`;
+      const forkPath = path.join(source.transcriptRoot, `rollout-${id}.jsonl`);
+      fs.writeFileSync(forkPath, codexSessionMeta(id, sourceId), { mode: 0o600 });
+      return { id, path: forkPath };
+    },
+    async resumeThread(id: string) { return { id, path: null }; },
+    async readThread(id: string) { return { id, path: null }; },
+    close() {},
+  }) as unknown as CodexAppServerClient;
+  const provider = new RegisteredSuccessorProvider({
+    accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
+    startCodex: async (home) => client(home),
+    claudeStatus: async () => ({ loggedIn: false }),
+    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
+    journalRoot,
+    now: () => "2026-07-10T12:00:00.000Z",
+  });
+  const recorded: string[] = [];
+  const attempt = (operationId: string) => ({
+    engine: "codex" as const,
+    operationId,
+    conversationId: "conversation_cross_operation" as const,
+    targetAccountId: "target",
+    source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
+    recordContinuityPath(pathname: string) { recorded.push(pathname); },
+  });
+
+  /* The incident: the post-fork step fails, and the retry arrives with a new
+     operation identity, so the journal it prepares is fresh. */
+  await expect(provider.create(attempt("attempt-one"))).rejects.toThrow("target Codex account is not authenticated");
+  expect(forkCalls).toBe(1);
+
+  targetAuthenticated = true;
+  const receipt = await provider.create(attempt("attempt-two"));
+
+  expect(forkCalls).toBe(1);
+  expect(receipt.nativeId).toBe("419f423a-d6e9-\x34903-8597-000000000001");
+  expect(fs.readdirSync(source.transcriptRoot).filter((name) => name !== path.basename(sourcePath))).toHaveLength(1);
+});
+
+test("orphan forks of one source resolve to the newest and the rest are recorded as history", async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-codex-orphan-forks-"));
+  roots.push(base);
+  const source = accountRoot("codex", base, "source");
+  const target = accountRoot("codex", base, "target");
+  const journalRoot = path.join(base, "provider-journal");
+  const sourceId = "519f423a-d6e9-\x37903-b597-3e676b6ff3d4";
+  const sourcePath = path.join(source.transcriptRoot, `rollout-${sourceId}.jsonl`);
+  fs.writeFileSync(sourcePath, codexSessionMeta(sourceId), { mode: 0o600 });
+  const conversationId = "conversation_orphan_forks";
+  const orphanIds = ["519f423a-d6e9-\x34903-8597-000000000001", "519f423a-d6e9-\x34903-8597-000000000002"];
+  const orphanPath = (id: string) => path.join(source.transcriptRoot, `rollout-${id}.jsonl`);
+  /* The state the operator's machine was found in: several attempts at one move
+     each left a full-history fork, and each of their journals died before it
+     could record which fork it had made. */
+  fs.mkdirSync(journalRoot, { recursive: true, mode: 0o700 });
+  orphanIds.forEach((id, index) => {
+    fs.writeFileSync(orphanPath(id), codexSessionMeta(id, sourceId), { mode: 0o600 });
+    const when = new Date(1_760_000_000_000 + (index + 1) * 60_000);
+    fs.utimesSync(orphanPath(id), when, when);
+    const journalName = `${crypto.createHash("sha256").update(`orphan-${index}`).digest("hex")}.json`;
+    fs.writeFileSync(path.join(journalRoot, journalName), JSON.stringify({
+      version: 1,
+      operationId: `orphan-${index}`,
+      conversationId,
+      sourceNativeId: sourceId,
+      sourceRoot: fs.realpathSync(source.transcriptRoot),
+      targetRoot: fs.realpathSync(target.transcriptRoot),
+      createdAtMs: when.getTime() - 1_000,
+      forkRequestedAtMs: when.getTime() - 500,
+      fork: null,
+    }), { mode: 0o600 });
+  });
+  let forkCalls = 0;
+  const client = () => ({
+    async readAccount() { return { account: { type: "chatgpt" }, requiresOpenaiAuth: true }; },
+    async forkThread() { forkCalls += 1; throw new Error("unexpected additional fork"); },
+    async resumeThread(id: string) { return { id, path: null }; },
+    async readThread(id: string) { return { id, path: null }; },
+    close() {},
+  }) as unknown as CodexAppServerClient;
+  const recorded: string[] = [];
+  const provider = new RegisteredSuccessorProvider({
+    accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
+    startCodex: async () => client(),
+    claudeStatus: async () => ({ loggedIn: false }),
+    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
+    journalRoot,
+    now: () => "2026-07-10T12:00:00.000Z",
+  });
+
+  const receipt = await provider.create({
+    engine: "codex",
+    operationId: "orphan-recovery",
+    conversationId,
+    targetAccountId: "target",
+    source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
+    recordContinuityPath(pathname: string) { recorded.push(pathname); },
+  });
+
+  expect(forkCalls).toBe(0);
+  expect(receipt.nativeId).toBe(orphanIds[1]);
+  /* The older fork is never deleted: it is handed back to be kept as the
+     conversation's history. */
+  expect(recorded).toContain(orphanPath(orphanIds[0]!));
+  expect(fs.existsSync(orphanPath(orphanIds[0]!))).toBeTrue();
+  expect(fs.existsSync(orphanPath(orphanIds[1]!))).toBeTrue();
 });

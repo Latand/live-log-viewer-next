@@ -165,3 +165,44 @@ test("a phone in a pocket never auto-follows, even where consent exists", () => 
   expect(autoFollowEligible({ visibility: "visible", freshness: "background" })).toBe(false);
   expect(autoFollowEligible(null)).toBe(false);
 });
+
+test("a conversation target resolves to the durable conversation's current transcript", () => {
+  const abandonedFork = "/tmp/sessions/rollout-fork.jsonl";
+  const currentPath = "/tmp/sessions/rollout-root.jsonl";
+  const conversations = {
+    conversationForPath: (artifactPath: string) => artifactPath === abandonedFork || artifactPath === currentPath
+      ? { generations: [{ path: "/tmp/sessions/rollout-archived.jsonl" }, { path: currentPath }] } as never
+      : null,
+    canonicalConversationId: (id: never) => id,
+    conversation: () => null,
+  };
+
+  const raised = raiseAttentionRequest({
+    origin: "root-agent",
+    target: { kind: "conversation", path: abandonedFork },
+    frameAtCreation: frame,
+    intent: "open",
+    reason: "The root conversation answered.",
+  }, { now: T0, id: "attention_fork", conversations });
+
+  expect(raised.request.target).toEqual({ kind: "conversation", path: currentPath });
+});
+
+test("a conversation target with no durable owner is left exactly as raised", () => {
+  const unknown = "/tmp/sessions/rollout-unknown.jsonl";
+  const conversations = {
+    conversationForPath: () => null,
+    canonicalConversationId: (id: never) => id,
+    conversation: () => null,
+  };
+
+  const raised = raiseAttentionRequest({
+    origin: "root-agent",
+    target: { kind: "conversation", path: unknown },
+    frameAtCreation: frame,
+    intent: "show",
+    reason: "An unregistered transcript still has a card.",
+  }, { now: T0, id: "attention_unknown", conversations });
+
+  expect(raised.request.target).toEqual({ kind: "conversation", path: unknown });
+});

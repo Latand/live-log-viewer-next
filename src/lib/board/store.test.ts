@@ -192,6 +192,23 @@ describe("board store", () => {
     });
     expect(replay).toEqual(first);
   });
+  test("adopting a fork onto its root keeps the root's placement and favourite", () => {
+    const file = temporaryFile();
+    const project = "viewer";
+    mutateBoard(project, 0, [
+      { kind: "restore", path: "/root", placement: "manual" },
+      { kind: "restore", path: "/fork", placement: "manual" },
+      { kind: "set-favorite", id: "conversation_root", favorite: true },
+    ], file);
+
+    const remapped = remapBoardPaths(project, [{ from: "/fork", to: "/root" }], { filePath: file });
+
+    expect(remapped).toMatchObject({
+      pathAliases: { "/fork": "/root" },
+      prefs: { manual: ["/root"], favorites: ["conversation_root"] },
+    });
+    expect(remapBoardPaths(project, [{ from: "/fork", to: "/root" }], { filePath: file })).toEqual(remapped);
+  });
   test("path remap derives provisional cleanup after a concurrent alias write", async () => {
     const file = temporaryFile();
     const project = "viewer";

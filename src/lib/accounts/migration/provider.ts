@@ -123,6 +123,9 @@ interface CodexForkArtifact {
 interface CodexProviderOperationJournal {
   version: 1;
   operationId: string;
+  /** The conversation this operation moves. Journals written before issue #708
+      have none, and are then invisible to cross-operation fork recovery. */
+  conversationId: string | null;
   sourceNativeId: string;
   sourceRoot: string;
   targetRoot: string;
@@ -132,6 +135,11 @@ interface CodexProviderOperationJournal {
 }
 
 const CODEX_META_SCAN_BYTES = 256 * 1024;
+/** Directory-entry bound on a fork-recovery scan. A cross-operation scan walks
+    an account's whole session tree, so it is bounded the same way the rollout
+    lookup is; running short returns the candidates found rather than throwing,
+    because a partial recovery still beats forking again. */
+const CODEX_FORK_SCAN_LIMIT = 20_000;
 const CODEX_OPERATION_LOCK_ATTEMPTS = 24_000;
 const CODEX_OPERATION_LOCK_WAIT_MS = 5;
 const CODEX_OPERATION_LOCK_STALE_MS = 30_000;
@@ -499,10 +507,12 @@ function readCodexSessionMeta(pathname: string): CodexSessionMeta | null {
 function codexForkArtifacts(root: string, sourceNativeId: string, createdAtMs: number): CodexForkArtifact[] {
   const stack: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
   const artifacts: CodexForkArtifact[] = [];
+  let visited = 0;
   while (stack.length) {
     const current = stack.pop()!;
     if (current.depth > 6) continue;
     for (const entry of fs.readdirSync(current.dir, { withFileTypes: true })) {
+      if (++visited > CODEX_FORK_SCAN_LIMIT) return artifacts;
       const candidate = path.join(current.dir, entry.name);
       if (entry.isSymbolicLink()) continue;
       if (entry.isDirectory()) {
@@ -538,37 +548,52 @@ function writeCodexOperationJournal(root: string, journal: CodexProviderOperatio
   }
 }
 
+function normalizeCodexOperationJournal(value: unknown): CodexProviderOperationJournal | null {
+  const journal = value as Partial<CodexProviderOperationJournal> | null;
+  if (!journal || typeof journal !== "object" || journal.version !== 1
+    || typeof journal.operationId !== "string" || typeof journal.sourceNativeId !== "string"
+    || typeof journal.sourceRoot !== "string" || typeof journal.targetRoot !== "string"
+    || typeof journal.createdAtMs !== "number" || !Number.isFinite(journal.createdAtMs)) return null;
+  return {
+    version: 1,
+    operationId: journal.operationId,
+    conversationId: typeof journal.conversationId === "string" && journal.conversationId ? journal.conversationId : null,
+    sourceNativeId: journal.sourceNativeId,
+    sourceRoot: journal.sourceRoot,
+    targetRoot: journal.targetRoot,
+    createdAtMs: journal.createdAtMs,
+    forkRequestedAtMs: typeof journal.forkRequestedAtMs === "number" && Number.isFinite(journal.forkRequestedAtMs)
+      ? journal.forkRequestedAtMs
+      : null,
+    fork: journal.fork && typeof journal.fork.id === "string" && typeof journal.fork.path === "string"
+      ? { id: journal.fork.id, path: journal.fork.path }
+      : null,
+  };
+}
+
 function prepareCodexOperationJournal(
   root: string,
   operationId: string,
+  conversationId: string,
   sourceNativeId: string,
   sourceRoot: string,
   targetRoot: string,
 ): { journal: CodexProviderOperationJournal; fresh: boolean } {
   const filename = operationJournalPath(root, operationId);
   try {
-    const journal = JSON.parse(fs.readFileSync(filename, "utf8")) as Partial<CodexProviderOperationJournal>;
-    if (journal.version !== 1 || journal.operationId !== operationId || journal.sourceNativeId !== sourceNativeId
-      || journal.sourceRoot !== sourceRoot || journal.targetRoot !== targetRoot
-      || typeof journal.createdAtMs !== "number" || !Number.isFinite(journal.createdAtMs)) {
+    const stored = normalizeCodexOperationJournal(JSON.parse(fs.readFileSync(filename, "utf8")));
+    if (!stored || stored.operationId !== operationId || stored.sourceNativeId !== sourceNativeId
+      || stored.sourceRoot !== sourceRoot || stored.targetRoot !== targetRoot) {
       throw new Error("Codex provider operation journal does not match");
     }
-    const fork = journal.fork && typeof journal.fork.id === "string" && typeof journal.fork.path === "string"
-      ? { id: journal.fork.id, path: journal.fork.path }
-      : null;
-    const forkRequestedAtMs = typeof journal.forkRequestedAtMs === "number" && Number.isFinite(journal.forkRequestedAtMs)
-      ? journal.forkRequestedAtMs
-      : null;
-    return {
-      journal: { version: 1, operationId, sourceNativeId, sourceRoot, targetRoot, createdAtMs: journal.createdAtMs, forkRequestedAtMs, fork },
-      fresh: false,
-    };
+    return { journal: { ...stored, conversationId: stored.conversationId ?? conversationId }, fresh: false };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   const journal: CodexProviderOperationJournal = {
     version: 1,
     operationId,
+    conversationId,
     sourceNativeId,
     sourceRoot,
     targetRoot,
@@ -578,6 +603,70 @@ function prepareCodexOperationJournal(
   };
   writeCodexOperationJournal(root, journal);
   return { journal, fresh: true };
+}
+
+/** Journals of earlier attempts to move the same conversation from the same
+    source thread to the same target account. */
+function siblingCodexOperationJournals(root: string, journal: CodexProviderOperationJournal): CodexProviderOperationJournal[] {
+  if (!journal.conversationId) return [];
+  let names: string[];
+  try { names = fs.readdirSync(root); } catch { return []; }
+  const siblings: CodexProviderOperationJournal[] = [];
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    let stored: CodexProviderOperationJournal | null = null;
+    try { stored = normalizeCodexOperationJournal(JSON.parse(fs.readFileSync(path.join(root, name), "utf8"))); }
+    catch { continue; }
+    if (!stored || stored.operationId === journal.operationId) continue;
+    if (stored.conversationId === journal.conversationId && stored.sourceNativeId === journal.sourceNativeId
+      && stored.sourceRoot === journal.sourceRoot && stored.targetRoot === journal.targetRoot) siblings.push(stored);
+  }
+  return siblings;
+}
+
+function forkArtifactMtimeMs(pathname: string): number {
+  try { return fs.statSync(pathname).mtimeMs; } catch { return 0; }
+}
+
+/**
+ * Recover the fork an earlier attempt at this same move already created.
+ *
+ * Journal-scoped recovery only sees the operation that wrote the journal, so
+ * before issue #708 a retry that arrived under a new operation identity always
+ * looked like a first attempt and forked again — one full copy of the personal
+ * transcript per failure. The logical operation is the conversation, its source
+ * thread and its target account, and every attempt at it left a journal saying
+ * so, which is what bounds the disk scan and what makes this recovery keyed on
+ * something stabler than the operation id.
+ *
+ * Several candidates mean earlier attempts made several. The newest becomes
+ * this operation's fork and the rest are returned to be recorded as the
+ * conversation's history — none of them is ever removed.
+ */
+function recoverPriorOperationFork(
+  journalRoot: string,
+  journal: CodexProviderOperationJournal,
+  scan: NonNullable<ProviderDependencies["scanCodexForkArtifacts"]> = codexForkArtifacts,
+): { fork: CodexForkArtifact | null; superseded: CodexForkArtifact[]; operationIds: string[] } {
+  const siblings = siblingCodexOperationJournals(journalRoot, journal);
+  if (siblings.length === 0) return { fork: null, superseded: [], operationIds: [] };
+  const floor = Math.min(...siblings.map((sibling) => sibling.forkRequestedAtMs ?? sibling.createdAtMs));
+  const candidates = new Map<string, CodexForkArtifact>();
+  for (const sibling of siblings) {
+    if (sibling.fork) candidates.set(sibling.fork.id, sibling.fork);
+  }
+  for (const artifact of scan(journal.sourceRoot, journal.sourceNativeId, floor)) candidates.set(artifact.id, artifact);
+  const validated = [...candidates.values()].flatMap((artifact) => {
+    try { return [validatedCodexFork(artifact, journal.sourceNativeId, journal.sourceRoot)]; }
+    catch { return []; }
+  });
+  validated.sort((left, right) =>
+    forkArtifactMtimeMs(right.path) - forkArtifactMtimeMs(left.path) || right.path.localeCompare(left.path));
+  return {
+    fork: validated[0] ?? null,
+    superseded: validated.slice(1),
+    operationIds: siblings.map((sibling) => sibling.operationId),
+  };
 }
 
 function validatedCodexFork(artifact: CodexForkArtifact, sourceNativeId: string, sourceRoot: string): CodexForkArtifact {
@@ -680,7 +769,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     const source = assertRegisteredRoots(this.dependencies.accounts.resolveTranscriptOwner(input.engine, input.source.path), target, input.source.path);
     ensureTargetRoot(target);
     return input.engine === "codex"
-      ? this.createCodex(input.operationId, input.source.id, input.source.launchProfile, source, target, input.recordContinuityPath)
+      ? this.createCodex(input.operationId, input.conversationId, input.source.id, input.source.launchProfile, source, target, input.recordContinuityPath)
       : this.createClaude(input.operationId, input.conversationId, input.source.path, input.source.launchProfile, source, target, input.recordContinuityPath);
   }
 
@@ -930,6 +1019,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
 
   private async createCodex(
     operationId: string,
+    conversationId: string,
     sourceNativeId: string,
     profile: LaunchProfile,
     source: AccountContext,
@@ -939,6 +1029,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     const journalRoot = this.dependencies.journalRoot ?? statePath("migration-provider-operations");
     return withCodexOperationLease(journalRoot, operationId, (assertLeaseOwned) => this.createCodexLocked(
       operationId,
+      conversationId,
       sourceNativeId,
       profile,
       source,
@@ -951,6 +1042,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
 
   private async createCodexLocked(
     operationId: string,
+    conversationId: string,
     sourceNativeId: string,
     profile: LaunchProfile,
     source: AccountContext,
@@ -962,12 +1054,24 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     const prepared = prepareCodexOperationJournal(
       journalRoot,
       operationId,
+      conversationId,
       sourceNativeId,
       fs.realpathSync(source.transcriptRoot),
       fs.realpathSync(target.transcriptRoot),
     );
     const journal = prepared.journal;
     let fork = prepared.fresh ? null : recoverCodexFork(journal, this.dependencies.scanCodexForkArtifacts);
+    /* Before requesting a fork of our own, adopt whatever an earlier attempt at
+       this same move already produced (#708). Nothing is deleted: the forks this
+       operation does not take over are recorded as the conversation's history. */
+    let supersededForks: CodexForkArtifact[] = [];
+    let priorOperationIds: string[] = [];
+    if (!fork && journal.forkRequestedAtMs === null) {
+      const prior = recoverPriorOperationFork(journalRoot, journal, this.dependencies.scanCodexForkArtifacts);
+      fork = prior.fork;
+      supersededForks = prior.superseded;
+      if (fork) priorOperationIds = prior.operationIds;
+    }
     if (fork && !journal.fork) {
       journal.fork = fork;
       assertLeaseOwned();
@@ -1004,6 +1108,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     }
     const sourceFork = fork.path;
     recordContinuityPath(sourceFork);
+    for (const superseded of supersededForks) recordContinuityPath(superseded.path);
     const relative = path.relative(source.transcriptRoot, sourceFork);
     assertLeaseOwned();
     const copied = safeCopyHistory({
@@ -1012,6 +1117,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
       targetRoot: target.transcriptRoot,
       destinationRelative: relative,
       operationId,
+      priorOperationIds,
       afterDestinationPublished: this.dependencies.afterCodexCopyPublished,
     });
     recordContinuityPath(copied.path);

@@ -11,7 +11,7 @@ import type { FileEntry } from "@/lib/types";
 import { advanceConversationMigration, createMigrationIntent, drainHeldDeliveries, previewMigration, reconcileMigrationInventory, reconcileMigrations } from "./coordinator";
 import { emptyLaunchProfile, type ProviderReceipt, type SuccessorProviderPort } from "./contracts";
 import { oauthFailureWithRecoveryTail } from "./fixtures/claudeRecoveryTail";
-import { CodexForkOutcomeUnknownError, SuccessorPendingError } from "./provider";
+import { CodexForkOutcomeUnknownError, RegisteredSuccessorProvider, SuccessorPendingError } from "./provider";
 
 const roots: string[] = [];
 
@@ -1417,7 +1417,7 @@ describe("durable account migration coordinator", () => {
     ]);
 
     const committed = store.conversation(conversation.id)!;
-    expect(committed.migration?.phase).toBe("committed");
+    expect(committed.migration).toMatchObject({ phase: "committed" });
     expect(committed.generations.map((generation) => generation.path)).toEqual([
       "/concurrent-source.jsonl",
       "/concurrent-successor.jsonl",
@@ -1558,7 +1558,7 @@ describe("durable account migration coordinator", () => {
       provider([targetPath], { create: 0, verify: 0 }, [[secondForkPath]]),
     );
 
-    expect(committed.migration?.phase).toBe("committed");
+    expect(committed.migration).toMatchObject({ phase: "committed" });
     expect(committed.continuityPaths).toEqual([firstForkPath, secondForkPath]);
     expect(boardFor(project).pathAliases).toEqual({
       [sourcePath]: targetPath,
@@ -2381,7 +2381,7 @@ describe("durable account migration coordinator", () => {
 
     const committed = await advanceConversationMigration(conversation.id, store, provider(["/root-successor.jsonl"]));
     const successor = committed.generations.at(-1)!;
-    expect(committed.migration?.phase).toBe("committed");
+    expect(committed.migration).toMatchObject({ phase: "committed" });
     expect(successor.launchProfile).toMatchObject({ role: "root", goal: { objective: "Ship", status: "active" } });
     expect(store.pendingDeliveries(conversation.id)[0]).toMatchObject({ state: "assigned", generationId: successor.id });
 
@@ -2483,7 +2483,7 @@ describe("durable account migration coordinator", () => {
     expect(failed).toMatchObject({ migration: { phase: "failed-recoverable", errorCode: "codex-fork-outcome-unknown" } });
     store.retryConversationMigration(conversation.id, failed.migration!.revision);
     const committed = await advanceConversationMigration(conversation.id, store, ambiguousProvider);
-    expect(committed.migration?.phase).toBe("committed");
+    expect(committed.migration).toMatchObject({ phase: "committed" });
     expect(operations).toEqual([operations[0]!, operations[0]!]);
   });
 
@@ -2930,7 +2930,7 @@ describe("durable account migration coordinator", () => {
     };
     const committed = await advanceConversationMigration(conversation.id, store, winningProvider);
 
-    expect(committed.migration?.phase).toBe("committed");
+    expect(committed.migration).toMatchObject({ phase: "committed" });
     expect(committed.migration?.pendingContinuityPaths).toEqual(["/winning-rebind-c.jsonl"]);
     expect(committed.generations.at(-1)).toMatchObject({ accountId: "c", path: "/winning-rebind-c.jsonl" });
     expect(committed.abandonedContinuityPaths).toContain("/stale-rebind-b.jsonl");
@@ -3093,7 +3093,7 @@ describe("durable account migration coordinator", () => {
       ownsOperation: async () => activeOperation === "same-target-new",
     });
 
-    expect(committed.migration?.phase).toBe("committed");
+    expect(committed.migration).toMatchObject({ phase: "committed" });
     expect(committed.generations.at(-1)?.accountId).toBe("b");
     expect(verificationCount).toBe(2);
     expect(published).toEqual(["same-target-claude-b"]);
@@ -3422,7 +3422,7 @@ describe("durable account migration coordinator", () => {
     expect(restarted.conversation(conversation.id)?.turn.state).toBe("terminal");
     await reconcileMigrations(migrationProvider, deliveryPort, restarted);
     const committed = restarted.conversation(conversation.id)!;
-    expect(committed.migration?.phase).toBe("committed");
+    expect(committed.migration).toMatchObject({ phase: "committed" });
     expect(committed.migration?.operationId).toBe(operationId);
     expect(createdOperations).toEqual([operationId]);
     expect(counts.create).toBe(1);
@@ -3499,7 +3499,7 @@ describe("durable account migration coordinator", () => {
     await reconcileMigrations(migrationProvider, deliveryPort, restarted);
 
     const committed = restarted.conversation(conversation.id)!;
-    expect(committed.migration?.phase).toBe("committed");
+    expect(committed.migration).toMatchObject({ phase: "committed" });
     expect(createdOperations).toEqual([operationId]);
     expect(committed.generations.map((generation) => generation.path)).toEqual([pathname, successorPath]);
     expect(sends).toEqual([{ path: successorPath, clientMessageId: "recovery-held-client" }]);
@@ -3642,5 +3642,187 @@ describe("durable account migration coordinator", () => {
     const balanced = store.autoBalancePolicy("codex");
     expect(balanced.cooldownUntil).not.toBeNull();
     expect(balanced.lastOutcome?.kind).toBe("switched");
+  });
+});
+
+describe("Codex canonical root conversation and fork recovery (#708)", () => {
+  const SOURCE_THREAD = "019f9557-0000-\x37000-8000-00000000aaaa";
+
+  function accountRoot(base: string, id: string) {
+    const home = path.join(base, id);
+    const transcriptRoot = path.join(home, "sessions");
+    fs.mkdirSync(transcriptRoot, { recursive: true, mode: 0o700 });
+    fs.chmodSync(home, 0o700);
+    fs.chmodSync(transcriptRoot, 0o700);
+    return { engine: "codex" as const, accountId: id, kind: "managed" as const, home, transcriptRoot, env: { ...process.env } };
+  }
+
+  function sessionMeta(id: string, forkedFromId?: string): string {
+    return JSON.stringify({ type: "session_meta", payload: { id, cwd: "/repo", ...(forkedFromId ? { forked_from_id: forkedFromId } : {}) } }) + "\n";
+  }
+
+  function fileEntry(pathname: string): FileEntry {
+    const stat = fs.statSync(pathname);
+    return {
+      path: pathname,
+      root: "codex-sessions",
+      name: path.basename(pathname),
+      project: "repo",
+      title: path.basename(pathname),
+      engine: "codex",
+      kind: "session",
+      fmt: "codex",
+      parent: null,
+      mtime: stat.mtimeMs / 1000,
+      size: stat.size,
+      activity: "idle",
+      proc: null,
+      pid: null,
+      model: null,
+      pendingQuestion: null,
+      waitingInput: null,
+    };
+  }
+
+  test("five recoverable failures in a row leave one fork artifact and one operation identity", async () => {
+    const store = registry();
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-708-multi-failure-"));
+    roots.push(base);
+    const source = accountRoot(base, "a");
+    const target = accountRoot(base, "b");
+    const sourcePath = path.join(source.transcriptRoot, `rollout-${SOURCE_THREAD}.jsonl`);
+    fs.writeFileSync(sourcePath, sessionMeta(SOURCE_THREAD), { mode: 0o600 });
+    await reconcileMigrationInventory(store, [fileEntry(sourcePath)]);
+    store.reconcileConversations([observation(sourcePath, "a", "idle")]);
+    const conversation = store.conversationForPath(sourcePath)!;
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "multi-failure",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    const operationId = store.conversation(conversation.id)!.migration!.operationId;
+
+    let forkCalls = 0;
+    let targetAuthenticated = false;
+    const client = (home: string) => ({
+      async readAccount() {
+        return home === target.home && !targetAuthenticated
+          ? { account: null, requiresOpenaiAuth: true }
+          : { account: { type: "chatgpt" }, requiresOpenaiAuth: true };
+      },
+      async forkThread() {
+        forkCalls += 1;
+        const id = `019f9c11-0000-7000-8000-${String(forkCalls).padStart(12, "0")}`;
+        const forkPath = path.join(source.transcriptRoot, `rollout-${id}.jsonl`);
+        fs.writeFileSync(forkPath, sessionMeta(id, SOURCE_THREAD), { mode: 0o600 });
+        return { id, path: forkPath };
+      },
+      async resumeThread(id: string) { return { id, path: null }; },
+      async readThread(id: string) { return { id, path: null }; },
+      async setThreadName() {},
+      async setThreadGoal() {},
+      close() {},
+    });
+    const provider = new RegisteredSuccessorProvider({
+      accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
+      startCodex: async (home: string) => client(home) as never,
+      claudeStatus: async () => ({ loggedIn: false }),
+      spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
+      journalRoot: path.join(base, "provider-journal"),
+      /* Pinned to this test's registry and to a no-op publisher: nothing here
+         may reach the shared runtime registry or start a real Codex host. */
+      registry: store,
+      publishCodexHost: async () => async () => {},
+      now: () => "2026-07-26T02:00:00.000Z",
+    } as never);
+
+    /* The incident, five times over: the post-fork step fails recoverably, and
+       every later touch of the conversation used to re-arm it with a brand new
+       operation identity — a fresh provider journal, so a fresh fork. */
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const failed = await advanceConversationMigration(conversation.id, store, provider);
+      expect(failed.migration).toMatchObject({ phase: "failed-recoverable" });
+      store.setEngineRouting("codex", "b");
+      store.requestConversationMigrationToActiveAccount(conversation.id);
+      expect(store.conversation(conversation.id)!.migration).toMatchObject({
+        phase: "failed-recoverable",
+        operationId,
+      });
+      store.retryConversationMigration(conversation.id, store.conversation(conversation.id)!.migration!.revision);
+    }
+
+    expect(store.conversation(conversation.id)!.migration!.operationId).toBe(operationId);
+    expect(forkCalls).toBe(1);
+    const forkFiles = fs.readdirSync(source.transcriptRoot).filter((name) => name !== path.basename(sourcePath));
+    expect(forkFiles).toHaveLength(1);
+
+    targetAuthenticated = true;
+    const committed = await advanceConversationMigration(conversation.id, store, provider);
+
+    expect(committed.migration).toMatchObject({ phase: "committed" });
+    expect(forkCalls).toBe(1);
+    expect(Object.values(store.snapshot().conversations)).toHaveLength(1);
+  });
+
+  test("lookalike fork cards collapse into the root conversation and their board placement follows", async () => {
+    const store = registry();
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-708-backfill-"));
+    roots.push(base);
+    const sessions = path.join(base, "sessions");
+    fs.mkdirSync(sessions, { recursive: true, mode: 0o700 });
+    const rootPath = path.join(sessions, `rollout-${SOURCE_THREAD}.jsonl`);
+    fs.writeFileSync(rootPath, sessionMeta(SOURCE_THREAD), { mode: 0o600 });
+    const forkPaths = ["bb01", "bb02", "bb03"].map((suffix) => {
+      const id = `019f9c11-0000-7000-8000-0000000${suffix}0`;
+      const pathname = path.join(sessions, `rollout-${id}.jsonl`);
+      /* Each artifact is a full snapshot: its own header first, then the source
+         conversation's replayed `session_meta`. */
+      fs.writeFileSync(pathname, sessionMeta(id, SOURCE_THREAD) + sessionMeta(SOURCE_THREAD), { mode: 0o600 });
+      return pathname;
+    });
+    const files = [rootPath, ...forkPaths].map(fileEntry);
+
+    /* The board the operator was actually looking at: the root and every fork
+       as sibling manual cards, with one fork already hidden by hand. */
+    const root = store.ensureConversation("codex", rootPath, "a");
+    for (const forkPath of forkPaths) store.ensureConversation("codex", forkPath, "a");
+    mutateBoard("repo", boardFor("repo").revision, [
+      { kind: "restore", path: rootPath, placement: "manual" },
+      ...forkPaths.map((forkPath) => ({ kind: "restore" as const, path: forkPath, placement: "manual" as const })),
+      { kind: "close", path: forkPaths[2]! },
+      { kind: "set-favorite", id: root.id, favorite: true },
+    ]);
+    expect(boardFor("repo").prefs.manual).toContain(forkPaths[0]!);
+    expect(boardFor("repo").prefs.hidden).toContain(forkPaths[2]!);
+
+    await reconcileMigrationInventory(store, files);
+
+    const conversations = Object.values(store.snapshot().conversations);
+    expect(conversations).toHaveLength(1);
+    expect(conversations[0]!.id).toBe(root.id);
+    expect(new Set(conversations[0]!.providerForkPaths)).toEqual(new Set(forkPaths));
+    /* Nothing was moved or removed — every transcript is still on disk and
+       still listed on the surviving conversation. */
+    for (const forkPath of forkPaths) {
+      expect(fs.existsSync(forkPath)).toBeTrue();
+      expect(conversations[0]!.continuityPaths).toContain(forkPath);
+      expect(store.conversationForPath(forkPath)?.id).toBe(root.id);
+    }
+    const board = boardFor("repo");
+    for (const forkPath of forkPaths.slice(0, 2)) expect(board.pathAliases?.[forkPath]).toBe(rootPath);
+    expect(board.prefs.manual).toContain(rootPath);
+    /* Hiding a duplicate is a statement about the duplicate: the hidden fork is
+       left unaliased so the surviving root card stays on the board. */
+    expect(board.pathAliases?.[forkPaths[2]!]).toBeUndefined();
+    expect(board.prefs.hidden).toEqual([forkPaths[2]!]);
+    expect(board.prefs.favorites).toContain(root.id);
+
+    const revisionAfterFirstPass = boardFor("repo").revision;
+    await reconcileMigrationInventory(store, files);
+
+    expect(Object.values(store.snapshot().conversations)).toHaveLength(1);
+    expect(boardFor("repo").revision).toBe(revisionAfterFirstPass);
   });
 });

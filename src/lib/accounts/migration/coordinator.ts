@@ -7,12 +7,14 @@ import { listCodexAccounts } from "@/lib/accounts/codex";
 import { agentRegistry, type AgentRegistry, type ConversationObservation, type MigrationScope, type RegistryConversation } from "@/lib/agent/registry";
 import { headCwd, headSessionStartedAt } from "@/lib/agent/transcript";
 import {
+  boardFor,
   remapBoardPaths as remapDurableBoardPaths,
   transferBoardPathPlacements as transferDurableBoardPathPlacements,
 } from "@/lib/board/store";
 import { forEachCooperatively, yieldToRuntime } from "@/lib/cooperative";
 import { listFiles } from "@/lib/scanner";
 import { recordTranscriptComposerRelease, transcriptTurnResult, type TranscriptTurnResult } from "@/lib/scanner/activity";
+import { nativeCodexForkSourceThreadId } from "@/lib/scanner/codexNative";
 import { writingHolders } from "@/lib/scanner/process";
 import type { FileEntry } from "@/lib/types";
 import { isStructuredDeliveryControllerUnavailable } from "@/lib/runtime/structuredDeliveryController";
@@ -149,6 +151,13 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
       launchProfileByPath.set(receipt.artifactPath, receipt.launchProfile);
     }
   });
+  /* The root marker is a conversation identity, so it is resolved through the
+     alias chain (#708): adopting a lookalike fork conversation into its source
+     must not leave the configured root naming a merged-away id. */
+  const configuredRootId = process.env.LLV_ROOT_CONVERSATION_ID;
+  const configuredRoot = configuredRootId?.startsWith("conversation_")
+    ? registry.canonicalConversationId(configuredRootId as ViewerConversationId)
+    : configuredRootId;
   const observations: ConversationObservation[] = [];
   await forEachCooperatively(files, (entry) => {
     const engine = engineOf(entry);
@@ -171,7 +180,6 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
     const turn = projectedInventoryTurn(entry, parsed, existing, hostedPath);
     const currentProfile = launchProfileByPath.get(entry.path)
       ?? existing?.generations.find((generation) => generation.path === entry.path)?.launchProfile;
-    const configuredRoot = process.env.LLV_ROOT_CONVERSATION_ID;
     const transcriptIdentity = { size: entry.size, mtimeMs };
     observations.push({
       engine,
@@ -198,6 +206,11 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
       // lineage edge against the post-admission index, even for a parent first
       // discovered in this same inventory cycle.
       parentArtifactPath: entry.parent,
+      // Provider-fork history (issue #708). Read from the FIRST `session_meta`
+      // row, because a fork replays its ancestor's header as row two.
+      forkSourceThreadId: engine === "codex"
+        ? nativeCodexForkSourceThreadId(entry.path, entry.size, mtimeMs)
+        : null,
       expectedTurnObservedAt: existing?.turn.observedAt ?? null,
       startedAt: entry.sessionStartedAt ?? headSessionStartedAt(entry.path, transcriptIdentity),
       observedAt: !observedTurn.complete && existing?.turn.observedAt
@@ -208,9 +221,67 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
   return observations;
 }
 
-export async function reconcileMigrationInventory(registry: AgentRegistry = agentRegistry(), files?: FileEntry[]): Promise<ReturnType<AgentRegistry["snapshot"]>> {
+/**
+ * Follow an adopted provider fork's board placement onto the conversation that
+ * now owns it (#708).
+ *
+ * The fork used to render as its own card, so the operator's `manual` and
+ * `expanded` entries name its transcript path. Aliasing that path to the
+ * conversation's current generation keeps those decisions attached to the
+ * surviving card instead of stranding them on a path that no longer renders.
+ * `remapBoardPaths` is a no-op once the alias exists, so this replays on every
+ * inventory cycle without touching the board again.
+ *
+ * A fork the operator had already hidden is deliberately left unaliased. Hiding
+ * a duplicate card is a statement about the duplicate, and an alias would carry
+ * it onto the survivor and take the real conversation off the board. The hidden
+ * entry stays on file untouched; it simply names a path that no longer draws.
+ */
+async function repairAdoptedForkBoardPlacements(
+  conversations: readonly RegistryConversation[],
+  remapPaths: typeof remapDurableBoardPaths,
+): Promise<void> {
+  const byProject = new Map<string, { from: string; to: string }[]>();
+  await forEachCooperatively(conversations, (conversation) => {
+    if (conversation.engine !== "codex" || conversation.providerForkPaths.length === 0) return;
+    const current = conversation.generations.at(-1);
+    if (!current) return;
+    const project = conversation.projectOwnership?.project || current.launchProfile.project;
+    if (!project) return;
+    const hidden = new Set(boardFor(project).prefs.hidden);
+    const pairs = conversation.providerForkPaths
+      .filter((pathname) => pathname !== current.path && !hidden.has(pathname))
+      .map((from) => ({ from, to: current.path }));
+    if (pairs.length === 0) return;
+    byProject.set(project, [...(byProject.get(project) ?? []), ...pairs]);
+  });
+  await forEachCooperatively([...byProject], ([project, pairs]) => {
+    try {
+      remapPaths(project, pairs);
+    } catch (error) {
+      console.warn("[account-migration] adopted fork board placement deferred", {
+        project,
+        paths: pairs.length,
+        error: safeProviderDiagnostic(error),
+      });
+    }
+  });
+}
+
+export async function reconcileMigrationInventory(
+  registry: AgentRegistry = agentRegistry(),
+  files?: FileEntry[],
+  options: MigrationCoordinatorOptions = {},
+): Promise<ReturnType<AgentRegistry["snapshot"]>> {
   const entries = files ?? await listFiles();
-  return registry.reconcileConversations(await inventory(entries, registry));
+  const snapshot = registry.reconcileConversations(await inventory(entries, registry));
+  if (!options.deferBoardRepair) {
+    await repairAdoptedForkBoardPlacements(
+      Object.values(snapshot.conversations),
+      options.remapBoardPaths ?? remapDurableBoardPaths,
+    );
+  }
+  return snapshot;
 }
 
 function previewFromSnapshot(engine: MigrationEngine, targetId: string, registry: AgentRegistry): MigrationPreview {
