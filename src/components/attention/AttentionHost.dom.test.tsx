@@ -9,7 +9,8 @@ import { flushSync } from "react-dom";
 import { viewBus, type ViewSlice } from "@/hooks/viewPresenceBus";
 import { answerAttentionRequest, attentionForDevice, raiseAttentionRequest } from "@/lib/attention/service";
 import { readAttentionFile } from "@/lib/attention/store";
-import { FOLLOW_HOLD_MS, OFFER_TTL_MS, RETURN_WINDOW_MS, type FocusRect } from "@/lib/attention/types";
+import { OFFER_TTL_MS, type FocusRect } from "@/lib/attention/types";
+import { UNREAD_FRAME_RECT } from "@/lib/attention/frames";
 import { validateAttentionEvent } from "@/lib/attention/validation";
 
 import { AttentionHost } from "./AttentionHost";
@@ -182,86 +183,177 @@ async function poll() {
   await settle();
 }
 
-test("a raised request renders within one poll and the record moves pending → offered", async () => {
+/** Raise a second, genuinely distinct focus event. */
+function raiseSecond(rect: FocusRect = RAISED_RECT) {
+  return raiseAttentionRequest({
+    origin: "root-agent",
+    target: { kind: "conversation", path: ANCHOR },
+    frameAtCreation: { project: "demo", rect, boardRevision: 4 },
+    intent: "show",
+    reason: "The reviewer answered again.",
+  }, { now, id: "attention_2" }).request;
+}
+
+function mountMobile(bus: ReturnType<typeof board>["bus"], fetchFn: typeof fetch) {
+  const host = dom.document.createElement("div");
+  dom.document.body.appendChild(host);
+  const root = createRoot(host as unknown as Element);
+  flushSync(() => root.render(
+    <AttentionHost mobile bus={bus} deviceId={DEVICE} fetchFn={fetchFn} pollMs={100_000} timing={{ timeoutMs: 0, pollMs: 0 }} />,
+  ));
+  roots.push(root);
+}
+
+/* ── Desktop follows immediately, once ──────────────────────────────────── */
+
+test("an explicit focus event moves the desktop view immediately, with no prompt and no menu", async () => {
   raise();
   expect(record().state).toBe("pending");
-  const { bus } = board({ [ANCHOR]: LIVE_RECT });
-
-  mount(bus);
-  await settle();
-
-  /* On screen, answerable, with the agent's sentence and which of show/open the
-     operator is about to agree to. */
-  expect(one("[data-testid='attention-request']")).not.toBeNull();
-  expect(one("[data-testid='attention-accept']")).not.toBeNull();
-  /* And the record now says a device showed it — which is what makes the
-     eventual expiry line "you never saw it" or "you said nothing", honestly. */
-  expect(record().state).toBe("offered");
-  expect(record().offeredTo).toEqual([DEVICE]);
-});
-
-test("a hidden surface renders nothing and reports nothing, and the request expires unseen", async () => {
-  visibility = "hidden";
-  raise();
-  const { bus } = board({ [ANCHOR]: LIVE_RECT });
-
-  mount(bus);
-  await settle();
-
-  /* A background tab claiming the operator saw an offer teaches the agent the
-     wrong lesson about whether to ask again. The operator's Viewer is
-     frequently backgrounded, so this is the common case, not the edge one. */
-  expect(record().state).toBe("pending");
-  expect(record().offeredTo).toEqual([]);
-  expect(one("[data-testid='attention-request']")).toBeNull();
-
-  now = at(OFFER_TTL_MS + 1);
-  const swept = attentionForDevice(DEVICE, { now });
-  now = new Date("2026-07-01T10:00:00.000Z");
-
-  expect(swept.expired).toEqual(["attention_1"]);
-  expect(record().state).toBe("expired");
-  expect(record().expiredCause).toBe("ttl");
-  expect(record().offeredTo).toEqual([]);
-});
-
-test("accepting resolves the target against the live board, moves the view, and records the arrival", async () => {
-  raise();
   const { bus, log } = board({ [ANCHOR]: LIVE_RECT });
+
   mount(bus);
   await settle();
 
-  click(one("[data-testid='attention-accept']")!);
-  await settle();
-
-  /* The rect the board holds NOW, not the one the request was raised against. */
+  /* The move happened on its own: nothing was ever put in front of the operator
+     to agree to. */
   expect(log.moved).toEqual([LIVE_RECT]);
   expect(record().state).toBe("following");
-  expect(record().resolution).toBe("exact");
-  expect(record().acknowledgedBy).toBe(DEVICE);
+  expect(record().acceptedVia).toBe("operator");
 });
 
-test("the return point is this device's viewport from before the move, and returning restores it", async () => {
+test("the whole confirmation panel is gone: no accept, preview, decline, message or pop-out control renders", async () => {
+  raise();
+  const { bus } = board({ [ANCHOR]: LIVE_RECT });
+
+  mount(bus);
+  await settle();
+
+  /* Negative evidence for the rejected product. Every one of these was on the
+     panel the operator rejected; none of them may come back. */
+  for (const gone of [
+    "attention-request",
+    "attention-accept",
+    "attention-preview",
+    "attention-preview-card",
+    "attention-preview-close",
+    "attention-decline",
+    "attention-withdrawn",
+    "attention-refused",
+    "attention-auto-follow",
+    "overlay-action-row",
+    "root-overlay-dock",
+  ]) {
+    expect(one(`[data-testid='${gone}']`)).toBeNull();
+  }
+  /* And no composer to message the agent from, anywhere on this surface. */
+  expect(dom.document.querySelector("textarea")).toBeNull();
+  expect(dom.document.querySelector("form")).toBeNull();
+});
+
+test("control releases after the one move: polls, renders and refreshes never move the view again", async () => {
+  raise();
+  const { bus, log } = board({ [ANCHOR]: LIVE_RECT });
+
+  mount(bus);
+  await settle();
+  expect(log.moved).toHaveLength(1);
+
+  /* Twenty heartbeats with the record sitting in `following` — the state that
+     used to be re-read as "still owed a move". */
+  for (let i = 0; i < 20; i += 1) await poll();
+
+  expect(log.moved).toHaveLength(1);
+  expect(record().state).toBe("following");
+});
+
+test("a replayed, idempotent retry of the same focus event does not move the view a second time", async () => {
   raise();
   const { bus, log } = board({ [ANCHOR]: LIVE_RECT });
   mount(bus);
   await settle();
+  expect(log.moved).toHaveLength(1);
 
-  click(one("[data-testid='attention-accept']")!);
+  /* The agent retries with the same clientRequestId, so the same request id
+     comes back down the poll. Same event, already applied. */
+  raiseAttentionRequest({
+    origin: "root-agent",
+    target: { kind: "conversation", path: ANCHOR },
+    frameAtCreation: { project: "demo", rect: RAISED_RECT, boardRevision: 4 },
+    intent: "show",
+    reason: "The reviewer finished with request-changes.",
+  }, { now, id: "attention_1" });
+  await poll();
+  await poll();
+
+  expect(log.moved).toHaveLength(1);
+});
+
+test("a distinct focus event may move the view once more, and then releases too", async () => {
+  raise();
+  const { bus, log } = board({ [ANCHOR]: LIVE_RECT });
+  mount(bus);
+  await settle();
+  expect(log.moved).toHaveLength(1);
+
+  /* Returning first, so the first request stops being the live one. */
+  click(one("[data-testid='attention-return']")!);
   await settle();
 
-  /* Captured before anything moved, against this device — presence is
-     per-device and two devices in the same seat do not share a framing. */
-  expect(record().returnPoints).toEqual([{
-    deviceId: DEVICE,
-    mode: "scheme",
-    camera: { x: 120, y: 340, zoom: 0.55 },
-    focusedPath: "/tmp/what-i-was-reading.jsonl",
-    capturedAt: expect.any(String) as unknown as string,
-  }]);
+  raiseSecond();
+  await poll();
+  await settle();
 
-  /* The board has since moved on, exactly as it would have after a real glide. */
-  viewBus.reportSlice({ ...WHERE_I_WAS, focusedPath: ANCHOR, camera: { x: -900, y: -1_400, zoom: 0.9, worldRect: { x: 0, y: 0, width: 10, height: 10 } } });
+  expect(log.moved).toHaveLength(2);
+  for (let i = 0; i < 5; i += 1) await poll();
+  expect(log.moved).toHaveLength(2);
+});
+
+/* ── The Back arrow, and nothing else ───────────────────────────────────── */
+
+test("the only thing left on screen is one small Back control, and only while there is somewhere to go back to", async () => {
+  raise();
+  const { bus } = board({ [ANCHOR]: LIVE_RECT });
+
+  mount(bus);
+  await settle();
+
+  const chip = one("[data-testid='focus-return-chip']");
+  expect(chip).not.toBeNull();
+  /* One control, no copy: the chip carries a single button and no text node of
+     its own. A sentence here would be the panel coming back in miniature. */
+  expect(chip!.querySelectorAll("button")).toHaveLength(1);
+  expect((chip!.textContent ?? "").trim()).toBe("");
+});
+
+test("the Back control is a real button with an accessible name and keyboard focus", async () => {
+  raise();
+  const { bus } = board({ [ANCHOR]: LIVE_RECT });
+  mount(bus);
+  await settle();
+
+  const back = one("[data-testid='attention-return']")!;
+  expect(back.tagName).toBe("BUTTON");
+  /* Typed, so it can never submit a form it is nested in. */
+  expect(back.getAttribute("type")).toBe("button");
+  /* Icon-only, so the accessible name has to come from the label rather than
+     from contents a screen reader would find empty. */
+  expect(back.getAttribute("aria-label")).toBe("Back to where you were");
+  expect(back.getAttribute("title")).toBe("Back to where you were");
+  /* It is in the tab order without being forced there. */
+  expect(back.getAttribute("tabindex")).toBeNull();
+  expect(back.hasAttribute("disabled")).toBe(false);
+  /* Nothing here claims a mode: a pressed/toggled control would read as an
+     ongoing follow, which is exactly what this design removed. */
+  expect(back.getAttribute("aria-pressed")).toBeNull();
+  /* The icon is decorative; the button's own label is the name. */
+  expect(back.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
+});
+
+test("Back restores the exact viewport the operator was at before the automatic move", async () => {
+  raise();
+  const { bus, log } = board({ [ANCHOR]: LIVE_RECT });
+  mount(bus);
+  await settle();
 
   click(one("[data-testid='attention-return']")!);
   await settle();
@@ -269,449 +361,81 @@ test("the return point is this device's viewport from before the move, and retur
   expect(log.restored).toEqual([{ x: 120, y: 340, zoom: 0.55 }]);
   expect(record().state).toBe("returned");
   expect(record().returnedVia).toBe("control");
+  /* And once taken, the way back is no longer on offer. */
+  expect(one("[data-testid='focus-return-chip']")).toBeNull();
 });
 
-/** Drive a request all the way to `following` on this device without going
-    through the host — a record that outlived whatever tab accepted it. */
-function seedFollowing(focusedPath: string | null = "/tmp/what-i-was-reading.jsonl") {
-  const request = raise();
-  answerAttentionRequest(request.id, { kind: "offer", deviceId: DEVICE }, { now });
-  answerAttentionRequest(request.id, { kind: "accept", deviceId: DEVICE }, { now });
-  answerAttentionRequest(request.id, {
-    kind: "arrive",
-    deviceId: DEVICE,
-    resolution: "exact",
-    returnPoint: { deviceId: DEVICE, mode: "scheme", camera: { x: 120, y: 340, zoom: 0.55 }, focusedPath, capturedAt: now.toISOString() },
-  }, { now });
-  return request;
-}
-
-test("a return with no memory of where the camera was captured never restores it into another project", async () => {
-  /* The record's ReturnPoint carries a camera but no project, and this browser
-     has no memory of capturing it: the tab that accepted is gone, or this is a
-     second tab that shares the device id and renders the same return control.
-     World coordinates from one project's layout mean nothing in another's. */
-  seedFollowing();
-  const { bus, log, opened } = board({ [ANCHOR]: LIVE_RECT }, "elsewhere");
+test("nothing renders at all while there is nothing to go back to", async () => {
+  const { bus } = board({ [ANCHOR]: LIVE_RECT });
   mount(bus);
   await settle();
 
-  click(one("[data-testid='attention-return']")!);
-  await settle();
-
-  expect(log.restored).toEqual([]);
-  /* The focused path names a thing rather than a coordinate, so it is the part
-     of that viewport that survives not knowing which project it belonged to. */
-  expect(opened).toEqual(["/tmp/what-i-was-reading.jsonl"]);
-  expect(record().state).toBe("returned");
+  expect(dom.document.body.textContent).toBe("");
+  expect(one("[data-testid='focus-return-chip']")).toBeNull();
 });
 
-test("the capture project outlives the tab, so a return after a reload restores the camera", async () => {
-  raise();
-  const first = board({ [ANCHOR]: LIVE_RECT });
-  mount(first.bus);
-  await settle();
-  click(one("[data-testid='attention-accept']")!);
-  await settle();
-
-  /* The reload: this component's memory is gone, the record and the device id
-     are not. */
-  for (const root of roots) flushSync(() => root.unmount());
-  roots = [];
-  dom.document.body.replaceChildren();
-
-  const second = board({ [ANCHOR]: LIVE_RECT });
-  mount(second.bus);
-  await settle();
-
-  click(one("[data-testid='attention-return']")!);
-  await settle();
-
-  expect(second.log.restored).toEqual([{ x: 120, y: 340, zoom: 0.55 }]);
-  expect(record().state).toBe("returned");
-});
-
-test("a vanished anchor degrades to where it was rather than failing or landing anywhere", async () => {
-  raise();
-  /* The reviewer's card is gone from the board; the frame the request was
-     raised against is still a place the operator can be taken. */
-  const { bus, log } = board({ "/tmp/somebody-else.jsonl": LIVE_RECT });
-  mount(bus);
-  await settle();
-
-  click(one("[data-testid='attention-accept']")!);
-  await settle();
-
-  expect(log.moved).toEqual([RAISED_RECT]);
-  expect(record().state).toBe("following");
-  expect(record().resolution).toBe("approximate");
-});
-
-/** A request with no live anchor and no frame worth degrading to: there is
-    nowhere on the board to take anyone. */
-function raiseUnlandable(id = "attention_1", reason = "The reviewer finished with request-changes.") {
-  return raiseAttentionRequest({
-    origin: "root-agent",
-    target: { kind: "conversation", path: ANCHOR },
-    frameAtCreation: { project: "demo", rect: { x: 0, y: 0, w: 0, h: 0 }, boardRevision: null },
-    intent: "show",
-    reason,
-  }, { now, id }).request;
-}
-
-test("a target that resolved to nothing ends the request then and there, as its own kind of ending", async () => {
-  /* The record refuses to call that a follow, and the surface that asked says
-     so — a control that appeared to work while the view never moved is the
-     failure this whole row exists to avoid. */
-  raiseUnlandable();
+test("a target that resolved to nothing moves nothing and puts nothing on screen", async () => {
+  /* Exactly what the MCP tool records: a request raised through the agent's
+     tool has no board in front of it, so it carries an unread frame. With the
+     anchor gone from the board too, there is nowhere to land — degrading to a
+     zero-area frame would drop the operator at the world origin. */
+  raise(UNREAD_FRAME_RECT);
   const { bus, log } = board({});
   mount(bus);
   await settle();
 
-  click(one("[data-testid='attention-accept']")!);
-  await settle();
-
   expect(log.moved).toEqual([]);
-  /* Terminal within the same answer, and never recorded as an arrival. The
-     alternative — leaving it `accepted` — is unrecoverable: no event is legal
-     from there, so it stays this device's oldest live entry for the life of the
-     record. */
+  expect(one("[data-testid='focus-return-chip']")).toBeNull();
+  /* The failure is reported to the record — and through it to the agent — never
+     as a banner over the operator's board. */
   expect(record().state).toBe("expired");
   expect(record().expiredCause).toBe("lost");
-  expect(record().resolution).toBeUndefined();
-  /* Not a refusal, and not "they never answered": three different things to be
-     able to say, and this is the third. */
-  expect(record().state).not.toBe("declined");
-  expect(attentionForDevice(DEVICE, { now }).offer).toBeNull();
-  expect(one("[data-testid='attention-refused']")).not.toBeNull();
 });
 
-test("a request raised after a handoff that could not land is rendered and answerable", async () => {
-  raiseUnlandable();
-  /* The anchor arrives on the board only after the first handoff has failed —
-     the reviewer's card appearing a moment later, which is the ordinary way
-     this happens. */
-  const rects: Record<string, FocusRect> = {};
-  const { bus } = board(rects);
-  mount(bus);
-  await settle();
+/* ── Mobile is chat-only ────────────────────────────────────────────────── */
 
-  click(one("[data-testid='attention-accept']")!);
-  await settle();
-  rects[ANCHOR] = LIVE_RECT;
-
-  /* The second ask is the one that matters. With the first wedged in
-     `accepted` it would be stamped `offered` by the poll, rendered by nothing,
-     and expire looking exactly like "they saw it and said nothing" — the record
-     lying about the operator, permanently, on that device. */
-  const second = raiseAttentionRequest({
-    origin: "root-agent",
-    target: { kind: "conversation", path: ANCHOR },
-    frameAtCreation: { project: "demo", rect: RAISED_RECT, boardRevision: 4 },
-    intent: "show",
-    reason: "The verifier is blocked on you.",
-  }, { now, id: "attention_2" }).request;
-
-  await poll();
-
-  expect(one("[data-testid='attention-request']")!.textContent).toContain("The verifier is blocked on you.");
-  expect(attentionForDevice(DEVICE, { now }).offer?.request.id).toBe(second.id);
-
-  click(one("[data-testid='attention-accept']")!);
-  await settle();
-
-  const stored = readAttentionFile().requests.find((entry) => entry.id === "attention_2")!;
-  expect(stored.state).toBe("following");
-});
-
-test("a request raised after a follow the operator never closed is rendered and answerable", async () => {
-  /* The same silent swallow as the lost landing above, by the other route.
-     `following` admits no event but Return, so an operator who follows and then
-     walks away leaves that request live for good — and, being the oldest live
-     entry, it is the only thing this device is ever shown again. */
-  raise();
-  const { bus } = board({ [ANCHOR]: LIVE_RECT });
-  mount(bus);
-  await settle();
-
-  click(one("[data-testid='attention-accept']")!);
-  await settle();
-  expect(record().state).toBe("following");
-
-  /* Long enough that the card has stopped naming where they came from, so there
-     is nothing left on it to take away. */
-  now = new Date(now.getTime() + RETURN_WINDOW_MS + 1);
-  const second = raiseAttentionRequest({
-    origin: "root-agent",
-    target: { kind: "conversation", path: ANCHOR },
-    frameAtCreation: { project: "demo", rect: RAISED_RECT, boardRevision: 4 },
-    intent: "show",
-    reason: "The verifier is blocked on you.",
-  }, { now, id: "attention_2" }).request;
-
-  await poll();
-
-  expect(one("[data-testid='attention-request']")!.textContent).toContain("The verifier is blocked on you.");
-  expect(attentionForDevice(DEVICE, { now }).offer?.request.id).toBe(second.id);
-  /* Replaced by the agent's newer ask, which is a different fact from the
-     operator refusing it and from nobody ever seeing it. */
-  expect(record().state).toBe("superseded");
-
-  click(one("[data-testid='attention-accept']")!);
-  await settle();
-  expect(readAttentionFile().requests.find((entry) => entry.id === "attention_2")!.state).toBe("following");
-});
-
-test("a follow nobody closes and nothing replaces is still bounded by the clock", async () => {
-  raise();
-  const { bus } = board({ [ANCHOR]: LIVE_RECT });
-  mount(bus);
-  await settle();
-
-  click(one("[data-testid='attention-accept']")!);
-  await settle();
-  expect(record().state).toBe("following");
-
-  /* Nothing is raised after it and Return is never pressed. Without a clock the
-     record stays live indefinitely and the slot with it. */
-  now = new Date(now.getTime() + FOLLOW_HOLD_MS);
-  await poll();
-
-  expect(record().state).toBe("expired");
-  /* Seen, agreed to, never closed — not a refusal, and not "they never saw it". */
-  expect(record().expiredCause).toBe("follow-elapsed");
-  expect(attentionForDevice(DEVICE, { now }).offer).toBeNull();
-  expect(dom.document.body.textContent).toBe("");
-});
-
-test("the refusal band can be dismissed, so a one-off refusal is not a permanent warning", async () => {
-  raiseUnlandable();
-  const { bus } = board({});
-  mount(bus);
-  await settle();
-
-  click(one("[data-testid='attention-accept']")!);
-  await settle();
-  expect(one("[data-testid='attention-refused']")).not.toBeNull();
-
-  click(one("[data-testid='attention-refused-dismiss']")!);
-  await settle();
-
-  /* Nothing is left to answer and nothing is left to say, so the surface goes
-     away entirely rather than leaving a band the operator cannot get rid of. */
-  expect(one("[data-testid='attention-refused']")).toBeNull();
-  expect(dom.document.body.textContent).toBe("");
-});
-
-test("asking for a preview shows what it is about, named by the board when the board knows it", async () => {
-  raise();
-  const { bus } = board({ [ANCHOR]: LIVE_RECT });
-  mount(bus);
-  await settle();
-
-  click(one("[data-testid='attention-preview']")!);
-  await settle();
-
-  /* The third branch of the loop — accept, decline, or look first — and it has
-     to show something, or it is a control that does nothing. */
-  const card = one("[data-testid='attention-preview-card']");
-  expect(card).not.toBeNull();
-  expect(card!.textContent).toContain("Reviewer — login fix");
-  expect(card!.textContent).toContain("demo");
-  /* Previewing never moves the view, whatever the target. */
-  expect(record().state).toBe("previewing");
-  expect(one("[data-testid='attention-accept']")).not.toBeNull();
-});
-
-test("a preview for a target the board cannot name still says what was asked about", async () => {
-  raise();
-  /* Another project's board is registered, so no label here may be borrowed
-     from it: the same key can mean a different thing in a different layout. */
-  const { bus } = board({ [ANCHOR]: LIVE_RECT }, "elsewhere");
-  mount(bus);
-  await settle();
-
-  click(one("[data-testid='attention-preview']")!);
-  await settle();
-
-  const card = one("[data-testid='attention-preview-card']");
-  expect(card!.textContent).toContain("reviewer");
-  expect(card!.textContent).toContain("demo");
-});
-
-test("nothing renders while there is nothing to answer", async () => {
-  const { bus } = board({ [ANCHOR]: LIVE_RECT });
-
-  mount(bus);
-  await settle();
-
-  expect(dom.document.body.textContent).toBe("");
-  expect(one("[data-testid='root-overlay-dock']")).toBeNull();
-});
-
-test("a 409 rejection does not move the board or record an arrival", async () => {
+test("mobile never moves its board, renders nothing, and leaves the request for a desktop", async () => {
   raise();
   const { bus, log } = board({ [ANCHOR]: LIVE_RECT });
-  /* Accepting on one device, then mounting a second that tries the same: the
-     record has already left `offered`, so the second device's accept is refused
-     with a 409. The view must stay put. */
-  answerAttentionRequest("attention_1", { kind: "offer", deviceId: DEVICE }, { now });
-  answerAttentionRequest("attention_1", { kind: "offer", deviceId: "other-device" }, { now });
-  answerAttentionRequest("attention_1", { kind: "accept", deviceId: "other-device" }, { now });
 
-  mount(bus);
-  await settle();
-  const accept = one("[data-testid='attention-accept']");
-  if (accept) {
-    click(accept);
-    await settle();
-  }
-
-  expect(log.moved).toEqual([]);
-  expect(log.restored).toEqual([]);
-});
-
-test("a transport failure does not move the board or record an arrival", async () => {
-  raise();
-  const { log } = board({ [ANCHOR]: LIVE_RECT });
-  const failingTransport: typeof fetch = (async () => {
-    throw new Error("network unreachable");
+  const calls: string[] = [];
+  const spy = (async (url: string, init?: { body?: string }) => {
+    calls.push(String(url));
+    return transport()(url as unknown as string, init as never);
   }) as unknown as typeof fetch;
-  const failing = createFocusHandoffBus();
-  const failingBoard: BoardFocusController = {
-    project: "demo",
-    index: { project: "demo", boardRevision: 9, rectFor: (key) => (key === ANCHOR ? LIVE_RECT : null), named: [] },
-    moveTo: ({ rect }) => { log.moved.push(rect); return true; },
-    restoreCamera: (camera) => { log.restored.push(camera); return true; },
-  };
-  failing.setBoard(failingBoard);
-  failing.setShell({ project: "demo", openProject: () => {}, openPath: () => {} });
 
-  const host = dom.document.createElement("div");
-  dom.document.body.appendChild(host as never);
-  const root = createRoot(host as unknown as Element);
-  flushSync(() => root.render(
-    <AttentionHost mobile={false} bus={failing} deviceId={DEVICE} fetchFn={failingTransport} pollMs={100_000} timing={{ timeoutMs: 0, pollMs: 0 }} />,
-  ));
-  roots.push(root);
+  mountMobile(bus, spy);
   await settle();
+  for (let i = 0; i < 5; i += 1) await poll();
 
-  const accept = one("[data-testid='attention-accept']");
-  if (accept) {
-    click(accept);
-    await settle();
-  }
-
+  /* Not one request, so the phone cannot even report having seen the offer. */
+  expect(calls).toEqual([]);
   expect(log.moved).toEqual([]);
-  expect(log.restored).toEqual([]);
+  expect(dom.document.body.textContent).toBe("");
+  expect(one("[data-testid='focus-return-chip']")).toBeNull();
+  /* Still waiting for a surface that can actually go there. */
+  expect(record().state).toBe("pending");
+  expect(record().offeredTo).toEqual([]);
 });
 
-/*
- * Transport failures on the two answers that come AFTER the view has already
- * moved. Both were reported as `Promise<void>`, so the surface could not tell a
- * dropped packet from a landing: the record stayed where it was while this
- * device carried on as though it had been updated.
- */
-
-test("an arrival the network swallowed is not a follow, and is reconciled on the next poll", async () => {
+test("a hidden desktop surface moves nothing and reports nothing, and the request expires unseen", async () => {
+  visibility = "hidden";
   raise();
   const { bus, log } = board({ [ANCHOR]: LIVE_RECT });
+
   mount(bus);
   await settle();
 
-  unreachable.add("arrive");
-  click(one("[data-testid='attention-accept']")!);
-  await settle();
+  /* A backgrounded tab claiming the operator saw an offer teaches the agent the
+     wrong lesson about whether to ask again — and moving a view nobody is
+     looking at is worse still. */
+  expect(record().state).toBe("pending");
+  expect(log.moved).toEqual([]);
 
-  /* The board moved — the operator IS at the target — but the record never
-     heard about it, so it is still `accepted` and not `following`. */
-  expect(log.moved).toHaveLength(1);
-  expect(record().state).toBe("accepted");
-  expect(record().returnPoints).toEqual([]);
+  now = at(OFFER_TTL_MS + 1);
+  const swept = attentionForDevice(DEVICE, { now });
+  now = new Date("2026-07-01T10:00:00.000Z");
 
-  /* The board has since moved on, exactly as it would after a real glide. This
-     is what a retry would recapture if it asked "where am I" instead of "where
-     did this request leave from". */
-  viewBus.reportSlice({ ...WHERE_I_WAS, focusedPath: ANCHOR, camera: { x: -900, y: -1_400, zoom: 0.9, worldRect: { x: 0, y: 0, width: 10, height: 10 } } });
-
-  unreachable.delete("arrive");
-  await poll();
-
-  expect(record().state).toBe("following");
-  /* The PRE-move viewport, carried across the retry. Recapturing at retry time
-     would record the target as the place to go back to, and Return would land
-     the operator exactly where they already are. */
-  expect(record().returnPoints).toEqual([{
-    deviceId: DEVICE,
-    mode: "scheme",
-    camera: { x: 120, y: 340, zoom: 0.55 },
-    focusedPath: "/tmp/what-i-was-reading.jsonl",
-    capturedAt: expect.any(String) as unknown as string,
-  }]);
-
-  /* And the way back still works, into the project that was departed from. */
-  click(one("[data-testid='attention-return']")!);
-  await settle();
-  expect(log.restored).toEqual([{ x: 120, y: 340, zoom: 0.55 }]);
-  expect(record().state).toBe("returned");
-});
-
-test("reconciling an arrival posts once however many polls run", async () => {
-  raise();
-  const { bus } = board({ [ANCHOR]: LIVE_RECT });
-  mount(bus);
-  await settle();
-
-  unreachable.add("arrive");
-  click(one("[data-testid='attention-accept']")!);
-  await settle();
-  expect(record().state).toBe("accepted");
-
-  unreachable.delete("arrive");
-  const revisionBefore = record().revision;
-  for (let tick = 0; tick < 4; tick += 1) await poll();
-
-  /* `arrive` is legal only from `accepted`, so the first retry closes the gate
-     for every later one: exactly one transition, not four refusals stacked into
-     a refusal band the operator has to dismiss. */
-  expect(record().state).toBe("following");
-  expect(record().revision).toBe(revisionBefore + 1);
-  expect(record().returnPoints).toHaveLength(1);
-  expect(one("[data-testid='attention-refused']")).toBeNull();
-});
-
-test("a return the network swallowed keeps the memory of where to go back to", async () => {
-  raise();
-  const { bus, log } = board({ [ANCHOR]: LIVE_RECT });
-  mount(bus);
-  await settle();
-
-  click(one("[data-testid='attention-accept']")!);
-  await settle();
-  expect(record().state).toBe("following");
-
-  viewBus.reportSlice({ ...WHERE_I_WAS, focusedPath: ANCHOR, camera: { x: -900, y: -1_400, zoom: 0.9, worldRect: { x: 0, y: 0, width: 10, height: 10 } } });
-
-  unreachable.add("return");
-  click(one("[data-testid='attention-return']")!);
-  await settle();
-
-  /* Nothing was decided, so the record still says the operator is following and
-     the control is still on offer. */
-  expect(record().state).toBe("following");
-  expect(one("[data-testid='attention-return']")).not.toBeNull();
-
-  unreachable.delete("return");
-  click(one("[data-testid='attention-return']")!);
-  await settle();
-
-  /* The second press restores the ORIGINAL camera. Forgetting the capture
-     project on the dropped first press would have left this press unable to
-     tell whether those world coordinates belonged to the project on screen, and
-     it would have declined to restore them at all. */
-  expect(record().state).toBe("returned");
-  expect(log.restored).toEqual([
-    { x: 120, y: 340, zoom: 0.55 },
-    { x: 120, y: 340, zoom: 0.55 },
-  ]);
+  expect(swept.expired).toEqual(["attention_1"]);
+  expect(record().expiredCause).toBe("ttl");
 });

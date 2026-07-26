@@ -20,6 +20,7 @@ import { MAX_VISIBLE_PATHS } from "@/lib/view/types";
 import type { Workflow } from "@/lib/workflows/types";
 
 import { BoardHistoryControls } from "./BoardHistoryControls";
+import { createFocusEdgeGate } from "./focusRequestEdge";
 import { TaskStrip } from "./BranchPane";
 import { ConversationList } from "./ConversationList";
 import { clearDraftStorage, draftCwd, draftParentConversationId, draftSrc, replaceUnverifiedDraftCwd, requireDraftCwdConfirmation, seedDraftCwd, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
@@ -343,6 +344,10 @@ export function ProjectDashboard({
   const pipelines = useMemo(() => resolvePipelineMemberPaths(rawPipelines, files), [rawPipelines, files]);
   const highlightTimer = useRef<number | null>(null);
   const pendingFocusRef = useRef<string | null>(null);
+  /* Automatic focus is one-shot and edge-triggered: see `focusRequestEdge`. The
+     gate lives for the mount, so a consumed edge stays consumed across every
+     poll, render and idempotent replay. */
+  const focusEdge = useRef(createFocusEdgeGate());
   /* The board arrangement (which windows, hidden/expanded, view mode, task
      panel) now lives in the shared server store, synced across devices, with a
      one-time seed from the old per-browser localStorage (#38). Reads stay
@@ -857,13 +862,31 @@ export function ProjectDashboard({
 
   /* An attention jump rides the same channel as switchboard opens: the ref is
      set here and the every-render effect below flashes it, whether the node is
-     already in the layout or enters it on this render. */
+     already in the layout or enters it on this render.
+
+     Gated on the request's NONCE, not on its presence. `focusRequest` is state
+     that outlives the move, while this effect's other dependencies (`files`,
+     `pipelines`, `deckFlows`, `compactPipelinePaths`) get fresh identities on
+     every scanner poll — so reading it as a level re-armed the focus channel
+     each poll and, because the highlight that drives the camera self-clears
+     after HIGHLIGHT_MS, the camera's own guard had reset and re-centred. That is
+     sticky follow: the operator pans away and is pulled back seconds later,
+     forever. Consuming the edge makes one explicit event exactly one move.
+
+     Consumption waits until the target is somewhere this board can put it: a
+     node that has not entered the layout yet cannot be flashed, and burning the
+     edge on that render would lose the move entirely. Arming and consuming stay
+     coupled — an armed-but-unconsumed edge is the sticky path back. */
   useEffect(() => {
     if (!focusRequest) return;
-    pendingFocusRef.current = focusRequest.path;
-    setEphemeral((prev) => compactPipelinePaths.has(focusRequest.path)
-      ? replaceCompactPipelineEphemeral(prev, focusRequest.path, pipelines, deckFlows, files)
-      : prev.includes(focusRequest.path) ? prev : [...prev, focusRequest.path]);
+    const placeable = pendingFocusTarget(focusRequest.path, files) !== null
+      || compactPipelinePaths.has(focusRequest.path);
+    if (!placeable || !focusEdge.current.consume(focusRequest)) return;
+    const { path } = focusRequest;
+    pendingFocusRef.current = path;
+    setEphemeral((prev) => compactPipelinePaths.has(path)
+      ? replaceCompactPipelineEphemeral(prev, path, pipelines, deckFlows, files)
+      : prev.includes(path) ? prev : [...prev, path]);
   }, [focusRequest, compactPipelinePaths, pipelines, deckFlows, files]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
