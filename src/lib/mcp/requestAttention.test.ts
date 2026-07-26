@@ -97,6 +97,7 @@ function rootConversation(id: string, transcript: string, updatedAt: string): Re
     }],
     continuityPaths: [],
     abandonedContinuityPaths: [],
+    providerForkPaths: [],
     projectOwnership: null,
     migration: null,
     migrationOptOut: null,

@@ -503,7 +503,7 @@ test("Claude cleanup cancels only the pane PID recorded by the losing receipt", 
   };
 
   const structuredFlag = process.env.LLV_STRUCTURED_HOSTS;
-  delete process.env.LLV_STRUCTURED_HOSTS;
+  process.env.LLV_STRUCTURED_HOSTS = "0";
   try {
     await provider.publishHost(receipt, {
       engine: "claude",

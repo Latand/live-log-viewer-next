@@ -66,6 +66,7 @@ function conversation(input: {
     generations: paths.map((transcript, index) => generation(`${input.id}_g${index}`, transcript, input.role)),
     continuityPaths: [],
     abandonedContinuityPaths: [],
+    providerForkPaths: [],
     projectOwnership: null,
     migration: null,
     migrationOptOut: null,

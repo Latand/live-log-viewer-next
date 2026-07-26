@@ -151,7 +151,7 @@ test("a persisted completed generation avoids cold tail rereads for unchanged tr
     expect(persisted).toBeDefined();
     const mtimeMs = persisted!.mtime * 1000;
     const caches = cacheStore.__llvCaches ?? {};
-    expect(caches["turn-evidence-v1"]?.get(`authoritative:${transcript}`)).toMatchObject({
+    expect(caches["turn-evidence-v2"]?.get(`authoritative:${transcript}`)).toMatchObject({
       size: persisted!.size,
       mtimeMs,
       codex: true,
@@ -526,7 +526,7 @@ test("persisted Claude question state hydrates without transcript reads and stay
   }
 }, 30_000);
 
-test("a persisted Claude result hydrates authoritative turn evidence without transcript reads", async () => {
+test("a persisted Claude result rebuilds recovery evidence while a busy assistant hydrates without reads", async () => {
   const previousTestStateDir = process.env.LLV_STATE_DIR;
   const testStateDir = path.join(sandbox, "durable-claude-result-state");
   const projectDir = path.join(process.env.LLV_CLAUDE_HOME!, "projects", "-repo-claude-result-hydration");
@@ -595,11 +595,12 @@ test("a persisted Claude result hydrates authoritative turn evidence without tra
       complete: true,
       turn: { state: "terminal", source: "lifecycle" },
     });
+    expect(transcriptReads).toBe(1);
     expect(transcriptTurnResult(assistantPath, restartedAssistant.size, restartedAssistant.mtime * 1000, false)).toMatchObject({
       complete: true,
       turn: { state: "busy", source: "assistant" },
     });
-    expect(transcriptReads).toBe(0);
+    expect(transcriptReads).toBe(1);
 
     fs.appendFileSync(resultPath, "\n");
     const changed = fs.statSync(resultPath);
@@ -610,7 +611,7 @@ test("a persisted Claude result hydrates authoritative turn evidence without tra
       complete: true,
       turn: { state: "terminal", source: "lifecycle" },
     });
-    expect(transcriptReads).toBe(2);
+    expect(transcriptReads).toBe(3);
   } finally {
     fs.openSync = originalOpen;
     fs.closeSync = originalClose;
