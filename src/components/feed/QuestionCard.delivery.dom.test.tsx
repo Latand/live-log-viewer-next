@@ -86,10 +86,35 @@ test("delivery errors map to translated copy by status, never the server string"
   expect(deliveryErrorKey(409)).toBe("question.errorMoved");
   expect(deliveryErrorKey(409, { noPane: true })).toBe("question.noPane");
   expect(deliveryErrorKey(403)).toBe("question.errorNotRunning");
-  expect(deliveryErrorKey(502)).toBe("question.errorUnconfirmed");
   expect(deliveryErrorKey(500)).toBe("common.serverUnavailable");
   expect(deliveryErrorKey(400)).toBe("question.errorRejected");
   expect(deliveryErrorKey(418)).toBe("common.failedSend");
+});
+
+/* Review finding 3: 502 is two different events. The driver throws BEFORE the
+   submit (it never reached the option, or the screen never advanced), so
+   nothing was answered; the route's own 502 fires AFTER Enter, with only the
+   transcript's confirmation missing. Mapping both to "the answer was sent"
+   asserted a delivery that usually did not happen — and contradicted the card's
+   own handling of the same event. */
+test("the two 502 paths produce individually true copy", () => {
+  expect(deliveryErrorKey(502, { delivered: true })).toBe("question.errorUnconfirmed");
+  expect(deliveryErrorKey(502, { delivered: false })).toBe("question.errorNotDelivered");
+  /* An older server that sends no flag must not claim a delivery either. */
+  expect(deliveryErrorKey(502)).toBe("question.errorNotDelivered");
+
+  expect(en["question.errorUnconfirmed"]).toContain("sent");
+  expect(en["question.errorNotDelivered"]).toContain("not delivered");
+});
+
+test("the answer route marks which 502 it is", async () => {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const route = fs.readFileSync(path.join(import.meta.dir, "../../app/api/answer/route.ts"), "utf8");
+  /* Post-send: Enter was pressed, only confirmation is missing. */
+  expect(route).toMatch(/answer was sent, but the transcript did not confirm it[^\n]*delivered: true/);
+  /* Driver throw: the submit never completed. */
+  expect(route).toMatch(/error instanceof DeliveryError[^\n]*delivered: false/);
 });
 
 test("a rejected answer clears the selection, hides the raw error and offers a retry", async () => {
@@ -113,6 +138,7 @@ test("a rejected answer clears the selection, hides the raw error and offers a r
   /* The option no longer asserts an acceptance that never happened. */
   expect(option!.textContent).not.toContain("✓");
   expect(option!.className).not.toContain("bg-accent/10");
+  expect(option!.getAttribute("data-choice-state")).toBe("failed");
   /* The card still says the agent is waiting — and now that is true. */
   expect(host.textContent).toContain(en["question.waiting"]);
   /* Translated copy at the boundary; the driver's own sentence never renders. */
@@ -128,6 +154,42 @@ test("a rejected answer clears the selection, hides the raw error and offers a r
   flushSync(() => { retry!.click(); });
   await settle();
   expect(posts).toBe(2);
+
+  flushSync(() => { root.unmount(); });
+  host.remove();
+});
+
+
+/* Review finding 5: the first fix cleared `answers` outright, which threw away
+   work the failure never invalidated — a multi-question form is several
+   decisions, and only a verbatim retry could recover them. */
+test("a rejected submit keeps the picks on screen, visibly failed and still editable", async () => {
+  globalThis.fetch = mock(async () =>
+    new Response(JSON.stringify({ error: RAW_SERVER_ERROR }), { status: 409 })) as unknown as typeof fetch;
+
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => { root.render(<QuestionCard file={questionFile()} />); });
+
+  const optionOf = (label: string) =>
+    [...host.querySelectorAll("button")].find((node) => node.textContent?.includes(label))!;
+
+  flushSync(() => { optionOf("Terminal").click(); });
+  await settle();
+
+  /* Still there, still the operator's choice — but wearing the failure. */
+  const failed = optionOf("Terminal");
+  expect(failed.getAttribute("data-choice-state")).toBe("failed");
+  expect(failed.className).toContain("border-danger/45");
+  expect(failed.textContent).toContain(en["question.failedChoice"]);
+  expect(failed.textContent).not.toContain("✓");
+  expect(failed.hasAttribute("disabled")).toBe(false);
+
+  /* Editing moves on from the failure rather than being blocked by it. */
+  flushSync(() => { optionOf("Structured").click(); });
+  await settle();
+  expect(optionOf("Terminal").getAttribute("data-choice-state")).toBeNull();
 
   flushSync(() => { root.unmount(); });
   host.remove();
