@@ -55,3 +55,26 @@ test("state text roles clear the small-text contrast floor on every surface they
     expect(contrast(warning[scheme], warningSoft[scheme])).toBeGreaterThanOrEqual(AA_SMALL_TEXT);
   }
 });
+
+/* `tokens.css` names design doc §1.5 as its authority, so the doc is the next
+   place someone reads before "restoring" a palette value under the floor. It
+   has to agree with what ships. */
+test("the design system §1.5 table documents the shipped token values", () => {
+  const doc = fs.readFileSync(
+    path.join(import.meta.dir, "../../docs/design/viewer-design-system.md"),
+    "utf8",
+  );
+  const section = doc.slice(doc.indexOf("## 1.5 Color roles"), doc.indexOf("Lifecycle states map to roles"));
+  expect(section).toContain("#");
+
+  /* §1.5 row label → the `--color-*` token it documents. */
+  const documented = { "text-muted": "color-muted", success: "color-success", warning: "color-warning" } as const;
+
+  for (const [label, token] of Object.entries(documented)) {
+    const [light, dark] = values(token);
+    const row = section.split("\n").find((line) => line.startsWith(`${label} `));
+    expect(row, `no §1.5 row labelled "${label}"`).toBeDefined();
+    expect(row!.toLowerCase(), `§1.5 "${label}" light value`).toContain(light);
+    expect(row!.toLowerCase(), `§1.5 "${label}" dark value`).toContain(dark);
+  }
+});

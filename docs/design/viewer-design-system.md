@@ -158,14 +158,14 @@ Slice 3 behind `prefers-color-scheme` + a `data-theme` override.
 role                 light      dark       replaces (examples)
 text-primary         #1c1c22    #e8e8ec    --color-ink
 text-secondary       #55555f    #a2a2ae    #555 / #333 / --color-faint
-text-muted           #8b8b95    #6f6f7a    --color-dim
+text-muted           #6c6c79    #8b8b98    --color-dim
 border-default       #e6e6ea    #26262e    --color-line
 border-strong        #c9c9d1    #3a3a44    done-state edges, drag handles
 accent               #5a51e0    #8f88ff    --color-accent
 accent-soft          #ecebfb    #262347    accent/10 backgrounds, tmsg cards
-success              #1a8a3e    #4fc36f    --color-ok
+success              #177a37    #4fc36f    --color-ok
 success-soft         #e5f6ea    #14261a    #eef8f0, #f2faf4, #e5f6ea
-warning              #9a6b00    #e0ae45    #b3831d #b8860b #8a5a00 #7a5300 (text-safe on soft)
+warning              #8a5f00    #e0ae45    #b3831d #b8860b #8a5a00 #7a5300 (text-safe on soft)
 warning-soft         #fff4dd    #2b2312    #fff7e6 #fff2d6 #fff9ed #fdf6ec
 danger               #c62828    #f07171    --color-err
 danger-soft          #fdeeee    #2c1616    #fdf0f0 #fff5f5 #ffe0e0 #f7e8e8
@@ -174,8 +174,18 @@ engine-codex(+soft)  #2f6fd0/#e8f0fb   #6ba2e8/#152238   kept, incl. model-famil
 engine-claude(+soft) #d97757/#faeee9   #e08a6d/#2b1c15   kept
 ```
 
+**Contrast floor (issue #700).** Every role above that carries small text —
+`text-muted`, `success`, `warning` — must clear 4.5:1 against every surface it
+renders on, including its own `-soft` fill. The earlier values did not
+(`text-muted` 3.05–3.37:1, `success` 3.94–4.42:1, `warning` 4.24–4.69:1), which
+is why state labels an operator reads to decide what needs attention were the
+hardest text in the app to read. `src/styles/tokens.contrast.test.ts` pins the
+floor: change a value here and there, and the test recomputes both.
+
 Lifecycle states map to roles once, in `paneState` → tone lookup:
 `live→success · waiting→warning · returned→accent · stalled→danger · done→muted`.
+Emphasis follows what needs the operator, not what is busy: `waiting` and
+`stalled` carry the attention ring, `working` does not.
 
 The model-family tints (`utils.ts modelTint`) stay — they are a working feature
 — but their *soft* variants must come from a dark-aware helper in Slice 3
