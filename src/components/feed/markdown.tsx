@@ -6,6 +6,7 @@ import type { ReactNode } from "react";
 import { CopyButton, copyText } from "./CopyButton";
 import { useHighlighted } from "./highlight";
 import { Lightbox } from "./Lightbox";
+import { ACTION_ANCHOR, ACTION_GUTTER, MESSAGE_ACTION } from "./actionStyles";
 import { tr } from "./parse";
 
 /* Image markdown wins over the link pattern, so `![alt](url)` embeds instead
@@ -44,9 +45,6 @@ function InlineCode({ text }: { text: string }) {
   );
 }
 
-/** Right padding that keeps the copy control clear of the code (issue #698). */
-const CODE_GUTTER = "pr-10";
-
 /* Fenced block with a copy control parked in its own right gutter — legible at
    rest on every pointer, and never on top of the first line. A `lang` hint
    lazily upgrades the body to highlight.js output on first paint (see
@@ -58,19 +56,19 @@ export function CodeBlock({ code, lang }: { code: string; lang?: string | null }
     <div className="group/code relative my-1.5 max-w-full">
       {highlighted ? (
         <pre
-          className={`hljs max-w-full overflow-x-auto rounded-[10px] border border-border bg-canvas py-2 pl-3 font-mono text-[11.5px] ${CODE_GUTTER}`}
+          className={`hljs max-w-full overflow-x-auto rounded-[10px] border border-border bg-canvas py-2 pl-3 font-mono text-[11.5px] ${ACTION_GUTTER}`}
           dangerouslySetInnerHTML={{ __html: highlighted }}
         />
       ) : (
-        <pre className={`max-w-full overflow-x-auto rounded-[10px] border border-border bg-canvas py-2 pl-3 font-mono text-[11.5px] ${CODE_GUTTER}`}>{code}</pre>
+        <pre className={`max-w-full overflow-x-auto rounded-[10px] border border-border bg-canvas py-2 pl-3 font-mono text-[11.5px] ${ACTION_GUTTER}`}>{code}</pre>
       )}
-      {/* Issue #698: the copy control keeps its own gutter (`CODE_GUTTER`)
-          instead of floating over the first line of code, and it is legible
-          without a hover. */}
+      {/* Issue #698: the control keeps its own gutter (`ACTION_GUTTER`, sized
+          for the 44px coarse-pointer button) instead of floating over the first
+          lines of code, and it is legible without a hover. */}
       <CopyButton
         text={code}
         label={tr("feed.copyCode")}
-        className="absolute right-1.5 top-1.5 opacity-70 transition-opacity hover:opacity-100 focus-visible:opacity-100 group-hover/code:opacity-100"
+        className={`${ACTION_ANCHOR} ${MESSAGE_ACTION} group-hover/code:opacity-100`}
       />
     </div>
   );

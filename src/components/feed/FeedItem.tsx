@@ -4,6 +4,7 @@ import { memo } from "react";
 
 import { Brain, ChevronUp, Command, Check, Mail, Mic, Sparkle, X } from "../icons";
 import { hhmm } from "../utils";
+import { MESSAGE_ACTION } from "./actionStyles";
 import { CopyButton } from "./CopyButton";
 import { InboxImageCard } from "./InboxImage";
 import { md, mdBlocks } from "./markdown";
@@ -21,11 +22,6 @@ import { ToolCard } from "./cards/ToolCard";
 import { WakeupCard } from "./cards/WakeupCard";
 import { SpeakButton } from "./SpeakButton";
 import { McpCallCard } from "../runtime/McpCallCard";
-
-/* Issue #698: one treatment for every message action. Discoverable at rest
-   instead of hover-only, and never `opacity-0`/`hover:none:opacity-60` on top
-   of text — each cluster is laid out beside or above the body, not over it. */
-const MESSAGE_ACTION = "opacity-70 transition-opacity hover:opacity-100 focus-visible:opacity-100 group-hover/msg:opacity-100";
 
 /* Memoized: feed items are immutable after buildFeed, so a pane re-render
    (poll tick, camera state, files refresh) skips re-parsing markdown for

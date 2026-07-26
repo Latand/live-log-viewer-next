@@ -3,6 +3,7 @@
 import { useState } from "react";
 
 import { ChevronUp } from "../../icons";
+import { ACTION_GUTTER, MESSAGE_ACTION } from "../actionStyles";
 import { CopyButton } from "../CopyButton";
 import { CodeBlock } from "../markdown";
 import { tr } from "../parse";
@@ -54,14 +55,16 @@ export function OutputPreview({
       {all && lang ? (
         <CodeBlock code={shown} lang={lang} />
       ) : (
-        <pre className={`max-h-[420px] max-w-full overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] pr-8 font-mono text-[12px] text-secondary ${edge}`}>
+        <pre className={`max-h-[420px] max-w-full overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-[12px] text-secondary ${ACTION_GUTTER} ${edge}`}>
           {shown}
         </pre>
       )}
       <CopyButton
         text={output}
         label={copyLabel ?? tr("tools.copyOutput")}
-        className={`absolute right-0 opacity-0 transition-opacity motion-reduce:transition-none focus-visible:opacity-100 group-hover/out:opacity-100 [@media(hover:none)]:opacity-60 ${heading ? "top-5" : "top-0"}`}
+        /* Issue #698: was `opacity-0` on desktop and a permanent 60% overlay on
+           a coarse pointer, over an 8px gutter that a 44px button dwarfed. */
+        className={`absolute right-[6px] ${MESSAGE_ACTION} group-hover/out:opacity-100 ${heading ? "top-5" : "top-[6px]"}`}
       />
       {overflow ? (
         <button
