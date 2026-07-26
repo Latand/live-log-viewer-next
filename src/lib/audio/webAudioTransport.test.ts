@@ -9,7 +9,7 @@ import { createWebAudioTransports, type AudioContextLike } from "./webAudioTrans
  * the audio thread has no seam, and one that is re-triggered from JavaScript
  * always does. That is observable here and nowhere else.
  */
-function fakeContext(state = "running") {
+function fakeContext(state = "running", scheduledSetterUpdatesValue = true) {
   const sources: FakeSource[] = [];
   const gains: FakeGain[] = [];
   let resumed = 0;
@@ -59,15 +59,17 @@ function fakeContext(state = "running") {
       return source;
     },
     createGain() {
+      let currentValue = 1;
       const gain: FakeGain = {
         gain: {
-          value: 0,
+          get value() { return currentValue; },
+          set value(value) { currentValue = value; },
           calls: [],
           ramps: [],
           cancelScheduledValues(when) { gain.gain.calls.push(`cancel@${when}`); },
           setValueAtTime(value, when) {
             gain.gain.calls.push(`set:${value}@${when}`);
-            gain.gain.value = value;
+            if (scheduledSetterUpdatesValue) currentValue = value;
           },
           linearRampToValueAtTime(value, when) {
             gain.gain.calls.push(`ramp:${value}@${when}`);
@@ -157,6 +159,17 @@ describe("the ambient bed loops without a seam", () => {
 });
 
 describe("levels move as ramps on the audio clock", () => {
+  test("a fade-in anchors at the requested initial gain in a spec-accurate AudioParam", async () => {
+    const context = fakeContext("running", false);
+    const transports = await warmed(context, LOOP);
+    const voice = transports.loop.start({ src: LOOP, gain: 0 })!;
+
+    voice.rampTo(0.12, 2.5);
+
+    expect(context.gains[0].gain.calls).toContain("set:0@10");
+    expect(context.gains[0].gain.ramps).toEqual([{ value: 0.12, when: 12.5 }]);
+  });
+
   test("a fade anchors at the current value and ramps to the target", async () => {
     const context = fakeContext();
     const transports = await warmed(context, LOOP);
