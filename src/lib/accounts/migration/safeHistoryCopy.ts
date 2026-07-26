@@ -188,6 +188,11 @@ export interface SafeHistoryCopyInput {
   targetRoot: string;
   destinationRelative: string;
   operationId: string;
+  /** Operation identities of earlier attempts at the same move whose published
+      copy this operation may adopt (issue #708). A copy is only ever adopted
+      when its content still hashes equal to the source, so this widens *who*
+      may have written the receipt, never *what* counts as a valid copy. */
+  priorOperationIds?: readonly string[];
   maxBytes?: number;
   afterDestinationPublished?(): void;
 }
@@ -258,8 +263,15 @@ export function safeCopyHistory(input: SafeHistoryCopyInput): SafeHistoryCopyRes
     const receipt = readReceipt(receiptPath);
     const existing = hashFile(destination, maxBytes, undefined, true);
     const original = hashFile(source.sourcePath, maxBytes, source);
-    if (receipt?.operationId === input.operationId && receipt.hash === existing.hash && receipt.size === existing.size
+    const receiptOwnerRecognised = receipt !== null
+      && (receipt.operationId === input.operationId || (input.priorOperationIds ?? []).includes(receipt.operationId));
+    if (receiptOwnerRecognised && receipt.hash === existing.hash && receipt.size === existing.size
       && original.hash === existing.hash && original.size === existing.size) {
+      /* Taking over an earlier attempt's copy re-stamps the receipt, so the
+         handover happens once and every later check sees this operation. */
+      if (receipt.operationId !== input.operationId) {
+        writeReceipt(receiptPath, { operationId: input.operationId, hash: existing.hash, size: existing.size });
+      }
       return { path: destination, ...existing, reused: true };
     }
     if (!fs.existsSync(receiptPath) && original.hash === existing.hash && original.size === existing.size) {

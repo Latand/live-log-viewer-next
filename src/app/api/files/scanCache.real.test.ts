@@ -1260,3 +1260,88 @@ test("a confirmed ENOENT deletion remains a complete inventory change", async ()
   const index = JSON.parse(fs.readFileSync(path.join(process.env.LLV_STATE_DIR!, "project-catalog.json"), "utf8"));
   expect(index.files[deletedPath]).toBeUndefined();
 });
+
+test("a restart served from the persisted scan cache adopts a Codex fork without reopening its header", async () => {
+  const previousTestStateDir = process.env.LLV_STATE_DIR;
+  const testStateDir = path.join(sandbox, "fork-edge-restart-state");
+  const fixtureDir = path.join(sessions, "fork-edge-restart");
+  const sourceThread = "019f9557-0000-\x37000-8000-00000000ab10";
+  const forkThread = "019f9c11-0000-\x37000-8000-00000000ab20";
+  const sourcePath = path.join(fixtureDir, `rollout-${sourceThread}.jsonl`);
+  const forkPath = path.join(fixtureDir, `rollout-${forkThread}.jsonl`);
+  const originalOpen = fs.openSync;
+  const originalClose = fs.closeSync;
+  const originalRead = fs.readSync;
+  const tracked = new Map<number, string>();
+  let headerReads = 0;
+  const cacheStore = globalThis as typeof globalThis & { __llvCaches?: Record<string, Map<string, unknown>> };
+  try {
+    process.env.LLV_STATE_DIR = testStateDir;
+    fs.mkdirSync(fixtureDir, { recursive: true });
+    const sessionMeta = (id: string, forkedFromId?: string) => JSON.stringify({
+      type: "session_meta",
+      payload: {
+        id,
+        cwd: "/repo/fork-edge-restart",
+        timestamp: "2026-07-26T12:00:00.000Z",
+        model: "gpt-5",
+        ...(forkedFromId ? { forked_from_id: forkedFromId } : {}),
+      },
+    });
+    /* Padded past the bounded prefix so a header read is a request at offset
+       zero while the turn tail is read from a different offset. The fork is a
+       full snapshot: its own header first, then the source's replayed one. */
+    const padding = ["x".repeat(140_000), JSON.stringify({ type: "event_msg", payload: { type: "task_complete" } }), ""].join("\n");
+    fs.writeFileSync(sourcePath, [sessionMeta(sourceThread), padding].join("\n"));
+    fs.writeFileSync(forkPath, [sessionMeta(forkThread, sourceThread), sessionMeta(sourceThread), padding].join("\n"));
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
+    resetFilesRouteCacheForTests();
+
+    const scanned = await currentFileScan({ fresh: true });
+    const scannedFork = scanned.snapshot.files.find((entry) => entry.path === forkPath);
+    expect(scannedFork).toMatchObject({ nativeForkSourceThreadId: sourceThread, derivationComplete: true });
+    expect(scanned.snapshot.files.find((entry) => entry.path === sourcePath)?.nativeForkSourceThreadId).toBeNull();
+
+    /* The restart: every in-process cache is gone and the entries come back
+       from the persisted snapshot alone, so the fork edge has to have been
+       written there. Reconciliation must not go back to the transcript for it. */
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
+    resetFilesRouteCacheForTests();
+    const restarted = await cachedFileScan(undefined, undefined, 0);
+    const restartedFiles = restarted.snapshot.files.filter((entry) => entry.path.startsWith(fixtureDir + path.sep));
+    expect(restartedFiles.find((entry) => entry.path === forkPath)?.nativeForkSourceThreadId).toBe(sourceThread);
+
+    fs.openSync = ((filename: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+      const fd = originalOpen(filename, flags, mode);
+      if (typeof filename === "string" && filename.startsWith(fixtureDir + path.sep)) tracked.set(fd, filename);
+      return fd;
+    }) as typeof fs.openSync;
+    fs.readSync = ((fd: number, buffer: NodeJS.ArrayBufferView, offset: number, length: number, position: fs.ReadPosition) => {
+      if (tracked.has(fd) && position === 0) headerReads += 1;
+      return originalRead(fd, buffer, offset, length, position);
+    }) as typeof fs.readSync;
+    fs.closeSync = ((fd: number) => {
+      tracked.delete(fd);
+      return originalClose(fd);
+    }) as typeof fs.closeSync;
+
+    const registry = new AgentRegistry(path.join(testStateDir, "fork-edge-registry.json"));
+    registry.ensureConversation("codex", sourcePath, "a");
+    await reconcileMigrationInventory(registry, restartedFiles);
+
+    expect(headerReads).toBe(0);
+    const conversations = Object.values(registry.snapshot().conversations);
+    expect(conversations).toHaveLength(1);
+    expect(conversations[0]!.providerForkPaths).toEqual([forkPath]);
+    expect(registry.conversationForPath(forkPath)?.id).toBe(registry.conversationForPath(sourcePath)?.id);
+  } finally {
+    fs.openSync = originalOpen;
+    fs.closeSync = originalClose;
+    fs.readSync = originalRead;
+    fs.rmSync(fixtureDir, { recursive: true, force: true });
+    process.env.LLV_STATE_DIR = previousTestStateDir;
+    resetFilesRouteCacheForTests();
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
+    fs.rmSync(testStateDir, { recursive: true, force: true });
+  }
+}, 30_000);

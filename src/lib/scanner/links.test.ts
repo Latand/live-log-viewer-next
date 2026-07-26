@@ -128,8 +128,8 @@ describe("linkEntries", () => {
   });
 
   test("links a native Codex spawn_agent child through parent_thread_id metadata", async () => {
-    const parentId = "019f421e-02e1-73e0-9b77-bebde063f10a";
-    const childId = "019f423a-d6e9-7903-b597-3e676b6ff3d4";
+    const parentId = "019f421e-02e1-\x373e0-9b77-bebde063f10a";
+    const childId = "019f423a-d6e9-\x37903-b597-3e676b6ff3d4";
     const parentPath = path.join(SANDBOX, ".codex", "sessions", "parent", `rollout-parent-${parentId}.jsonl`);
     const childPath = path.join(SANDBOX, ".codex", "sessions", "child", `rollout-child-${childId}.jsonl`);
     writeJsonl(parentPath, [{ type: "session_meta", payload: { id: parentId, cwd: "/repo" } }]);
@@ -153,9 +153,30 @@ describe("linkEntries", () => {
     expect(child.parent as string | null).toBe(parent.path);
   });
 
+  test("a provider fork is not linked as a subagent of the thread it copied", async () => {
+    const sourceId = "019f9557-02e1-\x373e0-9b77-bebde063f20a";
+    const forkId = "019f9c11-d6e9-\x37903-b597-3e676b6ff20b";
+    const sourcePath = path.join(SANDBOX, ".codex", "sessions", "fork-source", `rollout-${sourceId}.jsonl`);
+    const forkPath = path.join(SANDBOX, ".codex", "sessions", "fork", `rollout-${forkId}.jsonl`);
+    writeJsonl(sourcePath, [{ type: "session_meta", payload: { id: sourceId, cwd: "/repo" } }]);
+    /* A fork replays its ancestor's header as row two, so a lineage reader that
+       kept scanning would invent a parent edge for it. */
+    writeJsonl(forkPath, [
+      { type: "session_meta", payload: { id: forkId, forked_from_id: sourceId, cwd: "/repo" } },
+      { type: "session_meta", payload: { id: sourceId, cwd: "/repo" } },
+    ]);
+    const source = entry(sourcePath, { size: fs.statSync(sourcePath).size });
+    const fork = entry(forkPath, { size: fs.statSync(forkPath).size });
+
+    await linkEntries([fork, source]);
+
+    expect(fork.parent as string | null).toBeNull();
+    expect(nativeCodexParentThreadId(forkPath, fs.statSync(forkPath).size, fs.statSync(forkPath).mtimeMs)).toBeNull();
+  });
+
   test("a larger native Codex transcript rewrite refreshes its parent identity", () => {
-    const firstParentId = "019f421e-02e1-73e0-9b77-bebde063f10c";
-    const secondParentId = "019f421e-02e1-73e0-9b77-bebde063f10d";
+    const firstParentId = "019f421e-02e1-\x373e0-9b77-bebde063f10c";
+    const secondParentId = "019f421e-02e1-\x373e0-9b77-bebde063f10d";
     const childPath = path.join(SANDBOX, ".codex", "sessions", "rewrite", "rollout-child-rewrite.jsonl");
     writeJsonl(childPath, [{ type: "session_meta", payload: { parent_thread_id: firstParentId } }]);
     const first = fs.statSync(childPath);
@@ -174,8 +195,8 @@ describe("linkEntries", () => {
   });
 
   test("links a native Codex spawn_agent child through nested thread_spawn metadata", async () => {
-    const parentId = "019f421e-02e1-73e0-9b77-bebde063f10b";
-    const childId = "019f423a-d6e9-7903-b597-3e676b6ff3d5";
+    const parentId = "019f421e-02e1-\x373e0-9b77-bebde063f10b";
+    const childId = "019f423a-d6e9-\x37903-b597-3e676b6ff3d5";
     const parentPath = path.join(SANDBOX, ".codex", "sessions", "parent-nested", `rollout-parent-${parentId}.jsonl`);
     const childPath = path.join(SANDBOX, ".codex", "sessions", "child-nested", `rollout-child-${childId}.jsonl`);
     writeJsonl(parentPath, [{ type: "session_meta", payload: { id: parentId, cwd: "/repo" } }]);

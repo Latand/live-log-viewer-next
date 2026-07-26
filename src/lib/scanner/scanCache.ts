@@ -108,6 +108,7 @@ function isFileScanSnapshot(value: unknown): value is FileScanSnapshot {
       && typeof candidate.size === "number" && Number.isFinite(candidate.size)
       && (candidate.sessionStartedAt === undefined || candidate.sessionStartedAt === null || typeof candidate.sessionStartedAt === "string")
       && (candidate.nativeParentThreadId === undefined || candidate.nativeParentThreadId === null || typeof candidate.nativeParentThreadId === "string")
+      && (candidate.nativeForkSourceThreadId === undefined || candidate.nativeForkSourceThreadId === null || typeof candidate.nativeForkSourceThreadId === "string")
       && (candidate.activity === "live" || candidate.activity === "recent" || candidate.activity === "stalled" || candidate.activity === "idle")
       && (candidate.authoritativeTurn === undefined || isTurnState(candidate.authoritativeTurn))
       && (candidate.proc === null || candidate.proc === "running" || candidate.proc === "done" || candidate.proc === "killed")

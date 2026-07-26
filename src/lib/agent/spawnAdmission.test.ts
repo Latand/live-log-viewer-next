@@ -22,6 +22,7 @@ function conversation(id: string, fields: Partial<RegistryConversation> = {}): R
     generations: [],
     continuityPaths: [],
     abandonedContinuityPaths: [],
+    providerForkPaths: [],
     projectOwnership: null,
     migration: null,
     migrationOptOut: null,

@@ -108,6 +108,11 @@ export interface FileEntry {
   sessionStartedAt?: string | null;
   /** Native Codex parent thread parsed from the identity-bound transcript header. */
   nativeParentThreadId?: string | null;
+  /** Source thread of a Codex provider `thread/fork` artifact (issue #708),
+      parsed from the FIRST `session_meta` row of the identity-bound header.
+      `null` means the header was read and named no source; absent means no
+      reader has resolved it yet, so a consumer must derive it itself. */
+  nativeForkSourceThreadId?: string | null;
   /** Canonical parent-repository root when cwd belongs to a linked worktree. */
   projectRoot?: string | null;
   /** Git worktree name when cwd lives under <repo>/.claude/worktrees/<name>. */
