@@ -5,10 +5,12 @@ import { useEffect, useRef } from "react";
 import { paneState, type PaneState } from "@/components/paneState";
 import { isAuxTask } from "@/components/projectModel";
 import { conversationIdentity, isArchivedPredecessor } from "@/lib/accounts/identity";
-import { chime, type ChimeKind, panForPane, primeAudio } from "@/lib/chime";
+import { playCue, unlockAudioOnGesture } from "@/lib/audio/app";
+import { CUE_OF_LIFECYCLE, type LifecycleCueKind } from "@/lib/audio/cues";
+import { panForPane } from "@/lib/chime";
 import type { FileEntry } from "@/lib/types";
 
-const CHIME_OF: Partial<Record<PaneState, ChimeKind>> = {
+const CHIME_OF: Partial<Record<PaneState, LifecycleCueKind>> = {
   waiting: "waiting",
   returned: "returned",
   stalled: "stalled",
@@ -30,12 +32,12 @@ export const MAX_TRACKED_IDENTITIES = 4096;
 export interface TrackedConversation {
   state: PaneState;
   /** The finish chime this poll's entry would ring, derived at map build. */
-  kind: ChimeKind | undefined;
+  kind: LifecycleCueKind | undefined;
   parent: string | null;
 }
 
 export interface PlannedChime {
-  kind: ChimeKind;
+  kind: LifecycleCueKind;
   /** Conversation identity the chime pans toward. */
   id: string;
 }
@@ -149,24 +151,40 @@ export function planScopedAgentChimes(
 }
 
 /**
- * Watches the polled file list for lifecycle transitions and rings a chime
+ * Watches the polled file list for lifecycle transitions and rings a cue
  * when an agent finishes its turn: left `live` into an attention state, or
  * appeared already finished (a branch that ran its whole life between polls).
  * A new node joining the agent tree — a fresh subagent, or an existing
- * conversation whose parent link got resolved — rings its own `spawned`
- * blip, unless a finish chime for the same path already carries the news.
+ * conversation whose parent link got resolved — rings its own `launch`
+ * blip, unless a finish cue for the same path already carries the news.
  * The first poll after page load only seeds the baseline — reloading over
  * finished work stays silent.
+ *
+ * The transition scan above is the detector; the sound is the approved earcon
+ * set. The transcript mtime completes the event identity: the transition
+ * happened BECAUSE the transcript changed, so its mtime names that transition
+ * and stays the same value across every refetch and re-render that observes it —
+ * where a call-time timestamp would make each observation look like a new event.
  */
 export function useAgentChimes(files: FileEntry[], scope: string | null) {
   const historyRef = useRef<ScopedChimePlan | null>(null);
 
-  useEffect(() => primeAudio(), []);
+  useEffect(() => unlockAudioOnGesture(), []);
 
   useEffect(() => {
     if (!files.length || !scope) return;
     const plan = planScopedAgentChimes(files, historyRef.current, scope);
     historyRef.current = plan;
-    plan.chimes.forEach((planned, voice) => chime(planned.kind, panForPane(planned.id), voice * STAGGER_MS));
+    if (!plan.chimes.length) return;
+    const changedAt = new Map(files.map((file) => [conversationIdentity(file), file.mtime]));
+    plan.chimes.forEach((planned, voice) => {
+      const cue = CUE_OF_LIFECYCLE[planned.kind];
+      playCue({
+        cue,
+        eventId: `lifecycle:${cue}:${planned.id}:${changedAt.get(planned.id) ?? 0}`,
+        pan: panForPane(planned.id),
+        delayMs: voice * STAGGER_MS,
+      });
+    });
   }, [files, scope]);
 }

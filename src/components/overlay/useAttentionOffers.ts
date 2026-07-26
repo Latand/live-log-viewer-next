@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { playCue } from "@/lib/audio/app";
 import type { AttentionEvent } from "@/lib/attention/machine";
 import type { DeviceAttentionView } from "@/lib/attention/service";
 import type { AttentionRequestV1, AttentionState, FocusResolutionKind, ReturnPoint } from "@/lib/attention/types";
@@ -160,6 +161,11 @@ export function useAttentionOffers({
       setView(first);
       return;
     }
+    /* Rings exactly where the offer is first SHOWN — the same place the record
+       learns it was shown — so a hidden tab stays as silent as it is honest. The
+       request id is the identity: this poll runs every few seconds and the offer
+       stays in the record until it is answered. */
+    playCue({ cue: "attention", eventId: `attention:${pending.request.id}` });
     await post(pending.request.id, { kind: "offer", deviceId });
     setView(await read() ?? first);
   }, [read, post, deviceId]);
