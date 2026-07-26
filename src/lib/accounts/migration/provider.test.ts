@@ -5,8 +5,8 @@ import os from "node:os";
 import path from "node:path";
 
 import { emptyLaunchProfile, sameProviderReceiptOutcome, type NativeGeneration, type ProviderReceipt, type SuccessorProviderPort } from "./contracts";
-import { RegisteredSuccessorProvider, type ProviderDependencies } from "./provider";
-import type { CodexAppServerClient } from "@/lib/accounts/codexAppServer";
+import { CodexForkOutcomeUnknownError, RegisteredSuccessorProvider, type ProviderDependencies } from "./provider";
+import { CodexAppServerError, type CodexAppServerClient } from "@/lib/accounts/codexAppServer";
 import { AgentRegistry, type ConversationObservation, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { ClaudeStreamBrokerHost } from "@/lib/runtime/claudeStreamBrokerHost";
 import type { EngineHost, HostState } from "@/lib/runtime/engineHost";
@@ -1156,12 +1156,16 @@ test("Codex successor provider recovers a validated fork created before exact re
   await expect(crashed.create(input)).rejects.toThrow("simulated crash before exact fork receipt");
   expect(forkCalls).toBe(1);
 
+  /* A second artifact of the same source used to be an impasse. The retry keeps
+     this operation's identity, so the impasse was permanent; it now resolves the
+     way the cross-operation path does — newest adopted, older kept as history. */
   fs.writeFileSync(ambiguousPath, codexSessionMeta(ambiguousId, sourceId), { mode: 0o600 });
-  await expect(new RegisteredSuccessorProvider(dependencies).create(input)).rejects.toThrow("ambiguous");
-  expect(forkCalls).toBe(1);
-  fs.rmSync(ambiguousPath);
+  const olderThanTheFork = new Date(fs.statSync(forkPath).mtimeMs - 60_000);
+  fs.utimesSync(ambiguousPath, olderThanTheFork, olderThanTheFork);
 
   const receipt = await new RegisteredSuccessorProvider(dependencies).create(input);
+  expect(fs.existsSync(ambiguousPath)).toBeTrue();
+  expect(registry.conversation(conversation.id)?.continuityPaths).toContain(ambiguousPath);
   const observation = (pathname: string, accountId: string): ConversationObservation => ({
     engine: "codex",
     path: pathname,
@@ -1429,4 +1433,135 @@ test("orphan forks of one source resolve to the newest and the rest are recorded
   expect(recorded).toContain(orphanPath(orphanIds[0]!));
   expect(fs.existsSync(orphanPath(orphanIds[0]!))).toBeTrue();
   expect(fs.existsSync(orphanPath(orphanIds[1]!))).toBeTrue();
+});
+
+test("orphan forks recorded by journals that predate conversation identity are still recovered", async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-codex-legacy-journals-"));
+  roots.push(base);
+  const source = accountRoot("codex", base, "source");
+  const target = accountRoot("codex", base, "target");
+  const journalRoot = path.join(base, "provider-journal");
+  const sourceId = "619f423a-d6e9-\x37903-b597-3e676b6ff3d4";
+  const sourcePath = path.join(source.transcriptRoot, `rollout-${sourceId}.jsonl`);
+  fs.writeFileSync(sourcePath, codexSessionMeta(sourceId), { mode: 0o600 });
+  const orphanIds = ["619f423a-d6e9-\x34903-8597-000000000001", "619f423a-d6e9-\x34903-8597-000000000002"];
+  const orphanPath = (id: string) => path.join(source.transcriptRoot, `rollout-${id}.jsonl`);
+  /* The journals the operator's disk actually holds: every one of them was
+     written before a journal carried a conversation identity at all, so the only
+     thing tying them to this move is the source thread and the two roots. */
+  fs.mkdirSync(journalRoot, { recursive: true, mode: 0o700 });
+  const journalName = (operationId: string) => `${crypto.createHash("sha256").update(operationId).digest("hex")}.json`;
+  orphanIds.forEach((id, index) => {
+    fs.writeFileSync(orphanPath(id), codexSessionMeta(id, sourceId), { mode: 0o600 });
+    const when = new Date(1_760_000_000_000 + (index + 1) * 60_000);
+    fs.utimesSync(orphanPath(id), when, when);
+    fs.writeFileSync(path.join(journalRoot, journalName(`legacy-${index}`)), JSON.stringify({
+      version: 1,
+      operationId: `legacy-${index}`,
+      conversationId: null,
+      sourceNativeId: sourceId,
+      sourceRoot: fs.realpathSync(source.transcriptRoot),
+      targetRoot: fs.realpathSync(target.transcriptRoot),
+      createdAtMs: when.getTime() - 1_000,
+      forkRequestedAtMs: when.getTime() - 500,
+      fork: null,
+    }), { mode: 0o600 });
+  });
+  let forkCalls = 0;
+  const client = () => ({
+    async readAccount() { return { account: { type: "chatgpt" }, requiresOpenaiAuth: true }; },
+    async forkThread() { forkCalls += 1; throw new Error("unexpected additional fork"); },
+    async resumeThread(id: string) { return { id, path: null }; },
+    async readThread(id: string) { return { id, path: null }; },
+    close() {},
+  }) as unknown as CodexAppServerClient;
+  const recorded: string[] = [];
+  const provider = new RegisteredSuccessorProvider({
+    accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
+    startCodex: async () => client(),
+    claudeStatus: async () => ({ loggedIn: false }),
+    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
+    journalRoot,
+    now: () => "2026-07-10T12:00:00.000Z",
+  });
+
+  const receipt = await provider.create({
+    engine: "codex",
+    operationId: "legacy-recovery",
+    conversationId: "conversation_legacy_journals",
+    targetAccountId: "target",
+    source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
+    recordContinuityPath(pathname: string) { recorded.push(pathname); },
+  });
+
+  expect(forkCalls).toBe(0);
+  expect(receipt.nativeId).toBe(orphanIds[1]);
+  expect(recorded).toContain(orphanPath(orphanIds[0]!));
+  expect(fs.existsSync(orphanPath(orphanIds[0]!))).toBeTrue();
+  expect(fs.existsSync(orphanPath(orphanIds[1]!))).toBeTrue();
+  /* Reading a legacy journal names it, so the next scan matches it exactly. */
+  const backfilled = JSON.parse(fs.readFileSync(path.join(journalRoot, journalName("legacy-0")), "utf8")) as { conversationId: string | null };
+  expect(backfilled.conversationId).toBe("conversation_legacy_journals");
+});
+
+test("two forks inside one operation's own window resolve to the newest", async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-codex-same-operation-ambiguity-"));
+  roots.push(base);
+  const source = accountRoot("codex", base, "source");
+  const target = accountRoot("codex", base, "target");
+  const journalRoot = path.join(base, "provider-journal");
+  const sourceId = "719f423a-d6e9-\x37903-b597-3e676b6ff3d4";
+  const sourcePath = path.join(source.transcriptRoot, `rollout-${sourceId}.jsonl`);
+  fs.writeFileSync(sourcePath, codexSessionMeta(sourceId), { mode: 0o600 });
+  const forkIds = ["719f423a-d6e9-\x34903-8597-000000000001", "719f423a-d6e9-\x34903-8597-000000000002"];
+  const forkPath = (id: string) => path.join(source.transcriptRoot, `rollout-${id}.jsonl`);
+  let forkCalls = 0;
+  const client = () => ({
+    async readAccount() { return { account: { type: "chatgpt" }, requiresOpenaiAuth: true }; },
+    async forkThread() {
+      forkCalls += 1;
+      /* One request, two artifacts on disk — the outcome this operation's own
+         journal cannot disambiguate, because it died before recording a fork. */
+      const stamped = Date.now();
+      forkIds.forEach((id, index) => {
+        fs.writeFileSync(forkPath(id), codexSessionMeta(id, sourceId), { mode: 0o600 });
+        const when = new Date(stamped + (index + 1) * 60_000);
+        fs.utimesSync(forkPath(id), when, when);
+      });
+      throw new CodexAppServerError("fork outcome is unknown", "unknown");
+    },
+    async resumeThread(id: string) { return { id, path: null }; },
+    async readThread(id: string) { return { id, path: null }; },
+    close() {},
+  }) as unknown as CodexAppServerClient;
+  const recorded: string[] = [];
+  const dependencies = {
+    accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
+    startCodex: async () => client(),
+    claudeStatus: async () => ({ loggedIn: false }),
+    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
+    journalRoot,
+    now: () => "2026-07-10T12:00:00.000Z",
+  } as ProviderDependencies & { journalRoot: string };
+  const input = {
+    engine: "codex" as const,
+    operationId: "same-operation-ambiguity",
+    conversationId: "conversation_same_operation" as const,
+    targetAccountId: "target",
+    source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
+    recordContinuityPath(pathname: string) { recorded.push(pathname); },
+  };
+
+  await expect(new RegisteredSuccessorProvider(dependencies).create(input)).rejects.toBeInstanceOf(CodexForkOutcomeUnknownError);
+  expect(forkCalls).toBe(1);
+
+  /* The retry keeps the same operation identity, so an impasse here would be
+     permanent. It resolves the same way the cross-operation path does. */
+  const receipt = await new RegisteredSuccessorProvider(dependencies).create(input);
+
+  expect(forkCalls).toBe(1);
+  expect(receipt.nativeId).toBe(forkIds[1]);
+  expect(recorded).toContain(forkPath(forkIds[0]!));
+  expect(fs.existsSync(forkPath(forkIds[0]!))).toBeTrue();
+  expect(fs.existsSync(forkPath(forkIds[1]!))).toBeTrue();
 });

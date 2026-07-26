@@ -232,6 +232,13 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
  * `remapBoardPaths` is a no-op once the alias exists, so this replays on every
  * inventory cycle without touching the board again.
  *
+ * The remap runs with the target's placement authoritative, because here the
+ * survivor is not a successor generation of the fork — it is the conversation
+ * the fork was always a duplicate of. A fork adopted before it ever rendered
+ * carries no membership at all, and a default remap would read that absence as
+ * "this card is not placed" and strip the root's own pin, taking the operator's
+ * canonical card off the board with no way back.
+ *
  * A fork the operator had already hidden is deliberately left unaliased. Hiding
  * a duplicate card is a statement about the duplicate, and an alias would carry
  * it onto the survivor and take the real conversation off the board. The hidden
@@ -257,7 +264,7 @@ async function repairAdoptedForkBoardPlacements(
   });
   await forEachCooperatively([...byProject], ([project, pairs]) => {
     try {
-      remapPaths(project, pairs);
+      remapPaths(project, pairs, { targetPlacementAuthoritative: true });
     } catch (error) {
       console.warn("[account-migration] adopted fork board placement deferred", {
         project,

@@ -3825,4 +3825,51 @@ describe("Codex canonical root conversation and fork recovery (#708)", () => {
     expect(Object.values(store.snapshot().conversations)).toHaveLength(1);
     expect(boardFor("repo").revision).toBe(revisionAfterFirstPass);
   });
+
+  test("adopting a fork that never drew a card leaves the pinned root card pinned", async () => {
+    const store = registry();
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-708-unplaced-fork-"));
+    roots.push(base);
+    const sessions = path.join(base, "sessions");
+    fs.mkdirSync(sessions, { recursive: true, mode: 0o700 });
+    const rootPath = path.join(sessions, `rollout-${SOURCE_THREAD}.jsonl`);
+    fs.writeFileSync(rootPath, sessionMeta(SOURCE_THREAD), { mode: 0o600 });
+    const forkId = "019f9c11-0000-\x37000-8000-00000000cc10";
+    const forkPath = path.join(sessions, `rollout-${forkId}.jsonl`);
+    fs.writeFileSync(forkPath, sessionMeta(forkId, SOURCE_THREAD) + sessionMeta(SOURCE_THREAD), { mode: 0o600 });
+    const files = [rootPath, forkPath].map(fileEntry);
+
+    /* The ordinary case, and the one the board is most exposed to: the operator
+       pinned the root, and the fork was adopted before it ever rendered, so it
+       holds no membership of any kind. The root's pin is the only thing keeping
+       an idle conversation on the board — it has no automatic column. */
+    const root = store.ensureConversation("codex", rootPath, "a");
+    mutateBoard("repo", boardFor("repo").revision, [
+      { kind: "restore", path: rootPath, placement: "manual" },
+    ]);
+    expect(boardFor("repo").prefs.manual).toEqual([rootPath]);
+    expect(boardFor("repo").explicitManual).toEqual([rootPath]);
+
+    await reconcileMigrationInventory(store, files);
+
+    const board = boardFor("repo");
+    expect(board.prefs.manual).toEqual([rootPath]);
+    expect(board.explicitManual).toEqual([rootPath]);
+    expect(board.pathAliases?.[forkPath]).toBe(rootPath);
+    const conversations = Object.values(store.snapshot().conversations);
+    expect(conversations).toHaveLength(1);
+    expect(conversations[0]!.id).toBe(root.id);
+    expect(fs.existsSync(forkPath)).toBeTrue();
+
+    const revisionAfterFirstPass = board.revision;
+    const forkPathsAfterFirstPass = conversations[0]!.providerForkPaths;
+    await reconcileMigrationInventory(store, files);
+
+    const replayed = Object.values(store.snapshot().conversations);
+    expect(replayed).toHaveLength(1);
+    expect(replayed[0]!.providerForkPaths).toEqual(forkPathsAfterFirstPass);
+    expect(boardFor("repo").revision).toBe(revisionAfterFirstPass);
+    expect(boardFor("repo").prefs.manual).toEqual([rootPath]);
+    expect(boardFor("repo").explicitManual).toEqual([rootPath]);
+  });
 });

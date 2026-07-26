@@ -605,10 +605,19 @@ function prepareCodexOperationJournal(
   return { journal, fresh: true };
 }
 
-/** Journals of earlier attempts to move the same conversation from the same
-    source thread to the same target account. */
+/**
+ * Journals of earlier attempts to move the same conversation from the same
+ * source thread to the same target account.
+ *
+ * The logical operation is keyed on `(sourceNativeId, sourceRoot, targetRoot)`,
+ * which every journal ever written already carries. `conversationId` only
+ * narrows the match when BOTH sides name one: journals written before #708 have
+ * no `conversationId` at all, and those are exactly the attempts whose forks are
+ * already sitting on the operator's disk. Requiring it would make this guard
+ * blindest where it is needed most, so a missing id matches and is backfilled in
+ * place — additively, and best-effort, since recovery must not depend on it.
+ */
 function siblingCodexOperationJournals(root: string, journal: CodexProviderOperationJournal): CodexProviderOperationJournal[] {
-  if (!journal.conversationId) return [];
   let names: string[];
   try { names = fs.readdirSync(root); } catch { return []; }
   const siblings: CodexProviderOperationJournal[] = [];
@@ -618,14 +627,30 @@ function siblingCodexOperationJournals(root: string, journal: CodexProviderOpera
     try { stored = normalizeCodexOperationJournal(JSON.parse(fs.readFileSync(path.join(root, name), "utf8"))); }
     catch { continue; }
     if (!stored || stored.operationId === journal.operationId) continue;
-    if (stored.conversationId === journal.conversationId && stored.sourceNativeId === journal.sourceNativeId
-      && stored.sourceRoot === journal.sourceRoot && stored.targetRoot === journal.targetRoot) siblings.push(stored);
+    if (stored.sourceNativeId !== journal.sourceNativeId || stored.sourceRoot !== journal.sourceRoot
+      || stored.targetRoot !== journal.targetRoot) continue;
+    if (stored.conversationId && journal.conversationId && stored.conversationId !== journal.conversationId) continue;
+    if (!stored.conversationId && journal.conversationId && path.join(root, name) === operationJournalPath(root, stored.operationId)) {
+      const backfilled = { ...stored, conversationId: journal.conversationId };
+      try { writeCodexOperationJournal(root, backfilled); stored = backfilled; }
+      catch { /* the match already stands; naming it durably is a courtesy */ }
+    }
+    siblings.push(stored);
   }
   return siblings;
 }
 
 function forkArtifactMtimeMs(pathname: string): number {
   try { return fs.statSync(pathname).mtimeMs; } catch { return 0; }
+}
+
+/** The single ambiguity rule (#708): several forks of one source mean earlier
+    attempts made several, so the newest becomes this operation's fork and the
+    rest are handed back to be recorded as the conversation's history. Both
+    recovery paths sort identically so a retry always lands on the same fork. */
+function newestForkFirst(artifacts: readonly CodexForkArtifact[]): CodexForkArtifact[] {
+  return [...artifacts].sort((left, right) =>
+    forkArtifactMtimeMs(right.path) - forkArtifactMtimeMs(left.path) || right.path.localeCompare(left.path));
 }
 
 /**
@@ -656,12 +681,10 @@ function recoverPriorOperationFork(
     if (sibling.fork) candidates.set(sibling.fork.id, sibling.fork);
   }
   for (const artifact of scan(journal.sourceRoot, journal.sourceNativeId, floor)) candidates.set(artifact.id, artifact);
-  const validated = [...candidates.values()].flatMap((artifact) => {
+  const validated = newestForkFirst([...candidates.values()].flatMap((artifact) => {
     try { return [validatedCodexFork(artifact, journal.sourceNativeId, journal.sourceRoot)]; }
     catch { return []; }
-  });
-  validated.sort((left, right) =>
-    forkArtifactMtimeMs(right.path) - forkArtifactMtimeMs(left.path) || right.path.localeCompare(left.path));
+  }));
   return {
     fork: validated[0] ?? null,
     superseded: validated.slice(1),
@@ -679,16 +702,26 @@ function validatedCodexFork(artifact: CodexForkArtifact, sourceNativeId: string,
   return { id: artifact.id, path: validated.sourcePath };
 }
 
+/**
+ * Recover the fork this operation's own journal says it requested.
+ *
+ * Two candidates inside one operation's window used to be an impasse, but the
+ * operation identity now survives a retry, so that impasse re-threw on every
+ * attempt and parked the migration for good. It is the same situation the
+ * cross-operation path already handles, and it gets the same answer: adopt the
+ * newest, hand the rest back as history, remove nothing.
+ */
 function recoverCodexFork(
   journal: CodexProviderOperationJournal,
   scan: NonNullable<ProviderDependencies["scanCodexForkArtifacts"]> = codexForkArtifacts,
-): CodexForkArtifact | null {
-  if (journal.fork) return validatedCodexFork(journal.fork, journal.sourceNativeId, journal.sourceRoot);
-  if (journal.forkRequestedAtMs === null) return null;
-  const candidates = scan(journal.sourceRoot, journal.sourceNativeId, journal.forkRequestedAtMs)
-    .map((candidate) => validatedCodexFork(candidate, journal.sourceNativeId, journal.sourceRoot));
-  if (candidates.length > 1) throw new CodexForkOutcomeUnknownError("Codex provider fork ownership is ambiguous");
-  return candidates[0] ?? null;
+): { fork: CodexForkArtifact | null; superseded: CodexForkArtifact[] } {
+  if (journal.fork) {
+    return { fork: validatedCodexFork(journal.fork, journal.sourceNativeId, journal.sourceRoot), superseded: [] };
+  }
+  if (journal.forkRequestedAtMs === null) return { fork: null, superseded: [] };
+  const candidates = newestForkFirst(scan(journal.sourceRoot, journal.sourceNativeId, journal.forkRequestedAtMs)
+    .map((candidate) => validatedCodexFork(candidate, journal.sourceNativeId, journal.sourceRoot)));
+  return { fork: candidates[0] ?? null, superseded: candidates.slice(1) };
 }
 
 function ensureTargetRoot(account: AccountContext): void {
@@ -1060,12 +1093,19 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
       fs.realpathSync(target.transcriptRoot),
     );
     const journal = prepared.journal;
-    let fork = prepared.fresh ? null : recoverCodexFork(journal, this.dependencies.scanCodexForkArtifacts);
     /* Before requesting a fork of our own, adopt whatever an earlier attempt at
-       this same move already produced (#708). Nothing is deleted: the forks this
-       operation does not take over are recorded as the conversation's history. */
+       this same move already produced (#708) — whether it was this operation
+       retrying or an operation that has since been replaced. Nothing is deleted:
+       the forks this operation does not take over are recorded as the
+       conversation's history. */
     let supersededForks: CodexForkArtifact[] = [];
     let priorOperationIds: string[] = [];
+    let fork: CodexForkArtifact | null = null;
+    if (!prepared.fresh) {
+      const recovered = recoverCodexFork(journal, this.dependencies.scanCodexForkArtifacts);
+      fork = recovered.fork;
+      supersededForks = recovered.superseded;
+    }
     if (!fork && journal.forkRequestedAtMs === null) {
       const prior = recoverPriorOperationFork(journalRoot, journal, this.dependencies.scanCodexForkArtifacts);
       fork = prior.fork;

@@ -235,7 +235,7 @@ export function mutateBoard(project: string, baseRevision: number, mutations: re
 export function remapBoardPaths(
   project: string,
   pairs: Extract<BoardMutationV1, { kind: "remap-paths" }>["pairs"],
-  options: { provisionalManual?: readonly string[]; filePath?: string } = {},
+  options: { provisionalManual?: readonly string[]; targetPlacementAuthoritative?: boolean; filePath?: string } = {},
 ): BoardProjectStateV1 {
   const filePath = options.filePath ?? boardFileForTests ?? BOARD_FILE;
   return writeLatest(project, (current) => {
@@ -247,7 +247,7 @@ export function remapBoardPaths(
     if (provisionalManual.length) {
       mutations.push({ kind: "reconcile-roots", roots: [], removeManual: provisionalManual });
     }
-    mutations.push({ kind: "remap-paths", pairs });
+    mutations.push({ kind: "remap-paths", pairs, targetPlacementAuthoritative: options.targetPlacementAuthoritative });
     return applyBoardMutations(current, mutations);
   }, filePath);
 }
