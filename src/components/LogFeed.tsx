@@ -312,10 +312,13 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [session, file?.activity, tail.lines, tail.linesStart],
   );
-  /* Tool activity earns its cue from the parse itself: an in-flight call ticks
-     once, keyed on the engine's call id, so a tail tick that re-parses the same
-     window is silent and history never replays. */
-  useToolActivityCues(feed.items, memoryKey);
+  /* Tool activity earns its cue from the parse itself: every newly appended
+     call ticks once, keyed on the engine's call id — even one that settled
+     inside a single tail tick — while re-parses, remounts and paged-in history
+     stay silent. The window end anchors "newly appended" to the tail stream;
+     loading gates the baseline so an unloaded feed is not mistaken for an
+     empty conversation. */
+  useToolActivityCues(feed.items, memoryKey, file?.path ?? null, tail.linesStart + tail.lines.length, Boolean(file) && !tail.loading);
   const hiddenLocal = Math.max(0, feed.items.length - visibleCount);
   const visibleItems = hiddenLocal ? feed.items.slice(-visibleCount) : feed.items;
   const visibleStartIndex = feed.items.length - visibleItems.length;

@@ -27,8 +27,27 @@ import type { AttentionRequestV1, AttentionState, FocusResolutionKind, ReturnPoi
  *   re-reads and is shown, rather than looking exactly like success.
  */
 
-/** The viewport this device is about to leave. */
-export type ViewportCapture = () => Pick<ReturnPoint, "mode" | "camera" | "focusedPath">;
+/**
+ * The viewport this device is about to leave, for one request.
+ *
+ * Keyed by request rather than ambient, because an arrival may be reported more
+ * than once: a first attempt that never reached the server has to be retried
+ * with the SAME pre-move viewport, and by then the camera is sitting on the
+ * target. Asking "where was this request leaving from" is answerable at any
+ * later moment; asking "where are we now" is not the same question.
+ */
+export type ViewportCapture = (requestId: string) => Pick<ReturnPoint, "mode" | "camera" | "focusedPath">;
+
+/** How long a refusal stays on screen before it takes itself off. A refusal is
+    a message about one answer, not a status: left standing it becomes a warning
+    band the operator cannot get rid of, and after the record has moved on it is
+    describing something that is no longer true. Dismissible before then. */
+export const REFUSAL_TTL_MS = 12_000;
+
+/** The refusal reason a handoff that found nowhere to land reports. Not a
+    server code: the record accepted the close, and this is what the surface
+    says about it. */
+export const LOST_TARGET_REFUSAL = "lost-target";
 
 /** The server refused this device's own answer. Transport failures are NOT
     refusals: those retry silently, because nothing was decided. */
@@ -43,26 +62,41 @@ export interface AttentionRefusal {
 export interface AttentionOffersHandle {
   view: DeviceAttentionView | null;
   offer: DeviceAttentionView["offer"];
+  /** Bumped once per POLL — the interval tick and the return-to-tab read, never
+      the re-read that follows an answer. Anything that reconciles unfinished
+      business with the record hangs off this rather than off `view`, because
+      `view` changes as a RESULT of those attempts: a retry that failed would
+      publish a fresh view, re-trigger itself, and spin as fast as the network
+      can refuse it. */
+  pollGeneration: number;
   /** Set when this device's last answer was refused; cleared by the next one
-      that lands. */
+      that lands, by the operator, or by its own expiry. */
   refusal: AttentionRefusal | null;
-  accept: (request: AttentionRequestV1, via?: "operator" | "auto-follow") => Promise<void>;
+  /** Take the refusal band off screen. */
+  dismissRefusal: () => void;
+  accept: (request: AttentionRequestV1, via?: "operator" | "auto-follow") => Promise<PostOutcome>;
   preview: (request: AttentionRequestV1) => Promise<void>;
   /** Refuse before looking. Valid only from `offered`. */
   decline: (request: AttentionRequestV1) => Promise<void>;
   /** Looked, and stayed put. Valid only from `previewing` — a different fact
       from declining unseen, and the machine keeps them apart. */
   dismiss: (request: AttentionRequestV1) => Promise<void>;
-  /** Called once the camera has landed, with how the target resolved. */
-  arrive: (request: AttentionRequestV1, resolution: FocusResolutionKind) => Promise<void>;
-  goBack: (request: AttentionRequestV1, via?: "control" | "manual-move") => Promise<void>;
+  /** Called once the camera has landed, with how the target resolved. A `lost`
+      resolution ends the request instead of recording an arrival — see below.
+      The outcome is returned rather than swallowed: an arrival the server never
+      received leaves the record at `accepted`, and a caller that cannot tell
+      that from success goes on as though the operator were following. */
+  arrive: (request: AttentionRequestV1, resolution: FocusResolutionKind) => Promise<PostOutcome>;
+  /** Likewise: a return that never landed leaves the record `following`, so the
+      way back is still on offer and must not be forgotten. */
+  goBack: (request: AttentionRequestV1, via?: "control" | "manual-move") => Promise<PostOutcome>;
   refresh: () => Promise<void>;
 }
 
 const JSON_HEADERS = { "content-type": "application/json" };
 
 /** Whether a POST decided anything: `null` means the server never answered. */
-type PostOutcome = { ok: true } | { ok: false; refusal: AttentionRefusal | null };
+export type PostOutcome = { ok: true } | { ok: false; refusal: AttentionRefusal | null };
 
 function documentIsVisible(): boolean {
   return typeof document === "undefined" || document.visibilityState !== "hidden";
@@ -72,18 +106,22 @@ export function useAttentionOffers({
   deviceId,
   captureViewport,
   pollMs = 4_000,
+  refusalTtlMs = REFUSAL_TTL_MS,
   fetchFn,
   surfaceVisible,
 }: {
   deviceId: string | null;
   captureViewport: ViewportCapture;
   pollMs?: number;
+  /** Test seam. Production leaves this at {@link REFUSAL_TTL_MS}. */
+  refusalTtlMs?: number;
   fetchFn?: typeof fetch;
   /** Whether this surface is on screen. Defaults to the document's own
       visibility; a sheet collapsed out of sight passes its own answer. */
   surfaceVisible?: () => boolean;
 }): AttentionOffersHandle {
   const [view, setView] = useState<DeviceAttentionView | null>(null);
+  const [pollGeneration, setPollGeneration] = useState(0);
   const [refusal, setRefusal] = useState<AttentionRefusal | null>(null);
   const call = fetchFn ?? (typeof fetch === "function" ? fetch : null);
 
@@ -170,19 +208,24 @@ export function useAttentionOffers({
     setView(await read() ?? first);
   }, [read, post, deviceId]);
 
-  const answer = useCallback(async (id: string, event: AttentionEvent) => {
+  const answer = useCallback(async (id: string, event: AttentionEvent): Promise<PostOutcome> => {
     const outcome = await post(id, event);
     if (outcome.ok) setRefusal(null);
     else if (outcome.refusal) setRefusal(outcome.refusal);
     /* Refused or not, the record is re-read: a refusal is exactly the case
        where this device's picture of the request is the stale one. */
     await refresh();
+    return outcome;
   }, [post, refresh]);
 
   useEffect(() => {
     if (!deviceId) return;
     let stopped = false;
-    const poll = async () => { if (!stopped) await refresh(); };
+    const poll = async () => {
+      if (stopped) return;
+      await refresh();
+      if (!stopped) setPollGeneration((generation) => generation + 1);
+    };
     const timer = setInterval(() => { void poll(); }, pollMs);
     /* The first read is a poll like any other, just an immediate one. */
     void poll();
@@ -198,25 +241,47 @@ export function useAttentionOffers({
     };
   }, [deviceId, pollMs, refresh]);
 
-  const accept = useCallback(async (request: AttentionRequestV1, via: "operator" | "auto-follow" = "operator") => {
-    if (!deviceId) return;
-    await answer(request.id, { kind: "accept", deviceId, via });
+  const accept = useCallback(async (request: AttentionRequestV1, via: "operator" | "auto-follow" = "operator"): Promise<PostOutcome> => {
+    if (!deviceId) return { ok: false, refusal: null };
+    return answer(request.id, { kind: "accept", deviceId, via });
   }, [answer, deviceId]);
 
-  const arrive = useCallback(async (request: AttentionRequestV1, resolution: FocusResolutionKind) => {
-    if (!deviceId) return;
-    await answer(request.id, {
+  const arrive = useCallback(async (request: AttentionRequestV1, resolution: FocusResolutionKind): Promise<PostOutcome> => {
+    if (!deviceId) return { ok: false, refusal: null };
+    if (resolution === "lost") {
+      /* Nothing moved, so there is no arrival to record and no return point
+         worth keeping. The device that agreed closes its own request: reporting
+         it as an arrival would be refused by the record and leave the request
+         `accepted` forever — the oldest live entry, and therefore the only
+         thing this device is ever offered again. The operator is told on the
+         same surface, because they pressed a control and the view stayed put. */
+      const abandoned = await answer(request.id, { kind: "abandon", deviceId });
+      setRefusal({ requestId: request.id, reason: LOST_TARGET_REFUSAL, state: null });
+      return abandoned;
+    }
+    return answer(request.id, {
       kind: "arrive",
       deviceId,
       resolution,
-      returnPoint: { deviceId, capturedAt: new Date().toISOString(), ...captureViewport() },
+      returnPoint: { deviceId, capturedAt: new Date().toISOString(), ...captureViewport(request.id) },
     });
   }, [answer, deviceId, captureViewport]);
+
+  /* A refusal is about one answer, so it outlives that answer by a bounded
+     moment and no longer. Keyed on the refusal itself, so a second one restarts
+     the clock rather than inheriting the first one's remaining time. */
+  useEffect(() => {
+    if (!refusal) return;
+    const timer = setTimeout(() => setRefusal((current) => (current === refusal ? null : current)), refusalTtlMs);
+    return () => clearTimeout(timer);
+  }, [refusal, refusalTtlMs]);
 
   return {
     view,
     offer: view?.offer ?? null,
+    pollGeneration,
     refusal,
+    dismissRefusal: useCallback(() => setRefusal(null), []),
     accept,
     preview: useCallback(async (request) => {
       if (deviceId) await answer(request.id, { kind: "preview", deviceId });
@@ -228,8 +293,9 @@ export function useAttentionOffers({
       if (deviceId) await answer(request.id, { kind: "dismiss", deviceId });
     }, [answer, deviceId]),
     arrive,
-    goBack: useCallback(async (request, via: "control" | "manual-move" = "control") => {
-      if (deviceId) await answer(request.id, { kind: "return", deviceId, via });
+    goBack: useCallback(async (request, via: "control" | "manual-move" = "control"): Promise<PostOutcome> => {
+      if (!deviceId) return { ok: false, refusal: null };
+      return answer(request.id, { kind: "return", deviceId, via });
     }, [answer, deviceId]),
     refresh,
   };

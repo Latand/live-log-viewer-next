@@ -219,6 +219,22 @@ test("an answer the record refused is said on the surface that sent it", () => {
   expect(one("[data-testid='attention-refused']")).not.toBeNull();
 });
 
+test("a refusal can be got rid of, and a handoff with nowhere to go says that instead", () => {
+  const dismissals: number[] = [];
+  mount({
+    attention: null,
+    attentionRefused: true,
+    attentionRefusedReason: "lost-target",
+    onDismissAttentionRefusal: () => dismissals.push(1),
+  });
+
+  /* Nothing was refused — there was simply nowhere to take them — and saying
+     "that did not go through" would describe the wrong thing. */
+  expect(one("[data-testid='attention-refused']")!.textContent).toContain("nowhere to take you");
+  click(one("[data-testid='attention-refused-dismiss']")!);
+  expect(dismissals).toEqual([1]);
+});
+
 test("a preview shows a text card and never moves the view", () => {
   mount({
     attention: offer({ request: request({ state: "previewing" }) }),

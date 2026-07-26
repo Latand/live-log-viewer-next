@@ -35,6 +35,9 @@ export const MCP_TOOL_NAMES = [
   "deployment_status",
   "resources",
   "conversation_migration",
+  "agent_activity",
+  "lifecycle_events",
+  "request_attention",
 ] as const;
 
 export type McpToolName = typeof MCP_TOOL_NAMES[number];
@@ -52,6 +55,15 @@ const MUTATING_MCP_TOOL_NAMES = new Set<McpToolName>([
   "flow_action",
   "conversation_action",
   "conversation_migration",
+  /* Digest polls advance a durable relay cursor, so their receipts must
+     survive the MCP process: a replayed clientRequestId has to return the same
+     relay rather than skip past events the caller never saw. */
+  "lifecycle_events",
+  /* Reads liveness, but appends the stalls and exits it finds to the same
+     durable journal — for exactly the reason `lifecycle_events` is here, so it
+     is classified the same way rather than looking read-only by name. */
+  "agent_activity",
+  "request_attention",
 ]);
 
 export type McpToolArgs = Record<string, unknown> & { clientRequestId?: unknown };
@@ -935,6 +947,9 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   deployment_status: "Read Viewer deployment or runtime operation status, or list recent deployments.",
   resources: "Read system and Viewer-owned agent resource usage.",
   conversation_migration: "Reseat, retry, or roll back a conversation account migration.",
+  agent_activity: "Read agent liveness: last transcript record, turn state, whether the host is alive or gone, and how long a stalled conversation has been silent.",
+  lifecycle_events: "Query the durable lifecycle event journal by lineage and cursor, or poll a bounded relay digest of what changed since the last one.",
+  request_attention: "Ask the operator to look at something: raise an attention request that offers to move their Viewer to a target and waits for their yes.",
 };
 
 const clientRequestIdSchema = z.string().min(1).describe("Stable idempotency key for this logical call.");
@@ -1103,6 +1118,39 @@ const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     action: z.enum(["reseat", "retry", "rollback"]),
     expectedRevision: z.number().int().min(0).optional(),
     transcriptPath: z.string().optional(),
+  }).passthrough(),
+  agent_activity: z.object({
+    clientRequestId: clientRequestIdSchema,
+    conversationId: z.string().optional(),
+    transcriptPath: z.string().optional(),
+    project: z.string().optional(),
+    liveOnly: z.boolean().optional(),
+    stallAfterMs: z.number().int().min(1_000).max(6 * 60 * 60_000).optional()
+      .describe("Silence under a live host that counts as a stall. A dead host over an open turn is always stalled."),
+    limit: z.number().int().min(1).max(200).optional(),
+  }).passthrough(),
+  lifecycle_events: z.object({
+    clientRequestId: clientRequestIdSchema,
+    mode: z.enum(["query", "digest"]).optional().describe('"query" reads the journal; "digest" polls the bounded relay.'),
+    project: z.string().optional(),
+    pipelineId: z.string().optional(),
+    conversationId: z.string().optional(),
+    stageId: z.string().optional(),
+    type: z.string().optional(),
+    afterSeq: z.number().int().min(0).optional().describe("Exclusive journal cursor for mode=query."),
+    limit: z.number().int().min(1).max(200).optional(),
+    subscriberId: z.string().optional().describe("Durable digest cursor owner; required for mode=digest."),
+    maxItems: z.number().int().min(1).max(25).optional(),
+    acknowledge: z.boolean().optional().describe("false polls the digest without advancing the cursor."),
+  }).passthrough(),
+  request_attention: z.object({
+    clientRequestId: clientRequestIdSchema,
+    target: z.record(z.string(), z.unknown()).describe("Typed focus target: conversation | pipeline | stage | flowRound | task | draft | region | point."),
+    reason: z.string().min(1).describe("One operator-safe sentence saying why it is worth looking at. Never the target's contents."),
+    intent: z.enum(["show", "open"]).optional().describe("show frames and highlights; open also opens the target's own surface. Default show."),
+    zoom: z.enum(["inspect", "situate"]).optional(),
+    contextLabel: z.string().optional().describe("Named in the spoken sentence but never navigated to."),
+    project: z.string().optional().describe("Required only for a target the server cannot attribute on its own (a board draft)."),
   }).passthrough(),
 };
 

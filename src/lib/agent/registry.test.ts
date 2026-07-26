@@ -3464,3 +3464,210 @@ describe("spawn parent attribution (#341)", () => {
     });
   });
 });
+
+describe("Codex provider-fork history (#708)", () => {
+  const ROOT_THREAD = "019f9557-0000-\x37000-8000-00000000aaaa";
+  const FORK_THREADS = [
+    "019f9c11-0000-\x37000-8000-00000000bb01",
+    "019f9c13-0000-\x37000-8000-00000000bb02",
+    "019f9c15-0000-\x37000-8000-00000000bb03",
+  ];
+  const rootPath = `/sessions/rollout-${ROOT_THREAD}.jsonl`;
+  const forkPath = (index: number) => `/sessions/rollout-${FORK_THREADS[index]}.jsonl`;
+
+  function forkObservation(
+    index: number,
+    overrides: Partial<Parameters<AgentRegistry["reconcileConversations"]>[0][number]> = {},
+  ): Parameters<AgentRegistry["reconcileConversations"]>[0][number] {
+    return {
+      engine: "codex",
+      path: forkPath(index),
+      accountId: "a",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo", project: "repo" }),
+      turn: { state: "idle", source: "empty", terminalAt: null },
+      observedAt: "2026-07-26T02:00:00.000Z",
+      forkSourceThreadId: ROOT_THREAD,
+      ...overrides,
+    };
+  }
+
+  function rootObservation(): Parameters<AgentRegistry["reconcileConversations"]>[0][number] {
+    return {
+      engine: "codex",
+      path: rootPath,
+      accountId: "a",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo", project: "repo" }),
+      turn: { state: "idle", source: "empty", terminalAt: null },
+      observedAt: "2026-07-26T02:00:00.000Z",
+      forkSourceThreadId: null,
+    };
+  }
+
+  test("an unclaimed fork joins the conversation owning its source thread instead of minting a card", () => {
+    const store = registry();
+    const root = store.ensureConversation("codex", rootPath, "a");
+
+    store.reconcileConversations([rootObservation(), forkObservation(0)]);
+
+    const conversations = Object.values(store.snapshot().conversations);
+    expect(conversations).toHaveLength(1);
+    expect(conversations[0]!.id).toBe(root.id);
+    expect(conversations[0]!.continuityPaths).toContain(forkPath(0));
+    expect(conversations[0]!.providerForkPaths).toEqual([forkPath(0)]);
+    expect(conversations[0]!.generations).toHaveLength(1);
+    expect(store.conversationForPath(forkPath(0))?.id).toBe(root.id);
+  });
+
+  test("a fork of a fork resolves transitively, in any observation order", () => {
+    const store = registry();
+    const root = store.ensureConversation("codex", rootPath, "a");
+
+    store.reconcileConversations([
+      forkObservation(1, { forkSourceThreadId: FORK_THREADS[0] }),
+      forkObservation(0),
+      rootObservation(),
+    ]);
+
+    const conversations = Object.values(store.snapshot().conversations);
+    expect(conversations).toHaveLength(1);
+    expect(conversations[0]!.id).toBe(root.id);
+    expect(new Set(conversations[0]!.providerForkPaths)).toEqual(new Set([forkPath(0), forkPath(1)]));
+  });
+
+  test("a lookalike fork conversation is alias-merged into its source and the merge replays as a no-op", () => {
+    const store = registry();
+    const root = store.ensureConversation("codex", rootPath, "a");
+    /* The incident state: the fork was scanned before the fork edge was read,
+       so it already owns a conversation of its own. */
+    const lookalike = store.ensureConversation("codex", forkPath(0), "a");
+    expect(lookalike.id).not.toBe(root.id);
+
+    store.reconcileConversations([rootObservation(), forkObservation(0)]);
+
+    const merged = store.snapshot();
+    expect(Object.values(merged.conversations)).toHaveLength(1);
+    expect(merged.conversationAliases[lookalike.id]).toBe(root.id);
+    expect(store.conversation(lookalike.id)?.id).toBe(root.id);
+    expect(merged.conversations[root.id]!.providerForkPaths).toEqual([forkPath(0)]);
+
+    store.reconcileConversations([rootObservation(), forkObservation(0)]);
+
+    const replayed = store.snapshot();
+    expect(Object.values(replayed.conversations)).toHaveLength(1);
+    expect(replayed.conversations[root.id]!.providerForkPaths).toEqual([forkPath(0)]);
+    expect(replayed.conversations[root.id]!.continuityPaths).toEqual([forkPath(0)]);
+  });
+
+  test("a fork thread that is another conversation's live seat is never re-parented", () => {
+    const store = registry();
+    const root = store.ensureConversation("codex", rootPath, "a");
+    /* A committed migration successor: the same thread, published under the
+       target account. The fork is that conversation's seat, not loose history. */
+    const successor = store.ensureConversation("codex", `/target-sessions/rollout-${FORK_THREADS[0]}.jsonl`, "b");
+
+    store.reconcileConversations([rootObservation(), forkObservation(0)]);
+
+    expect(store.conversation(root.id)!.providerForkPaths).toEqual([]);
+    expect(store.conversationForPath(forkPath(0))?.id).not.toBe(root.id);
+    expect(store.conversation(successor.id)!.generations).toHaveLength(1);
+  });
+
+  test("a fork path with another durable owner is left where it is", () => {
+    const store = registry();
+    const root = store.ensureConversation("codex", rootPath, "a");
+    const durable = store.ensureConversation("codex", forkPath(0), "b");
+    store.setConversationMigration(durable.id, {
+      intentId: "durable-owner",
+      phase: "verifying",
+      targetId: "c",
+      revision: 1,
+      error: null,
+      updatedAt: "2026-07-26T02:00:00.000Z",
+    });
+
+    store.reconcileConversations([rootObservation(), forkObservation(0)]);
+
+    expect(store.conversationForPath(forkPath(0))?.id).toBe(durable.id);
+    expect(store.conversation(root.id)!.providerForkPaths).toEqual([]);
+  });
+
+  test("a deliberate user branch keeps its own conversation identity", () => {
+    const store = registry();
+    const root = store.ensureConversation("codex", rootPath, "a");
+
+    store.reconcileConversations([rootObservation(), forkObservation(0, { forkIntent: "user-branch" })]);
+
+    const conversations = Object.values(store.snapshot().conversations);
+    expect(conversations).toHaveLength(2);
+    expect(store.conversationForPath(forkPath(0))?.id).not.toBe(root.id);
+    expect(store.conversation(root.id)!.providerForkPaths).toEqual([]);
+  });
+
+  test("adopted fork history survives a registry reload", () => {
+    const store = registry();
+    const root = store.ensureConversation("codex", rootPath, "a");
+    store.reconcileConversations([rootObservation(), forkObservation(0)]);
+
+    const reloaded = new AgentRegistry(store.filename);
+
+    expect(reloaded.conversation(root.id)!.providerForkPaths).toEqual([forkPath(0)]);
+    expect(reloaded.conversationForPath(forkPath(0))?.id).toBe(root.id);
+  });
+});
+
+describe("account migration retry identity (#708)", () => {
+  function armedConversation(store: AgentRegistry, pathname: string) {
+    store.ensureConversation("codex", pathname, "a");
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "retry-identity",
+      expectedRevision: store.engineRouting("codex").revision,
+      scope: "all",
+    });
+    return store.conversationForPath(pathname)!;
+  }
+
+  test("a failed-recoverable migration is parked, not re-armed by a lazy active-account request", () => {
+    const store = registry();
+    const conversation = armedConversation(store, "/sessions/rollout-019f9557-0000-\x37000-8000-0000000000c1.jsonl");
+    const failed = store.transitionConversationMigration(conversation.id, conversation.migration!.revision, ["requested"], {
+      phase: "failed-recoverable",
+      error: "successor provider failed a recoverable preflight",
+      errorCode: "provider-failed",
+    });
+    store.setEngineRouting("codex", "b");
+
+    const touched = store.requestConversationMigrationToActiveAccount(conversation.id);
+
+    expect(touched.migration).toMatchObject({
+      phase: "failed-recoverable",
+      operationId: failed.migration!.operationId,
+      revision: failed.migration!.revision,
+    });
+  });
+
+  test("an explicit retry preserves the operation identity the provider journal is keyed on", () => {
+    const store = registry();
+    const conversation = armedConversation(store, "/sessions/rollout-019f9557-0000-\x37000-8000-0000000000c2.jsonl");
+    const operationId = conversation.migration!.operationId;
+    const failed = store.transitionConversationMigration(conversation.id, conversation.migration!.revision, ["requested"], {
+      phase: "failed-recoverable",
+      error: "successor provider failed a recoverable preflight",
+      errorCode: "provider-failed",
+    });
+
+    let retried = store.retryConversationMigration(conversation.id, failed.migration!.revision);
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const stalled = store.transitionConversationMigration(conversation.id, retried.migration!.revision, ["requested", "waiting-turn"], {
+        phase: "failed-recoverable",
+        error: "successor provider failed a recoverable preflight",
+        errorCode: "provider-failed",
+      });
+      retried = store.retryConversationMigration(conversation.id, stalled.migration!.revision);
+    }
+
+    expect(retried.migration!.operationId).toBe(operationId);
+  });
+});

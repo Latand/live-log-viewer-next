@@ -110,7 +110,7 @@ function runtimeFile(pathname: string, mtime: number): FileEntry {
 
 test("an external one-message session keeps the user-authored exemption", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-external-user-"));
-  const pathname = path.join(directory, "rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1341.jsonl");
+  const pathname = path.join(directory, "rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1341.jsonl");
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   fs.writeFileSync(pathname, JSON.stringify({
     type: "event_msg",
@@ -147,7 +147,7 @@ test("an external one-message session keeps the user-authored exemption", async 
 
 test("a completed Viewer worker spawn discounts its single launch prompt", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-viewer-worker-"));
-  const sessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1343";
+  const sessionId = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1343";
   const pathname = path.join(directory, `rollout-${sessionId}.jsonl`);
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   fs.writeFileSync(pathname, JSON.stringify({
@@ -197,8 +197,8 @@ test("a completed Viewer worker spawn discounts its single launch prompt", async
 
 test("a dashboard-reconciled root remains eligible while an explicit standalone placement is protected", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-board-placement-"));
-  const reconciledSessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1360";
-  const explicitSessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1361";
+  const reconciledSessionId = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1360";
+  const explicitSessionId = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1361";
   const reconciledPath = path.join(directory, `rollout-${reconciledSessionId}.jsonl`);
   const explicitPath = path.join(directory, `rollout-${explicitSessionId}.jsonl`);
   const boardFile = path.join(directory, "board.json");
@@ -250,7 +250,7 @@ test("a dashboard-reconciled root remains eligible while an explicit standalone 
 
 test("a running manual root from a legacy persisted board remains protected", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-legacy-board-placement-"));
-  const sessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1362";
+  const sessionId = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1362";
   const pathname = path.join(directory, `rollout-${sessionId}.jsonl`);
   const boardFile = path.join(directory, "board.json");
   const now = Date.parse("2026-07-12T12:00:00.000Z");
@@ -303,7 +303,7 @@ test("a running manual root from a legacy persisted board remains protected", as
 
 test("a malformed transcript protects an otherwise eligible Viewer probe", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-malformed-authorship-"));
-  const sessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1346";
+  const sessionId = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1346";
   const pathname = path.join(directory, `rollout-${sessionId}.jsonl`);
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   fs.writeFileSync(pathname, "{broken\n");
@@ -350,7 +350,7 @@ test("a malformed transcript protects an otherwise eligible Viewer probe", async
 
 test("an unknown missing transcript reaches the dead-transcript TTL in production input", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-missing-policy-"));
-  const sessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1353";
+  const sessionId = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1353";
   const pathname = path.join(directory, `missing-${sessionId}.jsonl`);
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   process.env.LLV_STATE_DIR = directory;
@@ -382,7 +382,7 @@ test("an unknown missing transcript reaches the dead-transcript TTL in productio
 
 test("authorship at the beginning of a transcript survives a tail larger than the session reader window", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-early-user-"));
-  const pathname = path.join(directory, "rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1344.jsonl");
+  const pathname = path.join(directory, "rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1344.jsonl");
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   const user = JSON.stringify({
     type: "event_msg",
@@ -425,7 +425,7 @@ test("authorship at the beginning of a transcript survives a tail larger than th
 
 test("a clean authorship scan persists a path-scoped scannedAt stamp (issue #112)", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-scannedat-"));
-  const pathname = path.join(directory, "rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1399.jsonl");
+  const pathname = path.join(directory, "rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1399.jsonl");
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   // A worker transcript with only agent output — no owner message.
   fs.writeFileSync(pathname, JSON.stringify({
@@ -472,7 +472,7 @@ test("a non-host worker transcript still earns a clean scannedAt stamp (issue #1
      transcript must be scanned so the board can clear authorshipUnverified and
      let it collapse. It reaches the reaper only through `files`, never `hosts`. */
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-nonhost-"));
-  const pathname = path.join(directory, "rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad13aa.jsonl");
+  const pathname = path.join(directory, "rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad13aa.jsonl");
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   fs.writeFileSync(pathname, JSON.stringify({
     type: "event_msg",
@@ -504,7 +504,7 @@ test("a non-host worker transcript still earns a clean scannedAt stamp (issue #1
 
 test("a non-host worker with an owner message is recorded user-authored (issue #112 finding)", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-nonhost-user-"));
-  const pathname = path.join(directory, "rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad13ab.jsonl");
+  const pathname = path.join(directory, "rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad13ab.jsonl");
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   fs.writeFileSync(pathname, JSON.stringify({
     type: "event_msg",
@@ -541,7 +541,7 @@ test("a native Claude subagent's automated assignment scans clean (issue #112 fi
      assignment, serialized as one user-role message with no receipt/delivery.
      The native-subagent allowance covers it so the spawned subtask can collapse. */
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-subagent-"));
-  const pathname = path.join(directory, "agent-019f4906-3f67-7b72-9fbc-9ec3b5ad13ca.jsonl");
+  const pathname = path.join(directory, "agent-019f4906-3f67-\x37b72-9fbc-9ec3b5ad13ca.jsonl");
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   fs.writeFileSync(pathname, claudeUserRecord(now, 60, "Investigate the failing test and report back.") + "\n");
   process.env.LLV_STATE_DIR = directory;
@@ -563,7 +563,7 @@ test("a native Claude subagent's automated assignment scans clean (issue #112 fi
 
 test("an owner message on a native Claude subagent still trips authorship (issue #112 finding)", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-subagent-owner-"));
-  const pathname = path.join(directory, "agent-019f4906-3f67-7b72-9fbc-9ec3b5ad13cb.jsonl");
+  const pathname = path.join(directory, "agent-019f4906-3f67-\x37b72-9fbc-9ec3b5ad13cb.jsonl");
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   // Automated assignment PLUS a real owner interjection.
   fs.writeFileSync(pathname, claudeUserRecord(now, 60, "Do the assigned subtask.") + "\n" + claudeUserRecord(now, 30, "wait — skip the migration path") + "\n");
@@ -584,11 +584,11 @@ test("an owner message on a native Claude subagent still trips authorship (issue
 
 test("a native Codex subagent's automated assignment scans clean (issue #112 finding)", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-codex-subagent-"));
-  const pathname = path.join(directory, "rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad13cc.jsonl");
+  const pathname = path.join(directory, "rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad13cc.jsonl");
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   // session_meta carries the parent_thread_id that marks a native codex subagent.
   fs.writeFileSync(pathname, [
-    JSON.stringify({ type: "session_meta", payload: { parent_thread_id: "019f4906-3f67-7b72-9fbc-9ec3b5ad0000" } }),
+    JSON.stringify({ type: "session_meta", payload: { parent_thread_id: "019f4906-3f67-\x37b72-9fbc-9ec3b5ad0000" } }),
     JSON.stringify({ type: "event_msg", timestamp: new Date(now - 60 * 60_000).toISOString(), payload: { type: "user_message", message: "Run the assigned subtask." } }),
   ].join("\n") + "\n");
   process.env.LLV_STATE_DIR = directory;
@@ -617,7 +617,7 @@ test("a headless reviewer's automated startup prompt alone is not owner-authored
      be recorded owner-authored and pinned forever, defeating immediate reviewer
      collapse. The round's reviewer transcript earns exactly one allowance. */
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-reviewer-allow-"));
-  const sessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad13ac";
+  const sessionId = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad13ac";
   const pathname = path.join(directory, `rollout-${sessionId}.jsonl`);
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   fs.writeFileSync(pathname, JSON.stringify({
@@ -655,7 +655,7 @@ test("a headless reviewer's automated startup prompt alone is not owner-authored
 
 test("a genuine owner message on top of a reviewer's startup prompt trips the exemption (issue #112 finding)", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-reviewer-owner-"));
-  const sessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad13ad";
+  const sessionId = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad13ad";
   const pathname = path.join(directory, `rollout-${sessionId}.jsonl`);
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   fs.writeFileSync(pathname, [
@@ -752,7 +752,7 @@ test("a headless reviewer's automated startup prompt is not owner authorship (is
      reviewer-launch allowance that single automated prompt would pin the finished
      reviewer forever; with it, the reviewer scans clean and can collapse. */
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-reviewer-prompt-"));
-  const sessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad13ba";
+  const sessionId = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad13ba";
   const reviewerPath = path.join(directory, `rollout-${sessionId}.jsonl`);
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   reviewerMessages(reviewerPath, now, ["Review the changes on this branch and reply REVIEW_READY"]);
@@ -782,7 +782,7 @@ test("a headless reviewer's automated startup prompt is not owner authorship (is
 
 test("a genuine owner message on a headless reviewer still trips authorship (issue #112 finding)", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-reviewer-owner-"));
-  const sessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad13bb";
+  const sessionId = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad13bb";
   const reviewerPath = path.join(directory, `rollout-${sessionId}.jsonl`);
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   // The automated startup prompt PLUS a real owner interjection.
@@ -816,7 +816,7 @@ test("a heuristically-claimed reviewer path gets no allowance and keeps authorsh
      allowance must not fire — the owner's first genuine message stays counted. */
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-reviewer-heuristic-"));
   // An owner-created transcript wrongly claimed as the reviewer path.
-  const ownerPath = path.join(directory, "rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad13bd.jsonl");
+  const ownerPath = path.join(directory, "rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad13bd.jsonl");
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   reviewerMessages(ownerPath, now, ["can you take a look at the failing test?"]);
   process.env.LLV_STATE_DIR = directory;
@@ -851,7 +851,7 @@ test("a pane reviewer with an owner follow-up keeps authorship (no double allowa
      message (count 2) would fall under a total allowance of 2 and clean-stamp an
      owner-touched card. */
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-pane-reviewer-"));
-  const sessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad13bc";
+  const sessionId = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad13bc";
   const reviewerPath = path.join(directory, `rollout-${sessionId}.jsonl`);
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   reviewerMessages(reviewerPath, now, ["Review the changes on this branch", "please also cover the migration path"]);
@@ -961,7 +961,7 @@ test("headless reviewer termination rejects pid reuse and verifies process exit"
 
 test("persisted GitHub merge evidence survives a deleted checkout and allows flow cleanup", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-merged-flow-"));
-  const pathname = path.join(directory, "rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1345.jsonl");
+  const pathname = path.join(directory, "rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1345.jsonl");
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   fs.writeFileSync(pathname, "");
   process.env.LLV_STATE_DIR = directory;
@@ -1287,6 +1287,43 @@ test("merge evidence persistence cannot roll back a concurrent flow transition",
   expect(stored[0]?.mergeEvidence?.mergedAt).toBeNull();
 });
 
+test("merge evidence moving underneath the refresh is not a concurrent transition", async () => {
+  /* The other side of the concurrency check: the revision compared against the
+     store deliberately EXCLUDES mergeEvidence, because the evidence is the very
+     thing this pass rewrites. A revision that included it would see the refresh's
+     own subject as somebody else's edit and drop every probe result on the floor
+     — silently, since the pass reports the merge either way. */
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  const reviewedSha = "4".repeat(40);
+  const identity = { repository: "owner/repo", headRef: "feature/evidence-only", headSha: reviewedSha };
+  const stale = {
+    ...headlessFlow(now),
+    id: "flow-evidence-only",
+    rounds: [{ ...headlessFlow(now).rounds[0]!, reviewHeadSha: reviewedSha }],
+    mergeEvidence: { ...identity, prNumber: null, mergedAt: null, checkedAt: null, source: null },
+  } satisfies Flow;
+  let stored: Flow[] = structuredClone([stale]);
+
+  const merged = await refreshMergedFlowIds([structuredClone(stale)], {
+    now: () => now,
+    resolveMergeIdentity: () => identity,
+    probePullRequest: async () => {
+      /* Only the evidence differs by the time the write lands — a checkedAt
+         stamp from a neighbouring pass, and nothing about the flow's state. */
+      stored[0]!.mergeEvidence = { ...identity, prNumber: null, mergedAt: null, checkedAt: new Date(now - 1_000).toISOString(), source: null };
+      return { number: 701, mergedAt: new Date(now - 60_000).toISOString(), headRefOid: reviewedSha };
+    },
+    localBranchMerged: () => false,
+    loadFlows: () => structuredClone(stored),
+    saveFlows: (flows) => { stored = structuredClone(flows); },
+  });
+
+  expect(merged).toEqual(new Set([stale.id]));
+  /* Persisted, not discarded. */
+  expect(stored[0]?.mergeEvidence).toMatchObject({ prNumber: 701, source: "github-pr" });
+  expect(stored[0]?.mergeEvidence?.mergedAt).toBe(new Date(now - 60_000).toISOString());
+});
+
 test("an existing checkout with unverified cleanliness loses merge authorization", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-unverified-checkout-"));
   const now = Date.parse("2026-07-12T12:00:00.000Z");
@@ -1340,7 +1377,7 @@ test("local merge evidence persists the reviewed SHA without GitHub identity", a
 
 test("Viewer flow deliveries are discounted from transcript authorship", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-flow-authorship-"));
-  const sessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1350";
+  const sessionId = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1350";
   const pathname = path.join(directory, `rollout-${sessionId}.jsonl`);
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   const messages = ["launch prompt", "flow kickoff", "review findings"].map((message) => JSON.stringify({
@@ -1414,7 +1451,7 @@ test("Viewer flow deliveries are discounted from transcript authorship", async (
 
 test("actuation rejects a replacement host that reused the candidate pane", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-reused-pane-"));
-  const sessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1351";
+  const sessionId = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1351";
   const pathname = path.join(directory, `rollout-${sessionId}.jsonl`);
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   fs.writeFileSync(pathname, JSON.stringify({
@@ -1480,7 +1517,7 @@ test("actuation rejects a replacement host that reused the candidate pane", asyn
 
 test("post-kill cleanup preserves a same-pane replacement registry host", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-registry-replacement-"));
-  const sessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1352";
+  const sessionId = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1352";
   const pathname = path.join(directory, `rollout-${sessionId}.jsonl`);
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   fs.writeFileSync(pathname, JSON.stringify({
@@ -1556,7 +1593,7 @@ test("post-kill cleanup preserves a same-pane replacement registry host", async 
 
 test("an idle candidate that becomes busy inside the operation lock is retained", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-idle-busy-"));
-  const sessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1354";
+  const sessionId = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1354";
   const pathname = path.join(directory, `rollout-${sessionId}.jsonl`);
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   fs.writeFileSync(pathname, JSON.stringify({
@@ -1614,7 +1651,7 @@ test("an idle candidate that becomes busy inside the operation lock is retained"
 
 test("a delivery created during merge revalidation fences the final reap decision", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-delivery-fence-"));
-  const pathname = path.join(directory, "missing-019f4906-3f67-7b72-9fbc-9ec3b5ad1342.jsonl");
+  const pathname = path.join(directory, "missing-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1342.jsonl");
   const now = Date.now();
   process.env.LLV_STATE_DIR = directory;
   process.env.LLV_REAPER_ENABLED = "1";
@@ -1622,7 +1659,7 @@ test("a delivery created during merge revalidation fences the final reap decisio
   const profile = emptyLaunchProfile({ cwd: "/repo", role: "worker", title: "probe" });
   fs.writeFileSync(pathname, "");
   const receipt = registry.beginSpawn("codex", "/repo", profile);
-  const key = { engine: "codex" as const, sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1342" };
+  const key = { engine: "codex" as const, sessionId: "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1342" };
   registry.completeSpawn(receipt.launchId, {
     key,
     artifactPath: pathname,

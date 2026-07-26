@@ -136,13 +136,6 @@ export function createCuePlayer(options: CuePlayerOptions): CuePlayer {
       const { cuesEnabled, cueVolume } = options.prefs();
       if (!cuesEnabled) return "disabled";
 
-      /* Routine texture coalesces: while one tick is sounding, the next tick is
-         the same information. Priority and salient cues never coalesce — two
-         failures are two facts. */
-      if (cueTier(cue) === "routine") {
-        for (const voice of active.values()) if (voice.cue === cue) return "dropped";
-      }
-
       if (active.size >= maxConcurrent) {
         const victim = weakest();
         if (!victim || TIER_RANK[cueTier(cue)] <= TIER_RANK[cueTier(victim.cue)]) return "dropped";

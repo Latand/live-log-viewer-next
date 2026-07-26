@@ -7,7 +7,7 @@ import { stateDir } from "@/lib/configDir";
 import type { Engine, Fmt, RootKey } from "../types";
 import { cleanTitle } from "../title";
 import { globalCache } from "./caches";
-import { nativeCodexParentThreadIdResult } from "./codexNative";
+import { nativeCodexSessionMetaResult } from "./codexNative";
 import { HEAD_READ_CHUNK_BYTES, headFingerprint, readHead, type HeadReadResult } from "./head";
 import { readJsonResult, recordValue, recordsValue, stringValue } from "./json";
 import { projectResolutionStateKey } from "./projectState";
@@ -18,6 +18,7 @@ export interface FileDescription {
   cwd?: string;
   sessionStartedAt?: string | null;
   nativeParentThreadId?: string | null;
+  nativeForkSourceThreadId?: string | null;
   projectRoot?: string | null;
   title: string;
   engine: Engine;
@@ -45,6 +46,7 @@ type TranscriptMetadata = {
   cwd?: string;
   sessionStartedAt: string | null;
   nativeParentThreadId: string | null;
+  nativeForkSourceThreadId: string | null;
   title: string;
   engine: Engine;
   kind: string;
@@ -845,6 +847,7 @@ function deriveTranscriptMetadata(
   let cwdComplete = identity.complete;
   let sessionStartedAt: string | null = null;
   let nativeParentThreadId: string | null = null;
+  let nativeForkSourceThreadId: string | null = null;
   let title: string | null = null;
   let engine: Engine = "claude";
   let kind = "";
@@ -863,9 +866,16 @@ function deriveTranscriptMetadata(
       sessionStartedAt = startedAtRead.value;
     }
     if (complete) {
-      const nativeParent = nativeCodexParentThreadIdResult(pathname, st.size, st.mtimeMs);
-      complete &&= nativeParent.complete;
-      nativeParentThreadId = nativeParent.value;
+      /* One read of the identity header serves both edges it carries: the
+         engine-native subagent parent (#339) and the provider-fork source
+         (#708). Carrying the fork edge on the description is what keeps
+         migration reconciliation off a second bounded prefix read per
+         transcript — including a restart served from the persisted scan
+         snapshot, where no in-process header cache survives. */
+      const sessionMeta = nativeCodexSessionMetaResult(pathname, st.size, st.mtimeMs);
+      complete &&= sessionMeta.complete;
+      nativeParentThreadId = sessionMeta.parent;
+      nativeForkSourceThreadId = sessionMeta.forkedFrom;
     }
     engine = "codex";
     kind = "session";
@@ -927,6 +937,7 @@ function deriveTranscriptMetadata(
       cwd,
       sessionStartedAt,
       nativeParentThreadId,
+      nativeForkSourceThreadId,
       title: cleanTitle(title ?? fn, 120),
       engine,
       kind,
@@ -1048,6 +1059,7 @@ export function describeFile(
     cwd: metadata.cwd,
     sessionStartedAt: metadata.sessionStartedAt,
     nativeParentThreadId: metadata.nativeParentThreadId,
+    nativeForkSourceThreadId: metadata.nativeForkSourceThreadId,
     projectRoot: overlay.projectRoot,
     title: metadata.title,
     engine: metadata.engine,

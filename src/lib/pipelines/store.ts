@@ -267,6 +267,8 @@ function isPipeline(value: unknown): value is Pipeline {
     pipeline.runs.every(isRun) &&
     ["draft", "provisioning", "running", "needs_decision", "paused", "completed", "closed"].includes(String(pipeline.state)) &&
     (pipeline.pausedState === null || ["provisioning", "running", "needs_decision", "completed", "closed"].includes(String(pipeline.pausedState))) &&
+    (pipeline.pausedAt === undefined || isNullableString(pipeline.pausedAt)) &&
+    (pipeline.resumedAt === undefined || isNullableString(pipeline.resumedAt)) &&
     isNullableString(pipeline.stateDetail) &&
     isNullableString(pipeline.srcPath) &&
     isNullableString(pipeline.srcConversationId) &&

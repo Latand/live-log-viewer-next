@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { deflateSync } from "node:zlib";
 
 import { auditGithubPublication, shouldFailGithubAudit } from "./privacy-github-audit";
-import { formatPrivacyReport } from "./privacy-publication-gate";
+import { commitMessageFindings, formatPrivacyReport } from "./privacy-publication-gate";
 
 const gate = join(import.meta.dir, "privacy-publication-gate.ts");
 const temporaryDirectories: string[] = [];
@@ -2667,5 +2667,92 @@ exec "$LLV_TEST_REAL_GIT" "$@"
     expect(formatPrivacyReport(findings)).toBe("PRIVACY GATE: FAIL\ninspection_error: 1\n");
     expect(requests).toHaveLength(2);
     expect(requests.every((url) => url.startsWith("https://api.github.test/"))).toBe(true);
+  });
+});
+
+describe("commitMessageFindings", () => {
+  function gitRepo(): string {
+    const repo = mkdtempSync(join(tmpdir(), "llv-privacy-commit-"));
+    temporaryDirectories.push(repo);
+    Bun.spawnSync({ cmd: ["git", "init", repo], stderr: "pipe", stdout: "pipe" });
+    Bun.spawnSync({ cmd: ["git", "-C", repo, "config", "user.email", "test@example.com"], stderr: "pipe", stdout: "pipe" });
+    Bun.spawnSync({ cmd: ["git", "-C", repo, "config", "user.name", "Test"], stderr: "pipe", stdout: "pipe" });
+    writeFileSync(join(repo, "init.txt"), "init");
+    Bun.spawnSync({ cmd: ["git", "-C", repo, "add", "."], stderr: "pipe", stdout: "pipe" });
+    Bun.spawnSync({ cmd: ["git", "-C", repo, "commit", "-m", "init"], stderr: "pipe", stdout: "pipe" });
+    Bun.spawnSync({ cmd: ["git", "-C", repo, "checkout", "-b", "feature"], stderr: "pipe", stdout: "pipe" });
+    return repo;
+  }
+
+  function commit(repo: string, message: string): void {
+    writeFileSync(join(repo, `${Date.now()}.txt`), "x");
+    Bun.spawnSync({ cmd: ["git", "-C", repo, "add", "."], stderr: "pipe", stdout: "pipe" });
+    Bun.spawnSync({ cmd: ["git", "-C", repo, "commit", "-m", message], stderr: "pipe", stdout: "pipe" });
+  }
+
+  test("flags a personal email in a Co-Authored-By trailer", () => {
+    const repo = gitRepo();
+    const localPart = "someone";
+    const domain = "personal.dev";
+    commit(repo, `feat: something\n\nCo-Authored-By: Someone <${localPart}@${domain}>`);
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(true);
+  });
+
+  test("flags a home path in a commit message", () => {
+    const repo = gitRepo();
+    const segment = ["home", "operator"].join("/");
+    commit(repo, `fix: update path /${segment}/project/file.ts`);
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("home_path")).toBe(true);
+  });
+
+  test("passes when commit messages contain no sensitive data", () => {
+    const repo = gitRepo();
+    commit(repo, "feat: add feature X");
+    commit(repo, "fix: resolve edge case in Y");
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.size).toBe(0);
+  });
+
+  test("a vendor no-reply attribution trailer is machine attribution, not a person", () => {
+    /* The commit trailer every agent-written commit here carries. It names a
+       tool and identifies nobody, and it is on 13 commits of one branch — so
+       flagging it would mean either rewriting history on every branch or
+       teaching everyone that a red privacy gate is normal. */
+    const repo = gitRepo();
+    const vendor = ["noreply", "vendor.example.com"].join("@");
+    commit(repo, `feat: something\n\nCo-Authored-By: Some Model <${vendor}>`);
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(false);
+  });
+
+  test("a GitHub no-reply address is still an account handle and is still flagged", () => {
+    /* The carve-out is the LOCAL PART being exactly noreply, and this is why:
+       `<id>+<handle>@users.noreply.github.com` reads as a no-reply address and
+       is an account handle with a number in front of it. */
+    const repo = gitRepo();
+    const handle = ["4242+someone", "users.noreply.github.com"].join("@");
+    commit(repo, `feat: something\n\nCo-Authored-By: Someone <${handle}>`);
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(true);
+  });
+
+  test("the carve-out is the trailer only, never the body", () => {
+    /* A no-reply address written into prose is not attribution, and the
+       exemption must not follow it there. */
+    const repo = gitRepo();
+    const vendor = ["noreply", "vendor.example.com"].join("@");
+    commit(repo, `fix: reported by ${vendor} in the incident thread`);
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(true);
+  });
+
+  test("ignores resource_identifier and transcript_content classes", () => {
+    const repo = gitRepo();
+    const uuid = ["550e8400", "e29b", "41d4", "a716", "446655440000"].join("-");
+    commit(repo, `fix: handle ${uuid} correctly`);
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("resource_identifier")).toBe(false);
   });
 });

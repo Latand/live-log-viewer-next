@@ -39,6 +39,7 @@ type CachedProjectFile = {
   cwd?: string | null;
   sessionStartedAt?: string | null;
   nativeParentThreadId?: string | null;
+  nativeForkSourceThreadId?: string | null;
   title?: string;
   engine?: "codex" | "claude" | "shell";
   fmt?: "codex" | "claude" | "plain";
@@ -116,6 +117,9 @@ function readState(): ProjectCatalogState {
       const nativeParentThreadId = typeof file.nativeParentThreadId === "string"
         ? file.nativeParentThreadId
         : file.nativeParentThreadId === null ? null : undefined;
+      const nativeForkSourceThreadId = typeof file.nativeForkSourceThreadId === "string"
+        ? file.nativeForkSourceThreadId
+        : file.nativeForkSourceThreadId === null ? null : undefined;
       const sidecarSize = typeof file.sidecarSize === "number" ? file.sidecarSize : file.sidecarSize === null ? null : undefined;
       const sidecarMtimeMs = typeof file.sidecarMtimeMs === "number"
         ? file.sidecarMtimeMs
@@ -127,6 +131,11 @@ function readState(): ProjectCatalogState {
         && cwd !== undefined
         && sessionStartedAt !== undefined
         && nativeParentThreadId !== undefined
+        /* A summary written before the fork edge was carried (#708) is treated
+           as incomplete rather than replayed: serving it would leave the edge
+           absent and send migration reconciliation back to the transcript
+           header for it on every restart. One re-derivation settles it. */
+        && nativeForkSourceThreadId !== undefined
         && file.projectRoot !== undefined
         && sidecarSize !== undefined
         && sidecarMtimeMs !== undefined;
@@ -147,6 +156,7 @@ function readState(): ProjectCatalogState {
         cwd,
         sessionStartedAt,
         nativeParentThreadId,
+        nativeForkSourceThreadId,
         title: typeof file.title === "string" ? file.title : undefined,
         engine,
         fmt,
@@ -236,6 +246,7 @@ function storeCachedFile(state: ProjectCatalogState, file: ProjectCatalogFile): 
     cwd: file.cwd ?? null,
     sessionStartedAt: file.sessionStartedAt ?? null,
     nativeParentThreadId: file.nativeParentThreadId ?? null,
+    nativeForkSourceThreadId: file.nativeForkSourceThreadId ?? null,
     title: file.titleCached ? file.title : undefined,
     engine: file.engine,
     fmt: file.fmt,
@@ -262,6 +273,7 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
       cwd: cached.cwd ?? undefined,
       sessionStartedAt: cached.sessionStartedAt,
       nativeParentThreadId: cached.nativeParentThreadId,
+      nativeForkSourceThreadId: cached.nativeForkSourceThreadId,
       projectRoot: cached.projectRoot,
       title: cached.title ?? fallbackTitle(raw, cached.kind),
       engine: cached.engine ?? engineForRoot(raw.rootName),
@@ -318,6 +330,7 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
         cwd: meta.cwd,
         sessionStartedAt: meta.sessionStartedAt,
         nativeParentThreadId: meta.nativeParentThreadId,
+        nativeForkSourceThreadId: meta.nativeForkSourceThreadId,
         title: meta.title,
         titleCached: true,
         engine: meta.engine,
@@ -331,6 +344,7 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
       cwd: cached.cwd ?? undefined,
       sessionStartedAt: cached.sessionStartedAt,
       nativeParentThreadId: cached.nativeParentThreadId,
+      nativeForkSourceThreadId: cached.nativeForkSourceThreadId,
       title: cached.title ?? fallbackTitle(raw, cached.kind),
       titleCached: typeof cached.title === "string",
       engine: cached.engine ?? engineForRoot(raw.rootName),
@@ -358,6 +372,7 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
     cwd: prior ? prior.cwd ?? undefined : meta.cwd,
     sessionStartedAt: prior ? prior.sessionStartedAt : meta.sessionStartedAt,
     nativeParentThreadId: prior ? prior.nativeParentThreadId : meta.nativeParentThreadId,
+    nativeForkSourceThreadId: prior ? prior.nativeForkSourceThreadId : meta.nativeForkSourceThreadId,
     title: meta.title,
     titleCached: true,
     engine: meta.engine,
@@ -454,6 +469,7 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
       cwd: file.cwd ?? null,
       sessionStartedAt: file.sessionStartedAt ?? null,
       nativeParentThreadId: file.nativeParentThreadId ?? null,
+      nativeForkSourceThreadId: file.nativeForkSourceThreadId ?? null,
       title: file.titleCached ? file.title : undefined,
       engine: file.engine,
       fmt: file.fmt,
@@ -502,6 +518,7 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
       cwd: file.cwd ?? undefined,
       sessionStartedAt: file.sessionStartedAt,
       nativeParentThreadId: file.nativeParentThreadId,
+      nativeForkSourceThreadId: file.nativeForkSourceThreadId,
       projectRoot: file.projectRoot,
       title: file.title,
       engine: file.engine,

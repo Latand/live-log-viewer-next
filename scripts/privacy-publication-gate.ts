@@ -566,7 +566,12 @@ export function sensitiveClasses(text: string): Set<FindingClass> {
   const emailPattern = /\b[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@([A-Z0-9.-]+\.[A-Z]{2,})\b/gi;
   for (let match = emailPattern.exec(searchableText); match; match = emailPattern.exec(searchableText)) {
     const domain = match[1].toLowerCase();
-    if (domain === "example.com" || domain === "example.net" || domain === "example.org" || domain.endsWith(".invalid")) continue;
+    /* RFC 6761 reserves `.test` for exactly this and guarantees it can never
+       resolve to anyone — the same reason `.invalid` is already skipped here.
+       Flagging it made fixture addresses in test files indistinguishable from a
+       real one, which teaches everybody to wave the gate through. */
+    if (domain === "example.com" || domain === "example.net" || domain === "example.org"
+      || domain.endsWith(".invalid") || domain === "test" || domain.endsWith(".test")) continue;
     findings.add("email_address");
     break;
   }
@@ -1101,6 +1106,55 @@ export function formatPrivacyReport(findings: Map<FindingClass, number>): string
   return `${lines.join("\n")}\n`;
 }
 
+const commitMessageFindingClasses = new Set<FindingClass>([
+  "credential",
+  "email_address",
+  "home_path",
+  "known_value",
+]);
+
+/**
+ * Attribution trailers naming a TOOL rather than a person.
+ *
+ * A commit message is a publication surface and its trailers are the one part
+ * of it a human never writes by hand, so they need a rule of their own. The
+ * local part must be exactly `noreply`/`no-reply`: that address belongs to a
+ * vendor and identifies nobody. Anything else is a person until proven
+ * otherwise — including `<id>+<handle>@users.noreply.github.com`, which reads
+ * as a no-reply address and is in fact an account handle with a number in
+ * front of it, exactly what this gate exists to keep out of a public repo.
+ */
+const MACHINE_ATTRIBUTION_TRAILER = /^(?:co-authored-by|signed-off-by)\s*:\s*[^<>\r\n]*<(?:noreply|no-reply)@[A-Za-z0-9.-]+\.[A-Za-z]{2,}>\s*$/i;
+
+/** The message as it reads once machine attribution is set aside. */
+export function commitMessageWithoutMachineTrailers(message: string): string {
+  return message
+    .split(/\r?\n/)
+    .filter((line) => !MACHINE_ATTRIBUTION_TRAILER.test(line.trim()))
+    .join("\n");
+}
+
+export function commitMessageFindings(repository: string, base: string): Map<FindingClass, number> {
+  const findings = new Map<FindingClass, number>();
+  const result = Bun.spawnSync({
+    cmd: ["git", "-C", repository, "log", "--format=%B%x00", `${base}...HEAD`],
+    env: withoutWakatimeCredential(process.env),
+    stderr: "pipe",
+    stdout: "pipe",
+  });
+  if (result.exitCode !== 0) {
+    addFinding(findings, "inspection_error");
+    return findings;
+  }
+  const messages = result.stdout.toString().split("\0").filter(Boolean);
+  for (const message of messages) {
+    for (const finding of sensitiveClasses(commitMessageWithoutMachineTrailers(message))) {
+      if (commitMessageFindingClasses.has(finding)) addFinding(findings, finding);
+    }
+  }
+  return findings;
+}
+
 export function reportPrivacyFindings(findings: Map<FindingClass, number>): void {
   process.stdout.write(formatPrivacyReport(findings));
   if (findings.size === 0) return;
@@ -1121,11 +1175,17 @@ if (import.meta.main) {
       error: explicitPaths.length === 0,
       paths: explicitPaths.map((path) => isAbsolute(path) ? path : resolve(inspectionRoot, path)),
     };
-  reportPrivacyFindings(inspectPaths(
+  const pathFindings = inspectPaths(
     selection.paths,
     selection.error || repositoryError,
     arguments_.includes("--require-known-values"),
     inspectionRoot,
     trustedBase,
-  ));
+  );
+  if (arguments_.includes("--check-commits")) {
+    for (const [finding, count] of commitMessageFindings(inspectionRoot, trustedBase)) {
+      pathFindings.set(finding, (pathFindings.get(finding) ?? 0) + count);
+    }
+  }
+  reportPrivacyFindings(pathFindings);
 }
