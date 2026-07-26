@@ -67,7 +67,7 @@ export function OverviewBoard({ files, projectCatalog, pipelines, workflows, arc
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div className="flex h-10 shrink-0 items-center gap-2.5 border-b border-border bg-card px-4">
+      <div className="flex h-10 shrink-0 items-center gap-2.5 overflow-hidden border-b border-border bg-card px-4">
         {onMenu ? (
           <button
             type="button"
@@ -78,9 +78,13 @@ export function OverviewBoard({ files, projectCatalog, pipelines, workflows, arc
             <Menu className="h-4 w-4" aria-hidden />
           </button>
         ) : null}
-        <h1 className="text-[13.5px] font-bold">{t("rail.overview")}</h1>
+        <h1 className="min-w-0 shrink truncate text-[13.5px] font-bold">{t("rail.overview")}</h1>
+        {/* Issue #701: the subtitle is dropped below 360px instead of wrapping
+            into this fixed 40px bar, where it overprinted the title and the
+            Orchestrator button and pushed the board past the viewport. Above
+            360px it truncates rather than growing the row. */}
         <span
-          className={`text-[11.5px] ${degraded ? "font-semibold text-danger" : "text-muted"}`}
+          className={`hidden min-w-0 shrink truncate text-[11.5px] min-[360px]:block ${degraded ? "font-semibold text-danger" : "text-muted"}`}
           data-degraded={degraded ? "true" : undefined}
         >
           {/* Issue #696: a failed catalog fetch never borrows the affirmative
