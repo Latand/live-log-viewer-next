@@ -327,18 +327,34 @@ test("link_task_to_pipeline follows the cursor retry after a fail-edge loop-back
 
 test("board_snapshot returns an inert bounded board projection with durable lineage and redaction", async () => {
   let writes = 0;
+  let rawScans = 0;
   const credentialLabel = ["api", "key"].join("_");
   const titleFixture = ["super", "secret"].join("-");
   const bindings = viewerMcpBindings(undefined, undefined, {
-    listFiles: async () => [{
-      path: "/sessions/worker.jsonl",
-      project: "viewer",
-      title: `Audit ${credentialLabel}=${titleFixture}`,
-      engine: "codex",
-      activity: "live",
-      proc: "codex",
-      conversationId: "conversation_worker",
-    }],
+    listFiles: async () => {
+      rawScans += 1;
+      throw new Error("board_snapshot must not start a raw transcript scan");
+    },
+    completedFileScan: async () => ({
+      snapshot: {
+        files: [{
+          path: "/sessions/worker.jsonl",
+          project: "viewer",
+          title: `Audit ${credentialLabel}=${titleFixture}`,
+          engine: "codex",
+          activity: "live",
+          proc: "codex",
+          conversationId: "conversation_worker",
+        }],
+        projectCatalog: [],
+        complete: true,
+      },
+      generation: 7,
+      targetGeneration: 8,
+      cacheStatus: "stale",
+      requestCount: 1,
+      cloneDurationMs: 0,
+    }),
     registrySnapshot: () => ({
       conversations: {
         conversation_worker: {
@@ -387,6 +403,7 @@ test("board_snapshot returns an inert bounded board projection with durable line
   });
   expect(JSON.stringify(result)).not.toContain("super-secret");
   expect(writes).toBe(0);
+  expect(rawScans).toBe(0);
 });
 
 test("flow tools read durable flows and return a stable action receipt", async () => {
