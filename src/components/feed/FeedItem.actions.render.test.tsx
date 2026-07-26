@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { ACTION_GUTTER, ACTION_INSET_PX, ACTION_SIZE_COARSE_PX, ACTION_SIZE_FINE_PX } from "./actionStyles";
 import { CodeBlock } from "./markdown";
 import { FeedItem } from "./FeedItem";
 import type { Item } from "./parse";
@@ -40,35 +39,23 @@ test("message actions are visible without a hover and never dimmed onto text", (
   }
 });
 
-test("a code block reserves a gutter for its copy control", () => {
+test("a code block's copy control is legible at rest, never dimmed onto the code", () => {
   const html = renderToStaticMarkup(<CodeBlock code={"const answer = 42;"} />);
-  /* The control still sits top-right, but the code is padded clear of it. */
-  expect(html).toContain(ACTION_GUTTER);
-  expect(html).toContain("absolute right-[6px] top-[6px]");
   expect(html).not.toContain("opacity-0");
   expect(html).not.toContain("[@media(hover:none)]:opacity-60");
+  expect(html).toContain("opacity-70");
 });
 
-/* Review finding 2: `CopyButton` is `h-11 w-11` on a coarse pointer, and the
-   old 40px `pr-10` gutter left the 44px button overhanging the content box by
-   10px — it covered the right edge of the first lines of code inside message
-   markdown. happy-dom has no layout engine, so the invariant is checked against
-   the declared geometry the classes are generated from. */
-test("the action gutter clears the control at both pointer sizes", () => {
-  const px = (className: string, prefix: string): number => {
-    const match = className.match(new RegExp(`${prefix}pr-\\[(\\d+)px\\]`));
-    expect(match, `no ${prefix || "base"} gutter in ${className}`).toBeTruthy();
-    return Number(match![1]);
-  };
-  const fine = px(ACTION_GUTTER, "(?<![:\\]])");
-  const coarse = px(ACTION_GUTTER, "\\[@media\\(pointer:coarse\\)\\]:");
-
-  /* The control's right edge must land inside the gutter, never on content. */
-  expect(fine).toBeGreaterThanOrEqual(ACTION_INSET_PX + ACTION_SIZE_FINE_PX);
-  expect(coarse).toBeGreaterThanOrEqual(ACTION_INSET_PX + ACTION_SIZE_COARSE_PX);
-  /* The 44px tap target is the whole point of the coarse branch. */
-  expect(ACTION_SIZE_COARSE_PX).toBeGreaterThanOrEqual(44);
-});
+/* The geometry half of this — that the code is padded clear of the control
+   rather than under it — is asserted in `actionGeometry.dom.test.tsx`, not here.
+   Two class assertions used to stand in for it: `toContain(ACTION_ANCHOR)` and
+   `toContain(ACTION_GUTTER)`. Both are class lists compared against the very
+   constants the markup interpolates, so reordering the classes inside a
+   constant failed them without any behaviour changing, while cutting the gutter
+   from 28px to 8px — the control overhanging the code by 20px, the whole defect
+   #698 is about — moved the constant with the markup and passed untouched.
+   The DOM test resolves the padding and the control's box to pixels under each
+   media state instead, so that regression fails and a reordering does not. */
 
 /* The same overlay pattern survived untouched in three feed cards. */
 test("no feed component keeps a hover-only or text-overlaying action", async () => {

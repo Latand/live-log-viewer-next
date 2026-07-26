@@ -49,23 +49,35 @@ export function OutputPreview({
   /* stderr keeps a thin danger left-edge so the failing stream stays scannable
      without wrapping the whole block in its own bordered card. */
   const edge = tone === "err" ? "border-l-2 border-danger/50 pl-2" : "";
+  /* One block, one copy control (issue #698). The highlighted body is a
+     `CodeBlock`, which brings its own control at the same top-right anchor — a
+     second one here landed on top of it and left the lower one unreachable, and
+     `MESSAGE_ACTION`'s opacity-70 made that collision permanent instead of
+     hover-only. So the control is delegated with this block's label, and the
+     block copies `output` rather than `shown`: they are the same string in this
+     branch (`all` is true), but the full-output guarantee should not rest on
+     the reader noticing that. */
+  const embedded = all && lang ? lang : null;
+  const copy = copyLabel ?? tr("tools.copyOutput");
   return (
     <div className="group/out relative mt-1.5">
       {label}
-      {all && lang ? (
-        <CodeBlock code={shown} lang={lang} />
+      {embedded ? (
+        <CodeBlock code={output} lang={embedded} copyLabel={copy} />
       ) : (
         <pre className={`max-h-[420px] max-w-full overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-[12px] text-secondary ${ACTION_GUTTER} ${edge}`}>
           {shown}
         </pre>
       )}
-      <CopyButton
-        text={output}
-        label={copyLabel ?? tr("tools.copyOutput")}
-        /* Issue #698: was `opacity-0` on desktop and a permanent 60% overlay on
-           a coarse pointer, over an 8px gutter that a 44px button dwarfed. */
-        className={`absolute right-[6px] ${MESSAGE_ACTION} group-hover/out:opacity-100 ${heading ? "top-5" : "top-[6px]"}`}
-      />
+      {embedded ? null : (
+        <CopyButton
+          text={output}
+          label={copy}
+          /* Issue #698: was `opacity-0` on desktop and a permanent 60% overlay
+             on a coarse pointer, over an 8px gutter that a 44px button dwarfed. */
+          className={`absolute right-[6px] ${MESSAGE_ACTION} group-hover/out:opacity-100 ${heading ? "top-5" : "top-[6px]"}`}
+        />
+      )}
       {overflow ? (
         <button
           type="button"

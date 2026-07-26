@@ -85,25 +85,67 @@ test("no failures renders nothing at all", () => {
   expect(render(<CatalogFailureNotice failures={0} />).textContent).toBe("");
 });
 
+/** Every JSX opening tag for `component`, brace-aware so a `=>` inside a prop
+    value does not end the tag early. */
+function openingTags(source: string, component: string): string[] {
+  const tags: string[] = [];
+  for (const match of source.matchAll(new RegExp(`<${component}(?![A-Za-z0-9])`, "g"))) {
+    const start = match.index!;
+    let depth = 0;
+    for (let i = start; i < source.length; i += 1) {
+      const ch = source[i];
+      if (ch === "{") depth += 1;
+      else if (ch === "}") depth -= 1;
+      else if (ch === ">" && depth === 0) {
+        tags.push(source.slice(start, i + 1));
+        break;
+      }
+    }
+  }
+  return tags;
+}
+
 /* The defect the review found was the WIRING, not the notice: the prop simply
    never reached the dashboard. Mounting the whole dashboard needs a harness far
    larger than the guarantee is worth, so this pins the wiring at the source —
-   every surface that can render an unconfirmed catalog is fed the count. */
+   every surface that can render an unconfirmed catalog is fed the count.
+
+   Asserted per surface, never as a total. Counting the wiring sites (the rail
+   twice, the board, the dashboard: "exactly 4") made the test fail the moment
+   somebody wired a FIFTH surface correctly — punishing the next person for
+   doing the right thing, and teaching them to edit the number rather than think
+   about it. What matters is that no surface renders WITHOUT the count. */
 test("every catalog surface is fed the failure count", async () => {
   const fs = await import("node:fs");
   const path = await import("node:path");
   const read = (file: string) => fs.readFileSync(path.join(import.meta.dir, file), "utf8");
 
   const viewer = read("Viewer.tsx");
-  /* The rail (x2), the overview board, and the project dashboard. */
-  expect(viewer.match(/catalogFailures=\{catalogFailures\}/g)?.length).toBe(4);
+  /* Each surface that can show an unconfirmed catalog, at every site it is
+     rendered from — a new surface joins this list, it does not shift a count. */
+  for (const surface of ["ProjectRail", "OverviewBoard", "ProjectDashboard"]) {
+    const tags = openingTags(viewer, surface);
+    expect(tags.length, `Viewer.tsx renders no <${surface}>`).toBeGreaterThan(0);
+    for (const tag of tags) {
+      expect(tag, `a <${surface}> in Viewer.tsx renders without the catalog failure count`).toContain("catalogFailures={catalogFailures}");
+    }
+  }
 
   const dashboard = read("ProjectDashboard.tsx");
-  /* Both skeleton sites — mobile focus view and desktop scheme board. */
-  expect(dashboard.match(/catalogFailures > 0 \? <CatalogFailureNotice/g)?.length).toBe(2);
+  /* Every skeleton site must yield to the notice. Comparing the two derived
+     counts — not either against a literal — means a correctly guarded third
+     site keeps passing and an unguarded one fails. */
+  const skeletons = dashboard.match(/<SchemeSkeleton\b/g) ?? [];
+  const guarded = dashboard.match(/catalogFailures > 0 \? <CatalogFailureNotice[^\n]*?\/> : <SchemeSkeleton\b/g) ?? [];
+  expect(skeletons.length, "the dashboard renders no skeleton at all").toBeGreaterThan(0);
+  expect(guarded.length, "a skeleton site does not yield to the catalog failure notice").toBe(skeletons.length);
+
   /* …and the deck it owns. */
-  expect(dashboard).toContain("<Switchboard files={files}");
-  expect(dashboard).toMatch(/<Switchboard[^>]*catalogFailures=\{catalogFailures\}/);
+  const decks = openingTags(dashboard, "Switchboard");
+  expect(decks.length, "ProjectDashboard.tsx renders no <Switchboard>").toBeGreaterThan(0);
+  for (const deck of decks) {
+    expect(deck, "a <Switchboard> renders without the catalog failure count").toContain("catalogFailures={catalogFailures}");
+  }
 
   for (const file of ["ProjectRail.tsx", "Switchboard.tsx"]) {
     expect(read(file), `${file} must route through the shared notice`).toContain("<CatalogFailureNotice");

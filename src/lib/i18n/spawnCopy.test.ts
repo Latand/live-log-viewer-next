@@ -14,8 +14,14 @@ import { uk } from "./uk";
  * the pane picks only once `/api/spawn` reports `spawnTransport: "tmux"`.
  */
 
-/** Pre-launch spawn copy: promises made before any transport is resolved. */
-const PRE_LAUNCH_SPAWN_KEYS = ["composer.placeholderSpawn", "composer.spawnAria", "composer.launchAgent"] as const;
+/** Pre-launch spawn copy: promises made before any transport is resolved.
+ *
+ * `composer.titleSpawnResumed` is the tooltip on the resume chip
+ * (`AgentControlStrip`), and it belongs here for the same reason: a resume goes
+ * through the same `/api/spawn` path, whose `target` is null under a structured
+ * transport, so "new tmux window with the resumed agent" described a window
+ * that never opens. */
+const PRE_LAUNCH_SPAWN_KEYS = ["composer.placeholderSpawn", "composer.spawnAria", "composer.launchAgent", "composer.titleSpawnResumed"] as const;
 
 test("pre-launch spawn copy names no transport in either locale", () => {
   for (const key of PRE_LAUNCH_SPAWN_KEYS) {

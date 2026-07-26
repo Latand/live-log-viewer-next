@@ -16,7 +16,14 @@ export const MESSAGE_ACTION =
    fine pointer and a full 44px tap target on a coarse one, and it is pinned
    `ACTION_INSET_PX` from the body's right edge. The gutter has to clear the
    LARGER of the two, or the coarse-pointer button overhangs the content box —
-   which is exactly what a 40px `pr-10` gutter did against a 44px button. */
+   which is exactly what a 40px `pr-10` gutter did against a 44px button.
+
+   ONE predicate decides both halves: `(pointer: coarse)`, read in CSS by the
+   gutter below and in JS by `CopyButton`'s `useCoarsePointer()`. Two predicates
+   is the second way this breaks — sizing the button off a viewport width while
+   the gutter reads the pointer leaves a fine pointer under 768px with a 44px
+   control in a 28px gutter. If either half ever moves to another axis, move
+   both. */
 export const ACTION_INSET_PX = 6;
 export const ACTION_SIZE_FINE_PX = 22;
 export const ACTION_SIZE_COARSE_PX = 44;

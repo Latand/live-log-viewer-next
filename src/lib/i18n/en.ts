@@ -317,7 +317,10 @@ export const en = {
   "composer.optionsShow": "Show message options",
   "composer.optionsHide": "Hide message options",
   "composer.titleRelay": "relayed through the branch's root session",
-  "composer.titleSpawnResumed": "new tmux window with the resumed agent",
+  /* Issue #702: shown on the resume chip BEFORE the launch, so it cannot name a
+     transport. Under a structured deployment a resume comes back with no target
+     and opens no window at all (see spawnCopy.test.ts). */
+  "composer.titleSpawnResumed": "starts a fresh agent session that continues this conversation",
   "composer.root": "root",
   "composer.interruptAria": "Interrupt the agent (Escape)",
   "composer.interruptTitle": "send Escape to the agent pane",

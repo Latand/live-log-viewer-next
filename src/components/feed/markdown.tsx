@@ -49,8 +49,12 @@ function InlineCode({ text }: { text: string }) {
    rest on every pointer, and never on top of the first line. A `lang` hint
    lazily upgrades the body to highlight.js output on first paint (see
    useHighlighted); until the chunk resolves — or when the language is unknown —
-   it stays plain monospace, so nothing blocks or flashes. */
-export function CodeBlock({ code, lang }: { code: string; lang?: string | null }) {
+   it stays plain monospace, so nothing blocks or flashes.
+
+   The block owns its copy control, so an embedder renders none of its own —
+   `copyLabel` lets it name what the block actually holds (an expanded tool
+   output says "copy output", not "copy code"). */
+export function CodeBlock({ code, lang, copyLabel }: { code: string; lang?: string | null; copyLabel?: string }) {
   const highlighted = useHighlighted(code, lang);
   return (
     <div className="group/code relative my-1.5 max-w-full">
@@ -67,7 +71,7 @@ export function CodeBlock({ code, lang }: { code: string; lang?: string | null }
           lines of code, and it is legible without a hover. */}
       <CopyButton
         text={code}
-        label={tr("feed.copyCode")}
+        label={copyLabel ?? tr("feed.copyCode")}
         className={`${ACTION_ANCHOR} ${MESSAGE_ACTION} group-hover/code:opacity-100`}
       />
     </div>

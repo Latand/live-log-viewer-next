@@ -302,7 +302,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "composer.optionsShow": "Показати параметри повідомлення",
   "composer.optionsHide": "Сховати параметри повідомлення",
   "composer.titleRelay": "передасться через кореневу сесію гілки",
-  "composer.titleSpawnResumed": "нове tmux-вікно з відновленим агентом",
+  "composer.titleSpawnResumed": "запустить новий сеанс агента, який продовжить цю розмову",
   "composer.root": "корінь",
   "composer.interruptAria": "Перервати агента (Escape)",
   "composer.interruptTitle": "надіслати Escape у пейн агента",
