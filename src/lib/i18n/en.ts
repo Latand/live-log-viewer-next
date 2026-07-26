@@ -268,7 +268,7 @@ export const en = {
   "composer.sentPaths": "sent {count} path(s)",
   "composer.failedInterrupt": "couldn't interrupt",
   "composer.escapeSent": "sent Escape — agent interrupted",
-  "composer.spawnAria": "Launch an agent with a prompt in tmux",
+  "composer.spawnAria": "Launch an agent with a prompt",
   "composer.resolvingAria": "Message the existing agent — delivery starts after its host is resolved",
   "composer.sendAria": "Send a message to the agent in tmux {target}",
   "composer.sendStructuredAria": "Send a message through the structured runtime host",
@@ -304,7 +304,10 @@ export const en = {
   "composer.deliveredEcho": "Delivered — appearing in the feed",
   "composer.retrySend": "Retry send",
   "composer.placeholderRelay": "type — I'll relay through the root session…",
-  "composer.placeholderSpawn": "prompt — the agent will start in tmux…",
+  /* Issue #702: no transport promise. #685 inverted the rollout gates, so a
+     deployment that declares a runtime host spawns structured and pane-less —
+     the placeholder used to name a tmux session the spawn never opens. */
+  "composer.placeholderSpawn": "prompt — the agent will start…",
   "composer.placeholderResolving": "message the agent — reconnecting to its session…",
   "composer.placeholderSend": "message the agent…",
   "composer.textAria": "Text for the agent",
