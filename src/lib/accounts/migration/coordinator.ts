@@ -206,10 +206,17 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
       // lineage edge against the post-admission index, even for a parent first
       // discovered in this same inventory cycle.
       parentArtifactPath: entry.parent,
-      // Provider-fork history (issue #708). Read from the FIRST `session_meta`
-      // row, because a fork replays its ancestor's header as row two.
+      // Provider-fork history (issue #708). The scanner resolved this from the
+      // FIRST `session_meta` row — a fork replays its ancestor's header as row
+      // two — and carries it on the entry, including through the persisted scan
+      // snapshot. Reconciliation reads it there instead of opening the
+      // transcript again; only an entry no scanner has described (an absent
+      // field, not a null one) falls back to the header, which is what still
+      // adopts forks discovered outside a scan.
       forkSourceThreadId: engine === "codex"
-        ? nativeCodexForkSourceThreadId(entry.path, entry.size, mtimeMs)
+        ? entry.nativeForkSourceThreadId === undefined
+          ? nativeCodexForkSourceThreadId(entry.path, entry.size, mtimeMs)
+          : entry.nativeForkSourceThreadId
         : null,
       expectedTurnObservedAt: existing?.turn.observedAt ?? null,
       startedAt: entry.sessionStartedAt ?? headSessionStartedAt(entry.path, transcriptIdentity),

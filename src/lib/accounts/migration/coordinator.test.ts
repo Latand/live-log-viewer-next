@@ -3872,4 +3872,79 @@ describe("Codex canonical root conversation and fork recovery (#708)", () => {
     expect(boardFor("repo").prefs.manual).toEqual([rootPath]);
     expect(boardFor("repo").explicitManual).toEqual([rootPath]);
   });
+
+  test("a scanned fork edge is read off the entry, and only an undescribed entry reopens the header", async () => {
+    const store = registry();
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-708-carried-edge-"));
+    roots.push(base);
+    const sessions = path.join(base, "sessions");
+    fs.mkdirSync(sessions, { recursive: true, mode: 0o700 });
+    const forkId = "019f9c11-0000-\x37000-8000-00000000dd10";
+    const rootPath = path.join(sessions, `rollout-${SOURCE_THREAD}.jsonl`);
+    const forkPath = path.join(sessions, `rollout-${forkId}.jsonl`);
+    /* Padded past the bounded prefix so a header read is a full 64 KiB request
+       at offset zero, and the turn tail is read from a different offset. */
+    const padding = "x".repeat(150_000) + "\n";
+    fs.writeFileSync(rootPath, sessionMeta(SOURCE_THREAD) + padding, { mode: 0o600 });
+    fs.writeFileSync(forkPath, sessionMeta(forkId, SOURCE_THREAD) + sessionMeta(SOURCE_THREAD) + padding, { mode: 0o600 });
+    /* What the scanner hands reconciliation: cwd, session start and the fork
+       edge are all already resolved from the one header read the scan did. */
+    const described = (pathname: string, nativeForkSourceThreadId: string | null): FileEntry => ({
+      ...fileEntry(pathname),
+      cwd: "/repo",
+      sessionStartedAt: "2026-07-26T02:00:00.000Z",
+      nativeForkSourceThreadId,
+    });
+    /* The conversation the operator has been using all along: the fork is
+       adopted into an owner that already exists, exactly as a live cycle finds
+       it. */
+    store.ensureConversation("codex", rootPath, "a");
+
+    const originalOpenSync = fs.openSync;
+    const originalReadSync = fs.readSync;
+    const originalCloseSync = fs.closeSync;
+    const fixtureFds = new Set<number>();
+    let headerReads = 0;
+    fs.openSync = ((target: fs.PathLike, ...args: unknown[]) => {
+      const fd = Reflect.apply(originalOpenSync, fs, [target, ...args]) as number;
+      if (path.resolve(String(target)).startsWith(sessions + path.sep)) fixtureFds.add(fd);
+      return fd;
+    }) as typeof fs.openSync;
+    fs.readSync = ((fd: number, ...args: unknown[]) => {
+      if (fixtureFds.has(fd) && args[3] === 0) headerReads += 1;
+      return Reflect.apply(originalReadSync, fs, [fd, ...args]);
+    }) as typeof fs.readSync;
+    fs.closeSync = ((fd: number) => {
+      fixtureFds.delete(fd);
+      return originalCloseSync(fd);
+    }) as typeof fs.closeSync;
+    try {
+      await reconcileMigrationInventory(store, [
+        described(rootPath, null),
+        described(forkPath, SOURCE_THREAD),
+      ]);
+      const carried = headerReads;
+
+      /* The same edge, from an entry nobody described — a fixture, or a scan
+         snapshot written before the field existed. The header is the fallback,
+         so a pre-existing orphan fork is still adopted. */
+      const undescribedStore = registry();
+      undescribedStore.ensureConversation("codex", rootPath, "a");
+      headerReads = 0;
+      await reconcileMigrationInventory(undescribedStore, [rootPath, forkPath].map(fileEntry));
+      const fallbackReads = headerReads;
+
+      expect({ carried, fallbackReads }).toEqual({ carried: 0, fallbackReads: 2 });
+      for (const owner of [store, undescribedStore]) {
+        const conversations = Object.values(owner.snapshot().conversations);
+        expect(conversations).toHaveLength(1);
+        expect(conversations[0]!.providerForkPaths).toEqual([forkPath]);
+        expect(owner.conversationForPath(forkPath)?.id).toBe(owner.conversationForPath(rootPath)?.id);
+      }
+    } finally {
+      fs.openSync = originalOpenSync;
+      fs.readSync = originalReadSync;
+      fs.closeSync = originalCloseSync;
+    }
+  });
 });
