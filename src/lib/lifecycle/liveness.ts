@@ -165,18 +165,34 @@ function hostEvidence(
   probe: LivenessProbe,
 ): { state: AgentHostState; kind: "tmux" | "structured" | "none"; pid: number | null } {
   if (!entry) return { state: "unknown", kind: "none", pid: null };
+  const hosted = entry.status === "starting" || entry.status === "live" || entry.status === "idle" || entry.status === "handoff";
   const structured = entry.structuredHost?.process ?? null;
-  if (entry.host) {
-    const alive = identityAlive(entry.host.agent, probe) || identityAlive(entry.host.panePid, probe);
-    return { state: alive ? "alive" : "gone", kind: "tmux", pid: entry.host.agent.pid };
+  const tmux = entry.host
+    ? {
+        state: identityAlive(entry.host.agent, probe) || identityAlive(entry.host.panePid, probe) ? "alive" as const : "gone" as const,
+        kind: "tmux" as const,
+        pid: entry.host.agent.pid,
+      }
+    : null;
+  const structuredEvidence = structured
+    ? {
+        state: identityAlive(structured, probe) ? "alive" as const : "gone" as const,
+        kind: "structured" as const,
+        pid: structured.pid,
+      }
+    : null;
+
+  if (!hosted) {
+    const recorded = tmux ?? structuredEvidence;
+    return recorded ? { ...recorded, state: "gone" } : { state: "gone", kind: "none", pid: null };
   }
-  if (structured) {
-    return { state: identityAlive(structured, probe) ? "alive" : "gone", kind: "structured", pid: structured.pid };
-  }
+  if (tmux?.state === "alive") return tmux;
+  if (structuredEvidence?.state === "alive") return structuredEvidence;
+  if (tmux) return tmux;
+  if (structuredEvidence) return structuredEvidence;
+
   /* A hosted status with no recorded process is either a launch still being
      admitted or registry rot; the grace decides which. */
-  const hosted = entry.status === "starting" || entry.status === "live" || entry.status === "idle" || entry.status === "handoff";
-  if (!hosted) return { state: "gone", kind: "none", pid: null };
   const updatedAt = Date.parse(entry.updatedAt);
   const young = Number.isFinite(updatedAt) && probe.now() - updatedAt < STARTING_GRACE_MS;
   return { state: young ? "unknown" : "gone", kind: "none", pid: null };
