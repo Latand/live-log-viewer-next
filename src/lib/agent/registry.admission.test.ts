@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, expect, test } from "bun:test";
 
-import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
+import { emptyLaunchProfile, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
 const previousStateDir = process.env.LLV_STATE_DIR;
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-admission-"));
@@ -54,6 +54,53 @@ function spawnAtDepth(
   if (begun.kind !== "created") throw new Error("expected create");
   return { launchId: begun.receipt.launchId, conversationId: settleLaunch(store, begun.receipt.launchId) };
 }
+
+test("a delegated conversation never acquires a Codex plugin grant (#687)", () => {
+  const { store } = registryAt("plugin-grant-delegation");
+  const parent = store.ensureConversation("codex", "/sessions/plugin-grant-parent.jsonl", "terra");
+  /* A stored profile that claims the grant is overridden for every delegated
+     launch shape: a role preset, and a lineage parent. */
+  const claimed = { plugins: ["computer-use"] };
+  const roleLaunch = store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    role: "builder",
+    origin: { kind: "operator" },
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", ...claimed }),
+  });
+  if (roleLaunch.kind !== "created") throw new Error("expected create");
+  const roleConversation = settleLaunch(store, roleLaunch.receipt.launchId);
+  const resumed = store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    conversationId: roleConversation,
+    purpose: "resume-successor",
+    origin: { kind: "operator" },
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", ...claimed }),
+  });
+  if (resumed.kind !== "created") throw new Error("expected create");
+  expect(resumed.receipt.launchProfile.plugins).toEqual([]);
+
+  const childLaunch = store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    parentConversationId: parent.id,
+    origin: { kind: "agent", conversationId: parent.id },
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", ...claimed }),
+  });
+  if (childLaunch.kind !== "created") throw new Error("expected create");
+  expect(childLaunch.receipt.launchProfile.plugins).toEqual([]);
+
+  /* The operator's own root session keeps the grant its spawn decided. */
+  const rootLaunch = store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    origin: { kind: "operator" },
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", ...claimed }),
+  });
+  if (rootLaunch.kind !== "created") throw new Error("expected create");
+  expect(rootLaunch.receipt.launchProfile.plugins).toEqual(["computer-use"]);
+});
 
 test("a reviewer-origin launch is terminally rejected with a durable typed receipt and zero child artifacts", () => {
   const { store } = registryAt("reviewer-origin");

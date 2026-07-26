@@ -1,5 +1,6 @@
 import type { AgentEngine } from "@/lib/agent/cli";
 import { normalizeSpawnMcpServers } from "@/lib/agent/mcpAllowlist";
+import { grantedPlugins } from "@/lib/agent/pluginAllowlist";
 import type { StructuredImageRef } from "@/lib/runtime/structuredContent";
 import type { AgentGoal, AgentPlan, EngineLimits, LimitsProvenance } from "@/lib/types";
 
@@ -58,6 +59,10 @@ export interface LaunchProfile {
   readOnly: boolean | null;
   allowSubagents: boolean;
   mcpServers: string[];
+  /** Codex plugins granted to this session (issue #687). Decided once, at
+      spawn, from the session's origin; a resume replays it and can never
+      widen it. Empty for every delegated session. */
+  plugins: string[];
   title: string | null;
   project: string | null;
   parentConversationId: ViewerConversationId | null;
@@ -84,6 +89,9 @@ export function emptyLaunchProfile(overrides: Partial<LaunchProfile> = {}): Laun
     plan: null,
     ...overrides,
     mcpServers: mcpServers.ok ? mcpServers.value : ["viewer"],
+    /* The grant bound is enforced again here: a durable profile can only ever
+       carry plugins the Viewer is allowed to grant (issue #687). */
+    plugins: grantedPlugins(overrides.plugins),
   };
 }
 

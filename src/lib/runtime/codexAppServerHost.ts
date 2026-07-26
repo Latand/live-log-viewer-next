@@ -5,6 +5,7 @@ import { isKnownEffortTier } from "@/lib/agent/efforts";
 import { procBackend } from "@/lib/proc";
 import { signalDetachedProcessGroup, signalProcessGroup, type ProcessSignal } from "@/lib/processGroup";
 import { headlessCodexThreadConfig } from "@/lib/codexHeadlessConfig";
+import { grantedPluginServerNames, grantedPlugins } from "@/lib/agent/pluginAllowlist";
 import { hardenedRedact } from "@/lib/view/compactText";
 import { decodeCodexStructuredUserText, encodeCodexStructuredUserText } from "./codexStructuredUserText";
 import { runtimeImageStore } from "./runtimeImageStore";
@@ -89,6 +90,9 @@ export interface CodexAppServerHostOptions {
   effort?: string;
   allowSubagents?: boolean;
   mcpServers?: string[];
+  /** Codex plugins granted to this session (issue #687). Empty or absent
+      denies the plugin subsystem, which is the default for every session. */
+  plugins?: readonly string[];
   fileAuthCredentials?: boolean;
   sandbox?: string;
   approvalPolicy?: string;
@@ -143,6 +147,33 @@ const CHILD_ENV_ALLOWLIST = [
   "SSL_CERT_FILE",
   "SSL_CERT_DIR",
   "LLV_SPAWN_CAPABILITY",
+] as const;
+/**
+ * Desktop-session variables forwarded ONLY to a host that holds a plugin grant
+ * (issue #687). The bundled `computer-use` backend reads each of these to find
+ * the operator's live session; without them it can only guess from defaults,
+ * which breaks outside a single-session GNOME/Wayland layout. Kept minimal and
+ * enumerated — no blanket environment passthrough:
+ *
+ *  - `DISPLAY`/`XAUTHORITY`: X11 (and Xwayland) server address plus the auth
+ *    cookie that connection needs — used by the AT-SPI and `xprop` paths.
+ *  - `WAYLAND_DISPLAY`: compositor socket name, for the Wayland window
+ *    backends when it is not the default `wayland-0`.
+ *  - `XDG_SESSION_TYPE`, `XDG_CURRENT_DESKTOP`, `DESKTOP_SESSION`: which
+ *    backend the plugin selects (GNOME Shell introspection, KWin, COSMIC …).
+ *
+ * `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` are equally required and
+ * already forwarded to every host above. Deliberately excluded: `YDOTOOL_SOCKET`
+ * and every other input-backend variable — this grant is for reading the
+ * desktop, and input stays behind the desktop permission path.
+ */
+const DESKTOP_ENV_ALLOWLIST = [
+  "DISPLAY",
+  "XAUTHORITY",
+  "WAYLAND_DISPLAY",
+  "XDG_SESSION_TYPE",
+  "XDG_CURRENT_DESKTOP",
+  "DESKTOP_SESSION",
 ] as const;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS = 5 * 60_000;
@@ -217,9 +248,10 @@ function stderrExitDiagnostic(value: string): string {
     .slice(0, 430);
 }
 
-function subscriptionEnv(source: NodeJS.ProcessEnv, codexHome?: string): NodeJS.ProcessEnv {
+function subscriptionEnv(source: NodeJS.ProcessEnv, codexHome?: string, desktopSession = false): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { NODE_ENV: source.NODE_ENV };
-  for (const name of CHILD_ENV_ALLOWLIST) {
+  const names = desktopSession ? [...CHILD_ENV_ALLOWLIST, ...DESKTOP_ENV_ALLOWLIST] : CHILD_ENV_ALLOWLIST;
+  for (const name of names) {
     if (source[name] !== undefined) env[name] = source[name];
   }
   if (codexHome) env.CODEX_HOME = codexHome;
@@ -458,9 +490,10 @@ export class CodexAppServerHost implements EngineHost {
       "--enable",
       "realtime_conversation",
     ];
+    const granted = grantedPlugins(options.plugins);
     const child = spawnProcess(options.binary ?? process.env.LLV_CODEX_BINARY ?? "codex", args, {
       cwd: options.cwd,
-      env: subscriptionEnv(options.env ?? process.env, options.codexHome),
+      env: subscriptionEnv(options.env ?? process.env, options.codexHome, granted.length > 0),
       detached: true,
     });
     const provisional = new CodexAppServerHost(child, { threadId: threadId ?? "pending", path: null }, options);
@@ -491,6 +524,7 @@ export class CodexAppServerHost implements EngineHost {
         await provisional.rpc("config/read", { cwd: options.cwd, includeLayers: false }),
         options.allowSubagents === true,
         options.mcpServers,
+        granted,
       );
       const result = threadId
         ? await provisional.rpc("thread/resume", { threadId, config })
@@ -507,6 +541,7 @@ export class CodexAppServerHost implements EngineHost {
       }
       provisional.identity.threadId = identity.threadId;
       provisional.identity.path = identity.path;
+      if (granted.length > 0) await provisional.verifyPluginGrant(granted, config);
       provisional.rememberConfirmedDeliveries(result);
       provisional.restoreEvents();
       provisional.beginBufferedNotificationReconciliation();
@@ -523,6 +558,33 @@ export class CodexAppServerHost implements EngineHost {
         throw new StructuredHostAdoptionCleanupError(safeError(error), provisional, { cause: cleanupError });
       }
       throw new Error(safeError(error));
+    }
+  }
+
+  /**
+   * Fails a granted thread closed when its realized tool surface is wider than
+   * the grant (issue #687). Codex resolves plugins from the global config, so
+   * `features.plugins` is the only per-thread gate it applies — this check is
+   * what turns that coarse gate into the allowlist: every MCP server the thread
+   * gained beyond its own configured table must belong to a granted plugin, or
+   * the host never opens. A grant that cannot be verified is not granted.
+   */
+  private async verifyPluginGrant(granted: readonly string[], config: JsonObject): Promise<void> {
+    const configured = new Set(Object.keys(record(config.mcp_servers) ?? {}));
+    const allowed = new Set(grantedPluginServerNames(granted));
+    let listed: unknown;
+    try {
+      listed = await this.rpc("mcpServerStatus/list", { threadId: this.identity.threadId });
+    } catch (error) {
+      throw new Error(`Codex plugin grant could not be verified: ${safeError(error)}`);
+    }
+    const entries = record(listed)?.data ?? listed;
+    if (!Array.isArray(entries)) throw new Error("Codex plugin grant could not be verified: mcpServerStatus/list returned no server list");
+    const unexpected = entries
+      .map((entry) => stringField(record(entry), "name"))
+      .filter((name): name is string => name !== null && !configured.has(name) && !allowed.has(name));
+    if (unexpected.length > 0) {
+      throw new Error(`Codex plugin grant surfaced servers outside the allowlist: ${[...new Set(unexpected)].sort().join(", ")}`);
     }
   }
 
