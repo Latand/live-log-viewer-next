@@ -74,6 +74,18 @@ function audioCtx(): AudioContext | null {
 }
 
 /**
+ * The tab's single AudioContext, shared with the sampled cue layer
+ * (`@/lib/audio`). One context means ONE thing the autoplay policy has to
+ * unlock: {@link primeAudio} resumes it and both the synthesized dictation
+ * chimes and the earcons start working at the same moment. Browsers also cap how
+ * many contexts a page may own, and a second one here would spend that budget
+ * for nothing.
+ */
+export function sharedAudioContext(): AudioContext | null {
+  return audioCtx();
+}
+
+/**
  * Autoplay policy keeps a fresh AudioContext suspended until a user gesture;
  * unlock it on the first interaction so later poll-driven chimes can play.
  * Returns the listener cleanup.
