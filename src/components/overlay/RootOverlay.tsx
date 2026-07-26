@@ -185,6 +185,7 @@ export function RootOverlay(props: RootOverlayProps) {
               data-testid="overlay-turn"
               data-role={entry.turn.role}
               data-partial={entry.turn.partial ? "true" : undefined}
+              data-clamp={entry.clampLines}
               style={{
                 display: "-webkit-box",
                 WebkitLineClamp: entry.clampLines,
