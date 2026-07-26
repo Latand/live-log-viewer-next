@@ -54,6 +54,7 @@ const adversarialFindingClasses = new Set<FindingClass>([
 ]);
 const rasterExtensions = new Set([".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"]);
 const animatedExtensions = new Set([".avi", ".gif", ".m4v", ".mkv", ".mov", ".mp4", ".webm"]);
+const audioExtensions = new Set([".mp3", ".wav"]);
 const textExtensions = new Set([
   ".cjs", ".conf", ".css", ".csv", ".env", ".graphql", ".htm", ".html", ".ini", ".js", ".json",
   ".jsx", ".lock", ".md", ".mdx", ".mjs", ".properties", ".sh", ".svg", ".toml", ".ts", ".tsx",
@@ -79,7 +80,7 @@ type SafePathResult = {
   status: "missing" | "safe" | "symlink";
 };
 
-type MediaKind = "animated" | "png" | "raster";
+type MediaKind = "animated" | "audio" | "png" | "raster";
 
 function safePath(path: string): SafePathResult {
   const absolute = resolve(path);
@@ -186,6 +187,9 @@ function signatureMediaKind(bytes: Buffer): MediaKind | undefined {
   if (bytes.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex"))) return "png";
   if (bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))) return "raster";
   const prefix = bytes.subarray(0, 12).toString("latin1");
+  if (prefix.startsWith("ID3")
+    || (bytes.length >= 2 && bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0)) return "audio";
+  if (prefix.startsWith("RIFF") && prefix.slice(8, 12) === "WAVE") return "audio";
   if (prefix.startsWith("GIF87a") || prefix.startsWith("GIF89a")) return "animated";
   if (prefix.startsWith("BM")) return "raster";
   if (bytes.subarray(0, 4).equals(Buffer.from([0x49, 0x49, 0x2a, 0x00]))
@@ -202,7 +206,9 @@ function signatureMediaKind(bytes: Buffer): MediaKind | undefined {
 
 function mediaKind(path: string): MediaKind | undefined {
   try {
-    return signatureMediaKind(readFileSync(path)) ?? extensionMediaKind(path);
+    const signature = signatureMediaKind(readFileSync(path));
+    if (signature === "audio" && !audioExtensions.has(extname(path).toLowerCase())) return undefined;
+    return signature ?? extensionMediaKind(path);
   } catch {
     return extensionMediaKind(path);
   }
@@ -1064,7 +1070,7 @@ export function inspectPaths(
     for (const finding of inspectRaster(path, kind)) pathFindings.add(finding);
     for (const finding of inspectAnimated(path, kind)) pathFindings.add(finding);
     for (const finding of inspectText(path, kind)) pathFindings.add(finding);
-    if (kind) {
+    if (kind && kind !== "audio") {
       const provenance = provenanceFor(path, inspectionRoot, trustedBase);
       if (provenance.status === "missing") pathFindings.add("provenance_missing");
       if (provenance.status === "invalid") pathFindings.add("provenance_invalid");
