@@ -33,7 +33,9 @@ import { MobilePipelineDock } from "./MobilePipelineDock";
 import { MobilePipelineDockSheet, MobilePipelineSummaryButton, MobilePipelineSummaryRow } from "./MobilePipelineDockSheet";
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { SubagentTray, type SubagentTrayApi } from "../scheme/SubagentTrayView";
+import { focusHandoffBus } from "@/components/attention/focusHandoffBus";
 import { deckKey } from "@/components/scheme/agentLinks";
+import { buildFocusFrameIndex, stageAnchorAliases } from "@/components/scheme/focusFrames";
 import { buildSchemeLayout } from "@/components/scheme/layout";
 import { SubagentBadges } from "@/components/scheme/SubagentBadges";
 import { layoutPipelineGroups, type PipelinePane } from "@/components/scheme/pipelineAnchor";
@@ -201,6 +203,26 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
     [layout],
   );
   const byKey = useMemo(() => new Map(entries.map((entry) => [entry.key, entry])), [entries]);
+
+  /* #688: the phone's half of a focus handoff. It resolves anchors through the
+     same index the desktop board publishes, but arrives by pinning the pane
+     rather than by moving a camera — there is no camera here, and one pane is
+     on screen at a time. A destination with no pane behind it (a coordinate, or
+     the space a vanished card used to occupy) is refused rather than answered
+     with an arrival that did not happen. */
+  const focusIndex = useMemo(() => buildFocusFrameIndex(layout, project, { aliases: stageAnchorAliases(pipelines) }), [layout, project, pipelines]);
+  useEffect(() => focusHandoffBus.setBoard({
+    project,
+    index: focusIndex,
+    moveTo: ({ anchorKeys }) => {
+      const landing = anchorKeys.find((key) => byKey.has(key));
+      if (!landing) return false;
+      setFocusPath(landing);
+      setMapOpen(false);
+      return true;
+    },
+    restoreCamera: () => false,
+  }), [project, focusIndex, byKey]);
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {

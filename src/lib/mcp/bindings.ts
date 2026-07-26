@@ -4,6 +4,10 @@ import { agentRegistry } from "@/lib/agent/registry";
 import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { applyConversationMigration } from "@/lib/accounts/migration/conversationCommand";
+import { UNREAD_FRAME_RECT } from "@/lib/attention/frames";
+import { raiseAttentionRequest } from "@/lib/attention/service";
+import { geometricFrameRect, isFocusTarget, isGeometricTarget } from "@/lib/attention/targets";
+import type { FocusIntent, FocusTarget, ZoomIntent } from "@/lib/attention/types";
 import { boardFor } from "@/lib/board/store";
 import { applyConversationAction } from "@/lib/conversation/actions";
 import { cancelRound, closeFlow, patchFlow } from "@/lib/flows/commands";
@@ -16,6 +20,7 @@ import { projectTaskPipelineIds } from "@/lib/pipelines/taskBinding";
 import type { CreatePipelineRequest, PatchPipelineRequest, PipelineAction } from "@/lib/pipelines/types";
 import { listFiles } from "@/lib/scanner";
 import { readResources } from "@/lib/resources";
+import { adoptLiveRootSession, type RootSessionSource } from "@/lib/root/adopt";
 import { runtimeHostClient, type RuntimeHostClient } from "@/lib/runtime/client";
 import { runtimeEventsEnabled } from "@/lib/runtime/flags";
 import { readSession } from "@/lib/session/reader";
@@ -94,6 +99,25 @@ export interface ViewerMcpDomainDependencies {
   readResources: typeof readResources;
   applyConversationAction: typeof applyConversationAction;
   applyConversationMigration: typeof applyConversationMigration;
+  /** #688 D5: fold the live root session into the rollover chain, so a request
+      references the root by an identity that survives the session it was raised
+      from. Called on the raise path, which is the moment that identity matters. */
+  adoptRootSession(): void;
+  raiseAttentionRequest: typeof raiseAttentionRequest;
+}
+
+/** The registry slice {@link adoptLiveRootSession} resolves the root from. */
+function rootSessionSource(): RootSessionSource {
+  const snapshot = agentRegistry().readOnlySnapshot();
+  return {
+    conversations: Object.values(snapshot.conversations).map((conversation) => ({
+      id: conversation.id,
+      agentRole: conversation.agentRole,
+      generations: conversation.generations.map((generation) => ({ path: generation.path })),
+      updatedAt: conversation.updatedAt,
+    })),
+    configuredRootId: process.env.LLV_ROOT_CONVERSATION_ID?.trim() || null,
+  };
 }
 
 const productionDomainDependencies: ViewerMcpDomainDependencies = {
@@ -113,6 +137,8 @@ const productionDomainDependencies: ViewerMcpDomainDependencies = {
   readResources,
   applyConversationAction,
   applyConversationMigration,
+  adoptRootSession: () => { adoptLiveRootSession(rootSessionSource()); },
+  raiseAttentionRequest,
 };
 
 function text(value: unknown): string {
@@ -557,6 +583,102 @@ async function conversationMigration(args: McpToolArgs, dependencies: ViewerMcpD
   });
 }
 
+/**
+ * Which project a target lives in, so the request can record one.
+ *
+ * Only the project is derived here — never a rect. The server has no board
+ * layout, and inventing one would put a made-up destination on a durable record
+ * (see `@/lib/attention/frames`). An explicit `project` wins, and is the only
+ * way to name a target the server cannot attribute at all: a board draft exists
+ * on the operator's canvas and nowhere else.
+ */
+async function focusTargetProject(
+  target: FocusTarget,
+  explicit: string,
+  dependencies: ViewerMcpDomainDependencies,
+): Promise<string> {
+  if (explicit) return explicit;
+  if (isGeometricTarget(target)) return target.project;
+  switch (target.kind) {
+    case "conversation": {
+      const files = await dependencies.listFiles({ fresh: true, persist: false, pin: target.path });
+      const entry = files.find((candidate) => candidate.path === target.path);
+      if (!entry) throw new Error("no conversation on the board has that transcript path");
+      return entry.project;
+    }
+    case "pipeline":
+    case "stage": {
+      const pipeline = dependencies.getPipelines().pipelines.find((candidate) => candidate.id === target.pipelineId);
+      if (!pipeline) throw new Error("pipeline not found");
+      return pipeline.project;
+    }
+    case "flowRound": {
+      const flow = dependencies.getFlowsWithPresets().flows.find((candidate) => candidate.id === target.flowId);
+      if (!flow) throw new Error("flow not found");
+      return flow.project;
+    }
+    case "task": {
+      const task = dependencies.loadTasks().find((candidate) => candidate.id === target.taskId);
+      if (!task) throw new Error("task not found");
+      return task.project;
+    }
+    case "draft":
+      throw new Error("a draft target needs an explicit project");
+  }
+}
+
+/**
+ * The root agent's own door into #688: ask the operator to look at something.
+ *
+ * It only ASKS. The request lands at `pending`, nothing moves until the
+ * operator agrees on a device, and their refusal comes back as a refusal rather
+ * than as silence. The root identity is resolved server-side by the service, so
+ * a caller cannot name a root other than the operator's own — which is the
+ * whole of D4's authority rule and why no rootId appears in this schema.
+ */
+async function requestAttention(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): Promise<McpToolPayload> {
+  const target = args.target;
+  if (!isFocusTarget(target)) throw new Error("target must be a typed focus target");
+  const intent = (text(args.intent) || "show") as FocusIntent;
+  if (intent !== "show" && intent !== "open") throw new Error("intent must be show or open");
+  const zoom = text(args.zoom) as ZoomIntent | "";
+  if (zoom && zoom !== "inspect" && zoom !== "situate") throw new Error("zoom must be inspect or situate");
+  const reason = required(args, "reason");
+  const contextLabel = text(args.contextLabel);
+  const project = await focusTargetProject(target, text(args.project), dependencies);
+
+  /* Before the request is written, not after: the request names the root by the
+     identity this call may have just extended with a fresh session. */
+  dependencies.adoptRootSession();
+  const created = dependencies.raiseAttentionRequest({
+    origin: "root-agent",
+    target,
+    /* Geometric targets ARE their own frame; everything else records that no
+       board was read, so a vanished anchor reports `lost` rather than landing
+       the operator at the world origin. */
+    frameAtCreation: {
+      project,
+      rect: isGeometricTarget(target) ? geometricFrameRect(target) : UNREAD_FRAME_RECT,
+      boardRevision: null,
+    },
+    intent,
+    reason,
+    ...(zoom ? { zoom } : {}),
+    ...(contextLabel ? { contextLabel } : {}),
+  });
+  const operationId = mcpOperationId("request_attention", requestId(args));
+  return redactPayload({
+    attentionId: created.request.id,
+    request: created.request,
+    /* A newer request from the same root replaces its own unanswered ones, and
+       an overfull queue drops the oldest routine entry. Both are named so the
+       agent can say so out loud instead of leaving a dropped ask silent. */
+    superseded: created.superseded,
+    dropped: created.dropped,
+    ...mutationReceipt(operationId),
+  });
+}
+
 export function viewerMcpBindings(
   linkTaskDependencies: LinkTaskToPipelineDependencies = productionLinkTaskDependencies,
   controlDependencies: ViewerControlDependencies = productionViewerControlDependencies,
@@ -586,5 +708,6 @@ export function viewerMcpBindings(
     resources: (args) => resources(args, domainDependencies),
     conversation_action: (args) => conversationAction(args, domainDependencies),
     conversation_migration: (args) => conversationMigration(args, domainDependencies),
+    request_attention: (args) => requestAttention(args, domainDependencies),
   };
 }

@@ -51,6 +51,8 @@ describe("describeMcpCall", () => {
       ["deployment_status", { deploymentId: "deployment-a" }, "deploy", "Reading deployment status"],
       ["resources", { fresh: true }, "tool", "Reading resources"],
       ["conversation_migration", { conversationId: "conversation_a", action: "rollback" }, "conversation", "Rolling back conversation migration"],
+      ["request_attention", { target: { kind: "conversation", path: "/tmp/a.jsonl" }, reason: "The reviewer finished." }, "conversation", "Asking to show a conversation"],
+      ["request_attention", { target: { kind: "task", taskId: "task-a" }, intent: "open", reason: "This is blocked." }, "conversation", "Asking to open a task"],
     ] as const;
 
     for (const [tool, args, icon, prefix] of cases) {

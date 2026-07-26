@@ -225,7 +225,11 @@ The MCP surface includes:
 - operator/runtime reads: `operator_snapshot`, `deployment_status`, and
   `resources`;
 - agent/runtime mutations: `spawn_agent`, `conversation_migration`, and
-  `deploy_exact_sha`.
+  `deploy_exact_sha`;
+- the operator's attention: `request_attention`, which offers to move their
+  Viewer to a target and waits for their answer. It only asks — nothing moves
+  until they agree on a device, and the request names the root agent by an
+  identity the server resolves, never one the caller supplies.
 
 Every call requires a stable `clientRequestId`. Reusing that id with the same
 arguments returns the durable result as a replay. Reusing it with different

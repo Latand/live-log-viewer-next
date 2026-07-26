@@ -19,6 +19,8 @@ import { type TFunction, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
 import { attentionId, buildAttentionQueue, nextAttention, STALLED_ATTENTION_TTL, type AttentionItem } from "./attention";
+import { AttentionHost } from "./attention/AttentionHost";
+import { focusHandoffBus } from "./attention/focusHandoffBus";
 import { ConnectionPill } from "./ConnectionPill";
 import { resolveFavoriteRows, type FavoriteRow } from "./favorites/favoriteRows";
 import { OverviewBoard } from "./OverviewBoard";
@@ -353,6 +355,16 @@ export function Viewer() {
     setFocusRequest((prev) => ({ path, nonce: (prev?.nonce ?? 0) + 1, catalog: false }));
   }, []);
 
+  /* #688: the shell half of a focus handoff. An accepted request opens the
+     project it lives in and, when its intent is `open`, the conversation
+     itself — the same hand-off an attention jump already uses, so a handoff and
+     a tap can never land differently. The board half registers in SchemeBoard. */
+  useEffect(() => focusHandoffBus.setShell({
+    project: project === OVERVIEW ? null : project,
+    openProject: selectProject,
+    openPath: requestFocus,
+  }), [project, selectProject, requestFocus]);
+
   /* The N-cycle position anchors to an id: an item answered elsewhere drops
      out without moving the pointer's neighbors (D12). */
   const cycleRef = useRef<string | null>(null);
@@ -681,6 +693,10 @@ export function Viewer() {
           of the bottom-right CornerStatus and the top-right attention anchor. */}
       {isMobile ? null : <ConnectionPill />}
       <DeploymentStatusPill />
+      {/* #688: polls the attention record for this device and renders the
+          root agent's focus handoff when there is one to answer. Renders
+          nothing at all the rest of the time. */}
+      <AttentionHost mobile={isMobile} />
       {/* Staging instances (#659) announce themselves on every device; prod
           renders nothing. Top-center, clear of both corner anchors. */}
       <StagingBadge />

@@ -35,6 +35,7 @@ export const MCP_TOOL_NAMES = [
   "deployment_status",
   "resources",
   "conversation_migration",
+  "request_attention",
 ] as const;
 
 export type McpToolName = typeof MCP_TOOL_NAMES[number];
@@ -52,6 +53,7 @@ const MUTATING_MCP_TOOL_NAMES = new Set<McpToolName>([
   "flow_action",
   "conversation_action",
   "conversation_migration",
+  "request_attention",
 ]);
 
 export type McpToolArgs = Record<string, unknown> & { clientRequestId?: unknown };
@@ -935,6 +937,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   deployment_status: "Read Viewer deployment or runtime operation status, or list recent deployments.",
   resources: "Read system and Viewer-owned agent resource usage.",
   conversation_migration: "Reseat, retry, or roll back a conversation account migration.",
+  request_attention: "Ask the operator to look at something: raise an attention request that offers to move their Viewer to a target and waits for their yes.",
 };
 
 const clientRequestIdSchema = z.string().min(1).describe("Stable idempotency key for this logical call.");
@@ -1103,6 +1106,15 @@ const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     action: z.enum(["reseat", "retry", "rollback"]),
     expectedRevision: z.number().int().min(0).optional(),
     transcriptPath: z.string().optional(),
+  }).passthrough(),
+  request_attention: z.object({
+    clientRequestId: clientRequestIdSchema,
+    target: z.record(z.string(), z.unknown()).describe("Typed focus target: conversation | pipeline | stage | flowRound | task | draft | region | point."),
+    reason: z.string().min(1).describe("One operator-safe sentence saying why it is worth looking at. Never the target's contents."),
+    intent: z.enum(["show", "open"]).optional().describe("show frames and highlights; open also opens the target's own surface. Default show."),
+    zoom: z.enum(["inspect", "situate"]).optional(),
+    contextLabel: z.string().optional().describe("Named in the spoken sentence but never navigated to."),
+    project: z.string().optional().describe("Required only for a target the server cannot attribute on its own (a board draft)."),
   }).passthrough(),
 };
 
