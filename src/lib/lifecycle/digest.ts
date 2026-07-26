@@ -4,7 +4,7 @@ import { statePath } from "@/lib/configDir";
 import { writeJsonDurably } from "@/lib/state/durableJson";
 import { withFileTransactionSync } from "@/lib/state/fileTransaction";
 
-import { pageFromEvents, readLifecycleJournal, type LifecycleEvent, type LifecycleJournalFile } from "./journal";
+import { pageFromEvents, readLifecycleJournal, someMatchingEvent, type LifecycleEvent, type LifecycleJournalFile } from "./journal";
 import { isTerminalHighSignalEvent, type LifecycleEventType, type LifecycleState } from "./vocabulary";
 
 /**
@@ -89,9 +89,20 @@ function digestStatePath(): string {
   return statePath("lifecycle-digests.json");
 }
 
+/**
+ * The one serialization of a subscriber's scope, used by every read and every
+ * write of the cursor file.
+ *
+ * Length-prefixed rather than separator-joined. `subscriberId` is whatever the
+ * calling agent passed, so a separator is a value it can supply: joining on one
+ * lets `{id: "a\0b", project: "c"}` and `{id: "a", project: "b\0c"}` build the
+ * same key, and two unrelated subscribers then share — and clobber — one
+ * durable cursor. A length prefix cannot be imitated by any content, so the
+ * encoding is injective for every input.
+ */
 export function digestScopeKey(request: Pick<LifecycleDigestRequest, "subscriberId" | "project" | "pipelineId" | "conversationId">): string {
   const parts = [request.subscriberId, request.project ?? "", request.pipelineId ?? "", request.conversationId ?? ""];
-  return parts.join("\0");
+  return parts.map((part) => `${part.length}:${part}`).join("");
 }
 
 function emptyState(): DigestStateFile {
@@ -133,9 +144,24 @@ function writeState(file: DigestStateFile): void {
   writeJsonDurably(digestStatePath(), file);
 }
 
+/**
+ * The persisted state under an ALREADY-SERIALIZED scope key.
+ *
+ * Taking the key rather than a subscriber id is the point: the acknowledging
+ * path stores under `digestScopeKey(request)`, so a reader handed that key which
+ * scoped it a second time would look under one nothing ever writes, find
+ * nothing, and report a fresh cursor for a subscriber that has been reading for
+ * hours — replaying its whole history as if it had never polled.
+ */
+function subscriberForScope(scopeKey: string): DigestSubscriberState | null {
+  return readState().subscribers[scopeKey] ?? null;
+}
+
+/** The unscoped subscriber — the same scope {@link seedLifecycleDigestCursor}
+    seeds, and what a poll carrying no project/pipeline/conversation filter
+    resolves to. */
 export function readDigestSubscriber(subscriberId: string): DigestSubscriberState | null {
-  const scopedId = digestScopeKey({ subscriberId });
-  return readState().subscribers[scopedId] ?? null;
+  return subscriberForScope(digestScopeKey({ subscriberId }));
 }
 
 /** Shape a digest item collapses on: same lineage, same transition. NUL is the
@@ -291,20 +317,22 @@ export function evaluateDigest(
     cursor: subscriber.cursorSeq,
     pending: pendingEvents.length + page.remaining,
   };
-  if (pendingEvents.length === 0 && page.remaining === 0) return { ...base, relay: null, heldUntil: null };
-
-  let terminal = pendingEvents.some((event) => isTerminalHighSignalEvent(event.type));
-  if (!terminal && page.remaining > 0) {
-    const overflow = pageFromEvents(file, {
-      project: request.project,
-      pipelineId: request.pipelineId,
-      conversationId: request.conversationId,
-      afterSeq: pendingEvents.at(-1)?.seq ?? subscriber.cursorSeq,
-      limit: 200,
-    });
-    terminal = overflow.events.some((event) => isTerminalHighSignalEvent(event.type));
-  }
+  /* A non-empty match always fills the page before it leaves any remainder, so
+     this covers "nothing pending" whether or not there is an overflow. */
   if (pendingEvents.length === 0) return { ...base, relay: null, heldUntil: null };
+
+  /* Over the WHOLE pending range, not the page. "Is there a terminal event
+     waiting?" decides whether the five-minute routine hold applies at all, so
+     answering it from a bounded slice puts the one class of event the agent
+     cannot proceed without behind a timer — and a busy project is exactly where
+     the slice fills up. A verdict sitting at pending position 401, or at the
+     journal's retention capacity, is as decision-blocking as one at position 1. */
+  const terminal = someMatchingEvent(file, {
+    project: request.project,
+    pipelineId: request.pipelineId,
+    conversationId: request.conversationId,
+    afterSeq: subscriber.cursorSeq,
+  }, (event) => isTerminalHighSignalEvent(event.type));
   if (!terminal) {
     const oldestRoutineAt = parseMs(pendingEvents[0]!.at) ?? now;
     const lastRelayMs = parseMs(subscriber.lastRelayAt);
@@ -343,7 +371,10 @@ export function pollLifecycleDigest(request: LifecycleDigestRequest): LifecycleD
   const now = Number.isFinite(request.now) ? request.now as number : Date.now();
   const scopedId = digestScopeKey(request);
   if (request.acknowledge === false) {
-    const subscriber = readDigestSubscriber(scopedId) ?? { cursorSeq: 0, lastRelayAt: null, updatedAt: new Date(now).toISOString() };
+    /* The same key the acknowledging branch below writes under — a dry run that
+       reported a cursor the real poll does not hold would be a diagnostic that
+       lies about exactly the thing it exists to show. */
+    const subscriber = subscriberForScope(scopedId) ?? { cursorSeq: 0, lastRelayAt: null, updatedAt: new Date(now).toISOString() };
     return evaluateDigest(journal, request, subscriber);
   }
   return withFileTransactionSync(digestStatePath(), "lifecycle digest state is busy", () => {

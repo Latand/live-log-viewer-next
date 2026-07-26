@@ -259,18 +259,45 @@ export function queryLifecycleEvents(query: LifecycleEventQuery = {}): Lifecycle
   return pageFromEvents(file, query);
 }
 
+/** The one definition of "matches this query", so a bounded page and an
+    unbounded scan can never disagree about what is pending. */
+function matchesQuery(event: LifecycleEvent, query: LifecycleEventQuery, afterSeq: number): boolean {
+  if (event.seq <= afterSeq) return false;
+  if (query.project && event.project !== query.project) return false;
+  if (query.pipelineId && event.pipelineId !== query.pipelineId) return false;
+  if (query.conversationId && event.conversationId !== query.conversationId) return false;
+  if (query.stageId && event.stageId !== query.stageId) return false;
+  if (query.type && event.type !== query.type) return false;
+  return true;
+}
+
+function queryCursor(query: LifecycleEventQuery): number {
+  return Number.isInteger(query.afterSeq) ? query.afterSeq as number : 0;
+}
+
+/**
+ * Whether ANY retained event matching the query satisfies the predicate —
+ * across the whole retained range, not one page of it.
+ *
+ * Paging exists to bound what is *carried* to a caller. Deciding whether
+ * something is present at all is a different question, and answering it a page
+ * at a time is how a caller ends up concluding "no" about an event that is
+ * simply further down. Bounded by the journal's own capacity and allocating
+ * nothing, so asking it over the full range is cheap.
+ */
+export function someMatchingEvent(
+  file: LifecycleJournalFile,
+  query: LifecycleEventQuery,
+  predicate: (event: LifecycleEvent) => boolean,
+): boolean {
+  const afterSeq = queryCursor(query);
+  return file.events.some((event) => matchesQuery(event, query, afterSeq) && predicate(event));
+}
+
 export function pageFromEvents(file: LifecycleJournalFile, query: LifecycleEventQuery = {}): LifecycleEventPage {
   const limit = Math.max(1, Math.min(200, Number.isInteger(query.limit) ? query.limit as number : 50));
-  const afterSeq = Number.isInteger(query.afterSeq) ? query.afterSeq as number : 0;
-  const matched = file.events.filter((event) => {
-    if (event.seq <= afterSeq) return false;
-    if (query.project && event.project !== query.project) return false;
-    if (query.pipelineId && event.pipelineId !== query.pipelineId) return false;
-    if (query.conversationId && event.conversationId !== query.conversationId) return false;
-    if (query.stageId && event.stageId !== query.stageId) return false;
-    if (query.type && event.type !== query.type) return false;
-    return true;
-  });
+  const afterSeq = queryCursor(query);
+  const matched = file.events.filter((event) => matchesQuery(event, query, afterSeq));
   const events = matched.slice(0, limit);
   return {
     count: events.length,

@@ -1,9 +1,11 @@
 import crypto from "node:crypto";
 
 import { agentRegistry } from "@/lib/agent/registry";
+import { procBackend } from "@/lib/proc";
 import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { applyConversationMigration } from "@/lib/accounts/migration/conversationCommand";
+import { attentionCallerAuthority, processAncestry, type AttentionCallerAuthority, type AttentionCallerSources } from "@/lib/attention/callerAuthority";
 import { UNREAD_FRAME_RECT } from "@/lib/attention/frames";
 import { raiseAttentionRequest } from "@/lib/attention/service";
 import { geometricFrameRect, isFocusTarget, isGeometricTarget } from "@/lib/attention/targets";
@@ -25,7 +27,7 @@ import { projectTaskPipelineIds } from "@/lib/pipelines/taskBinding";
 import type { CreatePipelineRequest, PatchPipelineRequest, PipelineAction } from "@/lib/pipelines/types";
 import { listFiles } from "@/lib/scanner";
 import { readResources } from "@/lib/resources";
-import { adoptLiveRootSession, type RootSessionSource } from "@/lib/root/adopt";
+import { adoptLiveRootSession, conversationRole, liveRootSession, type RootSessionSource } from "@/lib/root/adopt";
 import { runtimeHostClient, type RuntimeHostClient } from "@/lib/runtime/client";
 import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
 import { runtimeEventsEnabled } from "@/lib/runtime/flags";
@@ -114,6 +116,10 @@ export interface ViewerMcpDomainDependencies {
       from. Called on the raise path, which is the moment that identity matters. */
   adoptRootSession(): void;
   raiseAttentionRequest: typeof raiseAttentionRequest;
+  /** #688 D4: whether whoever is running this MCP server may ask for the
+      operator's screen at all. Resolved from process ancestry and the registry's
+      recorded hosts, never from anything the caller says. */
+  attentionAuthority(): AttentionCallerAuthority;
 }
 
 /**
@@ -129,6 +135,43 @@ function rootSessionSource(): RootSessionSource {
   return {
     conversations: Object.values(snapshot.conversations),
     configuredRootId: process.env.LLV_ROOT_CONVERSATION_ID?.trim() || null,
+  };
+}
+
+/**
+ * Which conversations the registry can name a live host process for, and which
+ * of them is the root — the evidence {@link attentionCallerAuthority} decides on.
+ *
+ * The join is by transcript path because that is what a registry ENTRY (which
+ * holds the host process ids) and a CONVERSATION (which holds the role) have in
+ * common. Both host shapes count: a tmux-hosted agent is the CLI process that
+ * parents this MCP server directly, and a structured host is the app-server or
+ * broker that parents it instead.
+ */
+function attentionCallerSources(): AttentionCallerSources {
+  return {
+    ancestry: () => processAncestry(process.pid, (pid) => procBackend.readPpid(pid)),
+    rootConversationId: () => liveRootSession(rootSessionSource())?.conversationId ?? null,
+    hosted: () => {
+      const snapshot = agentRegistry().readOnlySnapshot();
+      const owners = new Map<string, { id: string; role: string | null }>();
+      for (const conversation of Object.values(snapshot.conversations)) {
+        const owner = { id: conversation.id, role: conversationRole(conversation) };
+        for (const generation of conversation.generations) owners.set(generation.path, owner);
+      }
+      const hosted = new Map<string, { conversationId: string; role: string | null; pids: number[] }>();
+      for (const entry of Object.values(snapshot.entries)) {
+        const owner = owners.get(entry.artifactPath);
+        if (!owner) continue;
+        const pids = [entry.host?.agent?.pid, entry.structuredHost?.process?.pid]
+          .filter((pid): pid is number => typeof pid === "number" && pid > 0);
+        if (pids.length === 0) continue;
+        const existing = hosted.get(owner.id);
+        if (existing) existing.pids.push(...pids);
+        else hosted.set(owner.id, { conversationId: owner.id, role: owner.role, pids: [...pids] });
+      }
+      return [...hosted.values()];
+    },
   };
 }
 
@@ -155,6 +198,7 @@ const productionDomainDependencies: ViewerMcpDomainDependencies = {
   refreshLifecycleJournal,
   adoptRootSession: () => { adoptLiveRootSession(rootSessionSource()); },
   raiseAttentionRequest,
+  attentionAuthority: () => attentionCallerAuthority(attentionCallerSources()),
 };
 
 function text(value: unknown): string {
@@ -740,6 +784,23 @@ async function focusTargetProject(
  * whole of D4's authority rule and why no rootId appears in this schema.
  */
 async function requestAttention(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): Promise<McpToolPayload> {
+  /* Before anything else, and before any state is touched. Every Viewer-spawned
+     worker holds this same tool, and until this check existed a reviewer three
+     levels down could raise a request that landed under `origin: "root-agent"`
+     and the operator's own root identity — the operator could not tell it from
+     the root agent asking, and the root agent would be told "they declined"
+     about something it never asked. Refused rather than silently downgraded to
+     some lesser origin: D4 gives a worker no claim on the screen at all, and an
+     agent that is told no can say so instead of waiting on an answer that is
+     never coming. */
+  const authority = dependencies.attentionAuthority();
+  if (authority.kind === "worker") {
+    throw new McpToolRefusal("only the operator's root session may raise an attention request", {
+      callerConversationId: authority.conversationId,
+      callerRole: authority.role,
+    });
+  }
+
   const target = args.target;
   if (!isFocusTarget(target)) throw new Error("target must be a typed focus target");
   const intent = (text(args.intent) || "show") as FocusIntent;

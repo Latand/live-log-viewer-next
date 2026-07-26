@@ -1366,7 +1366,7 @@ test("a retry under a fresh operation identity recovers the fork the failed atte
   expect(fs.readdirSync(source.transcriptRoot).filter((name) => name !== path.basename(sourcePath))).toHaveLength(1);
 });
 
-test("orphan forks of one source resolve to the newest and the rest are recorded as history", async () => {
+test("orphan forks whose provenance died with their journals are re-forked once and all kept as history", async () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-codex-orphan-forks-"));
   roots.push(base);
   const source = accountRoot("codex", base, "source");
@@ -1400,9 +1400,14 @@ test("orphan forks of one source resolve to the newest and the rest are recorded
     }), { mode: 0o600 });
   });
   let forkCalls = 0;
+  const freshForkId = "519f423a-d6e9-\x34903-8597-000000000009";
   const client = () => ({
     async readAccount() { return { account: { type: "chatgpt" }, requiresOpenaiAuth: true }; },
-    async forkThread() { forkCalls += 1; throw new Error("unexpected additional fork"); },
+    async forkThread() {
+      forkCalls += 1;
+      fs.writeFileSync(orphanPath(freshForkId), codexSessionMeta(freshForkId, sourceId), { mode: 0o600 });
+      return { id: freshForkId, path: orphanPath(freshForkId) };
+    },
     async resumeThread(id: string) { return { id, path: null }; },
     async readThread(id: string) { return { id, path: null }; },
     close() {},
@@ -1426,13 +1431,39 @@ test("orphan forks of one source resolve to the newest and the rest are recorded
     recordContinuityPath(pathname: string) { recorded.push(pathname); },
   });
 
-  expect(forkCalls).toBe(0);
-  expect(receipt.nativeId).toBe(orphanIds[1]);
-  /* The older fork is never deleted: it is handed back to be kept as the
-     conversation's history. */
+  /* Recovery FINDS both orphans — that is the point of the scan — but it cannot
+     find out what either was forked FROM, because the journals that would have
+     said died first. An unprovable fork is treated as a possibly stale one: the
+     source may have gained turns since, and seating the successor on an older
+     snapshot would drop them silently and permanently. So one fresh fork is
+     taken from the source as it stands now. */
+  expect(forkCalls).toBe(1);
+  expect(receipt.nativeId).toBe(freshForkId);
+  /* And nothing recovered is thrown away. Both orphans are handed back as the
+     conversation's history, which is what makes the re-fork safe rather than
+     merely cautious: no work becomes unreachable. */
   expect(recorded).toContain(orphanPath(orphanIds[0]!));
+  expect(recorded).toContain(orphanPath(orphanIds[1]!));
   expect(fs.existsSync(orphanPath(orphanIds[0]!))).toBeTrue();
   expect(fs.existsSync(orphanPath(orphanIds[1]!))).toBeTrue();
+
+  /* A replay adopts the fork this operation just made — its provenance IS
+     recorded now — so the fail-safe fires exactly once and a retry loop cannot
+     fork the source over and over. */
+  recorded.length = 0;
+  const replayed = await provider.create({
+    engine: "codex",
+    operationId: "orphan-recovery",
+    conversationId,
+    targetAccountId: "target",
+    source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
+    recordContinuityPath(pathname: string) { recorded.push(pathname); },
+  });
+
+  expect(forkCalls).toBe(1);
+  expect(replayed.nativeId).toBe(freshForkId);
+  expect(recorded).toContain(orphanPath(orphanIds[0]!));
+  expect(recorded).toContain(orphanPath(orphanIds[1]!));
 });
 
 test("orphan forks recorded by journals that predate conversation identity are still recovered", async () => {
@@ -1468,9 +1499,14 @@ test("orphan forks recorded by journals that predate conversation identity are s
     }), { mode: 0o600 });
   });
   let forkCalls = 0;
+  const freshForkId = "619f423a-d6e9-\x34903-8597-000000000009";
   const client = () => ({
     async readAccount() { return { account: { type: "chatgpt" }, requiresOpenaiAuth: true }; },
-    async forkThread() { forkCalls += 1; throw new Error("unexpected additional fork"); },
+    async forkThread() {
+      forkCalls += 1;
+      fs.writeFileSync(orphanPath(freshForkId), codexSessionMeta(freshForkId, sourceId), { mode: 0o600 });
+      return { id: freshForkId, path: orphanPath(freshForkId) };
+    },
     async resumeThread(id: string) { return { id, path: null }; },
     async readThread(id: string) { return { id, path: null }; },
     close() {},
@@ -1494,9 +1530,16 @@ test("orphan forks recorded by journals that predate conversation identity are s
     recordContinuityPath(pathname: string) { recorded.push(pathname); },
   });
 
-  expect(forkCalls).toBe(0);
-  expect(receipt.nativeId).toBe(orphanIds[1]);
+  /* A journal old enough to predate conversation identity also predates any
+     record of what its fork was taken from, so recovery reaches these the same
+     way it reaches any other unprovable fork: adopt nothing, fork once from the
+     source as it stands, keep everything found as history. Recovery still did
+     its job — the orphans are attached to this conversation instead of being
+     stranded, which is the whole reason to scan legacy journals at all. */
+  expect(forkCalls).toBe(1);
+  expect(receipt.nativeId).toBe(freshForkId);
   expect(recorded).toContain(orphanPath(orphanIds[0]!));
+  expect(recorded).toContain(orphanPath(orphanIds[1]!));
   expect(fs.existsSync(orphanPath(orphanIds[0]!))).toBeTrue();
   expect(fs.existsSync(orphanPath(orphanIds[1]!))).toBeTrue();
   /* Reading a legacy journal names it, so the next scan matches it exactly. */

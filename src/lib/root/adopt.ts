@@ -55,7 +55,7 @@ export interface RootSessionCandidate {
  * with no profile at all is legacy and says nothing either way, so it is
  * skipped rather than read as "worker".
  */
-function conversationRole(conversation: RootConversationSlice): string | null {
+export function conversationRole(conversation: RootConversationSlice): string | null {
   for (let index = conversation.generations.length - 1; index >= 0; index -= 1) {
     const role = conversation.generations[index]?.launchProfile?.role;
     if (role) return role;

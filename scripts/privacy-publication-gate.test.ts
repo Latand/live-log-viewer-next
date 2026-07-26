@@ -2715,6 +2715,39 @@ describe("commitMessageFindings", () => {
     expect(findings.size).toBe(0);
   });
 
+  test("a vendor no-reply attribution trailer is machine attribution, not a person", () => {
+    /* The commit trailer every agent-written commit here carries. It names a
+       tool and identifies nobody, and it is on 13 commits of one branch — so
+       flagging it would mean either rewriting history on every branch or
+       teaching everyone that a red privacy gate is normal. */
+    const repo = gitRepo();
+    const vendor = ["noreply", "vendor.example.com"].join("@");
+    commit(repo, `feat: something\n\nCo-Authored-By: Some Model <${vendor}>`);
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(false);
+  });
+
+  test("a GitHub no-reply address is still an account handle and is still flagged", () => {
+    /* The carve-out is the LOCAL PART being exactly noreply, and this is why:
+       `<id>+<handle>@users.noreply.github.com` reads as a no-reply address and
+       is an account handle with a number in front of it. */
+    const repo = gitRepo();
+    const handle = ["4242+someone", "users.noreply.github.com"].join("@");
+    commit(repo, `feat: something\n\nCo-Authored-By: Someone <${handle}>`);
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(true);
+  });
+
+  test("the carve-out is the trailer only, never the body", () => {
+    /* A no-reply address written into prose is not attribution, and the
+       exemption must not follow it there. */
+    const repo = gitRepo();
+    const vendor = ["noreply", "vendor.example.com"].join("@");
+    commit(repo, `fix: reported by ${vendor} in the incident thread`);
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(true);
+  });
+
   test("ignores resource_identifier and transcript_content classes", () => {
     const repo = gitRepo();
     const uuid = ["550e8400", "e29b", "41d4", "a716", "446655440000"].join("-");

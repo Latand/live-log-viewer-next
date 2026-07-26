@@ -4,10 +4,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { viewBus } from "@/hooks/viewPresenceBus";
 import { stableDeviceId } from "@/hooks/useViewPresence";
-import type { AttentionRequestV1, ReturnPoint } from "@/lib/attention/types";
+import type { AttentionRequestV1, FocusResolutionKind, ReturnPoint } from "@/lib/attention/types";
 import { useLocale } from "@/lib/i18n";
 import { RootOverlayHost } from "@/components/overlay/RootOverlayHost";
-import { useAttentionOffers, type ViewportCapture } from "@/components/overlay/useAttentionOffers";
+import { useAttentionOffers, type PostOutcome, type ViewportCapture } from "@/components/overlay/useAttentionOffers";
 
 import { focusHandoffBus, type FocusHandoffBus } from "./focusHandoffBus";
 import { restoreFocusPoint, runFocusHandoff, type HandoffTiming } from "./navigate";
@@ -70,6 +70,20 @@ export function currentViewport(): CapturedViewport {
   };
 }
 
+/**
+ * Whether the server answered at all.
+ *
+ * A refusal IS an answer: the record moved on and this device's picture of it
+ * was the stale one, so local state should follow the record. A transport
+ * failure decided nothing — the record is untouched — so every local trace of
+ * the handoff has to stay exactly as it was until it can be reconciled.
+ * Collapsing the two is what turns "the wifi dropped" into "you already went
+ * back", and the operator loses the way home to a lost packet.
+ */
+function decided(outcome: PostOutcome): boolean {
+  return outcome.ok || outcome.refusal !== null;
+}
+
 function browserStorage(): Storage | null {
   if (typeof window === "undefined") return null;
   try {
@@ -101,13 +115,25 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
 
   /* The viewport the operator is leaving, taken before the move and handed to
      the arrival that records it. Held in a ref because `arrive` reads it after
-     the camera has already gone somewhere else. */
-  const leaving = useRef<CapturedViewport | null>(null);
+     the camera has already gone somewhere else.
 
-  const captureViewport = useCallback<ViewportCapture>(() => {
-    const captured = leaving.current ?? currentViewport();
+     Keyed by request and kept until the server has confirmed the arrival, not
+     just until the first attempt returns: an arrival the network swallowed is
+     retried below, and by then `currentViewport()` is the TARGET. A retry that
+     recaptured it would write the place the operator went as the place to
+     return to — the return control would still be there and would land them
+     exactly where they already are. */
+  const leaving = useRef(new Map<string, CapturedViewport>());
+
+  const captureViewport = useCallback<ViewportCapture>((requestId) => {
+    const captured = leaving.current.get(requestId) ?? currentViewport();
     return { mode: captured.mode, camera: captured.camera, focusedPath: captured.focusedPath };
   }, []);
+
+  /* Arrivals this device made on the board but has not got an answer about.
+     Only transport failures land here: a refusal is the server having decided,
+     and there is nothing to reconcile with a decision. */
+  const unconfirmedArrivals = useRef(new Map<string, FocusResolutionKind>());
 
   const offers = useAttentionOffers({
     deviceId,
@@ -118,8 +144,8 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
 
   const onAccept = useCallback(async (request: AttentionRequestV1) => {
     const before = currentViewport();
-    leaving.current = before;
-    let landed = false;
+    leaving.current.set(request.id, before);
+    let keepReturnPoint = false;
     try {
       const accepted = await offers.accept(request);
       if (!accepted.ok) return;
@@ -127,11 +153,21 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
          never stores a return point it will never use. */
       rememberReturnProject(browserStorage(), deviceId, request.id, before.project);
       const outcome = await runFocusHandoff(request, bus, timing ?? {});
-      landed = outcome.resolution !== "lost";
-      await offers.arrive(request, outcome.resolution);
+      const arrival = await offers.arrive(request, outcome.resolution);
+      /* The record says `following` only when the server said so. A move that
+         happened on this screen but never reached the record is NOT a follow:
+         nothing will offer a Return control for it, and treating it as one
+         leaves the operator at the target with the way back already discarded. */
+      if (arrival.ok) keepReturnPoint = true;
+      else if (!decided(arrival) && outcome.resolution !== "lost") {
+        /* Nothing was decided, so this is still owed to the record. Keep the
+           pre-move viewport and retry it below. */
+        keepReturnPoint = true;
+        unconfirmedArrivals.current.set(request.id, outcome.resolution);
+      }
     } finally {
-      leaving.current = null;
-      if (!landed) forgetReturnProject(browserStorage(), deviceId, request.id);
+      if (!unconfirmedArrivals.current.has(request.id)) leaving.current.delete(request.id);
+      if (!keepReturnPoint) forgetReturnProject(browserStorage(), deviceId, request.id);
     }
   }, [offers, bus, deviceId, timing]);
 
@@ -141,9 +177,58 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
       const restored = await restoreFocusPoint(point, readReturnProject(browserStorage(), deviceId, request.id), bus, timing ?? {});
       if (!restored) return;
     }
-    await offers.goBack(request, "control");
-    forgetReturnProject(browserStorage(), deviceId, request.id);
+    const outcome = await offers.goBack(request, "control");
+    /* Forgotten only once the record has actually left `following`. A return
+       the server never received leaves the control on screen, and a second
+       press with the memory already dropped restores the viewport into
+       whichever project happens to be open instead of the one departed from. */
+    if (decided(outcome)) forgetReturnProject(browserStorage(), deviceId, request.id);
   }, [offers, bus, deviceId, timing]);
+
+  /**
+   * Re-report an arrival the network swallowed, on the next poll that still
+   * shows the record waiting for it.
+   *
+   * Idempotent by construction: the retry is gated on the record still being
+   * `accepted` by this device, which is the one state `arrive` is legal from.
+   * Once it lands the request is `following` and the gate never opens again, so
+   * a duplicate cannot be posted however many polls run. Left unreconciled, the
+   * landing grace expires the request as `lost` and the agent is told the
+   * operator never got there — while they are sitting on the target.
+   */
+  const reconciling = useRef(new Set<string>());
+  /* Read through a ref so the effect can depend on the poll tick ALONE. Listing
+     the view would reintroduce the self-trigger the tick exists to avoid. */
+  const viewRef = useRef(offers.view);
+  const currentView = offers.view;
+  useEffect(() => { viewRef.current = currentView; }, [currentView]);
+  const pollGeneration = offers.pollGeneration;
+  useEffect(() => {
+    if (!deviceId || unconfirmedArrivals.current.size === 0) return;
+    for (const entry of viewRef.current?.live ?? []) {
+      const resolution = unconfirmedArrivals.current.get(entry.request.id);
+      if (resolution === undefined || reconciling.current.has(entry.request.id)) continue;
+      if (entry.request.state !== "accepted" || entry.request.acknowledgedBy !== deviceId) {
+        /* The record moved on without this device's report — nothing left to
+           reconcile, and the captured viewport is only noise from here. */
+        unconfirmedArrivals.current.delete(entry.request.id);
+        leaving.current.delete(entry.request.id);
+        continue;
+      }
+      reconciling.current.add(entry.request.id);
+      void (async () => {
+        try {
+          const retry = await offers.arrive(entry.request, resolution);
+          if (!decided(retry)) return;
+          unconfirmedArrivals.current.delete(entry.request.id);
+          leaving.current.delete(entry.request.id);
+          if (!retry.ok) forgetReturnProject(browserStorage(), deviceId, entry.request.id);
+        } finally {
+          reconciling.current.delete(entry.request.id);
+        }
+      })();
+    }
+  }, [pollGeneration, offers, deviceId]);
 
   const handlers = useMemo(() => ({
     onAcceptAttention: (request: AttentionRequestV1) => { void onAccept(request); },

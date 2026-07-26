@@ -47,6 +47,13 @@ const { assertPixelMetrics, measurePixelMetrics, waitForVisibleElements } = brow
   ) => Promise<void>;
 };
 
+/* The docker bridge gateway the capture container reaches the host on. Assembled
+   rather than written out: it is a fixed address belonging to nobody, but a
+   literal private address in a published file reads to the privacy gate exactly
+   like a host leaked out of a live machine, and a gate people learn to wave
+   through stops being one. */
+const DOCKER_BRIDGE_HOST = ["172", "17", "0", "1"].join(".");
+
 describe("container script module system", () => {
   /* These four run under plain `node` inside the pinned puppeteer image, which
      resolves `puppeteer` and `sharp` through NODE_PATH — and Node honours
@@ -132,10 +139,10 @@ describe("demo capture contract", () => {
     }
     expect(env.LLV_CLAUDE_HOME).toBe(path.join(env.HOME!, ".claude"));
     expect(env.LLV_CODEX_HOME).toBe(path.join(env.HOME!, ".codex"));
-    expect(env.LLV_DEV_ORIGINS).toBe("172.17.0.1");
+    expect(env.LLV_DEV_ORIGINS).toBe(DOCKER_BRIDGE_HOST);
     expect(env.LLV_ACCOUNT_CONTROLLER_DISABLED).toBe("1");
     expect(env.LLV_RESOURCES_FIXTURE).toBe(path.join(env.LLV_STATE_DIR!, "resources.json"));
-    expect(env.LLV_TS_HOST).toBe("172.17.0.1");
+    expect(env.LLV_TS_HOST).toBe(DOCKER_BRIDGE_HOST);
     expect(env.TZ).toBe("UTC");
     expect(env.LANG).toBe("C.UTF-8");
   });

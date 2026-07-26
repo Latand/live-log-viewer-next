@@ -264,3 +264,73 @@ test("an unmounting board never blanks the controller a fresh one just published
 
   expect(bus.board()).toBe(second);
 });
+
+test("a launched stage reaches a key-navigating surface as the card the board is drawing", async () => {
+  /* The phone pins a pane by key; it has no camera and cannot use a rect. A
+     launched — or retried — stage is the one anchor whose key and card differ:
+     the request names `slot::<pipeline>::<stage>`, and the board dissolved that
+     slot into the running agent's conversation card long ago. Handed only the
+     slot key, the phone finds nothing on its own list and reports the stage
+     lost while it is on screen in front of the operator. */
+  const AGENT = "/tmp/retry-attempt.jsonl";
+  const bus = createFocusHandoffBus();
+  const panes = new Set([AGENT]);
+  const destinations: FocusDestination[] = [];
+  bus.setBoard({
+    project: "demo",
+    index: {
+      project: "demo",
+      boardRevision: 7,
+      rectFor: (key) => (key === "slot::p1::review" || key === AGENT ? RECT : null),
+      concreteAnchorKey: (key) => (key === "slot::p1::review" ? AGENT : key === AGENT ? AGENT : null),
+    },
+    moveTo: (destination) => {
+      destinations.push(destination);
+      /* Exactly what MobileFocusView does: land only on a key it can pin. */
+      return destination.anchorKeys.some((key) => panes.has(key));
+    },
+    restoreCamera: () => false,
+  });
+  bus.setShell({ project: "demo", openProject: () => {}, openPath: () => {} });
+
+  const outcome = await runFocusHandoff({
+    target: { kind: "stage", pipelineId: "p1", stageId: "review" },
+    frameAtCreation: frame("demo"),
+    intent: "show",
+    zoom: "situate",
+  } as AttentionRequestV1, bus, NO_WAIT);
+
+  expect(outcome.resolution).toBe("exact");
+  expect(outcome.moved).toBeTrue();
+  /* The concrete card first, because that is what the board is drawing; the
+     requested slot key stays behind it for a surface that lists it that way. */
+  expect(destinations[0]!.anchorKeys).toEqual([AGENT, "slot::p1::review"]);
+});
+
+test("a stage still waiting to launch is pinned by its own slot", async () => {
+  /* No alias yet: the placeholder slot IS the card, and the concrete key is the
+     requested one. Nothing may be duplicated into the list on this path. */
+  const bus = createFocusHandoffBus();
+  const destinations: FocusDestination[] = [];
+  bus.setBoard({
+    project: "demo",
+    index: {
+      project: "demo",
+      boardRevision: 7,
+      rectFor: (key) => (key === "slot::p1::deploy" ? RECT : null),
+      concreteAnchorKey: (key) => (key === "slot::p1::deploy" ? key : null),
+    },
+    moveTo: (destination) => { destinations.push(destination); return true; },
+    restoreCamera: () => false,
+  });
+  bus.setShell({ project: "demo", openProject: () => {}, openPath: () => {} });
+
+  await runFocusHandoff({
+    target: { kind: "stage", pipelineId: "p1", stageId: "deploy" },
+    frameAtCreation: frame("demo"),
+    intent: "show",
+    zoom: "situate",
+  } as AttentionRequestV1, bus, NO_WAIT);
+
+  expect(destinations[0]!.anchorKeys).toEqual(["slot::p1::deploy"]);
+});

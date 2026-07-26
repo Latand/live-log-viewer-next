@@ -91,13 +91,22 @@ export function buildFocusFrameIndex(
     return extra ? toFocusRect(extra) : null;
   };
 
+  /** The key the layout genuinely holds this anchor under: itself when it is
+      placed directly, otherwise its alias. Null when neither is on the board. */
+  const concreteAnchorKey = (anchorKey: string): string | null => {
+    if (lookup(anchorKey)) return anchorKey;
+    const alias = options.aliases?.get(anchorKey);
+    return alias && lookup(alias) ? alias : null;
+  };
+
   return {
     project,
     boardRevision: options.boardRevision ?? null,
     named,
-    rectFor: (anchorKey) => lookup(anchorKey) ?? (() => {
-      const alias = options.aliases?.get(anchorKey);
-      return alias ? lookup(alias) : null;
-    })(),
+    concreteAnchorKey,
+    rectFor: (anchorKey) => {
+      const concrete = concreteAnchorKey(anchorKey);
+      return concrete ? lookup(concrete) : null;
+    },
   };
 }

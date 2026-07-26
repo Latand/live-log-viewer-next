@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
+import type { AttentionCallerAuthority } from "@/lib/attention/callerAuthority";
 import type { RegistryConversation } from "@/lib/agent/registry";
 import { raiseAttentionRequest } from "@/lib/attention/service";
 import { readAttentionFile } from "@/lib/attention/store";
@@ -61,13 +62,22 @@ const task = {
 
 interface Adoptions { count: number }
 
-function bindings(adoptions: Adoptions = { count: 0 }, adoptRootSession = () => { adoptions.count += 1; }) {
+/** The operator's own session, which is what every test here is unless it says
+    otherwise. The guard itself is exercised by the D4 tests at the bottom. */
+const ROOT_CALLER: AttentionCallerAuthority = { kind: "root", conversationId: "conversation_root" };
+
+function bindings(
+  adoptions: Adoptions = { count: 0 },
+  adoptRootSession = () => { adoptions.count += 1; },
+  attentionAuthority: () => AttentionCallerAuthority = () => ROOT_CALLER,
+) {
   return viewerMcpBindings(undefined, undefined, {
     listFiles: async () => [reviewerFile],
     loadTasks: () => [task],
     getPipelines: () => ({ pipelines: [{ id: "pipeline_1", project: "pipeline-project" }] }),
     getFlowsWithPresets: () => ({ flows: [{ id: "flow_1", project: "flow-project" }] }),
     adoptRootSession,
+    attentionAuthority,
     /* The real one: it resolves the state path per call, so the sandbox set in
        beforeEach applies and the request lands on a real record. */
     raiseAttentionRequest,
@@ -273,4 +283,68 @@ test("no rootId can be named by the caller", async () => {
      worker holding this tool still cannot speak as a root of its choosing. */
   expect(readAttentionFile().requests[0]!.requestedBy.rootId).toBe(readRootLineage()!.rootId);
   expect(readAttentionFile().requests[0]!.requestedBy.rootId).not.toBe("root_somebody_else");
+});
+
+/*
+ * D4's authority rule, on the side the record could never enforce.
+ *
+ * `rootId` was already resolved server-side, so nobody could name a root of
+ * their choosing — and that was read as the rule being enforced. It was not.
+ * Every Viewer-spawned worker is registered with this same `viewer` MCP server,
+ * so a worker calling this tool got the operator's own root identity written
+ * onto a request `origin: "root-agent"`: not a forged root, the REAL one, asked
+ * for by something that holds no claim on the operator's screen.
+ */
+
+const workerCaller: AttentionCallerAuthority = {
+  kind: "worker",
+  conversationId: "conversation_reviewer",
+  role: "reviewer",
+};
+
+function serviceAs(authority: AttentionCallerAuthority) {
+  return createMcpToolService(bindings(undefined, undefined, () => authority), new MemoryMcpReceiptStore());
+}
+
+test("a worker holding this tool is refused, and nothing reaches the record", async () => {
+  const refused = await serviceAs(workerCaller).callTool("request_attention", ask()) as McpToolResult;
+
+  expect(refused).toMatchObject({
+    ok: false,
+    error: "only the operator's root session may raise an attention request",
+  });
+  /* Named, so the agent can say why it was refused rather than retrying into a
+     wall — and so the operator can see which worker tried. */
+  expect((refused as { details?: Record<string, unknown> }).details)
+    .toMatchObject({ callerConversationId: "conversation_reviewer", callerRole: "reviewer" });
+  /* The whole point: no card, no queue entry, no expiry the root agent would
+     later be told about as if it had asked. */
+  expect(readAttentionFile().requests).toEqual([]);
+});
+
+test("the refusal lands before the root lineage is touched", async () => {
+  const adoptions = { count: 0 };
+  const tools = createMcpToolService(
+    bindings(adoptions, undefined, () => workerCaller),
+    new MemoryMcpReceiptStore(),
+  );
+
+  await tools.callTool("request_attention", ask());
+
+  /* A worker must not be able to drive root-session adoption either: the raise
+     path writes the durable lineage, and a refused caller reaching it would let
+     a worker move the operator's root identity forward as a side effect. */
+  expect(adoptions.count).toBe(0);
+});
+
+test("a caller no recorded host names is allowed through", async () => {
+  /* Deliberate, and the reason is in `callerAuthority.ts`: the operator's root
+     session is often a terminal the Viewer observes rather than launched, so
+     there are ordinary setups with no host evidence naming it. Refusing those
+     would take the feature from the person it exists for, to stop something
+     that already requires running code as them. */
+  const result = await serviceAs({ kind: "unidentified" }).callTool("request_attention", ask()) as McpToolResult;
+
+  expect(result.ok).toBe(true);
+  expect(readAttentionFile().requests).toHaveLength(1);
 });

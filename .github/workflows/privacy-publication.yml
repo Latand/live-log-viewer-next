@@ -54,9 +54,12 @@ jobs:
         working-directory: trusted
         run: bun test scripts/privacy-publication-gate.test.ts
 
-      - name: Scan changed publication surfaces
+      # Commit messages are published the moment the branch is pushed, and the
+      # gate is the only thing that reads them before that happens. Scanning
+      # only the files left the one surface nobody re-reads unguarded.
+      - name: Scan changed publication surfaces and commit messages
         env:
           LLV_PRIVACY_KNOWN_VALUE_FINGERPRINTS_FILE: ${{ github.workspace }}/trusted/scripts/privacy-known-value-fingerprints.json
           LLV_PRIVACY_OCR_LANGUAGES: eng+ukr
         working-directory: trusted
-        run: bun scripts/privacy-publication-gate.ts --repository ../candidate --require-known-values --base "$PRIVACY_BASE_SHA"
+        run: bun scripts/privacy-publication-gate.ts --repository ../candidate --require-known-values --check-commits --base "$PRIVACY_BASE_SHA"

@@ -62,6 +62,7 @@ beforeEach(() => {
   dom.document.body.replaceChildren();
   roots = [];
   visibility = "visible";
+  unreachable = new Set<string>();
   /* The return-project memory lives here and is keyed by request id, which the
      tests reuse; a leak between them would hide the case where it is empty. */
   dom.localStorage.clear();
@@ -100,10 +101,18 @@ const WHERE_I_WAS: ViewSlice = {
 let now = new Date("2026-07-01T10:00:00.000Z");
 const at = (ms: number) => new Date(now.getTime() + ms);
 
+/** Event kinds whose POST cannot reach the server right now. A dropped request
+    is NOT a refusal: nothing was decided, and the record is untouched — which is
+    exactly the case the surface has to tell apart from success. */
+let unreachable = new Set<string>();
+
 /** The two routes, answering exactly as `/api/attention` does — including the
     409-with-state that a refused transition comes back as. */
 function transport(): typeof fetch {
   return (async (url: string, init?: { body?: string }) => {
+    if (init?.body && unreachable.has((JSON.parse(init.body) as { kind: string }).kind)) {
+      throw new TypeError("Failed to fetch");
+    }
     if (!init?.body) {
       return { ok: true, status: 200, json: async () => ({ ok: true, ...attentionForDevice(DEVICE, { now }) }) };
     }
@@ -595,4 +604,114 @@ test("a transport failure does not move the board or record an arrival", async (
 
   expect(log.moved).toEqual([]);
   expect(log.restored).toEqual([]);
+});
+
+/*
+ * Transport failures on the two answers that come AFTER the view has already
+ * moved. Both were reported as `Promise<void>`, so the surface could not tell a
+ * dropped packet from a landing: the record stayed where it was while this
+ * device carried on as though it had been updated.
+ */
+
+test("an arrival the network swallowed is not a follow, and is reconciled on the next poll", async () => {
+  raise();
+  const { bus, log } = board({ [ANCHOR]: LIVE_RECT });
+  mount(bus);
+  await settle();
+
+  unreachable.add("arrive");
+  click(one("[data-testid='attention-accept']")!);
+  await settle();
+
+  /* The board moved — the operator IS at the target — but the record never
+     heard about it, so it is still `accepted` and not `following`. */
+  expect(log.moved).toHaveLength(1);
+  expect(record().state).toBe("accepted");
+  expect(record().returnPoints).toEqual([]);
+
+  /* The board has since moved on, exactly as it would after a real glide. This
+     is what a retry would recapture if it asked "where am I" instead of "where
+     did this request leave from". */
+  viewBus.reportSlice({ ...WHERE_I_WAS, focusedPath: ANCHOR, camera: { x: -900, y: -1_400, zoom: 0.9, worldRect: { x: 0, y: 0, width: 10, height: 10 } } });
+
+  unreachable.delete("arrive");
+  await poll();
+
+  expect(record().state).toBe("following");
+  /* The PRE-move viewport, carried across the retry. Recapturing at retry time
+     would record the target as the place to go back to, and Return would land
+     the operator exactly where they already are. */
+  expect(record().returnPoints).toEqual([{
+    deviceId: DEVICE,
+    mode: "scheme",
+    camera: { x: 120, y: 340, zoom: 0.55 },
+    focusedPath: "/tmp/what-i-was-reading.jsonl",
+    capturedAt: expect.any(String) as unknown as string,
+  }]);
+
+  /* And the way back still works, into the project that was departed from. */
+  click(one("[data-testid='attention-return']")!);
+  await settle();
+  expect(log.restored).toEqual([{ x: 120, y: 340, zoom: 0.55 }]);
+  expect(record().state).toBe("returned");
+});
+
+test("reconciling an arrival posts once however many polls run", async () => {
+  raise();
+  const { bus } = board({ [ANCHOR]: LIVE_RECT });
+  mount(bus);
+  await settle();
+
+  unreachable.add("arrive");
+  click(one("[data-testid='attention-accept']")!);
+  await settle();
+  expect(record().state).toBe("accepted");
+
+  unreachable.delete("arrive");
+  const revisionBefore = record().revision;
+  for (let tick = 0; tick < 4; tick += 1) await poll();
+
+  /* `arrive` is legal only from `accepted`, so the first retry closes the gate
+     for every later one: exactly one transition, not four refusals stacked into
+     a refusal band the operator has to dismiss. */
+  expect(record().state).toBe("following");
+  expect(record().revision).toBe(revisionBefore + 1);
+  expect(record().returnPoints).toHaveLength(1);
+  expect(one("[data-testid='attention-refused']")).toBeNull();
+});
+
+test("a return the network swallowed keeps the memory of where to go back to", async () => {
+  raise();
+  const { bus, log } = board({ [ANCHOR]: LIVE_RECT });
+  mount(bus);
+  await settle();
+
+  click(one("[data-testid='attention-accept']")!);
+  await settle();
+  expect(record().state).toBe("following");
+
+  viewBus.reportSlice({ ...WHERE_I_WAS, focusedPath: ANCHOR, camera: { x: -900, y: -1_400, zoom: 0.9, worldRect: { x: 0, y: 0, width: 10, height: 10 } } });
+
+  unreachable.add("return");
+  click(one("[data-testid='attention-return']")!);
+  await settle();
+
+  /* Nothing was decided, so the record still says the operator is following and
+     the control is still on offer. */
+  expect(record().state).toBe("following");
+  expect(one("[data-testid='attention-return']")).not.toBeNull();
+
+  unreachable.delete("return");
+  click(one("[data-testid='attention-return']")!);
+  await settle();
+
+  /* The second press restores the ORIGINAL camera. Forgetting the capture
+     project on the dropped first press would have left this press unable to
+     tell whether those world coordinates belonged to the project on screen, and
+     it would have declined to restore them at all. */
+  expect(record().state).toBe("returned");
+  expect(log.restored).toEqual([
+    { x: 120, y: 340, zoom: 0.55 },
+    { x: 120, y: 340, zoom: 0.55 },
+  ]);
 });

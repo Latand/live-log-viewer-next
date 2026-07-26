@@ -1,5 +1,5 @@
 import { frameWasRead } from "@/lib/attention/frames";
-import { resolveFocusTarget, type FocusFrameIndex } from "@/lib/attention/resolve";
+import { navigableAnchorKeys, resolveFocusTarget, type FocusFrameIndex } from "@/lib/attention/resolve";
 import { focusTargetAnchorKeys, isGeometricTarget } from "@/lib/attention/targets";
 import type { FocusTarget } from "@/lib/attention/types";
 import type { AttentionRequestV1, FocusFrame, FocusResolutionKind, ReturnPoint } from "@/lib/attention/types";
@@ -68,11 +68,20 @@ export function usableFrame(frame: FocusFrame | null | undefined): FocusFrame | 
   return frameWasRead(frame) ? frame! : null;
 }
 
-/** The anchor's keys that the board actually holds, in preference order. Empty
-    when the landing has no object behind it at all. */
+/**
+ * The anchor's keys that the board actually holds, in preference order. Empty
+ * when the landing has no object behind it at all.
+ *
+ * Resolved through the index rather than filtered by it, so an aliased anchor
+ * arrives as the key the board is DRAWING and not only as the one the request
+ * asked for. A launched or retried pipeline stage is exactly that case: the
+ * request names its slot, the board has long since replaced that slot with the
+ * running agent's card, and a phone handed only the slot key concludes the
+ * stage is gone while it is on screen in front of the operator.
+ */
 function presentAnchorKeys(target: FocusTarget | null, index: FocusFrameIndex): string[] {
   if (!target || isGeometricTarget(target)) return [];
-  return focusTargetAnchorKeys(target).filter((key) => index.rectFor(key) !== null);
+  return navigableAnchorKeys(index, focusTargetAnchorKeys(target));
 }
 
 async function boardForProject(bus: FocusHandoffBus, project: string, timing: HandoffTiming) {

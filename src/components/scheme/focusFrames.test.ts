@@ -103,3 +103,27 @@ test("an anchor the layout no longer holds reports gone rather than a stale rect
   expect(index.rectFor("/tmp/deleted.jsonl")).toBeNull();
   expect(resolveFocusTarget({ kind: "conversation", path: "/tmp/deleted.jsonl" }, null, index).resolution).toBe("lost");
 });
+
+test("the board reports which card a launched stage's anchor actually resolves through", () => {
+  /* The rect alone is enough for a camera and not for the phone, which pins a
+     pane by key. Both surfaces read this one index, so the concrete key has to
+     come from here rather than be re-derived by whoever navigates. */
+  const withoutSlot: FocusLayoutSlice = {
+    ...layout(),
+    byPath: new Map([["/tmp/stage-agent.jsonl", rect(4_000, 4_000)]]),
+  };
+  const index = buildFocusFrameIndex(withoutSlot, "demo", {
+    aliases: new Map([["slot::p1::s2", "/tmp/stage-agent.jsonl"]]),
+  });
+
+  expect(index.concreteAnchorKey!("slot::p1::s2")).toBe("/tmp/stage-agent.jsonl");
+  /* A directly placed anchor resolves through itself. */
+  expect(index.concreteAnchorKey!("/tmp/stage-agent.jsonl")).toBe("/tmp/stage-agent.jsonl");
+  /* And an alias whose target has also left the board is gone, not a key that
+     would send a surface looking for a card nobody is drawing. */
+  const orphaned = buildFocusFrameIndex(withoutSlot, "demo", {
+    aliases: new Map([["slot::p1::s2", "/tmp/vanished.jsonl"]]),
+  });
+  expect(orphaned.concreteAnchorKey!("slot::p1::s2")).toBeNull();
+  expect(orphaned.rectFor("slot::p1::s2")).toBeNull();
+});

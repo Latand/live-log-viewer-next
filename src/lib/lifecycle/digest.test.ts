@@ -3,8 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { pollLifecycleDigest, readDigestSubscriber, ROUTINE_DIGEST_INTERVAL_MS, seedLifecycleDigestCursor } from "./digest";
-import { appendLifecycleEvents, type LifecycleEventInput } from "./journal";
+import { digestScopeKey, pollLifecycleDigest, readDigestSubscriber, ROUTINE_DIGEST_INTERVAL_MS, seedLifecycleDigestCursor } from "./digest";
+import { appendLifecycleEvents, LIFECYCLE_JOURNAL_CAPACITY, type LifecycleEventInput } from "./journal";
 
 const sandboxes: string[] = [];
 const originalStateDir = process.env.LLV_STATE_DIR;
@@ -324,4 +324,110 @@ test("a terminal event beyond the first page still triggers immediate relay", ()
   const result = pollLifecycleDigest({ subscriberId: "sub_overflow", now: T0 + 1_000 });
   expect(result.relay).not.toBeNull();
   expect(result.pending).toBeGreaterThan(0);
+});
+
+/** `count` routine events, then one terminal verdict last — so the verdict sits
+    at pending position `count + 1` however deep that is. */
+function routinesThenVerdict(count: number): LifecycleEventInput[] {
+  const events: LifecycleEventInput[] = [];
+  for (let index = 0; index < count; index += 1) events.push(routine(index + 1, T0 + index * 100, `step-${index}`));
+  events.push({
+    key: "pipeline:pipeline_a:stage:review:attempt:1:verdict:fail",
+    type: "review_verdict",
+    at: new Date(T0 + count * 100).toISOString(),
+    project: "viewer",
+    pipelineId: "pipeline_a",
+    stageId: "review",
+    attempt: 1,
+    role: "reviewer",
+    summary: "fail: findings block the merge",
+  });
+  return events;
+}
+
+test.each([
+  ["the first page boundary", 200],
+  ["the second page boundary", 400],
+  ["the journal's retention capacity", LIFECYCLE_JOURNAL_CAPACITY - 1],
+])("a terminal event past %s still releases the relay immediately", (_where, routineCount) => {
+  sandbox();
+  appendLifecycleEvents(routinesThenVerdict(routineCount));
+
+  /* Well inside the routine hold window: without the terminal event this poll
+     would be held, so a relay here is only explainable by the verdict having
+     been found. Paging the search stopped at 400 and put a blocking verdict
+     behind a five-minute timer on exactly the busy projects that produce one. */
+  const result = pollLifecycleDigest({ subscriberId: `sub_${routineCount}`, now: T0 + 1_000 });
+
+  expect(result.heldUntil).toBeNull();
+  expect(result.relay).not.toBeNull();
+  /* Released immediately, yet still bounded: the payload is the head of the
+     queue rather than the whole retained range. */
+  expect(result.relay!.items.length).toBeLessThanOrEqual(10);
+  expect(result.pending).toBeGreaterThan(0);
+  /* And contiguous — the cursor never jumps over an event that was not carried. */
+  expect(result.cursor).toBeLessThan(routineCount + 1);
+  expect(result.relay!.through).toBe(result.cursor);
+});
+
+test("polling a deep terminal event walks the cursor forward until it arrives", () => {
+  sandbox();
+  appendLifecycleEvents(routinesThenVerdict(400));
+
+  /* Each poll is inside the routine window, so every one of them is released
+     only because the verdict is still pending somewhere ahead. */
+  let cursor = 0;
+  let delivered = false;
+  for (let poll = 0; poll < 60 && !delivered; poll += 1) {
+    const result = pollLifecycleDigest({ subscriberId: "sub_walk", now: T0 + 1_000 + poll });
+    expect(result.relay).not.toBeNull();
+    expect(result.cursor).toBeGreaterThan(cursor);
+    cursor = result.cursor;
+    delivered = result.relay!.items.some((item) => item.type === "review_verdict");
+  }
+
+  expect(delivered).toBeTrue();
+});
+
+test("a dry run reports the cursor the acknowledging poll actually holds", () => {
+  sandbox();
+  appendLifecycleEvents([routine(1, T0), routine(2, T0 + 1_000)]);
+
+  const real = pollLifecycleDigest({ subscriberId: SUBSCRIBER, now: T0 + ROUTINE_DIGEST_INTERVAL_MS + 1_000 });
+  expect(real.cursor).toBeGreaterThan(0);
+
+  const dry = pollLifecycleDigest({ subscriberId: SUBSCRIBER, now: T0 + ROUTINE_DIGEST_INTERVAL_MS + 2_000, acknowledge: false });
+
+  /* The diagnostic read has to resolve the same scope key the acknowledging
+     write used. Scoping an already-scoped key looked under one nothing writes,
+     so the dry run reported a fresh subscriber at 0 and offered to replay the
+     entire history of a subscriber that is fully caught up. */
+  expect(dry.cursor).toBe(real.cursor);
+  expect(dry.relay).toBeNull();
+  expect(dry.pending).toBe(0);
+  /* Still a dry run: nothing moved. */
+  expect(readDigestSubscriber(SUBSCRIBER)!.cursorSeq).toBe(real.cursor);
+});
+
+test("no two distinct subscriptions serialize to the same durable cursor key", () => {
+  /* `subscriberId` is whatever the calling agent passed, so any separator the
+     key joins on is a character it can supply. Each pair below joins to one
+     identical string under a separator-joined key, which means two unrelated
+     subscriptions sharing — and advancing — one durable cursor: whichever polls
+     first marks the other caught up on events it never saw. Written as an
+     escape, because a raw NUL byte would mark this whole file binary. */
+  const NUL = "\u0000";
+  const collidingPairs = [
+    [{ subscriberId: `a${NUL}b`, project: "c" }, { subscriberId: "a", project: `b${NUL}c` }],
+    [{ subscriberId: `a${NUL}b` }, { subscriberId: "a", project: `b${NUL}` }],
+    [{ subscriberId: "sub", project: `p${NUL}q` }, { subscriberId: "sub", project: "p", pipelineId: `q${NUL}` }],
+  ] as const;
+
+  for (const [left, right] of collidingPairs) {
+    expect(digestScopeKey(left)).not.toBe(digestScopeKey(right));
+  }
+
+  /* And ordinary scopes still each get their own stable key. */
+  expect(digestScopeKey({ subscriberId: SUBSCRIBER })).not.toBe(digestScopeKey({ subscriberId: SUBSCRIBER, project: "viewer" }));
+  expect(digestScopeKey({ subscriberId: SUBSCRIBER })).toBe(digestScopeKey({ subscriberId: SUBSCRIBER }));
 });
