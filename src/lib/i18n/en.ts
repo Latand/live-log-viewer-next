@@ -626,6 +626,11 @@ export const en = {
   "sound.off": "Sound notifications off",
   "sound.mute": "Mute sound notifications",
   "sound.unmute": "Enable sound notifications",
+  "sound.settings": "Sound levels",
+  "sound.cueVolume": "Notification cues",
+  "sound.ambient": "Ambient bed during calls",
+  "sound.ambientVolume": "Ambient level",
+  "sound.ambientHint": "Plays quietly while a voice call is connected, and ducks under speech.",
 
   // MicButton
   "mic.stopRecognize": "Stop recording and transcribe",

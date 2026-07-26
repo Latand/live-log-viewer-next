@@ -602,6 +602,11 @@ export const uk: Record<keyof typeof en, Message> = {
   "sound.off": "Звукові сповіщення вимкнено",
   "sound.mute": "Вимкнути звукові сповіщення",
   "sound.unmute": "Увімкнути звукові сповіщення",
+  "sound.settings": "Рівні звуку",
+  "sound.cueVolume": "Звукові сигнали",
+  "sound.ambient": "Фоновий шар під час дзвінка",
+  "sound.ambientVolume": "Рівень фону",
+  "sound.ambientHint": "Тихо звучить, поки триває голосовий дзвінок, і стишується під мову.",
 
   "mic.stopRecognize": "Зупинити запис і розпізнати",
   "mic.cancel": "Скасувати запис",

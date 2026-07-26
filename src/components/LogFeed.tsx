@@ -6,6 +6,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ChevronUp, Sparkle } from "@/components/icons";
 import { useLogTail } from "@/hooks/useLogTail";
 import { useRuntimeSessionForConversation } from "@/hooks/useRuntime";
+import { useToolActivityCues } from "@/hooks/useToolActivityCues";
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { getLocale, translate, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
@@ -311,6 +312,10 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [session, file?.activity, tail.lines, tail.linesStart],
   );
+  /* Tool activity earns its cue from the parse itself: an in-flight call ticks
+     once, keyed on the engine's call id, so a tail tick that re-parses the same
+     window is silent and history never replays. */
+  useToolActivityCues(feed.items, memoryKey);
   const hiddenLocal = Math.max(0, feed.items.length - visibleCount);
   const visibleItems = hiddenLocal ? feed.items.slice(-visibleCount) : feed.items;
   const visibleStartIndex = feed.items.length - visibleItems.length;

@@ -8,6 +8,7 @@ import { Select } from "@/components/ui/Select";
 import { useComposer } from "@/hooks/useComposer";
 import { seedLaunchOutbox } from "@/components/conversation/outbox";
 import { isEngineEffort } from "@/lib/agent/efforts";
+import { playCue } from "@/lib/audio/app";
 import { codexModelSupportsImages, defaultModelFor } from "@/lib/agent/models";
 import { useLocale } from "@/lib/i18n";
 import { requestFilesRefresh } from "@/lib/filesEvents";
@@ -691,6 +692,20 @@ export function DraftAgentPane({
         json = null;
       }
       const outcome = classifySpawnResponse(res.status, res.ok, json);
+      /* The server's own launch receipt is the event, and its id is the event's
+         identity: a reload that re-POSTs the identical idempotency key gets the
+         same launchId back, so the replay is silent. `clientAttemptId` covers a
+         receipt that named no launch — it is durable across the same reload. */
+      const launchEventId = outcome.kind === "launched" || outcome.kind === "failed-launch"
+        ? outcome.launchId ?? candidate.clientAttemptId
+        : null;
+      if (launchEventId) {
+        playCue(
+          outcome.kind === "launched"
+            ? { cue: "launch", eventId: `launch:${launchEventId}` }
+            : { cue: "failure", eventId: `launch-failed:${launchEventId}` },
+        );
+      }
       if (typeof json?.launchId === "string" && typeof json.conversationId === "string") requestFilesRefresh();
       if (outcome.kind === "launched") {
         /* Seed the operator's launch prompt as the conversation's first
