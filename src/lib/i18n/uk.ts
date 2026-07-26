@@ -689,6 +689,12 @@ export const uk: Record<keyof typeof en, Message> = {
   "question.approve": "Затвердити",
   "question.reject": "Відхилити",
   "question.ownAnswer": "Своя відповідь…",
+  "question.deliveryFailed": "Відповідь не доставлена",
+  "question.retryAnswer": "Спробувати ще",
+  "question.errorNotRunning": "агент більше не працює, тож нічого не доставлено",
+  "question.errorMoved": "агент уже пішов далі від цього питання",
+  "question.errorUnconfirmed": "відповідь надіслано, але агент її не підтвердив",
+  "question.errorRejected": "вʼювер не зміг зібрати коректну відповідь",
 
   "inbox.deleted": "видалено з диска",
   "inbox.fileGone": "файла вже немає на диску",

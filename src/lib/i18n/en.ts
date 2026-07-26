@@ -711,6 +711,14 @@ export const en = {
   "question.approve": "Approve",
   "question.reject": "Reject",
   "question.ownAnswer": "Your own answer…",
+  // Delivery failure (issue #697) — translated at the boundary, never the
+  // server's own exception text.
+  "question.deliveryFailed": "Answer not delivered",
+  "question.retryAnswer": "Retry",
+  "question.errorNotRunning": "the agent is no longer running, so nothing was delivered",
+  "question.errorMoved": "the agent has moved on from this question",
+  "question.errorUnconfirmed": "the answer was sent, but the agent never confirmed it",
+  "question.errorRejected": "the viewer could not build a valid answer",
 
   // InboxImage
   "inbox.deleted": "deleted from disk",

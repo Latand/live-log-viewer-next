@@ -1,14 +1,36 @@
 "use client";
 
-import { Check, Loader2, Pause, Send, X } from "lucide-react";
+import { Check, Loader2, Pause, RotateCw, Send, X } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { useIsMobile } from "@/hooks/useIsMobile";
 
-import { type TFunction, useLocale } from "@/lib/i18n";
+import { type MessageKey, type TFunction, useLocale } from "@/lib/i18n";
 import type { FileEntry, PendingQuestionItem } from "@/lib/types";
 
 type CardState = "pending" | "delivering" | "answered" | "superseded" | "failed";
+
+/** A submitted answer, kept so a failure can offer a labelled retry (#697). */
+interface Attempt {
+  payload: Record<string, unknown>;
+  optimistic: string;
+}
+
+/**
+ * Issue #697: delivery failures reach the operator as translated copy. The
+ * server's `error` string is internal detail — it carried untranslated driver
+ * text and colon-terminated pane dumps ("screen does not match this question: ")
+ * straight into the card — so it never becomes UI text.
+ */
+export function deliveryErrorKey(status: number, body: { noPane?: boolean } = {}): MessageKey {
+  if (body.noPane) return "question.noPane";
+  if (status === 400) return "question.errorRejected";
+  if (status === 403) return "question.errorNotRunning";
+  if (status === 409) return "question.errorMoved";
+  if (status === 502) return "question.errorUnconfirmed";
+  if (status >= 500) return "common.serverUnavailable";
+  return "common.failedSend";
+}
 
 function labelFor(question: PendingQuestionItem, value: number): string {
   return question.options[value]?.label ?? String(value + 1);
@@ -33,6 +55,7 @@ export function QuestionCard({ file }: { file: FileEntry }) {
   const [text, setText] = useState("");
   const [comment, setComment] = useState("");
   const [resuming, setResuming] = useState(false);
+  const [attempt, setAttempt] = useState<Attempt | null>(null);
   const hasPane = pending ? pending.paneTarget !== null : file.pid !== null && file.proc === "running";
 
   const selectedLabel = useMemo(() => {
@@ -65,7 +88,7 @@ export function QuestionCard({ file }: { file: FileEntry }) {
         const json = (await res.json()) as { ok?: boolean; error?: string };
         if (!res.ok || !json.ok) {
           setState("failed");
-          setMessage(json.error ?? t("common.failedSend"));
+          setMessage(t(deliveryErrorKey(res.status)));
           return;
         }
         setState("answered");
@@ -155,21 +178,28 @@ export function QuestionCard({ file }: { file: FileEntry }) {
   const submit = async (payload: Record<string, unknown>, optimistic: string) => {
     setState("delivering");
     setMessage("");
+    setAttempt({ payload, optimistic });
     try {
       const res = await fetch("/api/answer", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ transcriptPath: pending.transcriptPath, toolUseId: pending.toolUseId, kind: pending.kind, ...payload }),
       });
-      const json = (await res.json()) as { ok?: boolean; answer?: string; error?: string; superseded?: boolean };
+      const json = (await res.json()) as { ok?: boolean; answer?: string; error?: string; superseded?: boolean; noPane?: boolean };
       if (!res.ok || !json.ok) {
         if (res.status === 409 && (json.superseded || json.answer)) {
+          /* `answer` is the transcript's recorded answer, operator-facing by
+             construction; `error` beside it is not, so it is dropped. */
           setState("superseded");
-          setMessage(json.answer ?? json.error ?? t("question.alreadyAnswered"));
+          setMessage(json.answer ?? t("question.alreadyAnswered"));
           return;
         }
         setState("failed");
-        setMessage(json.error ?? t("common.failedSend"));
+        setMessage(t(deliveryErrorKey(res.status, json)));
+        /* Issue #697: nothing was delivered, so the option must stop rendering
+           as chosen. Leaving the ✓ and the accent fill up made the card assert
+           success while its own strip still read "waiting for a reply". */
+        setAnswers({});
         return;
       }
       setState("answered");
@@ -177,6 +207,7 @@ export function QuestionCard({ file }: { file: FileEntry }) {
     } catch {
       setState("failed");
       setMessage(t("common.serverUnavailable"));
+      setAnswers({});
     }
   };
 
@@ -204,7 +235,7 @@ export function QuestionCard({ file }: { file: FileEntry }) {
       });
       const json = (await res.json()) as { ok?: boolean; error?: string; target?: string };
       if (!res.ok || !json.ok) {
-        setMessage(json.error ?? t("question.openFailed"));
+        setMessage(t("question.openFailed"));
         return;
       }
       setMessage(t("question.opened", { target: json.target ?? "tmux" }));
@@ -344,7 +375,25 @@ export function QuestionCard({ file }: { file: FileEntry }) {
           <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> {t("common.sending")}
         </div>
       ) : null}
-      {state === "failed" ? <div className="mt-3 text-[12px] font-semibold text-danger">{message}</div> : null}
+      {/* Issue #697: the failure states what did not happen and offers the
+          recovery, so the strip's "waiting for a reply" and the card agree —
+          the question is still open and the operator can resend. */}
+      {state === "failed" ? (
+        <div role="alert" className="mt-3 flex flex-wrap items-center gap-2 rounded-[8px] border border-danger/30 bg-danger-soft px-2.5 py-2">
+          <span className="text-[12px] font-bold text-danger">{t("question.deliveryFailed")}</span>
+          <span className="min-w-0 text-[12px] font-semibold text-danger">{message}</span>
+          {attempt ? (
+            <button
+              type="button"
+              className={`ml-auto inline-flex items-center gap-1.5 rounded-[8px] border border-border bg-card px-3 py-1.5 text-[12px] font-bold text-primary hover:border-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60 ${mob}`}
+              disabled={!hasPane}
+              onClick={() => void submit(attempt.payload, attempt.optimistic)}
+            >
+              <RotateCw className="h-3.5 w-3.5" aria-hidden /> {t("question.retryAnswer")}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
