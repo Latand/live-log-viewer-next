@@ -9,6 +9,11 @@ import { applyConversationAction } from "@/lib/conversation/actions";
 import { cancelRound, closeFlow, patchFlow } from "@/lib/flows/commands";
 import { getFlowsWithPresets } from "@/lib/flows/engine";
 import type { PatchFlowRequest } from "@/lib/flows/types";
+import { pollLifecycleDigest, type LifecycleDigestRequest } from "@/lib/lifecycle/digest";
+import { queryLifecycleEvents, type LifecycleEventQuery } from "@/lib/lifecycle/journal";
+import { agentLivenessSnapshot, productionLivenessSources, type AgentLivenessSources } from "@/lib/lifecycle/liveness";
+import { refreshLifecycleJournal } from "@/lib/lifecycle/projector";
+import { isLifecycleEventType } from "@/lib/lifecycle/vocabulary";
 import { createPipelineFromRequest, getPipelines, patchPipeline } from "@/lib/pipelines/engine";
 import { latestOperationalPipelineAttempt } from "@/lib/pipelines/attemptSelection";
 import { requestPipelineTick } from "@/lib/pipelines/controllerSignal";
@@ -94,6 +99,10 @@ export interface ViewerMcpDomainDependencies {
   readResources: typeof readResources;
   applyConversationAction: typeof applyConversationAction;
   applyConversationMigration: typeof applyConversationMigration;
+  livenessSources(): AgentLivenessSources;
+  queryLifecycleEvents: typeof queryLifecycleEvents;
+  pollLifecycleDigest: typeof pollLifecycleDigest;
+  refreshLifecycleJournal: typeof refreshLifecycleJournal;
 }
 
 const productionDomainDependencies: ViewerMcpDomainDependencies = {
@@ -113,6 +122,10 @@ const productionDomainDependencies: ViewerMcpDomainDependencies = {
   readResources,
   applyConversationAction,
   applyConversationMigration,
+  livenessSources: productionLivenessSources,
+  queryLifecycleEvents,
+  pollLifecycleDigest,
+  refreshLifecycleJournal,
 };
 
 function text(value: unknown): string {
@@ -557,6 +570,74 @@ async function conversationMigration(args: McpToolArgs, dependencies: ViewerMcpD
   });
 }
 
+/**
+ * #645 — the liveness snapshot that replaces the operator's external
+ * `stat`/`pgrep` sweep. Cheap enough to poll on a schedule: it reads the
+ * registries the Viewer already maintains plus the durable transcript tail, and
+ * it never echoes a pipeline's own claim about a stage. A stall observed here
+ * is also journaled (#686), so the sweep leaves a durable record.
+ */
+async function agentActivity(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): Promise<McpToolPayload> {
+  const sources = dependencies.livenessSources();
+  const snapshot = await agentLivenessSnapshot({
+    conversationId: text(args.conversationId) || undefined,
+    transcriptPath: (text(args.transcriptPath) || text(args.path)) || undefined,
+    project: text(args.project) || undefined,
+    liveOnly: args.liveOnly === true,
+    stallAfterMs: typeof args.stallAfterMs === "number" ? args.stallAfterMs : undefined,
+    limit: typeof args.limit === "number" ? args.limit : undefined,
+  }, sources);
+  const journal = dependencies.refreshLifecycleJournal({ liveness: snapshot.conversations });
+  return redactPayload({ ...snapshot, journaled: journal.appended });
+}
+
+function lifecycleEventType(value: unknown): LifecycleEventQuery["type"] {
+  const candidate = text(value);
+  if (!candidate) return undefined;
+  if (!isLifecycleEventType(candidate)) throw new Error(`unknown lifecycle event type: ${candidate}`);
+  return candidate;
+}
+
+/**
+ * #686 — one tool over the durable journal. `query` reads it by lineage and
+ * cursor; `digest` polls the bounded relay, which releases terminal high-signal
+ * events at once and batches routine progress behind a five-minute window.
+ * Both refresh the projection first, so a stage that finished since the last
+ * call is already recorded — no background notification service.
+ */
+async function lifecycleEvents(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): Promise<McpToolPayload> {
+  const mode = text(args.mode) || "query";
+  if (mode !== "query" && mode !== "digest") throw new Error('mode must be "query" or "digest"');
+  const registry = dependencies.registrySnapshot();
+  const refreshed = dependencies.refreshLifecycleJournal({
+    pipelines: dependencies.getPipelines().pipelines,
+    deliveries: Object.values(registry.heldDeliveries),
+  });
+  if (mode === "digest") {
+    const subscriberId = text(args.subscriberId) || text(args.conversationId);
+    if (!subscriberId) throw new Error("subscriberId is required for mode=digest");
+    const request: LifecycleDigestRequest = {
+      subscriberId,
+      project: text(args.project) || undefined,
+      pipelineId: text(args.pipelineId) || undefined,
+      conversationId: text(args.conversationId) || undefined,
+      maxItems: typeof args.maxItems === "number" ? args.maxItems : undefined,
+      acknowledge: args.acknowledge !== false,
+    };
+    return redactPayload({ mode, journaled: refreshed.appended, ...dependencies.pollLifecycleDigest(request) });
+  }
+  const page = dependencies.queryLifecycleEvents({
+    project: text(args.project) || undefined,
+    pipelineId: text(args.pipelineId) || undefined,
+    conversationId: text(args.conversationId) || undefined,
+    stageId: text(args.stageId) || undefined,
+    type: lifecycleEventType(args.type),
+    afterSeq: typeof args.afterSeq === "number" ? args.afterSeq : undefined,
+    limit: typeof args.limit === "number" ? args.limit : undefined,
+  });
+  return redactPayload({ mode, journaled: refreshed.appended, ...page });
+}
+
 export function viewerMcpBindings(
   linkTaskDependencies: LinkTaskToPipelineDependencies = productionLinkTaskDependencies,
   controlDependencies: ViewerControlDependencies = productionViewerControlDependencies,
@@ -586,5 +667,7 @@ export function viewerMcpBindings(
     resources: (args) => resources(args, domainDependencies),
     conversation_action: (args) => conversationAction(args, domainDependencies),
     conversation_migration: (args) => conversationMigration(args, domainDependencies),
+    agent_activity: (args) => agentActivity(args, domainDependencies),
+    lifecycle_events: (args) => lifecycleEvents(args, domainDependencies),
   };
 }

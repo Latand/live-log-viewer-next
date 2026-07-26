@@ -35,6 +35,8 @@ export const MCP_TOOL_NAMES = [
   "deployment_status",
   "resources",
   "conversation_migration",
+  "agent_activity",
+  "lifecycle_events",
 ] as const;
 
 export type McpToolName = typeof MCP_TOOL_NAMES[number];
@@ -52,6 +54,10 @@ const MUTATING_MCP_TOOL_NAMES = new Set<McpToolName>([
   "flow_action",
   "conversation_action",
   "conversation_migration",
+  /* Digest polls advance a durable relay cursor, so their receipts must
+     survive the MCP process: a replayed clientRequestId has to return the same
+     relay rather than skip past events the caller never saw. */
+  "lifecycle_events",
 ]);
 
 export type McpToolArgs = Record<string, unknown> & { clientRequestId?: unknown };
@@ -935,6 +941,8 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   deployment_status: "Read Viewer deployment or runtime operation status, or list recent deployments.",
   resources: "Read system and Viewer-owned agent resource usage.",
   conversation_migration: "Reseat, retry, or roll back a conversation account migration.",
+  agent_activity: "Read agent liveness: last transcript record, turn state, whether the host is alive or gone, and how long a stalled conversation has been silent.",
+  lifecycle_events: "Query the durable lifecycle event journal by lineage and cursor, or poll a bounded relay digest of what changed since the last one.",
 };
 
 const clientRequestIdSchema = z.string().min(1).describe("Stable idempotency key for this logical call.");
@@ -1103,6 +1111,30 @@ const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     action: z.enum(["reseat", "retry", "rollback"]),
     expectedRevision: z.number().int().min(0).optional(),
     transcriptPath: z.string().optional(),
+  }).passthrough(),
+  agent_activity: z.object({
+    clientRequestId: clientRequestIdSchema,
+    conversationId: z.string().optional(),
+    transcriptPath: z.string().optional(),
+    project: z.string().optional(),
+    liveOnly: z.boolean().optional(),
+    stallAfterMs: z.number().int().min(1_000).max(6 * 60 * 60_000).optional()
+      .describe("Silence under a live host that counts as a stall. A dead host over an open turn is always stalled."),
+    limit: z.number().int().min(1).max(200).optional(),
+  }).passthrough(),
+  lifecycle_events: z.object({
+    clientRequestId: clientRequestIdSchema,
+    mode: z.enum(["query", "digest"]).optional().describe('"query" reads the journal; "digest" polls the bounded relay.'),
+    project: z.string().optional(),
+    pipelineId: z.string().optional(),
+    conversationId: z.string().optional(),
+    stageId: z.string().optional(),
+    type: z.string().optional(),
+    afterSeq: z.number().int().min(0).optional().describe("Exclusive journal cursor for mode=query."),
+    limit: z.number().int().min(1).max(200).optional(),
+    subscriberId: z.string().optional().describe("Durable digest cursor owner; required for mode=digest."),
+    maxItems: z.number().int().min(1).max(25).optional(),
+    acknowledge: z.boolean().optional().describe("false polls the digest without advancing the cursor."),
   }).passthrough(),
 };
 

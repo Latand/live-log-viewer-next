@@ -646,3 +646,98 @@ test("a refused pipeline close exposes its host report through MCP, not only pro
   expect(paused).toMatchObject({ ok: true, pipelineId: "pipeline_1" });
   expect((paused as { details?: unknown }).details).toBeUndefined();
 });
+
+test("agent_activity reports the liveness snapshot and journals the stalls it finds (#645)", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-activity-"));
+  sandboxes.push(sandbox);
+  process.env.LLV_STATE_DIR = sandbox;
+  const journaled: unknown[] = [];
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    livenessSources: () => ({
+      now: () => Date.parse("2026-07-26T08:40:00.000Z"),
+      probe: { now: () => Date.parse("2026-07-26T08:40:00.000Z"), pidAlive: () => false, processIdentity: () => null },
+      listFiles: async () => [{
+        path: "/transcripts/session.jsonl",
+        project: "viewer",
+        title: "stage agent",
+        engine: "codex",
+        activity: "stalled",
+        activityReason: "jsonl_turn_stalled",
+        mtime: Date.parse("2026-07-26T02:27:33.000Z") / 1000,
+        conversationId: "conversation_zombie",
+      }],
+      registrySnapshot: () => ({ entries: {}, conversations: {} }),
+      pipelines: () => [],
+      durableTurnEvidence: async () => ({ turn: "busy", message: { text: "mid turn", ts: Date.parse("2026-07-26T02:27:33.000Z") } }),
+    }),
+    refreshLifecycleJournal: (input: unknown) => {
+      journaled.push(input);
+      return { appended: 1, skipped: 0, throttled: false };
+    },
+  } as never);
+
+  const result = await bindings.agent_activity({ clientRequestId: "activity-645", liveOnly: true });
+
+  expect(result).toMatchObject({ count: 1, stalledCount: 1, journaled: 1 });
+  expect((result.conversations as Array<Record<string, unknown>>)[0]).toMatchObject({
+    conversationId: "conversation_zombie",
+    lifecycle: "stalled",
+    turnState: "busy",
+    lastRecordAt: "2026-07-26T02:27:33.000Z",
+  });
+  expect(journaled).toHaveLength(1);
+});
+
+test("lifecycle_events queries the journal by lineage and polls the bounded digest (#686)", async () => {
+  const queries: unknown[] = [];
+  const digests: unknown[] = [];
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    registrySnapshot: () => ({ heldDeliveries: {} }),
+    getPipelines: () => ({ pipelines: [] }),
+    refreshLifecycleJournal: () => ({ appended: 2, skipped: 5, throttled: false }),
+    queryLifecycleEvents: (query: unknown) => {
+      queries.push(query);
+      return { count: 1, events: [{ seq: 7, type: "review_verdict", summary: "pass" }], cursor: 7, remaining: 0 };
+    },
+    pollLifecycleDigest: (request: unknown) => {
+      digests.push(request);
+      return { subscriberId: "conversation_operator", relay: { reason: "terminal", items: [], through: 7, omitted: 0 }, cursor: 7, pending: 0, heldUntil: null };
+    },
+  } as never);
+
+  const queried = await bindings.lifecycle_events({
+    clientRequestId: "journal-686",
+    pipelineId: "pipeline_a",
+    afterSeq: 3,
+  });
+  expect(queried).toMatchObject({ mode: "query", count: 1, cursor: 7, journaled: 2 });
+  expect(queries).toEqual([{
+    project: undefined,
+    pipelineId: "pipeline_a",
+    conversationId: undefined,
+    stageId: undefined,
+    type: undefined,
+    afterSeq: 3,
+    limit: undefined,
+  }]);
+
+  const polled = await bindings.lifecycle_events({
+    clientRequestId: "digest-686",
+    mode: "digest",
+    subscriberId: "conversation_operator",
+  });
+  expect(polled).toMatchObject({ mode: "digest", cursor: 7, relay: { reason: "terminal" } });
+  expect(digests).toEqual([{
+    subscriberId: "conversation_operator",
+    project: undefined,
+    pipelineId: undefined,
+    conversationId: undefined,
+    maxItems: undefined,
+    acknowledge: true,
+  }]);
+
+  await expect(bindings.lifecycle_events({ clientRequestId: "digest-no-subscriber", mode: "digest" }))
+    .rejects.toThrow("subscriberId is required for mode=digest");
+  await expect(bindings.lifecycle_events({ clientRequestId: "bad-type", type: "not_a_type" }))
+    .rejects.toThrow("unknown lifecycle event type: not_a_type");
+});

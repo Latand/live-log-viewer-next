@@ -51,6 +51,9 @@ describe("describeMcpCall", () => {
       ["deployment_status", { deploymentId: "deployment-a" }, "deploy", "Reading deployment status"],
       ["resources", { fresh: true }, "tool", "Reading resources"],
       ["conversation_migration", { conversationId: "conversation_a", action: "rollback" }, "conversation", "Rolling back conversation migration"],
+      ["agent_activity", { project: "viewer" }, "conversation", "Checking agent activity"],
+      ["lifecycle_events", { pipelineId: "pipe-a" }, "pipeline", "Reading lifecycle events"],
+      ["lifecycle_events", { mode: "digest", subscriberId: "conversation_a" }, "pipeline", "Polling lifecycle digest"],
     ] as const;
 
     for (const [tool, args, icon, prefix] of cases) {
