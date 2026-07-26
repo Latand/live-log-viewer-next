@@ -26,6 +26,13 @@ export const OFFER_TTL_MS = 10 * 60_000;
 /** How long the return control names where you came from before collapsing to
     a conversation line that still restores it. */
 export const RETURN_WINDOW_MS = 60_000;
+/** How long an `accepted` request may go without landing before the clock ends
+    it as lost. Acceptance is a move in progress and lives for seconds — the
+    board wait bounds it — so a request still `accepted` this long afterwards is
+    a device that agreed and then went away: a closed tab, a crash, a reload
+    mid-handoff. Without this that request could never leave `accepted`, and it
+    would stay that device's only offer for the life of the record. */
+export const ACCEPTED_LANDING_GRACE_MS = 60_000;
 /** Auto-follow may move the view; it may not chain-move it. A request arriving
     inside this window after a move waits. */
 export const AUTO_FOLLOW_SETTLE_MS = 4_000;

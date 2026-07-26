@@ -138,6 +138,15 @@ export async function runFocusHandoff(
  * the focused path would glide the board to that node and undo the restore. In
  * the modes presence forbids a camera in, the focused path IS what they were
  * looking at, so that is what comes back.
+ *
+ * A camera is world coordinates in ONE project's layout, so it is only ever
+ * restored into the project it was captured in. `project` is null when this
+ * device has no memory of capturing the point — after a reload, or in a second
+ * tab that shares the device id and therefore renders the same return control.
+ * Restoring into whichever board happens to be registered would put the
+ * operator at a position that means nothing there, so the camera is skipped and
+ * the focused path — which names a thing rather than a coordinate — is what
+ * comes back instead.
  */
 export async function restoreFocusPoint(
   point: Pick<ReturnPoint, "camera" | "focusedPath">,
@@ -148,8 +157,8 @@ export async function restoreFocusPoint(
   const shell = bus.shell();
   if (project && shell && shell.project !== project) shell.openProject(project);
 
-  if (point.camera) {
-    const board = project ? await boardForProject(bus, project, timing) : bus.board();
+  if (point.camera && project) {
+    const board = await boardForProject(bus, project, timing);
     if (board?.restoreCamera(point.camera)) return true;
     /* A surface with no camera falls through to what was focused there, which
        is the only part of that viewport it can put back. */

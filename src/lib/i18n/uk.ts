@@ -1804,4 +1804,6 @@ export const uk: Record<keyof typeof en, Message> = {
   "attention.autoFollowRevoke": "Вимкнути автоперехід",
   "attention.previewClose": "Закрити перегляд",
   "attention.refused": "Це не пройшло — ось де зараз цей запит.",
+  "attention.lostTarget": "Немає куди вести — цього вже немає на дошці. Запит закрито.",
+  "attention.refusedDismiss": "Сховати",
 };

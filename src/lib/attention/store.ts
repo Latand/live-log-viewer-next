@@ -5,7 +5,7 @@ import path from "node:path";
 import { statePath } from "@/lib/configDir";
 import { withFileTransactionSync } from "@/lib/state/fileTransaction";
 
-import { applyAttentionEvent, expiryFrom, isExpiredByClock, type AttentionEvent, type AttentionTransition } from "./machine";
+import { applyAttentionEvent, expiryCauseByClock, expiryFrom, type AttentionEvent, type AttentionTransition } from "./machine";
 import { defaultZoomIntent, isFocusTarget, targetAcceptsIntent } from "./targets";
 import {
   ATTENTION_SCHEMA_VERSION,
@@ -306,14 +306,20 @@ export function transitionAttentionRequest(
  * Expire everything the clock has run out on. Every expiry is a fact both sides
  * can see — the caller writes one line to the conversation and one event to the
  * journal for each id returned here.
+ *
+ * The clock has two causes, and the sweep carries whichever applies rather than
+ * stamping them all `ttl`: an unanswered offer ran out, while an agreed request
+ * that never landed is `lost`. That second case is also the recovery path for a
+ * device that agreed and then vanished mid-handoff, which nothing else can end.
  */
 export function sweepExpiredAttention(options: { filePath?: string; now?: Date } = {}): string[] {
   const now = options.now ?? new Date();
   return mutateAttention((file) => {
     const expired: string[] = [];
     const requests = file.requests.map((request) => {
-      if (!isExpiredByClock(request, now)) return request;
-      const transition = applyAttentionEvent(request, { kind: "expire", cause: "ttl" }, { now });
+      const cause = expiryCauseByClock(request, now);
+      if (!cause) return request;
+      const transition = applyAttentionEvent(request, { kind: "expire", cause }, { now });
       if (!transition.ok) return request;
       expired.push(request.id);
       return transition.request;

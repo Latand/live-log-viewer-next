@@ -215,6 +215,29 @@ test("returning restores the exact camera the device left, and does not re-open 
   expect(log.opened).toEqual([]);
 });
 
+test("a camera is never restored into a project it was not captured in", async () => {
+  /* A null capture project means this device has no memory of taking the point
+     — a reload, or a second tab that shares the device id and renders the same
+     return control. Whatever board happens to be registered is not the one
+     those world coordinates describe, so restoring into it would land the
+     operator at a position that means nothing there. */
+  const { bus, log } = harness("some-other-project", { "/tmp/reviewer.jsonl": RECT });
+
+  const restored = await restoreFocusPoint(
+    { camera: { x: 120, y: 340, zoom: 0.55 }, focusedPath: "/tmp/what-i-was-reading.jsonl" },
+    null,
+    bus,
+    NO_WAIT,
+  );
+
+  expect(log.restored).toEqual([]);
+  /* The focused path names a thing rather than a coordinate, so it is the part
+     of that viewport that still means the same thing anywhere. */
+  expect(restored).toBe(true);
+  expect(log.opened).toEqual(["/tmp/what-i-was-reading.jsonl"]);
+  expect(log.projects).toEqual([]);
+});
+
 test("returning to a camera-less mode restores what was focused there instead", async () => {
   const { bus, log } = harness("demo", {}, "other");
 

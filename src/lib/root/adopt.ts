@@ -11,21 +11,31 @@ import type { RootAdoption } from "./types";
  * identity exists, but the chain it is supposed to survive is never written, so
  * a rollover leaves no link and the continuity marker has nothing to point at.
  *
- * The root is named the way the rest of the app already names it: the
- * conversation id the operator configured, and failing that the conversation
- * the registry recorded a `root` role for at admission. Both are durable
- * launch-time facts, so neither can drift onto a worker.
+ * The root is named the way the registry already names it: the conversation id
+ * the operator configured, and failing that the conversation whose launch
+ * profile carries the `root` role. Both are durable launch-time facts, so
+ * neither can drift onto a worker.
+ *
+ * The role lives on the LAUNCH PROFILE, not on `agentRole`. `agentRole` is the
+ * role-PRESET id (`builder`, `reviewer`, …) and has no `root` member at all —
+ * the operator's own session is precisely the one with no preset — so keying on
+ * it would adopt nothing, and would adopt a worker outright if anyone ever
+ * defined a preset by that name.
  */
 
-/** The narrow slice of a registry snapshot this needs — passed as data so the
-    resolution is testable without the shared registry. */
+/**
+ * The slice of a registry snapshot this reads, described structurally so a
+ * `RegistryConversation` satisfies it as-is and nothing here has to import the
+ * registry. The resolution stays a pure function of data.
+ */
+export interface RootConversationSlice {
+  id: string;
+  updatedAt: string;
+  generations: readonly { path: string; launchProfile?: { role?: string | null } | null }[];
+}
+
 export interface RootSessionSource {
-  conversations: readonly {
-    id: string;
-    agentRole: string | null;
-    generations: readonly { path: string }[];
-    updatedAt: string;
-  }[];
+  conversations: readonly RootConversationSlice[];
   /** `LLV_ROOT_CONVERSATION_ID`, the same env the migration coordinator reads
       to stamp the `root` role in the first place. */
   configuredRootId: string | null;
@@ -36,6 +46,23 @@ export interface RootSessionCandidate {
   path: string | null;
 }
 
+/**
+ * The role the registry stamped on this conversation, read from the newest
+ * generation that carries a launch profile.
+ *
+ * Newest, because a resume or a migration writes a fresh generation and the
+ * role is copied forward onto it; older generations are history. A generation
+ * with no profile at all is legacy and says nothing either way, so it is
+ * skipped rather than read as "worker".
+ */
+function conversationRole(conversation: RootConversationSlice): string | null {
+  for (let index = conversation.generations.length - 1; index >= 0; index -= 1) {
+    const role = conversation.generations[index]?.launchProfile?.role;
+    if (role) return role;
+  }
+  return null;
+}
+
 export function liveRootSession(source: RootSessionSource): RootSessionCandidate | null {
   const configured = source.configuredRootId
     ? source.conversations.find((conversation) => conversation.id === source.configuredRootId)
@@ -44,7 +71,7 @@ export function liveRootSession(source: RootSessionSource): RootSessionCandidate
      re-points the env at the successor; the newest such conversation is the one
      they are talking to. */
   const chosen = configured ?? [...source.conversations]
-    .filter((conversation) => conversation.agentRole === "root")
+    .filter((conversation) => conversationRole(conversation) === "root")
     .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt))
     .at(-1);
   if (!chosen) return null;

@@ -29,6 +29,17 @@ import type { AttentionRequestV1, AttentionState, FocusResolutionKind, ReturnPoi
 /** The viewport this device is about to leave. */
 export type ViewportCapture = () => Pick<ReturnPoint, "mode" | "camera" | "focusedPath">;
 
+/** How long a refusal stays on screen before it takes itself off. A refusal is
+    a message about one answer, not a status: left standing it becomes a warning
+    band the operator cannot get rid of, and after the record has moved on it is
+    describing something that is no longer true. Dismissible before then. */
+export const REFUSAL_TTL_MS = 12_000;
+
+/** The refusal reason a handoff that found nowhere to land reports. Not a
+    server code: the record accepted the close, and this is what the surface
+    says about it. */
+export const LOST_TARGET_REFUSAL = "lost-target";
+
 /** The server refused this device's own answer. Transport failures are NOT
     refusals: those retry silently, because nothing was decided. */
 export interface AttentionRefusal {
@@ -43,8 +54,10 @@ export interface AttentionOffersHandle {
   view: DeviceAttentionView | null;
   offer: DeviceAttentionView["offer"];
   /** Set when this device's last answer was refused; cleared by the next one
-      that lands. */
+      that lands, by the operator, or by its own expiry. */
   refusal: AttentionRefusal | null;
+  /** Take the refusal band off screen. */
+  dismissRefusal: () => void;
   accept: (request: AttentionRequestV1, via?: "operator" | "auto-follow") => Promise<void>;
   preview: (request: AttentionRequestV1) => Promise<void>;
   /** Refuse before looking. Valid only from `offered`. */
@@ -52,7 +65,8 @@ export interface AttentionOffersHandle {
   /** Looked, and stayed put. Valid only from `previewing` — a different fact
       from declining unseen, and the machine keeps them apart. */
   dismiss: (request: AttentionRequestV1) => Promise<void>;
-  /** Called once the camera has landed, with how the target resolved. */
+  /** Called once the camera has landed, with how the target resolved. A `lost`
+      resolution ends the request instead of recording an arrival — see below. */
   arrive: (request: AttentionRequestV1, resolution: FocusResolutionKind) => Promise<void>;
   goBack: (request: AttentionRequestV1, via?: "control" | "manual-move") => Promise<void>;
   refresh: () => Promise<void>;
@@ -71,12 +85,15 @@ export function useAttentionOffers({
   deviceId,
   captureViewport,
   pollMs = 4_000,
+  refusalTtlMs = REFUSAL_TTL_MS,
   fetchFn,
   surfaceVisible,
 }: {
   deviceId: string | null;
   captureViewport: ViewportCapture;
   pollMs?: number;
+  /** Test seam. Production leaves this at {@link REFUSAL_TTL_MS}. */
+  refusalTtlMs?: number;
   fetchFn?: typeof fetch;
   /** Whether this surface is on screen. Defaults to the document's own
       visibility; a sheet collapsed out of sight passes its own answer. */
@@ -199,6 +216,17 @@ export function useAttentionOffers({
 
   const arrive = useCallback(async (request: AttentionRequestV1, resolution: FocusResolutionKind) => {
     if (!deviceId) return;
+    if (resolution === "lost") {
+      /* Nothing moved, so there is no arrival to record and no return point
+         worth keeping. The device that agreed closes its own request: reporting
+         it as an arrival would be refused by the record and leave the request
+         `accepted` forever — the oldest live entry, and therefore the only
+         thing this device is ever offered again. The operator is told on the
+         same surface, because they pressed a control and the view stayed put. */
+      await answer(request.id, { kind: "abandon", deviceId });
+      setRefusal({ requestId: request.id, reason: LOST_TARGET_REFUSAL, state: null });
+      return;
+    }
     await answer(request.id, {
       kind: "arrive",
       deviceId,
@@ -207,10 +235,20 @@ export function useAttentionOffers({
     });
   }, [answer, deviceId, captureViewport]);
 
+  /* A refusal is about one answer, so it outlives that answer by a bounded
+     moment and no longer. Keyed on the refusal itself, so a second one restarts
+     the clock rather than inheriting the first one's remaining time. */
+  useEffect(() => {
+    if (!refusal) return;
+    const timer = setTimeout(() => setRefusal((current) => (current === refusal ? null : current)), refusalTtlMs);
+    return () => clearTimeout(timer);
+  }, [refusal, refusalTtlMs]);
+
   return {
     view,
     offer: view?.offer ?? null,
     refusal,
+    dismissRefusal: useCallback(() => setRefusal(null), []),
     accept,
     preview: useCallback(async (request) => {
       if (deviceId) await answer(request.id, { kind: "preview", deviceId });

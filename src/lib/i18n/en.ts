@@ -1853,4 +1853,6 @@ export const en = {
   "attention.autoFollowRevoke": "Turn auto-follow off",
   "attention.previewClose": "Close the preview",
   "attention.refused": "That did not go through — here is where the request stands now.",
+  "attention.lostTarget": "There was nowhere to take you — that is gone from the board. The request is closed.",
+  "attention.refusedDismiss": "Dismiss",
 } satisfies Dictionary;

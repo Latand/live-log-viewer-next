@@ -11,6 +11,8 @@ import { useAttentionOffers, type ViewportCapture } from "@/components/overlay/u
 
 import { focusHandoffBus, type FocusHandoffBus } from "./focusHandoffBus";
 import { restoreFocusPoint, runFocusHandoff, type HandoffTiming } from "./navigate";
+import { attentionPreviewFor } from "./preview";
+import { forgetReturnProject, readReturnProject, rememberReturnProject } from "./returnProjectMemory";
 
 /**
  * Where #688's loop is actually mounted (D3).
@@ -101,10 +103,6 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
      the arrival that records it. Held in a ref because `arrive` reads it after
      the camera has already gone somewhere else. */
   const leaving = useRef<CapturedViewport | null>(null);
-  /* The project each return point belongs to. The record's ReturnPoint carries
-     mode, camera and focused path but no project, so the device that captured
-     it remembers that part itself — which is per-device anyway. */
-  const returnProjects = useRef(new Map<string, string | null>());
 
   const captureViewport = useCallback<ViewportCapture>(() => {
     const captured = leaving.current ?? currentViewport();
@@ -121,24 +119,36 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
   const onAccept = useCallback(async (request: AttentionRequestV1) => {
     const before = currentViewport();
     leaving.current = before;
-    returnProjects.current.set(request.id, before.project);
+    /* Written before the move and outside this component's lifetime, so a
+       reload or a second tab on the same device restores the camera into the
+       project it was captured in — or, knowing nothing, restores no camera at
+       all rather than one project's coordinates in another's layout. */
+    rememberReturnProject(browserStorage(), deviceId, request.id, before.project);
+    let landed = false;
     try {
       await offers.accept(request);
       const outcome = await runFocusHandoff(request, bus, timing ?? {});
+      landed = outcome.resolution !== "lost";
       /* Reported whichever way it went: an `exact` or `approximate` arrival
-         becomes a follow with a return point, and a `lost` one is refused by
-         the record — visibly, rather than looking like a move that happened. */
+         becomes a follow with a return point, and a `lost` one ends the request
+         then and there — visibly, rather than looking like a move that
+         happened, and without leaving it agreed-to but never landed. */
       await offers.arrive(request, outcome.resolution);
     } finally {
       leaving.current = null;
+      /* Nothing landed, so there is no return to make and nothing to remember
+         the project for. Also the path a throw takes out. */
+      if (!landed) forgetReturnProject(browserStorage(), deviceId, request.id);
     }
-  }, [offers, bus, timing]);
+  }, [offers, bus, deviceId, timing]);
 
   const onReturn = useCallback(async (request: AttentionRequestV1) => {
     const point = request.returnPoints.find((entry) => entry.deviceId === deviceId);
-    if (point) await restoreFocusPoint(point, returnProjects.current.get(request.id) ?? null, bus, timing ?? {});
+    if (point) {
+      await restoreFocusPoint(point, readReturnProject(browserStorage(), deviceId, request.id), bus, timing ?? {});
+    }
     await offers.goBack(request, "control");
-    returnProjects.current.delete(request.id);
+    forgetReturnProject(browserStorage(), deviceId, request.id);
   }, [offers, bus, deviceId, timing]);
 
   const handlers = useMemo(() => ({
@@ -153,6 +163,12 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
   const live = Boolean(offer && offer.status !== "none" && offer.status !== "closed");
   if (!live && !offers.refusal) return null;
 
+  /* The preview card's content, so "let me look first" shows something. Built
+     here rather than in the row because only this side can see the board, which
+     is where the anchor's own name comes from when the operator is already in
+     the project that holds it. */
+  const preview = offer && offer.status === "actionable" ? attentionPreviewFor(offer.request, bus.board()) : null;
+
   return (
     <RootOverlayHost
       mobile={mobile}
@@ -160,7 +176,10 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
       state="idle"
       turns={NO_TURNS}
       attention={offer}
+      attentionPreview={preview}
       attentionRefused={Boolean(offers.refusal)}
+      attentionRefusedReason={offers.refusal?.reason ?? null}
+      onDismissAttentionRefusal={offers.dismissRefusal}
       t={t}
       {...handlers}
     />

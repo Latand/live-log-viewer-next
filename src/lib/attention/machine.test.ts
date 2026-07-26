@@ -2,13 +2,22 @@ import { expect, test } from "bun:test";
 
 import {
   applyAttentionEvent,
+  expiryCauseByClock,
   expiryFrom,
   isExpiredByClock,
   offerStatusForDevice,
   returnControlIsLive,
   type AttentionEvent,
 } from "./machine";
-import { OFFER_TTL_MS, RETURN_WINDOW_MS, type AttentionRequestV1, type AttentionState, type ReturnPoint } from "./types";
+import {
+  ACCEPTED_LANDING_GRACE_MS,
+  isTerminalAttentionState,
+  OFFER_TTL_MS,
+  RETURN_WINDOW_MS,
+  type AttentionRequestV1,
+  type AttentionState,
+  type ReturnPoint,
+} from "./types";
 
 const T0 = new Date("2026-07-01T10:00:00.000Z");
 const later = (ms: number) => new Date(T0.getTime() + ms);
@@ -173,7 +182,7 @@ test("a device that was never offered the request cannot answer it", () => {
   expect(wrongLander.ok === false && wrongLander.reason).toBe("not-acknowledger");
 });
 
-test("landing on a lost target is refused so the caller expires it instead", () => {
+test("landing on a lost target is refused, and the device closes the request instead", () => {
   const accepted = drive([{ kind: "offer", deviceId: "device-a" }, { kind: "accept", deviceId: "device-a" }]);
 
   const transition = applyAttentionEvent(accepted, {
@@ -186,6 +195,69 @@ test("landing on a lost target is refused so the caller expires it instead", () 
   expect(transition.ok).toBe(false);
   if (transition.ok) return;
   expect(transition.reason).toBe("lost-target");
+
+  /* And that is the whole point of `abandon`: without it the request has no
+     legal event left at all — every one of these is refused from `accepted` —
+     so it stays the device's oldest live entry forever and every later request
+     is offered behind it, rendered by nothing, and expires as if ignored. */
+  for (const event of [
+    { kind: "expire", cause: "ttl" },
+    { kind: "decline", deviceId: "device-a" },
+    { kind: "dismiss", deviceId: "device-a" },
+    { kind: "return", deviceId: "device-a", via: "control" },
+    { kind: "offer", deviceId: "device-a" },
+    { kind: "supersede", by: "attention_2" },
+  ] as const satisfies readonly AttentionEvent[]) {
+    expect(applyAttentionEvent(accepted, event, { now: T0 }).ok).toBe(false);
+  }
+
+  const closed = applyAttentionEvent(accepted, { kind: "abandon", deviceId: "device-a" }, { now: T0 });
+  expect(closed.ok).toBe(true);
+  if (!closed.ok) return;
+  expect(closed.request.state).toBe("expired");
+  /* Its own cause: not a refusal, and not "they never answered". */
+  expect(closed.request.expiredCause).toBe("lost");
+  expect(isTerminalAttentionState(closed.request.state)).toBe(true);
+});
+
+test("only the device that agreed may abandon, and only from accepted", () => {
+  const accepted = drive([
+    { kind: "offer", deviceId: "device-a" },
+    { kind: "offer", deviceId: "device-b" },
+    { kind: "accept", deviceId: "device-a" },
+  ]);
+
+  const other = applyAttentionEvent(accepted, { kind: "abandon", deviceId: "device-b" }, { now: T0 });
+  expect(other.ok).toBe(false);
+  if (other.ok) return;
+  expect(other.reason).toBe("not-acknowledger");
+
+  /* A device that has not agreed to anything cannot close an offer it simply
+     does not like — that is what `decline` is, and it is a different fact. */
+  const offered = drive([{ kind: "offer", deviceId: "device-a" }]);
+  const early = applyAttentionEvent(offered, { kind: "abandon", deviceId: "device-a" }, { now: T0 });
+  expect(early.ok).toBe(false);
+  if (early.ok) return;
+  expect(early.reason).toBe("invalid-transition");
+});
+
+test("an agreed request that never lands is ended by the clock as lost, never as unseen", () => {
+  const accepted = drive([{ kind: "offer", deviceId: "device-a" }, { kind: "accept", deviceId: "device-a" }]);
+
+  /* The move is bounded by the board wait, so a request still `accepted` a
+     minute later is a device that agreed and then went away — a closed tab, a
+     crash. Nothing else could ever end it. */
+  expect(expiryCauseByClock(accepted, later(ACCEPTED_LANDING_GRACE_MS - 1))).toBeNull();
+  expect(expiryCauseByClock(accepted, later(ACCEPTED_LANDING_GRACE_MS))).toBe("lost");
+
+  /* And a TTL is not a thing that may be said about it: "they never answered"
+     is exactly the fact the record is there to keep straight. */
+  const asUnseen = applyAttentionEvent(accepted, { kind: "expire", cause: "ttl" }, { now: later(ACCEPTED_LANDING_GRACE_MS) });
+  expect(asUnseen.ok).toBe(false);
+  const asLost = applyAttentionEvent(accepted, { kind: "expire", cause: "lost" }, { now: later(ACCEPTED_LANDING_GRACE_MS) });
+  expect(asLost.ok).toBe(true);
+  if (!asLost.ok) return;
+  expect(asLost.request.expiredCause).toBe("lost");
 });
 
 test("a writer working from a revision that has moved is refused", () => {
@@ -198,9 +270,10 @@ test("a writer working from a revision that has moved is refused", () => {
   expect(stale.reason).toBe("stale-revision");
 });
 
-test("only pre-acceptance requests run out on the clock", () => {
+test("an unanswered request runs out on the TTL, and a followed one has no clock at all", () => {
   const pending = request();
-  expect(isExpiredByClock(pending, later(OFFER_TTL_MS - 1))).toBe(false);
+  expect(expiryCauseByClock(pending, later(OFFER_TTL_MS - 1))).toBeNull();
+  expect(expiryCauseByClock(pending, later(OFFER_TTL_MS))).toBe("ttl");
   expect(isExpiredByClock(pending, later(OFFER_TTL_MS))).toBe(true);
 
   const following = drive([

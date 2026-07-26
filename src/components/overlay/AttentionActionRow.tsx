@@ -6,6 +6,8 @@ import type { DeviceAttentionOffer } from "@/lib/attention/service";
 import type { AttentionRequestV1 } from "@/lib/attention/types";
 import type { TFunction } from "@/lib/i18n";
 
+import { LOST_TARGET_REFUSAL } from "./useAttentionOffers";
+
 /**
  * The overlay's action row — the band that is 0px tall until something needs an
  * answer (#691), and the surface where #688's consent contract becomes visible.
@@ -40,8 +42,14 @@ export interface AttentionActionRowProps {
   onDismiss: (request: AttentionRequestV1) => void;
   onReturn: (request: AttentionRequestV1) => void;
   onRevokeAutoFollow?: () => void;
-  /** Set when this device's last answer was refused by the record. */
+  /** Set when this device's last answer was refused by the record, or when the
+      handoff it agreed to found nowhere to land. */
   refused?: boolean;
+  /** Why, when the surface knows. `lost-target` is the one case with its own
+      sentence: nothing was refused, there was simply nowhere to go. */
+  refusedReason?: string | null;
+  /** Take the refusal band off screen. Absent leaves it to its own expiry. */
+  onDismissRefusal?: () => void;
   /** Mobile controls are larger, deliberately. */
   controlSize: number;
   t: TFunction;
@@ -88,16 +96,33 @@ export function AttentionActionRow({
   onReturn,
   onRevokeAutoFollow,
   refused,
+  refusedReason,
+  onDismissRefusal,
   controlSize,
   t,
 }: AttentionActionRowProps) {
   /* An answer the record turned down is said out loud on the surface that sent
      it. Silently swallowing it would leave the operator tapping a control that
-     does nothing — the failure this whole row exists to avoid. */
+     does nothing — the failure this whole row exists to avoid. It is a message
+     about one answer, so it can always be got rid of: a band with no way out
+     would be the same dead surface in the other direction. */
   const refusal = refused ? (
-    <p className="px-2 py-1 text-caption text-warning" role="status" aria-live="polite" data-testid="attention-refused">
-      {t("attention.refused")}
-    </p>
+    <div className="flex items-start gap-2 px-2 py-1" data-testid="attention-refused">
+      <p className="flex-1 text-caption text-warning" role="status" aria-live="polite">
+        {t(refusedReason === LOST_TARGET_REFUSAL ? "attention.lostTarget" : "attention.refused")}
+      </p>
+      {onDismissRefusal ? (
+        <button
+          type="button"
+          data-testid="attention-refused-dismiss"
+          onClick={onDismissRefusal}
+          aria-label={t("attention.refusedDismiss")}
+          className="shrink-0 text-caption text-muted underline hover:text-secondary"
+        >
+          {t("attention.refusedDismiss")}
+        </button>
+      ) : null}
+    </div>
   ) : null;
 
   /* Standing consent is visible wherever it is in force and revocable from

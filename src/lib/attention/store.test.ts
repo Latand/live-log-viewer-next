@@ -16,7 +16,7 @@ import {
   transitionAttentionRequest,
   type AttentionCreateInput,
 } from "./store";
-import { OFFER_TTL_MS, QUEUE_CAP, type FocusFrame } from "./types";
+import { ACCEPTED_LANDING_GRACE_MS, OFFER_TTL_MS, QUEUE_CAP, type FocusFrame } from "./types";
 
 let sandbox = "";
 let previousStateDir: string | undefined;
@@ -101,6 +101,41 @@ test("an unacknowledged request expires on the clock and reports which ones did"
   expect(readAttentionFile().requests[0]!.state).toBe("expired");
   /* One sweep, one expiry: a second pass has nothing left to say. */
   expect(sweepExpiredAttention({ now: later(OFFER_TTL_MS * 2) })).toEqual([]);
+});
+
+test("a device that agreed and then vanished mid-handoff is recovered by the sweep, as lost", () => {
+  createAttentionRequest(input(), { now: T0, id: "attention_1" });
+  transitionAttentionRequest("attention_1", { kind: "offer", deviceId: "device-a" }, { now: T0 });
+  transitionAttentionRequest("attention_1", { kind: "accept", deviceId: "device-a" }, { now: T0 });
+
+  /* Nothing else can end an `accepted` request: `arrive` never came, and the
+     tab that would have sent it is gone. Left alone it stays the oldest live
+     entry for that device forever, so every later request is offered behind a
+     card nothing renders. */
+  expect(sweepExpiredAttention({ now: later(ACCEPTED_LANDING_GRACE_MS - 1) })).toEqual([]);
+  expect(sweepExpiredAttention({ now: later(ACCEPTED_LANDING_GRACE_MS) })).toEqual(["attention_1"]);
+
+  const swept = readAttentionFile().requests[0]!;
+  expect(swept.state).toBe("expired");
+  /* Its own cause. Calling it a TTL would say the operator never saw it, when
+     in fact they saw it and agreed. */
+  expect(swept.expiredCause).toBe("lost");
+  expect(liveAttentionRequests(readAttentionFile())).toEqual([]);
+});
+
+test("a followed request has no clock, so a sweep never takes the return point away", () => {
+  createAttentionRequest(input(), { now: T0, id: "attention_1" });
+  transitionAttentionRequest("attention_1", { kind: "offer", deviceId: "device-a" }, { now: T0 });
+  transitionAttentionRequest("attention_1", { kind: "accept", deviceId: "device-a" }, { now: T0 });
+  transitionAttentionRequest("attention_1", {
+    kind: "arrive",
+    deviceId: "device-a",
+    resolution: "exact",
+    returnPoint: { deviceId: "device-a", mode: "scheme", camera: { x: 1, y: 2, zoom: 0.5 }, focusedPath: null, capturedAt: T0.toISOString() },
+  }, { now: T0 });
+
+  expect(sweepExpiredAttention({ now: later(OFFER_TTL_MS * 10) })).toEqual([]);
+  expect(readAttentionFile().requests[0]!.state).toBe("following");
 });
 
 test("a request nobody ever rendered expires on the same clock", () => {

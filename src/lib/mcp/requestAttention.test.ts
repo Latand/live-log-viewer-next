@@ -3,8 +3,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
+import type { RegistryConversation } from "@/lib/agent/registry";
 import { raiseAttentionRequest } from "@/lib/attention/service";
 import { readAttentionFile } from "@/lib/attention/store";
+import { adoptLiveRootSession } from "@/lib/root/adopt";
 import { readRootLineage } from "@/lib/root/store";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
@@ -58,13 +61,13 @@ const task = {
 
 interface Adoptions { count: number }
 
-function bindings(adoptions: Adoptions = { count: 0 }) {
+function bindings(adoptions: Adoptions = { count: 0 }, adoptRootSession = () => { adoptions.count += 1; }) {
   return viewerMcpBindings(undefined, undefined, {
     listFiles: async () => [reviewerFile],
     loadTasks: () => [task],
     getPipelines: () => ({ pipelines: [{ id: "pipeline_1", project: "pipeline-project" }] }),
     getFlowsWithPresets: () => ({ flows: [{ id: "flow_1", project: "flow-project" }] }),
-    adoptRootSession: () => { adoptions.count += 1; },
+    adoptRootSession,
     /* The real one: it resolves the state path per call, so the sandbox set in
        beforeEach applies and the request lands on a real record. */
     raiseAttentionRequest,
@@ -73,6 +76,39 @@ function bindings(adoptions: Adoptions = { count: 0 }) {
 
 function service(adoptions: Adoptions = { count: 0 }) {
   return createMcpToolService(bindings(adoptions), new MemoryMcpReceiptStore());
+}
+
+/** A root conversation exactly as the registry holds one — the `root` role on
+    the newest generation's launch profile, which is the only place the registry
+    ever writes it. Typed as the real thing so the shape cannot drift. */
+function rootConversation(id: string, transcript: string, updatedAt: string): RegistryConversation {
+  return {
+    id: id as RegistryConversation["id"],
+    engine: "claude",
+    generations: [{
+      id: `${id}_g0`,
+      path: transcript,
+      accountId: null,
+      launchProfile: emptyLaunchProfile({ cwd: "/repo", role: "root" }),
+      historyHash: null,
+      host: null,
+      createdAt: "2026-07-01T09:00:00.000Z",
+      archivedAt: null,
+    }],
+    continuityPaths: [],
+    abandonedContinuityPaths: [],
+    projectOwnership: null,
+    migration: null,
+    migrationOptOut: null,
+    supersededBy: null,
+    /* No role PRESET: the operator's own session is precisely the one without
+       one, which is why the preset id can never identify it. */
+    agentRole: null,
+    delegationDepth: null,
+    turn: { state: "idle", source: "empty", terminalAt: null, observedAt: null },
+    createdAt: "2026-07-01T09:00:00.000Z",
+    updatedAt,
+  };
 }
 
 const ask = (overrides: Record<string, unknown> = {}) => ({
@@ -194,6 +230,37 @@ test("the ask is a mutation, so its receipt outlives the MCP process", async () 
      second time for the same thing. */
   expect(retentions).toEqual(["durable"]);
   expect(MCP_TOOL_NAMES).toContain("request_attention");
+});
+
+test("a raise folds the real live root session into the chain, and a rollover keeps the link", async () => {
+  /* The adoption runs for real here against registry-shaped conversations — not
+     a counter — because the defect this closes was the resolution reading a
+     field the registry never writes `root` into: the raise worked, the chain
+     stayed empty, and every request named an identity with no sessions behind
+     it. Only a production-shaped source can tell the two apart. */
+  let live = [rootConversation("conversation_root", "/tmp/root.jsonl", "2026-07-01T10:00:00.000Z")];
+  const tools = createMcpToolService(
+    bindings(undefined, () => { adoptLiveRootSession({ conversations: live, configuredRootId: null }); }),
+    new MemoryMcpReceiptStore(),
+  );
+
+  await tools.callTool("request_attention", ask());
+
+  const identity = readRootLineage()!.rootId;
+  expect(readRootLineage()!.sessions).toHaveLength(1);
+  expect(readRootLineage()!.sessions[0]).toMatchObject({ conversationId: "conversation_root", path: "/tmp/root.jsonl" });
+
+  /* The rollover D5 exists for: the session the operator is talking to is
+     replaced, and a request raised before it must still resolve after. */
+  live = [...live, rootConversation("conversation_root_2", "/tmp/root-2.jsonl", "2026-07-01T11:00:00.000Z")];
+  await tools.callTool("request_attention", ask({ clientRequestId: "raise-2", reason: "The verifier is blocked on you." }));
+
+  const sessions = readRootLineage()!.sessions;
+  expect(sessions.map((session) => session.conversationId)).toEqual(["conversation_root", "conversation_root_2"]);
+  expect(sessions[1]!.seededFrom).toBe("conversation_root");
+  /* Same stable identity across the rollover, and both requests named it. */
+  expect(readRootLineage()!.rootId).toBe(identity);
+  expect(readAttentionFile().requests.map((entry) => entry.requestedBy.rootId)).toEqual([identity, identity]);
 });
 
 test("no rootId can be named by the caller", async () => {

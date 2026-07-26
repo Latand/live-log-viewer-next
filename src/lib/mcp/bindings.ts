@@ -106,16 +106,18 @@ export interface ViewerMcpDomainDependencies {
   raiseAttentionRequest: typeof raiseAttentionRequest;
 }
 
-/** The registry slice {@link adoptLiveRootSession} resolves the root from. */
+/**
+ * The registry slice {@link adoptLiveRootSession} resolves the root from.
+ *
+ * Handed over verbatim: `RootSessionSource` is described structurally against
+ * the registry's own conversation shape — id, updatedAt, and the generations
+ * with their launch profiles — so there is no field mapping here to fall out of
+ * step with what the registry actually stamps.
+ */
 function rootSessionSource(): RootSessionSource {
   const snapshot = agentRegistry().readOnlySnapshot();
   return {
-    conversations: Object.values(snapshot.conversations).map((conversation) => ({
-      id: conversation.id,
-      agentRole: conversation.agentRole,
-      generations: conversation.generations.map((generation) => ({ path: generation.path })),
-      updatedAt: conversation.updatedAt,
-    })),
+    conversations: Object.values(snapshot.conversations),
     configuredRootId: process.env.LLV_ROOT_CONVERSATION_ID?.trim() || null,
   };
 }

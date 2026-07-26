@@ -1,4 +1,5 @@
 import {
+  ACCEPTED_LANDING_GRACE_MS,
   isTerminalAttentionState,
   OFFER_TTL_MS,
   RETURN_WINDOW_MS,
@@ -26,6 +27,9 @@ export type AttentionEvent =
   | { kind: "accept"; deviceId: string; via?: "operator" | "auto-follow" }
   /** The view reached the target; the pre-move viewport comes with it. */
   | { kind: "arrive"; deviceId: string; returnPoint: ReturnPoint; resolution: FocusResolutionKind }
+  /** The device that agreed could not land: there was nowhere to go. Its own
+      close for a handoff that never happened — see the `abandon` case. */
+  | { kind: "abandon"; deviceId: string }
   | { kind: "decline"; deviceId: string }
   /** Looked, and stayed put. */
   | { kind: "dismiss"; deviceId: string }
@@ -76,12 +80,29 @@ function advance(
 }
 
 /**
- * Whether the clock alone has run this request out. Only pre-acceptance states
- * expire: once the operator has agreed, the view has moved or is moving, and a
- * timer taking the return point away with it would strand them.
+ * How the clock alone would end this request, or null while it may still run.
+ *
+ * Two different clocks, because they answer two different questions. Before
+ * acceptance it is the TTL: nobody answered. After acceptance it is the landing
+ * grace: somebody agreed and the move never completed, which is the one state a
+ * request could otherwise never leave — `arrive` refuses a lost landing, and
+ * `return` needs a follow that never began. A `following` request has no clock
+ * at all: the view is where the request asked for, and a timer taking the
+ * return point away would strand the operator there.
  */
+export function expiryCauseByClock(request: AttentionRequestV1, now: Date): ExpiryCause | null {
+  if (PRE_ACCEPTANCE.includes(request.state)) {
+    return Date.parse(request.expiresAt) <= now.getTime() ? "ttl" : null;
+  }
+  if (request.state === "accepted") {
+    return now.getTime() - Date.parse(request.stateChangedAt) >= ACCEPTED_LANDING_GRACE_MS ? "lost" : null;
+  }
+  return null;
+}
+
+/** Whether the clock alone has run this request out. */
 export function isExpiredByClock(request: AttentionRequestV1, now: Date): boolean {
-  return PRE_ACCEPTANCE.includes(request.state) && Date.parse(request.expiresAt) <= now.getTime();
+  return expiryCauseByClock(request, now) !== null;
 }
 
 /** Whether the return control still names where the operator came from. Past
@@ -168,14 +189,29 @@ export function applyAttentionEvent(
     case "arrive": {
       if (request.state !== "accepted") return refuse(request, "invalid-transition");
       if (request.acknowledgedBy !== event.deviceId) return refuse(request, "not-acknowledger");
-      /* Nowhere to land is not a follow. The caller expires the request, which
-         writes one line to the conversation rather than a silent no-op. */
+      /* Nowhere to land is not a follow. The device that agreed closes it with
+         `abandon` instead, which writes one line to the conversation rather
+         than a silent no-op — and never records a follow that did not happen. */
       if (event.resolution === "lost") return refuse(request, "lost-target");
       const returnPoints = [
         ...request.returnPoints.filter((point) => point.deviceId !== event.deviceId),
         event.returnPoint,
       ];
       return advance(request, "following", now, { returnPoints, resolution: event.resolution });
+    }
+
+    /* The accepting device's own way out of a handoff that found nowhere to go.
+       It is deliberately none of the other three endings: nobody refused
+       anything, so it is not `declined`; the offer was seen and agreed to, so
+       it is not a TTL expiry; and the view never moved, so it is not a follow
+       that was returned from. The cause on the record says which it was, and
+       the request becomes terminal at once — otherwise it stays `accepted`
+       forever and, being the oldest live entry, hides every later offer on that
+       device behind a card nothing renders. */
+    case "abandon": {
+      if (request.state !== "accepted") return refuse(request, "invalid-transition");
+      if (request.acknowledgedBy !== event.deviceId) return refuse(request, "not-acknowledger");
+      return advance(request, "expired", now, { expiredCause: "lost" });
     }
 
     case "decline": {
@@ -197,7 +233,12 @@ export function applyAttentionEvent(
     }
 
     case "expire": {
-      if (!PRE_ACCEPTANCE.includes(request.state)) return refuse(request, "invalid-transition");
+      /* The clock's own event, and never a client's — see `validateAttentionEvent`.
+         From `accepted` it is only ever the landing grace running out, so the
+         cause is checked rather than trusted: nothing may end an agreed request
+         by calling it a TTL expiry, which would say the operator never saw it. */
+      const landingLost = request.state === "accepted" && event.cause === "lost";
+      if (!PRE_ACCEPTANCE.includes(request.state) && !landingLost) return refuse(request, "invalid-transition");
       /* The cause is kept, not just acted on: the caller that dropped a request
          to make room is gone as soon as its response is written, and the record
          still has to be able to say which kind of ending this was. */
