@@ -49,6 +49,7 @@ import { pushTaskToast, TaskToastHost } from "./tasks/taskToast";
 import { MobileFocusView } from "./mobile/MobileFocusView";
 import { canHandoff, HandoffHandle } from "./HandoffHandle";
 import { SchemeBoard } from "./scheme/SchemeBoard";
+import { CatalogFailureNotice } from "./CatalogFailureNotice";
 import { SchemeSkeleton } from "./scheme/SchemeSkeleton";
 import { Switchboard } from "./Switchboard";
 import {
@@ -91,6 +92,11 @@ interface Props {
   projectCwd?: string;
   project: string;
   loaded: boolean;
+  /** Consecutive `/api/files` failures (issue #696). A restored `#p=` or
+      localStorage project lands straight here, so this is the surface a dead
+      server reaches FIRST — and on the phone the rail is behind a drawer, so
+      it is the only surface that can name the failure at all. */
+  catalogFailures?: number;
   /** Bumped by Viewer on every openFile so a same-project open re-reads prefs
       even though `project` itself did not change. */
   openNonce: number;
@@ -308,6 +314,7 @@ export function ProjectDashboard({
   projectCwd,
   project,
   loaded,
+  catalogFailures = 0,
   openNonce,
   focusRequest,
   attentionPaths,
@@ -1527,7 +1534,14 @@ export function ProjectDashboard({
           </>
         ) : (
           <>
-            <span className="truncate text-[11.5px] text-muted">{statusBits.length ? statusBits.join(" · ") : t("common.nothingRunning")}</span>
+            {/* Issue #696: the header borrows the affirmative idle line only
+                when the catalog is actually known. Under a failing fetch it
+                names the failure, exactly as the overview board does. */}
+            <span className={`truncate text-[11.5px] ${catalogFailures > 0 ? "font-semibold text-danger" : "text-muted"}`}>
+              {catalogFailures > 0
+                ? t("catalog.unreachable")
+                : statusBits.length ? statusBits.join(" · ") : t("common.nothingRunning")}
+            </span>
             <SoundToggle />
             {archived ? (
               <button
@@ -1606,7 +1620,7 @@ export function ProjectDashboard({
               strip (finding 7). The scheme/list switch is not one of them — it
               is one tap inside the header's «⋯» menu (issue #613). */}
           {!boardReady ? (
-            <SchemeSkeleton />
+            catalogFailures > 0 ? <CatalogFailureNotice failures={catalogFailures} className="mt-[12vh]" /> : <SchemeSkeleton />
           ) : projectView === "scheme" && schemeAvailable ? (
             <MobileFocusView
               project={project}
@@ -1651,7 +1665,7 @@ export function ProjectDashboard({
               <ProjectViewTabs value={projectView} onChange={chooseEmptyView} floating />
             ) : null}
             {!boardReady ? (
-              <SchemeSkeleton />
+              catalogFailures > 0 ? <CatalogFailureNotice failures={catalogFailures} className="mt-[12vh]" /> : <SchemeSkeleton />
             ) : projectView === "scheme" && schemeAvailable ? (
               <SchemeBoard
                 project={project}
@@ -1748,7 +1762,7 @@ export function ProjectDashboard({
       {/* deckFlows here folds direct reviewers out of the switchboard exactly
           like managed rounds (claimedReviewerPaths); the hook keeps flow status
           lines to REAL flows itself. */}
-      {!isMobile && boardReady ? <Switchboard files={files} flows={deckFlows} project={project} loaded={loaded} onOpenFile={openSwitchboardFile} onOpenCatalogFile={openFullCatalogFile} /> : null}
+      {!isMobile && boardReady ? <Switchboard files={files} flows={deckFlows} project={project} loaded={loaded} catalogFailures={catalogFailures} onOpenFile={openSwitchboardFile} onOpenCatalogFile={openFullCatalogFile} /> : null}
 
       {/* Worker-class cards that have auto-collapsed fold into one stack per
           origin — flow / pipeline / spawner (issue #112, #136) — instead of

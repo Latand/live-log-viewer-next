@@ -16,6 +16,7 @@ import type { FileEntry } from "@/lib/types";
 import { conversationIdentity } from "@/lib/accounts/identity";
 
 import { projectKey } from "./projectModel";
+import { CatalogFailureNotice } from "./CatalogFailureNotice";
 import { CornerStatus } from "./CornerStatus";
 import { EngineAccountSwitch } from "./EngineAccountSwitch";
 import { FlipRow } from "./FlipRow";
@@ -26,6 +27,8 @@ interface Props {
   flows: Flow[];
   project: string;
   loaded: boolean;
+  /** Consecutive `/api/files` failures (issue #696). */
+  catalogFailures?: number;
   onOpenFile: (file: FileEntry) => void;
   onOpenCatalogFile: (file: FileEntry) => void;
 }
@@ -87,7 +90,7 @@ function Section({
   );
 }
 
-export function Switchboard({ files, flows, project, loaded, onOpenFile, onOpenCatalogFile }: Props) {
+export function Switchboard({ files, flows, project, loaded, catalogFailures = 0, onOpenFile, onOpenCatalogFile }: Props) {
   const { t } = useLocale();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -239,7 +242,11 @@ export function Switchboard({ files, flows, project, loaded, onOpenFile, onOpenC
                 ) : null}
               </section>
               {!data.waiting.length && !data.working.length && !data.recent.length && !data.older.length ? (
-                loaded ? (
+                /* Issue #696: an empty deck behind a failing catalog is
+                   unconfirmed, not "nothing found". */
+                catalogFailures > 0 ? (
+                  <CatalogFailureNotice failures={catalogFailures} className="pt-[18vh]" />
+                ) : loaded ? (
                   <div className="pt-[18vh] text-center text-[13px] font-semibold text-muted">{t("common.nothingFound")}</div>
                 ) : (
                   <div className="flex items-center justify-center gap-2 pt-[18vh] text-[13px] font-semibold text-muted">

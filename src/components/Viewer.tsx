@@ -658,6 +658,7 @@ export function Viewer() {
             projectCwd={projectCwds[project]}
             project={project}
             loaded={loaded}
+            catalogFailures={catalogFailures}
             openNonce={openNonce}
             focusRequest={focusRequest?.catalog && catalogPin?.path !== focusRequest.path ? null : focusRequest}
             attentionPaths={attentionPaths}
