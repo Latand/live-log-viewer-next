@@ -298,7 +298,7 @@ export function SpeakButton({ text }: { text: string }) {
 
   return (
     <span className="relative">
-      <button ref={triggerRef} type="button" onClick={toggle} className={`inline-flex items-center justify-center rounded-md text-muted transition-opacity hover:bg-sunken hover:text-primary focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 [@media(hover:none)]:opacity-60 ${isMobile ? "h-11 w-11" : "p-1 opacity-0 group-hover/msg:opacity-100"}`} aria-label={active ? t("tts.stop") : cached ? t("tts.replay") : t("tts.read")} title={active ? t("tts.stop") : cached ? t("tts.replayFree") : t("tts.readPaid")}>
+      <button ref={triggerRef} type="button" onClick={toggle} className={`inline-flex items-center justify-center rounded-md text-muted transition-opacity hover:bg-sunken hover:text-primary focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${isMobile ? "h-11 w-11" : "p-1"} opacity-70 hover:opacity-100 group-hover/msg:opacity-100`} aria-label={active ? t("tts.stop") : cached ? t("tts.replay") : t("tts.read")} title={active ? t("tts.stop") : cached ? t("tts.replayFree") : t("tts.readPaid")}>
         {active ? <Square className="h-3.5 w-3.5" aria-hidden /> : <Volume2 className="h-3.5 w-3.5" aria-hidden />}
       </button>
       <span role="status" aria-live="polite" className="sr-only">{announcement}</span>

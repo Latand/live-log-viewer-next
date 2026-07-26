@@ -44,27 +44,33 @@ function InlineCode({ text }: { text: string }) {
   );
 }
 
-/* Fenced block with a copy control that surfaces on hover (always faintly
-   there on touch screens, where hover never comes). A `lang` hint lazily
-   upgrades the body to highlight.js output on first paint (see useHighlighted);
-   until the chunk resolves — or when the language is unknown — it stays plain
-   monospace, so nothing blocks or flashes. */
+/** Right padding that keeps the copy control clear of the code (issue #698). */
+const CODE_GUTTER = "pr-10";
+
+/* Fenced block with a copy control parked in its own right gutter — legible at
+   rest on every pointer, and never on top of the first line. A `lang` hint
+   lazily upgrades the body to highlight.js output on first paint (see
+   useHighlighted); until the chunk resolves — or when the language is unknown —
+   it stays plain monospace, so nothing blocks or flashes. */
 export function CodeBlock({ code, lang }: { code: string; lang?: string | null }) {
   const highlighted = useHighlighted(code, lang);
   return (
     <div className="group/code relative my-1.5 max-w-full">
       {highlighted ? (
         <pre
-          className="hljs max-w-full overflow-x-auto rounded-[10px] border border-border bg-canvas px-3 py-2 font-mono text-[11.5px]"
+          className={`hljs max-w-full overflow-x-auto rounded-[10px] border border-border bg-canvas py-2 pl-3 font-mono text-[11.5px] ${CODE_GUTTER}`}
           dangerouslySetInnerHTML={{ __html: highlighted }}
         />
       ) : (
-        <pre className="max-w-full overflow-x-auto rounded-[10px] border border-border bg-canvas px-3 py-2 font-mono text-[11.5px]">{code}</pre>
+        <pre className={`max-w-full overflow-x-auto rounded-[10px] border border-border bg-canvas py-2 pl-3 font-mono text-[11.5px] ${CODE_GUTTER}`}>{code}</pre>
       )}
+      {/* Issue #698: the copy control keeps its own gutter (`CODE_GUTTER`)
+          instead of floating over the first line of code, and it is legible
+          without a hover. */}
       <CopyButton
         text={code}
         label={tr("feed.copyCode")}
-        className="absolute right-1.5 top-1.5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/code:opacity-100 [@media(hover:none)]:opacity-60"
+        className="absolute right-1.5 top-1.5 opacity-70 transition-opacity hover:opacity-100 focus-visible:opacity-100 group-hover/code:opacity-100"
       />
     </div>
   );
