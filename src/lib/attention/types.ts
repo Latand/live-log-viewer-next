@@ -83,6 +83,15 @@ export interface FocusFrame {
     one-way and always spoken. */
 export type FocusResolutionKind = "exact" | "approximate" | "lost";
 
+/**
+ * Why a request ended without an answer. Kept on the record rather than only in
+ * the reply to whoever caused it: "nobody answered in ten minutes", "the anchor
+ * was gone" and "the queue was full" are three different things to say out loud,
+ * and the last one is the one a caller would otherwise have to remember for the
+ * record's whole life.
+ */
+export type ExpiryCause = "ttl" | "lost" | "queue-evicted";
+
 /** `show` frames and highlights; `open` also opens the target's natural surface,
     and return closes what it opened — which is why the two are one field (D8). */
 export type FocusIntent = "show" | "open";
@@ -108,7 +117,8 @@ export type AttentionState =
       silence — the difference between an agent that learns to stop asking and
       one that keeps asking. */
   | "declined"
-  /** TTL elapsed unacknowledged, or the target resolved as lost. Terminal. */
+  /** TTL elapsed unacknowledged, the target resolved as lost, or the queue was
+      full. Which one is on the record as `expiredCause`. Terminal. */
   | "expired"
   /** Replaced by a newer request from the root agent. Terminal. */
   | "superseded";
@@ -187,6 +197,9 @@ export interface AttentionRequestV1 {
       what is shared is the target and the acknowledgement. */
   returnPoints: ReturnPoint[];
   resolution?: FocusResolutionKind;
+  /** Set with the `expired` state, so a dropped request stays distinguishable
+      from an unanswered one long after the POST that dropped it. */
+  expiredCause?: ExpiryCause;
   /** Why a follow ended, so the record never claims the operator is still
       looking at something they left by hand. */
   returnedVia?: "control" | "manual-move";

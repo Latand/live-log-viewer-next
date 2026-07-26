@@ -71,6 +71,7 @@ function mount(snap: SheetSnap, props: Partial<RootSheetProps> = {}): SheetSnap[
       onAcceptAttention={() => {}}
       onPreviewAttention={() => {}}
       onDeclineAttention={() => {}}
+      onDismissAttention={() => {}}
       onReturnAttention={() => {}}
       t={t}
       {...props}
@@ -84,14 +85,27 @@ const one = (selector: string) => dom.document.querySelector(selector) as unknow
 const all = (selector: string) => [...dom.document.querySelectorAll(selector)] as unknown as HTMLElement[];
 const click = (element: HTMLElement) => element.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
 
-function drag(element: HTMLElement, from: number, to: number): void {
-  const down = new dom.Event("pointerdown", { bubbles: true }) as unknown as Event & { clientY: number };
-  Object.defineProperty(down, "clientY", { value: from });
-  element.dispatchEvent(down);
-  const up = new dom.Event("pointerup", { bubbles: true }) as unknown as Event & { clientY: number };
-  Object.defineProperty(up, "clientY", { value: to });
-  element.dispatchEvent(up);
+function pointer(kind: string, clientY: number): Event {
+  const event = new dom.Event(kind, { bubbles: true }) as unknown as Event & { clientY: number; pointerId: number };
+  Object.defineProperty(event, "clientY", { value: clientY });
+  Object.defineProperty(event, "pointerId", { value: 1 });
+  return event;
 }
+
+/**
+ * A pointer sequence as a browser actually emits it: pointerdown, pointerup,
+ * and — because both landed on the same element — the click that follows. The
+ * bug this pins is exactly the one a pointerdown/pointerup-only helper cannot
+ * see, since happy-dom never synthesizes that trailing click by itself.
+ */
+function drag(element: HTMLElement, from: number, to: number): void {
+  element.dispatchEvent(pointer("pointerdown", from));
+  element.dispatchEvent(pointer("pointerup", to));
+  click(element);
+}
+
+/** A tap is the same sequence with the finger staying put. */
+const tap = (element: HTMLElement, at = 100) => drag(element, at, at);
 
 test("each snap renders its own height and leaves the Viewer the rest", () => {
   const heights = sheetHeights(USABLE);
@@ -126,15 +140,16 @@ test("Rail is one truncated line, and a digest becomes a counter rather than hei
 });
 
 test("tapping the state row toggles Rail and Half", () => {
-  expect(mount("rail").length).toBe(0);
-  click(one("[data-testid='sheet-grabber']")!);
+  const fromRail = mount("rail");
+  tap(one("[data-testid='sheet-grabber']")!);
+  expect(fromRail).toEqual(["half"]);
   /* The moves array belongs to the most recent mount. */
   flushSync(() => roots.at(-1)!.unmount());
   roots.pop();
   dom.document.body.replaceChildren();
 
   const fromHalf = mount("half");
-  click(one("[data-testid='sheet-grabber']")!);
+  tap(one("[data-testid='sheet-grabber']")!);
   expect(fromHalf).toEqual(["rail"]);
 });
 
@@ -148,12 +163,41 @@ test("a drag never jumps two snaps", () => {
   expect(moves).toEqual(["half"]);
 });
 
-test("a drag shorter than the threshold is a scroll, not a snap change", () => {
+test("the click a drag leaves behind does not toggle the sheet back", () => {
+  const moves = mount("half");
+
+  /* The grabber is one target for two gestures, and a browser reports a drag as
+     pointerdown, pointerup AND a click. Applying both would take an upward drag
+     from Half to Full and then collapse it to Rail in the same gesture. */
+  drag(one("[data-testid='sheet-grabber']")!, 400, 100);
+
+  expect(moves).toEqual(["full"]);
+});
+
+test("a movement below the threshold stays a tap rather than becoming a snap of its own", () => {
   const moves = mount("half");
 
   drag(one("[data-testid='sheet-grabber']")!, 100, 110);
 
+  /* Ten pixels is a finger that did not mean to drag; the browser still calls
+     it a click, and it reads as the tap it was — once. */
+  expect(moves).toEqual(["rail"]);
+});
+
+test("a gesture the browser takes away moves nothing and leaves no origin behind", () => {
+  const moves = mount("half");
+  const grabber = one("[data-testid='sheet-grabber']")!;
+
+  grabber.dispatchEvent(pointer("pointerdown", 400));
+  grabber.dispatchEvent(pointer("pointercancel", 400));
+  /* A pointerup arriving after the cancel has no live drag to be measured
+     against, so it cannot move the sheet on a stale origin. */
+  grabber.dispatchEvent(pointer("pointerup", 100));
   expect(moves).toEqual([]);
+
+  /* And the control is not left wedged: the next tap still works. */
+  tap(grabber);
+  expect(moves).toEqual(["rail"]);
 });
 
 test("the snap state is announced as a named state, not a percentage", () => {

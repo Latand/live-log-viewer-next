@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { answerAttentionRequest } from "@/lib/attention/service";
-import { AttentionStoreError } from "@/lib/attention/store";
-import { AttentionRequestError, readBoundedJson, validateAttentionEvent } from "@/lib/attention/validation";
+import { readBoundedJson, validateAttentionEvent } from "@/lib/attention/validation";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
+
+import { attentionFailure } from "../failure";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,12 +37,6 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     }
     return NextResponse.json({ error: outcome.reason, state: outcome.state }, { status: 409, headers });
   } catch (error) {
-    if (error instanceof AttentionRequestError) {
-      return NextResponse.json({ error: error.code, message: error.message }, { status: error.status, headers });
-    }
-    if (error instanceof AttentionStoreError) {
-      return NextResponse.json({ error: "ATTENTION_STATE_UNAVAILABLE", message: error.message }, { status: 503, headers });
-    }
-    return NextResponse.json({ error: "INVALID_REQUEST", message: "invalid request" }, { status: 400, headers });
+    return attentionFailure(error);
   }
 }

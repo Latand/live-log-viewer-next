@@ -92,10 +92,16 @@ const viewport: Pick<ReturnPoint, "mode" | "camera" | "focusedPath"> = {
   focusedPath: "/tmp/what-i-was-reading.jsonl",
 };
 
-function mount(fetchFn: typeof fetch): { current: AttentionOffersHandle | null } {
+function mount(fetchFn: typeof fetch, surfaceVisible?: () => boolean): { current: AttentionOffersHandle | null } {
   const box: { current: AttentionOffersHandle | null } = { current: null };
   function Harness() {
-    box.current = useAttentionOffers({ deviceId: DEVICE, captureViewport: () => viewport, fetchFn, pollMs: 100_000 });
+    box.current = useAttentionOffers({
+      deviceId: DEVICE,
+      captureViewport: () => viewport,
+      fetchFn,
+      pollMs: 100_000,
+      ...(surfaceVisible ? { surfaceVisible } : {}),
+    });
     return null;
   }
   const host = dom.document.createElement("div");
@@ -151,7 +157,7 @@ test("landing captures the viewport this device is leaving, and nobody else's", 
   expect(typeof arrival.returnPoint.capturedAt).toBe("string");
 });
 
-test("going back and declining each post their own answer", async () => {
+test("going back, declining and closing a preview each post their own answer", async () => {
   const server = fakeServer();
   const handle = mount(server.fetchFn);
   await settle();
@@ -159,13 +165,84 @@ test("going back and declining each post their own answer", async () => {
   await handle.current!.goBack(request("following"));
   await handle.current!.decline(request("offered"));
   await handle.current!.preview(request("offered"));
+  /* Closing a preview is `dismiss`, never `decline`: the machine refuses
+     `decline` from `previewing`, so wiring the close control to it would leave
+     the request to run out its TTL and be recorded as silence. */
+  await handle.current!.dismiss(request("previewing"));
   await settle();
 
   const kinds = server.calls.map((call) => (call.body as { kind?: string } | null)?.kind).filter(Boolean);
   /* And the offer is reported exactly once: once the record says a device has
      rendered it, later refreshes find nothing pending and post nothing, which
      is what keeps the read loop from feeding itself. */
-  expect(kinds).toEqual(["offer", "return", "decline", "preview"]);
+  expect(kinds).toEqual(["offer", "return", "decline", "preview", "dismiss"]);
+});
+
+test("a surface nobody can see reads the record but never claims the offer was shown", async () => {
+  const server = fakeServer();
+  const handle = mount(server.fetchFn, () => false);
+  await settle();
+
+  /* Reads, yes — a hidden tab that stops polling would show a stale card the
+     moment it came back. Reporting, no: `pending` means no active device
+     rendered it, and that is what makes an expiry line honest. */
+  expect(server.calls.filter((call) => call.body !== null)).toHaveLength(0);
+  expect(server.calls.length).toBeGreaterThan(0);
+  expect(handle.current!.view!.live[0]!.request.state).toBe("pending");
+});
+
+test("a visible surface still reports on the first tick", async () => {
+  const server = fakeServer();
+  mount(server.fetchFn, () => true);
+  await settle();
+
+  expect(server.calls.filter((call) => call.body !== null).map((call) => (call.body as { kind: string }).kind))
+    .toEqual(["offer"]);
+});
+
+test("a refused answer re-reads the record and is visible, rather than passing for success", async () => {
+  /* The route answers an out-of-order transition with 409 and the state the
+     record is actually in. Discarding that makes a dead control indistinguishable
+     from a working one. */
+  const calls: Call[] = [];
+  const fetchFn = (async (url: string, init?: { body?: string }) => {
+    const body = init?.body ? JSON.parse(init.body) as { kind?: string } : null;
+    calls.push({ url, body });
+    if (body?.kind === "decline") {
+      return { ok: false, status: 409, json: async () => ({ error: "invalid-transition", state: "previewing" }) };
+    }
+    return { ok: true, status: 200, json: async () => view("previewing") };
+  }) as unknown as typeof fetch;
+
+  const handle = mount(fetchFn);
+  await settle();
+
+  await handle.current!.decline(request("previewing"));
+  await settle();
+
+  expect(handle.current!.refusal).toEqual({ requestId: "attention_1", reason: "invalid-transition", state: "previewing" });
+  /* And the surface is showing the truth from the record, not the state this
+     device hoped it had reached. */
+  expect(handle.current!.offer!.request.state).toBe("previewing");
+  expect(calls.at(-1)!.body).toBeNull();
+
+  /* The next answer that lands clears it, so a stale warning never outlives the
+     thing it was about. */
+  await handle.current!.preview(request("offered"));
+  await settle();
+  expect(handle.current!.refusal).toBeNull();
+});
+
+test("a server that cannot be reached is not a refusal", async () => {
+  const failing = (async () => { throw new Error("offline"); }) as unknown as typeof fetch;
+  const handle = mount(failing);
+  await settle();
+
+  await handle.current!.decline(request("offered"));
+  await settle();
+
+  /* Nothing was decided, so nothing is announced and the poll simply retries. */
+  expect(handle.current!.refusal).toBeNull();
 });
 
 test("a server that cannot be reached leaves the last known offer on screen", async () => {

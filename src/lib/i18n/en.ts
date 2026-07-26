@@ -1807,17 +1807,13 @@ export const en = {
   "overlay.continuedFromHint": "Open the previous session",
   "overlay.newTurns": { one: "{count} new", other: "{count} new" },
   "overlay.moreUpdates": { one: "+{count} update", other: "+{count} updates" },
-  "overlay.expandTurn": "Show the rest",
-  "overlay.grow": "Make this window taller",
   "overlay.snap.rail": "Watching",
   "overlay.snap.half": "Half height",
   "overlay.snap.full": "Full height",
   "overlay.snapAria": "Conversation sheet height",
-  "overlay.replyHere": "Reply here",
   "overlay.computerUse": "Computer Use granted",
   "overlay.permission": "Waiting for permission",
 
-  "attention.heading": "Your agent wants to show you something",
   "attention.willShow": "It will bring it into view.",
   "attention.willOpen": "It will open it.",
   "attention.accept": "Take me there",
@@ -1831,4 +1827,5 @@ export const en = {
   "attention.autoFollow": "Auto-follow is on",
   "attention.autoFollowRevoke": "Turn auto-follow off",
   "attention.previewClose": "Close the preview",
+  "attention.refused": "That did not go through — here is where the request stands now.",
 } satisfies Dictionary;

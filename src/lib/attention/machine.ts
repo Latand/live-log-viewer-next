@@ -4,6 +4,7 @@ import {
   RETURN_WINDOW_MS,
   type AttentionRequestV1,
   type AttentionState,
+  type ExpiryCause,
   type FocusResolutionKind,
   type ReturnPoint,
 } from "./types";
@@ -29,7 +30,7 @@ export type AttentionEvent =
   /** Looked, and stayed put. */
   | { kind: "dismiss"; deviceId: string }
   | { kind: "return"; deviceId: string; via: "control" | "manual-move" }
-  | { kind: "expire"; cause: "ttl" | "lost" }
+  | { kind: "expire"; cause: ExpiryCause }
   | { kind: "supersede"; by: string };
 
 export type AttentionRejection =
@@ -197,7 +198,10 @@ export function applyAttentionEvent(
 
     case "expire": {
       if (!PRE_ACCEPTANCE.includes(request.state)) return refuse(request, "invalid-transition");
-      return advance(request, "expired", now);
+      /* The cause is kept, not just acted on: the caller that dropped a request
+         to make room is gone as soon as its response is written, and the record
+         still has to be able to say which kind of ending this was. */
+      return advance(request, "expired", now, { expiredCause: event.cause });
     }
 
     case "supersede": {

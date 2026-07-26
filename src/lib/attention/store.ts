@@ -214,7 +214,8 @@ export function liveAttentionRequests(file: AttentionFileV1): AttentionRequestV1
  *   ones. There is one speaker, so a second request means it changed its mind;
  * - the queue is capped, and overflow drops the oldest routine entry. The
  *   caller is told which, so a dropped request can be said out loud instead of
- *   vanishing.
+ *   vanishing, and the record itself keeps `expiredCause: "queue-evicted"` so
+ *   the distinction outlives that one response.
  *
  * An operator command enters at `accepted` — skipping consent, because it is
  * their own act — but is still recorded, so return, expiry and the multi-device
@@ -272,7 +273,7 @@ export function createAttentionRequest(
       const waiting = queued();
       const victim = waiting.find((entry) => entry.origin === "root-agent") ?? waiting[0];
       if (!victim) break;
-      const transition = applyAttentionEvent(victim, { kind: "expire", cause: "ttl" }, { now });
+      const transition = applyAttentionEvent(victim, { kind: "expire", cause: "queue-evicted" }, { now });
       if (!transition.ok) break;
       dropped.push(victim.id);
       requests = requests.map((entry) => (entry.id === victim.id ? transition.request : entry));

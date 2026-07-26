@@ -52,6 +52,9 @@ export interface RootOverlayProps {
   continuity?: ContinuityEntry | null;
   attention?: DeviceAttentionOffer | null;
   attentionPreview?: AttentionPreview | null;
+  /** This device's last answer was refused by the record; the action row says
+      so rather than leaving the operator with a control that did nothing. */
+  attentionRefused?: boolean;
   autoFollow?: { scope: "session" | "project"; label: string } | null;
   /** Sheet only: Rail collapses the timeline to a single line. */
   density?: TimelineDensity;
@@ -75,6 +78,9 @@ export interface RootOverlayProps {
   onAcceptAttention: (request: AttentionRequestV1) => void;
   onPreviewAttention: (request: AttentionRequestV1) => void;
   onDeclineAttention: (request: AttentionRequestV1) => void;
+  /** Closing a preview — a refusal after looking, which the record keeps apart
+      from refusing unseen. */
+  onDismissAttention: (request: AttentionRequestV1) => void;
   onReturnAttention: (request: AttentionRequestV1) => void;
   onRevokeAutoFollow?: () => void;
   t: TFunction;
@@ -87,7 +93,7 @@ function densityFor(surface: RootOverlayProps["surface"], arrangement: OverlayAr
 
 export function RootOverlay(props: RootOverlayProps) {
   const {
-    surface, height, state, turns, chips, continuity, attention, attentionPreview, autoFollow,
+    surface, height, state, turns, chips, continuity, attention, attentionPreview, attentionRefused, autoFollow,
     atTail, lastSeenTurnId, micLevel, reducedMotion = false, onStop, computerUse, permissionPending,
     onToggleDock, onSend, onFollowLatest, onOpenPreviousSession, onExpandChips, onChipCommand, t,
   } = props;
@@ -95,7 +101,12 @@ export function RootOverlay(props: RootOverlayProps) {
   const mobile = surface === "sheet";
   const arrangement = arrangementFor(height);
   const density = densityFor(surface, arrangement, props.density);
-  const hasAction = Boolean(attention && attention.status !== "closed" && attention.status !== "none") || Boolean(autoFollow);
+  /* A refusal keeps the band open even when the offer it belonged to has just
+     gone terminal — otherwise the one case the operator most needs told about
+     would take its own message off screen with it. */
+  const hasAction = Boolean(attention && attention.status !== "closed" && attention.status !== "none")
+    || Boolean(autoFollow)
+    || Boolean(attentionRefused);
   const bands: OverlayBands = mobile ? sheetBands(height, hasAction) : desktopBands(height, hasAction);
   const timeline = buildOverlayTimeline({ density, turns, chips, continuity, atTail, lastSeenTurnId });
 
@@ -244,10 +255,12 @@ export function RootOverlay(props: RootOverlayProps) {
             offer={attention ?? null}
             preview={attentionPreview ?? null}
             autoFollow={autoFollow ?? null}
+            refused={attentionRefused}
             controlSize={controlSize}
             onAccept={props.onAcceptAttention}
             onPreview={props.onPreviewAttention}
             onDecline={props.onDeclineAttention}
+            onDismiss={props.onDismissAttention}
             onReturn={props.onReturnAttention}
             onRevokeAutoFollow={props.onRevokeAutoFollow}
             t={t}

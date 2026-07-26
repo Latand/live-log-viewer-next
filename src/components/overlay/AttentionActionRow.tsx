@@ -1,5 +1,7 @@
 "use client";
 
+import type { ReactNode } from "react";
+
 import type { DeviceAttentionOffer } from "@/lib/attention/service";
 import type { AttentionRequestV1 } from "@/lib/attention/types";
 import type { TFunction } from "@/lib/i18n";
@@ -30,9 +32,16 @@ export interface AttentionActionRowProps {
   autoFollow?: { scope: "session" | "project"; label: string } | null;
   onAccept: (request: AttentionRequestV1) => void;
   onPreview: (request: AttentionRequestV1) => void;
+  /** Refusing before looking. */
   onDecline: (request: AttentionRequestV1) => void;
+  /** Closing a preview: looked, and stayed put. The record keeps this apart
+      from refusing unseen, and both are refusals rather than silence — which is
+      the whole reason the close control is not wired to `onDecline`. */
+  onDismiss: (request: AttentionRequestV1) => void;
   onReturn: (request: AttentionRequestV1) => void;
   onRevokeAutoFollow?: () => void;
+  /** Set when this device's last answer was refused by the record. */
+  refused?: boolean;
   /** Mobile controls are larger, deliberately. */
   controlSize: number;
   t: TFunction;
@@ -75,11 +84,22 @@ export function AttentionActionRow({
   onAccept,
   onPreview,
   onDecline,
+  onDismiss,
   onReturn,
   onRevokeAutoFollow,
+  refused,
   controlSize,
   t,
 }: AttentionActionRowProps) {
+  /* An answer the record turned down is said out loud on the surface that sent
+     it. Silently swallowing it would leave the operator tapping a control that
+     does nothing — the failure this whole row exists to avoid. */
+  const refusal = refused ? (
+    <p className="px-2 py-1 text-caption text-warning" role="status" aria-live="polite" data-testid="attention-refused">
+      {t("attention.refused")}
+    </p>
+  ) : null;
+
   /* Standing consent is visible wherever it is in force and revocable from
      exactly there — it is never a setting you have to remember the location of. */
   const consent = autoFollow ? (
@@ -98,92 +118,106 @@ export function AttentionActionRow({
     </div>
   ) : null;
 
-  if (!offer) return consent;
+  const body = (): ReactNode => {
+    if (!offer) return consent;
 
-  const { request, status, returnAvailable } = offer;
+    const { request, status, returnAvailable } = offer;
 
-  if (status === "withdrawn") {
-    return (
-      <div className="px-2 py-1 text-caption text-muted" data-testid="attention-withdrawn">
-        {t("attention.followedElsewhere")}
-      </div>
-    );
-  }
-
-  if (status === "following") {
-    /* The return control names where you came from for its window, then
-       collapses into a line that still restores the same point when tapped. */
-    return (
-      <div className="flex items-center gap-2 px-2 py-1">
-        {consent}
-        <button
-          type="button"
-          data-testid="attention-return"
-          onClick={() => onReturn(request)}
-          style={{ minHeight: controlSize }}
-          className={`inline-flex items-center rounded-control px-3 text-caption ${
-            returnAvailable ? "border border-border text-secondary hover:bg-sunken" : "text-muted underline"
-          }`}
-        >
-          {returnAvailable ? t("attention.return") : t("attention.returnLine")}
-        </button>
-      </div>
-    );
-  }
-
-  if (status !== "actionable") return consent;
-
-  const opening = request.intent === "open";
-  const previewing = request.state === "previewing";
-
-  return (
-    <div className="flex flex-col gap-1 px-2 py-1" data-testid="attention-request">
-      {/* Announced once on arrival; the marker is a button carrying the same
-          text, so no step of the flow requires perceiving a transition. */}
-      <p className="text-caption text-secondary" role="status" aria-live="polite">
-        <span className="font-medium">{request.reason}</span>{" "}
-        {/* D8: the operator hears WHICH of show/open they are agreeing to,
-            before they agree to it. */}
-        <span data-testid="attention-intent">{opening ? t("attention.willOpen") : t("attention.willShow")}</span>
-        {request.resolution === "approximate" ? (
-          <span data-testid="attention-approximate" className="text-muted"> {t("attention.approximate")}</span>
-        ) : null}
-      </p>
-
-      {previewing && preview ? (
-        <div className="rounded-control border border-border px-2 py-1 text-caption" data-testid="attention-preview-card">
-          <span className="font-medium">{preview.title}</span>
-          <span className="text-muted"> · {preview.project}</span>
-          {preview.detail ? <p className="text-muted">{preview.detail}</p> : null}
+    if (status === "withdrawn") {
+      return (
+        <div className="px-2 py-1 text-caption text-muted" data-testid="attention-withdrawn">
+          {t("attention.followedElsewhere")}
         </div>
-      ) : null}
+      );
+    }
 
-      <div className="flex items-center gap-2">
-        <Button
-          testId="attention-accept"
-          label={opening ? t("attention.acceptOpen") : t("attention.accept")}
-          tone="primary"
-          size={controlSize}
-          onClick={() => onAccept(request)}
-        />
-        {!previewing ? (
+    if (status === "following") {
+      /* The return control names where you came from for its window, then
+         collapses into a line that still restores the same point when tapped. */
+      return (
+        <div className="flex items-center gap-2 px-2 py-1">
+          {consent}
+          <button
+            type="button"
+            data-testid="attention-return"
+            onClick={() => onReturn(request)}
+            style={{ minHeight: controlSize }}
+            className={`inline-flex items-center rounded-control px-3 text-caption ${
+              returnAvailable ? "border border-border text-secondary hover:bg-sunken" : "text-muted underline"
+            }`}
+          >
+            {returnAvailable ? t("attention.return") : t("attention.returnLine")}
+          </button>
+        </div>
+      );
+    }
+
+    if (status !== "actionable") return consent;
+
+    const opening = request.intent === "open";
+    const previewing = request.state === "previewing";
+
+    return (
+      <div className="flex flex-col gap-1 px-2 py-1" data-testid="attention-request">
+        {/* Announced once on arrival; the marker is a button carrying the same
+            text, so no step of the flow requires perceiving a transition. */}
+        <p className="text-caption text-secondary" role="status" aria-live="polite">
+          <span className="font-medium">{request.reason}</span>{" "}
+          {/* D8: the operator hears WHICH of show/open they are agreeing to,
+              before they agree to it. */}
+          <span data-testid="attention-intent">{opening ? t("attention.willOpen") : t("attention.willShow")}</span>
+          {request.resolution === "approximate" ? (
+            <span data-testid="attention-approximate" className="text-muted"> {t("attention.approximate")}</span>
+          ) : null}
+        </p>
+
+        {previewing && preview ? (
+          <div className="rounded-control border border-border px-2 py-1 text-caption" data-testid="attention-preview-card">
+            <span className="font-medium">{preview.title}</span>
+            <span className="text-muted"> · {preview.project}</span>
+            {preview.detail ? <p className="text-muted">{preview.detail}</p> : null}
+          </div>
+        ) : null}
+
+        <div className="flex items-center gap-2">
           <Button
-            testId="attention-preview"
-            label={t("attention.preview")}
+            testId="attention-accept"
+            label={opening ? t("attention.acceptOpen") : t("attention.accept")}
+            tone="primary"
+            size={controlSize}
+            onClick={() => onAccept(request)}
+          />
+          {!previewing ? (
+            <Button
+              testId="attention-preview"
+              label={t("attention.preview")}
+              tone="secondary"
+              size={controlSize}
+              onClick={() => onPreview(request)}
+            />
+          ) : null}
+          {/* One control, two different facts underneath it: from `offered` this
+              is a refusal unseen, from `previewing` it is a refusal after
+              looking. Sending `decline` from `previewing` is refused by the
+              machine, which is why the close control has its own event. */}
+          <Button
+            testId={previewing ? "attention-preview-close" : "attention-decline"}
+            label={previewing ? t("attention.previewClose") : t("attention.decline")}
             tone="secondary"
             size={controlSize}
-            onClick={() => onPreview(request)}
+            onClick={() => (previewing ? onDismiss(request) : onDecline(request))}
           />
-        ) : null}
-        <Button
-          testId="attention-decline"
-          label={previewing ? t("attention.previewClose") : t("attention.decline")}
-          tone="secondary"
-          size={controlSize}
-          onClick={() => onDecline(request)}
-        />
+        </div>
+        {consent}
       </div>
-      {consent}
-    </div>
+    );
+  };
+
+  if (!refusal) return body();
+  return (
+    <>
+      {refusal}
+      {body()}
+    </>
   );
 }

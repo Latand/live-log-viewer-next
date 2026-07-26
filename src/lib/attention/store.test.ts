@@ -184,8 +184,41 @@ test("the queue is capped, and an overflowing entry is named so it can be said a
   const overflow = createAttentionRequest(input({ rootId: "root_new" }), { now: later(1_000), id: "attention_new" });
 
   expect(overflow.dropped).toEqual(["attention_0"]);
-  expect(readAttentionFile().requests.find((entry) => entry.id === "attention_0")!.state).toBe("expired");
+  const evicted = readAttentionFile().requests.find((entry) => entry.id === "attention_0")!;
+  expect(evicted.state).toBe("expired");
+  /* The `dropped` array lives only as long as this one response, so the reason
+     is on the record: "the queue was full" and "nobody answered in ten minutes"
+     are different things to say out loud, and only one of them means the
+     operator was there and stayed quiet. */
+  expect(evicted.expiredCause).toBe("queue-evicted");
   expect(liveAttentionRequests(readAttentionFile())).toHaveLength(QUEUE_CAP);
+});
+
+test("a request the clock ran out on is distinguishable from one the queue dropped", () => {
+  createAttentionRequest(input(), { now: T0, id: "attention_1" });
+
+  expect(sweepExpiredAttention({ now: later(OFFER_TTL_MS + 1) })).toEqual(["attention_1"]);
+  expect(readAttentionFile().requests[0]!.expiredCause).toBe("ttl");
+});
+
+test("previewing and then closing the preview is recorded as a refusal, not as silence", () => {
+  createAttentionRequest(input(), { now: T0, id: "attention_1" });
+  transitionAttentionRequest("attention_1", { kind: "offer", deviceId: "device-a" }, { now: later(1_000) });
+  transitionAttentionRequest("attention_1", { kind: "preview", deviceId: "device-a" }, { now: later(2_000) });
+
+  /* `decline` is the answer given without looking, and the machine refuses it
+     from `previewing` — a close control wired to it does nothing at all, and
+     the request survives to be swept as an unanswered one. */
+  const declined = transitionAttentionRequest("attention_1", { kind: "decline", deviceId: "device-a" }, { now: later(3_000) });
+  expect(declined).toEqual({ ok: false, reason: "invalid-transition", state: "previewing" });
+
+  const dismissed = transitionAttentionRequest("attention_1", { kind: "dismiss", deviceId: "device-a" }, { now: later(3_000) });
+  expect(dismissed.ok).toBe(true);
+  expect(readAttentionFile().requests[0]!.state).toBe("declined");
+
+  /* And the clock finds nothing left to expire, so the agent is told they
+     looked and said no rather than that they never answered. */
+  expect(sweepExpiredAttention({ now: later(OFFER_TTL_MS + 1) })).toEqual([]);
 });
 
 test("a request the operator already agreed to neither counts against the queue nor is evicted", () => {

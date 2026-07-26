@@ -40,6 +40,11 @@ export function RootSheet({ snap, onSnapChange, usableHeight, ...overlay }: Root
   const heights = sheetHeights(usableHeight);
   const height = heights[snap];
   const dragOrigin = useRef<number | null>(null);
+  /* A pointer that goes down and up on the same element also emits a click, so
+     without this a drag would move the sheet and then the follow-on click would
+     toggle it straight back. Drag and tap are one gesture with two readings,
+     and exactly one of them may apply. */
+  const dragApplied = useRef(false);
   const t = overlay.t;
 
   const apply = useCallback((gesture: SheetGesture) => {
@@ -67,16 +72,43 @@ export function RootSheet({ snap, onSnapChange, usableHeight, ...overlay }: Root
            percentage, and it rides in the accessible name so the control needs
            no slider semantics it does not otherwise have. */
         aria-label={`${t("overlay.snapAria")}: ${t(`overlay.snap.${snap}` as "overlay.snap.rail")}`}
-        className="mx-auto flex h-4 w-full shrink-0 items-center justify-center"
-        onClick={() => apply("tap-state-row")}
-        onPointerDown={(event) => { dragOrigin.current = event.clientY; }}
+        /* `touch-none` keeps the browser from claiming the vertical gesture as a
+           page pan, which is what would otherwise turn a drag into a
+           pointercancel with no snap change at all. */
+        className="mx-auto flex h-4 w-full shrink-0 touch-none items-center justify-center"
+        onClick={() => {
+          /* The drag already moved the sheet; this is the same gesture arriving
+             a second time. */
+          if (dragApplied.current) {
+            dragApplied.current = false;
+            return;
+          }
+          apply("tap-state-row");
+        }}
+        onPointerDown={(event) => {
+          /* Capture, so the gesture is still this control's once the finger
+             leaves it — an upward drag inevitably does. */
+          event.currentTarget.setPointerCapture?.(event.pointerId);
+          dragOrigin.current = event.clientY;
+          dragApplied.current = false;
+        }}
         onPointerUp={(event) => {
           const origin = dragOrigin.current;
           dragOrigin.current = null;
           if (origin === null) return;
           const delta = event.clientY - origin;
+          /* Short enough to be a tap: leave it to the click, so a tap still
+             toggles Rail↔Half. */
           if (Math.abs(delta) < DRAG_THRESHOLD) return;
+          dragApplied.current = true;
           apply(delta > 0 ? "drag-down" : "drag-up");
+        }}
+        onPointerCancel={() => {
+          /* The gesture was taken away mid-drag. Nothing moves, and the origin
+             does not survive to be measured against an unrelated later
+             pointerup. */
+          dragOrigin.current = null;
+          dragApplied.current = false;
         }}
       >
         <span className="h-1 w-9 rounded-full bg-strong" aria-hidden />

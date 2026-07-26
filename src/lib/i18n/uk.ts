@@ -1763,17 +1763,13 @@ export const uk: Record<keyof typeof en, Message> = {
   "overlay.continuedFromHint": "Відкрити попередню сесію",
   "overlay.newTurns": { one: "{count} нове", few: "{count} нових", many: "{count} нових", other: "{count} нових" },
   "overlay.moreUpdates": { one: "+{count} оновлення", few: "+{count} оновлення", many: "+{count} оновлень", other: "+{count} оновлень" },
-  "overlay.expandTurn": "Показати решту",
-  "overlay.grow": "Збільшити вікно",
   "overlay.snap.rail": "Спостереження",
   "overlay.snap.half": "Половина висоти",
   "overlay.snap.full": "Повна висота",
   "overlay.snapAria": "Висота панелі розмови",
-  "overlay.replyHere": "Відповісти тут",
   "overlay.computerUse": "Computer Use надано",
   "overlay.permission": "Очікує дозволу",
 
-  "attention.heading": "Агент хоче щось показати",
   "attention.willShow": "Він покаже це у полі зору.",
   "attention.willOpen": "Він відкриє це.",
   "attention.accept": "Перейти туди",
@@ -1787,4 +1783,5 @@ export const uk: Record<keyof typeof en, Message> = {
   "attention.autoFollow": "Автоперехід увімкнено",
   "attention.autoFollowRevoke": "Вимкнути автоперехід",
   "attention.previewClose": "Закрити перегляд",
+  "attention.refused": "Це не пройшло — ось де зараз цей запит.",
 };

@@ -102,6 +102,7 @@ function element(props: HostProps) {
       onAcceptAttention={() => {}}
       onPreviewAttention={() => {}}
       onDeclineAttention={() => {}}
+      onDismissAttention={() => {}}
       onReturnAttention={() => {}}
       t={t}
       {...props}
@@ -162,6 +163,9 @@ test("on a phone the sheet is the rendering, and it opens at Half", () => {
   expect(one("[data-testid='root-overlay-dock']")).toBeNull();
 });
 
+/** The full sequence a browser emits for a drag that starts and ends on the same
+    element: pointerdown, pointerup, and the click that follows both. Against
+    real host state, applying the click as well would undo the drag. */
 function drag(element: HTMLElement, from: number, to: number): void {
   flushSync(() => {
     const down = new dom.Event("pointerdown", { bubbles: true }) as unknown as Event & { clientY: number };
@@ -170,6 +174,7 @@ function drag(element: HTMLElement, from: number, to: number): void {
     const up = new dom.Event("pointerup", { bubbles: true }) as unknown as Event & { clientY: number };
     Object.defineProperty(up, "clientY", { value: to });
     element.dispatchEvent(up);
+    element.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
   });
 }
 

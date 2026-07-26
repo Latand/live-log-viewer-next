@@ -94,11 +94,12 @@ interface Answers {
   accepted: string[];
   previewed: string[];
   declined: string[];
+  dismissed: string[];
   returned: string[];
 }
 
 function mount(props: Partial<RootOverlayProps> = {}): Answers {
-  const answers: Answers = { accepted: [], previewed: [], declined: [], returned: [] };
+  const answers: Answers = { accepted: [], previewed: [], declined: [], dismissed: [], returned: [] };
   const host = dom.document.createElement("div");
   dom.document.body.appendChild(host);
   const root = createRoot(host as unknown as Element);
@@ -111,6 +112,7 @@ function mount(props: Partial<RootOverlayProps> = {}): Answers {
       onAcceptAttention={(entry) => answers.accepted.push(entry.id)}
       onPreviewAttention={(entry) => answers.previewed.push(entry.id)}
       onDeclineAttention={(entry) => answers.declined.push(entry.id)}
+      onDismissAttention={(entry) => answers.dismissed.push(entry.id)}
       onReturnAttention={(entry) => answers.returned.push(entry.id)}
       t={t}
       {...props}
@@ -178,7 +180,43 @@ test("accept, preview and decline each answer the request they are showing", () 
   click(one("[data-testid='attention-decline']")!);
   click(one("[data-testid='attention-accept']")!);
 
-  expect(answers).toEqual({ accepted: ["attention_1"], previewed: ["attention_1"], declined: ["attention_1"], returned: [] });
+  expect(answers).toEqual({
+    accepted: ["attention_1"],
+    previewed: ["attention_1"],
+    declined: ["attention_1"],
+    dismissed: [],
+    returned: [],
+  });
+});
+
+test("closing a preview refuses after looking, which is not the same event as declining unseen", () => {
+  const answers = mount({
+    attention: offer({ request: request({ state: "previewing" }) }),
+    attentionPreview: { title: "Reviewer", project: "demo", detail: null },
+  });
+
+  /* `decline` is refused from `previewing` by the machine, so a close wired to
+     it would be a dead control and the request would run to its TTL — recorded
+     as silence rather than as the refusal it was. */
+  expect(one("[data-testid='attention-decline']")).toBeNull();
+  click(one("[data-testid='attention-preview-close']")!);
+
+  expect(answers.dismissed).toEqual(["attention_1"]);
+  expect(answers.declined).toEqual([]);
+});
+
+test("an answer the record refused is said on the surface that sent it", () => {
+  mount({ attention: offer(), attentionRefused: true });
+  expect(one("[data-testid='attention-refused']")!.textContent).toContain("did not go through");
+
+  /* And the band stays open for the message even once the offer it belonged to
+     has gone terminal — that is the case the operator most needs told about. */
+  flushSync(() => roots.at(-1)!.unmount());
+  roots.pop();
+  dom.document.body.replaceChildren();
+  mount({ attention: null, attentionRefused: true });
+  expect(one("[data-testid='overlay-action-row']")).not.toBeNull();
+  expect(one("[data-testid='attention-refused']")).not.toBeNull();
 });
 
 test("a preview shows a text card and never moves the view", () => {
