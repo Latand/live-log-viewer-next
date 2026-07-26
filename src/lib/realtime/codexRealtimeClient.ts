@@ -170,8 +170,14 @@ class CodexRealtimeClient {
   private media: MediaStream | null = null;
   private audio: HTMLAudioElement | null = null;
   private delegationItemId: string | null = null;
-  private lastWorkerText = "";
+  /** The worker turn as the producer has it so far — a reference to the same
+      growing string, never a copy, so retention stays the producer's bound. */
   private pendingWorkerText = "";
+  /** How much of `pendingWorkerText` the channel has accepted. The cursor is
+      the whole contract with the wire: it advances only by characters that
+      were actually sent, so nothing ships twice and nothing is skipped. */
+  private sentWorkerChars = 0;
+  private flushingWorkerProgress = false;
   private pendingFinalText = "";
   private handoffTimer: number | null = null;
   private unloadHangup: (() => void) | null = null;
@@ -318,8 +324,44 @@ class CodexRealtimeClient {
 
   queueWorkerProgress(text: string): void {
     if (!text || this.snapshot.phase !== "live") return;
-    this.pendingWorkerText = text.slice(-MAX_LINE_CHARS);
-    this.upsertLine("progress", this.pendingWorkerText, false);
+    this.trackWorkerText(text);
+    this.upsertLine("progress", text.slice(-MAX_LINE_CHARS), false);
+    this.armHandoff();
+  }
+
+  finishWorkerProgress(text: string): void {
+    if (!text || this.snapshot.phase !== "live") return;
+    this.trackWorkerText(text);
+    if (this.handoffTimer !== null) {
+      window.clearTimeout(this.handoffTimer);
+      this.handoffTimer = null;
+    }
+    /* Everything still owed on commentary goes out before the spoken summary,
+       so the agent never hears the ending ahead of the middle. */
+    this.drainWorkerProgress();
+    const spoken = this.pendingWorkerText.slice(-MAX_LINE_CHARS);
+    this.pendingFinalText = `Agent Final Message:\n\n${spoken}`;
+    this.pendingFinalText = this.pendingFinalText.slice(
+      this.sendDelegationContext(this.pendingFinalText, "speakable"),
+    );
+    this.upsertLine("progress", spoken, true);
+    this.pendingWorkerText = "";
+    this.sentWorkerChars = 0;
+  }
+
+  /**
+   * The producer streams one turn that only grows, so the handoff is a cursor
+   * into it. Text that does not extend what was seen before is a rewrite (a
+   * restarted or replaced turn, not an append): the cursor returns to zero and
+   * the replacement ships once, rather than being diffed against a turn that
+   * no longer exists.
+   */
+  private trackWorkerText(text: string): void {
+    if (!text.startsWith(this.pendingWorkerText)) this.sentWorkerChars = 0;
+    this.pendingWorkerText = text;
+  }
+
+  private armHandoff(): void {
     if (this.handoffTimer !== null) return;
     this.handoffTimer = window.setTimeout(() => {
       this.handoffTimer = null;
@@ -327,34 +369,64 @@ class CodexRealtimeClient {
     }, HANDOFF_INTERVAL_MS);
   }
 
-  finishWorkerProgress(text: string): void {
-    if (!text || this.snapshot.phase !== "live") return;
-    this.pendingWorkerText = text.slice(-MAX_LINE_CHARS);
-    if (this.handoffTimer !== null) {
-      window.clearTimeout(this.handoffTimer);
-      this.handoffTimer = null;
-    }
-    this.flushWorkerProgress();
-    this.pendingFinalText = `Agent Final Message:\n\n${this.pendingWorkerText}`;
-    if (this.sendDelegationContext(this.pendingFinalText, "speakable")) this.pendingFinalText = "";
-    this.upsertLine("progress", this.pendingWorkerText, true);
-    this.lastWorkerText = "";
-    this.pendingWorkerText = "";
-  }
-
+  /** One flush, then re-arm while the wire still owes the producer content. */
   private flushWorkerProgress(): void {
-    const text = this.pendingWorkerText;
-    if (!text) return;
-    const delta = text.startsWith(this.lastWorkerText) ? text.slice(this.lastWorkerText.length) : text;
-    if (!delta || this.sendDelegationContext(delta, "commentary")) this.lastWorkerText = text;
+    if (this.flushOnce() > 0 && this.sentWorkerChars < this.pendingWorkerText.length) this.armHandoff();
   }
 
-  private sendDelegationContext(text: string, channel: "commentary" | "speakable"): boolean {
-    if (!this.delegationItemId || this.events?.readyState !== "open") return false;
-    for (const event of delegationContextEvents(this.delegationItemId, text, channel)) {
-      this.events.send(JSON.stringify(event));
+  private drainWorkerProgress(): void {
+    while (this.sentWorkerChars < this.pendingWorkerText.length && this.flushOnce() > 0);
+  }
+
+  /**
+   * Ships at most one window of unsent text and returns how much went out. A
+   * single flush is capped so a cursor reset (or a channel that was shut for a
+   * while) cannot burst an entire turn onto the wire in one tick; the rest
+   * follows on the next flush, in order.
+   */
+  private flushOnce(): number {
+    /* `update` runs subscribers synchronously, so a re-render can call back in
+       here mid-flush; a reentrant flush would read the cursor before it moved
+       and send the same characters twice. */
+    if (this.flushingWorkerProgress) return 0;
+    this.flushingWorkerProgress = true;
+    try {
+      const text = this.pendingWorkerText;
+      if (this.sentWorkerChars >= text.length) return 0;
+      const cap = Math.min(text.length, this.sentWorkerChars + MAX_LINE_CHARS);
+      /* A cap landing between the halves of a surrogate pair would put a lone
+         half in each append, and each encodes as U+FFFD. Keep the pair whole
+         and let it open the next flush. */
+      const lead = text.charCodeAt(cap - 1);
+      const end = cap < text.length && lead >= 0xd800 && lead <= 0xdbff ? cap - 1 : cap;
+      const sent = this.sendDelegationContext(text.slice(this.sentWorkerChars, end), "commentary");
+      this.sentWorkerChars += sent;
+      return sent;
+    } finally {
+      this.flushingWorkerProgress = false;
     }
-    return true;
+  }
+
+  /**
+   * Returns the number of characters the channel accepted — the whole text on
+   * success, the prefix that made it out if a send throws part-way, zero if
+   * there is nowhere to send yet. Callers resume from exactly that point, so a
+   * retry never repeats a delivered chunk.
+   */
+  private sendDelegationContext(text: string, channel: "commentary" | "speakable"): number {
+    if (!text || !this.delegationItemId || this.events?.readyState !== "open") return 0;
+    let sent = 0;
+    for (const chunk of chunkUtf8(text)) {
+      const [event] = delegationContextEvents(this.delegationItemId, chunk, channel);
+      if (!event) continue;
+      try {
+        this.events.send(JSON.stringify(event));
+      } catch {
+        return sent;
+      }
+      sent += chunk.length;
+    }
+    return text.length;
   }
 
   private acceptWireMessage(raw: unknown): void {
@@ -371,8 +443,10 @@ class CodexRealtimeClient {
     } else if (event.kind === "delegation") {
       this.delegationItemId = event.id;
       this.flushWorkerProgress();
-      if (this.pendingFinalText && this.sendDelegationContext(this.pendingFinalText, "speakable")) {
-        this.pendingFinalText = "";
+      if (this.pendingFinalText) {
+        this.pendingFinalText = this.pendingFinalText.slice(
+          this.sendDelegationContext(this.pendingFinalText, "speakable"),
+        );
       }
     } else if (event.kind === "error") {
       this.setError(event.message);
@@ -440,8 +514,9 @@ class CodexRealtimeClient {
     this.media = null;
     this.audio = null;
     this.delegationItemId = null;
-    this.lastWorkerText = "";
     this.pendingWorkerText = "";
+    this.sentWorkerChars = 0;
+    this.flushingWorkerProgress = false;
     this.pendingFinalText = "";
   }
 }
