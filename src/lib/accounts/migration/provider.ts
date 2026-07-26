@@ -778,6 +778,11 @@ function recoverPriorOperationFork(
     if (sibling.forkSource) observedSource.set(sibling.fork.id, sibling.forkSource);
   }
   for (const artifact of scan(journal.sourceRoot, journal.sourceNativeId, floor)) candidates.set(artifact.id, artifact);
+  /* A fork this operation already handed back must not come round again as the
+     one it adopts — otherwise a crash between setting it aside and re-forking
+     would let the next attempt pick the same stale snapshot straight back up.
+     It stays recorded as continuity through the journal either way. */
+  for (const artifact of journal.supersededForks) candidates.delete(artifact.id);
   const validated = newestForkFirst([...candidates.values()].flatMap((artifact) => {
     try { return [validatedCodexFork(artifact, journal.sourceNativeId, journal.sourceRoot)]; }
     catch { return []; }
@@ -822,7 +827,9 @@ function recoverCodexFork(
     };
   }
   if (journal.forkRequestedAtMs === null) return { fork: null, forkSource: null, superseded: [] };
+  const setAside = new Set(journal.supersededForks.map((artifact) => artifact.id));
   const candidates = newestForkFirst(scan(journal.sourceRoot, journal.sourceNativeId, journal.forkRequestedAtMs)
+    .filter((candidate) => !setAside.has(candidate.id))
     .map((candidate) => validatedCodexFork(candidate, journal.sourceNativeId, journal.sourceRoot)));
   /* This operation requested the fork itself, so the identity it recorded before
      asking describes whichever artifact that request produced. */
