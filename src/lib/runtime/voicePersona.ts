@@ -4,17 +4,17 @@ import path from "node:path";
 import { configFilePath } from "@/lib/configDir";
 
 /**
- * The assistant's established name, kept in its own script.
+ * The assistant's established name, in its canonical English spelling.
  *
- * The Cyrillic spelling is the operator's decision and is deliberately not
- * translated or transliterated. English-only governs the persona prose and the
- * tests; a proper name is not prose. Do not "fix" this.
- *
- * It is therefore the one non-Latin token in {@link DEFAULT_VOICE_PERSONA},
- * which is what lets the persona tests strip it and assert that everything left
- * pins no language.
+ * A name written in one script is read aloud in that script's language, so a
+ * non-Latin spelling here would nudge the spoken locale exactly the way a
+ * non-English prompt body does — the defect this file already guards against,
+ * arriving through the one token that used to be exempt from the guard. English
+ * only therefore covers the name too, and {@link DEFAULT_VOICE_PERSONA} carries
+ * no non-Latin token at all. A caller that needs the name in another script gets
+ * it the same way it gets any other wording change: the operator override.
  */
-export const PERSONA_NAME = "Алик";
+export const PERSONA_NAME = "Alik";
 
 /**
  * How the voice agent should sound, injected as the call's first thread item.
@@ -33,7 +33,7 @@ export const PERSONA_NAME = "Алик";
  * instruction to speak that language, whatever its words claim, so composing it
  * in one would hard-code the spoken locale into the build. English keeps the
  * choice at runtime, where the prompt hands it to the operator's locale and to
- * whatever they actually speak. Only the name stays in its own script.
+ * whatever they actually speak. The name is English for the same reason.
  *
  * Editable without a deploy — see {@link voicePersona}.
  */
