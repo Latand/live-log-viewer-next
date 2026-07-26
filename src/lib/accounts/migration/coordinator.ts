@@ -17,6 +17,7 @@ import { recordTranscriptComposerRelease, transcriptTurnResult, type TranscriptT
 import { nativeCodexForkSourceThreadId } from "@/lib/scanner/codexNative";
 import { writingHolders } from "@/lib/scanner/process";
 import type { FileEntry } from "@/lib/types";
+import type { BoardProjectStateV1 } from "@/lib/view/types";
 import { isStructuredDeliveryControllerUnavailable } from "@/lib/runtime/structuredDeliveryController";
 
 import {
@@ -236,8 +237,13 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
  * `expanded` entries name its transcript path. Aliasing that path to the
  * conversation's current generation keeps those decisions attached to the
  * surviving card instead of stranding them on a path that no longer renders.
- * `remapBoardPaths` is a no-op once the alias exists, so this replays on every
- * inventory cycle without touching the board again.
+ *
+ * Pairs the board already records are dropped here, against the same read that
+ * resolves `hidden`. `remapBoardPaths` would reach the same answer, but only
+ * after taking the board write lock and re-reading the file — every 60s
+ * controller tick and every reaper pass, per project with an adopted fork. A
+ * project whose forks are all aliased is skipped outright, so a replay costs one
+ * board read and no lock at all.
  *
  * The remap runs with the target's placement authoritative, because here the
  * survivor is not a successor generation of the fork — it is the conversation
@@ -256,15 +262,33 @@ async function repairAdoptedForkBoardPlacements(
   remapPaths: typeof remapDurableBoardPaths,
 ): Promise<void> {
   const byProject = new Map<string, { from: string; to: string }[]>();
+  const boards = new Map<string, BoardProjectStateV1 | null>();
   await forEachCooperatively(conversations, (conversation) => {
     if (conversation.engine !== "codex" || conversation.providerForkPaths.length === 0) return;
     const current = conversation.generations.at(-1);
     if (!current) return;
     const project = conversation.projectOwnership?.project || current.launchProfile.project;
     if (!project) return;
-    const hidden = new Set(boardFor(project).prefs.hidden);
+    if (!boards.has(project)) {
+      try {
+        boards.set(project, boardFor(project));
+      } catch (error) {
+        /* One project's board being malformed or unreadable used to abort the
+           whole reconciliation cycle, taking every other project's inventory
+           down with it. Skip this project's placement repair and carry on. */
+        boards.set(project, null);
+        console.warn("[account-migration] adopted fork board placement skipped", {
+          project,
+          error: safeProviderDiagnostic(error),
+        });
+      }
+    }
+    const board = boards.get(project);
+    if (!board) return;
+    const hidden = new Set(board.prefs.hidden);
+    const aliases = board.pathAliases ?? {};
     const pairs = conversation.providerForkPaths
-      .filter((pathname) => pathname !== current.path && !hidden.has(pathname))
+      .filter((pathname) => pathname !== current.path && !hidden.has(pathname) && aliases[pathname] !== current.path)
       .map((from) => ({ from, to: current.path }));
     if (pairs.length === 0) return;
     byProject.set(project, [...(byProject.get(project) ?? []), ...pairs]);

@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { emptyLaunchProfile, sameProviderReceiptOutcome, type NativeGeneration, type ProviderReceipt, type SuccessorProviderPort } from "./contracts";
-import { CodexForkOutcomeUnknownError, RegisteredSuccessorProvider, type ProviderDependencies } from "./provider";
+import { codexForkArtifacts, CodexForkOutcomeUnknownError, RegisteredSuccessorProvider, type ProviderDependencies } from "./provider";
 import { CodexAppServerError, type CodexAppServerClient } from "@/lib/accounts/codexAppServer";
 import { AgentRegistry, type ConversationObservation, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { ClaudeStreamBrokerHost } from "@/lib/runtime/claudeStreamBrokerHost";
@@ -1564,4 +1564,127 @@ test("two forks inside one operation's own window resolve to the newest", async 
   expect(recorded).toContain(forkPath(forkIds[0]!));
   expect(fs.existsSync(forkPath(forkIds[0]!))).toBeTrue();
   expect(fs.existsSync(forkPath(forkIds[1]!))).toBeTrue();
+});
+
+test("a retry re-forks when the source gained turns while the migration was parked", async () => {
+  /* A `failed-recoverable` migration stays parked, and `deliveryFence` keeps
+     letting the operator talk to the source while it is. So the source advances
+     under a fork that was already taken, and adopting that fork would seat the
+     successor on the older snapshot and drop every turn added since. */
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-codex-parked-advance-"));
+  roots.push(base);
+  const source = accountRoot("codex", base, "source");
+  const target = accountRoot("codex", base, "target");
+  const journalRoot = path.join(base, "provider-journal");
+  const sourceId = "819f423a-d6e9-\x37903-b597-3e676b6ff3d4";
+  const sourcePath = path.join(source.transcriptRoot, `rollout-${sourceId}.jsonl`);
+  const turn = (text: string) => JSON.stringify({ type: "turn", payload: { text } }) + "\n";
+  fs.writeFileSync(sourcePath, codexSessionMeta(sourceId) + turn("before the migration"), { mode: 0o600 });
+  let forkCalls = 0;
+  let targetAuthenticated = false;
+  const forkIdFor = (call: number) => `819f423a-d6e9-4903-8597-${String(call).padStart(12, "0")}`;
+  const forkPathFor = (id: string) => path.join(source.transcriptRoot, `rollout-${id}.jsonl`);
+  const client = (home: string) => ({
+    async readAccount() {
+      return home === target.home && !targetAuthenticated
+        ? { account: null, requiresOpenaiAuth: true }
+        : { account: { type: "chatgpt" }, requiresOpenaiAuth: true };
+    },
+    async forkThread() {
+      forkCalls += 1;
+      const id = forkIdFor(forkCalls);
+      /* What a real fork is: this thread's own header over a copy of the
+         source's turns as they stand right now. */
+      const turns = fs.readFileSync(sourcePath, "utf8").split("\n").slice(1).join("\n");
+      fs.writeFileSync(forkPathFor(id), codexSessionMeta(id, sourceId) + turns, { mode: 0o600 });
+      return { id, path: forkPathFor(id) };
+    },
+    async resumeThread(id: string) { return { id, path: null }; },
+    async readThread(id: string) { return { id, path: null }; },
+    close() {},
+  }) as unknown as CodexAppServerClient;
+  const provider = new RegisteredSuccessorProvider({
+    accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
+    startCodex: async (home) => client(home),
+    claudeStatus: async () => ({ loggedIn: false }),
+    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
+    journalRoot,
+    now: () => "2026-07-10T12:00:00.000Z",
+  });
+  const recorded: string[] = [];
+  const attempt = (operationId: string) => ({
+    engine: "codex" as const,
+    operationId,
+    conversationId: "conversation_parked_advance" as const,
+    targetAccountId: "target",
+    source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
+    recordContinuityPath(pathname: string) { recorded.push(pathname); },
+  });
+
+  await expect(provider.create(attempt("parked-attempt-one"))).rejects.toThrow("target Codex account is not authenticated");
+  expect(forkCalls).toBe(1);
+
+  /* The parked window: the operator keeps working, and the source gains a turn
+     the first attempt's fork has never seen. */
+  fs.appendFileSync(sourcePath, turn("said while the migration was parked"));
+  targetAuthenticated = true;
+  recorded.length = 0;
+  const receipt = await provider.create(attempt("parked-attempt-two"));
+
+  expect(forkCalls).toBe(2);
+  expect(receipt.nativeId).toBe(forkIdFor(2));
+  const successor = fs.readFileSync(receipt.path, "utf8");
+  expect(successor).toContain("said while the migration was parked");
+  expect(successor).toContain("before the migration");
+  /* The stale fork is never removed — it is handed back as recorded continuity. */
+  expect(recorded).toContain(forkPathFor(forkIdFor(1)));
+  expect(fs.existsSync(forkPathFor(forkIdFor(1)))).toBeTrue();
+  expect(fs.existsSync(forkPathFor(forkIdFor(2)))).toBeTrue();
+
+  /* And a replay of the same attempt against an unchanged source changes
+     nothing: no third fork, the same successor, the same continuity. */
+  const retryContinuity = [...recorded].sort();
+  recorded.length = 0;
+  const replayed = await provider.create(attempt("parked-attempt-two"));
+
+  expect(forkCalls).toBe(2);
+  expect(replayed.nativeId).toBe(forkIdFor(2));
+  expect([...recorded].sort()).toEqual(retryContinuity);
+});
+
+test("a truncated fork scan says so, and only transcripts draw on its bound", () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-codex-scan-bound-"));
+  roots.push(base);
+  const sessions = path.join(base, "sessions");
+  fs.mkdirSync(sessions, { recursive: true, mode: 0o700 });
+  const sourceId = "919f423a-d6e9-\x37903-b597-3e676b6ff3d4";
+  const forkIds = ["919f423a-d6e9-\x34903-8597-000000000001", "919f423a-d6e9-\x34903-8597-000000000002"];
+  for (const id of forkIds) {
+    fs.writeFileSync(path.join(sessions, `rollout-${id}.jsonl`), codexSessionMeta(id, sourceId), { mode: 0o600 });
+  }
+  /* Receipts, locks and whatever else shares the session tree. None of them can
+     ever be a fork, so none of them may cost the scan a slot. */
+  for (let index = 0; index < 50; index += 1) {
+    fs.writeFileSync(path.join(sessions, `rollout-noise-${index}.llv-receipt.json`), "{}", { mode: 0o600 });
+  }
+  const warnings = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const found = codexForkArtifacts(sessions, sourceId, 0, forkIds.length);
+
+    expect(found.map((artifact) => artifact.id).sort()).toEqual([...forkIds].sort());
+    expect(warnings).not.toHaveBeenCalled();
+
+    /* One transcript past the bound: the scan runs short, and a caller that
+       forks again because of it now has a log line saying why. */
+    const extraId = "919f423a-d6e9-\x34903-8597-000000000003";
+    fs.writeFileSync(path.join(sessions, `rollout-${extraId}.jsonl`), codexSessionMeta(extraId, sourceId), { mode: 0o600 });
+    const truncated = codexForkArtifacts(sessions, sourceId, 0, forkIds.length);
+
+    expect(truncated.length).toBeLessThan(3);
+    expect(warnings).toHaveBeenCalledTimes(1);
+    expect(warnings.mock.calls[0]![0]).toBe("[account-migration] Codex fork recovery scan hit its bound");
+    expect(warnings.mock.calls[0]![1]).toMatchObject({ root: sessions, limit: forkIds.length });
+  } finally {
+    warnings.mockRestore();
+  }
 });

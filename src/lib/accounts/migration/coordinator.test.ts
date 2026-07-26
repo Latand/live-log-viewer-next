@@ -3873,6 +3873,103 @@ describe("Codex canonical root conversation and fork recovery (#708)", () => {
     expect(boardFor("repo").explicitManual).toEqual([rootPath]);
   });
 
+  test("one unreadable board leaves every other project reconciled", async () => {
+    /* `boardFor` used to run unguarded, so a single malformed `board.json`
+       threw `BoardStoreError` out of `reconcileMigrationInventory` and aborted
+       the whole controller cycle and reaper pass — for every project, not just
+       the broken one. Placement repair is the only thing that may be lost. */
+    const store = registry();
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-708-unreadable-board-"));
+    roots.push(base);
+    const sessions = path.join(base, "sessions");
+    fs.mkdirSync(sessions, { recursive: true, mode: 0o700 });
+    const projects = ["alpha-project", "beta-project"];
+    const files: FileEntry[] = [];
+    const rootPaths: string[] = [];
+    projects.forEach((project, index) => {
+      const rootId = `019f9c11-0000-\x37000-8000-0000000000${index}a`;
+      const forkId = `019f9c11-0000-\x37000-8000-0000000000${index}b`;
+      const rootPath = path.join(sessions, `rollout-${rootId}.jsonl`);
+      const forkPath = path.join(sessions, `rollout-${forkId}.jsonl`);
+      fs.writeFileSync(rootPath, sessionMeta(rootId), { mode: 0o600 });
+      fs.writeFileSync(forkPath, sessionMeta(forkId, rootId) + sessionMeta(rootId), { mode: 0o600 });
+      rootPaths.push(rootPath);
+      files.push(...[rootPath, forkPath].map((pathname) => ({ ...fileEntry(pathname), project })));
+      store.ensureConversation("codex", rootPath, "a");
+    });
+    /* Not JSON at all — the shape an interrupted write or a hand edit leaves. */
+    fs.writeFileSync(path.join(path.dirname(store.filename), "board.json"), "{ not a board", { mode: 0o600 });
+
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args); };
+    try {
+      const snapshot = await reconcileMigrationInventory(store, files);
+
+      /* Every project is reconciled: two conversations, each having adopted its
+         own fork rather than minting a lookalike root card. */
+      const conversations = Object.values(snapshot.conversations);
+      expect(conversations).toHaveLength(2);
+      for (const rootPath of rootPaths) {
+        expect(store.conversationForPath(rootPath)).not.toBeNull();
+        expect(store.conversation(store.conversationForPath(rootPath)!.id)?.providerForkPaths).toHaveLength(1);
+      }
+    } finally {
+      console.warn = originalWarn;
+    }
+    const skipped = warnings.filter((call) => call[0] === "[account-migration] adopted fork board placement skipped");
+    expect(skipped.map((call) => (call[1] as { project: string }).project).sort()).toEqual([...projects].sort());
+  });
+
+  test("a project whose forks are already aliased takes no board write on replay", async () => {
+    /* The replay claim only held because `remapBoardPaths` reduced to a no-op
+       — after taking the board write lock, writing a queue ticket, fsyncing and
+       re-reading the file, on every 60s controller tick and every reaper pass.
+       An already-aliased project must not reach the store at all. */
+    const store = registry();
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-708-aliased-replay-"));
+    roots.push(base);
+    const sessions = path.join(base, "sessions");
+    fs.mkdirSync(sessions, { recursive: true, mode: 0o700 });
+    const forkId = "019f9c11-0000-\x37000-8000-00000000ee10";
+    const rootPath = path.join(sessions, `rollout-${SOURCE_THREAD}.jsonl`);
+    const forkPath = path.join(sessions, `rollout-${forkId}.jsonl`);
+    fs.writeFileSync(rootPath, sessionMeta(SOURCE_THREAD), { mode: 0o600 });
+    fs.writeFileSync(forkPath, sessionMeta(forkId, SOURCE_THREAD) + sessionMeta(SOURCE_THREAD), { mode: 0o600 });
+    const files = [rootPath, forkPath].map(fileEntry);
+    store.ensureConversation("codex", rootPath, "a");
+    mutateBoard("repo", boardFor("repo").revision, [{ kind: "restore", path: forkPath, placement: "manual" }]);
+
+    /* First pass through the real store: the alias is what a replay must see. */
+    await reconcileMigrationInventory(store, files);
+    expect(boardFor("repo").pathAliases?.[forkPath]).toBe(rootPath);
+    const settledRevision = boardFor("repo").revision;
+
+    const boardFile = path.join(path.dirname(store.filename), "board.json");
+    const lockWrites: string[] = [];
+    const originalMkdirSync = fs.mkdirSync;
+    fs.mkdirSync = ((target: fs.PathLike, ...args: unknown[]) => {
+      if (String(target).startsWith(`${boardFile}.write-lock`)) lockWrites.push(String(target));
+      return Reflect.apply(originalMkdirSync, fs, [target, ...args]) as string | undefined;
+    }) as typeof fs.mkdirSync;
+    const remapCalls: string[] = [];
+    try {
+      await reconcileMigrationInventory(store, files, {
+        remapBoardPaths(project) {
+          remapCalls.push(project);
+          return boardFor(project);
+        },
+      });
+    } finally {
+      fs.mkdirSync = originalMkdirSync;
+    }
+
+    expect(remapCalls).toEqual([]);
+    expect(lockWrites).toEqual([]);
+    expect(boardFor("repo").revision).toBe(settledRevision);
+    expect(Object.values(store.snapshot().conversations)).toHaveLength(1);
+  });
+
   test("a scanned fork edge is read off the entry, and only an undescribed entry reopens the header", async () => {
     const store = registry();
     const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-708-carried-edge-"));

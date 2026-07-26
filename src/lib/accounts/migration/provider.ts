@@ -120,6 +120,14 @@ interface CodexForkArtifact {
   path: string;
 }
 
+/** File identity of the source transcript at the moment a fork copied it. A
+    rollout is append-only, so a later size or mtime means the source has gained
+    turns the fork does not carry. */
+interface CodexSourceIdentity {
+  size: number;
+  mtimeMs: number;
+}
+
 interface CodexProviderOperationJournal {
   version: 1;
   operationId: string;
@@ -132,6 +140,16 @@ interface CodexProviderOperationJournal {
   createdAtMs: number;
   forkRequestedAtMs: number | null;
   fork: CodexForkArtifact | null;
+  /** The source identity `fork` was taken from, observed just before the fork
+      was requested. `null` means no attempt ever observed it — journals written
+      before this field existed, and forks found only by disk scan — and an
+      unobserved source cannot be proven stale, so those are reused as before. */
+  forkSource: CodexSourceIdentity | null;
+  /** Forks this operation stopped using: an earlier attempt's fork the source
+      has since advanced past, and the losers of the newest-wins ambiguity rule.
+      Nothing here is ever removed from disk; the list is what keeps them named
+      as the conversation's continuity on every replay. */
+  supersededForks: CodexForkArtifact[];
 }
 
 const CODEX_META_SCAN_BYTES = 256 * 1024;
@@ -504,28 +522,80 @@ function readCodexSessionMeta(pathname: string): CodexSessionMeta | null {
   }
 }
 
-function codexForkArtifacts(root: string, sourceNativeId: string, createdAtMs: number): CodexForkArtifact[] {
+/** Exported for the bound test: the production limit needs 20k files to reach. */
+export function codexForkArtifacts(
+  root: string,
+  sourceNativeId: string,
+  createdAtMs: number,
+  limit: number = CODEX_FORK_SCAN_LIMIT,
+): CodexForkArtifact[] {
   const stack: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
   const artifacts: CodexForkArtifact[] = [];
-  let visited = 0;
+  let considered = 0;
   while (stack.length) {
     const current = stack.pop()!;
     if (current.depth > 6) continue;
     for (const entry of fs.readdirSync(current.dir, { withFileTypes: true })) {
-      if (++visited > CODEX_FORK_SCAN_LIMIT) return artifacts;
       const candidate = path.join(current.dir, entry.name);
       if (entry.isSymbolicLink()) continue;
       if (entry.isDirectory()) {
         stack.push({ dir: candidate, depth: current.depth + 1 });
         continue;
       }
+      /* Only transcript candidates draw on the budget. Receipts, lock files and
+         whatever else shares the session tree can never be a fork, so letting
+         them consume it would truncate the scan short of a fork that exists. */
       if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+      if (++considered > limit) {
+        /* Running short is silent to the caller — it just sees fewer candidates
+           and forks again, writing another full copy of the transcript. Say so
+           once per scan, so that copy is explainable from the logs. */
+        console.warn("[account-migration] Codex fork recovery scan hit its bound", {
+          root,
+          limit,
+          found: artifacts.length,
+        });
+        return artifacts;
+      }
       if (fs.statSync(candidate).mtimeMs < createdAtMs) continue;
       const metadata = readCodexSessionMeta(candidate);
       if (metadata?.forkedFromId === sourceNativeId) artifacts.push({ id: metadata.id, path: fs.realpathSync(candidate) });
     }
   }
   return artifacts;
+}
+
+function codexSourceIdentity(pathname: string): CodexSourceIdentity | null {
+  try {
+    const listed = fs.statSync(pathname);
+    return listed.isFile() ? { size: listed.size, mtimeMs: listed.mtimeMs } : null;
+  } catch { return null; }
+}
+
+/**
+ * Has the source moved on from what this fork copied? (#708 follow-up)
+ *
+ * A fork is a point-in-time snapshot, and a `failed-recoverable` migration stays
+ * parked while `deliveryFence` keeps letting the operator talk to the source. So
+ * between the first attempt's fork and the retry that adopts it, the source can
+ * gain turns the fork has never seen — and seating the successor on it would
+ * drop exactly those turns.
+ *
+ * An unobserved source (`recorded === null`) or an unreadable one cannot be
+ * proven stale, and re-forking on a guess would copy the whole history again for
+ * nothing, so those keep reusing the fork.
+ */
+function codexForkIsStale(current: CodexSourceIdentity | null, recorded: CodexSourceIdentity | null): boolean {
+  if (!recorded || !current) return false;
+  return current.size !== recorded.size || current.mtimeMs !== recorded.mtimeMs;
+}
+
+function mergeForkRecords(...groups: readonly (readonly CodexForkArtifact[])[]): CodexForkArtifact[] {
+  const merged = new Map<string, CodexForkArtifact>();
+  for (const group of groups) {
+    for (const artifact of group) if (!merged.has(artifact.id)) merged.set(artifact.id, artifact);
+  }
+  return [...merged.values()];
 }
 
 function operationJournalPath(root: string, operationId: string): string {
@@ -568,6 +638,20 @@ function normalizeCodexOperationJournal(value: unknown): CodexProviderOperationJ
     fork: journal.fork && typeof journal.fork.id === "string" && typeof journal.fork.path === "string"
       ? { id: journal.fork.id, path: journal.fork.path }
       : null,
+    forkSource: journal.forkSource
+      && typeof journal.forkSource.size === "number" && Number.isFinite(journal.forkSource.size)
+      && typeof journal.forkSource.mtimeMs === "number" && Number.isFinite(journal.forkSource.mtimeMs)
+      ? { size: journal.forkSource.size, mtimeMs: journal.forkSource.mtimeMs }
+      : null,
+    supersededForks: Array.isArray(journal.supersededForks)
+      ? journal.supersededForks.flatMap((artifact) => (
+        artifact && typeof artifact === "object"
+          && typeof (artifact as CodexForkArtifact).id === "string"
+          && typeof (artifact as CodexForkArtifact).path === "string"
+          ? [{ id: (artifact as CodexForkArtifact).id, path: (artifact as CodexForkArtifact).path }]
+          : []
+      ))
+      : [],
   };
 }
 
@@ -600,6 +684,8 @@ function prepareCodexOperationJournal(
     createdAtMs: Date.now(),
     forkRequestedAtMs: null,
     fork: null,
+    forkSource: null,
+    supersededForks: [],
   };
   writeCodexOperationJournal(root, journal);
   return { journal, fresh: true };
@@ -672,21 +758,34 @@ function recoverPriorOperationFork(
   journalRoot: string,
   journal: CodexProviderOperationJournal,
   scan: NonNullable<ProviderDependencies["scanCodexForkArtifacts"]> = codexForkArtifacts,
-): { fork: CodexForkArtifact | null; superseded: CodexForkArtifact[]; operationIds: string[] } {
+): {
+  fork: CodexForkArtifact | null;
+  forkSource: CodexSourceIdentity | null;
+  superseded: CodexForkArtifact[];
+  operationIds: string[];
+} {
   const siblings = siblingCodexOperationJournals(journalRoot, journal);
-  if (siblings.length === 0) return { fork: null, superseded: [], operationIds: [] };
+  if (siblings.length === 0) return { fork: null, forkSource: null, superseded: [], operationIds: [] };
   const floor = Math.min(...siblings.map((sibling) => sibling.forkRequestedAtMs ?? sibling.createdAtMs));
   const candidates = new Map<string, CodexForkArtifact>();
+  /* The source identity each sibling observed before it requested its fork. Only
+     a fork some journal actually claims carries one; a fork found by disk scan
+     alone has no attempt vouching for when it was taken. */
+  const observedSource = new Map<string, CodexSourceIdentity>();
   for (const sibling of siblings) {
-    if (sibling.fork) candidates.set(sibling.fork.id, sibling.fork);
+    if (!sibling.fork) continue;
+    candidates.set(sibling.fork.id, sibling.fork);
+    if (sibling.forkSource) observedSource.set(sibling.fork.id, sibling.forkSource);
   }
   for (const artifact of scan(journal.sourceRoot, journal.sourceNativeId, floor)) candidates.set(artifact.id, artifact);
   const validated = newestForkFirst([...candidates.values()].flatMap((artifact) => {
     try { return [validatedCodexFork(artifact, journal.sourceNativeId, journal.sourceRoot)]; }
     catch { return []; }
   }));
+  const adopted = validated[0] ?? null;
   return {
-    fork: validated[0] ?? null,
+    fork: adopted,
+    forkSource: adopted ? observedSource.get(adopted.id) ?? null : null,
     superseded: validated.slice(1),
     operationIds: siblings.map((sibling) => sibling.operationId),
   };
@@ -714,14 +813,20 @@ function validatedCodexFork(artifact: CodexForkArtifact, sourceNativeId: string,
 function recoverCodexFork(
   journal: CodexProviderOperationJournal,
   scan: NonNullable<ProviderDependencies["scanCodexForkArtifacts"]> = codexForkArtifacts,
-): { fork: CodexForkArtifact | null; superseded: CodexForkArtifact[] } {
+): { fork: CodexForkArtifact | null; forkSource: CodexSourceIdentity | null; superseded: CodexForkArtifact[] } {
   if (journal.fork) {
-    return { fork: validatedCodexFork(journal.fork, journal.sourceNativeId, journal.sourceRoot), superseded: [] };
+    return {
+      fork: validatedCodexFork(journal.fork, journal.sourceNativeId, journal.sourceRoot),
+      forkSource: journal.forkSource,
+      superseded: [],
+    };
   }
-  if (journal.forkRequestedAtMs === null) return { fork: null, superseded: [] };
+  if (journal.forkRequestedAtMs === null) return { fork: null, forkSource: null, superseded: [] };
   const candidates = newestForkFirst(scan(journal.sourceRoot, journal.sourceNativeId, journal.forkRequestedAtMs)
     .map((candidate) => validatedCodexFork(candidate, journal.sourceNativeId, journal.sourceRoot)));
-  return { fork: candidates[0] ?? null, superseded: candidates.slice(1) };
+  /* This operation requested the fork itself, so the identity it recorded before
+     asking describes whichever artifact that request produced. */
+  return { fork: candidates[0] ?? null, forkSource: journal.forkSource, superseded: candidates.slice(1) };
 }
 
 function ensureTargetRoot(account: AccountContext): void {
@@ -802,7 +907,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     const source = assertRegisteredRoots(this.dependencies.accounts.resolveTranscriptOwner(input.engine, input.source.path), target, input.source.path);
     ensureTargetRoot(target);
     return input.engine === "codex"
-      ? this.createCodex(input.operationId, input.conversationId, input.source.id, input.source.launchProfile, source, target, input.recordContinuityPath)
+      ? this.createCodex(input.operationId, input.conversationId, input.source.id, input.source.path, input.source.launchProfile, source, target, input.recordContinuityPath)
       : this.createClaude(input.operationId, input.conversationId, input.source.path, input.source.launchProfile, source, target, input.recordContinuityPath);
   }
 
@@ -1054,6 +1159,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     operationId: string,
     conversationId: string,
     sourceNativeId: string,
+    sourcePath: string,
     profile: LaunchProfile,
     source: AccountContext,
     target: AccountContext,
@@ -1064,6 +1170,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
       operationId,
       conversationId,
       sourceNativeId,
+      sourcePath,
       profile,
       source,
       target,
@@ -1077,6 +1184,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     operationId: string,
     conversationId: string,
     sourceNativeId: string,
+    sourcePath: string,
     profile: LaunchProfile,
     source: AccountContext,
     target: AccountContext,
@@ -1098,26 +1206,51 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
        retrying or an operation that has since been replaced. Nothing is deleted:
        the forks this operation does not take over are recorded as the
        conversation's history. */
-    let supersededForks: CodexForkArtifact[] = [];
     let priorOperationIds: string[] = [];
     let fork: CodexForkArtifact | null = null;
+    let forkSource: CodexSourceIdentity | null = null;
+    let recoveredSuperseded: CodexForkArtifact[] = [];
     if (!prepared.fresh) {
       const recovered = recoverCodexFork(journal, this.dependencies.scanCodexForkArtifacts);
       fork = recovered.fork;
-      supersededForks = recovered.superseded;
+      forkSource = recovered.forkSource;
+      recoveredSuperseded = recovered.superseded;
     }
     if (!fork && journal.forkRequestedAtMs === null) {
       const prior = recoverPriorOperationFork(journalRoot, journal, this.dependencies.scanCodexForkArtifacts);
       fork = prior.fork;
-      supersededForks = prior.superseded;
+      forkSource = prior.forkSource;
+      recoveredSuperseded = prior.superseded;
       if (fork) priorOperationIds = prior.operationIds;
     }
-    if (fork && !journal.fork) {
+    /* A fork is a snapshot, and the source keeps advancing while a
+       `failed-recoverable` migration is parked (#708 follow-up). Adopting a fork
+       the source has since moved past would seat the successor on an older
+       point in time and silently drop every turn added since. Re-fork instead —
+       and hand the stale fork back as continuity, because it is history the
+       operator may still want and nothing here ever deletes an artifact. */
+    let refork = false;
+    if (fork && codexForkIsStale(codexSourceIdentity(sourcePath), forkSource)) {
+      journal.supersededForks = mergeForkRecords(journal.supersededForks, [fork], recoveredSuperseded);
+      journal.fork = null;
+      journal.forkSource = null;
+      journal.forkRequestedAtMs = null;
+      assertLeaseOwned();
+      writeCodexOperationJournal(journalRoot, journal);
+      fork = null;
+      forkSource = null;
+      recoveredSuperseded = [];
+      priorOperationIds = [];
+      refork = true;
+    }
+    if (fork && (!journal.fork || recoveredSuperseded.length > 0)) {
       journal.fork = fork;
+      journal.forkSource = forkSource;
+      journal.supersededForks = mergeForkRecords(journal.supersededForks, recoveredSuperseded);
       assertLeaseOwned();
       writeCodexOperationJournal(journalRoot, journal);
     }
-    if (!fork && !prepared.fresh && journal.forkRequestedAtMs !== null) throw new CodexForkOutcomeUnknownError();
+    if (!fork && !refork && !prepared.fresh && journal.forkRequestedAtMs !== null) throw new CodexForkOutcomeUnknownError();
     if (!fork) {
       const sourceClient = await this.dependencies.startCodex(source.home);
       let created: Awaited<ReturnType<CodexAppServerClient["forkThread"]>>;
@@ -1125,6 +1258,10 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
         const account = await sourceClient.readAccount();
         if (!account.account) throw new Error("source Codex account is not authenticated");
         journal.forkRequestedAtMs = Date.now();
+        /* Observed before the request, so it names the state the fork copies.
+           Reading it afterwards would count a turn that landed in between as
+           already forked, which is the loss this whole check exists to stop. */
+        journal.forkSource = codexSourceIdentity(sourcePath);
         assertLeaseOwned();
         writeCodexOperationJournal(journalRoot, journal);
         try {
@@ -1133,6 +1270,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
           const uncertain = error instanceof CodexAppServerError && error.outcome === "unknown";
           if (uncertain) throw new CodexForkOutcomeUnknownError(error.message);
           journal.forkRequestedAtMs = null;
+          journal.forkSource = null;
           assertLeaseOwned();
           writeCodexOperationJournal(journalRoot, journal);
           throw error;
@@ -1146,7 +1284,17 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
       writeCodexOperationJournal(journalRoot, journal);
       this.dependencies.afterCodexForkCreated?.();
     }
-    const sourceFork = fork.path;
+    const adopted = fork;
+    /* Every fork this operation set aside stays named as the conversation's
+       continuity, replay after replay. One the operator has since removed by
+       hand simply stops validating and drops out; nothing here removes it. */
+    const supersededForks = mergeForkRecords(journal.supersededForks, recoveredSuperseded)
+      .filter((artifact) => artifact.id !== adopted.id)
+      .flatMap((artifact) => {
+        try { return [validatedCodexFork(artifact, sourceNativeId, source.transcriptRoot)]; }
+        catch { return []; }
+      });
+    const sourceFork = adopted.path;
     recordContinuityPath(sourceFork);
     for (const superseded of supersededForks) recordContinuityPath(superseded.path);
     const relative = path.relative(source.transcriptRoot, sourceFork);
