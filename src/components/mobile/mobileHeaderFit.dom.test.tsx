@@ -38,6 +38,7 @@ mock.module("@/hooks/useConversationCatalog", () => ({
 }));
 
 const { ProjectDashboard } = await import("@/components/ProjectDashboard");
+const { KeepAwakeProvider } = await import("@/components/KeepAwakeControl");
 
 const dom = new Window({ url: "http://localhost/", width: 390, height: 844 });
 const G = globalThis as Record<string, unknown>;
@@ -169,11 +170,11 @@ beforeEach(() => {
 });
 afterEach(async () => { for (const root of roots) flushSync(() => root.unmount()); roots = []; await settle(); });
 
-function mount(): HTMLElement {
+function mount(wrap: (dashboard: React.ReactNode) => React.ReactNode = (dashboard) => dashboard): HTMLElement {
   const host = dom.document.createElement("div");
   dom.document.body.appendChild(host);
   const root = createRoot(host as unknown as Element);
-  flushSync(() => root.render(<ProjectDashboard {...dashboardProps()} />));
+  flushSync(() => root.render(<>{wrap(<ProjectDashboard {...dashboardProps()} />)}</>));
   roots.push(root);
   return host as unknown as HTMLElement;
 }
@@ -256,4 +257,100 @@ test("both board faces stay one tap away inside the «more» menu and still swit
   await settle();
   const reopened = Array.from(header(host).querySelectorAll('[role="menuitemradio"]'));
   expect(reopened[1]!.getAttribute("aria-checked")).toBe("true");
+});
+
+/*
+ * Issue #712 — «Keep screen awake» is the first control added after the 390px
+ * budget was fixed, so it takes the route that comment prescribes: it folds into
+ * the «⋯» menu and costs the row zero width. These cases prove it is reachable
+ * there, that it holds a real sentinel, and that it never rides the row.
+ */
+
+interface HeaderSentinel {
+  released: boolean;
+  release(): Promise<void>;
+  addEventListener(type: "release", listener: () => void): void;
+  removeEventListener(type: "release", listener: () => void): void;
+}
+
+function wakeLockScene() {
+  const scene = {
+    requests: 0,
+    granted: [] as HeaderSentinel[],
+    environment: {
+      request: () => {
+        scene.requests += 1;
+        const listeners = new Set<() => void>();
+        const sentinel: HeaderSentinel = {
+          released: false,
+          async release() {
+            if (sentinel.released) return;
+            sentinel.released = true;
+            for (const listener of [...listeners]) listener();
+          },
+          addEventListener: (_type, listener) => void listeners.add(listener),
+          removeEventListener: (_type, listener) => void listeners.delete(listener),
+        };
+        scene.granted.push(sentinel);
+        return Promise.resolve(sentinel);
+      },
+      secureContext: true,
+      isVisible: () => true,
+      storage: dom.localStorage as unknown as Pick<Storage, "getItem" | "setItem">,
+    },
+    factory: () => scene.environment,
+  };
+  return scene;
+}
+
+const openMore = async (host: HTMLElement) => {
+  const more = Array.from(header(host).querySelectorAll("button")).find(
+    (el) => label(el) === translate("en", "dash.moreMenu"),
+  ) as unknown as HTMLButtonElement;
+  flushSync(() => more.click());
+  await settle();
+};
+
+test("«Keep screen awake» is one tap inside the «⋯» menu and holds a real sentinel (#712)", async () => {
+  const scene = wakeLockScene();
+  const host = mount((dashboard) => <KeepAwakeProvider environment={scene.factory}>{dashboard}</KeepAwakeProvider>);
+  expect(await waitFor(() => shelfReady(host))).toBe(true);
+
+  /* Closed, it costs the 390px row nothing — that is the whole point of the fold. */
+  expect(header(host).querySelector('[data-testid="keep-awake-row"]')).toBeNull();
+
+  await openMore(host);
+  const row = header(host).querySelector('[data-testid="keep-awake-row"]') as unknown as HTMLElement;
+  expect(row).not.toBeNull();
+  expect(row.textContent).toContain(translate("en", "keepAwake.label"));
+  expect(row.getAttribute("data-wake-lock-status")).toBe("off");
+
+  const control = row.querySelector('[role="switch"]') as unknown as HTMLButtonElement;
+  expect(control.className).toMatch(/(^|\s)h-11(\s|$)/);
+  expect(control.className).toMatch(/(^|\s)w-11(\s|$)/);
+  expect(control.getAttribute("aria-checked")).toBe("false");
+
+  flushSync(() => control.click());
+  await settle();
+  const active = header(host).querySelector('[data-testid="keep-awake-row"]') as unknown as HTMLElement;
+  expect(active.getAttribute("data-wake-lock-status")).toBe("active");
+  expect(scene.requests).toBe(1);
+  expect(scene.granted.filter((sentinel) => !sentinel.released)).toHaveLength(1);
+  /* Device-local: the intent is in this device's storage, nowhere on the wire. */
+  expect(dom.localStorage.getItem("llvKeepAwake")).toBe("1");
+});
+
+test("the wake-lock row never becomes a sixth 44px target on the header row (#712)", async () => {
+  const scene = wakeLockScene();
+  const host = mount((dashboard) => <KeepAwakeProvider environment={scene.factory}>{dashboard}</KeepAwakeProvider>);
+  expect(await waitFor(() => shelfReady(host))).toBe(true);
+
+  /* With the menu closed the row carries exactly the five budgeted targets and
+     the attention pill — the wake-lock switch is not among them, and nothing
+     asked the platform for a lock just because the header rendered. */
+  const labels = Array.from(header(host).querySelectorAll("button")).map(label);
+  expect(labels).not.toContain(translate("en", "keepAwake.enableAria"));
+  expect(labels).not.toContain(translate("en", "keepAwake.disableAria"));
+  expect(header(host).querySelector('[role="switch"]')).toBeNull();
+  expect(scene.requests).toBe(0);
 });

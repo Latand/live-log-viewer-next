@@ -66,6 +66,7 @@ import {
   residualItems,
 } from "./projectModel";
 import { ArchiveRestore } from "./icons";
+import { KeepAwakeMenuRow } from "./KeepAwakeControl";
 import { ArchiveProjectButton, DeleteProjectButton } from "./ProjectTrash";
 import { SoundToggle } from "./SoundToggle";
 import { ResidualStrip } from "./TreeAside";
@@ -1399,7 +1400,8 @@ export function ProjectDashboard({
           That collapse below 390px is a documented limit, not a defect: a
           narrower phone would need a further fold into the «⋯» menu. Any control
           added later either fits the budget as a 44px target or folds into that
-          menu, the way the scheme/list switch did. */}
+          menu, the way the scheme/list switch did — and the way «Keep screen
+          awake» does (issue #712). */}
       <div
         data-testid={isMobile ? "mobile-project-header" : undefined}
         className={
@@ -1514,6 +1516,14 @@ export function ProjectDashboard({
                     <HeaderMenuItem icon={<Redo2 className="h-4 w-4" aria-hidden />} label={t("board.redo")} onSelect={() => { close(); onRedo(); }} />
                   ) : null}
                   <div className="flex min-h-11 items-center gap-2 px-1.5"><span className="text-[13px] font-semibold text-primary">{t("dash.soundMenu")}</span><SoundToggle /></div>
+                  {/* Device-local comfort settings sit together here. «Keep
+                      screen awake» (issue #712) folds into this menu for the
+                      same reason the scheme/list switch did: the 390px header
+                      row has no width for a sixth 44px target, and the focused
+                      conversation below must not lose height to a setting the
+                      operator touches once. Renders nothing without the
+                      Viewer-level provider that owns the sentinel. */}
+                  <KeepAwakeMenuRow />
                   <div className="flex min-h-11 items-center px-1.5">
                     {archived ? (
                       <button

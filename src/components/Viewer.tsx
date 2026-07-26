@@ -21,6 +21,7 @@ import type { FileEntry } from "@/lib/types";
 import { attentionId, buildAttentionQueue, nextAttention, STALLED_ATTENTION_TTL, type AttentionItem } from "./attention";
 import { ConnectionPill } from "./ConnectionPill";
 import { resolveFavoriteRows, type FavoriteRow } from "./favorites/favoriteRows";
+import { KeepAwakeProvider } from "./KeepAwakeControl";
 import { OverviewBoard } from "./OverviewBoard";
 import { ProjectDashboard, queueColumnOpen } from "./ProjectDashboard";
 import { isChildConversation, OVERVIEW, projectKey } from "./projectModel";
@@ -559,7 +560,7 @@ export function Viewer() {
     </div>
   ) : null;
 
-  return (
+  const shell = (
     <div className="flex h-full">
       {isMobile ? null : (
         <ProjectRail files={files} projectCatalog={projectCatalog} pipelines={pipelines} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} loaded={loaded} catalogFailures={catalogFailures} onSelect={selectProject} />
@@ -686,4 +687,11 @@ export function Viewer() {
       <StagingBadge />
     </div>
   );
+
+  /* The app's ONE screen wake-lock owner (issue #712). It wraps the shell rather
+     than living inside it so the mobile header's «Keep screen awake» row — which
+     unmounts every time the «⋯» menu closes — reads a controller that outlives
+     the menu. `shell` is built above, so a status change re-renders this provider
+     and its context consumers only, never the board. */
+  return <KeepAwakeProvider>{shell}</KeepAwakeProvider>;
 }
