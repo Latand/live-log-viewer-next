@@ -2,6 +2,42 @@ import { expect, test } from "bun:test";
 
 import { DEFAULT_VOICE_PERSONA, PERSONA_NAME, voicePersona } from "./voicePersona";
 
+/* Language names the prompt must never speak of, in the forms a hard pin would
+   plausibly arrive in: the English name, and the Latin-script autonym for the
+   ones whose autonym is Latin. Matched case-insensitively, because "always use
+   english" pins the locale exactly as hard as the capitalised sentence does. */
+const LANGUAGE_NAMES = [
+  "English", "Ukrainian", "Russian", "Polish", "German", "French", "Spanish",
+  "Italian", "Portuguese", "Dutch", "Swedish", "Norwegian", "Danish", "Finnish",
+  "Czech", "Slovak", "Romanian", "Hungarian", "Greek", "Turkish", "Arabic",
+  "Hebrew", "Hindi", "Bengali", "Japanese", "Korean", "Chinese", "Mandarin",
+  "Vietnamese", "Thai", "Indonesian", "Persian", "Farsi", "Urdu", "Swahili",
+  "Deutsch", "Français", "Francais", "Español", "Espanol", "Português",
+  "Portugues", "Italiano", "Polski", "Nederlands", "Svenska", "Türkçe",
+] as const;
+
+/* Any script that is not the Latin the prose is written in. A persona
+   translated back into another language arrives as body text in one of these,
+   which is the other half of the same defect as naming a language outright. */
+const FOREIGN_SCRIPT =
+  /[\p{Script=Cyrillic}\p{Script=Greek}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Arabic}\p{Script=Hebrew}\p{Script=Devanagari}\p{Script=Thai}\p{Script=Bengali}]/u;
+
+/**
+ * Every way a candidate persona would pin the spoken language, as a list of
+ * what it pins. The property under test is that this is empty: the prompt
+ * defers the choice to the operator's locale at runtime and names no language
+ * anywhere, so no sentence shape can be the thing being asserted.
+ *
+ * The name is stripped first — it is a proper noun the operator chose, not
+ * prose, and it is allowed to be in its own script.
+ */
+function languagePins(persona: string): string[] {
+  const body = persona.split(PERSONA_NAME).join("");
+  const pins: string[] = LANGUAGE_NAMES.filter((name) => new RegExp(`\\b${name}\\b`, "iu").test(body));
+  if (FOREIGN_SCRIPT.test(body)) pins.push("non-Latin script");
+  return pins;
+}
+
 test("the built-in persona stands when no override file exists", () => {
   const persona = voicePersona(() => { throw new Error("ENOENT"); });
   expect(persona).toBe(DEFAULT_VOICE_PERSONA);
@@ -19,31 +55,61 @@ test("an empty or whitespace override falls back instead of muting the persona",
   expect(voicePersona(() => "   \n  ")).toBe(DEFAULT_VOICE_PERSONA);
 });
 
-test("the shipped persona is written in English apart from the name", () => {
-  /* A persona composed in some language is an instruction to speak it, so
-     composing it in one would hard-code the spoken locale into the build. The
-     name is the single deliberate exception. */
-  const withoutName = DEFAULT_VOICE_PERSONA.split(PERSONA_NAME).join("");
-  expect(withoutName).not.toMatch(/\p{Script=Cyrillic}/u);
-  expect(withoutName).not.toMatch(/\p{Script=Han}|\p{Script=Arabic}|\p{Script=Hebrew}/u);
+test("the shipped persona pins no spoken language anywhere", () => {
+  /* The whole property in one line: naming any language, in any sentence, is
+     the defect — the prose may not even name the language it is written in. */
+  expect(languagePins(DEFAULT_VOICE_PERSONA)).toEqual([]);
+});
+
+test("appending a hard pin to any language is caught", () => {
+  /* The reviewer's mutation, generalised. A guard that rejects one phrasing is
+     a guard against that phrasing; these are the shapes a contradictory
+     directive actually arrives in, appended after the locale prose so the
+     deference clauses stay intact and only the pin is new. */
+  const pins = [
+    "Always use English.",
+    "always use english",
+    "Respond in Ukrainian at all times.",
+    "Default to Russian.",
+    "Speak Polish only.",
+    "Prefer German unless told otherwise.",
+    "The conversation is conducted in Japanese.",
+    "Your output language: Español.",
+    "Use Deutsch for every reply.",
+  ];
+  for (const pin of pins) {
+    expect(languagePins(`${DEFAULT_VOICE_PERSONA}\n\n${pin}`)).not.toEqual([]);
+  }
+});
+
+test("a persona rewritten in another script is caught", () => {
+  /* Bare codepoints rather than foreign sentences, so this file itself carries
+     no non-English content: the guard has to notice body text in another
+     script, which is how a persona translated back into one arrives. */
+  for (const sample of ["Аб", "中", "א", "あ"]) {
+    expect(languagePins(`${DEFAULT_VOICE_PERSONA}\n\n${sample}`)).toContain("non-Latin script");
+  }
+});
+
+test("the name survives the guard, because a proper noun is not prose", () => {
+  /* The name is the operator's decision and stays in its own script. If
+     stripping it ever stops working, the guard would fail the shipped persona
+     and the next reader would "fix" the name. */
   expect(DEFAULT_VOICE_PERSONA).toContain(PERSONA_NAME);
+  expect(FOREIGN_SCRIPT.test(PERSONA_NAME)).toBeTrue();
+  expect(languagePins(PERSONA_NAME)).toEqual([]);
 });
 
 test("the persona hands the spoken language to the operator's locale", () => {
-  /* The one rule that must not be expressible as "answer in <language>": the
-     spoken language follows the operator at runtime, and the language the
-     prompt happens to be written in never gets a vote. */
+  /* Rejecting every pin is only half of it: something has to say where the
+     language does come from, or a persona that says nothing at all would pass. */
   expect(DEFAULT_VOICE_PERSONA).toMatch(/Speak the operator's language/);
   expect(DEFAULT_VOICE_PERSONA).toMatch(/configured locale/);
   expect(DEFAULT_VOICE_PERSONA).toMatch(/switch language mid-call, switch with them/);
 });
 
-test("the persona pins no spoken language and names no person", () => {
-  /* It ships in a public repository and runs for whoever is on the call, so no
-     language may be named as the one to speak — English included. */
-  expect(DEFAULT_VOICE_PERSONA)
-    .not.toMatch(/\b(speak|answer|reply|respond|talk|write)\b[^.\n]{0,40}\bin (English|Ukrainian|Russian)\b/i);
-  expect(DEFAULT_VOICE_PERSONA).not.toMatch(/\b(Ukrainian|Russian)\b/);
+test("the persona names no person", () => {
+  /* It ships in a public repository and runs for whoever is on the call. */
   expect(DEFAULT_VOICE_PERSONA).not.toMatch(/Kostiantyn/i);
 });
 

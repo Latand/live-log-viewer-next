@@ -14,7 +14,7 @@ import { FileRuntimeEventStore, type RuntimeEventStore } from "./eventStore";
 import type { HostState, RuntimeEvent } from "./engineHost";
 import { adoptCodexRegistryHosts, bindCodexHostPersistence, persistCodexHost, startCodexStructuredHost, structuredHostsEnabled } from "./registry";
 import { STRUCTURED_IMAGE_CAPABILITY, structuredContent, type StructuredImageRef } from "./structuredContent";
-import { voicePersona } from "./voicePersona";
+import { DEFAULT_VOICE_PERSONA, VOICE_PERSONA_FILE, voicePersona } from "./voicePersona";
 
 class MemoryEventStore implements RuntimeEventStore {
   private readonly events = new Map<string, RuntimeEvent[]>();
@@ -306,9 +306,8 @@ describe("CodexAppServerHost", () => {
        every 9-second kill arrived on. */
     const injected = server.requests.find((request) => request.method === "thread/inject_items");
     expect((injected?.params as { threadId?: string })?.threadId).toBe("voice-thread");
-    /* Compared against the resolved persona rather than a phrase from it: the
-       wording is edited without a deploy, and an operator override replaces it
-       wholesale, so any literal here would be asserting last month's text. */
+    /* Shape and ordering only. Which text arrives is pinned by the override
+       test below, where the expected string cannot also be the default. */
     expect((injected?.params as { items?: { role?: string; text?: string }[] })?.items)
       .toEqual([{ role: "developer", text: voicePersona() }]);
     expect(server.requests.findIndex((request) => request.method === "thread/inject_items"))
@@ -324,6 +323,45 @@ describe("CodexAppServerHost", () => {
       threadId: "voice-thread",
     });
     await host.release();
+  });
+
+  test("the operator's override is the text that reaches the call's thread", async () => {
+    /* The call path has to resolve the persona the way production does, not
+       just inject some persona. With no override file on disk the resolver and
+       the built-in default are the same string, so a call that injected the
+       default would satisfy any assertion written against the resolver. An
+       isolated config dir holding a known override splits the two apart: this
+       expected text exists nowhere in the source, so only a call that actually
+       read the override can produce it. */
+    const configDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-persona-config-"));
+    const overridePath = path.join(configDirectory, "agent-log-viewer", ...VOICE_PERSONA_FILE.split("/"));
+    const override = "Isolated override persona for this call.";
+    fs.mkdirSync(path.dirname(overridePath), { recursive: true });
+    /* Written with surrounding whitespace, because the resolver trims and the
+       injected item must carry the trimmed text. */
+    fs.writeFileSync(overridePath, `  ${override}\n`);
+    expect(override).not.toBe(DEFAULT_VOICE_PERSONA);
+
+    const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = configDirectory;
+    try {
+      const server = new FakeAppServer("voice-thread");
+      const host = await CodexAppServerHost.start({
+        cwd: "/repo",
+        eventStore: new MemoryEventStore(),
+        spawnProcess: fakeSpawn(server),
+      });
+      await host.startRealtimeWebRtc("v=0\r\noffer");
+
+      const injected = server.requests.find((request) => request.method === "thread/inject_items");
+      expect((injected?.params as { items?: { role?: string; text?: string }[] })?.items)
+        .toEqual([{ role: "developer", text: override }]);
+      await host.release();
+    } finally {
+      if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      fs.rmSync(configDirectory, { recursive: true, force: true });
+    }
   });
 
   test("a browser offer with its terminal CRLF is forwarded byte-for-byte", async () => {
