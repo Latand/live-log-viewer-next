@@ -11,7 +11,7 @@ import type { FileEntry } from "@/lib/types";
 import { advanceConversationMigration, createMigrationIntent, drainHeldDeliveries, previewMigration, reconcileMigrationInventory, reconcileMigrations } from "./coordinator";
 import { emptyLaunchProfile, type ProviderReceipt, type SuccessorProviderPort } from "./contracts";
 import { oauthFailureWithRecoveryTail } from "./fixtures/claudeRecoveryTail";
-import { CodexForkOutcomeUnknownError, SuccessorPendingError } from "./provider";
+import { CodexForkOutcomeUnknownError, RegisteredSuccessorProvider, SuccessorPendingError } from "./provider";
 
 const roots: string[] = [];
 
@@ -1417,7 +1417,7 @@ describe("durable account migration coordinator", () => {
     ]);
 
     const committed = store.conversation(conversation.id)!;
-    expect(committed.migration?.phase).toBe("committed");
+    expect(committed.migration).toMatchObject({ phase: "committed" });
     expect(committed.generations.map((generation) => generation.path)).toEqual([
       "/concurrent-source.jsonl",
       "/concurrent-successor.jsonl",
@@ -1558,7 +1558,7 @@ describe("durable account migration coordinator", () => {
       provider([targetPath], { create: 0, verify: 0 }, [[secondForkPath]]),
     );
 
-    expect(committed.migration?.phase).toBe("committed");
+    expect(committed.migration).toMatchObject({ phase: "committed" });
     expect(committed.continuityPaths).toEqual([firstForkPath, secondForkPath]);
     expect(boardFor(project).pathAliases).toEqual({
       [sourcePath]: targetPath,
@@ -2381,7 +2381,7 @@ describe("durable account migration coordinator", () => {
 
     const committed = await advanceConversationMigration(conversation.id, store, provider(["/root-successor.jsonl"]));
     const successor = committed.generations.at(-1)!;
-    expect(committed.migration?.phase).toBe("committed");
+    expect(committed.migration).toMatchObject({ phase: "committed" });
     expect(successor.launchProfile).toMatchObject({ role: "root", goal: { objective: "Ship", status: "active" } });
     expect(store.pendingDeliveries(conversation.id)[0]).toMatchObject({ state: "assigned", generationId: successor.id });
 
@@ -2483,7 +2483,7 @@ describe("durable account migration coordinator", () => {
     expect(failed).toMatchObject({ migration: { phase: "failed-recoverable", errorCode: "codex-fork-outcome-unknown" } });
     store.retryConversationMigration(conversation.id, failed.migration!.revision);
     const committed = await advanceConversationMigration(conversation.id, store, ambiguousProvider);
-    expect(committed.migration?.phase).toBe("committed");
+    expect(committed.migration).toMatchObject({ phase: "committed" });
     expect(operations).toEqual([operations[0]!, operations[0]!]);
   });
 
@@ -2930,7 +2930,7 @@ describe("durable account migration coordinator", () => {
     };
     const committed = await advanceConversationMigration(conversation.id, store, winningProvider);
 
-    expect(committed.migration?.phase).toBe("committed");
+    expect(committed.migration).toMatchObject({ phase: "committed" });
     expect(committed.migration?.pendingContinuityPaths).toEqual(["/winning-rebind-c.jsonl"]);
     expect(committed.generations.at(-1)).toMatchObject({ accountId: "c", path: "/winning-rebind-c.jsonl" });
     expect(committed.abandonedContinuityPaths).toContain("/stale-rebind-b.jsonl");
@@ -3093,7 +3093,7 @@ describe("durable account migration coordinator", () => {
       ownsOperation: async () => activeOperation === "same-target-new",
     });
 
-    expect(committed.migration?.phase).toBe("committed");
+    expect(committed.migration).toMatchObject({ phase: "committed" });
     expect(committed.generations.at(-1)?.accountId).toBe("b");
     expect(verificationCount).toBe(2);
     expect(published).toEqual(["same-target-claude-b"]);
@@ -3422,7 +3422,7 @@ describe("durable account migration coordinator", () => {
     expect(restarted.conversation(conversation.id)?.turn.state).toBe("terminal");
     await reconcileMigrations(migrationProvider, deliveryPort, restarted);
     const committed = restarted.conversation(conversation.id)!;
-    expect(committed.migration?.phase).toBe("committed");
+    expect(committed.migration).toMatchObject({ phase: "committed" });
     expect(committed.migration?.operationId).toBe(operationId);
     expect(createdOperations).toEqual([operationId]);
     expect(counts.create).toBe(1);
@@ -3499,7 +3499,7 @@ describe("durable account migration coordinator", () => {
     await reconcileMigrations(migrationProvider, deliveryPort, restarted);
 
     const committed = restarted.conversation(conversation.id)!;
-    expect(committed.migration?.phase).toBe("committed");
+    expect(committed.migration).toMatchObject({ phase: "committed" });
     expect(createdOperations).toEqual([operationId]);
     expect(committed.generations.map((generation) => generation.path)).toEqual([pathname, successorPath]);
     expect(sends).toEqual([{ path: successorPath, clientMessageId: "recovery-held-client" }]);
@@ -3642,5 +3642,414 @@ describe("durable account migration coordinator", () => {
     const balanced = store.autoBalancePolicy("codex");
     expect(balanced.cooldownUntil).not.toBeNull();
     expect(balanced.lastOutcome?.kind).toBe("switched");
+  });
+});
+
+describe("Codex canonical root conversation and fork recovery (#708)", () => {
+  const SOURCE_THREAD = "019f9557-0000-\x37000-8000-00000000aaaa";
+
+  function accountRoot(base: string, id: string) {
+    const home = path.join(base, id);
+    const transcriptRoot = path.join(home, "sessions");
+    fs.mkdirSync(transcriptRoot, { recursive: true, mode: 0o700 });
+    fs.chmodSync(home, 0o700);
+    fs.chmodSync(transcriptRoot, 0o700);
+    return { engine: "codex" as const, accountId: id, kind: "managed" as const, home, transcriptRoot, env: { ...process.env } };
+  }
+
+  function sessionMeta(id: string, forkedFromId?: string): string {
+    return JSON.stringify({ type: "session_meta", payload: { id, cwd: "/repo", ...(forkedFromId ? { forked_from_id: forkedFromId } : {}) } }) + "\n";
+  }
+
+  function fileEntry(pathname: string): FileEntry {
+    const stat = fs.statSync(pathname);
+    return {
+      path: pathname,
+      root: "codex-sessions",
+      name: path.basename(pathname),
+      project: "repo",
+      title: path.basename(pathname),
+      engine: "codex",
+      kind: "session",
+      fmt: "codex",
+      parent: null,
+      mtime: stat.mtimeMs / 1000,
+      size: stat.size,
+      activity: "idle",
+      proc: null,
+      pid: null,
+      model: null,
+      pendingQuestion: null,
+      waitingInput: null,
+    };
+  }
+
+  test("five recoverable failures in a row leave one fork artifact and one operation identity", async () => {
+    const store = registry();
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-708-multi-failure-"));
+    roots.push(base);
+    const source = accountRoot(base, "a");
+    const target = accountRoot(base, "b");
+    const sourcePath = path.join(source.transcriptRoot, `rollout-${SOURCE_THREAD}.jsonl`);
+    fs.writeFileSync(sourcePath, sessionMeta(SOURCE_THREAD), { mode: 0o600 });
+    await reconcileMigrationInventory(store, [fileEntry(sourcePath)]);
+    store.reconcileConversations([observation(sourcePath, "a", "idle")]);
+    const conversation = store.conversationForPath(sourcePath)!;
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "multi-failure",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    const operationId = store.conversation(conversation.id)!.migration!.operationId;
+
+    let forkCalls = 0;
+    let targetAuthenticated = false;
+    const client = (home: string) => ({
+      async readAccount() {
+        return home === target.home && !targetAuthenticated
+          ? { account: null, requiresOpenaiAuth: true }
+          : { account: { type: "chatgpt" }, requiresOpenaiAuth: true };
+      },
+      async forkThread() {
+        forkCalls += 1;
+        const id = `019f9c11-0000-7000-8000-${String(forkCalls).padStart(12, "0")}`;
+        const forkPath = path.join(source.transcriptRoot, `rollout-${id}.jsonl`);
+        fs.writeFileSync(forkPath, sessionMeta(id, SOURCE_THREAD), { mode: 0o600 });
+        return { id, path: forkPath };
+      },
+      async resumeThread(id: string) { return { id, path: null }; },
+      async readThread(id: string) { return { id, path: null }; },
+      async setThreadName() {},
+      async setThreadGoal() {},
+      close() {},
+    });
+    const provider = new RegisteredSuccessorProvider({
+      accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
+      startCodex: async (home: string) => client(home) as never,
+      claudeStatus: async () => ({ loggedIn: false }),
+      spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
+      journalRoot: path.join(base, "provider-journal"),
+      /* Pinned to this test's registry and to a no-op publisher: nothing here
+         may reach the shared runtime registry or start a real Codex host. */
+      registry: store,
+      publishCodexHost: async () => async () => {},
+      now: () => "2026-07-26T02:00:00.000Z",
+    } as never);
+
+    /* The incident, five times over: the post-fork step fails recoverably, and
+       every later touch of the conversation used to re-arm it with a brand new
+       operation identity — a fresh provider journal, so a fresh fork. */
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const failed = await advanceConversationMigration(conversation.id, store, provider);
+      expect(failed.migration).toMatchObject({ phase: "failed-recoverable" });
+      store.setEngineRouting("codex", "b");
+      store.requestConversationMigrationToActiveAccount(conversation.id);
+      expect(store.conversation(conversation.id)!.migration).toMatchObject({
+        phase: "failed-recoverable",
+        operationId,
+      });
+      store.retryConversationMigration(conversation.id, store.conversation(conversation.id)!.migration!.revision);
+    }
+
+    expect(store.conversation(conversation.id)!.migration!.operationId).toBe(operationId);
+    expect(forkCalls).toBe(1);
+    const forkFiles = fs.readdirSync(source.transcriptRoot).filter((name) => name !== path.basename(sourcePath));
+    expect(forkFiles).toHaveLength(1);
+
+    targetAuthenticated = true;
+    const committed = await advanceConversationMigration(conversation.id, store, provider);
+
+    expect(committed.migration).toMatchObject({ phase: "committed" });
+    expect(forkCalls).toBe(1);
+    expect(Object.values(store.snapshot().conversations)).toHaveLength(1);
+  });
+
+  test("lookalike fork cards collapse into the root conversation and their board placement follows", async () => {
+    const store = registry();
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-708-backfill-"));
+    roots.push(base);
+    const sessions = path.join(base, "sessions");
+    fs.mkdirSync(sessions, { recursive: true, mode: 0o700 });
+    const rootPath = path.join(sessions, `rollout-${SOURCE_THREAD}.jsonl`);
+    fs.writeFileSync(rootPath, sessionMeta(SOURCE_THREAD), { mode: 0o600 });
+    const forkPaths = ["bb01", "bb02", "bb03"].map((suffix) => {
+      const id = `019f9c11-0000-7000-8000-0000000${suffix}0`;
+      const pathname = path.join(sessions, `rollout-${id}.jsonl`);
+      /* Each artifact is a full snapshot: its own header first, then the source
+         conversation's replayed `session_meta`. */
+      fs.writeFileSync(pathname, sessionMeta(id, SOURCE_THREAD) + sessionMeta(SOURCE_THREAD), { mode: 0o600 });
+      return pathname;
+    });
+    const files = [rootPath, ...forkPaths].map(fileEntry);
+
+    /* The board the operator was actually looking at: the root and every fork
+       as sibling manual cards, with one fork already hidden by hand. */
+    const root = store.ensureConversation("codex", rootPath, "a");
+    for (const forkPath of forkPaths) store.ensureConversation("codex", forkPath, "a");
+    mutateBoard("repo", boardFor("repo").revision, [
+      { kind: "restore", path: rootPath, placement: "manual" },
+      ...forkPaths.map((forkPath) => ({ kind: "restore" as const, path: forkPath, placement: "manual" as const })),
+      { kind: "close", path: forkPaths[2]! },
+      { kind: "set-favorite", id: root.id, favorite: true },
+    ]);
+    expect(boardFor("repo").prefs.manual).toContain(forkPaths[0]!);
+    expect(boardFor("repo").prefs.hidden).toContain(forkPaths[2]!);
+
+    await reconcileMigrationInventory(store, files);
+
+    const conversations = Object.values(store.snapshot().conversations);
+    expect(conversations).toHaveLength(1);
+    expect(conversations[0]!.id).toBe(root.id);
+    expect(new Set(conversations[0]!.providerForkPaths)).toEqual(new Set(forkPaths));
+    /* Nothing was moved or removed — every transcript is still on disk and
+       still listed on the surviving conversation. */
+    for (const forkPath of forkPaths) {
+      expect(fs.existsSync(forkPath)).toBeTrue();
+      expect(conversations[0]!.continuityPaths).toContain(forkPath);
+      expect(store.conversationForPath(forkPath)?.id).toBe(root.id);
+    }
+    const board = boardFor("repo");
+    for (const forkPath of forkPaths.slice(0, 2)) expect(board.pathAliases?.[forkPath]).toBe(rootPath);
+    expect(board.prefs.manual).toContain(rootPath);
+    /* Hiding a duplicate is a statement about the duplicate: the hidden fork is
+       left unaliased so the surviving root card stays on the board. */
+    expect(board.pathAliases?.[forkPaths[2]!]).toBeUndefined();
+    expect(board.prefs.hidden).toEqual([forkPaths[2]!]);
+    expect(board.prefs.favorites).toContain(root.id);
+
+    const revisionAfterFirstPass = boardFor("repo").revision;
+    await reconcileMigrationInventory(store, files);
+
+    expect(Object.values(store.snapshot().conversations)).toHaveLength(1);
+    expect(boardFor("repo").revision).toBe(revisionAfterFirstPass);
+  });
+
+  test("adopting a fork that never drew a card leaves the pinned root card pinned", async () => {
+    const store = registry();
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-708-unplaced-fork-"));
+    roots.push(base);
+    const sessions = path.join(base, "sessions");
+    fs.mkdirSync(sessions, { recursive: true, mode: 0o700 });
+    const rootPath = path.join(sessions, `rollout-${SOURCE_THREAD}.jsonl`);
+    fs.writeFileSync(rootPath, sessionMeta(SOURCE_THREAD), { mode: 0o600 });
+    const forkId = "019f9c11-0000-\x37000-8000-00000000cc10";
+    const forkPath = path.join(sessions, `rollout-${forkId}.jsonl`);
+    fs.writeFileSync(forkPath, sessionMeta(forkId, SOURCE_THREAD) + sessionMeta(SOURCE_THREAD), { mode: 0o600 });
+    const files = [rootPath, forkPath].map(fileEntry);
+
+    /* The ordinary case, and the one the board is most exposed to: the operator
+       pinned the root, and the fork was adopted before it ever rendered, so it
+       holds no membership of any kind. The root's pin is the only thing keeping
+       an idle conversation on the board — it has no automatic column. */
+    const root = store.ensureConversation("codex", rootPath, "a");
+    mutateBoard("repo", boardFor("repo").revision, [
+      { kind: "restore", path: rootPath, placement: "manual" },
+    ]);
+    expect(boardFor("repo").prefs.manual).toEqual([rootPath]);
+    expect(boardFor("repo").explicitManual).toEqual([rootPath]);
+
+    await reconcileMigrationInventory(store, files);
+
+    const board = boardFor("repo");
+    expect(board.prefs.manual).toEqual([rootPath]);
+    expect(board.explicitManual).toEqual([rootPath]);
+    expect(board.pathAliases?.[forkPath]).toBe(rootPath);
+    const conversations = Object.values(store.snapshot().conversations);
+    expect(conversations).toHaveLength(1);
+    expect(conversations[0]!.id).toBe(root.id);
+    expect(fs.existsSync(forkPath)).toBeTrue();
+
+    const revisionAfterFirstPass = board.revision;
+    const forkPathsAfterFirstPass = conversations[0]!.providerForkPaths;
+    await reconcileMigrationInventory(store, files);
+
+    const replayed = Object.values(store.snapshot().conversations);
+    expect(replayed).toHaveLength(1);
+    expect(replayed[0]!.providerForkPaths).toEqual(forkPathsAfterFirstPass);
+    expect(boardFor("repo").revision).toBe(revisionAfterFirstPass);
+    expect(boardFor("repo").prefs.manual).toEqual([rootPath]);
+    expect(boardFor("repo").explicitManual).toEqual([rootPath]);
+  });
+
+  test("one unreadable board leaves every other project reconciled", async () => {
+    /* `boardFor` used to run unguarded, so a single malformed `board.json`
+       threw `BoardStoreError` out of `reconcileMigrationInventory` and aborted
+       the whole controller cycle and reaper pass — for every project, not just
+       the broken one. Placement repair is the only thing that may be lost. */
+    const store = registry();
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-708-unreadable-board-"));
+    roots.push(base);
+    const sessions = path.join(base, "sessions");
+    fs.mkdirSync(sessions, { recursive: true, mode: 0o700 });
+    const projects = ["alpha-project", "beta-project"];
+    const files: FileEntry[] = [];
+    const rootPaths: string[] = [];
+    projects.forEach((project, index) => {
+      const rootId = `019f9c11-0000-\x37000-8000-0000000000${index}a`;
+      const forkId = `019f9c11-0000-\x37000-8000-0000000000${index}b`;
+      const rootPath = path.join(sessions, `rollout-${rootId}.jsonl`);
+      const forkPath = path.join(sessions, `rollout-${forkId}.jsonl`);
+      fs.writeFileSync(rootPath, sessionMeta(rootId), { mode: 0o600 });
+      fs.writeFileSync(forkPath, sessionMeta(forkId, rootId) + sessionMeta(rootId), { mode: 0o600 });
+      rootPaths.push(rootPath);
+      files.push(...[rootPath, forkPath].map((pathname) => ({ ...fileEntry(pathname), project })));
+      store.ensureConversation("codex", rootPath, "a");
+    });
+    /* Not JSON at all — the shape an interrupted write or a hand edit leaves. */
+    fs.writeFileSync(path.join(path.dirname(store.filename), "board.json"), "{ not a board", { mode: 0o600 });
+
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args); };
+    try {
+      const snapshot = await reconcileMigrationInventory(store, files);
+
+      /* Every project is reconciled: two conversations, each having adopted its
+         own fork rather than minting a lookalike root card. */
+      const conversations = Object.values(snapshot.conversations);
+      expect(conversations).toHaveLength(2);
+      for (const rootPath of rootPaths) {
+        expect(store.conversationForPath(rootPath)).not.toBeNull();
+        expect(store.conversation(store.conversationForPath(rootPath)!.id)?.providerForkPaths).toHaveLength(1);
+      }
+    } finally {
+      console.warn = originalWarn;
+    }
+    const skipped = warnings.filter((call) => call[0] === "[account-migration] adopted fork board placement skipped");
+    expect(skipped.map((call) => (call[1] as { project: string }).project).sort()).toEqual([...projects].sort());
+  });
+
+  test("a project whose forks are already aliased takes no board write on replay", async () => {
+    /* The replay claim only held because `remapBoardPaths` reduced to a no-op
+       — after taking the board write lock, writing a queue ticket, fsyncing and
+       re-reading the file, on every 60s controller tick and every reaper pass.
+       An already-aliased project must not reach the store at all. */
+    const store = registry();
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-708-aliased-replay-"));
+    roots.push(base);
+    const sessions = path.join(base, "sessions");
+    fs.mkdirSync(sessions, { recursive: true, mode: 0o700 });
+    const forkId = "019f9c11-0000-\x37000-8000-00000000ee10";
+    const rootPath = path.join(sessions, `rollout-${SOURCE_THREAD}.jsonl`);
+    const forkPath = path.join(sessions, `rollout-${forkId}.jsonl`);
+    fs.writeFileSync(rootPath, sessionMeta(SOURCE_THREAD), { mode: 0o600 });
+    fs.writeFileSync(forkPath, sessionMeta(forkId, SOURCE_THREAD) + sessionMeta(SOURCE_THREAD), { mode: 0o600 });
+    const files = [rootPath, forkPath].map(fileEntry);
+    store.ensureConversation("codex", rootPath, "a");
+    mutateBoard("repo", boardFor("repo").revision, [{ kind: "restore", path: forkPath, placement: "manual" }]);
+
+    /* First pass through the real store: the alias is what a replay must see. */
+    await reconcileMigrationInventory(store, files);
+    expect(boardFor("repo").pathAliases?.[forkPath]).toBe(rootPath);
+    const settledRevision = boardFor("repo").revision;
+
+    /* The replay runs against the real store, so the write lock the production
+       path would take is observable: `withBoardWriteLock` creates the ticket
+       queue before it can decide there is nothing to write. */
+    const boardFile = path.join(path.dirname(store.filename), "board.json");
+    const lockQueues: string[] = [];
+    const originalMkdirSync = fs.mkdirSync;
+    fs.mkdirSync = ((target: fs.PathLike, ...args: unknown[]) => {
+      if (String(target).startsWith(`${boardFile}.write-lock`)) lockQueues.push(String(target));
+      return Reflect.apply(originalMkdirSync, fs, [target, ...args]) as string | undefined;
+    }) as typeof fs.mkdirSync;
+    try {
+      await reconcileMigrationInventory(store, files);
+    } finally {
+      fs.mkdirSync = originalMkdirSync;
+    }
+
+    expect(lockQueues).toEqual([]);
+    expect(boardFor("repo").revision).toBe(settledRevision);
+
+    /* And the store is not reached at all, not merely reached to no effect. */
+    const remapCalls: string[] = [];
+    await reconcileMigrationInventory(store, files, {
+      remapBoardPaths(project) {
+        remapCalls.push(project);
+        return boardFor(project);
+      },
+    });
+
+    expect(remapCalls).toEqual([]);
+    expect(boardFor("repo").revision).toBe(settledRevision);
+    expect(Object.values(store.snapshot().conversations)).toHaveLength(1);
+  });
+
+  test("a scanned fork edge is read off the entry, and only an undescribed entry reopens the header", async () => {
+    const store = registry();
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-708-carried-edge-"));
+    roots.push(base);
+    const sessions = path.join(base, "sessions");
+    fs.mkdirSync(sessions, { recursive: true, mode: 0o700 });
+    const forkId = "019f9c11-0000-\x37000-8000-00000000dd10";
+    const rootPath = path.join(sessions, `rollout-${SOURCE_THREAD}.jsonl`);
+    const forkPath = path.join(sessions, `rollout-${forkId}.jsonl`);
+    /* Padded past the bounded prefix so a header read is a full 64 KiB request
+       at offset zero, and the turn tail is read from a different offset. */
+    const padding = "x".repeat(150_000) + "\n";
+    fs.writeFileSync(rootPath, sessionMeta(SOURCE_THREAD) + padding, { mode: 0o600 });
+    fs.writeFileSync(forkPath, sessionMeta(forkId, SOURCE_THREAD) + sessionMeta(SOURCE_THREAD) + padding, { mode: 0o600 });
+    /* What the scanner hands reconciliation: cwd, session start and the fork
+       edge are all already resolved from the one header read the scan did. */
+    const described = (pathname: string, nativeForkSourceThreadId: string | null): FileEntry => ({
+      ...fileEntry(pathname),
+      cwd: "/repo",
+      sessionStartedAt: "2026-07-26T02:00:00.000Z",
+      nativeForkSourceThreadId,
+    });
+    /* The conversation the operator has been using all along: the fork is
+       adopted into an owner that already exists, exactly as a live cycle finds
+       it. */
+    store.ensureConversation("codex", rootPath, "a");
+
+    const originalOpenSync = fs.openSync;
+    const originalReadSync = fs.readSync;
+    const originalCloseSync = fs.closeSync;
+    const fixtureFds = new Set<number>();
+    let headerReads = 0;
+    fs.openSync = ((target: fs.PathLike, ...args: unknown[]) => {
+      const fd = Reflect.apply(originalOpenSync, fs, [target, ...args]) as number;
+      if (path.resolve(String(target)).startsWith(sessions + path.sep)) fixtureFds.add(fd);
+      return fd;
+    }) as typeof fs.openSync;
+    fs.readSync = ((fd: number, ...args: unknown[]) => {
+      if (fixtureFds.has(fd) && args[3] === 0) headerReads += 1;
+      return Reflect.apply(originalReadSync, fs, [fd, ...args]);
+    }) as typeof fs.readSync;
+    fs.closeSync = ((fd: number) => {
+      fixtureFds.delete(fd);
+      return originalCloseSync(fd);
+    }) as typeof fs.closeSync;
+    try {
+      await reconcileMigrationInventory(store, [
+        described(rootPath, null),
+        described(forkPath, SOURCE_THREAD),
+      ]);
+      const carried = headerReads;
+
+      /* The same edge, from an entry nobody described — a fixture, or a scan
+         snapshot written before the field existed. The header is the fallback,
+         so a pre-existing orphan fork is still adopted. */
+      const undescribedStore = registry();
+      undescribedStore.ensureConversation("codex", rootPath, "a");
+      headerReads = 0;
+      await reconcileMigrationInventory(undescribedStore, [rootPath, forkPath].map(fileEntry));
+      const fallbackReads = headerReads;
+
+      expect({ carried, fallbackReads }).toEqual({ carried: 0, fallbackReads: 2 });
+      for (const owner of [store, undescribedStore]) {
+        const conversations = Object.values(owner.snapshot().conversations);
+        expect(conversations).toHaveLength(1);
+        expect(conversations[0]!.providerForkPaths).toEqual([forkPath]);
+        expect(owner.conversationForPath(forkPath)?.id).toBe(owner.conversationForPath(rootPath)?.id);
+      }
+    } finally {
+      fs.openSync = originalOpenSync;
+      fs.readSync = originalReadSync;
+      fs.closeSync = originalCloseSync;
+    }
   });
 });

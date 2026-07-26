@@ -2520,6 +2520,7 @@ export async function patchPipeline(
       if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused") {
         pipeline.pausedState = pipeline.state;
         pipeline.state = "paused";
+        pipeline.pausedAt = ports.now();
         pipeline.stateDetail = "paused by user";
         if (flow && flow.state !== "paused" && flow.state !== "closed") ports.patchFlow(flow.id, "pause");
       }
@@ -2527,6 +2528,7 @@ export async function patchPipeline(
       if (pipeline.state !== "paused") return { error: "pipeline is not paused", status: 409 };
       pipeline.state = pipeline.pausedState ?? "running";
       pipeline.pausedState = null;
+      pipeline.resumedAt = ports.now();
       pipeline.stateDetail = null;
       if (flow?.state === "paused") ports.patchFlow(flow.id, "resume");
     } else if (req.action === "retry-stage") {

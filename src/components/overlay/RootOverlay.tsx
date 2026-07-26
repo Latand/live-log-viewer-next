@@ -55,6 +55,10 @@ export interface RootOverlayProps {
   /** This device's last answer was refused by the record; the action row says
       so rather than leaving the operator with a control that did nothing. */
   attentionRefused?: boolean;
+  /** Which refusal it was, when the surface knows. */
+  attentionRefusedReason?: string | null;
+  /** Take the refusal band off screen. */
+  onDismissAttentionRefusal?: () => void;
   autoFollow?: { scope: "session" | "project"; label: string } | null;
   /** Sheet only: Rail collapses the timeline to a single line. */
   density?: TimelineDensity;
@@ -256,6 +260,8 @@ export function RootOverlay(props: RootOverlayProps) {
             preview={attentionPreview ?? null}
             autoFollow={autoFollow ?? null}
             refused={attentionRefused}
+            refusedReason={props.attentionRefusedReason ?? null}
+            onDismissRefusal={props.onDismissAttentionRefusal}
             controlSize={controlSize}
             onAccept={props.onAcceptAttention}
             onPreview={props.onPreviewAttention}

@@ -131,6 +131,11 @@ export function validateAttentionEvent(value: unknown): AttentionEvent {
     case "preview":
     case "decline":
     case "dismiss":
+    /* `abandon` is a device closing ITS OWN agreed request that found nowhere
+       to land. It is safe from a client for the same reason `arrive` is: the
+       machine accepts it only from `accepted`, and only from the device the
+       record names as the acknowledger. */
+    case "abandon":
       return { kind: body.kind, deviceId: text(body.deviceId, "deviceId", 256) };
     case "accept": {
       const via = body.via;

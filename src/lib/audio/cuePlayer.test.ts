@@ -90,18 +90,28 @@ describe("de-duplication on a stable event identity", () => {
 });
 
 describe("bounded overlap", () => {
-  test("a burst of twenty tool ticks is one sound, not twenty", () => {
+  test("a burst of tool ticks is bounded by the overlap cap", () => {
     const sink = recorder();
     const cues = player(sink);
 
     for (let index = 0; index < 20; index += 1) {
-      cues.play({ cue: "tool-tick", eventId: `tool:conv:call-${index}` });
+      cues.play({ cue: "tool-tick", eventId: `tool:conv:call-${index}`, delayMs: index * 220 });
     }
 
-    /* Routine texture coalesces while it is sounding: one tick, no chord, and
-       no queue waiting to arrive after the moment has passed. */
-    expect(sink.started).toHaveLength(1);
-    expect(cues.activeVoices()).toEqual(["tool-tick"]);
+    expect(sink.started).toHaveLength(3);
+    expect(cues.activeVoices()).toHaveLength(3);
+  });
+
+  test("each newly appended call earns exactly one sound when cap allows", () => {
+    const sink = recorder();
+    const cues = createCuePlayer({ transport: sink.transport, prefs: () => device, maxConcurrent: 10 });
+
+    cues.play({ cue: "tool-tick", eventId: "tool:conv:a" });
+    cues.play({ cue: "tool-tick", eventId: "tool:conv:b", delayMs: 220 });
+    cues.play({ cue: "viewer-mcp", eventId: "tool:conv:c", delayMs: 440 });
+
+    expect(sink.started).toHaveLength(3);
+    expect(sink.started.map((r) => r.cue)).toEqual(["tool-tick", "tool-tick", "viewer-mcp"]);
   });
 
   test("a tick after the previous one finished plays again", () => {

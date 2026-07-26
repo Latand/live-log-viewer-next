@@ -204,9 +204,15 @@ async function mapWithConcurrency<T>(items: T[], concurrency: number, task: (ite
   await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
 }
 
+/** Everything about a flow EXCEPT its merge evidence, serialized: the evidence
+    is what this pass is refreshing, so including it would make every flow look
+    concurrently modified by the refresh itself. Dropping the key by filtering
+    rather than by destructuring it into an unused binding keeps the same own
+    enumerable keys in the same order — the serialization is unchanged. */
 function flowTransitionRevision(flow: Flow): string {
-  const { mergeEvidence: _mergeEvidence, ...transition } = flow;
-  return JSON.stringify(transition);
+  return JSON.stringify(Object.fromEntries(
+    Object.entries(flow).filter(([key]) => key !== "mergeEvidence"),
+  ));
 }
 
 function cloneMergeEvidence(evidence: FlowMergeEvidence | null | undefined): FlowMergeEvidence | null {
