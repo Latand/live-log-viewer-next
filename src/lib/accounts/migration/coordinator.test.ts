@@ -3945,27 +3945,35 @@ describe("Codex canonical root conversation and fork recovery (#708)", () => {
     expect(boardFor("repo").pathAliases?.[forkPath]).toBe(rootPath);
     const settledRevision = boardFor("repo").revision;
 
+    /* The replay runs against the real store, so the write lock the production
+       path would take is observable: `withBoardWriteLock` creates the ticket
+       queue before it can decide there is nothing to write. */
     const boardFile = path.join(path.dirname(store.filename), "board.json");
-    const lockWrites: string[] = [];
+    const lockQueues: string[] = [];
     const originalMkdirSync = fs.mkdirSync;
     fs.mkdirSync = ((target: fs.PathLike, ...args: unknown[]) => {
-      if (String(target).startsWith(`${boardFile}.write-lock`)) lockWrites.push(String(target));
+      if (String(target).startsWith(`${boardFile}.write-lock`)) lockQueues.push(String(target));
       return Reflect.apply(originalMkdirSync, fs, [target, ...args]) as string | undefined;
     }) as typeof fs.mkdirSync;
-    const remapCalls: string[] = [];
     try {
-      await reconcileMigrationInventory(store, files, {
-        remapBoardPaths(project) {
-          remapCalls.push(project);
-          return boardFor(project);
-        },
-      });
+      await reconcileMigrationInventory(store, files);
     } finally {
       fs.mkdirSync = originalMkdirSync;
     }
 
+    expect(lockQueues).toEqual([]);
+    expect(boardFor("repo").revision).toBe(settledRevision);
+
+    /* And the store is not reached at all, not merely reached to no effect. */
+    const remapCalls: string[] = [];
+    await reconcileMigrationInventory(store, files, {
+      remapBoardPaths(project) {
+        remapCalls.push(project);
+        return boardFor(project);
+      },
+    });
+
     expect(remapCalls).toEqual([]);
-    expect(lockWrites).toEqual([]);
     expect(boardFor("repo").revision).toBe(settledRevision);
     expect(Object.values(store.snapshot().conversations)).toHaveLength(1);
   });
