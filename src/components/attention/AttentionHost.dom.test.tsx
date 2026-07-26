@@ -9,7 +9,7 @@ import { flushSync } from "react-dom";
 import { viewBus, type ViewSlice } from "@/hooks/viewPresenceBus";
 import { answerAttentionRequest, attentionForDevice, raiseAttentionRequest } from "@/lib/attention/service";
 import { readAttentionFile } from "@/lib/attention/store";
-import { OFFER_TTL_MS, type FocusRect } from "@/lib/attention/types";
+import { FOLLOW_HOLD_MS, OFFER_TTL_MS, RETURN_WINDOW_MS, type FocusRect } from "@/lib/attention/types";
 import { validateAttentionEvent } from "@/lib/attention/validation";
 
 import { AttentionHost } from "./AttentionHost";
@@ -65,6 +65,9 @@ beforeEach(() => {
   /* The return-project memory lives here and is keyed by request id, which the
      tests reuse; a leak between them would hide the case where it is empty. */
   dom.localStorage.clear();
+  /* The tests that wait a clock out move this, so it is put back rather than
+     leaking a later `now` into whichever test runs next. */
+  now = new Date("2026-07-01T10:00:00.000Z");
   previousStateDir = process.env.LLV_STATE_DIR;
   sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-attention-host-"));
   process.env.LLV_STATE_DIR = sandbox;
@@ -410,6 +413,66 @@ test("a request raised after a handoff that could not land is rendered and answe
 
   const stored = readAttentionFile().requests.find((entry) => entry.id === "attention_2")!;
   expect(stored.state).toBe("following");
+});
+
+test("a request raised after a follow the operator never closed is rendered and answerable", async () => {
+  /* The same silent swallow as the lost landing above, by the other route.
+     `following` admits no event but Return, so an operator who follows and then
+     walks away leaves that request live for good — and, being the oldest live
+     entry, it is the only thing this device is ever shown again. */
+  raise();
+  const { bus } = board({ [ANCHOR]: LIVE_RECT });
+  mount(bus);
+  await settle();
+
+  click(one("[data-testid='attention-accept']")!);
+  await settle();
+  expect(record().state).toBe("following");
+
+  /* Long enough that the card has stopped naming where they came from, so there
+     is nothing left on it to take away. */
+  now = new Date(now.getTime() + RETURN_WINDOW_MS + 1);
+  const second = raiseAttentionRequest({
+    origin: "root-agent",
+    target: { kind: "conversation", path: ANCHOR },
+    frameAtCreation: { project: "demo", rect: RAISED_RECT, boardRevision: 4 },
+    intent: "show",
+    reason: "The verifier is blocked on you.",
+  }, { now, id: "attention_2" }).request;
+
+  await poll();
+
+  expect(one("[data-testid='attention-request']")!.textContent).toContain("The verifier is blocked on you.");
+  expect(attentionForDevice(DEVICE, { now }).offer?.request.id).toBe(second.id);
+  /* Replaced by the agent's newer ask, which is a different fact from the
+     operator refusing it and from nobody ever seeing it. */
+  expect(record().state).toBe("superseded");
+
+  click(one("[data-testid='attention-accept']")!);
+  await settle();
+  expect(readAttentionFile().requests.find((entry) => entry.id === "attention_2")!.state).toBe("following");
+});
+
+test("a follow nobody closes and nothing replaces is still bounded by the clock", async () => {
+  raise();
+  const { bus } = board({ [ANCHOR]: LIVE_RECT });
+  mount(bus);
+  await settle();
+
+  click(one("[data-testid='attention-accept']")!);
+  await settle();
+  expect(record().state).toBe("following");
+
+  /* Nothing is raised after it and Return is never pressed. Without a clock the
+     record stays live indefinitely and the slot with it. */
+  now = new Date(now.getTime() + FOLLOW_HOLD_MS);
+  await poll();
+
+  expect(record().state).toBe("expired");
+  /* Seen, agreed to, never closed — not a refusal, and not "they never saw it". */
+  expect(record().expiredCause).toBe("follow-elapsed");
+  expect(attentionForDevice(DEVICE, { now }).offer).toBeNull();
+  expect(dom.document.body.textContent).toBe("");
 });
 
 test("the refusal band can be dismissed, so a one-off refusal is not a permanent warning", async () => {

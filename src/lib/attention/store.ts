@@ -211,7 +211,10 @@ export function liveAttentionRequests(file: AttentionFileV1): AttentionRequestV1
  * are about the *set* of requests rather than one of them:
  *
  * - a newer root-agent request supersedes that root's older un-acknowledged
- *   ones. There is one speaker, so a second request means it changed its mind;
+ *   ones. There is one speaker, so a second request means it changed its mind.
+ *   It also supersedes a follow whose way back has already collapsed: the
+ *   machine decides that, and it is what keeps a handoff the operator never
+ *   closed from shadowing everything raised afterwards;
  * - the queue is capped, and overflow drops the oldest routine entry. The
  *   caller is told which, so a dropped request can be said out loud instead of
  *   vanishing, and the record itself keeps `expiredCause: "queue-evicted"` so
@@ -307,10 +310,13 @@ export function transitionAttentionRequest(
  * can see — the caller writes one line to the conversation and one event to the
  * journal for each id returned here.
  *
- * The clock has two causes, and the sweep carries whichever applies rather than
- * stamping them all `ttl`: an unanswered offer ran out, while an agreed request
- * that never landed is `lost`. That second case is also the recovery path for a
- * device that agreed and then vanished mid-handoff, which nothing else can end.
+ * The clock has three causes, and the sweep carries whichever applies rather
+ * than stamping them all `ttl`: an unanswered offer ran out; an agreed request
+ * that never landed is `lost`; a follow nobody ever closed is `follow-elapsed`.
+ * The last two are the recovery paths for the two states a request cannot leave
+ * on its own — a device that agreed and then vanished mid-handoff, and an
+ * operator who followed and walked away — and each of those, left live, is the
+ * device's one offer slot held against everything raised after it.
  */
 export function sweepExpiredAttention(options: { filePath?: string; now?: Date } = {}): string[] {
   const now = options.now ?? new Date();

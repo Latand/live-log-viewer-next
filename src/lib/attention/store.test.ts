@@ -16,7 +16,7 @@ import {
   transitionAttentionRequest,
   type AttentionCreateInput,
 } from "./store";
-import { ACCEPTED_LANDING_GRACE_MS, OFFER_TTL_MS, QUEUE_CAP, type FocusFrame } from "./types";
+import { ACCEPTED_LANDING_GRACE_MS, FOLLOW_HOLD_MS, OFFER_TTL_MS, QUEUE_CAP, RETURN_WINDOW_MS, type FocusFrame } from "./types";
 
 let sandbox = "";
 let previousStateDir: string | undefined;
@@ -123,7 +123,7 @@ test("a device that agreed and then vanished mid-handoff is recovered by the swe
   expect(liveAttentionRequests(readAttentionFile())).toEqual([]);
 });
 
-test("a followed request has no clock, so a sweep never takes the return point away", () => {
+test("a sweep leaves a live follow alone, then closes one nobody ever came back from", () => {
   createAttentionRequest(input(), { now: T0, id: "attention_1" });
   transitionAttentionRequest("attention_1", { kind: "offer", deviceId: "device-a" }, { now: T0 });
   transitionAttentionRequest("attention_1", { kind: "accept", deviceId: "device-a" }, { now: T0 });
@@ -134,8 +134,21 @@ test("a followed request has no clock, so a sweep never takes the return point a
     returnPoint: { deviceId: "device-a", mode: "scheme", camera: { x: 1, y: 2, zoom: 0.5 }, focusedPath: null, capturedAt: T0.toISOString() },
   }, { now: T0 });
 
-  expect(sweepExpiredAttention({ now: later(OFFER_TTL_MS * 10) })).toEqual([]);
+  /* A clock taking the return point away while the control still names it would
+     strand the operator wherever they landed, so nothing does. */
+  expect(sweepExpiredAttention({ now: later(RETURN_WINDOW_MS) })).toEqual([]);
   expect(readAttentionFile().requests[0]!.state).toBe("following");
+
+  /* But `following` admits no event except Return, so an operator who never
+     presses it would otherwise leave this live for the life of the file —
+     holding the device's one offer slot against everything raised after it. */
+  expect(sweepExpiredAttention({ now: later(FOLLOW_HOLD_MS) })).toEqual(["attention_1"]);
+  const swept = readAttentionFile().requests[0]!;
+  expect(swept.state).toBe("expired");
+  /* Its own cause: they saw this one and agreed to it, so reporting it as a TTL
+     would tell the agent it was never looked at. */
+  expect(swept.expiredCause).toBe("follow-elapsed");
+  expect(liveAttentionRequests(readAttentionFile())).toEqual([]);
 });
 
 test("a request nobody ever rendered expires on the same clock", () => {

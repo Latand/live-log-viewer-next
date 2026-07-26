@@ -1,6 +1,13 @@
 import { rootIdentity } from "@/lib/root/store";
 
-import { applyAttentionEvent, offerStatusForDevice, returnControlIsLive, type AttentionEvent, type DeviceOfferStatus } from "./machine";
+import {
+  applyAttentionEvent,
+  offerStatusForDevice,
+  offerStillActionable,
+  returnControlIsLive,
+  type AttentionEvent,
+  type DeviceOfferStatus,
+} from "./machine";
 import {
   createAttentionRequest,
   liveAttentionRequests,
@@ -66,9 +73,21 @@ export function attentionForDevice(
       returnAvailable: returnControlIsLive(request, deviceId, now),
     }));
 
+  /* At most one request is rendered per device, oldest first — but a follow the
+     operator has wandered away from must not be what that one is. Its return
+     control has already collapsed, so it offers nothing to press, and being the
+     oldest live entry it would go on being this device's only offer while every
+     newer request sat behind it unseen. So a follow still naming its way back
+     wins (the operator is mid-handoff and Return is the thing to show), then
+     anything answerable, and only then a collapsed follow. */
+  const slot = live.filter((entry) => entry.status === "actionable" || entry.status === "following");
+  const offer = slot.find((entry) => offerStillActionable(entry.request, now))
+    ?? slot[0]
+    ?? null;
+
   return {
     rootId: rootIdentity(),
-    offer: live.find((entry) => entry.status === "actionable" || entry.status === "following") ?? null,
+    offer,
     live,
     expired,
   };

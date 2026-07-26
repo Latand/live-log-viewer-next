@@ -33,6 +33,23 @@ export const RETURN_WINDOW_MS = 60_000;
     mid-handoff. Without this that request could never leave `accepted`, and it
     would stay that device's only offer for the life of the record. */
 export const ACCEPTED_LANDING_GRACE_MS = 60_000;
+/**
+ * How long a follow nobody ever closed stays live before the clock ends it.
+ *
+ * `following` is the other state a request could never leave on its own: the
+ * only way out is the operator pressing Return, and an operator who simply
+ * walks away never presses anything. Being live and the oldest entry, that
+ * request goes on being the device's one offer, so every later request is
+ * stamped `offered`, rendered by nothing, and expires as if it had been
+ * ignored — the same silent swallow a lost landing used to cause.
+ *
+ * Deliberately far longer than {@link RETURN_WINDOW_MS}: by the time this runs
+ * the return control has long since stopped naming where the operator came
+ * from, so nothing is taken away that was still on offer. Ending the record
+ * never moves the view, so an operator still reading the target keeps reading
+ * it — what they lose is a card that had no action left on it.
+ */
+export const FOLLOW_HOLD_MS = 10 * 60_000;
 /** Auto-follow may move the view; it may not chain-move it. A request arriving
     inside this window after a move waits. */
 export const AUTO_FOLLOW_SETTLE_MS = 4_000;
@@ -93,11 +110,17 @@ export type FocusResolutionKind = "exact" | "approximate" | "lost";
 /**
  * Why a request ended without an answer. Kept on the record rather than only in
  * the reply to whoever caused it: "nobody answered in ten minutes", "the anchor
- * was gone" and "the queue was full" are three different things to say out loud,
- * and the last one is the one a caller would otherwise have to remember for the
- * record's whole life.
+ * was gone", "the queue was full" and "they followed and never came back" are
+ * four different things to say out loud, and the record is the only place the
+ * distinction outlives the response that caused it.
+ *
+ * `follow-elapsed` is the odd one out and says so: the operator DID see the
+ * request and DID agree to it. It is on this list rather than being its own
+ * state because the ending is the same shape — the clock closed a record nobody
+ * closed by hand — and reading it as a refusal or as "never seen" would teach
+ * the agent exactly the wrong lesson about asking again.
  */
-export type ExpiryCause = "ttl" | "lost" | "queue-evicted";
+export type ExpiryCause = "ttl" | "lost" | "queue-evicted" | "follow-elapsed";
 
 /** `show` frames and highlights; `open` also opens the target's natural surface,
     and return closes what it opened — which is why the two are one field (D8). */
@@ -124,8 +147,9 @@ export type AttentionState =
       silence — the difference between an agent that learns to stop asking and
       one that keeps asking. */
   | "declined"
-  /** TTL elapsed unacknowledged, the target resolved as lost, or the queue was
-      full. Which one is on the record as `expiredCause`. Terminal. */
+  /** TTL elapsed unacknowledged, the target resolved as lost, the queue was
+      full, or a follow was never closed. Which one is on the record as
+      `expiredCause`. Terminal. */
   | "expired"
   /** Replaced by a newer request from the root agent. Terminal. */
   | "superseded";
