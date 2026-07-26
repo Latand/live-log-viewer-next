@@ -632,6 +632,22 @@ export const en = {
   "sound.ambientVolume": "Ambient level",
   "sound.ambientHint": "Plays quietly while a voice call is connected, and ducks under speech.",
 
+  // KeepAwakeControl — the phone-only screen wake lock (issue #712). Every
+  // caption states what is true right now; only `active` says the screen is
+  // held, and it is the one that names the battery cost.
+  "keepAwake.label": "Keep screen awake",
+  "keepAwake.enableAria": "Keep the screen awake on this device",
+  "keepAwake.disableAria": "Let the screen sleep on this device",
+  "keepAwake.off": "The screen sleeps on this device's usual timer.",
+  "keepAwake.requesting": "Asking the browser…",
+  "keepAwake.active": "Screen stays awake while this tab is visible. Uses more battery.",
+  "keepAwake.waiting": "Paused while this tab is hidden. Resumes when you come back.",
+  "keepAwake.interrupted": "The system released the lock. Turn this off and on to ask again.",
+  "keepAwake.blocked": "The browser refused the request. The screen is not held.",
+  "keepAwake.failed": "The request failed. The screen is not held.",
+  "keepAwake.insecure": "Needs an HTTPS address. Over plain HTTP the screen cannot be held.",
+  "keepAwake.unsupported": "This browser has no screen wake lock.",
+
   // MicButton
   "mic.stopRecognize": "Stop recording and transcribe",
   "mic.cancel": "Cancel recording",
