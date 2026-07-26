@@ -369,6 +369,36 @@ export function describeMcpCall(
     };
   }
 
+  if (toolName === "agent_activity") {
+    const scope = string(args.conversationId) || string(args.project) || "all live agents";
+    const stalled = typeof result.stalledCount === "number" ? result.stalledCount : null;
+    const counted = typeof result.count === "number" ? `${result.count} checked` : "";
+    return {
+      icon: "conversation",
+      verb: "Checking",
+      title: `Checking agent activity: ${compact(scope)}`,
+      subtitle: replaySubtitle(result, [counted, stalled ? `${stalled} stalled` : ""].filter(Boolean).join(" · ")),
+      links: conversationLink(args),
+    };
+  }
+
+  if (toolName === "lifecycle_events") {
+    const digest = string(args.mode) === "digest";
+    const relay = record(result.relay);
+    const items = Array.isArray(relay.items) ? relay.items.length : 0;
+    const scope = string(args.pipelineId) || string(args.conversationId) || string(args.project);
+    const detail = digest
+      ? (result.relay ? `${string(relay.reason)} relay · ${items} change(s)` : "nothing due")
+      : (typeof result.count === "number" ? `${result.count} event(s)` : "");
+    return {
+      icon: "pipeline",
+      verb: digest ? "Polling" : "Reading",
+      title: `${digest ? "Polling lifecycle digest" : "Reading lifecycle events"}${scope ? `: ${compact(scope)}` : ""}`,
+      subtitle: replaySubtitle(result, detail),
+      links: entityLink("pipeline", string(args.pipelineId)),
+    };
+  }
+
   return {
     icon: "tool",
     verb: "Running",

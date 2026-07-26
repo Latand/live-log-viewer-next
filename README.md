@@ -224,6 +224,12 @@ The MCP surface includes:
 - tasks: `create_task`, `list_tasks`, `get_task`, and `update_task`;
 - operator/runtime reads: `operator_snapshot`, `deployment_status`, and
   `resources`;
+- agent liveness and lifecycle: `agent_activity` for the per-conversation
+  `{lastRecordAt, turnState, host alive/gone, stalledForMs}` stall snapshot, and
+  `lifecycle_events` for the durable lifecycle journal (`mode: "query"`, by
+  project/pipeline/conversation and cursor) and its bounded relay digest
+  (`mode: "digest"`, terminal events immediately, routine progress coalesced and
+  rate-limited to one per five minutes per subscriber);
 - agent/runtime mutations: `spawn_agent`, `conversation_migration`, and
   `deploy_exact_sha`.
 
