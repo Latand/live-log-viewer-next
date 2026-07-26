@@ -370,6 +370,13 @@ export interface RegistryConversation {
   continuityPaths: string[];
   /** Continuity artifacts from canceled successions that must stay outside board aliases. */
   abandonedContinuityPaths: string[];
+  /** Codex `thread/fork` artifacts adopted as this conversation's history
+      (issue #708), recognised through the first `session_meta` row's
+      `forked_from_id`. A subset of `continuityPaths` kept separately because it
+      is the durable record of *why* the path belongs here — provider-fork
+      history, never a deliberate operator branch — and it is what board
+      placement remapping replays idempotently. */
+  providerForkPaths: string[];
   /** Durable project authority (issue #315). Null for legacy sessions and
       cwd-attributed conversations; projections then fall back to canonical
       cwd, the launch-profile hint, and the scanner slug in that order. */
@@ -458,6 +465,17 @@ export interface ConversationObservation {
       inventory cycle still establishes the child's lineage edge. Never
       overrides an authoritative `viewer-spawn` edge. */
   parentArtifactPath?: string | null;
+  /** Codex provider-fork source thread, from the first `session_meta` row's
+      `forked_from_id` (issue #708). PROVIDER-FORK HISTORY ONLY — it records
+      that the migration provider copied a thread, never that an operator asked
+      for a branch. */
+  forkSourceThreadId?: string | null;
+  /** Why this artifact exists as a fork. Only `provider-history` is adopted as
+      continuity of the source conversation; `user-branch` is reserved for a
+      future deliberate branch feature, whose artifacts must keep their own
+      conversation identity and their own card. Absent means provider history,
+      because that is the only producer that exists today. */
+  forkIntent?: "provider-history" | "user-branch";
 }
 
 export type MigrationScope = "active" | "all";
@@ -1158,6 +1176,10 @@ function normalizeConversation(value: RegistryConversation): RegistryConversatio
   const abandonedContinuityPaths = Array.isArray(value.abandonedContinuityPaths)
     ? [...new Set(value.abandonedContinuityPaths.filter((pathname): pathname is string => typeof pathname === "string"))]
     : [];
+  const providerForkPaths = Array.isArray((value as Partial<RegistryConversation>).providerForkPaths)
+    ? [...new Set(value.providerForkPaths.filter((pathname): pathname is string => typeof pathname === "string"))]
+      .filter((pathname) => continuityPaths.includes(pathname))
+    : [];
   const rawOptOut = (value as Partial<RegistryConversation>).migrationOptOut;
   const migrationOptOut = rawOptOut
     && typeof rawOptOut.targetId === "string"
@@ -1182,6 +1204,7 @@ function normalizeConversation(value: RegistryConversation): RegistryConversatio
     generations,
     continuityPaths,
     abandonedContinuityPaths,
+    providerForkPaths,
     projectOwnership: normalizeProjectOwnership((value as Partial<RegistryConversation>).projectOwnership),
     reconfigure: normalizeConversationReconfigure((value as Partial<RegistryConversation>).reconfigure),
     migration,
@@ -1620,6 +1643,15 @@ function addAbandonedConversationContinuityPath(conversation: RegistryConversati
   if (!conversation.abandonedContinuityPaths.includes(pathname)) conversation.abandonedContinuityPaths.push(pathname);
 }
 
+/** Records a provider fork as this conversation's history. Deliberately does
+    not touch `migration.pendingContinuityPaths`: an adopted fork is history the
+    conversation keeps, not an artifact the current succession may abandon. */
+function addProviderForkHistoryPath(conversation: RegistryConversation, pathname: string): void {
+  if (conversation.generations.some((generation) => generation.path === pathname)) return;
+  if (!conversation.continuityPaths.includes(pathname)) conversation.continuityPaths.push(pathname);
+  if (!conversation.providerForkPaths.includes(pathname)) conversation.providerForkPaths.push(pathname);
+}
+
 function adoptContinuityPathProvenance(
   file: RegistryFile,
   conversation: RegistryConversation,
@@ -1981,6 +2013,109 @@ function adoptProvisionalOwner(
   file.conversationRevision[target.engine] += 1;
   file.engineRouting[target.engine].revision += 1;
   return true;
+}
+
+/**
+ * Group unclaimed Codex provider forks under the conversation that owns their
+ * source thread (issue #708).
+ *
+ * A recoverable account-migration failure could leave a full-history
+ * `thread/fork` artifact nobody had recorded. Path-based ownership then minted
+ * one brand-new conversation per artifact, so a single personal conversation
+ * showed up as a row of lookalike root cards. The edge back to the source is
+ * durable and already on disk — the fork's first `session_meta` row — so it is
+ * carried here as an observation field and resolved before identity allocation.
+ *
+ * Adoption is additive: the artifact becomes a continuity path of the source
+ * conversation and stays listed there. Nothing is moved, rewritten or deleted,
+ * and a lookalike conversation that already exists is alias-merged into the
+ * source rather than dropped, so its receipts, lineage and memberships follow.
+ *
+ * The boundary with a future deliberate branch feature is explicit: only
+ * `forkIntent: "provider-history"` is adopted, only when no committed
+ * generation already claims the fork thread, and only when the fork's path has
+ * no durable owner of its own.
+ */
+function adoptProviderForkHistory(
+  file: RegistryFile,
+  observations: readonly ConversationObservation[],
+  conversationsByPath: Map<string, RegistryConversation[]>,
+  indexConversation: (conversation: RegistryConversation) => void,
+): boolean {
+  const candidates = observations.filter((observation) =>
+    observation.engine === "codex"
+    && typeof observation.forkSourceThreadId === "string"
+    && observation.forkSourceThreadId.length > 0
+    && (observation.forkIntent ?? "provider-history") === "provider-history");
+  if (candidates.length === 0) return false;
+
+  const codexConversations = Object.values(file.conversations).filter((candidate) => candidate.engine === "codex");
+  const ownerByThread = new Map<string, RegistryConversation>();
+  const seatByThread = new Map<string, RegistryConversation>();
+  for (const conversation of codexConversations) {
+    for (const generation of conversation.generations) {
+      seatByThread.set(generation.id, conversation);
+      ownerByThread.set(generation.id, conversation);
+    }
+  }
+  /* Continuity threads resolve fork-of-fork lineage, and rank below generations
+     so a live seat always wins ownership of its own thread id. */
+  for (const conversation of codexConversations) {
+    for (const pathname of conversation.continuityPaths) {
+      const threadId = sessionKeyFromTranscript("codex", pathname)?.sessionId;
+      if (threadId && !ownerByThread.has(threadId)) ownerByThread.set(threadId, conversation);
+    }
+  }
+
+  let changed = false;
+  let pending = candidates;
+  for (let pass = 0; pass < candidates.length && pending.length > 0; pass += 1) {
+    const deferred: ConversationObservation[] = [];
+    let progressed = false;
+    for (const observation of pending) {
+      const forkThreadId = sessionKeyFromTranscript("codex", observation.path)?.sessionId ?? null;
+      const source = ownerByThread.get(observation.forkSourceThreadId!);
+      if (!source || file.conversations[source.id] !== source) {
+        deferred.push(observation);
+        continue;
+      }
+      /* Another conversation already holds this thread as a live generation —
+         a committed migration successor, say. That is a seat, not history, and
+         a seat is never re-parented. A scanner-allocated lookalike of this very
+         path is not a seat: allocating it is the defect being repaired. */
+      const seat = forkThreadId ? seatByThread.get(forkThreadId) : undefined;
+      if (seat && seat.id !== source.id && !scannerAllocatedProvisionalOwner(seat, observation.path)) continue;
+      const owners = (conversationsByPath.get(observation.path) ?? []).filter((candidate) =>
+        file.conversations[candidate.id] === candidate
+        && candidate.engine === "codex"
+        && conversationOwnsPath(candidate, observation.path));
+      if (owners.some((candidate) => candidate.id === source.id)) {
+        /* Already grouped. Recording the marker for a path the source holds
+           only as continuity is what makes a replay of this rule — and the
+           board remap derived from it — a no-op. A path the source holds as a
+           generation is its seat and gets no history marker at all. */
+        if (!source.providerForkPaths.includes(observation.path)
+          && !source.generations.some((generation) => generation.path === observation.path)) {
+          addProviderForkHistoryPath(source, observation.path);
+          changed = true;
+        }
+        if (forkThreadId) ownerByThread.set(forkThreadId, source);
+        continue;
+      }
+      const lookalike = owners.find((candidate) => scannerAllocatedProvisionalOwner(candidate, observation.path));
+      if (owners.length > 0 && !lookalike) continue;
+      if (lookalike && !adoptProvisionalOwner(file, lookalike, source, observation.path)) continue;
+      addProviderForkHistoryPath(source, observation.path);
+      if (observationIsCurrent(source.updatedAt, observation.observedAt)) source.updatedAt = observation.observedAt;
+      indexConversation(source);
+      if (forkThreadId) ownerByThread.set(forkThreadId, source);
+      changed = true;
+      progressed = true;
+    }
+    if (!progressed) break;
+    pending = deferred;
+  }
+  return changed;
 }
 
 function observationIsCurrent(currentObservedAt: string | null, observedAt: string): boolean {
@@ -3585,6 +3720,7 @@ export class AgentRegistry {
       generations: [],
       continuityPaths: [],
       abandonedContinuityPaths: [],
+      providerForkPaths: [],
       projectOwnership: null,
       migration: null,
       migrationOptOut: null,
@@ -4277,6 +4413,7 @@ export class AgentRegistry {
         }],
         continuityPaths: [],
         abandonedContinuityPaths: [],
+        providerForkPaths: [],
         projectOwnership: null,
         migration: null,
         migrationOptOut: null,
@@ -4319,6 +4456,10 @@ export class AgentRegistry {
         }
       };
       for (const conversation of Object.values(file.conversations)) indexConversation(conversation);
+      /* Provider-fork history is grouped before identity allocation (#708):
+         once the fork is a continuity path of its source conversation, the
+         path index below finds an owner and no lookalike root is minted. */
+      if (adoptProviderForkHistory(file, observations, conversationsByPath, indexConversation)) scopeChanged.add("codex");
       const resumeReceiptsByConversation = new Map<ViewerConversationId, SpawnReceipt[]>();
       const refreshResumeReceiptIndex = () => {
         resumeReceiptsByConversation.clear();
@@ -4448,6 +4589,7 @@ export class AgentRegistry {
             }],
             continuityPaths: [],
             abandonedContinuityPaths: [],
+            providerForkPaths: [],
             projectOwnership: null,
             migration: null,
             migrationOptOut: null,
@@ -4922,8 +5064,13 @@ export class AgentRegistry {
       const source = conversation.generations.at(-1);
       if (!targetId || !source || source.accountId === null || source.accountId === targetId) return clone(conversation);
       if (conversation.migrationOptOut?.targetId === targetId) return clone(conversation);
+      /* A failed-recoverable migration stays parked (#708). Re-arming it from a
+         lazy active-account request minted a fresh operation identity on every
+         later touch of the conversation, and a fresh identity means a fresh
+         provider journal, which means the provider cannot recognise the fork
+         the previous attempt already created. Recovery is an explicit retry. */
       if (conversation.migration?.targetId === targetId
-        && !["committed", "rolled-back", "failed-recoverable"].includes(conversation.migration.phase)) {
+        && !["committed", "rolled-back"].includes(conversation.migration.phase)) {
         return clone(conversation);
       }
 
@@ -5242,7 +5389,15 @@ export class AgentRegistry {
         phase: migrationTurnIsBusy(file, conversation) ? "waiting-turn" : "requested",
         targetId: intent.targetId,
         revision: intent.revision,
-        operationId: current.errorCode === "codex-fork-outcome-unknown" ? current.operationId : crypto.randomUUID(),
+        /* The operation identity is stable across retries of the same intent
+           revision (#708). It is what the provider journal is keyed on, so
+           minting a new one hides whatever the failed attempt already
+           produced — for Codex, a full-history fork — and the next attempt
+           produces another. A new identity is warranted only when the intent
+           itself moved on to a new revision. */
+        operationId: current.errorCode === "codex-fork-outcome-unknown" || current.revision === intent.revision
+          ? current.operationId
+          : crypto.randomUUID(),
         sourceGenerationId: source.id,
         providerReceipt: null,
         pendingContinuityPaths: current.phase === "committed" ? [] : current.pendingContinuityPaths,

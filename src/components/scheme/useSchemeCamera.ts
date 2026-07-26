@@ -102,6 +102,8 @@ export interface SchemeCamera {
   /** Glide the anchor to the `centerOn` placement at an explicit zoom — the
       keyboard zoom ladder, which unlike `centerOn` may zoom out below `c.z`. */
   glideFrame: (rect: SchemeRect, z: number) => void;
+  /** Put the camera back at an exact position (#688's return point). */
+  glideToCamera: (camera: { x: number; y: number; zoom: number }) => void;
 }
 
 /**
@@ -395,6 +397,16 @@ export function useSchemeCamera({
   const glideBy = useCallback(
     (wdx: number, wdy: number) => {
       glideTo((c) => clampCam({ ...c, x: c.x - wdx * c.z, y: c.y - wdy * c.z }));
+    },
+    [glideTo, clampCam],
+  );
+
+  /* Restore an exact camera — #688's return point, which puts back a framing
+     rather than framing a thing, so unlike every other move here it takes the
+     position verbatim (still clamped, since the world may have shrunk). */
+  const glideToCamera = useCallback(
+    (next: { x: number; y: number; zoom: number }) => {
+      glideTo(clampCam({ x: next.x, y: next.y, z: next.zoom }));
     },
     [glideTo, clampCam],
   );
@@ -795,5 +807,6 @@ export function useSchemeCamera({
     manualNonce,
     glideBy,
     glideFrame,
+    glideToCamera,
   };
 }

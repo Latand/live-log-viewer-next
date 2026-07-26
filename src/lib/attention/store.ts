@@ -5,7 +5,7 @@ import path from "node:path";
 import { statePath } from "@/lib/configDir";
 import { withFileTransactionSync } from "@/lib/state/fileTransaction";
 
-import { applyAttentionEvent, expiryFrom, isExpiredByClock, type AttentionEvent, type AttentionTransition } from "./machine";
+import { applyAttentionEvent, expiryCauseByClock, expiryFrom, type AttentionEvent, type AttentionTransition } from "./machine";
 import { defaultZoomIntent, isFocusTarget, targetAcceptsIntent } from "./targets";
 import {
   ATTENTION_SCHEMA_VERSION,
@@ -211,7 +211,10 @@ export function liveAttentionRequests(file: AttentionFileV1): AttentionRequestV1
  * are about the *set* of requests rather than one of them:
  *
  * - a newer root-agent request supersedes that root's older un-acknowledged
- *   ones. There is one speaker, so a second request means it changed its mind;
+ *   ones. There is one speaker, so a second request means it changed its mind.
+ *   It also supersedes a follow whose way back has already collapsed: the
+ *   machine decides that, and it is what keeps a handoff the operator never
+ *   closed from shadowing everything raised afterwards;
  * - the queue is capped, and overflow drops the oldest routine entry. The
  *   caller is told which, so a dropped request can be said out loud instead of
  *   vanishing, and the record itself keeps `expiredCause: "queue-evicted"` so
@@ -306,14 +309,23 @@ export function transitionAttentionRequest(
  * Expire everything the clock has run out on. Every expiry is a fact both sides
  * can see — the caller writes one line to the conversation and one event to the
  * journal for each id returned here.
+ *
+ * The clock has three causes, and the sweep carries whichever applies rather
+ * than stamping them all `ttl`: an unanswered offer ran out; an agreed request
+ * that never landed is `lost`; a follow nobody ever closed is `follow-elapsed`.
+ * The last two are the recovery paths for the two states a request cannot leave
+ * on its own — a device that agreed and then vanished mid-handoff, and an
+ * operator who followed and walked away — and each of those, left live, is the
+ * device's one offer slot held against everything raised after it.
  */
 export function sweepExpiredAttention(options: { filePath?: string; now?: Date } = {}): string[] {
   const now = options.now ?? new Date();
   return mutateAttention((file) => {
     const expired: string[] = [];
     const requests = file.requests.map((request) => {
-      if (!isExpiredByClock(request, now)) return request;
-      const transition = applyAttentionEvent(request, { kind: "expire", cause: "ttl" }, { now });
+      const cause = expiryCauseByClock(request, now);
+      if (!cause) return request;
+      const transition = applyAttentionEvent(request, { kind: "expire", cause }, { now });
       if (!transition.ok) return request;
       expired.push(request.id);
       return transition.request;

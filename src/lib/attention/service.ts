@@ -1,6 +1,14 @@
+import { agentRegistry, type ConversationLookup } from "@/lib/agent/registry";
 import { rootIdentity } from "@/lib/root/store";
 
-import { applyAttentionEvent, offerStatusForDevice, returnControlIsLive, type AttentionEvent, type DeviceOfferStatus } from "./machine";
+import {
+  applyAttentionEvent,
+  offerStatusForDevice,
+  offerStillActionable,
+  returnControlIsLive,
+  type AttentionEvent,
+  type DeviceOfferStatus,
+} from "./machine";
 import {
   createAttentionRequest,
   liveAttentionRequests,
@@ -9,7 +17,7 @@ import {
   transitionAttentionRequest,
   type AttentionCreateInput,
 } from "./store";
-import type { AttentionRequestV1 } from "./types";
+import type { AttentionRequestV1, FocusTarget } from "./types";
 
 /**
  * What the surfaces call (#688 slice 3): raise a request, read what this device
@@ -66,9 +74,21 @@ export function attentionForDevice(
       returnAvailable: returnControlIsLive(request, deviceId, now),
     }));
 
+  /* At most one request is rendered per device, oldest first — but a follow the
+     operator has wandered away from must not be what that one is. Its return
+     control has already collapsed, so it offers nothing to press, and being the
+     oldest live entry it would go on being this device's only offer while every
+     newer request sat behind it unseen. So a follow still naming its way back
+     wins (the operator is mid-handoff and Return is the thing to show), then
+     anything answerable, and only then a collapsed follow. */
+  const slot = live.filter((entry) => entry.status === "actionable" || entry.status === "following");
+  const offer = slot.find((entry) => offerStillActionable(entry.request, now))
+    ?? slot[0]
+    ?? null;
+
   return {
     rootId: rootIdentity(),
-    offer: live.find((entry) => entry.status === "actionable" || entry.status === "following") ?? null,
+    offer,
     live,
     expired,
   };
@@ -84,9 +104,30 @@ export function attentionForDevice(
  */
 export function raiseAttentionRequest(
   input: Omit<AttentionCreateInput, "rootId">,
-  options: { filePath?: string; now?: Date; id?: string } = {},
+  options: { filePath?: string; now?: Date; id?: string; conversations?: ConversationLookup } = {},
 ): ReturnType<typeof createAttentionRequest> {
-  return createAttentionRequest({ ...input, rootId: rootIdentity() }, options);
+  return createAttentionRequest({
+    ...input,
+    target: canonicalConversationTarget(input.target, options.conversations),
+    rootId: rootIdentity(),
+  }, options);
+}
+
+/**
+ * A conversation target names a card, and a card is a durable conversation —
+ * not whichever transcript path the caller happened to hold (#708).
+ *
+ * A Codex conversation accumulates transcript paths it no longer renders as:
+ * archived migration generations, and provider forks adopted as its history. A
+ * request aimed at one of those would resolve to an anchor the board never
+ * draws and expire as `lost`, so the path is resolved through the registry to
+ * the conversation's current generation before the request is recorded.
+ */
+function canonicalConversationTarget(target: FocusTarget, lookup?: ConversationLookup): FocusTarget {
+  if (target.kind !== "conversation") return target;
+  const conversations = lookup ?? agentRegistry();
+  const current = conversations.conversationForPath(target.path)?.generations.at(-1);
+  return current && current.path !== target.path ? { kind: "conversation", path: current.path } : target;
 }
 
 export function answerAttentionRequest(
