@@ -4,6 +4,7 @@ import { useState } from "react";
 
 import { AlarmClock, GlyphIcon } from "../../icons";
 import { hhmm } from "../../utils";
+import { ACTION_GUTTER, MESSAGE_ACTION } from "../actionStyles";
 import { CopyButton } from "../CopyButton";
 import { tr, type ToolEvent } from "../parse";
 import type { ArgChip } from "../tools";
@@ -86,14 +87,14 @@ function ToolMeta({ event }: { event: ToolEvent }) {
 function CommandBlock({ command }: { command: string }) {
   return (
     <div className="group/cmd relative">
-      <pre className="max-w-full whitespace-pre-wrap [overflow-wrap:anywhere] py-0.5 pr-10 font-mono text-ui text-primary">
+      <pre className={`max-w-full whitespace-pre-wrap [overflow-wrap:anywhere] py-0.5 font-mono text-ui text-primary ${ACTION_GUTTER}`}>
         <span className="select-none text-muted">$ </span>
         {command}
       </pre>
       <CopyButton
         text={command}
         label={tr("tools.copyCommand")}
-        className="absolute right-0 top-0 opacity-0 transition-opacity motion-reduce:transition-none focus-visible:opacity-100 group-hover/cmd:opacity-100 [@media(hover:none)]:opacity-60"
+        className={`absolute right-[6px] top-[6px] ${MESSAGE_ACTION} group-hover/cmd:opacity-100`}
       />
     </div>
   );

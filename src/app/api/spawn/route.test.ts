@@ -12,7 +12,7 @@ import { spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdenti
 import { rotateOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { spawnReplayStatus, spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
 import { resolveSpawnLineage, resolveSpawnLineageParent, resolveSpawnParent, SpawnParentError } from "@/lib/agent/spawnParent";
-import type { RuntimeHostClient } from "@/lib/runtime/client";
+import { RuntimeHostUnavailableError, type RuntimeHostClient } from "@/lib/runtime/client";
 import { StructuredRuntimeRequirementError } from "@/lib/proc/darwinIdentity";
 import { authenticatedAgentSpawnCaller, isAgentInitiatedSpawn, spawnLineageSelectorForCaller } from "./admission";
 import { POST } from "./route";
@@ -131,6 +131,87 @@ test("spawn admission persists Viewer-only defaults and normalized custom MCP al
     else process.env.LLV_RUNTIME_HOST_SOCKET = previousSocket;
     if (previousUi === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
     else process.env.NEXT_PUBLIC_RUNTIME_UI = previousUi;
+  }
+});
+
+test("spawn admission grants Computer Use to an operator root Codex session only (#687)", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "plugin-grant-"));
+  const store = registry();
+  const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
+  const previousHosts = process.env.LLV_STRUCTURED_HOSTS;
+  const previousEvents = process.env.LLV_RUNTIME_EVENTS;
+  const previousSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
+  const previousUi = process.env.NEXT_PUBLIC_RUNTIME_UI;
+  const previousBinary = process.env.LLV_CODEX_BINARY;
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  /* Codex MCP enumeration shells out to the real CLI; a stub keeps this test
+     off the operator's Codex installation and its account state. */
+  const codexStub = path.join(cwd, "codex-stub.sh");
+  fs.writeFileSync(codexStub, "#!/bin/sh\nprintf '[]'\n", { mode: 0o700 });
+  process.env.LLV_CODEX_BINARY = codexStub;
+  try {
+    const base = structuredRouteDependencies(cwd);
+    const codexAccount = {
+      engine: "codex" as const,
+      accountId: "codex-test",
+      kind: "managed" as const,
+      home: path.join(cwd, "account"),
+      transcriptRoot: path.join(cwd, "sessions"),
+      env: { CODEX_HOME: path.join(cwd, "account"), NODE_ENV: "test" as const },
+    };
+    const dependencies = {
+      ...base,
+      registry: () => store,
+      resolveHealthySpawnAccount: async () => codexAccount,
+      resolveSpawnAccount: () => codexAccount,
+    };
+    const capability = rotateOperatorSpawnCapability();
+    const post = async (clientAttemptId: string, extra: Record<string, unknown>) => POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+      method: "POST",
+      headers: {
+        origin: "http://127.0.0.1",
+        host: "127.0.0.1",
+        "content-type": "application/json",
+        "sec-fetch-site": "same-origin",
+        "x-llv-spawn-capability": capability,
+      },
+      body: JSON.stringify({ engine: "codex", cwd, prompt: "inspect", clientAttemptId, ...extra }),
+    }), dependencies);
+
+    const rootResponse = await post("plugins_root_20260726", {});
+    expect({ status: rootResponse.status, body: await rootResponse.clone().json() }).toMatchObject({ status: 202 });
+    expect((await post("plugins_role_20260726", { role: "builder" })).status).toBe(202);
+    expect((await post("plugins_optout_20260726", { plugins: [] })).status).toBe(202);
+
+    /* Default-on for the operator's own root session… */
+    expect(store.spawnReceiptForClientAttempt("plugins_root_20260726")?.launchProfile.plugins).toEqual(["computer-use"]);
+    /* …off for a delegated helper, even from the operator's own lane… */
+    expect(store.spawnReceiptForClientAttempt("plugins_role_20260726")?.launchProfile.plugins).toEqual([]);
+    /* …and off when the operator opts this root session out. */
+    expect(store.spawnReceiptForClientAttempt("plugins_optout_20260726")?.launchProfile.plugins).toEqual([]);
+
+    const widened = await post("plugins_widened_20260726", { plugins: ["browser"] });
+    expect(widened.status).toBe(400);
+    expect(await widened.json()).toMatchObject({ error: expect.stringContaining("browser") });
+    const everything = await post("plugins_star_20260726", { plugins: ["*"] });
+    expect(everything.status).toBe(400);
+  } finally {
+    if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
+    if (previousHosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previousHosts;
+    if (previousEvents === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previousEvents;
+    if (previousSocket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previousSocket;
+    if (previousUi === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previousUi;
+    if (previousBinary === undefined) delete process.env.LLV_CODEX_BINARY;
+    else process.env.LLV_CODEX_BINARY = previousBinary;
   }
 });
 
@@ -2082,4 +2163,119 @@ test("spawn replay keeps its identity after parent alias adoption", () => {
     parentSessionKey: secondEvidence.sessionKey,
     parentArtifactPath: secondEvidence.artifactPath,
   })).toMatchObject({ kind: "replay", receipt: { launchId: first.receipt.launchId } });
+});
+
+/* A rollback switch is reached for during an incident, so it must leave the
+   deployment able to spawn. `NEXT_PUBLIC_RUNTIME_UI=0` used to leave the
+   implicit choice on `structured` while still failing the capability gap, so
+   every spawn — tmux included — came back 409. The request below carries a
+   directory that does not exist: the cwd check sits *after* the transport
+   decision and the gap, so a 400 naming the directory proves the route got
+   past both, and the 409 gap proves it did not. */
+test("the runtime-UI rollback leaves a default spawn on a transport that can still spawn", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "runtime-ui-rollback-"));
+  const missing = path.join(cwd, "no-such-directory");
+  const previous = {
+    transport: process.env.LLV_SPAWN_TRANSPORT,
+    hosts: process.env.LLV_STRUCTURED_HOSTS,
+    events: process.env.LLV_RUNTIME_EVENTS,
+    socket: process.env.LLV_RUNTIME_HOST_SOCKET,
+    ui: process.env.NEXT_PUBLIC_RUNTIME_UI,
+  };
+  delete process.env.LLV_SPAWN_TRANSPORT;
+  delete process.env.LLV_STRUCTURED_HOSTS;
+  delete process.env.LLV_RUNTIME_EVENTS;
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "0";
+  try {
+    const response = await POST(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1:8898",
+        origin: "http://127.0.0.1:8898",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ engine: "codex", cwd: missing, prompt: "smoke" }),
+    }));
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: `directory does not exist: ${missing}` });
+  } finally {
+    if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previous.transport;
+    if (previous.hosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous.hosts;
+    if (previous.events === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previous.events;
+    if (previous.socket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previous.socket;
+    if (previous.ui === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previous.ui;
+  }
+});
+
+/* Socket configured, host unreachable — the default path now, since the
+   transport is chosen from declared capability. The deferred launch is the only
+   owner of the receipt's outcome: the host that would project the dead spawn is
+   the one that is down, and the stale-spawn reaper reconciles through the same
+   socket. Without a terminal state the operator sees an accepted 202 that never
+   becomes a conversation. */
+test("a structured launch that dies on an unreachable host terminalizes its receipt", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "structured-host-down-"));
+  const previous = {
+    transport: process.env.LLV_SPAWN_TRANSPORT,
+    hosts: process.env.LLV_STRUCTURED_HOSTS,
+    events: process.env.LLV_RUNTIME_EVENTS,
+    socket: process.env.LLV_RUNTIME_HOST_SOCKET,
+    ui: process.env.NEXT_PUBLIC_RUNTIME_UI,
+  };
+  delete process.env.LLV_SPAWN_TRANSPORT;
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  const store = new AgentRegistry(path.join(cwd, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+  let deferred: (() => Promise<void>) | null = null;
+  const dependencies = {
+    ...structuredRouteDependencies(cwd),
+    registry: () => store,
+    defer: (work: () => Promise<void>) => { deferred = work; },
+    spawnStructuredConversation: async () => {
+      throw new RuntimeHostUnavailableError("runtime host is unavailable");
+    },
+  } as Parameters<typeof POST.withDependencies>[1];
+  try {
+    const response = await POST.withDependencies(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1:8898",
+        origin: "http://127.0.0.1:8898",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ engine: "claude", cwd, prompt: "spawn against a dead host" }),
+    }), dependencies);
+
+    expect(response.status).toBe(202);
+    const accepted = await response.json() as { launchId: string };
+    expect(store.readOnlySnapshot().receipts[accepted.launchId]?.state).toBe("starting");
+
+    await runDeferred(deferred);
+
+    const settled = store.readOnlySnapshot().receipts[accepted.launchId];
+    expect(settled?.state).toBe("failed");
+    expect(settled?.error).toContain("runtime host is unavailable");
+  } finally {
+    if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previous.transport;
+    if (previous.hosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous.hosts;
+    if (previous.events === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previous.events;
+    if (previous.socket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previous.socket;
+    if (previous.ui === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previous.ui;
+  }
 });

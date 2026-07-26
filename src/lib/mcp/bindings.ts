@@ -1,14 +1,25 @@
 import crypto from "node:crypto";
 
 import { agentRegistry } from "@/lib/agent/registry";
+import { procBackend } from "@/lib/proc";
 import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { applyConversationMigration } from "@/lib/accounts/migration/conversationCommand";
+import { attentionCallerAuthority, processAncestry, type AttentionCallerAuthority, type AttentionCallerSources } from "@/lib/attention/callerAuthority";
+import { UNREAD_FRAME_RECT } from "@/lib/attention/frames";
+import { raiseAttentionRequest } from "@/lib/attention/service";
+import { geometricFrameRect, isFocusTarget, isGeometricTarget } from "@/lib/attention/targets";
+import type { FocusIntent, FocusTarget, ZoomIntent } from "@/lib/attention/types";
 import { boardFor } from "@/lib/board/store";
 import { applyConversationAction } from "@/lib/conversation/actions";
 import { cancelRound, closeFlow, patchFlow } from "@/lib/flows/commands";
 import { getFlowsWithPresets } from "@/lib/flows/engine";
 import type { PatchFlowRequest } from "@/lib/flows/types";
+import { pollLifecycleDigest, type LifecycleDigestRequest } from "@/lib/lifecycle/digest";
+import { queryLifecycleEvents, type LifecycleEventQuery } from "@/lib/lifecycle/journal";
+import { agentLivenessSnapshot, productionLivenessSources, type AgentLivenessSources } from "@/lib/lifecycle/liveness";
+import { refreshLifecycleJournal } from "@/lib/lifecycle/projector";
+import { isLifecycleEventType } from "@/lib/lifecycle/vocabulary";
 import { createPipelineFromRequest, getPipelines, patchPipeline } from "@/lib/pipelines/engine";
 import { latestOperationalPipelineAttempt } from "@/lib/pipelines/attemptSelection";
 import { requestPipelineTick } from "@/lib/pipelines/controllerSignal";
@@ -16,7 +27,9 @@ import { projectTaskPipelineIds } from "@/lib/pipelines/taskBinding";
 import type { CreatePipelineRequest, PatchPipelineRequest, PipelineAction } from "@/lib/pipelines/types";
 import { listFiles } from "@/lib/scanner";
 import { readResources } from "@/lib/resources";
+import { adoptLiveRootSession, conversationRole, liveRootSession, type RootSessionSource } from "@/lib/root/adopt";
 import { runtimeHostClient, type RuntimeHostClient } from "@/lib/runtime/client";
+import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
 import { runtimeEventsEnabled } from "@/lib/runtime/flags";
 import { readSession } from "@/lib/session/reader";
 import { applyAssignmentPatches, createTask, patchTask, type CreateTaskInput, type PatchTaskInput } from "@/lib/tasks/commands";
@@ -28,7 +41,7 @@ import { collectSnapshot } from "@/lib/view/collect";
 import { hardenedRedact } from "@/lib/view/compactText";
 import { validateSnapshotRequest } from "@/lib/view/validation";
 
-import type { McpToolArgs, McpToolBindings, McpToolPayload } from "./server";
+import { McpToolRefusal, type McpToolArgs, type McpToolBindings, type McpToolPayload } from "./server";
 
 const PIPELINE_CONTROLLER_ACTIONS = new Set<PipelineAction>(["start", "resume", "retry-stage", "skip-stage"]);
 
@@ -86,6 +99,7 @@ export interface ViewerMcpDomainDependencies {
   cancelRound: typeof cancelRound;
   closeFlow: typeof closeFlow;
   getPipelines: typeof getPipelines;
+  patchPipeline: typeof patchPipeline;
   loadTasks: typeof loadTasks;
   collectSnapshot: typeof collectSnapshot;
   runtimeEventsEnabled: typeof runtimeEventsEnabled;
@@ -93,6 +107,72 @@ export interface ViewerMcpDomainDependencies {
   readResources: typeof readResources;
   applyConversationAction: typeof applyConversationAction;
   applyConversationMigration: typeof applyConversationMigration;
+  livenessSources(): AgentLivenessSources;
+  queryLifecycleEvents: typeof queryLifecycleEvents;
+  pollLifecycleDigest: typeof pollLifecycleDigest;
+  refreshLifecycleJournal: typeof refreshLifecycleJournal;
+  /** #688 D5: fold the live root session into the rollover chain, so a request
+      references the root by an identity that survives the session it was raised
+      from. Called on the raise path, which is the moment that identity matters. */
+  adoptRootSession(): void;
+  raiseAttentionRequest: typeof raiseAttentionRequest;
+  /** #688 D4: whether whoever is running this MCP server may ask for the
+      operator's screen at all. Resolved from process ancestry and the registry's
+      recorded hosts, never from anything the caller says. */
+  attentionAuthority(): AttentionCallerAuthority;
+}
+
+/**
+ * The registry slice {@link adoptLiveRootSession} resolves the root from.
+ *
+ * Handed over verbatim: `RootSessionSource` is described structurally against
+ * the registry's own conversation shape — id, updatedAt, and the generations
+ * with their launch profiles — so there is no field mapping here to fall out of
+ * step with what the registry actually stamps.
+ */
+function rootSessionSource(): RootSessionSource {
+  const snapshot = agentRegistry().readOnlySnapshot();
+  return {
+    conversations: Object.values(snapshot.conversations),
+    configuredRootId: process.env.LLV_ROOT_CONVERSATION_ID?.trim() || null,
+  };
+}
+
+/**
+ * Which conversations the registry can name a live host process for, and which
+ * of them is the root — the evidence {@link attentionCallerAuthority} decides on.
+ *
+ * The join is by transcript path because that is what a registry ENTRY (which
+ * holds the host process ids) and a CONVERSATION (which holds the role) have in
+ * common. Both host shapes count: a tmux-hosted agent is the CLI process that
+ * parents this MCP server directly, and a structured host is the app-server or
+ * broker that parents it instead.
+ */
+function attentionCallerSources(): AttentionCallerSources {
+  return {
+    ancestry: () => processAncestry(process.pid, (pid) => procBackend.readPpid(pid)),
+    rootConversationId: () => liveRootSession(rootSessionSource())?.conversationId ?? null,
+    hosted: () => {
+      const snapshot = agentRegistry().readOnlySnapshot();
+      const owners = new Map<string, { id: string; role: string | null }>();
+      for (const conversation of Object.values(snapshot.conversations)) {
+        const owner = { id: conversation.id, role: conversationRole(conversation) };
+        for (const generation of conversation.generations) owners.set(generation.path, owner);
+      }
+      const hosted = new Map<string, { conversationId: string; role: string | null; pids: number[] }>();
+      for (const entry of Object.values(snapshot.entries)) {
+        const owner = owners.get(entry.artifactPath);
+        if (!owner) continue;
+        const pids = [entry.host?.agent?.pid, entry.structuredHost?.process?.pid]
+          .filter((pid): pid is number => typeof pid === "number" && pid > 0);
+        if (pids.length === 0) continue;
+        const existing = hosted.get(owner.id);
+        if (existing) existing.pids.push(...pids);
+        else hosted.set(owner.id, { conversationId: owner.id, role: owner.role, pids: [...pids] });
+      }
+      return [...hosted.values()];
+    },
+  };
 }
 
 const productionDomainDependencies: ViewerMcpDomainDependencies = {
@@ -104,6 +184,7 @@ const productionDomainDependencies: ViewerMcpDomainDependencies = {
   cancelRound,
   closeFlow,
   getPipelines,
+  patchPipeline,
   loadTasks,
   collectSnapshot,
   runtimeEventsEnabled,
@@ -111,6 +192,13 @@ const productionDomainDependencies: ViewerMcpDomainDependencies = {
   readResources,
   applyConversationAction,
   applyConversationMigration,
+  livenessSources: productionLivenessSources,
+  queryLifecycleEvents,
+  pollLifecycleDigest,
+  refreshLifecycleJournal,
+  adoptRootSession: () => { adoptLiveRootSession(rootSessionSource()); },
+  raiseAttentionRequest,
+  attentionAuthority: () => attentionCallerAuthority(attentionCallerSources()),
 };
 
 function text(value: unknown): string {
@@ -228,14 +316,21 @@ async function createPipeline(args: McpToolArgs): Promise<McpToolPayload> {
   return { pipelineId: result.pipeline.id, pipeline: result.pipeline };
 }
 
-async function pipelineAction(args: McpToolArgs): Promise<McpToolPayload> {
+async function pipelineAction(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): Promise<McpToolPayload> {
   const pipelineId = required(args, "pipelineId");
   const action = required(args, "action") as PipelineAction;
   const request = withoutKeys(args, ["pipelineId", "clientRequestId"]);
-  const result = await patchPipeline(pipelineId, request as PatchPipelineRequest);
-  if (!result.pipeline) throw new Error(result.error ?? "could not update pipeline");
+  const result = await dependencies.patchPipeline(pipelineId, request as PatchPipelineRequest);
+  if (!result.pipeline) {
+    const message = result.error ?? "could not update pipeline";
+    /* A refused close carries the hosts it stopped and the one it could not
+       (#670); an agent driving the board must not get less than an HTTP caller. */
+    throw result.close ? new McpToolRefusal(message, { close: result.close }) : new Error(message);
+  }
   if (PIPELINE_CONTROLLER_ACTIONS.has(action)) requestPipelineTick();
-  return { pipelineId, pipeline: result.pipeline };
+  /* A close reports the stage hosts it terminated and the uncommitted work it
+     left behind (#670), so an agent driving the board sees it too. */
+  return { pipelineId, pipeline: result.pipeline, ...(result.close ? { close: result.close } : {}) };
 }
 
 async function linkTaskToPipeline(args: McpToolArgs, dependencies: LinkTaskToPipelineDependencies): Promise<McpToolPayload> {
@@ -548,6 +643,206 @@ async function conversationMigration(args: McpToolArgs, dependencies: ViewerMcpD
   });
 }
 
+/**
+ * #645 — the liveness snapshot that replaces the operator's external
+ * `stat`/`pgrep` sweep. Cheap enough to poll on a schedule: it reads the
+ * registries the Viewer already maintains plus the durable transcript tail, and
+ * it never echoes a pipeline's own claim about a stage. A stall observed here
+ * is also journaled (#686), so the sweep leaves a durable record.
+ */
+async function agentActivity(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): Promise<McpToolPayload> {
+  const sources = dependencies.livenessSources();
+  const snapshot = await agentLivenessSnapshot({
+    conversationId: text(args.conversationId) || undefined,
+    transcriptPath: (text(args.transcriptPath) || text(args.path)) || undefined,
+    project: text(args.project) || undefined,
+    liveOnly: args.liveOnly === true,
+    stallAfterMs: typeof args.stallAfterMs === "number" ? args.stallAfterMs : undefined,
+    limit: typeof args.limit === "number" ? args.limit : undefined,
+  }, sources);
+  const journal = dependencies.refreshLifecycleJournal({ liveness: snapshot.conversations });
+  return redactPayload({ ...snapshot, journaled: journal.appended });
+}
+
+function lifecycleEventType(value: unknown): LifecycleEventQuery["type"] {
+  const candidate = text(value);
+  if (!candidate) return undefined;
+  if (!isLifecycleEventType(candidate)) throw new Error(`unknown lifecycle event type: ${candidate}`);
+  return candidate;
+}
+
+/**
+ * #686 — one tool over the durable journal. `query` reads it by lineage and
+ * cursor; `digest` polls the bounded relay, which releases terminal high-signal
+ * events at once and batches routine progress behind a five-minute window.
+ * Both refresh the projection first, so a stage that finished since the last
+ * call is already recorded — no background notification service.
+ */
+/**
+ * Viewer deployments as the journal's deploy events see them. The runtime host
+ * owns the deployment ledger, so a disabled or unreachable host simply
+ * contributes no deploy events — it must never fail the whole journal read.
+ */
+async function deploymentsForProjection(
+  dependencies: ViewerMcpDomainDependencies,
+): Promise<ViewerDeploymentStatus[]> {
+  if (!dependencies.runtimeEventsEnabled()) return [];
+  const client = dependencies.runtimeHostClient();
+  if (!client) return [];
+  try {
+    return (await client.snapshot()).deployments;
+  } catch {
+    return [];
+  }
+}
+
+async function lifecycleEvents(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): Promise<McpToolPayload> {
+  const mode = text(args.mode) || "query";
+  if (mode !== "query" && mode !== "digest") throw new Error('mode must be "query" or "digest"');
+  const registry = dependencies.registrySnapshot();
+  const refreshed = dependencies.refreshLifecycleJournal({
+    pipelines: dependencies.getPipelines().pipelines,
+    deliveries: Object.values(registry.heldDeliveries),
+    deployments: await deploymentsForProjection(dependencies),
+  });
+  if (mode === "digest") {
+    const subscriberId = text(args.subscriberId) || text(args.conversationId);
+    if (!subscriberId) throw new Error("subscriberId is required for mode=digest");
+    const request: LifecycleDigestRequest = {
+      subscriberId,
+      project: text(args.project) || undefined,
+      pipelineId: text(args.pipelineId) || undefined,
+      conversationId: text(args.conversationId) || undefined,
+      maxItems: typeof args.maxItems === "number" ? args.maxItems : undefined,
+      acknowledge: args.acknowledge !== false,
+    };
+    return redactPayload({ mode, journaled: refreshed.appended, ...dependencies.pollLifecycleDigest(request) });
+  }
+  const page = dependencies.queryLifecycleEvents({
+    project: text(args.project) || undefined,
+    pipelineId: text(args.pipelineId) || undefined,
+    conversationId: text(args.conversationId) || undefined,
+    stageId: text(args.stageId) || undefined,
+    type: lifecycleEventType(args.type),
+    afterSeq: typeof args.afterSeq === "number" ? args.afterSeq : undefined,
+    limit: typeof args.limit === "number" ? args.limit : undefined,
+  });
+  return redactPayload({ mode, journaled: refreshed.appended, ...page });
+}
+
+/**
+ * Which project a target lives in, so the request can record one.
+ *
+ * Only the project is derived here — never a rect. The server has no board
+ * layout, and inventing one would put a made-up destination on a durable record
+ * (see `@/lib/attention/frames`). An explicit `project` wins, and is the only
+ * way to name a target the server cannot attribute at all: a board draft exists
+ * on the operator's canvas and nowhere else.
+ */
+async function focusTargetProject(
+  target: FocusTarget,
+  explicit: string,
+  dependencies: ViewerMcpDomainDependencies,
+): Promise<string> {
+  if (explicit) return explicit;
+  if (isGeometricTarget(target)) return target.project;
+  switch (target.kind) {
+    case "conversation": {
+      const files = await dependencies.listFiles({ fresh: true, persist: false, pin: target.path });
+      const entry = files.find((candidate) => candidate.path === target.path);
+      if (!entry) throw new Error("no conversation on the board has that transcript path");
+      return entry.project;
+    }
+    case "pipeline":
+    case "stage": {
+      const pipeline = dependencies.getPipelines().pipelines.find((candidate) => candidate.id === target.pipelineId);
+      if (!pipeline) throw new Error("pipeline not found");
+      return pipeline.project;
+    }
+    case "flowRound": {
+      const flow = dependencies.getFlowsWithPresets().flows.find((candidate) => candidate.id === target.flowId);
+      if (!flow) throw new Error("flow not found");
+      return flow.project;
+    }
+    case "task": {
+      const task = dependencies.loadTasks().find((candidate) => candidate.id === target.taskId);
+      if (!task) throw new Error("task not found");
+      return task.project;
+    }
+    case "draft":
+      throw new Error("a draft target needs an explicit project");
+  }
+}
+
+/**
+ * The root agent's own door into #688: ask the operator to look at something.
+ *
+ * It only ASKS. The request lands at `pending`, nothing moves until the
+ * operator agrees on a device, and their refusal comes back as a refusal rather
+ * than as silence. The root identity is resolved server-side by the service, so
+ * a caller cannot name a root other than the operator's own — which is the
+ * whole of D4's authority rule and why no rootId appears in this schema.
+ */
+async function requestAttention(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): Promise<McpToolPayload> {
+  /* Before anything else, and before any state is touched. Every Viewer-spawned
+     worker holds this same tool, and until this check existed a reviewer three
+     levels down could raise a request that landed under `origin: "root-agent"`
+     and the operator's own root identity — the operator could not tell it from
+     the root agent asking, and the root agent would be told "they declined"
+     about something it never asked. Refused rather than silently downgraded to
+     some lesser origin: D4 gives a worker no claim on the screen at all, and an
+     agent that is told no can say so instead of waiting on an answer that is
+     never coming. */
+  const authority = dependencies.attentionAuthority();
+  if (authority.kind === "worker") {
+    throw new McpToolRefusal("only the operator's root session may raise an attention request", {
+      callerConversationId: authority.conversationId,
+      callerRole: authority.role,
+    });
+  }
+
+  const target = args.target;
+  if (!isFocusTarget(target)) throw new Error("target must be a typed focus target");
+  const intent = (text(args.intent) || "show") as FocusIntent;
+  if (intent !== "show" && intent !== "open") throw new Error("intent must be show or open");
+  const zoom = text(args.zoom) as ZoomIntent | "";
+  if (zoom && zoom !== "inspect" && zoom !== "situate") throw new Error("zoom must be inspect or situate");
+  const reason = required(args, "reason");
+  const contextLabel = text(args.contextLabel);
+  const project = await focusTargetProject(target, text(args.project), dependencies);
+
+  /* Before the request is written, not after: the request names the root by the
+     identity this call may have just extended with a fresh session. */
+  dependencies.adoptRootSession();
+  const created = dependencies.raiseAttentionRequest({
+    origin: "root-agent",
+    target,
+    /* Geometric targets ARE their own frame; everything else records that no
+       board was read, so a vanished anchor reports `lost` rather than landing
+       the operator at the world origin. */
+    frameAtCreation: {
+      project,
+      rect: isGeometricTarget(target) ? geometricFrameRect(target) : UNREAD_FRAME_RECT,
+      boardRevision: null,
+    },
+    intent,
+    reason,
+    ...(zoom ? { zoom } : {}),
+    ...(contextLabel ? { contextLabel } : {}),
+  });
+  const operationId = mcpOperationId("request_attention", requestId(args));
+  return redactPayload({
+    attentionId: created.request.id,
+    request: created.request,
+    /* A newer request from the same root replaces its own unanswered ones, and
+       an overfull queue drops the oldest routine entry. Both are named so the
+       agent can say so out loud instead of leaving a dropped ask silent. */
+    superseded: created.superseded,
+    dropped: created.dropped,
+    ...mutationReceipt(operationId),
+  });
+}
+
 export function viewerMcpBindings(
   linkTaskDependencies: LinkTaskToPipelineDependencies = productionLinkTaskDependencies,
   controlDependencies: ViewerControlDependencies = productionViewerControlDependencies,
@@ -559,7 +854,7 @@ export function viewerMcpBindings(
     create_task: createBoardTask,
     update_task: updateBoardTask,
     create_pipeline: createPipeline,
-    pipeline_action: pipelineAction,
+    pipeline_action: (args) => pipelineAction(args, domainDependencies),
     link_task_to_pipeline: (args) => linkTaskToPipeline(args, linkTaskDependencies),
     list_conversations: listConversations,
     get_conversation: (args) => getConversation(args, domainDependencies),
@@ -577,5 +872,8 @@ export function viewerMcpBindings(
     resources: (args) => resources(args, domainDependencies),
     conversation_action: (args) => conversationAction(args, domainDependencies),
     conversation_migration: (args) => conversationMigration(args, domainDependencies),
+    agent_activity: (args) => agentActivity(args, domainDependencies),
+    lifecycle_events: (args) => lifecycleEvents(args, domainDependencies),
+    request_attention: (args) => requestAttention(args, domainDependencies),
   };
 }

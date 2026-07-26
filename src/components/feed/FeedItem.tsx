@@ -2,8 +2,9 @@
 
 import { memo } from "react";
 
-import { Brain, ChevronUp, Command, Check, Mail, Sparkle, X } from "../icons";
+import { Brain, ChevronUp, Command, Check, Mail, Mic, Sparkle, X } from "../icons";
 import { hhmm } from "../utils";
+import { MESSAGE_ACTION } from "./actionStyles";
 import { CopyButton } from "./CopyButton";
 import { InboxImageCard } from "./InboxImage";
 import { md, mdBlocks } from "./markdown";
@@ -42,17 +43,53 @@ export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item
         <div className={`mt-1 flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-full text-white ${cls}`}>
           <AvatarIcon className="h-3.5 w-3.5" aria-hidden />
         </div>
-        <div className="relative min-w-0 flex-1 whitespace-pre-wrap break-words">
-          {hhmm(item.ts) ? <div className="mb-0.5 text-label tabular-nums text-muted">{hhmm(item.ts)}</div> : null}
-          <div className="absolute right-0 top-0 flex items-center gap-0.5">
-            {speakText ? <SpeakButton text={speakText} /> : null}
-            <CopyButton
-              text={item.text}
-              label={tr("feed.copyMd")}
-              className="opacity-0 transition-opacity focus-visible:opacity-100 group-hover/msg:opacity-100 [@media(hover:none)]:opacity-60"
-            />
+        <div className="min-w-0 flex-1 whitespace-pre-wrap break-words">
+          {/* Issue #698: this cluster used to be `absolute right-0 top-0` over a
+              body with no reserved gutter — on a coarse pointer the 44px buttons
+              sat permanently at 60% opacity on the first lines of the message,
+              and on desktop the same controls were invisible until hover. They
+              now hold their own row above the text: they cover nothing at any
+              width, and they are visible without a hover. */}
+          <div className="mb-0.5 flex min-h-6 items-center gap-1">
+            {hhmm(item.ts) ? <span className="text-label tabular-nums text-muted">{hhmm(item.ts)}</span> : null}
+            <span className="ml-auto flex shrink-0 items-center gap-0.5">
+              {speakText ? <SpeakButton text={speakText} /> : null}
+              <CopyButton text={item.text} label={tr("feed.copyMd")} className={MESSAGE_ACTION} />
+            </span>
           </div>
           {mdBlocks(item.text)}
+        </div>
+      </div>
+    );
+  }
+  /* A voice turn is the operator speaking, so it keeps the user side of the
+     feed — but labelled and with the call's interleaved transcript folded away,
+     because that tail repeats itself turn over turn and is only ever read when
+     something sounded wrong. */
+  if (item.kind === "voice") {
+    return (
+      <div className="group/msg my-3 flex items-start justify-end gap-1.5">
+        <CopyButton
+          text={item.input || item.delta}
+          label={tr("feed.copyMd")}
+          className={`mt-2 ${MESSAGE_ACTION}`}
+        />
+        <div className="max-w-[75%] rounded-surface bg-user px-4 py-2.5">
+          <span className="mb-1 flex items-center gap-1 text-caption uppercase tracking-wide text-muted">
+            <Mic className="h-3 w-3" aria-hidden />
+            {tr("feed.voiceTurn")}
+          </span>
+          {item.input ? (
+            <p className="whitespace-pre-wrap break-words">{item.input}</p>
+          ) : null}
+          {item.delta ? (
+            <details className="mt-1.5">
+              <summary className="cursor-pointer list-none text-caption text-muted [&::-webkit-details-marker]:hidden">
+                {tr("feed.voiceContext")}
+              </summary>
+              <pre className="mt-1 whitespace-pre-wrap break-words text-label text-secondary">{item.delta}</pre>
+            </details>
+          ) : null}
         </div>
       </div>
     );
@@ -64,7 +101,7 @@ export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item
         <CopyButton
           text={item.text}
           label={tr("feed.copyMd")}
-          className="mt-2 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/msg:opacity-100 [@media(hover:none)]:opacity-60"
+          className={`mt-2 ${MESSAGE_ACTION}`}
         />
         <div className="max-w-[75%] whitespace-pre-wrap break-words rounded-surface bg-user px-4 py-2.5">
           {long ? (

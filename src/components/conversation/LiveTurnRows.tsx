@@ -2,7 +2,13 @@
 
 import type { RuntimeLiveTurnItem } from "@/lib/runtime/liveTurn";
 import { useLocale } from "@/lib/i18n";
+import { StreamingMd } from "@/components/feed/markdown";
 
+/* A live row is the same message its transcript echo will carry a moment later,
+   so it goes through the same markdown grammar — otherwise the text visibly
+   changes appearance when the echo lands. While the item is still streaming,
+   StreamingMd holds the unfinished tail as plain text instead of guessing at a
+   construct whose closer has not arrived. */
 export function LiveTurnRows({ items }: { items: readonly RuntimeLiveTurnItem[] }) {
   const { t } = useLocale();
   if (!items.length) return null;
@@ -27,7 +33,7 @@ export function LiveTurnRows({ items }: { items: readonly RuntimeLiveTurnItem[] 
               {`${t("feed.liveOmittedChars", { chars: item.omittedChars })}\n`}
             </span>
           ) : null}
-          {item.text}
+          <StreamingMd text={item.text} streaming={item.phase === "streaming"} />
           {item.phase === "streaming" && index === items.length - 1 ? (
             <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse rounded-[2px] bg-accent align-text-bottom" aria-hidden />
           ) : null}

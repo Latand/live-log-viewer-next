@@ -30,11 +30,25 @@ interface Props {
   onArchive: (file: FileEntry) => void;
 }
 
+/*
+ * Issue #700: the emphasis used to run the wrong way — a "working" card, which
+ * needs nothing from the operator, carried the halo ring while the two tones
+ * that are BLOCKED ON THE OPERATOR (an unanswered question, an interrupted run)
+ * got a plain border. The ring now marks what needs attention; routine activity
+ * keeps its tint and drops to the quiet treatment.
+ */
 function toneClass(tone: SwitchCardTone): string {
-  if (tone === "working") return "border-success/40 bg-success-soft shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-success)_16%,transparent)]";
-  if (tone === "stalled") return "border-danger/35 bg-danger-soft";
-  if (tone === "waiting") return "border-warning/45 bg-warning-soft";
+  if (tone === "stalled") return "border-danger/45 bg-danger-soft shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-danger)_18%,transparent)]";
+  if (tone === "waiting") return "border-warning/55 bg-warning-soft shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-warning)_18%,transparent)]";
+  if (tone === "working") return "border-success/40 bg-success-soft";
   return "border-border bg-card";
+}
+
+/** The status line takes the tone's own color when the tone means "you". */
+function statusToneClass(tone: SwitchCardTone): string {
+  if (tone === "stalled") return "text-danger";
+  if (tone === "waiting") return "text-warning";
+  return "text-primary/75";
 }
 
 export function SwitchCard({ file, title, project, currentProject, descendants, statusLine, size, tone, onOpen, onArchive }: Props) {
@@ -110,7 +124,12 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
         ) : null}
       </div>
       {statusLine ? (
-        <div className={`relative mt-1 min-w-0 truncate ${large ? "text-[11.5px]" : "text-[10.5px]"} font-semibold text-primary/75`}>
+        <div
+          className={`relative mt-1 min-w-0 truncate font-semibold ${
+            tone === "waiting" || tone === "stalled" ? (large ? "text-[12.5px]" : "text-[11.5px]") : large ? "text-[11.5px]" : "text-[10.5px]"
+          } ${statusToneClass(tone)}`}
+          data-tone={tone}
+        >
           {statusLine}
         </div>
       ) : null}

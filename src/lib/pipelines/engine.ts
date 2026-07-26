@@ -1,32 +1,33 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 
 import { accountManager } from "@/lib/accounts/manager";
 import { emptyLaunchProfile, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor } from "@/lib/agent/cli";
-import { agentRegistry, type DurableMembershipInput } from "@/lib/agent/registry";
+import { agentRegistry, type DurableMembershipInput, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { transcriptAllowed } from "@/lib/agent/spawnParent";
-import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
+import { sessionKeyFromTranscript, sessionKeyId } from "@/lib/agent/sessionKey";
 import { headCwd } from "@/lib/agent/transcript";
 import { MAX_FLOW_NOTE_LENGTH, closeFlow, createFlowFromRequest, patchFlow } from "@/lib/flows/commands";
 import { lastAssistantMessage } from "@/lib/flows/findings";
 import { loadFlows } from "@/lib/flows/store";
 import type { CreateFlowRequest, Flow, RoleConfig } from "@/lib/flows/types";
 import { persistHandoffLineage, rememberHandoffChild } from "@/lib/handoffLineage";
-import { runtimeHostClient } from "@/lib/runtime/client";
+import { runtimeHostClient, type RuntimeHostClient } from "@/lib/runtime/client";
 import { spawnStructuredConversation } from "@/lib/runtime/structuredSpawn";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { loadTasks } from "@/lib/tasks/store";
 import type { BoardTask } from "@/lib/tasks/types";
 import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
 import { isShellCommand } from "@/lib/status";
-import { paneInfo } from "@/lib/tmux";
+import { killTmuxHostIfMatches, paneInfo } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 import { realExec, type ExecPort } from "@/lib/workflows/provision";
 
 import { requestPipelineTick } from "./controllerSignal";
 import { durableStageTurnEvidence, type StageTurnEvidence } from "./durableEvidence";
-import { commitPipelineStage, currentPipelineBranchHead, currentPipelineRemoteBranchHead, provisionPipelineWorktree, resetPipelineStage, resolvePipelineBase, synchronizePipelineRetryHead } from "./git";
+import { commitPipelineStage, currentPipelineBranchHead, currentPipelineRemoteBranchHead, pipelineWorktreeChanges, provisionPipelineWorktree, resetPipelineStage, resolvePipelineBase, synchronizePipelineRetryHead } from "./git";
 import {
   DEFAULT_FAIL_EDGE_ROUNDS,
   MAX_FAIL_EDGE_ROUNDS,
@@ -52,6 +53,7 @@ import type {
   PipelineStage,
   PipelineStageInput,
   PipelineStageAttempt,
+  PipelineUnconfirmedHost,
 } from "./types";
 import { parseStageVerdict, type ParsedStageVerdict } from "./verdict";
 
@@ -61,6 +63,53 @@ export type PipelineStageSpawn = {
   sessionId: string | null;
   "transcript": string | null;
   paneId: string | null;
+};
+
+/** Identity of the agent host a stage attempt owns, as a close reports it. */
+export type PipelineStageHostRef = {
+  stageId: string;
+  attempt: number;
+  conversationId: string | null;
+  agentPath: string | null;
+  paneId: string | null;
+  /** Set for a conversation a stage agent spawned and the pipeline adopted, so
+      the report distinguishes it from the stage's own launch. */
+  adopted?: true;
+};
+
+export type PipelineStageStopResult =
+  /** Termination is evidenced: the kill was delivered, or the host is gone. */
+  | { outcome: "stopped" }
+  | { outcome: "not-running" }
+  /** The kill was accepted (a `queued` receipt is the normal first answer) but
+      termination was not evidenced inside the confirmation budget. The host may
+      still be alive, so a close carrying one of these never claims a clean stop. */
+  | { outcome: "unconfirmed"; operationId: string | null; detail: string }
+  | { outcome: "failed"; error: string };
+
+/**
+ * What closing a pipeline did to its stage hosts, and what it left on disk
+ * (#670). `stopped` is empty and `alreadyStopped` may be populated when nothing
+ * was burning quota; a non-empty `stillRunning` means the close was refused.
+ */
+export type PipelineCloseReport = {
+  /** Hosts this close terminated, with termination evidenced. */
+  stopped: PipelineStageHostRef[];
+  /** Launched stages — settled or parked included — whose host was already gone. */
+  alreadyStopped: PipelineStageHostRef[];
+  /** Kills the runtime accepted without confirming termination in time. The
+      operation id keeps the possible survivor addressable. */
+  unconfirmed: Array<PipelineStageHostRef & { operationId: string | null; detail: string }>;
+  /** Review rounds whose live reviewer this close terminated through the flow.
+      Headless reviewers are child processes with no registry entry, so they are
+      counted here rather than in `stopped`. */
+  reviewers: Array<{ stageId: string; attempt: number; flowId: string; round: number }>;
+  /** Unconfirmed hosts the operator explicitly dismissed on this close. */
+  acknowledged: Array<PipelineStageHostRef & { detail: string }>;
+  /** Hosts that survived teardown, so the close cannot claim to be clean. */
+  stillRunning: Array<PipelineStageHostRef & { error: string }>;
+  /** Uncommitted stage work preserved in the worktree; null when unprovisioned. */
+  worktree: { dir: string; uncommitted: string[]; truncated: boolean; error?: string } | null;
 };
 
 export type PipelineStageLaunchReservation = Pick<PipelineStageSpawn, "launchId" | "conversationId">;
@@ -90,6 +139,26 @@ export interface PipelinePorts {
   spawnReceipt(launchId: string): PipelineSpawnReceipt | null;
   claimSpawnRetry(launchId: string, claimId: string): "claimed" | "settled" | "conflict";
   paneAgentAlive(paneId: string): Promise<boolean>;
+  /** Terminates the host that owns a stage attempt's agent. `not-running` means
+      no host was resident, so a close can tell an idle lane from one it stopped. */
+  stopStageAgent(target: PipelineStageHostRef): Promise<PipelineStageStopResult>;
+  /** Identity-verified teardown of a stage attempt's tmux pane, for a
+      pane-hosted agent the registry can no longer address. `unknown` means the
+      pane could not be proven to be this stage's, so nothing was signalled. */
+  stopStagePane(target: PipelineStageHostRef): Promise<
+    | { outcome: "stopped" | "not-running" }
+    | { outcome: "unknown"; detail: string }
+    | { outcome: "failed"; error: string }
+  >;
+  /** Residency read with no side effects: `false` means the host is
+      demonstrably gone. Used to retire an unconfirmed kill without re-killing. */
+  stageHostResident(target: PipelineStageHostRef): Promise<boolean>;
+  /** Monotonic milliseconds, kept apart from `now()` so a teardown budget can be
+      bounded independently of the ISO timestamps written to the record. */
+  monotonicNow(): number;
+  /** Whether the pipeline worktree is still on disk. A checkout removed after a
+      merge is a tidy close, not an unreadable worktree. */
+  worktreePresent(dir: string): boolean;
   conversationAgentActive(conversationId: string): Promise<boolean | null>;
   durableTurnEvidence(engine: EffectivePipelineRole["engine"], transcriptPath: string): Promise<StageTurnEvidence | null>;
   headCwd(transcriptPath: string): string | null;
@@ -100,7 +169,12 @@ export interface PipelinePorts {
   pipelineAdoptionCandidates(pipelineId: string): PipelineAdoptionCandidate[];
   createFlow(req: CreateFlowRequest, entries: FileEntry[]): Promise<{ flow?: Flow; error?: string }>;
   patchFlow(id: string, action: "advance" | "pause" | "resume", note?: string): { error?: string; status?: number };
-  closeFlow(id: string): Promise<{ flow?: Flow; error?: string; status?: number } | void>;
+  closeFlow(id: string): Promise<{
+    flow?: Flow;
+    error?: string;
+    status?: number;
+    stoppedReviewer?: { round: number } | null;
+  } | void>;
   getFlow(id: string): Flow | null;
   findFlow(implementerPath: string, implementerConversationId: string | null, baseRef: string, targetSha: string): Flow | null;
   projectForCwd(cwd: string): string | null;
@@ -243,6 +317,191 @@ async function spawnPipelineAgent(
   };
 }
 
+/** Confirmation window for an accepted kill. The whole close runs inside the
+    pipelines file transaction, so this stays short enough that a slow host
+    cannot stall every other pipeline mutation and the controller tick. */
+const KILL_CONFIRMATION_BUDGET_MS = 1_500;
+const KILL_CONFIRMATION_INTERVAL_MS = 250;
+const KILL_CONFIRMATION_MAX_POLLS = 8;
+/** Receipt states that terminally settle a kill operation: the delivery queue
+    transitions a terminated host to `delivered` and a refused termination to
+    `failed`; everything else (`queued`, `delivering`, …) is still in flight. */
+const KILL_DELIVERED_STATES = new Set(["delivered"]);
+const KILL_REFUSED_STATES = new Set(["failed", "rejected"]);
+
+export type StageStopProbes = {
+  client?: RuntimeHostClient | null;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+  budgetMs?: number;
+  intervalMs?: number;
+};
+
+/**
+ * Terminates the agent host a stage attempt owns, through the same control path
+ * an operator's kill uses — structured hosts go over the runtime command
+ * channel, legacy panes down the tmux ladder. Nothing on disk is touched: the
+ * worktree, including uncommitted stage work, is left exactly as the agent left
+ * it. Residency is read from the durable registry first so a lane whose host is
+ * already gone reports `not-running` instead of a manufactured kill.
+ *
+ * A structured kill answers `queued` before the host has gone anywhere, so an
+ * accepted receipt is not termination. Within a bounded window this re-reads
+ * host residency (the registry file signature invalidates the read cache, so a
+ * teardown written by the host process is visible here) and the durable
+ * operation receipt. Kills are idempotent, so re-checking is free of side
+ * effects. Only evidence yields `stopped`; a terminally refused operation
+ * yields `failed`; anything still in flight yields `unconfirmed` with its
+ * operation id, and the close reports that instead of a clean stop.
+ */
+/** Resolved identity of a stage host plus a live residency read. Null when the
+    registry has no trace of the conversation at all. */
+type StageHostProbe = {
+  conversationId: ViewerConversationId;
+  transcriptPath: string;
+  resident(): boolean;
+  /** Durable tmux evidence recorded for this session, if any. It is the only
+      thing that can identify a stored pane id as still being this agent's. */
+  host(): TmuxHostEvidence | null;
+};
+
+async function stageHostProbe(target: PipelineStageHostRef): Promise<StageHostProbe | null> {
+  const registry = agentRegistry();
+  /* applyConversationAction resolves by id or by path; residency must too, or a
+     prefixed id the registry cannot resolve short-circuits to not-running while
+     the attempt's transcript would have found the live conversation. */
+  const byId = target.conversationId?.startsWith("conversation_")
+    ? registry.conversation(target.conversationId as ViewerConversationId)
+    : null;
+  const conversation = byId ?? (target.agentPath ? registry.conversationForPath(target.agentPath) : null);
+  const generation = conversation?.generations.at(-1) ?? null;
+  if (!conversation || !generation) return null;
+  const sessionKey = sessionKeyId({ engine: conversation.engine, sessionId: generation.id });
+  const { structuredHostProcessAlive } = await import("@/lib/runtime/structuredRecovery");
+  return {
+    conversationId: conversation.id,
+    transcriptPath: generation.path,
+    /* Re-read every call: the registry read cache invalidates on the file
+       signature, so a teardown written by the host process is visible here. */
+    resident: () => {
+      const entry = registry.readOnlySnapshot().entries[sessionKey];
+      if (!entry || entry.status === "dead" || entry.status === "unhosted") return false;
+      return structuredHostProcessAlive(entry.structuredHost?.process ?? null) || Boolean(entry.host);
+    },
+    host: () => registry.readOnlySnapshot().entries[sessionKey]?.host ?? null,
+  };
+}
+
+export type StagePaneProbes = {
+  killHostIfMatches?: (host: TmuxHostEvidence) => Promise<boolean>;
+  /** What the pane shows right now. Null when tmux has no such pane. */
+  paneSnapshot?: (paneId: string) => Promise<{ windowName: string; command: string } | null>;
+};
+
+/**
+ * Last resort for a pane-hosted stage agent, gated on identity rather than
+ * liveness. A tmux pane id is unique only within one server lifetime and
+ * restarts at %0, while the attempt's stored id outlives that — and this path
+ * runs exactly when the registry has no resident host, which is when a stale id
+ * is most likely. "This pane runs something that is not a shell" would therefore
+ * happily kill an unrelated agent, so the kill goes through
+ * killTmuxHostIfMatches, which verifies the tmux server, the pane pid, the
+ * window name and the agent's process start identity before signalling. Without
+ * durable evidence to match, nothing is killed: the host is reported unknown so
+ * the operator decides. A refused close is a nuisance; killing someone else's
+ * agent is not recoverable.
+ */
+export async function stopPipelineStagePane(
+  target: PipelineStageHostRef,
+  probes: StagePaneProbes = {},
+): Promise<{ outcome: "stopped" | "not-running" } | { outcome: "unknown"; detail: string } | { outcome: "failed"; error: string }> {
+  const paneId = target.paneId;
+  if (!paneId) return { outcome: "not-running" };
+  const snapshot = probes.paneSnapshot ?? paneInfo;
+  /* Name what the pane actually shows. An operator handed "pane %3 now runs
+     codex in window review" can find it in tmux and decide; "it could not be
+     identified" alone leaves them nothing to act on. */
+  const describe = (info: { windowName: string; command: string } | null): string =>
+    info ? `pane ${paneId} now runs ${info.command} in window ${info.windowName}` : `pane ${paneId}`;
+  try {
+    const probe = await stageHostProbe(target);
+    const host = probe?.host() ?? null;
+    if (!host || host.paneId !== paneId) {
+      /* No durable evidence ties this id to this agent. Report what is there,
+         but never signal it. */
+      const info = await snapshot(paneId);
+      if (!info || isShellCommand(info.command)) return { outcome: "not-running" };
+      return {
+        outcome: "unknown",
+        detail: `${describe(info)} and cannot be identified as this stage's agent; stop it yourself if it is the orphan, or close again with acknowledgeHosts to dismiss it`,
+      };
+    }
+    const killed = await (probes.killHostIfMatches ?? killTmuxHostIfMatches)(host);
+    if (killed) return { outcome: "stopped" };
+    const info = await snapshot(paneId);
+    if (!info || isShellCommand(info.command)) return { outcome: "not-running" };
+    return {
+      outcome: "unknown",
+      detail: `${describe(info)}; it changed or its agent did not exit, so it was left running`,
+    };
+  } catch (error) {
+    return { outcome: "failed", error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export async function stopPipelineStageAgent(
+  target: PipelineStageHostRef,
+  probes: StageStopProbes = {},
+): Promise<PipelineStageStopResult> {
+  try {
+    const probe = await stageHostProbe(target);
+    if (!probe || !probe.resident()) return { outcome: "not-running" };
+    const { conversationId, transcriptPath, resident } = probe;
+
+    const { applyConversationAction } = await import("@/lib/conversation/actions");
+    const result = await applyConversationAction({ conversationId, transcriptPath, action: "kill" });
+    const body = result.body as { ok?: boolean; error?: string; operationId?: string; receipt?: { status?: string } };
+    if (result.status >= 400 || body.ok !== true) {
+      return { outcome: "failed", error: body.error ?? `stage host kill was refused with status ${result.status}` };
+    }
+    /* No receipt means the control settled synchronously — the legacy pane
+       ladder, or a replayed terminal kill on an already-dead host. */
+    const receiptStatus = body.receipt?.status ?? null;
+    if (!receiptStatus || KILL_DELIVERED_STATES.has(receiptStatus)) return { outcome: "stopped" };
+
+    const operationId = body.operationId ?? null;
+    const client = probes.client === undefined ? runtimeHostClient() : probes.client;
+    const now = probes.now ?? Date.now;
+    const sleep = probes.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+    const deadline = now() + (probes.budgetMs ?? KILL_CONFIRMATION_BUDGET_MS);
+    const interval = probes.intervalMs ?? KILL_CONFIRMATION_INTERVAL_MS;
+    for (let poll = 0; poll < KILL_CONFIRMATION_MAX_POLLS; poll += 1) {
+      if (!resident()) return { outcome: "stopped" };
+      if (operationId && client) {
+        const durable = await client.operationStatus(operationId).catch(() => null);
+        const status = durable?.receipt.status ?? null;
+        if (status && KILL_DELIVERED_STATES.has(status)) return { outcome: "stopped" };
+        if (status && KILL_REFUSED_STATES.has(status)) {
+          return {
+            outcome: "failed",
+            error: durable?.receipt.reason ?? `stage host kill ${status} (operation ${operationId})`,
+          };
+        }
+      }
+      if (now() >= deadline) break;
+      await sleep(interval);
+    }
+    if (!resident()) return { outcome: "stopped" };
+    return {
+      outcome: "unconfirmed",
+      operationId,
+      detail: `kill accepted as ${receiptStatus} but termination was not confirmed`,
+    };
+  } catch (error) {
+    return { outcome: "failed", error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 export function defaultPipelinePorts(): PipelinePorts {
   let runtimeSnapshot: ReturnType<NonNullable<ReturnType<typeof runtimeHostClient>>["snapshot"]> | null = null;
   return {
@@ -267,6 +526,19 @@ export function defaultPipelinePorts(): PipelinePorts {
       const info = await paneInfo(paneId);
       return info !== null && !isShellCommand(info.command);
     },
+    stopStageAgent: (target) => stopPipelineStageAgent(target),
+    stopStagePane: (target) => stopPipelineStagePane(target),
+    stageHostResident: async (target) => {
+      try {
+        const probe = await stageHostProbe(target);
+        return probe ? probe.resident() : false;
+      } catch {
+        /* An unreadable probe is not evidence of death; keep the record. */
+        return true;
+      }
+    },
+    monotonicNow: () => Date.now(),
+    worktreePresent: (dir) => Boolean(dir) && fs.existsSync(dir),
     conversationAgentActive: async (conversationId) => {
       const client = runtimeHostClient();
       if (!client) return null;
@@ -1469,6 +1741,39 @@ function isStructuredSpawnPark(pipeline: Pipeline, attempt: PipelineStageAttempt
     || failure.includes("runtime host request timed out");
 }
 
+/**
+ * Retires the unconfirmed-host records a close left behind, once each host is
+ * demonstrably gone (#670). Without this a lane that has actually finished would
+ * sit on the board forever claiming a survivor it no longer has. The probe has
+ * no side effects — nothing is re-killed here; a host that is still resident
+ * keeps its record and the lane stays visible.
+ */
+async function reconcileUnconfirmedHosts(pipeline: Pipeline, ports: PipelinePorts): Promise<boolean> {
+  const outstanding = pipeline.unconfirmedHosts;
+  if (!outstanding?.length) return false;
+  const remaining: PipelineUnconfirmedHost[] = [];
+  for (const host of outstanding) {
+    const target: PipelineStageHostRef = {
+      stageId: host.stageId,
+      attempt: host.attempt,
+      conversationId: host.conversationId,
+      agentPath: host.agentPath,
+      paneId: host.paneId ?? null,
+    };
+    const resident = await ports.stageHostResident(target);
+    const paneAlive = !resident && target.paneId ? await ports.paneAgentAlive(target.paneId) : false;
+    if (resident || paneAlive) remaining.push(host);
+  }
+  if (remaining.length === outstanding.length) return false;
+  pipeline.unconfirmedHosts = remaining.length > 0 ? remaining : undefined;
+  /* The last survivor retired: the lane has nothing left to surface, so the
+     closed record hides like any other. */
+  if (!pipeline.unconfirmedHosts && pipeline.state === "closed") {
+    pipeline.hiddenAt = pipeline.closedAt ?? ports.now();
+  }
+  return true;
+}
+
 export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts = defaultPipelinePorts()): Promise<{ pipelines: Pipeline[]; changed: boolean }> {
   if (tickStore.__llvPipelineTick) return { pipelines: [], changed: false };
   tickStore.__llvPipelineTick = true;
@@ -1483,6 +1788,7 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
         pipelineChanged = rebindPipelineAttemptPaths(pipeline, ports) || pipelineChanged;
         pipelineChanged = reconcileParkedStructuredSpawn(pipeline, ports) || pipelineChanged;
         pipelineChanged = reconcileBoundReviewFlow(pipeline, ports) || pipelineChanged;
+        pipelineChanged = await reconcileUnconfirmedHosts(pipeline, ports) || pipelineChanged;
         if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused" && pipeline.state !== "needs_decision") {
           pipelineChanged = await tickPipeline(pipeline, entries, ports, persist) || pipelineChanged;
         }
@@ -1669,13 +1975,15 @@ function replaceDraftStages(
   return {};
 }
 
-type PipelineMutationResult = {
+export type PipelineMutationResult = {
   pipeline?: Pipeline;
   error?: string;
   status?: number;
   code?: PipelineRepoPreflightErrorCode;
   field?: "repoDir";
   path?: string;
+  /** Set by the close action: what its host teardown stopped and preserved. */
+  close?: PipelineCloseReport;
 };
 
 type PipelineCreatorLineage = {
@@ -1894,6 +2202,109 @@ async function orphanAgentPane(
   return { error: `stage agent may still be running in pane ${attempt.paneId}; wait for it to exit or kill the pane first`, status: 409 };
 }
 
+/**
+ * Every host this pipeline ever launched, as a close must consider it.
+ *
+ * A terminal attempt state says nothing about whether its host is still
+ * resident: `park()` writes `needs_decision` precisely when a hosted session
+ * went idle, produced an unparseable verdict, or stopped reporting — the agent
+ * process is still there, still holding the account's quota. Those parked lanes
+ * are the orphans #670 was filed for, so residency is decided downstream from
+ * evidence about the host (the registry, then the pane), never from the attempt
+ * state machine.
+ *
+ * Adopted (`historical`) attempts count too. They are not passive evidence: a
+ * stage agent spawned that conversation through the viewer, adoptAttempt seats
+ * it running with its own launch, conversation and pane, and the tick tracks it
+ * as a live host until it produces a verdict. Skipping them let a helper the
+ * pipeline started keep burning quota behind a lane that had already left the
+ * board — this issue again, through another door.
+ */
+function launchedStageHosts(pipeline: Pipeline): StageHostCandidate[] {
+  const candidates: StageHostCandidate[] = [];
+  const seen = new Set<string>();
+  for (const run of pipeline.runs) {
+    for (const attempt of run.attempts) {
+      if (!attempt.conversationId && !attempt.agentPath && !attempt.paneId) continue;
+      /* Rounds can share a host identity (a review round re-reads its reviewer
+         conversation); probing one host once keeps the counts truthful. */
+      const identity = `${attempt.conversationId ?? ""}|${attempt.agentPath ?? ""}|${attempt.paneId ?? ""}`;
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      candidates.push({
+        target: {
+          stageId: run.stageId,
+          attempt: attempt.n,
+          conversationId: attempt.conversationId,
+          agentPath: attempt.agentPath,
+          paneId: attempt.paneId,
+          ...(attempt.historical ? { adopted: true as const } : {}),
+        },
+        /* Same reading orphanAgentPane uses: a verdict or a completion stamp
+           means the turn ended, so what is left in the pane is an idle CLI. A
+           parked attempt has neither (park writes only state and error), which
+           is why the pane heuristic still applies to it. */
+        turnSettled: Boolean(attempt.verdict || attempt.completedAt),
+      });
+    }
+  }
+  return candidates;
+}
+
+/** A launched host plus whether its attempt's turn ended, which decides only
+    whether the pane heuristic may speak for it. */
+type StageHostCandidate = { target: PipelineStageHostRef; turnSettled: boolean };
+
+/** Ceiling on a close's whole host teardown, holding the pipelines transaction. */
+const CLOSE_TEARDOWN_BUDGET_MS = 10_000;
+
+function stageHostLabel(target: PipelineStageHostRef): string {
+  const what = target.adopted ? "adopted agent of stage" : "stage";
+  return `${what} ${target.stageId} attempt ${target.attempt} (${target.conversationId ?? target.agentPath ?? "unknown host"})`;
+}
+
+/** Reads the uncommitted work a close leaves behind. Skipped while the pipeline
+    has no provisioned worktree to read. */
+function closeWorktreeReport(pipeline: Pipeline, ports: PipelinePorts): PipelineCloseReport["worktree"] {
+  if (pipeline.state === "provisioning" || !pipeline.lastPassedCommit) return null;
+  /* A worktree cleaned up after a merge has nothing to preserve and nothing to
+     report; only a checkout that is present but unreadable is a finding. */
+  if (!ports.worktreePresent(pipeline.worktreeDir)) return null;
+  const changes = pipelineWorktreeChanges(pipeline, ports.exec);
+  if (!changes.ok) return { dir: pipeline.worktreeDir, uncommitted: [], truncated: false, error: changes.error };
+  return { dir: pipeline.worktreeDir, uncommitted: changes.paths, truncated: changes.truncated };
+}
+
+/** Durable one-line account of a close, so the board and the API agree on
+    whether anything was stopped, what could not be confirmed, and what was
+    preserved. An unreadable worktree is reported as such — never as the silence
+    that a verified-clean worktree produces. */
+function closeSummary(report: PipelineCloseReport): string | null {
+  const parts: string[] = [];
+  const adopted = report.stopped.filter((item) => item.adopted).length;
+  const launched = report.stopped.length - adopted;
+  if (launched > 0) parts.push(`stopped ${launched} stage host${launched === 1 ? "" : "s"}`);
+  if (adopted > 0) parts.push(`stopped ${adopted} adopted agent${adopted === 1 ? "" : "s"}`);
+  if (report.reviewers.length > 0) {
+    parts.push(`stopped ${report.reviewers.length} review round${report.reviewers.length === 1 ? "" : "s"}`);
+  }
+  for (const item of report.unconfirmed) {
+    parts.push(`${item.detail} for ${stageHostLabel(item)}${item.operationId ? ` (operation ${item.operationId})` : ""}`);
+  }
+  if (report.acknowledged.length > 0) {
+    parts.push(`dismissed ${report.acknowledged.length} unconfirmed host${report.acknowledged.length === 1 ? "" : "s"} on the operator's word`);
+  }
+  if (report.worktree?.error) {
+    parts.push(`could not read the worktree at ${report.worktree.dir}: ${report.worktree.error}`);
+  } else {
+    const kept = report.worktree?.uncommitted.length ?? 0;
+    if (kept > 0) {
+      parts.push(`kept ${kept}${report.worktree?.truncated ? "+" : ""} uncommitted path${kept === 1 ? "" : "s"} in the worktree`);
+    }
+  }
+  return parts.length > 0 ? `closed; ${parts.join("; ")}` : null;
+}
+
 export async function patchPipeline(
   id: string,
   req: PatchPipelineRequest,
@@ -2109,6 +2520,7 @@ export async function patchPipeline(
       if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused") {
         pipeline.pausedState = pipeline.state;
         pipeline.state = "paused";
+        pipeline.pausedAt = ports.now();
         pipeline.stateDetail = "paused by user";
         if (flow && flow.state !== "paused" && flow.state !== "closed") ports.patchFlow(flow.id, "pause");
       }
@@ -2116,6 +2528,7 @@ export async function patchPipeline(
       if (pipeline.state !== "paused") return { error: "pipeline is not paused", status: 409 };
       pipeline.state = pipeline.pausedState ?? "running";
       pipeline.pausedState = null;
+      pipeline.resumedAt = ports.now();
       pipeline.stateDetail = null;
       if (flow?.state === "paused") ports.patchFlow(flow.id, "resume");
     } else if (req.action === "retry-stage") {
@@ -2326,12 +2739,84 @@ export async function patchPipeline(
         persist();
         return { pipeline };
       }
+      /* #670: a close used to leave the stage host resident, so the agent kept
+         executing on a paid quota and the board kept a live-looking chip. Tear
+         the hosts down before the flow and the state write, and report exactly
+         what was stopped. Nothing on disk is touched — uncommitted stage work
+         stays in the worktree and is named in the report instead. */
+      if (req.acknowledgeHosts !== undefined && typeof req.acknowledgeHosts !== "boolean") {
+        return { error: "acknowledgeHosts must be a boolean", status: 400 };
+      }
+      const close: PipelineCloseReport = { stopped: [], alreadyStopped: [], unconfirmed: [], acknowledged: [], reviewers: [], stillRunning: [], worktree: null };
+      /* Each host's confirmation is bounded, but N of them multiply, and this
+         whole loop holds the pipelines file transaction — every other pipeline
+         mutation and the controller tick queue behind it. So the aggregate is
+         bounded too, and the hosts the budget cut off are reported as
+         unconfirmed rather than silently skipped: the lane stays visible and a
+         later close picks the work up where this one stopped. */
+      const teardownDeadline = ports.monotonicNow() + CLOSE_TEARDOWN_BUDGET_MS;
+      const candidates = launchedStageHosts(pipeline);
+      for (let index = 0; index < candidates.length; index += 1) {
+        const { target, turnSettled } = candidates[index]!;
+        if (index > 0 && ports.monotonicNow() >= teardownDeadline) {
+          for (const remaining of candidates.slice(index)) {
+            close.unconfirmed.push({
+              ...remaining.target,
+              operationId: null,
+              detail: "close teardown budget expired before this host was probed",
+            });
+          }
+          break;
+        }
+        const result = await ports.stopStageAgent(target);
+        if (result.outcome === "stopped") close.stopped.push(target);
+        else if (result.outcome === "failed") close.stillRunning.push({ ...target, error: result.error });
+        else if (result.outcome === "unconfirmed") {
+          close.unconfirmed.push({ ...target, operationId: result.operationId, detail: result.detail });
+        } else if (!turnSettled && target.paneId) {
+          /* The registry knows no host, but the attempt never finished its turn
+             and its pane may still hold the agent. The teardown kills it only
+             when durable evidence proves the pane is still this stage's. */
+          const pane = await ports.stopStagePane(target);
+          if (pane.outcome === "stopped") close.stopped.push(target);
+          else if (pane.outcome === "failed") close.stillRunning.push({ ...target, error: pane.error });
+          else if (pane.outcome === "unknown") close.unconfirmed.push({ ...target, operationId: null, detail: pane.detail });
+          else close.alreadyStopped.push(target);
+        } else close.alreadyStopped.push(target);
+      }
+      close.worktree = closeWorktreeReport(pipeline, ports);
+      if (close.stillRunning.length > 0) {
+        /* A host that survived teardown must not be reported as a clean close:
+           the pipeline keeps its state so the survivor stays visible and
+           addressable instead of hiding behind a closed lane. */
+        const detail = `could not stop ${close.stillRunning.map((item) => `${stageHostLabel(item)}: ${item.error}`).join("; ")}`;
+        pipeline.stateDetail = detail;
+        persist();
+        return { error: detail, status: 409, close };
+      }
       if (flow && flow.state !== "closed") {
         const closed = await ports.closeFlow(flow.id);
         if (closed?.error) {
+          /* A reviewer that would not die is a survivor like any other, so it
+             leaves through the same report the host teardown uses. */
+          if (stage && attempt) close.stillRunning.push({
+            stageId: stage.id,
+            attempt: attempt.n,
+            conversationId: attempt.conversationId,
+            agentPath: attempt.agentPath,
+            paneId: attempt.paneId,
+            error: closed.error,
+          });
           pipeline.stateDetail = closed.error;
           persist();
-          return { error: closed.error, status: closed.status ?? 409 };
+          return { error: closed.error, status: closed.status ?? 409, close };
+        }
+        /* closeFlow terminates a live reviewer itself; counting what it stopped
+           is what keeps a mid-review close from reporting "nothing was running"
+           (#670). Headless reviewers never reach the agent registry, so the host
+           teardown above cannot see them. */
+        if (closed?.stoppedReviewer && stage && attempt) {
+          close.reviewers.push({ stageId: stage.id, attempt: attempt.n, flowId: flow.id, round: closed.stoppedReviewer.round });
         }
       }
       /* A cursor can rest at state pending before its round's attempt
@@ -2348,9 +2833,36 @@ export async function patchPipeline(
       pipeline.state = "closed";
       pipeline.cursor = null;
       pipeline.pausedState = null;
-      pipeline.stateDetail = null;
+      /* The operator's way out of an unresolvable host (#670): a pane whose id
+         was recycled can look alive forever, so the lane would otherwise stay
+         pinned to the board with no dismissal. An acknowledgement clears only
+         hosts that are unconfirmed — anything proven to be still running has
+         already refused this close above. */
+      if (req.acknowledgeHosts === true && close.unconfirmed.length > 0) {
+        close.acknowledged.push(...close.unconfirmed.map((item) => ({ ...item, detail: item.detail })));
+        close.unconfirmed.length = 0;
+      }
+      pipeline.stateDetail = closeSummary(close);
       pipeline.closedAt = ports.now();
-      pipeline.hiddenAt = pipeline.closedAt;
+      /* An unconfirmed kill may have left a resident host. Hiding the lane would
+         make that survivor invisible on the board, which is the opposite of
+         surfacing it, so the closed record stays visible (and durable) until a
+         later close confirms the host is gone and clears it. */
+      pipeline.unconfirmedHosts = close.unconfirmed.length > 0
+        ? close.unconfirmed.map((item) => ({
+            stageId: item.stageId,
+            attempt: item.attempt,
+            conversationId: item.conversationId,
+            agentPath: item.agentPath,
+            paneId: item.paneId,
+            operationId: item.operationId,
+            detail: item.detail,
+            at: pipeline.closedAt!,
+          }))
+        : undefined;
+      pipeline.hiddenAt = pipeline.unconfirmedHosts ? null : pipeline.closedAt;
+      persist();
+      return { pipeline, close };
     } else {
       return { error: "unknown pipeline action", status: 400 };
     }

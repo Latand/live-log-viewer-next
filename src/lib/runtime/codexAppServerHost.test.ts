@@ -14,6 +14,7 @@ import { FileRuntimeEventStore, type RuntimeEventStore } from "./eventStore";
 import type { HostState, RuntimeEvent } from "./engineHost";
 import { adoptCodexRegistryHosts, bindCodexHostPersistence, persistCodexHost, startCodexStructuredHost, structuredHostsEnabled } from "./registry";
 import { STRUCTURED_IMAGE_CAPABILITY, structuredContent, type StructuredImageRef } from "./structuredContent";
+import { DEFAULT_VOICE_PERSONA, VOICE_PERSONA_FILE, voicePersona } from "./voicePersona";
 
 class MemoryEventStore implements RuntimeEventStore {
   private readonly events = new Map<string, RuntimeEvent[]>();
@@ -62,6 +63,7 @@ class FakeAppServer extends EventEmitter {
   modelList: unknown[] = [{ id: "gpt-5.3-codex-spark", isDefault: true, inputModalities: ["text"] }];
   modelListFailuresRemaining = 0;
   realtimeStartError: string | null = null;
+  injectItemsError: string | null = null;
   private readonly serverRequestIds = new Set<string | number>();
   private turn = 0;
 
@@ -173,6 +175,11 @@ class FakeAppServer extends EventEmitter {
       return;
     }
     if (method === "turn/interrupt") return this.respond(message.id, {});
+    if (method === "thread/inject_items") {
+      return this.injectItemsError
+        ? this.respondError(message.id, this.injectItemsError)
+        : this.respond(message.id, {});
+    }
     if (method === "thread/realtime/start") {
       this.respond(message.id, {});
       if (this.realtimeStartError) {
@@ -289,7 +296,22 @@ describe("CodexAppServerHost", () => {
       clientManagedHandoffs: true,
       codexResponsesAsItems: true,
       includeStartupContext: true,
+      /* The voice persona rides in as the call's first item: the thread's own
+         instructions assume a text agent, which does not survive being read
+         aloud. */
     });
+
+    /* The persona rides into the THREAD before the call, never into the live
+       session: an initial item on the session opened the sideband channel that
+       every 9-second kill arrived on. */
+    const injected = server.requests.find((request) => request.method === "thread/inject_items");
+    expect((injected?.params as { threadId?: string })?.threadId).toBe("voice-thread");
+    /* Shape and ordering only. Which text arrives is pinned by the override
+       test below, where the expected string cannot also be the default. */
+    expect((injected?.params as { items?: { role?: string; text?: string }[] })?.items)
+      .toEqual([{ role: "developer", text: voicePersona() }]);
+    expect(server.requests.findIndex((request) => request.method === "thread/inject_items"))
+      .toBeLessThan(server.requests.findIndex((request) => request.method === "thread/realtime/start"));
 
     await host.appendRealtimeSpeech("Worker inspected package.json");
     expect(server.requests.find((request) => request.method === "thread/realtime/appendSpeech")?.params).toEqual({
@@ -301,6 +323,45 @@ describe("CodexAppServerHost", () => {
       threadId: "voice-thread",
     });
     await host.release();
+  });
+
+  test("the operator's override is the text that reaches the call's thread", async () => {
+    /* The call path has to resolve the persona the way production does, not
+       just inject some persona. With no override file on disk the resolver and
+       the built-in default are the same string, so a call that injected the
+       default would satisfy any assertion written against the resolver. An
+       isolated config dir holding a known override splits the two apart: this
+       expected text exists nowhere in the source, so only a call that actually
+       read the override can produce it. */
+    const configDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-persona-config-"));
+    const overridePath = path.join(configDirectory, "agent-log-viewer", ...VOICE_PERSONA_FILE.split("/"));
+    const override = "Isolated override persona for this call.";
+    fs.mkdirSync(path.dirname(overridePath), { recursive: true });
+    /* Written with surrounding whitespace, because the resolver trims and the
+       injected item must carry the trimmed text. */
+    fs.writeFileSync(overridePath, `  ${override}\n`);
+    expect(override).not.toBe(DEFAULT_VOICE_PERSONA);
+
+    const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = configDirectory;
+    try {
+      const server = new FakeAppServer("voice-thread");
+      const host = await CodexAppServerHost.start({
+        cwd: "/repo",
+        eventStore: new MemoryEventStore(),
+        spawnProcess: fakeSpawn(server),
+      });
+      await host.startRealtimeWebRtc("v=0\r\noffer");
+
+      const injected = server.requests.find((request) => request.method === "thread/inject_items");
+      expect((injected?.params as { items?: { role?: string; text?: string }[] })?.items)
+        .toEqual([{ role: "developer", text: override }]);
+      await host.release();
+    } finally {
+      if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      fs.rmSync(configDirectory, { recursive: true, force: true });
+    }
   });
 
   test("a browser offer with its terminal CRLF is forwarded byte-for-byte", async () => {
@@ -2817,4 +2878,50 @@ describe("CodexAppServerHost", () => {
       structuredHost,
     });
   });
+});
+
+test("a refused persona injection still yields a working call", async () => {
+  /* The persona is a nicety; the call is not. An app-server that refuses the
+     item shape — or the method outright — must cost the operator nothing. */
+  const server = new FakeAppServer("voice-thread");
+  server.injectItemsError = "Invalid request: unknown field `role`";
+  const host = await CodexAppServerHost.start({
+    cwd: "/repo",
+    eventStore: new MemoryEventStore(),
+    spawnProcess: fakeSpawn(server),
+  });
+
+  await expect(host.startRealtimeWebRtc("v=0\r\noffer")).resolves.toEqual({
+    sdp: "v=0\r\nanswer",
+    realtimeSessionId: "realtime-1",
+  });
+  await host.release();
+});
+
+test("releasing the host hangs up a live call so the account's slot is freed", async () => {
+  /* A realtime session the backend still believes is open holds the account's
+     one concurrent slot, and every later call is refused with "You have
+     reached your usage limit." — the same sentence an exhausted window
+     produces. A deploy replacing the runtime host mid-call is exactly how that
+     orphan gets created. */
+  const server = new FakeAppServer("voice-thread");
+  const host = await CodexAppServerHost.start({
+    cwd: "/repo",
+    eventStore: new MemoryEventStore(),
+    spawnProcess: fakeSpawn(server),
+  });
+  await host.startRealtimeWebRtc("v=0\r\noffer");
+  await host.release();
+  expect(server.requests.some((request) => request.method === "thread/realtime/stop")).toBe(true);
+});
+
+test("a host with no live call releases without a stray hangup", async () => {
+  const server = new FakeAppServer("voice-thread");
+  const host = await CodexAppServerHost.start({
+    cwd: "/repo",
+    eventStore: new MemoryEventStore(),
+    spawnProcess: fakeSpawn(server),
+  });
+  await host.release();
+  expect(server.requests.some((request) => request.method === "thread/realtime/stop")).toBe(false);
 });

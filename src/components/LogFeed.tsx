@@ -6,6 +6,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ChevronUp, Sparkle } from "@/components/icons";
 import { useLogTail } from "@/hooks/useLogTail";
 import { useRuntimeSessionForConversation } from "@/hooks/useRuntime";
+import { useToolActivityCues } from "@/hooks/useToolActivityCues";
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { getLocale, translate, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
@@ -146,10 +147,16 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      launch the file path is still `spawn:<launchId>` with no artifact, so an
      artifact-only lookup would miss the live host and drop the first deltas; the
      transcript path stays a fallback for subagents that carry no bus id. */
-  const runtimeLiveTurn = useRuntimeSessionForConversation(
+  const runtimeSession = useRuntimeSessionForConversation(
     file?.conversationId ?? null,
     file?.path ?? null,
-  )?.session.liveTurn ?? null;
+  )?.session ?? null;
+  const runtimeLiveTurn = runtimeSession?.liveTurn ?? null;
+  /* Liveness for the in-flight exemption (issue #674 review): a `streaming`
+     overlay row outranks the transcript only while the turn is actually
+     running. Once the turn is idle a lingering one — a broker that died
+     mid-stream leaves it streaming forever — is fenced like any other. */
+  const runtimeTurn = runtimeSession?.turn ?? null;
   /* The scroll magnet lives per feed instance, so each column remembers its
      own state across polls: glued to the live tail, or released by the user.
      A remount inherits the transcript's remembered state. */
@@ -305,6 +312,13 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [session, file?.activity, tail.lines, tail.linesStart],
   );
+  /* Tool activity earns its cue from the parse itself: every newly appended
+     call ticks once, keyed on the engine's call id — even one that settled
+     inside a single tail tick — while re-parses, remounts and paged-in history
+     stay silent. The window end anchors "newly appended" to the tail stream;
+     loading gates the baseline so an unloaded feed is not mistaken for an
+     empty conversation. */
+  useToolActivityCues(feed.items, memoryKey, file?.path ?? null, tail.linesStart + tail.lines.length, Boolean(file) && !tail.loading);
   const hiddenLocal = Math.max(0, feed.items.length - visibleCount);
   const visibleItems = hiddenLocal ? feed.items.slice(-visibleCount) : feed.items;
   const visibleStartIndex = feed.items.length - visibleItems.length;
@@ -514,8 +528,8 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     publishCanonicalAssistantClaims(memoryKey, feed.items);
   }, [file, memoryKey, feed.items]);
   const visibleLiveTurnItems = useMemo(
-    () => visibleRuntimeLiveTurnItems(runtimeLiveTurn, feed.items, assistantClaims),
-    [runtimeLiveTurn, feed.items, assistantClaims],
+    () => visibleRuntimeLiveTurnItems(runtimeLiveTurn, feed.items, assistantClaims, runtimeTurn),
+    [runtimeLiveTurn, feed.items, assistantClaims, runtimeTurn],
   );
   /* Anything the window shows below the transcript. While it is present an
      empty transcript is not "no output" — it is a conversation mid-launch. */

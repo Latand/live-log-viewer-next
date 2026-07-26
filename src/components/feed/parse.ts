@@ -140,6 +140,26 @@ function retainSessionOwner(event: ToolEvent, owner: SessionOwner | undefined): 
   return event;
 }
 
+/** A turn the voice call delegated into the thread (#664). Codex records these
+    as user rows carrying a `<realtime_delegation>` envelope: `input` is the
+    utterance being handed over, `delta` the rolling interleaved transcript
+    around it. Rendering the envelope raw put XML in the operator's feed. */
+export type VoiceTurnItem = {
+  kind: "voice";
+  ts: unknown;
+  input: string;
+  delta: string;
+};
+
+/** Lenient by construction: a delegation envelope can arrive truncated when the
+    transcript tail is long, so the closing tag is never required. */
+export function parseRealtimeDelegation(text: string): { input: string; delta: string } | null {
+  if (!/^\s*<realtime_delegation>/.test(text)) return null;
+  const input = text.match(/<input>([\s\S]*?)<\/input>/)?.[1]?.trim() ?? "";
+  const delta = text.match(/<transcript_delta>([\s\S]*?)(?:<\/transcript_delta>|$)/)?.[1]?.trim() ?? "";
+  return input || delta ? { input, delta } : null;
+}
+
 export type CitationEntry = {
   target: string;
   line?: string;
@@ -192,6 +212,7 @@ export type CmdGroupItem = {
 export type Item =
   | { kind: "prose"; ts: unknown; text: string; engine: "codex" | "claude"; sourceId?: string }
   | { kind: "user"; ts: unknown; text: string }
+  | VoiceTurnItem
   | { kind: "svc"; text: string }
   | { kind: "note"; text: string }
   | ToolEvent
@@ -1658,7 +1679,9 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     const entrySeqs: number[] = [];
     const emit = (item: Item) => entrySeqs.push(push(item));
     const { cleaned, images } = extractInboxImages(content.text);
-    if (cleaned) emit({ kind: "user", ts, text: cleaned });
+    const voice = cleaned ? parseRealtimeDelegation(cleaned) : null;
+    if (voice) emit({ kind: "voice", ts, ...voice });
+    else if (cleaned) emit({ kind: "user", ts, text: cleaned });
     for (const image of images) emit({ kind: "inbox-image", name: image.name, path: image.path });
     for (const attachment of content.attachments) emit(attachment);
     return { src: curSrc, ts, text: content.text, entrySeqs, structured: content.structured };
@@ -1902,11 +1925,6 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       return;
     }
     if (obj.type === "assistant" && obj.message) {
-      const attributedServer = textPart(obj.attributionMcpServer);
-      const attributedTool = textPart(obj.attributionMcpTool);
-      const attributedMcp = attributedServer && attributedTool && isViewerMcpServer(attributedServer)
-        ? { serverName: attributedServer, toolName: attributedTool }
-        : null;
       for (const part of arr(rec(obj.message).content)) {
         if (part.type === "text" && textPart(part.text).trim()) {
           addProse(ts, textPart(part.text), textPart(obj.uuid) || undefined);
@@ -1947,12 +1965,14 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
           } else {
             const command = familyOf(name) === "shell" ? textPart(input.command) : undefined;
             const lang = familyOf(name) === "read" ? extLang(textPart(input.file_path)) : undefined;
-            /* Claude may stamp an entire assistant record with the MCP tool that
-             * supplied context. That provenance is useful only for an actual
-             * MCP call. Applying it to a sibling Bash/Read call turns a real
-             * command into an unrelated MCP card (for example, `gh pr view`
-             * rendered as "Reading deployment status"). */
-            const mcpIdentity = viewerMcpToolUse(name) ?? (name.startsWith("mcp__") ? attributedMcp : null);
+            /* A card's identity is the call's own `mcp__<server>__<tool>` name
+             * and nothing else (issue #650). Claude stamps whole assistant
+             * records with `attributionMcpServer`/`attributionMcpTool` — the
+             * MCP tool that supplied the turn's context — and every sibling
+             * tool_use inherits that stamp, so honouring it renders a Bash
+             * command or an agent-browser call as "MCP · viewer · Updating
+             * pipeline" with the wrong tool's payload underneath. */
+            const mcpIdentity = viewerMcpToolUse(name);
             const mcp = mcpIdentity
               ? { ...mcpIdentity, args: input, result: null }
               : undefined;

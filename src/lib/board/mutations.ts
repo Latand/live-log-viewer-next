@@ -4,7 +4,16 @@ export type BoardMutationV1 =
   | { kind: "close"; path: string }
   | { kind: "restore"; path: string; placement: "auto" | "manual" | "expanded" }
   | { kind: "reconcile-roots"; roots: string[]; removeManual: string[] }
-  | { kind: "remap-paths"; pairs: Array<{ from: string; to: string }> }
+  /* A remap normally treats the target as provisional: a resumed conversation's
+     new transcript path may already have drawn a card, and the operator's
+     decision lives on the path they actually placed, so the target is dropped
+     from `manual`/`explicitManual` and inherits whatever the source carries.
+     `targetPlacementAuthoritative` inverts that for the case where the target is
+     the surviving conversation and the source is a duplicate being folded into
+     it (#708): the target keeps its own placement and still inherits the
+     source's, so adopting a fork that never drew a card cannot un-pin the
+     survivor. */
+  | { kind: "remap-paths"; pairs: Array<{ from: string; to: string }>; targetPlacementAuthoritative?: boolean }
   | { kind: "set-presentation"; viewMode?: "scheme" | "list" | null; taskPanelOpen?: boolean }
   /* Crown favorites (issue #185): `id` is a durable conversation identity
      (`conversationId` when the backend supplies one, else the transcript path),
@@ -76,20 +85,23 @@ function normalize(board: BoardProjectStateV1, aliases = aliasesOf(board)): Boar
   };
 }
 
-function remapPaths(board: BoardProjectStateV1, pairs: readonly { from: string; to: string }[]): BoardProjectStateV1 {
+function remapPaths(
+  board: BoardProjectStateV1,
+  pairs: readonly { from: string; to: string }[],
+  targetPlacementAuthoritative = false,
+): BoardProjectStateV1 {
   const currentAliases = aliasesOf(board);
   const activePairs = pairs.filter(({ from, to }) => resolvePath(from, currentAliases) !== resolvePath(to, currentAliases));
   if (activePairs.length === 0) return normalize(board);
   const sources = new Set(pairs.map(({ from }) => resolvePath(from, currentAliases)));
   const targets = new Set(activePairs.map(({ to }) => resolvePath(to, currentAliases)));
-  const manual = board.prefs.manual.filter((pathname) => {
+  const keepsPlacement = (pathname: string) => {
+    if (targetPlacementAuthoritative) return true;
     const resolved = resolvePath(pathname, currentAliases);
     return !targets.has(resolved) || sources.has(resolved);
-  });
-  const explicitManual = (board.explicitManual ?? []).filter((pathname) => {
-    const resolved = resolvePath(pathname, currentAliases);
-    return !targets.has(resolved) || sources.has(resolved);
-  });
+  };
+  const manual = board.prefs.manual.filter(keepsPlacement);
+  const explicitManual = (board.explicitManual ?? []).filter(keepsPlacement);
   const aliases = { ...currentAliases };
   for (const { from, to } of activePairs) aliases[from] = to;
   return normalize({ ...board, explicitManual, prefs: { ...board.prefs, manual } }, aliases);
@@ -136,7 +148,7 @@ export function applyBoardMutations(board: BoardProjectStateV1, mutations: reado
   let next = normalize(board);
   for (const mutation of mutations) {
     if (mutation.kind === "remap-paths") {
-      next = remapPaths(next, mutation.pairs);
+      next = remapPaths(next, mutation.pairs, mutation.targetPlacementAuthoritative);
       continue;
     }
     if (mutation.kind === "reconcile-roots") {

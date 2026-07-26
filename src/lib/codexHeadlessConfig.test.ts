@@ -48,6 +48,51 @@ test("an operator-granted Codex thread enables native collaboration", () => {
   });
 });
 
+test("a granted thread enables the plugin subsystem for itself and allowlists only computer use", () => {
+  const config = headlessCodexThreadConfig({
+    config: {
+      mcp_servers: {},
+      plugins: {
+        "computer-use@openai-bundled": { enabled: true },
+        "browser@openai-bundled": { enabled: true },
+        "github@openai-curated": { enabled: true },
+      },
+    },
+  }, false, undefined, ["computer-use"]);
+  expect(config).toMatchObject({
+    features: { plugins: true, apps: false, multi_agent: false },
+    plugins: {
+      "computer-use@openai-bundled": { enabled: true },
+      "browser@openai-bundled": { enabled: false },
+      "github@openai-curated": { enabled: false },
+    },
+    include_apps_instructions: false,
+  });
+});
+
+test("a thread without a grant keeps the plugin subsystem off and carries no plugin table", () => {
+  const config = headlessCodexThreadConfig({
+    config: { mcp_servers: {}, plugins: { "computer-use@openai-bundled": { enabled: true } } },
+  }, false, undefined, []);
+  expect(config).toMatchObject({ features: { plugins: false } });
+  expect(config).not.toHaveProperty("plugins");
+});
+
+test("a thread configuration cannot be widened to every installed plugin", () => {
+  /* Whatever a stored profile claims, only grantable names reach the thread —
+     an unknown name never enables a plugin and never turns the subsystem on. */
+  const wide = headlessCodexThreadConfig({
+    config: { mcp_servers: {}, plugins: { "browser@openai-bundled": { enabled: true } } },
+  }, false, undefined, ["browser", "*"]);
+  expect(wide).toMatchObject({ features: { plugins: false } });
+  expect(wide).not.toHaveProperty("plugins");
+});
+
+test("a granted plugin missing from the effective config is still stated in the thread table", () => {
+  expect(headlessCodexThreadConfig({ config: { mcp_servers: {} } }, false, undefined, ["computer-use"]))
+    .toMatchObject({ plugins: { "computer-use": { enabled: true } } });
+});
+
 test("a Codex thread approves Viewer and retains optional server approval policy", () => {
   expect(headlessCodexThreadConfig({
     config: {

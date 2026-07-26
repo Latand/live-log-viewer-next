@@ -36,7 +36,20 @@ interface SupersededResponse {
   superseded: true;
 }
 
-type RouteResponse = AnswerResponse | SupersededResponse | ApiError;
+/**
+ * A failed delivery, discriminated by whether the answer actually reached the
+ * pane (issue #697). The two 502s are not the same event: the driver fails
+ * BEFORE the submit, having navigated at most the option cursor, while the
+ * post-send path fails after Enter, with the answer in flight and only the
+ * transcript's confirmation missing. The client cannot tell them apart from the
+ * status alone, and telling the operator "the answer was sent" when it never
+ * was is the exact class of lie this issue is about.
+ */
+interface DeliveryFailure extends ApiError {
+  delivered: boolean;
+}
+
+type RouteResponse = AnswerResponse | SupersededResponse | DeliveryFailure | ApiError;
 
 const locks = new Map<string, Promise<NextResponse<RouteResponse>>>();
 
@@ -102,9 +115,12 @@ async function deliver(body: AnswerBody): Promise<NextResponse<RouteResponse>> {
     const label = await deliverAnswer(paneIo, target, pending, body);
     const recorded = await confirmAnswered(state.entry, toolUseId);
     if (recorded) return NextResponse.json({ ok: true, answer: recorded || label });
-    return NextResponse.json({ error: `answer was sent, but the transcript did not confirm it: ${screenTail(await paneScreen(target))}` }, { status: 502 });
+    /* Enter was pressed and `deliverAnswer` returned: the answer is in the
+       pane, only the transcript's confirmation is missing. */
+    return NextResponse.json({ error: `answer was sent, but the transcript did not confirm it: ${screenTail(await paneScreen(target))}`, delivered: true }, { status: 502 });
   } catch (error) {
-    if (error instanceof DeliveryError) return NextResponse.json({ error: error.message }, { status: error.status });
+    /* The driver threw before completing the submit — nothing was answered. */
+    if (error instanceof DeliveryError) return NextResponse.json({ error: error.message, delivered: false }, { status: error.status });
     throw error;
   }
 }

@@ -41,7 +41,7 @@ export interface AccountLivenessOptions {
   processIdentity?: (pid: number) => string | null;
 }
 
-interface LivenessProbe {
+export interface LivenessProbe {
   now(): number;
   pidAlive(pid: number): boolean;
   processIdentity(pid: number): string | null;
@@ -56,7 +56,7 @@ export function livenessProbe(options: AccountLivenessOptions = {}): LivenessPro
 }
 
 /** A recorded process is live only while its pid *and* its start identity hold. */
-function identityAlive(identity: ProcessIdentity | null | undefined, probe: LivenessProbe): boolean {
+export function identityAlive(identity: ProcessIdentity | null | undefined, probe: LivenessProbe): boolean {
   if (!identity || !Number.isInteger(identity.pid) || identity.pid <= 0) return false;
   if (!probe.pidAlive(identity.pid)) return false;
   return identity.startIdentity === null || probe.processIdentity(identity.pid) === identity.startIdentity;

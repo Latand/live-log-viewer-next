@@ -134,6 +134,7 @@ export async function reconfigureConversation(
     readOnly: profile?.readOnly ?? null,
     permissionMode: profile?.permissionMode ?? null,
     allowSubagents: profile?.allowSubagents ?? false,
+    plugins: profile?.plugins,
   });
   const deliver = overrides.deliver ?? deliverToTranscriptHost;
   const observedHost = await (overrides.livePaneHost ?? livePaneHost)(filePath);
@@ -362,6 +363,7 @@ export async function resumeConversation(
     model: entry.launchModel ?? entry.model,
     effort: entry.effort,
     allowSubagents: registry.launchProfileForPath(entry.path)?.allowSubagents,
+    plugins: registry.launchProfileForPath(entry.path)?.plugins,
   });
   if (!spec) return failure("this conversation cannot be resumed", 409);
   try {
@@ -643,6 +645,7 @@ export async function deliverConversationMessage(message: ConversationMessage, o
       effort: message.resumeEffort ?? entry.effort,
       ...(typeof message.resumeFast === "boolean" ? { fast: message.resumeFast } : {}),
       allowSubagents: registry.launchProfileForPath(entry.path)?.allowSubagents,
+      plugins: registry.launchProfileForPath(entry.path)?.plugins,
     });
     if (spec) {
       const bundle = materializePayload();
@@ -670,6 +673,7 @@ export async function deliverConversationMessage(message: ConversationMessage, o
       model: root.launchModel ?? root.model,
       effort: root.effort,
       allowSubagents: registry.launchProfileForPath(root.path)?.allowSubagents,
+      plugins: registry.launchProfileForPath(root.path)?.plugins,
     });
     if (!rootSpec) {
       return settle(failure("root session is unavailable for messaging", 409));

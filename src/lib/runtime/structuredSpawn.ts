@@ -788,6 +788,9 @@ async function defaultStartHost(input: StructuredSpawnInput, capability: string)
       effort: profile.effort ?? undefined,
       allowSubagents: profile.allowSubagents,
       mcpServers: profile.mcpServers,
+      /* Plugin grant from the durable profile (issue #687): present only for
+         an operator-launched root session that did not opt out. */
+      plugins: profile.plugins,
       sandbox: profile.readOnly ? "read-only" : "danger-full-access",
       approvalPolicy: profile.permissionMode ?? undefined,
       initialEventCursor,

@@ -52,6 +52,23 @@ test("reconstructs primary/secondary curves across events with window metadata",
   expect(series.weeklyResetsAt).toBe(resetWeek);
 });
 
+test("a weekly-only stream backfills the weekly curve, not the 5h one", () => {
+  // The plan behind issue #606 reports a single 10080-minute window, and it
+  // arrives in the primary slot: the declared length, not the slot, decides.
+  const resetWeek = 1_783_994_379;
+  writeSession("weekly-only.jsonl", "2026-07-08", [
+    { ts: "2026-07-08T15:00:00.000Z", primary: [15, 10080, resetWeek] },
+    { ts: "2026-07-08T17:28:49.000Z", primary: [22, 10080, resetWeek] },
+  ]);
+  const series = collectCodexRateLimitSeries(root, 0);
+  expect(series.weekly.map((s) => s.remaining)).toEqual([85, 78]);
+  expect(series.weeklyWindowSeconds).toBe(10080 * 60);
+  expect(series.weeklyResetsAt).toBe(resetWeek);
+  expect(series.session).toEqual([]);
+  expect(series.sessionWindowSeconds).toBeNull();
+  expect(series.sessionResetsAt).toBeNull();
+});
+
 test("drops events older than the cutoff and dedupes identical timestamps", () => {
   const reset = 1_783_544_991;
   writeSession("a.jsonl", "2026-07-08", [

@@ -11,6 +11,7 @@ import type { Pipeline } from "@/lib/pipelines/types";
 import type { Workflow } from "@/lib/workflows/types";
 
 import { AccessQrButton } from "./AccessQrButton";
+import { CatalogFailureNotice } from "./CatalogFailureNotice";
 import { FlipRow } from "./FlipRow";
 import { Archive, ChevronRight, Loader2 } from "./icons";
 import { LanguageToggle } from "./LanguageToggle";
@@ -31,13 +32,16 @@ interface Props {
   archivedProjects: ReadonlySet<string>;
   selected: string;
   loaded: boolean;
+  /** Consecutive `/api/files` failures (issue #696) — a rail that never loaded
+      says the fetch failed instead of spinning "loading…" indefinitely. */
+  catalogFailures?: number;
   /** Attention clock owned by Viewer — advances when a stalled entry crosses
       its TTL, so the rail badges expire together with the queue. */
   now: number;
   onSelect: (project: string) => void;
 }
 
-export function ProjectRail({ files, projectCatalog, pipelines, workflows, archivedProjects, selected, loaded, now, onSelect }: Props) {
+export function ProjectRail({ files, projectCatalog, pipelines, workflows, archivedProjects, selected, loaded, catalogFailures = 0, now, onSelect }: Props) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
   const [query, setQuery] = useState("");
@@ -172,7 +176,13 @@ export function ProjectRail({ files, projectCatalog, pipelines, workflows, archi
           </>
         ) : null}
         {!activeRows.length && !archivedRows.length ? (
-          loaded ? (
+          /* Issue #696: an unreachable server never reads as "still loading" or
+             as "nothing found" — an empty rail with failures behind it is an
+             unconfirmed rail, at any point in the session, not only before the
+             first success. */
+          catalogFailures > 0 ? (
+            <CatalogFailureNotice failures={catalogFailures} size="inline" />
+          ) : loaded ? (
             <div className="px-3 py-4 text-center text-[12px] text-muted">{t("common.nothingFound")}</div>
           ) : (
             <div className="flex items-center justify-center gap-2 px-3 py-4 text-[12px] text-muted">

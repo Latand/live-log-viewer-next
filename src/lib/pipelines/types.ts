@@ -161,6 +161,20 @@ export type PipelineCursorState = "pending" | "spawning" | "running" | "reviewin
 
 export type PipelineState = "draft" | "provisioning" | "running" | "needs_decision" | "paused" | "completed" | "closed";
 
+/** A stage host a close asked the runtime to kill without confirming that it
+    died (#670). Durable, so the possible survivor stays addressable: the board
+    keeps showing the closed lane until a later close settles it. */
+export type PipelineUnconfirmedHost = {
+  stageId: string;
+  attempt: number;
+  conversationId: string | null;
+  agentPath: string | null;
+  paneId: string | null;
+  operationId: string | null;
+  detail: string;
+  at: string;
+};
+
 export type PipelineCreationIntent = {
   kind: "task-spawn";
   taskId: string;
@@ -192,13 +206,24 @@ export type Pipeline = {
   cursor: { stageId: string; state: PipelineCursorState; input: string | null; activatedBy: PipelineEdgeActivation | null } | null;
   state: PipelineState;
   pausedState: Exclude<PipelineState, "paused" | "draft"> | null;
+  /** When the pipeline was last paused, and when it was last resumed. Durable
+      because they are the only record a pause/resume transition leaves: the
+      lifecycle journal (#686) derives its `stage_paused`/`stage_resumed` events
+      from them, and a key built on the timestamp is what lets a second pause
+      after a resume be a genuinely new event instead of a replay of the first. */
+  pausedAt?: string | null;
+  resumedAt?: string | null;
   stateDetail: string | null;
   srcPath: string | null;
   srcConversationId: string | null;
   createdAt: string;
   closedAt: string | null;
   hiddenAt?: string | null;
-  /** Read-model marker set when a hidden container is projected for a pinned member. */
+  /** Hosts the last close could not confirm terminated. Present only while one
+      is outstanding; a close that confirms every kill clears it. */
+  unconfirmedHosts?: PipelineUnconfirmedHost[];
+  /** Read-model marker set when a hidden container is projected for a pinned
+      member, or for a closed lane still holding an unconfirmed host. */
   restored?: boolean;
   /** Durable user pin for the desktop board's world-space pipeline group. */
   pos?: { x: number; y: number };
@@ -273,6 +298,12 @@ export type PatchPipelineRequest = {
   index?: number;
   stageIds?: string[];
   toIndex?: number;
+  /** for close: dismiss the hosts a previous close could not confirm, once the
+      operator has judged them (a recycled pane id can look alive forever, so an
+      unidentifiable host would otherwise pin the closed lane to the board).
+      Only unconfirmed hosts are dismissed; one proven to be still running still
+      refuses the close. */
+  acknowledgeHosts?: boolean;
   /** for set-edge (#353): rewires `stageId`'s pass or fail edge. `to: null`
       clears it (a cleared pass edge makes the stage terminal). A stage that has
       already run keeps its pass edge frozen (history names its successor); a

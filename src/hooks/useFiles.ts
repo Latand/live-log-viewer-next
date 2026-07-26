@@ -25,6 +25,9 @@ const FILES_DEBOUNCE_MS = 400;
 const FILES_REVISION_RETRY_MS = 1_000;
 const FILES_GENERATION_RETRY_MS = 25;
 const FILES_GENERATION_RETRY_MAX_MS = 1_000;
+/** Failed initial hydration: first retry, then doubling to the ceiling (#696). */
+const FILES_HYDRATE_RETRY_MS = 1_000;
+const FILES_HYDRATE_RETRY_MAX_MS = 30_000;
 
 export interface FilesData {
   files: FileEntry[];
@@ -45,10 +48,15 @@ export interface FilesData {
   /** `spawn:<launchId>` → canonical conversation id (issue #569). */
   launchRoutes: Record<string, string>;
   loaded: boolean;
+  /** Consecutive `/api/files` failures since the last success (issue #696).
+      Non-zero means everything above is unconfirmed: an empty catalog is a
+      failed fetch, and the UI must say so instead of presenting the affirmative
+      "nothing is running right now" / "No logs yet" idle copy. */
+  catalogFailures: number;
 }
 
 const HEALTHY_SYSTEM = { tmux: { status: "healthy" as const } };
-const EMPTY: FilesData = { files: [], pinOverlayPaths: [], requestScope: null, projectCatalog: [], projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, launchRoutes: {}, loaded: false };
+const EMPTY: FilesData = { files: [], pinOverlayPaths: [], requestScope: null, projectCatalog: [], projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, launchRoutes: {}, loaded: false, catalogFailures: 0 };
 
 export function filesApiUrl(_project?: string | null, pinnedPath?: string | null): string {
   const params: string[] = [];
@@ -89,6 +97,10 @@ export interface FilesClientCache {
   dispose(): void;
 }
 
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
 function equalValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
@@ -103,7 +115,7 @@ function patchRows<T>(previous: readonly T[], incoming: readonly T[], keyOf: (va
 
 function parsedFilesData(parsed: FilesResponse | FileEntry[], requestScope: string): FilesData {
   if (Array.isArray(parsed)) {
-    return { files: parsed, pinOverlayPaths: [], requestScope, projectCatalog: [], projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, launchRoutes: {}, loaded: true };
+    return { files: parsed, pinOverlayPaths: [], requestScope, projectCatalog: [], projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, launchRoutes: {}, loaded: true, catalogFailures: 0 };
   }
   return {
     files: parsed.files ?? [],
@@ -120,6 +132,7 @@ function parsedFilesData(parsed: FilesResponse | FileEntry[], requestScope: stri
     conversationAliases: parsed.conversationAliases ?? {},
     launchRoutes: parsed.launchRoutes ?? {},
     loaded: true,
+    catalogFailures: 0,
   };
 }
 
@@ -166,6 +179,13 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
      roll an applied edit back. `pipeline: null` hides a locally deleted draft. */
   const pipelineOverlays = new Map<string, { pipeline: Pipeline | null; minGeneration: number }>();
   let serverPipelines: readonly Pipeline[] = EMPTY.pipelines;
+  /* Consecutive failed `/api/files` attempts (issue #696). It lives beside the
+     snapshot rather than inside it: a failure produces no new representation,
+     so it has to be composed onto whatever each scope last certified. */
+  let catalogFailures = 0;
+
+  const withCatalogFailures = (data: FilesData): FilesData =>
+    data.catalogFailures === catalogFailures ? data : { ...data, catalogFailures };
 
   const pipelinesWithOverlays = (pipelines: readonly Pipeline[]): Pipeline[] => {
     if (!pipelineOverlays.size) return [...pipelines];
@@ -190,7 +210,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
   const exactScopeRepresentation = (requestScope: string): FilesData => {
     const representation = representations.get(requestScope)?.data
       ?? (snapshot.requestScope === requestScope ? snapshot : { ...EMPTY, requestScope });
-    return withPipelineOverlays(representation);
+    return withCatalogFailures(withPipelineOverlays(representation));
   };
 
   const exactScopeSnapshot = (pinnedPath?: string | null): FilesData =>
@@ -200,11 +220,21 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     if (disposed) return;
     for (const [listener, scope] of listeners) {
       if (requestScope !== undefined) {
-        if (requestScope === scope) listener(snapshot);
+        if (requestScope === scope) listener(withCatalogFailures(snapshot));
         continue;
       }
       listener(exactScopeRepresentation(scope));
     }
+  };
+
+  /* Every settled `/api/files` attempt lands here. The count is the only thing
+     that lets a consumer tell a failed fetch from an idle installation. */
+  const noteCatalogOutcome = (ok: boolean) => {
+    if (disposed) return;
+    const next = ok ? 0 : catalogFailures + 1;
+    if (next === catalogFailures) return;
+    catalogFailures = next;
+    publish();
   };
 
   const hasSubscriber = (requestScope: string): boolean =>
@@ -255,6 +285,26 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
   };
 
   const performRevalidate = async (
+    pinnedPath?: string | null,
+    revision?: number,
+    requiredGeneration?: number,
+    logicalGeneration?: number,
+    completionRetryAttempt = 0,
+    completionRetry?: CompletionRetry,
+  ): Promise<FilesData> => {
+    try {
+      const result = await runRevalidate(pinnedPath, revision, requiredGeneration, logicalGeneration, completionRetryAttempt, completionRetry);
+      noteCatalogOutcome(true);
+      return result;
+    } catch (error) {
+      /* An aborted in-flight request was superseded by a newer one — that is
+         not the server failing, so it must not degrade the catalog state. */
+      if (!isAbortError(error)) noteCatalogOutcome(false);
+      throw error;
+    }
+  };
+
+  const runRevalidate = async (
     pinnedPath?: string | null,
     revision?: number,
     requiredGeneration?: number,
@@ -484,7 +534,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     listeners.clear();
   };
 
-  return { read: () => snapshot, readScope: exactScopeSnapshot, revalidate, subscribe, applyPipeline, revertPipeline, dispose };
+  return { read: () => withCatalogFailures(snapshot), readScope: exactScopeSnapshot, revalidate, subscribe, applyPipeline, revertPipeline, dispose };
 }
 
 const defaultFilesFetcher: FilesFetcher = (input, init) => fetch(input, init);
@@ -570,13 +620,24 @@ export function useFiles(_project?: string | null, pinnedPath?: string | null): 
       return result;
     };
     let initialRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    let hydrateAttempt = 0;
     const hydrateInitial = async () => {
       const hydrated = await load();
-      if (!alive || hydrated) return;
+      if (!alive) return;
+      if (hydrated) {
+        hydrateAttempt = 0;
+        return;
+      }
+      /* Bounded backoff (issue #696). The old flat 1s retry hammered a dead
+         server forever — measured at 32 requests per 30s — while the rail still
+         claimed to be loading. The delay now doubles to a 30s ceiling, and the
+         failure itself reaches the operator through `catalogFailures`. */
+      const delay = Math.min(FILES_HYDRATE_RETRY_MAX_MS, FILES_HYDRATE_RETRY_MS * 2 ** Math.min(hydrateAttempt, 5));
+      hydrateAttempt += 1;
       initialRetryTimer = setTimeout(() => {
         initialRetryTimer = null;
         void hydrateInitial();
-      }, FILES_REVISION_RETRY_MS);
+      }, delay);
     };
     void hydrateInitial();
 
@@ -599,7 +660,19 @@ export function useFiles(_project?: string | null, pinnedPath?: string | null): 
 
     /* Flow, workflow and task mutations refresh out of band: strips and
        cards must not sit on stale state for up to a full poll interval. */
-    const onChanged = () => void load();
+    /* Also the operator's explicit "retry" on the degraded catalog state: while
+       the first hydration is still backing off, a change event cancels the
+       pending wait and starts a fresh attempt now (issue #696). */
+    const onChanged = () => {
+      if (initialRetryTimer) {
+        clearTimeout(initialRetryTimer);
+        initialRetryTimer = null;
+        hydrateAttempt = 0;
+        void hydrateInitial();
+        return;
+      }
+      void load();
+    };
     window.addEventListener(FLOWS_CHANGED_EVENT, onChanged);
     window.addEventListener(PIPELINES_CHANGED_EVENT, onChanged);
     window.addEventListener(WORKFLOWS_CHANGED_EVENT, onChanged);

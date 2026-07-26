@@ -1,14 +1,16 @@
 import { runtimeHostClient } from "@/lib/runtime/client";
-import { runtimeEventsEnabled } from "@/lib/runtime/flags";
+import { runtimeEventsEnabled, RUNTIME_PLANE_ABSENT } from "@/lib/runtime/flags";
 import { runtimeCursor, runtimeEventStream } from "@/lib/runtime/sse";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request): Promise<Response> {
-  if (!runtimeEventsEnabled()) return Response.json({ error: "runtime events are disabled" }, { status: 503 });
+  /* Same plane-absent code the snapshot route sends: a deployment with no
+     runtime plane is a durable fact, not a reconnectable outage. */
+  if (!runtimeEventsEnabled()) return Response.json({ error: "runtime events are disabled", code: RUNTIME_PLANE_ABSENT }, { status: 503 });
   const client = runtimeHostClient();
-  if (!client) return Response.json({ error: "runtime host socket is unavailable" }, { status: 503 });
+  if (!client) return Response.json({ error: "runtime host socket is unavailable", code: RUNTIME_PLANE_ABSENT }, { status: 503 });
   const url = new URL(request.url);
   const header = request.headers.get("last-event-id");
   let after: number;

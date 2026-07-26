@@ -10,7 +10,7 @@ import { LIMITS_RATE_LIMITED_REASON, LIMITS_REAUTH_REQUIRED_REASON, type EngineL
 import { AccountsPanel } from "./AccountsPanel";
 import { BurndownPanel } from "./BurndownPanel";
 import { ChevronDown, Loader2 } from "./icons";
-import { formatResetClock as fmtResetAt, formatResetEta as fmtEta, localeBcp47 as bcp47 } from "./rateLimit";
+import { formatResetClock as fmtResetAt, formatResetEta as fmtEta, localeBcp47 as bcp47, windowLabel } from "./rateLimit";
 import { engineTintOf, fmtAge } from "./utils";
 
 const POLL_MS = 60_000;
@@ -331,8 +331,8 @@ function EngineLimitsBlock({
             }}
             className={`block w-full px-3.5 pt-0.5 text-left hover:bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${visibleFailureReason ? "pb-1.5" : "pb-3"}`}
           >
-            <LimitRow label={t("limits.5h")} window={accountLimits!.session} engineColor={tint.color} now={now} />
-            <LimitRow label={t("limits.week")} window={accountLimits!.weekly} engineColor={tint.color} now={now} />
+            <LimitRow label={windowLabel(t, "session", accountLimits!.session?.windowMinutes)} window={accountLimits!.session} engineColor={tint.color} now={now} />
+            <LimitRow label={windowLabel(t, "weekly", accountLimits!.weekly?.windowMinutes)} window={accountLimits!.weekly} engineColor={tint.color} now={now} />
           </button>
         ) : visibleFailureReason ? null : (
           <div className="px-3.5 pb-3 pt-0.5 text-[10px] text-muted">{accounts.status === "loading" || identityPending ? t("limits.accountLoading") : t("limits.noDataYet")}</div>

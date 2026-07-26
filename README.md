@@ -120,10 +120,11 @@ development, `bun dev` runs the app with hot reload (it needs a high OS
 file-watch limit for large home directories).
 
 The gated SQLite registry modes require the Viewer server to run on Bun.
-Structured host mode also requires Bun on macOS so process ownership uses the
-kernel's microsecond start token. The Docker runtime and `agent-log-viewer` CLI
-select Bun automatically whenever `LLV_AGENT_REGISTRY_SQLITE` or
-`LLV_STRUCTURED_HOSTS` is enabled. Local source checkouts should use the
+Structured host mode requires Bun too — the runtime journal runs on `bun:sqlite`,
+and on macOS process ownership uses the kernel's microsecond start token. Since
+structured hosting is on by default, the Docker runtime and `agent-log-viewer`
+CLI select Bun unless `LLV_STRUCTURED_HOSTS=0` rolls it back and
+`LLV_AGENT_REGISTRY_SQLITE` is off. Local source checkouts should use the
 explicit `bun --bun` command above.
 
 ### Spawn transport
@@ -134,6 +135,10 @@ chosen by capability: a deployment that declares `LLV_RUNTIME_HOST_SOCKET`
 spawns structured, and one without a host still spawns through tmux instead of
 failing. Structured hosting itself is on by default; `LLV_STRUCTURED_HOSTS=0`,
 `LLV_RUNTIME_EVENTS=0`, and `NEXT_PUBLIC_RUNTIME_UI=0` are rollback switches.
+Each of the three sends the implicit choice back to tmux, so reaching for one
+during an incident never costs the ability to spawn. They accept the spellings
+an env file actually produces — `0`, `" 0 "`, `'0'`, `false`, `off`, `no` — and
+an unset variable means the default is on.
 
 `LLV_SPAWN_TRANSPORT=tmux|structured` overrides the choice. An explicit
 `structured` without a reachable host returns a gap naming what is missing
@@ -219,8 +224,18 @@ The MCP surface includes:
 - tasks: `create_task`, `list_tasks`, `get_task`, and `update_task`;
 - operator/runtime reads: `operator_snapshot`, `deployment_status`, and
   `resources`;
+- agent liveness and lifecycle: `agent_activity` for the per-conversation
+  `{lastRecordAt, turnState, host alive/gone, stalledForMs}` stall snapshot, and
+  `lifecycle_events` for the durable lifecycle journal (`mode: "query"`, by
+  project/pipeline/conversation and cursor) and its bounded relay digest
+  (`mode: "digest"`, terminal events immediately, routine progress coalesced and
+  rate-limited to one per five minutes per subscriber);
 - agent/runtime mutations: `spawn_agent`, `conversation_migration`, and
-  `deploy_exact_sha`.
+  `deploy_exact_sha`;
+- the operator's attention: `request_attention`, which offers to move their
+  Viewer to a target and waits for their answer. It only asks — nothing moves
+  until they agree on a device, and the request names the root agent by an
+  identity the server resolves, never one the caller supplies.
 
 Every call requires a stable `clientRequestId`. Reusing that id with the same
 arguments returns the durable result as a replay. Reusing it with different

@@ -420,3 +420,29 @@ test("conversation prompts stay in the search-only metadata path", () => {
     firstPrompt: "Investigate cobalt orchard",
   });
 });
+
+test("a Codex description carries the provider-fork source from the first session_meta row (#708)", () => {
+  const sourceId = "019f9557-0000-\x37000-8000-00000000aaaa";
+  const forkId = "019f9c11-0000-\x37000-8000-00000000bbbb";
+  const root = path.join(SANDBOX, "codex-fork-metadata");
+  const fork = path.join(root, `rollout-${forkId}.jsonl`);
+  const plain = path.join(root, `rollout-${sourceId}.jsonl`);
+  fs.mkdirSync(root, { recursive: true });
+  /* A fork is a full snapshot: its own header comes first and the source
+     conversation's replayed `session_meta` follows. The description must report
+     row one, or migration reconciliation loses the edge back to the source. */
+  fs.writeFileSync(fork, [
+    JSON.stringify({ type: "session_meta", payload: { id: forkId, forked_from_id: sourceId, cwd: "/repo/fork-metadata" } }),
+    JSON.stringify({ type: "session_meta", payload: { id: sourceId, cwd: "/repo/fork-metadata" } }),
+    "",
+  ].join("\n"));
+  fs.writeFileSync(plain, JSON.stringify({ type: "session_meta", payload: { id: sourceId, cwd: "/repo/fork-metadata" } }) + "\n");
+
+  expect(describe("codex-sessions", root, fork, fs.statSync(fork))).toMatchObject({
+    nativeForkSourceThreadId: sourceId,
+    nativeParentThreadId: null,
+  });
+  /* An ordinary rollout reports a resolved absence, never an absent field: a
+     consumer distinguishes "read, no fork" from "nobody has read this yet". */
+  expect(describe("codex-sessions", root, plain, fs.statSync(plain)).nativeForkSourceThreadId).toBeNull();
+});

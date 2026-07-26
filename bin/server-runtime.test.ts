@@ -3,7 +3,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { expect, test } from "bun:test";
 
+import { structuredHostsEnabled as structuredHostsEnabledInApp } from "@/lib/runtime/flags";
+
 import {
+  structuredHostsEnabled as structuredHostsEnabledInLauncher,
   viewerServerBunRuntime,
   viewerChildProcessOptions,
   WAKATIME_CREDENTIAL_ENV,
@@ -38,6 +41,41 @@ test("the packaged helper makes the same structured-runtime choice under Node", 
 
   expect(probe.exitCode).toBe(0);
   expect(probe.stdout.toString()).toBe("/verified/bun");
+});
+
+/* Structured hosting is on by default, and it genuinely needs Bun (`bun:sqlite`
+   journal, kernel start tokens on macOS). A launcher that still keyed on a
+   literal "1" would run the default configuration under Node — where startup
+   adoption throws the Darwin runtime requirement and the release controllers
+   never start. */
+test("an unset structured-hosts variable still selects Bun for the launcher", () => {
+  expect(viewerServerBunRuntime({
+    env: {},
+    versions: { node: "20.9.0" },
+    execPath: "/usr/bin/node",
+  })).toBe("bun");
+});
+
+/* `bin/` is plain JS outside the TS build, so its predicate is a copy. This
+   pins the copy to the original: one truth table, both readers. */
+test.each([
+  [undefined],
+  [""],
+  ["1"],
+  ["0"],
+  [" 0 "],
+  ["\"0\""],
+  ["'0'"],
+  ["false"],
+  ["OFF"],
+  ["no"],
+  ["yes"],
+] as const)("the launcher mirror and the app definition agree on %p", (value) => {
+  const env = value === undefined ? {} : { LLV_STRUCTURED_HOSTS: value };
+  expect(structuredHostsEnabledInLauncher(env)).toBe(structuredHostsEnabledInApp(env));
+  // …and the launcher's Bun selection follows that one answer.
+  expect(viewerServerBunRuntime({ env, versions: { node: "20.9.0" }, execPath: "/usr/bin/node" }) !== null)
+    .toBe(structuredHostsEnabledInApp(env));
 });
 
 test("legacy Node mode stays available when Bun-only features are disabled", () => {

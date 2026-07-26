@@ -88,6 +88,9 @@ export const en = {
   "dash.emptyHint": "Open the switchboard in the bottom-right corner and click a conversation — it will appear here",
   "dash.viewScheme": "scheme",
   "dash.viewList": "conversations",
+  "dash.viewSchemeMenu": "View: scheme",
+  "dash.viewListMenu": "View: conversations",
+  "dash.viewMenuGroup": "Board view",
   "dash.hiddenShelf": "Hidden",
 
   // ProjectTrash
@@ -265,7 +268,7 @@ export const en = {
   "composer.sentPaths": "sent {count} path(s)",
   "composer.failedInterrupt": "couldn't interrupt",
   "composer.escapeSent": "sent Escape — agent interrupted",
-  "composer.spawnAria": "Launch an agent with a prompt in tmux",
+  "composer.spawnAria": "Launch an agent with a prompt",
   "composer.resolvingAria": "Message the existing agent — delivery starts after its host is resolved",
   "composer.sendAria": "Send a message to the agent in tmux {target}",
   "composer.sendStructuredAria": "Send a message through the structured runtime host",
@@ -301,7 +304,10 @@ export const en = {
   "composer.deliveredEcho": "Delivered — appearing in the feed",
   "composer.retrySend": "Retry send",
   "composer.placeholderRelay": "type — I'll relay through the root session…",
-  "composer.placeholderSpawn": "prompt — the agent will start in tmux…",
+  /* Issue #702: no transport promise. #685 inverted the rollout gates, so a
+     deployment that declares a runtime host spawns structured and pane-less —
+     the placeholder used to name a tmux session the spawn never opens. */
+  "composer.placeholderSpawn": "prompt — the agent will start…",
   "composer.placeholderResolving": "message the agent — reconnecting to its session…",
   "composer.placeholderSend": "message the agent…",
   "composer.textAria": "Text for the agent",
@@ -311,7 +317,10 @@ export const en = {
   "composer.optionsShow": "Show message options",
   "composer.optionsHide": "Hide message options",
   "composer.titleRelay": "relayed through the branch's root session",
-  "composer.titleSpawnResumed": "new tmux window with the resumed agent",
+  /* Issue #702: shown on the resume chip BEFORE the launch, so it cannot name a
+     transport. Under a structured deployment a resume comes back with no target
+     and opens no window at all (see spawnCopy.test.ts). */
+  "composer.titleSpawnResumed": "starts a fresh agent session that continues this conversation",
   "composer.root": "root",
   "composer.interruptAria": "Interrupt the agent (Escape)",
   "composer.interruptTitle": "send Escape to the agent pane",
@@ -617,6 +626,27 @@ export const en = {
   "sound.off": "Sound notifications off",
   "sound.mute": "Mute sound notifications",
   "sound.unmute": "Enable sound notifications",
+  "sound.settings": "Sound levels",
+  "sound.cueVolume": "Notification cues",
+  "sound.ambient": "Ambient bed during calls",
+  "sound.ambientVolume": "Ambient level",
+  "sound.ambientHint": "Plays quietly while a voice call is connected, and ducks under speech.",
+
+  // KeepAwakeControl — the phone-only screen wake lock (issue #712). Every
+  // caption states what is true right now; only `active` says the screen is
+  // held, and it is the one that names the battery cost.
+  "keepAwake.label": "Keep screen awake",
+  "keepAwake.enableAria": "Keep the screen awake on this device",
+  "keepAwake.disableAria": "Let the screen sleep on this device",
+  "keepAwake.off": "The screen sleeps on this device's usual timer.",
+  "keepAwake.requesting": "Asking the browser…",
+  "keepAwake.active": "Screen stays awake while this tab is visible. Uses more battery.",
+  "keepAwake.waiting": "Paused while this tab is hidden. Resumes when you come back.",
+  "keepAwake.interrupted": "The system released the lock. Turn this off and on to ask again.",
+  "keepAwake.blocked": "The browser refused the request. The screen is not held.",
+  "keepAwake.failed": "The request failed. The screen is not held.",
+  "keepAwake.insecure": "Needs an HTTPS address. Over plain HTTP the screen cannot be held.",
+  "keepAwake.unsupported": "This browser has no screen wake lock.",
 
   // MicButton
   "mic.stopRecognize": "Stop recording and transcribe",
@@ -708,6 +738,16 @@ export const en = {
   "question.approve": "Approve",
   "question.reject": "Reject",
   "question.ownAnswer": "Your own answer…",
+  // Delivery failure (issue #697) — translated at the boundary, never the
+  // server's own exception text.
+  "question.deliveryFailed": "Delivery failed",
+  "question.failedChoice": "not delivered",
+  "question.retryAnswer": "Retry",
+  "question.errorNotRunning": "the agent is no longer running, so nothing was delivered",
+  "question.errorMoved": "the agent has moved on from this question",
+  "question.errorUnconfirmed": "the answer was sent, but the agent never confirmed it",
+  "question.errorNotDelivered": "the agent's screen did not respond as expected, so the answer was not delivered",
+  "question.errorRejected": "the viewer could not build a valid answer",
 
   // InboxImage
   "inbox.deleted": "deleted from disk",
@@ -726,6 +766,8 @@ export const en = {
   "feed.agentEnded": "agent finished",
   "feed.copyCode": "Copy code",
   "feed.copyMd": "Copy message (Markdown)",
+  "feed.voiceTurn": "Voice",
+  "feed.voiceContext": "Call transcript",
   "feed.speak": "Read answer aloud (AI-generated voice)",
   "feed.stopSpeaking": "Stop reading aloud",
   "tts.read": "Read answer aloud",
@@ -1040,6 +1082,7 @@ export const en = {
   "subagentTray.unfold": "Restore {name} to a full card",
   "subagentTray.state.running": "working",
   "subagentTray.state.live": "live",
+  "subagentTray.state.silent": "alive but silent",
   "subagentTray.state.closed": "idle",
   "subagentTray.state.dead": "unavailable",
 
@@ -1142,8 +1185,8 @@ export const en = {
   "pipelineGroup.openHistory": "Open pipeline history for {task}",
 
   // pipeline stage placeholders + template picker (#196)
-  "pipelineSlot.paneAria": "Planned stage {role}",
-  "pipelineSlot.completedAria": "Completed stage {role} — open to review",
+  "pipelineSlot.paneAria": "Planned stage {title}",
+  "pipelineSlot.completedAria": "Completed stage {title} — open to review",
   "pipelineSlot.openTranscript": "Open conversation",
   "pipelineSlot.stageOf": "stage {k}/{n}",
   "pipelineSlot.promptLabel": "Stage prompt",
@@ -1155,6 +1198,11 @@ export const en = {
   "pipelineSlot.reviewHint": "Review cycle over the previous stage — its rounds land here.",
   "pipelineSlot.frozen": "This stage already ran — its configuration is locked.",
   "pipelineSlot.saved": "Saved",
+  // settled stages collapsed to one status row (#658)
+  "pipelineSlot.rowAria": "Finished stage {title}",
+  "pipelineSlot.reasonSkipped": "Skipped by the operator — the chain moved on",
+  "pipelineSlot.rowExpand": "Show the full stage card",
+  "pipelineSlot.rowCollapse": "Collapse back to the status row",
   "pipelineTemplates.planBuildReview": "Plan → Build → Review",
   "pipelineTemplates.buildReview": "Build → Review",
   "pipelineTemplates.buildVerify": "Build → Verify",
@@ -1365,6 +1413,10 @@ export const en = {
   "limits.stale": "data is stale: {stale}",
   "limits.5h": "5h",
   "limits.week": "Week",
+  // Window labels for a horizon the provider declares itself (issue #606).
+  "limits.windowMinutes": "{n}m",
+  "limits.windowHours": "{n}h",
+  "limits.windowDays": "{n}d",
   "limits.accountsOpenAria": "Codex accounts — switch or add",
   "limits.noDataYet": "no data yet",
   "limits.rateLimited": "Provider is rate-limiting requests.",
@@ -1381,6 +1433,7 @@ export const en = {
   "burndown.loading": "Loading history…",
   "burndown.failed": "Couldn't load history.",
   "burndown.empty": "No history yet — the chart fills in as quota is sampled.",
+  "burndown.windowUnreported": "This plan reports no {window} window, so there is nothing to chart here.",
   "burndown.buildsFrom": "history builds from {date}",
   "burndown.fast": "{pct}% ahead of pace — burning fast",
   "burndown.slow": "{pct}% under pace — room to spare",
@@ -1478,6 +1531,13 @@ export const en = {
   "overview.quiet": "quiet · last activity {age}",
   "overview.empty": "No logs yet",
 
+  // Catalog fetch failure (issue #696) — never the idle empty-state copy
+  "catalog.unreachable": "catalog unavailable",
+  "catalog.errorTitle": "Couldn't load the session catalog",
+  "catalog.errorBody": "The viewer server did not answer, so what is running is unknown.",
+  "catalog.retry": "Retry",
+  "catalog.attempts": { one: "{count} failed attempt", other: "{count} failed attempts" },
+
   // OrchestratorChatButton
   "orch.chat": "Orchestrator",
   "orch.open": "Open the orchestrator chat",
@@ -1570,7 +1630,9 @@ export const en = {
   "task.signalSent": "sent {signal} to PID {pid}",
   "task.killRequested": "kill requested",
   "task.confirmKill": "Really kill PID {pid}?",
-  "task.killPid": "Kill {pid}",
+  /* Issue #700: compact confirmations name the conversation, not the PID. */
+  "task.confirmKillNamed": "Stop {name}?",
+  "task.confirmKillUntitled": "this agent",
   "task.confirmKillYes": "Yes, kill",
   "task.stopAria": "Stop process PID {pid}",
   "task.kill": "Kill",
@@ -1766,4 +1828,52 @@ export const en = {
   "voice.you": "You",
   "voice.agent": "Agent",
   "voice.progress": "Progress",
+  "voice.retry": "Try again",
+  "voice.ended": "Voice conversation ended",
+  "voice.elapsed": "Call duration",
+  "voice.micLevel": "Microphone level",
+  "voice.micMute": "Mute microphone",
+  "voice.micUnmute": "Unmute microphone",
+  "voice.outputMute": "Silence the agent",
+  "voice.outputUnmute": "Unsilence the agent",
+
+  /* The persistent root-conversation overlay (#691) and the focus handoff it
+     surfaces (#688). */
+  "overlay.title": "Your agent",
+  "overlay.popOut": "Pop out into its own window",
+  "overlay.dock": "Dock back into the page",
+  "overlay.stop": "Stop",
+  "overlay.composer": "Message your agent",
+  "overlay.send": "Send",
+  "overlay.state.idle": "Idle",
+  "overlay.state.listening": "Listening",
+  "overlay.state.speaking": "Speaking",
+  "overlay.state.working": "Working",
+  "overlay.continuedFrom": "Continued from earlier",
+  "overlay.continuedFromHint": "Open the previous session",
+  "overlay.newTurns": { one: "{count} new", other: "{count} new" },
+  "overlay.moreUpdates": { one: "+{count} update", other: "+{count} updates" },
+  "overlay.snap.rail": "Watching",
+  "overlay.snap.half": "Half height",
+  "overlay.snap.full": "Full height",
+  "overlay.snapAria": "Conversation sheet height",
+  "overlay.computerUse": "Computer Use granted",
+  "overlay.permission": "Waiting for permission",
+
+  "attention.willShow": "It will bring it into view.",
+  "attention.willOpen": "It will open it.",
+  "attention.accept": "Take me there",
+  "attention.acceptOpen": "Open it",
+  "attention.preview": "Preview",
+  "attention.decline": "Not now",
+  "attention.return": "Back to where you were",
+  "attention.returnLine": "Go back to where you were",
+  "attention.approximate": "That is gone now — this is where it was.",
+  "attention.followedElsewhere": "Followed on another device",
+  "attention.autoFollow": "Auto-follow is on",
+  "attention.autoFollowRevoke": "Turn auto-follow off",
+  "attention.previewClose": "Close the preview",
+  "attention.refused": "That did not go through — here is where the request stands now.",
+  "attention.lostTarget": "There was nowhere to take you — that is gone from the board. The request is closed.",
+  "attention.refusedDismiss": "Dismiss",
 } satisfies Dictionary;

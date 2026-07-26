@@ -23,7 +23,7 @@ export function didStructuredHostStartupFail(): boolean {
 export function structuredStartupAxis(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): "ready" | "failed" | "pending" | null {
-  if (!structuredHostsEnabled(env as NodeJS.ProcessEnv)) return null;
+  if (!structuredHostsEnabled(env)) return null;
   const failed = startupStore.__llvStructuredHostStartupFailed;
   if (failed === undefined) return "pending";
   return failed ? "failed" : "ready";

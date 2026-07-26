@@ -23,12 +23,15 @@ import { pushTaskToast } from "@/components/tasks/taskToast";
 import { cleanTitle } from "@/components/utils";
 import { taskDeliveryText } from "@/lib/tasks/helpers";
 
-import { compactPipelineLayoutFlows, compactPipelineOpenTarget, pipelineAnnouncement, pipelineLinkedTasks, pipelineStripByPath, renderableFlowIds } from "@/components/pipelines/pipelineModel";
+import { compactPipelineLayoutFlows, compactPipelineOpenTarget, pipelineAnnouncement, pipelineLinkedTasks, pipelineStageByAgentPath, pipelineStripByPath, renderableFlowIds, stagePaneTitleOf } from "@/components/pipelines/pipelineModel";
+import { focusHandoffBus } from "@/components/attention/focusHandoffBus";
+import { INSPECT_ZOOM } from "@/components/attention/navigate";
 import { BulkActionBar } from "./BulkActionBar";
+import { buildFocusFrameIndex, stageAnchorAliases } from "./focusFrames";
 import { EdgeChips } from "./EdgeChips";
 import { nodesInRect, pruneSelection, selectionBBox } from "./lasso";
 import { resolveExpandedNode } from "./expandedNode";
-import { autoEditTokenFor, clearStaleRename, requestRename, type RenameRequest } from "./renameRequest";
+import { autoEditTokenFor, clearStaleRename, requestRename, titleUnderRename, type RenameRequest } from "./renameRequest";
 import { currentWorkRect, currentWorkRects, rectUnion } from "./currentWork";
 import { buildSchemeLayout } from "./layout";
 import { Minimap, stackDotsFor, type StackDot } from "./Minimap";
@@ -354,6 +357,10 @@ export function SchemeBoard({
      stage's node. Review-loop current stages resolve to null here — their
      FlowStrip owns that slot — so the two controls never stack. */
   const pipelineStrips = useMemo(() => pipelineStripByPath(pipelines), [pipelines]);
+  /* Which stage each live transcript runs (#658) — the same index the board's
+     nodes read, so a stage pane is named identically on the board and in the
+     full-window overlay it expands into. */
+  const stagePaneByPath = useMemo(() => pipelineStageByAgentPath(pipelines), [pipelines]);
 
   /* One conversation expanded full-window at a time. React state only — never
      persisted, gone on reload; the board underneath stays mounted, so camera,
@@ -713,6 +720,7 @@ export function SchemeBoard({
     manualNonce,
     glideBy,
     glideFrame,
+    glideToCamera,
   } = useSchemeCamera({
     project,
     layout,
@@ -735,6 +743,37 @@ export function SchemeBoard({
     onZoomKey: navZoomRef,
     onFit: announceFit,
   });
+
+  /* #688: the board half of a focus handoff. The index is rebuilt from the
+     layout on every relayout on purpose — an accepted request resolves its
+     anchor against the board as it is NOW, never against the rect recorded when
+     the request was raised. The map instance stays out of it: a phone's
+     full-screen map is a transient overlay, not the surface a handoff lands on. */
+  const stageAliases = useMemo(() => stageAnchorAliases(pipelines), [pipelines]);
+  const focusIndex = useMemo(
+    () => buildFocusFrameIndex(layout, project, { extraRects: taskRects, aliases: stageAliases }),
+    [layout, project, taskRects, stageAliases],
+  );
+  useEffect(() => {
+    if (mapMode) return;
+    return focusHandoffBus.setBoard({
+      project,
+      index: focusIndex,
+      /* Zoom follows intent (D8): `inspect` goes in until the target reads,
+         `situate` fits the frame with context around it. A camera can go
+         anywhere, including to where a vanished card used to be, so this
+         surface never refuses a destination. */
+      moveTo: ({ rect, zoom }) => {
+        if (zoom === "inspect") glideFrame({ ...rect }, INSPECT_ZOOM);
+        else fitRect({ ...rect });
+        return true;
+      },
+      restoreCamera: (camera) => {
+        glideToCamera(camera);
+        return true;
+      },
+    });
+  }, [mapMode, project, focusIndex, glideFrame, fitRect, glideToCamera]);
 
   /* Screen-space boxes of fixed board chrome an edge chip must never paint over
      — the subagent avatar/round stack and the composer/input, tagged
@@ -1334,33 +1373,47 @@ export function SchemeBoard({
         viewport, with the live feed and the composer of exactly this
         conversation. Sibling of the viewport, so its clicks never reach the
         canvas pan/select handlers. */}
-    {expandedNode ? (
-      <div
-        className="fixed inset-0 z-40 flex flex-col bg-canvas p-3"
-        role="dialog"
-        aria-modal="true"
-        aria-label={cleanTitle(expandedNode.file.title, 90)}
-      >
-        <BranchPane
-          /* Not keyed by identity: SessionTitle resets its own edit state on a
-             real A→B switch (and preserves it across conversation-id enrichment
-             or succession), so a key here would only cause spurious remounts —
-             and replay a retained F2 token — when a poll fills in identity. */
-          file={expandedNode.file}
-          tasks={expandedNode.tasks}
-          isRoot={expandedNode.isRoot}
-          expanded
-          showFavorite
-          onToggleExpand={() => setExpanded(null)}
-          autoEditToken={autoEditTokenFor(renameRequest, expandedNode.file.path)}
-          onSpawnRetry={onSpawnRetry ? stableSpawnRetry : undefined}
-          relatedTasks={relatedTasksByPath.get(expandedNode.file.path)}
-          /* Opening a task from the full-window conversation returns to the
-             board first — the card the camera centers must be visible. */
-          onOpenTask={onOpenTask ? (task) => { setExpanded(null); stableOpenTask(task); } : undefined}
-        />
-      </div>
-    ) : null}
+    {expandedNode ? (() => {
+      /* The overlay is the surface a stage conversation is actually READ in, so
+         it carries the same imposed identity as the board card (#658) — without
+         it, expanding a stage put the operator back in front of the shared
+         safety preamble the scanner titled the transcript with, in the visible
+         header and in the dialog's accessible name alike.
+         A pending F2 rename suppresses the override: renaming works by expanding
+         the node and replaying the token into THIS pane's SessionTitle, so while
+         a rename is in flight the editable transcript title must stay mounted —
+         it is the only rename path a stage transcript has left. */
+      const renameToken = autoEditTokenFor(renameRequest, expandedNode.file.path);
+      const stageTitle = titleUnderRename(stagePaneTitleOf(t, stagePaneByPath.get(expandedNode.file.path)), renameToken);
+      return (
+        <div
+          className="fixed inset-0 z-40 flex flex-col bg-canvas p-3"
+          role="dialog"
+          aria-modal="true"
+          aria-label={stageTitle ?? cleanTitle(expandedNode.file.title, 90)}
+        >
+          <BranchPane
+            /* Not keyed by identity: SessionTitle resets its own edit state on a
+               real A→B switch (and preserves it across conversation-id enrichment
+               or succession), so a key here would only cause spurious remounts —
+               and replay a retained F2 token — when a poll fills in identity. */
+            file={expandedNode.file}
+            tasks={expandedNode.tasks}
+            isRoot={expandedNode.isRoot}
+            expanded
+            showFavorite
+            titleOverride={stageTitle}
+            onToggleExpand={() => setExpanded(null)}
+            autoEditToken={renameToken}
+            onSpawnRetry={onSpawnRetry ? stableSpawnRetry : undefined}
+            relatedTasks={relatedTasksByPath.get(expandedNode.file.path)}
+            /* Opening a task from the full-window conversation returns to the
+               board first — the card the camera centers must be visible. */
+            onOpenTask={onOpenTask ? (task) => { setExpanded(null); stableOpenTask(task); } : undefined}
+          />
+        </div>
+      );
+    })() : null}
     </>
   );
 }

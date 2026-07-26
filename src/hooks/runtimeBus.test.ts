@@ -1,8 +1,23 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 
 import type { RuntimeSnapshot } from "@/components/runtime/runtimeModel";
+import { capabilitiesFor } from "@/components/agentCapabilities";
+import { RUNTIME_PLANE_ABSENT } from "@/lib/runtime/flags";
+import type { FileEntry } from "@/lib/types";
 
 import { createRuntimeBus, type EventSourceLike, type FetchLike, type RuntimeBus, type RuntimeBusDeps } from "./runtimeBus";
+
+/** A running top-level Claude conversation — the card whose control strip the
+    plane's authority decides. Mirrors the fixture in agentCapabilities.test.ts. */
+function file(overrides: Partial<FileEntry> = {}): FileEntry {
+  return {
+    path: "/claude.jsonl", root: "claude-projects", name: "c.jsonl", project: "viewer", title: "c",
+    engine: "claude", kind: "session", fmt: "claude", parent: null, mtime: 1, size: 1,
+    activity: "idle", proc: null, pid: null, model: "sonnet", effort: "high", fast: false,
+    pendingQuestion: null, waitingInput: null,
+    ...overrides,
+  } as FileEntry;
+}
 
 /* ---------------------------- fakes ---------------------------- */
 
@@ -163,6 +178,8 @@ interface Harness {
   setSnapshot: (s: RuntimeSnapshot) => void;
   deferNextFetch: () => { resolveSnapshot: (s: RuntimeSnapshot) => void };
   failFetch: (fail: boolean) => void;
+  /** Answer every snapshot fetch with a non-ok status and body, as the routes do. */
+  serveError: (status: number, body: unknown) => void;
   fetchCalls: () => number;
 }
 
@@ -173,9 +190,14 @@ function harness(): Harness {
   let shouldFail = false;
   let calls = 0;
   let deferredFetch: Promise<Response> | null = null;
+  let errorResponse: { status: number; body: unknown } | null = null;
   const deps: RuntimeBusDeps = {
     fetch: (() => {
       calls += 1;
+      if (errorResponse) {
+        const { status, body } = errorResponse;
+        return Promise.resolve({ ok: false, status, json: () => Promise.resolve(body) } as unknown as Response);
+      }
       if (shouldFail) return Promise.reject(new Error("network"));
       if (deferredFetch) {
         const pending = deferredFetch;
@@ -210,6 +232,7 @@ function harness(): Harness {
       };
     },
     failFetch: (fail) => (shouldFail = fail),
+    serveError: (status, body) => (errorResponse = { status, body }),
     fetchCalls: () => calls,
   };
 }
@@ -774,5 +797,70 @@ describe("runtimeBus refresh (dead-host Re-check, §5)", () => {
     expect(await h.bus.refresh()).toBe(true);
     expect(h.bus.getState().store.cursor).toBe(200);
     expect(h.bus.getState().store.sessions["conv_a"]?.host).toBe("dead");
+  });
+});
+
+/* ------------------ plane-absent deployments (runtime UI ships on) ------------------ */
+
+describe("runtimeBus on a deployment with no runtime plane", () => {
+  /* The build-time `NEXT_PUBLIC_RUNTIME_UI` default cannot know whether a
+     runtime host exists, so a tmux-only viewer starts the bus. If it stayed
+     `enabled` against routes that answer 503 forever, the plane would be
+     authoritative but blind and `resolveHost` would classify every running
+     conversation as `unresolved` — Send disabled, Stop/kill/terminal hidden,
+     for the life of the tab. Authority has to go back to `file.proc`. */
+  const running = file({ proc: "running" });
+
+  test("a plane-absent 503 hands host authority back to the legacy path", async () => {
+    const h = harness();
+    h.serveError(503, { error: "runtime events are disabled", code: RUNTIME_PLANE_ABSENT });
+    h.bus.start();
+    await flush();
+
+    expect(h.bus.getState().enabled).toBeFalse();
+    const caps = capabilitiesFor(running, null, { runtimeEnabled: h.bus.getState().enabled });
+    expect(caps.surface).toBe("live-root");
+    expect(caps.controls.send.state).toBe("enabled");
+    expect(caps.controls.stop.state).not.toBe("hidden");
+  });
+
+  test("the inert bus stays inert across remounting consumers", async () => {
+    const h = harness();
+    h.serveError(503, { error: "runtime host socket is unavailable", code: RUNTIME_PLANE_ABSENT });
+    h.bus.start();
+    await flush();
+    const afterFirstJoin = h.fetchCalls();
+
+    h.bus.start();
+    h.bus.start();
+    h.clock.advance(60_000);
+    await flush();
+
+    expect(h.fetchCalls()).toBe(afterFirstJoin);
+    expect(h.bus.getState().enabled).toBeFalse();
+    expect(h.bus.getState().connection).toBe("offline");
+  });
+
+  test("a declared host that is merely unreachable keeps the unresolved fail-safe", async () => {
+    const h = harness();
+    // No plane-absent code: this deployment has a runtime host, it is just down
+    // (or its snapshot has not landed yet). The plane stays authoritative, so a
+    // running conversation with no host evidence must NOT fall back to legacy.
+    h.serveError(503, { error: "runtime host is unavailable" });
+    h.bus.start();
+    await flush();
+
+    expect(h.bus.getState().enabled).toBeTrue();
+    expect(capabilitiesFor(running, null, { runtimeEnabled: h.bus.getState().enabled }).surface).toBe("unresolved");
+  });
+
+  test("a snapshot still in flight keeps the unresolved fail-safe", async () => {
+    const h = harness();
+    h.deferNextFetch();
+    h.bus.start();
+    await flush();
+
+    expect(h.bus.getState().enabled).toBeTrue();
+    expect(capabilitiesFor(running, null, { runtimeEnabled: h.bus.getState().enabled }).surface).toBe("unresolved");
   });
 });

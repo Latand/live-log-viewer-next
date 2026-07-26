@@ -8,7 +8,11 @@ import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
+import { queryLifecycleEvents } from "@/lib/lifecycle/journal";
+import { refreshLifecycleJournal } from "@/lib/lifecycle/projector";
+
 import { viewerMcpBindings } from "./bindings";
+import { createMcpToolService, type McpToolResult } from "./server";
 
 const sandboxes: string[] = [];
 const originalStateDir = process.env.LLV_STATE_DIR;
@@ -599,4 +603,201 @@ test("conversation_migration delegates to the revision-fenced migration command 
   });
   expect(migrationOperationId).toMatch(/^mcp_conversation_migration_[0-9a-f]{24}$/);
   expect((result.receipt as { operationId: string }).operationId).toBe(migrationOperationId);
+});
+
+test("a refused pipeline close exposes its host report through MCP, not only prose (#670)", async () => {
+  const close = {
+    stopped: [{ stageId: "plan", attempt: 1, conversationId: "conversation_plan", agentPath: null, paneId: null }],
+    alreadyStopped: [],
+    unconfirmed: [],
+    acknowledged: [],
+    reviewers: [],
+    stillRunning: [{ stageId: "build", attempt: 2, conversationId: "conversation_build", agentPath: null, paneId: "%7", error: "structured runtime host is unavailable" }],
+    worktree: { dir: "/repo-pipeline-1", uncommitted: ["notes.md"], truncated: false },
+  };
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    patchPipeline: async (_id: string, request: { action?: string }) => (request.action === "close"
+      ? { error: "could not stop stage build attempt 2 (conversation_build): structured runtime host is unavailable", status: 409, close }
+      : { pipeline: { id: "pipeline_1", state: "paused" } }),
+  } as never);
+  const results = new Map<string, McpToolResult>();
+  const service = createMcpToolService(bindings, {
+    claim: async (key: string) => (results.has(key) ? { kind: "replay" as const, result: results.get(key)! } : { kind: "fresh" as const }),
+    complete: async (key: string, _digest: string, result: McpToolResult) => { results.set(key, result); },
+  } as never);
+
+  const refused = await service.callTool("pipeline_action", {
+    clientRequestId: "close-refused",
+    pipelineId: "pipeline_1",
+    action: "close",
+  });
+
+  expect(refused.ok).toBeFalse();
+  /* An agent driving the board gets the structured evidence an HTTP caller
+     gets — which host survived and where to find it — not just the prose. */
+  expect(refused).toMatchObject({
+    code: "tool_failed",
+    error: "could not stop stage build attempt 2 (conversation_build): structured runtime host is unavailable",
+    details: { close: { stillRunning: [{ stageId: "build", attempt: 2, conversationId: "conversation_build", paneId: "%7" }] } },
+  });
+
+  const paused = await service.callTool("pipeline_action", {
+    clientRequestId: "pause-ok",
+    pipelineId: "pipeline_1",
+    action: "pause",
+  });
+  expect(paused).toMatchObject({ ok: true, pipelineId: "pipeline_1" });
+  expect((paused as { details?: unknown }).details).toBeUndefined();
+});
+
+test("agent_activity reports the liveness snapshot and journals the stalls it finds (#645)", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-activity-"));
+  sandboxes.push(sandbox);
+  process.env.LLV_STATE_DIR = sandbox;
+  const journaled: unknown[] = [];
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    livenessSources: () => ({
+      now: () => Date.parse("2026-07-26T08:40:00.000Z"),
+      probe: { now: () => Date.parse("2026-07-26T08:40:00.000Z"), pidAlive: () => false, processIdentity: () => null },
+      listFiles: async () => [{
+        path: "/transcripts/session.jsonl",
+        project: "viewer",
+        title: "stage agent",
+        engine: "codex",
+        activity: "stalled",
+        activityReason: "jsonl_turn_stalled",
+        mtime: Date.parse("2026-07-26T02:27:33.000Z") / 1000,
+        conversationId: "conversation_zombie",
+      }],
+      registrySnapshot: () => ({ entries: {}, conversations: {} }),
+      pipelines: () => [],
+      describeTranscript: async () => null,
+      transcriptEvidence: async () => ({ turn: "busy", lastRecordTs: Date.parse("2026-07-26T02:27:33.000Z") }),
+    }),
+    refreshLifecycleJournal: (input: unknown) => {
+      journaled.push(input);
+      return { appended: 1, skipped: 0, throttled: false };
+    },
+  } as never);
+
+  const result = await bindings.agent_activity({ clientRequestId: "activity-645", liveOnly: true });
+
+  expect(result).toMatchObject({ count: 1, stalledCount: 1, journaled: 1 });
+  expect((result.conversations as Array<Record<string, unknown>>)[0]).toMatchObject({
+    conversationId: "conversation_zombie",
+    lifecycle: "stalled",
+    turnState: "busy",
+    lastRecordAt: "2026-07-26T02:27:33.000Z",
+  });
+  expect(journaled).toHaveLength(1);
+});
+
+test("lifecycle_events projects the runtime deployment ledger into the journal (#686)", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-deploy-events-"));
+  sandboxes.push(sandbox);
+  process.env.LLV_STATE_DIR = sandbox;
+  /* Real projector, real journal — only the runtime host is stubbed, because a
+     deploy event has no other durable source. */
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    registrySnapshot: () => ({ heldDeliveries: {} }),
+    getPipelines: () => ({ pipelines: [] }),
+    refreshLifecycleJournal,
+    queryLifecycleEvents,
+    runtimeEventsEnabled: () => true,
+    runtimeHostClient: () => ({
+      snapshot: async () => ({
+        deployments: [
+          {
+            deploymentId: "deployment_ready",
+            phase: "admitted",
+            revision: "b".repeat(40),
+            updatedAt: "2026-07-26T10:00:00.000Z",
+            error: null,
+          },
+          {
+            deploymentId: "deployment_done",
+            phase: "succeeded",
+            revision: "c".repeat(40),
+            updatedAt: "2026-07-26T10:05:00.000Z",
+            error: null,
+          },
+          {
+            deploymentId: "deployment_bad",
+            phase: "failed",
+            revision: "d".repeat(40),
+            updatedAt: "2026-07-26T10:09:00.000Z",
+            error: "the health gate never went green",
+          },
+        ],
+      }),
+    }),
+  } as never);
+
+  const result = await bindings.lifecycle_events({ clientRequestId: "deploy-events-686", type: "deploy_succeeded" });
+
+  expect(result).toMatchObject({ mode: "query", journaled: 3 });
+  expect((result.events as Array<Record<string, unknown>>).map((event) => event.type)).toEqual(["deploy_succeeded"]);
+  const journal = JSON.parse(fs.readFileSync(path.join(sandbox, "lifecycle-journal.json"), "utf8")) as {
+    events: Array<{ type: string; state: string; summary: string }>;
+  };
+  expect(journal.events.map((event) => event.type)).toEqual(["deploy_ready", "deploy_succeeded", "deploy_failed"]);
+  expect(journal.events.map((event) => event.state)).toEqual(["waiting", "completed", "failed"]);
+  expect(journal.events[2]!.summary).toBe("the health gate never went green");
+});
+
+test("lifecycle_events queries the journal by lineage and polls the bounded digest (#686)", async () => {
+  const queries: unknown[] = [];
+  const digests: unknown[] = [];
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    registrySnapshot: () => ({ heldDeliveries: {} }),
+    getPipelines: () => ({ pipelines: [] }),
+    /* No runtime host: the deploy projection contributes nothing and must not
+       fail the journal read. */
+    runtimeEventsEnabled: () => false,
+    refreshLifecycleJournal: () => ({ appended: 2, skipped: 5, throttled: false }),
+    queryLifecycleEvents: (query: unknown) => {
+      queries.push(query);
+      return { count: 1, events: [{ seq: 7, type: "review_verdict", summary: "pass" }], cursor: 7, remaining: 0 };
+    },
+    pollLifecycleDigest: (request: unknown) => {
+      digests.push(request);
+      return { subscriberId: "conversation_operator", relay: { reason: "terminal", items: [], through: 7, omitted: 0 }, cursor: 7, pending: 0, heldUntil: null };
+    },
+  } as never);
+
+  const queried = await bindings.lifecycle_events({
+    clientRequestId: "journal-686",
+    pipelineId: "pipeline_a",
+    afterSeq: 3,
+  });
+  expect(queried).toMatchObject({ mode: "query", count: 1, cursor: 7, journaled: 2 });
+  expect(queries).toEqual([{
+    project: undefined,
+    pipelineId: "pipeline_a",
+    conversationId: undefined,
+    stageId: undefined,
+    type: undefined,
+    afterSeq: 3,
+    limit: undefined,
+  }]);
+
+  const polled = await bindings.lifecycle_events({
+    clientRequestId: "digest-686",
+    mode: "digest",
+    subscriberId: "conversation_operator",
+  });
+  expect(polled).toMatchObject({ mode: "digest", cursor: 7, relay: { reason: "terminal" } });
+  expect(digests).toEqual([{
+    subscriberId: "conversation_operator",
+    project: undefined,
+    pipelineId: undefined,
+    conversationId: undefined,
+    maxItems: undefined,
+    acknowledge: true,
+  }]);
+
+  await expect(bindings.lifecycle_events({ clientRequestId: "digest-no-subscriber", mode: "digest" }))
+    .rejects.toThrow("subscriberId is required for mode=digest");
+  await expect(bindings.lifecycle_events({ clientRequestId: "bad-type", type: "not_a_type" }))
+    .rejects.toThrow("unknown lifecycle event type: not_a_type");
 });

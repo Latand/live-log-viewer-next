@@ -10,7 +10,7 @@ import { withFileTransaction, withFileTransactionSync } from "@/lib/state/fileTr
 import type { BoardTask } from "@/lib/tasks/types";
 
 import { MAX_FAIL_EDGE_ROUNDS, MAX_PIPELINE_STAGES } from "./limits";
-import type { EffectivePipelineRole, Pipeline, PipelineCreationIntent, PipelineEdgeActivation, PipelineStage } from "./types";
+import type { EffectivePipelineRole, Pipeline, PipelineCreationIntent, PipelineEdgeActivation, PipelineStage, PipelineUnconfirmedHost } from "./types";
 import { stageVerdictFrom } from "./verdict";
 
 export const PIPELINES_SCHEMA_VERSION = 4;
@@ -151,6 +151,19 @@ function isCreationIntent(value: unknown): value is PipelineCreationIntent {
     && typeof intent.launchId === "string" && Boolean(intent.launchId.trim());
 }
 
+function isUnconfirmedHost(value: unknown): value is PipelineUnconfirmedHost {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const host = value as Partial<PipelineUnconfirmedHost>;
+  return typeof host.stageId === "string"
+    && Number.isInteger(host.attempt)
+    && isNullableString(host.conversationId)
+    && isNullableString(host.agentPath)
+    && (host.paneId === undefined || isNullableString(host.paneId))
+    && isNullableString(host.operationId)
+    && typeof host.detail === "string"
+    && typeof host.at === "string";
+}
+
 function isStage(value: unknown): value is PipelineStage {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const stage = value as Partial<PipelineStage>;
@@ -254,12 +267,16 @@ function isPipeline(value: unknown): value is Pipeline {
     pipeline.runs.every(isRun) &&
     ["draft", "provisioning", "running", "needs_decision", "paused", "completed", "closed"].includes(String(pipeline.state)) &&
     (pipeline.pausedState === null || ["provisioning", "running", "needs_decision", "completed", "closed"].includes(String(pipeline.pausedState))) &&
+    (pipeline.pausedAt === undefined || isNullableString(pipeline.pausedAt)) &&
+    (pipeline.resumedAt === undefined || isNullableString(pipeline.resumedAt)) &&
     isNullableString(pipeline.stateDetail) &&
     isNullableString(pipeline.srcPath) &&
     isNullableString(pipeline.srcConversationId) &&
     typeof pipeline.createdAt === "string" &&
     isNullableString(pipeline.closedAt) &&
     (pipeline.hiddenAt === undefined || isNullableString(pipeline.hiddenAt)) &&
+    (pipeline.unconfirmedHosts === undefined
+      || (Array.isArray(pipeline.unconfirmedHosts) && pipeline.unconfirmedHosts.every(isUnconfirmedHost))) &&
     (pipeline.restored === undefined || typeof pipeline.restored === "boolean") &&
     (pipeline.pos === undefined || (
       typeof pipeline.pos === "object" && pipeline.pos !== null &&
@@ -392,6 +409,9 @@ export function loadPipelines(): Pipeline[] {
     srcConversationId: pipeline.srcConversationId ?? null,
     closedAt: pipeline.closedAt ?? null,
     hiddenAt: pipeline.hiddenAt ?? null,
+    unconfirmedHosts: pipeline.unconfirmedHosts?.length
+      ? pipeline.unconfirmedHosts.map((host) => ({ ...host }))
+      : undefined,
     restored: undefined,
     stages: pipeline.stages.map((stage) => ({ ...stage, onFail: stage.onFail ?? null })),
     cursor: pipeline.cursor

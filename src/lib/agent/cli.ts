@@ -9,6 +9,7 @@ import { claudeHomeOwningTranscript, claudeSettingsPath, isManagedClaudeHome, le
 
 import { claudeTranscriptPath, headCwd } from "./transcript";
 import { normalizeSpawnMcpServers } from "./mcpAllowlist";
+import { grantedPlugins } from "./pluginAllowlist";
 import { normalizeClaudeLaunchModel } from "./models";
 import { applyClaudeSpawnPolicy, claudeSpawnPolicyPaths, VIEWER_SPAWN_CAPABILITY_ENV } from "./spawnPolicy";
 import type { LaunchProfile } from "@/lib/accounts/migration/contracts";
@@ -147,6 +148,10 @@ export interface ResumeSpecOptions {
   permissionMode?: string | null;
   allowSubagents?: boolean;
   mcpServers?: readonly string[];
+  /** Codex plugin grant replayed from the conversation's durable profile
+      (issue #687). A resume is the controlled path by which an existing
+      session picks the grant up; absent ⇒ no plugin, the default. */
+  plugins?: readonly string[];
   /** The conversation's authoritative working directory. When set it is the ONE
       effective cwd used for MCP policy enumeration, materialization, and the
       rendered command. The resume spec otherwise re-derives cwd by sniffing the
@@ -260,6 +265,10 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
         readOnly: options.readOnly ?? false,
         allowSubagents: options.allowSubagents ?? false,
         mcpServers,
+        /* Plugin grants are a Codex thread capability decided by the spawn
+           route from the session's origin (issue #687), never by the command
+           builder — a fresh spec carries none. */
+        plugins: [],
         title: null,
         project: null,
         parentConversationId: null,
@@ -293,6 +302,7 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
       readOnly: options.readOnly ?? false,
       allowSubagents: options.allowSubagents ?? false,
       mcpServers,
+      plugins: [],
       title: null,
       project: null,
       parentConversationId: null,
@@ -434,7 +444,7 @@ export function resumeSpecForSession(
       cwd,
       windowName: "claude-resume",
       engine: "claude",
-      launchProfile: { ...emptyLaunchProfileForResume(cwd, launchModel, options.effort ?? null), readOnly: options.readOnly ?? null, permissionMode, allowSubagents: options.allowSubagents ?? false, mcpServers },
+      launchProfile: { ...emptyLaunchProfileForResume(cwd, launchModel, options.effort ?? null), readOnly: options.readOnly ?? null, permissionMode, allowSubagents: options.allowSubagents ?? false, mcpServers, plugins: grantedPlugins(options.plugins) },
     };
   }
   let command = `${(options.hostTerminal ? resolveHostBinary : resolveBinary)("codex")}`;
@@ -454,7 +464,7 @@ export function resumeSpecForSession(
     cwd,
     windowName: "codex-resume",
     engine: "codex",
-    launchProfile: { ...emptyLaunchProfileForResume(cwd, options.model ?? null, options.effort ?? null), fast: options.fast ?? null, readOnly: options.readOnly ?? null, permissionMode: options.permissionMode ?? null, allowSubagents: options.allowSubagents ?? false, mcpServers },
+    launchProfile: { ...emptyLaunchProfileForResume(cwd, options.model ?? null, options.effort ?? null), fast: options.fast ?? null, readOnly: options.readOnly ?? null, permissionMode: options.permissionMode ?? null, allowSubagents: options.allowSubagents ?? false, mcpServers, plugins: grantedPlugins(options.plugins) },
   };
 }
 
@@ -468,6 +478,7 @@ function emptyLaunchProfileForResume(cwd: string, model: string | null, effort: 
     readOnly: null,
     allowSubagents: false,
     mcpServers: ["viewer"],
+    plugins: [],
     title: null,
     project: null,
     parentConversationId: null,
