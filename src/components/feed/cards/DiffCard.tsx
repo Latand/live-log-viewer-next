@@ -3,6 +3,7 @@
 import { useState } from "react";
 
 import { ChevronUp } from "../../icons";
+import { MESSAGE_ACTION } from "../actionStyles";
 import { CopyButton } from "../CopyButton";
 import { tr, type ToolBody } from "../parse";
 import { FileRef } from "./shared";
@@ -84,7 +85,7 @@ function FileDiffView({ file }: { file: FileDiff }) {
           <CopyButton
             text={copyText}
             label={tr("tools.copyDiff")}
-            className="shrink-0 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/diff:opacity-100 [@media(hover:none)]:opacity-60"
+            className={`shrink-0 ${MESSAGE_ACTION} group-hover/diff:opacity-100`}
           />
         ) : null}
       </div>

@@ -268,7 +268,7 @@ export const en = {
   "composer.sentPaths": "sent {count} path(s)",
   "composer.failedInterrupt": "couldn't interrupt",
   "composer.escapeSent": "sent Escape — agent interrupted",
-  "composer.spawnAria": "Launch an agent with a prompt in tmux",
+  "composer.spawnAria": "Launch an agent with a prompt",
   "composer.resolvingAria": "Message the existing agent — delivery starts after its host is resolved",
   "composer.sendAria": "Send a message to the agent in tmux {target}",
   "composer.sendStructuredAria": "Send a message through the structured runtime host",
@@ -304,7 +304,10 @@ export const en = {
   "composer.deliveredEcho": "Delivered — appearing in the feed",
   "composer.retrySend": "Retry send",
   "composer.placeholderRelay": "type — I'll relay through the root session…",
-  "composer.placeholderSpawn": "prompt — the agent will start in tmux…",
+  /* Issue #702: no transport promise. #685 inverted the rollout gates, so a
+     deployment that declares a runtime host spawns structured and pane-less —
+     the placeholder used to name a tmux session the spawn never opens. */
+  "composer.placeholderSpawn": "prompt — the agent will start…",
   "composer.placeholderResolving": "message the agent — reconnecting to its session…",
   "composer.placeholderSend": "message the agent…",
   "composer.textAria": "Text for the agent",
@@ -314,7 +317,10 @@ export const en = {
   "composer.optionsShow": "Show message options",
   "composer.optionsHide": "Hide message options",
   "composer.titleRelay": "relayed through the branch's root session",
-  "composer.titleSpawnResumed": "new tmux window with the resumed agent",
+  /* Issue #702: shown on the resume chip BEFORE the launch, so it cannot name a
+     transport. Under a structured deployment a resume comes back with no target
+     and opens no window at all (see spawnCopy.test.ts). */
+  "composer.titleSpawnResumed": "starts a fresh agent session that continues this conversation",
   "composer.root": "root",
   "composer.interruptAria": "Interrupt the agent (Escape)",
   "composer.interruptTitle": "send Escape to the agent pane",
@@ -711,6 +717,16 @@ export const en = {
   "question.approve": "Approve",
   "question.reject": "Reject",
   "question.ownAnswer": "Your own answer…",
+  // Delivery failure (issue #697) — translated at the boundary, never the
+  // server's own exception text.
+  "question.deliveryFailed": "Delivery failed",
+  "question.failedChoice": "not delivered",
+  "question.retryAnswer": "Retry",
+  "question.errorNotRunning": "the agent is no longer running, so nothing was delivered",
+  "question.errorMoved": "the agent has moved on from this question",
+  "question.errorUnconfirmed": "the answer was sent, but the agent never confirmed it",
+  "question.errorNotDelivered": "the agent's screen did not respond as expected, so the answer was not delivered",
+  "question.errorRejected": "the viewer could not build a valid answer",
 
   // InboxImage
   "inbox.deleted": "deleted from disk",
@@ -1494,6 +1510,13 @@ export const en = {
   "overview.quiet": "quiet · last activity {age}",
   "overview.empty": "No logs yet",
 
+  // Catalog fetch failure (issue #696) — never the idle empty-state copy
+  "catalog.unreachable": "catalog unavailable",
+  "catalog.errorTitle": "Couldn't load the session catalog",
+  "catalog.errorBody": "The viewer server did not answer, so what is running is unknown.",
+  "catalog.retry": "Retry",
+  "catalog.attempts": { one: "{count} failed attempt", other: "{count} failed attempts" },
+
   // OrchestratorChatButton
   "orch.chat": "Orchestrator",
   "orch.open": "Open the orchestrator chat",
@@ -1586,7 +1609,9 @@ export const en = {
   "task.signalSent": "sent {signal} to PID {pid}",
   "task.killRequested": "kill requested",
   "task.confirmKill": "Really kill PID {pid}?",
-  "task.killPid": "Kill {pid}",
+  /* Issue #700: compact confirmations name the conversation, not the PID. */
+  "task.confirmKillNamed": "Stop {name}?",
+  "task.confirmKillUntitled": "this agent",
   "task.confirmKillYes": "Yes, kill",
   "task.stopAria": "Stop process PID {pid}",
   "task.kill": "Kill",

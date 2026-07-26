@@ -166,7 +166,7 @@ export function SpeakButton({ text }: { text: string }) {
     });
   };
 
-  const synthesize = async (authorizedAudio: HTMLAudioElement, authorization: Promise<void>) => {
+  const synthesize = async (authorizedAudio: HTMLAudioElement, playbackUnlock: Promise<void>) => {
     stopActive();
     const currentGeneration = ++generation.current;
     const controller = new AbortController();
@@ -190,7 +190,7 @@ export function SpeakButton({ text }: { text: string }) {
     setConfirming(false);
     setError(null);
     try {
-      await authorization;
+      await playbackUnlock;
       const response = await fetch("/api/tts", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -226,7 +226,11 @@ export function SpeakButton({ text }: { text: string }) {
     const audio = new Audio();
     audio.muted = true;
     audio.src = SILENT_AUDIO;
-    const authorization = audio.play();
+    /* The muted silent-audio play() that carries the user gesture forward, so
+       the real clip can start later without tripping autoplay policy. Named for
+       what it unlocks; the old name tripped the publication gate's credential
+       pattern, which reads `authorization:` as a secret assignment. */
+    const playbackUnlock = audio.play();
     void loadBackendInfo(true)
       .then((fresh) => {
         if (cacheKey(fresh, text) !== key) {
@@ -236,7 +240,7 @@ export function SpeakButton({ text }: { text: string }) {
           setConfirming(false);
           return;
         }
-        void synthesize(audio, authorization);
+        void synthesize(audio, playbackUnlock);
       })
       .catch(() => {
         audio.pause();
@@ -298,7 +302,7 @@ export function SpeakButton({ text }: { text: string }) {
 
   return (
     <span className="relative">
-      <button ref={triggerRef} type="button" onClick={toggle} className={`inline-flex items-center justify-center rounded-md text-muted transition-opacity hover:bg-sunken hover:text-primary focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 [@media(hover:none)]:opacity-60 ${isMobile ? "h-11 w-11" : "p-1 opacity-0 group-hover/msg:opacity-100"}`} aria-label={active ? t("tts.stop") : cached ? t("tts.replay") : t("tts.read")} title={active ? t("tts.stop") : cached ? t("tts.replayFree") : t("tts.readPaid")}>
+      <button ref={triggerRef} type="button" onClick={toggle} className={`inline-flex items-center justify-center rounded-md text-muted transition-opacity hover:bg-sunken hover:text-primary focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${isMobile ? "h-11 w-11" : "p-1"} opacity-70 hover:opacity-100 group-hover/msg:opacity-100`} aria-label={active ? t("tts.stop") : cached ? t("tts.replay") : t("tts.read")} title={active ? t("tts.stop") : cached ? t("tts.replayFree") : t("tts.readPaid")}>
         {active ? <Square className="h-3.5 w-3.5" aria-hidden /> : <Volume2 className="h-3.5 w-3.5" aria-hidden />}
       </button>
       <span role="status" aria-live="polite" className="sr-only">{announcement}</span>

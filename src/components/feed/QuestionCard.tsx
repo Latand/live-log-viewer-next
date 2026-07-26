@@ -1,14 +1,43 @@
 "use client";
 
-import { Check, Loader2, Pause, Send, X } from "lucide-react";
+import { Check, Loader2, Pause, RotateCw, Send, X } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { useIsMobile } from "@/hooks/useIsMobile";
 
-import { type TFunction, useLocale } from "@/lib/i18n";
+import { type MessageKey, type TFunction, useLocale } from "@/lib/i18n";
 import type { FileEntry, PendingQuestionItem } from "@/lib/types";
 
 type CardState = "pending" | "delivering" | "answered" | "superseded" | "failed";
+
+/** A submitted answer, kept so a failure can offer a labelled retry (#697). */
+interface Attempt {
+  payload: Record<string, unknown>;
+  optimistic: string;
+  /** The picks this attempt carried, so a failure can keep them on screen. */
+  selection: Record<number, number[]> | null;
+}
+
+/**
+ * Issue #697: delivery failures reach the operator as translated copy. The
+ * server's `error` string is internal detail — it carried untranslated driver
+ * text and colon-terminated pane dumps ("screen does not match this question: ")
+ * straight into the card — so it never becomes UI text.
+ */
+export function deliveryErrorKey(status: number, body: { noPane?: boolean; delivered?: boolean } = {}): MessageKey {
+  if (body.noPane) return "question.noPane";
+  if (status === 400) return "question.errorRejected";
+  if (status === 403) return "question.errorNotRunning";
+  if (status === 409) return "question.errorMoved";
+  /* 502 is two different events and only the route knows which (issue #697):
+     `delivered` means Enter was pressed and only the transcript confirmation is
+     missing; without it the driver failed while still navigating to the option,
+     so nothing was submitted. Claiming "the answer was sent" for the second is
+     the same class of untruth as the raw exception text this replaced. */
+  if (status === 502) return body.delivered ? "question.errorUnconfirmed" : "question.errorNotDelivered";
+  if (status >= 500) return "common.serverUnavailable";
+  return "common.failedSend";
+}
 
 function labelFor(question: PendingQuestionItem, value: number): string {
   return question.options[value]?.label ?? String(value + 1);
@@ -33,6 +62,12 @@ export function QuestionCard({ file }: { file: FileEntry }) {
   const [text, setText] = useState("");
   const [comment, setComment] = useState("");
   const [resuming, setResuming] = useState(false);
+  const [attempt, setAttempt] = useState<Attempt | null>(null);
+  /* Issue #697: the picks that a failed submit carried. They stay on screen in
+     a failed treatment — deleting them lost work the failure never invalidated
+     (a multi-question form is several decisions), and leaving them looking
+     chosen asserted an acceptance that never happened. */
+  const [failedAnswers, setFailedAnswers] = useState<Record<number, number[]> | null>(null);
   const hasPane = pending ? pending.paneTarget !== null : file.pid !== null && file.proc === "running";
 
   const selectedLabel = useMemo(() => {
@@ -65,7 +100,7 @@ export function QuestionCard({ file }: { file: FileEntry }) {
         const json = (await res.json()) as { ok?: boolean; error?: string };
         if (!res.ok || !json.ok) {
           setState("failed");
-          setMessage(json.error ?? t("common.failedSend"));
+          setMessage(t(deliveryErrorKey(res.status)));
           return;
         }
         setState("answered");
@@ -152,24 +187,29 @@ export function QuestionCard({ file }: { file: FileEntry }) {
     );
   }
 
-  const submit = async (payload: Record<string, unknown>, optimistic: string) => {
+  const submit = async (payload: Record<string, unknown>, optimistic: string, selection: Record<number, number[]> | null = null) => {
     setState("delivering");
     setMessage("");
+    setAttempt({ payload, optimistic, selection });
+    setFailedAnswers(null);
     try {
       const res = await fetch("/api/answer", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ transcriptPath: pending.transcriptPath, toolUseId: pending.toolUseId, kind: pending.kind, ...payload }),
       });
-      const json = (await res.json()) as { ok?: boolean; answer?: string; error?: string; superseded?: boolean };
+      const json = (await res.json()) as { ok?: boolean; answer?: string; error?: string; superseded?: boolean; noPane?: boolean; delivered?: boolean };
       if (!res.ok || !json.ok) {
         if (res.status === 409 && (json.superseded || json.answer)) {
+          /* `answer` is the transcript's recorded answer, operator-facing by
+             construction; `error` beside it is not, so it is dropped. */
           setState("superseded");
-          setMessage(json.answer ?? json.error ?? t("question.alreadyAnswered"));
+          setMessage(json.answer ?? t("question.alreadyAnswered"));
           return;
         }
         setState("failed");
-        setMessage(json.error ?? t("common.failedSend"));
+        setMessage(t(deliveryErrorKey(res.status, json)));
+        setFailedAnswers(selection);
         return;
       }
       setState("answered");
@@ -177,10 +217,17 @@ export function QuestionCard({ file }: { file: FileEntry }) {
     } catch {
       setState("failed");
       setMessage(t("common.serverUnavailable"));
+      setFailedAnswers(selection);
     }
   };
 
+  /** True while `option` of `qIndex` is a pick that a failed submit carried. */
+  const choiceFailed = (qIndex: number, option: number): boolean =>
+    (failedAnswers?.[qIndex] ?? []).includes(option);
+
   const setChoice = (qIndex: number, option: number, multi: boolean) => {
+    /* Editing after a failure leaves the failed treatment behind. */
+    setFailedAnswers(null);
     setAnswers((current) => {
       const prev = current[qIndex] ?? [];
       const next = multi ? (prev.includes(option) ? prev.filter((item) => item !== option) : [...prev, option]) : [option];
@@ -204,7 +251,7 @@ export function QuestionCard({ file }: { file: FileEntry }) {
       });
       const json = (await res.json()) as { ok?: boolean; error?: string; target?: string };
       if (!res.ok || !json.ok) {
-        setMessage(json.error ?? t("question.openFailed"));
+        setMessage(t("question.openFailed"));
         return;
       }
       setMessage(t("question.opened", { target: json.target ?? "tmux" }));
@@ -293,24 +340,43 @@ export function QuestionCard({ file }: { file: FileEntry }) {
               <div className="space-y-1.5">
                 {question.options.map((option, index) => {
                   const selected = (answers[qIndex] ?? []).includes(index);
+                  /* Issue #697: a pick a failed submit carried keeps its place
+                     — it is still the operator's choice and still editable —
+                     but it wears the failure, so it can be read neither as
+                     accepted nor as lost. */
+                  const failed = choiceFailed(qIndex, index);
                   return (
                     <button
                       key={index}
+                      data-choice-state={failed ? "failed" : selected ? "selected" : undefined}
                       className={`flex w-full items-start gap-2 rounded-[8px] border px-3 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/35 ${mob} ${
-                        selected ? "border-accent/45 bg-accent/10" : option.recommended ? "border-warning/45 bg-warning-soft" : "border-border bg-canvas"
+                        failed
+                          ? "border-danger/45 bg-danger-soft"
+                          : selected
+                            ? "border-accent/45 bg-accent/10"
+                            : option.recommended
+                              ? "border-warning/45 bg-warning-soft"
+                              : "border-border bg-canvas"
                       }`}
                       disabled={disabled}
                       onClick={() => {
                         const nextAnswers = { ...answers, [qIndex]: [index] };
                         setChoice(qIndex, index, question.multiSelect);
-                        if (!question.multiSelect && questionCount === 1) void submit({ answers: packedAnswers(nextAnswers) }, option.label);
+                        if (!question.multiSelect && questionCount === 1) void submit({ answers: packedAnswers(nextAnswers) }, option.label, nextAnswers);
                       }}
                     >
-                      <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border border-border bg-card text-[10px] font-bold">
-                        {selected ? "✓" : index + 1}
+                      <span
+                        className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border bg-card text-[10px] font-bold ${
+                          failed ? "border-danger/45 text-danger" : "border-border"
+                        }`}
+                      >
+                        {failed ? "!" : selected ? "✓" : index + 1}
                       </span>
                       <span className="min-w-0">
-                        <span className="block text-[13px] font-bold">{option.label}</span>
+                        <span className="block text-[13px] font-bold">
+                          {option.label}
+                          {failed ? <span className="ml-1.5 font-semibold text-danger">· {t("question.failedChoice")}</span> : null}
+                        </span>
                         {option.description ? <span className="block text-[12px] text-muted">{option.description}</span> : null}
                       </span>
                     </button>
@@ -333,7 +399,7 @@ export function QuestionCard({ file }: { file: FileEntry }) {
             </div>
           ) : null}
           {needsExplicitSubmit ? (
-            <button className={`mt-3 inline-flex items-center gap-1.5 rounded-[8px] bg-accent px-3 py-1.5 text-[13px] font-bold text-white disabled:opacity-60 ${mob}`} disabled={disabled || !allAnswered} onClick={() => submit({ answers: packedAnswers() }, selectedLabel)}>
+            <button className={`mt-3 inline-flex items-center gap-1.5 rounded-[8px] bg-accent px-3 py-1.5 text-[13px] font-bold text-white disabled:opacity-60 ${mob}`} disabled={disabled || !allAnswered} onClick={() => submit({ answers: packedAnswers() }, selectedLabel, answers)}>
               <Send className="h-4 w-4" aria-hidden /> {t("common.send")}
             </button>
           ) : null}
@@ -344,7 +410,25 @@ export function QuestionCard({ file }: { file: FileEntry }) {
           <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> {t("common.sending")}
         </div>
       ) : null}
-      {state === "failed" ? <div className="mt-3 text-[12px] font-semibold text-danger">{message}</div> : null}
+      {/* Issue #697: the failure states what did not happen and offers the
+          recovery, so the strip's "waiting for a reply" and the card agree —
+          the question is still open and the operator can resend. */}
+      {state === "failed" ? (
+        <div role="alert" className="mt-3 flex flex-wrap items-center gap-2 rounded-[8px] border border-danger/30 bg-danger-soft px-2.5 py-2">
+          <span className="text-[12px] font-bold text-danger">{t("question.deliveryFailed")}</span>
+          <span className="min-w-0 text-[12px] font-semibold text-danger">{message}</span>
+          {attempt ? (
+            <button
+              type="button"
+              className={`ml-auto inline-flex items-center gap-1.5 rounded-[8px] border border-border bg-card px-3 py-1.5 text-[12px] font-bold text-primary hover:border-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60 ${mob}`}
+              disabled={!hasPane}
+              onClick={() => void submit(attempt.payload, attempt.optimistic, attempt.selection)}
+            >
+              <RotateCw className="h-3.5 w-3.5" aria-hidden /> {t("question.retryAnswer")}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }

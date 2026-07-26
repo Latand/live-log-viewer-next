@@ -11,6 +11,7 @@ import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { Workflow } from "@/lib/workflows/types";
 
+import { CatalogFailureNotice } from "./CatalogFailureNotice";
 import { OrchestratorChatButton } from "./OrchestratorChatButton";
 import { buildBranchGroups, buildProjectSummaries, projectKey } from "./projectModel";
 import { activityDot, cleanTitle, engineBadge, fmtAge } from "./utils";
@@ -25,6 +26,9 @@ interface Props {
   archivedProjects: ReadonlySet<string>;
   /** Attention clock owned by Viewer — keeps summary badges in step with the queue. */
   now: number;
+  /** Consecutive `/api/files` failures (issue #696). Above zero the board is
+      showing an unconfirmed catalog, so the idle empty-state copy is a lie. */
+  catalogFailures?: number;
   onSelectProject: (project: string) => void;
   onSelectFile: (file: FileEntry) => void;
   /** Mobile shell: the rail hides behind a drawer, this opens it. */
@@ -41,8 +45,9 @@ interface Props {
 export const COARSE_TARGET_HEIGHT = 44;
 export const FINE_TARGET_HEIGHT = 22;
 
-export function OverviewBoard({ files, projectCatalog, pipelines, workflows, archivedProjects, now, onSelectProject, onSelectFile, onMenu, attention }: Props) {
+export function OverviewBoard({ files, projectCatalog, pipelines, workflows, archivedProjects, now, catalogFailures = 0, onSelectProject, onSelectFile, onMenu, attention }: Props) {
   const { t } = useLocale();
+  const degraded = catalogFailures > 0;
   const cols = useColumns();
   const targetHeight = useCoarsePointer() ? COARSE_TARGET_HEIGHT : FINE_TARGET_HEIGHT;
   const allSummaries = useMemo(() => buildProjectSummaries(files, now, workflows, projectCatalog, pipelines), [files, now, workflows, projectCatalog, pipelines]);
@@ -71,7 +76,13 @@ export function OverviewBoard({ files, projectCatalog, pipelines, workflows, arc
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div className="flex h-10 shrink-0 items-center gap-2.5 border-b border-border bg-card px-4">
+      {/* Issue #701 kept the 320px reflow out; the clip is x-only so it cannot
+          take the y axis with it. The bar's own mobile children are 44px tall
+          against this 40px row (the Orchestrator pill and the attention badge),
+          and a plain `overflow-hidden` sliced 2px off both — on the exact
+          surface #701 was meant to make usable. `overflow-x-clip` leaves the y
+          axis visible, so the pills overhang as they did before. */}
+      <div className="flex h-10 shrink-0 items-center gap-2.5 overflow-x-clip border-b border-border bg-card px-4">
         {onMenu ? (
           <button
             type="button"
@@ -82,12 +93,23 @@ export function OverviewBoard({ files, projectCatalog, pipelines, workflows, arc
             <Menu className="h-4 w-4" aria-hidden />
           </button>
         ) : null}
-        <h1 className="text-[13.5px] font-bold">{t("rail.overview")}</h1>
-        <span className="text-[11.5px] text-muted">
-          {totalLive
-            ? t("overview.branchesLiveIn", { count: totalLive, projects: t("overview.projects", { count: liveProjects }) })
-            : t("common.nothingRunning")}
-          {archivedCount ? ` ${t("overview.archived", { count: archivedCount })}` : ""}
+        <h1 className="min-w-0 shrink truncate text-[13.5px] font-bold">{t("rail.overview")}</h1>
+        {/* Issue #701: the subtitle is dropped below 360px instead of wrapping
+            into this fixed 40px bar, where it overprinted the title and the
+            Orchestrator button and pushed the board past the viewport. Above
+            360px it truncates rather than growing the row. */}
+        <span
+          className={`hidden min-w-0 shrink truncate text-[11.5px] min-[360px]:block ${degraded ? "font-semibold text-danger" : "text-muted"}`}
+          data-degraded={degraded ? "true" : undefined}
+        >
+          {/* Issue #696: a failed catalog fetch never borrows the affirmative
+              "nothing is running right now" copy. */}
+          {degraded
+            ? t("catalog.unreachable")
+            : totalLive
+              ? t("overview.branchesLiveIn", { count: totalLive, projects: t("overview.projects", { count: liveProjects }) })
+              : t("common.nothingRunning")}
+          {!degraded && archivedCount ? ` ${t("overview.archived", { count: archivedCount })}` : ""}
         </span>
         <span className="ml-auto flex shrink-0 items-center gap-2">
           <OrchestratorChatButton />
@@ -188,7 +210,13 @@ export function OverviewBoard({ files, projectCatalog, pipelines, workflows, arc
             </div>
           );
         })}
-        {!summaries.length ? (
+        {/* Issue #696: a failed fetch and a genuinely empty installation must
+            not render the same screen. While the catalog is unreachable the
+            board states the failure and offers the recovery action; the idle
+            "No logs yet" copy is held back until a fetch actually succeeds. */}
+        {degraded ? (
+          <CatalogFailureNotice failures={catalogFailures} className={`col-span-full ${summaries.length ? "mt-1" : "mt-[12vh]"}`} />
+        ) : !summaries.length ? (
           <div className="col-span-full mt-[20vh] text-center text-muted">{t("overview.empty")}</div>
         ) : null}
       </div>

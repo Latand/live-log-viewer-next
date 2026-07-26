@@ -105,7 +105,7 @@ export function Viewer() {
   const [project, setProject] = useState<string>(() => initialProject());
   const [pendingHash, setPendingHash] = useState<ConversationHash | null>(null);
   const [catalogPin, dispatchCatalogPin] = useReducer(reduceCatalogPin, null);
-  const { files: allFiles, requestScope, projectCatalog, projectCwds, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, conversationAliases, launchRoutes, loaded } = useFiles(null, filesRequestPin(pendingHash, catalogPin?.path ?? null));
+  const { files: allFiles, requestScope, projectCatalog, projectCwds, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, conversationAliases, launchRoutes, loaded, catalogFailures } = useFiles(null, filesRequestPin(pendingHash, catalogPin?.path ?? null));
   /* A committed account migration keeps the archived predecessor entry in the
      payload (for chain history) but it must never render as a second standalone
      card — every surface below sees only current generations. A no-op (same
@@ -562,11 +562,11 @@ export function Viewer() {
   return (
     <div className="flex h-full">
       {isMobile ? null : (
-        <ProjectRail files={files} projectCatalog={projectCatalog} pipelines={pipelines} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} loaded={loaded} onSelect={selectProject} />
+        <ProjectRail files={files} projectCatalog={projectCatalog} pipelines={pipelines} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} loaded={loaded} catalogFailures={catalogFailures} onSelect={selectProject} />
       )}
       {isMobile && drawerOpen ? (
         <div className="fixed inset-0 z-50 flex">
-          <ProjectRail files={files} projectCatalog={projectCatalog} pipelines={pipelines} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} loaded={loaded} onSelect={selectProject} />
+          <ProjectRail files={files} projectCatalog={projectCatalog} pipelines={pipelines} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} loaded={loaded} catalogFailures={catalogFailures} onSelect={selectProject} />
           <button
             type="button"
             className="min-w-0 flex-1 bg-primary/35"
@@ -639,6 +639,7 @@ export function Viewer() {
             workflows={workflows}
             archivedProjects={archivedProjects}
             now={clock}
+            catalogFailures={catalogFailures}
             onSelectProject={selectProject}
             onSelectFile={openFile}
             onMenu={isMobile ? () => setDrawerOpen(true) : undefined}
@@ -657,6 +658,7 @@ export function Viewer() {
             projectCwd={projectCwds[project]}
             project={project}
             loaded={loaded}
+            catalogFailures={catalogFailures}
             openNonce={openNonce}
             focusRequest={focusRequest?.catalog && catalogPin?.path !== focusRequest.path ? null : focusRequest}
             attentionPaths={attentionPaths}
