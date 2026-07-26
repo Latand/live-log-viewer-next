@@ -68,6 +68,9 @@ export interface ToolCueScanner {
  * floor back down with the window; the id-keyed de-duplication in the player
  * is what guarantees that even then nothing rings twice.
  */
+/** Audio-clock stagger between simultaneously discovered tool cues. */
+export const TOOL_CUE_STAGGER_MS = 220;
+
 export function createToolCueScanner(conversation: string): ToolCueScanner {
   /** Absolute index just past the last scanned window; null before baseline. */
   let heardEnd: number | null = null;
@@ -80,6 +83,9 @@ export function createToolCueScanner(conversation: string): ToolCueScanner {
         const appended = floor !== null && event.srcCall >= floor;
         if (appended || event.status === "run") requests.push(requestFor(event, conversation, pan));
       });
+      for (let i = 1; i < requests.length; i += 1) {
+        requests[i] = { ...requests[i], delayMs: i * TOOL_CUE_STAGGER_MS };
+      }
       return requests;
     },
   };

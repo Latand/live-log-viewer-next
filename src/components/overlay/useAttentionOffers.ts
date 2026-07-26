@@ -59,7 +59,7 @@ export interface AttentionOffersHandle {
   refusal: AttentionRefusal | null;
   /** Take the refusal band off screen. */
   dismissRefusal: () => void;
-  accept: (request: AttentionRequestV1, via?: "operator" | "auto-follow") => Promise<void>;
+  accept: (request: AttentionRequestV1, via?: "operator" | "auto-follow") => Promise<PostOutcome>;
   preview: (request: AttentionRequestV1) => Promise<void>;
   /** Refuse before looking. Valid only from `offered`. */
   decline: (request: AttentionRequestV1) => Promise<void>;
@@ -76,7 +76,7 @@ export interface AttentionOffersHandle {
 const JSON_HEADERS = { "content-type": "application/json" };
 
 /** Whether a POST decided anything: `null` means the server never answered. */
-type PostOutcome = { ok: true } | { ok: false; refusal: AttentionRefusal | null };
+export type PostOutcome = { ok: true } | { ok: false; refusal: AttentionRefusal | null };
 
 function documentIsVisible(): boolean {
   return typeof document === "undefined" || document.visibilityState !== "hidden";
@@ -187,13 +187,14 @@ export function useAttentionOffers({
     setView(await read() ?? first);
   }, [read, post, deviceId]);
 
-  const answer = useCallback(async (id: string, event: AttentionEvent) => {
+  const answer = useCallback(async (id: string, event: AttentionEvent): Promise<PostOutcome> => {
     const outcome = await post(id, event);
     if (outcome.ok) setRefusal(null);
     else if (outcome.refusal) setRefusal(outcome.refusal);
     /* Refused or not, the record is re-read: a refusal is exactly the case
        where this device's picture of the request is the stale one. */
     await refresh();
+    return outcome;
   }, [post, refresh]);
 
   useEffect(() => {
@@ -215,9 +216,9 @@ export function useAttentionOffers({
     };
   }, [deviceId, pollMs, refresh]);
 
-  const accept = useCallback(async (request: AttentionRequestV1, via: "operator" | "auto-follow" = "operator") => {
-    if (!deviceId) return;
-    await answer(request.id, { kind: "accept", deviceId, via });
+  const accept = useCallback(async (request: AttentionRequestV1, via: "operator" | "auto-follow" = "operator"): Promise<PostOutcome> => {
+    if (!deviceId) return { ok: false, refusal: null };
+    return answer(request.id, { kind: "accept", deviceId, via });
   }, [answer, deviceId]);
 
   const arrive = useCallback(async (request: AttentionRequestV1, resolution: FocusResolutionKind) => {

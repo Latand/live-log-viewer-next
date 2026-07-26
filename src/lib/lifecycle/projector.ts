@@ -327,13 +327,21 @@ export function projectLifecycleEvents(input: LifecycleProjectionInput): Lifecyc
   ].sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
 }
 
-/** In-process throttle for the projection sweep. It lives on `globalThis`
-    because Next bundles instrumentation separately from route handlers: a
-    module-level singleton would silently become two in a standalone build. */
-const projectionStore = globalThis as typeof globalThis & { __llvLifecycleProjectionAt?: number };
+/** In-process throttle for the projection sweep, tracked per source domain.
+    Lives on `globalThis` because Next bundles instrumentation separately from
+    route handlers: a module-level singleton would silently become two in a
+    standalone build. */
+const projectionStore = globalThis as typeof globalThis & { __llvLifecycleProjectionAt?: Record<string, number> };
 
 /** Minimum spacing between projections driven by a poll. */
 export const PROJECTION_THROTTLE_MS = 1_000;
+
+type ProjectionDomain = "liveness" | "lifecycle";
+
+function domainFor(input: LifecycleProjectionInput): ProjectionDomain {
+  return input.liveness?.length && !input.pipelines?.length && !input.deliveries?.length && !input.deployments?.length
+    ? "liveness" : "lifecycle";
+}
 
 /**
  * Projects and appends in one step, throttled so a tight polling loop does not
@@ -345,12 +353,11 @@ export function refreshLifecycleJournal(
   options: { now?: number; force?: boolean } = {},
 ): { appended: number; skipped: number; throttled: boolean } {
   const now = options.now ?? Date.now();
-  const last = projectionStore.__llvLifecycleProjectionAt ?? 0;
+  const stamps = projectionStore.__llvLifecycleProjectionAt ??= {};
+  const domain = domainFor(input);
+  const last = stamps[domain] ?? 0;
   if (!options.force && now - last < PROJECTION_THROTTLE_MS) return { appended: 0, skipped: 0, throttled: true };
-  projectionStore.__llvLifecycleProjectionAt = now;
-  /* Liveness transitions are the only projection that needs to know what was
-     observed before, so the journal is read back only when there are readings
-     to compare against. */
+  stamps[domain] = now;
   const observed = input.observed
     ?? (input.liveness?.length ? lastObservedAgentState(readLifecycleJournal()) : undefined);
   const result = appendLifecycleEvents(projectLifecycleEvents({ ...input, observed }));

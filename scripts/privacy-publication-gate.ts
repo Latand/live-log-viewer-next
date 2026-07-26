@@ -1101,6 +1101,34 @@ export function formatPrivacyReport(findings: Map<FindingClass, number>): string
   return `${lines.join("\n")}\n`;
 }
 
+const commitMessageFindingClasses = new Set<FindingClass>([
+  "credential",
+  "email_address",
+  "home_path",
+  "known_value",
+]);
+
+export function commitMessageFindings(repository: string, base: string): Map<FindingClass, number> {
+  const findings = new Map<FindingClass, number>();
+  const result = Bun.spawnSync({
+    cmd: ["git", "-C", repository, "log", "--format=%B%x00", `${base}...HEAD`],
+    env: withoutWakatimeCredential(process.env),
+    stderr: "pipe",
+    stdout: "pipe",
+  });
+  if (result.exitCode !== 0) {
+    addFinding(findings, "inspection_error");
+    return findings;
+  }
+  const messages = result.stdout.toString().split("\0").filter(Boolean);
+  for (const message of messages) {
+    for (const finding of sensitiveClasses(message)) {
+      if (commitMessageFindingClasses.has(finding)) addFinding(findings, finding);
+    }
+  }
+  return findings;
+}
+
 export function reportPrivacyFindings(findings: Map<FindingClass, number>): void {
   process.stdout.write(formatPrivacyReport(findings));
   if (findings.size === 0) return;
@@ -1121,11 +1149,17 @@ if (import.meta.main) {
       error: explicitPaths.length === 0,
       paths: explicitPaths.map((path) => isAbsolute(path) ? path : resolve(inspectionRoot, path)),
     };
-  reportPrivacyFindings(inspectPaths(
+  const pathFindings = inspectPaths(
     selection.paths,
     selection.error || repositoryError,
     arguments_.includes("--require-known-values"),
     inspectionRoot,
     trustedBase,
-  ));
+  );
+  if (arguments_.includes("--check-commits")) {
+    for (const [finding, count] of commitMessageFindings(inspectionRoot, trustedBase)) {
+      pathFindings.set(finding, (pathFindings.get(finding) ?? 0) + count);
+    }
+  }
+  reportPrivacyFindings(pathFindings);
 }

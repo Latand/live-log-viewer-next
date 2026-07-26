@@ -539,3 +539,60 @@ test("nothing renders while there is nothing to answer", async () => {
   expect(dom.document.body.textContent).toBe("");
   expect(one("[data-testid='root-overlay-dock']")).toBeNull();
 });
+
+test("a 409 rejection does not move the board or record an arrival", async () => {
+  raise();
+  const { bus, log } = board({ [ANCHOR]: LIVE_RECT });
+  /* Accepting on one device, then mounting a second that tries the same: the
+     record has already left `offered`, so the second device's accept is refused
+     with a 409. The view must stay put. */
+  answerAttentionRequest("attention_1", { kind: "offer", deviceId: DEVICE }, { now });
+  answerAttentionRequest("attention_1", { kind: "offer", deviceId: "other-device" }, { now });
+  answerAttentionRequest("attention_1", { kind: "accept", deviceId: "other-device" }, { now });
+
+  mount(bus);
+  await settle();
+  const accept = one("[data-testid='attention-accept']");
+  if (accept) {
+    click(accept);
+    await settle();
+  }
+
+  expect(log.moved).toEqual([]);
+  expect(log.restored).toEqual([]);
+});
+
+test("a transport failure does not move the board or record an arrival", async () => {
+  raise();
+  const { log } = board({ [ANCHOR]: LIVE_RECT });
+  const failingTransport: typeof fetch = (async () => {
+    throw new Error("network unreachable");
+  }) as unknown as typeof fetch;
+  const failing = createFocusHandoffBus();
+  const failingBoard: BoardFocusController = {
+    project: "demo",
+    index: { project: "demo", boardRevision: 9, rectFor: (key) => (key === ANCHOR ? LIVE_RECT : null), named: [] },
+    moveTo: ({ rect }) => { log.moved.push(rect); return true; },
+    restoreCamera: (camera) => { log.restored.push(camera); return true; },
+  };
+  failing.setBoard(failingBoard);
+  failing.setShell({ project: "demo", openProject: () => {}, openPath: () => {} });
+
+  const host = dom.document.createElement("div");
+  dom.document.body.appendChild(host as never);
+  const root = createRoot(host as unknown as Element);
+  flushSync(() => root.render(
+    <AttentionHost mobile={false} bus={failing} deviceId={DEVICE} fetchFn={failingTransport} pollMs={100_000} timing={{ timeoutMs: 0, pollMs: 0 }} />,
+  ));
+  roots.push(root);
+  await settle();
+
+  const accept = one("[data-testid='attention-accept']");
+  if (accept) {
+    click(accept);
+    await settle();
+  }
+
+  expect(log.moved).toEqual([]);
+  expect(log.restored).toEqual([]);
+});

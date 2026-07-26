@@ -269,3 +269,59 @@ test("acknowledge=false polls without moving the durable cursor", () => {
   expect(readDigestSubscriber(SUBSCRIBER)).toBeNull();
   expect(pollLifecycleDigest({ subscriberId: SUBSCRIBER, now: T0 + 2_000 }).relay?.items).toHaveLength(1);
 });
+
+test("two subscribers with the same id but different scope filters track independent cursors", () => {
+  sandbox();
+  appendLifecycleEvents([
+    routine(1, T0, "deploy"),
+    {
+      key: "pipeline:pipeline_b:stage:review:attempt:1:started",
+      type: "stage_started",
+      at: new Date(T0 + 1_000).toISOString(),
+      project: "other",
+      pipelineId: "pipeline_b",
+      stageId: "review",
+      attempt: 1,
+      conversationId: "conversation_other",
+      summary: "review started",
+    },
+  ]);
+
+  const scopeA = { subscriberId: SUBSCRIBER, project: "viewer", now: T0 + ROUTINE_DIGEST_INTERVAL_MS + 1_000 };
+  const scopeB = { subscriberId: SUBSCRIBER, project: "other", now: T0 + ROUTINE_DIGEST_INTERVAL_MS + 1_000 };
+
+  const relayA = pollLifecycleDigest(scopeA);
+  const relayB = pollLifecycleDigest(scopeB);
+
+  expect(relayA.relay?.items).toHaveLength(1);
+  expect(relayA.relay?.items[0]?.stageId).toBe("deploy");
+  expect(relayB.relay?.items).toHaveLength(1);
+  expect(relayB.relay?.items[0]?.stageId).toBe("review");
+
+  expect(pollLifecycleDigest(scopeA).relay).toBeNull();
+  expect(pollLifecycleDigest(scopeB).relay).toBeNull();
+});
+
+test("a terminal event beyond the first page still triggers immediate relay", () => {
+  sandbox();
+  const events: LifecycleEventInput[] = [];
+  for (let index = 0; index < 201; index += 1) {
+    events.push(routine(index + 1, T0 + index * 100, `step-${index}`));
+  }
+  events.push({
+    key: "pipeline:pipeline_a:stage:review:attempt:1:verdict:fail",
+    type: "review_verdict",
+    at: new Date(T0 + 201 * 100).toISOString(),
+    project: "viewer",
+    pipelineId: "pipeline_a",
+    stageId: "review",
+    attempt: 1,
+    role: "reviewer",
+    summary: "fail: findings block the merge",
+  });
+  appendLifecycleEvents(events);
+
+  const result = pollLifecycleDigest({ subscriberId: "sub_overflow", now: T0 + 1_000 });
+  expect(result.relay).not.toBeNull();
+  expect(result.pending).toBeGreaterThan(0);
+});

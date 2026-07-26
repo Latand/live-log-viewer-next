@@ -360,3 +360,23 @@ test("an unregistered transcript is aged: past the grace it has stopped starting
   expect(evaluateLiveness({ host: { state: "unknown" }, turnState: "unknown", silentForMs: null, stallAfterMs }))
     .toEqual({ lifecycle: "starting", reason: "launch_unproven" });
 });
+
+test("a targeted query with an unknown conversation id returns an empty snapshot, never the full inventory", async () => {
+  const registry = {
+    entries: {},
+    conversations: {},
+  } as unknown as RegistryFile;
+
+  const snapshot = await agentLivenessSnapshot({ conversationId: "nonexistent_conversation_id" }, sources({
+    listFiles: async () => {
+      throw new Error("a targeted query with an unknown id must not run the inventory sweep");
+    },
+    describeTranscript: async () => null,
+    registrySnapshot: () => registry,
+    pipelines: () => [],
+    transcriptEvidence: async () => null,
+  }));
+
+  expect(snapshot.count).toBe(0);
+  expect(snapshot.conversations).toEqual([]);
+});

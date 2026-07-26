@@ -304,6 +304,7 @@ export async function agentLivenessSnapshot(
   /* A conversation id names its current generation's transcript; that is the
      only path whose liveness is meaningful. */
   const requestedPaths = new Set<string>();
+  const targeted = Boolean(request.transcriptPath || request.conversationId);
   if (request.transcriptPath) requestedPaths.add(request.transcriptPath);
   if (request.conversationId) {
     const conversation = registry.conversations[request.conversationId];
@@ -311,14 +312,14 @@ export async function agentLivenessSnapshot(
     if (path) requestedPaths.add(path);
   }
 
-  /* The targeted branch. A caller that named its conversations already made the
-     selection, so nothing here needs the inventory: no root discovery, no
-     process-table sweep, no tmux subprocess, and one tail read per named
-     transcript. `project`/`liveOnly` narrow an inventory and have nothing left
-     to narrow here, so they are not applied. */
-  const entries: LivenessTranscript[] = requestedPaths.size > 0
-    ? (await Promise.all([...requestedPaths].slice(0, limit).map((path) => sources.describeTranscript(path))))
-      .filter((entry): entry is LivenessTranscript => entry !== null)
+  /* The targeted branch. A caller that named a specific target gets back what
+     it named and nothing else — even an empty set. Falling through to the full
+     inventory would turn a stale alias into an unrelated sweep. */
+  const entries: LivenessTranscript[] = targeted
+    ? (requestedPaths.size > 0
+      ? (await Promise.all([...requestedPaths].slice(0, limit).map((path) => sources.describeTranscript(path))))
+        .filter((entry): entry is LivenessTranscript => entry !== null)
+      : [])
     : (await sources.listFiles())
       .filter((entry) => entry.engine === "claude" || entry.engine === "codex")
       .filter((entry) => !request.project || entry.project === request.project)

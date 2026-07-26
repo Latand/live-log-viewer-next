@@ -119,25 +119,18 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
   const onAccept = useCallback(async (request: AttentionRequestV1) => {
     const before = currentViewport();
     leaving.current = before;
-    /* Written before the move and outside this component's lifetime, so a
-       reload or a second tab on the same device restores the camera into the
-       project it was captured in — or, knowing nothing, restores no camera at
-       all rather than one project's coordinates in another's layout. */
-    rememberReturnProject(browserStorage(), deviceId, request.id, before.project);
     let landed = false;
     try {
-      await offers.accept(request);
+      const accepted = await offers.accept(request);
+      if (!accepted.ok) return;
+      /* Written after the server confirmed ownership, so a rejected device
+         never stores a return point it will never use. */
+      rememberReturnProject(browserStorage(), deviceId, request.id, before.project);
       const outcome = await runFocusHandoff(request, bus, timing ?? {});
       landed = outcome.resolution !== "lost";
-      /* Reported whichever way it went: an `exact` or `approximate` arrival
-         becomes a follow with a return point, and a `lost` one ends the request
-         then and there — visibly, rather than looking like a move that
-         happened, and without leaving it agreed-to but never landed. */
       await offers.arrive(request, outcome.resolution);
     } finally {
       leaving.current = null;
-      /* Nothing landed, so there is no return to make and nothing to remember
-         the project for. Also the path a throw takes out. */
       if (!landed) forgetReturnProject(browserStorage(), deviceId, request.id);
     }
   }, [offers, bus, deviceId, timing]);
@@ -145,7 +138,8 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
   const onReturn = useCallback(async (request: AttentionRequestV1) => {
     const point = request.returnPoints.find((entry) => entry.deviceId === deviceId);
     if (point) {
-      await restoreFocusPoint(point, readReturnProject(browserStorage(), deviceId, request.id), bus, timing ?? {});
+      const restored = await restoreFocusPoint(point, readReturnProject(browserStorage(), deviceId, request.id), bus, timing ?? {});
+      if (!restored) return;
     }
     await offers.goBack(request, "control");
     forgetReturnProject(browserStorage(), deviceId, request.id);

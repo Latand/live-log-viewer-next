@@ -218,3 +218,32 @@ test("a sweep journals agent_gone for an unfinished stage and agent_resumed when
   }, { force: true });
   expect(queryLifecycleEvents({ conversationId: "conversation_long_finished" }).count).toBe(0);
 });
+
+test("a liveness-only refresh does not throttle a lifecycle refresh and vice versa", () => {
+  const now = Date.now() + 60_000;
+
+  const livenessInput: Parameters<typeof refreshLifecycleJournal>[0] = {
+    liveness: [livenessRecord({
+      conversationId: "conversation_domain_a",
+      lifecycle: "stalled",
+      reason: "host_gone_turn_open",
+      turnState: "busy",
+      pipeline: null,
+    })],
+  };
+  const pipelineInput: Parameters<typeof refreshLifecycleJournal>[0] = {
+    pipelines: [pipelineFixture("pipeline_domain_throttle")],
+  };
+
+  const first = refreshLifecycleJournal(livenessInput, { now });
+  expect(first.throttled).toBe(false);
+
+  const second = refreshLifecycleJournal(pipelineInput, { now });
+  expect(second.throttled).toBe(false);
+
+  const third = refreshLifecycleJournal(livenessInput, { now });
+  expect(third.throttled).toBe(true);
+
+  const fourth = refreshLifecycleJournal(pipelineInput, { now });
+  expect(fourth.throttled).toBe(true);
+});

@@ -586,7 +586,8 @@ function codexSourceIdentity(pathname: string): CodexSourceIdentity | null {
  * nothing, so those keep reusing the fork.
  */
 function codexForkIsStale(current: CodexSourceIdentity | null, recorded: CodexSourceIdentity | null): boolean {
-  if (!recorded || !current) return false;
+  if (!current) return false;
+  if (!recorded) return true;
   return current.size !== recorded.size || current.mtimeMs !== recorded.mtimeMs;
 }
 
@@ -1173,7 +1174,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     recordContinuityPath: (pathname: string) => void,
   ): Promise<ProviderReceipt> {
     const journalRoot = this.dependencies.journalRoot ?? statePath("migration-provider-operations");
-    return withCodexOperationLease(journalRoot, operationId, (assertLeaseOwned) => this.createCodexLocked(
+    return withCodexOperationLease(journalRoot, `move:${sourceNativeId}`, (assertLeaseOwned) => this.createCodexLocked(
       operationId,
       conversationId,
       sourceNativeId,

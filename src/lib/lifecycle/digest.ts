@@ -89,6 +89,11 @@ function digestStatePath(): string {
   return statePath("lifecycle-digests.json");
 }
 
+export function digestScopeKey(request: Pick<LifecycleDigestRequest, "subscriberId" | "project" | "pipelineId" | "conversationId">): string {
+  const parts = [request.subscriberId, request.project ?? "", request.pipelineId ?? "", request.conversationId ?? ""];
+  return parts.join("\0");
+}
+
 function emptyState(): DigestStateFile {
   return { version: DIGEST_STATE_VERSION, subscribers: {} };
 }
@@ -129,7 +134,8 @@ function writeState(file: DigestStateFile): void {
 }
 
 export function readDigestSubscriber(subscriberId: string): DigestSubscriberState | null {
-  return readState().subscribers[subscriberId] ?? null;
+  const scopedId = digestScopeKey({ subscriberId });
+  return readState().subscribers[scopedId] ?? null;
 }
 
 /** Shape a digest item collapses on: same lineage, same transition. NUL is the
@@ -285,9 +291,20 @@ export function evaluateDigest(
     cursor: subscriber.cursorSeq,
     pending: pendingEvents.length + page.remaining,
   };
-  if (pendingEvents.length === 0) return { ...base, relay: null, heldUntil: null };
+  if (pendingEvents.length === 0 && page.remaining === 0) return { ...base, relay: null, heldUntil: null };
 
-  const terminal = pendingEvents.some((event) => isTerminalHighSignalEvent(event.type));
+  let terminal = pendingEvents.some((event) => isTerminalHighSignalEvent(event.type));
+  if (!terminal && page.remaining > 0) {
+    const overflow = pageFromEvents(file, {
+      project: request.project,
+      pipelineId: request.pipelineId,
+      conversationId: request.conversationId,
+      afterSeq: pendingEvents.at(-1)?.seq ?? subscriber.cursorSeq,
+      limit: 200,
+    });
+    terminal = overflow.events.some((event) => isTerminalHighSignalEvent(event.type));
+  }
+  if (pendingEvents.length === 0) return { ...base, relay: null, heldUntil: null };
   if (!terminal) {
     const oldestRoutineAt = parseMs(pendingEvents[0]!.at) ?? now;
     const lastRelayMs = parseMs(subscriber.lastRelayAt);
@@ -324,17 +341,18 @@ export function evaluateDigest(
 export function pollLifecycleDigest(request: LifecycleDigestRequest): LifecycleDigestResult {
   const journal = readLifecycleJournal();
   const now = Number.isFinite(request.now) ? request.now as number : Date.now();
+  const scopedId = digestScopeKey(request);
   if (request.acknowledge === false) {
-    const subscriber = readDigestSubscriber(request.subscriberId) ?? { cursorSeq: 0, lastRelayAt: null, updatedAt: new Date(now).toISOString() };
+    const subscriber = readDigestSubscriber(scopedId) ?? { cursorSeq: 0, lastRelayAt: null, updatedAt: new Date(now).toISOString() };
     return evaluateDigest(journal, request, subscriber);
   }
   return withFileTransactionSync(digestStatePath(), "lifecycle digest state is busy", () => {
     const state = readState();
-    const subscriber = state.subscribers[request.subscriberId]
+    const subscriber = state.subscribers[scopedId]
       ?? { cursorSeq: 0, lastRelayAt: null, updatedAt: new Date(now).toISOString() };
     const result = evaluateDigest(journal, request, subscriber);
     if (!result.relay) return result;
-    state.subscribers[request.subscriberId] = {
+    state.subscribers[scopedId] = {
       cursorSeq: result.cursor,
       lastRelayAt: new Date(now).toISOString(),
       updatedAt: new Date(now).toISOString(),
@@ -351,12 +369,13 @@ export function pollLifecycleDigest(request: LifecycleDigestRequest): LifecycleD
  */
 export function seedLifecycleDigestCursor(subscriberId: string, now = Date.now()): DigestSubscriberState {
   const head = readLifecycleJournal().lastSeq;
+  const scopedId = digestScopeKey({ subscriberId });
   return withFileTransactionSync(digestStatePath(), "lifecycle digest state is busy", () => {
     const state = readState();
-    const existing = state.subscribers[subscriberId];
+    const existing = state.subscribers[scopedId];
     if (existing) return existing;
     const seeded: DigestSubscriberState = { cursorSeq: head, lastRelayAt: null, updatedAt: new Date(now).toISOString() };
-    state.subscribers[subscriberId] = seeded;
+    state.subscribers[scopedId] = seeded;
     writeState(state);
     return seeded;
   });
