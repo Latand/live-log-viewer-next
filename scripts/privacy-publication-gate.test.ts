@@ -2674,7 +2674,7 @@ describe("commitMessageFindings", () => {
   function gitRepo(): string {
     const repo = mkdtempSync(join(tmpdir(), "llv-privacy-commit-"));
     temporaryDirectories.push(repo);
-    Bun.spawnSync({ cmd: ["git", "init", repo], stderr: "pipe", stdout: "pipe" });
+    Bun.spawnSync({ cmd: ["git", "init", "-b", "main", repo], stderr: "pipe", stdout: "pipe" });
     Bun.spawnSync({ cmd: ["git", "-C", repo, "config", "user.email", "test@example.com"], stderr: "pipe", stdout: "pipe" });
     Bun.spawnSync({ cmd: ["git", "-C", repo, "config", "user.name", "Test"], stderr: "pipe", stdout: "pipe" });
     writeFileSync(join(repo, "init.txt"), "init");
