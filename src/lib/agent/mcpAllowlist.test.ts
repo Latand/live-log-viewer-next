@@ -175,16 +175,32 @@ test("durable launch profiles reset each new spawn to Viewer only", () => {
   expect(emptyLaunchProfile().mcpServers).toEqual(["viewer"]);
 });
 
-function settledParent(store: AgentRegistry, mcpServers: string[]) {
-  const parent = store.beginSpawnRequest({
-    engine: "codex",
-    cwd: "/repo",
-    launchProfile: { mcpServers },
-  });
-  if (parent.kind !== "created") throw new Error("expected parent reservation");
-  const settled = store.settleSpawn(parent.receipt.launchId, {
-    key: { engine: "codex", sessionId: "nested-parent" },
-    artifactPath: "/sessions/nested-parent.jsonl",
+/* A session id and its transcript, in the shapes production actually uses. The
+   registry derives a generation's id from the transcript FILENAME
+   (`nativeGenerationId`), and an entry's row key from its session key, so the
+   two agree only when the file is named `<session-uuid>.jsonl` — which is what
+   both engines write. A fixture named `/sessions/worker.jsonl` instead makes the
+   registry synthesize a random generation id that no entry row key can ever
+   match, and would test the ownership link against a shape that never exists. */
+const sessionIds = new Map<string, string>();
+function sessionIdFor(label: string): string {
+  const existing = sessionIds.get(label);
+  if (existing) return existing;
+  const created = crypto.randomUUID();
+  sessionIds.set(label, created);
+  return created;
+}
+function transcriptFor(label: string): string {
+  return `/sessions/${sessionIdFor(label)}.jsonl`;
+}
+function entryRowKey(label: string): string {
+  return `codex:${sessionIdFor(label)}`;
+}
+
+function settleAs(store: AgentRegistry, launchId: string, label: string) {
+  return store.settleSpawn(launchId, {
+    key: { engine: "codex", sessionId: sessionIdFor(label) },
+    artifactPath: transcriptFor(label),
     cwd: "/repo",
     accountId: "account",
     status: "idle",
@@ -193,6 +209,16 @@ function settledParent(store: AgentRegistry, mcpServers: string[]) {
     claimOwner: null,
     pendingAction: null,
   });
+}
+
+function settledParent(store: AgentRegistry, mcpServers: string[], label = "nested-parent") {
+  const parent = store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    launchProfile: { mcpServers },
+  });
+  if (parent.kind !== "created") throw new Error("expected parent reservation");
+  const settled = settleAs(store, parent.receipt.launchId, label);
   if (settled.kind !== "settled") throw new Error("expected parent settlement");
   return settled.conversation.id;
 }
@@ -305,15 +331,15 @@ test("a delegated conversation cannot keep a hand-edited grant across resume or 
     tamperJsonGrant(registryPath, ["viewer", "test-connector"]);
 
     const reloaded = new AgentRegistry(registryPath, undefined, undefined, storage);
-    expect(reloaded.launchProfileForPath("/sessions/delegated-worker.jsonl")?.mcpServers).toEqual(["viewer"]);
+    expect(reloaded.launchProfileForPath(transcriptFor("delegated-worker"))?.mcpServers).toEqual(["viewer"]);
     const snapshot = reloaded.snapshot();
-    expect(snapshot.entries["codex:delegated-worker"]?.launchProfile?.mcpServers).toEqual(["viewer"]);
+    expect(snapshot.entries[entryRowKey("delegated-worker")]?.launchProfile?.mcpServers).toEqual(["viewer"]);
     expect(snapshot.conversations[workerId]!.generations.at(-1)!.launchProfile.mcpServers).toEqual(["viewer"]);
     /* The operator root's own rows keep the tampered grant, because its stored
        origin proves it may hold one. Without this control the assertions above
        would also pass if the read simply wiped every grant it saw. */
-    expect(reloaded.launchProfileForPath("/sessions/nested-parent.jsonl")?.mcpServers).toEqual(["viewer", "test-connector"]);
-    expect(snapshot.entries["codex:nested-parent"]?.launchProfile?.mcpServers).toEqual(["viewer", "test-connector"]);
+    expect(reloaded.launchProfileForPath(transcriptFor("nested-parent"))?.mcpServers).toEqual(["viewer", "test-connector"]);
+    expect(snapshot.entries[entryRowKey("nested-parent")]?.launchProfile?.mcpServers).toEqual(["viewer", "test-connector"]);
     expect(snapshot.conversations[parentId]!.generations.at(-1)!.launchProfile.mcpServers).toEqual(["viewer", "test-connector"]);
 
     const resumedWorker = reloaded.beginSpawnRequest({
@@ -357,19 +383,9 @@ test("a tampered receipt cannot carry a grant into settlement or attach", () => 
     tamperJsonGrant(registryPath, ["viewer", "test-connector"]);
 
     const reloaded = new AgentRegistry(registryPath, undefined, undefined, storage);
-    const settle = (launchId: string, sessionId: string) => {
-      const settled = reloaded.settleSpawn(launchId, {
-        key: { engine: "codex", sessionId },
-        artifactPath: `/sessions/${sessionId}.jsonl`,
-        cwd: "/repo",
-        accountId: "account",
-        status: "idle",
-        host: null,
-        claimEpoch: 0,
-        claimOwner: null,
-        pendingAction: null,
-      });
-      if (settled.kind !== "settled") throw new Error(`expected ${sessionId} settlement`);
+    const settle = (launchId: string, label: string) => {
+      const settled = settleAs(reloaded, launchId, label);
+      if (settled.kind !== "settled") throw new Error(`expected ${label} settlement`);
       return settled.conversation.id;
     };
 
@@ -381,18 +397,18 @@ test("a tampered receipt cannot carry a grant into settlement or attach", () => 
        copy settlement writes ever holds the connector. */
     expect(snapshot.receipts[worker.receipt.launchId]!.launchProfile.mcpServers).toEqual(["viewer"]);
     expect(snapshot.conversations[workerId]!.generations.at(-1)!.launchProfile.mcpServers).toEqual(["viewer"]);
-    expect(snapshot.entries["codex:receipt-worker"]?.launchProfile?.mcpServers).toEqual(["viewer"]);
+    expect(snapshot.entries[entryRowKey("receipt-worker")]?.launchProfile?.mcpServers).toEqual(["viewer"]);
     /* The operator root's receipt keeps it through the same reload and the same
        settlement, so the reset above is the origin rule, not a blanket wipe. */
     expect(snapshot.receipts[root.receipt.launchId]!.launchProfile.mcpServers).toEqual(["viewer", "test-connector"]);
     expect(snapshot.conversations[rootId]!.generations.at(-1)!.launchProfile.mcpServers).toEqual(["viewer", "test-connector"]);
-    expect(snapshot.entries["codex:receipt-root"]?.launchProfile?.mcpServers).toEqual(["viewer", "test-connector"]);
+    expect(snapshot.entries[entryRowKey("receipt-root")]?.launchProfile?.mcpServers).toEqual(["viewer", "test-connector"]);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 
-function settledDelegatedChild(store: AgentRegistry, parentId: string, sessionId: string) {
+function settledDelegatedChild(store: AgentRegistry, parentId: string, label: string) {
   const child = store.beginSpawnRequest({
     engine: "codex",
     cwd: "/repo",
@@ -401,27 +417,17 @@ function settledDelegatedChild(store: AgentRegistry, parentId: string, sessionId
     origin: { kind: "agent", conversationId: parentId as never },
   });
   if (child.kind !== "created") throw new Error("expected child reservation");
-  const settled = store.settleSpawn(child.receipt.launchId, {
-    key: { engine: "codex", sessionId },
-    artifactPath: `/sessions/${sessionId}.jsonl`,
-    cwd: "/repo",
-    accountId: "account",
-    status: "idle",
-    host: null,
-    claimEpoch: 0,
-    claimOwner: null,
-    pendingAction: null,
-  });
+  const settled = settleAs(store, child.receipt.launchId, label);
   if (settled.kind !== "settled") throw new Error("expected child settlement");
   return settled.conversation.id;
 }
 
-function structuredRow(store: AgentRegistry, sessionId: string) {
+function structuredRow(store: AgentRegistry, label: string) {
   /* A structured host row is what boot adoption filters for and what a claim
      hands to `optionsFor`, so the claim path is exercised rather than skipped. */
   store.upsert({
-    key: { engine: "codex", sessionId },
-    artifactPath: `/sessions/${sessionId}.jsonl`,
+    key: { engine: "codex", sessionId: sessionIdFor(label) },
+    artifactPath: transcriptFor(label),
     cwd: "/repo",
     accountId: "account",
     status: "dead",
@@ -466,13 +472,211 @@ function tamperSqliteGrant(sqlitePath: string, rows: { collection: "entries" | "
   }
 }
 
+/** Rewrite ONE entry row's embedded identity, leaving its row KEY — the
+    storage-level identity a row does not get to choose — alone. This is the
+    escalation the origin rule alone does not see: the row keeps its own origin
+    and simply claims to be somebody else's session. */
+type IdentityForgery = { key?: { engine: string; sessionId: string }; artifactPath?: string };
+
+function forgeJsonEntryIdentity(registryPath: string, rowKey: string, forgery: IdentityForgery): void {
+  const raw = JSON.parse(fs.readFileSync(registryPath, "utf8")) as {
+    entries: Record<string, IdentityForgery>;
+  };
+  const entry = raw.entries[rowKey];
+  if (!entry) throw new Error(`expected a stored entry row for ${rowKey}`);
+  Object.assign(entry, forgery);
+  fs.writeFileSync(registryPath, JSON.stringify(raw));
+}
+
+function forgeSqliteEntryIdentity(sqlitePath: string, rowKey: string, forgery: IdentityForgery): void {
+  const db = new Database(sqlitePath, { strict: true });
+  try {
+    const row = db.query<{ value_json: string }, [string, string]>(
+      "SELECT value_json FROM registry_rows WHERE collection = ? AND row_key = ?",
+    ).get("entries", rowKey);
+    if (!row) throw new Error(`expected a stored entries row for ${rowKey}`);
+    db.query<unknown, [string, string, string]>(
+      "UPDATE registry_rows SET value_json = ? WHERE collection = ? AND row_key = ?",
+    ).run(JSON.stringify({ ...JSON.parse(row.value_json) as object, ...forgery }), "entries", rowKey);
+  } finally {
+    db.close();
+  }
+}
+
+/* Each forgery is exercised ALONE. Applying both at once would let either
+   check alone carry the case, and the other could be deleted unnoticed. */
+const IDENTITY_FORGERIES = [
+  {
+    what: "embedded session key",
+    forge: (): IdentityForgery => ({ key: { engine: "codex", sessionId: sessionIdFor("nested-parent") } }),
+  },
+  {
+    what: "transcript path",
+    forge: (): IdentityForgery => ({ artifactPath: transcriptFor("nested-parent") }),
+  },
+] as const;
+
+for (const { what, forge } of IDENTITY_FORGERIES) {
+  test(`a delegated entry cannot borrow the operator root's grant by forging its ${what} (JSON)`, () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-json-identity-"));
+    const registryPath = path.join(directory, "registry.json");
+    const storage = { sqliteMode: "off" as const, mcpGrantPolicy: WITH_CONNECTOR };
+    const workerRow = entryRowKey("json-identity-worker");
+    try {
+      const store = new AgentRegistry(registryPath, undefined, undefined, storage);
+      const rootId = settledParent(store, ["viewer"]);
+      settledDelegatedChild(store, rootId, "json-identity-worker");
+      /* The root legitimately holds the connector, so there is something worth
+         borrowing; the worker's own rows are reset by the origin rule. */
+      tamperJsonGrant(registryPath, ["viewer", "test-connector"]);
+      forgeJsonEntryIdentity(registryPath, workerRow, forge());
+
+      const reloaded = new AgentRegistry(registryPath, undefined, undefined, storage);
+      expect(reloaded.snapshot().entries[workerRow]?.launchProfile?.mcpServers).toEqual(["viewer"]);
+      expect(reloaded.readOnlySnapshot().entries[workerRow]?.launchProfile?.mcpServers).toEqual(["viewer"]);
+      /* The root's own row is untouched by the forgery and keeps its grant, so
+         the denial is the identity rule rather than a blanket wipe. */
+      expect(reloaded.snapshot().entries[entryRowKey("nested-parent")]?.launchProfile?.mcpServers)
+        .toEqual(["viewer", "test-connector"]);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test(`a delegated entry cannot borrow the operator root's grant by forging its ${what} (SQLite, claim, adoption, recovery)`, () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-sqlite-identity-"));
+    const registryPath = path.join(directory, "agent-registry.json");
+    const sqlitePath = path.join(directory, "agent-registry.sqlite");
+    const storage = { sqliteMode: "sqlite" as const, mcpGrantPolicy: WITH_CONNECTOR };
+    const workerRow = entryRowKey("sqlite-identity-worker");
+    const rootRow = entryRowKey("nested-parent");
+    try {
+      const store = new AgentRegistry(registryPath, undefined, undefined, storage);
+      const rootId = settledParent(store, ["viewer"]);
+      const workerId = settledDelegatedChild(store, rootId, "sqlite-identity-worker");
+      structuredRow(store, "sqlite-identity-worker");
+      structuredRow(store, "nested-parent");
+
+      tamperSqliteGrant(sqlitePath, [
+        { collection: "entries", key: workerRow },
+        { collection: "conversations", key: workerId },
+        { collection: "entries", key: rootRow },
+        { collection: "conversations", key: rootId },
+      ], ["viewer", "test-connector"]);
+      forgeSqliteEntryIdentity(sqlitePath, workerRow, forge());
+
+      const reopened = new AgentRegistry(registryPath, undefined, undefined, storage);
+      /* readOnlySnapshot is what boot ADOPTION filters rows from; snapshot is
+         what structured RECOVERY reads a profile and cursor through. */
+      expect(reopened.readOnlySnapshot().entries[workerRow]?.launchProfile?.mcpServers).toEqual(["viewer"]);
+      expect(reopened.snapshot().entries[workerRow]?.launchProfile?.mcpServers).toEqual(["viewer"]);
+      /* And the CLAIM mutation, which hands a host one row and never sees an
+         assembled snapshot at all. */
+      const owner = { pid: process.pid, startIdentity: null };
+      const claimed = reopened.claimStructuredHost(
+        { engine: "codex", sessionId: sessionIdFor("sqlite-identity-worker") },
+        owner,
+        { allowUnhosted: true },
+      );
+      expect(claimed).not.toBeNull();
+      expect(claimed?.launchProfile?.mcpServers).toEqual(["viewer"]);
+      /* The operator root keeps its grant on every one of those paths. */
+      expect(reopened.readOnlySnapshot().entries[rootRow]?.launchProfile?.mcpServers).toEqual(["viewer", "test-connector"]);
+      expect(reopened.claimStructuredHost({ engine: "codex", sessionId: sessionIdFor("nested-parent") }, owner, { allowUnhosted: true })
+        ?.launchProfile?.mcpServers).toEqual(["viewer", "test-connector"]);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+}
+
+test("identity evidence that cannot name one owner denies rather than picking a winner", () => {
+  const profileFor = (mcpServers: string[], parentConversationId: string | null) => ({
+    ...emptyLaunchProfile(),
+    parentConversationId: parentConversationId as never,
+    mcpServers,
+  });
+  const grant = ["viewer", "test-connector"];
+  /* Two conversations of DIFFERENT origin whose generations claim one entry row
+     — the delegated one by having copied the root generation's id. Nothing left
+     in the file says which decision the row should follow. */
+  const contested = () => ({
+    conversations: {
+      root: {
+        id: "conversation_root",
+        engine: "codex",
+        agentRole: null,
+        delegationDepth: 0,
+        generations: [{ id: "contested", path: "/sessions/root.jsonl", launchProfile: profileFor(grant, null) }],
+      },
+      worker: {
+        id: "conversation_worker",
+        engine: "codex",
+        agentRole: "builder",
+        delegationDepth: 1,
+        generations: [{ id: "contested", path: "/sessions/worker.jsonl", launchProfile: profileFor(grant, "conversation_root") }],
+      },
+    },
+    entries: { "codex:contested": { launchProfile: profileFor(grant, null) } },
+  } as unknown as StoredGrantFile);
+
+  expect(reboundStoredMcpGrants(contested(), WITH_CONNECTOR).entries["codex:contested"]!.launchProfile!.mcpServers)
+    .toEqual(["viewer"]);
+  expect(reboundAssembledMcpGrants(contested(), WITH_CONNECTOR).entries["codex:contested"]!.launchProfile!.mcpServers)
+    .toEqual(["viewer"]);
+
+  /* And the same for a transcript two generations both record: the path names
+     no single owner, so an entry pointing at it is attributable to neither. */
+  const sharedPath = () => ({
+    conversations: {
+      root: {
+        id: "conversation_root",
+        engine: "codex",
+        agentRole: null,
+        delegationDepth: 0,
+        generations: [{ id: "root-generation", path: "/sessions/shared.jsonl", launchProfile: profileFor(grant, null) }],
+      },
+      worker: {
+        id: "conversation_worker",
+        engine: "codex",
+        agentRole: "builder",
+        delegationDepth: 1,
+        generations: [{ id: "worker-generation", path: "/sessions/shared.jsonl", launchProfile: profileFor(grant, "conversation_root") }],
+      },
+    },
+    entries: {
+      "codex:root-generation": { artifactPath: "/sessions/shared.jsonl", launchProfile: profileFor(grant, null) },
+    },
+  } as unknown as StoredGrantFile);
+
+  expect(reboundAssembledMcpGrants(sharedPath(), WITH_CONNECTOR).entries["codex:root-generation"]!.launchProfile!.mcpServers)
+    .toEqual(["viewer"]);
+});
+
+test("a forged embedded key is denied even where no conversation is loaded", () => {
+  /* A row key/payload mismatch needs nothing but the row, so the per-collection
+     pass — which deliberately leaves merely-unowned rows alone — still denies
+     it. Otherwise a SQLite entries-only normalize would be the way in. */
+  const forged = {
+    conversations: {},
+    entries: {
+      "codex:worker": {
+        key: { engine: "codex", sessionId: "root" },
+        launchProfile: { mcpServers: ["viewer", "test-connector"] },
+      },
+    },
+  } as unknown as StoredGrantFile;
+  expect(reboundStoredMcpGrants(forged, WITH_CONNECTOR).entries["codex:worker"]!.launchProfile!.mcpServers)
+    .toEqual(["viewer"]);
+});
+
 test("a SQLite-authoritative registry re-bounds a tampered entry row on the paths adoption reads", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-sqlite-tamper-"));
   const registryPath = path.join(directory, "agent-registry.json");
   const sqlitePath = path.join(directory, "agent-registry.sqlite");
   const storage = { sqliteMode: "sqlite" as const, mcpGrantPolicy: WITH_CONNECTOR };
-  const workerEntryId = "codex:sqlite-delegated-worker";
-  const rootEntryId = "codex:nested-parent";
+  const workerEntryId = entryRowKey("sqlite-delegated-worker");
+  const rootEntryId = entryRowKey("nested-parent");
   try {
     const store = new AgentRegistry(registryPath, undefined, undefined, storage);
     const parentId = settledParent(store, ["viewer"]);
@@ -502,10 +706,10 @@ test("a SQLite-authoritative registry re-bounds a tampered entry row on the path
     /* And the entry a claim mutation hands to a host, which never sees an
        assembled snapshot at all. */
     const owner = { pid: process.pid, startIdentity: null };
-    const claimedWorker = reopened.claimStructuredHost({ engine: "codex", sessionId: "sqlite-delegated-worker" }, owner, { allowUnhosted: true });
+    const claimedWorker = reopened.claimStructuredHost({ engine: "codex", sessionId: sessionIdFor("sqlite-delegated-worker") }, owner, { allowUnhosted: true });
     expect(claimedWorker).not.toBeNull();
     expect(claimedWorker?.launchProfile?.mcpServers).toEqual(["viewer"]);
-    const claimedRoot = reopened.claimStructuredHost({ engine: "codex", sessionId: "nested-parent" }, owner, { allowUnhosted: true });
+    const claimedRoot = reopened.claimStructuredHost({ engine: "codex", sessionId: sessionIdFor("nested-parent") }, owner, { allowUnhosted: true });
     expect(claimedRoot?.launchProfile?.mcpServers).toEqual(["viewer", "test-connector"]);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
@@ -537,10 +741,10 @@ test("an assembled SQLite snapshot re-decides entry rows by their owning convers
     reboundStoredMcpGrants(snapshot as unknown as StoredGrantFile, WITH_CONNECTOR);
 
     expect(snapshot.conversations[rootId]!.generations.at(-1)!.launchProfile.mcpServers).toEqual(grant);
-    expect(snapshot.entries["codex:nested-parent"]?.launchProfile?.mcpServers).toEqual(grant);
+    expect(snapshot.entries[entryRowKey("nested-parent")]?.launchProfile?.mcpServers).toEqual(grant);
     /* The delegated worker loses it on both copies, matched by real session key. */
     expect(snapshot.conversations[workerId]!.generations.at(-1)!.launchProfile.mcpServers).toEqual(["viewer"]);
-    expect(snapshot.entries["codex:sqlite-origin-worker"]?.launchProfile?.mcpServers).toEqual(["viewer"]);
+    expect(snapshot.entries[entryRowKey("sqlite-origin-worker")]?.launchProfile?.mcpServers).toEqual(["viewer"]);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -576,12 +780,12 @@ test("the SQLite store re-decides entry rows by origin when it assembles a snaps
       const file = store.snapshot().file;
       /* The operator root keeps the grant on both copies of its profile. */
       expect(file.conversations[rootId]!.generations.at(-1)!.launchProfile.mcpServers).toEqual(grant);
-      expect(file.entries["codex:nested-parent"]!.launchProfile!.mcpServers).toEqual(grant);
+      expect(file.entries[entryRowKey("nested-parent")]!.launchProfile!.mcpServers).toEqual(grant);
       /* The delegated worker loses it on both — including the ENTRY row, which
          is normalized with no conversation in sight and is what boot adoption
          and structured recovery consume. */
       expect(file.conversations[workerId]!.generations.at(-1)!.launchProfile.mcpServers).toEqual(["viewer"]);
-      expect(file.entries["codex:assembled-worker"]!.launchProfile!.mcpServers).toEqual(["viewer"]);
+      expect(file.entries[entryRowKey("assembled-worker")]!.launchProfile!.mcpServers).toEqual(["viewer"]);
     }
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });

@@ -207,19 +207,108 @@ function sameGrant(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((name, index) => name === right[index]);
 }
 
-/** An entry names its generation by session key, and the transcript path is the
-    same identity spelled the other way; either match makes the entry's owning
-    conversation — and so its origin — knowable. */
-function generationKeys(engine: string, generation: StoredGeneration): string[] {
-  const keys = [sessionKeyId({ engine: engine as never, sessionId: generation.id })];
-  if (generation.path) keys.push(JSON.stringify(["path", engine, generation.path]));
-  return keys;
+/**
+ * The entry row a generation owns.
+ *
+ * A row KEY is storage identity rather than payload: it is the JSON object key
+ * and the SQLite `row_key` column, written by the registry as
+ * `sessionKeyId(entry.key)` and never re-read from inside the row. Everything an
+ * entry CARRIES — its embedded `key`, its `artifactPath` — is payload the entry
+ * can rewrite, so none of it may decide which generation owns the row; letting
+ * it would just move the escalation from forging an ORIGIN to forging an
+ * IDENTITY, and a delegated row could borrow the operator root's grant by
+ * naming the root's session. The registry already resolves a generation's entry
+ * exactly this way (`writeConversationLaunchProfile`,
+ * `conversationActivelyHosted`).
+ */
+function generationEntryRowKey(engine: string, generation: StoredGeneration): string {
+  return sessionKeyId({ engine: engine as never, sessionId: generation.id });
 }
 
-function entryKeys(id: string, entry: StoredEntry): string[] {
-  const keys = [entry.key ? sessionKeyId({ engine: entry.key.engine as never, sessionId: entry.key.sessionId }) : id];
-  if (entry.key && entry.artifactPath) keys.push(JSON.stringify(["path", entry.key.engine, entry.artifactPath]));
-  return keys;
+/**
+ * What the conversation side — the only side that carries origin evidence —
+ * says about entry rows.
+ *
+ * `grants` maps an entry row key to the grant the generation owning that row
+ * was decided to hold. `pathOwner` maps a transcript path a generation records
+ * to the row key entitled to it, which is what catches an entry that keeps its
+ * own row key but points its `artifactPath` at somebody else's transcript.
+ *
+ * A `null` in either map is unresolvable identity — two generations claiming
+ * one row key with different decisions, or one path recorded under two owners.
+ * A grant boundary cannot break that tie by guessing, so it denies.
+ */
+interface StoredGrantOwnership {
+  grants: Map<string, string[] | null>;
+  pathOwner: Map<string, string | null>;
+}
+
+function storedGrantOwnership(
+  file: StoredGrantFile,
+  policy: McpGrantPolicy,
+  decideGenerations: boolean,
+): StoredGrantOwnership {
+  const grants = new Map<string, string[] | null>();
+  const pathOwner = new Map<string, string | null>();
+  for (const conversation of Object.values(file.conversations)) {
+    for (const generation of conversation.generations) {
+      const rowKey = generationEntryRowKey(conversation.engine, generation);
+      const granted = decideStoredGrant(conversation, generation, policy);
+      if (decideGenerations) generation.launchProfile.mcpServers = granted;
+      if (!grants.has(rowKey)) grants.set(rowKey, granted);
+      else {
+        const claimed = grants.get(rowKey)!;
+        if (claimed === null || !sameGrant(claimed, granted)) grants.set(rowKey, null);
+      }
+      const recorded = generation.path;
+      if (!recorded) continue;
+      if (!pathOwner.has(recorded)) pathOwner.set(recorded, rowKey);
+      else if (pathOwner.get(recorded) !== rowKey) pathOwner.set(recorded, null);
+    }
+  }
+  return { grants, pathOwner };
+}
+
+/**
+ * The grant an entry row may keep:
+ *
+ *  - a list is the decision of the generation that owns the row;
+ *  - `null` DENIES, because the row's identity evidence is forged, borrowed or
+ *    contradictory — an escalation that is merely well-formed is still one;
+ *  - `undefined` means no conversation in THIS view claims the row, which is a
+ *    statement about how much was loaded rather than about the row itself.
+ */
+function entryGrant(id: string, entry: StoredEntry, ownership: StoredGrantOwnership): string[] | null | undefined {
+  /* The embedded key is payload and the row key is storage, so a row whose
+     payload names a different session has rewritten its own identity. This
+     needs nothing but the row, so it denies in every view, however little of
+     the file was loaded. */
+  if (entry.key && sessionKeyId({ engine: entry.key.engine as never, sessionId: entry.key.sessionId }) !== id) return null;
+  /* The same move spelled as a path: a transcript recorded by a generation that
+     owns a DIFFERENT row is a borrowed identity, and a path two generations both
+     record can attribute nothing. An unrecorded path is not evidence either way
+     — a lone entries row is normalized with no conversation in sight. */
+  if (entry.artifactPath) {
+    const owner = ownership.pathOwner.get(entry.artifactPath);
+    if (owner !== undefined && owner !== id) return null;
+  }
+  if (!ownership.grants.has(id)) return undefined;
+  return ownership.grants.get(id)!;
+}
+
+function reboundGrants<T extends StoredGrantFile>(file: T, policy: McpGrantPolicy, assembled: boolean): T {
+  const ownership = storedGrantOwnership(file, policy, true);
+  for (const [id, entry] of Object.entries(file.entries)) {
+    const stored = entry.launchProfile?.mcpServers;
+    if (!stored || isBaselineGrant(stored)) continue;
+    const granted = entryGrant(id, entry, ownership);
+    /* Unowned in a partial view says nothing; unowned in an assembled one is a
+       fact about the row. Forged evidence denies in both. */
+    if (granted === undefined && !assembled) continue;
+    const next = granted ?? DEFAULT_SPAWN_MCP_SERVERS;
+    if (!sameGrant(stored, next)) entry.launchProfile!.mcpServers = [...next];
+  }
+  return file;
 }
 
 function decideStoredGrant(
@@ -258,25 +347,12 @@ function decideStoredGrant(
  * Deciding an unowned entry at this level would wipe a legitimate root grant
  * every time a lone entries row is normalized; that judgement belongs to
  * {@link reboundAssembledMcpGrants}, which runs where the whole file is known.
+ *
+ * Which generation owns an entry is decided by {@link generationEntryRowKey},
+ * never by what the entry says about itself.
  */
 export function reboundStoredMcpGrants<T extends StoredGrantFile>(file: T, policy: McpGrantPolicy = MCP_GRANT_POLICY): T {
-  const decided = new Map<string, string[]>();
-  for (const conversation of Object.values(file.conversations)) {
-    for (const generation of conversation.generations) {
-      const granted = decideStoredGrant(conversation, generation, policy);
-      generation.launchProfile.mcpServers = granted;
-      for (const key of generationKeys(conversation.engine, generation)) decided.set(key, granted);
-    }
-  }
-  /* The entry row is the copy structured host adoption reads, and it can be
-     tampered with on its own, so it follows its conversation's decision. */
-  for (const [id, entry] of Object.entries(file.entries)) {
-    const stored = entry.launchProfile?.mcpServers;
-    if (!stored || isBaselineGrant(stored)) continue;
-    const granted = entryKeys(id, entry).map((key) => decided.get(key)).find(Boolean);
-    if (granted && !sameGrant(stored, granted)) entry.launchProfile!.mcpServers = [...granted];
-  }
-  return file;
+  return reboundGrants(file, policy, false);
 }
 
 /**
@@ -284,28 +360,21 @@ export function reboundStoredMcpGrants<T extends StoredGrantFile>(file: T, polic
  * exists is present: an entry no conversation owns has no origin evidence at
  * all, and here that is a fact about the entry rather than about how much of
  * the file was loaded, so it falls back to the baseline — the same fail-closed
- * reading {@link sessionOriginFor} gives an unrecognized launch.
+ * reading {@link storedSessionOriginFor} gives a record that cannot prove it is
+ * an operator root.
  */
 export function reboundAssembledMcpGrants<T extends StoredGrantFile>(file: T, policy: McpGrantPolicy = MCP_GRANT_POLICY): T {
-  reboundStoredMcpGrants(file, policy);
-  const owned = new Set<string>();
-  for (const conversation of Object.values(file.conversations)) {
-    for (const generation of conversation.generations) {
-      for (const key of generationKeys(conversation.engine, generation)) owned.add(key);
-    }
-  }
-  for (const [id, entry] of Object.entries(file.entries)) {
-    const stored = entry.launchProfile?.mcpServers;
-    if (!stored || isBaselineGrant(stored)) continue;
-    if (entryKeys(id, entry).some((key) => owned.has(key))) continue;
-    entry.launchProfile!.mcpServers = [...DEFAULT_SPAWN_MCP_SERVERS];
-  }
-  return file;
+  return reboundGrants(file, policy, true);
 }
 
 /**
  * The same decision for ONE entry row, for the paths that hand a single entry
  * to a host from inside a mutation rather than from an assembled snapshot.
+ *
+ * A mutation holds the whole file, so an entry no generation owns is genuinely
+ * unowned here and falls back to the baseline, as it would in an assembled
+ * read. The generation profiles are left alone: this is a single-row decision
+ * inside somebody else's transaction.
  */
 export function reboundEntryMcpGrant(
   file: StoredGrantFile,
@@ -316,14 +385,6 @@ export function reboundEntryMcpGrant(
   const entry = file.entries[id];
   const stored = entry?.launchProfile?.mcpServers;
   if (!entry || !stored || isBaselineGrant(stored)) return;
-  const wanted = new Set(entryKeys(id, entry));
-  for (const conversation of Object.values(file.conversations)) {
-    for (const generation of conversation.generations) {
-      if (!generationKeys(conversation.engine, generation).some((candidate) => wanted.has(candidate))) continue;
-      const granted = decideStoredGrant(conversation, generation, policy);
-      if (!sameGrant(stored, granted)) entry.launchProfile!.mcpServers = [...granted];
-      return;
-    }
-  }
-  entry.launchProfile!.mcpServers = [...DEFAULT_SPAWN_MCP_SERVERS];
+  const granted = entryGrant(id, entry, storedGrantOwnership(file, policy, false)) ?? DEFAULT_SPAWN_MCP_SERVERS;
+  if (!sameGrant(stored, granted)) entry.launchProfile!.mcpServers = [...granted];
 }
