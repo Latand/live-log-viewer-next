@@ -14,6 +14,7 @@ import { FileRuntimeEventStore, type RuntimeEventStore } from "./eventStore";
 import type { HostState, RuntimeEvent } from "./engineHost";
 import { adoptCodexRegistryHosts, bindCodexHostPersistence, persistCodexHost, startCodexStructuredHost, structuredHostsEnabled } from "./registry";
 import { STRUCTURED_IMAGE_CAPABILITY, structuredContent, type StructuredImageRef } from "./structuredContent";
+import type { RuntimeVoiceDelivery } from "./voiceDelivery";
 import { DEFAULT_VOICE_PERSONA, VOICE_PERSONA_FILE, voicePersona } from "./voicePersona";
 
 class MemoryEventStore implements RuntimeEventStore {
@@ -63,6 +64,8 @@ class FakeAppServer extends EventEmitter {
   modelList: unknown[] = [{ id: "gpt-5.3-codex-spark", isDefault: true, inputModalities: ["text"] }];
   modelListFailuresRemaining = 0;
   realtimeStartError: string | null = null;
+  realtimeAppendErrorAt: number | null = null;
+  readonly acceptedRealtimeSpeech: string[] = [];
   injectItemsError: string | null = null;
   private readonly serverRequestIds = new Set<string | number>();
   private turn = 0;
@@ -200,7 +203,16 @@ class FakeAppServer extends EventEmitter {
       }
       return;
     }
-    if (method === "thread/realtime/appendSpeech" || method === "thread/realtime/stop") {
+    if (method === "thread/realtime/appendSpeech") {
+      const attempt = this.requests.filter((request) =>
+        request.method === "thread/realtime/appendSpeech").length;
+      if (attempt === this.realtimeAppendErrorAt) {
+        return this.respondError(message.id, "realtime channel replaced");
+      }
+      this.acceptedRealtimeSpeech.push((message.params as { text: string }).text);
+      return this.respond(message.id, {});
+    }
+    if (method === "thread/realtime/stop") {
       return this.respond(message.id, {});
     }
   }
@@ -323,6 +335,93 @@ describe("CodexAppServerHost", () => {
       threadId: "voice-thread",
     });
     await host.release();
+  });
+
+  test("delivers a large multi-item response exactly once and deduplicates after host recovery", async () => {
+    const eventStore = new MemoryEventStore();
+    const firstServer = new FakeAppServer("voice-delivery-thread");
+    const firstHost = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore,
+      spawnProcess: fakeSpawn(firstServer),
+    });
+    const firstText = `${"🙂界".repeat(20_000)}\n`;
+    const secondText = `${"🫶🏽".repeat(5_000)}done`;
+    const delivery: RuntimeVoiceDelivery = {
+      deliveryId: 'voice:["turn-delivery",["response-one","response-two"]]',
+      turnId: "turn-delivery",
+      responses: [
+        { responseId: "response-one", text: firstText },
+        { responseId: "response-two", text: secondText },
+      ],
+      ready: true,
+    };
+
+    await expect(firstHost.deliverRealtimeWorkerResponse(delivery)).resolves.toEqual({
+      deliveryId: delivery.deliveryId,
+      acknowledged: true,
+    });
+    await firstHost.deliverRealtimeWorkerResponse(delivery);
+    expect(firstServer.acceptedRealtimeSpeech.join("")).toBe(firstText + secondText);
+    expect(firstServer.acceptedRealtimeSpeech.every((chunk) =>
+      Buffer.byteLength(chunk, "utf8") <= 8 * 1024)).toBeTrue();
+    expect(eventStore.load("voice-delivery-thread").at(-1)).toMatchObject({
+      kind: "realtime-delivery-acknowledged",
+      deliveryId: delivery.deliveryId,
+    });
+    await expect(firstHost.deliverRealtimeWorkerResponse({
+      ...delivery,
+      responses: [
+        { responseId: "response-one", text: "different content" },
+        { responseId: "response-two", text: secondText },
+      ],
+    })).rejects.toThrow("delivery id belongs to different content");
+    await firstHost.release();
+
+    const replacementServer = new FakeAppServer("voice-delivery-thread");
+    const replacementHost = await CodexAppServerHost.adopt("voice-delivery-thread", {
+      cwd: "/repo",
+      eventStore,
+      spawnProcess: fakeSpawn(replacementServer),
+    });
+    await replacementHost.deliverRealtimeWorkerResponse(delivery);
+    expect(replacementServer.acceptedRealtimeSpeech).toEqual([]);
+    await replacementHost.release();
+  });
+
+  test("resumes the exact Unicode suffix after a partial realtime send", async () => {
+    const eventStore = new MemoryEventStore();
+    const firstServer = new FakeAppServer("voice-partial-thread");
+    firstServer.realtimeAppendErrorAt = 2;
+    const firstHost = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore,
+      spawnProcess: fakeSpawn(firstServer),
+    });
+    const text = `boundary:${"🙂🫶🏽界".repeat(8_000)}:end`;
+    const delivery: RuntimeVoiceDelivery = {
+      deliveryId: 'voice:["turn-partial",["response-partial"]]',
+      turnId: "turn-partial",
+      responses: [{ responseId: "response-partial", text }],
+      ready: true,
+    };
+
+    await expect(firstHost.deliverRealtimeWorkerResponse(delivery))
+      .rejects.toThrow("realtime channel replaced");
+    const acceptedPrefix = firstServer.acceptedRealtimeSpeech.join("");
+    expect(acceptedPrefix.length).toBeGreaterThan(0);
+    expect(text.startsWith(acceptedPrefix)).toBeTrue();
+    await firstHost.release();
+
+    const replacementServer = new FakeAppServer("voice-partial-thread");
+    const replacementHost = await CodexAppServerHost.adopt("voice-partial-thread", {
+      cwd: "/repo",
+      eventStore,
+      spawnProcess: fakeSpawn(replacementServer),
+    });
+    await replacementHost.deliverRealtimeWorkerResponse(delivery);
+    expect(acceptedPrefix + replacementServer.acceptedRealtimeSpeech.join("")).toBe(text);
+    await replacementHost.release();
   });
 
   test("the operator's override is the text that reaches the call's thread", async () => {

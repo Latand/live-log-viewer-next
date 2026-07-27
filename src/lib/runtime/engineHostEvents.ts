@@ -1,5 +1,6 @@
 import type { RuntimeAttentionKind, RuntimeAttentionRequest, RuntimeEventInput } from "./contracts";
 import type { RuntimeEvent } from "./engineHost";
+import { terminalVoiceResponse } from "./voiceDelivery";
 
 type JsonObject = Record<string, unknown>;
 
@@ -41,7 +42,7 @@ function questionFrom(value: unknown): RuntimeAttentionRequest["question"] | nul
     : undefined;
   return {
     ...(text(source.header) ? { header: clipped(text(source.header)!, 256) } : {}),
-    prompt: clipped(prompt, 512),
+    "prompt": clipped(prompt, 512),
     ...(options?.length ? { options } : {}),
     ...(typeof source.multiSelect === "boolean" ? { multiSelect: source.multiSelect } : {}),
   };
@@ -118,7 +119,20 @@ export function projectEngineHostEvent(
     return { ...base, kind: "delta", payload: { conversationId, turnId: event.turnId, text: clipped(event.text, 8 * 1024) } };
   }
   if (event.kind === "item") {
-    return { ...base, kind: "item", payload: { conversationId, turnId: event.turnId, item: boundedValue(event.item), phase: event.phase } };
+    const voiceResponse = engine === "codex" && event.phase === "completed"
+      ? terminalVoiceResponse(event.item, `engine-host:${hostKey}:${event.seq}`)
+      : null;
+    return {
+      ...base,
+      kind: "item",
+      payload: {
+        conversationId,
+        turnId: event.turnId,
+        item: boundedValue(event.item),
+        phase: event.phase,
+        ...(voiceResponse ? { voiceResponse } : {}),
+      },
+    };
   }
   if (event.kind === "turn-ended") {
     return { ...base, kind: "turn-ended", payload: { conversationId, turnId: event.turnId, outcome: event.status } };
@@ -146,6 +160,25 @@ export function projectEngineHostEvent(
   }
   if (event.kind === "limits") {
     return { ...base, kind: "limits", payload: { conversationId, snapshot: boundedValue(event.snapshot) } };
+  }
+  if (event.kind === "realtime-delivery-progress") {
+    return {
+      ...base,
+      kind: "voice-delivery-progress",
+      payload: {
+        conversationId,
+        deliveryId: event.deliveryId,
+        responseIndex: event.responseIndex,
+        offset: event.offset,
+      },
+    };
+  }
+  if (event.kind === "realtime-delivery-acknowledged") {
+    return {
+      ...base,
+      kind: "voice-delivery-acknowledged",
+      payload: { conversationId, deliveryId: event.deliveryId },
+    };
   }
   return null;
 }

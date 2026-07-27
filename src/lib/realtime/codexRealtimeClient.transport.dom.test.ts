@@ -172,7 +172,20 @@ test("a data channel lost before opening surfaces the error state instead of con
 });
 
 test("a live call keeps worker progress local and sends one completed response to voice", async () => {
-  globalThis.fetch = (async () => jsonResponse(200, { ok: true, sdp: "v=0\r\nanswer" })) as unknown as typeof fetch;
+  const requests: Array<Record<string, unknown>> = [];
+  globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    requests.push(body);
+    if (body.action === "deliverWorkerResponse") {
+      const delivery = body.delivery as { deliveryId: string };
+      return jsonResponse(200, {
+        ok: true,
+        deliveryId: delivery.deliveryId,
+        acknowledged: true,
+      });
+    }
+    return jsonResponse(200, { ok: true, sdp: "v=0\r\nanswer" });
+  }) as unknown as typeof fetch;
 
   const client = codexRealtimeClient("conversation_live_call");
   await client.start();
@@ -195,9 +208,9 @@ test("a live call keeps worker progress local and sends one completed response t
   // Delegation: accumulated progress remains local while the worker runs.
   peer.channel.onmessage?.({ data: JSON.stringify({ type: "delegation.created", item: { id: "delegation-9" } }) });
   let produced = "";
-  for (let step = 0; step < 40; step += 1) {
+  for (let step = 0; step < 50; step += 1) {
     produced += segment(step, 300);
-    client.queueWorkerProgress("turn-live-call", produced);
+    client.updateWorkerProgress("turn-live-call", produced, true);
   }
   expect(client.getSnapshot().lines.at(-1)).toMatchObject({
     role: "progress",
@@ -205,22 +218,23 @@ test("a live call keeps worker progress local and sends one completed response t
     final: false,
   });
 
-  client.finishWorkerProgress("turn-live-call", produced);
-  // A repeated completion render describes the same worker response.
-  client.finishWorkerProgress("turn-live-call", produced);
-  // A replay can surface the completed turn's progress before completion again.
-  client.queueWorkerProgress("turn-live-call", produced);
-  client.finishWorkerProgress("turn-live-call", produced);
+  client.updateWorkerProgress("turn-live-call", produced, false);
+  const delivery = voiceDelivery("turn-live-call", [
+    { responseId: "response-one", text: produced },
+    { responseId: "response-two", text: "second item 🫶🏽" },
+  ]);
+  client.reconcileWorkerDeliveries([delivery]);
+  client.reconcileWorkerDeliveries([delivery]);
+  await flushAsync();
 
-  const events = peer.channel.sent.map((payload) => JSON.parse(payload) as {
-    type: string;
-    delegation_item_id: string;
-    channel: string;
-    content: { text: string }[];
-  });
-  expect(events.every((event) => event.type === "delegation.context.append" && event.delegation_item_id === "delegation-9")).toBe(true);
-  expect(events.filter((event) => event.channel === "commentary")).toEqual([]);
-  expect(sentOn(peer.channel, "speakable")).toBe(`Agent Final Message:\n\n${produced.slice(-12_000)}`);
+  const delivered = requests.filter((request) =>
+    request.action === "deliverWorkerResponse");
+  expect(delivered).toEqual([{
+    action: "deliverWorkerResponse",
+    conversationId: "conversation_live_call",
+    delivery,
+  }]);
+  expect(peer.channel.sent).toEqual([]);
 
   const progress = client.getSnapshot().lines.filter((line) => line.role === "progress");
   expect(progress).toHaveLength(1);
@@ -279,97 +293,151 @@ test("issue 664: the transport reason stands when the host has no failure to rep
   expect(client.getSnapshot().error).toBe("Realtime connection was interrupted");
 });
 
-/** Every character the client actually put on one channel, in wire order. */
-function sentOn(channel: StubDataChannel, name: "commentary" | "speakable", from = 0): string {
-  return channel.sent
-    .slice(from)
-    .map((payload) => JSON.parse(payload) as { channel: string; content: { text: string }[] })
-    .filter((event) => event.channel === name)
-    .map((event) => event.content.map((part) => part.text).join(""))
-    .join("");
-}
-
 /** Varied filler of an exact length, so no accidental prefix coincidences make
     a duplicate look like new content. */
 function segment(step: number, size: number): string {
   return `«${step}» ${"worker progress — reading agents ".repeat(size)}`.slice(0, size);
 }
 
-async function liveCall(conversationId: string, delegationId: string) {
-  globalThis.fetch = (async () => jsonResponse(200, { ok: true, sdp: "v=0\r\nanswer" })) as unknown as typeof fetch;
-  const client = codexRealtimeClient(conversationId);
-  await client.start();
-  const peer = StubPeerConnection.latest!;
-  peer.channel.onopen?.();
-  peer.channel.onmessage?.({ data: JSON.stringify({ type: "delegation.created", item: { id: delegationId } }) });
-  return { client, channel: peer.channel };
+function voiceDelivery(
+  turnId: string,
+  responses: Array<{ responseId: string; text: string }>,
+) {
+  return {
+    deliveryId: `voice:${JSON.stringify([turnId, responses.map((response) => response.responseId)])}`,
+    turnId,
+    responses,
+    ready: true,
+  };
 }
 
-test("a rejected completed response waits for the data channel and is delivered exactly once", async () => {
-  const { client, channel } = await liveCall("conversation_progress_retry", "delegation-retry");
-  const completed = segment(1, 1_200);
-  client.queueWorkerProgress("turn-retry", completed);
+async function flushAsync(): Promise<void> {
+  await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
 
-  channel.failOnAttempt = 2;
-  client.finishWorkerProgress("turn-retry", completed);
-  client.finishWorkerProgress("turn-retry", completed);
-  const expected = `Agent Final Message:\n\n${completed}`;
-  const acceptedPrefix = sentOn(channel, "speakable");
-  expect(acceptedPrefix.length).toBeGreaterThan(0);
-  expect(expected.startsWith(acceptedPrefix)).toBe(true);
+test("explicit stop retains an unacknowledged response and retries the same delivery id", async () => {
+  const delivered: unknown[] = [];
+  let attempts = 0;
+  globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    if (body.action === "deliverWorkerResponse") {
+      delivered.push(body.delivery);
+      attempts += 1;
+      if (attempts === 1) return jsonResponse(409, { error: "realtime channel replaced" });
+      return jsonResponse(200, {
+        ok: true,
+        deliveryId: (body.delivery as { deliveryId: string }).deliveryId,
+        acknowledged: true,
+      });
+    }
+    if (body.action === "stop") return jsonResponse(200, { ok: true });
+    return jsonResponse(200, { ok: true, sdp: "v=0\r\nanswer" });
+  }) as unknown as typeof fetch;
+  const client = codexRealtimeClient("conversation_progress_retry");
+  await client.start();
+  StubPeerConnection.latest?.channel.onopen?.();
+  const delivery = voiceDelivery("turn-retry", [{
+    responseId: "response-retry",
+    text: "retained response",
+  }]);
+  client.reconcileWorkerDeliveries([delivery]);
+  await flushAsync();
 
-  channel.onopen?.();
-  channel.onopen?.();
-  expect(sentOn(channel, "speakable")).toBe(expected);
+  await client.stop();
+  await client.start();
+  StubPeerConnection.latest?.channel.onopen?.();
+  await flushAsync();
 
+  expect(delivered).toEqual([delivery, delivery]);
   await client.stop();
 });
 
-test("a completed response survives replacement of a failed realtime transport", async () => {
-  const { client, channel } = await liveCall("conversation_progress_reconnect", "delegation-old");
-  const completed = "Response retained across transport replacement";
-
-  channel.readyState = "closed";
-  client.queueWorkerProgress("turn-reconnect", completed);
-  client.finishWorkerProgress("turn-reconnect", completed);
+test("channel replacement retries before acknowledgement and never repeats after acknowledgement", async () => {
+  const delivered: unknown[] = [];
+  let rejectFirstDelivery!: () => void;
+  const firstDelivery = new Promise<Response>((resolve) => {
+    rejectFirstDelivery = () => resolve(jsonResponse(409, { error: "channel unavailable" }));
+  });
+  globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    if (body.action === "deliverWorkerResponse") {
+      delivered.push(body.delivery);
+      if (delivered.length === 1) return firstDelivery;
+      return jsonResponse(200, {
+        ok: true,
+        deliveryId: (body.delivery as { deliveryId: string }).deliveryId,
+        acknowledged: true,
+      });
+    }
+    if (body.action === "status") return jsonResponse(200, { ok: true, failure: null });
+    return jsonResponse(200, { ok: true, sdp: "v=0\r\nanswer" });
+  }) as unknown as typeof fetch;
+  const client = codexRealtimeClient("conversation_progress_reconnect");
+  const delivery = voiceDelivery("turn-reconnect", [{
+    responseId: "response-reconnect",
+    text: "Response retained across transport replacement",
+  }]);
+  await client.start();
+  StubPeerConnection.latest?.channel.onopen?.();
+  client.reconcileWorkerDeliveries([delivery]);
+  await flushAsync();
 
   const failedPeer = StubPeerConnection.latest!;
   failedPeer.connectionState = "failed";
   failedPeer.onconnectionstatechange?.();
-  expect(client.getSnapshot().phase).toBe("error");
-
+  await flushAsync();
   await client.start();
-  const replacement = StubPeerConnection.latest!;
-  replacement.channel.onopen?.();
-  replacement.channel.onmessage?.({
-    data: JSON.stringify({ type: "delegation.created", item: { id: "delegation-new" } }),
-  });
-  replacement.channel.onmessage?.({
-    data: JSON.stringify({ type: "delegation.created", item: { id: "delegation-new" } }),
-  });
+  StubPeerConnection.latest?.channel.onopen?.();
+  rejectFirstDelivery();
+  await flushAsync();
+  client.reconcileWorkerDeliveries([delivery]);
+  await flushAsync();
 
-  expect(sentOn(replacement.channel, "speakable")).toBe(`Agent Final Message:\n\n${completed}`);
+  const acknowledgedPeer = StubPeerConnection.latest!;
+  acknowledgedPeer.connectionState = "failed";
+  acknowledgedPeer.onconnectionstatechange?.();
+  await flushAsync();
+  await client.start();
+  StubPeerConnection.latest?.channel.onopen?.();
+  client.reconcileWorkerDeliveries([delivery]);
+  await flushAsync();
+
+  expect(delivered).toEqual([delivery, delivery]);
   await client.stop();
 });
 
-test("completed responses queue in order while the data channel is unavailable", async () => {
-  const { client, channel } = await liveCall("conversation_progress_queue", "delegation-queue");
-  const first = "First completed worker response";
-  const second = "Second completed worker response";
+test("hydrated completed responses queue in order before Live Mode opens", async () => {
+  const delivered: unknown[] = [];
+  globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    if (body.action === "deliverWorkerResponse") {
+      const delivery = body.delivery as { deliveryId: string };
+      delivered.push(delivery);
+      return jsonResponse(200, {
+        ok: true,
+        deliveryId: delivery.deliveryId,
+        acknowledged: true,
+      });
+    }
+    return jsonResponse(200, { ok: true, sdp: "v=0\r\nanswer" });
+  }) as unknown as typeof fetch;
+  const client = codexRealtimeClient("conversation_progress_queue");
+  const first = voiceDelivery("turn-first", [{
+    responseId: "response-first",
+    text: "First completed worker response",
+  }]);
+  const second = voiceDelivery("turn-second", [{
+    responseId: "response-second",
+    text: "Second completed worker response",
+  }]);
+  client.reconcileWorkerDeliveries([first, second]);
+  expect(delivered).toEqual([]);
 
-  channel.readyState = "closed";
-  client.queueWorkerProgress("turn-first", first);
-  client.finishWorkerProgress("turn-first", first);
-  client.queueWorkerProgress("turn-second", second);
-  client.finishWorkerProgress("turn-second", second);
-  expect(channel.sent).toEqual([]);
-
-  channel.readyState = "open";
-  channel.onopen?.();
-  expect(sentOn(channel, "speakable")).toBe(
-    `Agent Final Message:\n\n${first}Agent Final Message:\n\n${second}`,
-  );
-
+  await client.start();
+  StubPeerConnection.latest?.channel.onopen?.();
+  await flushAsync();
+  expect(delivered).toEqual([first, second]);
   await client.stop();
 });
 

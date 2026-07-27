@@ -976,6 +976,7 @@ export function TmuxComposer({
     voiceWorkerTurn?.turnId ?? "",
     voiceWorkerTurn?.text ?? "",
     Boolean(voiceWorkerTurn?.turnId && structuredSession?.session.activeTurnId === voiceWorkerTurn.turnId),
+    structuredSession?.session.voiceDeliveries ?? [],
   );
   const structuredImageCapability = structuredSession?.session.capabilities?.imageInput;
   const structuredImageControl = caps.controls.images;

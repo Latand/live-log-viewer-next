@@ -32,6 +32,12 @@ import {
   type ViewerDeploymentStatus,
 } from "@/lib/runtime/contracts";
 import {
+  acknowledgeVoiceDelivery,
+  appendVoiceResponse,
+  completeVoiceTurn,
+  normalizeVoiceDeliveries,
+} from "@/lib/runtime/voiceDelivery";
+import {
   appendRuntimeLiveTurnDelta,
   completeRuntimeLiveTurnItem,
   normalizeRuntimeLiveTurn,
@@ -235,6 +241,9 @@ function baseSession(id: string, payload: Record<string, unknown>, revision: num
       : null,
     drift: payload.drift && typeof payload.drift === "object" ? payload.drift as RuntimeSession["drift"] : null,
     ...(liveTurn ? { liveTurn } : {}),
+    ...(Array.isArray(payload.voiceDeliveries)
+      ? { voiceDeliveries: normalizeVoiceDeliveries(payload.voiceDeliveries) }
+      : {}),
   };
 }
 
@@ -1558,12 +1567,20 @@ export class RuntimeJournal {
     }
     if (event.kind === "turn-started" || event.kind === "turn-ended") {
       const previous = this.entity<RuntimeSession>("session", scope.id) ?? baseSession(scope.id, {}, 0);
+      const turnId = typeof payload.turnId === "string" ? payload.turnId : null;
       const next: RuntimeSession = {
         ...previous,
         revision: event.revision,
         turn: event.kind === "turn-started" ? "running" : "idle",
-        activeTurnId: event.kind === "turn-started" && typeof payload.turnId === "string" ? payload.turnId : null,
+        activeTurnId: event.kind === "turn-started" && turnId ? turnId : null,
         liveTurn: previous.liveTurn,
+        ...(previous.voiceDeliveries
+          ? {
+            voiceDeliveries: event.kind === "turn-ended" && turnId
+              ? completeVoiceTurn(previous.voiceDeliveries, turnId, typeof payload.outcome === "string" ? payload.outcome : "")
+              : previous.voiceDeliveries,
+          }
+          : {}),
       };
       this.upsertEntity("session", scope.id, event.revision, next, event.seq);
       return;
@@ -1589,10 +1606,40 @@ export class RuntimeJournal {
       const liveTurn = payload.phase === "completed"
         ? completeRuntimeLiveTurnItem(previous.liveTurn, turnId, payload.item, event.recorded_at)
         : previous.liveTurn;
+      const response = record(payload.voiceResponse);
+      const voiceDeliveries = payload.phase === "completed"
+        && typeof response.responseId === "string"
+        && typeof response.text === "string"
+        ? appendVoiceResponse(previous.voiceDeliveries, turnId, {
+          responseId: response.responseId,
+          text: response.text,
+        })
+        : previous.voiceDeliveries;
       this.upsertEntity("session", scope.id, event.revision, {
         ...previous,
         revision: event.revision,
         liveTurn,
+        ...(voiceDeliveries ? { voiceDeliveries } : {}),
+      }, event.seq);
+      return;
+    }
+    if (event.kind === "voice-delivery-acknowledged") {
+      const previous = this.entity<RuntimeSession>("session", scope.id) ?? baseSession(scope.id, {}, 0);
+      this.upsertEntity("session", scope.id, event.revision, {
+        ...previous,
+        revision: event.revision,
+        voiceDeliveries: acknowledgeVoiceDelivery(
+          previous.voiceDeliveries,
+          typeof payload.deliveryId === "string" ? payload.deliveryId : "",
+        ),
+      }, event.seq);
+      return;
+    }
+    if (event.kind === "voice-delivery-progress") {
+      const previous = this.entity<RuntimeSession>("session", scope.id) ?? baseSession(scope.id, {}, 0);
+      this.upsertEntity("session", scope.id, event.revision, {
+        ...previous,
+        revision: event.revision,
       }, event.seq);
       return;
     }

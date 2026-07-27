@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 
 import { setVoiceConnected } from "@/lib/audio/app";
 import { codexRealtimeClient } from "@/lib/realtime/codexRealtimeClient";
+import type { RuntimeVoiceDelivery } from "@/lib/runtime/voiceDelivery";
 
 const IDLE = { phase: "idle" as const, lines: [], error: null, startedAt: null, micMuted: false, outputMuted: false };
 
@@ -13,6 +14,7 @@ export function useCodexRealtime(
   workerTurnId: string,
   workerProgress: string,
   workerRunning: boolean,
+  workerDeliveries: readonly RuntimeVoiceDelivery[],
 ) {
   const ambientOwner = useRef(Symbol("realtime-ambient-owner"));
   const client = useMemo(
@@ -26,9 +28,11 @@ export function useCodexRealtime(
   );
   useEffect(() => {
     if (!client || !workerTurnId || !workerProgress) return;
-    if (workerRunning) client.queueWorkerProgress(workerTurnId, workerProgress);
-    else client.finishWorkerProgress(workerTurnId, workerProgress);
+    client.updateWorkerProgress(workerTurnId, workerProgress, workerRunning);
   }, [client, snapshot.phase, workerProgress, workerRunning, workerTurnId]);
+  useEffect(() => {
+    client?.reconcileWorkerDeliveries(workerDeliveries);
+  }, [client, snapshot.phase, workerDeliveries]);
 
   /* The ambient bed is eligible only while a call is up, and it fades on both
      edges. `live` is the only phase with two participants who can talk;

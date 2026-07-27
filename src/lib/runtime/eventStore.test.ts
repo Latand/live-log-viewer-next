@@ -23,6 +23,42 @@ test("runtime event store durably replays ordered events and ignores a partial t
   expect(fs.statSync(filename).mode & 0o777).toBe(0o600);
 });
 
+test("runtime event store durably replays realtime delivery progress and acknowledgement", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-voice-delivery-"));
+  const store = new FileRuntimeEventStore(directory);
+  store.append("voice-thread", {
+    kind: "realtime-delivery-progress",
+    deliveryId: "delivery-one",
+    digest: "digest-one",
+    responseIndex: 1,
+    offset: 17,
+    seq: 1,
+  });
+  store.append("voice-thread", {
+    kind: "realtime-delivery-acknowledged",
+    deliveryId: "delivery-one",
+    digest: "digest-one",
+    seq: 2,
+  });
+
+  expect(new FileRuntimeEventStore(directory).load("voice-thread")).toEqual([
+    {
+      kind: "realtime-delivery-progress",
+      deliveryId: "delivery-one",
+      digest: "digest-one",
+      responseIndex: 1,
+      offset: 17,
+      seq: 1,
+    },
+    {
+      kind: "realtime-delivery-acknowledged",
+      deliveryId: "delivery-one",
+      digest: "digest-one",
+      seq: 2,
+    },
+  ]);
+});
+
 test("runtime event store repairs a crash tail after the production 942-record contiguous prefix", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-crash-tail-"));
   const filename = path.join(directory, "crash-tail.jsonl");

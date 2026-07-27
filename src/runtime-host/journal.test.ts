@@ -108,6 +108,84 @@ test("producer cursor reports the highest durably acknowledged engine event", ()
   compacted.close();
 });
 
+test("canonical voice deliveries survive missed-running recovery and compaction until acknowledged", () => {
+  const dir = sandbox("voice-delivery-recovery");
+  const filename = path.join(dir, "events.sqlite");
+  const unicode = `${"🫶🏽界".repeat(12_000)}\nterminal`;
+  const journal = new RuntimeJournal(filename, { maxEvents: 100, now: () => 100 });
+  journal.append({
+    scope: runtimeScope("session", "conversation_voice"),
+    kind: "item",
+    payload: {
+      conversationId: "conversation_voice",
+      turnId: "turn-recovered",
+      phase: "completed",
+      item: { type: "agentMessage", id: "bounded", text: "bounded" },
+      voiceResponse: { responseId: "response-one", text: unicode },
+    },
+  });
+  journal.append({
+    scope: runtimeScope("session", "conversation_voice"),
+    kind: "item",
+    payload: {
+      conversationId: "conversation_voice",
+      turnId: "turn-recovered",
+      phase: "completed",
+      item: { type: "agentMessage", id: "bounded-two", text: "bounded" },
+      voiceResponse: { responseId: "response-two", text: "second" },
+    },
+  });
+  journal.append({
+    scope: runtimeScope("session", "conversation_voice"),
+    kind: "turn-ended",
+    payload: {
+      conversationId: "conversation_voice",
+      turnId: "turn-recovered",
+      outcome: "completed",
+    },
+  });
+  journal.compact(1);
+  journal.close();
+
+  const recovered = new RuntimeJournal(filename, { maxEvents: 100, now: () => 200 });
+  const delivery = recovered.snapshot().sessions[0]?.voiceDeliveries?.[0];
+  expect(delivery).toEqual({
+    deliveryId: 'voice:["turn-recovered",["response-one","response-two"]]',
+    turnId: "turn-recovered",
+    responses: [
+      { responseId: "response-one", text: unicode },
+      { responseId: "response-two", text: "second" },
+    ],
+    ready: true,
+  });
+  expect(new TextEncoder().encode(delivery!.responses[0]!.text).length).toBeGreaterThan(64 * 1024);
+
+  recovered.append({
+    scope: runtimeScope("session", "conversation_voice"),
+    kind: "voice-delivery-progress",
+    payload: {
+      conversationId: "conversation_voice",
+      deliveryId: delivery!.deliveryId,
+      responseIndex: 0,
+      offset: 8_192,
+    },
+  });
+  expect(recovered.snapshot().sessions[0]).toMatchObject({
+    revision: 4,
+    voiceDeliveries: [delivery],
+  });
+  recovered.append({
+    scope: runtimeScope("session", "conversation_voice"),
+    kind: "voice-delivery-acknowledged",
+    payload: {
+      conversationId: "conversation_voice",
+      deliveryId: delivery!.deliveryId,
+    },
+  });
+  expect(recovered.snapshot().sessions[0]?.voiceDeliveries).toEqual([]);
+  recovered.close();
+});
+
 test("snapshot exposes the canonical projected runtime model", () => {
   const dir = sandbox("canonical-snapshot");
   const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 100, now: () => 100 });

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
+import { createHash } from "node:crypto";
 
 import { isKnownEffortTier } from "@/lib/agent/efforts";
 import { procBackend } from "@/lib/proc";
@@ -10,6 +11,11 @@ import { hardenedRedact } from "@/lib/view/compactText";
 import { decodeCodexStructuredUserText, encodeCodexStructuredUserText } from "./codexStructuredUserText";
 import { runtimeImageStore } from "./runtimeImageStore";
 import { STRUCTURED_IMAGE_CAPABILITY, type StructuredImageRef } from "./structuredContent";
+import {
+  normalizeVoiceDeliveries,
+  utf8ChunkAt,
+  type RuntimeVoiceDelivery,
+} from "./voiceDelivery";
 
 import type {
   DeliveryReceipt,
@@ -77,6 +83,12 @@ type PendingAttention = {
 type ThreadStatus = {
   type: "active" | "idle" | "notLoaded" | "systemError";
   activeFlags: string[];
+};
+type RealtimeDeliveryState = {
+  digest: string;
+  responseIndex: number;
+  offset: number;
+  acknowledged: boolean;
 };
 type UnsequencedEvent = RuntimeEvent extends infer Event
   ? Event extends RuntimeEvent ? Omit<Event, "seq"> : never
@@ -391,6 +403,11 @@ export class CodexAppServerHost implements EngineHost {
     contentDigest: string | null;
   }>();
   private readonly pendingDeliveries = new Map<string, PendingDelivery>();
+  private readonly realtimeDeliveries = new Map<string, RealtimeDeliveryState>();
+  private readonly activeRealtimeDeliveries = new Map<string, {
+    digest: string;
+    promise: Promise<{ deliveryId: string; acknowledged: true }>;
+  }>();
   private readonly attentions = new Map<string, PendingAttention>();
   private readonly stateListeners = new Set<(state: HostState) => void>();
   private readonly preRestoreEvents: UnsequencedEvent[] = [];
@@ -413,6 +430,7 @@ export class CodexAppServerHost implements EngineHost {
       the next image send. */
   private imageInputSupport: "supported" | "unsupported" | "unknown" = "unknown";
   private requestedModel: string | undefined;
+  private realtimeDeliveryEpoch = 0;
   private releasing = false;
   private released = false;
   private dead = false;
@@ -798,17 +816,112 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   async appendRealtimeSpeech(text: string): Promise<void> {
-    const speech = text.trim();
-    if (!speech || Buffer.byteLength(speech, "utf8") > MAX_REALTIME_SPEECH_BYTES) {
+    if (!text || Buffer.byteLength(text, "utf8") > MAX_REALTIME_SPEECH_BYTES) {
       throw new Error("Realtime speech text is empty or too large");
     }
     await this.rpc("thread/realtime/appendSpeech", {
       threadId: this.identity.threadId,
-      text: speech,
+      text,
     });
   }
 
+  async deliverRealtimeWorkerResponse(
+    value: RuntimeVoiceDelivery,
+  ): Promise<{ deliveryId: string; acknowledged: true }> {
+    const delivery = normalizeVoiceDeliveries([value])[0];
+    if (!delivery || !delivery.ready || delivery.deliveryId !== value.deliveryId) {
+      throw new Error("Realtime worker delivery is invalid");
+    }
+    const digest = createHash("sha256")
+      .update(JSON.stringify(delivery.responses))
+      .digest("hex");
+    const active = this.activeRealtimeDeliveries.get(delivery.deliveryId);
+    if (active) {
+      if (active.digest !== digest) throw new Error("Realtime delivery id belongs to different content");
+      return active.promise;
+    }
+    const task = this.performRealtimeWorkerDelivery(delivery, digest);
+    this.activeRealtimeDeliveries.set(delivery.deliveryId, { digest, promise: task });
+    try {
+      return await task;
+    } finally {
+      if (this.activeRealtimeDeliveries.get(delivery.deliveryId)?.promise === task) {
+        this.activeRealtimeDeliveries.delete(delivery.deliveryId);
+      }
+    }
+  }
+
+  private async performRealtimeWorkerDelivery(
+    delivery: RuntimeVoiceDelivery,
+    digest: string,
+  ): Promise<{ deliveryId: string; acknowledged: true }> {
+    const restored = this.realtimeDeliveries.get(delivery.deliveryId);
+    if (restored?.digest !== undefined && restored.digest !== digest) {
+      throw new Error("Realtime delivery id belongs to different content");
+    }
+    if (restored?.acknowledged) {
+      return { deliveryId: delivery.deliveryId, acknowledged: true };
+    }
+    let responseIndex = restored?.responseIndex ?? 0;
+    let offset = restored?.offset ?? 0;
+    if (responseIndex > delivery.responses.length
+      || (responseIndex < delivery.responses.length
+        && offset > delivery.responses[responseIndex]!.text.length)) {
+      throw new Error("Realtime delivery cursor is invalid");
+    }
+    const deliveryEpoch = this.realtimeDeliveryEpoch;
+    while (responseIndex < delivery.responses.length) {
+      if (deliveryEpoch !== this.realtimeDeliveryEpoch) {
+        throw new Error("Realtime worker delivery paused by stop");
+      }
+      const response = delivery.responses[responseIndex]!;
+      const chunk = utf8ChunkAt(response.text, offset, MAX_REALTIME_SPEECH_BYTES);
+      if (!chunk) {
+        responseIndex += 1;
+        offset = 0;
+        continue;
+      }
+      await this.appendRealtimeSpeech(chunk.text);
+      offset = chunk.nextOffset;
+      if (offset === response.text.length) {
+        responseIndex += 1;
+        offset = 0;
+      }
+      this.emit({
+        kind: "realtime-delivery-progress",
+        deliveryId: delivery.deliveryId,
+        digest,
+        responseIndex,
+        offset,
+      });
+      if (this.ledgerFailed) throw new Error("Realtime delivery progress was not persisted");
+      this.realtimeDeliveries.set(delivery.deliveryId, {
+        digest,
+        responseIndex,
+        offset,
+        acknowledged: false,
+      });
+    }
+    this.emit({
+      kind: "realtime-delivery-acknowledged",
+      deliveryId: delivery.deliveryId,
+      digest,
+    });
+    if (this.ledgerFailed) throw new Error("Realtime delivery acknowledgement was not persisted");
+    this.realtimeDeliveries.set(delivery.deliveryId, {
+      digest,
+      responseIndex,
+      offset,
+      acknowledged: true,
+    });
+    return { deliveryId: delivery.deliveryId, acknowledged: true };
+  }
+
   async stopRealtime(): Promise<void> {
+    /* Stop is a pause boundary for canonical worker delivery. A chunk already
+       admitted by app-server is durably checkpointed; later chunks remain
+       pending and resume from that cursor when Live Mode is started again. */
+    this.realtimeDeliveryEpoch += 1;
     await this.rpc("thread/realtime/stop", { threadId: this.identity.threadId });
     this.rejectRealtimeStart(new Error("Realtime session stopped during startup"));
     /* An operator hanging up is not a failure to report back to them. */
@@ -892,6 +1005,7 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   private async releaseAndReap(): Promise<void> {
+    this.realtimeDeliveryEpoch += 1;
     /* Hang up before the process goes away. A realtime call the backend still
        believes is open holds the account's concurrent slot, and every later
        call is refused with "You have reached your usage limit." — the same
@@ -1100,6 +1214,23 @@ export class CodexAppServerHost implements EngineHost {
         this.attentions.set(event.id, { rpcId: "restored", method: event.method, origin: "restored" });
       }
       if (event.kind === "attention-resolved") this.attentions.delete(event.id);
+      if (event.kind === "realtime-delivery-progress") {
+        this.realtimeDeliveries.set(event.deliveryId, {
+          digest: event.digest,
+          responseIndex: event.responseIndex,
+          offset: event.offset,
+          acknowledged: false,
+        });
+      }
+      if (event.kind === "realtime-delivery-acknowledged") {
+        const previous = this.realtimeDeliveries.get(event.deliveryId);
+        this.realtimeDeliveries.set(event.deliveryId, {
+          digest: event.digest,
+          responseIndex: previous?.responseIndex ?? 0,
+          offset: previous?.offset ?? 0,
+          acknowledged: true,
+        });
+      }
       if (event.kind === "session-status") {
         this.engineStatus = event.status;
         this.activeFlags = [...(event.activeFlags ?? [])];

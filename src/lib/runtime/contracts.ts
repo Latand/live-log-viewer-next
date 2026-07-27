@@ -4,6 +4,7 @@ import type { Flow } from "@/lib/flows/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { Workflow } from "@/lib/workflows/types";
 import type { RuntimeLiveTurn } from "@/lib/runtime/liveTurn";
+import type { RuntimeVoiceDelivery } from "@/lib/runtime/voiceDelivery";
 import type { RuntimeImageCapability, StructuredImageRef } from "./structuredContent";
 
 export const RUNTIME_SCHEMA_VERSION = 1;
@@ -354,6 +355,9 @@ export interface RuntimeSession {
   /** In-flight assistant text accumulated from live `delta` events, rendered
       as a streaming bubble until the transcript materializes the item. */
   liveTurn?: RuntimeLiveTurn | null;
+  /** Canonical terminal assistant items retained independently from the
+      bounded live UI projection until Live Mode acknowledges delivery. */
+  voiceDeliveries?: RuntimeVoiceDelivery[];
 }
 
 export interface ScopedEntity<T> {
@@ -610,5 +614,14 @@ export function assertRuntimeEvent(input: RuntimeEventInput): void {
   if (!input.payload || typeof input.payload !== "object" || Array.isArray(input.payload)) throw new Error("runtime event payload is invalid");
   const normalized = normalizeRuntimeEventInput(input);
   if (!/^[a-z][a-z0-9._-]{1,120}$/.test(normalized.kind)) throw new Error("runtime event kind is invalid");
-  if (Buffer.byteLength(JSON.stringify(normalized.payload)) > 16 * 1024) throw new Error("runtime event payload exceeds 16 KiB");
+  const payloadBytes = Buffer.byteLength(JSON.stringify(normalized.payload));
+  const carriesCanonicalVoiceResponse = normalized.kind === "item"
+    && normalized.payload.voiceResponse !== null
+    && typeof normalized.payload.voiceResponse === "object";
+  const payloadLimit = carriesCanonicalVoiceResponse ? 16 * 1024 * 1024 : 16 * 1024;
+  if (payloadBytes > payloadLimit) {
+    throw new Error(carriesCanonicalVoiceResponse
+      ? "runtime terminal response payload exceeds 16 MiB"
+      : "runtime event payload exceeds 16 KiB");
+  }
 }
