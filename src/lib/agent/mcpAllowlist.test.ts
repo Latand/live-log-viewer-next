@@ -503,12 +503,22 @@ function forgeSqliteEntryIdentity(sqlitePath: string, rowKey: string, forgery: I
   }
 }
 
-/* Each forgery is exercised ALONE. Applying both at once would let either
-   check alone carry the case, and the other could be deleted unnoticed. */
+/* One field is forged at a time. Forging both at once would look stronger and
+   test less — the path rule catches a row-key forgery on its own, so the case
+   would keep passing with the row-key rule deleted.
+
+   These two pin the attack end to end on every backend and reader. Which
+   individual RULE carries each denial is pinned separately below, on the pure
+   functions, where a fixture can isolate one rule at a time. */
 const IDENTITY_FORGERIES = [
   {
     what: "embedded session key",
-    forge: (): IdentityForgery => ({ key: { engine: "codex", sessionId: sessionIdFor("nested-parent") } }),
+    /* The transcript moves to a path no generation records, so the path rule
+       has nothing to say about this row and the row-key rule stands alone. */
+    forge: (): IdentityForgery => ({
+      key: { engine: "codex", sessionId: sessionIdFor("nested-parent") },
+      artifactPath: transcriptFor("unrecorded-transcript"),
+    }),
   },
   {
     what: "transcript path",
@@ -651,6 +661,42 @@ test("identity evidence that cannot name one owner denies rather than picking a 
 
   expect(reboundAssembledMcpGrants(sharedPath(), WITH_CONNECTOR).entries["codex:root-generation"]!.launchProfile!.mcpServers)
     .toEqual(["viewer"]);
+});
+
+test("an unowned entry pointing at another row's transcript is denied even in a partial read", () => {
+  /* The per-collection pass deliberately leaves a merely-UNOWNED row alone, so
+     that normalizing a lone entries row cannot wipe a legitimate root grant.
+     A row that erased its own generation and points at the operator root's
+     transcript would ride in on exactly that, in exactly the view a SQLite
+     entries-only normalize produces. Borrowed identity is not mere absence. */
+  const grant = ["viewer", "test-connector"];
+  const borrowed = () => ({
+    conversations: {
+      root: {
+        id: "conversation_root",
+        engine: "codex",
+        agentRole: null,
+        delegationDepth: 0,
+        generations: [{
+          id: "root-generation",
+          path: "/sessions/root.jsonl",
+          launchProfile: { ...emptyLaunchProfile(), parentConversationId: null, mcpServers: [...grant] },
+        }],
+      },
+    },
+    entries: {
+      "codex:orphan-worker": { artifactPath: "/sessions/root.jsonl", launchProfile: { mcpServers: [...grant] } },
+    },
+  } as unknown as StoredGrantFile);
+
+  expect(reboundStoredMcpGrants(borrowed(), WITH_CONNECTOR).entries["codex:orphan-worker"]!.launchProfile!.mcpServers)
+    .toEqual(["viewer"]);
+  expect(reboundAssembledMcpGrants(borrowed(), WITH_CONNECTOR).entries["codex:orphan-worker"]!.launchProfile!.mcpServers)
+    .toEqual(["viewer"]);
+  /* The generation's own row keeps the grant, so this is the borrowing that is
+     denied and not the transcript. */
+  expect(reboundStoredMcpGrants(borrowed(), WITH_CONNECTOR).conversations.root!.generations[0]!.launchProfile.mcpServers)
+    .toEqual(grant);
 });
 
 test("a forged embedded key is denied even where no conversation is loaded", () => {
