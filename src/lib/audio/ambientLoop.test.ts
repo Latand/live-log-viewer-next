@@ -16,26 +16,47 @@ import { AMBIENT_LOOP_ASSET } from "./loopAsset";
 import { DEFAULT_AUDIO_PREFS, type AudioPrefs } from "./prefs";
 import { speakingFromLines } from "./speech";
 
-type Ramp = { gain: number; seconds: number };
+type Ramp = { gain: number; seconds: number; voice: number };
 
-/** Records every level change the bed asks for, so a test can tell a ramp from
-    a step and a fade from a cut. */
-function recorder(options: { refuse?: boolean } = {}) {
-  const starts: { src: string; gain: number }[] = [];
+/**
+ * Records every level change the bed asks for, so a test can tell a ramp from
+ * a step and a fade from a cut.
+ *
+ * Each voice carries the ordinal of the `start` that created it. That ordinal is
+ * what makes a RESTART visible: a bed that crossed an edge on the same track
+ * only ever ramps voice 1, and one that was torn down and re-created ramps
+ * voice 2 — indistinguishable by level alone.
+ */
+function recorder(options: { refuse?: boolean; position?: () => number; revive?: boolean } = {}) {
+  const starts: { src: string; gain: number; offsetSeconds?: number }[] = [];
   const ramps: Ramp[] = [];
+  const pauses: number[] = [];
+  const resumes: number[] = [];
   const stops: number[] = [];
   const transport: LoopTransport = {
     start(request) {
       if (options.refuse) return null;
       starts.push(request);
+      const voice = starts.length;
       const handle: LoopVoiceHandle = {
-        rampTo: (gain, seconds) => void ramps.push({ gain, seconds }),
+        rampTo: (gain, seconds) => void ramps.push({ gain, seconds, voice }),
+        pause: (seconds) => {
+          pauses.push(seconds);
+          return options.position?.() ?? 0;
+        },
+        /* Whether the parked voice is still alive. `false` is the ordinary
+           case — the fade finished long ago; `true` models a call that ended
+           inside it. */
+        resume: () => {
+          resumes.push(voice);
+          return options.revive === true;
+        },
         stop: (seconds) => void stops.push(seconds),
       };
       return handle;
     },
   };
-  return { transport, starts, ramps, stops, last: () => ramps.at(-1) };
+  return { transport, starts, ramps, pauses, resumes, stops, last: () => ramps.at(-1) };
 }
 
 function loop(
@@ -72,6 +93,14 @@ const enabled = (over: Partial<AudioPrefs> = {}): AudioPrefs => ({
   ...DEFAULT_AUDIO_PREFS,
   loopEnabled: true,
   ...over,
+});
+
+/** One row of the toggle matrix, at full slider so levels are legible. */
+const music = (viewer: boolean, call: boolean): AudioPrefs => ({
+  ...DEFAULT_AUDIO_PREFS,
+  loopVolume: 1,
+  viewerLoopEnabled: viewer,
+  loopEnabled: call,
 });
 
 describe("eligibility", () => {
@@ -169,7 +198,7 @@ describe("fades", () => {
     bed.setVoiceConnected(true);
 
     expect(sink.starts[0].gain).toBe(0);
-    expect(sink.ramps[0]).toEqual({ gain: loopGain(1), seconds: FADE_IN_SECONDS });
+    expect(sink.ramps[0]).toEqual({ gain: loopGain(1), seconds: FADE_IN_SECONDS, voice: 1 });
   });
 
   test("disconnecting fades out over time, never a hard stop", () => {
@@ -179,12 +208,15 @@ describe("fades", () => {
     bed.setVoiceConnected(true);
     bed.setVoiceConnected(false);
 
-    expect(sink.stops).toEqual([FADE_OUT_SECONDS]);
+    /* Music the device still wants for its calls is PARKED, not destroyed: the
+       fade is the same length, and the position outlives it. */
+    expect(sink.pauses).toEqual([FADE_OUT_SECONDS]);
+    expect(sink.stops).toEqual([]);
     expect(FADE_OUT_SECONDS).toBeGreaterThan(0);
     expect(bed.state().playing).toBe(false);
   });
 
-  test("a second call starts a fresh fade-in", () => {
+  test("a second call fades back in rather than cutting in", () => {
     const sink = recorder();
     const { bed } = loop(enabled(), sink);
 
@@ -195,6 +227,169 @@ describe("fades", () => {
     expect(sink.starts).toHaveLength(2);
     expect(sink.starts[1].gain).toBe(0);
     expect(sink.ramps.at(-1)?.seconds).toBe(FADE_IN_SECONDS);
+  });
+});
+
+/**
+ * Two independent switches — music in the Viewer, music during a call — and the
+ * four ways they can be set. One shared level governs all four.
+ */
+describe("the toggle matrix", () => {
+  test("on/on — one continuous track crosses the call boundary in both directions", () => {
+    /* The position source would answer a resume offset if anything ever asked
+       for one. Nothing on this row does, which is the assertion. */
+    const sink = recorder({ position: () => 12 });
+    const { bed } = loop(music(true, true), sink);
+
+    bed.refresh();
+    expect(sink.starts).toHaveLength(1);
+    expect(sink.starts[0].offsetSeconds ?? 0).toBe(0);
+
+    bed.setVoiceConnected(true);
+    /* Ducking still applies while the call is live and the music is audible. */
+    bed.setSpeaking("agent");
+    expect(sink.last()!.gain).toBeCloseTo(loopGain(1) * SPEECH_DUCK, 6);
+    bed.setSpeaking(null);
+    bed.setVoiceConnected(false);
+
+    /* One voice, from before the call to after it. A re-created track would show
+       up as a second start and as ramps against voice 2 — this passes only while
+       nothing was torn down at either edge. */
+    expect(sink.starts).toHaveLength(1);
+    expect(sink.pauses).toEqual([]);
+    expect(sink.stops).toEqual([]);
+    expect([...new Set(sink.ramps.map((ramp) => ramp.voice))]).toEqual([1]);
+    /* And no position was ever retained, because nothing ever stopped. */
+    expect(bed.state().resumeAt).toBe(0);
+    expect(bed.state().playing).toBe(true);
+    expect(sink.last()!.gain).toBeCloseTo(loopGain(1), 6);
+  });
+
+  test("on/off — the call parks the music at its position, and hangup resumes it there", () => {
+    const sink = recorder({ position: () => 12 });
+    const { bed } = loop(music(true, false), sink);
+
+    bed.refresh();
+    expect(bed.state().playing).toBe(true);
+
+    bed.setVoiceConnected(true);
+    expect(sink.pauses).toEqual([FADE_OUT_SECONDS]);
+    expect(sink.stops).toEqual([]);
+    expect(bed.state().playing).toBe(false);
+    expect(bed.state().resumeAt).toBe(12);
+
+    bed.setVoiceConnected(false);
+    expect(sink.starts).toHaveLength(2);
+    expect(sink.starts[1]).toEqual({ src: AMBIENT_LOOP_ASSET as string, gain: 0, offsetSeconds: 12 });
+    expect(sink.last()).toEqual({ gain: loopGain(1), seconds: FADE_IN_SECONDS, voice: 2 });
+  });
+
+  test("off/on — silent in the Viewer, and a repeat call does not replay the same opening", () => {
+    let position = 9;
+    const sink = recorder({ position: () => position });
+    const { bed } = loop(music(false, true), sink);
+
+    bed.refresh();
+    expect(sink.starts).toEqual([]);
+    expect(bed.state().playing).toBe(false);
+
+    bed.setVoiceConnected(true);
+    expect(sink.starts).toHaveLength(1);
+    expect(sink.starts[0].offsetSeconds ?? 0).toBe(0);
+    expect(sink.last()).toEqual({ gain: loopGain(1), seconds: FADE_IN_SECONDS, voice: 1 });
+
+    bed.setVoiceConnected(false);
+    expect(sink.pauses).toEqual([FADE_OUT_SECONDS]);
+    expect(bed.state().playing).toBe(false);
+
+    position = 40;
+    bed.setVoiceConnected(true);
+    /* The second call picks the track up where the first one left it. */
+    expect(sink.starts[1].offsetSeconds).toBe(9);
+    expect(sink.starts[1].gain).toBe(0);
+  });
+
+  test("a boundary reversed inside the fade returns to the parked voice, not a second one", () => {
+    /* The operator hangs up a second after answering. The parked voice is still
+       fading and still audible, so starting another would double the music. */
+    const sink = recorder({ position: () => 12, revive: true });
+    const { bed } = loop(music(true, false), sink);
+
+    bed.refresh();
+    bed.setVoiceConnected(true);
+    expect(sink.pauses).toEqual([FADE_OUT_SECONDS]);
+
+    bed.setVoiceConnected(false);
+
+    expect(sink.resumes).toEqual([1]);
+    expect(sink.starts).toHaveLength(1);
+    expect(bed.state().playing).toBe(true);
+    /* Back up to full on the same voice, no reopening at the retained offset. */
+    expect(sink.last()).toEqual({ gain: loopGain(1), seconds: FADE_IN_SECONDS, voice: 1 });
+  });
+
+  test("a parked voice that has already died is replaced, not revived", () => {
+    const sink = recorder({ position: () => 12, revive: false });
+    const { bed } = loop(music(true, false), sink);
+
+    bed.refresh();
+    bed.setVoiceConnected(true);
+    bed.setVoiceConnected(false);
+
+    /* Asked first, and only then replaced at the position it left. */
+    expect(sink.resumes).toEqual([1]);
+    expect(sink.starts).toHaveLength(2);
+    expect(sink.starts[1].offsetSeconds).toBe(12);
+  });
+
+  test("off/off — silent everywhere, in a call and out of one", () => {
+    const sink = recorder({ position: () => 5 });
+    const harness = loop(music(false, false), sink);
+
+    harness.bed.refresh();
+    harness.bed.setVoiceConnected(true);
+    harness.bed.duckForCue("attention");
+    harness.bed.setVoiceConnected(false);
+
+    expect(harness.bed.wanted()).toBe(false);
+    expect(sink.starts).toEqual([]);
+    expect(sink.ramps).toEqual([]);
+    expect(sink.pauses).toEqual([]);
+  });
+
+  test("enabling music in the Viewer starts it without waiting for a call", () => {
+    const prefs = music(false, false);
+    const sink = recorder();
+    const { bed } = loop(prefs, sink);
+
+    bed.refresh();
+    expect(sink.starts).toEqual([]);
+
+    prefs.viewerLoopEnabled = true;
+    bed.refresh();
+
+    expect(sink.starts).toHaveLength(1);
+    expect(bed.state().playing).toBe(true);
+  });
+
+  test("the master mute tears the music down rather than parking it", () => {
+    const prefs = music(true, true);
+    const sink = recorder({ position: () => 12 });
+    const { bed } = loop(prefs, sink);
+    bed.refresh();
+
+    prefs.cuesEnabled = false;
+    bed.refresh();
+
+    /* A mute is not an intermission: nothing is held for later, so the next
+       unmute opens the track rather than resuming a position nobody chose. */
+    expect(sink.stops).toEqual([FADE_OUT_SECONDS]);
+    expect(sink.pauses).toEqual([]);
+    expect(bed.state().resumeAt).toBe(0);
+
+    prefs.cuesEnabled = true;
+    bed.refresh();
+    expect(sink.starts[1].offsetSeconds ?? 0).toBe(0);
   });
 });
 
@@ -282,7 +477,7 @@ describe("ducking", () => {
     harness.bed.setVoiceConnected(true);
 
     /* The new call opens at full bed level, not mid-duck from the last one. */
-    expect(sink.last()).toEqual({ gain: loopGain(1), seconds: FADE_IN_SECONDS });
+    expect(sink.last()).toEqual({ gain: loopGain(1), seconds: FADE_IN_SECONDS, voice: 2 });
     expect(harness.bed.state().ducked).toBe(false);
     expect(harness.pendingTimers()).toBe(0);
   });

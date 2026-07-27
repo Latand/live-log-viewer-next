@@ -89,6 +89,31 @@ versions follow [SemVer](https://semver.org/) (0.x — the API may still move).
   so it is visible and usable at 390px instead of painting under the backdrop.
 
 ### Added
+- Background music in the Viewer, and one track across the call boundary
+  (#732). The Audio settings now carry two independent switches sharing one
+  level: music while using the Viewer, and music during a call — the latter the
+  renamed old ambient setting, whose Ukrainian label read as an engineering term
+  («фоновий шар») rather than as music. With both on, the same track simply
+  keeps playing across the call edge in either direction: no teardown, no
+  re-init, no position reset, and speech ducking applies for the duration of the
+  call as before. With only one on, the edge that silences the music parks it —
+  the voice fades out and the position it reached is retained, so the edge that
+  brings it back resumes from there instead of replaying the same opening on
+  every call — and the parked voice stays alive for its whole fade, so a call
+  that ends inside it returns to that very voice instead of stacking a second
+  one over the music still sounding. Only a device that wants no music at all
+  (the sound master off, both switches off, no asset) tears the track down. The
+  music ducks under whoever is talking, read off the transcript the call already
+  produces, with the duck owned per mounted composer so a card nobody is
+  speaking in cannot let the music back up over the one they are. Every line a
+  call inherits is disqualified as speech the moment it goes live, so the line a
+  dropped call left mid-sentence — never marked final, and kept on screen on
+  purpose — cannot open the next call already ducked. Ambient
+  ownership across conversation cards holds through a keyed card switch: React
+  destroys the outgoing card's effects before creating the incoming one's, so
+  the last lease going away is settled at the end of the tick rather than on the
+  instant — a swipe between conversations never restarts, duplicates or drops
+  the track.
 - On-canvas pipeline stage reordering (#507). A draft's stage cards carry their
   own move-earlier / move-later controls, so the whole conversation graph is
   composed in place on the canvas — no nested form. Each move is offered only

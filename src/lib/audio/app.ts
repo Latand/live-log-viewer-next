@@ -2,7 +2,7 @@
 
 import { primeAudio, sharedAudioContext } from "@/lib/chime";
 
-import { createAmbientLoop, type AmbientLoop } from "./ambientLoop";
+import { createAmbientLoop, type AmbientLoop, type LoopTransport, type Speaker } from "./ambientLoop";
 import { createCuePlayer, type CueOutcome, type CuePlayer } from "./cuePlayer";
 import { cueAsset, CUES, type AudioCue, type CueRequest } from "./cues";
 import { AMBIENT_LOOP_ASSET, ambientLoopConfigured } from "./loopAsset";
@@ -37,24 +37,59 @@ let loop: AmbientLoop | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let retries = 0;
 let prefsWatched = false;
+let loopTransport: LoopTransport | null = null;
+let voiceSettlePending = false;
 const voiceOwners = new Set<unknown>();
+/** Who each mounted surface last reported talking, in the order they took the
+    floor. A `Map` because the duck belongs to whoever is speaking NOW, and one
+    card falling silent must not speak for another. */
+const speakingOwners = new Map<unknown, Speaker>();
+
+/**
+ * Run `settle` once the current commit is finished.
+ *
+ * A microtask, not a timer: React destroys and creates effects for one commit in
+ * a single synchronous pass, so this is the first moment at which the lease set
+ * is known to be complete — and it is still the same tick, so a call that really
+ * ended fades out with no perceptible delay.
+ */
+function defer(settle: () => void): void {
+  if (typeof queueMicrotask === "function") queueMicrotask(settle);
+  else setTimeout(settle, 0);
+}
 
 function watchPrefs(): void {
   if (prefsWatched) return;
   prefsWatched = true;
-  /* Turning the master (or the bed's own switch) off has to stop a sounding bed
-     now, not at the next call. */
-  subscribeAudioPrefs(() => ensureAmbientLoop());
+  /* Turning the master (or either music switch) off has to stop a sounding bed
+     now, not at the next call — and turning one on is a fresh intent, so it gets
+     a fresh retry budget rather than the remains of an earlier one. */
+  subscribeAudioPrefs(() => {
+    retries = 0;
+    ensureAmbientLoop();
+  });
 }
 
 export function ambientLoop(): AmbientLoop {
   loop ??= createAmbientLoop({
     asset: AMBIENT_LOOP_ASSET,
-    transport: transports.loop,
+    transport: loopTransport ?? transports.loop,
     prefs: audioPrefs,
   });
   watchPrefs();
   return loop;
+}
+
+/**
+ * Test seam: run the bed on a fake transport.
+ *
+ * The ownership rules that decide when the bed starts and stops live HERE, above
+ * the loop controller, so a test that only drives `createAmbientLoop` cannot see
+ * them. `null` restores the real Web Audio backend.
+ */
+export function configureAmbientTransportForTests(transport: LoopTransport | null): void {
+  loopTransport = transport;
+  loop = null;
 }
 
 export function cuePlayer(): CuePlayer {
@@ -103,13 +138,64 @@ export function ensureAmbientLoop(): void {
  * Ownership matters because several conversation cards can mount composers in
  * the same tab. A card may release only its own lease; the ambient bed remains
  * connected while any other live call still owns one.
+ *
+ * The LAST lease going away is settled at the end of the tick rather than on the
+ * spot, because a card switch is not one event but two. The focused card is a
+ * keyed element, and React replaces a keyed subtree by destroying the old
+ * effects and only then creating the new ones — so between the two the count is
+ * legitimately zero, in the same commit, with the operator still in the same
+ * call. Acting on that instant is what makes the music fade out and restart
+ * under a swipe. A call that has genuinely ended stays ended: nothing takes the
+ * lease over, and the settle lands a microtask later.
  */
 export function setVoiceConnected(owner: unknown, connected: boolean): void {
   if (connected) voiceOwners.add(owner);
-  else voiceOwners.delete(owner);
+  else {
+    voiceOwners.delete(owner);
+    /* A card that stopped talking (or unmounted) is not talking, whatever it
+       said last: leaving its duck behind would hold the music down for the card
+       that took over. */
+    speakingOwners.delete(owner);
+  }
   retries = 0;
-  ambientLoop().setVoiceConnected(voiceOwners.size > 0);
+  if (voiceOwners.size > 0) {
+    settleVoiceConnection();
+    return;
+  }
+  if (voiceSettlePending) return;
+  voiceSettlePending = true;
+  defer(() => {
+    voiceSettlePending = false;
+    settleVoiceConnection();
+  });
+}
+
+/** Whoever is talking anywhere, most recent first. */
+function currentSpeaker(): Speaker | null {
+  let latest: Speaker | null = null;
+  for (const speaker of speakingOwners.values()) latest = speaker;
+  return latest;
+}
+
+function settleVoiceConnection(): void {
+  const bed = ambientLoop();
+  bed.setVoiceConnected(voiceOwners.size > 0);
+  bed.setSpeaking(voiceOwners.size > 0 ? currentSpeaker() : null);
   ensureAmbientLoop();
+}
+
+/**
+ * One mounted realtime surface's participant started or stopped talking.
+ *
+ * Owner-scoped for the same reason the connection is: with two composers
+ * mounted, the silent one must not release the duck the talking one is holding.
+ * The most recent speaker wins, so a barge-in ducks under whoever took the floor
+ * rather than under whichever card re-rendered last.
+ */
+export function setVoiceSpeaking(owner: unknown, speaker: Speaker | null): void {
+  speakingOwners.delete(owner);
+  if (speaker) speakingOwners.set(owner, speaker);
+  ambientLoop().setSpeaking(voiceOwners.size > 0 ? currentSpeaker() : null);
 }
 
 /**
@@ -126,7 +212,11 @@ export function unlockAudioOnGesture(): () => void {
   const unlock = () => {
     transports.warm(Object.keys(CUES).map((cue) => cueAsset(cue as AudioCue)));
     /* A device that has already opted in gets its bed the moment it is allowed
-       one — the gesture is the last thing standing between the two. */
+       one — the gesture is the last thing standing between the two. Music in the
+       Viewer is wanted from the first paint, so the retry budget may well have
+       burned out waiting for exactly this gesture: the attempt that follows it
+       is a fresh one, not the tail of an exhausted run. */
+    retries = 0;
     ensureAmbientLoop();
   };
   window.addEventListener("pointerdown", unlock, { passive: true });
@@ -148,8 +238,11 @@ export function resetAppAudioForTests(): void {
   player?.reset();
   player = null;
   loop = null;
+  loopTransport = null;
   prefsWatched = false;
+  voiceSettlePending = false;
   voiceOwners.clear();
+  speakingOwners.clear();
   retries = 0;
   if (retryTimer !== null) clearTimeout(retryTimer);
   retryTimer = null;

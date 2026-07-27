@@ -12,13 +12,13 @@ import { handleOverlayEscape } from "@/lib/overlay";
 /**
  * The header's sound cluster: the master switch, and the levels behind it.
  *
- * The master governs ALL product audio — the semantic earcons and the ambient
- * bed under a voice call alike. One switch, because a mute that leaves something
- * still making noise is the mute people remember. Everything here is
- * DEVICE-LOCAL: the phone in the kitchen and the desk keep their own answers,
- * which is the whole reason none of this is server state.
+ * The master governs ALL product audio — the semantic earcons and the
+ * background music alike. One switch, because a mute that leaves something still
+ * making noise is the mute people remember. Everything here is DEVICE-LOCAL: the
+ * phone in the kitchen and the desk keep their own answers, which is the whole
+ * reason none of this is server state.
  *
- * The ambient rows appear only when a loop asset is actually configured. With no
+ * The music rows appear only when a loop asset is actually configured. With no
  * asset there is nothing to enable, and a toggle that cannot do anything is
  * worse than an absent one.
  */
@@ -112,6 +112,22 @@ export function SoundToggle({ ambientAvailable }: { ambientAvailable?: boolean }
             {/* No asset, no rows. */}
             {ambient ? (
               <>
+                {/* Two independent switches, one shared level: music in the
+                    Viewer and music during a call compose freely, and with both
+                    on it is one track across the call boundary. */}
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    data-testid="ambient-viewer-enabled"
+                    checked={prefs.viewerLoopEnabled}
+                    onChange={(event) => {
+                      setAudioPrefs({ viewerLoopEnabled: event.target.checked });
+                      ensureAmbientLoop();
+                    }}
+                    className="accent-accent"
+                  />
+                  <span className="text-[11px] font-semibold text-secondary">{t("sound.ambientViewer")}</span>
+                </label>
                 <label className="flex items-center gap-2">
                   <input
                     type="checkbox"
