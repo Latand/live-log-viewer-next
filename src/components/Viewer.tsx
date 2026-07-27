@@ -20,6 +20,7 @@ import type { FileEntry } from "@/lib/types";
 
 import { attentionId, buildAttentionQueue, nextAttention, STALLED_ATTENTION_TTL, type AttentionItem } from "./attention";
 import { AttentionHost } from "./attention/AttentionHost";
+import { VoicePipHost } from "./voice/VoicePipHost";
 import { focusHandoffBus } from "./attention/focusHandoffBus";
 import { ConnectionPill } from "./ConnectionPill";
 import { resolveFavoriteRows, type FavoriteRow } from "./favorites/favoriteRows";
@@ -698,6 +699,11 @@ export function Viewer() {
           root agent's focus handoff when there is one to answer. Renders
           nothing at all the rest of the time. */}
       <AttentionHost mobile={isMobile} />
+      {/* #691: the floating rendering of whichever conversation has a voice call.
+          Mounted here rather than in the card because the card unmounts on board
+          navigation while the call keeps running. Renders nothing until a call
+          starts, and nothing at all on mobile. */}
+      <VoicePipHost mobile={isMobile} />
       {/* Staging instances (#659) announce themselves on every device; prod
           renders nothing. Top-center, clear of both corner anchors. */}
       <StagingBadge />

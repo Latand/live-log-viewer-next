@@ -4,11 +4,26 @@ import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
 
-/* The single-instance record for the built-in Orchestrator (issue #182).
- * One conversation is THE orchestrator; the chat button resolves it here and
- * only spawns a fresh one when no live record exists. */
+/* The single-instance record for the built-in Orchestrator (issue #182), which
+ * #691 promotes to THE MANAGER: the agent that owns the board — tasks,
+ * pipelines, flows, PRs, workers, deploys — and never speaks to the user.
+ *
+ * It stays a record of its own, separate from the voice root's lineage, joined
+ * to it only by the bridge channel (`src/lib/bridge/`). Collapsing the two would
+ * make the gateway and the executor one identity, and the whole point is that
+ * they are not: one may talk to the user, the other may touch the board.
+ *
+ * The record names the *incumbent* — which engine and model is currently sitting
+ * in the manager's seat — so a model swap is retire, spawn, update this record.
+ * The record itself survives, and so do the bridge cursors that reference it,
+ * because they reference it by name and never by conversation id. */
 
-export const ORCHESTRATOR_SCHEMA_VERSION = 1;
+export const ORCHESTRATOR_SCHEMA_VERSION = 2;
+
+/** #691: Claude Opus 5 by default (`opus` is this repo's latest-Opus alias —
+    see `src/lib/agent/models.ts`), swappable without reshaping anything. */
+export const MANAGER_DEFAULT_ENGINE = "claude";
+export const MANAGER_DEFAULT_MODEL = "opus";
 
 export interface OrchestratorRecord {
   /** Stable viewer conversation id of the orchestrator session. */
@@ -17,7 +32,17 @@ export interface OrchestratorRecord {
   path: string | null;
   /** ISO timestamp of the adopting spawn. */
   createdAt: string;
+  /** The incumbent's engine (`claude`, `codex`, …). Descriptive, not a gate. */
+  engine: string;
+  /** The incumbent's model alias. */
+  model: string;
 }
+
+/** What a caller may hand in: the incumbent fields default, so #182-era callers
+    and the existing spawn path keep compiling and keep meaning the same thing. */
+export type OrchestratorRecordInput =
+  Omit<OrchestratorRecord, "engine" | "model">
+  & Partial<Pick<OrchestratorRecord, "engine" | "model">>;
 
 type OrchestratorFile = { schemaVersion: number; record: OrchestratorRecord };
 
@@ -30,19 +55,38 @@ function atomicWriteJson(filePath: string, value: unknown): void {
   fs.renameSync(temp, filePath);
 }
 
-function isRecord(value: unknown): value is OrchestratorRecord {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+/**
+ * Read one stored record, filling the incumbent fields when they are missing or
+ * unusable.
+ *
+ * A #182-era file (schema 1) has no engine/model, and a partially written one may
+ * have nonsense in them. Neither is a reason to report "no manager": that answer
+ * would abandon a designation the operator already has and let a second manager
+ * be spawned beside the live one. The identity fields are the ones worth
+ * refusing over; the descriptive ones default.
+ */
+function normalizeRecord(value: unknown): OrchestratorRecord | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Partial<OrchestratorRecord>;
-  return (
-    typeof record.conversationId === "string" && record.conversationId.length > 0 &&
-    (record.path === null || typeof record.path === "string") &&
-    typeof record.createdAt === "string"
-  );
+  if (typeof record.conversationId !== "string" || record.conversationId.length === 0) return null;
+  if (record.path !== null && typeof record.path !== "string") return null;
+  if (typeof record.createdAt !== "string") return null;
+  const text = (candidate: unknown, fallback: string): string =>
+    typeof candidate === "string" && candidate.trim() ? candidate : fallback;
+  return {
+    conversationId: record.conversationId,
+    path: record.path ?? null,
+    createdAt: record.createdAt,
+    engine: text(record.engine, MANAGER_DEFAULT_ENGINE),
+    model: text(record.model, MANAGER_DEFAULT_MODEL),
+  };
 }
 
 /** The current record, or null when none was adopted yet. A malformed or
     future-schema file reads as absent — adoption then overwrites it, which is
-    the recovery path for a corrupt state file. */
+    the recovery path for a corrupt state file. Every schema this app has ever
+    written reads forward, because losing the designation is worse than reading
+    an old shape. */
 export function readOrchestratorRecord(): OrchestratorRecord | null {
   let raw: string;
   try {
@@ -52,11 +96,22 @@ export function readOrchestratorRecord(): OrchestratorRecord | null {
   }
   try {
     const parsed = JSON.parse(raw) as Partial<OrchestratorFile>;
-    if (parsed.schemaVersion !== ORCHESTRATOR_SCHEMA_VERSION || !isRecord(parsed.record)) return null;
-    return parsed.record;
+    const version = parsed.schemaVersion;
+    if (typeof version !== "number" || version < 1 || version > ORCHESTRATOR_SCHEMA_VERSION) return null;
+    return normalizeRecord(parsed.record);
   } catch {
     return null;
   }
+}
+
+function withIncumbent(candidate: OrchestratorRecordInput): OrchestratorRecord {
+  return {
+    conversationId: candidate.conversationId,
+    path: candidate.path,
+    createdAt: candidate.createdAt,
+    engine: candidate.engine ?? MANAGER_DEFAULT_ENGINE,
+    model: candidate.model ?? MANAGER_DEFAULT_MODEL,
+  };
 }
 
 /** Whether the recorded conversation still exists on disk. A record without a
@@ -71,11 +126,31 @@ export function orchestratorRecordExists(record: OrchestratorRecord): boolean {
  * Losers get the canonical record back and navigate to it instead — the
  * one-instance invariant lives here, not in the button.
  */
-export function adoptOrchestratorRecord(candidate: OrchestratorRecord): { record: OrchestratorRecord; adopted: boolean } {
+export function adoptOrchestratorRecord(candidate: OrchestratorRecordInput): { record: OrchestratorRecord; adopted: boolean } {
   const current = readOrchestratorRecord();
   if (current && orchestratorRecordExists(current) && current.conversationId !== candidate.conversationId) {
     return { record: current, adopted: false };
   }
-  atomicWriteJson(orchestratorFile(), { schemaVersion: ORCHESTRATOR_SCHEMA_VERSION, record: candidate } satisfies OrchestratorFile);
-  return { record: candidate, adopted: true };
+  const record = withIncumbent(candidate);
+  atomicWriteJson(orchestratorFile(), { schemaVersion: ORCHESTRATOR_SCHEMA_VERSION, record } satisfies OrchestratorFile);
+  return { record, adopted: true };
+}
+
+/**
+ * Seat a new incumbent deliberately, replacing a live record (#691 §3, §7.3).
+ *
+ * Adoption cannot do this, and must not: refusing a second conversation while one
+ * is live is the entire single-instance guarantee. Swapping the manager's model is
+ * a different act with a different intent — the operator retired the incumbent on
+ * purpose — so it gets its own entry point rather than a flag that weakens the
+ * guard for everyone.
+ *
+ * Deliberately touches nothing but this file. The bridge channel references the
+ * manager by record name, so its cursors stay exactly where they were and the
+ * successor drains the directives its predecessor never read.
+ */
+export function replaceOrchestratorIncumbent(candidate: OrchestratorRecordInput): OrchestratorRecord {
+  const record = withIncumbent(candidate);
+  atomicWriteJson(orchestratorFile(), { schemaVersion: ORCHESTRATOR_SCHEMA_VERSION, record } satisfies OrchestratorFile);
+  return record;
 }

@@ -5,6 +5,8 @@ import {
   type RuntimeVoiceDelivery,
 } from "@/lib/runtime/voiceDelivery";
 
+import { reportCallPhase } from "./activeCall";
+
 export type CodexRealtimePhase = "idle" | "connecting" | "live" | "stopping" | "error";
 export type CodexRealtimeRole = "user" | "assistant" | "progress";
 /** The two roles that stream a turn. Worker progress is excluded: its line is
@@ -448,8 +450,12 @@ class CodexRealtimeClient {
   }
 
   private update(patch: Partial<CodexRealtimeSnapshot>): void {
+    const previousPhase = this.snapshot.phase;
     this.snapshot = { ...this.snapshot, ...patch };
     for (const listener of this.listeners) listener();
+    /* Announced after this client's own subscribers, so the Viewer-level host
+       never sees a phase the card has not rendered yet. */
+    if (this.snapshot.phase !== previousPhase) reportCallPhase(this.conversationId, this.snapshot.phase);
   }
 
   private cleanupTransport(): void {

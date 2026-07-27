@@ -61,6 +61,7 @@ import {
 import { mintIdempotencyKey, receiptIsAdmitted, receiptIsTerminal } from "./runtime/runtimeModel";
 import { useAgentCapabilities } from "./useAgentCapabilities";
 import { VoiceConversationButton, VoiceConversationPanel } from "./VoiceConversation";
+import { VoiceFloatButton } from "./voice/VoiceFloatButton";
 
 /** The persisted "on resume" runtime profile as a POST body fragment (issue
     #241 §4). `fast` is a codex-only service-tier override. */
@@ -2022,12 +2023,19 @@ export function TmuxComposer({
            was already sent, newest first (issue #561). */
         history={composerHistory}
         voiceControl={voiceEnabled ? (
-          <VoiceConversationButton
-            phase={voice.phase}
-            start={voice.start}
-            stop={voice.stop}
-            t={t}
-          />
+          <>
+            <VoiceConversationButton
+              phase={voice.phase}
+              start={voice.start}
+              stop={voice.stop}
+              t={t}
+            />
+            {/* #691 §5: re-float a call whose window the operator closed. Only while a
+                call is up, and only where Document PiP exists — the floater opens
+                itself on voice start, so this is the way back, not the way in. It has
+                to be a real click: `requestWindow` needs transient user activation. */}
+            <VoiceFloatButton phase={voice.phase} t={t} />
+          </>
         ) : undefined}
         voicePanel={voiceEnabled ? (
           <VoiceConversationPanel

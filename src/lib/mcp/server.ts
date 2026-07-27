@@ -9,6 +9,8 @@ import { z } from "zod";
 import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
 
+import type { McpToolPolicy } from "./toolAllowlist";
+
 export const MCP_SERVER_NAME = "viewer";
 
 export const MCP_TOOL_NAMES = [
@@ -865,6 +867,9 @@ export interface McpToolService {
 export function createMcpToolService(
   bindings: McpToolBindings,
   receipts: McpReceiptStore,
+  /** #691 §6: the per-identity fence. Absent means "no fence", which is what every
+      existing caller of this factory means and gets. */
+  policy?: McpToolPolicy,
 ): McpToolService {
   const inFlight = new Map<string, { digest: string; result: Promise<McpToolResult> }>();
   return {
@@ -876,6 +881,15 @@ export function createMcpToolService(
       const retention: ReceiptRetention = MUTATING_MCP_TOOL_NAMES.has(typedTool) ? "durable" : "bounded";
       const requestId = clientRequestId(args);
       if (!requestId) return failure(toolName, null, "invalid_request", "clientRequestId is required", false);
+
+      /* Refused before the receipt is claimed, on purpose. A refusal is a
+         property of who is calling, not of the operation, so it must not burn the
+         clientRequestId — the same call becomes legitimate the moment the operator
+         grants the tool, and a spent receipt would answer it with a stale no. */
+      const verdict = policy?.permit(typedTool, args);
+      if (verdict && !verdict.allowed) {
+        return failure(typedTool, requestId, verdict.code, verdict.error, false);
+      }
 
       const digest = requestDigest(typedTool, args);
       const key = `${typedTool}:${requestId}`;
@@ -1175,10 +1189,11 @@ export function createViewerMcpServer(service: McpToolService): McpServer {
 }
 
 export async function startViewerMcpServer(): Promise<void> {
-  const { viewerMcpBindings } = await import("./bindings");
+  const { viewerMcpBindings, viewerMcpToolPolicy } = await import("./bindings");
   const service = createMcpToolService(
     viewerMcpBindings(),
     new FileMcpReceiptStore(statePath("mcp-receipts.json")),
+    viewerMcpToolPolicy(),
   );
   const server = createViewerMcpServer(service);
   const transport = new StdioServerTransport();

@@ -20,6 +20,7 @@ import { queryLifecycleEvents, type LifecycleEventQuery } from "@/lib/lifecycle/
 import { agentLivenessSnapshot, productionLivenessSources, type AgentLivenessSources } from "@/lib/lifecycle/liveness";
 import { refreshLifecycleJournal } from "@/lib/lifecycle/projector";
 import { isLifecycleEventType } from "@/lib/lifecycle/vocabulary";
+import { readOrchestratorRecord } from "@/lib/orchestrator/store";
 import { createPipelineFromRequest, getPipelines, patchPipeline } from "@/lib/pipelines/engine";
 import { latestOperationalPipelineAttempt } from "@/lib/pipelines/attemptSelection";
 import { requestPipelineTick } from "@/lib/pipelines/controllerSignal";
@@ -43,6 +44,7 @@ import { hardenedRedact } from "@/lib/view/compactText";
 import { validateSnapshotRequest } from "@/lib/view/validation";
 
 import { McpToolRefusal, type McpToolArgs, type McpToolBindings, type McpToolPayload } from "./server";
+import { mcpCallerIdentity, mcpToolPolicy, type ManagerTarget, type McpToolPolicy } from "./toolAllowlist";
 
 const PIPELINE_CONTROLLER_ACTIONS = new Set<PipelineAction>(["start", "resume", "retry-stage", "skip-stage"]);
 
@@ -845,6 +847,29 @@ async function requestAttention(args: McpToolArgs, dependencies: ViewerMcpDomain
     dropped: created.dropped,
     ...mutationReceipt(operationId),
   });
+}
+
+/**
+ * #691 §6 — the live per-identity fence.
+ *
+ * Built from the same evidence `request_attention` already trusts: this process's
+ * ancestry and the registry's recorded host pids, resolved by
+ * {@link attentionCallerAuthority}. Nothing the caller says participates.
+ *
+ * The manager is resolved per call rather than captured, so seating a new
+ * incumbent takes effect without restarting anything.
+ */
+export function viewerMcpToolPolicy(
+  domainDependencies: ViewerMcpDomainDependencies = productionDomainDependencies,
+): McpToolPolicy {
+  const manager = (): ManagerTarget | null => {
+    const record = readOrchestratorRecord();
+    return record ? { conversationId: record.conversationId, path: record.path } : null;
+  };
+  return mcpToolPolicy(
+    () => mcpCallerIdentity(domainDependencies.attentionAuthority(), manager()),
+    manager,
+  );
 }
 
 export function viewerMcpBindings(
