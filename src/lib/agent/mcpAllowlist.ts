@@ -131,19 +131,47 @@ export function mcpServersForSession(input: {
 }
 
 /**
+ * Origin of a session as read back OUT of durable storage, where the evidence
+ * is a stored record rather than a live request.
+ *
+ * {@link sessionOriginFor} answers "did this launch carry a delegation signal?"
+ * and reads the absence of every signal as an operator root. That is the right
+ * reading for a request being admitted right now, where a root genuinely
+ * carries no signals. It is the WRONG reading for a durable row: a record whose
+ * origin fields were never written — or were erased by the very session that
+ * wants the grant — is then indistinguishable from an operator root, so
+ * DELETING evidence would PROMOTE a delegated worker into the most privileged
+ * session class. A grant boundary cannot have that shape.
+ *
+ * So operator root has to be PROVEN here, not merely not-disproven: the record
+ * must carry an affirmative root marker — an `operator` origin kind, or the
+ * delegation depth `0` that admission (#393) stamps on every root receipt.
+ * Anything else is delegated, including a row carrying no origin evidence at
+ * all. A session the Viewer never launched (a transcript the scanner adopted,
+ * a pre-#393 row) therefore holds the baseline and nothing more, which is the
+ * correct answer for a record whose origin nobody can attest to.
+ */
+export function storedSessionOriginFor(input: SessionOriginInput): SessionOrigin {
+  if (sessionOriginFor(input) === "delegated") return "delegated";
+  if (input.origin?.kind === "operator") return "operator-root";
+  return input.delegationDepth === 0 ? "operator-root" : "delegated";
+}
+
+/**
  * The same resolution for a list coming back OUT of durable storage, where the
  * session's origin is whatever its record says it is rather than a live
  * request. The global bound alone is not enough here: without the origin, a
  * delegated session that hand-edits its own profile to name a server the
  * Viewer *can* grant would have it honoured on the next resume, attach or
- * structured recovery. Fail-closed by construction — {@link sessionOriginFor}
- * reads anything but a clean operator root as delegated.
+ * structured recovery. Fail-closed by construction — {@link
+ * storedSessionOriginFor} grants the operator-root default only to a record
+ * that proves it is one.
  */
 export function mcpServersForStoredSession(
   input: SessionOriginInput & { requested?: readonly string[] | null },
   policy: McpGrantPolicy = MCP_GRANT_POLICY,
 ): string[] {
-  return mcpServersForSession({ origin: sessionOriginFor(input), requested: input.requested }, policy);
+  return mcpServersForSession({ origin: storedSessionOriginFor(input), requested: input.requested }, policy);
 }
 
 /** Last line of the bound, where an engine's enable table is materialized: the

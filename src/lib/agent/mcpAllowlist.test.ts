@@ -19,6 +19,7 @@ import {
   mcpServersForStoredSession,
   normalizeSpawnMcpServers,
   reboundStoredMcpGrants,
+  storedSessionOriginFor,
   type StoredGrantFile,
   type McpGrantPolicy,
 } from "./mcpAllowlist";
@@ -99,9 +100,59 @@ test("a stored grant is re-decided from the session's durable origin, not replay
   expect(mcpServersForStoredSession({ parentConversationId: "conversation_parent", requested: tampered }, WITH_CONNECTOR)).toEqual(["viewer"]);
   expect(mcpServersForStoredSession({ delegationDepth: 1, requested: tampered }, WITH_CONNECTOR)).toEqual(["viewer"]);
   expect(mcpServersForStoredSession({ origin: { kind: "agent" }, requested: tampered }, WITH_CONNECTOR)).toEqual(["viewer"]);
-  /* The operator's own root keeps what it was granted. */
+  /* The operator's own root keeps what it was granted — but only because the
+     row PROVES it is one, which is what makes the resets above the origin rule
+     rather than a blanket wipe. */
   expect(mcpServersForStoredSession({ delegationDepth: 0, requested: tampered }, WITH_CONNECTOR))
     .toEqual(["viewer", "test-connector"]);
+  expect(mcpServersForStoredSession({ origin: { kind: "operator" }, requested: tampered }, WITH_CONNECTOR))
+    .toEqual(["viewer", "test-connector"]);
+});
+
+test("a stored grant with missing or erased origin evidence is denied, never promoted to operator root", () => {
+  const tampered = ["viewer", "test-connector"];
+  /* Absence of a delegation signal is not evidence of an operator root. If it
+     were, ERASING the evidence would be the widening path: a delegated worker
+     that blanks its own durable origin fields would be read as the most
+     privileged session class and keep a connector across every resume, attach
+     and structured recovery. */
+  expect(storedSessionOriginFor({})).toBe("delegated");
+  expect(storedSessionOriginFor({ agentRole: null, parentConversationId: null, delegationDepth: null })).toBe("delegated");
+  expect(storedSessionOriginFor({ delegationDepth: 0 })).toBe("operator-root");
+  expect(mcpServersForStoredSession({ requested: tampered }, WITH_CONNECTOR)).toEqual(["viewer"]);
+  expect(mcpServersForStoredSession({ agentRole: null, parentConversationId: null, delegationDepth: null, requested: tampered }, WITH_CONNECTOR))
+    .toEqual(["viewer"]);
+  /* A row that only lost its depth — the one affirmative root marker #393
+     stamps — is no longer a root either. */
+  expect(mcpServersForStoredSession({ agentRole: null, parentConversationId: null, origin: { kind: "successor" }, requested: tampered }, WITH_CONNECTOR))
+    .toEqual(["viewer"]);
+});
+
+test("a stored conversation whose delegation depth was erased loses its grant on the next read", () => {
+  const fileWith = (delegationDepth: number | null) => ({
+    conversations: {
+      root: {
+        id: "conversation_root",
+        engine: "codex",
+        agentRole: null,
+        delegationDepth,
+        generations: [{
+          id: "root-generation",
+          launchProfile: { ...emptyLaunchProfile(), parentConversationId: null, mcpServers: ["viewer", "test-connector"] },
+        }],
+      },
+    },
+    entries: {
+      "codex:root-generation": { launchProfile: { ...emptyLaunchProfile(), mcpServers: ["viewer", "test-connector"] } },
+    },
+  } as unknown as StoredGrantFile);
+
+  const proven = reboundStoredMcpGrants(fileWith(0), WITH_CONNECTOR);
+  expect(proven.conversations.root!.generations[0]!.launchProfile.mcpServers).toEqual(["viewer", "test-connector"]);
+  /* Same row, origin evidence deleted: the grant goes with it on both copies. */
+  const erased = reboundStoredMcpGrants(fileWith(null), WITH_CONNECTOR);
+  expect(erased.conversations.root!.generations[0]!.launchProfile.mcpServers).toEqual(["viewer"]);
+  expect(erased.entries["codex:root-generation"]!.launchProfile!.mcpServers).toEqual(["viewer"]);
 });
 
 test("a launch profile hand-edited to carry an ungranted server is re-bounded at the point of use", () => {
@@ -215,63 +266,127 @@ test("the storage boundary re-decides a grantable connector by the conversation'
   expect(rebounded.entries["codex:worker-generation"]!.launchProfile!.mcpServers).toEqual(["viewer"]);
 });
 
+/** Every row in the JSON file that carries an MCP grant, set to `grant`. The
+    tamper is deliberately indiscriminate — a worker with write access to the
+    file edits what it can reach, not what the boundary expects it to. */
+function tamperJsonGrant(registryPath: string, grant: string[]): void {
+  const raw = JSON.parse(fs.readFileSync(registryPath, "utf8")) as {
+    conversations: Record<string, { generations: { launchProfile: { mcpServers: string[] } }[] }>;
+    entries: Record<string, { launchProfile?: { mcpServers: string[] } }>;
+    receipts: Record<string, { launchProfile?: { mcpServers: string[] } }>;
+  };
+  for (const conversation of Object.values(raw.conversations)) {
+    for (const generation of conversation.generations) generation.launchProfile.mcpServers = [...grant];
+  }
+  for (const row of [...Object.values(raw.entries), ...Object.values(raw.receipts)]) {
+    if (row.launchProfile) row.launchProfile.mcpServers = [...grant];
+  }
+  fs.writeFileSync(registryPath, JSON.stringify(raw));
+}
+
 test("a delegated conversation cannot keep a hand-edited grant across resume or reload", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-tamper-"));
   const registryPath = path.join(directory, "registry.json");
+  /* The tampered name must be one the bound genuinely GRANTS, and the policy
+     must be injected on both the seeding and the reloading store. With an
+     out-of-bound name the global bound alone strips it, and this case would
+     keep passing with the origin decision deleted — proving nothing. */
+  const storage = { sqliteMode: "off" as const, mcpGrantPolicy: WITH_CONNECTOR };
   try {
     /* This case tampers with the JSON file itself, so it pins the backend
        rather than inheriting the environment's: under a SQLite-authoritative
        mode that file is a lagging rollback mirror, not the source of truth. */
-    const store = new AgentRegistry(registryPath, undefined, undefined, { sqliteMode: "off" });
+    const store = new AgentRegistry(registryPath, undefined, undefined, storage);
     const parentId = settledParent(store, ["viewer"]);
-    const child = store.beginSpawnRequest({
+    const workerId = settledDelegatedChild(store, parentId, "delegated-worker");
+
+    /* The worker edits the durable file it can reach on disk, naming a server
+       that IS inside the grant bound — the global bound alone would honour it. */
+    tamperJsonGrant(registryPath, ["viewer", "test-connector"]);
+
+    const reloaded = new AgentRegistry(registryPath, undefined, undefined, storage);
+    expect(reloaded.launchProfileForPath("/sessions/delegated-worker.jsonl")?.mcpServers).toEqual(["viewer"]);
+    const snapshot = reloaded.snapshot();
+    expect(snapshot.entries["codex:delegated-worker"]?.launchProfile?.mcpServers).toEqual(["viewer"]);
+    expect(snapshot.conversations[workerId]!.generations.at(-1)!.launchProfile.mcpServers).toEqual(["viewer"]);
+    /* The operator root's own rows keep the tampered grant, because its stored
+       origin proves it may hold one. Without this control the assertions above
+       would also pass if the read simply wiped every grant it saw. */
+    expect(reloaded.launchProfileForPath("/sessions/nested-parent.jsonl")?.mcpServers).toEqual(["viewer", "test-connector"]);
+    expect(snapshot.entries["codex:nested-parent"]?.launchProfile?.mcpServers).toEqual(["viewer", "test-connector"]);
+    expect(snapshot.conversations[parentId]!.generations.at(-1)!.launchProfile.mcpServers).toEqual(["viewer", "test-connector"]);
+
+    const resumedWorker = reloaded.beginSpawnRequest({
+      engine: "codex",
+      cwd: "/repo",
+      conversationId: workerId as never,
+      purpose: "resume-successor",
+    });
+    expect(resumedWorker.receipt.launchProfile.mcpServers).toEqual(["viewer"]);
+    const resumedRoot = reloaded.beginSpawnRequest({
+      engine: "codex",
+      cwd: "/repo",
+      conversationId: parentId as never,
+      purpose: "resume-successor",
+    });
+    expect(resumedRoot.receipt.launchProfile.mcpServers).toEqual(["viewer", "test-connector"]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a tampered receipt cannot carry a grant into settlement or attach", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-receipt-tamper-"));
+  const registryPath = path.join(directory, "registry.json");
+  const storage = { sqliteMode: "off" as const, mcpGrantPolicy: WITH_CONNECTOR };
+  try {
+    const store = new AgentRegistry(registryPath, undefined, undefined, storage);
+    const parentId = settledParent(store, ["viewer"]);
+    /* Two receipts admitted and left UNSETTLED, so the widening path is the
+       live one: settlement copies `receipt.launchProfile` onto the conversation
+       generation and the entry row, and attach reads it back from there. */
+    const worker = store.beginSpawnRequest({
       engine: "codex",
       cwd: "/repo",
       role: "builder",
       parentConversationId: parentId,
       origin: { kind: "agent", conversationId: parentId },
     });
-    if (child.kind !== "created") throw new Error("expected child reservation");
-    const settledChild = store.settleSpawn(child.receipt.launchId, {
-      key: { engine: "codex", sessionId: "delegated-worker" },
-      artifactPath: "/sessions/delegated-worker.jsonl",
-      cwd: "/repo",
-      accountId: "account",
-      status: "idle",
-      host: null,
-      claimEpoch: 0,
-      claimOwner: null,
-      pendingAction: null,
-    });
-    if (settledChild.kind !== "settled") throw new Error("expected child settlement");
+    const root = store.beginSpawnRequest({ engine: "codex", cwd: "/repo" });
 
-    /* The worker edits the durable file it can reach on disk, naming a server
-       that IS inside the grant bound — the global bound alone would honour it. */
-    const raw = JSON.parse(fs.readFileSync(registryPath, "utf8")) as {
-      conversations: Record<string, { generations: { launchProfile: { mcpServers: string[] } }[] }>;
-      entries: Record<string, { launchProfile?: { mcpServers: string[] } }>;
+    tamperJsonGrant(registryPath, ["viewer", "test-connector"]);
+
+    const reloaded = new AgentRegistry(registryPath, undefined, undefined, storage);
+    const settle = (launchId: string, sessionId: string) => {
+      const settled = reloaded.settleSpawn(launchId, {
+        key: { engine: "codex", sessionId },
+        artifactPath: `/sessions/${sessionId}.jsonl`,
+        cwd: "/repo",
+        accountId: "account",
+        status: "idle",
+        host: null,
+        claimEpoch: 0,
+        claimOwner: null,
+        pendingAction: null,
+      });
+      if (settled.kind !== "settled") throw new Error(`expected ${sessionId} settlement`);
+      return settled.conversation.id;
     };
-    const conversation = raw.conversations[settledChild.conversation.id]!;
-    for (const generation of conversation.generations) generation.launchProfile.mcpServers = ["viewer", "granted-connector"];
-    for (const entry of Object.values(raw.entries)) {
-      if (entry.launchProfile) entry.launchProfile.mcpServers = ["viewer", "granted-connector"];
-    }
-    fs.writeFileSync(registryPath, JSON.stringify(raw));
 
-    const reloaded = new AgentRegistry(registryPath, undefined, undefined, { sqliteMode: "off" });
-    const profile = reloaded.launchProfileForPath("/sessions/delegated-worker.jsonl");
-    expect(profile?.mcpServers).toEqual(["viewer"]);
+    const workerId = settle(worker.receipt.launchId, "receipt-worker");
+    const rootId = settle(root.receipt.launchId, "receipt-root");
     const snapshot = reloaded.snapshot();
-    for (const entry of Object.values(snapshot.entries)) {
-      expect(entry.launchProfile?.mcpServers ?? ["viewer"]).toEqual(["viewer"]);
-    }
-    const resumed = reloaded.beginSpawnRequest({
-      engine: "codex",
-      cwd: "/repo",
-      conversationId: settledChild.conversation.id,
-      purpose: "resume-successor",
-    });
-    expect(resumed.receipt.launchProfile.mcpServers).toEqual(["viewer"]);
+
+    /* The delegated receipt's claim dies at the storage boundary, so neither
+       copy settlement writes ever holds the connector. */
+    expect(snapshot.receipts[worker.receipt.launchId]!.launchProfile.mcpServers).toEqual(["viewer"]);
+    expect(snapshot.conversations[workerId]!.generations.at(-1)!.launchProfile.mcpServers).toEqual(["viewer"]);
+    expect(snapshot.entries["codex:receipt-worker"]?.launchProfile?.mcpServers).toEqual(["viewer"]);
+    /* The operator root's receipt keeps it through the same reload and the same
+       settlement, so the reset above is the origin rule, not a blanket wipe. */
+    expect(snapshot.receipts[root.receipt.launchId]!.launchProfile.mcpServers).toEqual(["viewer", "test-connector"]);
+    expect(snapshot.conversations[rootId]!.generations.at(-1)!.launchProfile.mcpServers).toEqual(["viewer", "test-connector"]);
+    expect(snapshot.entries["codex:receipt-root"]?.launchProfile?.mcpServers).toEqual(["viewer", "test-connector"]);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
