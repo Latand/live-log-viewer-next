@@ -14,7 +14,7 @@ let relayDeliveries = 0;
 let releaseRelayDeliveries: Array<() => void> = [];
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-engine-test-"));
-const { captureReviewHead, newRound, tickFlow, tickFlows, persistTickFlows, flowTickBase, reviewerLaunchPersisted, abandonLaunch, adoptSyntheticLaunchTakeover, recordHeadlessLaunch, relayFixOrPark, reserveReviewerSpawn, setRelayDeliveryForTest } = await import("./engine");
+const { captureReviewHead, newRound, tickFlow, tickFlows, persistTickFlows, flowTickBase, reviewerLaunchPersisted, abandonLaunch, adoptSyntheticLaunchTakeover, recordHeadlessLaunch, relayFixOrPark, reserveReviewerSpawn, sendToImplementer, setRelayDeliveryForTest } = await import("./engine");
 const { loadFlows, outputPathFor, saveFlows, stderrPathFor, stdoutPathFor } = await import("./store");
 
 afterAll(() => {
@@ -1613,4 +1613,70 @@ test("a pane-mode Claude review launch under structured transport parks without 
     else process.env.LLV_CLAUDE_HOME = previousClaudeHome;
     fs.rmSync(cwd, { recursive: true, force: true });
   }
+});
+
+/* --- the review verdict must reach a pane-less structured implementer ------ */
+
+function structuredImplementer(name: string) {
+  const implementerPath = path.join(process.env.LLV_STATE_DIR!, `${name}.jsonl`);
+  fs.writeFileSync(implementerPath, "");
+  const conversation = agentRegistry().ensureConversation("claude", implementerPath, null);
+  const flow = {
+    id: `flow-${name}`,
+    cwd: "/repo",
+    implementerPath,
+    implementerConversationId: conversation.id,
+  } as unknown as Flow;
+  return { flow, implementerPath, conversationId: conversation.id, entries: new Map([[implementerPath, entryFor(implementerPath, 1)]]) };
+}
+
+test("a review relay reaches a pane-less structured implementer instead of dying on the tmux ladder", async () => {
+  const subject = structuredImplementer("structured-implementer");
+  const enqueued: Array<{ text: string; conversationId?: string | null }> = [];
+  const legacy: string[] = [];
+
+  const target = await sendToImplementer(subject.flow, subject.entries, "REQUEST_CHANGES: fix the fence", {
+    recover: async () => ({ target: null, path: subject.implementerPath, conversationId: subject.conversationId, spawned: false }),
+    enqueueStructured: async (request) => {
+      enqueued.push({ text: request.text, conversationId: request.conversationId });
+      return { ok: true, structured: true, target: null, outcome: "queued", operationId: "op-relay", receipt: {} as never };
+    },
+    /* The legacy ladder is what refused flow 0d1364f8's relay outright. If the
+       structured branch is ever skipped for a structured implementer, this
+       records the regression rather than letting it pass silently. */
+    deliver: async () => {
+      legacy.push("tmux");
+      return { ok: false, outcome: "failed", error: "structured transport prohibits legacy tmux Claude launches", status: 409 };
+    },
+  });
+
+  expect(target).toBe(subject.implementerPath);
+  expect(enqueued).toEqual([{ text: "REQUEST_CHANGES: fix the fence", conversationId: subject.conversationId }]);
+  expect(legacy).toEqual([]);
+});
+
+test("a structured relay that cannot be owned surfaces its reason instead of reporting delivery", async () => {
+  const subject = structuredImplementer("unowned-implementer");
+
+  await expect(sendToImplementer(subject.flow, subject.entries, "relay", {
+    recover: async () => ({ target: null, path: subject.implementerPath, conversationId: subject.conversationId, spawned: false }),
+    enqueueStructured: async () => ({ ok: false, structured: true, outcome: "failed", error: "runtime host is unavailable", status: 503 }),
+    deliver: async () => ({ ok: true, outcome: "delivered-to-live", target: "%7" }),
+  })).rejects.toThrow("runtime host is unavailable");
+});
+
+test("a conversation with no structured host falls through to the legacy transcript host", async () => {
+  const subject = structuredImplementer("legacy-implementer");
+  let structuredAttempted = false;
+
+  /* This fixture has no resume spec, so the legacy ladder is entered and stops
+     at its first gate. That is the evidence the test wants: the relay left the
+     structured branch rather than enqueueing against a host it never recovered,
+     so legacy pane-hosted flows keep exactly today's behavior. */
+  await expect(sendToImplementer(subject.flow, subject.entries, "relay text", {
+    recover: async () => null,
+    enqueueStructured: async () => { structuredAttempted = true; return null; },
+  })).rejects.toThrow("implementer session cannot be resumed");
+
+  expect(structuredAttempted).toBe(false);
 });
