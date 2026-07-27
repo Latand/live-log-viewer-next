@@ -1,34 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { retireOutgoingManager } from "@/lib/orchestrator/retire";
 import { adoptOrchestratorRecord, orchestratorRecordExists, readOrchestratorRecord, replaceOrchestratorIncumbent, type OrchestratorRecord } from "@/lib/orchestrator/store";
-import { applyConversationAction } from "@/lib/conversation/actions";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import type { ApiError } from "@/lib/types";
 
+/* A route module may export ONLY the documented route fields — the HTTP method
+   handlers and the segment config below. Next.js validates that list at build time,
+   so a helper, a type or a test seam exported from here fails `next build` even
+   though `tsc --noEmit` accepts it. Retiring the outgoing manager therefore lives in
+   `@/lib/orchestrator/retire`, which both this route and its tests import. */
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-/**
- * Stopping the outgoing manager. Seamed so the route's own contract — that a swap
- * either retires the predecessor or does not happen — is testable without killing a
- * real process.
- */
-type RetireManager = (conversationId: string, transcriptPath: string) => Promise<string>;
-
-const productionRetire: RetireManager = async (conversationId, transcriptPath) => {
-  const outcome = await applyConversationAction({ conversationId, transcriptPath, action: "kill" });
-  if (outcome && typeof outcome === "object" && "error" in outcome) {
-    throw new Error(String((outcome as { error: unknown }).error));
-  }
-  return "killed";
-};
-
-let retireManager: RetireManager = productionRetire;
-
-/** Tests only. Production never replaces this. */
-export function __setOrchestratorRetireForTest(retire: RetireManager | null): void {
-  retireManager = retire ?? productionRetire;
-}
 
 interface OrchestratorStatus {
   record: OrchestratorRecord | null;
@@ -101,7 +84,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<{ ok: true; r
       try {
         retired = {
           conversationId: supersedes.conversationId,
-          outcome: await retireManager(supersedes.conversationId, supersedes.path ?? ""),
+          outcome: await retireOutgoingManager(supersedes.conversationId, supersedes.path ?? ""),
         };
       } catch (error) {
         return NextResponse.json({

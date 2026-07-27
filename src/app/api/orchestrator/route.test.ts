@@ -5,7 +5,9 @@ import path from "node:path";
 
 import { NextRequest } from "next/server";
 
-import { GET, POST, __setOrchestratorRetireForTest } from "./route";
+import { setRetireManagerForTests } from "@/lib/orchestrator/retire";
+
+import { GET, POST } from "./route";
 
 let retirements: { conversationId: string; action: string }[] = [];
 let retireOutcome: "ok" | "fail" = "ok";
@@ -19,7 +21,7 @@ beforeEach(() => {
   process.env.LLV_STATE_DIR = sandbox;
   retirements = [];
   retireOutcome = "ok";
-  __setOrchestratorRetireForTest(async (conversationId) => {
+  setRetireManagerForTests(async (conversationId) => {
     retirements.push({ conversationId, action: "kill" });
     if (retireOutcome === "fail") throw new Error("the predecessor could not be stopped");
     return "killed";
@@ -30,7 +32,7 @@ afterEach(() => {
   if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
   else process.env.LLV_STATE_DIR = previousStateDir;
   fs.rmSync(sandbox, { recursive: true, force: true });
-  __setOrchestratorRetireForTest(null);
+  setRetireManagerForTests(null);
 });
 
 function adoptRequest(body: unknown): NextRequest {
