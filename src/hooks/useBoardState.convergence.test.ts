@@ -1,0 +1,342 @@
+import { beforeEach, expect, test } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import { boardFor, mutateBoard, patchBoard } from "@/lib/board/store";
+import type { BoardMutationV1 } from "@/lib/board/mutations";
+import type { BoardPatch } from "@/lib/board/validation";
+
+import { createBoardStore, resetPendingOpensForTest } from "./useBoardState";
+
+/*
+ * Convergence across desktop, phone and agents (revives #38).
+ *
+ * Every case here runs two writers against ONE durable board: the store under
+ * test (a device) and `server.otherDevice(...)`, which stands for the second
+ * phone/desktop or an agent PATCHing /api/board. The "server" is the real
+ * `mutateBoard`/`patchBoard`/`boardFor` over an isolated temp file, so these
+ * assert the shipped server semantics — including durability, since `boardFor`
+ * re-reads the file on every call and a fresh store is a restart.
+ */
+
+const settle = async () => {
+  for (let index = 0; index < 24; index += 1) await Promise.resolve();
+};
+
+function temporaryBoardFile(): string {
+  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), "llv-board-converge-")), "board.json");
+}
+
+/** The real board API over an isolated file, plus a handle for the other device. */
+function durableBoard() {
+  const file = temporaryBoardFile();
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if (!init || (init.method ?? "GET") === "GET") {
+      const project = new URL(input, "http://x").searchParams.get("project")!;
+      return { ok: true, status: 200, json: async () => ({ ok: true, board: boardFor(project, file) }) };
+    }
+    const body = JSON.parse(String(init.body)) as { project: string; baseRevision: number; patch?: BoardPatch; mutations?: BoardMutationV1[] };
+    const result = body.mutations
+      ? mutateBoard(body.project, body.baseRevision, body.mutations, file)
+      : patchBoard(body.project, body.baseRevision, body.patch!, file);
+    if (!result.ok) return { ok: false, status: 409, json: async () => ({ error: "BOARD_REVISION_CONFLICT", board: result.board }) };
+    return { ok: true, status: 200, json: async () => ({ ok: true, board: result.board }) };
+  };
+  return {
+    file,
+    fetcher,
+    board: (project: string) => boardFor(project, file),
+    /** Another device (or an agent) writing at the revision it just read. */
+    otherDevice: (project: string, mutations: BoardMutationV1[]) => {
+      const result = mutateBoard(project, boardFor(project, file).revision, mutations, file);
+      if (!result.ok) throw new Error("otherDevice write was rejected");
+      return result.board;
+    },
+  };
+}
+
+/** A device whose PATCHes can be cut off while its GETs keep working — a phone
+    that lost its uplink mid-drag, or a laptop lid closed with queued intent. */
+function flakyDevice(server: ReturnType<typeof durableBoard>) {
+  const state = { patchDown: false };
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if (init && (init.method ?? "GET") !== "GET" && state.patchDown) throw new Error("offline");
+    return server.fetcher(input, init);
+  };
+  return { state, fetcher };
+}
+
+const idleScheduler = () => {
+  let pollFn = () => {};
+  const timeouts: Array<(() => void) | null> = [];
+  return {
+    scheduler: {
+      setInterval: (fn: () => void) => ((pollFn = fn), 1 as unknown as ReturnType<typeof setInterval>),
+      clearInterval: () => {},
+      setTimeout: (fn: () => void) => (timeouts.push(fn), timeouts.length as unknown as ReturnType<typeof setTimeout>),
+      clearTimeout: (handle: ReturnType<typeof setTimeout>) => {
+        const index = (handle as unknown as number) - 1;
+        if (timeouts[index]) timeouts[index] = null;
+      },
+    },
+    tick: () => pollFn(),
+    runTimeouts: () => {
+      for (const fn of timeouts.splice(0)) fn?.();
+    },
+  };
+};
+
+beforeEach(() => resetPendingOpensForTest());
+
+test("a view holding unflushed intent still converges on the other device's board", async () => {
+  const server = durableBoard();
+  server.otherDevice("proj", [
+    { kind: "restore", path: "/a", placement: "manual" },
+    { kind: "restore", path: "/x", placement: "manual" },
+  ]);
+  const device = flakyDevice(server);
+  const sched = idleScheduler();
+  const store = createBoardStore({ project: "proj", fetcher: device.fetcher, storage: null, scheduler: sched.scheduler });
+  await settle();
+  expect(store.getSnapshot().revision).toBe(1);
+
+  /* This device loses its uplink and the operator closes /x on it. The intent
+     is queued and rendered optimistically; the PATCH cannot land. */
+  device.state.patchDown = true;
+  store.mutate([{ kind: "close", path: "/x" }]);
+  await settle();
+  expect(store.getSnapshot().prefs.hidden).toEqual(["/x"]);
+
+  /* Meanwhile the operator keeps working on the other device: opens /b and
+     switches the project to list view. */
+  server.otherDevice("proj", [{ kind: "restore", path: "/b", placement: "manual" }]);
+  server.otherDevice("proj", [{ kind: "set-presentation", viewMode: "list" }]);
+
+  sched.tick();
+  await settle();
+
+  /* The regression: a read is not a write, so queued local intent must never
+     stop a view from learning where the board has moved. The old store skipped
+     every poll while the outbox was non-empty, so this device kept rendering the
+     revision-1 picture — /b missing, still on the scheme view — until a reload. */
+  const behind = store.getSnapshot();
+  expect(behind.prefs.manual).toEqual(["/a", "/b"]);
+  expect(behind.prefs.viewMode).toBe("list");
+  /* Its own unacknowledged close is replayed on top, not lost. */
+  expect(behind.prefs.hidden).toEqual(["/x"]);
+  /* And the view says out loud that it is rendering intent the durable board
+     does not carry, instead of claiming to be current. */
+  expect(behind.sync).toBe("stale");
+
+  device.state.patchDown = false;
+  sched.runTimeouts();
+  await settle();
+  expect(store.getSnapshot().sync).toBe("current");
+  expect(server.board("proj").prefs.manual).toEqual(["/a", "/b"]);
+  expect(server.board("proj").prefs.hidden).toEqual(["/x"]);
+  expect(server.board("proj").prefs.viewMode).toBe("list");
+  store.dispose();
+
+  /* Restart: a fresh store reads the same converged arrangement off disk. */
+  resetPendingOpensForTest();
+  const restarted = createBoardStore({ project: "proj", fetcher: server.fetcher, storage: null, scheduler: idleScheduler().scheduler });
+  await settle();
+  expect(restarted.getSnapshot().prefs).toMatchObject({ manual: ["/a", "/b"], hidden: ["/x"], viewMode: "list" });
+  restarted.dispose();
+});
+
+test("a view whose first load failed recovers on the next poll, not on a reload", async () => {
+  const server = durableBoard();
+  let firstGet = true;
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if ((!init || (init.method ?? "GET") === "GET") && firstGet) {
+      firstGet = false;
+      throw new Error("offline");
+    }
+    return server.fetcher(input, init);
+  };
+  const sched = idleScheduler();
+  const store = createBoardStore({ project: "proj", fetcher, storage: null, scheduler: sched.scheduler });
+  await settle();
+  expect(store.getSnapshot().sync).toBe("unavailable");
+
+  sched.tick();
+  await settle();
+  /* The project is untouched, so the poll reads back the same revision 0 it
+     already holds. The old store only cleared `unavailable` when the revision
+     CHANGED, so a fresh project whose first GET failed stayed unavailable
+     forever — the dashboard held its skeleton and its convergence effects, which
+     bail on an unavailable board, never ran again. */
+  expect(store.getSnapshot()).toMatchObject({ revision: 0, loaded: true, sync: "current" });
+
+  /* And it is a live, writable board from here on. */
+  store.mutate([{ kind: "restore", path: "/a", placement: "manual" }]);
+  await settle();
+  expect(server.board("proj").prefs.manual).toEqual(["/a"]);
+  store.dispose();
+});
+
+test("a stale view's presentation intent loses to the device that acted on current state", async () => {
+  const server = durableBoard();
+  server.otherDevice("proj", [{ kind: "restore", path: "/a", placement: "manual" }]);
+  const device = flakyDevice(server);
+  const sched = idleScheduler();
+  const store = createBoardStore({ project: "proj", fetcher: device.fetcher, storage: null, scheduler: sched.scheduler });
+  await settle();
+  expect(store.getSnapshot().prefs.viewMode).toBeNull();
+
+  /* Laptop goes offline holding a view-mode switch. */
+  device.state.patchDown = true;
+  store.mutate([{ kind: "set-presentation", viewMode: "list" }]);
+  await settle();
+  expect(store.getSnapshot().prefs.viewMode).toBe("list");
+
+  /* Later, on the phone, the operator picks the scheme view against the board
+     as it actually stands. That writer saw current state; the laptop's queued
+     intent was formed against a picture the operator has since superseded. */
+  server.otherDevice("proj", [{ kind: "set-presentation", viewMode: "scheme" }]);
+  expect(server.board("proj").revision).toBe(2);
+
+  sched.tick();
+  await settle();
+  /* The laptop adopts the newer board and DROPS its superseded view-mode
+     intent instead of replaying it on top. */
+  expect(store.getSnapshot().prefs.viewMode).toBe("scheme");
+
+  device.state.patchDown = false;
+  sched.runTimeouts();
+  await settle();
+  /* The stale writer never lands: the phone's choice is still the durable one
+     and no revision was burned undoing it. */
+  expect(server.board("proj").prefs.viewMode).toBe("scheme");
+  expect(server.board("proj").revision).toBe(2);
+  expect(store.getSnapshot()).toMatchObject({ revision: 2, sync: "current" });
+  store.dispose();
+});
+
+test("an accepted no-op cannot smuggle a newer board past the fence", async () => {
+  const server = durableBoard();
+  server.otherDevice("proj", [
+    { kind: "restore", path: "/a", placement: "manual" },
+    { kind: "restore", path: "/x", placement: "manual" },
+  ]);
+  /* Hold the first PATCH open so a second intent queues behind it. */
+  let releaseFirst = () => {};
+  const gate = new Promise<void>((resolve) => (releaseFirst = resolve));
+  let patches = 0;
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if (init && (init.method ?? "GET") !== "GET") {
+      patches += 1;
+      if (patches === 1) await gate;
+    }
+    return server.fetcher(input, init);
+  };
+  const sched = idleScheduler();
+  const store = createBoardStore({ project: "proj", fetcher, storage: null, scheduler: sched.scheduler });
+  await settle();
+
+  store.mutate([{ kind: "close", path: "/x" }]); // PATCH #1, held inflight at base revision 1
+  await settle();
+
+  /* While that write is in flight the other device closes /x itself and then
+     picks the scheme view — both against current state. */
+  server.otherDevice("proj", [{ kind: "close", path: "/x" }]);
+  server.otherDevice("proj", [{ kind: "set-presentation", viewMode: "scheme" }]);
+  expect(server.board("proj").revision).toBe(3);
+
+  store.mutate([{ kind: "set-presentation", viewMode: "list" }]); // queues behind the held PATCH
+
+  releaseFirst();
+  await settle();
+
+  /* PATCH #1 arrives with a base of 1 against a revision-3 board. The server
+     accepts it anyway — closing an already-closed /x changes nothing, and a
+     no-op is accepted from ANY base — so the response hands this view a board
+     another writer moved, with no 409 to mark it as behind. The queued view-mode
+     intent must still be fenced against that board rather than replayed on top. */
+  expect(store.getSnapshot().prefs.viewMode).toBe("scheme");
+  expect(server.board("proj").prefs.viewMode).toBe("scheme");
+  expect(server.board("proj").revision).toBe(3);
+  expect(store.getSnapshot().sync).toBe("current");
+  store.dispose();
+});
+
+test("a stale view loses only the keys another device wrote, and keeps the rest", async () => {
+  const server = durableBoard();
+  server.otherDevice("proj", [
+    { kind: "restore", path: "/a", placement: "manual" },
+    { kind: "restore", path: "/x", placement: "manual" },
+    { kind: "restore", path: "/b", placement: "manual" },
+  ]);
+  const device = flakyDevice(server);
+  const sched = idleScheduler();
+  const store = createBoardStore({ project: "proj", fetcher: device.fetcher, storage: null, scheduler: sched.scheduler });
+  await settle();
+
+  /* Offline, this device closes two windows. */
+  device.state.patchDown = true;
+  store.mutate([{ kind: "close", path: "/x" }, { kind: "close", path: "/b" }]);
+  await settle();
+  expect(store.getSnapshot().prefs.hidden).toEqual(["/x", "/b"]);
+
+  /* The other device rearranges /b — it wired /b under its parent — knowing the
+     current board. Nothing it did touches /x. */
+  server.otherDevice("proj", [{ kind: "restore", path: "/b", placement: "expanded" }]);
+
+  sched.tick();
+  await settle();
+  /* Per-key resolution: the close of /b is superseded and dropped; the close of
+     /x names a key nobody else wrote and survives. */
+  expect(store.getSnapshot().prefs.expanded).toEqual(["/b"]);
+  expect(store.getSnapshot().prefs.hidden).toEqual(["/x"]);
+
+  device.state.patchDown = false;
+  sched.runTimeouts();
+  await settle();
+  const durable = server.board("proj");
+  expect(durable.prefs.manual).toEqual(["/a"]);
+  expect(durable.prefs.expanded).toEqual(["/b"]);
+  expect(durable.prefs.hidden).toEqual(["/x"]);
+  expect(store.getSnapshot()).toMatchObject({ sync: "current", prefs: durable.prefs });
+  store.dispose();
+});
+
+test("a stale root reconciliation cannot retire the window another device just opened", async () => {
+  const server = durableBoard();
+  /* Both roots are board bookkeeping, seeded by reconciliation — neither is a
+     genuine user pin yet. */
+  server.otherDevice("proj", [{ kind: "reconcile-roots", roots: ["/a", "/gone"], removeManual: [] }]);
+  const device = flakyDevice(server);
+  const sched = idleScheduler();
+  const store = createBoardStore({ project: "proj", fetcher: device.fetcher, storage: null, scheduler: sched.scheduler });
+  await settle();
+  expect(store.getSnapshot().prefs.manual).toEqual(["/a", "/gone"]);
+
+  /* Offline, this device's dashboard reconciles roots against the picture it can
+     see: only /a is a live root, and its catalog says /gone is gone. */
+  device.state.patchDown = true;
+  store.mutate([{ kind: "reconcile-roots", roots: ["/a"], removeManual: ["/gone"] }]);
+  store.mutate([{ kind: "close", path: "/a" }]);
+  await settle();
+  expect(store.getSnapshot().prefs.manual).toEqual([]);
+
+  /* On the phone the operator deliberately pins /gone against current state. */
+  server.otherDevice("proj", [{ kind: "restore", path: "/gone", placement: "manual" }]);
+  expect(server.board("proj").explicitManual).toEqual(["/gone"]);
+
+  sched.tick();
+  await settle();
+  device.state.patchDown = false;
+  sched.runTimeouts();
+  await settle();
+
+  /* The stale reconciliation named /gone, so it is dropped rather than replayed
+     over the pin. The close of /a, which nobody else wrote, still lands. */
+  const durable = server.board("proj");
+  expect(durable.prefs.manual).toEqual(["/gone"]);
+  expect(durable.explicitManual).toEqual(["/gone"]);
+  expect(durable.prefs.hidden).toEqual(["/a"]);
+  expect(store.getSnapshot()).toMatchObject({ sync: "current", prefs: durable.prefs });
+  store.dispose();
+});

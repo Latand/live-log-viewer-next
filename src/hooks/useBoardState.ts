@@ -160,12 +160,14 @@ export function queueColumnOpen(project: string, path: string, connected = false
   activeStores.get(project)?.();
 }
 
-/** Test seam: clears queued cross-project opens and the session board cache
-    between cases, so a board confirmed in one test never primes the next. */
+/** Test seam: clears queued cross-project opens, the session board cache and any
+    shared project store, so a board confirmed in one test never primes the next. */
 export function resetPendingOpensForTest(): void {
   pendingOpens.clear();
   activeStores.clear();
   confirmedBoards.clear();
+  for (const entry of sharedStores.values()) entry.store.dispose();
+  sharedStores.clear();
 }
 
 type WriteAttempt =
@@ -197,6 +199,106 @@ function sameArrangement(left: BoardProjectStateV1, right: BoardProjectStateV1):
     JSON.stringify({ prefs: left.prefs, pathAliases: left.pathAliases ?? {}, explicitManual: left.explicitManual ?? [] }) ===
     JSON.stringify({ prefs: right.prefs, pathAliases: right.pathAliases ?? {}, explicitManual: right.explicitManual ?? [] })
   );
+}
+
+/* ── Convergence: per-key last-writer-wins, fenced by observation (#38).
+ *
+ * The writer is the device whose PATCH the server serializes last at a matching
+ * `baseRevision`; the server rejects any writer whose base is behind (409). That
+ * alone does not stop a stale device from winning, because the client adopts the
+ * newer board and replays its outbox on top — intent formed against a picture the
+ * operator has since superseded then overwrites the informed device's work.
+ *
+ * So when a view adopts a board it did not author, it diffs the board it held
+ * against the one it adopted to learn which KEYS another writer changed, and
+ * drops its own queued mutations naming those keys. Queued mutations naming
+ * untouched keys replay on top and still land. The last writer is therefore
+ * always one that acted with knowledge of the current value of the key it wrote;
+ * a view that has fallen behind loses exactly the keys it is behind on.
+ *
+ * A key is one independently-writable unit of the board: a transcript path's
+ * placement, a favourite/tray identity, or one presentation field. */
+
+function resolveThrough(pathname: string, aliases: Record<string, string>): string {
+  const seen = new Set<string>();
+  let resolved = pathname;
+  while (aliases[resolved] !== undefined) {
+    if (seen.has(resolved)) return resolved;
+    seen.add(resolved);
+    resolved = aliases[resolved]!;
+  }
+  return resolved;
+}
+
+/** A path's full placement, including whether the manual slot is a genuine user
+    pin — re-pinning a reconcile-seeded root is a real write on that key. */
+function placementOf(board: BoardProjectStateV1, pathname: string): string {
+  if (board.prefs.hidden.includes(pathname)) return "hidden";
+  if (board.prefs.expanded.includes(pathname)) return "expanded";
+  if (board.prefs.manual.includes(pathname)) return (board.explicitManual ?? []).includes(pathname) ? "pinned" : "manual";
+  return "absent";
+}
+
+function symmetricDifference(before: readonly string[] | undefined, after: readonly string[] | undefined): string[] {
+  const left = new Set(before ?? []);
+  const right = new Set(after ?? []);
+  return [...new Set([...left, ...right])].filter((item) => left.has(item) !== right.has(item));
+}
+
+/**
+ * The keys another writer changed between the board this view held and the one
+ * it adopted. Paths are compared through the adopted board's aliases, so a
+ * succession remap that carried a placement to a new transcript path reads as no
+ * change — bookkeeping must not look like a competing operator decision.
+ */
+export function foreignKeys(before: BoardProjectStateV1, after: BoardProjectStateV1): Set<string> {
+  const keys = new Set<string>();
+  const aliases = after.pathAliases ?? {};
+  const paths = new Set<string>([
+    ...before.prefs.manual, ...before.prefs.hidden, ...before.prefs.expanded,
+    ...after.prefs.manual, ...after.prefs.hidden, ...after.prefs.expanded,
+  ]);
+  for (const pathname of paths) {
+    if (placementOf(before, pathname) !== placementOf(after, resolveThrough(pathname, aliases))) keys.add(`path:${pathname}`);
+  }
+  for (const id of symmetricDifference(before.prefs.favorites, after.prefs.favorites)) keys.add(`favorite:${id}`);
+  for (const id of symmetricDifference(before.prefs.foldedEngineChildIds, after.prefs.foldedEngineChildIds)) keys.add(`fold:${id}`);
+  for (const id of symmetricDifference(before.prefs.expandedEngineTrayParentIds, after.prefs.expandedEngineTrayParentIds)) keys.add(`tray:${id}`);
+  if (before.prefs.viewMode !== after.prefs.viewMode) keys.add("viewMode");
+  if (before.prefs.taskPanelOpen !== after.prefs.taskPanelOpen) keys.add("taskPanelOpen");
+  return keys;
+}
+
+/** Every key a queued mutation would write. A mutation naming several paths
+    (a reconciliation, a remap graph) travels whole, so one superseded path
+    supersedes the batch — it was computed against the picture that moved. */
+export function mutationKeys(mutation: BoardMutationV1): string[] {
+  switch (mutation.kind) {
+    case "close":
+    case "restore":
+      return [`path:${mutation.path}`];
+    case "reconcile-roots":
+      return [...mutation.roots, ...mutation.removeManual].map((pathname) => `path:${pathname}`);
+    case "remap-paths":
+      return mutation.pairs.flatMap(({ from, to }) => [`path:${from}`, `path:${to}`]);
+    case "set-favorite":
+      return [`favorite:${mutation.id}`];
+    case "set-engine-child-fold":
+      return [`fold:${mutation.id}`, `path:${mutation.path}`];
+    case "set-engine-tray-expanded":
+      return [`tray:${mutation.parentId}`];
+    case "set-presentation":
+      return [
+        ...(mutation.viewMode === undefined ? [] : ["viewMode"]),
+        ...(mutation.taskPanelOpen === undefined ? [] : ["taskPanelOpen"]),
+      ];
+  }
+}
+
+/** Drop the queued intent a better-informed writer has already superseded. */
+export function fenceOutbox(outbox: readonly BoardMutationV1[], foreign: ReadonlySet<string>): BoardMutationV1[] {
+  if (foreign.size === 0) return [...outbox];
+  return outbox.filter((mutation) => !mutationKeys(mutation).some((key) => foreign.has(key)));
 }
 
 /** Replay the unacknowledged outbox over the last server-confirmed board to get
@@ -285,16 +387,32 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
   let rejectCap: number | null = null;
   let retryHandle: ReturnType<typeof scheduler.setTimeout> | null = null;
   let retryDelay = RETRY_BASE_MS;
+  /* This view has fallen behind: it adopted a board another writer moved while
+     holding intent of its own, so what it renders is a picture no other device
+     has. Published as `sync: "stale"` (and through presence to agents) until the
+     outbox is fully acknowledged — a lagging view must never be silently
+     trusted as current. */
+  let rebased = false;
+  /* Bumped whenever a PATCH is issued. A GET that started before a write must
+     not install its (now superseded) board over the write's response, which is
+     the authoritative post-write state. */
+  let writeEpoch = 0;
   const listeners = new Set<() => void>();
 
   const emit = () => {
     for (const listener of listeners) listener();
   };
-  const syncFor = (): BoardSync => (unavailable ? "unavailable" : inflight || outbox.length ? "pending" : "current");
+  const syncFor = (): BoardSync => {
+    if (unavailable) return "unavailable";
+    if (outbox.length === 0) return inflight ? "pending" : "current";
+    return rebased ? "stale" : "pending";
+  };
   /* Recompute the published snapshot from the confirmed board + outbox. The
      revision stays the confirmed one — optimistic mutations do not invent a
      revision the server has not assigned. */
   const refresh = () => {
+    /* Every queued intent is acknowledged: this view is no longer behind. */
+    if (outbox.length === 0) rebased = false;
     const board = optimisticBoard(confirmed, outbox);
     snapshot = { prefs: board.prefs, explicitManual: board.explicitManual ?? [], revision: confirmed.revision, sync: syncFor(), loaded };
     /* Cache only a genuinely loaded, available board — never the pre-load empty
@@ -304,7 +422,27 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
     emit();
   };
 
+  /**
+   * Install a board this view did not author (a poll, or the 409 response to a
+   * rejected write). Whatever another writer changed in the meantime supersedes
+   * this view's queued intent on those keys, so that intent is dropped rather
+   * than replayed on top; the rest replays and still lands. Surviving intent
+   * marks the view stale, because it now renders something no other device has.
+   */
+  const adoptForeign = (board: BoardProjectStateV1) => {
+    const previous = confirmed;
+    confirmed = board;
+    unavailable = false;
+    if (outbox.length > 0) {
+      outbox = fenceOutbox(outbox, foreignKeys(previous, board));
+      if (outbox.length > 0) rebased = true;
+      else cancelRetry();
+    }
+    refresh();
+  };
+
   const attemptMutations = async (mutations: readonly BoardMutationV1[], baseRevision: number): Promise<WriteAttempt> => {
+    writeEpoch += 1;
     try {
       const res = await fetcher("/api/board", {
         method: "PATCH",
@@ -330,6 +468,7 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
   /* The legacy seed writes whole prefs (the patch form) onto the empty
      revision-0 board — the mutation protocol only carries membership deltas. */
   const attemptSeed = async (patch: BoardPrefs, baseRevision: number): Promise<WriteAttempt> => {
+    writeEpoch += 1;
     try {
       const res = await fetcher("/api/board", {
         method: "PATCH",
@@ -432,8 +571,19 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
       conflictStreak = 0;
       rejectCap = null;
       unavailable = false;
+      /* The board this write should have produced. The server accepts a batch
+         that reduces to nothing from ANY base revision, so an accepted response
+         can hand back a board another writer has moved — with no 409 to mark
+         this view as behind. Diffing expected against returned names exactly the
+         keys that writer changed, and the outbox still queued behind this prefix
+         is fenced against them just as it would be after a conflict. */
+      const expected = optimisticBoard(confirmed, prefix);
       confirmed = result.board;
       outbox = outbox.slice(prefix.length);
+      if (outbox.length > 0) {
+        outbox = fenceOutbox(outbox, foreignKeys(expected, result.board));
+        if (outbox.length > 0) rebased = true;
+      }
       refresh();
       if (outbox.length) void drain();
       return;
@@ -469,13 +619,17 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
       return;
     }
     if (result.status === "conflict") {
-      /* Another writer landed first. Adopt the server board and retain the whole
-         outbox: the optimistic replay puts this intent back on top, and we retry
-         the same prefix at the returned revision. A satisfied mutation then
+      /* Another writer landed first, so this attempt was stale and the server
+         refused it. Adopt the server board; intent this view formed against keys
+         that writer changed is superseded and dropped, and the rest replays on
+         top and retries at the returned revision. A satisfied mutation then
          reduces to a server no-op that leaves the revision untouched. */
-      confirmed = result.board;
+      adoptForeign(result.board);
       conflictStreak += 1;
-      refresh();
+      if (outbox.length === 0) {
+        conflictStreak = 0;
+        return;
+      }
       if (conflictStreak <= MAX_CONFLICT_RETRIES) void drain();
       else scheduleRetry();
       return;
@@ -526,17 +680,33 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
     refresh();
   };
 
+  /* Read where the board actually is. Deliberately NOT gated on a pending
+     outbox: a read is not a write, and the old outbox gate meant a device that
+     could not flush its intent — an uplink that dropped mid-drag, a laptop lid
+     closed — also stopped learning that the board had moved, and rendered a
+     frozen picture until a reload (#38). Unflushed intent survives adoption
+     through the same fence the 409 path uses. */
   const poll = () => {
-    if (inflight || outbox.length || disposed) return;
+    if (inflight || disposed) return;
+    const epoch = writeEpoch;
     void (async () => {
       try {
         const res = await fetcher(getUrl);
         if (!res.ok) return;
         const board = ((await res.json()) as { board: BoardProjectStateV1 }).board;
-        /* Another device moved the board. Adopt it while preserving unflushed
-           local intent through the outbox/inflight guard. */
-        if (!inflight && outbox.length === 0 && !disposed && board.revision !== confirmed.revision) {
-          confirmed = board;
+        /* A write that started or finished during this read owns the outcome:
+           its response is the authoritative post-write board. */
+        if (inflight || disposed || writeEpoch !== epoch) return;
+        if (board.revision !== confirmed.revision) {
+          adoptForeign(board);
+          return;
+        }
+        /* Same revision, but the read itself proves the board is reachable again
+           — otherwise a project still at revision 0 whose first load failed would
+           stay unavailable forever, holding the dashboard skeleton. A held
+           outbox means writes are still being refused (schema skew), so the
+           unavailable signal stands until that intent can drain. */
+        if (unavailable && outbox.length === 0) {
           unavailable = false;
           refresh();
         }
@@ -584,6 +754,45 @@ function initialBoardSnapshot(project: string | null): BoardSnapshot {
   return { prefs: cached.prefs, explicitManual: cached.explicitManual ?? [], revision: cached.revision, sync: "current", loaded: true };
 }
 
+/* One store per project per tab, refcounted across bindings. A project board is
+   bound more than once in the same tab — the shell rail and the dashboard both
+   mount `useBoardState(project)` — and a private store per binding gave each its
+   own confirmed board, outbox and poll clock, so one tab could render two
+   different window sets for one project and only a reload settled them (#38).
+   Sharing makes a mutation dispatched through one binding state the other is
+   already showing, and leaves exactly one writer per project per tab. */
+interface SharedBoardStore {
+  store: BoardStore;
+  refs: number;
+}
+const sharedStores = new Map<string, SharedBoardStore>();
+
+function acquireBoardStore(project: string): BoardStore {
+  const existing = sharedStores.get(project);
+  if (existing) {
+    existing.refs += 1;
+    return existing.store;
+  }
+  let storage: Pick<Storage, "getItem"> | null = null;
+  try {
+    storage = window.localStorage;
+  } catch {
+    storage = null;
+  }
+  const store = createBoardStore({ project, fetcher: (input, init) => fetch(input, init), storage });
+  sharedStores.set(project, { store, refs: 1 });
+  return store;
+}
+
+function releaseBoardStore(project: string): void {
+  const entry = sharedStores.get(project);
+  if (!entry) return;
+  entry.refs -= 1;
+  if (entry.refs > 0) return;
+  sharedStores.delete(project);
+  entry.store.dispose();
+}
+
 export interface BoardState extends BoardSnapshot {
   /** Dispatch a semantic mutation batch (close/restore/reconcile/remap/
       presentation). The store replays it optimistically and flushes durably. */
@@ -627,19 +836,13 @@ export function useBoardState(project: string | null): BoardState {
       setBound({ project, snapshot: UNAVAILABLE_SNAPSHOT });
       return;
     }
-    let storage: Pick<Storage, "getItem"> | null = null;
-    try {
-      storage = window.localStorage;
-    } catch {
-      storage = null;
-    }
-    const store = createBoardStore({ project, fetcher: (input, init) => fetch(input, init), storage });
+    const store = acquireBoardStore(project);
     storeRef.current = store;
     setBound({ project, snapshot: store.getSnapshot() });
     const unsubscribe = store.subscribe(() => setBound({ project, snapshot: store.getSnapshot() }));
     return () => {
       unsubscribe();
-      store.dispose();
+      releaseBoardStore(project);
       storeRef.current = null;
     };
   }, [project]);
