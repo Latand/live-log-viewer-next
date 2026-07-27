@@ -1160,7 +1160,10 @@ function commitPassedStage(
      is what left pipeline 2ae14391 parked for over seven hours. Publication
      failure is its own recoverable class: the commit is already durable in
      `lastPassedCommit`, so nothing is lost while the operator resolves it. */
-  const published = publishPipelineBranch(pipeline, ports.exec, pipeline.publishedCommit ?? null);
+  const published = publishPipelineBranch(pipeline, ports.exec, {
+    acceptedSha: result.sha,
+    publishedSha: pipeline.publishedCommit ?? null,
+  });
   if (!published.ok) {
     park(pipeline, `publishing the passed stage: ${published.error}`, attempt);
     return;
@@ -1500,7 +1503,9 @@ function publishReviewIngressHead(pipeline: Pipeline, attempt: PipelineStageAtte
     return `review stage head mismatch: the accepted review head is ${expected}, but the pipeline worktree is at ${local.sha}; nothing was published`;
   }
 
-  const published = publishPipelineBranch(pipeline, ports.exec, null);
+  /* `publishedSha` is deliberately omitted: ingress probes the remote for real
+     rather than trusting a durable record that may be stale or migrated. */
+  const published = publishPipelineBranch(pipeline, ports.exec, { acceptedSha: expected });
   if (!published.ok) return `review stage could not publish the accepted head ${expected}: ${published.error}`;
   if (published.remote === "unavailable") {
     return `review stage requires a published pipeline branch, but this repository has no origin remote to publish ${expected} to`;
@@ -2672,7 +2677,10 @@ export async function patchPipeline(
            one. Without this, a local repair the operator committed in the
            worktree would park the retry on the same unavailable remote the
            retry was meant to escape — an unbounded operator loop. */
-        const republished = publishPipelineBranch(pipeline, ports.exec, pipeline.publishedCommit ?? null);
+        const republished = publishPipelineBranch(pipeline, ports.exec, {
+          acceptedSha: retryReviewHead!.sha,
+          publishedSha: pipeline.publishedCommit ?? null,
+        });
         if (!republished.ok) {
           pipeline.stateDetail = republished.error;
           persist();
