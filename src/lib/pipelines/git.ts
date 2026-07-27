@@ -170,6 +170,20 @@ export function publishPipelineBranch(pipeline: Pipeline, exec: ExecPort, publis
   if (remoteSha === local.sha) return { ok: true, sha: local.sha, remote: "published" };
   if (remoteSha) {
     if (!/^[0-9a-f]{40}$/i.test(remoteSha)) return { ok: false, error: "the remote pipeline branch has no exact commit SHA" };
+    /* A revision pushed from another checkout is not in this worktree's object
+       database, and `merge-base` cannot reason about a commit it does not have
+       — it fails outright, which would report a transient git error where the
+       truth is a divergence. Fetch it first, and only when it is genuinely
+       unknown, so an ordinary fast-forward still costs no extra round trip. */
+    const known = exec("git", ["cat-file", "-e", `${remoteSha}^{commit}`], pipeline.worktreeDir);
+    if (known.code !== 0) {
+      const fetched = exec(
+        "git",
+        ["fetch", "--no-tags", "origin", `+refs/heads/${pipeline.branch}:refs/remotes/origin/${pipeline.branch}`],
+        pipeline.worktreeDir,
+      );
+      if (fetched.code !== 0) return failure("fetching the remote pipeline branch", fetched);
+    }
     /* Only a fast-forward is ever published. A remote revision the local head
        does not contain is someone else's repair; overwriting it would discard
        work, so the pipeline parks and lets the operator choose. */

@@ -27,7 +27,7 @@ import { realExec, type ExecPort } from "@/lib/workflows/provision";
 
 import { requestPipelineTick } from "./controllerSignal";
 import { durableStageTurnEvidence, type StageTurnEvidence } from "./durableEvidence";
-import { commitPipelineStage, currentPipelineBranchHead, currentPipelineRemoteBranchHead, pipelineWorktreeChanges, provisionPipelineWorktree, resetPipelineStage, resolvePipelineBase, synchronizePipelineRetryHead } from "./git";
+import { commitPipelineStage, currentPipelineBranchHead, currentPipelineRemoteBranchHead, pipelineWorktreeChanges, provisionPipelineWorktree, publishPipelineBranch, resetPipelineStage, resolvePipelineBase, synchronizePipelineRetryHead } from "./git";
 import {
   DEFAULT_FAIL_EDGE_ROUNDS,
   MAX_FAIL_EDGE_ROUNDS,
@@ -1153,6 +1153,19 @@ function commitPassedStage(
     return;
   }
   pipeline.lastPassedCommit = result.sha;
+  /* Publish before the next stage can gate on the publication (#729). A review
+     stage fences every round on `origin/<branch>` through captureReviewHead, so
+     a builder that produced a usable head strands the whole handoff unless the
+     orchestrator itself pushes it — waiting for a stage to have run `git push`
+     is what left pipeline 2ae14391 parked for over seven hours. Publication
+     failure is its own recoverable class: the commit is already durable in
+     `lastPassedCommit`, so nothing is lost while the operator resolves it. */
+  const published = publishPipelineBranch(pipeline, ports.exec, pipeline.publishedCommit ?? null);
+  if (!published.ok) {
+    park(pipeline, `publishing the passed stage: ${published.error}`, attempt);
+    return;
+  }
+  pipeline.publishedCommit = published.remote === "published" ? published.sha : null;
   attempt.state = "passed";
   attempt.completedAt = ports.now();
   advancePipeline(pipeline, stage, ports, attempt);
@@ -2611,6 +2624,17 @@ export async function patchPipeline(
         pipeline.state = "provisioning";
       } else if (stage?.kind === "review-loop") {
         pipeline.lastPassedCommit = retryReviewHead!.sha;
+        /* A retried reviewer fences on the published head exactly like the first
+           one. Without this, a local repair the operator committed in the
+           worktree would park the retry on the same unavailable remote the
+           retry was meant to escape — an unbounded operator loop. */
+        const republished = publishPipelineBranch(pipeline, ports.exec, pipeline.publishedCommit ?? null);
+        if (!republished.ok) {
+          pipeline.stateDetail = republished.error;
+          persist();
+          return { error: republished.error, status: 409 };
+        }
+        pipeline.publishedCommit = republished.remote === "published" ? republished.sha : null;
         pipeline.state = "running";
       } else if (pipeline.lastPassedCommit) {
         const reset = resetPipelineStage(pipeline, ports.exec);

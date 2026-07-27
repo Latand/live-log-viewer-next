@@ -4502,3 +4502,162 @@ test("closing a fail-edge target with an older terminal attempt records a fresh 
   expect(buildRun.attempts[1]!.input).toContain("regression");
   expect(reloaded.runs.find((run) => run.stageId === "verify")!.attempts[0]!.state).toBe("failed");
 });
+
+/* --- #729: the orchestrator publishes the head the review layer fences on --- */
+
+function publishHarness(h: ReturnType<typeof harness>, options: { origin?: boolean; pushFails?: boolean } = {}) {
+  const passedSha = "7".repeat(40);
+  const order: string[] = [];
+  /* Oldest first. `merge-base --is-ancestor` is answered from this, so the
+     fake cannot accidentally agree that a divergence is a fast-forward. */
+  const history = [ORIGIN_MAIN_SHA, passedSha];
+  let localHead = ORIGIN_MAIN_SHA;
+  let remoteBranch: string | null = null;
+  let dirty = true;
+  const baseExec = h.ports.exec;
+  h.ports.exec = (command, args, cwd) => {
+    if (command !== "git") return baseExec(command, args, cwd);
+    const branch = loadPipelines()[0]?.branch ?? "pipeline/test";
+    if (args[0] === "status") return { code: 0, stdout: dirty ? " M src/lib/thing.ts\n" : "", stderr: "" };
+    if (args[0] === "add") return { code: 0, stdout: "", stderr: "" };
+    if (args[0] === "commit") {
+      dirty = false;
+      localHead = passedSha;
+      order.push("commit");
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    if (args[0] === "branch" && args[1] === "--show-current") return { code: 0, stdout: `${branch}\n`, stderr: "" };
+    if (args[0] === "remote" && args[1] === "get-url") {
+      return options.origin === false
+        ? { code: 128, stdout: "", stderr: "error: No such remote 'origin'" }
+        : { code: 0, stdout: "git@example.invalid:owner/repo.git\n", stderr: "" };
+    }
+    if (args[0] === "ls-remote") {
+      return { code: 0, stdout: remoteBranch ? `${remoteBranch}\trefs/heads/${branch}\n` : "", stderr: "" };
+    }
+    if (args[0] === "push") {
+      if (options.pushFails) {
+        order.push("push-rejected");
+        return { code: 1, stdout: "", stderr: "! [remote rejected] (shallow update not allowed)" };
+      }
+      remoteBranch = localHead;
+      order.push(`push:${localHead}`);
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    if (args[0] === "cat-file") return { code: history.includes(String(args[2]).replace("^{commit}", "")) ? 0 : 1, stdout: "", stderr: "" };
+    if (args[0] === "merge-base" && args[1] === "--is-ancestor") {
+      const ancestor = history.indexOf(String(args[2]));
+      const descendant = history.indexOf(String(args[3]));
+      return { code: ancestor >= 0 && descendant >= 0 && ancestor <= descendant ? 0 : 1, stdout: "", stderr: "" };
+    }
+    if (args[0] === "fetch") return { code: 0, stdout: "", stderr: "" };
+    if (args[0] === "merge" && args[1] === "--ff-only") {
+      localHead = remoteBranch ?? localHead;
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    if (args[0] === "rev-parse" && args[1] === "HEAD") return { code: 0, stdout: `${localHead}\n`, stderr: "" };
+    if (args[0] === "rev-parse" && String(args[1]).startsWith("refs/remotes/origin/")) {
+      return remoteBranch
+        ? { code: 0, stdout: `${remoteBranch}\n`, stderr: "" }
+        : { code: 128, stdout: "", stderr: "fatal: bad revision" };
+    }
+    return baseExec(command, args, cwd);
+  };
+  const baseCreateFlow = h.ports.createFlow;
+  h.ports.createFlow = async (req, entries) => {
+    order.push("createFlow");
+    return await baseCreateFlow(req, entries);
+  };
+  return {
+    passedSha,
+    order,
+    remote: () => remoteBranch,
+    setRemote: (sha: string) => { remoteBranch = sha; },
+    setLocalHead: (sha: string) => { localHead = sha; if (!history.includes(sha)) history.push(sha); },
+    /* Records a revision nobody's local checkout contains — a repair pushed
+       from another clone, which must never be fast-forwarded away. */
+    setDivergentRemote: (sha: string) => { remoteBranch = sha; },
+  };
+}
+
+const PUBLISH_STAGES = [
+  { id: "build", kind: "run", role: { roleId: "builder" }, ["prompt"]: "build", next: "review" },
+  { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, ["prompt"]: "review", next: null },
+] as const;
+
+test("a passed run stage publishes its committed head before the review stage creates its flow (#729)", async () => {
+  const h = harness();
+  const box = publishHarness(h);
+  await create(h.ports, PUBLISH_STAGES as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+
+  /* The builder's commit reaches origin before anything can gate on it: this is
+     the exact ordering pipeline 2ae14391 lacked when its review stage parked on
+     `review remote head is unavailable before launch`. */
+  expect(box.remote()).toBe(box.passedSha);
+  expect(loadPipelines()[0]).toMatchObject({ lastPassedCommit: box.passedSha, publishedCommit: box.passedSha });
+
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  expect(box.order).toEqual(["commit", `push:${box.passedSha}`, "createFlow"]);
+  expect(h.flows.get("flow-1")).toMatchObject({ headRef: loadPipelines()[0]!.branch, targetSha: box.passedSha });
+  expect(loadPipelines()[0]!.state).toBe("running");
+});
+
+test("a publication that cannot land parks the pass without losing the commit", async () => {
+  const h = harness();
+  const box = publishHarness(h, { pushFails: true });
+  await create(h.ports, PUBLISH_STAGES as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+
+  const parked = loadPipelines()[0]!;
+  expect(parked.state).toBe("needs_decision");
+  expect(parked.stateDetail).toContain("publishing the passed stage: publishing the pipeline branch:");
+  /* The stage's work is committed and recorded — the park is recoverable, and a
+     retry resets to this commit rather than discarding the builder's output. */
+  expect(parked.lastPassedCommit).toBe(box.passedSha);
+  expect(parked.publishedCommit ?? null).toBeNull();
+  expect(box.order).toEqual(["commit", "push-rejected"]);
+  expect(h.flows.size).toBe(0);
+});
+
+test("a pipeline whose repo has no origin advances without publishing anything", async () => {
+  const h = harness();
+  const box = publishHarness(h, { origin: false });
+  await create(h.ports, PUBLISH_STAGES as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  expect(box.order).toEqual(["commit", "createFlow"]);
+  expect(box.remote()).toBeNull();
+  expect(loadPipelines()[0]).toMatchObject({ state: "running", lastPassedCommit: box.passedSha, publishedCommit: null });
+});
+
+test("retrying a parked review stage republishes a local repair before the reviewer relaunches", async () => {
+  const h = harness();
+  const box = publishHarness(h);
+  const pipeline = await create(h.ports, PUBLISH_STAGES as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  h.flows.get("flow-1")!.state = "done_comment";
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  expect(loadPipelines()[0]!.state).toBe("needs_decision");
+
+  /* The operator commits a repair in the shared worktree. Without republication
+     the retried reviewer fences on a remote that never learned about it. */
+  const repairHead = "9".repeat(40);
+  box.setLocalHead(repairHead);
+  await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
+
+  expect(box.remote()).toBe(repairHead);
+  expect(loadPipelines()[0]).toMatchObject({ state: "running", lastPassedCommit: repairHead, publishedCommit: repairHead });
+  expect(box.order).toEqual(["commit", `push:${box.passedSha}`, "createFlow", `push:${repairHead}`]);
+});
