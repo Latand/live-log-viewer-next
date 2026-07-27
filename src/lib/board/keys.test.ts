@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { mutationKeys, pathKey, VIEW_MODE_KEY } from "./keys";
+import { keyRevisionAt, MAX_RETIRED_KEY_REVISIONS, mutationKeys, pathKey, VIEW_MODE_KEY } from "./keys";
 import { boardFor, mutateBoard, remapBoardPaths } from "./store";
 
 /*
@@ -11,7 +11,10 @@ import { boardFor, mutateBoard, remapBoardPaths } from "./store";
  * revision of the keys it changed. This is what makes ABA detectable — a value
  * driven away and back is indistinguishable by comparison, and unmistakable by
  * revision. Any surface that wants revision-fenced per-project durable settings
- * relies on exactly these four properties.
+ * relies on exactly these properties: revisions advance on every write, move
+ * only the keys a write changed, are durable across a restart, unify across an
+ * alias boundary so one logical key has one clock, and survive tombstone GC by
+ * leaving a floor behind rather than forgetting.
  */
 
 function temporaryFile(): string {
@@ -73,18 +76,90 @@ test("causal revisions are durable and survive a restart", () => {
   expect(at(file, pathKey("/a"))).toBe(8);
 });
 
-test("a remap carries a placement without burning the old path's causal revision", () => {
+test("a remap unifies the two names onto one clock without burning it", () => {
   const file = temporaryFile();
   mutateBoard("proj", 0, [{ kind: "restore", path: "/old", placement: "manual" }], file);
   expect(at(file, pathKey("/old"))).toBe(1);
 
   remapBoardPaths("proj", [{ from: "/old", to: "/new" }], { filePath: file });
-  /* Succession bookkeeping is not a competing operator decision: the placement
-     followed the conversation, so queued intent naming /old is not superseded
-     by the rename alone. The retired alias source is pruned from the map. */
   const board = boardFor("proj", file);
   expect(board.prefs.manual).toEqual(["/new"]);
-  expect(board.keyRevisions?.[pathKey("/old")]).toBe(1);
+  /* One logical thing, one clock. The alias source stops holding a clock of its
+     own — two names with independent clocks is ABA across an alias boundary, and
+     a stale writer naming /old would look unopposed against a write naming /new.
+     Both names now read the same revision. */
+  expect(board.keyRevisions?.[pathKey("/old")]).toBeUndefined();
+  expect(keyRevisionAt(board, pathKey("/old"))).toBe(1);
+  expect(keyRevisionAt(board, pathKey("/new"))).toBe(1);
+  /* Succession is bookkeeping, not a competing operator decision, so the rename
+     alone does not advance the clock and cannot fence unrelated queued intent. */
+  expect(keyRevisionAt(board, pathKey("/new"))).toBe(1);
+
+  /* An informed post-remap write advances the shared clock, and the old name
+     sees it — which is what fences a stale pre-remap writer. */
+  mutateBoard("proj", board.revision, [{ kind: "close", path: "/new" }], file);
+  expect(keyRevisionAt(boardFor("proj", file), pathKey("/old"))).toBe(3);
+});
+
+test("a merged alias class keeps the newer of the two clocks", () => {
+  const file = temporaryFile();
+  mutateBoard("proj", 0, [{ kind: "restore", path: "/old", placement: "manual" }], file); // path:/old = 1
+  mutateBoard("proj", 1, [{ kind: "restore", path: "/new", placement: "manual" }], file); // path:/new = 2
+  mutateBoard("proj", 2, [{ kind: "remap-paths", pairs: [{ from: "/old", to: "/new" }] }], file);
+
+  /* Merging takes the maximum, so a rename can only ever move a class's clock
+     forward. Intent formed against /old at revision 1 is now correctly fenced by
+     the write that landed on /new at revision 2 — collapsing to the lower clock
+     would un-supersede it. */
+  const board = boardFor("proj", file);
+  expect(keyRevisionAt(board, pathKey("/old"))).toBeGreaterThanOrEqual(2);
+  expect(keyRevisionAt(board, pathKey("/old"))).toBe(keyRevisionAt(board, pathKey("/new")));
+});
+
+test("a board written before keys were unified normalizes its alias clocks on read", () => {
+  const file = temporaryFile();
+  /* The shape an earlier build could leave behind: an alias in place, and the
+     source still holding a clock of its own. Canonicalizing only on lookup would
+     leave that clock unreachable, so /new would read as never-written and a
+     stale writer naming either name would sail through. */
+  fs.writeFileSync(file, JSON.stringify({ projects: { proj: {
+    schemaVersion: 1, revision: 9, updatedAt: "2026-07-27T00:00:00.000Z",
+    pathAliases: { "/old": "/new" }, explicitManual: ["/new"],
+    keyRevisions: { "path:/old": 7, "path:/new": 3 },
+    prefs: { manual: ["/new"], hidden: [], expanded: [], favorites: [], viewMode: null, taskPanelOpen: false },
+  } } }), "utf8");
+
+  const board = boardFor("proj", file);
+  expect(board.keyRevisions?.[pathKey("/old")]).toBeUndefined();
+  /* Merged by maximum, so the older name's history is inherited rather than
+     lost, and both names answer with it. */
+  expect(board.keyRevisions?.[pathKey("/new")]).toBe(7);
+  expect(keyRevisionAt(board, pathKey("/old"))).toBe(7);
+});
+
+test("compaction raises a floor instead of erasing causal history", () => {
+  const file = temporaryFile();
+  const keyRevisions: Record<string, number> = { "favorite:ancient": 5 };
+  for (let index = 0; index < MAX_RETIRED_KEY_REVISIONS + 40; index += 1) keyRevisions[`favorite:dead-${index}`] = 100 + index;
+  fs.writeFileSync(file, JSON.stringify({ projects: { proj: {
+    schemaVersion: 1, revision: 900, updatedAt: "2026-07-27T00:00:00.000Z",
+    pathAliases: {}, explicitManual: [], keyRevisions,
+    prefs: { manual: [], hidden: [], expanded: [], favorites: [], viewMode: null, taskPanelOpen: false },
+  } } }), "utf8");
+
+  mutateBoard("proj", 900, [{ kind: "set-presentation", viewMode: "list" }], file);
+  const board = boardFor("proj", file);
+
+  /* Bounded: the map cannot grow with every id the operator ever touched. */
+  expect(Object.keys(board.keyRevisions ?? {}).length).toBeLessThanOrEqual(MAX_RETIRED_KEY_REVISIONS + 8);
+  /* Safe: what was dropped is not forgotten. An evicted key reads the floor, so
+     it can still supersede intent older than the history that was discarded —
+     reporting zero would quietly re-enable every stale writer. */
+  expect(board.keyRevisions?.["favorite:ancient"]).toBeUndefined();
+  expect(board.keyRevisionFloor).toBeGreaterThan(5);
+  expect(keyRevisionAt(board, "favorite:ancient")).toBe(board.keyRevisionFloor!);
+  /* Live keys keep their exact clock rather than being flattened to the floor. */
+  expect(board.keyRevisions?.[VIEW_MODE_KEY]).toBe(901);
 });
 
 test("mutationKeys names every key a mutation contends on", () => {

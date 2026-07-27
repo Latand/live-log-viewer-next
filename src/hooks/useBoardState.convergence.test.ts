@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { MAX_RETIRED_KEY_REVISIONS } from "@/lib/board/keys";
 import { boardFor, mutateBoard, patchBoard } from "@/lib/board/store";
 import type { BoardMutationV1 } from "@/lib/board/mutations";
 import type { BoardPatch } from "@/lib/board/validation";
@@ -433,6 +434,96 @@ test("an accepted no-op that another writer made identical is not mistaken for o
   expect(server.board("proj").revision).toBe(2);
   expect(store.getSnapshot()).toMatchObject({ revision: 2, sync: "current" });
   expect(store.getSnapshot().prefs.hidden).toEqual(["/x"]);
+  store.dispose();
+});
+
+test("a stale pre-remap close loses to an informed post-remap write on the same conversation", async () => {
+  const server = durableBoard();
+  server.otherDevice("proj", [{ kind: "restore", path: "/old", placement: "manual" }]);
+  const device = flakyDevice(server);
+  const sched = idleScheduler();
+  const store = createBoardStore({ project: "proj", fetcher: device.fetcher, storage: null, scheduler: sched.scheduler });
+  await settle();
+  expect(store.getSnapshot().prefs.manual).toEqual(["/old"]);
+
+  /* Offline, this device closes the conversation under the name it knows. */
+  device.state.patchDown = true;
+  store.mutate([{ kind: "close", path: "/old" }]);
+  await settle();
+
+  /* The conversation resumes and mints a new transcript path; succession aliases
+     /old onto /new. Two names, ONE logical thing. */
+  server.otherDevice("proj", [{ kind: "remap-paths", pairs: [{ from: "/old", to: "/new" }] }]);
+  expect(server.board("proj").prefs.manual).toEqual(["/new"]);
+
+  /* Then, on the phone and against current state, the operator wires it under
+     its parent. This is an informed write on the same logical key. */
+  server.otherDevice("proj", [{ kind: "restore", path: "/new", placement: "expanded" }]);
+
+  sched.tick();
+  await settle();
+  device.state.patchDown = false;
+  sched.runTimeouts();
+  await settle();
+
+  /* The stale close named /old and the informed write named /new. If the two
+     names carry independent clocks, the close looks unopposed, replays, resolves
+     through the alias and hides the very node the phone just placed — ABA across
+     an alias boundary. One logical key, one causal revision. */
+  const durable = server.board("proj");
+  expect(durable.prefs.expanded).toEqual(["/new"]);
+  expect(durable.prefs.hidden).toEqual([]);
+  expect(store.getSnapshot()).toMatchObject({ sync: "current" });
+  expect(store.getSnapshot().prefs.expanded).toEqual(["/new"]);
+  expect(store.getSnapshot().prefs.hidden).toEqual([]);
+  store.dispose();
+});
+
+test("a stale writer still loses after its key was evicted by retired-key compaction", async () => {
+  const server = durableBoard();
+  /* A board whose retired-key history has long outgrown the cap: 600 favourites
+     the operator has since taken back, plus conv-1, retired at a much older
+     revision than any of them. Written straight to disk because reaching this
+     state through the API would take 600 round trips. */
+  const keyRevisions: Record<string, number> = { "favorite:conv-1": 50 };
+  for (let index = 0; index < 600; index += 1) keyRevisions[`favorite:dead-${index}`] = 200 + index;
+  fs.writeFileSync(server.file, JSON.stringify({ projects: { proj: {
+    schemaVersion: 1, revision: 1000, updatedAt: "2026-07-27T00:00:00.000Z",
+    pathAliases: {}, explicitManual: ["/a"], keyRevisions,
+    prefs: { manual: ["/a"], hidden: [], expanded: [], favorites: [], foldedEngineChildIds: [], expandedEngineTrayParentIds: [], viewMode: null, taskPanelOpen: false },
+  } } }), "utf8");
+
+  const device = flakyDevice(server);
+  const sched = idleScheduler();
+  const store = createBoardStore({ project: "proj", fetcher: device.fetcher, storage: null, scheduler: sched.scheduler });
+  await settle();
+  expect(store.getSnapshot().revision).toBe(1000);
+
+  /* Offline, this device crowns conv-1 — intent formed against conv-1's history
+     as it stood at revision 50. */
+  device.state.patchDown = true;
+  store.mutate([{ kind: "set-favorite", id: "conv-1", favorite: true }]);
+  await settle();
+
+  /* One unrelated write on the other device runs compaction. conv-1's entry is
+     far outside the cap and is evicted. */
+  server.otherDevice("proj", [{ kind: "set-presentation", viewMode: "list" }]);
+  const compacted = server.board("proj");
+  expect(Object.keys(compacted.keyRevisions ?? {}).length).toBeLessThanOrEqual(MAX_RETIRED_KEY_REVISIONS + 8);
+  expect(compacted.keyRevisions?.["favorite:conv-1"]).toBeUndefined();
+
+  sched.tick();
+  await settle();
+  device.state.patchDown = false;
+  sched.runTimeouts();
+  await settle();
+
+  /* Eviction must not resurrect the stale writer. Dropping an entry has to raise
+     a floor that absent keys read through, or forgetting history silently hands
+     old intent a win — the failure gets MORE likely the longer a board lives. */
+  expect(server.board("proj").prefs.favorites).toEqual([]);
+  expect(store.getSnapshot().prefs.favorites).toEqual([]);
+  expect(store.getSnapshot()).toMatchObject({ sync: "current" });
   store.dispose();
 });
 

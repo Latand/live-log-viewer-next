@@ -119,6 +119,10 @@ export interface BoardProjectStateV1 {
      read the same" — the ABA case a snapshot comparison cannot see. Optional
      because boards written before it existed omit it; the store defaults it. */
   keyRevisions?: Record<string, number>;
+  /* What an ABSENT key reports. Retired-key compaction is bounded, so evicted
+     history must not read as "never written" — every key missing from
+     `keyRevisions` reads this floor instead. Monotonic; server-authored. */
+  keyRevisionFloor?: number;
   prefs: {
     manual: string[];
     hidden: string[];

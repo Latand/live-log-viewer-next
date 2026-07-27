@@ -5,7 +5,7 @@ import path from "node:path";
 import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
 
-import { stampKeyRevisions } from "@/lib/board/keys";
+import { canonicalizeKeyRevisions, stampKeyRevisions } from "@/lib/board/keys";
 import { applyBoardMutations, type BoardMutationV1 } from "@/lib/board/mutations";
 import type { BoardFileV1, BoardProjectStateV1 } from "@/lib/view/types";
 
@@ -45,11 +45,12 @@ function projectState(value: unknown): value is BoardProjectStateV1 {
     (state.explicitManual === undefined || stringArray(state.explicitManual)) &&
     (state.pathAliases === undefined || aliases(state.pathAliases)) &&
     (state.keyRevisions === undefined || keyRevisions(state.keyRevisions)) &&
+    (state.keyRevisionFloor === undefined || (Number.isInteger(state.keyRevisionFloor) && state.keyRevisionFloor! >= 0)) &&
     (prefs!.viewMode === null || prefs!.viewMode === "scheme" || prefs!.viewMode === "list") && typeof prefs!.taskPanelOpen === "boolean";
 }
 
 function emptyBoard(): BoardProjectStateV1 {
-  return { schemaVersion: 1, revision: 0, updatedAt: new Date(0).toISOString(), pathAliases: {}, explicitManual: [], keyRevisions: {}, prefs: { ...EMPTY_PREFS, manual: [], hidden: [], expanded: [] } };
+  return { schemaVersion: 1, revision: 0, updatedAt: new Date(0).toISOString(), pathAliases: {}, explicitManual: [], keyRevisions: {}, keyRevisionFloor: 0, prefs: { ...EMPTY_PREFS, manual: [], hidden: [], expanded: [] } };
 }
 
 /** The durable form of a reduction: the new revision, plus a causal revision
@@ -63,7 +64,7 @@ function committed(current: BoardProjectStateV1, reduced: BoardProjectStateV1, r
     revision,
     updatedAt: new Date().toISOString(),
     pathAliases: reduced.pathAliases ?? {},
-    keyRevisions: stampKeyRevisions(current, reduced, revision),
+    ...stampKeyRevisions(current, reduced, revision),
   };
 }
 
@@ -79,7 +80,11 @@ function read(filePath: string): BoardFileV1 {
       /* A board written before per-key causal revisions existed reads back with
          an empty map: every key then looks never-written, which is exactly right
          — no client can hold intent that predates a revision nobody recorded. */
-      keyRevisions: state.keyRevisions ?? {},
+      /* Canonicalized on read: an alias source must never keep a clock of its
+         own, or two names for one conversation carry independent causal history
+         and a stale writer holding the old name looks unopposed. */
+      keyRevisions: canonicalizeKeyRevisions(state.keyRevisions ?? {}, state.pathAliases ?? {}),
+      keyRevisionFloor: state.keyRevisionFloor ?? 0,
       /* Boards written before favorites / tray intent existed lack the fields;
          default them so every GET response and reducer input carries the
          durable-id lists (issue #185 favorites, issue #142 tray pins). */

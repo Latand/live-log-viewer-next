@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { type BoardKeyRevisions, mutationKeys } from "@/lib/board/keys";
+import { type BoardKeyRevisions, canonicalKey, keyRevisionAt, mutationKeys } from "@/lib/board/keys";
 import { applyBoardMutations, type BoardMutationV1 } from "@/lib/board/mutations";
 import type { BoardProjectStateV1 } from "@/lib/view/types";
 
@@ -242,21 +242,26 @@ interface OutboxEntry {
 }
 
 function observeKeys(mutation: BoardMutationV1, board: BoardProjectStateV1): OutboxEntry {
-  const revisions = board.keyRevisions ?? {};
   const observed: BoardKeyRevisions = {};
-  for (const key of mutationKeys(mutation)) observed[key] = revisions[key] ?? 0;
+  /* Keys are canonicalized against the board this intent is formed on, and read
+     through `keyRevisionAt` so an absent key picks up the compaction floor
+     rather than a bare zero. */
+  for (const key of mutationKeys(mutation, board.pathAliases ?? {})) observed[key] = keyRevisionAt(board, key);
   return { mutation, observed };
 }
 
 /** True when some key this entry writes has advanced past what it observed —
-    another writer has spoken on that key since the operator formed this intent. */
-function superseded(entry: OutboxEntry, revisions: BoardKeyRevisions): boolean {
-  return Object.entries(entry.observed).some(([key, at]) => (revisions[key] ?? 0) > at);
+    another writer has spoken on that key since the operator formed this intent.
+    Recorded key names are re-canonicalized against the adopted board, so intent
+    formed under a transcript path that has since been aliased onto a successor
+    still reads the successor's clock instead of an orphaned one. */
+function superseded(entry: OutboxEntry, board: BoardProjectStateV1): boolean {
+  return Object.entries(entry.observed).some(([key, at]) => keyRevisionAt(board, key) > at);
 }
 
 /** Drop the queued intent a better-informed writer has already superseded. */
-export function fenceOutbox(outbox: readonly OutboxEntry[], revisions: BoardKeyRevisions): OutboxEntry[] {
-  return outbox.filter((entry) => !superseded(entry, revisions));
+export function fenceOutbox(outbox: readonly OutboxEntry[], board: BoardProjectStateV1): OutboxEntry[] {
+  return outbox.filter((entry) => !superseded(entry, board));
 }
 
 /** Re-observe the keys THIS device just wrote. Our own accepted write is
@@ -265,14 +270,15 @@ export function fenceOutbox(outbox: readonly OutboxEntry[], revisions: BoardKeyR
     Only the keys the landed prefix actually wrote are refreshed; a key some
     other writer moved in the same response stays observed at its old value and
     still supersedes. */
-function reobserve(outbox: readonly OutboxEntry[], ownKeys: ReadonlySet<string>, revisions: BoardKeyRevisions): OutboxEntry[] {
+function reobserve(outbox: readonly OutboxEntry[], ownKeys: ReadonlySet<string>, board: BoardProjectStateV1): OutboxEntry[] {
   if (ownKeys.size === 0) return [...outbox];
+  const aliases = board.pathAliases ?? {};
   return outbox.map((entry) => {
     const refreshed: BoardKeyRevisions = { ...entry.observed };
     let moved = false;
     for (const key of Object.keys(entry.observed)) {
-      if (!ownKeys.has(key)) continue;
-      const at = revisions[key] ?? 0;
+      if (!ownKeys.has(canonicalKey(key, aliases))) continue;
+      const at = keyRevisionAt(board, key);
       if (at !== refreshed[key]) {
         refreshed[key] = at;
         moved = true;
@@ -317,12 +323,44 @@ export interface BoardStore {
 }
 
 /**
- * The per-project durable board arrangement, moved off per-browser storage into
- * the shared server store. It holds the last server-confirmed board plus an
- * outbox of unacknowledged semantic mutations (close/restore/reconcile/remap/
- * presentation), each tagged with the causal revision it observed for every key
- * it writes. The UI renders the outbox replayed over the confirmed board
- * (optimistic), and a background drain flushes it as a stable prefix.
+ * THE DURABLE CONTRACT (#38), in one sentence, for anything that wants to build
+ * per-project durable state on this shape:
+ *
+ *   One project-scoped shared store over a revision-fenced durable API, with a
+ *   monotonic server-authored causal revision for each LOGICAL key that survives
+ *   aliases, ABA, restart, and safe tombstone GC.
+ *
+ * Every clause is load-bearing, and each was a real defect before it was true:
+ *
+ * - **project-scoped shared store** — one refcounted store per project per tab.
+ *   A private store per binding let one tab render two different window sets for
+ *   the same project, settled only by a reload.
+ * - **revision-fenced durable API** — a write carries the `baseRevision` it was
+ *   formed on; the server refuses any writer whose base is behind, and the state
+ *   is a file, so it survives a restart.
+ * - **monotonic causal revision per key** — `keyRevisions` in `@/lib/board/keys`.
+ *   Comparing the board held against the board adopted is blind to ABA: a key
+ *   driven away from a value and back reads identical to one never touched, so
+ *   superseded intent replayed and won. A monotonic clock cannot be fooled that
+ *   way.
+ * - **server-authored** — including whether a write `applied`. A no-op is
+ *   accepted from ANY base revision, so an accepted response can carry another
+ *   writer's board; when both writers made the same change the two boards are
+ *   identical, and only the server can say which happened.
+ * - **logical key, surviving aliases** — a conversation that resumes mints a new
+ *   transcript path and the board aliases old onto new. Two names with
+ *   independent clocks is ABA across an alias boundary, so the clocks merge by
+ *   maximum onto one canonical key.
+ * - **safe tombstone GC** — retired keys are evicted under a bound, and whatever
+ *   is dropped raises `keyRevisionFloor`, which every absent key reads. Evicting
+ *   without a floor makes forgotten keys read as never-written and quietly
+ *   re-enables every stale writer, more likely the longer a board lives.
+ *
+ * The store itself: it holds the last server-confirmed board plus an outbox of
+ * unacknowledged semantic mutations (close/restore/reconcile/remap/presentation),
+ * each tagged with the causal revision it observed for every key it writes. The
+ * UI renders the outbox replayed over the confirmed board (optimistic), and a
+ * background drain flushes it as a stable prefix.
  *
  * Adopting a board this view did not author — a revision conflict, a poll, or an
  * accepted response that turns out to carry another writer's work — does NOT
@@ -330,8 +368,8 @@ export interface BoardStore {
  * intent observed is dropped as superseded; only intent on keys nobody else has
  * written since replays on top and retries. So a close, restore or remap
  * survives an interleaved write to a DIFFERENT key, and loses to an interleaved
- * write to the SAME key, which is the convergence guarantee (#38): the last
- * writer on a key is always one that acted knowing that key's current value.
+ * write to the SAME key: the last writer on a key is always one that acted
+ * knowing that key's current value.
  *
  * The one-time legacy seed still writes whole prefs; localStorage serves as
  * read-only migration input.
@@ -353,6 +391,7 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
     pathAliases: {},
     explicitManual: [],
     keyRevisions: {},
+    keyRevisionFloor: 0,
     prefs: EMPTY_BOARD_PREFS,
   });
 
@@ -426,7 +465,7 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
     confirmed = board;
     unavailable = false;
     if (outbox.length > 0) {
-      outbox = fenceOutbox(outbox, board.keyRevisions ?? {});
+      outbox = fenceOutbox(outbox, board);
       if (outbox.length > 0) rebased = true;
       else cancelRetry();
     }
@@ -584,9 +623,9 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
         /* Re-observe only the keys THIS prefix wrote, and only when it was ours:
            our own accepted write is causally before the intent queued behind it
            and must not fence itself. */
-        const revisions = result.board.keyRevisions ?? {};
-        const rebased0 = authored ? reobserve(outbox, new Set(prefix.flatMap(mutationKeys)), revisions) : outbox;
-        outbox = fenceOutbox(rebased0, revisions);
+        const aliases = result.board.pathAliases ?? {};
+        const ownKeys = new Set(prefix.flatMap((mutation) => mutationKeys(mutation, aliases)));
+        outbox = fenceOutbox(authored ? reobserve(outbox, ownKeys, result.board) : outbox, result.board);
         if (outbox.length > 0) rebased = true;
       }
       refresh();
