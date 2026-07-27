@@ -7,6 +7,9 @@ import {
 
 export type CodexRealtimePhase = "idle" | "connecting" | "live" | "stopping" | "error";
 export type CodexRealtimeRole = "user" | "assistant" | "progress";
+/** The two roles that stream a turn. Worker progress is excluded: its line is
+    addressed by turn id, not by who is currently holding the floor. */
+type TranscriptSpeaker = Exclude<CodexRealtimeRole, "progress">;
 
 export interface CodexRealtimeLine {
   id: string;
@@ -146,6 +149,11 @@ class CodexRealtimeClient {
   private workerDeliveryWakeEpoch: number | null = null;
   private unloadHangup: (() => void) | null = null;
   private lineSequence = 0;
+  /** The line each speaker is still streaming into, by line id. Held here
+      rather than read off the end of the list because a delegating turn
+      interleaves both speakers with worker progress, so "the last line" is
+      almost never the line an update belongs to. */
+  private readonly openTranscriptLines = new Map<TranscriptSpeaker, string>();
   private epoch = 0;
 
   constructor(readonly conversationId: string) {}
@@ -294,7 +302,13 @@ class CodexRealtimeClient {
 
   updateWorkerProgress(turnId: string, text: string, running: boolean): void {
     if (!turnId || !text || this.snapshot.phase !== "live") return;
-    this.upsertLine("progress", text.slice(-MAX_LINE_CHARS), !running);
+    /* One line per turn, addressed by turn id. Every tick carries the whole
+       accumulated answer rather than a delta, so a tick that cannot find its
+       own line redraws the entire text as a new one — the operator sees the
+       answer once per tick as a ladder of ever-longer prefixes. The turn id
+       also survives the line being finalized when the turn ends, so a trailing
+       tick reuses it instead of opening a second copy. */
+    this.writeLine(`progress:${turnId}`, "progress", text, !running, "replace");
   }
 
   reconcileWorkerDeliveries(value: readonly RuntimeVoiceDelivery[] | null | undefined): void {
@@ -356,7 +370,7 @@ class CodexRealtimeClient {
     }
     const event = parseCodexRealtimeEvent(value);
     if (event.kind === "transcript") {
-      this.upsertLine(event.role, event.text, event.final);
+      this.writeTranscript(event.role, event.text, event.final);
     } else if (event.kind === "delegation") {
       return;
     } else if (event.kind === "error") {
@@ -364,14 +378,41 @@ class CodexRealtimeClient {
     }
   }
 
-  private upsertLine(role: CodexRealtimeRole, text: string, final: boolean): void {
+  /**
+   * Route a speaker's text to the line that speaker currently owns. Barge-in
+   * puts the operator's turn after the agent's half-finished one, and worker
+   * progress lands between the two, so position says nothing about ownership.
+   * Whoever speaks closes the other's line: an interrupted turn that resumes
+   * opens a fresh line instead of growing the one it abandoned.
+   */
+  private writeTranscript(role: TranscriptSpeaker, text: string, final: boolean): void {
+    this.openTranscriptLines.delete(role === "user" ? "assistant" : "user");
+    const key = this.openTranscriptLines.get(role) ?? `${role}:${++this.lineSequence}`;
+    if (final) this.openTranscriptLines.delete(role);
+    else this.openTranscriptLines.set(role, key);
+    /* A final event carries the complete turn, a streamed one only the new
+       fragment — except on backends that resend the whole text, which the
+       prefix check below absorbs. */
+    this.writeLine(key, role, text, final, final ? "replace" : "append");
+  }
+
+  private writeLine(
+    key: string,
+    role: CodexRealtimeRole,
+    text: string,
+    final: boolean,
+    mode: "replace" | "append",
+  ): void {
     const lines = [...this.snapshot.lines];
-    const previous = lines.at(-1);
-    if (previous?.role === role && !previous.final) {
-      const combined = final || text.startsWith(previous.text) ? text : `${previous.text}${text}`;
-      lines[lines.length - 1] = { ...previous, text: combined.slice(-MAX_LINE_CHARS), final };
+    const index = lines.findIndex((line) => line.id === key);
+    if (index < 0) {
+      lines.push({ id: key, role, text: text.slice(-MAX_LINE_CHARS), final });
     } else {
-      lines.push({ id: `${Date.now()}-${++this.lineSequence}`, role, text: text.slice(-MAX_LINE_CHARS), final });
+      const previous = lines[index]!;
+      const combined = mode === "replace" || text.startsWith(previous.text)
+        ? text
+        : `${previous.text}${text}`;
+      lines[index] = { ...previous, text: combined.slice(-MAX_LINE_CHARS), final };
     }
     this.update({ lines: lines.slice(-MAX_LINES) });
   }
@@ -412,6 +453,9 @@ class CodexRealtimeClient {
   }
 
   private cleanupTransport(): void {
+    /* No line survives a dead transport as "still streaming": the next call
+       opens its own rather than appending to a turn nobody can finish. */
+    this.openTranscriptLines.clear();
     if (this.unloadHangup) window.removeEventListener("pagehide", this.unloadHangup);
     this.unloadHangup = null;
     this.events?.close();
