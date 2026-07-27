@@ -432,21 +432,27 @@ describe("cues", () => {
     expect(context.sources[0].started).toEqual([10.22]);
   });
 });
-
 /**
- * A context whose gain params are AUTOMATION TIMELINES, not numbers.
+ * A context whose gain params are modelled on the REAL `AudioParam`: an
+ * automation timeline AND the current-value slot that sits beside it.
  *
  * Every other fake here records what was asked for. This one answers what would
- * be HEARD, which is the only way to see the defect in #728: the bed opened at
- * full volume and slid down to its level, and every individual call the code made
- * looked right. The two rules that produce it are both the real ones:
+ * be HEARD, which is the only way to see the defect in #728 — the bed opened at
+ * full volume and slid down to its level, while every individual call the code
+ * made looked right. Four rules, all of them the spec's, and the fourth is the
+ * one that decides which implementations are actually guilty:
  *
  * - `cancelScheduledValues(t)` drops every event at or after `t` — including one
  *   scheduled at exactly `t`, so an initialization and a ramp in the same tick
- *   collide and the initialization is the one that loses;
- * - reading `value` back answers from the timeline, so once the cancel above has
- *   emptied it the answer is the param's own 1.0 default — a full-scale gain
- *   nobody asked for, taken as the level to fade from.
+ *   collide and the initialization is the one that comes off the timeline;
+ * - with no event governing an instant, the param sounds its INTRINSIC value,
+ *   which is the param's 1.0 default until something assigns it;
+ * - assigning `value` sets the intrinsic value and the current-value slot, and
+ *   also schedules `setValueAtTime(value, currentTime)`. The slot is why an
+ *   initialization written that way survives the cancel above, and a fake
+ *   without it convicts a safe implementation of a burst it does not have;
+ * - reading `value` answers that slot, which the rendering thread refreshes from
+ *   the timeline as the clock advances — `advanceTo` below is that thread.
  */
 function timelineContext(state = "running") {
   interface Event { type: "set" | "ramp"; value: number; when: number }
@@ -457,6 +463,8 @@ function timelineContext(state = "running") {
     gain: AudioParamLike;
     /** What this node is sounding at `time`. */
     heardAt(time: number): number;
+    /** One render quantum: refresh the current-value slot from the timeline. */
+    render(): void;
     connect(destination: never): unknown;
   }
 
@@ -481,9 +489,13 @@ function timelineContext(state = "running") {
     },
     createGain() {
       const events: Event[] = [];
-      /** The gain param's default. A bed that reaches this is a burst. */
+      const createdAt = context.currentTime;
+      /** The param's own default, until an assignment says otherwise. */
+      let intrinsic = 1;
+      /** The current-value slot: what a readback answers. */
+      let slot = intrinsic;
       const heardAt = (time: number): number => {
-        let previous = { value: 1, when: 0 };
+        let previous = { value: intrinsic, when: createdAt };
         for (const event of [...events].sort((a, b) => a.when - b.when)) {
           if (event.when > time) {
             if (event.type !== "ramp") return previous.value;
@@ -497,11 +509,12 @@ function timelineContext(state = "running") {
       };
       const gain: TimelineGain = {
         gain: {
-          /* Both directions go through the timeline, exactly as the browser's
-             do: setting `value` is `setValueAtTime(value, currentTime)`, and
-             getting it reads back whatever the timeline currently says. */
-          get value() { return heardAt(context.currentTime); },
-          set value(value: number) { events.push({ type: "set", value, when: context.currentTime }); },
+          get value() { return slot; },
+          set value(value: number) {
+            intrinsic = value;
+            slot = value;
+            events.push({ type: "set", value, when: context.currentTime });
+          },
           cancelScheduledValues(when: number) {
             for (let index = events.length - 1; index >= 0; index -= 1) {
               if (events[index].when >= when) events.splice(index, 1);
@@ -511,22 +524,34 @@ function timelineContext(state = "running") {
           linearRampToValueAtTime(value: number, when: number) { events.push({ type: "ramp", value, when }); },
         },
         heardAt,
+        render() { slot = heardAt(context.currentTime); },
         connect: () => undefined,
       };
       gains.push(gain);
       return gain;
     },
     decodeAudioData: async () => ({ duration: 26.666 }),
+    /** Move the audio clock, rendering as it goes. */
+    advanceTo(time: number) {
+      context.currentTime = time;
+      for (const gain of gains) gain.render();
+    },
     gains,
     sources,
   };
-  return context as unknown as AudioContextLike & { gains: TimelineGain[]; sources: { started: number[] }[]; currentTime: number };
+  return context as unknown as AudioContextLike & {
+    gains: TimelineGain[];
+    sources: { started: number[] }[];
+    currentTime: number;
+    advanceTo(time: number): void;
+  };
 }
 
 describe("the bed opens in silence and only ever comes UP (#728)", () => {
   /** What a 5% ambient slider is worth once the loop ceiling is applied. */
   const TARGET = 0.35 * 0.05;
   const FADE_IN = 2.5;
+  const OPENED_AT = 10;
 
   /** Highest level heard between the node starting and the fade finishing. */
   function loudest(gain: { heardAt(time: number): number }, from: number, to: number): number {
@@ -534,6 +559,61 @@ describe("the bed opens in silence and only ever comes UP (#728)", () => {
     for (let time = from; time <= to + 1e-9; time += 0.05) peak = Math.max(peak, gain.heardAt(time));
     return peak;
   }
+
+  /** The whole of #728 in one assertion: silent on the first sample, and never
+      once above the level the bed was asked for. */
+  function expectOpensBelowTarget(gain: { heardAt(time: number): number }): void {
+    expect(gain.heardAt(OPENED_AT)).toBeCloseTo(0, 6);
+    expect(loudest(gain, OPENED_AT, OPENED_AT + FADE_IN)).toBeLessThanOrEqual(TARGET + 1e-9);
+  }
+
+  /**
+   * The ramp this transport shipped before the fix: anchored by reading the
+   * param back, immediately after cancelling the events at that timestamp.
+   *
+   * It is here so the two historical openers can be measured on the same model
+   * as the current one. Whether it bursts depends entirely on what the
+   * initialization left behind for the readback to find.
+   */
+  function readbackRamp(context: { currentTime: number }, param: AudioParamLike, target: number, seconds: number): void {
+    const now = context.currentTime;
+    param.cancelScheduledValues(now);
+    param.setValueAtTime(param.value, now);
+    param.linearRampToValueAtTime(target, now + Math.max(0.01, seconds));
+  }
+
+  test("the ORIGINAL opener — a scheduled initializer — bursts to full gain", () => {
+    const context = timelineContext();
+    context.createGain();
+    const gain = context.gains[0];
+
+    /* What #728 was filed against: the opening level exists ONLY as an event at
+       `currentTime`, so the ramp's own cancel takes it straight back off, and
+       the readback finds the param's 1.0 default. */
+    gain.gain.setValueAtTime(0, context.currentTime);
+    readbackRamp(context, gain.gain, TARGET, FADE_IN);
+
+    /* The operator's report, reproduced: full scale on the first sample, then a
+       two-and-a-half second slide DOWN to the level that was asked for. */
+    expect(gain.heardAt(OPENED_AT)).toBeCloseTo(1, 6);
+    expect(loudest(gain, OPENED_AT, OPENED_AT + FADE_IN)).toBeCloseTo(1, 6);
+    expect(() => expectOpensBelowTarget(gain)).toThrow();
+  });
+
+  test("the property setter before playback is already safe, and this model says so", () => {
+    const context = timelineContext();
+    context.createGain();
+    const gain = context.gains[0];
+
+    /* The opener this transport has shipped since `be07d1c0`. The assignment
+       fills the current-value slot as well as the timeline, so the readback
+       still answers zero after the cancel and the bed opens silent. A model
+       that misses that slot accuses this line of the burst above. */
+    gain.gain.value = 0;
+    readbackRamp(context, gain.gain, TARGET, FADE_IN);
+
+    expectOpensBelowTarget(gain);
+  });
 
   test("a call opens below the bed's target, not above it", async () => {
     const context = timelineContext();
@@ -545,11 +625,10 @@ describe("the bed opens in silence and only ever comes UP (#728)", () => {
     voice.rampTo(TARGET, FADE_IN);
 
     const bed = context.gains[0];
-    /* The first sample the operator can hear is the one the node starts on. */
-    expect(bed.heardAt(10)).toBeCloseTo(0, 6);
-    /* And nothing between there and the end of the fade is above the level the
-       bed was asked for — a burst is exactly a sample that is. */
-    expect(loudest(bed, 10, 10 + FADE_IN)).toBeLessThanOrEqual(TARGET + 1e-9);
+    /* The first sample the operator can hear is the one the node starts on, and
+       nothing between there and the end of the fade is above the level the bed
+       was asked for — a burst is exactly a sample that is. */
+    expectOpensBelowTarget(bed);
     /* Which is a fade IN: the level rises to its target rather than falling to it. */
     expect(bed.heardAt(12.5)).toBeCloseTo(TARGET, 6);
     expect(bed.heardAt(11.25)).toBeGreaterThan(0);
@@ -565,8 +644,7 @@ describe("the bed opens in silence and only ever comes UP (#728)", () => {
     const voice = transports.loop.start({ src: LOOP, gain: 0, offsetSeconds: 8.5 })!;
     voice.rampTo(TARGET, FADE_IN);
 
-    expect(context.gains[0].heardAt(10)).toBeCloseTo(0, 6);
-    expect(loudest(context.gains[0], 10, 10 + FADE_IN)).toBeLessThanOrEqual(TARGET + 1e-9);
+    expectOpensBelowTarget(context.gains[0]);
   });
 
   test("a duck that interrupts the fade-in continues from the level being heard", async () => {
@@ -576,7 +654,7 @@ describe("the bed opens in silence and only ever comes UP (#728)", () => {
     voice.rampTo(TARGET, FADE_IN);
 
     /* Somebody speaks half a second in, while the bed is still coming up. */
-    context.currentTime = 10.5;
+    context.advanceTo(10.5);
     const heardWhenDucked = context.gains[0].heardAt(10.5);
     voice.rampTo(TARGET * 0.25, 0.3);
 
