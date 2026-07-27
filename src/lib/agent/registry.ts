@@ -2146,6 +2146,10 @@ function observationIsCurrent(currentObservedAt: string | null, observedAt: stri
     rather than promoting. */
 function receiptLaunchProfile(value: SpawnReceipt, policy?: McpGrantPolicy): LaunchProfile {
   const profile = emptyLaunchProfile({ ...(value.launchProfile ?? {}), cwd: value.launchProfile?.cwd ?? value.cwd }, policy);
+  /* Every read walks every receipt, so the overwhelmingly common baseline
+     profile skips the resolver and its allocation — as the conversation path
+     does. Only a profile claiming more than the baseline is worth deciding. */
+  if (profile.mcpServers.length === 1 && profile.mcpServers[0] === "viewer") return profile;
   return {
     ...profile,
     mcpServers: mcpServersForStoredSession({
