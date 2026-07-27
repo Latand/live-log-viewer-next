@@ -29,6 +29,15 @@ import {
   completeRuntimeLiveTurnItem,
   type RuntimeLiveTurn,
 } from "@/lib/runtime/liveTurn";
+import {
+  acknowledgeVoiceDelivery,
+  appendVoiceResponse,
+  completeVoiceTurn,
+  normalizeAcknowledgedVoiceDeliveryIds,
+  normalizeVoiceDeliveries,
+  rememberAcknowledgedVoiceDelivery,
+  type RuntimeVoiceDelivery,
+} from "@/lib/runtime/voiceDelivery";
 
 /* ------------------------------------------------------------------ *
  * Vocabulary (frozen)                                                 *
@@ -254,6 +263,8 @@ export interface RuntimeSession {
   /** In-flight assistant text accumulated from live `delta` events, rendered
       as a streaming bubble until the transcript materializes the item. */
   liveTurn?: RuntimeLiveTurn | null;
+  voiceDeliveries?: RuntimeVoiceDelivery[];
+  acknowledgedVoiceDeliveryIds?: string[];
 }
 
 /**
@@ -349,7 +360,21 @@ export function installSnapshot(snapshot: RuntimeSnapshot): RuntimeStore {
   const scopeHeads: Record<string, number> = {};
   const sessions: Record<string, RuntimeSession> = {};
   for (const session of snapshot.sessions) {
-    sessions[session.conversationId] = { ...session, attentionIds: [...session.attentionIds], recentReceipts: [...session.recentReceipts] };
+    sessions[session.conversationId] = {
+      ...session,
+      attentionIds: [...session.attentionIds],
+      recentReceipts: [...session.recentReceipts],
+      ...(session.voiceDeliveries
+        ? { voiceDeliveries: normalizeVoiceDeliveries(session.voiceDeliveries) }
+        : {}),
+      ...(session.acknowledgedVoiceDeliveryIds
+        ? {
+          acknowledgedVoiceDeliveryIds: normalizeAcknowledgedVoiceDeliveryIds(
+            session.acknowledgedVoiceDeliveryIds,
+          ),
+        }
+        : {}),
+    };
     scopeHeads[`session:${session.conversationId}`] = session.revision;
   }
   const operations: Record<string, RuntimeReceipt> = {};
@@ -469,6 +494,9 @@ function reduceKnown(store: RuntimeStore, env: RuntimeEnvelope, revision: number
         // never let a status payload silently drop live sub-projections
         attentionIds: p.attentionIds ?? prev?.attentionIds ?? [],
         recentReceipts: prev?.recentReceipts ?? [],
+        acknowledgedVoiceDeliveryIds: normalizeAcknowledgedVoiceDeliveryIds(
+          p.acknowledgedVoiceDeliveryIds ?? prev?.acknowledgedVoiceDeliveryIds,
+        ),
       };
       store.sessions = { ...store.sessions, [id]: merged };
       break;
@@ -510,26 +538,66 @@ function reduceKnown(store: RuntimeStore, env: RuntimeEnvelope, revision: number
         turnId?: string;
         phase?: string;
         item?: unknown;
+        voiceResponse?: { responseId?: unknown; text?: unknown };
       };
       if (p.phase !== "completed") break;
-      updateSession(store, p.conversationId ?? env.scope.id, revision, (s) => ({
-        ...s,
-        liveTurn: completeRuntimeLiveTurnItem(
-          s.liveTurn,
-          p.turnId ?? s.activeTurnId ?? "unknown",
-          p.item,
-          env.occurredAt ?? env.recordedAt ?? null,
-        ),
-      }));
+      updateSession(store, p.conversationId ?? env.scope.id, revision, (s) => {
+        const turnId = p.turnId ?? s.activeTurnId ?? "unknown";
+        const voiceResponse = p.voiceResponse;
+        return {
+          ...s,
+          liveTurn: completeRuntimeLiveTurnItem(
+            s.liveTurn,
+            turnId,
+            p.item,
+            env.occurredAt ?? env.recordedAt ?? null,
+          ),
+          voiceDeliveries: typeof voiceResponse?.responseId === "string"
+            && typeof voiceResponse.text === "string"
+            ? appendVoiceResponse(s.voiceDeliveries, turnId, {
+              responseId: voiceResponse.responseId,
+              text: voiceResponse.text,
+            })
+            : s.voiceDeliveries,
+        };
+      });
       break;
     }
     case "turn-ended": {
-      const p = env.payload as { conversationId?: string; outcome?: string };
+      const p = env.payload as { conversationId?: string; turnId?: string; outcome?: string };
       updateSession(store, p.conversationId ?? env.scope.id, revision, (s) => ({
         ...s,
         turn: "idle",
         activeTurnId: null,
+        voiceDeliveries: p.turnId
+          ? completeVoiceTurn(
+            s.voiceDeliveries,
+            p.turnId,
+            p.outcome ?? "",
+            s.acknowledgedVoiceDeliveryIds,
+          )
+          : s.voiceDeliveries,
       }));
+      break;
+    }
+    case "voice-delivery-acknowledged": {
+      const p = env.payload as { conversationId?: string; deliveryId?: string };
+      updateSession(store, p.conversationId ?? env.scope.id, revision, (s) => {
+        const deliveryId = p.deliveryId ?? "";
+        return {
+          ...s,
+          voiceDeliveries: acknowledgeVoiceDelivery(s.voiceDeliveries, deliveryId),
+          acknowledgedVoiceDeliveryIds: rememberAcknowledgedVoiceDelivery(
+            s.acknowledgedVoiceDeliveryIds,
+            deliveryId,
+          ),
+        };
+      });
+      break;
+    }
+    case "voice-delivery-progress": {
+      const p = env.payload as { conversationId?: string };
+      updateSession(store, p.conversationId ?? env.scope.id, revision, (s) => s);
       break;
     }
     case "attention": {

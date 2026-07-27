@@ -32,16 +32,16 @@ describe("no audio graph", () => {
   });
 
   test("connecting and disconnecting a call is safe and leaves nothing playing", () => {
-    expect(() => setVoiceConnected(true)).not.toThrow();
+    expect(() => setVoiceConnected("call", true)).not.toThrow();
     expect(ambientLoop().state().playing).toBe(false);
-    expect(() => setVoiceConnected(false)).not.toThrow();
+    expect(() => setVoiceConnected("call", false)).not.toThrow();
     expect(ambientLoop().state().playing).toBe(false);
   });
 
   test("the bed is not even wanted while this device has not opted in", () => {
     configureAudioPrefsStorage({ getItem: () => null, setItem: () => undefined });
     resetAppAudioForTests();
-    setVoiceConnected(true);
+    setVoiceConnected("call", true);
     /* Conservative first run: a connected call alone is not consent. */
     expect(ambientLoop().wanted()).toBe(false);
   });
@@ -54,13 +54,31 @@ describe("no audio graph", () => {
     });
     resetAppAudioForTests();
     setAudioPrefs({ loopEnabled: true });
-    setVoiceConnected(true);
+    setVoiceConnected("call", true);
 
     expect(ambientLoop().wanted()).toBe(true);
     /* Wanted, unplayable, and still not throwing or looping forever — the retry
        is what resumes it the moment the autoplay policy lifts. */
     expect(ambientLoop().state().playing).toBe(false);
     expect(() => ensureAmbientLoop()).not.toThrow();
+  });
+
+  test("one card cannot disconnect the ambient bed owned by another live call", () => {
+    const store = new Map<string, string>();
+    configureAudioPrefsStorage({
+      getItem: (key) => store.get(key) ?? null,
+      setItem: (key, value) => void store.set(key, value),
+    });
+    resetAppAudioForTests();
+    setAudioPrefs({ loopEnabled: true });
+
+    setVoiceConnected("live-call", true);
+    setVoiceConnected("unrelated-card", false);
+
+    expect(ambientLoop().wanted()).toBe(true);
+
+    setVoiceConnected("live-call", false);
+    expect(ambientLoop().wanted()).toBe(false);
   });
 });
 

@@ -1,5 +1,6 @@
 import { redactCodexHostDiagnostic } from "./codexAppServerHost";
 import { structuredDeliveryHostForConversation } from "./structuredDeliveryController";
+import type { RuntimeVoiceDelivery } from "./voiceDelivery";
 
 const MAX_SDP_BYTES = 512 * 1024;
 const MAX_SPEECH_BYTES = 8 * 1024;
@@ -7,6 +8,10 @@ const MAX_SPEECH_BYTES = 8 * 1024;
 interface RealtimeHost {
   startRealtimeWebRtc(sdp: string): Promise<{ sdp: string; realtimeSessionId: string | null }>;
   appendRealtimeSpeech(text: string): Promise<void>;
+  deliverRealtimeWorkerResponse?(delivery: RuntimeVoiceDelivery): Promise<{
+    deliveryId: string;
+    acknowledged: true;
+  }>;
   stopRealtime(): Promise<void>;
   /** Optional so an older or stubbed host still satisfies the contract; the
       `status` action simply reports no failure when it is absent (#664). */
@@ -69,6 +74,13 @@ export async function executeRealtimeControl(
       await host.appendRealtimeSpeech(text);
       return { status: 200, body: { ok: true } };
     }
+    if (request.action === "deliverWorkerResponse") {
+      if (typeof host.deliverRealtimeWorkerResponse !== "function") {
+        return { status: 409, body: { error: "the hosted realtime receiver does not support durable worker delivery" } };
+      }
+      const result = await host.deliverRealtimeWorkerResponse(request.delivery as RuntimeVoiceDelivery);
+      return { status: 200, body: { ok: true, ...result } };
+    }
     if (request.action === "stop") {
       await host.stopRealtime();
       return { status: 200, body: { ok: true } };
@@ -89,7 +101,7 @@ export async function executeRealtimeControl(
         },
       };
     }
-    return { status: 400, body: { error: "action must be start, appendSpeech, stop, or status" } };
+    return { status: 400, body: { error: "action must be start, appendSpeech, deliverWorkerResponse, stop, or status" } };
   } catch (error) {
     return { status: 409, body: { error: redactCodexHostDiagnostic(error) } };
   }

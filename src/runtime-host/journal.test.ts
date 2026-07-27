@@ -11,6 +11,7 @@ import { applyEvent, installSnapshot } from "@/components/runtime/runtimeModel";
 import type { Flow } from "@/lib/flows/types";
 import { UnixRuntimeHostClient } from "@/lib/runtime/client";
 import { runtimePresentationReceipt, runtimeScope } from "@/lib/runtime/contracts";
+import { projectEngineHostEvent } from "@/lib/runtime/engineHostEvents";
 import { structuredContentDigest, type StructuredImageRef } from "@/lib/runtime/structuredContent";
 
 import { RuntimeHost, RuntimeHostFence } from "./host";
@@ -106,6 +107,189 @@ test("producer cursor reports the highest durably acknowledged engine event", ()
     "SELECT COUNT(*) AS count FROM producer_receipts WHERE producer_kind = ? AND producer_key >= ? AND producer_key < ?",
   ).get("codex-app-server", prefix, `${prefix}\uffff`)?.count).toBe(1);
   compacted.close();
+});
+
+test("canonical voice deliveries survive missed-running recovery and compaction until acknowledged", () => {
+  const dir = sandbox("voice-delivery-recovery");
+  const filename = path.join(dir, "events.sqlite");
+  const unicode = `${"🫶🏽界".repeat(12_000)}\nterminal`;
+  const journal = new RuntimeJournal(filename, { maxEvents: 100, now: () => 100 });
+  journal.append({
+    scope: runtimeScope("session", "conversation_voice"),
+    kind: "item",
+    payload: {
+      conversationId: "conversation_voice",
+      turnId: "turn-recovered",
+      phase: "completed",
+      item: { type: "agentMessage", id: "bounded", text: "bounded" },
+      voiceResponse: { responseId: "response-one", text: unicode },
+    },
+  });
+  journal.append({
+    scope: runtimeScope("session", "conversation_voice"),
+    kind: "item",
+    payload: {
+      conversationId: "conversation_voice",
+      turnId: "turn-recovered",
+      phase: "completed",
+      item: { type: "agentMessage", id: "bounded-two", text: "bounded" },
+      voiceResponse: { responseId: "response-two", text: "second" },
+    },
+  });
+  journal.append({
+    scope: runtimeScope("session", "conversation_voice"),
+    kind: "turn-ended",
+    payload: {
+      conversationId: "conversation_voice",
+      turnId: "turn-recovered",
+      outcome: "completed",
+    },
+  });
+  journal.compact(1);
+  journal.close();
+
+  const recovered = new RuntimeJournal(filename, { maxEvents: 100, now: () => 200 });
+  const delivery = recovered.snapshot().sessions[0]?.voiceDeliveries?.[0];
+  expect(delivery).toEqual({
+    deliveryId: 'voice:["turn-recovered",["response-one","response-two"]]',
+    turnId: "turn-recovered",
+    responses: [
+      { responseId: "response-one", text: unicode },
+      { responseId: "response-two", text: "second" },
+    ],
+    ready: true,
+  });
+  expect(new TextEncoder().encode(delivery!.responses[0]!.text).length).toBeGreaterThan(64 * 1024);
+
+  recovered.append({
+    scope: runtimeScope("session", "conversation_voice"),
+    kind: "voice-delivery-progress",
+    payload: {
+      conversationId: "conversation_voice",
+      deliveryId: delivery!.deliveryId,
+      responseIndex: 0,
+      offset: 8_192,
+    },
+  });
+  expect(recovered.snapshot().sessions[0]).toMatchObject({
+    revision: 4,
+    voiceDeliveries: [delivery],
+  });
+  recovered.append({
+    scope: runtimeScope("session", "conversation_voice"),
+    kind: "voice-delivery-acknowledged",
+    payload: {
+      conversationId: "conversation_voice",
+      deliveryId: delivery!.deliveryId,
+    },
+  });
+  expect(recovered.snapshot().sessions[0]?.voiceDeliveries).toEqual([]);
+  recovered.close();
+});
+
+test("acknowledged voice delivery stays retired after reload and terminal replay while an undelivered response hydrates", () => {
+  const dir = sandbox("voice-delivery-reload");
+  const filename = path.join(dir, "events.sqlite");
+  const conversationId = "conversation_reload";
+  const firstHostKey = "codex:thread-before-reload";
+  const replayHostKey = "codex:thread-after-reload";
+  const deliveredItem = {
+    type: "agentMessage",
+    id: "response-delivered",
+    phase: "final_answer",
+    text: "Delivered once before reload 🫶🏽",
+  };
+  const appendProjected = (
+    journal: RuntimeJournal,
+    hostKey: string,
+    event: Parameters<typeof projectEngineHostEvent>[2],
+  ) => {
+    const projected = projectEngineHostEvent(conversationId, hostKey, event);
+    expect(projected).not.toBeNull();
+    return journal.append(projected!);
+  };
+
+  const journal = new RuntimeJournal(filename, { maxEvents: 100, now: () => 100 });
+  appendProjected(journal, firstHostKey, {
+    kind: "item",
+    turnId: "turn-delivered",
+    item: deliveredItem,
+    phase: "completed",
+    seq: 1,
+  });
+  appendProjected(journal, firstHostKey, {
+    kind: "turn-ended",
+    turnId: "turn-delivered",
+    status: "completed",
+    seq: 2,
+  });
+  const firstMount = installSnapshot(journal.snapshot());
+  const delivered = firstMount.sessions[conversationId]?.voiceDeliveries?.[0];
+  expect(delivered).toMatchObject({
+    turnId: "turn-delivered",
+    responses: [{ responseId: "response-delivered", text: deliveredItem.text }],
+    ready: true,
+  });
+  appendProjected(journal, firstHostKey, {
+    kind: "realtime-delivery-acknowledged",
+    deliveryId: delivered!.deliveryId,
+    digest: "delivered-digest",
+    seq: 3,
+  });
+  expect(journal.snapshot().sessions[0]?.voiceDeliveries).toEqual([]);
+  expect(journal.snapshot().sessions[0]?.acknowledgedVoiceDeliveryIds).toEqual([
+    delivered!.deliveryId,
+  ]);
+  journal.compact(1);
+  journal.close();
+
+  const recovered = new RuntimeJournal(filename, { maxEvents: 100, now: () => 200 });
+  appendProjected(recovered, replayHostKey, {
+    kind: "item",
+    turnId: "turn-delivered",
+    item: deliveredItem,
+    phase: "completed",
+    seq: 1,
+  });
+  appendProjected(recovered, replayHostKey, {
+    kind: "turn-ended",
+    turnId: "turn-delivered",
+    status: "completed",
+    seq: 2,
+  });
+  appendProjected(recovered, replayHostKey, {
+    kind: "item",
+    turnId: "turn-undelivered",
+    item: {
+      type: "agentMessage",
+      id: "response-undelivered",
+      phase: "final_answer",
+      text: "Genuinely undelivered after reload 界",
+    },
+    phase: "completed",
+    seq: 3,
+  });
+  appendProjected(recovered, replayHostKey, {
+    kind: "turn-ended",
+    turnId: "turn-undelivered",
+    status: "completed",
+    seq: 4,
+  });
+
+  const reloadMount = installSnapshot(recovered.snapshot());
+  expect(reloadMount.sessions[conversationId]?.acknowledgedVoiceDeliveryIds).toEqual([
+    delivered!.deliveryId,
+  ]);
+  expect(reloadMount.sessions[conversationId]?.voiceDeliveries).toEqual([{
+    deliveryId: 'voice:["turn-undelivered",["response-undelivered"]]',
+    turnId: "turn-undelivered",
+    responses: [{
+      responseId: "response-undelivered",
+      text: "Genuinely undelivered after reload 界",
+    }],
+    ready: true,
+  }]);
+  recovered.close();
 });
 
 test("snapshot exposes the canonical projected runtime model", () => {

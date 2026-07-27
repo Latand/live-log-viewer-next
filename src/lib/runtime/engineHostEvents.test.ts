@@ -63,4 +63,53 @@ describe("projectEngineHostEvent", () => {
       payload: { conversationId: "conversation_three", turnId: "turn-two", outcome: "interrupted" },
     });
   });
+
+  test("projects the full terminal assistant response separately from the bounded UI item", () => {
+    const text = `${"🙂界".repeat(40_000)}\n`;
+    const projected = projectEngineHostEvent("conversation_voice", "codex:thread-voice", {
+      kind: "item",
+      turnId: "turn-voice",
+      item: { type: "agentMessage", id: "response-voice", text },
+      phase: "completed",
+      seq: 12,
+    });
+
+    expect(projected?.payload.item).toEqual({
+      truncated: true,
+      id: "response-voice",
+      type: "agentMessage",
+    });
+    expect(projected?.payload.voiceResponse).toEqual({
+      responseId: "response-voice",
+      text,
+    });
+    expect(new TextEncoder().encode((projected?.payload.voiceResponse as { text: string }).text).length)
+      .toBeGreaterThan(64 * 1024);
+  });
+
+  test("projects durable receiver acknowledgement onto the pending session delivery", () => {
+    expect(projectEngineHostEvent("conversation_voice", "codex:thread-voice", {
+      kind: "realtime-delivery-acknowledged",
+      deliveryId: "voice-delivery-one",
+      digest: "digest-one",
+      seq: 13,
+    })).toMatchObject({
+      kind: "voice-delivery-acknowledged",
+      payload: {
+        conversationId: "conversation_voice",
+        deliveryId: "voice-delivery-one",
+      },
+    });
+  });
+
+  test("does not retain canonical voice payloads for Claude sessions that cannot open Live Mode", () => {
+    const projected = projectEngineHostEvent("conversation_claude", "claude:session-one", {
+      kind: "item",
+      turnId: "turn-claude",
+      item: { type: "assistant", id: "response-claude", text: "completed" },
+      phase: "completed",
+      seq: 14,
+    });
+    expect(projected?.payload.voiceResponse).toBeUndefined();
+  });
 });

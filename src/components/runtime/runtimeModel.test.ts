@@ -209,6 +209,89 @@ describe("live turn delta buffering", () => {
   });
 });
 
+describe("canonical voice delivery reconciliation", () => {
+  test("hydrates an unseen completed multi-item turn and keeps rerenders idempotent", () => {
+    const unicode = `${"🙂界".repeat(8_000)}\nfinished`;
+    let store = installSnapshot(snapshot());
+    const firstItem = env("item", { type: "session", id: "conv_a" }, 4, {
+      conversationId: "conv_a",
+      turnId: "missed-turn",
+      phase: "completed",
+      item: { type: "agentMessage", id: "bounded-one", text: "bounded" },
+      voiceResponse: { responseId: "response-one", text: unicode },
+    });
+    store = apply(store, firstItem);
+    store = apply(store, env("item", { type: "session", id: "conv_a" }, 5, {
+      conversationId: "conv_a",
+      turnId: "missed-turn",
+      phase: "completed",
+      item: { type: "agentMessage", id: "bounded-two", text: "bounded" },
+      voiceResponse: { responseId: "response-two", text: "second" },
+    }));
+    store = apply(store, env("turn-ended", { type: "session", id: "conv_a" }, 6, {
+      conversationId: "conv_a",
+      turnId: "missed-turn",
+      outcome: "completed",
+    }));
+
+    expect(store.sessions["conv_a"]?.voiceDeliveries).toEqual([{
+      deliveryId: 'voice:["missed-turn",["response-one","response-two"]]',
+      turnId: "missed-turn",
+      responses: [
+        { responseId: "response-one", text: unicode },
+        { responseId: "response-two", text: "second" },
+      ],
+      ready: true,
+    }]);
+    expect(applyEvent(store, firstItem).outcome).toBe("duplicate");
+  });
+
+  test("installs pending delivery snapshots and removes only a matching acknowledgement", () => {
+    const delivery = {
+      deliveryId: 'voice:["recovered",["response"]]',
+      turnId: "recovered",
+      responses: [{ responseId: "response", text: "recovered response" }],
+      ready: true,
+    };
+    let store = installSnapshot(snapshot({
+      sessions: [session({
+        conversationId: "conv_a",
+        revision: 3,
+        voiceDeliveries: [delivery],
+      })],
+    }));
+    expect(store.sessions["conv_a"]?.voiceDeliveries).toEqual([delivery]);
+    store = apply(store, env("voice-delivery-progress", { type: "session", id: "conv_a" }, 4, {
+      conversationId: "conv_a",
+      deliveryId: delivery.deliveryId,
+      responseIndex: 0,
+      offset: 4,
+    }));
+    expect(store.sessions["conv_a"]?.revision).toBe(4);
+    store = apply(store, env("voice-delivery-acknowledged", { type: "session", id: "conv_a" }, 5, {
+      conversationId: "conv_a",
+      deliveryId: delivery.deliveryId,
+    }));
+    expect(store.sessions["conv_a"]?.voiceDeliveries).toEqual([]);
+    expect(store.sessions["conv_a"]?.acknowledgedVoiceDeliveryIds).toEqual([
+      delivery.deliveryId,
+    ]);
+    store = apply(store, env("item", { type: "session", id: "conv_a" }, 6, {
+      conversationId: "conv_a",
+      turnId: "recovered",
+      phase: "completed",
+      item: { type: "agentMessage", id: "response", text: "recovered response" },
+      voiceResponse: { responseId: "response", text: "recovered response" },
+    }));
+    store = apply(store, env("turn-ended", { type: "session", id: "conv_a" }, 7, {
+      conversationId: "conv_a",
+      turnId: "recovered",
+      outcome: "completed",
+    }));
+    expect(store.sessions["conv_a"]?.voiceDeliveries).toEqual([]);
+  });
+});
+
 /* --------------------- strict revision guard --------------------- */
 
 describe("applyEvent revision guard", () => {
