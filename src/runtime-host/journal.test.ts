@@ -240,6 +240,7 @@ test("acknowledged voice delivery stays retired after reload and terminal replay
   expect(journal.snapshot().sessions[0]?.acknowledgedVoiceDeliveryIds).toEqual([
     delivered!.deliveryId,
   ]);
+  journal.compact(1);
   journal.close();
 
   const recovered = new RuntimeJournal(filename, { maxEvents: 100, now: () => 200 });
