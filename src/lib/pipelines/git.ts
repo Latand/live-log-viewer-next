@@ -140,6 +140,98 @@ export function currentPipelineRemoteBranchHead(pipeline: Pipeline, exec: ExecPo
   return { ok: true, sha };
 }
 
+export type PipelinePublishResult =
+  | { ok: true; sha: string; remote: "published" | "unavailable" }
+  | { ok: false; error: string };
+
+export interface PipelinePublishRequest {
+  /** The immutable revision the pipeline accepted. This exact object is what
+      gets pushed and what the publication is revalidated against. */
+  acceptedSha: string;
+  /** What the caller last recorded as published; a match short-circuits the
+      whole probe. */
+  publishedSha?: string | null;
+}
+
+/**
+ * Publishes the accepted pipeline revision so the review layer can fence on the
+ * exact revision it reviews. The orchestrator owns this step: a builder that
+ * commits a usable head without pushing it must still hand off
+ * deterministically, and every review round fences on `origin/<branch>`
+ * (captureReviewHead), so a branch nobody published strands the handoff.
+ *
+ * The accepted SHA is an input, never re-derived here, and the push source is
+ * that immutable object rather than `refs/heads/<branch>`. A branch ref is a
+ * moving target: between capturing the head and running the push, a concurrent
+ * stage can advance it, and pushing the ref would publish a commit the pipeline
+ * never accepted — leaving review fenced on a different target than the one
+ * that passed. Pushing `<sha>:refs/heads/<branch>` makes that unrepresentable,
+ * and the fast-forward and confirmation checks compare against the same
+ * immutable SHA, so a mid-flight advance can only fail the publication, never
+ * redirect it.
+ *
+ * A repo with no `origin` reports `unavailable` — there is nothing to publish
+ * to, which is a different fact from a failed publication and never a stall on
+ * its own.
+ */
+export function publishPipelineBranch(pipeline: Pipeline, exec: ExecPort, request: PipelinePublishRequest): PipelinePublishResult {
+  const acceptedSha = request.acceptedSha;
+  if (!/^[0-9a-f]{40}$/i.test(acceptedSha)) {
+    return { ok: false, error: `the accepted pipeline revision is not an exact commit SHA: ${acceptedSha || "absent"}` };
+  }
+  const local = currentPipelineBranchHead(pipeline, exec);
+  if (!local.ok) return local;
+  /* The worktree must still hold the accepted revision when publication starts.
+     A head that has moved on is not this publication's business to push. */
+  if (local.sha !== acceptedSha) {
+    return { ok: false, error: `the pipeline worktree is at ${local.sha}, not the accepted revision ${acceptedSha}; nothing was published` };
+  }
+  if (request.publishedSha && request.publishedSha === acceptedSha) return { ok: true, sha: acceptedSha, remote: "published" };
+
+  const origin = exec("git", ["remote", "get-url", "origin"], pipeline.worktreeDir);
+  if (origin.code !== 0 || !origin.stdout.trim()) return { ok: true, sha: acceptedSha, remote: "unavailable" };
+
+  const probe = exec("git", ["ls-remote", "--heads", "origin", `refs/heads/${pipeline.branch}`], pipeline.worktreeDir);
+  if (probe.code !== 0) return failure("checking the remote pipeline branch", probe);
+  const remoteSha = probe.stdout.trim().split(/\s+/)[0] ?? "";
+  if (remoteSha === acceptedSha) return { ok: true, sha: acceptedSha, remote: "published" };
+  if (remoteSha) {
+    if (!/^[0-9a-f]{40}$/i.test(remoteSha)) return { ok: false, error: "the remote pipeline branch has no exact commit SHA" };
+    /* A revision pushed from another checkout is not in this worktree's object
+       database, and `merge-base` cannot reason about a commit it does not have
+       — it fails outright, which would report a transient git error where the
+       truth is a divergence. Fetch it first, and only when it is genuinely
+       unknown, so an ordinary fast-forward still costs no extra round trip. */
+    const known = exec("git", ["cat-file", "-e", `${remoteSha}^{commit}`], pipeline.worktreeDir);
+    if (known.code !== 0) {
+      const fetched = exec(
+        "git",
+        ["fetch", "--no-tags", "origin", `+refs/heads/${pipeline.branch}:refs/remotes/origin/${pipeline.branch}`],
+        pipeline.worktreeDir,
+      );
+      if (fetched.code !== 0) return failure("fetching the remote pipeline branch", fetched);
+    }
+    /* Only a fast-forward is ever published. A remote revision the ACCEPTED
+       revision does not contain is someone else's repair; overwriting it would
+       discard work, so the pipeline parks and lets the operator choose. */
+    const remoteIsAncestor = exec("git", ["merge-base", "--is-ancestor", remoteSha, acceptedSha], pipeline.worktreeDir);
+    if (remoteIsAncestor.code === 1) {
+      return { ok: false, error: "the local and remote pipeline branches diverged; choose which revision to publish before the review stage can start" };
+    }
+    if (remoteIsAncestor.code !== 0) return failure("comparing local and remote pipeline revisions", remoteIsAncestor);
+  }
+
+  const push = exec("git", ["push", "origin", `${acceptedSha}:refs/heads/${pipeline.branch}`], pipeline.worktreeDir);
+  if (push.code !== 0) return failure("publishing the pipeline branch", push);
+  const confirm = exec("git", ["ls-remote", "--heads", "origin", `refs/heads/${pipeline.branch}`], pipeline.worktreeDir);
+  if (confirm.code !== 0) return failure("confirming the published pipeline branch", confirm);
+  const publishedHead = confirm.stdout.trim().split(/\s+/)[0] ?? "";
+  if (publishedHead !== acceptedSha) {
+    return { ok: false, error: `publishing the pipeline branch did not land: origin/${pipeline.branch} is ${publishedHead || "absent"}, expected ${acceptedSha}` };
+  }
+  return { ok: true, sha: acceptedSha, remote: "published" };
+}
+
 /**
  * Resolves the exact revision a retried reviewer will receive. A remote repair
  * fast-forwards the shared worktree; a local repair stays intact; divergence

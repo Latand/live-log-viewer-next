@@ -11,6 +11,8 @@ import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
 import { isNativeCodexSubagentTranscript } from "@/lib/scanner/codexNative";
+import { enqueueStructuredMessage } from "@/lib/runtime/structuredMessageDelivery";
+import { recoverDeadStructuredConversation } from "@/lib/runtime/structuredRecovery";
 import { isShellCommand } from "@/lib/status";
 import { killPane, paneInfo, spawnAgentWithPrompt } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
@@ -264,9 +266,47 @@ function currentConversationPath(conversationId: string | null | undefined, fall
   return agentRegistry().canonicalPath(fallback);
 }
 
-export async function sendToImplementer(flow: Flow, entriesByPath: Map<string, FileEntry>, text: string): Promise<string> {
+export interface RelayDeliveryOverrides {
+  recover?: typeof recoverDeadStructuredConversation;
+  enqueueStructured?: typeof enqueueStructuredMessage;
+  deliver?: typeof deliverToTranscriptHost;
+}
+
+export async function sendToImplementer(
+  flow: Flow,
+  entriesByPath: Map<string, FileEntry>,
+  text: string,
+  overrides: RelayDeliveryOverrides = {},
+): Promise<string> {
   const entry = entriesByPath.get(currentConversationPath(flow.implementerConversationId, flow.implementerPath));
   if (!entry) throw new Error("implementer transcript is missing from scanner");
+  /* Structured hosts first, exactly as deliverConversationMessage does. The
+     legacy tmux ladder below refuses a pane-less Claude host outright
+     ("structured transport prohibits legacy tmux Claude launches"), so a relay
+     that only knew that ladder could not hand a finished review back to a
+     structured implementer: flow 0d1364f8 held a real round-1 verdict and
+     paused in `relaying` with nowhere to deliver it. The recovery probe is the
+     same gate the canonical send path uses — it returns null whenever the
+     conversation is not structured, which leaves legacy pane flows untouched. */
+  const registry = agentRegistry();
+  const conversation = flow.implementerConversationId?.startsWith("conversation_")
+    ? registry.conversation(flow.implementerConversationId as `conversation_${string}`)
+    : registry.conversationForPath(entry.path);
+  if (conversation) {
+    const recovered = await (overrides.recover ?? recoverDeadStructuredConversation)(
+      { path: entry.path, conversationId: conversation.id },
+      { registry },
+    );
+    if (recovered) {
+      const structured = await (overrides.enqueueStructured ?? enqueueStructuredMessage)(
+        { path: recovered.path, conversationId: recovered.conversationId, text },
+        { registry: () => registry },
+      );
+      if (!structured) throw new Error("structured delivery ownership is unavailable");
+      if (!structured.ok) throw new Error(structured.error);
+      return recovered.path;
+    }
+  }
   const spec = resumeSpecFor(entry.root, entry.path, {
     model: entry.launchModel ?? entry.model,
     effort: entry.effort,
@@ -275,7 +315,7 @@ export async function sendToImplementer(flow: Flow, entriesByPath: Map<string, F
     plugins: agentRegistry().launchProfileForPath(entry.path)?.plugins,
   });
   if (!spec) throw new Error("implementer session cannot be resumed");
-  const outcome = await deliverToTranscriptHost({ entry, spec, payload: text });
+  const outcome = await (overrides.deliver ?? deliverToTranscriptHost)({ entry, spec, payload: text });
   if (!outcome.ok) throw new Error(outcome.error);
   return entry.path;
 }

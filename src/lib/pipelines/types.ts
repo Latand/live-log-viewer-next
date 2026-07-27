@@ -197,6 +197,12 @@ export type Pipeline = {
   baseBranch: string;
   baseRef: string;
   lastPassedCommit: string;
+  /** The revision the orchestrator last published to `origin/<branch>`. The
+      review layer fences every round on the published head, so publication is
+      the pipeline's job, not a stage's; recording what landed lets a steady
+      state skip the remote probe entirely. Null while nothing is published
+      (a fresh pipeline, or a repo with no `origin` to publish to). */
+  publishedCommit?: string | null;
   stages: PipelineStage[];
   runs: PipelineStageRun[];
   /** The cursor carries the durable relay record (#353): the forwarded input and
