@@ -140,6 +140,57 @@ export function currentPipelineRemoteBranchHead(pipeline: Pipeline, exec: ExecPo
   return { ok: true, sha };
 }
 
+export type PipelinePublishResult =
+  | { ok: true; sha: string; remote: "published" | "unavailable" }
+  | { ok: false; error: string };
+
+/**
+ * Publishes the pipeline branch so the review layer can fence on the exact
+ * revision it reviews. The orchestrator owns this step: a builder that commits
+ * a usable head without pushing it must still hand off deterministically, and
+ * every review round fences on `origin/<branch>` (captureReviewHead), so a
+ * branch nobody published strands the handoff for good.
+ *
+ * `publishedSha` is the caller's record of what it last published; a local head
+ * that still matches it settles with no network probe at all. A repo with no
+ * `origin` reports `unavailable` — there is nothing to publish to, which is a
+ * different fact from a failed publication and never a stall on its own.
+ */
+export function publishPipelineBranch(pipeline: Pipeline, exec: ExecPort, publishedSha: string | null = null): PipelinePublishResult {
+  const local = currentPipelineBranchHead(pipeline, exec);
+  if (!local.ok) return local;
+  if (publishedSha && publishedSha === local.sha) return { ok: true, sha: local.sha, remote: "published" };
+
+  const origin = exec("git", ["remote", "get-url", "origin"], pipeline.worktreeDir);
+  if (origin.code !== 0 || !origin.stdout.trim()) return { ok: true, sha: local.sha, remote: "unavailable" };
+
+  const probe = exec("git", ["ls-remote", "--heads", "origin", `refs/heads/${pipeline.branch}`], pipeline.worktreeDir);
+  if (probe.code !== 0) return failure("checking the remote pipeline branch", probe);
+  const remoteSha = probe.stdout.trim().split(/\s+/)[0] ?? "";
+  if (remoteSha === local.sha) return { ok: true, sha: local.sha, remote: "published" };
+  if (remoteSha) {
+    if (!/^[0-9a-f]{40}$/i.test(remoteSha)) return { ok: false, error: "the remote pipeline branch has no exact commit SHA" };
+    /* Only a fast-forward is ever published. A remote revision the local head
+       does not contain is someone else's repair; overwriting it would discard
+       work, so the pipeline parks and lets the operator choose. */
+    const remoteIsAncestor = exec("git", ["merge-base", "--is-ancestor", remoteSha, local.sha], pipeline.worktreeDir);
+    if (remoteIsAncestor.code === 1) {
+      return { ok: false, error: "the local and remote pipeline branches diverged; choose which revision to publish before the review stage can start" };
+    }
+    if (remoteIsAncestor.code !== 0) return failure("comparing local and remote pipeline revisions", remoteIsAncestor);
+  }
+
+  const push = exec("git", ["push", "origin", `refs/heads/${pipeline.branch}:refs/heads/${pipeline.branch}`], pipeline.worktreeDir);
+  if (push.code !== 0) return failure("publishing the pipeline branch", push);
+  const confirm = exec("git", ["ls-remote", "--heads", "origin", `refs/heads/${pipeline.branch}`], pipeline.worktreeDir);
+  if (confirm.code !== 0) return failure("confirming the published pipeline branch", confirm);
+  const publishedHead = confirm.stdout.trim().split(/\s+/)[0] ?? "";
+  if (publishedHead !== local.sha) {
+    return { ok: false, error: `publishing the pipeline branch did not land: origin/${pipeline.branch} is ${publishedHead || "absent"}, expected ${local.sha}` };
+  }
+  return { ok: true, sha: local.sha, remote: "published" };
+}
+
 /**
  * Resolves the exact revision a retried reviewer will receive. A remote repair
  * fast-forwards the shared worktree; a local repair stays intact; divergence
