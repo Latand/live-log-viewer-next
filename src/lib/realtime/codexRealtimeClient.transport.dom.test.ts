@@ -463,3 +463,71 @@ test("closing the page hangs up so the account's realtime slot is not stranded",
 
   await client.stop();
 });
+
+/**
+ * A delegating turn talks and streams worker progress at the same time, so
+ * progress ticks and assistant deltas arrive interleaved. Position-based line
+ * merging ("update the last line if it has my role and is not final") loses
+ * the progress line the moment anything else is appended after it, and the
+ * next tick — which carries the WHOLE accumulated text, not a delta — lands as
+ * a new line. The operator sees the same answer redrawn once per tick as a
+ * ladder of ever-longer prefixes, with the agent's own deltas shredded into
+ * one line each between them.
+ */
+test("interleaved progress and assistant deltas keep one line each", async () => {
+  globalThis.fetch = (async () => jsonResponse(200, { ok: true, sdp: "v=0\r\nanswer" })) as unknown as typeof fetch;
+  const client = codexRealtimeClient("conversation_interleaved");
+  await client.start();
+  const peer = StubPeerConnection.latest!;
+  peer.channel.onopen?.();
+  expect(client.getSnapshot().phase).toBe("live");
+
+  const words = ["Yes", " the", " fix", " works", " well"];
+  let spoken = "";
+  let progress = "";
+  for (const word of words) {
+    spoken += word;
+    progress += word;
+    peer.channel.onmessage?.({ data: JSON.stringify({ type: "output_transcript.added", item: { text: word } }) });
+    client.updateWorkerProgress("turn-interleaved", progress, true);
+  }
+  peer.channel.onmessage?.({ data: JSON.stringify({ type: "turn.done", turn: { role: "assistant", transcript: spoken } }) });
+
+  const lines = client.getSnapshot().lines;
+  expect(lines.filter((line) => line.role === "progress")).toHaveLength(1);
+  expect(lines.filter((line) => line.role === "assistant")).toHaveLength(1);
+  expect(lines.map((line) => [line.role, line.text, line.final])).toEqual([
+    ["assistant", spoken, true],
+    ["progress", progress, false],
+  ]);
+
+  await client.stop();
+});
+
+/**
+ * `workerRunning` goes false the moment the turn ends while the accumulated
+ * text is still on screen, which finalizes the progress line. Any later tick
+ * for the SAME turn — a trailing update, or the effect re-firing when the call
+ * phase changes — must reuse that turn's line instead of starting a new one.
+ */
+test("a finalized progress line is reused by later ticks of the same turn", async () => {
+  globalThis.fetch = (async () => jsonResponse(200, { ok: true, sdp: "v=0\r\nanswer" })) as unknown as typeof fetch;
+  const client = codexRealtimeClient("conversation_progress_refinal");
+  await client.start();
+  const peer = StubPeerConnection.latest!;
+  peer.channel.onopen?.();
+
+  client.updateWorkerProgress("turn-a", "partial answer", true);
+  client.updateWorkerProgress("turn-a", "partial answer complete", false);
+  // Replay of the same accumulated text (phase change re-fires the effect).
+  client.updateWorkerProgress("turn-a", "partial answer complete", false);
+  // A different turn is a different line.
+  client.updateWorkerProgress("turn-b", "next answer", true);
+
+  expect(client.getSnapshot().lines.map((line) => [line.role, line.text, line.final])).toEqual([
+    ["progress", "partial answer complete", true],
+    ["progress", "next answer", false],
+  ]);
+
+  await client.stop();
+});
