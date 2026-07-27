@@ -21,9 +21,10 @@ function fakeContext(state = "running", scheduledSetterUpdatesValue = true) {
     loopEnd: number;
     onended?: unknown;
     started: number[];
+    offsets: number[];
     stopped: number[];
     connect(destination: never): unknown;
-    start(when?: number): void;
+    start(when?: number, offset?: number): void;
     stop(when?: number): void;
   }
   interface FakeGain {
@@ -50,9 +51,10 @@ function fakeContext(state = "running", scheduledSetterUpdatesValue = true) {
         loopStart: -1,
         loopEnd: -1,
         started: [],
+        offsets: [],
         stopped: [],
         connect: () => undefined,
-        start(when) { source.started.push(when ?? 0); },
+        start(when, offset) { source.started.push(when ?? 0); source.offsets.push(offset ?? 0); },
         stop(when) { source.stopped.push(when ?? 0); },
       };
       sources.push(source);
@@ -155,6 +157,62 @@ describe("the ambient bed loops without a seam", () => {
     /* Two voices, one buffer: nothing re-fetches or re-decodes mid-call. */
     expect(context.sources).toHaveLength(2);
     expect(context.sources[0].buffer).toBe(context.sources[1].buffer);
+  });
+});
+
+describe("parking the bed keeps its place in the track", () => {
+  test("pausing fades out, releases the node, and answers where the track had got to", async () => {
+    const context = fakeContext();
+    const transports = await warmed(context, LOOP);
+    const voice = transports.loop.start({ src: LOOP, gain: 0.12 })!;
+
+    context.currentTime = 17;
+    const at = voice.pause(1.5);
+
+    /* Seven seconds of playback since the start, so seven seconds in. */
+    expect(at).toBeCloseTo(7, 6);
+    expect(context.gains[0].gain.ramps.at(-1)).toEqual({ value: 0, when: 18.5 });
+    expect(context.sources[0].stopped[0]).toBeGreaterThan(18.5);
+  });
+
+  test("resuming starts the same buffer at the retained offset", async () => {
+    const context = fakeContext();
+    const transports = await warmed(context, LOOP);
+    const first = transports.loop.start({ src: LOOP, gain: 0 })!;
+    context.currentTime = 17;
+    const at = first.pause(1.5);
+
+    transports.loop.start({ src: LOOP, gain: 0, offsetSeconds: at });
+
+    /* The resumed pass opens where the parked one stopped, not at the top. */
+    expect(context.sources[1].offsets[0]).toBeCloseTo(7, 6);
+    expect(context.sources[1].loop).toBe(true);
+    expect(context.sources[1].buffer).toBe(context.sources[0].buffer);
+  });
+
+  test("a retained position past the end of the track wraps, it does not overrun", async () => {
+    const context = fakeContext();
+    const transports = await warmed(context, LOOP);
+    const duration = 26.666;
+
+    const voice = transports.loop.start({ src: LOOP, gain: 0, offsetSeconds: duration - 1 })!;
+    context.currentTime = 15;
+
+    /* Five seconds later the loop has wrapped: four seconds past the top. */
+    expect(voice.pause(1.5)).toBeCloseTo(4, 3);
+    expect(context.sources[0].offsets[0]).toBeCloseTo(duration - 1, 6);
+  });
+
+  test("a parked bed ignores later level changes, exactly as a stopped one does", async () => {
+    const context = fakeContext();
+    const transports = await warmed(context, LOOP);
+    const voice = transports.loop.start({ src: LOOP, gain: 0.12 })!;
+
+    voice.pause(1.5);
+    const after = context.gains[0].gain.ramps.length;
+    voice.rampTo(0.5, 1);
+
+    expect(context.gains[0].gain.ramps).toHaveLength(after);
   });
 });
 

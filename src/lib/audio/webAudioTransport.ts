@@ -13,7 +13,10 @@ import type { CueTransport, CueVoiceHandle } from "./cuePlayer";
  *   clock. Re-triggering on `ended`, or scheduling the next pass from a timer,
  *   both put a main-thread hop between the last sample and the first — that hop
  *   is the click. Neither appears here, and `onended` is deliberately left unset
- *   on the loop voice;
+ *   on the loop voice. `pause` does release its node, and the resume builds a
+ *   new one — but only across a stretch that has already faded to silence, and
+ *   it opens at the position the parked voice reported, so the operator hears a
+ *   continuation rather than the same opening again;
  * - fades and ducks have to be ramps on the same clock. `AudioParam`
  *   `linearRampToValueAtTime` is sample-accurate; stepping `.volume` from a
  *   `setInterval` is not, and the steps are audible;
@@ -56,7 +59,9 @@ export interface BufferSourceLike {
   loopStart: number;
   loopEnd: number;
   connect(destination: never): unknown;
-  start(when?: number): void;
+  /** `offset` is where in the buffer playback begins — how a parked loop
+      resumes at the position it was paused at. */
+  start(when?: number, offset?: number): void;
   stop(when?: number): void;
 }
 
@@ -192,24 +197,43 @@ export function createWebAudioTransports(
           gain.gain.value = request.gain;
           source.connect(gain as never);
           gain.connect(context.destination as never);
-          source.start();
+          /* Where this pass opens. A resumed bed carries the position its
+             predecessor was parked at, so the operator hears a continuation and
+             not the same eight bars again. */
+          const duration = buffer.duration > 0 ? buffer.duration : 0;
+          const offset = duration > 0 ? Math.max(0, request.offsetSeconds ?? 0) % duration : 0;
+          const openedAt = context.currentTime;
+          source.start(openedAt, offset);
           let stopped = false;
+          /** How far into the track playback has got, wrapped at the loop. */
+          const position = (): number => {
+            if (duration <= 0) return 0;
+            return (offset + Math.max(0, context.currentTime - openedAt)) % duration;
+          };
+          /** Every release is a fade first; the node dies after it, never during. */
+          const fadeOut = (seconds: number): void => {
+            stopped = true;
+            const fade = Math.max(MIN_RAMP_SECONDS, seconds);
+            ramp(context, gain.gain, 0, fade);
+            try {
+              source.stop(context.currentTime + fade + 0.05);
+            } catch {
+              /* already stopped */
+            }
+          };
           return {
             rampTo(target, seconds) {
               if (stopped) return;
               ramp(context, gain.gain, Math.max(0, target), seconds);
             },
+            pause(seconds) {
+              const at = position();
+              if (!stopped) fadeOut(seconds);
+              return at;
+            },
             stop(seconds) {
               if (stopped) return;
-              stopped = true;
-              const fade = Math.max(MIN_RAMP_SECONDS, seconds);
-              ramp(context, gain.gain, 0, fade);
-              try {
-                /* Stop only AFTER the fade has run to zero. */
-                source.stop(context.currentTime + fade + 0.05);
-              } catch {
-                /* already stopped */
-              }
+              fadeOut(seconds);
             },
           };
         } catch {

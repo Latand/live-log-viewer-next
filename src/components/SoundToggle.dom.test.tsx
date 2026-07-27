@@ -27,6 +27,7 @@ const {
   CUE_VOLUME_KEY,
   LOOP_ENABLED_KEY,
   LOOP_VOLUME_KEY,
+  VIEWER_LOOP_ENABLED_KEY,
 } = await import("@/lib/audio/prefs");
 const { AMBIENT_LOOP_ASSET } = await import("@/lib/audio/loopAsset");
 
@@ -161,6 +162,26 @@ describe("levels are device-local and independent", () => {
     /* A reload is a fresh read of the same storage: still on, no re-enabling. */
     expect(readAudioPrefs(storage).loopEnabled).toBe(true);
   });
+
+  test("the two music switches are independent, and share the one level", async () => {
+    await render({ ambientAvailable: true });
+    await openPanel();
+
+    await click(find("ambient-viewer-enabled")!);
+    await setRange(find("ambient-volume") as HTMLInputElement, "0.6");
+
+    /* Music in the Viewer says nothing about calls: the call switch is still the
+       operator's own separate answer. */
+    expect(storage.dump()[VIEWER_LOOP_ENABLED_KEY]).toBe("on");
+    expect(readAudioPrefs(storage).loopEnabled).toBe(false);
+    expect((find("ambient-enabled") as HTMLInputElement).checked).toBe(false);
+
+    await click(find("ambient-enabled")!);
+    const settings = readAudioPrefs(storage);
+    /* Both on, one level — there is no second slider to go looking for. */
+    expect(settings).toMatchObject({ viewerLoopEnabled: true, loopEnabled: true, loopVolume: 0.6 });
+    expect(host.querySelectorAll('[data-testid="ambient-volume"]')).toHaveLength(1);
+  });
 });
 
 describe("the ambient controls exist only when there is something to play", () => {
@@ -172,10 +193,12 @@ describe("the ambient controls exist only when there is something to play", () =
     expect(find("cue-volume")).not.toBeNull();
     /* Absent — a toggle that cannot do anything is worse than no toggle. */
     expect(find("ambient-enabled")).toBeNull();
+    expect(find("ambient-viewer-enabled")).toBeNull();
     expect(find("ambient-volume")).toBeNull();
-    expect(host.textContent).not.toContain("Ambient");
+    expect(host.textContent).not.toContain("music");
     /* And nothing about the loop was written to storage by rendering. */
     expect(storage.dump()[LOOP_ENABLED_KEY]).toBeUndefined();
+    expect(storage.dump()[VIEWER_LOOP_ENABLED_KEY]).toBeUndefined();
     expect(storage.dump()[LOOP_VOLUME_KEY]).toBeUndefined();
   });
 
@@ -185,8 +208,11 @@ describe("the ambient controls exist only when there is something to play", () =
     await openPanel();
 
     expect(find("ambient-enabled")).not.toBeNull();
+    expect(find("ambient-viewer-enabled")).not.toBeNull();
     expect(find("ambient-volume")).not.toBeNull();
-    /* Conservative first run: shown, and off until this device says otherwise. */
+    /* Conservative first run: shown, and both off until this device says
+       otherwise — nothing starts playing music at somebody. */
     expect((find("ambient-enabled") as HTMLInputElement).checked).toBe(false);
+    expect((find("ambient-viewer-enabled") as HTMLInputElement).checked).toBe(false);
   });
 });

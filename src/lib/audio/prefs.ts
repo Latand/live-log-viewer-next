@@ -19,15 +19,21 @@ import { useSyncExternalStore } from "react";
 export const CUES_ENABLED_KEY = "llvSound";
 export const CUE_VOLUME_KEY = "llvAudioCueVolume";
 export const LOOP_ENABLED_KEY = "llvAudioLoopEnabled";
+export const VIEWER_LOOP_ENABLED_KEY = "llvAudioViewerLoopEnabled";
 export const LOOP_VOLUME_KEY = "llvAudioLoopVolume";
 
 export interface AudioPrefs {
   cuesEnabled: boolean;
   /** 0…1, multiplied into the cue tier gain. */
   cueVolume: number;
-  /** The ambient loop is opt-in, always. */
+  /**
+   * Background music DURING A CALL. Keeps its original key, so a device that
+   * opted in before the Viewer switch existed stays opted in.
+   */
   loopEnabled: boolean;
-  /** 0…1, independent of {@link AudioPrefs.cueVolume}. */
+  /** Background music while using the Viewer, outside any call. */
+  viewerLoopEnabled: boolean;
+  /** 0…1, shared by both music switches, independent of {@link AudioPrefs.cueVolume}. */
   loopVolume: number;
 }
 
@@ -35,6 +41,7 @@ export const DEFAULT_AUDIO_PREFS: AudioPrefs = {
   cuesEnabled: true,
   cueVolume: 0.7,
   loopEnabled: false,
+  viewerLoopEnabled: false,
   loopVolume: 0.35,
 };
 
@@ -98,6 +105,7 @@ export function readAudioPrefs(storage: PrefStorage | null = activeStorage()): A
     cuesEnabled: readSwitch(storage, CUES_ENABLED_KEY, DEFAULT_AUDIO_PREFS.cuesEnabled),
     cueVolume: readVolume(storage, CUE_VOLUME_KEY, DEFAULT_AUDIO_PREFS.cueVolume),
     loopEnabled: readSwitch(storage, LOOP_ENABLED_KEY, DEFAULT_AUDIO_PREFS.loopEnabled),
+    viewerLoopEnabled: readSwitch(storage, VIEWER_LOOP_ENABLED_KEY, DEFAULT_AUDIO_PREFS.viewerLoopEnabled),
     loopVolume: readVolume(storage, LOOP_VOLUME_KEY, DEFAULT_AUDIO_PREFS.loopVolume),
   };
 }
@@ -116,6 +124,9 @@ export function setAudioPrefs(patch: Partial<AudioPrefs>): AudioPrefs {
       if (patch.cuesEnabled !== undefined) storage.setItem(CUES_ENABLED_KEY, next.cuesEnabled ? "on" : "off");
       if (patch.cueVolume !== undefined) storage.setItem(CUE_VOLUME_KEY, String(next.cueVolume));
       if (patch.loopEnabled !== undefined) storage.setItem(LOOP_ENABLED_KEY, next.loopEnabled ? "on" : "off");
+      if (patch.viewerLoopEnabled !== undefined) {
+        storage.setItem(VIEWER_LOOP_ENABLED_KEY, next.viewerLoopEnabled ? "on" : "off");
+      }
       if (patch.loopVolume !== undefined) storage.setItem(LOOP_VOLUME_KEY, String(next.loopVolume));
     } catch {
       /* storage refused the write: the choice still applies for this session. */

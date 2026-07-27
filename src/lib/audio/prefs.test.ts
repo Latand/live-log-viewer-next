@@ -10,6 +10,7 @@ import {
   readAudioPrefs,
   setAudioPrefs,
   subscribeAudioPrefs,
+  VIEWER_LOOP_ENABLED_KEY,
   type PrefStorage,
 } from "./prefs";
 
@@ -29,8 +30,10 @@ describe("first run is conservative", () => {
   test("a device that has never chosen gets sound on, ambient off", () => {
     const fresh = readAudioPrefs(device());
     expect(fresh.cuesEnabled).toBe(true);
-    /* Nothing starts playing a bed at somebody on first load. */
+    /* Nothing starts playing a bed at somebody on first load — in a call or
+       out of one. */
     expect(fresh.loopEnabled).toBe(false);
+    expect(fresh.viewerLoopEnabled).toBe(false);
     expect(fresh).toEqual(DEFAULT_AUDIO_PREFS);
   });
 
@@ -76,6 +79,24 @@ describe("settings are device-local", () => {
     expect(afterReload.loopVolume).toBe(0.5);
     expect(persisted.dump()[LOOP_ENABLED_KEY]).toBe("on");
     expect(persisted.dump()[LOOP_VOLUME_KEY]).toBe("0.5");
+  });
+
+  test("the two music switches persist separately, under one shared level", () => {
+    const persisted = device();
+    configureAudioPrefsStorage(persisted);
+
+    setAudioPrefs({ viewerLoopEnabled: true, loopVolume: 0.4 });
+
+    /* Turning music on in the Viewer says nothing about calls: the call switch
+       is the operator's own separate answer, and both read the one level. */
+    expect(readAudioPrefs(persisted).viewerLoopEnabled).toBe(true);
+    expect(readAudioPrefs(persisted).loopEnabled).toBe(false);
+    expect(persisted.dump()[VIEWER_LOOP_ENABLED_KEY]).toBe("on");
+    expect(persisted.dump()[LOOP_ENABLED_KEY]).toBeUndefined();
+
+    setAudioPrefs({ loopEnabled: true });
+    const both = readAudioPrefs(persisted);
+    expect(both).toMatchObject({ viewerLoopEnabled: true, loopEnabled: true, loopVolume: 0.4 });
   });
 
   test("the master switch shares the key the header toggle already used", () => {

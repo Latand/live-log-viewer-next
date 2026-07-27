@@ -2,7 +2,7 @@
 
 import { primeAudio, sharedAudioContext } from "@/lib/chime";
 
-import { createAmbientLoop, type AmbientLoop } from "./ambientLoop";
+import { createAmbientLoop, type AmbientLoop, type LoopTransport } from "./ambientLoop";
 import { createCuePlayer, type CueOutcome, type CuePlayer } from "./cuePlayer";
 import { cueAsset, CUES, type AudioCue, type CueRequest } from "./cues";
 import { AMBIENT_LOOP_ASSET, ambientLoopConfigured } from "./loopAsset";
@@ -37,24 +37,41 @@ let loop: AmbientLoop | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let retries = 0;
 let prefsWatched = false;
+let loopTransport: LoopTransport | null = null;
 const voiceOwners = new Set<unknown>();
 
 function watchPrefs(): void {
   if (prefsWatched) return;
   prefsWatched = true;
-  /* Turning the master (or the bed's own switch) off has to stop a sounding bed
-     now, not at the next call. */
-  subscribeAudioPrefs(() => ensureAmbientLoop());
+  /* Turning the master (or either music switch) off has to stop a sounding bed
+     now, not at the next call — and turning one on is a fresh intent, so it gets
+     a fresh retry budget rather than the remains of an earlier one. */
+  subscribeAudioPrefs(() => {
+    retries = 0;
+    ensureAmbientLoop();
+  });
 }
 
 export function ambientLoop(): AmbientLoop {
   loop ??= createAmbientLoop({
     asset: AMBIENT_LOOP_ASSET,
-    transport: transports.loop,
+    transport: loopTransport ?? transports.loop,
     prefs: audioPrefs,
   });
   watchPrefs();
   return loop;
+}
+
+/**
+ * Test seam: run the bed on a fake transport.
+ *
+ * The ownership rules that decide when the bed starts and stops live HERE, above
+ * the loop controller, so a test that only drives `createAmbientLoop` cannot see
+ * them. `null` restores the real Web Audio backend.
+ */
+export function configureAmbientTransportForTests(transport: LoopTransport | null): void {
+  loopTransport = transport;
+  loop = null;
 }
 
 export function cuePlayer(): CuePlayer {
@@ -126,7 +143,11 @@ export function unlockAudioOnGesture(): () => void {
   const unlock = () => {
     transports.warm(Object.keys(CUES).map((cue) => cueAsset(cue as AudioCue)));
     /* A device that has already opted in gets its bed the moment it is allowed
-       one — the gesture is the last thing standing between the two. */
+       one — the gesture is the last thing standing between the two. Music in the
+       Viewer is wanted from the first paint, so the retry budget may well have
+       burned out waiting for exactly this gesture: the attempt that follows it
+       is a fresh one, not the tail of an exhausted run. */
+    retries = 0;
     ensureAmbientLoop();
   };
   window.addEventListener("pointerdown", unlock, { passive: true });
@@ -148,6 +169,7 @@ export function resetAppAudioForTests(): void {
   player?.reset();
   player = null;
   loop = null;
+  loopTransport = null;
   prefsWatched = false;
   voiceOwners.clear();
   retries = 0;

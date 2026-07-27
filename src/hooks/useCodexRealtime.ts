@@ -8,6 +8,29 @@ import type { RuntimeVoiceDelivery } from "@/lib/runtime/voiceDelivery";
 
 const IDLE = { phase: "idle" as const, lines: [], error: null, startedAt: null, micMuted: false, outputMuted: false };
 
+/**
+ * One mounted realtime surface's lease on "a call is up".
+ *
+ * The lease is per MOUNT, not per conversation: several conversation cards can
+ * have composers mounted at once, and the operator switches between them
+ * constantly. Each mount releases only its own lease, so a switch that mounts
+ * the next card before unmounting the last one never lets the count reach zero
+ * — which is what keeps the background music from restarting, duplicating or
+ * dropping when the selected card changes.
+ *
+ * What the music then DOES with that signal is the audio module's business: with
+ * music enabled on both sides of the call boundary this hook's edges change
+ * nothing audible at all.
+ */
+export function useAmbientCallLease(live: boolean): void {
+  const owner = useRef(Symbol("realtime-ambient-owner"));
+  useEffect(() => {
+    const held = owner.current;
+    setVoiceConnected(held, live);
+    return () => setVoiceConnected(held, false);
+  }, [live]);
+}
+
 export function useCodexRealtime(
   conversationId: string,
   enabled: boolean,
@@ -16,7 +39,6 @@ export function useCodexRealtime(
   workerRunning: boolean,
   workerDeliveries: readonly RuntimeVoiceDelivery[],
 ) {
-  const ambientOwner = useRef(Symbol("realtime-ambient-owner"));
   const client = useMemo(
     () => enabled && conversationId.startsWith("conversation_") ? codexRealtimeClient(conversationId) : null,
     [conversationId, enabled],
@@ -34,15 +56,10 @@ export function useCodexRealtime(
     client?.reconcileWorkerDeliveries(workerDeliveries);
   }, [client, snapshot.phase, workerDeliveries]);
 
-  /* The ambient bed is eligible only while a call is up, and it fades on both
-     edges. `live` is the only phase with two participants who can talk;
-     connecting, stopping and error are not a call. */
-  const live = snapshot.phase === "live";
-  useEffect(() => {
-    const owner = ambientOwner.current;
-    setVoiceConnected(owner, live);
-    return () => setVoiceConnected(owner, false);
-  }, [live]);
+  /* Which side of the call boundary the background music is on. `live` is the
+     only phase with two participants who can talk; connecting, stopping and
+     error are not a call. */
+  useAmbientCallLease(snapshot.phase === "live");
 
   return {
     ...snapshot,

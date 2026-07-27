@@ -89,6 +89,20 @@ versions follow [SemVer](https://semver.org/) (0.x — the API may still move).
   so it is visible and usable at 390px instead of painting under the backdrop.
 
 ### Added
+- Background music in the Viewer, and one track across the call boundary
+  (#732). The Audio settings now carry two independent switches sharing one
+  level: music while using the Viewer, and music during a call — the latter the
+  renamed old ambient setting, whose Ukrainian label read as an engineering term
+  («фоновий шар») rather than as music. With both on, the same track simply
+  keeps playing across the call edge in either direction: no teardown, no
+  re-init, no position reset, and speech ducking applies for the duration of the
+  call as before. With only one on, the edge that silences the music parks it —
+  the voice fades out and the position it reached is retained, so the edge that
+  brings it back resumes from there instead of replaying the same opening on
+  every call. Only a device that wants no music at all (the sound master off,
+  both switches off, no asset) tears the track down. Ambient ownership across
+  conversation cards is unchanged: the lease is per mounted composer, so
+  switching the selected card never restarts, duplicates or drops the track.
 - On-canvas pipeline stage reordering (#507). A draft's stage cards carry their
   own move-earlier / move-later controls, so the whole conversation graph is
   composed in place on the canvas — no nested form. Each move is offered only
