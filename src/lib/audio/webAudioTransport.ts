@@ -229,25 +229,38 @@ export function createWebAudioTransports(
           let released = false;
           /** A park in flight — the node is fading but still audible. */
           let park: number | null = null;
+          /**
+           * When that fade ends, ON THE AUDIO CLOCK.
+           *
+           * The timer below only carries out the release; this is what DECIDES
+           * whether the park is over. The two clocks disagree whenever the page
+           * is throttled — a hidden tab's timers are held back while the audio
+           * thread keeps running — and only one of them can be right about
+           * whether the bed is still sounding. It is this one: the fade, the
+           * position and the silence are all on it.
+           */
+          let parkEndsAt = 0;
           /** Where the parked track will be picked up from. */
           let retained = 0;
           /** How far into the track playback has got, wrapped at the loop. */
           const at = (seconds: number): number => (duration > 0 ? seconds % duration : 0);
           const position = (): number => at(offset + Math.max(0, context.currentTime - openedAt));
-          const release = (): void => {
-            released = true;
+          const cancelPark = (): void => {
+            if (park === null) return;
+            timers.cancel(park);
             park = null;
+          };
+          const release = (): void => {
+            cancelPark();
+            released = true;
             try {
               source.stop();
             } catch {
               /* already stopped */
             }
           };
-          const cancelPark = (): void => {
-            if (park === null) return;
-            timers.cancel(park);
-            park = null;
-          };
+          /** A park is still takeable only while its fade has not run out. */
+          const parking = (): boolean => park !== null && context.currentTime < parkEndsAt;
           return {
             rampTo(target, seconds) {
               if (released) return;
@@ -264,11 +277,21 @@ export function createWebAudioTransports(
               /* And the node lives until then, so a call that ends inside the
                  fade can take the park back instead of stacking a second voice
                  on top of one that is still sounding. */
+              parkEndsAt = context.currentTime + fade;
               park = timers.schedule(release, fade * 1000);
               return retained;
             },
             resume() {
               if (released) return false;
+              if (park === null) return true;
+              /* The fade has run out: this voice is silent and has played on
+                 past the position anybody retained, so it is NOT the voice to
+                 come back to however late its release timer is. Finish the park
+                 here and make the caller open a fresh one at that position. */
+              if (!parking()) {
+                release();
+                return false;
+              }
               cancelPark();
               return true;
             },

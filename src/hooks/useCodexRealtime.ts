@@ -1,11 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import { setVoiceConnected, setVoiceSpeaking } from "@/lib/audio/app";
 import type { Speaker } from "@/lib/audio/ambientLoop";
 import { speakingFromLines } from "@/lib/audio/speech";
-import { codexRealtimeClient, type CodexRealtimeSnapshot } from "@/lib/realtime/codexRealtimeClient";
+import { codexRealtimeClient, type CodexRealtimeLine, type CodexRealtimeSnapshot } from "@/lib/realtime/codexRealtimeClient";
 import type { RuntimeVoiceDelivery } from "@/lib/runtime/voiceDelivery";
 
 const IDLE = { phase: "idle" as const, lines: [], error: null, startedAt: null, micMuted: false, outputMuted: false };
@@ -28,6 +28,8 @@ export interface RealtimeSurface {
   updateWorkerProgress(turnId: string, progress: string, running: boolean): void;
   reconcileWorkerDeliveries(deliveries: readonly RuntimeVoiceDelivery[]): void;
 }
+
+const NO_LINES: ReadonlySet<string> = new Set();
 
 let clientFactory: (conversationId: string) => RealtimeSurface = codexRealtimeClient;
 
@@ -57,6 +59,39 @@ export function configureRealtimeClientForTests(factory: ((conversationId: strin
  * music enabled on both sides of the call boundary this hook's edges change
  * nothing audible at all.
  */
+/**
+ * Who is talking IN THIS CALL, read from the transcript.
+ *
+ * The transcript outlives the call that produced it, on purpose: the operator
+ * keeps reading it after a hangup. Nothing marks its last line final when a call
+ * ends, either — a call that drops mid-sentence leaves a streaming line behind
+ * for good. Read naively, that line says "the agent is talking" forever, and the
+ * NEXT call would open already ducked with nobody saying anything.
+ *
+ * So every line the call inherited is disqualified at the moment it goes live.
+ * The client numbers each line from a counter that only ever goes up and clears
+ * its open-line table on teardown, so a new call cannot write into an inherited
+ * id — which makes "was it already there?" an exact test for "is it from a call
+ * that is over?", with no clock and no heuristic.
+ *
+ * The carried-over set is adjusted DURING the render that first sees the call
+ * (React's documented way to derive state from a change), so the very first
+ * committed render of a live call is already un-ducked. An effect would be a
+ * commit late, and that commit is precisely the one that opens the duck.
+ */
+function useCurrentCallSpeaker(live: boolean, lines: readonly CodexRealtimeLine[]): Speaker | null {
+  const [wasLive, setWasLive] = useState(live);
+  const [carriedOver, setCarriedOver] = useState<ReadonlySet<string>>(NO_LINES);
+  if (wasLive !== live) {
+    setWasLive(live);
+    setCarriedOver(live ? new Set(lines.map((line) => line.id)) : NO_LINES);
+  }
+  return useMemo(
+    () => (live ? speakingFromLines(lines.filter((line) => !carriedOver.has(line.id))) : null),
+    [carriedOver, lines, live],
+  );
+}
+
 export function useAmbientCallLease(live: boolean, speaking: Speaker | null = null): void {
   const owner = useRef(Symbol("realtime-ambient-owner"));
   useEffect(() => {
@@ -104,7 +139,9 @@ export function useCodexRealtime(
      connecting, stopping and error are not a call. Speech is read off the
      transcript this call already produces — no analyser node, no second event
      path — and the music ducks under it. */
-  useAmbientCallLease(snapshot.phase === "live", speakingFromLines(snapshot.lines));
+  const live = snapshot.phase === "live";
+  const speaking = useCurrentCallSpeaker(live, snapshot.lines);
+  useAmbientCallLease(live, speaking);
 
   return {
     ...snapshot,

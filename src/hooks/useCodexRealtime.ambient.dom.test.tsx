@@ -305,6 +305,43 @@ describe("ducking under whoever is talking", () => {
     expect(ambientLoop().state().playing).toBe(true);
   });
 
+  test("a line left non-final by a finished call cannot duck the next one", async () => {
+    setAudioPrefs({ loopEnabled: true, loopVolume: 1 });
+    const view = screen();
+    await view.show(<Composer id="conversation_a" />);
+    const client = realtime.of("conversation_a");
+
+    /* A call that ends mid-sentence. The client never marks that line final —
+       neither `start()` nor `stop()` touches `lines`, and the transcript is
+       deliberately kept on screen after a hangup — so it is still sitting there,
+       still non-final, when the next call opens. */
+    await act(async () => client.push({ phase: "live", startedAt: 1 }));
+    await act(async () => client.push({ lines: [line("assistant", "mid-sentence", false, "assistant:1")] }));
+    expect(sink.last()!.gain).toBeCloseTo(DUCKED, 6);
+
+    await act(async () => client.push({ phase: "idle" }));
+    expect(ambientLoop().state().ducked).toBe(false);
+
+    const before = sink.ramps.length;
+    await act(async () => client.push({ phase: "live", startedAt: 2 }));
+
+    /* Not "ducked and then released": never ducked at all. A new call opens with
+       nobody talking in it, whatever the last one left behind. */
+    expect(ambientLoop().state().ducked).toBe(false);
+    expect(sink.ramps.slice(before).filter((ramp) => ramp.gain < FULL - 1e-9)).toEqual([]);
+    expect(sink.last()!.gain).toBeCloseTo(FULL, 6);
+
+    /* And the new call's own voice still ducks it: the guard is scoped to the
+       lines that came before it, not to the feature. */
+    await act(async () => client.push({
+      lines: [
+        line("assistant", "mid-sentence", false, "assistant:1"),
+        line("assistant", "new turn", false, "assistant:2"),
+      ],
+    }));
+    expect(sink.last()!.gain).toBeCloseTo(DUCKED, 6);
+  });
+
   test("a silent card cannot release the duck the talking card is holding", async () => {
     setAudioPrefs({ loopEnabled: true, loopVolume: 1 });
     const view = screen();

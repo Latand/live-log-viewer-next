@@ -281,6 +281,46 @@ describe("parking the bed keeps its place in the track", () => {
     expect(context.gains[0].gain.ramps.at(-1)).toEqual({ value: 0.12, when: 19.7 });
   });
 
+  test("a park the AUDIO clock already finished cannot be revived by a late timer", async () => {
+    const context = fakeContext();
+    const clock = fakeClock();
+    const transports = await warmed(context, LOOP, clock);
+    const voice = transports.loop.start({ src: LOOP, gain: 0.12 })!;
+
+    context.currentTime = 17;
+    const retained = voice.pause(1.5);
+
+    /* A backgrounded tab throttles timers; the audio clock does not throttle.
+       Here the fade ended at 18.5 and the release timer still has not run. */
+    context.currentTime = 19;
+    expect(clock.pending()).toBe(1);
+
+    /* The park is over on the clock that decides — the bed is silent and the
+       node has run a further half second past the position anyone retained.
+       Reviving it would resume the track half a second adrift of `retained`. */
+    expect(voice.resume()).toBe(false);
+    expect(retained).toBeCloseTo(8.5, 6);
+    expect(context.sources[0].stopped).toHaveLength(1);
+    expect(clock.pending()).toBe(0);
+
+    const after = context.gains[0].gain.ramps.length;
+    voice.rampTo(0.5, 1);
+    expect(context.gains[0].gain.ramps).toHaveLength(after);
+  });
+
+  test("the instant the fade ends counts as finished, not as still parking", async () => {
+    const context = fakeContext();
+    const clock = fakeClock();
+    const transports = await warmed(context, LOOP, clock);
+    const voice = transports.loop.start({ src: LOOP, gain: 0.12 })!;
+
+    context.currentTime = 17;
+    voice.pause(1.5);
+    context.currentTime = 18.5;
+
+    expect(voice.resume()).toBe(false);
+  });
+
   test("once the park has completed the voice is gone, and says so", async () => {
     const context = fakeContext();
     const clock = fakeClock();

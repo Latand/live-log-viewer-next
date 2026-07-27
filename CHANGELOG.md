@@ -105,7 +105,10 @@ versions follow [SemVer](https://semver.org/) (0.x — the API may still move).
   (the sound master off, both switches off, no asset) tears the track down. The
   music ducks under whoever is talking, read off the transcript the call already
   produces, with the duck owned per mounted composer so a card nobody is
-  speaking in cannot let the music back up over the one they are. Ambient
+  speaking in cannot let the music back up over the one they are. Every line a
+  call inherits is disqualified as speech the moment it goes live, so the line a
+  dropped call left mid-sentence — never marked final, and kept on screen on
+  purpose — cannot open the next call already ducked. Ambient
   ownership across conversation cards holds through a keyed card switch: React
   destroys the outgoing card's effects before creating the incoming one's, so
   the last lease going away is settled at the end of the tick rather than on the
