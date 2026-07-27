@@ -1194,3 +1194,36 @@ test("a send or resume aimed at a superseded round answers 409 with the live cha
      silently forked by a message. */
   expect(recoveryCalls).toBe(0);
 });
+
+test("a tmux resume rebuilds the command with the conversation's stored MCP grant", async () => {
+  /* A plain fixture name: the publication gate reads a real session-id shape as
+     a resource identifier, and every lookup here is overridden anyway. */
+  const pathname = path.join(SANDBOX, "resume-grant-fixture.jsonl");
+  fs.writeFileSync(pathname, "");
+  const stored = emptyLaunchProfile({ allowSubagents: true, plugins: ["computer-use"] });
+  /* Written past the profile helper on purpose: this stands for the grant a
+     conversation carries, whatever the bound of the day admits. */
+  const profile = { ...stored, mcpServers: ["viewer", "granted-connector"] };
+  const options: { mcpServers?: readonly string[] }[] = [];
+
+  const outcome = await resumeConversation(pathname, {
+    pathAllowed: () => true,
+    registry: {
+      conversationForPath: () => null,
+      launchProfileForPath: () => profile,
+    },
+    recover: async () => null,
+    listFiles: async () => [{ root: "codex-sessions", path: pathname, project: "p", mtime: 0, size: 0 } as unknown as FileEntry],
+    resumeSpecFor: (_root: string, _path: string, given: { mcpServers?: readonly string[] }) => {
+      options.push(given);
+      return { command: "resume", transcript: pathname, launchProfile: profile };
+    },
+    deliver: async () => ({ ok: true, outcome: "resumed", target: "%7" }),
+  } as never);
+
+  expect(outcome).toMatchObject({ ok: true });
+  /* The grant travels with the resume: omitting it relaunched the session on
+     the Viewer baseline while the durable profile still claimed it (#739). */
+  expect(options).toHaveLength(1);
+  expect(options[0]!.mcpServers).toEqual(["viewer", "granted-connector"]);
+});

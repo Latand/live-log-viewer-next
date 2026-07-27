@@ -193,9 +193,10 @@ describe("ClaudeStreamBrokerHost", () => {
     expect(captured.args).not.toContain("--safe-mode");
     const mcpConfigPath = captured.args![captured.args!.indexOf("--mcp-config") + 1]!;
     const mcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, "utf8")) as { mcpServers: Record<string, unknown> };
+    /* Only granted servers are copied into the exclusive file; the grant bound
+       admits none beyond the Viewer baseline this tranche (#739). */
     expect(mcpConfig.mcpServers).toEqual({
       viewer: { type: "stdio", command: "viewer-mcp" },
-      "agent-browser": { type: "stdio", command: "browser-mcp" },
     });
     await host.release();
     expect(child.signals).toContain("SIGTERM");
@@ -684,7 +685,6 @@ describe("ClaudeStreamBrokerHost", () => {
     expect(adoptedMcp).toEqual(freshMcp);
     expect(freshMcp).toEqual({ mcpServers: {
       viewer: { type: "stdio", command: "viewer-mcp" },
-      "agent-browser": { type: "stdio", command: "browser-mcp" },
     } });
     await adopted.release();
 

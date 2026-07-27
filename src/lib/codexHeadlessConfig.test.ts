@@ -102,10 +102,13 @@ test("a Codex thread approves Viewer and retains optional server approval policy
         "telegram-readonly": { default_tools_approval_mode: "prompt" },
       },
     },
+    /* Nothing outside the grant bound can be enabled, so a stored allowlist
+       naming a configured server still leaves it off (issue #739). Each
+       server's own approval policy survives the disable. */
   }, false, ["agent-browser"])).toMatchObject({
     mcp_servers: {
       viewer: { enabled: true, default_tools_approval_mode: "approve" },
-      "agent-browser": { enabled: true, default_tools_approval_mode: "writes" },
+      "agent-browser": { enabled: false, default_tools_approval_mode: "writes" },
       "telegram-readonly": { enabled: false, default_tools_approval_mode: "prompt" },
     },
   });

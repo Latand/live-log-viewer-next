@@ -39,7 +39,7 @@ test("fresh Codex commands fix CODEX_HOME in the typed shell command", () => {
   expect(spec.launchProfile?.allowSubagents).toBe(false);
 });
 
-test("fresh tmux Codex commands enforce the normalized MCP allowlist at runtime", () => {
+test("fresh tmux Codex commands enable only servers inside the grant bound", () => {
   const home = path.join(SANDBOX, "codex-mcp-runtime");
   fs.mkdirSync(home, { recursive: true });
   fs.writeFileSync(path.join(home, "config.toml"), [
@@ -57,10 +57,12 @@ test("fresh tmux Codex commands enforce the normalized MCP allowlist at runtime"
     mcpServers: ["agent-browser"],
   });
 
+  /* A configured server outside the grant bound stays disabled however the
+     allowlist names it (issue #739); Viewer is the only enabled surface. */
   expect(spec.command).toContain("'mcp_servers.viewer.enabled=true'");
-  expect(spec.command).toContain("'mcp_servers.agent-browser.enabled=true'");
+  expect(spec.command).toContain("'mcp_servers.agent-browser.enabled=false'");
   expect(spec.command).toContain("'mcp_servers.unrelated.enabled=false'");
-  expect(spec.launchProfile?.mcpServers).toEqual(["viewer", "agent-browser"]);
+  expect(spec.launchProfile?.mcpServers).toEqual(["viewer"]);
 });
 
 test("fresh tmux Codex defaults disable every configured server outside Viewer", () => {
@@ -250,38 +252,40 @@ test("fresh tmux Claude uses its exclusive native MCP file", () => {
   const sessionId = path.basename(spec.transcript!, ".jsonl");
   const mcpConfigPath = path.join(home, ".llv", "spawn-mcp", `${sessionId}.json`);
 
+  /* The per-spawn file carries exactly the granted surface; a configured
+     server the allowlist names but the bound excludes is not copied (#739). */
   expect(spec.command).toContain(`'--strict-mcp-config' '--mcp-config' '${mcpConfigPath}'`);
   expect(JSON.parse(fs.readFileSync(mcpConfigPath, "utf8"))).toEqual({ mcpServers: {
     viewer: { type: "stdio", command: "viewer-mcp" },
-    "agent-browser": { type: "stdio", command: "browser-mcp" },
   } });
-  expect(spec.launchProfile?.mcpServers).toEqual(["viewer", "agent-browser"]);
+  expect(spec.launchProfile?.mcpServers).toEqual(["viewer"]);
 });
 
-test("a stored allowlist naming an ungranted server is re-bounded when the command is built", () => {
-  const home = path.join(SANDBOX, "claude-mcp-rebound");
-  fs.mkdirSync(home, { recursive: true });
-  fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({
+test("a resume rebuilds its command from the re-bounded grant, not the stored list", () => {
+  const home = process.env.LLV_CLAUDE_HOME!;
+  const transcript = path.join(home, "projects", "-repo", "019fa1b2-c3d4-0567-8899-aabbccddef77.jsonl");
+  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  fs.writeFileSync(transcript, JSON.stringify({ cwd: SANDBOX }) + "\n");
+  /* A legacy home keeps its MCP state beside the home directory, which is where
+     the resume path reads the registered definitions from. */
+  fs.writeFileSync(path.join(path.dirname(home), ".claude.json"), JSON.stringify({
     mcpServers: {
       viewer: { type: "stdio", command: "viewer-mcp" },
-      "agent-browser": { type: "stdio", command: "browser-mcp" },
       telegram: { type: "stdio", command: "telegram-mcp" },
     },
   }));
 
-  /* Launch profiles are durable and editable by hand, so the rendered command
-     comes from the re-validated grant, not from what storage claimed (#739). */
-  const spec = freshSpecFor("claude", "/repo", {
-    claudeConfigDir: home,
-    claudeProjectsDir: path.join(home, "projects"),
-    mcpServers: ["viewer", "telegram", "agent-browser"],
+  /* Launch profiles are durable and editable by hand, so a resume renders from
+     the re-validated grant instead of throwing or trusting storage (#739). */
+  const resumed = resumeSpecFor("claude-projects", transcript, {
+    mcpServers: ["viewer", "telegram"],
   });
-  const sessionId = path.basename(spec.transcript!, ".jsonl");
-  const mcpConfigPath = path.join(home, ".llv", "spawn-mcp", `${sessionId}.json`);
+  const mcpConfigPath = resumed!.command.match(/'--mcp-config' '([^']+)'/)![1]!;
 
-  expect(spec.launchProfile?.mcpServers).toEqual(["viewer", "agent-browser"]);
-  expect(Object.keys((JSON.parse(fs.readFileSync(mcpConfigPath, "utf8")) as { mcpServers: Record<string, unknown> }).mcpServers))
-    .toEqual(["viewer", "agent-browser"]);
+  expect(resumed?.launchProfile?.mcpServers).toEqual(["viewer"]);
+  expect(JSON.parse(fs.readFileSync(mcpConfigPath, "utf8"))).toEqual({ mcpServers: {
+    viewer: { type: "stdio", command: "viewer-mcp" },
+  } });
 });
 
 test("allowSubagents enables Codex multi-agent for fresh and resumed launches", () => {

@@ -119,20 +119,21 @@ test("spawn admission grants MCP servers by session origin and refuses ungranted
 
     const defaultResponse = await post("mcp_default_20260723");
     expect({ status: defaultResponse.status, body: await defaultResponse.clone().json() }).toMatchObject({ status: 202 });
-    /* A delegated launch (every role preset is one) cannot request its way to a
-       grantable connector — it keeps the Viewer baseline (issue #739). */
-    expect((await post("mcp_custom_20260723", ["agent-browser", "viewer", "agent-browser"])).status).toBe(202);
-    /* The same request from an operator-launched root session is granted. */
-    expect((await post("mcp_root_20260727", ["agent-browser"], null)).status).toBe(202);
-    /* A name outside the grant bound is refused, not trimmed. */
-    const ungranted = await post("mcp_ungranted_20260727", ["telegram"], null);
-    expect(ungranted.status).toBe(400);
-    expect(await ungranted.json()).toMatchObject({ error: expect.stringContaining("telegram") });
+    /* An explicit opt-out is honoured on both lanes and still yields Viewer. */
+    expect((await post("mcp_optout_20260723", [])).status).toBe(202);
+    /* A name outside the grant bound is refused, not trimmed — from the
+       operator lane as much as from a delegated one (issue #739). Tranche 1
+       ships that bound empty of connectors, so this covers every configured
+       server, `agent-browser` included. */
+    for (const [attempt, role] of [["mcp_ungranted_delegated_20260727", "builder"], ["mcp_ungranted_root_20260727", null]] as const) {
+      const ungranted = await post(attempt, ["agent-browser"], role);
+      expect(ungranted.status).toBe(400);
+      expect(await ungranted.json()).toMatchObject({ error: expect.stringContaining("agent-browser") });
+      expect(store.spawnReceiptForClientAttempt(attempt)).toBeNull();
+    }
 
     expect(store.spawnReceiptForClientAttempt("mcp_default_20260723")?.launchProfile.mcpServers).toEqual(["viewer"]);
-    expect(store.spawnReceiptForClientAttempt("mcp_custom_20260723")?.launchProfile.mcpServers).toEqual(["viewer"]);
-    expect(store.spawnReceiptForClientAttempt("mcp_root_20260727")?.launchProfile.mcpServers).toEqual(["viewer", "agent-browser"]);
-    expect(store.spawnReceiptForClientAttempt("mcp_ungranted_20260727")).toBeNull();
+    expect(store.spawnReceiptForClientAttempt("mcp_optout_20260723")?.launchProfile.mcpServers).toEqual(["viewer"]);
   } finally {
     if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
     else process.env.LLV_SPAWN_TRANSPORT = previousTransport;

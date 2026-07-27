@@ -359,11 +359,17 @@ export async function resumeConversation(
   }
   const entry = (await (overrides.listFiles ?? listFiles)()).find((item) => item.path === filePath);
   if (!entry) return failure("file is unknown to the viewer", 403);
+  const profile = registry.launchProfileForPath(entry.path);
   const spec = (overrides.resumeSpecFor ?? resumeSpecFor)(entry.root, entry.path, {
     model: entry.launchModel ?? entry.model,
     effort: entry.effort,
-    allowSubagents: registry.launchProfileForPath(entry.path)?.allowSubagents,
-    plugins: registry.launchProfileForPath(entry.path)?.plugins,
+    allowSubagents: profile?.allowSubagents,
+    plugins: profile?.plugins,
+    /* The durable grant travels with the resume (#739). Omitting it silently
+       relaunched the session on the Viewer baseline while the profile went on
+       claiming the grant — durable state and running process disagreeing. The
+       stored list is already origin-bounded when the registry reads it. */
+    mcpServers: profile?.mcpServers,
   });
   if (!spec) return failure("this conversation cannot be resumed", 409);
   try {

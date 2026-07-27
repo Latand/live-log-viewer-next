@@ -28,6 +28,7 @@ import {
 } from "@/lib/accounts/migration/contracts";
 
 import type { AgentEngine } from "./cli";
+import { MCP_GRANT_POLICY, mcpServersForStoredSession, type McpGrantPolicy } from "./mcpAllowlist";
 import { liveAccountConversationIds, type AccountLivenessOptions } from "./accountLiveness";
 import { loadSpawnNestingPolicy } from "./nestingPolicy";
 import {
@@ -2240,6 +2241,44 @@ function normalizeSpawnRejection(value: SpawnRejection | null | undefined): Spaw
   };
 }
 
+/**
+ * Re-decides every stored MCP grant from the conversation's durable origin as
+ * the registry is read (#739).
+ *
+ * `emptyLaunchProfile` already applies the global bound to each profile, but a
+ * bound alone cannot tell an operator root apart from a delegated worker: a
+ * delegated session that edits this file by hand to name a server the Viewer
+ * *can* grant would otherwise have it honoured by attach, resume and structured
+ * host adoption, all of which read these profiles straight off disk. Doing it
+ * here means no reader has to remember to.
+ */
+export function reboundStoredMcpGrants(file: RegistryFile, policy: McpGrantPolicy = MCP_GRANT_POLICY): RegistryFile {
+  const isBaseline = (names: readonly string[]) => names.length === 1 && names[0] === "viewer";
+  for (const conversation of Object.values(file.conversations)) {
+    for (const generation of conversation.generations) {
+      const stored = generation.launchProfile.mcpServers;
+      /* Every read walks this, so the overwhelmingly common baseline profile
+         skips the resolver and its allocation; only a profile claiming more
+         than the baseline is worth re-deciding. */
+      const granted = isBaseline(stored) ? stored : mcpServersForStoredSession({
+        parentConversationId: generation.launchProfile.parentConversationId,
+        agentRole: conversation.agentRole,
+        delegationDepth: conversation.delegationDepth,
+        requested: stored,
+      }, policy);
+      generation.launchProfile.mcpServers = granted;
+      /* The entry row is the copy structured host adoption reads, and it can be
+         tampered with on its own, so it follows the conversation's decision. */
+      const entry = file.entries[sessionKeyId({ engine: conversation.engine, sessionId: generation.id })];
+      const mirrored = entry?.launchProfile?.mcpServers;
+      if (entry?.launchProfile && (mirrored!.length !== granted.length || mirrored!.some((name, index) => name !== granted[index]))) {
+        entry.launchProfile.mcpServers = [...granted];
+      }
+    }
+  }
+  return file;
+}
+
 function backfillMaterializedSpawnArtifacts(file: RegistryFile): RegistryFile {
   for (const receipt of Object.values(file.receipts)) {
     if (receipt.transport !== "structured"
@@ -2315,7 +2354,7 @@ export function normalizeRegistry(value: unknown): RegistryFile {
   const heldDeliveries = parsed.heldDeliveries && typeof parsed.heldDeliveries === "object"
     ? Object.fromEntries(Object.entries(parsed.heldDeliveries).map(([id, delivery]) => [id, normalizeHeldDelivery(delivery)]))
     : {};
-  return backfillMaterializedSpawnArtifacts({
+  return reboundStoredMcpGrants(backfillMaterializedSpawnArtifacts({
       version: 2,
       entries: Object.fromEntries(Object.entries(parsed.entries).map(([id, entry]) => [id, normalizeEntry(entry)])),
       receipts: Object.fromEntries(Object.entries(parsed.receipts).map(([id, receipt]) => [id, normalizeReceipt(receipt)])),
@@ -2353,7 +2392,7 @@ export function normalizeRegistry(value: unknown): RegistryFile {
         ? parsed.pendingSuccessorCleanups
         : {},
       pendingSupersedence: normalizePendingSupersedence(parsed.pendingSupersedence),
-  });
+  }));
 }
 
 function readFileWithPayload(filename: string): { file: RegistryFile; payload: string | null } {
@@ -3277,6 +3316,24 @@ export class AgentRegistry {
          preset or a lineage parent denies it on resume, successor and restart
          adoption alike, whatever a stored or requested profile claims. */
       if (existingConversation?.agentRole || parentConversationId) profile.plugins = [];
+      /* Same rule for the MCP grant (#739), from the same durable evidence:
+         role preset, lineage parent, recorded delegation depth and — for a
+         genuinely new launch — the request origin. The global bound alone would
+         let a delegated session hand-edit its profile to a server the Viewer
+         CAN grant and keep it across resume; re-resolving the origin here means
+         the grant is re-decided, never replayed. A successor or resume relaunch
+         carries the conversation's own identity, so its `successor` origin must
+         not be mistaken for a fresh delegation signal. */
+      const launchOrigin = (input.purpose ?? "launch") === "launch" && input.origin && input.origin.kind !== "successor"
+        ? { kind: input.origin.kind }
+        : undefined;
+      profile.mcpServers = mcpServersForStoredSession({
+        origin: launchOrigin,
+        parentConversationId: parentConversationId ?? profile.parentConversationId,
+        agentRole: existingConversation?.agentRole ?? role,
+        delegationDepth: existingConversation?.delegationDepth ?? null,
+        requested: profile.mcpServers,
+      });
       if (existingConversation && existingConversation.engine !== input.engine) {
         throw new Error("spawn conversation ownership is invalid");
       }

@@ -22,16 +22,22 @@
  * orchestration surface the board itself depends on, not a grant.
  */
 
-import type { SessionOrigin } from "./pluginAllowlist";
+import { sessionOriginFor, type SessionOrigin, type SessionOriginInput } from "./pluginAllowlist";
 
 /** The always-on baseline. A spawn that selects nothing gets exactly this. */
 export const DEFAULT_SPAWN_MCP_SERVERS: readonly string[] = Object.freeze(["viewer"]);
 
 /** Outer bound of the mechanism: the only MCP servers the Viewer can grant at
     all. Everything else the operator has configured stays off for every
-    session, whoever asks. Personal connectors — a Telegram account, a mail
-    box — join this list only once they exist and only deliberately. */
-export const GRANTABLE_MCP_SERVERS: readonly string[] = Object.freeze(["viewer", "agent-browser"]);
+    session, whoever asks.
+
+    Tranche 1 deliberately ships this bound EMPTY of connectors — `viewer` is
+    the baseline every session holds, not a grant. No MCP server can be enabled
+    for any session until a connector is added here, which is what tranche 2
+    does for `telegram`. Adding a name here grants it to the operator-root
+    session class by default, so a name belongs here only once its credential
+    boundary and revocation path exist. */
+export const GRANTABLE_MCP_SERVERS: readonly string[] = Object.freeze(["viewer"]);
 
 /** What an operator-launched root session receives when it does not opt out.
     The operator's own root conversation is the session class the grantable
@@ -42,6 +48,28 @@ export const OPERATOR_ROOT_MCP_SERVERS: readonly string[] = Object.freeze([...GR
     receives: the baseline and nothing more. A delegated launch that asks for a
     connector is not an error — the grant simply is not its to take. */
 export const DELEGATED_MCP_SERVERS: readonly string[] = Object.freeze([...DEFAULT_SPAWN_MCP_SERVERS]);
+
+/**
+ * The bound plus its per-origin defaults, as one value.
+ *
+ * Every function here takes it as an optional last argument that defaults to
+ * {@link MCP_GRANT_POLICY}; no production call site passes one. The seam exists
+ * so the origin rules can be exercised against a policy that actually has a
+ * grantable connector while the shipped bound has none — otherwise "delegated
+ * cannot obtain a connector" would be proven only by there being nothing to
+ * obtain, and would silently stop being proven the day tranche 2 lands.
+ */
+export interface McpGrantPolicy {
+  readonly grantable: readonly string[];
+  readonly operatorRoot: readonly string[];
+  readonly delegated: readonly string[];
+}
+
+export const MCP_GRANT_POLICY: McpGrantPolicy = Object.freeze({
+  grantable: GRANTABLE_MCP_SERVERS,
+  operatorRoot: OPERATOR_ROOT_MCP_SERVERS,
+  delegated: DELEGATED_MCP_SERVERS,
+});
 
 export type SpawnMcpServersResult =
   | { ok: true; value: string[] }
@@ -65,22 +93,22 @@ function withViewer(names: readonly string[]): string[] {
  * rejected with the bound spelled out, rather than silently dropped, so a
  * caller cannot believe it received a surface it did not get.
  */
-export function normalizeSpawnMcpServers(value: unknown): SpawnMcpServersResult {
+export function normalizeSpawnMcpServers(value: unknown, policy: McpGrantPolicy = MCP_GRANT_POLICY): SpawnMcpServersResult {
   if (value === undefined) return { ok: true, value: [...DEFAULT_SPAWN_MCP_SERVERS] };
   if (!Array.isArray(value) || !value.every((name) => typeof name === "string" && MCP_SERVER_NAME.test(name))) {
     return { ok: false, error: "mcpServers must be an array of non-empty server names" };
   }
   const names = value as string[];
-  const ungranted = names.filter((name) => !GRANTABLE_MCP_SERVERS.includes(name));
+  const ungranted = names.filter((name) => !policy.grantable.includes(name));
   if (ungranted.length > 0) {
-    return { ok: false, error: `mcpServers may only contain ${GRANTABLE_MCP_SERVERS.join(", ")}; rejected: ${[...new Set(ungranted)].join(", ")}` };
+    return { ok: false, error: `mcpServers may only contain ${policy.grantable.join(", ")}; rejected: ${[...new Set(ungranted)].join(", ")}` };
   }
   return { ok: true, value: withViewer(names) };
 }
 
 /** Policy default for a session class, before any request narrows it. */
-export function defaultMcpServersForOrigin(origin: SessionOrigin): readonly string[] {
-  return origin === "operator-root" ? OPERATOR_ROOT_MCP_SERVERS : DELEGATED_MCP_SERVERS;
+export function defaultMcpServersForOrigin(origin: SessionOrigin, policy: McpGrantPolicy = MCP_GRANT_POLICY): readonly string[] {
+  return origin === "operator-root" ? policy.operatorRoot : policy.delegated;
 }
 
 /**
@@ -93,18 +121,37 @@ export function mcpServersForSession(input: {
   origin: SessionOrigin;
   /** `null`/absent means the request said nothing and policy decides. */
   requested?: readonly string[] | null;
-}): string[] {
-  const policy = defaultMcpServersForOrigin(input.origin);
+}, policy: McpGrantPolicy = MCP_GRANT_POLICY): string[] {
+  const allowed = defaultMcpServersForOrigin(input.origin, policy);
   const granted = input.requested == null
-    ? policy
-    : policy.filter((name) => input.requested!.includes(name));
-  return withViewer(granted.filter((name) => GRANTABLE_MCP_SERVERS.includes(name)));
+    ? allowed
+    : allowed.filter((name) => input.requested!.includes(name));
+  return withViewer(granted.filter((name) => policy.grantable.includes(name)));
 }
 
-/** Re-validates a stored allowlist on the way into an engine's enable table.
-    Launch profiles are durable and can be edited by hand, so the bound is
-    enforced again at the point of use rather than trusted from storage. */
-export function grantedMcpServers(value: readonly string[] | undefined | null): string[] {
+/**
+ * The same resolution for a list coming back OUT of durable storage, where the
+ * session's origin is whatever its record says it is rather than a live
+ * request. The global bound alone is not enough here: without the origin, a
+ * delegated session that hand-edits its own profile to name a server the
+ * Viewer *can* grant would have it honoured on the next resume, attach or
+ * structured recovery. Fail-closed by construction — {@link sessionOriginFor}
+ * reads anything but a clean operator root as delegated.
+ */
+export function mcpServersForStoredSession(
+  input: SessionOriginInput & { requested?: readonly string[] | null },
+  policy: McpGrantPolicy = MCP_GRANT_POLICY,
+): string[] {
+  return mcpServersForSession({ origin: sessionOriginFor(input), requested: input.requested }, policy);
+}
+
+/** Last line of the bound, where an engine's enable table is materialized: the
+    global grantable set, applied again to whatever the caller was handed. The
+    ORIGIN bound belongs upstream of this — {@link mcpServersForStoredSession}
+    at the storage boundary — because an engine builder holds a list, not a
+    session record. Keeping both means a tampered profile has to defeat the
+    origin rule and the bound. */
+export function grantedMcpServers(value: readonly string[] | undefined | null, policy: McpGrantPolicy = MCP_GRANT_POLICY): string[] {
   if (!Array.isArray(value)) return [...DEFAULT_SPAWN_MCP_SERVERS];
-  return withViewer(value.filter((name) => typeof name === "string" && GRANTABLE_MCP_SERVERS.includes(name)));
+  return withViewer(value.filter((name) => typeof name === "string" && policy.grantable.includes(name)));
 }

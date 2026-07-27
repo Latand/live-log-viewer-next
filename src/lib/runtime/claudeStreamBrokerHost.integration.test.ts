@@ -446,21 +446,19 @@ test.skipIf(!mcpCustomHome)("real Claude custom MCP policy force-includes Viewer
       "spawn-settings",
       `${profileId}.json`,
     ), "utf8")) as { enabledMcpjsonServers: string[]; disabledMcpjsonServers: string[] };
-    expect(freshMcpConfig.mcpServers["agent-browser"]).toMatchObject({
-      env: { PROJECT_AUTH: "preserved" },
-      timeout: 120_000,
-      alwaysLoad: true,
-    });
-    expect(freshMcpConfig.mcpServers).not.toHaveProperty("project-unrelated");
-    expect(freshSettings.enabledMcpjsonServers).toEqual(["agent-browser"]);
-    expect(freshSettings.disabledMcpjsonServers).toEqual(["project-unrelated"]);
+    /* The allowlist names a project-scoped server; the grant bound admits none,
+       so the exclusive config carries Viewer alone and the optional server's
+       process is never started (#739). */
+    expect(Object.keys(freshMcpConfig.mcpServers)).toEqual(["viewer"]);
+    expect(freshSettings.enabledMcpjsonServers ?? []).not.toContain("agent-browser");
+    expect(freshSettings.disabledMcpjsonServers ?? []).toContain("project-unrelated");
     await exerciseClaudeTool(fresh, {
-      name: "mcp__agent-browser__get_pipeline",
-      request: `Call the exact native tool mcp__agent-browser__get_pipeline with clientRequestId "claude-custom-fresh" and pipelineId "${fixture.pipelineId}". Do not use mcp__viewer__get_pipeline or shell execution. Reply after the successful result.`,
+      name: "mcp__viewer__get_pipeline",
+      request: `Call the exact native tool mcp__viewer__get_pipeline with clientRequestId "claude-custom-fresh" and pipelineId "${fixture.pipelineId}". Shell execution is prohibited. Reply after the successful result.`,
       expectedResult: fixture.pipelineId,
     });
     expect(fs.existsSync(fixture.viewerPidPath)).toBeTrue();
-    expect(fs.existsSync(fixture.optionalPidPath)).toBeTrue();
+    expect(fs.existsSync(fixture.optionalPidPath)).toBeFalse();
     expect(fs.existsSync(fixture.unrelatedPath)).toBeFalse();
     const sessionId = fresh.identity.sessionId;
     const cursor = (await fresh.health()).eventCursor;
@@ -468,33 +466,25 @@ test.skipIf(!mcpCustomHome)("real Claude custom MCP policy force-includes Viewer
     if (!freshPid) throw new Error("fresh Claude host pid is unavailable");
     const freshProcesses = processTree(freshPid);
     addRecordedProcess(freshProcesses, fixture.viewerPidPath);
-    addRecordedProcess(freshProcesses, fixture.optionalPidPath);
     await fresh.release();
     fresh = null;
     await expectProcessesReaped(freshProcesses);
 
     fs.rmSync(fixture.viewerPidPath);
-    fs.rmSync(fixture.optionalPidPath);
     adopted = await ClaudeStreamBrokerHost.adopt(sessionId, { ...options, initialEventCursor: cursor });
-    await exerciseClaudeTool(adopted, {
-      name: "mcp__agent-browser__get_pipeline",
-      request: `Call the exact native tool mcp__agent-browser__get_pipeline with clientRequestId "claude-adopted" and pipelineId "${fixture.pipelineId}". Do not use mcp__viewer__get_pipeline or shell execution. Reply after the successful result.`,
-      expectedResult: fixture.pipelineId,
-    });
     await exerciseClaudeTool(adopted, {
       name: "mcp__viewer__get_pipeline",
       request: `Call the exact native tool mcp__viewer__get_pipeline with clientRequestId "claude-adopted-viewer" and pipelineId "${fixture.pipelineId}". Shell execution is prohibited. Reply after the successful result.`,
       expectedResult: fixture.pipelineId,
     });
     expect(fs.existsSync(fixture.viewerPidPath)).toBeTrue();
-    expect(fs.existsSync(fixture.optionalPidPath)).toBeTrue();
+    expect(fs.existsSync(fixture.optionalPidPath)).toBeFalse();
     expect(fs.existsSync(fixture.unrelatedPath)).toBeFalse();
     expect(fs.existsSync(fixture.hookPath)).toBeTrue();
     const adoptedPid = (await adopted.health()).pid;
     if (!adoptedPid) throw new Error("adopted Claude host pid is unavailable");
     const adoptedProcesses = processTree(adoptedPid);
     addRecordedProcess(adoptedProcesses, fixture.viewerPidPath);
-    addRecordedProcess(adoptedProcesses, fixture.optionalPidPath);
     await adopted.release();
     adopted = null;
     await expectProcessesReaped(adoptedProcesses);
