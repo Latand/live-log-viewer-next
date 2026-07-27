@@ -2,33 +2,76 @@
 
 import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 
-import { setVoiceConnected } from "@/lib/audio/app";
-import { codexRealtimeClient } from "@/lib/realtime/codexRealtimeClient";
+import { setVoiceConnected, setVoiceSpeaking } from "@/lib/audio/app";
+import type { Speaker } from "@/lib/audio/ambientLoop";
+import { speakingFromLines } from "@/lib/audio/speech";
+import { codexRealtimeClient, type CodexRealtimeSnapshot } from "@/lib/realtime/codexRealtimeClient";
 import type { RuntimeVoiceDelivery } from "@/lib/runtime/voiceDelivery";
 
 const IDLE = { phase: "idle" as const, lines: [], error: null, startedAt: null, micMuted: false, outputMuted: false };
 
 /**
- * One mounted realtime surface's lease on "a call is up".
+ * The part of the realtime client this hook consumes.
  *
- * The lease is per MOUNT, not per conversation: several conversation cards can
- * have composers mounted at once, and the operator switches between them
- * constantly. Each mount releases only its own lease, so a switch that mounts
- * the next card before unmounting the last one never lets the count reach zero
- * — which is what keeps the background music from restarting, duplicating or
- * dropping when the selected card changes.
+ * Named so the store can be swapped for one with no WebRTC under it, which is
+ * the only way to drive the transcript-fed behaviours below — ducking above all
+ * — through the REAL hook rather than a copy of it in a test.
+ */
+export interface RealtimeSurface {
+  subscribe(listener: () => void): () => void;
+  getSnapshot(): CodexRealtimeSnapshot;
+  micStream(): MediaStream | null;
+  toggleMic(): void;
+  toggleOutput(): void;
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  updateWorkerProgress(turnId: string, progress: string, running: boolean): void;
+  reconcileWorkerDeliveries(deliveries: readonly RuntimeVoiceDelivery[]): void;
+}
+
+let clientFactory: (conversationId: string) => RealtimeSurface = codexRealtimeClient;
+
+/** Test seam: `null` restores the real client. */
+export function configureRealtimeClientForTests(factory: ((conversationId: string) => RealtimeSurface) | null): void {
+  clientFactory = factory ?? codexRealtimeClient;
+}
+
+/**
+ * One mounted realtime surface's lease on the background music: whether a call
+ * is up, and who is talking in it.
  *
- * What the music then DOES with that signal is the audio module's business: with
+ * Both are per MOUNT, not per conversation, because several conversation cards
+ * can have composers mounted at once. A mount speaks only for itself: it
+ * releases only its own lease and clears only its own duck, so the card the
+ * operator is not looking at can neither end the call nor let the music back up
+ * over the voice in the one they are.
+ *
+ * Card switching is the case that decides the shape here. The focused card is a
+ * keyed element, so React destroys the outgoing card's effects before creating
+ * the incoming one's — the lease count legitimately passes through zero inside
+ * one commit. `setVoiceConnected` settles that at the end of the tick rather
+ * than acting on the instant, which is what keeps a swipe from restarting the
+ * music.
+ *
+ * What the music then DOES with the signals is the audio module's business: with
  * music enabled on both sides of the call boundary this hook's edges change
  * nothing audible at all.
  */
-export function useAmbientCallLease(live: boolean): void {
+export function useAmbientCallLease(live: boolean, speaking: Speaker | null = null): void {
   const owner = useRef(Symbol("realtime-ambient-owner"));
   useEffect(() => {
     const held = owner.current;
     setVoiceConnected(held, live);
     return () => setVoiceConnected(held, false);
   }, [live]);
+  useEffect(() => {
+    const held = owner.current;
+    /* Nobody is talking in a call that is not up — a call dropping mid-sentence
+       leaves a non-final line behind for good, and the music must not stay held
+       down under a voice that is gone. */
+    setVoiceSpeaking(held, live ? speaking : null);
+    return () => setVoiceSpeaking(held, null);
+  }, [live, speaking]);
 }
 
 export function useCodexRealtime(
@@ -40,7 +83,7 @@ export function useCodexRealtime(
   workerDeliveries: readonly RuntimeVoiceDelivery[],
 ) {
   const client = useMemo(
-    () => enabled && conversationId.startsWith("conversation_") ? codexRealtimeClient(conversationId) : null,
+    () => enabled && conversationId.startsWith("conversation_") ? clientFactory(conversationId) : null,
     [conversationId, enabled],
   );
   const snapshot = useSyncExternalStore(
@@ -56,10 +99,12 @@ export function useCodexRealtime(
     client?.reconcileWorkerDeliveries(workerDeliveries);
   }, [client, snapshot.phase, workerDeliveries]);
 
-  /* Which side of the call boundary the background music is on. `live` is the
-     only phase with two participants who can talk; connecting, stopping and
-     error are not a call. */
-  useAmbientCallLease(snapshot.phase === "live");
+  /* Which side of the call boundary the background music is on, and who has the
+     floor. `live` is the only phase with two participants who can talk;
+     connecting, stopping and error are not a call. Speech is read off the
+     transcript this call already produces — no analyser node, no second event
+     path — and the music ducks under it. */
+  useAmbientCallLease(snapshot.phase === "live", speakingFromLines(snapshot.lines));
 
   return {
     ...snapshot,

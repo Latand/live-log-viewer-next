@@ -73,7 +73,7 @@ describe("no audio graph", () => {
     expect(() => ensureAmbientLoop()).not.toThrow();
   });
 
-  test("one card cannot disconnect the ambient bed owned by another live call", () => {
+  test("one card cannot disconnect the ambient bed owned by another live call", async () => {
     const store = new Map<string, string>();
     configureAudioPrefsStorage({
       getItem: (key) => store.get(key) ?? null,
@@ -87,7 +87,11 @@ describe("no audio graph", () => {
 
     expect(ambientLoop().wanted()).toBe(true);
 
+    /* The last lease going away settles at the end of the tick, so a keyed card
+       swap — cleanup then mount, one commit — is never mistaken for a hangup. */
     setVoiceConnected("live-call", false);
+    expect(ambientLoop().wanted()).toBe(true);
+    await Promise.resolve();
     expect(ambientLoop().wanted()).toBe(false);
   });
 });
@@ -113,6 +117,8 @@ describe("ownership across conversation cards", () => {
             pauses.push(seconds);
             return 12;
           },
+          /* The fade has long finished by the time anything asks. */
+          resume: () => false,
           stop: (seconds) => void stops.push(seconds),
         };
         return handle;
@@ -130,7 +136,7 @@ describe("ownership across conversation cards", () => {
     resetAppAudioForTests();
   }
 
-  test("switching the selected card hands the lease over without touching the track", () => {
+  test("switching the selected card hands the lease over without touching the track", async () => {
     device();
     const sink = fakeTransport();
     configureAmbientTransportForTests(sink.transport);
@@ -139,10 +145,11 @@ describe("ownership across conversation cards", () => {
     setVoiceConnected("card-a", true);
     expect(sink.starts).toHaveLength(1);
 
-    /* The operator opens another card: its composer mounts and takes its own
-       lease before the first one lets go, exactly as React orders the effects. */
-    setVoiceConnected("card-b", true);
+    /* A keyed card replacement, in the order React actually runs it: the old
+       card's cleanup FIRST, the new card's mount second. */
     setVoiceConnected("card-a", false);
+    setVoiceConnected("card-b", true);
+    await Promise.resolve();
 
     /* One track throughout — no restart, no duplicate, nothing dropped. */
     expect(sink.starts).toHaveLength(1);
@@ -152,10 +159,11 @@ describe("ownership across conversation cards", () => {
 
     /* And the last card leaving is still what ends the call side of it. */
     setVoiceConnected("card-b", false);
+    await Promise.resolve();
     expect(sink.pauses).toEqual([FADE_OUT_SECONDS]);
   });
 
-  test("with music in the Viewer on, a card switch is not even a boundary", () => {
+  test("with music in the Viewer on, a card switch is not even a boundary", async () => {
     device();
     const sink = fakeTransport();
     configureAmbientTransportForTests(sink.transport);
@@ -164,9 +172,10 @@ describe("ownership across conversation cards", () => {
 
     expect(sink.starts).toHaveLength(1);
     setVoiceConnected("card-a", true);
-    setVoiceConnected("card-b", true);
     setVoiceConnected("card-a", false);
+    setVoiceConnected("card-b", true);
     setVoiceConnected("card-b", false);
+    await Promise.resolve();
 
     /* The music started before the first call and is still the same track after
        the last one ended. */

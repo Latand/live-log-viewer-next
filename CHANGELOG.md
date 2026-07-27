@@ -99,10 +99,18 @@ versions follow [SemVer](https://semver.org/) (0.x — the API may still move).
   call as before. With only one on, the edge that silences the music parks it —
   the voice fades out and the position it reached is retained, so the edge that
   brings it back resumes from there instead of replaying the same opening on
-  every call. Only a device that wants no music at all (the sound master off,
-  both switches off, no asset) tears the track down. Ambient ownership across
-  conversation cards is unchanged: the lease is per mounted composer, so
-  switching the selected card never restarts, duplicates or drops the track.
+  every call — and the parked voice stays alive for its whole fade, so a call
+  that ends inside it returns to that very voice instead of stacking a second
+  one over the music still sounding. Only a device that wants no music at all
+  (the sound master off, both switches off, no asset) tears the track down. The
+  music ducks under whoever is talking, read off the transcript the call already
+  produces, with the duck owned per mounted composer so a card nobody is
+  speaking in cannot let the music back up over the one they are. Ambient
+  ownership across conversation cards holds through a keyed card switch: React
+  destroys the outgoing card's effects before creating the incoming one's, so
+  the last lease going away is settled at the end of the tick rather than on the
+  instant — a swipe between conversations never restarts, duplicates or drops
+  the track.
 - On-canvas pipeline stage reordering (#507). A draft's stage cards carry their
   own move-earlier / move-later controls, so the whole conversation graph is
   composed in place on the canvas — no nested form. Each move is offered only

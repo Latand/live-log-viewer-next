@@ -21,10 +21,12 @@ import type { AudioPrefs } from "./prefs";
  *   answer never changes at the call edge, so the same track simply keeps
  *   playing across it — no teardown, no re-init, no position reset;
  * - with only one of them on, the edge that silences the music PARKS it: the
- *   voice fades out and the position it reached is retained, so the edge that
- *   brings it back resumes from there rather than replaying the opening. Only a
- *   device that wants no music at all (master off, both switches off, no asset)
- *   tears the track down and forgets where it was;
+ *   voice fades out and the position that fade ENDS on is retained, so the edge
+ *   that brings it back resumes from there rather than replaying the opening —
+ *   or, if the boundary reverses while the parked voice is still fading, returns
+ *   to that very voice instead of stacking a second one over it. Only a device
+ *   that wants no music at all (master off, both switches off, no asset) tears
+ *   the track down and forgets where it was;
  * - it fades. Becoming audible ramps up over {@link FADE_IN_SECONDS}; becoming
  *   silent ramps down over {@link FADE_OUT_SECONDS} and only then releases the
  *   voice. A hard cut on either edge reads as a fault;
@@ -64,10 +66,17 @@ export interface LoopVoiceHandle {
   /** Ramp the loop gain to `gain` over `seconds`. Always a ramp, never a set. */
   rampTo(gain: number, seconds: number): void;
   /**
-   * Fade out over `seconds`, release the voice, and answer the position the
-   * track had reached — what a later {@link LoopTransport.start} resumes from.
+   * Fade out over `seconds` and park the voice, answering the position the track
+   * will have reached when that fade ENDS — what {@link LoopTransport.start}
+   * resumes from. The voice stays audible for the whole fade.
    */
   pause(seconds: number): number;
+  /**
+   * Take a park back. `true` when the voice is still alive and is now playing
+   * again (the caller ramps it up); `false` when the park already completed and
+   * the caller must start a fresh voice at the retained position.
+   */
+  resume(): boolean;
   /** Fade out over `seconds`, then stop. Never an abrupt cut. */
   stop(seconds: number): void;
 }
@@ -141,7 +150,10 @@ export function createAmbientLoop(options: AmbientLoopOptions): AmbientLoop {
   const cancel = options.cancel ?? ((handle: number) => clearTimeout(handle));
 
   let voice: LoopVoiceHandle | null = null;
-  /** Where a parked track resumes: the position it had when it was paused. */
+  /** The voice fading out under a park. Still alive, and still the right one to
+      come back to if the boundary reverses before its fade has run. */
+  let parked: LoopVoiceHandle | null = null;
+  /** Where a parked track resumes: the position its fade-out ends on. */
   let resumeAt = 0;
   let connected = false;
   let speaking: Speaker | null = null;
@@ -176,19 +188,33 @@ export function createAmbientLoop(options: AmbientLoopOptions): AmbientLoop {
       if (voice) {
         /* Parked, not destroyed, while the other switch still wants this track:
            the position is what makes the return leg a continuation. */
-        if (armed()) resumeAt = voice.pause(FADE_OUT_SECONDS);
-        else {
+        if (armed()) {
+          resumeAt = voice.pause(FADE_OUT_SECONDS);
+          parked = voice;
+        } else {
           voice.stop(FADE_OUT_SECONDS);
+          parked = null;
           resumeAt = 0;
         }
         voice = null;
       } else if (!armed()) {
         /* Nothing wants music any more, so there is nothing to come back to. */
+        parked = null;
         resumeAt = 0;
       }
       return;
     }
     if (!voice) {
+      /* A boundary reversed inside the fade: the parked voice is still sounding,
+         so it is the one to come back to. Opening a second one over it would
+         double the music and flam against itself. */
+      if (parked?.resume()) {
+        voice = parked;
+        parked = null;
+        voice.rampTo(targetGain(), FADE_IN_SECONDS);
+        return;
+      }
+      parked = null;
       /* Starts silent: the fade-in is the whole point of the first ramp. A
          `null` here is the autoplay policy still holding — nothing throws, and
          the next `refresh()` after the unlocking gesture starts the bed. */

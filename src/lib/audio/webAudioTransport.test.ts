@@ -106,9 +106,41 @@ function okFetch(): typeof fetch {
   return (async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(8) })) as unknown as typeof fetch;
 }
 
+/**
+ * A clock the test advances by hand.
+ *
+ * The park is the one thing here that spans real time — the node has to stay
+ * alive and audible for the whole fade — so the test drives it rather than
+ * waiting for it.
+ */
+function fakeClock() {
+  const pending = new Map<number, { run: () => void; ms: number }>();
+  let sequence = 0;
+  return {
+    timers: {
+      schedule(run: () => void, ms: number) {
+        pending.set(++sequence, { run, ms });
+        return sequence;
+      },
+      cancel(handle: number) {
+        pending.delete(handle);
+      },
+    },
+    pending: () => pending.size,
+    delays: () => [...pending.values()].map((timer) => timer.ms),
+    /** Fire everything due, as the clock would. */
+    run() {
+      for (const [handle, timer] of [...pending]) {
+        pending.delete(handle);
+        timer.run();
+      }
+    },
+  };
+}
+
 /** Decode is async; a start attempt kicks it and the next one succeeds. */
-async function warmed(context: AudioContextLike, src: string) {
-  const transports = createWebAudioTransports(() => context, okFetch());
+async function warmed(context: AudioContextLike, src: string, clock = fakeClock()) {
+  const transports = createWebAudioTransports(() => context, okFetch(), clock.timers);
   transports.warm([src]);
   await Promise.resolve();
   await Promise.resolve();
@@ -161,58 +193,126 @@ describe("the ambient bed loops without a seam", () => {
 });
 
 describe("parking the bed keeps its place in the track", () => {
-  test("pausing fades out, releases the node, and answers where the track had got to", async () => {
+  test("the retained position is where the fade ENDS, because the bed plays through it", async () => {
     const context = fakeContext();
-    const transports = await warmed(context, LOOP);
+    const clock = fakeClock();
+    const transports = await warmed(context, LOOP, clock);
     const voice = transports.loop.start({ src: LOOP, gain: 0.12 })!;
 
     context.currentTime = 17;
     const at = voice.pause(1.5);
 
-    /* Seven seconds of playback since the start, so seven seconds in. */
-    expect(at).toBeCloseTo(7, 6);
+    /* Seven seconds played before the park was asked for, and the bed is
+       audible for the whole 1.5s fade — so it reaches 8.5s, not 7s. Retaining
+       the position the fade STARTED at would replay that second and a half. */
+    expect(at).toBeCloseTo(8.5, 6);
     expect(context.gains[0].gain.ramps.at(-1)).toEqual({ value: 0, when: 18.5 });
-    expect(context.sources[0].stopped[0]).toBeGreaterThan(18.5);
   });
 
-  test("resuming starts the same buffer at the retained offset", async () => {
+  test("the node is released when the fade finishes, never during it", async () => {
     const context = fakeContext();
-    const transports = await warmed(context, LOOP);
+    const clock = fakeClock();
+    const transports = await warmed(context, LOOP, clock);
+    const voice = transports.loop.start({ src: LOOP, gain: 0.12 })!;
+
+    context.currentTime = 17;
+    voice.pause(1.5);
+
+    /* Mid-fade: still playing, still audible, nothing cut. */
+    expect(context.sources[0].stopped).toEqual([]);
+    expect(clock.delays()).toEqual([1500]);
+
+    context.currentTime = 18.5;
+    clock.run();
+    expect(context.sources[0].stopped).toHaveLength(1);
+  });
+
+  test("resuming after the park starts the same buffer exactly where the fade left off", async () => {
+    const context = fakeContext();
+    const clock = fakeClock();
+    const transports = await warmed(context, LOOP, clock);
     const first = transports.loop.start({ src: LOOP, gain: 0 })!;
     context.currentTime = 17;
     const at = first.pause(1.5);
+    context.currentTime = 18.5;
+    clock.run();
 
     transports.loop.start({ src: LOOP, gain: 0, offsetSeconds: at });
 
-    /* The resumed pass opens where the parked one stopped, not at the top. */
-    expect(context.sources[1].offsets[0]).toBeCloseTo(7, 6);
+    /* The resumed pass opens on the sample after the last audible one. */
+    expect(context.sources[1].offsets[0]).toBeCloseTo(8.5, 6);
     expect(context.sources[1].loop).toBe(true);
     expect(context.sources[1].buffer).toBe(context.sources[0].buffer);
   });
 
   test("a retained position past the end of the track wraps, it does not overrun", async () => {
     const context = fakeContext();
-    const transports = await warmed(context, LOOP);
+    const clock = fakeClock();
+    const transports = await warmed(context, LOOP, clock);
     const duration = 26.666;
 
     const voice = transports.loop.start({ src: LOOP, gain: 0, offsetSeconds: duration - 1 })!;
     context.currentTime = 15;
 
-    /* Five seconds later the loop has wrapped: four seconds past the top. */
-    expect(voice.pause(1.5)).toBeCloseTo(4, 3);
+    /* Five seconds of playback plus a 1.5s fade from one second before the end:
+       5.5s past the top, wrapped. */
+    expect(voice.pause(1.5)).toBeCloseTo(5.5, 3);
     expect(context.sources[0].offsets[0]).toBeCloseTo(duration - 1, 6);
   });
 
-  test("a parked bed ignores later level changes, exactly as a stopped one does", async () => {
+  test("a call that ends inside the fade returns to the SAME voice, never a second one", async () => {
     const context = fakeContext();
-    const transports = await warmed(context, LOOP);
+    const clock = fakeClock();
+    const transports = await warmed(context, LOOP, clock);
     const voice = transports.loop.start({ src: LOOP, gain: 0.12 })!;
 
+    context.currentTime = 17;
     voice.pause(1.5);
+    /* The operator hangs up 200ms into the fade. The parked node is still
+       audible; starting another one here would double the music and flam. */
+    context.currentTime = 17.2;
+    expect(voice.resume()).toBe(true);
+    voice.rampTo(0.12, 2.5);
+
+    expect(context.sources).toHaveLength(1);
+    expect(context.sources[0].stopped).toEqual([]);
+    /* The park was called off, so nothing is left to kill the revived voice. */
+    expect(clock.pending()).toBe(0);
+    expect(context.gains[0].gain.ramps.at(-1)).toEqual({ value: 0.12, when: 19.7 });
+  });
+
+  test("once the park has completed the voice is gone, and says so", async () => {
+    const context = fakeContext();
+    const clock = fakeClock();
+    const transports = await warmed(context, LOOP, clock);
+    const voice = transports.loop.start({ src: LOOP, gain: 0.12 })!;
+
+    context.currentTime = 17;
+    voice.pause(1.5);
+    context.currentTime = 18.5;
+    clock.run();
+
+    /* The caller must start a fresh voice at the retained offset instead. */
+    expect(voice.resume()).toBe(false);
     const after = context.gains[0].gain.ramps.length;
     voice.rampTo(0.5, 1);
-
     expect(context.gains[0].gain.ramps).toHaveLength(after);
+  });
+
+  test("tearing down during a park kills the node instead of leaving it running", async () => {
+    const context = fakeContext();
+    const clock = fakeClock();
+    const transports = await warmed(context, LOOP, clock);
+    const voice = transports.loop.start({ src: LOOP, gain: 0.12 })!;
+
+    context.currentTime = 17;
+    voice.pause(1.5);
+    voice.stop(1.5);
+
+    expect(context.sources[0].stopped).toHaveLength(1);
+    /* And the park timer is not left behind to fire at a dead node. */
+    expect(clock.pending()).toBe(0);
+    expect(voice.resume()).toBe(false);
   });
 });
 

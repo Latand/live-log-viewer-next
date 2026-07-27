@@ -76,6 +76,26 @@ export interface AudioContextLike {
   decodeAudioData(data: ArrayBuffer): Promise<AudioBufferLike>;
 }
 
+/**
+ * The one thing here that has to happen LATER: releasing a parked node.
+ *
+ * A park stays audible for its whole fade, so the node may only be stopped once
+ * the fade has run — and a call that ends inside that window has to be able to
+ * call the release off and return to the very same voice. An audio-clock
+ * `stop(when)` cannot be taken back, so the release rides an ordinary timer,
+ * which can. Precision does not matter: by the time it fires, the node is
+ * silent.
+ */
+export interface TransportTimers {
+  schedule(run: () => void, ms: number): number;
+  cancel(handle: number): void;
+}
+
+const REAL_TIMERS: TransportTimers = {
+  schedule: (run, ms) => setTimeout(run, ms) as unknown as number,
+  cancel: (handle) => clearTimeout(handle),
+};
+
 export interface WebAudioTransports {
   cues: CueTransport;
   loop: LoopTransport;
@@ -92,6 +112,7 @@ const MIN_RAMP_SECONDS = 0.01;
 export function createWebAudioTransports(
   getContext: () => AudioContextLike | null,
   fetchFn: typeof fetch | null = typeof fetch === "function" ? fetch : null,
+  timers: TransportTimers = REAL_TIMERS,
 ): WebAudioTransports {
   const buffers = new Map<string, AudioBufferLike>();
   /** A source that failed to fetch or decode is never retried: a 404 asset
@@ -204,36 +225,65 @@ export function createWebAudioTransports(
           const offset = duration > 0 ? Math.max(0, request.offsetSeconds ?? 0) % duration : 0;
           const openedAt = context.currentTime;
           source.start(openedAt, offset);
-          let stopped = false;
+          /** The node is gone: nothing can be ramped, resumed or heard again. */
+          let released = false;
+          /** A park in flight — the node is fading but still audible. */
+          let park: number | null = null;
+          /** Where the parked track will be picked up from. */
+          let retained = 0;
           /** How far into the track playback has got, wrapped at the loop. */
-          const position = (): number => {
-            if (duration <= 0) return 0;
-            return (offset + Math.max(0, context.currentTime - openedAt)) % duration;
-          };
-          /** Every release is a fade first; the node dies after it, never during. */
-          const fadeOut = (seconds: number): void => {
-            stopped = true;
-            const fade = Math.max(MIN_RAMP_SECONDS, seconds);
-            ramp(context, gain.gain, 0, fade);
+          const at = (seconds: number): number => (duration > 0 ? seconds % duration : 0);
+          const position = (): number => at(offset + Math.max(0, context.currentTime - openedAt));
+          const release = (): void => {
+            released = true;
+            park = null;
             try {
-              source.stop(context.currentTime + fade + 0.05);
+              source.stop();
             } catch {
               /* already stopped */
             }
           };
+          const cancelPark = (): void => {
+            if (park === null) return;
+            timers.cancel(park);
+            park = null;
+          };
           return {
             rampTo(target, seconds) {
-              if (stopped) return;
+              if (released) return;
               ramp(context, gain.gain, Math.max(0, target), seconds);
             },
             pause(seconds) {
-              const at = position();
-              if (!stopped) fadeOut(seconds);
-              return at;
+              if (released || park !== null) return retained;
+              const fade = Math.max(MIN_RAMP_SECONDS, seconds);
+              /* The bed plays through its whole fade, so the position to come
+                 back to is where the fade ENDS. Retaining where it began would
+                 replay the fade — the same seconds twice, every call. */
+              retained = at(position() + fade);
+              ramp(context, gain.gain, 0, fade);
+              /* And the node lives until then, so a call that ends inside the
+                 fade can take the park back instead of stacking a second voice
+                 on top of one that is still sounding. */
+              park = timers.schedule(release, fade * 1000);
+              return retained;
+            },
+            resume() {
+              if (released) return false;
+              cancelPark();
+              return true;
             },
             stop(seconds) {
-              if (stopped) return;
-              fadeOut(seconds);
+              if (released) return;
+              cancelPark();
+              released = true;
+              const fade = Math.max(MIN_RAMP_SECONDS, seconds);
+              ramp(context, gain.gain, 0, fade);
+              try {
+                /* Stop only AFTER the fade has run to zero. */
+                source.stop(context.currentTime + fade + 0.05);
+              } catch {
+                /* already stopped */
+              }
             },
           };
         } catch {

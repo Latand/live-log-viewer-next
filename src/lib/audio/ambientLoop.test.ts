@@ -27,10 +27,11 @@ type Ramp = { gain: number; seconds: number; voice: number };
  * only ever ramps voice 1, and one that was torn down and re-created ramps
  * voice 2 — indistinguishable by level alone.
  */
-function recorder(options: { refuse?: boolean; position?: () => number } = {}) {
+function recorder(options: { refuse?: boolean; position?: () => number; revive?: boolean } = {}) {
   const starts: { src: string; gain: number; offsetSeconds?: number }[] = [];
   const ramps: Ramp[] = [];
   const pauses: number[] = [];
+  const resumes: number[] = [];
   const stops: number[] = [];
   const transport: LoopTransport = {
     start(request) {
@@ -43,12 +44,19 @@ function recorder(options: { refuse?: boolean; position?: () => number } = {}) {
           pauses.push(seconds);
           return options.position?.() ?? 0;
         },
+        /* Whether the parked voice is still alive. `false` is the ordinary
+           case — the fade finished long ago; `true` models a call that ended
+           inside it. */
+        resume: () => {
+          resumes.push(voice);
+          return options.revive === true;
+        },
         stop: (seconds) => void stops.push(seconds),
       };
       return handle;
     },
   };
-  return { transport, starts, ramps, pauses, stops, last: () => ramps.at(-1) };
+  return { transport, starts, ramps, pauses, resumes, stops, last: () => ramps.at(-1) };
 }
 
 function loop(
@@ -299,6 +307,39 @@ describe("the toggle matrix", () => {
     /* The second call picks the track up where the first one left it. */
     expect(sink.starts[1].offsetSeconds).toBe(9);
     expect(sink.starts[1].gain).toBe(0);
+  });
+
+  test("a boundary reversed inside the fade returns to the parked voice, not a second one", () => {
+    /* The operator hangs up a second after answering. The parked voice is still
+       fading and still audible, so starting another would double the music. */
+    const sink = recorder({ position: () => 12, revive: true });
+    const { bed } = loop(music(true, false), sink);
+
+    bed.refresh();
+    bed.setVoiceConnected(true);
+    expect(sink.pauses).toEqual([FADE_OUT_SECONDS]);
+
+    bed.setVoiceConnected(false);
+
+    expect(sink.resumes).toEqual([1]);
+    expect(sink.starts).toHaveLength(1);
+    expect(bed.state().playing).toBe(true);
+    /* Back up to full on the same voice, no reopening at the retained offset. */
+    expect(sink.last()).toEqual({ gain: loopGain(1), seconds: FADE_IN_SECONDS, voice: 1 });
+  });
+
+  test("a parked voice that has already died is replaced, not revived", () => {
+    const sink = recorder({ position: () => 12, revive: false });
+    const { bed } = loop(music(true, false), sink);
+
+    bed.refresh();
+    bed.setVoiceConnected(true);
+    bed.setVoiceConnected(false);
+
+    /* Asked first, and only then replaced at the position it left. */
+    expect(sink.resumes).toEqual([1]);
+    expect(sink.starts).toHaveLength(2);
+    expect(sink.starts[1].offsetSeconds).toBe(12);
   });
 
   test("off/off — silent everywhere, in a call and out of one", () => {
