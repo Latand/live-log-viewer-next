@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { requireOperatorAuthority } from "@/lib/agent/operatorAuthority";
 import { executeRealtimeControl } from "@/lib/runtime/realtimeControl";
 import { designatedManagerConversationId, realtimeCallerFromRequest } from "@/lib/runtime/realtimeInjection";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
@@ -25,6 +26,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<Record<string
       ? body as Record<string, unknown>
       : {}),
     managerConversationId: designatedManagerConversationId(),
+    /* Opening and closing the call is the operator's own act; an agent presenting its
+       capability is refused by the same primitive that guards designation change. */
+    operator: requireOperatorAuthority(req).ok,
   });
   return NextResponse.json(result.body, { status: result.status });
 }

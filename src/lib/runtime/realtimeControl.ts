@@ -49,7 +49,7 @@ export async function executeRealtimeControl(
      the manager. Defaulted to the operator so every existing caller of this function
      (the browser's own control path, and its tests) keeps its behaviour; the route
      resolves the real caller from the capability header. */
-  authority: { caller?: RealtimeCaller; managerConversationId?: string | null } = {},
+  authority: { caller?: RealtimeCaller; managerConversationId?: string | null; operator?: boolean } = {},
 ): Promise<RealtimeControlResult> {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     return { status: 400, body: { error: "body must be an object" } };
@@ -72,6 +72,7 @@ export async function executeRealtimeControl(
     authority.caller ?? { kind: "anonymous" },
     authority.managerConversationId ?? null,
     host?.currentRealtimeSessionId?.() ?? null,
+    authority.operator ?? false,
   );
   if (!permitted.allowed) {
     return { status: permitted.status, body: { error: permitted.error } };

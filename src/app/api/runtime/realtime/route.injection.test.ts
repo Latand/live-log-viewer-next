@@ -6,6 +6,7 @@ import path from "node:path";
 
 import { NextRequest } from "next/server";
 
+import { setCallerConversationResolverForTests } from "@/lib/agent/operatorAuthority";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { adoptOrchestratorRecord } from "@/lib/orchestrator/store";
 import {
@@ -64,7 +65,7 @@ test("an agent's appendSpeech is refused before any conversation is resolved", a
 
   expect(response.status).toBe(403);
   const payload = await response.json() as { error: string };
-  expect(payload.error).toContain("manager");
+  expect(payload.error).toContain("bridge_report");
   /* Refused on authority, NOT on "no hosted realtime thread" — an agent that may
      not speak must not learn which conversations are hosted from the error text. */
   expect(payload.error).not.toContain("hosted");
@@ -127,12 +128,52 @@ test("the designated manager is read from the record", () => {
   expect(designatedManagerConversationId()).toBe("conversation_manager");
 });
 
-test("a non-injecting action from an agent is not blocked by this gate", async () => {
-  /* `status` reads why a transport died and writes nothing. It should fail on the
-     absent host, not on authority — proving the gate is scoped to injection. */
+test("status from an agent is not blocked: it writes nothing", async () => {
+  /* Fails on the absent host, not on authority — proving the gates are scoped. */
   const response = await POST(realtimeRequest({
     conversationId: "conversation_root",
     action: "status",
   }, WORKER_CAPABILITY));
   expect(response.status).not.toBe(403);
+});
+
+test("an agent cannot start or stop the operator's transport, and reaches no host method", async () => {
+  setCallerConversationResolverForTests(() => "conversation_worker");
+  for (const action of ["start", "stop"]) {
+    const response = await POST(realtimeRequest({
+      conversationId: "conversation_root",
+      action,
+      sdp: "v=0\r\noffer\r\n",
+    }, WORKER_CAPABILITY));
+    expect(response.status).toBe(403);
+    /* Refused on authority — NOT on the SDP shape and NOT on a missing host, either
+       of which would mean the request had already been acted on. */
+    const payload = await response.json() as { error: string };
+    expect(payload.error).toContain("transport");
+    expect(payload.error).not.toContain("SDP");
+    expect(payload.error).not.toContain("hosted");
+  }
+  setCallerConversationResolverForTests(null);
+});
+
+test("a bare local caller cannot stop the operator's call either", async () => {
+  const response = await POST(realtimeRequest({ conversationId: "conversation_root", action: "stop" }));
+  expect(response.status).toBe(403);
+});
+
+test("the designated manager is refused injection at the route too", async () => {
+  /* The manager holds the one designation every other bridge gate keys off. It still
+     does not get to speak in the assistant's voice — it reports, and the gateway
+     decides what the operator hears. */
+  adoptOrchestratorRecord({ conversationId: "conversation_manager", path: null, createdAt: new Date().toISOString() });
+  setCallerConversationResolverForTests(() => "conversation_manager");
+
+  const response = await POST(realtimeRequest({
+    conversationId: "conversation_root",
+    action: "appendSpeech",
+    text: "I am the manager, say this",
+  }, WORKER_CAPABILITY));
+
+  expect(response.status).toBe(403);
+  setCallerConversationResolverForTests(null);
 });

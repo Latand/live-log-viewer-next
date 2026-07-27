@@ -1717,10 +1717,18 @@ export function TmuxComposer({
             return { ...body, status: response.status, ok: response.ok && body.ok === true };
           }));
       const json = await withComposerAdmissionDeadline(admissionRequest, COMPOSER_ADMISSION_DEADLINE_MS);
-      /* #691 §4: the bridge cursor moves only now, once the turn carrying those
-         reports has been durably admitted. A rejected or deadlined send leaves them
-         pending for the next turn rather than losing them. */
-      if (json.ok) bridgeTurn?.commit();
+      /* #691 §4 — the bridge cursor moves only on DURABLE admission.
+         `json.ok` is not that. A structured send answers ok with a receipt that may
+         still be `pending`, which is a message the server has not committed to
+         holding; retiring the reports on that would lose them if it never settles.
+         So the cursor waits for a receipt the outbox itself would call admitted, and
+         for the legacy path — which has no receipt and no queue behind it — an ok
+         response IS the admission. */
+      const durablyAdmitted = json.ok
+        && (json.structured
+          ? Boolean(json.receipt && receiptIsAdmitted(json.receipt.status))
+          : true);
+      if (durablyAdmitted) bridgeTurn?.commit();
       if (!json.ok) {
         if (json.structured && json.receipt) {
           /* Keep the payload readable in the compact receipt for retry and

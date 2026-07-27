@@ -22,26 +22,36 @@ import crypto from "node:crypto";
  * tear down the operator's own WebRTC leg from their own browser, and `status`
  * reports why a transport died; none writes into the conversation.
  *
- * FAILS CLOSED, and that is the point of this module's second revision. Presenting
- * nothing used to read as "the operator's browser", which meant a worker could inject
- * by simply omitting a header — the cheapest possible attack, and the same fail-open
- * shape the MCP grant lane was corrected for. Authority is now a credential the
- * caller HAS:
+ * FAILS CLOSED, and narrowly. Two earlier shapes of this gate were both too wide:
  *
- * - the call's `realtimeSessionId`, minted by the backend during the SDP exchange and
- *   held only by the peer that ran it; or
- * - the spawn capability the registry issued per conversation — the same evidence
- *   `authenticatedAgentSpawnCaller` trusts — matched against the manager's
- *   designation record.
+ * - Presenting NOTHING once read as "the operator's browser", so a worker could
+ *   inject by omitting a header — the cheapest possible attack.
+ * - Then the designated MANAGER was allowed, which moved the hole up a level rather
+ *   than closing it: manager authority is a designation, and whatever can obtain
+ *   that designation inherits the right to speak in the assistant's voice.
  *
- * A role string would not do either: it is stamped on a launch profile and anything
- * launched with it could claim it.
+ * What remains is the narrowest thing that still works: the call's
+ * `realtimeSessionId`, minted by the backend during the SDP exchange and held only
+ * by the peer that ran it. The manager does not need this and never did — its
+ * channel to the operator is `bridge_report`, read and voiced by the gateway, which
+ * is the architecture's own rule that the manager never speaks to the user directly.
  */
 
 /** Actions that write into the user-facing session. */
 export const REALTIME_INJECTION_ACTIONS: readonly string[] = ["appendSpeech", "deliverWorkerResponse"];
 
+/**
+ * Actions that mutate the transport itself.
+ *
+ * Not injection — they put no words in the operator's ear — but an agent that can
+ * `stop` can hang up the operator's call, and one that can `start` can hold the
+ * host's single realtime slot so the operator cannot. Both are the operator's own,
+ * and `start` cannot be authorized by a session id because it is what mints one.
+ */
+export const REALTIME_TRANSPORT_ACTIONS: readonly string[] = ["start", "stop"];
+
 const INJECTION_ACTION_SET: ReadonlySet<string> = new Set(REALTIME_INJECTION_ACTIONS);
+const TRANSPORT_ACTION_SET: ReadonlySet<string> = new Set(REALTIME_TRANSPORT_ACTIONS);
 
 export type RealtimeCaller =
   /**
@@ -70,31 +80,54 @@ export function permitRealtimeAction(
   managerConversationId: string | null,
   /** The session id the host currently holds for this conversation, if any. */
   liveRealtimeSessionId: string | null = null,
+  /** Whether the request carries the operator's own authority (§ transport). */
+  operator = false,
 ): RealtimeInjectionVerdict {
-  if (typeof action !== "string" || !INJECTION_ACTION_SET.has(action)) return { allowed: true };
+  if (typeof action !== "string") return { allowed: true };
+
+  if (TRANSPORT_ACTION_SET.has(action)) {
+    /* The operator opens and closes their own call. `stop` additionally accepts the
+       peer that owns the session — hanging up your own call is not an escalation —
+       but `start` has no session to present yet, so it is the operator's alone. */
+    if (operator) return { allowed: true };
+    if (action === "stop"
+      && caller.kind === "session"
+      && liveRealtimeSessionId
+      && caller.realtimeSessionId === liveRealtimeSessionId) {
+      return { allowed: true };
+    }
+    return {
+      allowed: false,
+      status: 403,
+      error: `${action} controls the operator's voice transport; an agent may not open or close their call.`,
+    };
+  }
+
+  if (!INJECTION_ACTION_SET.has(action)) return { allowed: true };
 
   /* FAILS CLOSED. Presenting nothing is not evidence of being the operator — it is
      the cheapest thing an impostor can do, and treating it as authority was the same
      fail-open shape the MCP grant lane was corrected for. Authority is a credential
      the caller HAS: the live session id, or the manager's capability. */
-  if (caller.kind === "session") {
-    return liveRealtimeSessionId && caller.realtimeSessionId === liveRealtimeSessionId
-      ? { allowed: true }
-      : refuse(action);
-  }
-  if (caller.kind === "conversation") {
-    return managerConversationId && caller.conversationId === managerConversationId
-      ? { allowed: true }
-      : refuse(action);
-  }
-  return refuse(action);
+  /* THE LIVE PEER, AND NOBODY ELSE — not even the manager.
+     Granting injection to the manager ROLE reopened the hole one level up: manager
+     authority is a designation, and anything that can obtain that designation
+     inherits the right to speak in the assistant's voice. It is also unnecessary.
+     The manager's channel to the user is `bridge_report`, which the gateway reads
+     and voices in its own words; the architecture's own sentence is that the manager
+     never speaks to the user directly. So the only thing that may write into a call
+     is the peer that established it. */
+  if (caller.kind !== "session") return refuse(action);
+  return liveRealtimeSessionId && caller.realtimeSessionId === liveRealtimeSessionId
+    ? { allowed: true }
+    : refuse(action);
 }
 
 function refuse(action: string): RealtimeInjectionVerdict {
   return {
     allowed: false,
     status: 403,
-    error: `${action} writes into the operator's voice session. Only the peer holding this call's realtime session id, or the designated manager, may do that. Report through bridge_report and let the gateway decide what to say.`,
+    error: `${action} writes into the operator's voice session. Only the peer that established this call may do that. If you have something for the operator, append it with bridge_report and let the gateway decide what to say.`,
   };
 }
 

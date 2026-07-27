@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import {
   permitRealtimeAction,
   REALTIME_INJECTION_ACTIONS,
+  REALTIME_TRANSPORT_ACTIONS,
   type RealtimeCaller,
 } from "./realtimeInjection";
 
@@ -29,7 +30,7 @@ test("an ordinary worker cannot speak into the voice session, by any injecting a
     expect(verdict.allowed).toBe(false);
     if (!verdict.allowed) {
       expect(verdict.status).toBe(403);
-      expect(verdict.error).toContain("manager");
+      expect(verdict.error).toContain("bridge_report");
     }
   }
 });
@@ -53,9 +54,14 @@ test("a session id that is not this call's is refused", () => {
   }
 });
 
-test("the designated manager may inject", () => {
+test("not even the designated manager may inject", () => {
+  /* Allowing the manager reopened the hole one level up: manager authority is a
+     designation, and whatever can obtain that designation would inherit the right to
+     speak in the assistant's voice. The manager reports; the gateway speaks. */
   for (const action of REALTIME_INJECTION_ACTIONS) {
-    expect(permitRealtimeAction(action, MANAGER_CALLER, MANAGER, LIVE_SESSION).allowed).toBe(true);
+    const verdict = permitRealtimeAction(action, MANAGER_CALLER, MANAGER, LIVE_SESSION);
+    expect(verdict.allowed).toBe(false);
+    if (!verdict.allowed) expect(verdict.error).toContain("bridge_report");
   }
 });
 
@@ -73,24 +79,51 @@ test("an unresolvable capability is refused rather than promoted to anything", (
   }
 });
 
-test("with no manager designated, no agent may inject at all", () => {
-  for (const action of REALTIME_INJECTION_ACTIONS) {
-    expect(permitRealtimeAction(action, MANAGER_CALLER, null, LIVE_SESSION).allowed).toBe(false);
-    expect(permitRealtimeAction(action, WORKER, null, LIVE_SESSION).allowed).toBe(false);
+test("no conversation may inject, whatever the designation says", () => {
+  /* Enumerated across the designation states, because the finding was precisely that
+     the answer used to depend on one. */
+  for (const manager of [MANAGER, null, "conversation_someone_else"]) {
+    for (const action of REALTIME_INJECTION_ACTIONS) {
+      expect(permitRealtimeAction(action, MANAGER_CALLER, manager, LIVE_SESSION).allowed).toBe(false);
+      expect(permitRealtimeAction(action, WORKER, manager, LIVE_SESSION).allowed).toBe(false);
+      expect(permitRealtimeAction(action, ANONYMOUS, manager, LIVE_SESSION).allowed).toBe(false);
+    }
+    /* And the call's own peer is unaffected by the designation entirely. */
+    expect(permitRealtimeAction("appendSpeech", CALL_PEER, manager, LIVE_SESSION).allowed).toBe(true);
   }
-  /* The call's own peer is unaffected: its authority comes from the session, not
-     from any designation. */
-  expect(permitRealtimeAction("appendSpeech", CALL_PEER, null, LIVE_SESSION).allowed).toBe(true);
 });
 
-test("the non-injecting actions stay open to whoever owns the transport", () => {
-  /* `start`/`stop` establish and tear down the operator's own WebRTC leg and
-     `status` explains a dead transport. None writes into the conversation, and
-     gating them would break the operator's own call before it has a session id to
-     present. */
-  for (const action of ["start", "stop", "status"]) {
-    expect(permitRealtimeAction(action, ANONYMOUS, MANAGER, LIVE_SESSION).allowed).toBe(true);
-    expect(permitRealtimeAction(action, WORKER, MANAGER, LIVE_SESSION).allowed).toBe(true);
+test("an agent can neither open nor close the operator's call", () => {
+  /* Not injection — no words reach the operator — but `stop` hangs up their call and
+     `start` holds the host's single realtime slot so they cannot make one. */
+  for (const action of REALTIME_TRANSPORT_ACTIONS) {
+    for (const caller of [ANONYMOUS, WORKER, MANAGER_CALLER]) {
+      const verdict = permitRealtimeAction(action, caller, MANAGER, LIVE_SESSION);
+      expect(verdict.allowed).toBe(false);
+      if (!verdict.allowed) expect(verdict.status).toBe(403);
+    }
+  }
+});
+
+test("the operator opens and closes their own call", () => {
+  for (const action of REALTIME_TRANSPORT_ACTIONS) {
+    expect(permitRealtimeAction(action, ANONYMOUS, MANAGER, LIVE_SESSION, true).allowed).toBe(true);
+  }
+});
+
+test("the peer that owns a call may hang it up, but may not open a new one", () => {
+  /* Hanging up your own call is not an escalation. Starting one has no session to
+     present yet, so it stays the operator's alone. */
+  expect(permitRealtimeAction("stop", CALL_PEER, MANAGER, LIVE_SESSION).allowed).toBe(true);
+  expect(permitRealtimeAction("start", CALL_PEER, MANAGER, LIVE_SESSION).allowed).toBe(false);
+  /* A stale session id hangs up nothing. */
+  const stale: RealtimeCaller = { kind: "session", realtimeSessionId: "rt_sess_old" };
+  expect(permitRealtimeAction("stop", stale, MANAGER, LIVE_SESSION).allowed).toBe(false);
+});
+
+test("status stays readable: it explains a dead transport and writes nothing", () => {
+  for (const caller of [ANONYMOUS, WORKER, CALL_PEER]) {
+    expect(permitRealtimeAction("status", caller, MANAGER, LIVE_SESSION).allowed).toBe(true);
   }
 });
 

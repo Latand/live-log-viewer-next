@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { requireOperatorAuthority } from "@/lib/agent/operatorAuthority";
 import { retireOutgoingManager } from "@/lib/orchestrator/retire";
 import { adoptOrchestratorRecord, orchestratorRecordExists, readOrchestratorRecord, replaceOrchestratorIncumbent, type OrchestratorRecord } from "@/lib/orchestrator/store";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
@@ -34,6 +35,17 @@ export async function GET(): Promise<NextResponse<OrchestratorStatus>> {
 export async function POST(req: NextRequest): Promise<NextResponse<{ ok: true; record: OrchestratorRecord; adopted: boolean; replaced: boolean } | ApiError>> {
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
+
+  /* #691 round 5 — DESIGNATION IS OPERATOR-ONLY, and it has to be, because every
+     other gate in the bridge keys off "is this the designated manager": a worker
+     able to appoint itself would inherit manager-only `bridge_report` and the rest
+     in one move. Checked before the body is read and before anything is retired, so
+     a refusal leaves both the record and the live incumbent exactly as they were —
+     a refusal that killed the incumbent first would be its own denial of service. */
+  const operator = requireOperatorAuthority(req);
+  if (!operator.ok) {
+    return NextResponse.json({ error: operator.error }, { status: operator.status });
+  }
   let body: { conversationId?: unknown; path?: unknown; replace?: unknown; engine?: unknown; model?: unknown };
   try {
     body = (await req.json()) as typeof body;
