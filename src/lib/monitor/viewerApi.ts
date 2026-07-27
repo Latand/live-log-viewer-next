@@ -1,4 +1,5 @@
 import type { MonitorSessionRecord } from "./requests";
+import type { MonitorRunRecord } from "./types";
 
 /**
  * The monitor's only door into the machine (issue #741).
@@ -47,6 +48,12 @@ export interface PipelineSummary {
   createdAt: string;
   closedAt: string | null;
   spec?: string;
+  /** Every instant the container itself recorded movement at: stage attempt
+      starts and completions, pauses and resumes. Creation time is NOT movement
+      — a container running for a week is not stale because it started a week
+      ago — so this is what staleness is judged on. Empty means the payload
+      carried no movement evidence, and freshness is unknown. */
+  activityAt: string[];
 }
 
 export interface FlowSummary {
@@ -56,6 +63,9 @@ export interface FlowSummary {
   spec?: string;
   createdAt: string;
   closedAt: string | null;
+  /** Round-level movement: spawn, review, relay and terminal instants. Same
+      contract as {@link PipelineSummary.activityAt}. */
+  activityAt: string[];
 }
 
 export interface CreateCardInput {
@@ -78,6 +88,11 @@ export interface DeliveryInput {
   clientMessageId: string;
 }
 
+/** The single-flight admission the viewer granted, or who holds it. */
+export type RunLockClaim =
+  | { claimed: true; token: string }
+  | { claimed: false; detail: string };
+
 export interface ViewerApi {
   orchestrator(): Promise<OrchestratorStatusResponse>;
   /** The host currently owning a transcript, or null when nothing does. A
@@ -91,6 +106,12 @@ export interface ViewerApi {
   flows(): Promise<FlowSummary[]>;
   createCard(input: CreateCardInput): Promise<{ taskId: string }>;
   deliver(input: DeliveryInput): Promise<DeliveryResult>;
+  /** Audit journal, owned by the viewer: the monitor never opens the file. */
+  readRuns(limit: number): Promise<MonitorRunRecord[]>;
+  appendRun(record: MonitorRunRecord): Promise<void>;
+  /** Atomic single-flight admission, likewise owned by the viewer. */
+  claimRunLock(): Promise<RunLockClaim>;
+  releaseRunLock(token: string): Promise<boolean>;
 }
 
 export class ViewerApiError extends Error {
@@ -120,6 +141,11 @@ function str(value: unknown, fallback = ""): string {
 
 function num(value: unknown, fallback = 0): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+/** The parsable ISO instants among a pile of maybe-timestamps. */
+function timestamps(values: readonly unknown[]): string[] {
+  return values.filter((value): value is string => typeof value === "string" && Number.isFinite(Date.parse(value)));
 }
 
 /** The Viewer speaks HTTP on loopback; the same-origin headers mirror what the
@@ -230,6 +256,18 @@ export function httpViewerApi(options: HttpViewerApiOptions): ViewerApi {
       const payload = object(await call("api/pipelines"));
       return array(payload.pipelines).map((raw) => {
         const pipeline = object(raw);
+        /* Attempt-level instants are where a long-running container actually
+           shows movement; the container's own createdAt never changes. */
+        const activityAt = timestamps([
+          pipeline.pausedAt,
+          pipeline.resumedAt,
+          pipeline.updatedAt,
+          ...array(pipeline.runs).flatMap((run) =>
+            array(object(run).attempts).flatMap((attempt) => {
+              const entry = object(attempt);
+              return [entry.startedAt, entry.completedAt];
+            })),
+        ]);
         return {
           id: str(pipeline.id),
           task: str(pipeline.task),
@@ -238,6 +276,7 @@ export function httpViewerApi(options: HttpViewerApiOptions): ViewerApi {
           createdAt: str(pipeline.createdAt),
           closedAt: typeof pipeline.closedAt === "string" ? pipeline.closedAt : null,
           spec: str(pipeline.spec),
+          activityAt,
         };
       }).filter((pipeline) => pipeline.id);
     },
@@ -246,6 +285,10 @@ export function httpViewerApi(options: HttpViewerApiOptions): ViewerApi {
       const payload = object(await call("api/flows"));
       return array(payload.flows).map((raw) => {
         const flow = object(raw);
+        const activityAt = timestamps(array(flow.rounds).flatMap((round) => {
+          const entry = object(round);
+          return [entry.startedAt, entry.spawnStartedAt, entry.relayStartedAt, entry.reviewedAt, entry.relayedAt, entry.terminalAt];
+        }));
         return {
           id: str(flow.id),
           project: str(flow.project),
@@ -253,6 +296,7 @@ export function httpViewerApi(options: HttpViewerApiOptions): ViewerApi {
           spec: str(flow.spec),
           createdAt: str(flow.createdAt),
           closedAt: typeof flow.closedAt === "string" ? flow.closedAt : null,
+          activityAt,
         };
       }).filter((flow) => flow.id);
     },
@@ -271,6 +315,26 @@ export function httpViewerApi(options: HttpViewerApiOptions): ViewerApi {
       const taskId = str(task.id);
       if (!taskId) throw new ViewerApiError("board create returned no task id", null);
       return { taskId };
+    },
+
+    async readRuns(limit) {
+      const payload = object(await call(`api/monitor/runs?limit=${encodeURIComponent(String(limit))}`));
+      return array(payload.runs).filter((run): run is MonitorRunRecord => Boolean(run) && typeof run === "object");
+    },
+
+    async appendRun(record) {
+      await call("api/monitor/runs", { method: "POST", body: JSON.stringify({ record }) });
+    },
+
+    async claimRunLock() {
+      const payload = object(await call("api/monitor/lock", { method: "POST", body: JSON.stringify({ action: "claim" }) }));
+      if (payload.claimed === true && typeof payload.token === "string") return { claimed: true, token: payload.token };
+      return { claimed: false, detail: str(payload.detail, "the monitor lock is held") };
+    },
+
+    async releaseRunLock(token) {
+      const payload = object(await call("api/monitor/lock", { method: "POST", body: JSON.stringify({ action: "release", token }) }));
+      return payload.released === true;
     },
 
     async deliver(input): Promise<DeliveryResult> {

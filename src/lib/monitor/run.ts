@@ -1,6 +1,5 @@
 import crypto from "node:crypto";
 
-import { appendRunRecord, claimMonitorRun, type MonitorClaim } from "./audit";
 import { classifyRequest, DEFAULT_STALL_AFTER_MS } from "./classify";
 import { monitorClientRequestId, monitorCardText, ORCHESTRATOR_ALERT_REF, orchestratorAlertCardText } from "./cards";
 import { evidenceFromFlows, evidenceFromGithub, evidenceFromPipelines, evidenceFromTasks, type GithubEvidenceRow } from "./evidence";
@@ -43,12 +42,20 @@ const DEFAULT_WINDOW_HOURS = 6;
 const DEFAULT_MAX_CONVERSATIONS = 40;
 const DEFAULT_MAX_CARDS = 5;
 
+/** The single-flight admission, held for the length of one run. */
+export type MonitorClaim =
+  | { claimed: true; release(): Promise<void> }
+  | { claimed: false; detail: string };
+
 export interface MonitorDeps {
   api: ViewerApi;
   now(): Date;
   runId?(): string;
-  appendRun?(record: MonitorRunRecord): void;
-  claim?(): MonitorClaim;
+  /** Overrides the API-backed journal; production leaves it unset, so the
+      viewer owns the file and the monitor owns none. */
+  appendRun?(record: MonitorRunRecord): Promise<void>;
+  /** Overrides the API-backed single-flight claim, same reasoning. */
+  claim?(): Promise<MonitorClaim>;
   /** Optional pull-request / issue correlation. A source that cannot answer
       throws; the run then continues without it and says so. */
   github?(): Promise<GithubEvidenceRow[]>;
@@ -93,25 +100,35 @@ async function resolveOrchestrator(api: ViewerApi): Promise<{ resolution: Orches
   if (!status.record) return { resolution: { kind: "missing-record" }, path: null, note: null };
   const { conversationId, path } = status.record;
   if (!status.exists) return { resolution: { kind: "stale-record", conversationId }, path, note: null };
-  const resolved: OrchestratorResolution = { kind: "resolved", conversationId, source: "durable-record" };
-  /* A path-pending record belongs to a spawn still settling; there is nothing
-     to probe yet, and the id is still the right address. */
-  if (!path) return { resolution: resolved, path, note: null };
-  try {
-    const target = await api.hostTarget(path);
-    if (target === null) {
-      return {
-        resolution: { kind: "unavailable", detail: "the recorded orchestrator conversation has no live host" },
-        path,
-        note: null,
-      };
-    }
-  } catch (error) {
-    /* An unprovable host is not a dead one. Deliver, and say in the audit that
-       liveness went unverified rather than pretending it was checked. */
-    return { resolution: resolved, path, note: `orchestrator host liveness could not be probed: ${errorText(error)}` };
+  /* A record with no settled transcript path cannot be probed, so nothing here
+     can show that anyone is listening. Unproven is not resolved: the whole
+     failure this monitor exists to end was a predecessor believing it had
+     delivered when it had not. */
+  if (!path) {
+    return {
+      resolution: { kind: "unavailable", detail: "the orchestrator record has no settled transcript path, so no host could be confirmed" },
+      path,
+      note: null,
+    };
   }
-  return { resolution: resolved, path, note: null };
+  let target: string | null;
+  try {
+    target = await api.hostTarget(path);
+  } catch (error) {
+    return {
+      resolution: { kind: "unavailable", detail: `the orchestrator host could not be probed: ${errorText(error)}` },
+      path,
+      note: null,
+    };
+  }
+  if (target === null) {
+    return {
+      resolution: { kind: "unavailable", detail: "the recorded orchestrator conversation has no live host" },
+      path,
+      note: null,
+    };
+  }
+  return { resolution: { kind: "resolved", conversationId, source: "durable-record" }, path, note: null };
 }
 
 function resolutionDetail(resolution: OrchestratorResolution): string {
@@ -145,10 +162,34 @@ function conversationsInWindow(
     .slice(0, limit);
 }
 
+/** The production claim: the viewer owns the lock file and hands out a token. */
+async function apiClaim(api: ViewerApi): Promise<MonitorClaim> {
+  let claim: Awaited<ReturnType<ViewerApi["claimRunLock"]>>;
+  try {
+    claim = await api.claimRunLock();
+  } catch (error) {
+    /* A lock that cannot be asked for is not a lock that is free. Skipping is
+       the safe read: two monitors on one board create duplicate cards. */
+    return { claimed: false, detail: `the monitor lock could not be claimed: ${errorText(error)}` };
+  }
+  if (!claim.claimed) return claim;
+  return {
+    claimed: true,
+    release: async () => {
+      try {
+        await api.releaseRunLock(claim.token);
+      } catch {
+        /* The lock expires on its own; a failed release costs the next run a
+           wait, never correctness. */
+      }
+    },
+  };
+}
+
 export async function runConversationMonitor(deps: MonitorDeps, options: MonitorOptions = {}): Promise<MonitorRunReport> {
   const now = deps.now();
   const runId = deps.runId?.() ?? crypto.randomUUID();
-  const appendRun = deps.appendRun ?? ((record: MonitorRunRecord) => appendRunRecord(record));
+  const appendRun = deps.appendRun ?? ((record: MonitorRunRecord) => deps.api.appendRun(record));
   const windowHours = options.windowHours ?? DEFAULT_WINDOW_HOURS;
   const fromMs = now.getTime() - windowHours * 60 * 60 * 1000;
   const startedAt = now.toISOString();
@@ -165,18 +206,28 @@ export async function runConversationMonitor(deps: MonitorDeps, options: Monitor
     skipped: [],
   };
 
-  const finish = (
+  const finish = async (
     outcome: MonitorRunRecord["outcome"],
     detail: string | null,
     classified: ClassifiedRequest[] = [],
     message: string | null = null,
-  ): MonitorRunReport => {
+  ): Promise<MonitorRunReport> => {
     const record: MonitorRunRecord = { ...base, outcome, detail, finishedAt: deps.now().toISOString() };
-    appendRun(record);
-    return { record, classified, message };
+    /* A run nobody could record is indistinguishable from a run that never
+       happened — the exact ambiguity this monitor was built to remove — so the
+       failure travels back with the report instead of being swallowed. */
+    let audited = true;
+    let auditError: string | null = null;
+    try {
+      await appendRun(record);
+    } catch (error) {
+      audited = false;
+      auditError = `the run could not be audited: ${errorText(error)}`;
+    }
+    return { record: auditError ? { ...record, detail: [detail, auditError].filter(Boolean).join("; ") } : record, classified, message, audited };
   };
 
-  const claim = deps.claim?.() ?? claimMonitorRun();
+  const claim = await (deps.claim?.() ?? apiClaim(deps.api));
   if (!claim.claimed) return finish("skipped", claim.detail);
 
   try {
@@ -193,7 +244,7 @@ export async function runConversationMonitor(deps: MonitorDeps, options: Monitor
     try {
       catalog = await deps.api.conversations({ project: options.project ?? undefined, limit: 100 });
     } catch (error) {
-      return finish("failed", `the conversation catalog could not be read: ${errorText(error)}`);
+      return await finish("failed", `the conversation catalog could not be read: ${errorText(error)}`);
     }
     const project = options.project
       ?? (orchestratorPath ? catalog.find((entry) => entry.path === orchestratorPath)?.project ?? null : null);
@@ -246,7 +297,7 @@ export async function runConversationMonitor(deps: MonitorDeps, options: Monitor
       const [tasks, pipelines, flows] = await Promise.all([deps.api.tasks(), deps.api.pipelines(), deps.api.flows()]);
       evidence = [...evidenceFromTasks(tasks), ...evidenceFromPipelines(pipelines), ...evidenceFromFlows(flows)];
     } catch (error) {
-      return finish("failed", `tracked work could not be read: ${errorText(error)}`);
+      return await finish("failed", `tracked work could not be read: ${errorText(error)}`);
     }
     if (deps.github) {
       try {
@@ -290,7 +341,7 @@ export async function runConversationMonitor(deps: MonitorDeps, options: Monitor
       } catch (error) {
         base.created = created;
         base.skipped = skipped;
-        return finish("failed", `a board card could not be created: ${errorText(error)}`, classified);
+        return await finish("failed", `a board card could not be created: ${errorText(error)}`, classified);
       }
     }
 
@@ -335,23 +386,34 @@ export async function runConversationMonitor(deps: MonitorDeps, options: Monitor
     if (resolution.kind !== "resolved") {
       /* The message is returned unsent: the caller may log it, but nothing is
          delivered into a conversation nobody is holding. */
-      return finish("failed", provisional.detail, classified, message);
+      return await finish("failed", provisional.detail, classified, message);
     }
     const worthSaying = classified.length > 0 || created.length > 0 || options.deliverWhenEmpty === true;
-    let deliveryNote: string | null = null;
     if (!options.dryRun && worthSaying) {
+      let delivery: Awaited<ReturnType<ViewerApi["deliver"]>>;
       try {
-        const delivery = await deps.api.deliver({ conversationId: resolution.conversationId, text: message, clientMessageId: `monitor-741-${runId}` });
-        base.orchestrator = { ...base.orchestrator, delivered: true };
-        /* The probe said a host was there. If the send booted one anyway, the
-           monitor woke a session it had no business waking — say so. */
-        if (delivery.spawned) deliveryNote = "the report resumed the orchestrator host, which the liveness probe had reported live";
+        delivery = await deps.api.deliver({ conversationId: resolution.conversationId, text: message, clientMessageId: `monitor-741-${runId}` });
       } catch (error) {
-        return finish("failed", `the report could not be delivered to the orchestrator: ${errorText(error)}`, classified, message);
+        return await finish("failed", `the report could not be delivered to the orchestrator: ${errorText(error)}`, classified, message);
       }
+      /* The probe said a host was there, and the send booted one anyway. The
+         monitor woke a session it had no business waking, and — worse — the
+         conversation it was addressing was not live after all. A run that had
+         to resurrect its audience did not deliver in the sense that matters,
+         so it does not get to finish clean. */
+      if (delivery.spawned) {
+        base.orchestrator = { ...base.orchestrator, delivered: false };
+        return await finish(
+          "failed",
+          "the send had to resume the orchestrator host, so the conversation had no live audience when the report was written",
+          classified,
+          message,
+        );
+      }
+      base.orchestrator = { ...base.orchestrator, delivered: true };
     }
-    return finish("clean", [notes, deliveryNote].filter(Boolean).join("; ") || null, classified, message);
+    return await finish("clean", notes, classified, message);
   } finally {
-    claim.release();
+    await claim.release();
   }
 }

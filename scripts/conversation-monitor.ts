@@ -19,7 +19,6 @@
  * schedule's own log distinguishes the three without reading the journal.
  */
 
-import { readRunRecords } from "../src/lib/monitor/audit";
 import { githubEvidenceSource } from "../src/lib/monitor/githubEvidence";
 import { runConversationMonitor, type MonitorOptions } from "../src/lib/monitor/run";
 import { httpViewerApi } from "../src/lib/monitor/viewerApi";
@@ -104,14 +103,17 @@ export function parseMonitorArgs(
 async function main(): Promise<void> {
   const args = parseMonitorArgs(process.argv.slice(2));
 
+  const api = httpViewerApi({ baseUrl: args.baseUrl });
+
   if (args.status !== null) {
-    for (const record of readRunRecords(args.status)) {
+    /* Read back through the API too: the journal is the viewer's file, and the
+       monitor process has no business opening it. */
+    for (const record of await api.readRuns(args.status)) {
       console.log(JSON.stringify(record));
     }
     return;
   }
 
-  const api = httpViewerApi({ baseUrl: args.baseUrl });
   const report = await runConversationMonitor(
     { api, now: () => new Date(), ...(args.github ? { github: githubEvidenceSource({ cwd: args.repoDir }) } : {}) },
     args,
@@ -132,7 +134,9 @@ async function main(): Promise<void> {
         + `created ${record.created.length} card(s), skipped ${record.skipped.length}`,
     );
   }
-  if (report.record.outcome === "failed") process.exit(1);
+  /* An unaudited run is indistinguishable from one that never ran, so it exits
+     the same way a failed one does. */
+  if (report.record.outcome === "failed" || !report.audited) process.exit(1);
 }
 
 if (import.meta.main) {

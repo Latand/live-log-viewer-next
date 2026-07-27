@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-monitor-audit-"));
+const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-monitor-journal-"));
 const RESTORE = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, TMPDIR: process.env.TMPDIR, LLV_STATE_DIR: process.env.LLV_STATE_DIR };
 process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 process.env.HOME = SANDBOX;
@@ -11,8 +11,14 @@ process.env.XDG_CONFIG_HOME = path.join(SANDBOX, "config");
 process.env.TMPDIR = path.join(SANDBOX, "tmp");
 fs.mkdirSync(process.env.TMPDIR, { recursive: true });
 
-const { MONITOR_RUN_HISTORY, appendRunRecord, claimMonitorRun, readRunRecords } = await import("./audit");
+const { MONITOR_RUN_HISTORY, appendRunRecord, claimMonitorRun, readRunRecords, releaseMonitorRun, sanitizeRunRecord } = await import("./journalStore");
 import type { MonitorOutcome, MonitorRunRecord } from "./types";
+
+/* Stand-ins for the two things that must never reach the journal, assembled at
+   runtime so this file carries neither a transcript-shaped sentence nor a
+   home path of its own. */
+const SMUGGLED_BODY = "SMUGGLED-TRANSCRIPT-SENTINEL";
+const SMUGGLED_PATH = ["", "home", "someone", "Projects", "viewer"].join("/");
 
 afterAll(() => {
   fs.rmSync(SANDBOX, { recursive: true, force: true });
@@ -23,7 +29,6 @@ afterAll(() => {
 });
 
 const journal = path.join(SANDBOX, "journal", "runs.ndjson");
-const lock = path.join(SANDBOX, "journal", "run.lock");
 
 function record(runId: string, outcome: MonitorOutcome, detail: string | null = null): MonitorRunRecord {
   return {
@@ -85,24 +90,78 @@ describe("monitor audit journal", () => {
   });
 });
 
+describe("record sanitation at the boundary", () => {
+  test("keeps only audit fields, dropping anything smuggled alongside them", () => {
+    const sanitized = sanitizeRunRecord({
+      ...record("run-x", "clean"),
+      operatorBody: SMUGGLED_BODY,
+      cwd: SMUGGLED_PATH,
+    } as unknown);
+    expect(sanitized).not.toBeNull();
+    const serialized = JSON.stringify(sanitized);
+    expect(serialized).not.toContain(SMUGGLED_BODY);
+    expect(serialized).not.toContain(SMUGGLED_PATH);
+  });
+
+  test("bounds a long detail and a flood of fingerprints", () => {
+    const sanitized = sanitizeRunRecord({
+      ...record("run-y", "failed", "x".repeat(5000)),
+      found: { total: 2000, byState: {}, fingerprints: Array.from({ length: 2000 }, (_, index) => `f${index}`) },
+    } as unknown)!;
+    expect(sanitized.detail!.length).toBeLessThanOrEqual(800);
+    expect(sanitized.found.fingerprints.length).toBeLessThanOrEqual(500);
+  });
+
+  test("refuses anything that is not a run record", () => {
+    expect(sanitizeRunRecord(null)).toBeNull();
+    expect(sanitizeRunRecord({ runId: "x" })).toBeNull();
+    expect(sanitizeRunRecord({ ...record("run-z", "clean"), schemaVersion: 2 })).toBeNull();
+    expect(sanitizeRunRecord({ ...record("run-z", "clean"), outcome: "invented" })).toBeNull();
+  });
+});
+
 describe("single-flight claim", () => {
-  test("a second overlapping run is skipped, not run twice", () => {
+  test("a second overlapping run loses, and the winner's token frees it", () => {
+    const lock = path.join(SANDBOX, "lock-a", "run.lock");
     const first = claimMonitorRun({ lockPath: lock, pidAlive: () => true });
     expect(first.claimed).toBe(true);
     const second = claimMonitorRun({ lockPath: lock, pidAlive: () => true });
     expect(second.claimed).toBe(false);
     if (!second.claimed) expect(second.detail).toContain("lock");
-    if (first.claimed) first.release();
+
+    /* Only the holder may release: a superseded run must not free the lock its
+       successor is holding. */
+    expect(releaseMonitorRun("some-other-token", { lockPath: lock })).toBe(false);
+    expect(first.claimed && releaseMonitorRun(first.token, { lockPath: lock })).toBe(true);
     const third = claimMonitorRun({ lockPath: lock, pidAlive: () => true });
     expect(third.claimed).toBe(true);
-    if (third.claimed) third.release();
   });
 
   test("a lock left behind by a dead run is reclaimed", () => {
-    const abandoned = claimMonitorRun({ lockPath: lock, pidAlive: () => true });
-    expect(abandoned.claimed).toBe(true);
-    const next = claimMonitorRun({ lockPath: lock, pidAlive: () => false });
-    expect(next.claimed).toBe(true);
-    if (next.claimed) next.release();
+    const lock = path.join(SANDBOX, "lock-b", "run.lock");
+    expect(claimMonitorRun({ lockPath: lock, pidAlive: () => true }).claimed).toBe(true);
+    expect(claimMonitorRun({ lockPath: lock, pidAlive: () => false }).claimed).toBe(true);
   });
+
+  test("a lock older than the stale window is reclaimed", () => {
+    const lock = path.join(SANDBOX, "lock-c", "run.lock");
+    expect(claimMonitorRun({ lockPath: lock, pidAlive: () => true, now: () => 1_000 }).claimed).toBe(true);
+    expect(claimMonitorRun({ lockPath: lock, pidAlive: () => true, now: () => 1_000 + 40 * 60 * 1000 }).claimed).toBe(true);
+  });
+
+  test("exactly one of four racing PROCESSES wins the lock", async () => {
+    /* In-process claims prove nothing about atomicity: a read-then-write race
+       needs two schedulers. Four children start at one shared instant. */
+    const lock = path.join(SANDBOX, "lock-race", "run.lock");
+    fs.mkdirSync(path.dirname(lock), { recursive: true });
+    const child = path.join(import.meta.dir, "lockClaimChild.ts");
+    const startAt = Date.now() + 1_200;
+    const results = await Promise.all(Array.from({ length: 4 }, async () => {
+      const proc = Bun.spawn(["bun", child, lock, String(startAt)], { stdout: "pipe", stderr: "pipe", env: { ...process.env } });
+      const stdout = await new Response(proc.stdout).text();
+      await proc.exited;
+      return JSON.parse(stdout.trim().split("\n").at(-1) ?? "{}") as { claimed?: boolean };
+    }));
+    expect(results.filter((result) => result.claimed === true)).toHaveLength(1);
+  }, 30_000);
 });

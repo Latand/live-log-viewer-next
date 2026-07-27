@@ -88,6 +88,60 @@ describe("viewer api client", () => {
     expect(calls[0]!.body).toMatchObject({ conversationId: "conversation_abc", path: "" });
   });
 
+  test("derives a pipeline's last movement from its stage attempts, not its birthday", async () => {
+    const { impl } = stubFetch(() => ({ payload: { pipelines: [{
+      id: "pipeline-1", task: "t", project: "viewer", state: "running", createdAt: "2026-07-20T09:00:00Z", closedAt: null,
+      pausedAt: null, resumedAt: "2026-07-21T09:00:00Z",
+      runs: [{ stageId: "build", attempts: [{ startedAt: "2026-07-20T09:05:00Z", completedAt: "2026-07-27T11:55:00Z" }] }],
+    }] } }));
+    const [pipeline] = await httpViewerApi({ baseUrl: "http://127.0.0.1:8898", fetchImpl: impl }).pipelines();
+    expect(pipeline!.activityAt).toContain("2026-07-27T11:55:00Z");
+    expect(pipeline!.activityAt).toContain("2026-07-21T09:00:00Z");
+    /* Creation time is not movement and must not sneak in as one. */
+    expect(pipeline!.activityAt).not.toContain("2026-07-20T09:00:00Z");
+  });
+
+  test("derives a flow's last movement from its rounds", async () => {
+    const { impl } = stubFetch(() => ({ payload: { flows: [{
+      id: "flow-1", project: "viewer", state: "reviewing", createdAt: "2026-07-20T09:00:00Z", closedAt: null,
+      rounds: [{ startedAt: "2026-07-20T10:00:00Z", reviewedAt: "2026-07-27T11:00:00Z", relayedAt: null, terminalAt: "nonsense" }],
+    }] } }));
+    const [flow] = await httpViewerApi({ baseUrl: "http://127.0.0.1:8898", fetchImpl: impl }).flows();
+    expect(flow!.activityAt).toEqual(["2026-07-20T10:00:00Z", "2026-07-27T11:00:00Z"]);
+  });
+
+  test("a payload with no movement evidence reports none rather than inventing it", async () => {
+    const { impl } = stubFetch(() => ({ payload: { pipelines: [{ id: "p", task: "t", project: "viewer", state: "running", createdAt: "2026-07-20T09:00:00Z" }] } }));
+    const [pipeline] = await httpViewerApi({ baseUrl: "http://127.0.0.1:8898", fetchImpl: impl }).pipelines();
+    expect(pipeline!.activityAt).toEqual([]);
+  });
+
+  test("reads and appends the audit journal through the viewer", async () => {
+    const { calls, impl } = stubFetch((url) => url.includes("limit")
+      ? { payload: { runs: [{ schemaVersion: 1, runId: "run-1", outcome: "clean" }] } }
+      : { payload: { ok: true } });
+    const api = httpViewerApi({ baseUrl: "http://127.0.0.1:8898", fetchImpl: impl });
+    const runs = await api.readRuns(3);
+    expect(runs).toHaveLength(1);
+    expect(calls[0]!.url).toContain("/api/monitor/runs?limit=3");
+
+    await api.appendRun({ schemaVersion: 1, runId: "run-2" } as never);
+    expect(calls[1]!.method).toBe("POST");
+    expect(calls[1]!.body).toMatchObject({ record: { runId: "run-2" } });
+  });
+
+  test("claims and releases the single-flight lock through the viewer", async () => {
+    let held = false;
+    const { calls, impl } = stubFetch(() => ({ payload: held ? { claimed: false, detail: "another monitor run holds the lock" } : ((held = true), { claimed: true, token: "tok" }) }));
+    const api = httpViewerApi({ baseUrl: "http://127.0.0.1:8898", fetchImpl: impl });
+    const first = await api.claimRunLock();
+    expect(first).toEqual({ claimed: true, token: "tok" });
+    const second = await api.claimRunLock();
+    expect(second.claimed).toBe(false);
+    expect(calls[0]!.url).toContain("/api/monitor/lock");
+    expect(calls[0]!.body).toMatchObject({ action: "claim" });
+  });
+
   test("a refusing viewer surfaces as an error with its status", async () => {
     const { impl } = stubFetch(() => ({ status: 503, payload: { error: "scanner unavailable" } }));
     const api = httpViewerApi({ baseUrl: "http://127.0.0.1:8898", fetchImpl: impl });

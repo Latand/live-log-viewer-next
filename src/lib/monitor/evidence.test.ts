@@ -11,7 +11,7 @@ process.env.XDG_CONFIG_HOME = path.join(SANDBOX, "config");
 process.env.TMPDIR = path.join(SANDBOX, "tmp");
 fs.mkdirSync(process.env.TMPDIR, { recursive: true });
 
-const { evidenceFromFlows, evidenceFromPipelines, evidenceFromTasks } = await import("./evidence");
+const { evidenceFromFlows, evidenceFromGithub, evidenceFromPipelines, evidenceFromTasks } = await import("./evidence");
 import type { FlowSummary, PipelineSummary, TaskSummary } from "./viewerApi";
 
 afterAll(() => {
@@ -27,11 +27,11 @@ function task(overrides: Partial<TaskSummary>): TaskSummary {
 }
 
 function pipeline(overrides: Partial<PipelineSummary>): PipelineSummary {
-  return { id: "pipeline-1", task: "Pipeline title", project: "viewer", state: "running", createdAt: "2026-07-27T09:00:00Z", closedAt: null, ...overrides };
+  return { id: "pipeline-1", task: "Pipeline title", project: "viewer", state: "running", createdAt: "2026-07-27T09:00:00Z", closedAt: null, activityAt: [], ...overrides };
 }
 
 function flow(overrides: Partial<FlowSummary>): FlowSummary {
-  return { id: "flow-1", project: "viewer", state: "reviewing", spec: "Flow spec headline", createdAt: "2026-07-27T09:00:00Z", closedAt: null, ...overrides };
+  return { id: "flow-1", project: "viewer", state: "reviewing", spec: "Flow spec headline", createdAt: "2026-07-27T09:00:00Z", closedAt: null, activityAt: [], ...overrides };
 }
 
 describe("evidence projection", () => {
@@ -75,5 +75,42 @@ describe("evidence projection", () => {
   test("issue references travel with the item so a request naming one correlates", () => {
     const [item] = evidenceFromPipelines([pipeline({ task: "Implement #741 monitor", spec: "see also #737" })]);
     expect(item!.references).toEqual([741, 737]);
+  });
+
+  test("each item carries the board it belongs to, and GitHub rows carry none", () => {
+    expect(evidenceFromTasks([task({ project: "viewer" })])[0]!.project).toBe("viewer");
+    expect(evidenceFromPipelines([pipeline({ project: "other" })])[0]!.project).toBe("other");
+    expect(evidenceFromFlows([flow({ project: "viewer" })])[0]!.project).toBe("viewer");
+    expect(evidenceFromGithub([{ kind: "issue", number: 741, title: "t", state: "OPEN" }])[0]!.project).toBeNull();
+  });
+
+  test("a long-running container's last movement is its newest stage activity, not its birthday", () => {
+    /* A pipeline started a week ago whose stage moved minutes ago is working,
+       and reading `createdAt` as last-movement called it stalled. */
+    const [item] = evidenceFromPipelines([pipeline({
+      createdAt: "2026-07-20T09:00:00Z",
+      activityAt: ["2026-07-20T09:05:00Z", "2026-07-27T11:55:00Z"],
+    })]);
+    expect(item!.updatedAt).toBe("2026-07-27T11:55:00Z");
+  });
+
+  test("an old container with no recent movement keeps its old instant", () => {
+    const [item] = evidenceFromPipelines([pipeline({ createdAt: "2026-07-20T09:00:00Z", activityAt: ["2026-07-20T09:05:00Z"] })]);
+    expect(item!.updatedAt).toBe("2026-07-20T09:05:00Z");
+  });
+
+  test("a flow's last movement comes from its rounds", () => {
+    const [item] = evidenceFromFlows([flow({ createdAt: "2026-07-20T09:00:00Z", activityAt: ["2026-07-20T10:00:00Z", "2026-07-27T11:00:00Z"] })]);
+    expect(item!.updatedAt).toBe("2026-07-27T11:00:00Z");
+  });
+
+  test("no movement evidence reads as unknown freshness, never as staleness", () => {
+    expect(evidenceFromPipelines([pipeline({ activityAt: [] })])[0]!.updatedAt).toBeNull();
+    expect(evidenceFromFlows([flow({ activityAt: [] })])[0]!.updatedAt).toBeNull();
+  });
+
+  test("a closed container's close instant counts as its last movement", () => {
+    const [item] = evidenceFromPipelines([pipeline({ state: "closed", activityAt: ["2026-07-20T09:05:00Z"], closedAt: "2026-07-26T18:00:00Z" })]);
+    expect(item!.updatedAt).toBe("2026-07-26T18:00:00Z");
   });
 });

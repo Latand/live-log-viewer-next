@@ -59,6 +59,10 @@ export interface EvidenceItem {
   /** Stable id within its kind (task id, pipeline id, `#741`…). */
   id: string;
   title: string;
+  /** The board this item belongs to. `null` means the source is not
+      project-scoped (a repository-wide pull request or issue); such an item may
+      only correlate through an explicit reference, never through wording. */
+  project: string | null;
   state: EvidenceState;
   /** Who is carrying it, when the source names one. */
   owner: string | null;
@@ -71,10 +75,23 @@ export interface EvidenceItem {
   monitorRef: string | null;
 }
 
+/** How a request found its evidence — which decides how much the match is
+    allowed to conclude. */
+export type MatchBasis =
+  /** The monitor's own card for this exact fingerprint; authoritative. */
+  | "monitor-ref"
+  /** Wording overlap strong enough to stand on its own. */
+  | "wording"
+  /** An explicit `#N` the request named, corroborated by wording. */
+  | "reference"
+  /** An explicit `#N` named in passing, with nothing else agreeing. */
+  | "contextual-reference";
+
 export interface EvidenceMatch {
   item: EvidenceItem;
-  /** 0..1 correlation strength; 1 for an explicit issue/PR reference. */
+  /** 0..1 wording-overlap strength; 1 for the monitor's own card. */
   score: number;
+  basis: MatchBasis;
 }
 
 export interface ClassifiedRequest {
@@ -133,6 +150,10 @@ export interface MonitorRunRecord {
 
 export interface MonitorRunReport {
   record: MonitorRunRecord;
+  /** Whether the audit line actually landed. A run nobody could record reads
+      exactly like a run that never happened, so the caller is told and exits
+      non-zero rather than reporting a success it cannot evidence. */
+  audited: boolean;
   /** Classified requests, richest form, for the delivered report. Never
       persisted to the journal — it carries operator wording. */
   classified: ClassifiedRequest[];

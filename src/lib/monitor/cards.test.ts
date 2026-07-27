@@ -41,12 +41,38 @@ function classified(overrides: Partial<ClassifiedRequest> = {}): ClassifiedReque
 }
 
 describe("monitor board cards", () => {
-  test("carries the request, the verdict and a machine-readable ref", () => {
+  test("carries the summary, the verdict and a machine-readable ref", () => {
     const text = monitorCardText(classified());
     expect(text.split("\n")[0]).toBe("Add a nightly backup for the attachment store");
     expect(text).toContain("never materialized");
     expect(text).toContain("2026-07-27 09:30 UTC");
     expect(monitorRefIn(text)).toBe("0123456789abcdef");
+  });
+
+  test("never quotes the operator's own words back onto the board", () => {
+    const asked = classified({
+      request: {
+        ...classified().request,
+        title: "Add a nightly backup for the attachment store",
+        text: "Please add a nightly backup for the attachment store, my laptop died again and I lost the screenshots.",
+      },
+    });
+    const text = monitorCardText(asked);
+    /* A card is pasted, screenshotted and pushed. The transcript body must not
+       travel with it — and the publication gate cannot catch a card, because
+       cards are produced at runtime. */
+    expect(text).not.toContain("my laptop died again");
+    expect(text).not.toContain(asked.request.text);
+    expect(text).not.toContain(">");
+    expect(text).toContain("the monitor's own summary");
+  });
+
+  test("redacts anything the summary itself dragged along", () => {
+    const text = monitorCardText(classified({
+      request: { ...classified().request, title: "Fix the loader at /etc/agents/boot.json for someone@example.com" },
+    }));
+    expect(text).not.toContain("/etc/agents/boot.json");
+    expect(text).not.toContain("someone@example.com");
   });
 
   test("an unconfirmed GitHub-issue candidate says no issue was created", () => {

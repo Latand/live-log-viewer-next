@@ -59,25 +59,55 @@ export interface ClassifyOptions {
 }
 
 /**
+ * Whether this item is even allowed to answer for this request.
+ *
+ * Correlation is project-scoped: another board's card must never suppress a
+ * request made here, and the fingerprint of a request says nothing about which
+ * project it belongs to. Repository-wide sources (pull requests, issues) carry
+ * no project and are admitted only for an explicit reference, where the
+ * operator named the number themselves.
+ */
+function eligible(request: OperatorRequest, item: EvidenceItem, viaReference: boolean): boolean {
+  if (item.project === null) return viaReference;
+  return item.project === request.project;
+}
+
+/**
  * The best correlated item, or null when nothing clears the ambiguity floor.
+ *
  * A card the monitor itself created for this exact request wins outright — it
  * is the same request by construction, whatever the wording drifted to.
+ *
+ * An explicit `#N` ranks next, but it is not self-evidently about the request:
+ * "finish the exporter before #741 lands" names an issue in passing. So a
+ * reference match reports whether wording corroborates it, and the classifier
+ * refuses to draw a terminal conclusion from an uncorroborated one.
  */
 export function matchEvidence(request: OperatorRequest, evidence: readonly EvidenceItem[]): EvidenceMatch | null {
   const own = evidence.find((item) => item.monitorRef && item.monitorRef === request.fingerprint);
-  if (own) return { item: own, score: 1 };
-
-  if (request.references.length > 0) {
-    const referenced = evidence.find((item) => item.references.some((value) => request.references.includes(value)));
-    if (referenced) return { item: referenced, score: 1 };
-  }
+  if (own) return { item: own, score: 1, basis: "monitor-ref" };
 
   const requestTokens = tokens(`${request.title} ${request.text}`);
+
+  if (request.references.length > 0) {
+    const referenced = evidence.find((item) =>
+      item.references.some((value) => request.references.includes(value)) && eligible(request, item, true));
+    if (referenced) {
+      const corroboration = overlapScore(requestTokens, tokens(referenced.title));
+      return {
+        item: referenced,
+        score: corroboration,
+        basis: corroboration >= AMBIGUOUS_SCORE ? "reference" : "contextual-reference",
+      };
+    }
+  }
+
   let best: EvidenceMatch | null = null;
   for (const item of evidence) {
+    if (!eligible(request, item, false)) continue;
     const score = overlapScore(requestTokens, tokens(item.title));
     if (score < AMBIGUOUS_SCORE) continue;
-    if (!best || score > best.score) best = { item, score };
+    if (!best || score > best.score) best = { item, score, basis: "wording" };
   }
   return best;
 }
@@ -106,9 +136,22 @@ export function classifyRequest(
 ): ClassifiedRequest {
   const match = matchEvidence(request, evidence);
 
-  if (match && (match.score >= MATCH_SCORE || match.item.monitorRef === request.fingerprint)) {
+  /* A reference named in passing is the one match that must never conclude
+     anything on its own — least of all `completed`, which would retire a
+     request nobody worked on because the operator mentioned a closed issue
+     while asking for something else. */
+  if (match?.basis === "contextual-reference") {
+    return {
+      request,
+      state: "awaiting-confirmation",
+      match,
+      reason: `names ${match.item.kind} ${match.item.id} in passing, with nothing else agreeing — too thin to call`,
+    };
+  }
+
+  if (match && (match.basis === "monitor-ref" || match.basis === "reference" || match.score >= MATCH_SCORE)) {
     const { state, reason } = stateFromEvidence(match, options);
-    const owned = match.item.monitorRef === request.fingerprint;
+    const owned = match.basis === "monitor-ref";
     return { request, state, match, reason: owned ? `already on the board as ${match.item.id}; ${reason}` : reason };
   }
 

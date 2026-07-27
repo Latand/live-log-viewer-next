@@ -49,9 +49,12 @@ function harness(overrides: {
       unprobeable viewer. */
   hostTarget?: string | null | (() => string | null);
   failTasks?: boolean;
+  /** The send booted a host instead of reaching a live one. */
+  deliveryResumes?: boolean;
 } = {}): Harness {
   const tasks: TaskSummary[] = overrides.tasks ?? [];
   const runs: MonitorRunRecord[] = [];
+  let lockHeld = false;
   const delivered: { conversationId: string; text: string }[] = [];
   let created = 0;
   const conversations: ConversationSummary[] = overrides.conversations ?? [
@@ -86,17 +89,31 @@ function harness(overrides: {
     },
     deliver: async (input) => {
       delivered.push({ conversationId: input.conversationId, text: input.text });
-      return { outcome: "delivered-to-live", spawned: false };
+      return overrides.deliveryResumes
+        ? { outcome: "resumed", spawned: true }
+        : { outcome: "delivered-to-live", spawned: false };
+    },
+    readRuns: async (limit) => runs.slice(-limit),
+    appendRun: async (record) => void runs.push(record),
+    claimRunLock: async () => {
+      if (lockHeld) return { claimed: false, detail: "another monitor run holds the lock" };
+      lockHeld = true;
+      return { claimed: true, token: "token-1" };
+    },
+    releaseRunLock: async (token) => {
+      if (token !== "token-1") return false;
+      lockHeld = false;
+      return true;
     },
   };
 
   let runCounter = 0;
+  /* No injected journal or lock: the run reaches both through the API, which
+     is the contract under test. */
   const deps: MonitorDeps = {
     api,
     now: () => NOW,
     runId: () => `run-${(runCounter += 1)}`,
-    appendRun: (record) => void runs.push(record),
-    claim: () => ({ claimed: true, release: () => {} }),
   };
   return { api, deps, runs, delivered, tasks };
 }
@@ -207,12 +224,43 @@ describe("conversation monitor run", () => {
 
   test("an overlapping run is skipped and says so", async () => {
     const seeded = harness();
-    seeded.deps.claim = () => ({ claimed: false, detail: "another monitor run holds the lock" });
+    /* Model the viewer answering "held" to the claim, which is what a second
+       run sees while the first is mid-sweep. */
+    seeded.api.claimRunLock = async () => ({ claimed: false, detail: "another monitor run holds the lock" });
     const report = await runConversationMonitor(seeded.deps, OPTIONS);
     expect(report.record.outcome).toBe("skipped");
     expect(report.record.detail).toContain("lock");
     expect(seeded.runs).toHaveLength(1);
     expect(seeded.delivered).toHaveLength(0);
+  });
+
+  test("a lock the viewer cannot grant skips the run rather than racing", async () => {
+    const seeded = harness();
+    seeded.api.claimRunLock = async () => {
+      throw new ViewerApiError("viewer request to api/monitor/lock returned 500", 500);
+    };
+    const report = await runConversationMonitor(seeded.deps, OPTIONS);
+    expect(report.record.outcome).toBe("skipped");
+    expect(report.record.detail).toContain("could not be claimed");
+    expect(seeded.tasks).toHaveLength(0);
+  });
+
+  test("the lock is released once the run is audited, so the next run proceeds", async () => {
+    const seeded = harness();
+    await runConversationMonitor(seeded.deps, OPTIONS);
+    const second = await runConversationMonitor(seeded.deps, OPTIONS);
+    expect(second.record.outcome).toBe("clean");
+    expect(seeded.runs).toHaveLength(2);
+  });
+
+  test("a run whose audit line cannot be written does not report success", async () => {
+    const seeded = harness();
+    seeded.api.appendRun = async () => {
+      throw new ViewerApiError("viewer request to api/monitor/runs returned 500", 500);
+    };
+    const report = await runConversationMonitor(seeded.deps, OPTIONS);
+    expect(report.audited).toBe(false);
+    expect(report.record.detail).toContain("could not be audited");
   });
 
   test("a dry run reports without writing board work", async () => {
@@ -260,41 +308,43 @@ describe("conversation monitor run", () => {
     expect(seeded.tasks.some((task) => monitorRefIn(task.text) === ORCHESTRATOR_ALERT_REF)).toBe(true);
   });
 
-  test("a host that cannot be probed still gets the report, with the doubt recorded", async () => {
+  test("a host that cannot be probed is not resolved, and nothing is delivered into the doubt", async () => {
+    /* An earlier draft delivered anyway and noted the doubt. That is the old
+       monitor's mistake in a politer form: an unproven audience is not an
+       audience, and the send itself could resume the session. */
     const seeded = harness({
       hostTarget: () => {
         throw new ViewerApiError("viewer request to api/tmux returned 409", 409);
       },
     });
     const report = await runConversationMonitor(seeded.deps, OPTIONS);
-    expect(report.record.outcome).toBe("clean");
-    expect(report.record.orchestrator.delivered).toBe(true);
-    expect(report.record.detail).toContain("liveness could not be probed");
+    expect(report.record.outcome).toBe("failed");
+    expect(report.record.orchestrator.resolution).toBe("unavailable");
+    expect(report.record.orchestrator.delivered).toBe(false);
+    expect(report.record.detail).toContain("could not be probed");
+    expect(seeded.delivered).toHaveLength(0);
+    /* Still reportable work: the condition lands on the board. */
+    expect(seeded.tasks.some((task) => monitorRefIn(task.text) === ORCHESTRATOR_ALERT_REF)).toBe(true);
   });
 
-  test("the default wiring writes the real journal and takes the real lock", async () => {
-    const journal = path.join(SANDBOX, "default-wiring", "runs.ndjson");
-    process.env.LLV_MONITOR_AUDIT_FILE = journal;
-    try {
-      const { readRunRecords } = await import("./audit");
-      const seeded = harness();
-      /* Drop the injected journal and lock: this run exercises exactly what
-         the scheduled CLI does. */
-      delete seeded.deps.appendRun;
-      delete seeded.deps.claim;
-      delete seeded.deps.runId;
-      const report = await runConversationMonitor(seeded.deps, OPTIONS);
-      expect(report.record.outcome).toBe("clean");
-      const persisted = readRunRecords(5, journal);
-      expect(persisted).toHaveLength(1);
-      expect(persisted[0]!.runId).toBe(report.record.runId);
-      /* The lock was released, so the next scheduled run is not skipped. */
-      const second = await runConversationMonitor(seeded.deps, OPTIONS);
-      expect(second.record.outcome).toBe("clean");
-      expect(readRunRecords(5, journal)).toHaveLength(2);
-    } finally {
-      delete process.env.LLV_MONITOR_AUDIT_FILE;
-    }
+  test("a path-pending record cannot be confirmed, so it is not resolved", async () => {
+    /* A spawn still settling has no transcript to probe. Believing it resolved
+       is precisely the assumption that let the old monitor report delivery it
+       never made. */
+    const seeded = harness({ orchestrator: { record: { conversationId: "conversation_new", path: null, createdAt: "2026-07-27T11:59:00Z" }, exists: true, defaultCwd: "/repo" } });
+    const report = await runConversationMonitor(seeded.deps, OPTIONS);
+    expect(report.record.orchestrator.resolution).toBe("unavailable");
+    expect(report.record.outcome).toBe("failed");
+    expect(report.record.detail).toContain("no settled transcript path");
+    expect(seeded.delivered).toHaveLength(0);
+  });
+
+  test("a send that had to resume the host does not finish clean", async () => {
+    const seeded = harness({ deliveryResumes: true });
+    const report = await runConversationMonitor(seeded.deps, OPTIONS);
+    expect(report.record.outcome).toBe("failed");
+    expect(report.record.orchestrator.delivered).toBe(false);
+    expect(report.record.detail).toContain("resume");
   });
 
   test("a request naming a GitHub issue is surfaced unconfirmed and no issue is created", async () => {

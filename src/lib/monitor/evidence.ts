@@ -27,6 +27,25 @@ function referencesIn(text: string): number[] {
   return [...found];
 }
 
+/**
+ * When a container last actually moved.
+ *
+ * Creation time is not movement. Judging a pipeline or flow by `createdAt`
+ * makes every container older than the stall threshold read as stalled, however
+ * recently its stage or round did something — which is the difference between
+ * "nobody is working on this" and "this has been working for three days".
+ *
+ * A container with no movement evidence at all returns `null`, and the
+ * classifier treats an unknown freshness conservatively: still in flight, never
+ * declared stalled on the strength of a missing field.
+ */
+function lastMovement(activityAt: readonly string[] | undefined, closedAt: string | null): string | null {
+  const instants = [...(activityAt ?? []), ...(closedAt ? [closedAt] : [])]
+    .filter((value) => Number.isFinite(Date.parse(value)));
+  if (instants.length === 0) return null;
+  return instants.reduce((latest, value) => (Date.parse(value) > Date.parse(latest) ? value : latest));
+}
+
 function taskState(status: string): EvidenceState {
   if (status === "done") return "terminal";
   if (status === "blocked") return "inert";
@@ -45,6 +64,7 @@ export function evidenceFromTasks(tasks: readonly TaskSummary[]): EvidenceItem[]
     kind: "task" as const,
     id: task.id,
     title: firstLine(task.text),
+    project: task.project || null,
     state: taskState(task.status),
     owner: taskOwner(task),
     updatedAt: task.updatedAt || null,
@@ -64,9 +84,10 @@ export function evidenceFromPipelines(pipelines: readonly PipelineSummary[]): Ev
     kind: "pipeline" as const,
     id: pipeline.id,
     title: firstLine(`${pipeline.task}\n${pipeline.spec ?? ""}`),
+    project: pipeline.project || null,
     state: pipelineState(pipeline.state),
     owner: `pipeline ${pipeline.id}`,
-    updatedAt: pipeline.closedAt ?? pipeline.createdAt ?? null,
+    updatedAt: lastMovement(pipeline.activityAt, pipeline.closedAt),
     references: referencesIn(`${pipeline.task} ${pipeline.spec ?? ""}`),
     monitorRef: null,
   }));
@@ -83,9 +104,10 @@ export function evidenceFromFlows(flows: readonly FlowSummary[]): EvidenceItem[]
     kind: "flow" as const,
     id: flow.id,
     title: firstLine(flow.spec ?? ""),
+    project: flow.project || null,
     state: flowState(flow.state),
     owner: `flow ${flow.id}`,
-    updatedAt: flow.closedAt ?? flow.createdAt ?? null,
+    updatedAt: lastMovement(flow.activityAt, flow.closedAt),
     references: referencesIn(flow.spec ?? ""),
     monitorRef: null,
   }));
@@ -107,6 +129,9 @@ export function evidenceFromGithub(rows: readonly GithubEvidenceRow[]): Evidence
     kind: row.kind,
     id: `#${row.number}`,
     title: firstLine(row.title),
+    /* Repository-wide, so it belongs to no single board. The classifier admits
+       it only for a reference the operator named. */
+    project: null,
     state: (row.state.toUpperCase() === "OPEN" ? "active" : "terminal") as EvidenceState,
     owner: row.kind === "pull-request" ? `pull request #${row.number}` : `issue #${row.number}`,
     updatedAt: row.updatedAt ?? null,

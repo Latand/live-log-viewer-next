@@ -46,6 +46,7 @@ function item(overrides: Partial<EvidenceItem> = {}): EvidenceItem {
     kind: "task",
     id: "task-1",
     title: "",
+    project: "viewer",
     state: "active",
     owner: null,
     updatedAt: "2026-07-27T11:00:00Z",
@@ -65,13 +66,37 @@ describe("evidence correlation", () => {
     expect(match!.score).toBeGreaterThan(0.5);
   });
 
-  test("an explicit issue reference outranks wording", () => {
-    const match = matchEvidence(request("Finish #741 before the deploy", { references: [741] }), [
-      item({ id: "task-9", title: "Something else entirely", references: [] }),
-      item({ kind: "issue", id: "#741", title: "recurring conversation monitor", references: [741] }),
-    ]);
-    expect(match?.item.id).toBe("#741");
-    expect(match!.score).toBe(1);
+  test("an explicit issue reference outranks wording, and says whether wording agrees", () => {
+    const corroborated = matchEvidence(
+      request("Finish the recurring conversation monitor in #741", { references: [741] }),
+      [
+        item({ id: "task-9", title: "Something else entirely", references: [] }),
+        item({ kind: "issue", id: "#741", project: null, title: "recurring conversation monitor", references: [741] }),
+      ],
+    );
+    expect(corroborated?.item.id).toBe("#741");
+    expect(corroborated!.basis).toBe("reference");
+
+    const passing = matchEvidence(
+      request("Ship the archive exporter before #741 lands", { references: [741] }),
+      [item({ kind: "issue", id: "#741", project: null, title: "recurring conversation monitor", references: [741] })],
+    );
+    expect(passing?.item.id).toBe("#741");
+    expect(passing!.basis).toBe("contextual-reference");
+  });
+
+  test("another project's work can never answer for this project's request", () => {
+    const asked = request("Add a retry to the deploy script when the health check flaps");
+    const foreign = item({ id: "task-other", project: "other-repo", title: "Deploy script retry on a flapping health check" });
+    expect(matchEvidence(asked, [foreign])).toBeNull();
+    expect(matchEvidence(asked, [{ ...foreign, project: "viewer" }])?.item.id).toBe("task-other");
+  });
+
+  test("a repository-wide item correlates only through a reference the operator named", () => {
+    const wording = request("Recurring conversation monitor work");
+    const repoWide = item({ kind: "pull-request", id: "#744", project: null, title: "recurring conversation monitor", references: [744] });
+    expect(matchEvidence(wording, [repoWide])).toBeNull();
+    expect(matchEvidence(request("Finish the recurring conversation monitor in #744", { references: [744] }), [repoWide])?.item.id).toBe("#744");
   });
 
   test("unrelated work never matches", () => {
@@ -161,5 +186,36 @@ describe("request classification", () => {
     const asked = request("Add a retry to the deploy script");
     const result = classifyRequest(asked, [item({ monitorRef: asked.fingerprint, state: "terminal" })], OPTIONS);
     expect(result.state).toBe("completed");
+  });
+
+  test("an issue named in passing never retires the request that mentioned it", () => {
+    /* "before #741 lands" is context, not evidence. Reading a closed issue as
+       terminal here would drop a request nobody has done. */
+    const result = classifyRequest(
+      request("Ship the archive exporter before #741 lands", { references: [741] }),
+      [item({ kind: "issue", id: "#741", project: null, title: "recurring conversation monitor", state: "terminal", references: [741] })],
+      OPTIONS,
+    );
+    expect(result.state).toBe("awaiting-confirmation");
+    expect(result.reason).toContain("in passing");
+  });
+
+  test("a reference the wording agrees with does settle the verdict", () => {
+    const result = classifyRequest(
+      request("Finish the recurring conversation monitor in #741", { references: [741] }),
+      [item({ kind: "issue", id: "#741", project: null, title: "recurring conversation monitor", state: "terminal", references: [741] })],
+      OPTIONS,
+    );
+    expect(result.state).toBe("completed");
+  });
+
+  test("a foreign project's card leaves the request untracked", () => {
+    const result = classifyRequest(
+      request("Add a retry to the deploy script when the health check flaps"),
+      [item({ id: "task-other", project: "other-repo", title: "Deploy script retry on a flapping health check" })],
+      OPTIONS,
+    );
+    expect(result.state).toBe("untracked");
+    expect(result.match).toBeNull();
   });
 });

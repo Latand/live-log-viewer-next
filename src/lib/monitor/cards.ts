@@ -45,8 +45,20 @@ function askedLine(request: OperatorRequest): string {
   return `Asked ${when} UTC in project ${request.project}.`;
 }
 
-/** The card body for one classified request. Quoted operator wording is
-    already redacted by the extractor; nothing else here reaches outside. */
+/**
+ * The card body for one classified request.
+ *
+ * It **summarizes and never quotes**. An earlier draft carried a `> …` block
+ * of the operator's own wording, which put private transcript text into an
+ * artifact that gets pasted, screenshotted and pushed — and the publication
+ * gate cannot catch it, because the gate inspects committed files and this is
+ * produced at runtime.
+ *
+ * What survives is a short derived label (the same normalization the task
+ * inbox already applies, redacted and clamped) plus monitor-authored context.
+ * That is enough for the operator to recognize the ask and go read the
+ * conversation; anything more is republishing it.
+ */
 export function monitorCardText(classified: ClassifiedRequest): string {
   const { request, state, reason } = classified;
   const lines = [
@@ -63,7 +75,12 @@ export function monitorCardText(classified: ClassifiedRequest): string {
         : "Unconfirmed: confirm with the operator before acting on this.",
     );
   }
-  lines.push("", "What the operator asked:", `> ${request.text.split("\n").join("\n> ")}`, "", `${MONITOR_REF_PREFIX} ${request.fingerprint}`);
+  lines.push(
+    "",
+    "The line above is the monitor's own summary; the conversation holds what was actually said.",
+    "",
+    `${MONITOR_REF_PREFIX} ${request.fingerprint}`,
+  );
   return redactBounded(lines.join("\n"), CARD_TEXT_LIMIT);
 }
 
