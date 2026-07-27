@@ -156,6 +156,15 @@ function validEvent(value: unknown): value is RuntimeEvent {
         && (event.resolution === "answered" || event.resolution === "host-restarted" || event.resolution === "server-resolved");
     case "limits":
       return Object.hasOwn(event, "snapshot");
+    case "realtime-delivery-progress":
+      return nonEmptyString(event.deliveryId)
+        && nonEmptyString(event.digest)
+        && Number.isSafeInteger(event.responseIndex)
+        && (event.responseIndex as number) >= 0
+        && Number.isSafeInteger(event.offset)
+        && (event.offset as number) >= 0;
+    case "realtime-delivery-acknowledged":
+      return nonEmptyString(event.deliveryId) && nonEmptyString(event.digest);
     case "session-status":
       return (event.status === "active" || event.status === "idle" || event.status === "unhosted" || event.status === "dead")
         && (event.activeFlags === undefined

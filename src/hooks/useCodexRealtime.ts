@@ -2,17 +2,21 @@
 
 import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 
-import { ambientLoop, setVoiceConnected } from "@/lib/audio/app";
-import { speakingFromLines } from "@/lib/audio/speech";
+import { setVoiceConnected } from "@/lib/audio/app";
 import { codexRealtimeClient } from "@/lib/realtime/codexRealtimeClient";
+import type { RuntimeVoiceDelivery } from "@/lib/runtime/voiceDelivery";
 
 const IDLE = { phase: "idle" as const, lines: [], error: null, startedAt: null, micMuted: false, outputMuted: false };
 
 export function useCodexRealtime(
   conversationId: string,
   enabled: boolean,
+  workerTurnId: string,
   workerProgress: string,
+  workerRunning: boolean,
+  workerDeliveries: readonly RuntimeVoiceDelivery[],
 ) {
+  const ambientOwner = useRef(Symbol("realtime-ambient-owner"));
   const client = useMemo(
     () => enabled && conversationId.startsWith("conversation_") ? codexRealtimeClient(conversationId) : null,
     [conversationId, enabled],
@@ -22,39 +26,23 @@ export function useCodexRealtime(
     client?.getSnapshot ?? (() => IDLE),
     () => IDLE,
   );
-  const previousProgress = useRef("");
-
   useEffect(() => {
-    if (!client) {
-      previousProgress.current = "";
-      return;
-    }
-    if (workerProgress) {
-      previousProgress.current = workerProgress;
-      client.queueWorkerProgress(workerProgress);
-      return;
-    }
-    if (previousProgress.current) {
-      client.finishWorkerProgress(previousProgress.current);
-      previousProgress.current = "";
-    }
-  }, [client, snapshot.phase, workerProgress]);
+    if (!client || !workerTurnId || !workerProgress) return;
+    client.updateWorkerProgress(workerTurnId, workerProgress, workerRunning);
+  }, [client, snapshot.phase, workerProgress, workerRunning, workerTurnId]);
+  useEffect(() => {
+    client?.reconcileWorkerDeliveries(workerDeliveries);
+  }, [client, snapshot.phase, workerDeliveries]);
 
   /* The ambient bed is eligible only while a call is up, and it fades on both
      edges. `live` is the only phase with two participants who can talk;
      connecting, stopping and error are not a call. */
   const live = snapshot.phase === "live";
   useEffect(() => {
-    setVoiceConnected(live);
-    return () => setVoiceConnected(false);
+    const owner = ambientOwner.current;
+    setVoiceConnected(owner, live);
+    return () => setVoiceConnected(owner, false);
   }, [live]);
-
-  /* Ducking reads the transcript the call already produces — no analyser on
-     either stream, no second signal path to keep in step with this one. */
-  const speaking = live ? speakingFromLines(snapshot.lines) : null;
-  useEffect(() => {
-    ambientLoop().setSpeaking(speaking);
-  }, [speaking]);
 
   return {
     ...snapshot,

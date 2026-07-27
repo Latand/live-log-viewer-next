@@ -54,6 +54,8 @@ export type RuntimeEvent =
   | { kind: "attention"; id: string; method: string; attention: unknown; seq: number }
   | { kind: "attention-resolved"; id: string; resolution: "answered" | "host-restarted" | "server-resolved"; seq: number }
   | { kind: "limits"; snapshot: unknown; seq: number }
+  | { kind: "realtime-delivery-progress"; deliveryId: string; digest: string; responseIndex: number; offset: number; seq: number }
+  | { kind: "realtime-delivery-acknowledged"; deliveryId: string; digest: string; seq: number }
   | { kind: "session-status"; status: "active" | "idle" | "unhosted" | "dead"; activeFlags?: string[]; seq: number };
 
 export interface HostState {

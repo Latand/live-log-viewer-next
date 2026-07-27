@@ -1,25 +1,35 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { viewBus } from "@/hooks/viewPresenceBus";
 import { stableDeviceId } from "@/hooks/useViewPresence";
 import type { AttentionRequestV1, FocusResolutionKind, ReturnPoint } from "@/lib/attention/types";
 import { useLocale } from "@/lib/i18n";
-import { RootOverlayHost } from "@/components/overlay/RootOverlayHost";
 import { useAttentionOffers, type PostOutcome, type ViewportCapture } from "@/components/overlay/useAttentionOffers";
 
+import { FocusReturnChip } from "./FocusReturnChip";
 import { focusHandoffBus, type FocusHandoffBus } from "./focusHandoffBus";
 import { restoreFocusPoint, runFocusHandoff, type HandoffTiming } from "./navigate";
-import { attentionPreviewFor } from "./preview";
 import { forgetReturnProject, readReturnProject, rememberReturnProject } from "./returnProjectMemory";
 
 /**
- * Where #688's loop is actually mounted (D3).
+ * Where the focus handoff is actually mounted (#688 D3).
  *
- * Everything below it already existed and is unchanged; what was missing was a
- * surface that polls the record on a real device and can move the real board.
- * Three things this file is responsible for, and nothing else is:
+ * Two operator decisions shape this file, and both are load-bearing:
+ *
+ * DESKTOP FOLLOWS IMMEDIATELY. An explicit focus event from the root agent
+ * moves the view; there is no consent step, no preview, and no action row. The
+ * confirmation cluster that used to live here is gone, and the only thing left
+ * behind is a small Back control in the board chrome.
+ *
+ * MOBILE IS CHAT-ONLY. The phone never renders, offers, accepts or navigates a
+ * focus request. That is enforced by withholding the device id — the same
+ * switch that stops the poll also stops every POST, so a phone cannot even
+ * report having seen an offer, and the request stays available for a desktop to
+ * follow rather than being consumed by a surface that will not move.
+ *
+ * What this file owns beyond those two:
  *
  * - the DEVICE. One stable id per browser, the same one presence already uses,
  *   so "which device was offered this" and "which device is looking at what"
@@ -32,16 +42,7 @@ import { forgetReturnProject, readReturnProject, rememberReturnProject } from ".
  *   A target that resolved to nothing is reported as `lost` and the record
  *   refuses to call it a follow, which is what keeps "you are looking at it"
  *   from being written about a view that never went anywhere.
- *
- * The overlay renders only while something needs an answer. The root
- * conversation's own turns are a separate slice (they need a transcript feed
- * adapter), and a permanently docked empty conversation would be worse than
- * none — but an unanswered request must never be invisible, which is the whole
- * failure this mount exists to end.
  */
-
-/** Fallback height for the mobile sheet before the window can be measured. */
-const DEFAULT_USABLE_HEIGHT = 720;
 
 export interface AttentionHostProps {
   mobile: boolean;
@@ -102,16 +103,11 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
     /* eslint-disable-next-line react-hooks/set-state-in-effect -- localStorage is unavailable during the server render, so the id can only be resolved once mounted */
     setResolvedDeviceId(stableDeviceId(browserStorage()));
   }, [forcedDeviceId]);
-  const deviceId = forcedDeviceId ?? resolvedDeviceId;
-
-  const [usableHeight, setUsableHeight] = useState(DEFAULT_USABLE_HEIGHT);
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const measure = () => setUsableHeight(window.innerHeight || DEFAULT_USABLE_HEIGHT);
-    measure();
-    window.addEventListener("resize", measure);
-    return () => window.removeEventListener("resize", measure);
-  }, []);
+  /* The single switch that makes the phone chat-only. Every read and every POST
+     below is gated on a device id, so withholding it here is what guarantees a
+     phone neither moves its own board nor consumes a request a desktop should
+     answer — rather than relying on each call site to remember. */
+  const deviceId = mobile ? null : (forcedDeviceId ?? resolvedDeviceId);
 
   /* The viewport the operator is leaving, taken before the move and handed to
      the arrival that records it. Held in a ref because `arrive` reads it after
@@ -230,39 +226,41 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
     }
   }, [pollGeneration, offers, deviceId]);
 
-  const handlers = useMemo(() => ({
-    onAcceptAttention: (request: AttentionRequestV1) => { void onAccept(request); },
-    onPreviewAttention: (request: AttentionRequestV1) => { void offers.preview(request); },
-    onDeclineAttention: (request: AttentionRequestV1) => { void offers.decline(request); },
-    onDismissAttention: (request: AttentionRequestV1) => { void offers.dismiss(request); },
-    onReturnAttention: (request: AttentionRequestV1) => { void onReturn(request); },
-  }), [onAccept, onReturn, offers]);
-
+  /**
+   * Follow an explicit focus event, exactly once.
+   *
+   * Edge-triggered on the request id and latched forever: the poll re-delivers
+   * the same actionable offer every few seconds, and a replayed MCP call
+   * re-delivers the same request id, so anything level-triggered here would
+   * re-move the view on a heartbeat. The latch is set BEFORE the await, because
+   * accepting is asynchronous and the next poll can land while it is still in
+   * flight.
+   *
+   * Nothing re-opens the latch. A second navigation requires a genuinely new
+   * request, which carries its own id.
+   */
+  const followed = useRef(new Set<string>());
   const offer = offers.offer;
-  const live = Boolean(offer && offer.status !== "none" && offer.status !== "closed");
-  if (!live && !offers.refusal) return null;
+  const actionableRequestId = offer && offer.status === "actionable" ? offer.request.id : null;
+  const actionableRequest = offer && offer.status === "actionable" ? offer.request : null;
+  useEffect(() => {
+    if (!deviceId || !actionableRequestId || !actionableRequest) return;
+    if (followed.current.has(actionableRequestId)) return;
+    followed.current.add(actionableRequestId);
+    void onAccept(actionableRequest);
+  }, [deviceId, actionableRequestId, actionableRequest, onAccept]);
 
-  /* The preview card's content, so "let me look first" shows something. Built
-     here rather than in the row because only this side can see the board, which
-     is where the anchor's own name comes from when the operator is already in
-     the project that holds it. */
-  const preview = offer && offer.status === "actionable" ? attentionPreviewFor(offer.request, bus.board()) : null;
+  const onReturnClick = useCallback(() => {
+    if (offer) void onReturn(offer.request);
+  }, [offer, onReturn]);
 
-  return (
-    <RootOverlayHost
-      mobile={mobile}
-      usableHeight={usableHeight}
-      state="idle"
-      turns={NO_TURNS}
-      attention={offer}
-      attentionPreview={preview}
-      attentionRefused={Boolean(offers.refusal)}
-      attentionRefusedReason={offers.refusal?.reason ?? null}
-      onDismissAttentionRefusal={offers.dismissRefusal}
-      t={t}
-      {...handlers}
-    />
-  );
+  /* The whole surface: one small control, and only while there is somewhere to
+     go back to. Everything else the overlay used to put here — the request card,
+     the accept/preview/decline row, the refusal band — is gone. A move that has
+     already happened does not need announcing, and a failed one is reported to
+     the agent through the focus-follow outcome rather than as a banner over the
+     operator's board. */
+  if (!offer || offer.status !== "following") return null;
+
+  return <FocusReturnChip onReturn={onReturnClick} precise={offer.returnAvailable} t={t} />;
 }
-
-const NO_TURNS = Object.freeze([]) as readonly never[];

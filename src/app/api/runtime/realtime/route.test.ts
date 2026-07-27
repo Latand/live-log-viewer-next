@@ -53,6 +53,37 @@ test("starts V3 WebRTC through the active hosted conversation", async () => {
   ]);
 });
 
+test("acknowledges a stable completed-response delivery through the hosted receiver", async () => {
+  const calls: unknown[] = [];
+  const delivery = {
+    deliveryId: 'voice:["turn-one",["response-one"]]',
+    turnId: "turn-one",
+    responses: [{ responseId: "response-one", text: "full response 🙂" }],
+    ready: true,
+  };
+  const result = await executeRealtimeControl({
+    action: "deliverWorkerResponse",
+    conversationId: "conversation_voice",
+    delivery,
+  }, () => ({
+    async startRealtimeWebRtc() {
+      return { sdp: "v=0\r\nanswer", realtimeSessionId: null };
+    },
+    async appendRealtimeSpeech() {},
+    async deliverRealtimeWorkerResponse(value: unknown) {
+      calls.push(value);
+      return { deliveryId: delivery.deliveryId, acknowledged: true as const };
+    },
+    async stopRealtime() {},
+  }));
+
+  expect(calls).toEqual([delivery]);
+  expect(result).toEqual({
+    status: 200,
+    body: { ok: true, deliveryId: delivery.deliveryId, acknowledged: true },
+  });
+});
+
 test("keeps validation and backend admission errors bounded", async () => {
   expect((await executeRealtimeControl({ action: "start", conversationId: "other", sdp: "v=0" })).status).toBe(400);
   expect((await executeRealtimeControl({

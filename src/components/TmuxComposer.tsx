@@ -969,10 +969,14 @@ export function TmuxComposer({
   const voiceEnabled = cardId.startsWith("conversation_")
     && structuredSession?.session.hostKind === "codex-app-server"
     && structuredSession.session.host === "hosted";
+  const voiceWorkerTurn = structuredSession?.session.liveTurn;
   const voice = useCodexRealtime(
     cardId,
     voiceEnabled,
-    structuredSession?.session.liveTurn?.text ?? "",
+    voiceWorkerTurn?.turnId ?? "",
+    voiceWorkerTurn?.text ?? "",
+    Boolean(voiceWorkerTurn?.turnId && structuredSession?.session.activeTurnId === voiceWorkerTurn.turnId),
+    structuredSession?.session.voiceDeliveries ?? [],
   );
   const structuredImageCapability = structuredSession?.session.capabilities?.imageInput;
   const structuredImageControl = caps.controls.images;

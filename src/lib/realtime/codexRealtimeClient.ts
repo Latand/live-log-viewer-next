@@ -1,5 +1,10 @@
 "use client";
 
+import {
+  normalizeVoiceDeliveries,
+  type RuntimeVoiceDelivery,
+} from "@/lib/runtime/voiceDelivery";
+
 export type CodexRealtimePhase = "idle" | "connecting" | "live" | "stopping" | "error";
 export type CodexRealtimeRole = "user" | "assistant" | "progress";
 
@@ -32,8 +37,6 @@ export type ParsedRealtimeEvent =
 
 const MAX_LINE_CHARS = 12_000;
 const MAX_LINES = 80;
-const HANDOFF_INTERVAL_MS = 200;
-const HANDOFF_CHUNK_BYTES = 500;
 
 function object(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -108,38 +111,6 @@ export function parseCodexRealtimeEvent(value: unknown): ParsedRealtimeEvent {
   return { kind: "ignored" };
 }
 
-export function chunkUtf8(text: string, maxBytes = HANDOFF_CHUNK_BYTES): string[] {
-  if (!Number.isInteger(maxBytes) || maxBytes <= 0) throw new Error("maxBytes must be positive");
-  const encoder = new TextEncoder();
-  const chunks: string[] = [];
-  let current = "";
-  for (const symbol of text) {
-    if (encoder.encode(symbol).byteLength > maxBytes) continue;
-    if (current && encoder.encode(current + symbol).byteLength > maxBytes) {
-      chunks.push(current);
-      current = symbol;
-    } else {
-      current += symbol;
-    }
-  }
-  if (current) chunks.push(current);
-  return chunks;
-}
-
-export function delegationContextEvents(
-  delegationItemId: string,
-  text: string,
-  channel: "commentary" | "speakable",
-): Record<string, unknown>[] {
-  if (!delegationItemId || !text) return [];
-  return chunkUtf8(text).map((chunk) => ({
-    type: "delegation.context.append",
-    delegation_item_id: delegationItemId,
-    channel,
-    content: [{ type: "input_text", text: chunk }],
-  }));
-}
-
 async function responseJson(response: Response): Promise<Record<string, unknown>> {
   const body = await response.json().catch(() => ({})) as Record<string, unknown>;
   if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : `Realtime request failed (${response.status})`);
@@ -169,11 +140,10 @@ class CodexRealtimeClient {
   private events: RTCDataChannel | null = null;
   private media: MediaStream | null = null;
   private audio: HTMLAudioElement | null = null;
-  private delegationItemId: string | null = null;
-  private lastWorkerText = "";
-  private pendingWorkerText = "";
-  private pendingFinalText = "";
-  private handoffTimer: number | null = null;
+  private readonly pendingWorkerDeliveries = new Map<string, RuntimeVoiceDelivery>();
+  private readonly acknowledgedWorkerDeliveries = new Set<string>();
+  private workerDeliveryFlush: Promise<void> | null = null;
+  private workerDeliveryWakeEpoch: number | null = null;
   private unloadHangup: (() => void) | null = null;
   private lineSequence = 0;
   private epoch = 0;
@@ -243,7 +213,10 @@ class CodexRealtimeClient {
         if (epoch === this.epoch) this.acceptWireMessage(message.data);
       };
       events.onopen = () => {
-        if (epoch === this.epoch) this.update({ phase: "live", error: null, startedAt: Date.now() });
+        if (epoch === this.epoch) {
+          this.update({ phase: "live", error: null, startedAt: Date.now() });
+          this.flushWorkerDeliveries();
+        }
       };
       /* Closing the tab must hang up too. A call the backend still believes is
          open holds the account's one concurrent slot, and the next call is
@@ -312,49 +285,65 @@ class CodexRealtimeClient {
     } catch (error) {
       failure = error instanceof Error ? error.message : String(error);
     }
+    /* Canonical pending deliveries intentionally survive an explicit hangup.
+       A later Live Mode start retries the same stable id and the host resumes
+       from its durable chunk cursor. */
     this.cleanupTransport();
     this.update({ phase: failure ? "error" : "idle", error: failure });
   }
 
-  queueWorkerProgress(text: string): void {
-    if (!text || this.snapshot.phase !== "live") return;
-    this.pendingWorkerText = text.slice(-MAX_LINE_CHARS);
-    this.upsertLine("progress", this.pendingWorkerText, false);
-    if (this.handoffTimer !== null) return;
-    this.handoffTimer = window.setTimeout(() => {
-      this.handoffTimer = null;
-      this.flushWorkerProgress();
-    }, HANDOFF_INTERVAL_MS);
+  updateWorkerProgress(turnId: string, text: string, running: boolean): void {
+    if (!turnId || !text || this.snapshot.phase !== "live") return;
+    this.upsertLine("progress", text.slice(-MAX_LINE_CHARS), !running);
   }
 
-  finishWorkerProgress(text: string): void {
-    if (!text || this.snapshot.phase !== "live") return;
-    this.pendingWorkerText = text.slice(-MAX_LINE_CHARS);
-    if (this.handoffTimer !== null) {
-      window.clearTimeout(this.handoffTimer);
-      this.handoffTimer = null;
+  reconcileWorkerDeliveries(value: readonly RuntimeVoiceDelivery[] | null | undefined): void {
+    for (const delivery of normalizeVoiceDeliveries(value)) {
+      if (!delivery.ready || this.acknowledgedWorkerDeliveries.has(delivery.deliveryId)) continue;
+      this.pendingWorkerDeliveries.set(delivery.deliveryId, delivery);
     }
-    this.flushWorkerProgress();
-    this.pendingFinalText = `Agent Final Message:\n\n${this.pendingWorkerText}`;
-    if (this.sendDelegationContext(this.pendingFinalText, "speakable")) this.pendingFinalText = "";
-    this.upsertLine("progress", this.pendingWorkerText, true);
-    this.lastWorkerText = "";
-    this.pendingWorkerText = "";
+    this.flushWorkerDeliveries();
   }
 
-  private flushWorkerProgress(): void {
-    const text = this.pendingWorkerText;
-    if (!text) return;
-    const delta = text.startsWith(this.lastWorkerText) ? text.slice(this.lastWorkerText.length) : text;
-    if (!delta || this.sendDelegationContext(delta, "commentary")) this.lastWorkerText = text;
-  }
-
-  private sendDelegationContext(text: string, channel: "commentary" | "speakable"): boolean {
-    if (!this.delegationItemId || this.events?.readyState !== "open") return false;
-    for (const event of delegationContextEvents(this.delegationItemId, text, channel)) {
-      this.events.send(JSON.stringify(event));
+  private flushWorkerDeliveries(): void {
+    if (this.snapshot.phase !== "live" || this.pendingWorkerDeliveries.size === 0) return;
+    if (this.workerDeliveryFlush) {
+      this.workerDeliveryWakeEpoch = this.epoch;
+      return;
     }
-    return true;
+    const task = this.deliverPendingWorkerResponses();
+    this.workerDeliveryFlush = task;
+    void task.finally(() => {
+      if (this.workerDeliveryFlush !== task) return;
+      this.workerDeliveryFlush = null;
+      const wakeEpoch = this.workerDeliveryWakeEpoch;
+      this.workerDeliveryWakeEpoch = null;
+      if (wakeEpoch === this.epoch) this.flushWorkerDeliveries();
+    });
+  }
+
+  private async deliverPendingWorkerResponses(): Promise<void> {
+    while (this.snapshot.phase === "live") {
+      const delivery = this.pendingWorkerDeliveries.values().next().value as RuntimeVoiceDelivery | undefined;
+      if (!delivery) return;
+      let body: Record<string, unknown>;
+      try {
+        body = await responseJson(await fetch("/api/runtime/realtime", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            action: "deliverWorkerResponse",
+            conversationId: this.conversationId,
+            delivery,
+          }),
+        }));
+      } catch {
+        return;
+      }
+      if (body.acknowledged !== true || body.deliveryId !== delivery.deliveryId) return;
+      this.pendingWorkerDeliveries.delete(delivery.deliveryId);
+      this.acknowledgedWorkerDeliveries.add(delivery.deliveryId);
+    }
   }
 
   private acceptWireMessage(raw: unknown): void {
@@ -369,11 +358,7 @@ class CodexRealtimeClient {
     if (event.kind === "transcript") {
       this.upsertLine(event.role, event.text, event.final);
     } else if (event.kind === "delegation") {
-      this.delegationItemId = event.id;
-      this.flushWorkerProgress();
-      if (this.pendingFinalText && this.sendDelegationContext(this.pendingFinalText, "speakable")) {
-        this.pendingFinalText = "";
-      }
+      return;
     } else if (event.kind === "error") {
       this.setError(event.message);
     }
@@ -429,8 +414,6 @@ class CodexRealtimeClient {
   private cleanupTransport(): void {
     if (this.unloadHangup) window.removeEventListener("pagehide", this.unloadHangup);
     this.unloadHangup = null;
-    if (this.handoffTimer !== null) window.clearTimeout(this.handoffTimer);
-    this.handoffTimer = null;
     this.events?.close();
     this.peer?.close();
     for (const track of this.media?.getTracks() ?? []) track.stop();
@@ -439,10 +422,6 @@ class CodexRealtimeClient {
     this.peer = null;
     this.media = null;
     this.audio = null;
-    this.delegationItemId = null;
-    this.lastWorkerText = "";
-    this.pendingWorkerText = "";
-    this.pendingFinalText = "";
   }
 }
 

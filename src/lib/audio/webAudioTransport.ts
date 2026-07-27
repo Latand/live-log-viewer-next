@@ -189,7 +189,7 @@ export function createWebAudioTransports(
           source.loopStart = 0;
           source.loopEnd = buffer.duration;
           const gain = context.createGain();
-          gain.gain.setValueAtTime(request.gain, context.currentTime);
+          gain.gain.value = request.gain;
           source.connect(gain as never);
           gain.connect(context.destination as never);
           source.start();
