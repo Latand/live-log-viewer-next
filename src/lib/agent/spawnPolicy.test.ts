@@ -170,25 +170,24 @@ test("Claude native MCP config merges project scope between user and local scope
   fs.mkdirSync(path.join(projectRoot, ".git"), { recursive: true });
   fs.mkdirSync(cwd, { recursive: true });
   fs.writeFileSync(path.join(accountHome, "settings.json"), JSON.stringify({
-    enabledMcpjsonServers: ["project-allowed"],
+    enabledMcpjsonServers: ["agent-browser"],
   }));
   fs.writeFileSync(path.join(accountHome, ".claude.json"), JSON.stringify({
     mcpServers: {
       viewer: { type: "stdio", command: "viewer-user" },
-      "project-allowed": { type: "stdio", command: "user-version" },
-      "local-wins": { type: "stdio", command: "user-local" },
+      "agent-browser": { type: "stdio", command: "user-version" },
     },
     projects: {
       [cwd]: {
         mcpServers: {
-          "local-wins": { type: "stdio", command: "local-version", env: { LOCAL_AUTH: "kept" } },
+          "agent-browser": { type: "stdio", command: "local-version", env: { LOCAL_AUTH: "kept" } },
         },
       },
     },
   }));
   fs.writeFileSync(path.join(projectRoot, ".mcp.json"), JSON.stringify({
     mcpServers: {
-      "project-allowed": {
+      "agent-browser": {
         type: "stdio",
         command: "project-version",
         args: ["--project"],
@@ -196,15 +195,33 @@ test("Claude native MCP config merges project scope between user and local scope
         timeout: 12_345,
         alwaysLoad: true,
       },
-      "local-wins": { type: "stdio", command: "project-local" },
       "project-unrelated": { type: "stdio", command: "unrelated-project" },
     },
   }));
 
+  /* Shared project scope wins over the user root definition where the launch
+     directory carries no local override of its own. */
+  const sharedInstalled = applyClaudeSpawnPolicy(accountHome, {
+    profileId: "project-scopes-shared",
+    cwd: projectRoot,
+    mcpServers: ["agent-browser"],
+  });
+  const sharedConfig = JSON.parse(fs.readFileSync(sharedInstalled.mcpConfigPath, "utf8")) as {
+    mcpServers: Record<string, unknown>;
+  };
+  expect(sharedConfig.mcpServers["agent-browser"]).toEqual({
+    type: "stdio",
+    command: "project-version",
+    args: ["--project"],
+    env: { PROJECT_AUTH: "kept" },
+    timeout: 12_345,
+    alwaysLoad: true,
+  });
+
   const installed = applyClaudeSpawnPolicy(accountHome, {
     profileId: "project-scopes",
     cwd,
-    mcpServers: ["project-allowed", "local-wins"],
+    mcpServers: ["agent-browser"],
   });
   const mcpConfig = JSON.parse(fs.readFileSync(installed.mcpConfigPath, "utf8")) as {
     mcpServers: Record<string, unknown>;
@@ -214,21 +231,38 @@ test("Claude native MCP config merges project scope between user and local scope
     disabledMcpjsonServers: string[];
   };
 
+  /* The launch directory's local definition wins over both. */
   expect(mcpConfig.mcpServers).toEqual({
     viewer: { type: "stdio", command: "viewer-user" },
-    "project-allowed": {
-      type: "stdio",
-      command: "project-version",
-      args: ["--project"],
-      env: { PROJECT_AUTH: "kept" },
-      timeout: 12_345,
-      alwaysLoad: true,
-    },
-    "local-wins": { type: "stdio", command: "local-version", env: { LOCAL_AUTH: "kept" } },
+    "agent-browser": { type: "stdio", command: "local-version", env: { LOCAL_AUTH: "kept" } },
   });
   expect(mcpConfig.mcpServers).not.toHaveProperty("project-unrelated");
-  expect(settings.enabledMcpjsonServers).toEqual(["project-allowed"]);
+  expect(settings.enabledMcpjsonServers).toEqual(["agent-browser"]);
   expect(settings.disabledMcpjsonServers).toEqual(["project-unrelated"]);
+});
+
+test("an ungranted server in a stored allowlist never reaches the Claude MCP config", () => {
+  const accountHome = home();
+  fs.writeFileSync(path.join(accountHome, ".claude.json"), JSON.stringify({
+    mcpServers: {
+      viewer: { type: "stdio", command: "viewer-mcp" },
+      "agent-browser": { type: "stdio", command: "browser-mcp" },
+      telegram: { type: "stdio", command: "telegram-mcp" },
+    },
+  }));
+
+  /* A launch profile hand-edited to name an ungranted server is re-bounded
+     where the command materializes it, not trusted from storage (issue #739). */
+  const installed = applyClaudeSpawnPolicy(accountHome, {
+    profileId: "rebounded",
+    cwd: "/repo",
+    mcpServers: ["viewer", "telegram", "agent-browser"],
+  });
+  const mcpConfig = JSON.parse(fs.readFileSync(installed.mcpConfigPath, "utf8")) as {
+    mcpServers: Record<string, unknown>;
+  };
+
+  expect(Object.keys(mcpConfig.mcpServers)).toEqual(["viewer", "agent-browser"]);
 });
 
 test("allowSubagents uses an isolated profile while the denied profile stays enforced", () => {

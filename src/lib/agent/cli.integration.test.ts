@@ -276,21 +276,24 @@ test.skipIf(!layeredHome)("native Codex enumeration enforces the allowlist for t
     'trust_level = "trusted"',
     "",
   ].join("\n"), { mode: 0o600 });
+  /* Project configuration is enumerated, then filtered by the grant: only a
+     server inside the grantable bound can be enabled, whichever scope declared
+     it (issue #739), and `project-ungranted` stands for everything outside it. */
   fs.writeFileSync(path.join(projectRoot, ".codex", "config.toml"), [
-    "[mcp_servers.project-allowed]",
+    "[mcp_servers.agent-browser]",
     'command = "/bin/true"',
-    "[mcp_servers.project-unrelated]",
+    "[mcp_servers.project-ungranted]",
     'command = "/bin/true"',
     "",
   ].join("\n"), { mode: 0o600 });
 
   const spec = freshSpecFor("codex", projectRoot, {
     codexHome: layeredHome.codexHome,
-    mcpServers: ["project-allowed"],
+    mcpServers: ["agent-browser", "project-ungranted"],
   });
 
-  expect(spec.command).toContain("'mcp_servers.project-allowed.enabled=true'");
-  expect(spec.command).toContain("'mcp_servers.project-unrelated.enabled=false'");
+  expect(spec.command).toContain("'mcp_servers.agent-browser.enabled=true'");
+  expect(spec.command).toContain("'mcp_servers.project-ungranted.enabled=false'");
 });
 
 test.skipIf(!customHome)("real custom tmux Codex enables the optional server, force-enables Viewer, excludes sentinels, and reaps its MCP processes", async () => {

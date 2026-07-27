@@ -971,7 +971,7 @@ const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     allowSubagents: z.boolean().optional(),
     mcpServers: z.array(z.string().regex(/^[^\s\u0000-\u001f\u007f]{1,128}$/u))
       .optional()
-      .describe("Per-spawn MCP server allowlist. Viewer is always included; omission selects Viewer only."),
+      .describe("Per-spawn MCP server allowlist, resolved server-side. Only servers the Viewer may grant are accepted; any other name is refused outright, never silently trimmed. Viewer is always included. The grant is then decided by the new session's origin — a delegated launch, which every role-preset spawn is, receives the Viewer baseline whatever it lists here — so this can narrow the surface, never widen it."),
     images: z.array(z.unknown()).optional(),
   }).passthrough(),
   send_message: z.object({

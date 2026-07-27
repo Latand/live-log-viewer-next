@@ -1,5 +1,5 @@
 import { CODEX_VIEWER_SPAWN_FEATURES } from "@/lib/agent/spawnPolicy";
-import { normalizeSpawnMcpServers } from "@/lib/agent/mcpAllowlist";
+import { grantedMcpServers } from "@/lib/agent/mcpAllowlist";
 import { grantedPlugins } from "@/lib/agent/pluginAllowlist";
 
 type JsonObject = Record<string, unknown>;
@@ -34,8 +34,10 @@ export function headlessCodexThreadConfig(
   const config = record(record(configRead)?.config);
   const servers = record(config?.mcp_servers);
   if (!config || !servers) throw new Error("config/read returned no MCP server table");
-  const normalized = normalizeSpawnMcpServers(mcpServers);
-  const enabled = new Set(normalized.ok ? normalized.value : ["viewer"]);
+  /* The grant bound is enforced again here (issue #739): the thread's enable
+     table is materialized from the re-validated list, so a launch profile
+     edited by hand cannot turn a server on for this thread. */
+  const enabled = new Set(grantedMcpServers(mcpServers));
   /* The plugin subsystem is off for every session that holds no grant, which
      is the default. A grant turns it on for THIS thread only — never for the
      app-server, never in the operator's configuration. */

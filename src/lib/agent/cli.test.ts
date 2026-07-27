@@ -258,6 +258,32 @@ test("fresh tmux Claude uses its exclusive native MCP file", () => {
   expect(spec.launchProfile?.mcpServers).toEqual(["viewer", "agent-browser"]);
 });
 
+test("a stored allowlist naming an ungranted server is re-bounded when the command is built", () => {
+  const home = path.join(SANDBOX, "claude-mcp-rebound");
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({
+    mcpServers: {
+      viewer: { type: "stdio", command: "viewer-mcp" },
+      "agent-browser": { type: "stdio", command: "browser-mcp" },
+      telegram: { type: "stdio", command: "telegram-mcp" },
+    },
+  }));
+
+  /* Launch profiles are durable and editable by hand, so the rendered command
+     comes from the re-validated grant, not from what storage claimed (#739). */
+  const spec = freshSpecFor("claude", "/repo", {
+    claudeConfigDir: home,
+    claudeProjectsDir: path.join(home, "projects"),
+    mcpServers: ["viewer", "telegram", "agent-browser"],
+  });
+  const sessionId = path.basename(spec.transcript!, ".jsonl");
+  const mcpConfigPath = path.join(home, ".llv", "spawn-mcp", `${sessionId}.json`);
+
+  expect(spec.launchProfile?.mcpServers).toEqual(["viewer", "agent-browser"]);
+  expect(Object.keys((JSON.parse(fs.readFileSync(mcpConfigPath, "utf8")) as { mcpServers: Record<string, unknown> }).mcpServers))
+    .toEqual(["viewer", "agent-browser"]);
+});
+
 test("allowSubagents enables Codex multi-agent for fresh and resumed launches", () => {
   const transcript = path.join(SANDBOX, "legacy", "sessions", "2026", "07", "14", "rollout-019f5f2f-743a-7f23-7773-3cf2dd4b4168.jsonl");
   fs.mkdirSync(path.dirname(transcript), { recursive: true });
