@@ -426,10 +426,8 @@ async function deployExactSha(args: McpToolArgs, control: ViewerControlDependenc
      stops the deploy instead of downgrading to an unauthorized one. The consume is
      atomic with the check, so two answers racing cannot both pass. */
   /* Shape-checked here so the manager gets a useful refusal without a round trip;
-     VERIFIED AND SPENT at the deployment endpoint, which is the last door before the
-     host and the one every deploy path passes through. Consuming in both places
-     would spend the operator's yes twice for one deploy, and consuming only here
-     would leave the endpoint open to anything that skips this tool. */
+     VERIFIED AND SPENT at runtime-host admission, the one checkpoint this tool, the
+     HTTP route and a raw socket client all converge on. */
   const bridgeRef = args.bridgeRef;
   const bridgeNonce = text(args.bridgeNonce);
   if (typeof bridgeRef !== "number" || !Number.isInteger(bridgeRef) || bridgeRef < 1 || !bridgeNonce) {

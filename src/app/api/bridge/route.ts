@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import {
-  acknowledgeBridgeDelivery,
   bridgeTurnStartPrelude,
+  issueBridgeAcknowledgementToken,
   pendingBridgeDelivery,
+  redeemBridgeAcknowledgement,
 } from "@/lib/bridge/service";
+import { authenticateBridgeGateway } from "@/lib/bridge/gatewayAuthority";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { FileTransactionBusyError } from "@/lib/state/fileTransaction";
 
@@ -26,6 +28,17 @@ const headers = { "Cache-Control": "no-store" };
  * moving anything, POST records what actually arrived. A drain that advanced the
  * cursor by itself would lose any batch that died between the response and the
  * call.
+ *
+ * AUTHENTICATED, because the payload is not merely private — it carries the
+ * single-use nonces that authorize deploys. An unauthenticated loopback reader could
+ * harvest one and then approve a deploy in the operator's name, which defeats the
+ * confirmation design entirely. The caller proves it is the live gateway surface by
+ * presenting the realtime session id the backend minted for the root's call; nobody
+ * else holds it.
+ *
+ * And an acknowledgement names the batch it received, by the token issued with it —
+ * never a sequence of the caller's choosing, which would let a caller retire every
+ * blocker and question in the log without ever reading one.
  */
 
 /** Whatever the operator's browser is willing to say it already played. Bounded so
@@ -34,13 +47,21 @@ const MAX_ACKNOWLEDGED_IDS = 256;
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const parameters = request.nextUrl.searchParams;
+  const gateway = authenticateBridgeGateway(parameters.get("realtimeSessionId"));
+  if (!gateway.ok) return NextResponse.json({ error: gateway.error }, { status: 403, headers });
 
   /* The no-call path (§4). A turn is about to open with no live call to interject
      into, so its inbox becomes part of that turn's own input. Same cursor, same
      caps, same "read moves nothing" rule as the live drain. */
   if (parameters.get("mode") === "turn-start") {
     try {
-      return NextResponse.json({ ok: true, prelude: bridgeTurnStartPrelude({ now: new Date() }) }, { headers });
+      const prelude = bridgeTurnStartPrelude({ now: new Date() });
+      return NextResponse.json({
+        ok: true,
+        prelude: prelude
+          ? { text: prelude.text, ackToken: issueBridgeAcknowledgementToken(prelude.throughSeq) }
+          : null,
+      }, { headers });
     } catch (error) {
       return failure(error);
     }
@@ -54,7 +75,18 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
   try {
     const plan = pendingBridgeDelivery({ now: new Date(), lastBatchAt, acknowledgedDeliveryIds });
-    return NextResponse.json({ ok: true, plan }, { headers });
+    /* The seq never leaves; the token does. A caller settles the batch it was given
+       and cannot name another. */
+    if (plan.kind === "idle" || plan.kind === "hold") {
+      return NextResponse.json({ ok: true, plan }, { headers });
+    }
+    const ackToken = issueBridgeAcknowledgementToken(plan.throughSeq);
+    return NextResponse.json({
+      ok: true,
+      plan: plan.kind === "deliver"
+        ? { kind: "deliver", delivery: plan.delivery, ackToken }
+        : { kind: "already-acknowledged", ackToken },
+    }, { headers });
   } catch (error) {
     return failure(error);
   }
@@ -63,18 +95,28 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 export async function POST(request: NextRequest): Promise<NextResponse> {
   const rejection = rejectCrossOrigin(request);
   if (rejection) return rejection;
-  let body: { throughSeq?: unknown };
+  let body: { ackToken?: unknown; realtimeSessionId?: unknown };
   try {
     body = (await request.json()) as typeof body;
   } catch {
     return NextResponse.json({ error: "invalid JSON" }, { status: 400, headers });
   }
-  if (!Number.isInteger(body.throughSeq) || (body.throughSeq as number) < 1) {
-    return NextResponse.json({ error: "throughSeq must be a positive integer" }, { status: 400, headers });
+  const gateway = authenticateBridgeGateway(
+    typeof body.realtimeSessionId === "string" ? body.realtimeSessionId : null,
+  );
+  if (!gateway.ok) return NextResponse.json({ error: gateway.error }, { status: 403, headers });
+
+  /* The batch, by the token it was handed out with. A caller cannot name a sequence:
+     acknowledging reports it never received is how the whole inbox goes quiet. */
+  if (typeof body.ackToken !== "string" || !body.ackToken.trim()) {
+    return NextResponse.json({ error: "ackToken from the delivered batch is required" }, { status: 400, headers });
   }
   try {
-    acknowledgeBridgeDelivery(body.throughSeq as number);
-    return NextResponse.json({ ok: true }, { headers });
+    const settled = redeemBridgeAcknowledgement(body.ackToken.trim());
+    if (!settled.ok) {
+      return NextResponse.json({ error: "ackToken does not match the outstanding batch" }, { status: 409, headers });
+    }
+    return NextResponse.json({ ok: true, throughSeq: settled.throughSeq }, { headers });
   } catch (error) {
     return failure(error);
   }

@@ -168,6 +168,7 @@ const CLIENT = {
   stop: async () => undefined,
   reconcileWorkerDeliveries: () => undefined,
   onDeliveryAcknowledged: () => () => undefined,
+  realtimeSession: () => "rt_sess_test",
 };
 
 const resolveClient = (conversationId: string) => {

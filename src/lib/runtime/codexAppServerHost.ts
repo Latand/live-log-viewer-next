@@ -1869,6 +1869,13 @@ export class CodexAppServerHost implements EngineHost {
   /** The reason the last realtime call ended, or null when none has failed
       since the current call started. Read by the realtime control endpoint so
       the browser can replace its generic transport message with this one. */
+  /** #691 §6: the session id minted during the SDP exchange. Injection is
+      authorized against this, so only the peer that ran that exchange can write into
+      the call. */
+  currentRealtimeSessionId(): string | null {
+    return this.realtimeSessionId;
+  }
+
   lastRealtimeFailure(): CodexRealtimeFailure | null {
     return this.realtimeFailure;
   }

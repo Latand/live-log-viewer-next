@@ -14,12 +14,18 @@ import { setDeploymentRuntimeForTests } from "@/lib/runtime/deploymentRuntime";
 import { POST } from "./route";
 
 /**
- * The second door into the deploy room.
+ * One of three doors — and, deliberately, not the lock.
  *
- * Gating `deploy_exact_sha` stops the manager's TOOL CALL; it does not stop anything
- * that can reach this endpoint, and any local caller can. So the confirmation is
- * verified and spent here, immediately before the runtime host is asked to deploy,
- * and these prove that no shape of request gets past it without the operator's yes.
+ * The MCP binding, this route and a raw runtime-host socket are three ways to ask
+ * for the same deploy. Gating each closed only that one, which is how a third door
+ * was found behind the first two, so the verification and the single-use spend both
+ * live at host admission now (`src/runtime-host/deployment.authorization.test.ts`,
+ * against the real coordinator).
+ *
+ * What this route still owes: refuse an obviously unauthorized request early enough
+ * to give the caller a useful answer, and forward the proof it was handed WITHOUT
+ * consuming it — a spend here would have the real deploy refused as already
+ * consumed.
  */
 
 const sandboxes: string[] = [];
@@ -27,7 +33,7 @@ const originalStateDir = process.env.LLV_STATE_DIR;
 const originalSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
 const originalRollback = process.env.LLV_RUNTIME_EVENTS;
 
-let requested: { revision?: string; idempotencyKey: string }[] = [];
+let requested: { revision?: string; idempotencyKey: string; bridgeProof?: { ref?: unknown; nonce?: unknown } }[] = [];
 
 beforeEach(() => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-deployments-route-"));
@@ -84,52 +90,24 @@ test("a deploy with no bridge proof is refused and never reaches the runtime hos
   expect(requested).toEqual([]);
 });
 
-test("a confirmed deploy reaches the runtime host exactly once", async () => {
+test("the proof is forwarded to host admission, verbatim and unspent", async () => {
   const { ref, nonce } = confirmed();
   const response = await POST(deployRequest({
     revision: SHA, idempotencyKey: "k1", bridgeRef: ref, bridgeNonce: nonce,
   }));
   expect(response.status).toBe(202);
-  expect(requested).toEqual([{ revision: SHA, idempotencyKey: "k1" }]);
+  expect(requested).toEqual([{ revision: SHA, idempotencyKey: "k1", bridgeProof: { ref, nonce } }]);
 
-  /* Replay: a fresh idempotencyKey must not resurrect a spent authorization. */
-  const replay = await POST(deployRequest({
-    revision: SHA, idempotencyKey: "k2", bridgeRef: ref, bridgeNonce: nonce,
-  }));
-  expect(replay.status).toBe(403);
-  expect(await replay.json()).toMatchObject({ reason: "consumed" });
-  expect(requested).toHaveLength(1);
+  /* Unspent HERE. Consuming at this layer would leave admission — the one gate that
+     matters — with an already-consumed nonce and no deploy. */
+  const stored = drainBridgeReports().reports.find((report) => report.seq === ref);
+  expect(stored?.confirmation?.consumedAt).toBeUndefined();
 });
 
-test("a wrong nonce, a wrong SHA and an unknown ref each deploy nothing", async () => {
+test("a half-presented proof is refused before the runtime is reached", async () => {
   const { ref, nonce } = confirmed();
-
-  expect((await POST(deployRequest({ revision: SHA, idempotencyKey: "k1", bridgeRef: ref, bridgeNonce: "wrong" }))).status).toBe(403);
-  expect((await POST(deployRequest({ revision: "b".repeat(40), idempotencyKey: "k2", bridgeRef: ref, bridgeNonce: nonce }))).status).toBe(403);
-  expect((await POST(deployRequest({ revision: SHA, idempotencyKey: "k3", bridgeRef: 9_999, bridgeNonce: nonce }))).status).toBe(403);
-  expect(requested).toEqual([]);
-
-  /* None of those spent the confirmation, so the correct answer still deploys. */
-  expect((await POST(deployRequest({ revision: SHA, idempotencyKey: "k4", bridgeRef: ref, bridgeNonce: nonce }))).status).toBe(202);
-  expect(requested).toHaveLength(1);
-});
-
-test("an expired confirmation deploys nothing", async () => {
-  const confirmation = mintBridgeConfirmation({ sha: SHA, now: new Date(Date.now() - 60 * 60_000) });
-  recordManagerReport({
-    key: "confirm-expired",
-    class: "confirmation_request",
-    at: new Date().toISOString(),
-    body: "stale",
-    confirmation,
-  });
-  const ref = drainBridgeReports().reports.at(-1)!.seq;
-
-  const response = await POST(deployRequest({
-    revision: SHA, idempotencyKey: "k1", bridgeRef: ref, bridgeNonce: confirmation.nonce,
-  }));
-  expect(response.status).toBe(403);
-  expect(await response.json()).toMatchObject({ reason: "expired" });
+  expect((await POST(deployRequest({ revision: SHA, idempotencyKey: "k1", bridgeRef: ref }))).status).toBe(403);
+  expect((await POST(deployRequest({ revision: SHA, idempotencyKey: "k2", bridgeNonce: nonce }))).status).toBe(403);
   expect(requested).toEqual([]);
 });
 

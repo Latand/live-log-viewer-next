@@ -200,6 +200,7 @@ function normalizeChannel(value: unknown, target: string): BridgeChannelV1 | nul
   }
   const file = value as Partial<BridgeChannelV1>;
   if (typeof file.rootId !== "string" || !file.rootId) return null;
+  const outstanding = file.outstanding;
   return {
     schemaVersion: BRIDGE_CHANNEL_SCHEMA_VERSION,
     rootId: file.rootId,
@@ -208,7 +209,57 @@ function normalizeChannel(value: unknown, target: string): BridgeChannelV1 | nul
       ? file.managerReportCursor as number
       : 0,
     updatedAt: typeof file.updatedAt === "string" ? file.updatedAt : new Date(0).toISOString(),
+    ...(outstanding
+      && typeof outstanding === "object"
+      && typeof (outstanding as { token?: unknown }).token === "string"
+      && Number.isInteger((outstanding as { throughSeq?: unknown }).throughSeq)
+      ? { outstanding: outstanding as { token: string; throughSeq: number; issuedAt: string } }
+      : {}),
   };
+}
+
+/**
+ * Record the batch just handed out and mint the token that settles it.
+ *
+ * Overwrites any previous outstanding batch: a handout supersedes the one before it,
+ * and the cursor is monotonic anyway, so a stale token can only ever try to settle a
+ * position already passed.
+ */
+export function issueBridgeAckToken(throughSeq: number, now = new Date()): string {
+  return withFileTransactionSync(bridgeChannelPath(), BRIDGE_CHANNEL_BUSY, () => {
+    const current = readBridgeChannel();
+    if (!current) throw new Error("the bridge channel is not open");
+    const token = `ack_${crypto.randomBytes(18).toString("hex")}`;
+    writeJsonDurably(bridgeChannelPath(), {
+      ...current,
+      outstanding: { token, throughSeq, issuedAt: now.toISOString() },
+    } satisfies BridgeChannelV1);
+    return token;
+  });
+}
+
+/**
+ * Settle the outstanding batch by its token.
+ *
+ * The seq comes from what was HANDED OUT, never from the caller — so a caller cannot
+ * retire reports it never received by naming their sequence.
+ */
+export function redeemBridgeAckToken(token: string, now = new Date()): { ok: boolean; throughSeq: number } {
+  return withFileTransactionSync(bridgeChannelPath(), BRIDGE_CHANNEL_BUSY, () => {
+    const current = readBridgeChannel();
+    if (!current?.outstanding || current.outstanding.token !== token) {
+      return { ok: false, throughSeq: current?.managerReportCursor ?? 0 };
+    }
+    const throughSeq = Math.max(current.managerReportCursor, current.outstanding.throughSeq);
+    const next: BridgeChannelV1 = {
+      ...current,
+      managerReportCursor: throughSeq,
+      updatedAt: now.toISOString(),
+    };
+    delete next.outstanding;
+    writeJsonDurably(bridgeChannelPath(), next);
+    return { ok: true, throughSeq };
+  });
 }
 
 /** Channel state as stored, or null when the bridge was never opened. */

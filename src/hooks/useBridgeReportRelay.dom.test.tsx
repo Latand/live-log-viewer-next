@@ -68,7 +68,11 @@ const client = {
     acknowledgeListeners.push(listener);
     return () => { acknowledgeListeners = acknowledgeListeners.filter((entry) => entry !== listener); };
   },
+  realtimeSession: () => sessionCredential,
 };
+
+/** The credential this peer holds for its own call; null before the SDP exchange. */
+let sessionCredential: string | null = "rt_sess_relay";
 
 /** The host confirming the write, which is the only thing that may move a cursor. */
 function confirmDurableDelivery(deliveryId: string): void {
@@ -106,6 +110,7 @@ beforeEach(() => {
   delivered = [];
   plans = [];
   acknowledgeListeners = [];
+  sessionCredential = "rt_sess_relay";
 });
 
 afterEach(async () => {
@@ -137,7 +142,7 @@ test("the cursor does NOT move on enqueue — only durable delivery may advance 
   /* Inverting this is inverting exactly-once. `reconcileWorkerDeliveries` puts the
      batch in an in-memory queue; a crash between that and the host's write loses
      the report while the cursor claims it was delivered. */
-  plans = [{ kind: "deliver", delivery: delivery(4), throughSeq: 4 }];
+  plans = [{ kind: "deliver", delivery: delivery(4), ackToken: "ack_4" }];
   mount(true);
   await settle();
 
@@ -146,7 +151,7 @@ test("the cursor does NOT move on enqueue — only durable delivery may advance 
 });
 
 test("the cursor advances once the host confirms the durable write", async () => {
-  plans = [{ kind: "deliver", delivery: delivery(4), throughSeq: 4 }];
+  plans = [{ kind: "deliver", delivery: delivery(4), ackToken: "ack_4" }];
   mount(true);
   await settle();
 
@@ -154,7 +159,7 @@ test("the cursor advances once the host confirms the durable write", async () =>
   await settle();
 
   const acknowledgement = calls.find((call) => call.method === "POST");
-  expect(acknowledgement?.body).toEqual({ throughSeq: 4 });
+  expect(acknowledgement?.body).toEqual({ ackToken: "ack_4", realtimeSessionId: "rt_sess_relay" });
 
   /* Order matters: the cursor must not move past something the call never got. */
   const deliveryIndex = calls.findIndex((call) => call.method === "GET");
@@ -163,7 +168,7 @@ test("the cursor advances once the host confirms the durable write", async () =>
 });
 
 test("a confirmation for some other delivery never advances this batch's cursor", async () => {
-  plans = [{ kind: "deliver", delivery: delivery(4), throughSeq: 4 }];
+  plans = [{ kind: "deliver", delivery: delivery(4), ackToken: "ack_4" }];
   mount(true);
   await settle();
 
@@ -173,12 +178,12 @@ test("a confirmation for some other delivery never advances this batch's cursor"
 });
 
 test("a lost-ack batch is acknowledged without being spoken again", async () => {
-  plans = [{ kind: "already-acknowledged", throughSeq: 7 }];
+  plans = [{ kind: "already-acknowledged", ackToken: "ack_7" }];
   mount(true);
   await settle();
 
   expect(delivered).toEqual([]);
-  expect(calls.find((call) => call.method === "POST")?.body).toEqual({ throughSeq: 7 });
+  expect(calls.find((call) => call.method === "POST")?.body).toEqual({ ackToken: "ack_7", realtimeSessionId: "rt_sess_relay" });
 });
 
 test("hold and idle acknowledge nothing", async () => {
@@ -191,7 +196,7 @@ test("hold and idle acknowledge nothing", async () => {
 
 test("the poll carries what this client already played, so the server can suppress it", async () => {
   plans = [
-    { kind: "deliver", delivery: delivery(2), throughSeq: 2 },
+    { kind: "deliver", delivery: delivery(2), ackToken: "ack_2" },
     { kind: "idle" },
   ];
   const root = mount(true);
@@ -219,4 +224,25 @@ test("a failing poll is a retry, not an incident", async () => {
   await settle();
 
   expect(delivered).toEqual([]);
+});
+
+test("a call with no session credential yet reads nothing at all", async () => {
+  /* The inbox carries deploy nonces, so a peer that has not finished its SDP
+     exchange has nothing to present and must wait rather than be trusted. */
+  sessionCredential = null;
+  plans = [{ kind: "deliver", delivery: delivery(1), ackToken: "ack_1" }];
+  mount(true);
+  await settle();
+
+  expect(calls).toEqual([]);
+  expect(delivered).toEqual([]);
+});
+
+test("the poll presents this call's credential", async () => {
+  plans = [{ kind: "idle" }];
+  mount(true);
+  await settle();
+
+  const poll = calls.find((call) => call.method === "GET");
+  expect(poll?.url).toContain("realtimeSessionId=rt_sess_relay");
 });

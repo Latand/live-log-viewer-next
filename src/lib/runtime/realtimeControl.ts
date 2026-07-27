@@ -17,6 +17,10 @@ interface RealtimeHost {
   /** Optional so an older or stubbed host still satisfies the contract; the
       `status` action simply reports no failure when it is absent (#664). */
   lastRealtimeFailure?(): { message: string; at: string; realtimeSessionId: string | null } | null;
+  /** #691 §6: the live session id injection is authorized against. Absent on a host
+      that cannot report one, which denies session-based callers rather than
+      admitting them. */
+  currentRealtimeSessionId?(): string | null;
 }
 
 export type RealtimeControlResult = {
@@ -52,23 +56,27 @@ export async function executeRealtimeControl(
   }
   const request = body as Record<string, unknown>;
 
-  /* Checked before the conversation is resolved and before any host is touched: an
-     agent that may not speak must not be able to probe which conversations are
-     hosted by watching the error it gets back. */
-  const permitted = permitRealtimeAction(
-    request.action,
-    authority.caller ?? { kind: "operator" },
-    authority.managerConversationId ?? null,
-  );
-  if (!permitted.allowed) {
-    return { status: permitted.status, body: { error: permitted.error } };
-  }
 
   const conversationId = typeof request.conversationId === "string" ? request.conversationId.trim() : "";
   if (!conversationId.startsWith("conversation_")) {
     return { status: 400, body: { error: "a canonical conversationId is required" } };
   }
   const host = realtimeHost(resolveHost(conversationId));
+
+  /* Authorized before anything is DONE, but after the host is looked up, because the
+     live session id is the credential a browser presents and only the host holds it.
+     The refusal is identical whether or not a host exists, so an agent that may not
+     speak cannot probe which conversations are hosted by reading the error. */
+  const permitted = permitRealtimeAction(
+    request.action,
+    authority.caller ?? { kind: "anonymous" },
+    authority.managerConversationId ?? null,
+    host?.currentRealtimeSessionId?.() ?? null,
+  );
+  if (!permitted.allowed) {
+    return { status: permitted.status, body: { error: permitted.error } };
+  }
+
   if (!host) {
     return { status: 409, body: { error: "the active conversation has no hosted Codex realtime thread" } };
   }

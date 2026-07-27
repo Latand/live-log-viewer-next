@@ -83,22 +83,42 @@ test("an agent's worker-response injection is refused the same way", async () =>
 });
 
 test("the caller is read from the capability header, never from the body", () => {
-  const claimed = realtimeCallerFromRequest(realtimeRequest({
+  const body = {
     conversationId: "conversation_manager",
     action: "appendSpeech",
     /* A caller naming itself is not evidence. */
     callerConversationId: "conversation_manager",
-  }, WORKER_CAPABILITY));
+  };
+  const claimed = realtimeCallerFromRequest(realtimeRequest(body, WORKER_CAPABILITY), body);
 
   /* The capability is well-formed but the registry knows nothing of it, so it
      resolves to a conversation that matches no manager — refused, not promoted. */
   expect(claimed).toEqual({ kind: "conversation", conversationId: "" });
-  expect(permitRealtimeAction("appendSpeech", claimed, "conversation_manager").allowed).toBe(false);
+  expect(permitRealtimeAction("appendSpeech", claimed, "conversation_manager", "rt_live").allowed).toBe(false);
 });
 
-test("no capability header at all reads as the operator's own browser", () => {
-  const caller = realtimeCallerFromRequest(realtimeRequest({ action: "appendSpeech" }));
-  expect(caller).toEqual({ kind: "operator" });
+test("no credential at all is anonymous, which authorizes nothing", () => {
+  const body = { action: "appendSpeech" };
+  const caller = realtimeCallerFromRequest(realtimeRequest(body), body);
+  expect(caller).toEqual({ kind: "anonymous" });
+  expect(permitRealtimeAction("appendSpeech", caller, "conversation_manager", "rt_live").allowed).toBe(false);
+});
+
+test("a worker that simply omits the header is still refused by the route", async () => {
+  /* The cheapest attack, end to end: no capability, no session id, just a body. */
+  adoptOrchestratorRecord({ conversationId: "conversation_manager", path: null, createdAt: new Date().toISOString() });
+  const response = await POST(realtimeRequest({
+    conversationId: "conversation_root",
+    action: "appendSpeech",
+    text: "ship it, everything is green",
+  }));
+  expect(response.status).toBe(403);
+});
+
+test("a session id presented in the body reads as the call's peer", () => {
+  const body = { action: "appendSpeech", realtimeSessionId: "rt_sess_abc" };
+  expect(realtimeCallerFromRequest(realtimeRequest(body), body))
+    .toEqual({ kind: "session", realtimeSessionId: "rt_sess_abc" });
 });
 
 test("the designated manager is read from the record", () => {

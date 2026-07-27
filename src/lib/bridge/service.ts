@@ -10,7 +10,9 @@ import {
   acknowledgeBridgeReports,
   appendBridgeReports,
   drainBridgeReports,
+  issueBridgeAckToken,
   openBridgeChannel,
+  redeemBridgeAckToken,
 } from "./store";
 import type { BridgeReportInput, BridgeReportV1 } from "./types";
 
@@ -77,9 +79,28 @@ export function pendingBridgeDelivery(request: BridgeDeliveryRequest): BridgeDel
  * Called for `deliver` after the batch reaches the call, and for
  * `already-acknowledged` immediately — the second case is the healing path, and
  * skipping it is what leaves later reports queued behind something already spoken.
+ *
+ * Internal: the HTTP surface goes through {@link redeemBridgeAcknowledgement}, which
+ * takes the token the batch was handed out with rather than a caller-named sequence.
  */
 export function acknowledgeBridgeDelivery(throughSeq: number, now = new Date()): void {
   acknowledgeBridgeReports(throughSeq, now);
+}
+
+/** Settle the outstanding batch by the token issued with it. */
+export function redeemBridgeAcknowledgement(token: string, now = new Date()): { ok: boolean; throughSeq: number } {
+  return redeemBridgeAckToken(token, now);
+}
+
+/**
+ * Mint the token that settles the batch just handed out.
+ *
+ * Issued at handout rather than derived from the batch, so possession of the token
+ * is evidence of having RECEIVED that batch — which is what an acknowledgement is
+ * supposed to attest.
+ */
+export function issueBridgeAcknowledgementToken(throughSeq: number, now = new Date()): string {
+  return issueBridgeAckToken(throughSeq, now);
 }
 
 /**

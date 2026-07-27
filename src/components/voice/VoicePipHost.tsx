@@ -79,6 +79,8 @@ export interface VoicePipClient {
      running, so a card-scoped relay stopped delivering mid-call. */
   reconcileWorkerDeliveries: (deliveries: readonly RuntimeVoiceDelivery[]) => void;
   onDeliveryAcknowledged: (listener: (deliveryId: string) => void) => () => void;
+  /** This call's credential, presented when reading the inbox (it carries nonces). */
+  realtimeSession: () => string | null;
 }
 
 export interface VoicePipHostProps {

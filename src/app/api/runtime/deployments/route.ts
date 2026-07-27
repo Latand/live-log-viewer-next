@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { authorizeDeployRequest } from "@/lib/bridge/deployAuthorization";
+import { describeDeployProof } from "@/lib/bridge/deployAuthorization";
 import { RuntimeHostUnavailableError } from "@/lib/runtime/client";
 import { DeploymentRuntimeUnavailableError, requestViewerDeployment } from "@/lib/runtime/deploymentRuntime";
 import { runtimeEventsEnabled } from "@/lib/runtime/flags";
@@ -10,17 +10,17 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * #691 §4 — the last door before a deploy, and therefore where the user's spoken
- * authorization is verified and spent.
+ * #691 §4 — one of several doors, and deliberately not the lock.
  *
- * Gating `deploy_exact_sha` alone was a lock on one of two doors: this endpoint is
- * reachable by any local caller, so a deploy could be issued around the nonce, the
- * expiry, the SHA match and the replay check by simply not using the tool. The
- * confirmation is checked here, immediately before the host is asked, and a refusal
- * never reaches the host.
+ * Sealing endpoints one at a time was the wrong shape: the MCP binding, this route
+ * and a raw runtime-host socket are three ways to ask for the same deploy, and each
+ * gate closed only its own. The authoritative check now lives at HOST ADMISSION,
+ * where every caller converges — so this route forwards the proof and refuses early
+ * only to give a caller a useful answer without a round trip.
  *
- * `revision` became required as part of that. A confirmation authorizes one commit;
- * "deploy whatever the host picks" is not something the operator can have agreed to.
+ * `revision` is required here for the same reason it is there: a confirmation
+ * authorizes one commit, and "deploy whatever the host picks" is not something the
+ * operator can have agreed to.
  */
 export async function POST(request: NextRequest): Promise<NextResponse> {
   const rejection = rejectCrossOrigin(request);
@@ -31,23 +31,20 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   catch { return NextResponse.json({ error: "invalid JSON" }, { status: 400 }); }
   if (typeof body.idempotencyKey !== "string") return NextResponse.json({ error: "idempotencyKey is required" }, { status: 400 });
 
-  /* Shape first, approval second: a malformed request must be refused without
-     spending the operator's yes, so they can still answer the real question.
-     Named `approval` because the publication gate reads `authorization = <long
-     value>` as a committed credential — it is right to, so the variable moves
-     rather than the pattern loosening. */
-  const approval = authorizeDeployRequest(body.revision, body);
-  if (!approval.ok) {
-    return NextResponse.json(
-      { error: approval.error, reason: approval.reason },
-      { status: approval.status },
-    );
+  /* Shape only — nothing is spent here. Verifying without consuming would be a
+     check the host repeats; consuming would spend the operator's yes before the one
+     gate that matters ever sees it, and the real deploy would then be refused as
+     already consumed. */
+  const shape = describeDeployProof(body.revision, body);
+  if (!shape.ok) {
+    return NextResponse.json({ error: shape.error, reason: shape.reason }, { status: shape.status });
   }
 
   try {
     const receipt = await requestViewerDeployment({
-      revision: approval.sha,
+      revision: shape.sha,
       idempotencyKey: body.idempotencyKey,
+      bridgeProof: { ref: body.bridgeRef, nonce: body.bridgeNonce },
     });
     return NextResponse.json(receipt, { status: receipt.state === "busy" ? 409 : 202 });
   } catch (error) {

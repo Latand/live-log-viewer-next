@@ -1,19 +1,14 @@
-import { authorizeBridgeDeploy } from "./service";
-
 /**
- * The single gate between a spoken yes and a production deploy (#691 §4, §7.7).
+ * The shape of a deploy request that claims the user's authorization (#691 §4).
  *
- * There is exactly one place this may be enforced, and it is the last door before
- * the runtime host — not the MCP binding. A gate in the binding stops the manager's
- * tool call and nothing else: `POST /api/runtime/deployments` is reachable by any
- * local caller, so a gate one layer up is a lock on the front door of a room with
- * two doors.
+ * Sealing endpoints one at a time was the wrong shape, and the third door proved it:
+ * the MCP binding, `POST /api/runtime/deployments` and a raw runtime-host socket are
+ * three ways to ask for the same deploy, and a gate on each closes only that one.
  *
- * It is also the only place the confirmation may be CONSUMED. A nonce spent in the
- * binding and re-presented here would be refused as `consumed` and the real deploy
- * would never happen; a nonce spent in both places would be spent twice for one
- * deploy. So the binding validates shape and forwards, and the spending happens
- * here, atomically, immediately before the deployment is requested.
+ * The confirmation is verified and CONSUMED in exactly one place — the runtime
+ * host's admission, where the MCP binding, the HTTP route and a raw socket client
+ * all converge. Everything above that forwards. This module holds only the shape
+ * check the forwarding layers use to fail fast with a useful message.
  */
 
 export interface BridgeDeployProof {
@@ -21,21 +16,22 @@ export interface BridgeDeployProof {
   bridgeNonce?: unknown;
 }
 
-export type BridgeDeployAuthorization =
+export type BridgeDeployProofShape =
   | { ok: true; sha: string }
   | { ok: false; status: number; error: string; reason: string };
 
 /**
- * Verify and spend the authorization for exactly this revision.
+ * Whether this request is even shaped like an authorized deploy.
  *
- * Every refusal leaves the confirmation unspent, so a malformed or mistaken request
- * never costs the operator the ability to answer correctly.
+ * Shape ONLY. Nothing is verified against the bridge and nothing is spent — that
+ * happens once, at host admission. A forwarding layer that consumed here would
+ * spend the operator's yes before the gate that matters ever saw it, and the real
+ * deploy would then be refused as already consumed.
  */
-export function authorizeDeployRequest(
+export function describeDeployProof(
   revision: unknown,
   proof: BridgeDeployProof,
-  now = new Date(),
-): BridgeDeployAuthorization {
+): BridgeDeployProofShape {
   if (typeof revision !== "string" || !/^[0-9a-f]{40}$/i.test(revision)) {
     return {
       ok: false,
@@ -54,15 +50,5 @@ export function authorizeDeployRequest(
       error: "a deploy requires the bridge confirmation the user authorized: bridgeRef (the confirmation_request's seq) and bridgeNonce from the trailer the gateway relayed",
     };
   }
-
-  const outcome = authorizeBridgeDeploy({ ref: ref as number, nonce, sha: revision.toLowerCase() }, now);
-  if (!outcome.ok) {
-    return {
-      ok: false,
-      status: 403,
-      reason: outcome.reason,
-      error: `the bridge confirmation for this deploy was refused (${outcome.reason}); ask the user again and deploy nothing`,
-    };
-  }
-  return { ok: true, sha: outcome.sha };
+  return { ok: true, sha: revision.toLowerCase() };
 }

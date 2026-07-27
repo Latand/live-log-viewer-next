@@ -151,6 +151,9 @@ class CodexRealtimeClient {
      bridge's cursor rides on this signal, so a listener firing early would move a
      durable cursor past a report the session never actually received. */
   private readonly deliveryAcknowledgedListeners = new Set<(deliveryId: string) => void>();
+  /* #691 §6: the credential this peer holds for its own call. Presented on every
+     write into the session, because absence of evidence authorizes nothing. */
+  private realtimeSessionId: string | null = null;
   private workerDeliveryFlush: Promise<void> | null = null;
   private workerDeliveryWakeEpoch: number | null = null;
   private unloadHangup: (() => void) | null = null;
@@ -287,6 +290,10 @@ class CodexRealtimeClient {
       }));
       if (epoch !== this.epoch) return;
       if (typeof answer.sdp !== "string") throw new Error("Codex returned no WebRTC answer");
+      /* The credential for this call, minted by the backend during the exchange this
+         peer just ran. Held for the life of the session and presented on every write
+         into it (#691 §6). */
+      this.realtimeSessionId = typeof answer.realtimeSessionId === "string" ? answer.realtimeSessionId : null;
       await peer.setRemoteDescription({ type: "answer", sdp: answer.sdp });
     } catch (error) {
       if (epoch !== this.epoch) return;
@@ -364,6 +371,7 @@ class CodexRealtimeClient {
           body: JSON.stringify({
             action: "deliverWorkerResponse",
             conversationId: this.conversationId,
+            realtimeSessionId: this.realtimeSessionId,
             delivery,
           }),
         }));
@@ -473,6 +481,10 @@ class CodexRealtimeClient {
     if (this.snapshot.phase !== previousPhase) reportCallPhase(this.conversationId, this.snapshot.phase);
   }
 
+  /** The live session credential, for consumers that must write into this call
+      through the host (the #691 bridge relay). Null when no call is up. */
+  realtimeSession = (): string | null => this.realtimeSessionId;
+
   private cleanupTransport(): void {
     /* No line survives a dead transport as "still streaming": the next call
        opens its own rather than appending to a turn nobody can finish. */
@@ -487,6 +499,7 @@ class CodexRealtimeClient {
     this.peer = null;
     this.media = null;
     this.audio = null;
+    this.realtimeSessionId = null;
   }
 }
 

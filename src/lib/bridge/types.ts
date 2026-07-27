@@ -127,6 +127,16 @@ export interface BridgeChannelV1 {
   /** Last report seq the gateway has fully consumed. */
   managerReportCursor: number;
   updatedAt: string;
+  /**
+   * The batch currently handed out and not yet acknowledged.
+   *
+   * An acknowledgement names THIS, not a sequence of the caller's choosing. A
+   * caller that could name a seq could retire reports it never received — every
+   * blocker and question in the log, silently, from loopback. The token is minted
+   * per handout and matched on the way back, so an acknowledgement can only settle
+   * the batch that was actually delivered.
+   */
+  outstanding?: { token: string; throughSeq: number; issuedAt: string };
 }
 
 /** §4: at most this many reports reach the gateway in one batch. */

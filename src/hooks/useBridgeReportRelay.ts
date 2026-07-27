@@ -33,8 +33,8 @@ import type { RuntimeVoiceDelivery } from "@/lib/runtime/voiceDelivery";
  */
 
 type BridgeDeliveryPlanPayload =
-  | { kind: "deliver"; delivery: RuntimeVoiceDelivery; throughSeq: number }
-  | { kind: "already-acknowledged"; throughSeq: number }
+  | { kind: "deliver"; delivery: RuntimeVoiceDelivery; ackToken: string }
+  | { kind: "already-acknowledged"; ackToken: string }
   | { kind: "hold" }
   | { kind: "idle" };
 
@@ -42,6 +42,9 @@ export interface BridgeRelayClient {
   reconcileWorkerDeliveries(deliveries: readonly RuntimeVoiceDelivery[]): void;
   /** Fires when the runtime host has durably accepted a delivery. */
   onDeliveryAcknowledged(listener: (deliveryId: string) => void): () => void;
+  /** #691 §4: this call's credential. The inbox carries deploy nonces, so reading it
+      needs the same proof writing into the call does. */
+  realtimeSession(): string | null;
 }
 
 /** Slightly under the coalescing window: polling faster cannot produce a batch any
@@ -75,16 +78,24 @@ const NOTHING_PENDING: BridgeTurnStart = { text: "", commit: () => undefined };
 
 export function useBridgeTurnStartDrain(
   enabled: boolean,
-  options: { fetchFn?: typeof fetch } = {},
+  options: { fetchFn?: typeof fetch; realtimeSession?: () => string | null } = {},
 ): () => Promise<BridgeTurnStart> {
   const fetchFn = options.fetchFn;
+  const realtimeSession = options.realtimeSession;
   return useCallback(async () => {
     if (!enabled) return NOTHING_PENDING;
     const request = fetchFn ?? fetch;
+    const session = realtimeSession?.() ?? null;
+    /* Same credential as the live drain: the inbox carries deploy nonces, so a turn
+       that cannot prove it is the gateway reads nothing. */
+    if (!session) return NOTHING_PENDING;
     try {
-      const response = await request("/api/bridge?mode=turn-start", { cache: "no-store" });
+      const response = await request(
+        `/api/bridge?mode=turn-start&realtimeSessionId=${encodeURIComponent(session)}`,
+        { cache: "no-store" },
+      );
       if (!response.ok) return NOTHING_PENDING;
-      const payload = await response.json() as { prelude?: { text: string; throughSeq: number } | null };
+      const payload = await response.json() as { prelude?: { text: string; ackToken: string } | null };
       const prelude = payload.prelude;
       if (!prelude?.text) return NOTHING_PENDING;
       return {
@@ -93,7 +104,7 @@ export function useBridgeTurnStartDrain(
           void request("/api/bridge", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ throughSeq: prelude.throughSeq }),
+            body: JSON.stringify({ ackToken: prelude.ackToken, realtimeSessionId: session }),
           }).catch(() => undefined);
         },
       };
@@ -102,7 +113,7 @@ export function useBridgeTurnStartDrain(
          again. A blocked send would be a far worse failure than a late report. */
       return NOTHING_PENDING;
     }
-  }, [enabled, fetchFn]);
+  }, [enabled, fetchFn, realtimeSession]);
 }
 
 export function useBridgeReportRelay(
@@ -126,30 +137,36 @@ export function useBridgeReportRelay(
 
     /* Batches handed to the client and still waiting on the host's confirmation.
        The cursor for each moves only when its delivery id comes back. */
-    const awaitingConfirmation = new Map<string, number>();
+    const awaitingConfirmation = new Map<string, string>();
 
-    const acknowledgeCursor = async (throughSeq: number): Promise<void> => {
+    const acknowledgeCursor = async (ackToken: string): Promise<void> => {
       await request("/api/bridge", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ throughSeq }),
+        /* The token the batch was handed out with — never a sequence of our own
+           choosing, which the server would be right to refuse. */
+        body: JSON.stringify({ ackToken, realtimeSessionId: client.realtimeSession() }),
       });
     };
 
     const releaseAcknowledged = client.onDeliveryAcknowledged((deliveryId) => {
-      const throughSeq = awaitingConfirmation.get(deliveryId);
-      if (throughSeq === undefined || cancelled) return;
+      const ackToken = awaitingConfirmation.get(deliveryId);
+      if (ackToken === undefined || cancelled) return;
       awaitingConfirmation.delete(deliveryId);
       /* Now — and only now — has the report provably reached the session. */
       acknowledgedRef.current = [...acknowledgedRef.current, deliveryId].slice(-256);
-      void acknowledgeCursor(throughSeq).catch(() => undefined);
+      void acknowledgeCursor(ackToken).catch(() => undefined);
     });
 
     const poll = async (): Promise<void> => {
       if (busyRef.current) return;
       busyRef.current = true;
       try {
-        const parameters = new URLSearchParams();
+        const session = client.realtimeSession();
+        /* No credential, no read: the inbox carries deploy nonces. A call that has
+           not finished its SDP exchange has nothing to present yet, and waits. */
+        if (!session) return;
+        const parameters = new URLSearchParams({ realtimeSessionId: session });
         for (const id of acknowledgedRef.current) parameters.append("acked", id);
         if (lastBatchAtRef.current) parameters.set("lastBatchAt", lastBatchAtRef.current.toISOString());
         const response = await request(`/api/bridge?${parameters.toString()}`, { cache: "no-store" });
@@ -164,14 +181,14 @@ export function useBridgeReportRelay(
              Advancing the cursor here would invert exactly-once — a crash in
              between loses the report while the cursor claims it was delivered — so
              the batch is parked until the host confirms, above. */
-          awaitingConfirmation.set(plan.delivery.deliveryId, plan.throughSeq);
+          awaitingConfirmation.set(plan.delivery.deliveryId, plan.ackToken);
           client.reconcileWorkerDeliveries([plan.delivery]);
           lastBatchAtRef.current = new Date();
           return;
         }
         if (plan.kind !== "already-acknowledged") return;
         /* Already spoken and provably received; this only heals the cursor. */
-        await acknowledgeCursor(plan.throughSeq);
+        await acknowledgeCursor(plan.ackToken);
       } catch {
         /* A dropped poll is a retry, not an incident: the reports are durable and
            the cursor did not move. Surfacing a transport blip mid-call would be

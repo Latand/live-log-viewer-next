@@ -22,10 +22,20 @@ import crypto from "node:crypto";
  * tear down the operator's own WebRTC leg from their own browser, and `status`
  * reports why a transport died; none writes into the conversation.
  *
- * Identity comes from the spawn capability the registry issued per conversation —
- * the same evidence `authenticatedAgentSpawnCaller` trusts for spawns — matched
- * against the manager's designation record. A role string would not do: it is
- * stamped on a launch profile and anything launched with it could claim it.
+ * FAILS CLOSED, and that is the point of this module's second revision. Presenting
+ * nothing used to read as "the operator's browser", which meant a worker could inject
+ * by simply omitting a header — the cheapest possible attack, and the same fail-open
+ * shape the MCP grant lane was corrected for. Authority is now a credential the
+ * caller HAS:
+ *
+ * - the call's `realtimeSessionId`, minted by the backend during the SDP exchange and
+ *   held only by the peer that ran it; or
+ * - the spawn capability the registry issued per conversation — the same evidence
+ *   `authenticatedAgentSpawnCaller` trusts — matched against the manager's
+ *   designation record.
+ *
+ * A role string would not do either: it is stamped on a launch profile and anything
+ * launched with it could claim it.
  */
 
 /** Actions that write into the user-facing session. */
@@ -34,10 +44,15 @@ export const REALTIME_INJECTION_ACTIONS: readonly string[] = ["appendSpeech", "d
 const INJECTION_ACTION_SET: ReadonlySet<string> = new Set(REALTIME_INJECTION_ACTIONS);
 
 export type RealtimeCaller =
-  /** The operator's own browser: it presented no agent capability at all. */
-  | { kind: "operator" }
+  /**
+   * The peer that established the call, proven by presenting the realtime session id
+   * the backend minted for it. Only the browser that ran the SDP exchange holds it.
+   */
+  | { kind: "session"; realtimeSessionId: string }
   /** An agent the registry can name from the capability it presented. */
-  | { kind: "conversation"; conversationId: string };
+  | { kind: "conversation"; conversationId: string }
+  /** Nothing was presented. Never an authority. */
+  | { kind: "anonymous" };
 
 export type RealtimeInjectionVerdict =
   | { allowed: true }
@@ -53,37 +68,62 @@ export function permitRealtimeAction(
   action: unknown,
   caller: RealtimeCaller,
   managerConversationId: string | null,
+  /** The session id the host currently holds for this conversation, if any. */
+  liveRealtimeSessionId: string | null = null,
 ): RealtimeInjectionVerdict {
   if (typeof action !== "string" || !INJECTION_ACTION_SET.has(action)) return { allowed: true };
-  if (caller.kind === "operator") return { allowed: true };
-  if (managerConversationId && caller.conversationId === managerConversationId) return { allowed: true };
+
+  /* FAILS CLOSED. Presenting nothing is not evidence of being the operator — it is
+     the cheapest thing an impostor can do, and treating it as authority was the same
+     fail-open shape the MCP grant lane was corrected for. Authority is a credential
+     the caller HAS: the live session id, or the manager's capability. */
+  if (caller.kind === "session") {
+    return liveRealtimeSessionId && caller.realtimeSessionId === liveRealtimeSessionId
+      ? { allowed: true }
+      : refuse(action);
+  }
+  if (caller.kind === "conversation") {
+    return managerConversationId && caller.conversationId === managerConversationId
+      ? { allowed: true }
+      : refuse(action);
+  }
+  return refuse(action);
+}
+
+function refuse(action: string): RealtimeInjectionVerdict {
   return {
     allowed: false,
     status: 403,
-    error: `${action} writes into the operator's voice session, which only the designated manager may do. Report through bridge_report and let the gateway decide what to say.`,
+    error: `${action} writes into the operator's voice session. Only the peer holding this call's realtime session id, or the designated manager, may do that. Report through bridge_report and let the gateway decide what to say.`,
   };
 }
 
 /**
- * Resolve the caller from evidence it cannot restate.
+ * Resolve the caller from what it presented, never from what it claims to be.
  *
- * A capability that the registry maps to a conversation names that conversation. A
- * capability it cannot map is NOT promoted to the operator — a wrong or stale token
- * is exactly what an impostor presents — so it resolves to a conversation id that
- * matches nothing and is refused. Only the absence of any capability reads as the
- * operator's own browser, which is the same discrimination `spawn/admission.ts`
- * already makes.
+ * A capability the registry maps names that conversation; one it cannot map resolves
+ * to a conversation id matching nothing, because a wrong or stale token is what an
+ * impostor presents. A bare session id is checked against the live session later.
+ * Presenting neither is `anonymous`, which authorizes nothing at all.
  */
-export function realtimeCallerFromRequest(request: Pick<NextRequest, "headers">): RealtimeCaller {
+export function realtimeCallerFromRequest(
+  request: Pick<NextRequest, "headers">,
+  body: Record<string, unknown>,
+): RealtimeCaller {
   const capability = request.headers.get(VIEWER_SPAWN_CAPABILITY_HEADER)?.trim() ?? "";
-  if (!capability) return { kind: "operator" };
-  const digest = /^[A-Za-z0-9_-]{43}$/.test(capability)
-    ? crypto.createHash("sha256").update(capability).digest("hex")
-    : "";
-  const conversationId = digest
-    ? agentRegistry().conversationIdForSpawnCapabilityDigest(digest)
-    : null;
-  return { kind: "conversation", conversationId: conversationId ?? "" };
+  if (capability) {
+    /* A capability the registry cannot map is NOT downgraded to anonymous-but-
+       trusted: a wrong or stale token is what an impostor presents, so it resolves
+       to a conversation that matches nothing and is refused. */
+    const digest = /^[A-Za-z0-9_-]{43}$/.test(capability)
+      ? crypto.createHash("sha256").update(capability).digest("hex")
+      : "";
+    const conversationId = digest ? agentRegistry().conversationIdForSpawnCapabilityDigest(digest) : null;
+    return { kind: "conversation", conversationId: conversationId ?? "" };
+  }
+  const realtimeSessionId = typeof body.realtimeSessionId === "string" ? body.realtimeSessionId.trim() : "";
+  if (realtimeSessionId) return { kind: "session", realtimeSessionId };
+  return { kind: "anonymous" };
 }
 
 /** The manager's conversation, or null when none is designated. */

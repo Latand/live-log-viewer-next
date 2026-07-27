@@ -21,7 +21,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<Record<string
   /* #691 §6: resolved from the capability the registry issued, never from anything
      in the body — a caller naming itself is not evidence. */
   const result = await executeRealtimeControl(body, undefined, {
-    caller: realtimeCallerFromRequest(req),
+    caller: realtimeCallerFromRequest(req, body && typeof body === "object" && !Array.isArray(body)
+      ? body as Record<string, unknown>
+      : {}),
     managerConversationId: designatedManagerConversationId(),
   });
   return NextResponse.json(result.body, { status: result.status });
