@@ -2,8 +2,7 @@
 
 import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 
-import { ambientLoop, setVoiceConnected } from "@/lib/audio/app";
-import { speakingFromLines } from "@/lib/audio/speech";
+import { setVoiceConnected } from "@/lib/audio/app";
 import { codexRealtimeClient } from "@/lib/realtime/codexRealtimeClient";
 
 const IDLE = { phase: "idle" as const, lines: [], error: null, startedAt: null, micMuted: false, outputMuted: false };
@@ -13,6 +12,7 @@ export function useCodexRealtime(
   enabled: boolean,
   workerProgress: string,
 ) {
+  const ambientOwner = useRef(Symbol("realtime-ambient-owner"));
   const client = useMemo(
     () => enabled && conversationId.startsWith("conversation_") ? codexRealtimeClient(conversationId) : null,
     [conversationId, enabled],
@@ -45,16 +45,10 @@ export function useCodexRealtime(
      connecting, stopping and error are not a call. */
   const live = snapshot.phase === "live";
   useEffect(() => {
-    setVoiceConnected(live);
-    return () => setVoiceConnected(false);
+    const owner = ambientOwner.current;
+    setVoiceConnected(owner, live);
+    return () => setVoiceConnected(owner, false);
   }, [live]);
-
-  /* Ducking reads the transcript the call already produces — no analyser on
-     either stream, no second signal path to keep in step with this one. */
-  const speaking = live ? speakingFromLines(snapshot.lines) : null;
-  useEffect(() => {
-    ambientLoop().setSpeaking(speaking);
-  }, [speaking]);
 
   return {
     ...snapshot,

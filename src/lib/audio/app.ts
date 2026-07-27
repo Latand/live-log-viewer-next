@@ -37,6 +37,7 @@ let loop: AmbientLoop | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let retries = 0;
 let prefsWatched = false;
+const voiceOwners = new Set<unknown>();
 
 function watchPrefs(): void {
   if (prefsWatched) return;
@@ -60,8 +61,6 @@ export function cuePlayer(): CuePlayer {
   player ??= createCuePlayer({
     transport: transports.cues,
     prefs: audioPrefs,
-    /* Priority cues duck the bed rather than fighting it. */
-    onPriorityCue: (cue) => ambientLoop().duckForCue(cue),
   });
   watchPrefs();
   return player;
@@ -98,10 +97,18 @@ export function ensureAmbientLoop(): void {
   }, AMBIENT_RETRY_MS);
 }
 
-/** Realtime voice went live or ended. */
-export function setVoiceConnected(connected: boolean): void {
+/**
+ * One mounted realtime surface went live or ended.
+ *
+ * Ownership matters because several conversation cards can mount composers in
+ * the same tab. A card may release only its own lease; the ambient bed remains
+ * connected while any other live call still owns one.
+ */
+export function setVoiceConnected(owner: unknown, connected: boolean): void {
+  if (connected) voiceOwners.add(owner);
+  else voiceOwners.delete(owner);
   retries = 0;
-  ambientLoop().setVoiceConnected(connected);
+  ambientLoop().setVoiceConnected(voiceOwners.size > 0);
   ensureAmbientLoop();
 }
 
@@ -142,6 +149,7 @@ export function resetAppAudioForTests(): void {
   player = null;
   loop = null;
   prefsWatched = false;
+  voiceOwners.clear();
   retries = 0;
   if (retryTimer !== null) clearTimeout(retryTimer);
   retryTimer = null;
