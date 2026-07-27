@@ -35,7 +35,9 @@ import {
   acknowledgeVoiceDelivery,
   appendVoiceResponse,
   completeVoiceTurn,
+  normalizeAcknowledgedVoiceDeliveryIds,
   normalizeVoiceDeliveries,
+  rememberAcknowledgedVoiceDelivery,
 } from "@/lib/runtime/voiceDelivery";
 import {
   appendRuntimeLiveTurnDelta,
@@ -243,6 +245,13 @@ function baseSession(id: string, payload: Record<string, unknown>, revision: num
     ...(liveTurn ? { liveTurn } : {}),
     ...(Array.isArray(payload.voiceDeliveries)
       ? { voiceDeliveries: normalizeVoiceDeliveries(payload.voiceDeliveries) }
+      : {}),
+    ...(Array.isArray(payload.acknowledgedVoiceDeliveryIds)
+      ? {
+        acknowledgedVoiceDeliveryIds: normalizeAcknowledgedVoiceDeliveryIds(
+          payload.acknowledgedVoiceDeliveryIds,
+        ),
+      }
       : {}),
   };
 }
@@ -1577,7 +1586,12 @@ export class RuntimeJournal {
         ...(previous.voiceDeliveries
           ? {
             voiceDeliveries: event.kind === "turn-ended" && turnId
-              ? completeVoiceTurn(previous.voiceDeliveries, turnId, typeof payload.outcome === "string" ? payload.outcome : "")
+              ? completeVoiceTurn(
+                previous.voiceDeliveries,
+                turnId,
+                typeof payload.outcome === "string" ? payload.outcome : "",
+                previous.acknowledgedVoiceDeliveryIds,
+              )
               : previous.voiceDeliveries,
           }
           : {}),
@@ -1625,12 +1639,17 @@ export class RuntimeJournal {
     }
     if (event.kind === "voice-delivery-acknowledged") {
       const previous = this.entity<RuntimeSession>("session", scope.id) ?? baseSession(scope.id, {}, 0);
+      const deliveryId = typeof payload.deliveryId === "string" ? payload.deliveryId : "";
       this.upsertEntity("session", scope.id, event.revision, {
         ...previous,
         revision: event.revision,
         voiceDeliveries: acknowledgeVoiceDelivery(
           previous.voiceDeliveries,
-          typeof payload.deliveryId === "string" ? payload.deliveryId : "",
+          deliveryId,
+        ),
+        acknowledgedVoiceDeliveryIds: rememberAcknowledgedVoiceDelivery(
+          previous.acknowledgedVoiceDeliveryIds,
+          deliveryId,
         ),
       }, event.seq);
       return;

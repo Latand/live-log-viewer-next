@@ -33,7 +33,9 @@ import {
   acknowledgeVoiceDelivery,
   appendVoiceResponse,
   completeVoiceTurn,
+  normalizeAcknowledgedVoiceDeliveryIds,
   normalizeVoiceDeliveries,
+  rememberAcknowledgedVoiceDelivery,
   type RuntimeVoiceDelivery,
 } from "@/lib/runtime/voiceDelivery";
 
@@ -262,6 +264,7 @@ export interface RuntimeSession {
       as a streaming bubble until the transcript materializes the item. */
   liveTurn?: RuntimeLiveTurn | null;
   voiceDeliveries?: RuntimeVoiceDelivery[];
+  acknowledgedVoiceDeliveryIds?: string[];
 }
 
 /**
@@ -363,6 +366,13 @@ export function installSnapshot(snapshot: RuntimeSnapshot): RuntimeStore {
       recentReceipts: [...session.recentReceipts],
       ...(session.voiceDeliveries
         ? { voiceDeliveries: normalizeVoiceDeliveries(session.voiceDeliveries) }
+        : {}),
+      ...(session.acknowledgedVoiceDeliveryIds
+        ? {
+          acknowledgedVoiceDeliveryIds: normalizeAcknowledgedVoiceDeliveryIds(
+            session.acknowledgedVoiceDeliveryIds,
+          ),
+        }
         : {}),
     };
     scopeHeads[`session:${session.conversationId}`] = session.revision;
@@ -484,6 +494,9 @@ function reduceKnown(store: RuntimeStore, env: RuntimeEnvelope, revision: number
         // never let a status payload silently drop live sub-projections
         attentionIds: p.attentionIds ?? prev?.attentionIds ?? [],
         recentReceipts: prev?.recentReceipts ?? [],
+        acknowledgedVoiceDeliveryIds: normalizeAcknowledgedVoiceDeliveryIds(
+          p.acknowledgedVoiceDeliveryIds ?? prev?.acknowledgedVoiceDeliveryIds,
+        ),
       };
       store.sessions = { ...store.sessions, [id]: merged };
       break;
@@ -557,17 +570,29 @@ function reduceKnown(store: RuntimeStore, env: RuntimeEnvelope, revision: number
         turn: "idle",
         activeTurnId: null,
         voiceDeliveries: p.turnId
-          ? completeVoiceTurn(s.voiceDeliveries, p.turnId, p.outcome ?? "")
+          ? completeVoiceTurn(
+            s.voiceDeliveries,
+            p.turnId,
+            p.outcome ?? "",
+            s.acknowledgedVoiceDeliveryIds,
+          )
           : s.voiceDeliveries,
       }));
       break;
     }
     case "voice-delivery-acknowledged": {
       const p = env.payload as { conversationId?: string; deliveryId?: string };
-      updateSession(store, p.conversationId ?? env.scope.id, revision, (s) => ({
-        ...s,
-        voiceDeliveries: acknowledgeVoiceDelivery(s.voiceDeliveries, p.deliveryId ?? ""),
-      }));
+      updateSession(store, p.conversationId ?? env.scope.id, revision, (s) => {
+        const deliveryId = p.deliveryId ?? "";
+        return {
+          ...s,
+          voiceDeliveries: acknowledgeVoiceDelivery(s.voiceDeliveries, deliveryId),
+          acknowledgedVoiceDeliveryIds: rememberAcknowledgedVoiceDelivery(
+            s.acknowledgedVoiceDeliveryIds,
+            deliveryId,
+          ),
+        };
+      });
       break;
     }
     case "voice-delivery-progress": {

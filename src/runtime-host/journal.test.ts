@@ -11,6 +11,7 @@ import { applyEvent, installSnapshot } from "@/components/runtime/runtimeModel";
 import type { Flow } from "@/lib/flows/types";
 import { UnixRuntimeHostClient } from "@/lib/runtime/client";
 import { runtimePresentationReceipt, runtimeScope } from "@/lib/runtime/contracts";
+import { projectEngineHostEvent } from "@/lib/runtime/engineHostEvents";
 import { structuredContentDigest, type StructuredImageRef } from "@/lib/runtime/structuredContent";
 
 import { RuntimeHost, RuntimeHostFence } from "./host";
@@ -183,6 +184,110 @@ test("canonical voice deliveries survive missed-running recovery and compaction 
     },
   });
   expect(recovered.snapshot().sessions[0]?.voiceDeliveries).toEqual([]);
+  recovered.close();
+});
+
+test("acknowledged voice delivery stays retired after reload and terminal replay while an undelivered response hydrates", () => {
+  const dir = sandbox("voice-delivery-reload");
+  const filename = path.join(dir, "events.sqlite");
+  const conversationId = "conversation_reload";
+  const firstHostKey = "codex:thread-before-reload";
+  const replayHostKey = "codex:thread-after-reload";
+  const deliveredItem = {
+    type: "agentMessage",
+    id: "response-delivered",
+    phase: "final_answer",
+    text: "Delivered once before reload 🫶🏽",
+  };
+  const appendProjected = (
+    journal: RuntimeJournal,
+    hostKey: string,
+    event: Parameters<typeof projectEngineHostEvent>[2],
+  ) => {
+    const projected = projectEngineHostEvent(conversationId, hostKey, event);
+    expect(projected).not.toBeNull();
+    return journal.append(projected!);
+  };
+
+  const journal = new RuntimeJournal(filename, { maxEvents: 100, now: () => 100 });
+  appendProjected(journal, firstHostKey, {
+    kind: "item",
+    turnId: "turn-delivered",
+    item: deliveredItem,
+    phase: "completed",
+    seq: 1,
+  });
+  appendProjected(journal, firstHostKey, {
+    kind: "turn-ended",
+    turnId: "turn-delivered",
+    status: "completed",
+    seq: 2,
+  });
+  const firstMount = installSnapshot(journal.snapshot());
+  const delivered = firstMount.sessions[conversationId]?.voiceDeliveries?.[0];
+  expect(delivered).toMatchObject({
+    turnId: "turn-delivered",
+    responses: [{ responseId: "response-delivered", text: deliveredItem.text }],
+    ready: true,
+  });
+  appendProjected(journal, firstHostKey, {
+    kind: "realtime-delivery-acknowledged",
+    deliveryId: delivered!.deliveryId,
+    digest: "delivered-digest",
+    seq: 3,
+  });
+  expect(journal.snapshot().sessions[0]?.voiceDeliveries).toEqual([]);
+  expect(journal.snapshot().sessions[0]?.acknowledgedVoiceDeliveryIds).toEqual([
+    delivered!.deliveryId,
+  ]);
+  journal.close();
+
+  const recovered = new RuntimeJournal(filename, { maxEvents: 100, now: () => 200 });
+  appendProjected(recovered, replayHostKey, {
+    kind: "item",
+    turnId: "turn-delivered",
+    item: deliveredItem,
+    phase: "completed",
+    seq: 1,
+  });
+  appendProjected(recovered, replayHostKey, {
+    kind: "turn-ended",
+    turnId: "turn-delivered",
+    status: "completed",
+    seq: 2,
+  });
+  appendProjected(recovered, replayHostKey, {
+    kind: "item",
+    turnId: "turn-undelivered",
+    item: {
+      type: "agentMessage",
+      id: "response-undelivered",
+      phase: "final_answer",
+      text: "Genuinely undelivered after reload 界",
+    },
+    phase: "completed",
+    seq: 3,
+  });
+  appendProjected(recovered, replayHostKey, {
+    kind: "turn-ended",
+    turnId: "turn-undelivered",
+    status: "completed",
+    seq: 4,
+  });
+
+  const reloadMount = installSnapshot(recovered.snapshot());
+  expect(reloadMount.sessions[conversationId]?.acknowledgedVoiceDeliveryIds).toEqual([
+    delivered!.deliveryId,
+  ]);
+  expect(reloadMount.sessions[conversationId]?.voiceDeliveries).toEqual([{
+    deliveryId: 'voice:["turn-undelivered",["response-undelivered"]]',
+    turnId: "turn-undelivered",
+    responses: [{
+      responseId: "response-undelivered",
+      text: "Genuinely undelivered after reload 界",
+    }],
+    ready: true,
+  }]);
   recovered.close();
 });
 

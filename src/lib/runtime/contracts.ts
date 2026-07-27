@@ -358,6 +358,9 @@ export interface RuntimeSession {
   /** Canonical terminal assistant items retained independently from the
       bounded live UI projection until Live Mode acknowledges delivery. */
   voiceDeliveries?: RuntimeVoiceDelivery[];
+  /** Bounded durable tombstones prevent terminal-event replay from recreating
+      deliveries already acknowledged by Live Mode. */
+  acknowledgedVoiceDeliveryIds?: string[];
 }
 
 export interface ScopedEntity<T> {

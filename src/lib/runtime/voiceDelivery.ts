@@ -15,6 +15,8 @@ export interface Utf8Chunk {
   nextOffset: number;
 }
 
+const MAX_ACKNOWLEDGED_VOICE_DELIVERIES = 256;
+
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -89,6 +91,28 @@ export function normalizeVoiceDeliveries(value: unknown): RuntimeVoiceDelivery[]
   });
 }
 
+export function normalizeAcknowledgedVoiceDeliveryIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const ids: string[] = [];
+  for (const candidate of value) {
+    if (typeof candidate !== "string" || !candidate) continue;
+    const previous = ids.indexOf(candidate);
+    if (previous >= 0) ids.splice(previous, 1);
+    ids.push(candidate);
+  }
+  return ids.slice(-MAX_ACKNOWLEDGED_VOICE_DELIVERIES);
+}
+
+export function rememberAcknowledgedVoiceDelivery(
+  value: readonly string[] | null | undefined,
+  acknowledgedDeliveryId: string,
+): string[] {
+  return normalizeAcknowledgedVoiceDeliveryIds([
+    ...normalizeAcknowledgedVoiceDeliveryIds(value),
+    acknowledgedDeliveryId,
+  ]);
+}
+
 export function appendVoiceResponse(
   value: readonly RuntimeVoiceDelivery[] | null | undefined,
   turnId: string,
@@ -123,6 +147,7 @@ export function completeVoiceTurn(
   value: readonly RuntimeVoiceDelivery[] | null | undefined,
   turnId: string,
   outcome: string,
+  acknowledgedDeliveryIds?: readonly string[] | null,
 ): RuntimeVoiceDelivery[] {
   const deliveries = normalizeVoiceDeliveries(value);
   const index = deliveries.findIndex((delivery) => delivery.turnId === turnId);
@@ -131,6 +156,10 @@ export function completeVoiceTurn(
     return deliveries.filter((_, deliveryIndex) => deliveryIndex !== index);
   }
   if (deliveries[index]!.ready) return deliveries;
+  if (normalizeAcknowledgedVoiceDeliveryIds(acknowledgedDeliveryIds)
+    .includes(deliveries[index]!.deliveryId)) {
+    return deliveries.filter((_, deliveryIndex) => deliveryIndex !== index);
+  }
   return deliveries.map((delivery, deliveryIndex) =>
     deliveryIndex === index ? { ...delivery, ready: true } : delivery);
 }

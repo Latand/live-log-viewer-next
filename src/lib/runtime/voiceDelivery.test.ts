@@ -4,6 +4,7 @@ import {
   acknowledgeVoiceDelivery,
   appendVoiceResponse,
   completeVoiceTurn,
+  rememberAcknowledgedVoiceDelivery,
   terminalVoiceResponse,
   utf8ChunkAt,
   type RuntimeVoiceDelivery,
@@ -67,6 +68,28 @@ describe("canonical voice delivery state", () => {
     expect(completeVoiceTurn(withDraft, "turn-interrupted", "interrupted")).toEqual(pending);
     expect(acknowledgeVoiceDelivery(pending, pending[0]!.deliveryId)).toEqual([]);
     expect(acknowledgeVoiceDelivery(pending, "unknown")).toEqual(pending);
+  });
+
+  test("bounds durable acknowledgement identities and retires a replayed delivery", () => {
+    let acknowledged: string[] = [];
+    for (let index = 0; index < 300; index += 1) {
+      acknowledged = rememberAcknowledgedVoiceDelivery(acknowledged, `delivery-${index}`);
+    }
+    expect(acknowledged).toHaveLength(256);
+    expect(acknowledged[0]).toBe("delivery-44");
+    expect(acknowledged.at(-1)).toBe("delivery-299");
+
+    const replayed = appendVoiceResponse([], "turn-replayed", {
+      responseId: "response-replayed",
+      text: "already spoken",
+    });
+    const deliveryId = 'voice:["turn-replayed",["response-replayed"]]';
+    expect(completeVoiceTurn(
+      replayed,
+      "turn-replayed",
+      "completed",
+      rememberAcknowledgedVoiceDelivery(acknowledged, deliveryId),
+    )).toEqual([]);
   });
 
   test("chunks on Unicode scalar boundaries without changing ordered content", () => {
