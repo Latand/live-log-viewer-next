@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { adoptOrchestratorRecord, orchestratorRecordExists, readOrchestratorRecord, type OrchestratorRecord } from "@/lib/orchestrator/store";
+import { adoptOrchestratorRecord, orchestratorRecordExists, readOrchestratorRecord, replaceOrchestratorIncumbent, type OrchestratorRecord } from "@/lib/orchestrator/store";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import type { ApiError } from "@/lib/types";
 
@@ -25,10 +25,10 @@ export async function GET(): Promise<NextResponse<OrchestratorStatus>> {
   });
 }
 
-export async function POST(req: NextRequest): Promise<NextResponse<{ ok: true; record: OrchestratorRecord; adopted: boolean } | ApiError>> {
+export async function POST(req: NextRequest): Promise<NextResponse<{ ok: true; record: OrchestratorRecord; adopted: boolean; replaced: boolean } | ApiError>> {
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
-  let body: { conversationId?: unknown; path?: unknown };
+  let body: { conversationId?: unknown; path?: unknown; replace?: unknown; engine?: unknown; model?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -40,10 +40,30 @@ export async function POST(req: NextRequest): Promise<NextResponse<{ ok: true; r
   if (body.path !== undefined && body.path !== null && typeof body.path !== "string") {
     return NextResponse.json({ error: "path must be a string or null" }, { status: 400 });
   }
-  const { record, adopted } = adoptOrchestratorRecord({
+  for (const field of ["engine", "model"] as const) {
+    const value = body[field];
+    if (value !== undefined && (typeof value !== "string" || !value.trim())) {
+      return NextResponse.json({ error: `${field} must be a non-empty string` }, { status: 400 });
+    }
+  }
+
+  /* #691 §3, AC23 — seating a new incumbent is a different act from adopting the
+     first one, so the caller has to say which one it means. Adoption still refuses a
+     second conversation while one is live (that refusal IS the single-instance
+     guarantee); `replace` is the operator swapping the manager's model on purpose,
+     and it deliberately touches nothing but this record — the bridge cursors
+     reference the record by name and survive it untouched. */
+  const candidate = {
     conversationId: body.conversationId.trim(),
     path: typeof body.path === "string" && body.path ? body.path : null,
     createdAt: new Date().toISOString(),
-  });
-  return NextResponse.json({ ok: true, record, adopted });
+    ...(typeof body.engine === "string" ? { engine: body.engine.trim() } : {}),
+    ...(typeof body.model === "string" ? { model: body.model.trim() } : {}),
+  };
+  if (body.replace === true) {
+    const record = replaceOrchestratorIncumbent(candidate);
+    return NextResponse.json({ ok: true, record, adopted: true, replaced: true });
+  }
+  const { record, adopted } = adoptOrchestratorRecord(candidate);
+  return NextResponse.json({ ok: true, record, adopted, replaced: false });
 }

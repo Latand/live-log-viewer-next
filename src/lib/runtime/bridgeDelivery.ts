@@ -51,11 +51,50 @@ export function isBridgeDeliveryTurn(turnId: string): boolean {
   return turnId.startsWith(BRIDGE_TURN_PREFIX);
 }
 
-export interface BridgeDeliveryPlan {
-  delivery: RuntimeVoiceDelivery;
-  /** Cursor to acknowledge once the call has taken delivery — never before. */
-  throughSeq: number;
+const ACKNOWLEDGED_REPORT_SEQ = /"report:(\d+)"/g;
+
+/**
+ * The highest report seq any tombstone says was already spoken.
+ *
+ * Per-report rather than per-batch, and that distinction is load-bearing. A
+ * delivery id names the *set* of reports it carried, so when the cursor write is
+ * lost and the manager appends one more report, the next drain produces a batch
+ * with a different id — one the tombstones do not recognize. Matching on the id
+ * alone would then re-speak everything in it, which is the failure a tombstone
+ * exists to prevent. Reading the seqs back out of the ids answers the question
+ * that actually matters: what has this user already heard.
+ */
+export function bridgeAcknowledgedSeqCeiling(
+  acknowledgedDeliveryIds: readonly string[] | null | undefined,
+): number {
+  let ceiling = 0;
+  for (const id of normalizeAcknowledgedVoiceDeliveryIds(acknowledgedDeliveryIds)) {
+    for (const match of id.matchAll(ACKNOWLEDGED_REPORT_SEQ)) {
+      const seq = Number.parseInt(match[1]!, 10);
+      if (Number.isInteger(seq) && seq > ceiling) ceiling = seq;
+    }
+  }
+  return ceiling;
 }
+
+export type BridgeDeliveryPlan =
+  /** Speak this batch, then acknowledge `throughSeq` — never before. */
+  | { kind: "deliver"; delivery: RuntimeVoiceDelivery; throughSeq: number }
+  /**
+   * The user already heard this batch, but the cursor never moved: the ack landed
+   * in the call and the durable write did not.
+   *
+   * This case has to be distinguishable from "nothing to do", because the two want
+   * opposite actions. Reporting silence here wedges the channel permanently — the
+   * drain hands back the same batch, the tombstone suppresses it, and every later
+   * report queues behind something already spoken. The caller must heal the cursor
+   * to `throughSeq` and drain again.
+   */
+  | { kind: "already-acknowledged"; throughSeq: number }
+  /** Inside the coalescing window; try again after it elapses. */
+  | { kind: "hold" }
+  /** Nothing pending. */
+  | { kind: "idle" };
 
 /**
  * What the gateway says when a report arrives.
@@ -79,13 +118,11 @@ function reportText(report: BridgeReportV1): string {
 }
 
 /**
- * Turn a drained batch into at most one delivery.
+ * Turn a drained batch into at most one delivery, or say why not.
  *
- * Returns null — deliberately, not as an error — when there is nothing to say,
- * when the coalescing window has not elapsed, or when this exact batch was already
- * acknowledged. The last case is what makes a lost ack harmless: the report log
- * still shows the reports as unread until the cursor advances, so the batch is
- * re-planned, recognized by its tombstone, and dropped instead of re-spoken.
+ * Every outcome is named rather than collapsed into null, because the caller owes
+ * each one a different action — and the one that used to be indistinguishable
+ * (`already-acknowledged` vs `idle`) is the one that could wedge the channel.
  */
 export function planBridgeReportDelivery(options: {
   batch: BridgeReportBatch;
@@ -93,31 +130,43 @@ export function planBridgeReportDelivery(options: {
   /** When the previous interjection batch reached this call, or null for none. */
   lastBatchAt: Date | null;
   acknowledgedDeliveryIds?: readonly string[] | null;
-}): BridgeDeliveryPlan | null {
+}): BridgeDeliveryPlan {
   const { reports } = options.batch;
-  if (reports.length === 0) return null;
+  if (reports.length === 0) return { kind: "idle" };
   if (options.lastBatchAt
     && options.now.getTime() - options.lastBatchAt.getTime() < BRIDGE_LIVE_BATCH_INTERVAL_MS) {
-    return null;
+    return { kind: "hold" };
   }
 
-  const throughSeq = reports.reduce((highest, report) => Math.max(highest, report.seq), 0);
+  /* Anything at or below the ceiling has already been spoken, whatever batch it
+     arrives in now. Dropping those before building the delivery is what stops a
+     lost cursor write from replaying them to the user. */
+  const ceiling = bridgeAcknowledgedSeqCeiling(options.acknowledgedDeliveryIds);
+  const fresh = reports.filter((report) => report.seq > ceiling);
+  if (fresh.length === 0) {
+    return {
+      kind: "already-acknowledged",
+      throughSeq: reports.reduce((highest, report) => Math.max(highest, report.seq), ceiling),
+    };
+  }
+
+  const throughSeq = fresh.reduce((highest, report) => Math.max(highest, report.seq), 0);
   const turnId = bridgeDeliveryTurnId(throughSeq);
   let deliveries: RuntimeVoiceDelivery[] = [];
-  for (const report of reports) {
+  for (const report of fresh) {
     deliveries = appendVoiceResponse(deliveries, turnId, {
       responseId: bridgeReportResponseId(report.seq),
       text: reportText(report),
     });
   }
   const delivery = deliveries[0];
-  if (!delivery) return null;
+  if (!delivery) return { kind: "idle" };
 
   const acknowledged = normalizeAcknowledgedVoiceDeliveryIds(options.acknowledgedDeliveryIds);
-  if (acknowledged.includes(delivery.deliveryId)) return null;
+  if (acknowledged.includes(delivery.deliveryId)) return { kind: "already-acknowledged", throughSeq };
 
   /* `ready` is what the call-side flush loop waits for. A worker response becomes
      ready when its turn completes; a report has no turn to complete — the manager
      already finished the thought before appending it. */
-  return { delivery: { ...delivery, ready: true }, throughSeq };
+  return { kind: "deliver", delivery: { ...delivery, ready: true }, throughSeq };
 }

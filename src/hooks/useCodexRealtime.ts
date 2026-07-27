@@ -8,6 +8,8 @@ import { speakingFromLines } from "@/lib/audio/speech";
 import { codexRealtimeClient, type CodexRealtimeLine, type CodexRealtimeSnapshot } from "@/lib/realtime/codexRealtimeClient";
 import type { RuntimeVoiceDelivery } from "@/lib/runtime/voiceDelivery";
 
+import { useBridgeReportRelay } from "./useBridgeReportRelay";
+
 const IDLE = { phase: "idle" as const, lines: [], error: null, startedAt: null, micMuted: false, outputMuted: false };
 
 /**
@@ -142,6 +144,11 @@ export function useCodexRealtime(
   const live = snapshot.phase === "live";
   const speaking = useCurrentCallSpeaker(live, snapshot.lines);
   useAmbientCallLease(live, speaking);
+
+  /* #691 §4 — manager reports reach the user here, in the card's tree, exactly once
+     per conversation. The floater is a second rendering of this same client and
+     mounts no relay of its own, so a report cannot be delivered twice. */
+  useBridgeReportRelay(client, live);
 
   return {
     ...snapshot,

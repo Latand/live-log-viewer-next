@@ -1,8 +1,9 @@
 "use client";
 
-import { useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import { useImageAttachments } from "@/components/imageAttachments";
+import type { ComposerSnapshot, ComposerStore } from "@/components/voice/composerStore";
 import { performVoiceSend } from "@/hooks/composerVoiceSend";
 import { useAutosizePinned } from "@/hooks/useAutosizePinned";
 import { useDictation } from "@/hooks/useDictation";
@@ -28,6 +29,12 @@ function useViewportHeight(): number {
   return useSyncExternalStore(subscribeViewport, () => window.innerHeight, () => 800);
 }
 
+/* Stable identities: a fresh function or object per render would make
+   `useSyncExternalStore` treat every unrelated render as a store change. */
+const NO_SHARED_SUBSCRIBE = () => () => undefined;
+const EMPTY_SHARED: ComposerSnapshot = { draft: "", attachments: [] };
+const NO_SHARED_SNAPSHOT = () => EMPTY_SHARED;
+
 export interface ComposerStatus {
   /** `info` is a neutral/pending tone (e.g. a message held for a migration). */
   kind: "ok" | "err" | "info";
@@ -50,6 +57,16 @@ export interface UseComposerOptions {
       `fieldsDisabled` and `canSend` exactly like the in-flight flags. */
   disabled?: boolean;
   imageCapability?: RuntimeImageCapability | null;
+  /**
+   * #691 U2 — the per-conversation store both renderings of a voice conversation
+   * share. When present, this composer stops being the draft's owner and becomes
+   * one of its two editors: it writes every edit through, reflects edits made in
+   * the other window, and publishes its own `submit` so the floater delivers
+   * through this outbox rather than a second one.
+   *
+   * Absent for every ordinary card, which keeps today's behaviour exactly.
+   */
+  shared?: ComposerStore | null;
   /** Whether an in-flight delivery locks the text field. Queue-first composers
       (issue #561) pass `false`: a submitted message is already in the durable
       queue, so the input must stay typable while it is delivered — there is no
@@ -65,7 +82,7 @@ export interface UseComposerOptions {
  * own delivery (`submit`) and its own surrounding chrome; everything below the
  * text lives in `ComposerBar`.
  */
-export function useComposer({ initialText, persistText, submit, disabled = false, imageCapability = null, holdInputWhileBusy = true }: UseComposerOptions) {
+export function useComposer({ initialText, persistText, submit, disabled = false, imageCapability = null, holdInputWhileBusy = true, shared = null }: UseComposerOptions) {
   /* A remount mid-typing (column reshuffles, draft handovers) restores the
      draft from storage; the ref always holds the latest text so async
      dictation callbacks append to what the user typed meanwhile instead of
@@ -77,7 +94,31 @@ export function useComposer({ initialText, persistText, submit, disabled = false
     textRef.current = next;
     setTextState(next);
     persistText(next);
+    /* Written through, never mirrored afterwards: the store notifies, the effect
+       below sees the value it already holds, and the loop stops there. */
+    shared?.setDraft(next);
   };
+
+  /* The shared draft, when this composer has one. `hydrate` offers the persisted
+     draft exactly once and loses to anything already typed elsewhere — a remounting
+     card is the older event, and adopting its storage would silently discard what
+     the operator just typed in the floating window. */
+  const sharedSnapshot = useSyncExternalStore(
+    shared?.subscribe ?? NO_SHARED_SUBSCRIBE,
+    shared?.getSnapshot ?? NO_SHARED_SNAPSHOT,
+    NO_SHARED_SNAPSHOT,
+  );
+  /* Offered from an effect, and deliberately only the mount-time draft: `text` is
+     read from the first render's closure, so a later keystroke cannot re-hydrate an
+     older value over itself. `hydrate` itself loses to anything already typed. */
+  const [mountedText] = useState(text);
+  useEffect(() => { shared?.hydrate(mountedText); }, [mountedText, shared]);
+  const sharedDraft = shared ? sharedSnapshot.draft : null;
+  useEffect(() => {
+    if (sharedDraft === null || sharedDraft === textRef.current) return;
+    textRef.current = sharedDraft;
+    setTextState(sharedDraft);
+  }, [sharedDraft]);
 
   const [busy, setBusy] = useState(false);
   const [voiceSending, setVoiceSending] = useState(false);
@@ -203,6 +244,12 @@ export function useComposer({ initialText, persistText, submit, disabled = false
   const attachmentsBlocked = attachments.hasReading || attachments.hasError;
   const canSend =
     !fieldsDisabled && !dictationBusy && !attachmentsBlocked && (dictationRecording || Boolean(text.trim()) || attachments.images.length > 0);
+
+  /* The floater's Send is this Send. Registered rather than duplicated, so the
+     queue-first outbox, its idempotency key and its receipts stay in one place. */
+  const submitRef = useRef(submit);
+  useEffect(() => { submitRef.current = submit; });
+  useEffect(() => shared?.registerSender(() => { void submitRef.current(); }), [shared]);
 
   return {
     text,

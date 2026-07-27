@@ -61,6 +61,7 @@ import {
 import { mintIdempotencyKey, receiptIsAdmitted, receiptIsTerminal } from "./runtime/runtimeModel";
 import { useAgentCapabilities } from "./useAgentCapabilities";
 import { VoiceConversationButton, VoiceConversationPanel } from "./VoiceConversation";
+import { composerStore } from "./voice/composerStore";
 import { VoiceFloatButton } from "./voice/VoiceFloatButton";
 
 /** The persisted "on resume" runtime profile as a POST body fragment (issue
@@ -1014,6 +1015,10 @@ export function TmuxComposer({
     /* Queue-first (issue #561): a submitted message lives in the durable
        outbox, so the field never locks behind an in-flight delivery. */
     holdInputWhileBusy: false,
+    /* #691 U2: the voice conversation's draft is shared with its floating
+       rendering — one draft, one queue, one dispatcher. Every other card owns its
+       draft outright, exactly as before. */
+    shared: voiceEnabled ? composerStore(cardId) : null,
   });
   const { text, textRef, setText, setTextState, inputRef, setStatus, busy, setBusy, voiceSending, attachments } = composer;
   const attachmentDraftHydrated = useRef(false);

@@ -90,7 +90,8 @@ test("a root rollover resumes at the cursor and re-speaks nothing (§7.4)", () =
 
   /* First root session takes delivery of the first batch and acknowledges it. */
   const firstBatch = drainBridgeReports();
-  const firstPlan = planBridgeReportDelivery({ batch: firstBatch, now: NOW, lastBatchAt: null })!;
+  const firstPlan = planBridgeReportDelivery({ batch: firstBatch, now: NOW, lastBatchAt: null });
+  if (firstPlan.kind !== "deliver") throw new Error("expected a delivery");
   let tombstones = rememberAcknowledgedVoiceDelivery([], firstPlan.delivery.deliveryId);
   acknowledgeBridgeReports(firstPlan.throughSeq);
 
@@ -108,7 +109,8 @@ test("a root rollover resumes at the cursor and re-speaks nothing (§7.4)", () =
     now: new Date(NOW.getTime() + 60_000),
     lastBatchAt: null,
     acknowledgedDeliveryIds: tombstones,
-  })!;
+  });
+  if (resumedPlan.kind !== "deliver") throw new Error("expected a delivery");
   expect(resumedPlan.delivery.responses.map((response) => response.text.includes("report d"))).toEqual([true]);
 
   /* And the batch the predecessor already delivered stays delivered. */
@@ -152,7 +154,8 @@ test("the manager appending the same report through two hosts yields one deliver
 
   const batch = drainBridgeReports();
   expect(batch.reports).toHaveLength(1);
-  const plan = planBridgeReportDelivery({ batch, now: NOW, lastBatchAt: null })!;
+  const plan = planBridgeReportDelivery({ batch, now: NOW, lastBatchAt: null });
+  if (plan.kind !== "deliver") throw new Error("expected a delivery");
   expect(plan.delivery.responses).toHaveLength(1);
 });
 
@@ -167,4 +170,64 @@ test("a channel opened for a different root identity does not inherit the old cu
   const other = openBridgeChannel("root_0000deadbeef");
   expect(other.managerReportCursor).toBe(0);
   expect(drainBridgeReports().reports.map((entry) => entry.seq)).toEqual([1]);
+});
+
+test("a lost cursor write cannot hide every later report behind a batch already spoken", () => {
+  sandbox();
+  openBridgeChannel(ROOT_ID);
+  appendBridgeReports([report("a"), report("b")]);
+
+  /* Delivered and acknowledged in the call; the durable cursor write is lost. */
+  const first = planBridgeReportDelivery({ batch: drainBridgeReports(), now: NOW, lastBatchAt: null });
+  if (first.kind !== "deliver") throw new Error("expected a delivery");
+  const tombstones = rememberAcknowledgedVoiceDelivery([], first.delivery.deliveryId);
+  expect(readBridgeChannel()?.managerReportCursor).toBe(0);
+
+  /* The manager keeps working. Without cursor healing these never reach the user:
+     the drain returns 1..3, the plan recognizes seqs 1-2 as already spoken, and
+     report 3 waits behind them forever. */
+  appendBridgeReports([report("c", { class: "blocked", body: "needs a decision" })]);
+
+  const next = planBridgeReportDelivery({
+    batch: drainBridgeReports(),
+    now: new Date(NOW.getTime() + 60_000),
+    lastBatchAt: null,
+    acknowledgedDeliveryIds: tombstones,
+  });
+
+  /* The blocker reaches the user, and reports 1-2 are NOT spoken a second time —
+     the batch id changed when report 3 arrived, so only per-report suppression can
+     tell the difference. */
+  if (next.kind !== "deliver") throw new Error(`expected the blocker to be delivered, got ${next.kind}`);
+  expect(next.delivery.responses).toHaveLength(1);
+  expect(next.delivery.responses[0]!.text).toContain("needs a decision");
+  expect(next.throughSeq).toBe(3);
+
+  /* And acknowledging it heals the cursor past everything, including the reports
+     whose own acknowledgement was lost. */
+  acknowledgeBridgeReports(next.throughSeq);
+  expect(readBridgeChannel()?.managerReportCursor).toBe(3);
+  expect(drainBridgeReports().reports).toEqual([]);
+});
+
+test("a batch entirely below the ceiling reports the seq to heal to rather than silence", () => {
+  sandbox();
+  openBridgeChannel(ROOT_ID);
+  appendBridgeReports([report("a"), report("b")]);
+
+  const first = planBridgeReportDelivery({ batch: drainBridgeReports(), now: NOW, lastBatchAt: null });
+  if (first.kind !== "deliver") throw new Error("expected a delivery");
+  const tombstones = rememberAcknowledgedVoiceDelivery([], first.delivery.deliveryId);
+
+  /* Cursor write lost, nothing new appended: the drain still offers 1-2. */
+  const replay = planBridgeReportDelivery({
+    batch: drainBridgeReports(),
+    now: new Date(NOW.getTime() + 60_000),
+    lastBatchAt: null,
+    acknowledgedDeliveryIds: tombstones,
+  });
+  expect(replay).toEqual({ kind: "already-acknowledged", throughSeq: 2 });
+
+  acknowledgeBridgeReports(2);
+  expect(readBridgeChannel()?.managerReportCursor).toBe(2);
 });

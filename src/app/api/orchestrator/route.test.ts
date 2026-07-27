@@ -73,3 +73,54 @@ test("POST rejects cross-origin browsers", async () => {
   });
   expect((await POST(request)).status).toBe(403);
 });
+
+/* #691 §3/§7.3, AC23 — a manager swap is a record update, and the production route
+   has to be able to perform one. Adoption deliberately cannot: refusing a second
+   conversation while one is live is the single-instance guarantee. */
+
+test("POST replaces a live incumbent when the caller asks for a replacement", async () => {
+  const transcript = path.join(sandbox, "orchestrator.jsonl");
+  fs.writeFileSync(transcript, "", "utf8");
+  await POST(adoptRequest({ conversationId: "conv-1", path: transcript }));
+
+  /* Without an explicit replacement this is refused, and must stay refused. */
+  const refused = await (await POST(adoptRequest({ conversationId: "conv-2", path: null }))).json();
+  expect(refused).toMatchObject({ adopted: false, record: { conversationId: "conv-1" } });
+
+  const swapped = await (await POST(adoptRequest({
+    conversationId: "conv-2",
+    path: null,
+    replace: true,
+    engine: "codex",
+    model: "sol",
+  }))).json();
+  expect(swapped).toMatchObject({
+    ok: true,
+    adopted: true,
+    replaced: true,
+    record: { conversationId: "conv-2", engine: "codex", model: "sol" },
+  });
+
+  const status = await (await GET()).json();
+  expect(status.record).toMatchObject({ conversationId: "conv-2", engine: "codex", model: "sol" });
+});
+
+test("a replacement defaults to the standing incumbent identity when none is named", async () => {
+  await POST(adoptRequest({ conversationId: "conv-1", path: null }));
+  const swapped = await (await POST(adoptRequest({ conversationId: "conv-2", path: null, replace: true }))).json();
+  expect(swapped.record).toMatchObject({ conversationId: "conv-2", engine: "claude", model: "opus" });
+});
+
+test("the adopted record carries the incumbent engine and model", async () => {
+  const adopted = await (await POST(adoptRequest({ conversationId: "conv-1", path: null }))).json();
+  expect(adopted.record).toMatchObject({ engine: "claude", model: "opus" });
+});
+
+test("POST refuses a non-string engine or model rather than storing it", async () => {
+  for (const body of [
+    { conversationId: "conv-1", path: null, engine: 7 },
+    { conversationId: "conv-1", path: null, model: {} },
+  ]) {
+    expect((await POST(adoptRequest(body))).status).toBe(400);
+  }
+});

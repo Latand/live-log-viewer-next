@@ -20,6 +20,9 @@ import { queryLifecycleEvents, type LifecycleEventQuery } from "@/lib/lifecycle/
 import { agentLivenessSnapshot, productionLivenessSources, type AgentLivenessSources } from "@/lib/lifecycle/liveness";
 import { refreshLifecycleJournal } from "@/lib/lifecycle/projector";
 import { isLifecycleEventType } from "@/lib/lifecycle/vocabulary";
+import { authorizeBridgeDeploy, recordManagerReport } from "@/lib/bridge/service";
+import { mintBridgeConfirmation } from "@/lib/bridge/confirmation";
+import { isBridgeReportClass } from "@/lib/bridge/types";
 import { readOrchestratorRecord } from "@/lib/orchestrator/store";
 import { createPipelineFromRequest, getPipelines, patchPipeline } from "@/lib/pipelines/engine";
 import { latestOperationalPipelineAttempt } from "@/lib/pipelines/attemptSelection";
@@ -415,12 +418,89 @@ async function deployExactSha(args: McpToolArgs, control: ViewerControlDependenc
   if (args.confirm !== "deploy") throw new Error('confirm must equal "deploy"');
   const revision = required(args, "revision");
   if (!/^[0-9a-f]{40}$/i.test(revision)) throw new Error("revision must be a full 40-character commit SHA");
+
+  /* #691 §4 — the user's spoken yes, verified and spent here rather than trusted.
+     The manager relays a trailer it received; presenting it authorizes exactly this
+     SHA exactly once, and every refusal (replay, expiry, wrong nonce, wrong SHA)
+     stops the deploy instead of downgrading to an unauthorized one. The consume is
+     atomic with the check, so two answers racing cannot both pass. */
+  const bridgeRef = args.bridgeRef;
+  if (bridgeRef !== undefined) {
+    if (typeof bridgeRef !== "number" || !Number.isInteger(bridgeRef) || bridgeRef < 1) {
+      throw new McpToolRefusal("bridgeRef must be the report seq the confirmation came from", { code: "bridge_confirmation_invalid" });
+    }
+    const outcome = authorizeBridgeDeploy({ ref: bridgeRef, nonce: text(args.bridgeNonce), sha: revision.toLowerCase() });
+    if (!outcome.ok) {
+      throw new McpToolRefusal(
+        `the bridge confirmation for this deploy was refused (${outcome.reason}); ask the user again and deploy nothing`,
+        { code: "bridge_confirmation_refused", reason: outcome.reason, revision },
+      );
+    }
+  }
+
   const receipt = await control.post("/api/runtime/deployments", { revision, idempotencyKey: requestId(args) });
   return {
     deploymentId: receipt.deploymentId,
     revision: receipt.revision,
     replayed: receipt.state === "accepted" && receipt.replayed === true,
     state: receipt.state,
+  };
+}
+
+/**
+ * The manager's only channel to the user (#691 §4).
+ *
+ * Deliberately thin: everything that makes a report safe — the 2 KB bound, the
+ * secret redaction, the idempotent key, the monotonic seq — lives in the store, so
+ * this cannot weaken any of it by being called differently. What it does own is
+ * minting the confirmation nonce, because a nonce the caller supplied would be a
+ * nonce the caller could replay.
+ */
+function bridgeReport(args: McpToolArgs): McpToolPayload {
+  const key = required(args, "key");
+  const reportClass = text(args.class);
+  if (!isBridgeReportClass(reportClass)) throw new Error("class must be one of the bridge report classes");
+  const body = text(args.body);
+  if (!body) throw new Error("body is required");
+
+  const requested = args.confirmation && typeof args.confirmation === "object" && !Array.isArray(args.confirmation)
+    ? args.confirmation as { sha?: unknown; expiresMinutes?: unknown }
+    : null;
+  if (requested && reportClass !== "confirmation_request") {
+    throw new Error("only a confirmation_request may carry a confirmation");
+  }
+  if (reportClass === "confirmation_request" && !requested) {
+    throw new Error("a confirmation_request must carry the SHA it authorizes");
+  }
+  const confirmation = requested
+    ? mintBridgeConfirmation({
+      sha: text(requested.sha),
+      ...(typeof requested.expiresMinutes === "number"
+        ? { ttlMs: requested.expiresMinutes * 60_000 }
+        : {}),
+    })
+    : null;
+
+  const appended = recordManagerReport({
+    key,
+    class: reportClass,
+    at: new Date().toISOString(),
+    body,
+    correlatesDirective: text(args.correlatesDirective) || null,
+    confirmation,
+  });
+
+  /* A replay under the same key appends nothing, and says so rather than pretending
+     to have delivered a second report. */
+  if (!appended) return { recorded: false, replayed: true };
+  return {
+    recorded: true,
+    replayed: false,
+    seq: appended.seq,
+    reportId: appended.id,
+    ...(appended.confirmation
+      ? { confirmation: { nonce: appended.confirmation.nonce, sha: appended.confirmation.sha, expiresAt: appended.confirmation.expiresAt } }
+      : {}),
   };
 }
 
@@ -904,5 +984,6 @@ export function viewerMcpBindings(
     agent_activity: (args) => agentActivity(args, domainDependencies),
     lifecycle_events: (args) => lifecycleEvents(args, domainDependencies),
     request_attention: (args) => requestAttention(args, domainDependencies),
+    bridge_report: (args) => Promise.resolve(bridgeReport(args)),
   };
 }

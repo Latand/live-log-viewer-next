@@ -40,6 +40,7 @@ export const MCP_TOOL_NAMES = [
   "agent_activity",
   "lifecycle_events",
   "request_attention",
+  "bridge_report",
 ] as const;
 
 export type McpToolName = typeof MCP_TOOL_NAMES[number];
@@ -66,6 +67,9 @@ const MUTATING_MCP_TOOL_NAMES = new Set<McpToolName>([
      is classified the same way rather than looking read-only by name. */
   "agent_activity",
   "request_attention",
+  /* Appends to the durable bridge log, so a replayed clientRequestId must return
+     the original receipt rather than append the report a second time. */
+  "bridge_report",
 ]);
 
 export type McpToolArgs = Record<string, unknown> & { clientRequestId?: unknown };
@@ -964,6 +968,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   agent_activity: "Read agent liveness: last transcript record, turn state, whether the host is alive or gone, and how long a stalled conversation has been silent.",
   lifecycle_events: "Query the durable lifecycle event journal by lineage and cursor, or poll a bounded relay digest of what changed since the last one.",
   request_attention: "Ask the operator to look at something: raise an attention request that offers to move their Viewer to a target and waits for their yes.",
+  bridge_report: "Manager only: append one bounded report to the durable bridge log so the voice gateway can relay it to the user. The only channel from the manager to the user.",
 };
 
 const clientRequestIdSchema = z.string().min(1).describe("Stable idempotency key for this logical call.");
@@ -1165,6 +1170,17 @@ const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     zoom: z.enum(["inspect", "situate"]).optional(),
     contextLabel: z.string().optional().describe("Named in the spoken sentence but never navigated to."),
     project: z.string().optional().describe("Required only for a target the server cannot attribute on its own (a board draft)."),
+  }).passthrough(),
+  bridge_report: z.object({
+    clientRequestId: clientRequestIdSchema,
+    key: z.string().min(1).describe("Stable identity of this report. The same key always yields one log entry, so a retry after a host death is a no-op."),
+    class: z.enum(["status", "completed", "failed", "blocked", "review_verdict", "question", "confirmation_request"]),
+    body: z.string().min(1).describe("Short prose for the gateway to relay. Bounded to 2 KB and secret-redacted at write. Never transcript payloads or raw tool output."),
+    correlatesDirective: z.string().optional().describe("clientRequestId of the directive this answers."),
+    confirmation: z.object({
+      sha: z.string().regex(/^[0-9a-f]{40}$/).describe("Full lowercase 40-hex commit SHA this authorization is for."),
+      expiresMinutes: z.number().int().positive().max(60).optional(),
+    }).optional().describe("confirmation_request only: mints the single-use nonce the gateway must echo back before a deploy."),
   }).passthrough(),
 };
 

@@ -18,6 +18,8 @@ const MANAGER: ManagerTarget = {
 
 const GATEWAY = mcpCallerIdentity({ kind: "root", conversationId: "conversation_root" });
 
+
+
 function permit(toolName: McpToolName, args: Record<string, unknown> = {}) {
   return permitMcpTool(GATEWAY, toolName, { clientRequestId: "r1", ...args }, MANAGER);
 }
@@ -112,14 +114,51 @@ test("ordinary workers are unchanged by this fence", () => {
   }
 });
 
-test("an unidentifiable caller keeps the full surface rather than being locked out", () => {
-  /* `attentionCallerAuthority` documents why `unidentified` exists: a root the
-     Viewer observes rather than launched has no host evidence. Treating that as
-     the gateway would strip the operator's own terminal session of every tool it
-     has today, to fence an agent the registry cannot even name. */
+test("a caller whose identity cannot be resolved is denied, never handed the full surface", () => {
+  /* Fail closed. `unidentified` means the registry could not name the process
+     running this tool — which is exactly the state a gateway ends up in whenever
+     host evidence is missing, racing, or unreadable. Treating "cannot tell" as
+     "not the gateway" makes identity-resolution failure a path to spawn_agent and
+     deploy_exact_sha, so the load-bearing constraint would hold only while the
+     registry happened to be readable. */
   const unknown = mcpCallerIdentity({ kind: "unidentified" });
-  expect(unknown).toEqual({ kind: "unrestricted", reason: "unidentified" });
-  expect(permitMcpTool(unknown, "spawn_agent", { clientRequestId: "r1" }, MANAGER).allowed).toBe(true);
+  expect(unknown).toEqual({ kind: "restricted", reason: "unidentified" });
+
+  for (const toolName of ["spawn_agent", "deploy_exact_sha", "create_task", "pipeline_action"] as McpToolName[]) {
+    const verdict = permitMcpTool(unknown, toolName, { clientRequestId: "r1" }, MANAGER);
+    expect(verdict.allowed).toBe(false);
+    if (!verdict.allowed) expect(verdict.code).toBe("tool_not_permitted");
+  }
+});
+
+test("an unresolved identity gets exactly the gateway surface and nothing more", () => {
+  const unknown = mcpCallerIdentity({ kind: "unidentified" });
+  const permitted = MCP_TOOL_NAMES.filter((toolName) =>
+    permitMcpTool(unknown, toolName, {
+      clientRequestId: "r1",
+      conversationId: MANAGER.conversationId,
+      text: "go",
+    }, MANAGER).allowed);
+  expect([...permitted].sort()).toEqual(["request_attention", "send_message"]);
+});
+
+test("no restricted identity can reach any tool outside the allowlist (AC21, both restricted kinds)", () => {
+  /* Enumerated as a complement rather than a hand-written list: widening
+     GATEWAY_ALLOWED_TOOLS by one entry fails this immediately, for every
+     restricted caller, without anyone remembering to update a fixture. */
+  const forbidden = MCP_TOOL_NAMES.filter((toolName) => !GATEWAY_ALLOWED_TOOLS.includes(toolName));
+  expect(forbidden.length).toBe(MCP_TOOL_NAMES.length - 2);
+
+  for (const identity of [GATEWAY, mcpCallerIdentity({ kind: "unidentified" })]) {
+    for (const toolName of forbidden) {
+      expect(permitMcpTool(identity, toolName, {
+        clientRequestId: "r1",
+        conversationId: MANAGER.conversationId,
+        sha: "a".repeat(40),
+        confirm: "deploy",
+      }, MANAGER).allowed).toBe(false);
+    }
+  }
 });
 
 test("the identity mapping reads only the authority, never anything the caller states", () => {
@@ -129,11 +168,11 @@ test("the identity mapping reads only the authority, never anything the caller s
     { kind: "worker", conversationId: "conversation_x", role: null },
     { kind: "unidentified" },
   ];
-  expect(authorities.map((authority) => mcpCallerIdentity(authority).kind)).toEqual([
-    "gateway",
-    "gateway",
-    "unrestricted",
-    "unrestricted",
+  expect(authorities.map((authority) => mcpCallerIdentity(authority))).toEqual([
+    { kind: "restricted", reason: "gateway" },
+    { kind: "restricted", reason: "gateway" },
+    { kind: "unrestricted", reason: "worker" },
+    { kind: "restricted", reason: "unidentified" },
   ]);
 });
 

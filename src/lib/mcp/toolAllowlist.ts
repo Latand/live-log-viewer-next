@@ -46,10 +46,13 @@ export interface ManagerTarget {
 }
 
 export type McpCallerIdentity =
-  /** The voice root: sole user-facing gateway, minimal tools. */
-  | { kind: "gateway" }
-  /** Everyone else keeps exactly the surface they have today. */
-  | { kind: "unrestricted"; reason: "manager" | "worker" | "unidentified" };
+  /** Held to the gateway allowlist. `gateway` is the voice root; `unidentified`
+      is a caller the registry could not name, which is denied for the same
+      reason — see {@link mcpCallerIdentity}. */
+  | { kind: "restricted"; reason: "gateway" | "unidentified" }
+  /** Positively identified as something other than the root. Keeps exactly the
+      surface it has today. */
+  | { kind: "unrestricted"; reason: "manager" | "worker" };
 
 export type McpToolVerdict =
   | { allowed: true }
@@ -60,21 +63,30 @@ const ALLOWED: McpToolVerdict = { allowed: true };
 /**
  * Who is calling, from evidence the caller cannot restate.
  *
- * `unidentified` stays unrestricted on purpose. `attentionCallerAuthority`
- * explains why the state exists at all: the operator's root is frequently a
- * terminal they started themselves, which the Viewer observes rather than
- * launches, so there are ordinary setups with no host evidence naming it.
- * Treating "cannot tell" as "is the gateway" would strip that session of every
- * tool it has today. The gateway this fence is actually about is a hosted
- * `codex-app-server` conversation by construction — voice requires it — which is
- * precisely the case the registry always has a host pid for.
+ * FAILS CLOSED. Only a caller the registry positively names as something other
+ * than the root gets the full surface; the root and every caller that could not
+ * be resolved are held to the allowlist.
+ *
+ * `unidentified` is the case worth spelling out, because the tempting reading is
+ * the wrong one. It does not mean "probably a worker" — it means the host
+ * evidence that decides this was missing, racing, or unreadable. A gateway lands
+ * in that state whenever the registry snapshot is empty or its own ancestry walk
+ * comes up short, so granting it the full surface would make the load-bearing
+ * constraint hold only while the registry happened to be readable: an
+ * identity-resolution failure would become a path to `spawn_agent` and
+ * `deploy_exact_sha`, which is precisely what AC21 forbids.
+ *
+ * The cost is real and deliberate: a worker whose host record cannot be read is
+ * refused tools it would otherwise have, and recovers as soon as the registry
+ * names it again. Refusing a call that should have been allowed is a retry;
+ * allowing one that should have been refused can spawn agents or ship a commit.
  */
 export function mcpCallerIdentity(
   authority: AttentionCallerAuthority,
   manager: ManagerTarget | null = null,
 ): McpCallerIdentity {
-  if (authority.kind === "root") return { kind: "gateway" };
-  if (authority.kind === "unidentified") return { kind: "unrestricted", reason: "unidentified" };
+  if (authority.kind === "root") return { kind: "restricted", reason: "gateway" };
+  if (authority.kind === "unidentified") return { kind: "restricted", reason: "unidentified" };
   const isManager = authority.role === "orchestrator"
     || (manager?.conversationId != null && manager.conversationId === authority.conversationId);
   return { kind: "unrestricted", reason: isManager ? "manager" : "worker" };
@@ -95,12 +107,14 @@ export function permitMcpTool(
   args: McpToolArgs,
   manager: ManagerTarget | null,
 ): McpToolVerdict {
-  if (identity.kind !== "gateway") return ALLOWED;
+  if (identity.kind !== "restricted") return ALLOWED;
   if (!GATEWAY_TOOL_SET.has(toolName)) {
     return {
       allowed: false,
       code: "tool_not_permitted",
-      error: `${toolName} belongs to the manager, not to the voice gateway. Relay the intent with send_message and report back what the manager answers.`,
+      error: identity.reason === "gateway"
+        ? `${toolName} belongs to the manager, not to the voice gateway. Relay the intent with send_message and report back what the manager answers.`
+        : `${toolName} is refused because this caller's conversation could not be identified from the registry, and an unidentified caller is held to the voice gateway's surface. Relay through the manager with send_message.`,
     };
   }
   if (toolName !== "send_message") return ALLOWED;

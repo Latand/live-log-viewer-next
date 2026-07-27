@@ -280,6 +280,28 @@ test("the floater's composer writes the one shared draft (U2, AC4)", async () =>
     .toBe("start a reviewer");
 });
 
+test("with no send prop the floater delivers through the card's registered sender (§4 rule 5)", async () => {
+  const sends: number[] = [];
+  const store = composerStore(CONVERSATION);
+  const release = store.registerSender(() => { sends.push(1); });
+  const { render } = mount();
+  startCall("live");
+  await settle();
+  render();
+  await settle();
+
+  flushSync(() => store.setDraft("deploy it"));
+  await settle();
+  const button = pip.document.querySelector("[data-testid='voice-float-send']") as unknown as HTMLButtonElement;
+  flushSync(() => button.click());
+  await settle();
+
+  /* Production passes no onSend: the only path out of this window is the one the
+     card published, so there is no second dispatcher to race. */
+  expect(sends).toEqual([1]);
+  release();
+});
+
 test("send goes through the opener's one send path, carrying the shared key (§4 rule 5)", async () => {
   const sends: { conversationId: string; draft: string; sendKey: string }[] = [];
   const { render } = mount({

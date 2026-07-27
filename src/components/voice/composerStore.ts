@@ -57,6 +57,19 @@ export interface ComposerStore {
   /** Record that `key` was handed to the outbox: clears the draft and its tiles.
       A stale key is ignored, so a late duplicate Send does nothing. */
   commitSend(key: string): void;
+  /**
+   * Publish the card's real delivery so the floater can use it.
+   *
+   * §4 rule 5 says every send flows through the existing queue-first outbox, and
+   * that outbox lives in the card's tree with its receipts, its admission handling
+   * and its history. The floater must therefore *borrow* the card's send rather
+   * than own one — a PiP-specific send route would be a second delivery path, which
+   * is precisely how one draft becomes two messages.
+   */
+  registerSender(send: () => void): () => void;
+  /** Deliver the current draft through the registered sender. A no-op when no card
+      is mounted: the floater cannot invent a delivery path of its own. */
+  send(): void;
 }
 
 const EMPTY: ComposerSnapshot = { draft: "", attachments: [] };
@@ -68,6 +81,9 @@ function createStore(conversationId: string): ComposerStore {
   /* Bumped on every send so a re-typed identical draft is a new message rather
      than a replay of the one just delivered. */
   let epoch = 0;
+  /* The card's delivery, while a card is mounted. Not part of the snapshot: it is
+     a capability, not something either rendering displays. */
+  let sender: (() => void) | null = null;
 
   const notify = (): void => {
     for (const listener of listeners) listener();
@@ -125,6 +141,18 @@ function createStore(conversationId: string): ComposerStore {
       epoch += 1;
       touched = false;
       commit(EMPTY);
+    },
+    registerSender(send) {
+      /* Last registration wins. A card remount registers before the outgoing one
+         unregisters, so a naive "clear on unregister" would leave the floater with
+         no sender at all; only the still-current registration may clear it. */
+      sender = send;
+      return () => {
+        if (sender === send) sender = null;
+      };
+    },
+    send() {
+      sender?.();
     },
   };
 }

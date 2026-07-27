@@ -78,9 +78,8 @@ export interface VoicePipHostProps {
   /** Mobile has no Document PiP and stays chat-first (§7). */
   mobile: boolean;
   /**
-   * Send the shared draft through the card's one send path. Absent means no send
-   * path is wired yet, in which case the floater's composer is read-only rather
-   * than pretending to deliver.
+   * Test seam only. Production leaves this unset and the floater delivers through
+   * the sender the card registered on the shared store — §4 rule 5, one send path.
    */
   onSend?: (conversationId: string, draft: string, sendKey: string) => void;
   /** Test seam. Production passes none of these. */
@@ -174,10 +173,16 @@ export function VoicePipHost({ mobile, onSend, resolveClient = codexRealtimeClie
 
   const sendKey = store?.sendKey() ?? null;
   const handleSend = useCallback(() => {
-    if (!store || !conversationId || !onSend) return;
+    if (!store || !conversationId) return;
     const key = store.sendKey();
     if (!key) return;
-    onSend(conversationId, store.getSnapshot().draft, key);
+    if (onSend) {
+      onSend(conversationId, store.getSnapshot().draft, key);
+      return;
+    }
+    /* The card's own queue-first submit, borrowed rather than duplicated. A send
+       from this window and a send from the card are the same call. */
+    store.send();
   }, [conversationId, onSend, store]);
 
   if (mobile || !pipWindow || !client || !store) return null;
@@ -204,7 +209,7 @@ export function VoicePipHost({ mobile, onSend, resolveClient = codexRealtimeClie
       onRemoveAttachment={(id) =>
         store.setAttachments(composer.attachments.filter((attachment) => attachment.id !== id))}
       onSend={handleSend}
-      sendDisabled={!onSend || sendKey === null}
+      sendDisabled={sendKey === null}
       compact={compact}
       t={t}
     />,

@@ -59,7 +59,7 @@ test("a refusal does not spend the clientRequestId, so a later grant still works
 
   let fenced = true;
   const policy = mcpToolPolicy(
-    () => (fenced ? { kind: "gateway" } : { kind: "unrestricted", reason: "worker" }),
+    () => (fenced ? { kind: "restricted", reason: "gateway" } : { kind: "unrestricted", reason: "worker" }),
     () => MANAGER,
   );
   const tools = createMcpToolService(bindings, new MemoryMcpReceiptStore(), policy);
