@@ -1534,9 +1534,9 @@ export function TmuxComposer({
        reported while nothing was live rides in with it. Never on a replay — a
        retained generation replays its original bytes under its original key, and
        changing them would defeat the idempotency the retry exists for. */
-    const bridgePrelude = replayGeneration ? "" : await drainBridgeTurnStart();
+    const bridgeTurn = replayGeneration ? null : await drainBridgeTurnStart();
     const payloadText = replayGeneration?.text
-      ?? (bridgePrelude ? `${bridgePrelude}\n\n${requestedText}` : requestedText);
+      ?? (bridgeTurn?.text ? `${bridgeTurn.text}\n\n${requestedText}` : requestedText);
     const sentImages: PendingImage[] = replayGeneration
       ? replayGeneration.images.map((image) => ({ ...image }))
       : requestedImages;
@@ -1717,6 +1717,10 @@ export function TmuxComposer({
             return { ...body, status: response.status, ok: response.ok && body.ok === true };
           }));
       const json = await withComposerAdmissionDeadline(admissionRequest, COMPOSER_ADMISSION_DEADLINE_MS);
+      /* #691 §4: the bridge cursor moves only now, once the turn carrying those
+         reports has been durably admitted. A rejected or deadlined send leaves them
+         pending for the next turn rather than losing them. */
+      if (json.ok) bridgeTurn?.commit();
       if (!json.ok) {
         if (json.structured && json.receipt) {
           /* Keep the payload readable in the compact receipt for retry and

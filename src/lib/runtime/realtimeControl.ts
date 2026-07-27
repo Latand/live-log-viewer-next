@@ -1,5 +1,6 @@
 import { redactCodexHostDiagnostic } from "./codexAppServerHost";
 import { structuredDeliveryHostForConversation } from "./structuredDeliveryController";
+import { permitRealtimeAction, type RealtimeCaller } from "./realtimeInjection";
 import type { RuntimeVoiceDelivery } from "./voiceDelivery";
 
 const MAX_SDP_BYTES = 512 * 1024;
@@ -40,11 +41,29 @@ function byteLength(value: string): number {
 export async function executeRealtimeControl(
   body: unknown,
   resolveHost: (conversationId: string) => unknown = structuredDeliveryHostForConversation,
+  /* #691 §6: who is calling, and which conversation the designation record names as
+     the manager. Defaulted to the operator so every existing caller of this function
+     (the browser's own control path, and its tests) keeps its behaviour; the route
+     resolves the real caller from the capability header. */
+  authority: { caller?: RealtimeCaller; managerConversationId?: string | null } = {},
 ): Promise<RealtimeControlResult> {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     return { status: 400, body: { error: "body must be an object" } };
   }
   const request = body as Record<string, unknown>;
+
+  /* Checked before the conversation is resolved and before any host is touched: an
+     agent that may not speak must not be able to probe which conversations are
+     hosted by watching the error it gets back. */
+  const permitted = permitRealtimeAction(
+    request.action,
+    authority.caller ?? { kind: "operator" },
+    authority.managerConversationId ?? null,
+  );
+  if (!permitted.allowed) {
+    return { status: permitted.status, body: { error: permitted.error } };
+  }
+
   const conversationId = typeof request.conversationId === "string" ? request.conversationId.trim() : "";
   if (!conversationId.startsWith("conversation_")) {
     return { status: 400, body: { error: "a canonical conversationId is required" } };

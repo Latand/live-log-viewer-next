@@ -10,10 +10,18 @@ import { drainBridgeReports, openBridgeChannel } from "@/lib/bridge/store";
 import { viewerMcpBindings, type ViewerControlDependencies } from "./bindings";
 
 /**
- * The confirmation gate is the only thing between a spoken yes and a production
- * deploy (#691 §4, §7.7). A deploy that can be issued without presenting one is a
- * path around the entire round trip, so these assert the refusals — and that a
- * refusal never reaches the deployment endpoint at all.
+ * The BINDING half of the deploy gate (#691 §4, §7.7).
+ *
+ * The confirmation is verified and SPENT at `/api/runtime/deployments` — the last
+ * door, and the one every deploy path passes through — so what this file proves is
+ * the binding's own two obligations: it refuses to call at all without proof, and it
+ * forwards the proof it was given unaltered. The four checks themselves (nonce,
+ * expiry, SHA match, replay) live in `src/app/api/runtime/deployments/route.test.ts`,
+ * against the door that an attacker would use instead of this tool.
+ *
+ * Consumption deliberately does NOT happen here. Spending the nonce in the binding
+ * and re-presenting it at the endpoint would have the real deploy refused as
+ * `consumed`; spending it in both places would spend one yes twice.
  */
 
 const sandboxes: string[] = [];
@@ -71,7 +79,7 @@ test("a deploy with no bridge confirmation is refused and never reaches the endp
   expect(posted).toEqual([]);
 });
 
-test("a confirmed deploy reaches the endpoint exactly once, and a replay does not", async () => {
+test("the proof is forwarded to the endpoint unaltered, where it is verified and spent", async () => {
   sandbox();
   const tools = bindings();
   const { seq, nonce } = confirmedDeploy();
@@ -85,61 +93,28 @@ test("a confirmed deploy reaches the endpoint exactly once, and a replay does no
   });
   expect(receipt).toMatchObject({ revision: SHA });
   expect(posted).toHaveLength(1);
+  expect(posted[0]).toMatchObject({
+    pathname: "/api/runtime/deployments",
+    body: { revision: SHA, bridgeRef: seq, bridgeNonce: nonce },
+  });
 
-  /* The nonce is spent. A second call presenting it deploys nothing, whatever its
-     clientRequestId says. */
-  await expect(tools.deploy_exact_sha({
-    clientRequestId: "d2",
-    revision: SHA,
-    confirm: "deploy",
-    bridgeRef: seq,
-    bridgeNonce: nonce,
-  })).rejects.toThrow(/consumed/);
-  expect(posted).toHaveLength(1);
+  /* And the binding did NOT spend it: the endpoint is the one place that may, and a
+     nonce spent here would have the real deploy refused as already consumed. */
+  const stored = drainBridgeReports().reports.find((report) => report.seq === seq);
+  expect(stored?.confirmation?.consumedAt).toBeUndefined();
 });
 
-test("a wrong nonce, a wrong SHA and an unknown ref each deploy nothing", async () => {
+test("a bridgeNonce without a bridgeRef, or the reverse, is refused before any call", async () => {
   sandbox();
   const tools = bindings();
   const { seq, nonce } = confirmedDeploy();
 
   await expect(tools.deploy_exact_sha({
-    clientRequestId: "d1", revision: SHA, confirm: "deploy", bridgeRef: seq, bridgeNonce: "wrong",
-  })).rejects.toThrow(/nonce_mismatch/);
-
+    clientRequestId: "d1", revision: SHA, confirm: "deploy", bridgeNonce: nonce,
+  })).rejects.toThrow(/confirmation/i);
   await expect(tools.deploy_exact_sha({
-    clientRequestId: "d2", revision: "b".repeat(40), confirm: "deploy", bridgeRef: seq, bridgeNonce: nonce,
-  })).rejects.toThrow(/sha_mismatch/);
-
-  await expect(tools.deploy_exact_sha({
-    clientRequestId: "d3", revision: SHA, confirm: "deploy", bridgeRef: 9_999, bridgeNonce: nonce,
-  })).rejects.toThrow(/no_confirmation/);
-
-  expect(posted).toEqual([]);
-
-  /* None of those refusals spent the confirmation, so the right answer still works. */
-  await tools.deploy_exact_sha({
-    clientRequestId: "d4", revision: SHA, confirm: "deploy", bridgeRef: seq, bridgeNonce: nonce,
-  });
-  expect(posted).toHaveLength(1);
-});
-
-test("an expired confirmation deploys nothing", async () => {
-  sandbox();
-  const tools = bindings();
-  const confirmation = mintBridgeConfirmation({ sha: SHA, now: new Date(Date.now() - 60 * 60_000) });
-  recordManagerReport({
-    key: "confirm-expired",
-    class: "confirmation_request",
-    at: new Date().toISOString(),
-    body: "stale",
-    confirmation,
-  });
-  const seq = drainBridgeReports().reports.at(-1)!.seq;
-
-  await expect(tools.deploy_exact_sha({
-    clientRequestId: "d1", revision: SHA, confirm: "deploy", bridgeRef: seq, bridgeNonce: confirmation.nonce,
-  })).rejects.toThrow(/expired/);
+    clientRequestId: "d2", revision: SHA, confirm: "deploy", bridgeRef: seq,
+  })).rejects.toThrow(/confirmation/i);
   expect(posted).toEqual([]);
 });
 
@@ -153,15 +128,16 @@ test("confirm=deploy is still required on top of the confirmation", async () => 
   expect(posted).toEqual([]);
 });
 
-test("an abbreviated SHA is still refused before any confirmation is spent", async () => {
+test("an abbreviated SHA is refused before the endpoint is called at all", async () => {
   sandbox();
   const tools = bindings();
   const { seq, nonce } = confirmedDeploy();
   await expect(tools.deploy_exact_sha({
     clientRequestId: "d1", revision: SHA.slice(0, 12), confirm: "deploy", bridgeRef: seq, bridgeNonce: nonce,
   })).rejects.toThrow(/40-character/);
+  expect(posted).toEqual([]);
 
-  /* Still spendable: a malformed request must not burn the operator's yes. */
+  /* And the operator's yes is untouched, so the correct request still works. */
   await tools.deploy_exact_sha({
     clientRequestId: "d2", revision: SHA, confirm: "deploy", bridgeRef: seq, bridgeNonce: nonce,
   });

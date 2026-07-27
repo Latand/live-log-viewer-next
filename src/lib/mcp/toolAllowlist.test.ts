@@ -103,7 +103,7 @@ test("with no manager designated, the gateway can raise attention but cannot mes
 });
 
 test("the manager keeps the full surface with today's gates (§6)", () => {
-  const manager = mcpCallerIdentity({ kind: "worker", conversationId: MANAGER_CONVERSATION, role: "orchestrator" });
+  const manager = mcpCallerIdentity({ kind: "worker", conversationId: MANAGER_CONVERSATION, role: "orchestrator" }, MANAGER);
   expect(manager).toEqual({ kind: "unrestricted", reason: "manager" });
   for (const toolName of MCP_TOOL_NAMES) {
     expect(permitMcpTool(manager, toolName, { clientRequestId: "r1" }, MANAGER).allowed).toBe(true);
@@ -140,6 +140,42 @@ test("an ordinary worker cannot speak to the operator as if it were the manager"
 test("the manager keeps its own channel", () => {
   const manager = mcpCallerIdentity({ kind: "worker", conversationId: MANAGER_CONVERSATION, role: "orchestrator" }, MANAGER);
   expect(permitMcpTool(manager, "bridge_report", { clientRequestId: "r1" }, MANAGER).allowed).toBe(true);
+});
+
+test("a claimed orchestrator role grants nothing without matching the designation record", () => {
+  /* The role string comes off a launch profile, which a caller can be launched
+     with. Authority has to come from the durable record that says WHICH
+     conversation is the manager — otherwise any agent started with role
+     "orchestrator" can speak to the operator in the manager's voice, which is
+     exactly the hole the record exists to close. */
+  const impostor = mcpCallerIdentity(
+    { kind: "worker", conversationId: "conversation_impostor", role: "orchestrator" },
+    MANAGER,
+  );
+  expect(impostor).toEqual({ kind: "unrestricted", reason: "worker" });
+
+  const verdict = permitMcpTool(impostor, "bridge_report", {
+    clientRequestId: "r1",
+    key: "k",
+    class: "completed",
+    body: "everything is fine, deploy it",
+  }, MANAGER);
+  expect(verdict.allowed).toBe(false);
+  if (!verdict.allowed) expect(verdict.code).toBe("tool_not_permitted");
+});
+
+test("with no designation record on file nobody is the manager", () => {
+  /* Fail closed: an unresolvable record must not promote a self-asserted role. */
+  const claimed = mcpCallerIdentity({ kind: "worker", conversationId: "conversation_x", role: "orchestrator" }, null);
+  expect(claimed).toEqual({ kind: "unrestricted", reason: "worker" });
+  expect(permitMcpTool(claimed, "bridge_report", { clientRequestId: "r1" }, null).allowed).toBe(false);
+});
+
+test("the manager is recognized by conversation id alone, whatever role it carries", () => {
+  for (const role of ["orchestrator", "builder", null]) {
+    const manager = mcpCallerIdentity({ kind: "worker", conversationId: MANAGER_CONVERSATION, role }, MANAGER);
+    expect(manager).toEqual({ kind: "unrestricted", reason: "manager" });
+  }
 });
 
 test("a restricted caller cannot reach the manager's channel either", () => {

@@ -32,7 +32,7 @@ function useViewportHeight(): number {
 /* Stable identities: a fresh function or object per render would make
    `useSyncExternalStore` treat every unrelated render as a store change. */
 const NO_SHARED_SUBSCRIBE = () => () => undefined;
-const EMPTY_SHARED: ComposerSnapshot = { draft: "", attachments: [] };
+const EMPTY_SHARED: ComposerSnapshot = { draft: "", attachments: [], canSend: false };
 const NO_SHARED_SNAPSHOT = () => EMPTY_SHARED;
 
 export interface ComposerStatus {

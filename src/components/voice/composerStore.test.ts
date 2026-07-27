@@ -218,3 +218,41 @@ test("the attachment owner survives a card remount the same way the sender does"
   expect(removed).toEqual(["second"]);
   releaseSecond();
 });
+
+test("the store says whether a delivery path exists, so the floater can be honest", () => {
+  /* The card can unmount while the floater stays on screen — different windows,
+     different lifetimes. A Send button that silently does nothing is worse than a
+     disabled one: the operator believes the message went. */
+  const store = composerStore("conversation_a");
+  expect(store.getSnapshot().canSend).toBe(false);
+
+  const release = store.registerSender(() => undefined);
+  expect(store.getSnapshot().canSend).toBe(true);
+
+  release();
+  expect(store.getSnapshot().canSend).toBe(false);
+});
+
+test("gaining and losing a delivery path notifies subscribers", () => {
+  const store = composerStore("conversation_a");
+  const seen: boolean[] = [];
+  store.subscribe(() => seen.push(store.getSnapshot().canSend));
+
+  const release = store.registerSender(() => undefined);
+  release();
+  expect(seen).toEqual([true, false]);
+});
+
+test("a replacement sender keeps the path open across a card remount", () => {
+  const store = composerStore("conversation_a");
+  const releaseFirst = store.registerSender(() => undefined);
+  const seen: boolean[] = [];
+  store.subscribe(() => seen.push(store.getSnapshot().canSend));
+
+  const releaseSecond = store.registerSender(() => undefined);
+  releaseFirst();
+  /* Never flickered closed: the operator's Send stayed live through the remount. */
+  expect(seen).toEqual([]);
+  expect(store.getSnapshot().canSend).toBe(true);
+  releaseSecond();
+});

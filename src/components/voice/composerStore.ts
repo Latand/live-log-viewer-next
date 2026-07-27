@@ -38,6 +38,16 @@ export interface SharedAttachment {
 export interface ComposerSnapshot {
   draft: string;
   attachments: readonly SharedAttachment[];
+  /**
+   * Whether a card is currently mounted to deliver through.
+   *
+   * Part of the snapshot because the floater has to RENDER it. The two surfaces
+   * live in different windows with different lifetimes — the card unmounts on board
+   * navigation while the floating window stays on screen — and a Send button that
+   * silently does nothing is worse than a disabled one: the operator believes the
+   * message went.
+   */
+  canSend: boolean;
 }
 
 export interface ComposerStore {
@@ -91,7 +101,7 @@ export interface ComposerAttachmentOwner {
   clearAll(): void;
 }
 
-const EMPTY: ComposerSnapshot = { draft: "", attachments: [] };
+const EMPTY: ComposerSnapshot = { draft: "", attachments: [], canSend: false };
 
 function createStore(conversationId: string): ComposerStore {
   const listeners = new Set<() => void>();
@@ -161,15 +171,22 @@ function createStore(conversationId: string): ComposerStore {
       if (sent !== key()) return;
       epoch += 1;
       touched = false;
-      commit(EMPTY);
+      /* Clearing the draft must not revoke the delivery path the card still holds. */
+      commit({ ...EMPTY, canSend: sender !== null });
     },
     registerSender(send) {
       /* Last registration wins. A card remount registers before the outgoing one
          unregisters, so a naive "clear on unregister" would leave the floater with
-         no sender at all; only the still-current registration may clear it. */
+         no sender at all; only the still-current registration may clear it — and
+         because the replacement is already in place by then, the floater's Send
+         never flickers closed across a remount. */
+      const had = sender !== null;
       sender = send;
+      if (!had) commit({ ...snapshot, canSend: true });
       return () => {
-        if (sender === send) sender = null;
+        if (sender !== send) return;
+        sender = null;
+        commit({ ...snapshot, canSend: false });
       };
     },
     send() {

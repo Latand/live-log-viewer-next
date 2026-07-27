@@ -166,6 +166,8 @@ const CLIENT = {
   toggleOutput: () => undefined,
   start: async () => undefined,
   stop: async () => undefined,
+  reconcileWorkerDeliveries: () => undefined,
+  onDeliveryAcknowledged: () => () => undefined,
 };
 
 const resolveClient = (conversationId: string) => {
@@ -490,4 +492,32 @@ test("the floater adopts the opener's styles, language and direction", async () 
 
   expect(pip.document.documentElement.lang).toBe("uk");
   expect(pip.document.documentElement.dir).toBe("ltr");
+});
+
+test("a card that unmounts disables the floater's Send rather than swallowing it", async () => {
+  const store = composerStore(CONVERSATION);
+  const release = store.registerSender(() => undefined);
+  const { render } = mount();
+  startCall("live");
+  await settle();
+  render();
+  await settle();
+
+  flushSync(() => store.setDraft("start a reviewer"));
+  await settle();
+  const enabled = pip.document.querySelector("[data-testid='voice-float-send']") as unknown as HTMLButtonElement;
+  expect(enabled.disabled).toBe(false);
+
+  /* The card leaves the viewport — different window, different lifetime. The draft
+     and the transcript survive; the delivery path does not, and the button says so
+     instead of accepting a press that goes nowhere. */
+  flushSync(() => release());
+  await settle();
+  render();
+  await settle();
+
+  const disabled = pip.document.querySelector("[data-testid='voice-float-send']") as unknown as HTMLButtonElement;
+  expect(disabled.disabled).toBe(true);
+  expect(store.getSnapshot().draft).toBe("start a reviewer");
+  expect(floatSurface()).not.toBeNull();
 });

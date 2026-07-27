@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { executeRealtimeControl } from "@/lib/runtime/realtimeControl";
+import { designatedManagerConversationId, realtimeCallerFromRequest } from "@/lib/runtime/realtimeInjection";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import type { ApiError } from "@/lib/types";
 
@@ -17,6 +18,11 @@ export async function POST(req: NextRequest): Promise<NextResponse<Record<string
   } catch {
     return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
-  const result = await executeRealtimeControl(body);
+  /* #691 §6: resolved from the capability the registry issued, never from anything
+     in the body — a caller naming itself is not evidence. */
+  const result = await executeRealtimeControl(body, undefined, {
+    caller: realtimeCallerFromRequest(req),
+    managerConversationId: designatedManagerConversationId(),
+  });
   return NextResponse.json(result.body, { status: result.status });
 }

@@ -59,30 +59,48 @@ const POLL_MS = Math.floor(BRIDGE_LIVE_BATCH_INTERVAL_MS / 3);
  * for the reason the live path parks its cursor: a batch folded into a message that
  * never sent must arrive again.
  */
+export interface BridgeTurnStart {
+  /** Prepended to the turn's own input; "" when nothing is pending. */
+  text: string;
+  /**
+   * Advance the cursor — call ONLY once the turn carrying `text` has been durably
+   * admitted. Same rule as the live path, same reason: a batch folded into a
+   * message that was rejected, deadlined or never sent has not reached anyone, and
+   * a cursor moved on composing it would lose those reports permanently.
+   */
+  commit: () => void;
+}
+
+const NOTHING_PENDING: BridgeTurnStart = { text: "", commit: () => undefined };
+
 export function useBridgeTurnStartDrain(
   enabled: boolean,
   options: { fetchFn?: typeof fetch } = {},
-): () => Promise<string> {
+): () => Promise<BridgeTurnStart> {
   const fetchFn = options.fetchFn;
   return useCallback(async () => {
-    if (!enabled) return "";
+    if (!enabled) return NOTHING_PENDING;
     const request = fetchFn ?? fetch;
     try {
       const response = await request("/api/bridge?mode=turn-start", { cache: "no-store" });
-      if (!response.ok) return "";
+      if (!response.ok) return NOTHING_PENDING;
       const payload = await response.json() as { prelude?: { text: string; throughSeq: number } | null };
       const prelude = payload.prelude;
-      if (!prelude?.text) return "";
-      await request("/api/bridge", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ throughSeq: prelude.throughSeq }),
-      });
-      return prelude.text;
+      if (!prelude?.text) return NOTHING_PENDING;
+      return {
+        text: prelude.text,
+        commit: () => {
+          void request("/api/bridge", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ throughSeq: prelude.throughSeq }),
+          }).catch(() => undefined);
+        },
+      };
     } catch {
       /* The reports are durable and the cursor did not move: the next turn tries
          again. A blocked send would be a far worse failure than a late report. */
-      return "";
+      return NOTHING_PENDING;
     }
   }, [enabled, fetchFn]);
 }

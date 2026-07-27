@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 
+import { useBridgeReportRelay } from "@/hooks/useBridgeReportRelay";
 import { useLocale } from "@/lib/i18n";
 import {
   getActiveCall,
@@ -14,6 +15,7 @@ import {
   type CodexRealtimeLine,
   type CodexRealtimePhase,
 } from "@/lib/realtime/codexRealtimeClient";
+import type { RuntimeVoiceDelivery } from "@/lib/runtime/voiceDelivery";
 
 import { composerStore } from "./composerStore";
 import {
@@ -72,6 +74,11 @@ export interface VoicePipClient {
   toggleOutput: () => void;
   start: () => Promise<void>;
   stop: () => Promise<void>;
+  /* The relay's two seams. Held here because this host owns the live report loop:
+     the card that used to own it unmounts on board navigation while the call keeps
+     running, so a card-scoped relay stopped delivering mid-call. */
+  reconcileWorkerDeliveries: (deliveries: readonly RuntimeVoiceDelivery[]) => void;
+  onDeliveryAcknowledged: (listener: (deliveryId: string) => void) => () => void;
 }
 
 export interface VoicePipHostProps {
@@ -169,6 +176,15 @@ export function VoicePipHost({ mobile, onSend, resolveClient = codexRealtimeClie
     void open();
   }, [calling, floatRequest, mobile, open, pipWindow, supported]);
 
+  /* #691 §4 — the live report relay lives HERE, not in the card.
+     The card unmounts when the operator scrolls it out of view or opens another
+     project, while the call — a module-scoped singleton — keeps running; a relay
+     scoped to the card therefore stopped delivering mid-call, silently. This host is
+     mounted once at Viewer level for exactly that reason, so it is also the right
+     owner for the one polling loop. It stays out of the portal: this component runs
+     in the opener, and only `VoiceFloatSurface` is portalled. */
+  useBridgeReportRelay(client, phase === "live");
+
   const compact = useMeasuredCompact(pipWindow);
 
   const sendKey = store?.sendKey() ?? null;
@@ -210,7 +226,10 @@ export function VoicePipHost({ mobile, onSend, resolveClient = codexRealtimeClie
          the shared list here would hide a tile the card still holds. */
       onRemoveAttachment={(id) => store.removeAttachment(id)}
       onSend={handleSend}
-      sendDisabled={sendKey === null}
+      /* Honest about a card that went away: the floater keeps the draft and the
+         transcript, and says the send path is gone rather than swallowing a press.
+         An explicit `onSend` is itself a path, so it satisfies the same check. */
+      sendDisabled={sendKey === null || !(onSend || composer.canSend)}
       compact={compact}
       t={t}
     />,
@@ -244,5 +263,5 @@ const IDLE = {
   outputMuted: false,
 };
 const IDLE_SNAPSHOT = () => IDLE;
-const EMPTY = { draft: "", attachments: [] as const };
+const EMPTY = { draft: "", attachments: [] as const, canSend: false };
 const EMPTY_COMPOSER = () => EMPTY;

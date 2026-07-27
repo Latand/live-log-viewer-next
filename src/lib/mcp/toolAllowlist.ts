@@ -106,8 +106,16 @@ export function mcpCallerIdentity(
 ): McpCallerIdentity {
   if (authority.kind === "root") return { kind: "restricted", reason: "gateway" };
   if (authority.kind === "unidentified") return { kind: "restricted", reason: "unidentified" };
-  const isManager = authority.role === "orchestrator"
-    || (manager?.conversationId != null && manager.conversationId === authority.conversationId);
+
+  /* MANAGER AUTHORITY COMES FROM THE RECORD, NEVER FROM A ROLE STRING.
+     `role` is stamped on a launch profile, so anything launched as "orchestrator"
+     could claim it — and the manager's one privilege is the channel the operator
+     hears from, where an impostor is indistinguishable from the real thing by
+     construction. The designation record is the only statement of which
+     conversation is the manager, and matching it is the only way to be one. No
+     record on file means no manager, which fails closed. */
+  const isManager = manager?.conversationId != null
+    && manager.conversationId === authority.conversationId;
   return { kind: "unrestricted", reason: isManager ? "manager" : "worker" };
 }
 

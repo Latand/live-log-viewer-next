@@ -20,7 +20,7 @@ import { queryLifecycleEvents, type LifecycleEventQuery } from "@/lib/lifecycle/
 import { agentLivenessSnapshot, productionLivenessSources, type AgentLivenessSources } from "@/lib/lifecycle/liveness";
 import { refreshLifecycleJournal } from "@/lib/lifecycle/projector";
 import { isLifecycleEventType } from "@/lib/lifecycle/vocabulary";
-import { authorizeBridgeDeploy, recordManagerReport } from "@/lib/bridge/service";
+import { recordManagerReport } from "@/lib/bridge/service";
 import { bridgeDirectiveBody, bridgeDirectiveId } from "@/lib/bridge/directive";
 import { mintBridgeConfirmation } from "@/lib/bridge/confirmation";
 import { isBridgeReportClass } from "@/lib/bridge/types";
@@ -425,22 +425,26 @@ async function deployExactSha(args: McpToolArgs, control: ViewerControlDependenc
      SHA exactly once, and every refusal (replay, expiry, wrong nonce, wrong SHA)
      stops the deploy instead of downgrading to an unauthorized one. The consume is
      atomic with the check, so two answers racing cannot both pass. */
+  /* Shape-checked here so the manager gets a useful refusal without a round trip;
+     VERIFIED AND SPENT at the deployment endpoint, which is the last door before the
+     host and the one every deploy path passes through. Consuming in both places
+     would spend the operator's yes twice for one deploy, and consuming only here
+     would leave the endpoint open to anything that skips this tool. */
   const bridgeRef = args.bridgeRef;
-  if (typeof bridgeRef !== "number" || !Number.isInteger(bridgeRef) || bridgeRef < 1) {
+  const bridgeNonce = text(args.bridgeNonce);
+  if (typeof bridgeRef !== "number" || !Number.isInteger(bridgeRef) || bridgeRef < 1 || !bridgeNonce) {
     throw new McpToolRefusal(
       "a deploy requires the bridge confirmation the user authorized: pass bridgeRef (the confirmation_request's seq) and bridgeNonce from the trailer the gateway relayed. Ask for a confirmation first and deploy nothing until it comes back.",
       { code: "bridge_confirmation_required", revision },
     );
   }
-  const outcome = authorizeBridgeDeploy({ ref: bridgeRef, nonce: text(args.bridgeNonce), sha: revision.toLowerCase() });
-  if (!outcome.ok) {
-    throw new McpToolRefusal(
-      `the bridge confirmation for this deploy was refused (${outcome.reason}); ask the user again and deploy nothing`,
-      { code: "bridge_confirmation_refused", reason: outcome.reason, revision },
-    );
-  }
 
-  const receipt = await control.post("/api/runtime/deployments", { revision, idempotencyKey: requestId(args) });
+  const receipt = await control.post("/api/runtime/deployments", {
+    revision,
+    idempotencyKey: requestId(args),
+    bridgeRef,
+    bridgeNonce,
+  });
   return {
     deploymentId: receipt.deploymentId,
     revision: receipt.revision,
