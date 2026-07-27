@@ -89,6 +89,28 @@ versions follow [SemVer](https://semver.org/) (0.x — the API may still move).
   so it is visible and usable at 390px instead of painting under the backdrop.
 
 ### Added
+- A recurring conversation monitor that surfaces pending, stalled and untracked
+  operator requests (#741). It resolves the current orchestrator through the
+  durable single-instance record and addresses it by conversation id, so a
+  rollover, restart or model swap cannot orphan it the way the hard-coded
+  transcript path it replaces did. Resolution includes a read-only host probe,
+  because the mechanism it replaces spent over a day nudging a conversation with
+  no live host — and because a send into one would resume it. When no live
+  orchestrator can be resolved, that is a failed run with a card on the board,
+  never a silent success. It reads operator-authored messages over a bounded recent window,
+  telling them apart from assistant text, tool output and its own nudges (which
+  carry a marker precisely so it cannot read its own report back as a request),
+  correlates each concrete request against board cards, pipelines, flows, pull
+  requests and issues, and classifies it as completed, in flight, stalled, never
+  materialized, or awaiting operator confirmation. Gaps become board cards
+  through the Viewer API, each stamped with the request's fingerprint, so
+  re-running over the same window creates nothing further. GitHub issues are
+  never created from inferred intent — a request for one is surfaced as an
+  unconfirmed candidate. Every run appends exactly one audit line that tells a
+  clean run from a failed or skipped one, carrying fingerprints and counts but
+  no transcript text, path or identity. Scheduled with
+  `bun scripts/conversation-monitor.ts`; design notes in
+  `docs/design/conversation-monitor.md`.
 - Background music in the Viewer, and one track across the call boundary
   (#732). The Audio settings now carry two independent switches sharing one
   level: music while using the Viewer, and music during a call — the latter the
