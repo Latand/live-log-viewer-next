@@ -1471,6 +1471,44 @@ export function reviewNote(pipeline: Pipeline, stage: PipelineStage, role: Effec
   return { note: trimmedBody ? `${prompt}${header}${trimmedBody}${fences}` : `${prompt}${fences}` };
 }
 
+/**
+ * Exact-head publication as a precondition of review ingress.
+ *
+ * Publishing on the pass path alone is not enough: a migrated record with no
+ * `publishedCommit`, an operator `skip-stage`, and a fail edge whose target is a
+ * review-loop stage all reach this point without ever having published, and the
+ * flow would then fence on an `origin/<branch>` that does not exist. Every route
+ * into a review flow goes through here, so the guarantee holds regardless of how
+ * the cursor arrived.
+ *
+ * The local head must already BE the accepted review head. When it is not — a
+ * failed stage that committed on its own, a worktree someone advanced by hand —
+ * this parks WITHOUT pushing, so a revision the pipeline never accepted is never
+ * published. A dirty worktree fails the same way and its work is left untouched.
+ *
+ * The cached `publishedCommit` is deliberately not trusted here: ingress passes
+ * null so the remote is genuinely probed, which is what makes a stale or
+ * migrated record safe. Publication itself stays fast-forward-only.
+ */
+function publishReviewIngressHead(pipeline: Pipeline, attempt: PipelineStageAttempt, ports: PipelinePorts): string | null {
+  const expected = attempt.expectedReviewHeadSha;
+  if (!expected) return "review-loop stage requires a verified pipeline commit";
+
+  const local = currentPipelineBranchHead(pipeline, ports.exec);
+  if (!local.ok) return `review stage could not verify the pipeline head before publishing: ${local.error}`;
+  if (local.sha !== expected) {
+    return `review stage head mismatch: the accepted review head is ${expected}, but the pipeline worktree is at ${local.sha}; nothing was published`;
+  }
+
+  const published = publishPipelineBranch(pipeline, ports.exec, null);
+  if (!published.ok) return `review stage could not publish the accepted head ${expected}: ${published.error}`;
+  if (published.remote === "unavailable") {
+    return `review stage requires a published pipeline branch, but this repository has no origin remote to publish ${expected} to`;
+  }
+  pipeline.publishedCommit = published.sha;
+  return null;
+}
+
 async function tickReviewStage(
   pipeline: Pipeline,
   stage: PipelineStage,
@@ -1511,6 +1549,12 @@ async function tickReviewStage(
   }
 
   if (!attempt.flowId) {
+    const ingressError = publishReviewIngressHead(pipeline, attempt, ports);
+    if (ingressError) {
+      park(pipeline, ingressError, attempt);
+      return;
+    }
+    persist();
     const existing = ports.findFlow(implementer.agentPath, implementer.conversationId, pipeline.baseRef, attempt.expectedReviewHeadSha);
     if (existing) {
       attachReviewFlowAttempt(attempt, existing);

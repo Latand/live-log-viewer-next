@@ -117,6 +117,9 @@ function harness() {
       if (args[0] === "rev-parse" && args[1] === "--verify") return { code: 0, stdout: `${ORIGIN_MAIN_SHA}\n`, stderr: "" };
       if (args[0] === "rev-parse" && args[1] === "--abbrev-ref") return { code: 0, stdout: "main\n", stderr: "" };
       if (args[0] === "branch" && args[1] === "--show-current") return { code: 0, stdout: `${loadPipelines()[0]?.branch ?? ""}\n`, stderr: "" };
+      /* Review ingress requires a publishable remote, so the default repo has
+         one. A test that needs the no-origin case overrides this. */
+      if (args[0] === "remote" && args[1] === "get-url") return { code: 0, stdout: "git@example.invalid:owner/repo.git\n", stderr: "" };
       if (args[0] === "ls-remote") {
         const branch = loadPipelines()[0]?.branch ?? "pipeline/test";
         return { code: 0, stdout: `${ORIGIN_MAIN_SHA}\trefs/heads/${branch}\n`, stderr: "" };
@@ -1442,9 +1445,16 @@ function countDurableReads(h: ReturnType<typeof harness>): () => number {
 
 function pinStageHead(h: ReturnType<typeof harness>) {
   const baseExec = h.ports.exec;
-  h.ports.exec = (command, args, cwd) => args[0] === "rev-parse" && args[1] === "HEAD"
-    ? { code: 0, stdout: `${STAGE_HEAD}\n`, stderr: "" }
-    : baseExec(command, args, cwd);
+  h.ports.exec = (command, args, cwd) => {
+    if (args[0] === "rev-parse" && args[1] === "HEAD") return { code: 0, stdout: `${STAGE_HEAD}\n`, stderr: "" };
+    /* The remote carries the same stage commit: these tests are about durable
+       turn evidence, not publication, so origin is modelled as already current
+       and publication short-circuits without a push. */
+    if (args[0] === "ls-remote") {
+      return { code: 0, stdout: `${STAGE_HEAD}\trefs/heads/${loadPipelines()[0]?.branch ?? "pipeline/test"}\n`, stderr: "" };
+    }
+    return baseExec(command, args, cwd);
+  };
 }
 
 /** Provision + spawn the first stage, then strip its pane so the attempt is a
@@ -2008,6 +2018,15 @@ test("issue 533: an in-loop repair advances expectedReviewHeadSha with reviewHea
   const persisted = loadPipelines()[0]!;
   persisted.lastPassedCommit = beforeRepair;
   savePipelines([persisted]);
+  /* The accepted commit IS the worktree head, and origin already carries it:
+     review ingress publishes the exact accepted head, so a fixture whose
+     worktree disagreed with its own accepted commit would park instead. */
+  const baseExec = h.ports.exec;
+  h.ports.exec = (command, args, cwd) => {
+    if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") return { code: 0, stdout: `${beforeRepair}\n`, stderr: "" };
+    if (command === "git" && args[0] === "ls-remote") return { code: 0, stdout: `${beforeRepair}\trefs/heads/${loadPipelines()[0]!.branch}\n`, stderr: "" };
+    return baseExec(command, args, cwd);
+  };
   await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
 
   const actualReviewHead = "5755f992b195cc8637fd7129d9be4049c10494fa";
@@ -2702,13 +2721,16 @@ test("retrying a paused review with a live reviewer never mutates its checkout (
   ] as const;
   const repairHead = "e".repeat(40);
   let localHead = ORIGIN_MAIN_SHA;
+  let repaired = false;
   const baseExec = h.ports.exec;
   h.ports.exec = (command, args, cwd) => {
     if (command === "git" && args[0] === "status") return { code: 0, stdout: "", stderr: "" };
     if (command === "git" && args[0] === "branch" && args[1] === "--show-current") return { code: 0, stdout: `${loadPipelines()[0]!.branch}\n`, stderr: "" };
     if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") return { code: 0, stdout: `${localHead}\n`, stderr: "" };
-    if (command === "git" && args[0] === "ls-remote") return { code: 0, stdout: `${repairHead}\trefs/heads/${loadPipelines()[0]!.branch}\n`, stderr: "" };
-    if (command === "git" && args[0] === "rev-parse" && String(args[1]).startsWith("refs/remotes/origin/")) return { code: 0, stdout: `${repairHead}\n`, stderr: "" };
+    /* The repair only exists on the remote once it has actually landed there;
+       before that origin simply carries what the pipeline published. */
+    if (command === "git" && args[0] === "ls-remote") return { code: 0, stdout: `${repaired ? repairHead : localHead}\trefs/heads/${loadPipelines()[0]!.branch}\n`, stderr: "" };
+    if (command === "git" && args[0] === "rev-parse" && String(args[1]).startsWith("refs/remotes/origin/")) return { code: 0, stdout: `${repaired ? repairHead : localHead}\n`, stderr: "" };
     if (command === "git" && args[0] === "merge-base") return { code: 0, stdout: "", stderr: "" };
     if (command === "git" && args[0] === "merge" && args[1] === "--ff-only") {
       localHead = repairHead;
@@ -2730,6 +2752,7 @@ test("retrying a paused review with a live reviewer never mutates its checkout (
   flow.stateDetail = "reviewer paused";
   await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
 
+  repaired = true;
   const retried = await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
 
   expect(retried).toMatchObject({ status: 409, error: expect.stringContaining("still be running") });
@@ -2746,13 +2769,16 @@ test("retry parks without synchronizing when reviewer termination cannot be veri
   ] as const;
   const repairHead = "f".repeat(40);
   let localHead = ORIGIN_MAIN_SHA;
+  let repaired = false;
   const baseExec = h.ports.exec;
   h.ports.exec = (command, args, cwd) => {
     if (command === "git" && args[0] === "status") return { code: 0, stdout: "", stderr: "" };
     if (command === "git" && args[0] === "branch" && args[1] === "--show-current") return { code: 0, stdout: `${loadPipelines()[0]!.branch}\n`, stderr: "" };
     if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") return { code: 0, stdout: `${localHead}\n`, stderr: "" };
-    if (command === "git" && args[0] === "ls-remote") return { code: 0, stdout: `${repairHead}\trefs/heads/${loadPipelines()[0]!.branch}\n`, stderr: "" };
-    if (command === "git" && args[0] === "rev-parse" && String(args[1]).startsWith("refs/remotes/origin/")) return { code: 0, stdout: `${repairHead}\n`, stderr: "" };
+    /* The repair only exists on the remote once it has actually landed there;
+       before that origin simply carries what the pipeline published. */
+    if (command === "git" && args[0] === "ls-remote") return { code: 0, stdout: `${repaired ? repairHead : localHead}\trefs/heads/${loadPipelines()[0]!.branch}\n`, stderr: "" };
+    if (command === "git" && args[0] === "rev-parse" && String(args[1]).startsWith("refs/remotes/origin/")) return { code: 0, stdout: `${repaired ? repairHead : localHead}\n`, stderr: "" };
     if (command === "git" && args[0] === "merge-base") return { code: 0, stdout: "", stderr: "" };
     if (command === "git" && args[0] === "merge" && args[1] === "--ff-only") {
       localHead = repairHead;
@@ -2770,6 +2796,7 @@ test("retry parks without synchronizing when reviewer termination cannot be veri
   await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
   h.ports.closeFlow = async () => ({ error: "reviewer process group did not terminate", status: 409 });
 
+  repaired = true;
   const retried = await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
 
   expect(retried).toEqual({ error: "reviewer process group did not terminate", status: 409 });
@@ -4514,6 +4541,7 @@ function publishHarness(h: ReturnType<typeof harness>, options: { origin?: boole
   let localHead = ORIGIN_MAIN_SHA;
   let remoteBranch: string | null = null;
   let dirty = true;
+  let pushFails = false;
   const baseExec = h.ports.exec;
   h.ports.exec = (command, args, cwd) => {
     if (command !== "git") return baseExec(command, args, cwd);
@@ -4536,12 +4564,16 @@ function publishHarness(h: ReturnType<typeof harness>, options: { origin?: boole
       return { code: 0, stdout: remoteBranch ? `${remoteBranch}\trefs/heads/${branch}\n` : "", stderr: "" };
     }
     if (args[0] === "push") {
-      if (options.pushFails) {
+      if (options.pushFails || pushFails) {
         order.push("push-rejected");
         return { code: 1, stdout: "", stderr: "! [remote rejected] (shallow update not allowed)" };
       }
       remoteBranch = localHead;
       order.push(`push:${localHead}`);
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    if (args[0] === "reset" || args[0] === "clean") {
+      dirty = false;
       return { code: 0, stdout: "", stderr: "" };
     }
     if (args[0] === "cat-file") return { code: history.includes(String(args[2]).replace("^{commit}", "")) ? 0 : 1, stdout: "", stderr: "" };
@@ -4572,7 +4604,9 @@ function publishHarness(h: ReturnType<typeof harness>, options: { origin?: boole
     passedSha,
     order,
     remote: () => remoteBranch,
-    setRemote: (sha: string) => { remoteBranch = sha; },
+    setRemote: (sha: string | null) => { remoteBranch = sha; },
+    setDirty: (value: boolean) => { dirty = value; },
+    setPushFails: (value: boolean) => { pushFails = value; },
     setLocalHead: (sha: string) => { localHead = sha; if (!history.includes(sha)) history.push(sha); },
     /* Records a revision nobody's local checkout contains — a repair pushed
        from another clone, which must never be fast-forwarded away. */
@@ -4625,18 +4659,29 @@ test("a publication that cannot land parks the pass without losing the commit", 
   expect(h.flows.size).toBe(0);
 });
 
-test("a pipeline whose repo has no origin advances without publishing anything", async () => {
+test("a pipeline whose repo has no origin parks at review ingress instead of fencing on a remote it cannot have", async () => {
   const h = harness();
   const box = publishHarness(h, { origin: false });
   await create(h.ports, PUBLISH_STAGES as never);
   await tickPipelines([], h.ports);
   await tickPipelines([], h.ports);
+  /* The pass itself still advances — an unpublishable repo is not a reason to
+     lose the builder's commit. */
   await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  expect(loadPipelines()[0]).toMatchObject({ state: "running", lastPassedCommit: box.passedSha, publishedCommit: null });
+
   await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
 
-  expect(box.order).toEqual(["commit", "createFlow"]);
-  expect(box.remote()).toBeNull();
-  expect(loadPipelines()[0]).toMatchObject({ state: "running", lastPassedCommit: box.passedSha, publishedCommit: null });
+  const parked = loadPipelines()[0]!;
+  expect(parked.state).toBe("needs_decision");
+  expect(parked.stateDetail).toBe(
+    `review stage requires a published pipeline branch, but this repository has no origin remote to publish ${box.passedSha} to`,
+  );
+  /* Parked BEFORE the flow exists: no reviewer is ever fenced on a remote head
+     that cannot be created. */
+  expect(box.order).toEqual(["commit"]);
+  expect(h.flows.size).toBe(0);
+  expect(parked.lastPassedCommit).toBe(box.passedSha);
 });
 
 test("retrying a parked review stage republishes a local repair before the reviewer relaunches", async () => {
@@ -4660,4 +4705,158 @@ test("retrying a parked review stage republishes a local repair before the revie
   expect(box.remote()).toBe(repairHead);
   expect(loadPipelines()[0]).toMatchObject({ state: "running", lastPassedCommit: repairHead, publishedCommit: repairHead });
   expect(box.order).toEqual(["commit", `push:${box.passedSha}`, "createFlow", `push:${repairHead}`]);
+});
+
+/* --- exact-head publication is a precondition of EVERY review ingress ------ */
+
+/* A review stage needs a passed run session to review, so both the skip path
+   and the fail-edge path reach ingress only behind an earlier passed stage. */
+const SKIP_STAGES = [
+  { id: "plan", kind: "run", role: { roleId: "builder" }, ["prompt"]: "plan", next: "build" },
+  { id: "build", kind: "run", role: { roleId: "builder" }, ["prompt"]: "build", next: "review" },
+  { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, ["prompt"]: "review", next: null },
+] as const;
+
+const FAIL_EDGE_STAGES = [
+  { id: "plan", kind: "run", role: { roleId: "builder" }, ["prompt"]: "plan", next: "build" },
+  { id: "build", kind: "run", role: { roleId: "builder" }, ["prompt"]: "build", next: "review", onFail: { to: "review", maxRounds: 2 } },
+  { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, ["prompt"]: "review", next: null },
+] as const;
+
+test("a skipped stage publishes the accepted head before its review flow is created", async () => {
+  const h = harness();
+  const box = publishHarness(h);
+  const pipeline = await create(h.ports, SKIP_STAGES as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  await tickPipelines([h.finish("/codex/stage-2.jsonl", "needs_decision", "operator call")], h.ports);
+  expect(loadPipelines()[0]!.state).toBe("needs_decision");
+
+  /* Nothing on the skip route publishes: the branch is unpublished when the
+     cursor reaches review. */
+  box.setRemote(null);
+  await patchPipeline(pipeline.id, { action: "skip-stage" }, h.ports);
+  const beforeIngress = box.order.length;
+  await tickPipelines([entry("/codex/stage-1.jsonl"), entry("/codex/stage-2.jsonl")], h.ports);
+
+  const accepted = loadPipelines()[0]!.lastPassedCommit;
+  expect(box.remote()).toBe(accepted);
+  expect(box.order.slice(beforeIngress)).toEqual([`push:${accepted}`, "createFlow"]);
+  expect(loadPipelines()[0]).toMatchObject({ state: "running", publishedCommit: accepted });
+});
+
+test("a fail edge into a review stage publishes the accepted head before its review flow is created", async () => {
+  const h = harness();
+  const box = publishHarness(h);
+  await create(h.ports, FAIL_EDGE_STAGES as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  /* A failed stage commits nothing; the worktree is clean at the accepted head. */
+  box.setDirty(false);
+  box.setRemote(null);
+  await tickPipelines([h.finish("/codex/stage-2.jsonl", "fail", "needs a reviewer")], h.ports);
+
+  const beforeIngress = box.order.length;
+  await tickPipelines([entry("/codex/stage-1.jsonl"), entry("/codex/stage-2.jsonl")], h.ports);
+
+  const accepted = loadPipelines()[0]!.lastPassedCommit;
+  expect(box.remote()).toBe(accepted);
+  expect(box.order.slice(beforeIngress)).toEqual([`push:${accepted}`, "createFlow"]);
+  expect(loadPipelines()[0]!.state).toBe("running");
+});
+
+test("review ingress re-probes the remote instead of trusting a stale publishedCommit", async () => {
+  const h = harness();
+  const box = publishHarness(h);
+  await create(h.ports, PUBLISH_STAGES as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  expect(loadPipelines()[0]!.publishedCommit).toBe(box.passedSha);
+
+  /* The durable record says published, but origin does not have it — a migrated
+     record, or a branch deleted on the remote. Ingress must not believe it. */
+  box.setRemote(null);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  expect(box.remote()).toBe(box.passedSha);
+  expect(box.order).toEqual(["commit", `push:${box.passedSha}`, `push:${box.passedSha}`, "createFlow"]);
+  expect(loadPipelines()[0]!.state).toBe("running");
+});
+
+test("a worktree head that is not the accepted review head parks without publishing anything", async () => {
+  const h = harness();
+  const box = publishHarness(h);
+  await create(h.ports, FAIL_EDGE_STAGES as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  const accepted = loadPipelines()[0]!.lastPassedCommit;
+
+  /* The failed stage committed on its own. That revision was never accepted by
+     the pipeline, so it must never reach origin. */
+  const unaccepted = "c".repeat(40);
+  box.setDirty(false);
+  box.setRemote(null);
+  await tickPipelines([h.finish("/codex/stage-2.jsonl", "fail", "self-committed")], h.ports);
+  box.setLocalHead(unaccepted);
+  const beforeIngress = box.order.length;
+
+  await tickPipelines([entry("/codex/stage-1.jsonl"), entry("/codex/stage-2.jsonl")], h.ports);
+
+  const parked = loadPipelines()[0]!;
+  expect(parked.state).toBe("needs_decision");
+  expect(parked.stateDetail).toBe(
+    `review stage head mismatch: the accepted review head is ${accepted}, but the pipeline worktree is at ${unaccepted}; nothing was published`,
+  );
+  expect(box.remote()).toBeNull();
+  expect(box.order.slice(beforeIngress)).toEqual([]);
+  expect(h.flows.size).toBe(0);
+});
+
+test("a remote that diverged from the accepted head parks review ingress and keeps both revisions", async () => {
+  const h = harness();
+  const box = publishHarness(h);
+  await create(h.ports, PUBLISH_STAGES as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+
+  /* Someone else's repair landed on the branch; the accepted head does not
+     contain it, so publication must refuse rather than fast-forward over it. */
+  const foreignRepair = "d".repeat(40);
+  box.setDivergentRemote(foreignRepair);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const parked = loadPipelines()[0]!;
+  expect(parked.state).toBe("needs_decision");
+  expect(parked.stateDetail).toContain(`review stage could not publish the accepted head ${box.passedSha}`);
+  expect(parked.stateDetail).toContain("diverged");
+  expect(box.remote()).toBe(foreignRepair);
+  expect(h.flows.size).toBe(0);
+});
+
+test("a push that fails at review ingress parks before the review flow exists", async () => {
+  const h = harness();
+  const box = publishHarness(h);
+  await create(h.ports, PUBLISH_STAGES as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+
+  box.setRemote(null);
+  box.setPushFails(true);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const parked = loadPipelines()[0]!;
+  expect(parked.state).toBe("needs_decision");
+  expect(parked.stateDetail).toContain(`review stage could not publish the accepted head ${box.passedSha}`);
+  expect(parked.stateDetail).toContain("publishing the pipeline branch:");
+  expect(h.flows.size).toBe(0);
+  expect(parked.lastPassedCommit).toBe(box.passedSha);
 });
