@@ -37,12 +37,21 @@ export interface AudioPrefs {
   loopVolume: number;
 }
 
+/**
+ * Where a device that has never chosen STARTS — and nothing more than that.
+ *
+ * Every one of these is a fallback for a key that is absent from this device's
+ * storage, so moving one moves first runs only: a device holding its own value
+ * keeps it, because a stored value is an answer and a default is a guess.
+ */
 export const DEFAULT_AUDIO_PREFS: AudioPrefs = {
   cuesEnabled: true,
-  cueVolume: 0.7,
+  /* Loud enough to notice across a room, quiet enough not to be startling. */
+  cueVolume: 0.4,
   loopEnabled: false,
   viewerLoopEnabled: false,
-  loopVolume: 0.35,
+  /* A bed, under the ceiling in `ambientLoop`: present, never in the way. */
+  loopVolume: 0.05,
 };
 
 /** The slice of `Storage` this module needs, so tests can hand over a fake. */

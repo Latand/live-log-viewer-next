@@ -109,6 +109,58 @@ export interface WebAudioTransports {
 /** The shortest ramp worth scheduling; below this the ear hears a step. */
 const MIN_RAMP_SECONDS = 0.01;
 
+/**
+ * One gain node's level, as THIS module commanded it.
+ *
+ * A ramp has to start from the level that is currently sounding, and the graph
+ * is the wrong place to ask for it. Every ramp begins by cancelling what was
+ * scheduled, and `cancelScheduledValues(t)` drops the events at `t` as well —
+ * including the one that established the starting level a moment earlier, in the
+ * same tick. Reading `AudioParam.value` back after that answers from a timeline
+ * with nothing left on it: the param's own 1.0 default. That is how a bed asked
+ * to open in silence opened at full volume and slid down to its level (#728).
+ *
+ * So the level is kept here instead, on the audio clock. A start value, a target
+ * and the window between them are all it takes to know what is sounding at any
+ * instant, and none of it can be erased by a cancel.
+ */
+interface Level {
+  /** Ramp to `target` over `seconds`, from whatever is sounding now. */
+  rampTo(target: number, seconds: number): void;
+}
+
+function createLevel(context: AudioContextLike, param: AudioParamLike, initial: number): Level {
+  let from = initial;
+  let to = initial;
+  let startedAt = context.currentTime;
+  let endsAt = context.currentTime;
+
+  /** The level right now, interpolated across a ramp in flight. */
+  const current = (): number => {
+    const now = context.currentTime;
+    if (now >= endsAt) return to;
+    if (now <= startedAt) return from;
+    return from + (to - from) * ((now - startedAt) / (endsAt - startedAt));
+  };
+
+  return {
+    rampTo(target, seconds): void {
+      const now = context.currentTime;
+      const value = current();
+      const ends = now + Math.max(MIN_RAMP_SECONDS, seconds);
+      param.cancelScheduledValues(now);
+      /* Re-anchored at the known level, which is also what puts the opening
+         silence back on the timeline after the cancel above took it off. */
+      param.setValueAtTime(value, now);
+      param.linearRampToValueAtTime(target, ends);
+      from = value;
+      to = target;
+      startedAt = now;
+      endsAt = ends;
+    },
+  };
+}
+
 export function createWebAudioTransports(
   getContext: () => AudioContextLike | null,
   fetchFn: typeof fetch | null = typeof fetch === "function" ? fetch : null,
@@ -151,15 +203,6 @@ export function createWebAudioTransports(
     }
     const buffer = ensureBuffer(context, src);
     return buffer ? { context, buffer } : null;
-  };
-
-  const ramp = (context: AudioContextLike, param: AudioParamLike, target: number, seconds: number): void => {
-    const now = context.currentTime;
-    param.cancelScheduledValues(now);
-    /* Anchor at the CURRENT value: without this the ramp starts from whatever
-       was last scheduled and a duck that interrupts a fade-in jumps. */
-    param.setValueAtTime(param.value, now);
-    param.linearRampToValueAtTime(target, now + Math.max(MIN_RAMP_SECONDS, seconds));
   };
 
   return {
@@ -215,7 +258,12 @@ export function createWebAudioTransports(
           source.loopStart = 0;
           source.loopEnd = buffer.duration;
           const gain = context.createGain();
+          /* The level is settled BEFORE the node is started below, and it is
+             settled in both places that can answer for it: on the param, and in
+             the level that every later ramp anchors from. Neither the graph nor
+             this module can report the bed as louder than it was asked to open. */
           gain.gain.value = request.gain;
+          const level = createLevel(context, gain.gain, request.gain);
           source.connect(gain as never);
           gain.connect(context.destination as never);
           /* Where this pass opens. A resumed bed carries the position its
@@ -264,7 +312,7 @@ export function createWebAudioTransports(
           return {
             rampTo(target, seconds) {
               if (released) return;
-              ramp(context, gain.gain, Math.max(0, target), seconds);
+              level.rampTo(Math.max(0, target), seconds);
             },
             pause(seconds) {
               if (released || park !== null) return retained;
@@ -273,7 +321,7 @@ export function createWebAudioTransports(
                  back to is where the fade ENDS. Retaining where it began would
                  replay the fade — the same seconds twice, every call. */
               retained = at(position() + fade);
-              ramp(context, gain.gain, 0, fade);
+              level.rampTo(0, fade);
               /* And the node lives until then, so a call that ends inside the
                  fade can take the park back instead of stacking a second voice
                  on top of one that is still sounding. */
@@ -300,7 +348,7 @@ export function createWebAudioTransports(
               cancelPark();
               released = true;
               const fade = Math.max(MIN_RAMP_SECONDS, seconds);
-              ramp(context, gain.gain, 0, fade);
+              level.rampTo(0, fade);
               try {
                 /* Stop only AFTER the fade has run to zero. */
                 source.stop(context.currentTime + fade + 0.05);

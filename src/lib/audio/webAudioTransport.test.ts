@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { createWebAudioTransports, type AudioContextLike } from "./webAudioTransport";
+import { createWebAudioTransports, type AudioContextLike, type AudioParamLike } from "./webAudioTransport";
 
 /**
  * A fake Web Audio graph that records the wiring.
@@ -430,6 +430,160 @@ describe("cues", () => {
     transports.cues.start({ cue: "success", src: CUE, gain: 0.5, pan: 0, delaySeconds: 0.22, onEnded: () => undefined });
 
     expect(context.sources[0].started).toEqual([10.22]);
+  });
+});
+
+/**
+ * A context whose gain params are AUTOMATION TIMELINES, not numbers.
+ *
+ * Every other fake here records what was asked for. This one answers what would
+ * be HEARD, which is the only way to see the defect in #728: the bed opened at
+ * full volume and slid down to its level, and every individual call the code made
+ * looked right. The two rules that produce it are both the real ones:
+ *
+ * - `cancelScheduledValues(t)` drops every event at or after `t` — including one
+ *   scheduled at exactly `t`, so an initialization and a ramp in the same tick
+ *   collide and the initialization is the one that loses;
+ * - reading `value` back answers from the timeline, so once the cancel above has
+ *   emptied it the answer is the param's own 1.0 default — a full-scale gain
+ *   nobody asked for, taken as the level to fade from.
+ */
+function timelineContext(state = "running") {
+  interface Event { type: "set" | "ramp"; value: number; when: number }
+  const gains: TimelineGain[] = [];
+  const sources: { started: number[] }[] = [];
+
+  interface TimelineGain {
+    gain: AudioParamLike;
+    /** What this node is sounding at `time`. */
+    heardAt(time: number): number;
+    connect(destination: never): unknown;
+  }
+
+  const context = {
+    state,
+    currentTime: 10,
+    destination: { id: "out" },
+    resume: async () => undefined,
+    createBufferSource() {
+      const source = {
+        buffer: null as { duration: number } | null,
+        loop: false,
+        loopStart: -1,
+        loopEnd: -1,
+        started: [] as number[],
+        connect: () => undefined,
+        start(when?: number) { source.started.push(when ?? context.currentTime); },
+        stop: () => undefined,
+      };
+      sources.push(source);
+      return source;
+    },
+    createGain() {
+      const events: Event[] = [];
+      /** The gain param's default. A bed that reaches this is a burst. */
+      const heardAt = (time: number): number => {
+        let previous = { value: 1, when: 0 };
+        for (const event of [...events].sort((a, b) => a.when - b.when)) {
+          if (event.when > time) {
+            if (event.type !== "ramp") return previous.value;
+            const span = event.when - previous.when;
+            const progress = span > 0 ? (time - previous.when) / span : 1;
+            return previous.value + (event.value - previous.value) * progress;
+          }
+          previous = { value: event.value, when: event.when };
+        }
+        return previous.value;
+      };
+      const gain: TimelineGain = {
+        gain: {
+          /* Both directions go through the timeline, exactly as the browser's
+             do: setting `value` is `setValueAtTime(value, currentTime)`, and
+             getting it reads back whatever the timeline currently says. */
+          get value() { return heardAt(context.currentTime); },
+          set value(value: number) { events.push({ type: "set", value, when: context.currentTime }); },
+          cancelScheduledValues(when: number) {
+            for (let index = events.length - 1; index >= 0; index -= 1) {
+              if (events[index].when >= when) events.splice(index, 1);
+            }
+          },
+          setValueAtTime(value: number, when: number) { events.push({ type: "set", value, when }); },
+          linearRampToValueAtTime(value: number, when: number) { events.push({ type: "ramp", value, when }); },
+        },
+        heardAt,
+        connect: () => undefined,
+      };
+      gains.push(gain);
+      return gain;
+    },
+    decodeAudioData: async () => ({ duration: 26.666 }),
+    gains,
+    sources,
+  };
+  return context as unknown as AudioContextLike & { gains: TimelineGain[]; sources: { started: number[] }[]; currentTime: number };
+}
+
+describe("the bed opens in silence and only ever comes UP (#728)", () => {
+  /** What a 5% ambient slider is worth once the loop ceiling is applied. */
+  const TARGET = 0.35 * 0.05;
+  const FADE_IN = 2.5;
+
+  /** Highest level heard between the node starting and the fade finishing. */
+  function loudest(gain: { heardAt(time: number): number }, from: number, to: number): number {
+    let peak = 0;
+    for (let time = from; time <= to + 1e-9; time += 0.05) peak = Math.max(peak, gain.heardAt(time));
+    return peak;
+  }
+
+  test("a call opens below the bed's target, not above it", async () => {
+    const context = timelineContext();
+    const transports = await warmed(context, LOOP);
+
+    /* Exactly what `createAmbientLoop` does at the start of a call: open the
+       voice silent, then fade it up. */
+    const voice = transports.loop.start({ src: LOOP, gain: 0, offsetSeconds: 0 })!;
+    voice.rampTo(TARGET, FADE_IN);
+
+    const bed = context.gains[0];
+    /* The first sample the operator can hear is the one the node starts on. */
+    expect(bed.heardAt(10)).toBeCloseTo(0, 6);
+    /* And nothing between there and the end of the fade is above the level the
+       bed was asked for — a burst is exactly a sample that is. */
+    expect(loudest(bed, 10, 10 + FADE_IN)).toBeLessThanOrEqual(TARGET + 1e-9);
+    /* Which is a fade IN: the level rises to its target rather than falling to it. */
+    expect(bed.heardAt(12.5)).toBeCloseTo(TARGET, 6);
+    expect(bed.heardAt(11.25)).toBeGreaterThan(0);
+    expect(bed.heardAt(11.25)).toBeLessThan(TARGET);
+  });
+
+  test("a bed resumed at a retained position opens silent too", async () => {
+    const context = timelineContext();
+    const transports = await warmed(context, LOOP);
+
+    /* The park/resume leg: a fresh voice for the same track, part way in. It is
+       still a fade-in, so it still may not be heard above the target. */
+    const voice = transports.loop.start({ src: LOOP, gain: 0, offsetSeconds: 8.5 })!;
+    voice.rampTo(TARGET, FADE_IN);
+
+    expect(context.gains[0].heardAt(10)).toBeCloseTo(0, 6);
+    expect(loudest(context.gains[0], 10, 10 + FADE_IN)).toBeLessThanOrEqual(TARGET + 1e-9);
+  });
+
+  test("a duck that interrupts the fade-in continues from the level being heard", async () => {
+    const context = timelineContext();
+    const transports = await warmed(context, LOOP);
+    const voice = transports.loop.start({ src: LOOP, gain: 0 })!;
+    voice.rampTo(TARGET, FADE_IN);
+
+    /* Somebody speaks half a second in, while the bed is still coming up. */
+    context.currentTime = 10.5;
+    const heardWhenDucked = context.gains[0].heardAt(10.5);
+    voice.rampTo(TARGET * 0.25, 0.3);
+
+    /* The duck starts from that same level — no step, in either direction — and
+       nothing after it climbs over the target either. */
+    expect(context.gains[0].heardAt(10.5)).toBeCloseTo(heardWhenDucked, 6);
+    expect(loudest(context.gains[0], 10.5, 13)).toBeLessThanOrEqual(TARGET + 1e-9);
   });
 });
 
