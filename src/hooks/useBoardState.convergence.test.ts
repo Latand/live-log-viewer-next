@@ -41,7 +41,10 @@ function durableBoard() {
       ? mutateBoard(body.project, body.baseRevision, body.mutations, file)
       : patchBoard(body.project, body.baseRevision, body.patch!, file);
     if (!result.ok) return { ok: false, status: 409, json: async () => ({ error: "BOARD_REVISION_CONFLICT", board: result.board }) };
-    return { ok: true, status: 200, json: async () => ({ ok: true, board: result.board }) };
+    /* Mirrors the route: `applied` reports whether the write committed or
+       reduced to a no-op, which is what separates our own work from another
+       writer's when both produce the same board. */
+    return { ok: true, status: 200, json: async () => ({ ok: true, applied: result.applied, board: result.board }) };
   };
   return {
     file,
@@ -259,6 +262,177 @@ test("an accepted no-op cannot smuggle a newer board past the fence", async () =
   expect(server.board("proj").prefs.viewMode).toBe("scheme");
   expect(server.board("proj").revision).toBe(3);
   expect(store.getSnapshot().sync).toBe("current");
+  store.dispose();
+});
+
+/*
+ * ABA. Comparing the board a view held against the board it adopted can only see
+ * endpoints: a key driven away from a value and back again lands on a snapshot
+ * identical to the one the stale view remembers, so a snapshot diff reports "no
+ * other writer touched this" and the superseded intent replays and wins. Both
+ * cycles below are ordinary operator behaviour — toggling a view mode, closing
+ * and reopening a window — so this is the common case, not a corner. Only a
+ * monotonic per-key revision distinguishes "never written" from "written twice".
+ */
+
+test("an A→B→A cycle on a presentation key still supersedes a stale writer", async () => {
+  const server = durableBoard();
+  server.otherDevice("proj", [{ kind: "restore", path: "/a", placement: "manual" }]);
+  server.otherDevice("proj", [{ kind: "set-presentation", viewMode: "scheme" }]);
+  const device = flakyDevice(server);
+  const sched = idleScheduler();
+  const store = createBoardStore({ project: "proj", fetcher: device.fetcher, storage: null, scheduler: sched.scheduler });
+  await settle();
+  expect(store.getSnapshot()).toMatchObject({ revision: 2, prefs: { viewMode: "scheme" } });
+
+  /* Offline, this device queues a switch to list view. */
+  device.state.patchDown = true;
+  store.mutate([{ kind: "set-presentation", viewMode: "list" }]);
+  await settle();
+
+  /* On the phone the operator tries list, then goes back to scheme — A → B → A.
+     The board ends on the same view mode the stale device last saw, but it was
+     written twice in between, and the second write is the informed decision. */
+  server.otherDevice("proj", [{ kind: "set-presentation", viewMode: "list" }]);
+  server.otherDevice("proj", [{ kind: "set-presentation", viewMode: "scheme" }]);
+  expect(server.board("proj").revision).toBe(4);
+  expect(server.board("proj").prefs.viewMode).toBe("scheme");
+
+  sched.tick();
+  await settle();
+  device.state.patchDown = false;
+  sched.runTimeouts();
+  await settle();
+
+  /* The stale switch must lose. A snapshot diff sees revision 2's "scheme" and
+     revision 4's "scheme" and concludes nobody wrote this key. */
+  expect(server.board("proj").prefs.viewMode).toBe("scheme");
+  expect(server.board("proj").revision).toBe(4);
+  expect(store.getSnapshot()).toMatchObject({ revision: 4, sync: "current", prefs: { viewMode: "scheme" } });
+  store.dispose();
+});
+
+test("an A→B→A cycle on a path key still supersedes a stale writer", async () => {
+  const server = durableBoard();
+  server.otherDevice("proj", [
+    { kind: "restore", path: "/a", placement: "manual" },
+    { kind: "restore", path: "/x", placement: "manual" },
+  ]);
+  const device = flakyDevice(server);
+  const sched = idleScheduler();
+  const store = createBoardStore({ project: "proj", fetcher: device.fetcher, storage: null, scheduler: sched.scheduler });
+  await settle();
+
+  /* Offline, this device closes /x. */
+  device.state.patchDown = true;
+  store.mutate([{ kind: "close", path: "/x" }]);
+  await settle();
+
+  /* On the phone the operator closes /x and then reopens it — the placement
+     leaves manual and comes back to exactly the same manual pin. */
+  server.otherDevice("proj", [{ kind: "close", path: "/x" }]);
+  server.otherDevice("proj", [{ kind: "restore", path: "/x", placement: "manual" }]);
+  expect(server.board("proj").prefs.manual).toEqual(["/a", "/x"]);
+  expect(server.board("proj").revision).toBe(3);
+
+  sched.tick();
+  await settle();
+  device.state.patchDown = false;
+  sched.runTimeouts();
+  await settle();
+
+  /* The reopen is the informed decision and must stand: the stale close cannot
+     re-hide a window the operator has since deliberately brought back. */
+  expect(server.board("proj").prefs.hidden).toEqual([]);
+  expect(server.board("proj").prefs.manual).toEqual(["/a", "/x"]);
+  expect(server.board("proj").revision).toBe(3);
+  expect(store.getSnapshot()).toMatchObject({ revision: 3, sync: "current" });
+  expect(store.getSnapshot().prefs.manual).toEqual(["/a", "/x"]);
+  store.dispose();
+});
+
+test("an A→B→A cycle still supersedes a stale writer when the key leaves the board", async () => {
+  const server = durableBoard();
+  server.otherDevice("proj", [{ kind: "restore", path: "/a", placement: "manual" }]);
+  const device = flakyDevice(server);
+  const sched = idleScheduler();
+  const store = createBoardStore({ project: "proj", fetcher: device.fetcher, storage: null, scheduler: sched.scheduler });
+  await settle();
+  expect(store.getSnapshot().prefs.favorites).toEqual([]);
+
+  /* Offline, this device crowns conv-1 a favourite. */
+  device.state.patchDown = true;
+  store.mutate([{ kind: "set-favorite", id: "conv-1", favorite: true }]);
+  await settle();
+
+  /* On the phone the operator crowns it and then takes it back. "Off" leaves no
+     trace in the board — conv-1 is simply absent from `favorites` again, exactly
+     as the stale device last saw it — so the key's causal revision is the only
+     surviving evidence that two writers have spoken. */
+  server.otherDevice("proj", [{ kind: "set-favorite", id: "conv-1", favorite: true }]);
+  server.otherDevice("proj", [{ kind: "set-favorite", id: "conv-1", favorite: false }]);
+  expect(server.board("proj").prefs.favorites).toEqual([]);
+  expect(server.board("proj").revision).toBe(3);
+
+  sched.tick();
+  await settle();
+  device.state.patchDown = false;
+  sched.runTimeouts();
+  await settle();
+
+  /* Taking it back is the informed decision and must stand. */
+  expect(server.board("proj").prefs.favorites).toEqual([]);
+  expect(server.board("proj").revision).toBe(3);
+  expect(store.getSnapshot()).toMatchObject({ revision: 3, sync: "current" });
+  expect(store.getSnapshot().prefs.favorites).toEqual([]);
+  store.dispose();
+});
+
+test("an accepted no-op that another writer made identical is not mistaken for our own write", async () => {
+  const server = durableBoard();
+  server.otherDevice("proj", [
+    { kind: "restore", path: "/a", placement: "manual" },
+    { kind: "restore", path: "/x", placement: "manual" },
+  ]);
+  let releaseFirst = () => {};
+  const gate = new Promise<void>((resolve) => (releaseFirst = resolve));
+  let patches = 0;
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if (init && (init.method ?? "GET") !== "GET") {
+      patches += 1;
+      if (patches === 1) await gate;
+    }
+    return server.fetcher(input, init);
+  };
+  const sched = idleScheduler();
+  const store = createBoardStore({ project: "proj", fetcher, storage: null, scheduler: sched.scheduler });
+  await settle();
+
+  store.mutate([{ kind: "close", path: "/x" }]); // PATCH #1, held inflight at base revision 1
+
+  /* The phone closes /x too — the SAME change, so the board it produces is
+     byte-identical to the one this device's write would have produced. Nothing
+     in the response content can tell the two writers apart. */
+  server.otherDevice("proj", [{ kind: "close", path: "/x" }]);
+  expect(server.board("proj").revision).toBe(2);
+
+  /* Then this device changes its mind and reopens /x, formed against its own
+     revision-1 picture — before it could know the phone had spoken. */
+  store.mutate([{ kind: "restore", path: "/x", placement: "manual" }]);
+
+  releaseFirst();
+  await settle();
+
+  /* PATCH #1 reduces to nothing against revision 2 and is accepted from its
+     stale base. Treating that as "our write landed" would re-observe path:/x at
+     the phone's revision and let the queued reopen through, undoing a close this
+     device never saw. The server's `applied: false` is the only thing that
+     distinguishes the two, so the reopen must be fenced. */
+  expect(server.board("proj").prefs.hidden).toEqual(["/x"]);
+  expect(server.board("proj").prefs.manual).toEqual(["/a"]);
+  expect(server.board("proj").revision).toBe(2);
+  expect(store.getSnapshot()).toMatchObject({ revision: 2, sync: "current" });
+  expect(store.getSnapshot().prefs.hidden).toEqual(["/x"]);
   store.dispose();
 });
 

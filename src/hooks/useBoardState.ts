@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { type BoardKeyRevisions, mutationKeys } from "@/lib/board/keys";
 import { applyBoardMutations, type BoardMutationV1 } from "@/lib/board/mutations";
 import type { BoardProjectStateV1 } from "@/lib/view/types";
 
@@ -171,7 +172,13 @@ export function resetPendingOpensForTest(): void {
 }
 
 type WriteAttempt =
-  | { status: "ok"; board: BoardProjectStateV1 }
+  /* `applied` is the server's own verdict on whether this write committed or
+     reduced to a no-op. A no-op is accepted from any base revision, so only that
+     verdict reliably separates "my write produced this board" from "someone
+     else's did and mine changed nothing" — the two are identical by content when
+     both writers made the same change. Absent from a server older than this
+     field; the arrangement comparison stands in for it there. */
+  | { status: "ok"; applied?: boolean; board: BoardProjectStateV1 }
   | { status: "conflict"; board: BoardProjectStateV1 }
   /* The server's validator refused the batch content itself, identified by a
      structured permanent error code. Resending the same bytes can never
@@ -201,7 +208,7 @@ function sameArrangement(left: BoardProjectStateV1, right: BoardProjectStateV1):
   );
 }
 
-/* ── Convergence: per-key last-writer-wins, fenced by observation (#38).
+/* ── Convergence: per-key last-writer-wins, resolved by CAUSAL revision (#38).
  *
  * The writer is the device whose PATCH the server serializes last at a matching
  * `baseRevision`; the server rejects any writer whose base is behind (409). That
@@ -209,96 +216,70 @@ function sameArrangement(left: BoardProjectStateV1, right: BoardProjectStateV1):
  * newer board and replays its outbox on top — intent formed against a picture the
  * operator has since superseded then overwrites the informed device's work.
  *
- * So when a view adopts a board it did not author, it diffs the board it held
- * against the one it adopted to learn which KEYS another writer changed, and
- * drops its own queued mutations naming those keys. Queued mutations naming
- * untouched keys replay on top and still land. The last writer is therefore
- * always one that acted with knowledge of the current value of the key it wrote;
- * a view that has fallen behind loses exactly the keys it is behind on.
+ * So every queued mutation records, per key it writes, the causal revision it
+ * OBSERVED for that key when the operator formed it. Adopting a board another
+ * writer moved drops any queued mutation whose key has since advanced past what
+ * it observed; the rest replays on top and still lands. The last writer on a key
+ * is therefore always one that acted knowing that key's current value.
  *
- * A key is one independently-writable unit of the board: a transcript path's
- * placement, a favourite/tray identity, or one presentation field. */
+ * Comparing the board held against the board adopted would be cheaper and is
+ * what this started as, but it is structurally blind to ABA: a key driven away
+ * from a value and back — toggling a view mode, closing and reopening a window —
+ * lands on a snapshot identical to the one the stale view remembers, so the
+ * comparison reports "untouched" and the superseded intent wins. `keyRevisions`
+ * is monotonic, so A → B → A carries a strictly higher revision than the A the
+ * stale view saw. That is the whole reason the metadata is durable rather than
+ * derived.
+ *
+ * The key vocabulary is shared with the server in `@/lib/board/keys` — both
+ * sides must name keys identically or the fence silently stops matching. */
 
-function resolveThrough(pathname: string, aliases: Record<string, string>): string {
-  const seen = new Set<string>();
-  let resolved = pathname;
-  while (aliases[resolved] !== undefined) {
-    if (seen.has(resolved)) return resolved;
-    seen.add(resolved);
-    resolved = aliases[resolved]!;
-  }
-  return resolved;
+/** A queued mutation plus the causal revision it observed for each key it
+    writes, captured when the operator formed it. */
+interface OutboxEntry {
+  mutation: BoardMutationV1;
+  observed: BoardKeyRevisions;
 }
 
-/** A path's full placement, including whether the manual slot is a genuine user
-    pin — re-pinning a reconcile-seeded root is a real write on that key. */
-function placementOf(board: BoardProjectStateV1, pathname: string): string {
-  if (board.prefs.hidden.includes(pathname)) return "hidden";
-  if (board.prefs.expanded.includes(pathname)) return "expanded";
-  if (board.prefs.manual.includes(pathname)) return (board.explicitManual ?? []).includes(pathname) ? "pinned" : "manual";
-  return "absent";
+function observeKeys(mutation: BoardMutationV1, board: BoardProjectStateV1): OutboxEntry {
+  const revisions = board.keyRevisions ?? {};
+  const observed: BoardKeyRevisions = {};
+  for (const key of mutationKeys(mutation)) observed[key] = revisions[key] ?? 0;
+  return { mutation, observed };
 }
 
-function symmetricDifference(before: readonly string[] | undefined, after: readonly string[] | undefined): string[] {
-  const left = new Set(before ?? []);
-  const right = new Set(after ?? []);
-  return [...new Set([...left, ...right])].filter((item) => left.has(item) !== right.has(item));
-}
-
-/**
- * The keys another writer changed between the board this view held and the one
- * it adopted. Paths are compared through the adopted board's aliases, so a
- * succession remap that carried a placement to a new transcript path reads as no
- * change — bookkeeping must not look like a competing operator decision.
- */
-export function foreignKeys(before: BoardProjectStateV1, after: BoardProjectStateV1): Set<string> {
-  const keys = new Set<string>();
-  const aliases = after.pathAliases ?? {};
-  const paths = new Set<string>([
-    ...before.prefs.manual, ...before.prefs.hidden, ...before.prefs.expanded,
-    ...after.prefs.manual, ...after.prefs.hidden, ...after.prefs.expanded,
-  ]);
-  for (const pathname of paths) {
-    if (placementOf(before, pathname) !== placementOf(after, resolveThrough(pathname, aliases))) keys.add(`path:${pathname}`);
-  }
-  for (const id of symmetricDifference(before.prefs.favorites, after.prefs.favorites)) keys.add(`favorite:${id}`);
-  for (const id of symmetricDifference(before.prefs.foldedEngineChildIds, after.prefs.foldedEngineChildIds)) keys.add(`fold:${id}`);
-  for (const id of symmetricDifference(before.prefs.expandedEngineTrayParentIds, after.prefs.expandedEngineTrayParentIds)) keys.add(`tray:${id}`);
-  if (before.prefs.viewMode !== after.prefs.viewMode) keys.add("viewMode");
-  if (before.prefs.taskPanelOpen !== after.prefs.taskPanelOpen) keys.add("taskPanelOpen");
-  return keys;
-}
-
-/** Every key a queued mutation would write. A mutation naming several paths
-    (a reconciliation, a remap graph) travels whole, so one superseded path
-    supersedes the batch — it was computed against the picture that moved. */
-export function mutationKeys(mutation: BoardMutationV1): string[] {
-  switch (mutation.kind) {
-    case "close":
-    case "restore":
-      return [`path:${mutation.path}`];
-    case "reconcile-roots":
-      return [...mutation.roots, ...mutation.removeManual].map((pathname) => `path:${pathname}`);
-    case "remap-paths":
-      return mutation.pairs.flatMap(({ from, to }) => [`path:${from}`, `path:${to}`]);
-    case "set-favorite":
-      return [`favorite:${mutation.id}`];
-    case "set-engine-child-fold":
-      return [`fold:${mutation.id}`, `path:${mutation.path}`];
-    case "set-engine-tray-expanded":
-      return [`tray:${mutation.parentId}`];
-    case "set-presentation":
-      return [
-        ...(mutation.viewMode === undefined ? [] : ["viewMode"]),
-        ...(mutation.taskPanelOpen === undefined ? [] : ["taskPanelOpen"]),
-      ];
-  }
+/** True when some key this entry writes has advanced past what it observed —
+    another writer has spoken on that key since the operator formed this intent. */
+function superseded(entry: OutboxEntry, revisions: BoardKeyRevisions): boolean {
+  return Object.entries(entry.observed).some(([key, at]) => (revisions[key] ?? 0) > at);
 }
 
 /** Drop the queued intent a better-informed writer has already superseded. */
-export function fenceOutbox(outbox: readonly BoardMutationV1[], foreign: ReadonlySet<string>): BoardMutationV1[] {
-  if (foreign.size === 0) return [...outbox];
-  return outbox.filter((mutation) => !mutationKeys(mutation).some((key) => foreign.has(key)));
+export function fenceOutbox(outbox: readonly OutboxEntry[], revisions: BoardKeyRevisions): OutboxEntry[] {
+  return outbox.filter((entry) => !superseded(entry, revisions));
+}
+
+/** Re-observe the keys THIS device just wrote. Our own accepted write is
+    causally before intent still queued behind it — the operator formed that
+    intent already knowing what they had just done — so it must not fence itself.
+    Only the keys the landed prefix actually wrote are refreshed; a key some
+    other writer moved in the same response stays observed at its old value and
+    still supersedes. */
+function reobserve(outbox: readonly OutboxEntry[], ownKeys: ReadonlySet<string>, revisions: BoardKeyRevisions): OutboxEntry[] {
+  if (ownKeys.size === 0) return [...outbox];
+  return outbox.map((entry) => {
+    const refreshed: BoardKeyRevisions = { ...entry.observed };
+    let moved = false;
+    for (const key of Object.keys(entry.observed)) {
+      if (!ownKeys.has(key)) continue;
+      const at = revisions[key] ?? 0;
+      if (at !== refreshed[key]) {
+        refreshed[key] = at;
+        moved = true;
+      }
+    }
+    return moved ? { ...entry, observed: refreshed } : entry;
+  });
 }
 
 /** Replay the unacknowledged outbox over the last server-confirmed board to get
@@ -313,6 +294,8 @@ function optimisticBoard(confirmed: BoardProjectStateV1, outbox: readonly BoardM
     return confirmed;
   }
 }
+
+const mutationsOf = (outbox: readonly OutboxEntry[]): BoardMutationV1[] => outbox.map((entry) => entry.mutation);
 
 export interface BoardStoreOptions {
   project: string;
@@ -337,12 +320,21 @@ export interface BoardStore {
  * The per-project durable board arrangement, moved off per-browser storage into
  * the shared server store. It holds the last server-confirmed board plus an
  * outbox of unacknowledged semantic mutations (close/restore/reconcile/remap/
- * presentation); the UI renders the outbox replayed over the confirmed board
- * (optimistic), and a background drain flushes the outbox as a stable prefix. A
- * revision conflict adopts the server board, replays the whole outbox on top, and
- * retries, preserving a close, restore or remap intent across an interleaved
- * write by another device. The one-time legacy seed still writes
- * whole prefs; localStorage serves as read-only migration input.
+ * presentation), each tagged with the causal revision it observed for every key
+ * it writes. The UI renders the outbox replayed over the confirmed board
+ * (optimistic), and a background drain flushes it as a stable prefix.
+ *
+ * Adopting a board this view did not author — a revision conflict, a poll, or an
+ * accepted response that turns out to carry another writer's work — does NOT
+ * replay the whole outbox. Queued intent whose key has advanced past what that
+ * intent observed is dropped as superseded; only intent on keys nobody else has
+ * written since replays on top and retries. So a close, restore or remap
+ * survives an interleaved write to a DIFFERENT key, and loses to an interleaved
+ * write to the SAME key, which is the convergence guarantee (#38): the last
+ * writer on a key is always one that acted knowing that key's current value.
+ *
+ * The one-time legacy seed still writes whole prefs; localStorage serves as
+ * read-only migration input.
  */
 export function createBoardStore(options: BoardStoreOptions): BoardStore {
   const { project, fetcher, storage } = options;
@@ -360,6 +352,7 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
     updatedAt: new Date(0).toISOString(),
     pathAliases: {},
     explicitManual: [],
+    keyRevisions: {},
     prefs: EMPTY_BOARD_PREFS,
   });
 
@@ -370,7 +363,7 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
      carries the settled arrangement (#172) while a background GET revalidates. */
   const cachedConfirmed = confirmedBoards.get(project);
   let confirmed: BoardProjectStateV1 = cachedConfirmed ?? emptyBoard();
-  let outbox: BoardMutationV1[] = [];
+  let outbox: OutboxEntry[] = [];
   let inflight = false;
   let loaded = cachedConfirmed !== undefined;
   let unavailable = false;
@@ -413,7 +406,7 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
   const refresh = () => {
     /* Every queued intent is acknowledged: this view is no longer behind. */
     if (outbox.length === 0) rebased = false;
-    const board = optimisticBoard(confirmed, outbox);
+    const board = optimisticBoard(confirmed, mutationsOf(outbox));
     snapshot = { prefs: board.prefs, explicitManual: board.explicitManual ?? [], revision: confirmed.revision, sync: syncFor(), loaded };
     /* Cache only a genuinely loaded, available board — never the pre-load empty
        board or an unavailable one — so a later mount primes from the settled
@@ -424,17 +417,16 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
 
   /**
    * Install a board this view did not author (a poll, or the 409 response to a
-   * rejected write). Whatever another writer changed in the meantime supersedes
-   * this view's queued intent on those keys, so that intent is dropped rather
-   * than replayed on top; the rest replays and still lands. Surviving intent
-   * marks the view stale, because it now renders something no other device has.
+   * rejected write). Any queued intent whose key has advanced past what that
+   * intent observed is superseded and dropped rather than replayed on top; the
+   * rest replays and still lands. Surviving intent marks the view stale, because
+   * it now renders something no other device has.
    */
   const adoptForeign = (board: BoardProjectStateV1) => {
-    const previous = confirmed;
     confirmed = board;
     unavailable = false;
     if (outbox.length > 0) {
-      outbox = fenceOutbox(outbox, foreignKeys(previous, board));
+      outbox = fenceOutbox(outbox, board.keyRevisions ?? {});
       if (outbox.length > 0) rebased = true;
       else cancelRetry();
     }
@@ -449,7 +441,10 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ schemaVersion: 1, project, baseRevision, mutations }),
       });
-      if (res.ok) return { status: "ok", board: ((await res.json()) as { board: BoardProjectStateV1 }).board };
+      if (res.ok) {
+        const body = (await res.json()) as { applied?: boolean; board: BoardProjectStateV1 };
+        return { status: "ok", applied: body.applied, board: body.board };
+      }
       if (res.status === 409) return { status: "conflict", board: ((await res.json()) as { board: BoardProjectStateV1 }).board };
       if (res.status >= 400 && res.status < 500) {
         const body = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -498,11 +493,14 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
        fallback would render it indistinguishable from a no-op, and the
        server verdict plus bisection must isolate the invalid mutation while
        the valid ones sharing the batch land. */
-    const before = optimisticBoard(confirmed, outbox);
-    const nextOutbox = [...outbox, ...mutations];
+    const before = optimisticBoard(confirmed, mutationsOf(outbox));
+    /* Each mutation records the causal revision it observes for every key it
+       writes, taken from the board the operator is looking at right now. That is
+       the fixed point the fence compares against later. */
+    const nextOutbox = [...outbox, ...mutations.map((mutation) => observeKeys(mutation, confirmed))];
     let after: BoardProjectStateV1 | null;
     try {
-      after = applyBoardMutations(confirmed, nextOutbox);
+      after = applyBoardMutations(confirmed, mutationsOf(nextOutbox));
     } catch {
       after = null;
     }
@@ -562,7 +560,7 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
        never drops a later optimistic action. Bounded to the server's per-PATCH
        mutation and body-size caps (tightened while bisecting a rejection); a
        longer outbox drains over consecutive requests. */
-    const prefix = patchPrefix(outbox, rejectCap ?? MAX_MUTATIONS_PER_PATCH);
+    const prefix = patchPrefix(mutationsOf(outbox), rejectCap ?? MAX_MUTATIONS_PER_PATCH);
     const result = await attemptMutations(prefix, confirmed.revision);
     inflight = false;
     if (disposed) return;
@@ -571,17 +569,24 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
       conflictStreak = 0;
       rejectCap = null;
       unavailable = false;
-      /* The board this write should have produced. The server accepts a batch
-         that reduces to nothing from ANY base revision, so an accepted response
-         can hand back a board another writer has moved — with no 409 to mark
-         this view as behind. Diffing expected against returned names exactly the
-         keys that writer changed, and the outbox still queued behind this prefix
-         is fenced against them just as it would be after a conflict. */
-      const expected = optimisticBoard(confirmed, prefix);
+      /* Accepted does not mean authored. The server accepts a batch that
+         reduces to nothing from ANY base revision, so this response can carry a
+         board another writer moved, with no 409 to mark this view as behind —
+         and if that writer made the same change we did, the board it returns is
+         byte-identical to the one our write would have produced. Content cannot
+         separate those, so the server's own `applied` verdict decides; the
+         arrangement comparison is only the fallback for a server that predates
+         the field. */
+      const authored = result.applied ?? sameArrangement(optimisticBoard(confirmed, prefix), result.board);
       confirmed = result.board;
       outbox = outbox.slice(prefix.length);
       if (outbox.length > 0) {
-        outbox = fenceOutbox(outbox, foreignKeys(expected, result.board));
+        /* Re-observe only the keys THIS prefix wrote, and only when it was ours:
+           our own accepted write is causally before the intent queued behind it
+           and must not fence itself. */
+        const revisions = result.board.keyRevisions ?? {};
+        const rebased0 = authored ? reobserve(outbox, new Set(prefix.flatMap(mutationKeys)), revisions) : outbox;
+        outbox = fenceOutbox(rebased0, revisions);
         if (outbox.length > 0) rebased = true;
       }
       refresh();
@@ -620,10 +625,10 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
     }
     if (result.status === "conflict") {
       /* Another writer landed first, so this attempt was stale and the server
-         refused it. Adopt the server board; intent this view formed against keys
-         that writer changed is superseded and dropped, and the rest replays on
-         top and retries at the returned revision. A satisfied mutation then
-         reduces to a server no-op that leaves the revision untouched. */
+         refused it. Adopt the server board; intent whose key has advanced past
+         what it observed is superseded and dropped, and the rest replays on top
+         and retries at the returned revision. A satisfied mutation then reduces
+         to a server no-op that leaves the revision untouched. */
       adoptForeign(result.board);
       conflictStreak += 1;
       if (outbox.length === 0) {
