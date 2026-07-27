@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 
 import { BRIDGE_LIVE_BATCH_INTERVAL_MS } from "@/lib/bridge/types";
 import type { RuntimeVoiceDelivery } from "@/lib/runtime/voiceDelivery";
@@ -21,10 +21,13 @@ import type { RuntimeVoiceDelivery } from "@/lib/runtime/voiceDelivery";
  * Three outcomes, three different obligations, which is why the plan is a tagged
  * union rather than a nullable delivery:
  *
- * - `deliver` — hand it to the client, then acknowledge. In that order: the cursor
- *   must never move past something the call did not receive.
- * - `already-acknowledged` — the batch reached the user but the cursor write was
- *   lost. Acknowledge immediately and nothing else. Skipping this is what leaves
+ * - `deliver` — hand it to the client and park the cursor. The acknowledgement is
+ *   NOT sent here: `reconcileWorkerDeliveries` only enqueues, and a cursor advanced
+ *   on an enqueue is exactly-once inverted — a crash before the host writes loses
+ *   the report while the cursor swears it arrived. The cursor moves in the
+ *   confirmation listener, when the host says the session took it.
+ * - `already-acknowledged` — the batch provably reached the session but the cursor
+ *   write was lost. Acknowledge immediately and nothing else. Skipping this leaves
  *   every later report queued behind something already spoken.
  * - `hold` / `idle` — nothing to do.
  */
@@ -37,11 +40,52 @@ type BridgeDeliveryPlanPayload =
 
 export interface BridgeRelayClient {
   reconcileWorkerDeliveries(deliveries: readonly RuntimeVoiceDelivery[]): void;
+  /** Fires when the runtime host has durably accepted a delivery. */
+  onDeliveryAcknowledged(listener: (deliveryId: string) => void): () => void;
 }
 
 /** Slightly under the coalescing window: polling faster cannot produce a batch any
     sooner, and polling slower would add latency the server already bounds. */
 const POLL_MS = Math.floor(BRIDGE_LIVE_BATCH_INTERVAL_MS / 3);
+
+/**
+ * The no-call half of the relay (§4): drain at the start of the gateway's turn.
+ *
+ * Returned as a callback rather than run on a timer, because a turn is an event
+ * the card already owns — it is the submit. Nothing pushes while no call is live;
+ * this pulls once, at the only moment the inbox is about to matter.
+ *
+ * The cursor is acknowledged only after the caller reports the turn actually left,
+ * for the reason the live path parks its cursor: a batch folded into a message that
+ * never sent must arrive again.
+ */
+export function useBridgeTurnStartDrain(
+  enabled: boolean,
+  options: { fetchFn?: typeof fetch } = {},
+): () => Promise<string> {
+  const fetchFn = options.fetchFn;
+  return useCallback(async () => {
+    if (!enabled) return "";
+    const request = fetchFn ?? fetch;
+    try {
+      const response = await request("/api/bridge?mode=turn-start", { cache: "no-store" });
+      if (!response.ok) return "";
+      const payload = await response.json() as { prelude?: { text: string; throughSeq: number } | null };
+      const prelude = payload.prelude;
+      if (!prelude?.text) return "";
+      await request("/api/bridge", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ throughSeq: prelude.throughSeq }),
+      });
+      return prelude.text;
+    } catch {
+      /* The reports are durable and the cursor did not move: the next turn tries
+         again. A blocked send would be a far worse failure than a late report. */
+      return "";
+    }
+  }, [enabled, fetchFn]);
+}
 
 export function useBridgeReportRelay(
   client: BridgeRelayClient | null,
@@ -62,6 +106,27 @@ export function useBridgeReportRelay(
     const request = fetchFn ?? fetch;
     let cancelled = false;
 
+    /* Batches handed to the client and still waiting on the host's confirmation.
+       The cursor for each moves only when its delivery id comes back. */
+    const awaitingConfirmation = new Map<string, number>();
+
+    const acknowledgeCursor = async (throughSeq: number): Promise<void> => {
+      await request("/api/bridge", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ throughSeq }),
+      });
+    };
+
+    const releaseAcknowledged = client.onDeliveryAcknowledged((deliveryId) => {
+      const throughSeq = awaitingConfirmation.get(deliveryId);
+      if (throughSeq === undefined || cancelled) return;
+      awaitingConfirmation.delete(deliveryId);
+      /* Now — and only now — has the report provably reached the session. */
+      acknowledgedRef.current = [...acknowledgedRef.current, deliveryId].slice(-256);
+      void acknowledgeCursor(throughSeq).catch(() => undefined);
+    });
+
     const poll = async (): Promise<void> => {
       if (busyRef.current) return;
       busyRef.current = true;
@@ -76,20 +141,19 @@ export function useBridgeReportRelay(
         if (!plan || cancelled) return;
 
         if (plan.kind === "deliver") {
-          /* Into the call first. The client's own tombstones make a repeat of this
-             delivery a no-op, so an acknowledgement lost after this point costs a
-             duplicate attempt, never a duplicate utterance. */
+          /* Enqueue only. `reconcileWorkerDeliveries` puts the batch in an
+             in-memory queue and returns; the host has not written anything yet.
+             Advancing the cursor here would invert exactly-once — a crash in
+             between loses the report while the cursor claims it was delivered — so
+             the batch is parked until the host confirms, above. */
+          awaitingConfirmation.set(plan.delivery.deliveryId, plan.throughSeq);
           client.reconcileWorkerDeliveries([plan.delivery]);
-          acknowledgedRef.current = [...acknowledgedRef.current, plan.delivery.deliveryId].slice(-256);
           lastBatchAtRef.current = new Date();
-        } else if (plan.kind !== "already-acknowledged") {
           return;
         }
-        await request("/api/bridge", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ throughSeq: plan.throughSeq }),
-        });
+        if (plan.kind !== "already-acknowledged") return;
+        /* Already spoken and provably received; this only heals the cursor. */
+        await acknowledgeCursor(plan.throughSeq);
       } catch {
         /* A dropped poll is a retry, not an incident: the reports are durable and
            the cursor did not move. Surfacing a transport blip mid-call would be
@@ -103,6 +167,7 @@ export function useBridgeReportRelay(
     const timer = setInterval(() => { void poll(); }, pollMs);
     return () => {
       cancelled = true;
+      releaseAcknowledged();
       clearInterval(timer);
     };
   }, [client, fetchFn, live, pollMs]);

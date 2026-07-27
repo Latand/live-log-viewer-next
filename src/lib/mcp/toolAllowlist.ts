@@ -31,11 +31,30 @@ import type { McpToolArgs, McpToolName } from "./server";
  * model to call and nothing to rate-limit.
  */
 export const GATEWAY_ALLOWED_TOOLS: readonly McpToolName[] = [
+  /* The deterministic relay: the recipient and the delivery id are derived
+     server-side, so the gateway cannot address anyone but the manager and cannot
+     mint an id that would let a retry deliver twice. */
+  "bridge_directive",
   "send_message",
   "request_attention",
 ];
 
 const GATEWAY_TOOL_SET: ReadonlySet<string> = new Set(GATEWAY_ALLOWED_TOOLS);
+
+/**
+ * Tools only the designated manager may call.
+ *
+ * `bridge_report` is the single channel anything the user hears comes through. A
+ * worker holding it could put words in the manager's mouth — and the operator has
+ * no way to tell a report the manager wrote from one a reviewer three levels down
+ * injected, because by design they arrive in the same voice. "Every Viewer-spawned
+ * worker registers with the same MCP server the operator's own session uses" is the
+ * exact hole `attentionCallerAuthority` was written to close for `request_attention`;
+ * this closes it for the bridge.
+ */
+export const MANAGER_ONLY_TOOLS: readonly McpToolName[] = ["bridge_report"];
+
+const MANAGER_ONLY_TOOL_SET: ReadonlySet<string> = new Set(MANAGER_ONLY_TOOLS);
 
 /** Where the manager currently sits, resolved from its designation record. Both
     addressing forms `send_message` accepts must be checkable, or the restriction
@@ -107,6 +126,16 @@ export function permitMcpTool(
   args: McpToolArgs,
   manager: ManagerTarget | null,
 ): McpToolVerdict {
+  /* Checked before the restricted branch so it covers every identity that is not
+     the manager, in one place: gateway, unidentified, and ordinary workers. */
+  if (MANAGER_ONLY_TOOL_SET.has(toolName)
+    && !(identity.kind === "unrestricted" && identity.reason === "manager")) {
+    return {
+      allowed: false,
+      code: "tool_not_permitted",
+      error: `${toolName} belongs to the designated manager alone — it is the only channel the operator hears from, and a report from anyone else would reach them in the manager's voice.`,
+    };
+  }
   if (identity.kind !== "restricted") return ALLOWED;
   if (!GATEWAY_TOOL_SET.has(toolName)) {
     return {

@@ -9,6 +9,7 @@ import { mintBridgeConfirmation } from "./confirmation";
 import {
   acknowledgeBridgeDelivery,
   authorizeBridgeDeploy,
+  bridgeTurnStartPrelude,
   pendingBridgeDelivery,
   recordManagerReport,
 } from "./service";
@@ -183,4 +184,49 @@ test("a report body is bounded and redacted on the production append path too", 
   const stored = drainBridgeReports().reports[0]!;
   expect(stored.body).toContain("[redacted]");
   expect(stored.body).not.toContain(secretShaped);
+});
+
+/* §4, the no-call path: with nothing live, the root's NEXT TURN drains the cursor. */
+
+test("a turn opened after a quiet night carries one bounded batch, once", () => {
+  sandbox();
+  for (let index = 0; index < 9; index += 1) {
+    recordManagerReport({ key: `r${index}`, class: "completed", at: NOW.toISOString(), body: `finished ${index}` });
+  }
+
+  const prelude = bridgeTurnStartPrelude({ rootIdentity, now: NOW });
+  expect(prelude).not.toBeNull();
+  expect(prelude!.text).toContain("finished 0");
+  expect(prelude!.text).toContain("finished 4");
+  /* Bounded: the sixth report is not in this turn. */
+  expect(prelude!.text).not.toContain("finished 5");
+  expect(prelude!.text).toContain("4 more waiting");
+  expect(prelude!.throughSeq).toBe(5);
+
+  /* The gateway is told to speak, not to recite. */
+  expect(prelude!.text).toContain("Do not read this list aloud");
+});
+
+test("the turn-start drain does not consume anything by itself", () => {
+  sandbox();
+  recordManagerReport({ key: "a", class: "status", at: NOW.toISOString(), body: "one" });
+  bridgeTurnStartPrelude({ rootIdentity, now: NOW });
+
+  /* A turn that never reached the agent must not have eaten the report. */
+  expect(readBridgeChannel()?.managerReportCursor).toBe(0);
+  expect(bridgeTurnStartPrelude({ rootIdentity, now: NOW })).not.toBeNull();
+});
+
+test("an acknowledged turn-start batch never arrives a second time", () => {
+  sandbox();
+  recordManagerReport({ key: "a", class: "blocked", at: NOW.toISOString(), body: "needs a decision" });
+  const prelude = bridgeTurnStartPrelude({ rootIdentity, now: NOW })!;
+  acknowledgeBridgeDelivery(prelude.throughSeq);
+
+  expect(bridgeTurnStartPrelude({ rootIdentity, now: NOW })).toBeNull();
+});
+
+test("a turn with an empty inbox opens with nothing at all", () => {
+  sandbox();
+  expect(bridgeTurnStartPrelude({ rootIdentity, now: NOW })).toBeNull();
 });

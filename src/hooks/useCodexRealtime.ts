@@ -29,6 +29,9 @@ export interface RealtimeSurface {
   stop(): Promise<void>;
   updateWorkerProgress(turnId: string, progress: string, running: boolean): void;
   reconcileWorkerDeliveries(deliveries: readonly RuntimeVoiceDelivery[]): void;
+  /* #691 §4: fires when the runtime host has DURABLY accepted a delivery, which is
+     the only signal that may advance the bridge's cursor. */
+  onDeliveryAcknowledged(listener: (deliveryId: string) => void): () => void;
 }
 
 const NO_LINES: ReadonlySet<string> = new Set();

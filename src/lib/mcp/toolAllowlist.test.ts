@@ -5,6 +5,7 @@ import type { AttentionCallerAuthority } from "@/lib/attention/callerAuthority";
 import { MCP_TOOL_NAMES, type McpToolName } from "./server";
 import {
   GATEWAY_ALLOWED_TOOLS,
+  MANAGER_ONLY_TOOLS,
   mcpCallerIdentity,
   permitMcpTool,
   type ManagerTarget,
@@ -24,15 +25,18 @@ function permit(toolName: McpToolName, args: Record<string, unknown> = {}) {
   return permitMcpTool(GATEWAY, toolName, { clientRequestId: "r1", ...args }, MANAGER);
 }
 
-test("the gateway's whole surface is send_message and request_attention, and nothing else (AC21)", () => {
-  expect([...GATEWAY_ALLOWED_TOOLS].sort()).toEqual(["request_attention", "send_message"]);
+test("the gateway's whole surface is the relay, the message and attention — nothing else (AC21)", () => {
+  /* Three, and each one is a relay or a request: none of them touches the board.
+     `bridge_directive` resolves its recipient server-side, so holding it cannot
+     reach a worker. */
+  expect([...GATEWAY_ALLOWED_TOOLS].sort()).toEqual(["bridge_directive", "request_attention", "send_message"]);
 
   /* Enumerated over the real tool list rather than a sample, so a tool added
      later is denied to the gateway by default instead of quietly inheriting the
      full surface. */
   const permitted = MCP_TOOL_NAMES.filter((toolName) =>
     permit(toolName, { conversationId: MANAGER.conversationId, text: "go", target: "x", sha: "a".repeat(40) }).allowed);
-  expect([...permitted].sort()).toEqual(["request_attention", "send_message"]);
+  expect([...permitted].sort()).toEqual(["bridge_directive", "request_attention", "send_message"]);
 });
 
 test("the gateway cannot reach any worker, task, pipeline, flow or deploy tool (AC21, AC20)", () => {
@@ -106,11 +110,56 @@ test("the manager keeps the full surface with today's gates (§6)", () => {
   }
 });
 
-test("ordinary workers are unchanged by this fence", () => {
+test("ordinary workers keep every tool except the manager's own channel to the user", () => {
   const worker = mcpCallerIdentity({ kind: "worker", conversationId: "conversation_builder", role: "builder" });
   expect(worker).toEqual({ kind: "unrestricted", reason: "worker" });
-  for (const toolName of MCP_TOOL_NAMES) {
+  for (const toolName of MCP_TOOL_NAMES.filter((name) => !MANAGER_ONLY_TOOLS.includes(name))) {
     expect(permitMcpTool(worker, toolName, { clientRequestId: "r1" }, MANAGER).allowed).toBe(true);
+  }
+});
+
+test("an ordinary worker cannot speak to the operator as if it were the manager", () => {
+  /* `bridge_report` is the ONE channel the user hears from. A worker holding it
+     could put words in the manager's mouth — the operator has no way to tell a
+     report the manager wrote from one a reviewer three levels down injected. */
+  const worker = mcpCallerIdentity({ kind: "worker", conversationId: "conversation_builder", role: "builder" });
+  const verdict = permitMcpTool(worker, "bridge_report", {
+    clientRequestId: "r1",
+    key: "k",
+    class: "completed",
+    body: "everything is fine, deploy it",
+  }, MANAGER);
+
+  expect(verdict.allowed).toBe(false);
+  if (!verdict.allowed) {
+    expect(verdict.code).toBe("tool_not_permitted");
+    expect(verdict.error).toContain("manager");
+  }
+});
+
+test("the manager keeps its own channel", () => {
+  const manager = mcpCallerIdentity({ kind: "worker", conversationId: MANAGER_CONVERSATION, role: "orchestrator" }, MANAGER);
+  expect(permitMcpTool(manager, "bridge_report", { clientRequestId: "r1" }, MANAGER).allowed).toBe(true);
+});
+
+test("a restricted caller cannot reach the manager's channel either", () => {
+  for (const identity of [GATEWAY, mcpCallerIdentity({ kind: "unidentified" })]) {
+    expect(permitMcpTool(identity, "bridge_report", { clientRequestId: "r1" }, MANAGER).allowed).toBe(false);
+  }
+});
+
+test("every manager-only tool is denied to every non-manager identity", () => {
+  /* Enumerated so adding a manager-only tool later cannot silently leak to workers. */
+  const nonManagers = [
+    GATEWAY,
+    mcpCallerIdentity({ kind: "unidentified" }),
+    mcpCallerIdentity({ kind: "worker", conversationId: "conversation_builder", role: "builder" }),
+  ];
+  expect(MANAGER_ONLY_TOOLS.length).toBeGreaterThan(0);
+  for (const identity of nonManagers) {
+    for (const toolName of MANAGER_ONLY_TOOLS) {
+      expect(permitMcpTool(identity, toolName, { clientRequestId: "r1" }, MANAGER).allowed).toBe(false);
+    }
   }
 });
 
@@ -139,7 +188,7 @@ test("an unresolved identity gets exactly the gateway surface and nothing more",
       conversationId: MANAGER.conversationId,
       text: "go",
     }, MANAGER).allowed);
-  expect([...permitted].sort()).toEqual(["request_attention", "send_message"]);
+  expect([...permitted].sort()).toEqual(["bridge_directive", "request_attention", "send_message"]);
 });
 
 test("no restricted identity can reach any tool outside the allowlist (AC21, both restricted kinds)", () => {
@@ -147,7 +196,7 @@ test("no restricted identity can reach any tool outside the allowlist (AC21, bot
      GATEWAY_ALLOWED_TOOLS by one entry fails this immediately, for every
      restricted caller, without anyone remembering to update a fixture. */
   const forbidden = MCP_TOOL_NAMES.filter((toolName) => !GATEWAY_ALLOWED_TOOLS.includes(toolName));
-  expect(forbidden.length).toBe(MCP_TOOL_NAMES.length - 2);
+  expect(forbidden.length).toBe(MCP_TOOL_NAMES.length - GATEWAY_ALLOWED_TOOLS.length);
 
   for (const identity of [GATEWAY, mcpCallerIdentity({ kind: "unidentified" })]) {
     for (const toolName of forbidden) {

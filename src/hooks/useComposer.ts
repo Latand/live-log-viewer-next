@@ -251,6 +251,29 @@ export function useComposer({ initialText, persistText, submit, disabled = false
   useEffect(() => { submitRef.current = submit; });
   useEffect(() => shared?.registerSender(() => { void submitRef.current(); }), [shared]);
 
+  /* The tray itself, published for the same reason the send is: the floater must
+     act on the card's attachments rather than keep a second set. */
+  const attachmentsRef = useRef(attachments);
+  useEffect(() => { attachmentsRef.current = attachments; });
+  useEffect(() => shared?.registerAttachmentOwner({
+    remove: (id) => attachmentsRef.current.remove(id),
+    clearAll: () => attachmentsRef.current.clearAll(),
+  }), [shared]);
+
+  /* And the tiles themselves, so both renderings show one tray. Published as the
+     bounded view the floater needs; the Files and object-URL ownership stay here. */
+  const tiles = attachments.attachments;
+  useEffect(() => {
+    shared?.setAttachments(tiles.map((tile) => ({
+      id: tile.id,
+      status: tile.status,
+      name: tile.name,
+      mime: tile.mime,
+      preview: tile.preview,
+      ...(tile.error ? { error: tile.error } : {}),
+    })));
+  }, [shared, tiles]);
+
   return {
     text,
     textRef,

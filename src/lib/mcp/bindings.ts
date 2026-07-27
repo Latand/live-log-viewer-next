@@ -21,6 +21,7 @@ import { agentLivenessSnapshot, productionLivenessSources, type AgentLivenessSou
 import { refreshLifecycleJournal } from "@/lib/lifecycle/projector";
 import { isLifecycleEventType } from "@/lib/lifecycle/vocabulary";
 import { authorizeBridgeDeploy, recordManagerReport } from "@/lib/bridge/service";
+import { bridgeDirectiveBody, bridgeDirectiveId } from "@/lib/bridge/directive";
 import { mintBridgeConfirmation } from "@/lib/bridge/confirmation";
 import { isBridgeReportClass } from "@/lib/bridge/types";
 import { readOrchestratorRecord } from "@/lib/orchestrator/store";
@@ -425,17 +426,18 @@ async function deployExactSha(args: McpToolArgs, control: ViewerControlDependenc
      stops the deploy instead of downgrading to an unauthorized one. The consume is
      atomic with the check, so two answers racing cannot both pass. */
   const bridgeRef = args.bridgeRef;
-  if (bridgeRef !== undefined) {
-    if (typeof bridgeRef !== "number" || !Number.isInteger(bridgeRef) || bridgeRef < 1) {
-      throw new McpToolRefusal("bridgeRef must be the report seq the confirmation came from", { code: "bridge_confirmation_invalid" });
-    }
-    const outcome = authorizeBridgeDeploy({ ref: bridgeRef, nonce: text(args.bridgeNonce), sha: revision.toLowerCase() });
-    if (!outcome.ok) {
-      throw new McpToolRefusal(
-        `the bridge confirmation for this deploy was refused (${outcome.reason}); ask the user again and deploy nothing`,
-        { code: "bridge_confirmation_refused", reason: outcome.reason, revision },
-      );
-    }
+  if (typeof bridgeRef !== "number" || !Number.isInteger(bridgeRef) || bridgeRef < 1) {
+    throw new McpToolRefusal(
+      "a deploy requires the bridge confirmation the user authorized: pass bridgeRef (the confirmation_request's seq) and bridgeNonce from the trailer the gateway relayed. Ask for a confirmation first and deploy nothing until it comes back.",
+      { code: "bridge_confirmation_required", revision },
+    );
+  }
+  const outcome = authorizeBridgeDeploy({ ref: bridgeRef, nonce: text(args.bridgeNonce), sha: revision.toLowerCase() });
+  if (!outcome.ok) {
+    throw new McpToolRefusal(
+      `the bridge confirmation for this deploy was refused (${outcome.reason}); ask the user again and deploy nothing`,
+      { code: "bridge_confirmation_refused", reason: outcome.reason, revision },
+    );
   }
 
   const receipt = await control.post("/api/runtime/deployments", { revision, idempotencyKey: requestId(args) });
@@ -501,6 +503,64 @@ function bridgeReport(args: McpToolArgs): McpToolPayload {
     ...(appended.confirmation
       ? { confirmation: { nonce: appended.confirmation.nonce, sha: appended.confirmation.sha, expiresAt: appended.confirmation.expiresAt } }
       : {}),
+  };
+}
+
+/**
+ * The gateway's relay to the manager (#691 §4) — user intent, flowing onward.
+ *
+ * Two things are deliberately NOT the caller's to choose, because both are how a
+ * relay stops being exactly-once:
+ *
+ * - The RECIPIENT is resolved from the designation record here. A gateway that
+ *   could name a conversation could message a worker directly, which is the one
+ *   sentence the whole architecture exists to prevent.
+ * - The DELIVERY ID is derived from the root turn. `send_message`-style receipts
+ *   are durable and recognize a replayed id, so a retry after a lost receipt
+ *   answers from the receipt instead of delivering the instruction a second time —
+ *   but only if the id is a function of the turn rather than freshly minted.
+ */
+async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependencies): Promise<McpToolPayload> {
+  const instruction = text(args.instruction);
+  if (!instruction) throw new Error("instruction is required");
+  const utterance = args.utterance;
+  if (typeof utterance !== "number") throw new Error("utterance must be a non-negative integer");
+  /* Both throw on anything that would not round-trip through the parser. */
+  const deliveryId = bridgeDirectiveId(text(args.rootTurnId), utterance);
+
+  const manager = readOrchestratorRecord();
+  if (!manager) {
+    throw new McpToolRefusal(
+      "no manager conversation is designated, so there is nobody to relay this to; tell the user the manager is not running",
+      { code: "manager_not_designated" },
+    );
+  }
+
+  const ref = args.ref;
+  const trailer = typeof ref === "number" && Number.isInteger(ref) && ref > 0
+    ? {
+      ref,
+      ...(text(args.nonce) ? { nonce: text(args.nonce) } : {}),
+      ...(text(args.sha) ? { sha: text(args.sha).toLowerCase() } : {}),
+    }
+    : undefined;
+  /* Composes and validates together: a nonce without a SHA would otherwise reach
+     the manager as a bare reference and read as an unconditional yes. */
+  const body = bridgeDirectiveBody(instruction, trailer);
+
+  const outcome = await control.post("/api/tmux", {
+    pid: null,
+    path: manager.path,
+    conversationId: manager.conversationId,
+    clientMessageId: deliveryId,
+    text: body,
+    images: [],
+  });
+  return {
+    directiveId: deliveryId,
+    managerConversationId: manager.conversationId,
+    operationId: outcome.operationId ?? null,
+    outcome: outcome.outcome ?? "delivered",
   };
 }
 
@@ -985,5 +1045,6 @@ export function viewerMcpBindings(
     lifecycle_events: (args) => lifecycleEvents(args, domainDependencies),
     request_attention: (args) => requestAttention(args, domainDependencies),
     bridge_report: (args) => Promise.resolve(bridgeReport(args)),
+    bridge_directive: (args) => bridgeDirective(args, controlDependencies),
   };
 }

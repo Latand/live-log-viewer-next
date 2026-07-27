@@ -83,6 +83,39 @@ export function acknowledgeBridgeDelivery(throughSeq: number, now = new Date()):
 }
 
 /**
+ * What the gateway's next turn must open with when no call is live (§4).
+ *
+ * The design forbids pushing when there is no call to interject into, so the
+ * pending reports wait — and would wait forever if nothing drained them. A turn is
+ * the moment the gateway is about to think, so it is the moment its inbox becomes
+ * relevant: the batch is prepended to that turn's own input.
+ *
+ * Deliberately part of the turn's input rather than a separate injected item (U3
+ * settled that), and bounded by the same drain caps as the live path — a quiet
+ * night arrives as one batch, oldest first, not as a night's worth of messages.
+ */
+export function bridgeTurnStartPrelude(
+  request: Omit<BridgeDeliveryRequest, "lastBatchAt" | "acknowledgedDeliveryIds"> = { now: new Date() },
+): { text: string; throughSeq: number } | null {
+  const identity = (request.rootIdentity ?? readRootIdentity)();
+  openBridgeChannel(identity, request.now);
+  const batch = drainBridgeReports({ now: request.now });
+  if (batch.reports.length === 0) return null;
+
+  const lines = batch.reports.map((report) => `- [${report.class}] ${report.body}`);
+  if (batch.remaining > 0) lines.push(`- (${batch.remaining} more waiting; they arrive next turn.)`);
+  return {
+    text: [
+      "While you were away the manager reported:",
+      ...lines,
+      "",
+      "Mention what matters in your own words. Do not read this list aloud.",
+    ].join("\n"),
+    throughSeq: batch.throughSeq,
+  };
+}
+
+/**
  * Verify and consume the authorization the gateway relayed, immediately before a
  * deploy runs (§4, §7.7).
  *

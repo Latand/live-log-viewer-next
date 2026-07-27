@@ -41,6 +41,7 @@ export const MCP_TOOL_NAMES = [
   "lifecycle_events",
   "request_attention",
   "bridge_report",
+  "bridge_directive",
 ] as const;
 
 export type McpToolName = typeof MCP_TOOL_NAMES[number];
@@ -70,6 +71,9 @@ const MUTATING_MCP_TOOL_NAMES = new Set<McpToolName>([
   /* Appends to the durable bridge log, so a replayed clientRequestId must return
      the original receipt rather than append the report a second time. */
   "bridge_report",
+  /* Delivers an instruction to the manager. Its own derived id is what makes a
+     retry idempotent, and the receipt must outlive the MCP process for that. */
+  "bridge_directive",
 ]);
 
 export type McpToolArgs = Record<string, unknown> & { clientRequestId?: unknown };
@@ -951,7 +955,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   link_task_to_pipeline: "Attach a board task to a conversation owned by a pipeline.",
   list_conversations: "List scanned Viewer conversations with durable ids and transcript paths.",
   get_conversation: "Read a conversation summary and its recent messages and tools.",
-  deploy_exact_sha: "Deploy one full commit SHA after the caller supplies confirm=deploy.",
+  deploy_exact_sha: "Deploy one full commit SHA. Requires confirm=deploy AND the bridge confirmation the user authorized (bridgeRef + bridgeNonce from the gateway's trailer); one confirmation authorizes one SHA once.",
   get_pipeline: "Read one pipeline by durable id.",
   board_snapshot: "Read a bounded, redacted snapshot of the Viewer board and durable placement.",
   list_flows: "List durable implement-review flows.",
@@ -969,6 +973,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   lifecycle_events: "Query the durable lifecycle event journal by lineage and cursor, or poll a bounded relay digest of what changed since the last one.",
   request_attention: "Ask the operator to look at something: raise an attention request that offers to move their Viewer to a target and waits for their yes.",
   bridge_report: "Manager only: append one bounded report to the durable bridge log so the voice gateway can relay it to the user. The only channel from the manager to the user.",
+  bridge_directive: "Voice gateway only: relay the user's intent to the manager. The recipient and the delivery id are derived server-side, so a retry of the same root turn is one instruction, never two.",
 };
 
 const clientRequestIdSchema = z.string().min(1).describe("Stable idempotency key for this logical call.");
@@ -1054,6 +1059,11 @@ const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     clientRequestId: clientRequestIdSchema,
     revision: z.string().regex(/^[0-9a-f]{40}$/i),
     confirm: z.literal("deploy"),
+    /* #691 §4: the user's spoken yes, relayed by the gateway. Required — a deploy
+       issued without one has bypassed the only gate between a spoken yes and
+       production. */
+    bridgeRef: z.number().int().positive().describe("seq of the confirmation_request report the user answered."),
+    bridgeNonce: z.string().min(1).describe("Single-use nonce from that report's trailer. Verified against SHA and expiry, then spent."),
   }).passthrough(),
   get_pipeline: z.object({
     clientRequestId: clientRequestIdSchema,
@@ -1181,6 +1191,15 @@ const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
       sha: z.string().regex(/^[0-9a-f]{40}$/).describe("Full lowercase 40-hex commit SHA this authorization is for."),
       expiresMinutes: z.number().int().positive().max(60).optional(),
     }).optional().describe("confirmation_request only: mints the single-use nonce the gateway must echo back before a deploy."),
+  }).passthrough(),
+  bridge_directive: z.object({
+    clientRequestId: clientRequestIdSchema,
+    rootTurnId: z.string().regex(/^[A-Za-z0-9_.:-]+$/).describe("The realtime turn this instruction came from. The delivery id derives from it, so a retry must reuse the same value."),
+    utterance: z.number().int().min(0).describe("Index of this instruction within that turn, from 0."),
+    instruction: z.string().min(1).describe("What the user asked for, in plain words. No board state, no tool output."),
+    ref: z.number().int().positive().optional().describe("seq of the report this answers, when it answers one."),
+    nonce: z.string().optional().describe("With sha: the deploy authorization the user just gave aloud."),
+    sha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
   }).passthrough(),
 };
 

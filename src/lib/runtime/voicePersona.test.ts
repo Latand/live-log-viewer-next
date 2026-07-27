@@ -166,3 +166,32 @@ test("the character never buys itself room on truth", () => {
   expect(DEFAULT_VOICE_PERSONA).toMatch(/an assistant with a personality/);
   expect(DEFAULT_VOICE_PERSONA).toMatch(/not a character from a series/);
 });
+
+/* #691 §4 — the gateway's instruction path. The relay is deterministic only if the
+   agent is told which tool carries it and what to reuse on a retry; nothing else in
+   the running system can say so. */
+
+test("the persona tells the gateway it relays to a manager rather than driving the board", () => {
+  expect(DEFAULT_VOICE_PERSONA).toContain("only agent the user talks to");
+  expect(DEFAULT_VOICE_PERSONA).toContain("do not touch the board yourself");
+  expect(DEFAULT_VOICE_PERSONA).toContain("manager");
+});
+
+test("the persona names the directive tool and the id it must reuse on a retry", () => {
+  expect(DEFAULT_VOICE_PERSONA).toContain("bridge_directive");
+  expect(DEFAULT_VOICE_PERSONA).toContain("reuse the same turn id and index");
+  /* The recipient is server-resolved; a gateway that thought it chose one would
+     eventually try to message a worker. */
+  expect(DEFAULT_VOICE_PERSONA).toContain("you never name it");
+});
+
+test("the persona carries the deploy round trip and its refusals", () => {
+  expect(DEFAULT_VOICE_PERSONA).toContain("spoken yes");
+  expect(DEFAULT_VOICE_PERSONA).toContain("Never invent or reword");
+  expect(DEFAULT_VOICE_PERSONA).toContain("Anything other than a clear yes is a no");
+});
+
+test("the persona keeps the plumbing out of the user's ear", () => {
+  expect(DEFAULT_VOICE_PERSONA).toContain("do not narrate the plumbing");
+  expect(DEFAULT_VOICE_PERSONA).toContain("do not read the report verbatim");
+});

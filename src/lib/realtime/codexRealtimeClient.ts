@@ -147,6 +147,10 @@ class CodexRealtimeClient {
   private audio: HTMLAudioElement | null = null;
   private readonly pendingWorkerDeliveries = new Map<string, RuntimeVoiceDelivery>();
   private readonly acknowledgedWorkerDeliveries = new Set<string>();
+  /* Announced only when the HOST has confirmed the write, never on enqueue. The
+     bridge's cursor rides on this signal, so a listener firing early would move a
+     durable cursor past a report the session never actually received. */
+  private readonly deliveryAcknowledgedListeners = new Set<(deliveryId: string) => void>();
   private workerDeliveryFlush: Promise<void> | null = null;
   private workerDeliveryWakeEpoch: number | null = null;
   private unloadHangup: (() => void) | null = null;
@@ -166,6 +170,16 @@ class CodexRealtimeClient {
   };
 
   getSnapshot = (): CodexRealtimeSnapshot => this.snapshot;
+
+  /**
+   * Fires when the runtime host has durably accepted a delivery — the one moment
+   * at which "this reached the session" is true. Consumers that advance a durable
+   * cursor (the #691 bridge) must key on this and on nothing earlier.
+   */
+  onDeliveryAcknowledged = (listener: (deliveryId: string) => void): (() => void) => {
+    this.deliveryAcknowledgedListeners.add(listener);
+    return () => this.deliveryAcknowledgedListeners.delete(listener);
+  };
 
   /** The live microphone stream, for the panel's level meter. Deliberately
       outside the snapshot: the meter animates per frame and must not push
@@ -359,6 +373,7 @@ class CodexRealtimeClient {
       if (body.acknowledged !== true || body.deliveryId !== delivery.deliveryId) return;
       this.pendingWorkerDeliveries.delete(delivery.deliveryId);
       this.acknowledgedWorkerDeliveries.add(delivery.deliveryId);
+      for (const listener of this.deliveryAcknowledgedListeners) listener(delivery.deliveryId);
     }
   }
 

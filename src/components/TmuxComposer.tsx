@@ -61,6 +61,8 @@ import {
 import { mintIdempotencyKey, receiptIsAdmitted, receiptIsTerminal } from "./runtime/runtimeModel";
 import { useAgentCapabilities } from "./useAgentCapabilities";
 import { VoiceConversationButton, VoiceConversationPanel } from "./VoiceConversation";
+import { useBridgeTurnStartDrain } from "@/hooks/useBridgeReportRelay";
+
 import { composerStore } from "./voice/composerStore";
 import { VoiceFloatButton } from "./voice/VoiceFloatButton";
 
@@ -1020,6 +1022,9 @@ export function TmuxComposer({
        draft outright, exactly as before. */
     shared: voiceEnabled ? composerStore(cardId) : null,
   });
+  /* Pulls the bridge inbox once, at the start of a turn, and only for the voice
+     conversation. Returns "" for every other card and whenever nothing is pending. */
+  const drainBridgeTurnStart = useBridgeTurnStartDrain(voiceEnabled);
   const { text, textRef, setText, setTextState, inputRef, setStatus, busy, setBusy, voiceSending, attachments } = composer;
   const attachmentDraftHydrated = useRef(false);
   const isMobile = useIsMobile();
@@ -1525,7 +1530,13 @@ export function TmuxComposer({
        submit replays the original bytes under the original key. */
     const clientMessageId = deliveryAttemptKey(idempotencyKey.current, retry?.clientMessageId);
     const replayGeneration = pendingDeliveries.current.find((entry) => entry.key === clientMessageId);
-    const payloadText = replayGeneration?.text ?? requestedText;
+    /* #691 §4, the no-call path: a turn is opening, so whatever the manager
+       reported while nothing was live rides in with it. Never on a replay — a
+       retained generation replays its original bytes under its original key, and
+       changing them would defeat the idempotency the retry exists for. */
+    const bridgePrelude = replayGeneration ? "" : await drainBridgeTurnStart();
+    const payloadText = replayGeneration?.text
+      ?? (bridgePrelude ? `${bridgePrelude}\n\n${requestedText}` : requestedText);
     const sentImages: PendingImage[] = replayGeneration
       ? replayGeneration.images.map((image) => ({ ...image }))
       : requestedImages;

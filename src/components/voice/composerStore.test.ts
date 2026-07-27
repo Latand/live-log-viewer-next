@@ -156,3 +156,65 @@ test("hydrating an untouched store adopts the persisted draft", () => {
   store.hydrate("older persisted draft");
   expect(store.getSnapshot().draft).toBe("older persisted draft");
 });
+
+/* Round 2: the floater must not be silently disarmed by an ordinary card remount,
+   and both renderings must own one attachment tray. */
+
+test("a card remount never leaves the floater without a sender", () => {
+  const store = composerStore("conversation_a");
+  const sends: string[] = [];
+
+  /* React mounts the replacement before it unmounts the outgoing one, so the
+     release from the OLD registration arrives last. A naive "clear on release"
+     disarms the Send button the operator is about to press. */
+  const releaseFirst = store.registerSender(() => sends.push("first"));
+  const releaseSecond = store.registerSender(() => sends.push("second"));
+  releaseFirst();
+
+  store.setDraft("still sendable");
+  store.send();
+  expect(sends).toEqual(["second"]);
+
+  releaseSecond();
+  store.send();
+  expect(sends).toEqual(["second"]);
+});
+
+test("attachments staged in the card appear in the floater and are removed once", () => {
+  const store = composerStore("conversation_a");
+  const removed: string[] = [];
+  const release = store.registerAttachmentOwner({
+    remove: (id) => { removed.push(id); },
+    clearAll: () => { removed.push("*"); },
+  });
+
+  store.setAttachments([attachment("one"), attachment("two")]);
+  /* Removing from the floater must reach the card's real tray — the tray owns the
+     File objects and the object-URL lifetimes, which cannot live in two places. */
+  store.removeAttachment("one");
+  expect(removed).toEqual(["one"]);
+
+  release();
+  /* With no card mounted there is nothing to remove from, and inventing a second
+     tray would be how one attachment becomes two. */
+  store.removeAttachment("two");
+  expect(removed).toEqual(["one"]);
+});
+
+test("the attachment owner survives a card remount the same way the sender does", () => {
+  const store = composerStore("conversation_a");
+  const removed: string[] = [];
+  const releaseFirst = store.registerAttachmentOwner({
+    remove: () => { removed.push("first"); },
+    clearAll: () => undefined,
+  });
+  const releaseSecond = store.registerAttachmentOwner({
+    remove: () => { removed.push("second"); },
+    clearAll: () => undefined,
+  });
+  releaseFirst();
+
+  store.removeAttachment("x");
+  expect(removed).toEqual(["second"]);
+  releaseSecond();
+});

@@ -54,11 +54,28 @@ let calls: { url: string; method: string; body: unknown }[] = [];
 let delivered: RuntimeVoiceDelivery[][] = [];
 let plans: unknown[] = [];
 
+/**
+ * Stands in for the realtime client, including the part that matters most here:
+ * `reconcileWorkerDeliveries` only ENQUEUES. Durable delivery is confirmed later,
+ * when the host answers `acknowledged: true`, and the client announces it then.
+ */
+let acknowledgeListeners: ((deliveryId: string) => void)[] = [];
 const client = {
   reconcileWorkerDeliveries(deliveries: readonly RuntimeVoiceDelivery[]) {
     delivered.push([...deliveries]);
   },
+  onDeliveryAcknowledged(listener: (deliveryId: string) => void) {
+    acknowledgeListeners.push(listener);
+    return () => { acknowledgeListeners = acknowledgeListeners.filter((entry) => entry !== listener); };
+  },
 };
+
+/** The host confirming the write, which is the only thing that may move a cursor. */
+function confirmDurableDelivery(deliveryId: string): void {
+  flushSync(() => {
+    for (const listener of [...acknowledgeListeners]) listener(deliveryId);
+  });
+}
 
 function delivery(seq: number): RuntimeVoiceDelivery {
   return {
@@ -88,6 +105,7 @@ beforeEach(() => {
   calls = [];
   delivered = [];
   plans = [];
+  acknowledgeListeners = [];
 });
 
 afterEach(async () => {
@@ -115,13 +133,25 @@ test("no call means no poll — nothing pushes when there is nothing to interjec
   expect(calls).toEqual([]);
 });
 
-test("a delivered batch reaches the client first and is acknowledged after", async () => {
+test("the cursor does NOT move on enqueue — only durable delivery may advance it", async () => {
+  /* Inverting this is inverting exactly-once. `reconcileWorkerDeliveries` puts the
+     batch in an in-memory queue; a crash between that and the host's write loses
+     the report while the cursor claims it was delivered. */
   plans = [{ kind: "deliver", delivery: delivery(4), throughSeq: 4 }];
   mount(true);
   await settle();
 
   expect(delivered).toHaveLength(1);
-  expect(delivered[0]![0]!.responses[0]!.text).toContain("report 4");
+  expect(calls.filter((call) => call.method === "POST")).toEqual([]);
+});
+
+test("the cursor advances once the host confirms the durable write", async () => {
+  plans = [{ kind: "deliver", delivery: delivery(4), throughSeq: 4 }];
+  mount(true);
+  await settle();
+
+  confirmDurableDelivery(delivery(4).deliveryId);
+  await settle();
 
   const acknowledgement = calls.find((call) => call.method === "POST");
   expect(acknowledgement?.body).toEqual({ throughSeq: 4 });
@@ -130,6 +160,16 @@ test("a delivered batch reaches the client first and is acknowledged after", asy
   const deliveryIndex = calls.findIndex((call) => call.method === "GET");
   const ackIndex = calls.findIndex((call) => call.method === "POST");
   expect(deliveryIndex).toBeLessThan(ackIndex);
+});
+
+test("a confirmation for some other delivery never advances this batch's cursor", async () => {
+  plans = [{ kind: "deliver", delivery: delivery(4), throughSeq: 4 }];
+  mount(true);
+  await settle();
+
+  confirmDurableDelivery("voice:[\"bridge:99\",[\"report:99\"]]");
+  await settle();
+  expect(calls.filter((call) => call.method === "POST")).toEqual([]);
 });
 
 test("a lost-ack batch is acknowledged without being spoken again", async () => {

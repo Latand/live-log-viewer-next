@@ -70,6 +70,25 @@ export interface ComposerStore {
   /** Deliver the current draft through the registered sender. A no-op when no card
       is mounted: the floater cannot invent a delivery path of its own. */
   send(): void;
+  /**
+   * Publish the card's real attachment tray.
+   *
+   * The tray owns things the store cannot: the `File` objects, and the object-URL
+   * lifetimes that have to be revoked exactly once. Two trays would mean two
+   * revocations and, worse, two sets of bytes for one staged image — so the
+   * floater renders the tiles and asks the tray to act, exactly as it borrows the
+   * card's send rather than owning one.
+   */
+  registerAttachmentOwner(owner: ComposerAttachmentOwner): () => void;
+  /** Drop one staged attachment through the card's tray. No-op with no card. */
+  removeAttachment(id: string): void;
+  /** Drop every staged attachment through the card's tray. */
+  clearAttachments(): void;
+}
+
+export interface ComposerAttachmentOwner {
+  remove(id: string): void;
+  clearAll(): void;
 }
 
 const EMPTY: ComposerSnapshot = { draft: "", attachments: [] };
@@ -81,9 +100,11 @@ function createStore(conversationId: string): ComposerStore {
   /* Bumped on every send so a re-typed identical draft is a new message rather
      than a replay of the one just delivered. */
   let epoch = 0;
-  /* The card's delivery, while a card is mounted. Not part of the snapshot: it is
-     a capability, not something either rendering displays. */
+  /* The card's delivery and its attachment tray, while a card is mounted. Not part
+     of the snapshot: they are capabilities, not something either rendering
+     displays. */
   let sender: (() => void) | null = null;
+  let attachmentOwner: ComposerAttachmentOwner | null = null;
 
   const notify = (): void => {
     for (const listener of listeners) listener();
@@ -153,6 +174,19 @@ function createStore(conversationId: string): ComposerStore {
     },
     send() {
       sender?.();
+    },
+    registerAttachmentOwner(owner) {
+      /* Same last-one-wins discipline, for the same remount ordering. */
+      attachmentOwner = owner;
+      return () => {
+        if (attachmentOwner === owner) attachmentOwner = null;
+      };
+    },
+    removeAttachment(id) {
+      attachmentOwner?.remove(id);
+    },
+    clearAttachments() {
+      attachmentOwner?.clearAll();
     },
   };
 }

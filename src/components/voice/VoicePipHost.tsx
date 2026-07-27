@@ -206,8 +206,9 @@ export function VoicePipHost({ mobile, onSend, resolveClient = codexRealtimeClie
       draft={composer.draft}
       attachments={composer.attachments}
       onDraftChange={(draft) => store.setDraft(draft)}
-      onRemoveAttachment={(id) =>
-        store.setAttachments(composer.attachments.filter((attachment) => attachment.id !== id))}
+      /* Through the card's tray, which owns the File and the object URL. Filtering
+         the shared list here would hide a tile the card still holds. */
+      onRemoveAttachment={(id) => store.removeAttachment(id)}
       onSend={handleSend}
       sendDisabled={sendKey === null}
       compact={compact}

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import {
   acknowledgeBridgeDelivery,
+  bridgeTurnStartPrelude,
   pendingBridgeDelivery,
 } from "@/lib/bridge/service";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
@@ -33,6 +34,18 @@ const MAX_ACKNOWLEDGED_IDS = 256;
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const parameters = request.nextUrl.searchParams;
+
+  /* The no-call path (§4). A turn is about to open with no live call to interject
+     into, so its inbox becomes part of that turn's own input. Same cursor, same
+     caps, same "read moves nothing" rule as the live drain. */
+  if (parameters.get("mode") === "turn-start") {
+    try {
+      return NextResponse.json({ ok: true, prelude: bridgeTurnStartPrelude({ now: new Date() }) }, { headers });
+    } catch (error) {
+      return failure(error);
+    }
+  }
+
   const acknowledgedDeliveryIds = parameters.getAll("acked").slice(-MAX_ACKNOWLEDGED_IDS);
   const lastBatchAtRaw = parameters.get("lastBatchAt");
   const lastBatchAt = lastBatchAtRaw && Number.isFinite(Date.parse(lastBatchAtRaw))

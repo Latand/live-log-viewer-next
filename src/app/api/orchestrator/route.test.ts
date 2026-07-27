@@ -5,7 +5,10 @@ import path from "node:path";
 
 import { NextRequest } from "next/server";
 
-import { GET, POST } from "./route";
+import { GET, POST, __setOrchestratorRetireForTest } from "./route";
+
+let retirements: { conversationId: string; action: string }[] = [];
+let retireOutcome: "ok" | "fail" = "ok";
 
 let sandbox = "";
 let previousStateDir: string | undefined;
@@ -14,12 +17,20 @@ beforeEach(() => {
   previousStateDir = process.env.LLV_STATE_DIR;
   sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-orchestrator-route-"));
   process.env.LLV_STATE_DIR = sandbox;
+  retirements = [];
+  retireOutcome = "ok";
+  __setOrchestratorRetireForTest(async (conversationId) => {
+    retirements.push({ conversationId, action: "kill" });
+    if (retireOutcome === "fail") throw new Error("the predecessor could not be stopped");
+    return "killed";
+  });
 });
 
 afterEach(() => {
   if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
   else process.env.LLV_STATE_DIR = previousStateDir;
   fs.rmSync(sandbox, { recursive: true, force: true });
+  __setOrchestratorRetireForTest(null);
 });
 
 function adoptRequest(body: unknown): NextRequest {
@@ -123,4 +134,56 @@ test("POST refuses a non-string engine or model rather than storing it", async (
   ]) {
     expect((await POST(adoptRequest(body))).status).toBe(400);
   }
+});
+
+/* Round 2 — a swap must leave exactly ONE live manager. Rewriting the record while
+   the predecessor is still running is split-brain: two agents both believe they own
+   the board, and the bridge references whichever the record happens to name. */
+
+test("replacing a live incumbent retires the predecessor", async () => {
+  const transcript = path.join(sandbox, "orchestrator.jsonl");
+  fs.writeFileSync(transcript, "", "utf8");
+  await POST(adoptRequest({ conversationId: "conv-1", path: transcript }));
+
+  const swapped = await (await POST(adoptRequest({
+    conversationId: "conv-2",
+    path: null,
+    replace: true,
+    engine: "codex",
+    model: "sol",
+  }))).json();
+
+  expect(swapped.retired).toEqual({ conversationId: "conv-1", outcome: "killed" });
+  expect(retirements).toEqual([{ conversationId: "conv-1", action: "kill" }]);
+});
+
+test("a replacement that cannot retire the predecessor does not seat the successor", async () => {
+  const transcript = path.join(sandbox, "orchestrator.jsonl");
+  fs.writeFileSync(transcript, "", "utf8");
+  await POST(adoptRequest({ conversationId: "conv-1", path: transcript }));
+  retireOutcome = "fail";
+
+  const response = await POST(adoptRequest({ conversationId: "conv-2", path: null, replace: true }));
+  expect(response.status).toBe(409);
+
+  /* Split-brain avoided by refusing the swap: the record still names the only
+     manager that is actually running. */
+  const status = await (await GET()).json();
+  expect(status.record).toMatchObject({ conversationId: "conv-1" });
+});
+
+test("replacing the same conversation is a no-op rather than a self-kill", async () => {
+  await POST(adoptRequest({ conversationId: "conv-1", path: null }));
+  const swapped = await (await POST(adoptRequest({
+    conversationId: "conv-1", path: null, replace: true, model: "sonnet",
+  }))).json();
+
+  expect(retirements).toEqual([]);
+  expect(swapped.record).toMatchObject({ conversationId: "conv-1", model: "sonnet" });
+});
+
+test("a replacement with no live predecessor retires nothing", async () => {
+  const swapped = await (await POST(adoptRequest({ conversationId: "conv-1", path: null, replace: true }))).json();
+  expect(swapped.retired).toBeNull();
+  expect(retirements).toEqual([]);
 });

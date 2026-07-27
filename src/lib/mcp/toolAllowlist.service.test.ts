@@ -7,7 +7,7 @@ import {
   type McpToolBindings,
   type McpToolName,
 } from "./server";
-import { mcpCallerIdentity, mcpToolPolicy, type ManagerTarget } from "./toolAllowlist";
+import { MANAGER_ONLY_TOOLS, mcpCallerIdentity, mcpToolPolicy, type ManagerTarget } from "./toolAllowlist";
 
 /**
  * The fence at the seam it actually runs on. `toolAllowlist.test.ts` proves the
@@ -18,7 +18,7 @@ import { mcpCallerIdentity, mcpToolPolicy, type ManagerTarget } from "./toolAllo
 
 const MANAGER: ManagerTarget = { conversationId: "conversation_manager", path: null };
 
-function service(identity: "gateway" | "worker") {
+function service(identity: "gateway" | "worker" | "manager") {
   const calls: string[] = [];
   const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [
     toolName,
@@ -30,7 +30,9 @@ function service(identity: "gateway" | "worker") {
 
   const authority = identity === "gateway"
     ? { kind: "root" as const, conversationId: "conversation_root" }
-    : { kind: "worker" as const, conversationId: "conversation_builder", role: "builder" };
+    : identity === "manager"
+      ? { kind: "worker" as const, conversationId: MANAGER.conversationId!, role: "orchestrator" }
+      : { kind: "worker" as const, conversationId: "conversation_builder", role: "builder" };
   const policy = mcpToolPolicy(() => mcpCallerIdentity(authority, MANAGER), () => MANAGER);
   return { calls, service: createMcpToolService(bindings, new MemoryMcpReceiptStore(), policy) };
 }
@@ -118,8 +120,24 @@ test("without a policy the service behaves exactly as it did before", async () =
   expect(calls).toEqual(["spawn_agent", "deploy_exact_sha"]);
 });
 
-test("an unrestricted caller reaches every tool through the same service", async () => {
+test("an ordinary worker reaches every tool except the manager's own channel", async () => {
   const { calls, service: tools } = service("worker");
+  const reachable = MCP_TOOL_NAMES.filter((name) => !MANAGER_ONLY_TOOLS.includes(name));
+  for (const toolName of reachable) {
+    expect((await tools.callTool(toolName, { clientRequestId: `r-${toolName}` })).ok).toBe(true);
+  }
+  expect(calls).toEqual([...reachable]);
+
+  /* And the manager-only channel is refused at the service, not merely in policy. */
+  for (const toolName of MANAGER_ONLY_TOOLS) {
+    const result = await tools.callTool(toolName, { clientRequestId: `r-${toolName}` });
+    expect(result.ok).toBe(false);
+  }
+  expect(calls).toEqual([...reachable]);
+});
+
+test("the designated manager reaches every tool, including its own channel", async () => {
+  const { calls, service: tools } = service("manager");
   for (const toolName of MCP_TOOL_NAMES) {
     expect((await tools.callTool(toolName, { clientRequestId: `r-${toolName}` })).ok).toBe(true);
   }
