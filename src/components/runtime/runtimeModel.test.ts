@@ -273,6 +273,22 @@ describe("canonical voice delivery reconciliation", () => {
       deliveryId: delivery.deliveryId,
     }));
     expect(store.sessions["conv_a"]?.voiceDeliveries).toEqual([]);
+    expect(store.sessions["conv_a"]?.acknowledgedVoiceDeliveryIds).toEqual([
+      delivery.deliveryId,
+    ]);
+    store = apply(store, env("item", { type: "session", id: "conv_a" }, 6, {
+      conversationId: "conv_a",
+      turnId: "recovered",
+      phase: "completed",
+      item: { type: "agentMessage", id: "response", text: "recovered response" },
+      voiceResponse: { responseId: "response", text: "recovered response" },
+    }));
+    store = apply(store, env("turn-ended", { type: "session", id: "conv_a" }, 7, {
+      conversationId: "conv_a",
+      turnId: "recovered",
+      outcome: "completed",
+    }));
+    expect(store.sessions["conv_a"]?.voiceDeliveries).toEqual([]);
   });
 });
 
