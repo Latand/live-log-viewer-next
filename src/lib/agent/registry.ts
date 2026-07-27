@@ -2129,36 +2129,18 @@ function observationIsCurrent(currentObservedAt: string | null, observedAt: stri
   return observedAt >= currentObservedAt;
 }
 
-/** A receipt's launch profile, re-decided from the receipt's OWN durable origin
-    evidence (#739).
+/** A receipt's launch profile, held to the GLOBAL grant bound (#739).
 
-    A receipt is not a passive record of a finished decision: settlement copies
-    `receipt.launchProfile` onto the conversation generation and the entry row,
-    and attach reads it back, so a receipt that survives with a connector on it
-    widens the session AFTER the grant decision was made. The global bound
-    `emptyLaunchProfile` applies cannot see that — it holds a list, not a
-    session — and a delegated receipt naming a genuinely grantable server would
-    ride straight through it.
-
-    The evidence is on the row itself: admission (#393) stamps `agentRole`,
-    `delegationDepth` and `parentConversationId` on every receipt, so this is
-    decidable per row with no conversation in sight, and absent evidence denies
-    rather than promoting. */
+    The origin half of the decision is deliberately NOT made here. Settlement
+    copies `receipt.launchProfile` onto the conversation generation and the
+    entry row, and stamps the receipt's own role and depth onto a brand-new
+    conversation, so a receipt does not merely hold a grant — it manufactures
+    the origin evidence every later read trusts. Deciding it from the fields
+    travelling on the receipt would let the row authorise itself, whatever its
+    lineage says. That decision belongs to `reboundStoredMcpGrants`, which sees
+    the lineage edge and the conversation row the receipt cannot rewrite. */
 function receiptLaunchProfile(value: SpawnReceipt, policy?: McpGrantPolicy): LaunchProfile {
-  const profile = emptyLaunchProfile({ ...(value.launchProfile ?? {}), cwd: value.launchProfile?.cwd ?? value.cwd }, policy);
-  /* Every read walks every receipt, so the overwhelmingly common baseline
-     profile skips the resolver and its allocation — as the conversation path
-     does. Only a profile claiming more than the baseline is worth deciding. */
-  if (profile.mcpServers.length === 1 && profile.mcpServers[0] === "viewer") return profile;
-  return {
-    ...profile,
-    mcpServers: mcpServersForStoredSession({
-      parentConversationId: value.parentConversationId ?? profile.parentConversationId,
-      agentRole: normalizeAgentRole(value.agentRole),
-      delegationDepth: normalizeDelegationDepth(value.delegationDepth),
-      requested: profile.mcpServers,
-    }, policy),
-  };
+  return emptyLaunchProfile({ ...(value.launchProfile ?? {}), cwd: value.launchProfile?.cwd ?? value.cwd }, policy);
 }
 
 function normalizeReceipt(value: SpawnReceipt, policy?: McpGrantPolicy): SpawnReceipt {

@@ -716,6 +716,249 @@ test("a forged embedded key is denied even where no conversation is loaded", () 
     .toEqual(["viewer"]);
 });
 
+/** The origin fields a receipt carries, rewritten into the shape admission
+    stamps on an operator root. The receipt's LINEAGE — the edge row admission
+    wrote for it, and the conversation row once it settles — is left intact and
+    still says delegated. */
+const ROOT_SHAPE = { agentRole: null, delegationDepth: 0, parentConversationId: null } as const;
+type ReceiptForgery = { agentRole?: string | null; delegationDepth?: number | null; parentConversationId?: string | null };
+
+function forgeJsonReceiptOrigin(registryPath: string, launchId: string, forgery: ReceiptForgery, grant: string[]): void {
+  const raw = JSON.parse(fs.readFileSync(registryPath, "utf8")) as {
+    receipts: Record<string, ReceiptForgery & { launchProfile?: { mcpServers: string[] } }>;
+  };
+  const receipt = raw.receipts[launchId];
+  if (!receipt) throw new Error(`expected a stored receipt for ${launchId}`);
+  Object.assign(receipt, forgery);
+  /* The launch profile carries its own copy of the parent, and settlement puts
+     that copy on the generation, so a forgery that stopped at the receipt's
+     top-level fields would leave the delegation visible on the row it writes. */
+  receipt.launchProfile = { ...(receipt.launchProfile ?? {}), parentConversationId: null, mcpServers: [...grant] } as { mcpServers: string[] };
+  fs.writeFileSync(registryPath, JSON.stringify(raw));
+}
+
+function forgeSqliteReceiptOrigin(sqlitePath: string, launchId: string, forgery: ReceiptForgery, grant: string[]): void {
+  const db = new Database(sqlitePath, { strict: true });
+  try {
+    const row = db.query<{ value_json: string }, [string, string]>(
+      "SELECT value_json FROM registry_rows WHERE collection = ? AND row_key = ?",
+    ).get("receipts", launchId);
+    if (!row) throw new Error(`expected a stored receipts row for ${launchId}`);
+    const parsed = JSON.parse(row.value_json) as { launchProfile?: Record<string, unknown> };
+    Object.assign(parsed, forgery);
+    parsed.launchProfile = { ...(parsed.launchProfile ?? {}), parentConversationId: null, mcpServers: [...grant] };
+    db.query<unknown, [string, string, string]>(
+      "UPDATE registry_rows SET value_json = ? WHERE collection = ? AND row_key = ?",
+    ).run(JSON.stringify(parsed), "receipts", launchId);
+  } finally {
+    db.close();
+  }
+}
+
+/** A delegated launch admitted but NOT settled: its lineage edge row exists,
+    its conversation row does not yet. This is the state where the receipt's own
+    fields are the only thing describing it — and precisely where trusting them
+    would let the row authorise itself. */
+function admittedDelegatedChild(store: AgentRegistry, parentId: string) {
+  const child = store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    role: "builder",
+    parentConversationId: parentId as never,
+    origin: { kind: "agent", conversationId: parentId as never },
+  });
+  if (child.kind !== "created") throw new Error("expected child reservation");
+  return child.receipt;
+}
+
+test("a receipt forged into root shape is denied by the lineage it cannot rewrite, and nothing propagates through settlement (JSON)", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-receipt-origin-"));
+  const registryPath = path.join(directory, "registry.json");
+  const storage = { sqliteMode: "off" as const, mcpGrantPolicy: WITH_CONNECTOR };
+  try {
+    const store = new AgentRegistry(registryPath, undefined, undefined, storage);
+    const rootId = settledParent(store, ["viewer"]);
+    const worker = admittedDelegatedChild(store, rootId);
+    const honestRoot = store.beginSpawnRequest({ engine: "codex", cwd: "/repo" });
+
+    /* The worker rewrites its receipt's role, depth and parent into root shape
+       and helps itself to a connector. Its lineage edge is untouched. */
+    forgeJsonReceiptOrigin(registryPath, worker.launchId, ROOT_SHAPE, ["viewer", "test-connector"]);
+    /* The operator's own un-parented launch claims the same thing truthfully. */
+    forgeJsonReceiptOrigin(registryPath, honestRoot.receipt.launchId, ROOT_SHAPE, ["viewer", "test-connector"]);
+
+    const reloaded = new AgentRegistry(registryPath, undefined, undefined, storage);
+    expect(reloaded.snapshot().receipts[worker.launchId]!.launchProfile.mcpServers).toEqual(["viewer"]);
+    /* The honest root has no lineage edge to contradict it and keeps its grant,
+       so the denial is the contradiction and not a blanket receipt wipe. */
+    expect(reloaded.snapshot().receipts[honestRoot.receipt.launchId]!.launchProfile.mcpServers)
+      .toEqual(["viewer", "test-connector"]);
+
+    /* Settlement is the propagation path: it copies the receipt profile onto the
+       conversation generation and the entry row, and stamps the receipt's own
+       role and depth onto the conversation it creates. */
+    const settledWorker = settleAs(reloaded, worker.launchId, "forged-worker");
+    if (settledWorker.kind !== "settled") throw new Error("expected worker settlement");
+    const settledRoot = settleAs(reloaded, honestRoot.receipt.launchId, "honest-root");
+    if (settledRoot.kind !== "settled") throw new Error("expected root settlement");
+    const after = reloaded.snapshot();
+
+    expect(after.conversations[settledWorker.conversation.id]!.generations.at(-1)!.launchProfile.mcpServers).toEqual(["viewer"]);
+    expect(after.entries[entryRowKey("forged-worker")]?.launchProfile?.mcpServers).toEqual(["viewer"]);
+    expect(after.conversations[settledRoot.conversation.id]!.generations.at(-1)!.launchProfile.mcpServers)
+      .toEqual(["viewer", "test-connector"]);
+    expect(after.entries[entryRowKey("honest-root")]?.launchProfile?.mcpServers).toEqual(["viewer", "test-connector"]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a receipt forged into root shape is denied on every SQLite reader, and on claim after it settles", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-receipt-origin-sqlite-"));
+  const registryPath = path.join(directory, "agent-registry.json");
+  const sqlitePath = path.join(directory, "agent-registry.sqlite");
+  const storage = { sqliteMode: "sqlite" as const, mcpGrantPolicy: WITH_CONNECTOR };
+  try {
+    const store = new AgentRegistry(registryPath, undefined, undefined, storage);
+    const rootId = settledParent(store, ["viewer"]);
+    const worker = admittedDelegatedChild(store, rootId);
+
+    forgeSqliteReceiptOrigin(sqlitePath, worker.launchId, ROOT_SHAPE, ["viewer", "test-connector"]);
+
+    const reopened = new AgentRegistry(registryPath, undefined, undefined, storage);
+    /* readOnlySnapshot is what boot ADOPTION filters from; snapshot is what
+       structured RECOVERY reads through. */
+    expect(reopened.readOnlySnapshot().receipts[worker.launchId]!.launchProfile.mcpServers).toEqual(["viewer"]);
+    expect(reopened.snapshot().receipts[worker.launchId]!.launchProfile.mcpServers).toEqual(["viewer"]);
+
+    /* Settle it anyway. Settlement stamps the receipt's OWN role and depth onto
+       the conversation it creates, so the row now on disk reads `agentRole:
+       null, delegationDepth: 0` — an operator root by its own account. The
+       conversation's origin alone can no longer tell; only the lineage edge
+       admission wrote, which settlement never touches, still says otherwise. */
+    const settled = settleAs(reopened, worker.launchId, "sqlite-forged-worker");
+    if (settled.kind !== "settled") throw new Error("expected worker settlement");
+    structuredRow(reopened, "sqlite-forged-worker");
+    structuredRow(reopened, "nested-parent");
+    const workerRow = entryRowKey("sqlite-forged-worker");
+    const rootRow = entryRowKey("nested-parent");
+    expect(reopened.snapshot().conversations[settled.conversation.id]!.delegationDepth).toBe(0);
+
+    /* And it helps itself to the connector on every row it now owns. */
+    tamperSqliteGrant(sqlitePath, [
+      { collection: "entries", key: workerRow },
+      { collection: "conversations", key: settled.conversation.id },
+      { collection: "entries", key: rootRow },
+      { collection: "conversations", key: rootId },
+    ], ["viewer", "test-connector"]);
+
+    const settledView = new AgentRegistry(registryPath, undefined, undefined, storage);
+    expect(settledView.readOnlySnapshot().entries[workerRow]?.launchProfile?.mcpServers).toEqual(["viewer"]);
+    expect(settledView.snapshot().conversations[settled.conversation.id]!.generations.at(-1)!.launchProfile.mcpServers)
+      .toEqual(["viewer"]);
+    /* And the CLAIM mutation, which hands a host one row of its own. */
+    const claimed = settledView.claimStructuredHost(
+      { engine: "codex", sessionId: sessionIdFor("sqlite-forged-worker") },
+      { pid: process.pid, startIdentity: null },
+      { allowUnhosted: true },
+    );
+    expect(claimed).not.toBeNull();
+    expect(claimed?.launchProfile?.mcpServers).toEqual(["viewer"]);
+    /* The operator root has no lineage edge contradicting it and keeps the
+       grant on all three, so none of the above is a blanket wipe. */
+    expect(settledView.readOnlySnapshot().entries[rootRow]?.launchProfile?.mcpServers).toEqual(["viewer", "test-connector"]);
+    expect(settledView.snapshot().conversations[rootId]!.generations.at(-1)!.launchProfile.mcpServers)
+      .toEqual(["viewer", "test-connector"]);
+    expect(settledView.claimStructuredHost({ engine: "codex", sessionId: sessionIdFor("nested-parent") }, { pid: process.pid, startIdentity: null }, { allowUnhosted: true })
+      ?.launchProfile?.mcpServers).toEqual(["viewer", "test-connector"]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a receipt whose self-description disagrees with the rows attesting to it is denied in either direction", () => {
+  const grant = ["viewer", "test-connector"];
+  const fileWith = (
+    receipt: ReceiptForgery & { conversationId: string },
+    rows: { conversation?: { delegationDepth: number | null; agentRole: string | null }; edgeParent?: string },
+  ) => ({
+    conversations: rows.conversation
+      ? { [receipt.conversationId]: { engine: "codex", ...rows.conversation, generations: [] } }
+      : {},
+    lineageEdges: rows.edgeParent ? { [receipt.conversationId]: { parentConversationId: rows.edgeParent } } : {},
+    entries: {},
+    receipts: { launch: { ...receipt, launchProfile: { mcpServers: [...grant] } } },
+  } as unknown as StoredGrantFile);
+  const grantOf = (file: StoredGrantFile) =>
+    reboundAssembledMcpGrants(file, WITH_CONNECTOR).receipts!.launch!.launchProfile!.mcpServers;
+
+  /* Claims root; its lineage edge records a parent. The forgery direction. */
+  expect(grantOf(fileWith(
+    { conversationId: "conversation_worker", ...ROOT_SHAPE },
+    { edgeParent: "conversation_root" },
+  ))).toEqual(["viewer"]);
+
+  /* Claims delegated; the conversation attesting to it is an operator root.
+     Denied too — resolving a contradiction by believing whichever row is more
+     generous is how a tamper signal turns into an authorisation. */
+  expect(grantOf(fileWith(
+    { conversationId: "conversation_root", agentRole: "builder", delegationDepth: 1, parentConversationId: null },
+    { conversation: { agentRole: null, delegationDepth: 0 } },
+  ))).toEqual(["viewer"]);
+
+  /* Agreeing rows keep the grant, so neither denial above is a blanket wipe. */
+  expect(grantOf(fileWith(
+    { conversationId: "conversation_root", ...ROOT_SHAPE },
+    { conversation: { agentRole: null, delegationDepth: 0 } },
+  ))).toEqual(grant);
+  /* And an un-parented launch that has not settled has nothing attesting to it
+     yet, which is not a contradiction — it still only narrows. */
+  expect(grantOf(fileWith({ conversationId: "conversation_fresh", ...ROOT_SHAPE }, {}))).toEqual(grant);
+  expect(grantOf(fileWith(
+    { conversationId: "conversation_fresh", agentRole: "builder", delegationDepth: 1, parentConversationId: null },
+    {},
+  ))).toEqual(["viewer"]);
+});
+
+test("a conversation whose lineage edge contradicts its own row is denied rather than believed", () => {
+  const grant = ["viewer", "test-connector"];
+  /* The row settlement writes from a receipt forged into root shape: depth 0,
+     no role, no parent — while the edge admission wrote still records a parent.
+     Two rows, one of them lying, and no way to tell which. */
+  const contradicted = () => ({
+    conversations: {
+      conversation_worker: {
+        id: "conversation_worker",
+        engine: "codex",
+        agentRole: null,
+        delegationDepth: 0,
+        generations: [{
+          id: "worker-generation",
+          path: "/sessions/worker.jsonl",
+          launchProfile: { ...emptyLaunchProfile(), parentConversationId: null, mcpServers: [...grant] },
+        }],
+      },
+    },
+    lineageEdges: {
+      conversation_worker: { childConversationId: "conversation_worker", parentConversationId: "conversation_root" },
+    },
+    entries: {
+      "codex:worker-generation": { artifactPath: "/sessions/worker.jsonl", launchProfile: { mcpServers: [...grant] } },
+    },
+  } as unknown as StoredGrantFile);
+
+  const rebounded = reboundAssembledMcpGrants(contradicted(), WITH_CONNECTOR);
+  expect(rebounded.conversations.conversation_worker!.generations[0]!.launchProfile.mcpServers).toEqual(["viewer"]);
+  expect(rebounded.entries["codex:worker-generation"]!.launchProfile!.mcpServers).toEqual(["viewer"]);
+
+  /* Drop the edge and the same row is an ordinary operator root again, so the
+     denial above is the contradiction rather than the row's own shape. */
+  const uncontradicted = contradicted();
+  delete (uncontradicted as { lineageEdges?: unknown }).lineageEdges;
+  expect(reboundAssembledMcpGrants(uncontradicted, WITH_CONNECTOR)
+    .conversations.conversation_worker!.generations[0]!.launchProfile.mcpServers).toEqual(grant);
+});
+
 test("a SQLite-authoritative registry re-bounds a tampered entry row on the paths adoption reads", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-sqlite-tamper-"));
   const registryPath = path.join(directory, "agent-registry.json");
