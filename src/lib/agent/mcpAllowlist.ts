@@ -23,6 +23,7 @@
  */
 
 import { sessionOriginFor, type SessionOrigin, type SessionOriginInput } from "./pluginAllowlist";
+import { sessionKeyId } from "./sessionKey";
 
 /** The always-on baseline. A spawn that selects nothing gets exactly this. */
 export const DEFAULT_SPAWN_MCP_SERVERS: readonly string[] = Object.freeze(["viewer"]);
@@ -154,4 +155,147 @@ export function mcpServersForStoredSession(
 export function grantedMcpServers(value: readonly string[] | undefined | null, policy: McpGrantPolicy = MCP_GRANT_POLICY): string[] {
   if (!Array.isArray(value)) return [...DEFAULT_SPAWN_MCP_SERVERS];
   return withViewer(value.filter((name) => typeof name === "string" && policy.grantable.includes(name)));
+}
+
+/* The durable shapes this module re-decides grants on. Typed structurally and
+   type-only, so the storage layers can call in without a runtime cycle. */
+type StoredGeneration = { id: string; path?: string | null; launchProfile: { mcpServers: string[]; parentConversationId: string | null } };
+type StoredConversation = { engine: string; agentRole: string | null; delegationDepth: number | null; generations: StoredGeneration[] };
+type StoredEntry = {
+  key?: { engine: string; sessionId: string } | null;
+  artifactPath?: string | null;
+  launchProfile?: { mcpServers: string[] } | null;
+};
+export interface StoredGrantFile {
+  conversations: Record<string, StoredConversation>;
+  entries: Record<string, StoredEntry>;
+}
+
+function isBaselineGrant(names: readonly string[]): boolean {
+  return names.length === 1 && names[0] === "viewer";
+}
+
+function sameGrant(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((name, index) => name === right[index]);
+}
+
+/** An entry names its generation by session key, and the transcript path is the
+    same identity spelled the other way; either match makes the entry's owning
+    conversation — and so its origin — knowable. */
+function generationKeys(engine: string, generation: StoredGeneration): string[] {
+  const keys = [sessionKeyId({ engine: engine as never, sessionId: generation.id })];
+  if (generation.path) keys.push(JSON.stringify(["path", engine, generation.path]));
+  return keys;
+}
+
+function entryKeys(id: string, entry: StoredEntry): string[] {
+  const keys = [entry.key ? sessionKeyId({ engine: entry.key.engine as never, sessionId: entry.key.sessionId }) : id];
+  if (entry.key && entry.artifactPath) keys.push(JSON.stringify(["path", entry.key.engine, entry.artifactPath]));
+  return keys;
+}
+
+function decideStoredGrant(
+  conversation: StoredConversation,
+  generation: StoredGeneration,
+  policy: McpGrantPolicy,
+): string[] {
+  const stored = generation.launchProfile.mcpServers;
+  /* Every read walks this, so the overwhelmingly common baseline profile skips
+     the resolver and its allocation; only a profile claiming more than the
+     baseline is worth re-deciding. */
+  if (isBaselineGrant(stored)) return stored;
+  return mcpServersForStoredSession({
+    parentConversationId: generation.launchProfile.parentConversationId,
+    agentRole: conversation.agentRole,
+    delegationDepth: conversation.delegationDepth,
+    requested: stored,
+  }, policy);
+}
+
+/**
+ * Re-decides every stored MCP grant from the conversation's durable origin as
+ * a registry snapshot is read (#739).
+ *
+ * `emptyLaunchProfile` already applies the global bound to each profile, but a
+ * bound alone cannot tell an operator root apart from a delegated worker: a
+ * delegated session that edits durable state by hand to name a server the
+ * Viewer *can* grant would otherwise have it honoured by attach, resume and
+ * structured host adoption, all of which read these profiles straight out of
+ * storage. Doing it here means no reader has to remember to.
+ *
+ * A conversation row carries its own origin evidence, so it is decidable
+ * alone. An ENTRY row is not — and both backends normalize rows one collection
+ * (one row, for SQLite) at a time, which is why an entry is only ever narrowed
+ * here when the conversation that owns it is present in the same object.
+ * Deciding an unowned entry at this level would wipe a legitimate root grant
+ * every time a lone entries row is normalized; that judgement belongs to
+ * {@link reboundAssembledMcpGrants}, which runs where the whole file is known.
+ */
+export function reboundStoredMcpGrants<T extends StoredGrantFile>(file: T, policy: McpGrantPolicy = MCP_GRANT_POLICY): T {
+  const decided = new Map<string, string[]>();
+  for (const conversation of Object.values(file.conversations)) {
+    for (const generation of conversation.generations) {
+      const granted = decideStoredGrant(conversation, generation, policy);
+      generation.launchProfile.mcpServers = granted;
+      for (const key of generationKeys(conversation.engine, generation)) decided.set(key, granted);
+    }
+  }
+  /* The entry row is the copy structured host adoption reads, and it can be
+     tampered with on its own, so it follows its conversation's decision. */
+  for (const [id, entry] of Object.entries(file.entries)) {
+    const stored = entry.launchProfile?.mcpServers;
+    if (!stored || isBaselineGrant(stored)) continue;
+    const granted = entryKeys(id, entry).map((key) => decided.get(key)).find(Boolean);
+    if (granted && !sameGrant(stored, granted)) entry.launchProfile!.mcpServers = [...granted];
+  }
+  return file;
+}
+
+/**
+ * The same pass for a COMPLETE registry snapshot, where every conversation that
+ * exists is present: an entry no conversation owns has no origin evidence at
+ * all, and here that is a fact about the entry rather than about how much of
+ * the file was loaded, so it falls back to the baseline — the same fail-closed
+ * reading {@link sessionOriginFor} gives an unrecognized launch.
+ */
+export function reboundAssembledMcpGrants<T extends StoredGrantFile>(file: T, policy: McpGrantPolicy = MCP_GRANT_POLICY): T {
+  reboundStoredMcpGrants(file, policy);
+  const owned = new Set<string>();
+  for (const conversation of Object.values(file.conversations)) {
+    for (const generation of conversation.generations) {
+      for (const key of generationKeys(conversation.engine, generation)) owned.add(key);
+    }
+  }
+  for (const [id, entry] of Object.entries(file.entries)) {
+    const stored = entry.launchProfile?.mcpServers;
+    if (!stored || isBaselineGrant(stored)) continue;
+    if (entryKeys(id, entry).some((key) => owned.has(key))) continue;
+    entry.launchProfile!.mcpServers = [...DEFAULT_SPAWN_MCP_SERVERS];
+  }
+  return file;
+}
+
+/**
+ * The same decision for ONE entry row, for the paths that hand a single entry
+ * to a host from inside a mutation rather than from an assembled snapshot.
+ */
+export function reboundEntryMcpGrant(
+  file: StoredGrantFile,
+  key: { engine: string; sessionId: string },
+  policy: McpGrantPolicy = MCP_GRANT_POLICY,
+): void {
+  const id = sessionKeyId({ engine: key.engine as never, sessionId: key.sessionId });
+  const entry = file.entries[id];
+  const stored = entry?.launchProfile?.mcpServers;
+  if (!entry || !stored || isBaselineGrant(stored)) return;
+  const wanted = new Set(entryKeys(id, entry));
+  for (const conversation of Object.values(file.conversations)) {
+    for (const generation of conversation.generations) {
+      if (!generationKeys(conversation.engine, generation).some((candidate) => wanted.has(candidate))) continue;
+      const granted = decideStoredGrant(conversation, generation, policy);
+      if (!sameGrant(stored, granted)) entry.launchProfile!.mcpServers = [...granted];
+      return;
+    }
+  }
+  entry.launchProfile!.mcpServers = [...DEFAULT_SPAWN_MCP_SERVERS];
 }

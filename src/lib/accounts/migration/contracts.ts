@@ -1,5 +1,5 @@
 import type { AgentEngine } from "@/lib/agent/cli";
-import { grantedMcpServers } from "@/lib/agent/mcpAllowlist";
+import { grantedMcpServers, type McpGrantPolicy } from "@/lib/agent/mcpAllowlist";
 import { grantedPlugins } from "@/lib/agent/pluginAllowlist";
 import type { StructuredImageRef } from "@/lib/runtime/structuredContent";
 import type { AgentGoal, AgentPlan, EngineLimits, LimitsProvenance } from "@/lib/types";
@@ -71,7 +71,13 @@ export interface LaunchProfile {
   plan: AgentPlan | null;
 }
 
-export function emptyLaunchProfile(overrides: Partial<LaunchProfile> = {}): LaunchProfile {
+export function emptyLaunchProfile(
+  overrides: Partial<LaunchProfile> = {},
+  /* The grant bound to enforce. Production omits it; the storage layer threads
+     a test policy through so the origin rules can be exercised against a bound
+     that HAS a grantable connector (issue #739). */
+  policy?: McpGrantPolicy,
+): LaunchProfile {
   return {
     cwd: "",
     model: null,
@@ -90,7 +96,7 @@ export function emptyLaunchProfile(overrides: Partial<LaunchProfile> = {}): Laun
     /* Same bound, enforced again on the durable profile: an allowlist can only
        ever carry servers the Viewer is allowed to grant, and always carries
        `viewer` (issue #739). */
-    mcpServers: grantedMcpServers(overrides.mcpServers),
+    mcpServers: grantedMcpServers(overrides.mcpServers, policy),
     /* The grant bound is enforced again here: a durable profile can only ever
        carry plugins the Viewer is allowed to grant (issue #687). */
     plugins: grantedPlugins(overrides.plugins),

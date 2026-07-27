@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import type { Database as BunDatabase } from "bun:sqlite";
 
+import { reboundAssembledMcpGrants, type McpGrantPolicy } from "./mcpAllowlist";
 import type { RegistryFile } from "./registry";
 
 const ROW_COLLECTIONS = [
@@ -58,6 +59,11 @@ export interface SqliteRegistryMutation<T> {
 export interface SqliteRegistryStoreOptions {
   initialSnapshot: RegistryFile;
   normalize(value: unknown): RegistryFile;
+  /** Grant bound for the assembled-snapshot rebound below, matching whatever
+      `normalize` enforces. Production omits both; a test supplies a policy that
+      HAS a grantable connector, because the shipped bound has none and an empty
+      bound cannot tell an origin reset from itself (issue #739). */
+  mcpGrantPolicy?: McpGrantPolicy;
   onWriterWait?(durationMs: number): void;
   onSnapshotLoad?(): void;
   onRowPayloadRead?(collection: RowCollection, count: number): void;
@@ -109,6 +115,8 @@ export class SqliteAgentRegistryStore {
   private revisionCache: { signature: string; revision: number } | null = null;
   private readOnlyCache: SqliteRegistrySnapshot | null = null;
 
+  private readonly mcpGrantPolicy: McpGrantPolicy | undefined;
+
   constructor(readonly filename: string, options: SqliteRegistryStoreOptions) {
     fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
     const sqlite = process.getBuiltinModule?.("bun:sqlite") as typeof import("bun:sqlite") | undefined;
@@ -121,6 +129,7 @@ export class SqliteAgentRegistryStore {
     this.onRowPayloadRead = options.onRowPayloadRead;
     this.onRowPayloadParse = options.onRowPayloadParse;
     this.onRevisionQuery = options.onRevisionQuery;
+    this.mcpGrantPolicy = options.mcpGrantPolicy;
     this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL;");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS registry_meta (
@@ -288,6 +297,13 @@ export class SqliteAgentRegistryStore {
     const snapshot = this.loadLazyInTransaction(false, useRowCache);
     for (const collection of ROW_COLLECTIONS) void snapshot.file[collection];
     for (const field of META_FIELDS) void snapshot.file[field];
+    /* Rows are normalized one collection — one row, even — at a time, so an
+       entry row is normalized with no conversations in sight and the origin
+       half of the MCP grant bound cannot be decided there (#739). The assembled
+       snapshot is the first point where an entry can be matched to the
+       conversation that owns it, so the decision lands here, before any reader
+       (startup adoption, structured recovery) sees a profile. */
+    reboundAssembledMcpGrants(snapshot.file, this.mcpGrantPolicy);
     return snapshot;
   }
 

@@ -460,7 +460,7 @@ test("idle reconfiguration survives a transient host miss and resumes after veri
   };
   let resumed = 0;
   let killed = false;
-  let resumePolicy: { readOnly?: boolean | null; permissionMode?: string | null; allowSubagents?: boolean } = {};
+  let resumePolicy: { readOnly?: boolean | null; permissionMode?: string | null; allowSubagents?: boolean; mcpServers?: readonly string[] } = {};
 
   const outcome = await reconfigureConversation(pathname, { model: "gpt-5.6-terra", effort: "medium", fast: true }, {
     pathAllowed: () => true,
@@ -484,7 +484,9 @@ test("idle reconfiguration survives a transient host miss and resumes after veri
   expect(outcome).toMatchObject({ ok: true, outcome: "reconfigured", target: "%8" });
   expect(resumed).toBe(1);
   expect(killed).toBe(true);
-  expect(resumePolicy).toMatchObject({ readOnly: true, permissionMode: "never", allowSubagents: true });
+  /* The rebuilt command carries the durable MCP grant too (#739): dropping it
+     relaunched the session on the baseline while the profile still claimed it. */
+  expect(resumePolicy).toMatchObject({ readOnly: true, permissionMode: "never", allowSubagents: true, mcpServers: ["viewer"] });
 });
 
 test("legacy account reconfiguration queues a conversation reseat without touching the active pane", async () => {
@@ -1226,4 +1228,66 @@ test("a tmux resume rebuilds the command with the conversation's stored MCP gran
      the Viewer baseline while the durable profile still claimed it (#739). */
   expect(options).toHaveLength(1);
   expect(options[0]!.mcpServers).toEqual(["viewer", "granted-connector"]);
+});
+
+test("message-triggered relaunches carry the stored MCP grant on both the direct and root-relay paths", async () => {
+  /* Real session ids: this path goes through the process-wide registry, which
+     keys entries by session key rather than by the override object. */
+  const branchId = "019f4e76-66b4-\x37f87-94b2-cfa9bf746661";
+  const rootId = "019f4e76-66b4-\x37f87-94b2-cfa9bf746662";
+  const branchPath = path.join(SANDBOX, `${branchId}.jsonl`);
+  const rootPath = path.join(SANDBOX, `${rootId}.jsonl`);
+  fs.writeFileSync(branchPath, "");
+  fs.writeFileSync(rootPath, "");
+  const registry = new AgentRegistry(path.join(SANDBOX, "message-grant-registry.json"), undefined, undefined, { sqliteMode: "off" });
+  setAgentRegistryForTests(registry);
+  for (const [sessionId, pathname] of [[branchId, branchPath], [rootId, rootPath]] as const) {
+    registry.upsert({
+      key: { engine: "codex", sessionId }, artifactPath: pathname, cwd: SANDBOX, accountId: "account",
+      launchProfile: emptyLaunchProfile({ cwd: SANDBOX, mcpServers: ["viewer"] }), status: "dead",
+      host: null, claimEpoch: 0, claimOwner: null, pendingAction: null,
+    });
+    /* The durable profile a relaunch reads hangs off the conversation, so the
+       session needs one — an entry row alone is not what it looks up. */
+    const conversation = registry.ensureConversation("codex", pathname, "account");
+    registry.updateConversationLaunchProfile(conversation.id, { model: "gpt-5.6-sol", effort: "high", fast: false });
+  }
+  const fileEntry = (pathname: string, parent: string | null): FileEntry => ({
+    path: pathname, root: "codex-sessions", name: path.basename(pathname), project: "viewer",
+    title: "grant", engine: "codex", kind: "session", fmt: "codex", parent, mtime: 1, size: 0,
+    activity: "idle", proc: null, pid: null, model: "gpt-5.6-sol", effort: "high", fast: false,
+    pendingQuestion: null, waitingInput: null,
+  });
+  const seen: { path: string; mcpServers?: readonly string[] }[] = [];
+  const overrides = (resumable: (pathname: string) => boolean) => ({
+    pathAllowed: () => true,
+    listFiles: async () => [fileEntry(branchPath, rootPath), fileEntry(rootPath, null)],
+    livePaneHost: async () => null,
+    resumeSpecFor: (_root: string, pathname: string, given: { mcpServers?: readonly string[] }) => {
+      seen.push({ path: pathname, mcpServers: given.mcpServers });
+      return resumable(pathname)
+        ? { command: "codex resume", cwd: SANDBOX, windowName: "codex-resume", engine: "codex" }
+        : null;
+    },
+    deliver: async () => ({ ok: true, outcome: "resumed", target: "%4" }),
+  });
+
+  /* The dead session reopens as its own window: its own grant travels with it,
+     rather than the command falling back to the baseline (#739). */
+  const direct = await deliverConversationMessage({ path: branchPath, text: "reopen", images: [] } as never, overrides(() => true) as never);
+  expect(direct).toMatchObject({ ok: true });
+  expect(seen).toEqual([{ path: branchPath, mcpServers: ["viewer"] }]);
+
+  /* A branch that cannot be resumed relays through its root, whose own grant
+     must reach the root's command on the same terms. */
+  seen.length = 0;
+  const relayed = await deliverConversationMessage(
+    { path: branchPath, text: "relay", images: [] } as never,
+    overrides((pathname) => pathname === rootPath) as never,
+  );
+  expect(relayed).toMatchObject({ ok: true });
+  expect(seen).toEqual([
+    { path: branchPath, mcpServers: ["viewer"] },
+    { path: rootPath, mcpServers: ["viewer"] },
+  ]);
 });
