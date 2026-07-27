@@ -10,7 +10,9 @@ const IDLE = { phase: "idle" as const, lines: [], error: null, startedAt: null, 
 export function useCodexRealtime(
   conversationId: string,
   enabled: boolean,
+  workerTurnId: string,
   workerProgress: string,
+  workerRunning: boolean,
 ) {
   const ambientOwner = useRef(Symbol("realtime-ambient-owner"));
   const client = useMemo(
@@ -22,23 +24,11 @@ export function useCodexRealtime(
     client?.getSnapshot ?? (() => IDLE),
     () => IDLE,
   );
-  const previousProgress = useRef("");
-
   useEffect(() => {
-    if (!client) {
-      previousProgress.current = "";
-      return;
-    }
-    if (workerProgress) {
-      previousProgress.current = workerProgress;
-      client.queueWorkerProgress(workerProgress);
-      return;
-    }
-    if (previousProgress.current) {
-      client.finishWorkerProgress(previousProgress.current);
-      previousProgress.current = "";
-    }
-  }, [client, snapshot.phase, workerProgress]);
+    if (!client || !workerTurnId || !workerProgress) return;
+    if (workerRunning) client.queueWorkerProgress(workerTurnId, workerProgress);
+    else client.finishWorkerProgress(workerTurnId, workerProgress);
+  }, [client, snapshot.phase, workerProgress, workerRunning, workerTurnId]);
 
   /* The ambient bed is eligible only while a call is up, and it fades on both
      edges. `live` is the only phase with two participants who can talk;

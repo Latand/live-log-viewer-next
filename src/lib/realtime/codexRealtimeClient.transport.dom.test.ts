@@ -14,15 +14,16 @@ Object.assign(globalThis, {
 class StubDataChannel {
   readyState = "open";
   sent: string[] = [];
-  /** Sends to reject before accepting again, standing in for a transport that
-      drops mid-flush; a rejected send is never recorded as delivered. */
-  failuresRemaining = 0;
+  sendAttempts = 0;
+  /** One send attempt to reject, standing in for a transport that drops
+      mid-response; a rejected chunk is never recorded as delivered. */
+  failOnAttempt: number | null = null;
   onopen: (() => void) | null = null;
   onmessage: ((message: { data: unknown }) => void) | null = null;
   onclose: (() => void) | null = null;
   send(payload: string): void {
-    if (this.failuresRemaining > 0) {
-      this.failuresRemaining -= 1;
+    this.sendAttempts += 1;
+    if (this.sendAttempts === this.failOnAttempt) {
       throw new Error("data channel send failed");
     }
     this.sent.push(payload);
@@ -170,7 +171,7 @@ test("a data channel lost before opening surfaces the error state instead of con
   expect(client.getSnapshot().error).toBe("Realtime connection closed");
 });
 
-test("a live call renders both transcripts and streams delegation handoffs with a final message", async () => {
+test("a live call keeps worker progress local and sends one completed response to voice", async () => {
   globalThis.fetch = (async () => jsonResponse(200, { ok: true, sdp: "v=0\r\nanswer" })) as unknown as typeof fetch;
 
   const client = codexRealtimeClient("conversation_live_call");
@@ -191,12 +192,25 @@ test("a live call renders both transcripts and streams delegation handoffs with 
     ["assistant", "On it — three agents are active", true],
   ]);
 
-  // Delegation: worker progress flows as targeted context appends (~200ms
-  // cadence), and completion carries the Agent Final Message on speakable.
+  // Delegation: accumulated progress remains local while the worker runs.
   peer.channel.onmessage?.({ data: JSON.stringify({ type: "delegation.created", item: { id: "delegation-9" } }) });
-  client.queueWorkerProgress("Reading current agents");
-  await new Promise((resolve) => setTimeout(resolve, 250));
-  client.finishWorkerProgress("Reading current agents — done");
+  let produced = "";
+  for (let step = 0; step < 40; step += 1) {
+    produced += segment(step, 300);
+    client.queueWorkerProgress("turn-live-call", produced);
+  }
+  expect(client.getSnapshot().lines.at(-1)).toMatchObject({
+    role: "progress",
+    text: produced.slice(-12_000),
+    final: false,
+  });
+
+  client.finishWorkerProgress("turn-live-call", produced);
+  // A repeated completion render describes the same worker response.
+  client.finishWorkerProgress("turn-live-call", produced);
+  // A replay can surface the completed turn's progress before completion again.
+  client.queueWorkerProgress("turn-live-call", produced);
+  client.finishWorkerProgress("turn-live-call", produced);
 
   const events = peer.channel.sent.map((payload) => JSON.parse(payload) as {
     type: string;
@@ -205,13 +219,12 @@ test("a live call renders both transcripts and streams delegation handoffs with 
     content: { text: string }[];
   });
   expect(events.every((event) => event.type === "delegation.context.append" && event.delegation_item_id === "delegation-9")).toBe(true);
-  expect(events.filter((event) => event.channel === "commentary").length).toBeGreaterThanOrEqual(1);
-  expect(events.at(-1)?.channel).toBe("speakable");
-  expect(events.at(-1)?.content[0]?.text).toStartWith("Agent Final Message:");
+  expect(events.filter((event) => event.channel === "commentary")).toEqual([]);
+  expect(sentOn(peer.channel, "speakable")).toBe(`Agent Final Message:\n\n${produced.slice(-12_000)}`);
 
   const progress = client.getSnapshot().lines.filter((line) => line.role === "progress");
-  expect(progress.at(-1)?.text).toBe("Reading current agents — done");
-  expect(progress.at(-1)?.final).toBe(true);
+  expect(progress).toHaveLength(1);
+  expect(progress[0]).toMatchObject({ text: produced.slice(-12_000), final: true });
 
   await client.stop();
   expect(client.getSnapshot().phase).toBe("idle");
@@ -266,44 +279,6 @@ test("issue 664: the transport reason stands when the host has no failure to rep
   expect(client.getSnapshot().error).toBe("Realtime connection was interrupted");
 });
 
-/* The handoff flush is a 200ms `window.setTimeout`. Driving it by hand keeps a
-   60,000-character stream a millisecond of test time instead of 40 seconds, and
-   makes "one flush per producer tick" observable rather than timing-dependent. */
-function manualTimers() {
-  const host = window as unknown as {
-    setTimeout: unknown;
-    clearTimeout: unknown;
-  };
-  const originalSet = host.setTimeout;
-  const originalClear = host.clearTimeout;
-  const pending = new Map<number, () => void>();
-  let handle = 0;
-  host.setTimeout = (callback: () => void) => {
-    pending.set(++handle, callback);
-    return handle;
-  };
-  host.clearTimeout = (id: number) => {
-    pending.delete(id);
-  };
-  function run(): number {
-    const due = [...pending.entries()];
-    pending.clear();
-    for (const [, callback] of due) callback();
-    return due.length;
-  }
-  return {
-    run,
-    /** Runs armed callbacks until the client stops re-arming (bounded). */
-    drain(): void {
-      for (let pass = 0; pass < 10_000 && run() > 0; pass += 1);
-    },
-    restore(): void {
-      host.setTimeout = originalSet;
-      host.clearTimeout = originalClear;
-    },
-  };
-}
-
 /** Every character the client actually put on one channel, in wire order. */
 function sentOn(channel: StubDataChannel, name: "commentary" | "speakable", from = 0): string {
   return channel.sent
@@ -330,147 +305,71 @@ async function liveCall(conversationId: string, delegationId: string) {
   return { client, channel: peer.channel };
 }
 
-test("worker progress past the 12,000-character window ships each character exactly once", async () => {
-  /* The producer is one monotonically growing turn. Handoff traffic must stay
-     proportional to new content across the retained-window boundary — the tail
-     window sliding used to make every flush resend the whole window, 32x and
-     climbing over a 60,000-character turn. */
-  const { client, channel } = await liveCall("conversation_progress_window", "delegation-window");
-  const timers = manualTimers();
-  let produced = "";
-  try {
-    for (let step = 0; step < 200; step += 1) {
-      produced += segment(step, 300);
-      client.queueWorkerProgress(produced);
-      timers.run();
-    }
-    timers.drain();
-  } finally {
-    timers.restore();
-  }
-
-  expect(produced.length).toBe(60_000);
-  const commentary = sentOn(channel, "commentary");
-  // Ordering and exact-once: the wire is the produced turn, byte for byte.
-  expect(commentary).toBe(produced);
-  expect(commentary.length / produced.length).toBeLessThanOrEqual(1.05);
-  await client.stop();
-});
-
-test("a stream that never reaches the window boundary behaves the same", async () => {
-  const { client, channel } = await liveCall("conversation_progress_short", "delegation-short");
-  const timers = manualTimers();
-  let produced = "";
-  try {
-    for (let step = 0; step < 20; step += 1) {
-      produced += segment(step, 250);
-      client.queueWorkerProgress(produced);
-      timers.run();
-    }
-    timers.drain();
-  } finally {
-    timers.restore();
-  }
-
-  expect(produced.length).toBe(5_000);
-  expect(sentOn(channel, "commentary")).toBe(produced);
-  await client.stop();
-});
-
-test("a rewritten turn resets the cursor and ships the replacement once", async () => {
-  const { client, channel } = await liveCall("conversation_progress_rewrite", "delegation-rewrite");
-  const timers = manualTimers();
-  try {
-    let produced = "";
-    for (let step = 0; step < 50; step += 1) {
-      produced += segment(step, 300);
-      client.queueWorkerProgress(produced);
-      timers.run();
-    }
-    timers.drain();
-    expect(produced.length).toBe(15_000);
-    expect(sentOn(channel, "commentary")).toBe(produced);
-
-    // The producer replaces the turn rather than extending it (compaction, a
-    // restarted turn). The replacement is not a suffix of anything sent, so it
-    // ships whole — once — and nothing already sent repeats.
-    const before = channel.sent.length;
-    const rewritten = segment(999, 800);
-    client.queueWorkerProgress(rewritten);
-    timers.drain();
-    expect(sentOn(channel, "commentary", before)).toBe(rewritten);
-  } finally {
-    timers.restore();
-  }
-  await client.stop();
-});
-
-test("a backlog larger than one window drains in order without splitting a character", async () => {
-  /* One producer tick can owe more than a single flush may carry (a cursor
-     reset, or a channel that was shut for a while). The rest follows on the
-     next flush, and the cap never lands inside a surrogate pair. */
-  const { client, channel } = await liveCall("conversation_progress_burst", "delegation-burst");
-  const timers = manualTimers();
-  const produced = `${"a".repeat(11_999)}😀${"b".repeat(20_000)}`;
-  try {
-    client.queueWorkerProgress(produced);
-    timers.drain();
-  } finally {
-    timers.restore();
-  }
-
-  expect(sentOn(channel, "commentary")).toBe(produced);
-  const chunks = channel.sent.map((payload) => (JSON.parse(payload) as { content: { text: string }[] })
-    .content.map((part) => part.text).join(""));
-  expect(chunks.length).toBeGreaterThan(1);
-  expect(chunks.every((chunk) => chunk.isWellFormed())).toBe(true);
-  await client.stop();
-});
-
-test("a failed send is retried from the exact character it stopped at", async () => {
+test("a rejected completed response waits for the data channel and is delivered exactly once", async () => {
   const { client, channel } = await liveCall("conversation_progress_retry", "delegation-retry");
-  const timers = manualTimers();
-  let produced = "";
-  try {
-    // Phase 1: the channel is not open, so nothing may go out and nothing may
-    // be dropped — the backlog waits.
-    channel.readyState = "closed";
-    for (let step = 0; step < 20; step += 1) {
-      produced += segment(step, 300);
-      client.queueWorkerProgress(produced);
-      timers.run();
-    }
-    expect(channel.sent).toEqual([]);
+  const completed = segment(1, 1_200);
+  client.queueWorkerProgress("turn-retry", completed);
 
-    // Phase 2: the channel returns and the backlog ships in order.
-    channel.readyState = "open";
-    produced += segment(20, 300);
-    client.queueWorkerProgress(produced);
-    timers.drain();
-    expect(sentOn(channel, "commentary")).toBe(produced);
+  channel.failOnAttempt = 2;
+  client.finishWorkerProgress("turn-retry", completed);
+  client.finishWorkerProgress("turn-retry", completed);
+  const expected = `Agent Final Message:\n\n${completed}`;
+  const acceptedPrefix = sentOn(channel, "speakable");
+  expect(acceptedPrefix.length).toBeGreaterThan(0);
+  expect(expected.startsWith(acceptedPrefix)).toBe(true);
 
-    // Phase 3: sends reject part-way through a flush; the next flushes resume
-    // from the last delivered character, with no duplicate and no gap.
-    channel.failuresRemaining = 3;
-    for (let step = 21; step < 60; step += 1) {
-      produced += segment(step, 900);
-      client.queueWorkerProgress(produced);
-      timers.run();
-    }
-    timers.drain();
-    expect(sentOn(channel, "commentary")).toBe(produced);
+  channel.onopen?.();
+  channel.onopen?.();
+  expect(sentOn(channel, "speakable")).toBe(expected);
 
-    // The final message survives a rejected send too: it is retried whole on
-    // the next delegation announcement, and lands exactly once.
-    const before = channel.sent.length;
-    channel.failuresRemaining = 1;
-    client.finishWorkerProgress(produced);
-    channel.onmessage?.({ data: JSON.stringify({ type: "delegation.created", item: { id: "delegation-retry" } }) });
-    timers.drain();
-    expect(sentOn(channel, "speakable", before)).toBe(`Agent Final Message:\n\n${produced.slice(-12_000)}`);
-  } finally {
-    timers.restore();
-  }
+  await client.stop();
+});
+
+test("a completed response survives replacement of a failed realtime transport", async () => {
+  const { client, channel } = await liveCall("conversation_progress_reconnect", "delegation-old");
+  const completed = "Response retained across transport replacement";
+
+  channel.readyState = "closed";
+  client.queueWorkerProgress("turn-reconnect", completed);
+  client.finishWorkerProgress("turn-reconnect", completed);
+
+  const failedPeer = StubPeerConnection.latest!;
+  failedPeer.connectionState = "failed";
+  failedPeer.onconnectionstatechange?.();
+  expect(client.getSnapshot().phase).toBe("error");
+
+  await client.start();
+  const replacement = StubPeerConnection.latest!;
+  replacement.channel.onopen?.();
+  replacement.channel.onmessage?.({
+    data: JSON.stringify({ type: "delegation.created", item: { id: "delegation-new" } }),
+  });
+  replacement.channel.onmessage?.({
+    data: JSON.stringify({ type: "delegation.created", item: { id: "delegation-new" } }),
+  });
+
+  expect(sentOn(replacement.channel, "speakable")).toBe(`Agent Final Message:\n\n${completed}`);
+  await client.stop();
+});
+
+test("completed responses queue in order while the data channel is unavailable", async () => {
+  const { client, channel } = await liveCall("conversation_progress_queue", "delegation-queue");
+  const first = "First completed worker response";
+  const second = "Second completed worker response";
+
+  channel.readyState = "closed";
+  client.queueWorkerProgress("turn-first", first);
+  client.finishWorkerProgress("turn-first", first);
+  client.queueWorkerProgress("turn-second", second);
+  client.finishWorkerProgress("turn-second", second);
+  expect(channel.sent).toEqual([]);
+
+  channel.readyState = "open";
+  channel.onopen?.();
+  expect(sentOn(channel, "speakable")).toBe(
+    `Agent Final Message:\n\n${first}Agent Final Message:\n\n${second}`,
+  );
+
   await client.stop();
 });
 

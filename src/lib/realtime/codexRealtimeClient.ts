@@ -32,7 +32,6 @@ export type ParsedRealtimeEvent =
 
 const MAX_LINE_CHARS = 12_000;
 const MAX_LINES = 80;
-const HANDOFF_INTERVAL_MS = 200;
 const HANDOFF_CHUNK_BYTES = 500;
 
 function object(value: unknown): Record<string, unknown> | null {
@@ -129,7 +128,7 @@ export function chunkUtf8(text: string, maxBytes = HANDOFF_CHUNK_BYTES): string[
 export function delegationContextEvents(
   delegationItemId: string,
   text: string,
-  channel: "commentary" | "speakable",
+  channel: "speakable",
 ): Record<string, unknown>[] {
   if (!delegationItemId || !text) return [];
   return chunkUtf8(text).map((chunk) => ({
@@ -170,16 +169,11 @@ class CodexRealtimeClient {
   private media: MediaStream | null = null;
   private audio: HTMLAudioElement | null = null;
   private delegationItemId: string | null = null;
-  /** The worker turn as the producer has it so far — a reference to the same
-      growing string, never a copy, so retention stays the producer's bound. */
-  private pendingWorkerText = "";
-  /** How much of `pendingWorkerText` the channel has accepted. The cursor is
-      the whole contract with the wire: it advances only by characters that
-      were actually sent, so nothing ships twice and nothing is skipped. */
-  private sentWorkerChars = 0;
-  private flushingWorkerProgress = false;
-  private pendingFinalText = "";
-  private handoffTimer: number | null = null;
+  private activeWorkerTurnId: string | null = null;
+  private readonly completedWorkerTurnIds = new Set<string>();
+  /** Completed worker responses retained in wire order until the data channel
+      accepts every chunk. The first entry may be a suffix after a partial send. */
+  private readonly pendingFinalTexts: string[] = [];
   private unloadHangup: (() => void) | null = null;
   private lineSequence = 0;
   private epoch = 0;
@@ -249,7 +243,10 @@ class CodexRealtimeClient {
         if (epoch === this.epoch) this.acceptWireMessage(message.data);
       };
       events.onopen = () => {
-        if (epoch === this.epoch) this.update({ phase: "live", error: null, startedAt: Date.now() });
+        if (epoch === this.epoch) {
+          this.update({ phase: "live", error: null, startedAt: Date.now() });
+          this.flushPendingFinal();
+        }
       };
       /* Closing the tab must hang up too. A call the backend still believes is
          open holds the account's one concurrent slot, and the next call is
@@ -318,93 +315,28 @@ class CodexRealtimeClient {
     } catch (error) {
       failure = error instanceof Error ? error.message : String(error);
     }
-    this.cleanupTransport();
+    this.cleanupTransport(true);
     this.update({ phase: failure ? "error" : "idle", error: failure });
   }
 
-  queueWorkerProgress(text: string): void {
-    if (!text || this.snapshot.phase !== "live") return;
-    this.trackWorkerText(text);
+  queueWorkerProgress(turnId: string, text: string): void {
+    if (!turnId || !text || this.completedWorkerTurnIds.has(turnId) || this.snapshot.phase !== "live") return;
+    this.activeWorkerTurnId = turnId;
     this.upsertLine("progress", text.slice(-MAX_LINE_CHARS), false);
-    this.armHandoff();
   }
 
-  finishWorkerProgress(text: string): void {
-    if (!text || this.snapshot.phase !== "live") return;
-    this.trackWorkerText(text);
-    if (this.handoffTimer !== null) {
-      window.clearTimeout(this.handoffTimer);
-      this.handoffTimer = null;
-    }
-    /* Everything still owed on commentary goes out before the spoken summary,
-       so the agent never hears the ending ahead of the middle. */
-    this.drainWorkerProgress();
-    const spoken = this.pendingWorkerText.slice(-MAX_LINE_CHARS);
-    this.pendingFinalText = `Agent Final Message:\n\n${spoken}`;
-    this.pendingFinalText = this.pendingFinalText.slice(
-      this.sendDelegationContext(this.pendingFinalText, "speakable"),
-    );
+  finishWorkerProgress(turnId: string, text: string): void {
+    if (!turnId
+      || !text
+      || this.activeWorkerTurnId !== turnId
+      || this.completedWorkerTurnIds.has(turnId)
+      || this.snapshot.phase !== "live") return;
+    const spoken = text.slice(-MAX_LINE_CHARS);
+    this.completedWorkerTurnIds.add(turnId);
+    this.pendingFinalTexts.push(`Agent Final Message:\n\n${spoken}`);
+    this.flushPendingFinal();
     this.upsertLine("progress", spoken, true);
-    this.pendingWorkerText = "";
-    this.sentWorkerChars = 0;
-  }
-
-  /**
-   * The producer streams one turn that only grows, so the handoff is a cursor
-   * into it. Text that does not extend what was seen before is a rewrite (a
-   * restarted or replaced turn, not an append): the cursor returns to zero and
-   * the replacement ships once, rather than being diffed against a turn that
-   * no longer exists.
-   */
-  private trackWorkerText(text: string): void {
-    if (!text.startsWith(this.pendingWorkerText)) this.sentWorkerChars = 0;
-    this.pendingWorkerText = text;
-  }
-
-  private armHandoff(): void {
-    if (this.handoffTimer !== null) return;
-    this.handoffTimer = window.setTimeout(() => {
-      this.handoffTimer = null;
-      this.flushWorkerProgress();
-    }, HANDOFF_INTERVAL_MS);
-  }
-
-  /** One flush, then re-arm while the wire still owes the producer content. */
-  private flushWorkerProgress(): void {
-    if (this.flushOnce() > 0 && this.sentWorkerChars < this.pendingWorkerText.length) this.armHandoff();
-  }
-
-  private drainWorkerProgress(): void {
-    while (this.sentWorkerChars < this.pendingWorkerText.length && this.flushOnce() > 0);
-  }
-
-  /**
-   * Ships at most one window of unsent text and returns how much went out. A
-   * single flush is capped so a cursor reset (or a channel that was shut for a
-   * while) cannot burst an entire turn onto the wire in one tick; the rest
-   * follows on the next flush, in order.
-   */
-  private flushOnce(): number {
-    /* `update` runs subscribers synchronously, so a re-render can call back in
-       here mid-flush; a reentrant flush would read the cursor before it moved
-       and send the same characters twice. */
-    if (this.flushingWorkerProgress) return 0;
-    this.flushingWorkerProgress = true;
-    try {
-      const text = this.pendingWorkerText;
-      if (this.sentWorkerChars >= text.length) return 0;
-      const cap = Math.min(text.length, this.sentWorkerChars + MAX_LINE_CHARS);
-      /* A cap landing between the halves of a surrogate pair would put a lone
-         half in each append, and each encodes as U+FFFD. Keep the pair whole
-         and let it open the next flush. */
-      const lead = text.charCodeAt(cap - 1);
-      const end = cap < text.length && lead >= 0xd800 && lead <= 0xdbff ? cap - 1 : cap;
-      const sent = this.sendDelegationContext(text.slice(this.sentWorkerChars, end), "commentary");
-      this.sentWorkerChars += sent;
-      return sent;
-    } finally {
-      this.flushingWorkerProgress = false;
-    }
+    this.activeWorkerTurnId = null;
   }
 
   /**
@@ -413,7 +345,7 @@ class CodexRealtimeClient {
    * there is nowhere to send yet. Callers resume from exactly that point, so a
    * retry never repeats a delivered chunk.
    */
-  private sendDelegationContext(text: string, channel: "commentary" | "speakable"): number {
+  private sendDelegationContext(text: string, channel: "speakable"): number {
     if (!text || !this.delegationItemId || this.events?.readyState !== "open") return 0;
     let sent = 0;
     for (const chunk of chunkUtf8(text)) {
@@ -429,6 +361,19 @@ class CodexRealtimeClient {
     return text.length;
   }
 
+  private flushPendingFinal(): void {
+    while (this.pendingFinalTexts.length > 0) {
+      const pending = this.pendingFinalTexts[0]!;
+      const sent = this.sendDelegationContext(pending, "speakable");
+      if (sent === pending.length) {
+        this.pendingFinalTexts.shift();
+        continue;
+      }
+      if (sent > 0) this.pendingFinalTexts[0] = pending.slice(sent);
+      return;
+    }
+  }
+
   private acceptWireMessage(raw: unknown): void {
     if (typeof raw !== "string") return;
     let value: unknown;
@@ -442,12 +387,7 @@ class CodexRealtimeClient {
       this.upsertLine(event.role, event.text, event.final);
     } else if (event.kind === "delegation") {
       this.delegationItemId = event.id;
-      this.flushWorkerProgress();
-      if (this.pendingFinalText) {
-        this.pendingFinalText = this.pendingFinalText.slice(
-          this.sendDelegationContext(this.pendingFinalText, "speakable"),
-        );
-      }
+      this.flushPendingFinal();
     } else if (event.kind === "error") {
       this.setError(event.message);
     }
@@ -500,11 +440,9 @@ class CodexRealtimeClient {
     for (const listener of this.listeners) listener();
   }
 
-  private cleanupTransport(): void {
+  private cleanupTransport(discardWorkerDelivery = false): void {
     if (this.unloadHangup) window.removeEventListener("pagehide", this.unloadHangup);
     this.unloadHangup = null;
-    if (this.handoffTimer !== null) window.clearTimeout(this.handoffTimer);
-    this.handoffTimer = null;
     this.events?.close();
     this.peer?.close();
     for (const track of this.media?.getTracks() ?? []) track.stop();
@@ -514,10 +452,11 @@ class CodexRealtimeClient {
     this.media = null;
     this.audio = null;
     this.delegationItemId = null;
-    this.pendingWorkerText = "";
-    this.sentWorkerChars = 0;
-    this.flushingWorkerProgress = false;
-    this.pendingFinalText = "";
+    if (discardWorkerDelivery) {
+      this.activeWorkerTurnId = null;
+      this.completedWorkerTurnIds.clear();
+      this.pendingFinalTexts.length = 0;
+    }
   }
 }
 
