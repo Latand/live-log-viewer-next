@@ -59,11 +59,7 @@ import {
   withDismissedReceipts,
   writeDismissedReceipts,
 } from "./runtime/deliveryState";
-import {
-  getServerHasOperatorCredential,
-  hasOperatorCredential,
-  subscribeOperatorCredential,
-} from "./operatorCredential";
+import { hasOperatorCredential } from "./operatorCredential";
 import { mintIdempotencyKey, receiptIsAdmitted, receiptIsTerminal } from "./runtime/runtimeModel";
 import { useAgentCapabilities } from "./useAgentCapabilities";
 import { VoiceConversationButton } from "./VoiceConversation";
@@ -75,7 +71,6 @@ import {
 } from "@/lib/bridge/pendingAcknowledgements";
 
 import { VoiceFloatButton } from "./voice/VoiceFloatButton";
-import { VoiceOperatorGate } from "./voice/VoiceOperatorGate";
 import { viewerContextPrelude } from "./voice/viewerContextPrelude";
 import {
   getServerVoiceComposerHostMounted,
@@ -1053,19 +1048,12 @@ export function TmuxComposerCore({
     && structuredSession.session.host === "hosted";
   /* The start control stands down in a tab that never adopted the operator
      credential, exactly as the startup link promises — the backend guard
-     (realtimeInjection) would refuse the start anyway, in internal English.
-     STANDS DOWN, never disappears: without the credential the slot renders
-     `VoiceOperatorGate`, which says why in the operator's language and adopts a
-     pasted operator link — the legitimate way in for a tab opened by plain
-     navigation. Subscribed rather than read once, so the paste flips this tab
-     live without a reload. A STALE credential (server restarted, tab kept its
-     sessionStorage value) still passes here, reaches the backend, and comes back
-     as the localized authorization notice on the voice panel. */
-  const operatorTab = useSyncExternalStore(
-    subscribeOperatorCredential,
-    hasOperatorCredential,
-    getServerHasOperatorCredential,
-  );
+     (realtimeInjection) would refuse the start anyway, in internal English. Read
+     at render: adoption runs during the Viewer's render, before any card mounts.
+     A STALE credential (server restarted, tab kept its sessionStorage value)
+     still passes here, reaches the backend, and comes back as the localized
+     authorization notice on the voice panel. */
+  const operatorTab = hasOperatorCredential();
   const voiceWorkerTurn = structuredSession?.session.liveTurn;
   const voice = useCodexRealtime(
     cardId,
@@ -2093,27 +2081,20 @@ export function TmuxComposerCore({
       /* ArrowUp/ArrowDown in an empty composer walk what is queued and what
          was already sent, newest first (issue #561). */
       history={composerHistory}
-      voiceControl={voiceEnabled ? (
-        operatorTab ? (
-          <>
-            <VoiceConversationButton
-              phase={voice.phase}
-              start={voice.start}
-              stop={voice.stop}
-              t={t}
-            />
-            {/* #691 §5: re-float a call whose window the operator closed. Only while a
-                call is up, and only where Document PiP exists — the floater opens
-                itself on voice start, so this is the way back, not the way in. It has
-                to be a real click: `requestWindow` needs transient user activation. */}
-            <VoiceFloatButton phase={voice.phase} t={t} />
-          </>
-        ) : (
-          /* The only entry point to voice must never be a blank space: without
-             the credential the control stands down visibly and offers the
-             operator link paste as the way in. */
-          <VoiceOperatorGate t={t} />
-        )
+      voiceControl={voiceEnabled && operatorTab ? (
+        <>
+          <VoiceConversationButton
+            phase={voice.phase}
+            start={voice.start}
+            stop={voice.stop}
+            t={t}
+          />
+          {/* #691 §5: re-float a call whose window the operator closed. Only while a
+              call is up, and only where Document PiP exists — the floater opens
+              itself on voice start, so this is the way back, not the way in. It has
+              to be a real click: `requestWindow` needs transient user activation. */}
+          <VoiceFloatButton phase={voice.phase} t={t} />
+        </>
       ) : undefined}
       voicePanel={voiceEnabled && !pipComposerSlot ? (
         /* An empty slot, not a panel: `VoicePipHost` owns the ONE panel rendering

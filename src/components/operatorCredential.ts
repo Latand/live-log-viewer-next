@@ -38,26 +38,6 @@ const STORAGE_KEY = "llv.operator.capability";
 
 let capability: string | null = null;
 
-/* Adoption can now happen mid-session (the operator pastes the link into the
-   voice gate), so controls that stand down without the credential subscribe
-   here instead of reading a render-time constant. */
-const listeners = new Set<() => void>();
-
-function notifyCredentialChanged(): void {
-  for (const listener of listeners) listener();
-}
-
-export function subscribeOperatorCredential(listener: () => void): () => void {
-  listeners.add(listener);
-  return () => listeners.delete(listener);
-}
-
-/** The server render never holds a credential; the first client render must
-    match it, and adoption re-renders the subscribers right after. */
-export function getServerHasOperatorCredential(): false {
-  return false;
-}
-
 function readStored(): string | null {
   try {
     return window.sessionStorage.getItem(STORAGE_KEY);
@@ -85,15 +65,11 @@ function store(value: string): void {
  */
 export function adoptOperatorCredentialFromLocation(): void {
   if (typeof window === "undefined") return;
+  if (capability) return;
 
   const hash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : window.location.hash;
   const fragment = new URLSearchParams(hash);
   const claimed = fragment.get(OPERATOR_CREDENTIAL_FRAGMENT)?.trim();
-  /* A link in the address bar wins over anything already held: the credential is
-     minted per server process, so after a restart the freshly printed link is
-     exactly how a tab with a stale value recovers. Without a link this stays the
-     idempotent per-render read it always was. */
-  if (!claimed && capability) return;
   if (claimed) {
     capability = claimed;
     store(claimed);
@@ -102,55 +78,9 @@ export function adoptOperatorCredentialFromLocation(): void {
     fragment.delete(OPERATOR_CREDENTIAL_FRAGMENT);
     const remaining = fragment.toString();
     window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${remaining ? `#${remaining}` : ""}`);
-    notifyCredentialChanged();
     return;
   }
   capability = readStored();
-  if (capability) notifyCredentialChanged();
-}
-
-/**
- * Adopt a credential the operator pasted into the in-app gate: the whole
- * operator link, just its fragment, or the bare value.
- *
- * The delivery analysis above still holds — this adds no fetchable surface and
- * no new persistence. The secret goes exactly where the link route puts it
- * (module state plus this tab's `sessionStorage`), the paste field is masked,
- * and nothing echoes the value anywhere. What it buys is a legitimate route for
- * a tab that was opened by plain navigation, and a recovery route after a server
- * restart mints a new credential: the operator copies the freshly printed link
- * and pastes it here instead of re-opening the tab.
- *
- * No client-side validation beyond shape — the server is the only judge of the
- * value, and a wrong paste fails closed there with the localized notice.
- */
-export function adoptOperatorCredentialFromPaste(raw: string): boolean {
-  const value = extractPastedCredential(raw);
-  if (!value) return false;
-  capability = value;
-  store(value);
-  notifyCredentialChanged();
-  return true;
-}
-
-function extractPastedCredential(raw: string): string | null {
-  const text = raw.trim();
-  if (!text) return null;
-  const marker = text.indexOf(`${OPERATOR_CREDENTIAL_FRAGMENT}=`);
-  if (marker >= 0) {
-    const tail = text.slice(marker + OPERATOR_CREDENTIAL_FRAGMENT.length + 1);
-    const end = tail.search(/[&\s#]/);
-    const encoded = end === -1 ? tail : tail.slice(0, end);
-    try {
-      return decodeURIComponent(encoded).trim() || null;
-    } catch {
-      return encoded.trim() || null;
-    }
-  }
-  /* A bare value: one token, no whitespace. A pasted sentence is a mistake, and
-     adopting it would just move the failure to the server. */
-  if (/\s/.test(text)) return null;
-  return text;
 }
 
 export function operatorCredential(): string | null {
