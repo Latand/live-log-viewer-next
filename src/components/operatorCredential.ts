@@ -52,13 +52,66 @@ let capability: string | null = null;
    the boolean is learned by probing and updated by establishment. */
 let browserAuthorized = false;
 let probeInFlight = false;
-let lastProbeAt = 0;
 /* The credential value already traded for a cookie, so one adoption establishes
    once rather than on every render. */
 let establishedFor: string | null = null;
 let probeTriggersInstalled = false;
+let probeTimer: ReturnType<typeof setInterval> | null = null;
 
 const PROBE_INTERVAL_MS = 15_000;
+
+/* A REACTIVE STORE, not a render-time read. The authority flips asynchronously —
+   a probe resolves, an establishment lands, a session is revoked — and hosted
+   acceptance proved the consumer cannot be assumed to re-render for unrelated
+   reasons in time (or ever): the canonical voice button stayed hidden after the
+   probe had long resolved true. So every consumer subscribes, and every
+   transition notifies. */
+const listeners = new Set<() => void>();
+
+/* Deferred a microtask: fragment adoption runs inside the Viewer's render body,
+   and notifying subscribers synchronously there would be an update-during-render.
+   The async paths (probe, establish) tolerate the deferral trivially. */
+let notifyQueued = false;
+function notifyCredentialChanged(): void {
+  if (notifyQueued) return;
+  notifyQueued = true;
+  queueMicrotask(() => {
+    notifyQueued = false;
+    for (const listener of listeners) listener();
+  });
+}
+
+export function subscribeOperatorCredential(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+/** The server render never holds a credential, and the first client render must
+    match it; adoption and the probes re-render subscribers immediately after. */
+export function getServerHasOperatorCredential(): false {
+  return false;
+}
+
+function noteBrowserSession(authorized: boolean): void {
+  if (browserAuthorized === authorized) return;
+  browserAuthorized = authorized;
+  notifyCredentialChanged();
+  syncProbeTimer();
+}
+
+/** The probe interval runs exactly while unauthorized: its one job is noticing
+    that another tab (or the launch flow) authorized this browser. No render
+    cadence is assumed anywhere — this is a real timer. */
+function syncProbeTimer(): void {
+  if (browserAuthorized) {
+    if (probeTimer !== null) {
+      clearInterval(probeTimer);
+      probeTimer = null;
+    }
+    return;
+  }
+  if (probeTimer === null) probeTimer = setInterval(probeBrowserSession, PROBE_INTERVAL_MS);
+}
 
 /** Trade the adopted link credential for the browser-scoped cookie. Fire and
     forget: a failure (stale credential, offline) leaves this tab exactly where
@@ -71,7 +124,7 @@ function establishBrowserSession(value: string): void {
     headers: { [VIEWER_SPAWN_CAPABILITY_HEADER]: value },
   })
     .then((response) => {
-      if (response.ok) browserAuthorized = true;
+      if (response.ok) noteBrowserSession(true);
     })
     .catch(() => undefined);
 }
@@ -83,7 +136,7 @@ function probeBrowserSession(): void {
     .then((response) => (response.ok ? response.json() : null))
     .then((body: unknown) => {
       if (body && typeof body === "object" && typeof (body as { operator?: unknown }).operator === "boolean") {
-        browserAuthorized = (body as { operator: boolean }).operator;
+        noteBrowserSession((body as { operator: boolean }).operator);
       }
     })
     .catch(() => undefined)
@@ -93,22 +146,16 @@ function probeBrowserSession(): void {
 }
 
 /** The operator authorizes the browser from SOME tab; the tab they are looking
-    at learns it here — on focus/visibility, and on a slow render-driven cadence
-    (the Viewer re-renders with every poll). Stops asking once authorized. */
+    at learns it here: one probe now, one on every focus/visibility return (which
+    also notices a revoked session), and the timer above while unauthorized. */
 function keepBrowserSessionFresh(): void {
-  if (!probeTriggersInstalled) {
-    probeTriggersInstalled = true;
-    window.addEventListener("focus", () => {
-      if (!browserAuthorized) probeBrowserSession();
-    });
-    document.addEventListener("visibilitychange", () => {
-      if (!document.hidden && !browserAuthorized) probeBrowserSession();
-    });
-  }
-  if (browserAuthorized) return;
-  const now = Date.now();
-  if (now - lastProbeAt < PROBE_INTERVAL_MS) return;
-  lastProbeAt = now;
+  if (probeTriggersInstalled) return;
+  probeTriggersInstalled = true;
+  window.addEventListener("focus", probeBrowserSession);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) probeBrowserSession();
+  });
+  syncProbeTimer();
   probeBrowserSession();
 }
 
@@ -151,6 +198,7 @@ export function adoptOperatorCredentialFromLocation(): void {
      stripped. Without a link this stays the idempotent per-render read. */
   if (!claimed && capability) return;
   if (claimed) {
+    const changed = capability !== claimed;
     capability = claimed;
     store(claimed);
     /* Out of the address bar immediately: a fragment that stays put ends up in
@@ -158,6 +206,7 @@ export function adoptOperatorCredentialFromLocation(): void {
     fragment.delete(OPERATOR_CREDENTIAL_FRAGMENT);
     const remaining = fragment.toString();
     window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${remaining ? `#${remaining}` : ""}`);
+    if (changed) notifyCredentialChanged();
     /* The link authorizes the BROWSER, not just this tab: trade the credential
        for the httpOnly session cookie so every other tab — including the one the
        operator is actually looking at — picks the authority up on its next probe. */
@@ -165,7 +214,10 @@ export function adoptOperatorCredentialFromLocation(): void {
     keepBrowserSessionFresh();
     return;
   }
-  if (capability === null) capability = readStored();
+  if (capability === null) {
+    capability = readStored();
+    if (capability) notifyCredentialChanged();
+  }
   /* A tab that adopted earlier in this process's lifetime can still seed the
      browser session (e.g. the cookie era beginning after the link was opened). */
   if (capability) establishBrowserSession(capability);
@@ -197,8 +249,12 @@ export function resetOperatorCredentialForTests(): void {
   capability = null;
   browserAuthorized = false;
   probeInFlight = false;
-  lastProbeAt = 0;
   establishedFor = null;
+  probeTriggersInstalled = false;
+  if (probeTimer !== null) {
+    clearInterval(probeTimer);
+    probeTimer = null;
+  }
   try {
     window.sessionStorage.removeItem(STORAGE_KEY);
   } catch {
