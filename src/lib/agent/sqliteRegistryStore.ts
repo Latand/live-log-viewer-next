@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import type { Database as BunDatabase } from "bun:sqlite";
 
-import { reboundAssembledMcpGrants, type McpGrantPolicy } from "./mcpAllowlist";
+import { reboundAssembledMcpGrants, rowClaimsBeyondBaselineGrant, type McpGrantPolicy } from "./mcpAllowlist";
 import type { RegistryFile } from "./registry";
 
 /** The collections the MCP grant decision reads and writes. Touching any one of
@@ -323,10 +323,13 @@ export class SqliteAgentRegistryStore {
        the lazily normalized file directly, which put every store mutation —
        settlement, structured claim, upsert — underneath the gate that `snapshot`
        passed through.
-       Gating the collection ACCESSORS instead of a call site means the ordering
-       cannot be got wrong by a future path: the first read of any grant-bearing
-       collection runs the decision over all of them before it returns a row, and
-       a mutation that never touches one still pays nothing for it. */
+       Gating the ACCESSORS rather than a call site means the ordering cannot be
+       got wrong by a future path. The gate hangs off the ROW, not the
+       collection: a row already at the baseline is returned byte-identical by
+       the decision, so skipping it there is the gate answering trivially rather
+       than a way around it, and a keyed mutation still reads exactly the one row
+       it asked for. The first row that claims anything MORE runs the decision
+       over the whole file before it is handed out. */
     let grantsDecided = false;
     let decidingGrants = false;
     const decideGrants = () => {
@@ -338,6 +341,13 @@ export class SqliteAgentRegistryStore {
       } finally {
         decidingGrants = false;
       }
+    };
+    /* Every row leaves a loader through here. A row at the baseline is admitted
+       untouched; anything claiming more is only returned once the decision has
+       run over the whole file, including the rows attesting to this one. */
+    const admitRow = <T>(collection: RowCollection, row: T): T => {
+      if (GRANT_COLLECTIONS.has(collection) && rowClaimsBeyondBaselineGrant(row)) decideGrants();
+      return row;
     };
     const loadedCollections = new Map<RowCollection, RegistryFile[RowCollection]>();
     const baselineCollections = new Map<RowCollection, Map<string, string | null>>();
@@ -429,17 +439,25 @@ export class SqliteAgentRegistryStore {
             baseline.set(key, stored);
             return stored;
           };
+          /* Every row this collection hands out leaves through here — the keyed
+             read below, and equally the rows `loadAllRows` has already cached,
+             which an enumeration reaches through `getOwnPropertyDescriptor`. So
+             the gate sits on the single exit rather than on the load, and no
+             route to a row can arrive before the decision it needs. */
           const readRow = (key: string): unknown => {
-            if (Object.hasOwn(rows, key)) return rows[key];
-            if (deleted.has(key)) return undefined;
-            const stored = readBaseline(key);
-            if (stored === null) return undefined;
-            const input: Record<string, unknown> = { version: 2, entries: {}, receipts: {} };
-            input[collection] = { [key]: structuredClone(this.parseRow(collection, key, stored, useRowCache)) };
-            const normalized = this.normalize(input)[collection] as Record<string, unknown>;
-            if (!Object.hasOwn(normalized, key)) return undefined;
-            rows[key] = normalized[key];
-            return rows[key];
+            if (!Object.hasOwn(rows, key)) {
+              if (deleted.has(key)) return undefined;
+              const stored = readBaseline(key);
+              if (stored === null) return undefined;
+              const input: Record<string, unknown> = { version: 2, entries: {}, receipts: {} };
+              input[collection] = { [key]: structuredClone(this.parseRow(collection, key, stored, useRowCache)) };
+              const normalized = this.normalize(input)[collection] as Record<string, unknown>;
+              if (!Object.hasOwn(normalized, key)) return undefined;
+              rows[key] = normalized[key];
+            }
+            /* The decision rewrites `rows[key]` in place where it denies, so the
+               caller never holds the undecided object. */
+            return admitRow(collection, rows[key]);
           };
           const loadAllRows = () => {
             if (allRowsLoaded) return;
@@ -529,7 +547,11 @@ export class SqliteAgentRegistryStore {
         enumerable: true,
         get: () => {
           load();
-          if (GRANT_COLLECTIONS.has(collection)) decideGrants();
+          /* The eager loader has materialized the whole collection by now, so
+             there is no laziness left to protect and the decision runs on the
+             collection. The lazy loader gates each ROW instead, on `readRow`'s
+             single exit, so a keyed read stays keyed. */
+          if (!trackMutations && GRANT_COLLECTIONS.has(collection)) decideGrants();
           return value;
         },
         set: (next: typeof value) => {

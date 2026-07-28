@@ -6,7 +6,7 @@ import path from "node:path";
 
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { headlessCodexThreadConfig } from "@/lib/codexHeadlessConfig";
-import { AgentRegistry, normalizeRegistry } from "./registry";
+import { AgentRegistry, normalizeRegistry, type RegistryFile } from "./registry";
 import { SqliteAgentRegistryStore } from "./sqliteRegistryStore";
 
 import {
@@ -920,6 +920,93 @@ test("a receipt whose self-description disagrees with the rows attesting to it i
   ))).toEqual(["viewer"]);
 });
 
+test("a receipt cannot shed the lineage attesting to it by retargeting the conversation it names", () => {
+  const grant = ["viewer", "test-connector"];
+  /* The worker rewrites itself into root shape AND points `conversationId` at
+     the operator root, so every attestor reachable through a pointer it owns
+     now agrees with it. The edge admission wrote is indexed by the launch id in
+     the EDGE's own evidence, so it still names this receipt whatever the
+     receipt says about itself. */
+  const retargeted = (conversationId: string | null, launchId = "launch") => ({
+    conversations: {
+      conversation_root: { engine: "codex", agentRole: null, delegationDepth: 0, generations: [] },
+    },
+    lineageEdges: {
+      conversation_worker: { parentConversationId: "conversation_root", evidence: { launchId } },
+    },
+    entries: {},
+    receipts: { launch: { conversationId, ...ROOT_SHAPE, launchProfile: { mcpServers: [...grant] } } },
+  } as unknown as StoredGrantFile);
+  const grantOf = (file: StoredGrantFile) =>
+    reboundAssembledMcpGrants(file, WITH_CONNECTOR).receipts!.launch!.launchProfile!.mcpServers;
+
+  /* Named at the operator root, whose own row attests root truthfully. */
+  expect(grantOf(retargeted("conversation_root"))).toEqual(["viewer"]);
+  /* And blanked, so no pointer-reachable row attests to it at all. */
+  expect(grantOf(retargeted(null))).toEqual(["viewer"]);
+  /* An edge naming a DIFFERENT launch leaves this receipt genuinely unattested
+     and it keeps the grant, so the denials above are this receipt's own lineage
+     rather than any edge anywhere existing. */
+  expect(grantOf(retargeted("conversation_root", "other-launch"))).toEqual(grant);
+});
+
+test("a receipt claiming root is denied by a delegated attestor no lineage edge names", () => {
+  const grant = ["viewer", "test-connector"];
+  /* No lineage edge exists here at all, so the only rows that can contradict the
+     receipt are the two it points at itself: the conversation it names, and the
+     conversation owning the entry row its key settled onto. Both still deny,
+     which is the point of collecting them — following a pointer the subject
+     controls can only ever ADD a contradiction, never supply the origin. */
+  const delegatedOwner = (receipt: Record<string, unknown>) => ({
+    conversations: {
+      conversation_worker: {
+        engine: "codex",
+        agentRole: "builder",
+        delegationDepth: 1,
+        generations: [{
+          id: "worker-generation",
+          path: "/sessions/worker.jsonl",
+          launchProfile: { parentConversationId: null, mcpServers: ["viewer"] },
+        }],
+      },
+    },
+    lineageEdges: {},
+    entries: {},
+    receipts: { launch: { ...ROOT_SHAPE, ...receipt, launchProfile: { mcpServers: [...grant] } } },
+  } as unknown as StoredGrantFile);
+  const grantOf = (file: StoredGrantFile) =>
+    reboundAssembledMcpGrants(file, WITH_CONNECTOR).receipts!.launch!.launchProfile!.mcpServers;
+
+  /* The conversation it names is delegated by its own role and depth. */
+  expect(grantOf(delegatedOwner({ conversationId: "conversation_worker" }))).toEqual(["viewer"]);
+  /* It names no conversation, but its key settled onto the row that one owns. */
+  expect(grantOf(delegatedOwner({ conversationId: null, key: { engine: "codex", sessionId: "worker-generation" } })))
+    .toEqual(["viewer"]);
+  /* A key pointing at a row no generation owns attests nothing and the receipt
+     keeps its grant, so both denials are the delegated OWNER rather than the
+     receipt merely carrying a key. */
+  expect(grantOf(delegatedOwner({ conversationId: null, key: { engine: "codex", sessionId: "unowned-generation" } })))
+    .toEqual(grant);
+
+  /* Two conversations claiming one entry row key with different origins name no
+     owner at all. A receipt keyed at that row is denied rather than handed
+     whichever of the two readings suits it. */
+  const disputed = delegatedOwner({ conversationId: null, key: { engine: "codex", sessionId: "worker-generation" } }) as unknown as {
+    conversations: Record<string, unknown>;
+  };
+  disputed.conversations.conversation_root = {
+    engine: "codex",
+    agentRole: null,
+    delegationDepth: 0,
+    generations: [{
+      id: "worker-generation",
+      path: null,
+      launchProfile: { parentConversationId: null, mcpServers: ["viewer"] },
+    }],
+  };
+  expect(grantOf(disputed as unknown as StoredGrantFile)).toEqual(["viewer"]);
+});
+
 test("a conversation whose lineage edge contradicts its own row is denied rather than believed", () => {
   const grant = ["viewer", "test-connector"];
   /* The row settlement writes from a receipt forged into root shape: depth 0,
@@ -1102,4 +1189,206 @@ test("an entry no conversation owns keeps its grant per row and loses it in an a
      evidence exists for it, so it falls back to the baseline. */
   const assembled = reboundAssembledMcpGrants(orphan(), WITH_CONNECTOR);
   expect(assembled.entries["codex:orphan"]!.launchProfile!.mcpServers).toEqual(["viewer"]);
+});
+
+/**
+ * Every `SqliteAgentRegistryStore` method that reaches a row writer, read out of
+ * the SOURCE rather than listed by hand.
+ *
+ * The origin half of the grant bound is a PRECONDITION of a row being observed
+ * or written, and this lane has now reopened that ordering twice — once because
+ * a mutation ran on lazily normalized rows, once because a wholesale
+ * replacement carried its payload in from outside. A new mutation path is the
+ * obvious third way in, so it has to fail here until somebody exercises it,
+ * rather than quietly inheriting whatever gate the path it was copied from had.
+ */
+function storeMutationEntryPoints(): string[] {
+  const lines = fs.readFileSync(path.join(import.meta.dir, "sqliteRegistryStore.ts"), "utf8").split("\n");
+  const writes = /this\.(persistAll|persistDiff|persistChanges)\(/;
+  const signature = /^ {2}(?:private |protected |public |static )*(?:async )?([A-Za-z_]\w*)\s*(?:<[^(]*>)?\(/;
+  const found = new Set<string>();
+  for (const [index, line] of lines.entries()) {
+    if (!writes.test(line)) continue;
+    for (let above = index; above >= 0; above -= 1) {
+      const match = signature.exec(lines[above]!);
+      if (!match) continue;
+      found.add(match[1]!);
+      break;
+    }
+  }
+  return [...found].sort();
+}
+
+function storedReceiptGrant(sqlitePath: string, launchId: string): string[] {
+  const db = new Database(sqlitePath, { strict: true });
+  try {
+    const row = db.query<{ value_json: string }, [string, string]>(
+      "SELECT value_json FROM registry_rows WHERE collection = ? AND row_key = ?",
+    ).get("receipts", launchId);
+    if (!row) throw new Error(`expected a stored receipts row for ${launchId}`);
+    return (JSON.parse(row.value_json) as { launchProfile: { mcpServers: string[] } }).launchProfile.mcpServers;
+  } finally {
+    db.close();
+  }
+}
+
+/** The same forgery `forgeSqliteReceiptOrigin` writes, applied to a file the
+    caller is about to hand a store, for the entry points whose payload arrives
+    from outside rather than off disk. */
+function forgeReceiptOriginInFile(file: RegistryFile, launchId: string, forgery: ReceiptForgery, grant: string[]): void {
+  const receipt = file.receipts[launchId] as unknown as ReceiptForgery & { launchProfile: Record<string, unknown> };
+  if (!receipt) throw new Error(`expected a receipt for ${launchId}`);
+  Object.assign(receipt, forgery);
+  receipt.launchProfile = { ...receipt.launchProfile, parentConversationId: null, mcpServers: [...grant] };
+}
+
+test("every SQLite store mutation entry point re-decides grants before it can persist a row", () => {
+  const grant = ["viewer", "test-connector"];
+  const storage = { sqliteMode: "sqlite" as const, mcpGrantPolicy: WITH_CONNECTOR };
+  const storeOptions = {
+    normalize: (value: unknown) => normalizeRegistry(value, WITH_CONNECTOR),
+    mcpGrantPolicy: WITH_CONNECTOR,
+  };
+
+  /** A forged delegated receipt and an honest root one, both admitted and
+      unsettled, on a real registry backed by SQLite. */
+  const seed = (label: string) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-mcp-entrypoint-${label}-`));
+    const sqlitePath = path.join(directory, "agent-registry.sqlite");
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, storage);
+    const rootId = settledParent(registry, ["viewer"], `entrypoint-parent-${label}`);
+    const workerId = settledDelegatedChild(registry, rootId, `entrypoint-worker-${label}`);
+    const forged = admittedDelegatedChild(registry, rootId).launchId;
+    const honest = registry.beginSpawnRequest({ engine: "codex", cwd: "/repo" }).receipt.launchId;
+    return { directory, sqlitePath, registry, rootId, workerId, forged, honest };
+  };
+
+  /** A conversation row rewritten into root shape and helped to a connector, on
+      its GENERATIONS and nowhere else. Its lineage edge is left alone.
+
+      The row-at-a-time normalize decides a conversation from its own origin
+      fields, which this rewrite now satisfies, so only the assembled decision —
+      which can see the edge still recording a parent — denies it. That makes
+      this the case where the gate has to look INSIDE the row: the grant it
+      claims lives on a nested generation profile, not at the row's top level. */
+  const forgeConversationIntoRoot = (sqlitePath: string, conversationId: string, intoRoot: boolean) => {
+    const db = new Database(sqlitePath, { strict: true });
+    try {
+      const row = db.query<{ value_json: string }, [string, string]>(
+        "SELECT value_json FROM registry_rows WHERE collection = ? AND row_key = ?",
+      ).get("conversations", conversationId);
+      if (!row) throw new Error(`expected a stored conversations row for ${conversationId}`);
+      const parsed = JSON.parse(row.value_json) as {
+        agentRole: string | null;
+        delegationDepth: number | null;
+        generations: { launchProfile: { mcpServers: string[]; parentConversationId: string | null } }[];
+      };
+      if (intoRoot) {
+        parsed.agentRole = null;
+        parsed.delegationDepth = 0;
+      }
+      for (const generation of parsed.generations) {
+        generation.launchProfile.mcpServers = [...grant];
+        if (intoRoot) generation.launchProfile.parentConversationId = null;
+      }
+      db.query<unknown, [string, string, string]>(
+        "UPDATE registry_rows SET value_json = ? WHERE collection = ? AND row_key = ?",
+      ).run(JSON.stringify(parsed), "conversations", conversationId);
+    } finally {
+      db.close();
+    }
+  };
+
+  /* Each entry point is driven for real, with the forgery arriving the way that
+     entry point receives its payload. The honest root's receipt rides along
+     through the same call, so a gate that simply wiped every grant would fail
+     here rather than pass. */
+  const exercises: Record<string, () => void> = {
+    /* Two routes to a row, each on its own seed so neither can cover for the
+       other: whichever read comes FIRST in a mutation is the one that has to
+       run the decision, and a second read afterwards would hide a first that
+       did not. */
+    mutate: () => {
+      const receipts = seed("mutate-receipts");
+      try {
+        forgeSqliteReceiptOrigin(receipts.sqlitePath, receipts.forged, ROOT_SHAPE, grant);
+        forgeSqliteReceiptOrigin(receipts.sqlitePath, receipts.honest, ROOT_SHAPE, grant);
+        const store = new SqliteAgentRegistryStore(receipts.sqlitePath, {
+          ...storeOptions,
+          initialSnapshot: normalizeRegistry({ version: 2, entries: {}, receipts: {} }, WITH_CONNECTOR),
+        });
+        /* What settlement and the structured claim do: reach for the receipt row
+           by key, here out of the cache a preceding enumeration filled — the
+           route a boot sweep takes, and a second way in that has to be gated as
+           the keyed one is. The row the operation sees is already decided, and
+           the decision is what the mutation then persists. */
+        const seenByOperation = store.mutate((file) => {
+          expect(Object.keys(file.receipts)).toContain(receipts.forged);
+          return [
+            file.receipts[receipts.forged]!.launchProfile.mcpServers,
+            file.receipts[receipts.honest]!.launchProfile.mcpServers,
+          ];
+        }).result;
+        expect(seenByOperation).toEqual([["viewer"], grant]);
+        expect(storedReceiptGrant(receipts.sqlitePath, receipts.forged)).toEqual(["viewer"]);
+        expect(storedReceiptGrant(receipts.sqlitePath, receipts.honest)).toEqual(grant);
+      } finally {
+        fs.rmSync(receipts.directory, { recursive: true, force: true });
+      }
+
+      const conversations = seed("mutate-conversations");
+      try {
+        forgeConversationIntoRoot(conversations.sqlitePath, conversations.workerId, true);
+        forgeConversationIntoRoot(conversations.sqlitePath, conversations.rootId, false);
+        const store = new SqliteAgentRegistryStore(conversations.sqlitePath, {
+          ...storeOptions,
+          initialSnapshot: normalizeRegistry({ version: 2, entries: {}, receipts: {} }, WITH_CONNECTOR),
+        });
+        /* Nothing else is read first. A conversation row claims a grant only
+           through a profile NESTED in its generations, so a gate that looked no
+           deeper than the row's top level would hand this one over untouched. */
+        const seenByOperation = store.mutate((file) => [
+          file.conversations[conversations.workerId]!.generations.at(-1)!.launchProfile.mcpServers,
+          file.conversations[conversations.rootId]!.generations.at(-1)!.launchProfile.mcpServers,
+        ]).result;
+        expect(seenByOperation).toEqual([["viewer"], grant]);
+      } finally {
+        fs.rmSync(conversations.directory, { recursive: true, force: true });
+      }
+    },
+    replace: () => {
+      const { directory, sqlitePath, registry, forged, honest } = seed("replace");
+      try {
+        const store = new SqliteAgentRegistryStore(sqlitePath, {
+          ...storeOptions,
+          initialSnapshot: normalizeRegistry({ version: 2, entries: {}, receipts: {} }, WITH_CONNECTOR),
+        });
+        const file = registry.snapshot();
+        forgeReceiptOriginInFile(file, forged, ROOT_SHAPE, grant);
+        forgeReceiptOriginInFile(file, honest, ROOT_SHAPE, grant);
+        expect(store.replace(file, store.revision()).replaced).toBe(true);
+        expect(storedReceiptGrant(sqlitePath, forged)).toEqual(["viewer"]);
+        expect(storedReceiptGrant(sqlitePath, honest)).toEqual(grant);
+      } finally {
+        fs.rmSync(directory, { recursive: true, force: true });
+      }
+    },
+    importFirstBoot: () => {
+      const { directory, registry, forged, honest } = seed("import");
+      try {
+        const file = registry.snapshot();
+        forgeReceiptOriginInFile(file, forged, ROOT_SHAPE, grant);
+        forgeReceiptOriginInFile(file, honest, ROOT_SHAPE, grant);
+        const importedPath = path.join(directory, "imported.sqlite");
+        new SqliteAgentRegistryStore(importedPath, { ...storeOptions, initialSnapshot: file });
+        expect(storedReceiptGrant(importedPath, forged)).toEqual(["viewer"]);
+        expect(storedReceiptGrant(importedPath, honest)).toEqual(grant);
+      } finally {
+        fs.rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  };
+
+  expect(storeMutationEntryPoints()).toEqual(Object.keys(exercises).sort());
+  for (const exercise of Object.values(exercises)) exercise();
 });
