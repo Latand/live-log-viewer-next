@@ -1789,7 +1789,6 @@ export const uk: Record<keyof typeof en, Message> = {
   "voice.floatSurface": "Голосова розмова",
   "voice.float": "Відкрити плавуче вікно голосу",
   "voice.dock": "Закрити плавуче вікно, не завершуючи розмову",
-  "voice.floatMessage": "Повідомлення…",
   "voice.floatUnsupported": "Плавуче вікно голосу потребує браузера на Chromium; розмова лишається тут.",
 
   /* Постійний оверлей кореневої розмови (#691) і передача фокуса (#688). */

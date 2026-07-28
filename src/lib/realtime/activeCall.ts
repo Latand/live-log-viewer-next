@@ -29,6 +29,11 @@ const listeners = new Set<() => void>();
 /** Insertion-ordered, so "the newest non-idle call" is a well-defined answer when
     the operator has somehow started a second one. */
 const phases = new Map<string, CodexRealtimePhase>();
+/** The conversation whose call most recently existed. The transcript outlives the
+    call on purpose — the operator keeps reading it after a hangup — so the host
+    that owns the panel must keep resolving this conversation once every phase has
+    gone back to `idle`. */
+let lastCallConversationId: string | null = null;
 
 /**
  * Cached so `useSyncExternalStore` sees a stable identity between notifications.
@@ -42,6 +47,12 @@ function recompute(): void {
   for (const [conversationId, phase] of phases) {
     if (phase !== "idle") next = { conversationId, phase };
   }
+  /* No live call: the last conversation that had one keeps its (idle) panel, so
+     the ended-call transcript stays on screen exactly as it did when the card
+     rendered the panel itself. */
+  if (!next && lastCallConversationId) {
+    next = { conversationId: lastCallConversationId, phase: phases.get(lastCallConversationId) ?? "idle" };
+  }
   if (next?.conversationId === snapshot?.conversationId && next?.phase === snapshot?.phase) return;
   snapshot = next;
   for (const listener of listeners) listener();
@@ -52,6 +63,7 @@ function recompute(): void {
 export function reportCallPhase(conversationId: string, phase: CodexRealtimePhase): void {
   if (phases.get(conversationId) === phase) return;
   phases.set(conversationId, phase);
+  if (phase !== "idle") lastCallConversationId = conversationId;
   recompute();
 }
 
@@ -74,6 +86,7 @@ export function getServerActiveCall(): ActiveCall | null {
     into the next. Production has no reason to forget a live call. */
 export function resetActiveCallsForTest(): void {
   phases.clear();
+  lastCallConversationId = null;
   snapshot = null;
   listeners.clear();
 }
