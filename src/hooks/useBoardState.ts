@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { type BoardKeyRevisions, canonicalKey, keyRevisionAt, mutationKeys } from "@/lib/board/keys";
+import { boardKeysChanged, type BoardKeyRevisions, canonicalKey, keyRevisionAt, mutationKeys } from "@/lib/board/keys";
 import { applyBoardMutations, type BoardMutationV1 } from "@/lib/board/mutations";
 import type { BoardProjectStateV1 } from "@/lib/view/types";
 
@@ -326,9 +326,10 @@ export interface BoardStore {
  * THE DURABLE CONTRACT (#38), in one sentence, for anything that wants to build
  * per-project durable state on this shape:
  *
- *   One project-scoped shared store over a revision-fenced durable API, with a
- *   monotonic server-authored causal revision for each LOGICAL key that survives
- *   aliases, ABA, restart, and safe tombstone GC.
+ *   One project-scoped shared store over a revision-fenced durable API, fencing
+ *   every authoritative adoption with server-authored monotonic revisions per
+ *   logical key, canonical across aliases and preserved through restart and
+ *   causally safe tombstone GC.
  *
  * Every clause is load-bearing, and each was a real defect before it was true:
  *
@@ -351,10 +352,18 @@ export interface BoardStore {
  *   transcript path and the board aliases old onto new. Two names with
  *   independent clocks is ABA across an alias boundary, so the clocks merge by
  *   maximum onto one canonical key.
- * - **safe tombstone GC** — retired keys are evicted under a bound, and whatever
- *   is dropped raises `keyRevisionFloor`, which every absent key reads. Evicting
- *   without a floor makes forgotten keys read as never-written and quietly
- *   re-enables every stale writer, more likely the longer a board lives.
+ * - **causally safe tombstone GC** — retired keys are evicted under a bound, and
+ *   whatever is dropped raises `keyRevisionFloor`, which every absent key reads.
+ *   Evicting without a floor makes forgotten keys read as never-written and
+ *   quietly re-enables every stale writer, more likely the longer a board lives.
+ * - **EVERY authoritative adoption** — a board arrives from five places: a poll,
+ *   a 409, an accepted write, the initial load, and the completion of the legacy
+ *   seed. All five install it through `adopt` and nothing else assigns
+ *   `confirmed`. The last two were direct assignments and were the third
+ *   appearance of the same ABA class, after per-key and across-alias: a remount
+ *   paints from the session cache and is live before its load lands, so intent
+ *   queued against the cached revision has to be fenced against what the load
+ *   reveals. A gate only some entry points use is not a gate.
  *
  * The store itself: it holds the last server-confirmed board plus an outbox of
  * unacknowledged semantic mutations (close/restore/reconcile/remap/presentation),
@@ -455,17 +464,27 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
   };
 
   /**
-   * Install a board this view did not author (a poll, or the 409 response to a
-   * rejected write). Any queued intent whose key has advanced past what that
-   * intent observed is superseded and dropped rather than replayed on top; the
-   * rest replays and still lands. Surviving intent marks the view stale, because
-   * it now renders something no other device has.
+   * THE causal gate. Every authoritative board — a poll, a 409, an accepted
+   * write, the initial load, the completion of the legacy seed — is installed
+   * through here and nowhere else. A board arriving by any other route would be
+   * adopted unfenced, and a gate only some entry points use is not a gate.
+   *
+   * Queued intent whose key has advanced past what that intent observed is
+   * superseded and dropped; the rest replays on top and still lands. Surviving
+   * intent marks the view stale, because it now renders something no other
+   * device has.
+   *
+   * `ownKeys` names keys THIS device just wrote and had acknowledged. Those are
+   * re-observed instead of fenced: our own accepted write is causally before the
+   * intent queued behind it — the operator formed that intent already knowing
+   * what they had just done — so it must not fence itself. Pass null whenever
+   * the board might carry another writer's work.
    */
-  const adoptForeign = (board: BoardProjectStateV1) => {
+  const adopt = (board: BoardProjectStateV1, ownKeys: ReadonlySet<string> | null = null) => {
     confirmed = board;
     unavailable = false;
     if (outbox.length > 0) {
-      outbox = fenceOutbox(outbox, board);
+      outbox = fenceOutbox(ownKeys === null ? outbox : reobserve(outbox, ownKeys, board), board);
       if (outbox.length > 0) rebased = true;
       else cancelRetry();
     }
@@ -509,7 +528,12 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ schemaVersion: 1, project, baseRevision, patch }),
       });
-      if (res.ok) return { status: "ok", board: ((await res.json()) as { board: BoardProjectStateV1 }).board };
+      if (res.ok) {
+        /* The seed is a write like any other and its verdict matters just as
+           much: accepted-but-no-op means the board came from somewhere else. */
+        const body = (await res.json()) as { applied?: boolean; board: BoardProjectStateV1 };
+        return { status: "ok", applied: body.applied, board: body.board };
+      }
       if (res.status === 409) return { status: "conflict", board: ((await res.json()) as { board: BoardProjectStateV1 }).board };
       return { status: "error" };
     } catch {
@@ -617,18 +641,14 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
          arrangement comparison is only the fallback for a server that predates
          the field. */
       const authored = result.applied ?? sameArrangement(optimisticBoard(confirmed, prefix), result.board);
-      confirmed = result.board;
+      /* Only the keys THIS prefix wrote, and only when the write was ours. */
+      const ownKeys = authored
+        ? new Set(prefix.flatMap((mutation) => mutationKeys(mutation, result.board.pathAliases ?? {})))
+        : null;
+      /* The prefix is acknowledged either way — it either committed or was a
+         no-op — so it leaves the outbox before the rest is fenced. */
       outbox = outbox.slice(prefix.length);
-      if (outbox.length > 0) {
-        /* Re-observe only the keys THIS prefix wrote, and only when it was ours:
-           our own accepted write is causally before the intent queued behind it
-           and must not fence itself. */
-        const aliases = result.board.pathAliases ?? {};
-        const ownKeys = new Set(prefix.flatMap((mutation) => mutationKeys(mutation, aliases)));
-        outbox = fenceOutbox(authored ? reobserve(outbox, ownKeys, result.board) : outbox, result.board);
-        if (outbox.length > 0) rebased = true;
-      }
-      refresh();
+      adopt(result.board, ownKeys);
       if (outbox.length) void drain();
       return;
     }
@@ -668,7 +688,7 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
          what it observed is superseded and dropped, and the rest replays on top
          and retries at the returned revision. A satisfied mutation then reduces
          to a server no-op that leaves the revision untouched. */
-      adoptForeign(result.board);
+      adopt(result.board);
       conflictStreak += 1;
       if (outbox.length === 0) {
         conflictStreak = 0;
@@ -702,7 +722,10 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
     if (board.revision === 0 && isEmptyPrefs(board.prefs)) {
       const seed = readLegacyPrefs(project, storage);
       if (seed && isMeaningfulPrefs(seed)) {
-        /* Show the seed optimistically while its PATCH is inflight. */
+        /* A local optimistic paint, NOT an adoption: no server state is being
+           installed, and it is replaced by a gated `adopt` the moment the seed
+           PATCH answers. Keeping the loaded board's `keyRevisions` means intent
+           the operator forms against this paint observes real causal history. */
         confirmed = { ...board, prefs: seed };
         loaded = true;
         inflight = true;
@@ -710,8 +733,18 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
         const result = await attemptSeed(seed, 0);
         inflight = false;
         if (disposed) return;
-        confirmed = result.status === "ok" || result.status === "conflict" ? result.board : board;
-        refresh();
+        /* Seed completion is an adoption, so it goes through the gate. The seed
+           only counts as OUR write when the server says it applied: a seed that
+           reduced to a no-op was accepted from its stale revision-0 base and the
+           board it returns is another writer's. When it did apply, the keys it
+           wrote are re-observed so intent the operator formed against the
+           optimistic seed — a close of the very node being seeded — is not
+           fenced by our own seed. */
+        const seeded = result.status === "ok" || result.status === "conflict" ? result.board : board;
+        const seedKeys = result.status === "ok" && result.applied === true
+          ? boardKeysChanged(board, result.board)
+          : null;
+        adopt(seeded, seedKeys);
         /* A mutation queued while the seed was inflight parked in the outbox
            because drain returns early during inflight. Flush it now so the
            queued action proceeds without another edit. */
@@ -719,9 +752,12 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
         return;
       }
     }
-    confirmed = board;
+    /* The first load is authoritative too. A remount for a project already
+       loaded this session paints from the session cache and is live before this
+       lands (#172), so the operator can queue intent against the cached
+       revision — which the gate must fence against whatever the load reveals. */
     loaded = true;
-    refresh();
+    adopt(board);
   };
 
   /* Read where the board actually is. Deliberately NOT gated on a pending
@@ -742,7 +778,7 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
            its response is the authoritative post-write board. */
         if (inflight || disposed || writeEpoch !== epoch) return;
         if (board.revision !== confirmed.revision) {
-          adoptForeign(board);
+          adopt(board);
           return;
         }
         /* Same revision, but the read itself proves the board is reachable again

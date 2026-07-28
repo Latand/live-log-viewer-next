@@ -527,6 +527,137 @@ test("a stale writer still loses after its key was evicted by retired-key compac
   store.dispose();
 });
 
+/*
+ * The adoption paths. A board arrives authoritatively in five places: a poll, a
+ * 409, an accepted write, the initial load, and the completion of the legacy
+ * seed. The first three are fenced; these cover the last two. A gate that only
+ * some entry points use is not a gate.
+ */
+
+test("intent queued on a cached remount loses to a foreign A→B→A the load reveals", async () => {
+  const server = durableBoard();
+  server.otherDevice("proj", [
+    { kind: "restore", path: "/a", placement: "manual" },
+    { kind: "restore", path: "/x", placement: "manual" },
+  ]);
+  /* One mount settles the project, so the session cache holds revision 1. */
+  const first = createBoardStore({ project: "proj", fetcher: server.fetcher, storage: null, scheduler: idleScheduler().scheduler });
+  await settle();
+  expect(first.getSnapshot().revision).toBe(1);
+  first.dispose();
+
+  /* While nothing of ours is mounted, the phone closes /x and reopens it. The
+     board ends exactly where the cache remembers it. */
+  server.otherDevice("proj", [{ kind: "close", path: "/x" }]);
+  server.otherDevice("proj", [{ kind: "restore", path: "/x", placement: "manual" }]);
+  expect(server.board("proj").revision).toBe(3);
+
+  const device = flakyDevice(server);
+  device.state.patchDown = true;
+  const sched = idleScheduler();
+  const store = createBoardStore({ project: "proj", fetcher: device.fetcher, storage: null, scheduler: sched.scheduler });
+  /* A remount paints the cached arrangement on its first frame (#172), so the
+     dashboard is live and the operator can act before the load has landed. */
+  expect(store.getSnapshot()).toMatchObject({ loaded: true, revision: 1 });
+  store.mutate([{ kind: "close", path: "/x" }]);
+
+  await settle();
+  device.state.patchDown = false;
+  sched.runTimeouts();
+  await settle();
+
+  /* The load is an authoritative adoption like any other. Assigning it straight
+     to `confirmed` leaves intent formed against the cached revision unfenced,
+     and it replays over a reopen this device never saw. */
+  expect(server.board("proj").prefs.hidden).toEqual([]);
+  expect(server.board("proj").prefs.manual).toEqual(["/a", "/x"]);
+  expect(server.board("proj").revision).toBe(3);
+  expect(store.getSnapshot().prefs.hidden).toEqual([]);
+  store.dispose();
+});
+
+test("intent queued during a seed that turns out to be a no-op loses to a foreign A→B→A", async () => {
+  const server = durableBoard();
+  const storage = { getItem: (key: string) => (key === "llvCols:proj" ? JSON.stringify({ manual: ["/x"], hidden: [], expanded: [] }) : null) };
+  let releaseSeed = () => {};
+  const seedGate = new Promise<void>((resolve) => (releaseSeed = resolve));
+  let patches = 0;
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if (init && (init.method ?? "GET") !== "GET") {
+      patches += 1;
+      if (patches === 1) await seedGate;
+    }
+    return server.fetcher(input, init);
+  };
+  const sched = idleScheduler();
+  const store = createBoardStore({ project: "proj", fetcher, storage, scheduler: sched.scheduler });
+  await settle(); // the revision-0 GET landed; the seed PATCH is inflight and gated
+
+  /* Another device seeds the same arrangement from its own localStorage, then
+     the operator closes /x there and reopens it. The board now reads exactly
+     what this device's seed was going to write — so the seed will reduce to
+     nothing and be accepted from its stale revision-0 base. */
+  server.otherDevice("proj", [{ kind: "restore", path: "/x", placement: "manual" }]);
+  server.otherDevice("proj", [{ kind: "close", path: "/x" }]);
+  server.otherDevice("proj", [{ kind: "restore", path: "/x", placement: "manual" }]);
+  expect(server.board("proj").revision).toBe(3);
+
+  /* Meanwhile the operator closes /x on THIS device, against the optimistic
+     seed — intent formed with no knowledge of any of the above. */
+  store.mutate([{ kind: "close", path: "/x" }]);
+
+  releaseSeed();
+  await settle();
+  sched.runTimeouts();
+  await settle();
+
+  /* Seed completion adopts a board this device did not author, so it has to
+     fence like every other adoption. The reopen must survive. */
+  expect(server.board("proj").prefs.hidden).toEqual([]);
+  expect(server.board("proj").prefs.manual).toEqual(["/x"]);
+  expect(server.board("proj").revision).toBe(3);
+  expect(store.getSnapshot().prefs.hidden).toEqual([]);
+  store.dispose();
+});
+
+test("intent formed after an authored seed survives that seed landing", async () => {
+  const server = durableBoard();
+  const storage = { getItem: (key: string) => (key === "llvCols:proj" ? JSON.stringify({ manual: ["/seed"], hidden: [], expanded: [] }) : null) };
+  let releaseSeed = () => {};
+  const seedGate = new Promise<void>((resolve) => (releaseSeed = resolve));
+  let patches = 0;
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if (init && (init.method ?? "GET") !== "GET") {
+      patches += 1;
+      if (patches === 1) await seedGate;
+    }
+    return server.fetcher(input, init);
+  };
+  const sched = idleScheduler();
+  const store = createBoardStore({ project: "proj", fetcher, storage, scheduler: sched.scheduler });
+  await settle();
+
+  /* The operator closes the very node the seed is placing, while the seed is
+     still inflight. Nobody else is writing — this is our own seed and our own
+     later decision about a key the seed touches. */
+  store.mutate([{ kind: "close", path: "/seed" }]);
+  expect(store.getSnapshot().prefs.hidden).toEqual(["/seed"]);
+
+  releaseSeed();
+  await settle();
+  sched.runTimeouts();
+  await settle();
+
+  /* Fencing must not treat this device's own authored seed as a competing
+     writer: the close was formed after it and has to land. Over-fencing here
+     silently eats the operator's action. */
+  expect(server.board("proj").prefs.hidden).toEqual(["/seed"]);
+  expect(server.board("proj").prefs.manual).toEqual([]);
+  expect(store.getSnapshot().prefs.hidden).toEqual(["/seed"]);
+  expect(store.getSnapshot().sync).toBe("current");
+  store.dispose();
+});
+
 test("a stale view loses only the keys another device wrote, and keeps the rest", async () => {
   const server = durableBoard();
   server.otherDevice("proj", [
