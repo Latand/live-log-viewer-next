@@ -59,6 +59,7 @@ import {
   withDismissedReceipts,
   writeDismissedReceipts,
 } from "./runtime/deliveryState";
+import { hasOperatorCredential } from "./operatorCredential";
 import { mintIdempotencyKey, receiptIsAdmitted, receiptIsTerminal } from "./runtime/runtimeModel";
 import { useAgentCapabilities } from "./useAgentCapabilities";
 import { VoiceConversationButton } from "./VoiceConversation";
@@ -984,6 +985,14 @@ export function TmuxComposer({
   const voiceEnabled = cardId.startsWith("conversation_")
     && structuredSession?.session.hostKind === "codex-app-server"
     && structuredSession.session.host === "hosted";
+  /* The start control stands down in a tab that never adopted the operator
+     credential, exactly as the startup link promises — the backend guard
+     (realtimeInjection) would refuse the start anyway, in internal English. Read
+     at render: adoption runs during the Viewer's render, before any card mounts.
+     A STALE credential (server restarted, tab kept its sessionStorage value)
+     still passes here, reaches the backend, and comes back as the localized
+     authorization notice on the voice panel. */
+  const operatorTab = hasOperatorCredential();
   const voiceWorkerTurn = structuredSession?.session.liveTurn;
   const voice = useCodexRealtime(
     cardId,
@@ -2000,7 +2009,7 @@ export function TmuxComposer({
       /* ArrowUp/ArrowDown in an empty composer walk what is queued and what
          was already sent, newest first (issue #561). */
       history={composerHistory}
-      voiceControl={voiceEnabled ? (
+      voiceControl={voiceEnabled && operatorTab ? (
         <>
           <VoiceConversationButton
             phase={voice.phase}

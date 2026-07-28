@@ -1841,6 +1841,7 @@ export const en = {
   "voice.float": "Open the floating voice window",
   "voice.dock": "Close the floating window and keep the call",
   "voice.floatUnsupported": "A floating voice window needs a Chromium browser; the call stays here.",
+  "voice.unauthorized": "Voice calls need the operator link. Open the Viewer through the link printed in its terminal, then try again.",
 
   /* The persistent root-conversation overlay (#691) and the focus handoff it
      surfaces (#688). */
