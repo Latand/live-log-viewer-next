@@ -227,6 +227,7 @@ export function VoicePipHost({ mobile, onSend, resolveClient = codexRealtimeClie
       /* Through the card's tray, which owns the File and the object URL. Filtering
          the shared list here would hide a tile the card still holds. */
       onRemoveAttachment={(id) => store.removeAttachment(id)}
+      canRemoveAttachments={composer.canAttach}
       onSend={handleSend}
       /* Honest about a card that went away: the floater keeps the draft and the
          transcript, and says the send path is gone rather than swallowing a press.
@@ -265,5 +266,5 @@ const IDLE = {
   outputMuted: false,
 };
 const IDLE_SNAPSHOT = () => IDLE;
-const EMPTY = { draft: "", attachments: [] as const, canSend: false };
+const EMPTY = { draft: "", attachments: [] as const, canSend: false, canAttach: false };
 const EMPTY_COMPOSER = () => EMPTY;

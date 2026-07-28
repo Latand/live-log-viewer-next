@@ -3,41 +3,100 @@
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/capabilityHeader";
 
 /**
- * The operator capability, as the browser holds it (#691 round 6).
+ * The operator capability, as the browser holds it (#691 rounds 6–7).
  *
- * Operator-only actions — changing the manager designation, opening and closing the
- * voice transport — used to be authorized by request shape: `sec-fetch-site:
- * same-origin` with a matching `Origin`. That is a CSRF signal about where a BROWSER
- * request came from, and a local process can write all three headers, so any worker
- * could omit its own capability and inherit the right to appoint itself the manager.
+ * Three deliveries have been tried on this feature and two were broken in the same
+ * way, so the reasoning is worth keeping:
  *
- * A credential fixes that, and a browser can only hold a server secret if the server
- * puts it there: `page.tsx` reads the capability during the server render and seeds
- * it here. Nothing fetches it over HTTP, because an endpoint that hands it out is the
- * forgeable classification again with extra steps.
+ * 1. Trust the ROUTE's caller — a claim, and claims are free.
+ * 2. Trust the HEADER SHAPE (`sec-fetch-site: same-origin`) — forbidden to page
+ *    JavaScript, trivially written by a local process.
+ * 3. SERVE it in the page — worst of the three: the page is fetched anonymously over
+ *    loopback, so any local process could GET it and become the operator. A sound
+ *    credential leaked by its delivery is worse than none, because it looks
+ *    authenticated.
  *
- * Held in a module variable rather than storage on purpose. It should live exactly as
- * long as the document does; persisting it would leave the operator's capability in
- * a place every later page — and anything that can read that origin's storage — can
- * pick it up.
+ * What survives is the constraint all three failed: the credential must never appear
+ * in anything a local process can request. So it arrives in the URL FRAGMENT of a
+ * one-time link the server prints to the terminal the operator launched it from.
+ * Fragments are never transmitted to the server, never appear in a response body, and
+ * never land in request logs — there is nothing to fetch and nothing to replay.
+ *
+ * The fragment is stripped from the address bar the moment it is read, so it does not
+ * linger in history, and the value is kept in `sessionStorage`: per-tab, gone when the
+ * tab closes, and reachable only by script on this origin — which an agent, being a
+ * separate process rather than a page, is not running.
+ *
+ * This does NOT defend against a process reading the capability file directly. Nothing
+ * in this app does; agents run as the operator's own uid. That is the repo's standing
+ * boundary, and it is a different question from the one this file answers.
  */
+
+/** The fragment key the startup link uses. */
+export const OPERATOR_CREDENTIAL_FRAGMENT = "llv-operator";
+const STORAGE_KEY = "llv.operator.capability";
 
 let capability: string | null = null;
 
-/** Seeded once, from the server render. */
-export function seedOperatorCredential(value: string | null): void {
-  if (value) capability = value;
+function readStored(): string | null {
+  try {
+    return window.sessionStorage.getItem(STORAGE_KEY);
+  } catch {
+    /* Private mode or disabled storage: the credential simply lives for this
+       render tree, which still covers the tab that opened the link. */
+    return null;
+  }
+}
+
+function store(value: string): void {
+  try {
+    window.sessionStorage.setItem(STORAGE_KEY, value);
+  } catch {
+    /* see readStored */
+  }
+}
+
+/**
+ * Take the credential out of the URL fragment, if this is the one-time link, and
+ * remember it for the tab.
+ *
+ * Idempotent and safe to call during render: it touches no React state, and the
+ * history rewrite happens at most once because the fragment is gone afterwards.
+ */
+export function adoptOperatorCredentialFromLocation(): void {
+  if (typeof window === "undefined") return;
+  if (capability) return;
+
+  const hash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : window.location.hash;
+  const fragment = new URLSearchParams(hash);
+  const claimed = fragment.get(OPERATOR_CREDENTIAL_FRAGMENT)?.trim();
+  if (claimed) {
+    capability = claimed;
+    store(claimed);
+    /* Out of the address bar immediately: a fragment that stays put ends up in
+       history, in a screenshot, and in whatever the operator pastes next. */
+    fragment.delete(OPERATOR_CREDENTIAL_FRAGMENT);
+    const remaining = fragment.toString();
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${remaining ? `#${remaining}` : ""}`);
+    return;
+  }
+  capability = readStored();
 }
 
 export function operatorCredential(): string | null {
   return capability;
 }
 
+/** Whether operator-only controls can work at all in this tab. */
+export function hasOperatorCredential(): boolean {
+  return capability !== null;
+}
+
 /**
  * Headers for an operator-only request.
  *
- * Returns nothing when the credential is absent, which makes the call fail closed at
- * the server with a clear refusal rather than appearing to work.
+ * Empty when the credential is absent, so the call fails closed at the server with a
+ * clear refusal rather than appearing to work.
  */
 export function operatorHeaders(): Record<string, string> {
   return capability ? { [VIEWER_SPAWN_CAPABILITY_HEADER]: capability } : {};
@@ -46,4 +105,9 @@ export function operatorHeaders(): Record<string, string> {
 /** Tests only. */
 export function resetOperatorCredentialForTests(): void {
   capability = null;
+  try {
+    window.sessionStorage.removeItem(STORAGE_KEY);
+  } catch {
+    /* nothing stored */
+  }
 }

@@ -89,13 +89,17 @@ const NOTHING_PENDING: BridgeTurnStart = { text: "", ackToken: "", commit: () =>
  * is what lets the cursor move then: the token is a value, so it survives being
  * stored beside the delivery key and replayed once.
  */
-export function commitBridgeTurn(ackToken: string, fetchFn: typeof fetch = fetch): void {
+export async function commitBridgeTurn(ackToken: string, fetchFn: typeof fetch = fetch): Promise<void> {
   if (!ackToken) return;
-  void fetchFn("/api/bridge", {
+  /* Awaitable and throwing on refusal, so the caller can keep the token when the
+     cursor did not actually move. Swallowing the failure here is what left batches
+     parked with nothing able to settle them. */
+  const response = await fetchFn("/api/bridge", {
     method: "POST",
     headers: { "content-type": "application/json", ...operatorHeaders() },
     body: JSON.stringify({ ackToken }),
-  }).catch(() => undefined);
+  });
+  if (!response.ok) throw new Error(`bridge acknowledgement refused with ${response.status}`);
 }
 
 export function useBridgeTurnStartDrain(

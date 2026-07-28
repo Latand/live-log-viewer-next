@@ -1081,12 +1081,28 @@ export function TmuxComposer({
      the entry is deleted before the request goes out, so a receipt arriving twice
      acknowledges once. */
   const pendingBridgeCommits = useRef<Map<string, string>>(new Map());
+  /* Tokens already spent, so a receipt arriving twice acknowledges once. Kept
+     separately from the pending map because the entry must SURVIVE a failed
+     acknowledgement: deleting on the way out lost the token when the POST failed,
+     leaving the cursor parked with nothing left to settle it. */
+  const spentBridgeCommits = useRef<Set<string>>(new Set());
   const commitBridgeFor = (deliveryKey: string) => {
     const ackToken = pendingBridgeCommits.current.get(deliveryKey);
-    if (!ackToken) return;
-    pendingBridgeCommits.current.delete(deliveryKey);
-    commitBridgeTurn(ackToken);
+    if (!ackToken || spentBridgeCommits.current.has(ackToken)) return;
+    spentBridgeCommits.current.add(ackToken);
+    if (spentBridgeCommits.current.size > 64) {
+      spentBridgeCommits.current.delete(spentBridgeCommits.current.values().next().value as string);
+    }
+    void commitBridgeTurn(ackToken)
+      .then(() => { pendingBridgeCommits.current.delete(deliveryKey); })
+      .catch(() => {
+        /* The cursor did not move, so the token is still the only thing that can
+           settle this batch: keep it and let the next admitted receipt retry. */
+        spentBridgeCommits.current.delete(ackToken);
+      });
   };
+  const commitBridgeForRef = useRef(commitBridgeFor);
+  useEffect(() => { commitBridgeForRef.current = commitBridgeFor; });
   /* Per-idempotency-key snapshot of the runtime settings a structured send
      carries (issue #390 §10): a same-key replay must re-send *identical*
      settings — a pill selection made between attempts changes only the NEXT
@@ -1097,6 +1113,16 @@ export function TmuxComposer({
      is disabled or the session is legacy/unhosted). */
   const runtimeReceipts = useRuntimeReceiptsForArtifact(file.path, cardId);
   const displayedRuntimeReceipts = mergeRuntimeReceipts(runtimeReceipts, immediateRuntimeReceipts);
+  /* #691 §4 — THE RECEIPT-STREAM CONSUMER for parked bridge batches.
+     A structured send can answer `pending` and settle minutes later on this stream,
+     by which time the closure that drained the batch is gone. Watching the receipts
+     is the only way that admission ever reaches the cursor; without it a batch stays
+     parked and its reports repeat on the next turn. */
+  useEffect(() => {
+    for (const receipt of displayedRuntimeReceipts) {
+      if (receiptIsAdmitted(receipt.status)) commitBridgeForRef.current(receipt.idempotencyKey);
+    }
+  }, [displayedRuntimeReceipts]);
   const assistantTurnReceipt = messageReceiptForAssistantTurn(
     displayedRuntimeReceipts,
     structuredSession?.session.liveTurn?.turnId,

@@ -522,3 +522,29 @@ test("a card that unmounts disables the floater's Send rather than swallowing it
   expect(store.getSnapshot().draft).toBe("start a reviewer");
   expect(floatSurface()).not.toBeNull();
 });
+
+test("a card that unmounts disables the floater's tile controls too", async () => {
+  const store = composerStore(CONVERSATION);
+  const release = store.registerAttachmentOwner({ remove: () => undefined, clearAll: () => undefined });
+  const { render } = mount();
+  startCall("live");
+  await settle();
+  flushSync(() => store.setAttachments([
+    { id: "one", status: "ready", name: "shot.png", mime: "image/png", preview: "blob:one" },
+  ]));
+  render();
+  await settle();
+
+  const enabled = pip.document.querySelector("[data-testid='voice-float-attachments'] button") as unknown as HTMLButtonElement;
+  expect(enabled.disabled).toBe(false);
+
+  /* The tray goes with the card; the tile stays on screen. The button must say so
+     rather than accepting a press that removes nothing. */
+  flushSync(() => release());
+  await settle();
+  render();
+  await settle();
+
+  const disabled = pip.document.querySelector("[data-testid='voice-float-attachments'] button") as unknown as HTMLButtonElement;
+  expect(disabled.disabled).toBe(true);
+});

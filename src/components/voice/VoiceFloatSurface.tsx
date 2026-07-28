@@ -43,6 +43,9 @@ export interface VoiceFloatSurfaceProps {
   attachments: readonly SharedAttachment[];
   onDraftChange: (draft: string) => void;
   onRemoveAttachment: (id: string) => void;
+  /** False when no card owns the tray: the tiles still show, their controls do not
+      pretend to work. */
+  canRemoveAttachments: boolean;
   onSend: () => void;
   sendDisabled: boolean;
   /** Derived from the measured window height, never from a mode toggle (§6). */
@@ -67,6 +70,7 @@ export function VoiceFloatSurface({
   attachments,
   onDraftChange,
   onRemoveAttachment,
+  canRemoveAttachments,
   onSend,
   sendDisabled,
   compact,
@@ -156,8 +160,9 @@ export function VoiceFloatSurface({
                 type="button"
                 aria-label={t("img.removeAria", { n: index + 1 })}
                 title={t("img.removeAria", { n: index + 1 })}
+                disabled={!canRemoveAttachments}
                 onClick={() => onRemoveAttachment(attachment.id)}
-                className="inline-flex items-center justify-center rounded-control text-muted hover:bg-sunken hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="inline-flex items-center justify-center rounded-control text-muted hover:bg-sunken hover:text-danger disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               >
                 <X className="h-3.5 w-3.5" aria-hidden />
               </button>

@@ -256,3 +256,40 @@ test("a replacement sender keeps the path open across a card remount", () => {
   expect(store.getSnapshot().canSend).toBe(true);
   releaseSecond();
 });
+
+test("the tray's presence is published, so the floater's tile controls can be honest", () => {
+  const store = composerStore("conversation_a");
+  expect(store.getSnapshot().canAttach).toBe(false);
+
+  const release = store.registerAttachmentOwner({ remove: () => undefined, clearAll: () => undefined });
+  expect(store.getSnapshot().canAttach).toBe(true);
+
+  /* Card unmounts while the floating window stays open: the tiles are still on
+     screen, the tray that owns their Files is not. */
+  release();
+  expect(store.getSnapshot().canAttach).toBe(false);
+});
+
+test("gaining and losing the tray notifies subscribers, and a remount never flickers", () => {
+  const store = composerStore("conversation_a");
+  const seen: boolean[] = [];
+  store.subscribe(() => seen.push(store.getSnapshot().canAttach));
+
+  const first = store.registerAttachmentOwner({ remove: () => undefined, clearAll: () => undefined });
+  const second = store.registerAttachmentOwner({ remove: () => undefined, clearAll: () => undefined });
+  first();
+  expect(seen).toEqual([true]);
+  expect(store.getSnapshot().canAttach).toBe(true);
+
+  second();
+  expect(seen).toEqual([true, false]);
+});
+
+test("a send does not revoke the tray it did not own", () => {
+  const store = composerStore("conversation_a");
+  store.registerSender(() => undefined);
+  store.registerAttachmentOwner({ remove: () => undefined, clearAll: () => undefined });
+  store.setDraft("go");
+  store.commitSend(store.sendKey()!);
+  expect(store.getSnapshot()).toMatchObject({ draft: "", canSend: true, canAttach: true });
+});

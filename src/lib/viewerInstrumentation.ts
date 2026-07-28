@@ -155,12 +155,36 @@ export async function startCurrentReleaseControllers(
   scheduleAccountMigrationController(startAccountMigrationController, accountControllerDelayMs(env));
 }
 
+/**
+ * The operator's one-time link (#691 round 7).
+ *
+ * The capability reaches the browser through the URL FRAGMENT of this link and
+ * nowhere else. It is printed to the terminal the operator started the Viewer from —
+ * a channel a local process cannot fetch — and the fragment never travels to the
+ * server, so it appears in no response and no request log.
+ *
+ * Returned as well as printed so a caller can place it somewhere else; kept off every
+ * HTTP surface deliberately, because an endpoint that hands out the credential is the
+ * anonymous page all over again.
+ */
+export function operatorCredentialLink(capability: string, origin: string): string {
+  return `${origin}/#llv-operator=${encodeURIComponent(capability)}`;
+}
+
 export async function initializeOperatorSpawnCapabilityAtStartup(
   env: Readonly<Record<string, string | undefined>> = process.env,
+  log: (line: string) => void = (line) => console.error(line),
 ): Promise<void> {
   const { ensureOperatorSpawnCapability, rotateOperatorSpawnCapability } = await import("@/lib/agent/operatorCapability");
-  if (env.LLV_ROTATE_OPERATOR_SPAWN_CAPABILITY === "1") rotateOperatorSpawnCapability();
-  else ensureOperatorSpawnCapability();
+  const capability = env.LLV_ROTATE_OPERATOR_SPAWN_CAPABILITY === "1"
+    ? rotateOperatorSpawnCapability()
+    : ensureOperatorSpawnCapability();
+
+  const port = env.PORT?.trim() || "8898";
+  const origin = `http://127.0.0.1:${port}`;
+  log(`[viewer] operator link (grants operator-only actions in the browser you open it in):`);
+  log(`[viewer]   ${operatorCredentialLink(capability, origin)}`);
+  log(`[viewer] Opening ${origin} without it still shows everything; designation and voice transport controls stand down.`);
 }
 
 export async function startWakatimeIntegrationIfEnabled(

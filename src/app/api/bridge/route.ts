@@ -48,18 +48,15 @@ const MAX_ACKNOWLEDGED_IDS = 256;
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const parameters = request.nextUrl.searchParams;
-  /* The LIVE path: the drain carries deploy nonces, so reading it needs the same
-     proof writing into the call does. */
-  const gateway = authenticateBridgeGateway(parameters.get("realtimeSessionId"));
-  if (!gateway.ok) return NextResponse.json({ error: gateway.error }, { status: 403, headers });
 
-  /* The no-call path (§4). A turn is about to open with no live call to interject
-     into, so its inbox becomes part of that turn's own input. Same cursor, same
-     caps, same "read moves nothing" rule as the live drain. */
+  /* MODE FIRST, THEN THE PROOF THAT MODE ACTUALLY USES.
+     The two paths authenticate differently because they exist in different states:
+     the live drain proves it is the call's peer, and the turn-start drain cannot,
+     because it runs precisely when no call is live. Checking the live proof ahead of
+     the dispatch made the no-call path answer 403 in the one situation it was built
+     for — reachable only while unnecessary. */
   if (parameters.get("mode") === "turn-start") {
-    /* The NO-CALL path, so a live session id is exactly what does not exist here —
-       requiring one defeated the branch it was added to protect. The operator's own
-       composer is opening a turn, so the operator credential is the right proof. */
+    /* The operator's own composer is opening a turn; the credential is what says so. */
     const operator = requireOperatorAuthority(request);
     if (!operator.ok) return NextResponse.json({ error: operator.error }, { status: operator.status, headers });
     try {
@@ -74,6 +71,11 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       return failure(error);
     }
   }
+
+  /* The LIVE path: this payload carries deploy nonces, so reading it needs the same
+     proof writing into the call does. */
+  const gateway = authenticateBridgeGateway(parameters.get("realtimeSessionId"));
+  if (!gateway.ok) return NextResponse.json({ error: gateway.error }, { status: 403, headers });
 
   const acknowledgedDeliveryIds = parameters.getAll("acked").slice(-MAX_ACKNOWLEDGED_IDS);
   const lastBatchAtRaw = parameters.get("lastBatchAt");

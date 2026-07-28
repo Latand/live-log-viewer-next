@@ -5,6 +5,8 @@ import path from "node:path";
 
 import { NextRequest } from "next/server";
 
+import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
+import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { setBridgeGatewaySourcesForTests } from "@/lib/bridge/gatewayAuthority";
 import { recordManagerReport } from "@/lib/bridge/service";
 import { readBridgeChannel } from "@/lib/bridge/store";
@@ -217,4 +219,45 @@ test("the drain never carries a work log, a tool call or a journal entry (AC12)"
   for (const word of ["toolCall", "tool_use", "lifecycle", "journal", "transcript"]) {
     expect(body).not.toContain(word);
   }
+});
+
+test("turn-start drains with NO live call at all — the situation it exists for", async () => {
+  sandbox();
+  /* No live realtime session anywhere: this is the state the no-call path is FOR, and
+     checking the live-session proof before dispatching on mode made it a 403. */
+  setBridgeGatewaySourcesForTests({
+    rootConversationId: () => "conversation_root",
+    liveRealtimeSessionId: () => null,
+  });
+  recordManagerReport({ key: "a", class: "blocked", at: new Date().toISOString(), body: "needs a decision" });
+
+  const response = await GET(new NextRequest(`${ORIGIN}/api/bridge?mode=turn-start`, {
+    headers: { host: "127.0.0.1", [VIEWER_SPAWN_CAPABILITY_HEADER]: ensureOperatorSpawnCapability() },
+  })) as unknown as Response;
+
+  expect(response.status).toBe(200);
+  const payload = await response.json() as { prelude: { text: string; ackToken: string } | null };
+  expect(payload.prelude?.text).toContain("needs a decision");
+  expect(payload.prelude?.ackToken).toBeTruthy();
+});
+
+test("turn-start still refuses a caller with no operator credential", async () => {
+  sandbox();
+  recordManagerReport({ key: "a", class: "status", at: new Date().toISOString(), body: "one" });
+  const response = await GET(new NextRequest(`${ORIGIN}/api/bridge?mode=turn-start`, {
+    headers: { host: "127.0.0.1" },
+  })) as unknown as Response;
+  expect(response.status).toBe(403);
+  expect(await response.text()).not.toContain("needs a decision");
+});
+
+test("the live drain still requires the call's session id", async () => {
+  sandbox();
+  recordManagerReport({ key: "a", class: "status", at: new Date().toISOString(), body: "one" });
+  /* An operator credential does not substitute: the live payload carries nonces and
+     the peer proof is what bounds who can read them. */
+  const response = await GET(new NextRequest(`${ORIGIN}/api/bridge`, {
+    headers: { host: "127.0.0.1", [VIEWER_SPAWN_CAPABILITY_HEADER]: ensureOperatorSpawnCapability() },
+  })) as unknown as Response;
+  expect(response.status).toBe(403);
 });

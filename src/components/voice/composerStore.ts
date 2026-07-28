@@ -48,6 +48,14 @@ export interface ComposerSnapshot {
    * message went.
    */
   canSend: boolean;
+  /**
+   * Whether a card is mounted to own the attachment tray.
+   *
+   * Separate from `canSend` because they are lost independently and the floater has
+   * to render both honestly: a remove button with no tray behind it looks like it
+   * worked and does nothing, which is exactly the failure the send path had.
+   */
+  canAttach: boolean;
 }
 
 export interface ComposerStore {
@@ -101,7 +109,7 @@ export interface ComposerAttachmentOwner {
   clearAll(): void;
 }
 
-const EMPTY: ComposerSnapshot = { draft: "", attachments: [], canSend: false };
+const EMPTY: ComposerSnapshot = { draft: "", attachments: [], canSend: false, canAttach: false };
 
 function createStore(conversationId: string): ComposerStore {
   const listeners = new Set<() => void>();
@@ -172,7 +180,7 @@ function createStore(conversationId: string): ComposerStore {
       epoch += 1;
       touched = false;
       /* Clearing the draft must not revoke the delivery path the card still holds. */
-      commit({ ...EMPTY, canSend: sender !== null });
+      commit({ ...EMPTY, canSend: sender !== null, canAttach: attachmentOwner !== null });
     },
     registerSender(send) {
       /* Last registration wins. A card remount registers before the outgoing one
@@ -193,10 +201,16 @@ function createStore(conversationId: string): ComposerStore {
       sender?.();
     },
     registerAttachmentOwner(owner) {
-      /* Same last-one-wins discipline, for the same remount ordering. */
+      /* Same last-one-wins discipline, for the same remount ordering — and the same
+         published flag, so the floater's tile controls disable with the tray rather
+         than staying live over nothing. */
+      const had = attachmentOwner !== null;
       attachmentOwner = owner;
+      if (!had) commit({ ...snapshot, canAttach: true });
       return () => {
-        if (attachmentOwner === owner) attachmentOwner = null;
+        if (attachmentOwner !== owner) return;
+        attachmentOwner = null;
+        commit({ ...snapshot, canAttach: false });
       };
     },
     removeAttachment(id) {
