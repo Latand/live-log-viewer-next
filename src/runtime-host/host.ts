@@ -1,45 +1,12 @@
-import fs from "node:fs";
-import path from "node:path";
-
 import { RuntimeIdempotencyConflictError, type RuntimeEvent, type RuntimeEventInput, type RuntimeOperationCommand, type RuntimeReceiptStatus, type RuntimeSocketRequest, type RuntimeSocketResponse } from "@/lib/runtime/contracts";
 import { structuredHostsEnabled } from "@/lib/runtime/flags";
 import { consumeRuntimeEvent, type RuntimeConsumerPorts } from "@/lib/runtime/consumers";
-import { procBackend } from "@/lib/proc";
 
 import { RuntimeJournal } from "./journal";
 import type { ViewerDeploymentCoordinator } from "./deployment";
+import type { McpHealthProbeAdmissions } from "./mcpHealthProbeAdmission";
 
-export class RuntimeHostFence {
-  private held = false;
-  constructor(
-    private readonly filename: string,
-    private readonly ownerAlive: (owner: { pid: number; startIdentity: string | null }) => boolean = (owner) =>
-      procBackend.pidAlive(owner.pid) && (owner.startIdentity === null || procBackend.processIdentity(owner.pid) === owner.startIdentity),
-  ) {}
-  acquire(): void {
-    fs.mkdirSync(path.dirname(this.filename), { recursive: true, mode: 0o700 });
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      try {
-        fs.writeFileSync(this.filename, JSON.stringify({ pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) }), { flag: "wx", mode: 0o600 });
-        this.held = true;
-        return;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        let stale = false;
-        try {
-          const owner = JSON.parse(fs.readFileSync(this.filename, "utf8")) as { pid: number; startIdentity?: string | null };
-          stale = Number.isInteger(owner.pid) && owner.pid > 0 && !this.ownerAlive({ pid: owner.pid, startIdentity: owner.startIdentity ?? null });
-        } catch {
-          stale = false;
-        }
-        if (!stale) throw new Error("runtime host singleton fence is held");
-        fs.rmSync(this.filename, { force: true });
-      }
-    }
-    throw new Error("runtime host singleton fence is held");
-  }
-  release(): void { if (this.held) fs.rmSync(this.filename, { force: true }); this.held = false; }
-}
+export { RuntimeHostFence } from "./runtimeHostFence";
 
 export class RuntimeHost {
   private consumerQueue: Promise<void> = Promise.resolve();
@@ -51,6 +18,7 @@ export class RuntimeHost {
     private readonly deployments?: ViewerDeploymentCoordinator,
     private readonly structuredHosts = structuredHostsEnabled(),
     private readonly signalFlowPipelineProgress?: () => void,
+    private readonly mcpHealthProbeAdmissions?: McpHealthProbeAdmissions,
   ) {}
 
   async recoverConsumers(): Promise<number> {
@@ -214,6 +182,8 @@ export class RuntimeHost {
       } else if (request.method === "viewer-deployment-read") {
         if (!this.deployments) throw new Error("viewer deployments are disabled");
         result = this.deployments.readViewerDeployment(String(request.params?.deploymentId ?? ""));
+      } else if (request.method === "mcp-health-probe-admission") {
+        result = this.mcpHealthProbeAdmissions?.consume(request.params?.capability) ?? false;
       } else throw new Error("runtime request method is unsupported");
       return { id: request.id, ok: true, result };
     } catch (error) {

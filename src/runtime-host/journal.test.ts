@@ -2256,9 +2256,14 @@ test("runtime host fencing reclaims a stale process identity", () => {
   fs.writeFileSync(filename, JSON.stringify({ pid: 42, startIdentity: "42:old" }), { mode: 0o600 });
   const fence = new RuntimeHostFence(filename, () => false);
   fence.acquire();
-  expect(JSON.parse(fs.readFileSync(filename, "utf8"))).toMatchObject({ pid: process.pid });
+  expect(JSON.parse(fs.readFileSync(filename, "utf8"))).toMatchObject({
+    pid: process.pid,
+    acquisitionId: expect.any(String),
+  });
   fence.release();
-  expect(fs.existsSync(filename)).toBe(false);
+  const successor = new RuntimeHostFence(filename);
+  successor.acquire();
+  successor.release();
 });
 
 test("issue 367: a failed structured spawn retires its registering placeholder with the terminal receipt", () => {

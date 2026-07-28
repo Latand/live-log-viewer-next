@@ -5,6 +5,7 @@ import type { AttentionCallerAuthority } from "@/lib/attention/callerAuthority";
 import { MCP_TOOL_NAMES, type McpToolName } from "./server";
 import {
   GATEWAY_ALLOWED_TOOLS,
+  HEALTH_PROBE_ALLOWED_TOOLS,
   MANAGER_ONLY_TOOLS,
   mcpCallerIdentity,
   permitMcpTool,
@@ -37,6 +38,14 @@ test("the gateway's whole surface is the relay, the message and attention — no
   const permitted = MCP_TOOL_NAMES.filter((toolName) =>
     permit(toolName, { conversationId: MANAGER.conversationId, text: "go", target: "x", sha: "a".repeat(40) }).allowed);
   expect([...permitted].sort()).toEqual(["bridge_directive", "request_attention", "send_message"]);
+});
+
+test("host health admission reaches exactly the two deployment reads and no agent action", () => {
+  const admitted = MCP_TOOL_NAMES.filter((toolName) =>
+    permitMcpTool({ kind: "health-probe" }, toolName, { clientRequestId: "health" }, MANAGER).allowed);
+
+  expect([...HEALTH_PROBE_ALLOWED_TOOLS].sort()).toEqual(["board_snapshot", "deployment_status"]);
+  expect([...admitted].sort()).toEqual(["board_snapshot", "deployment_status"]);
 });
 
 test("the gateway cannot reach any worker, task, pipeline, flow or deploy tool (AC21, AC20)", () => {

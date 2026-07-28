@@ -11,6 +11,7 @@ import type {
   ViewerMcpRuntimeReconciliation,
   ViewerReleaseIdentity,
 } from "../src/lib/runtime/contracts";
+import { admittedMcpHealthProbe } from "../src/lib/mcp/healthProbeAdmission";
 import {
   obsoleteManagedViewerContainers,
   viewerAuthenticationTokenFromConfig,
@@ -23,8 +24,11 @@ import {
 } from "../src/runtime-host/candidateContainer";
 import { ensureCanonicalMirror } from "../src/runtime-host/canonicalMirror";
 import { allocateBuiltCandidatePort, candidatePortsFromEnvironmentLists, isCandidatePortAvailable } from "../src/runtime-host/candidatePort";
+import { withBootstrapMcpHealthProbeAdmission } from "../src/runtime-host/bootstrapMcpHealthProbeAdmission";
 import { viewerCandidateContainerName, viewerCandidateImageName, viewerComposeSnapshotName } from "../src/runtime-host/deploymentArtifacts";
 import { bootstrapViewerRelease } from "../src/runtime-host/deploymentBootstrap";
+import { McpHealthProbeAdmissions } from "../src/runtime-host/mcpHealthProbeAdmission";
+import type { McpHealthProbeAdmissionConsumer } from "../src/runtime-host/mcpHealthProbeAdmissionChannel";
 import { probeMcpRuntime } from "../src/runtime-host/mcpRuntimeProbe";
 import { McpRuntimeReleaseStore } from "../src/runtime-host/mcpRuntimeRelease";
 import {
@@ -348,13 +352,21 @@ async function verifyViewer(candidate: ViewerReleaseIdentity, endpoint: string, 
   });
 }
 
-async function verify(candidate: ViewerReleaseIdentity, endpoint: string, expectedAssetsEndpoint?: string): Promise<ViewerHealthEvidence> {
-  const viewer = await verifyViewer(candidate, endpoint, expectedAssetsEndpoint);
+async function verify(
+  candidate: ViewerReleaseIdentity,
+  endpoint: string,
+  options: {
+    expectedAssetsEndpoint?: string;
+    healthProbeCapability?: string;
+    healthProbeAdmissions?: McpHealthProbeAdmissionConsumer;
+  } = {},
+): Promise<ViewerHealthEvidence> {
+  const viewer = await verifyViewer(candidate, endpoint, options.expectedAssetsEndpoint);
   if (!viewer.ok) return viewer;
   if (!candidate.mcpRuntime || candidate.mcpRuntime.source !== "managed") {
     return { ...viewer, ok: false, detail: "candidate MCP runtime identity is missing" };
   }
-  const promoted = expectedAssetsEndpoint !== undefined;
+  const promoted = options.expectedAssetsEndpoint !== undefined;
   const probeTarget = promoted
     ? targetFile
     : path.join(stateDir, `mcp-candidate-probe-${candidate.mcpRuntime.releaseId}.json`);
@@ -368,6 +380,8 @@ async function verify(candidate: ViewerReleaseIdentity, endpoint: string, expect
     cwd: mcpRuntimeRoot,
     env: probeEnvironment,
     runtime: candidate.mcpRuntime,
+    ...(options.healthProbeCapability ? { healthProbeCapability: options.healthProbeCapability } : {}),
+    ...(options.healthProbeAdmissions ? { healthProbeAdmissions: options.healthProbeAdmissions } : {}),
   });
   if (!promoted) {
     fs.rmSync(probeTarget, { force: true });
@@ -445,7 +459,13 @@ async function currentMcpRuntime(): Promise<ViewerMcpRuntimeIdentity> {
    surface. `stagePreparedPackage` derives its release id from the deployment
    id, so a boot that crashed mid-reconcile reuses (never duplicates) the same
    release, and a boot that already matches does nothing at all. */
-async function reconcileMcpRuntime(revision: string): Promise<ViewerMcpRuntimeReconciliation | null> {
+async function reconcileMcpRuntime(
+  revision: string,
+  healthProbe?: {
+    healthProbeCapability: string;
+    healthProbeAdmissions: McpHealthProbeAdmissionConsumer;
+  },
+): Promise<ViewerMcpRuntimeReconciliation | null> {
   if (!/^[0-9a-f]{40}$/.test(revision)) throw new Error("runtime-host MCP revision is invalid");
   const previous = readTarget();
   if (previous.revision !== revision) throw new Error("runtime-host MCP revision differs from the active Viewer release");
@@ -464,6 +484,7 @@ async function reconcileMcpRuntime(revision: string): Promise<ViewerMcpRuntimeRe
       cwd: mcpRuntimeRoot,
       env: probeEnvironment,
       runtime,
+      ...(healthProbe ?? {}),
     });
     if (!health.ok) throw new Error(health.detail ?? "runtime-host MCP reconciliation health gate failed");
     return { publication, health };
@@ -508,22 +529,69 @@ async function stageRuntimeHostSuccessor(candidate: ViewerReleaseIdentity): Prom
   }, { registryBackendMode });
 }
 
+export interface BootstrapReleaseDependencies {
+  runtimeSocket: string;
+  targetExists(): boolean;
+  resolveRevision(requested: string): Promise<string>;
+  buildCandidate(deploymentId: string, revision: string): Promise<ViewerReleaseIdentity>;
+  startCandidate(candidate: ViewerReleaseIdentity): Promise<void>;
+  verifyCandidate(
+    candidate: ViewerReleaseIdentity,
+    healthProbeCapability: string,
+    healthProbeAdmissions: McpHealthProbeAdmissionConsumer,
+  ): Promise<ViewerHealthEvidence>;
+  publishTarget(candidate: ViewerReleaseIdentity): Promise<void>;
+  targetMatches(candidate: ViewerReleaseIdentity): boolean;
+  retireCandidate(candidate: ViewerReleaseIdentity): Promise<void>;
+}
+
+export async function runBootstrapRelease(
+  input: Record<string, unknown>,
+  dependencies: BootstrapReleaseDependencies = {
+    runtimeSocket,
+    targetExists: () => fs.existsSync(targetFile),
+    resolveRevision,
+    buildCandidate,
+    startCandidate,
+    verifyCandidate: (candidate, healthProbeCapability, healthProbeAdmissions) =>
+      verify(candidate, candidate.endpoint, { healthProbeCapability, healthProbeAdmissions }),
+    publishTarget: async (candidate) => { switchTarget(candidate, "activate"); },
+    targetMatches: (candidate) => releasesEqual(readTarget(), candidate),
+    retireCandidate: retireRelease,
+  },
+) {
+  return bootstrapViewerRelease(String(input.revision ?? "origin/main"), `bootstrap-${randomUUID()}`, {
+    ...dependencies,
+    verifyCandidate: (candidate) => withBootstrapMcpHealthProbeAdmission(
+      dependencies.runtimeSocket,
+      (healthProbeCapability, healthProbeAdmissions) =>
+        dependencies.verifyCandidate(candidate, healthProbeCapability, healthProbeAdmissions),
+    ),
+  });
+}
+
+async function delegatedHealthProbeAdmission(
+  hostCapability: string | undefined,
+): Promise<{
+  healthProbeCapability: string;
+  healthProbeAdmissions: McpHealthProbeAdmissionConsumer;
+} | undefined> {
+  if (!await admittedMcpHealthProbe(hostCapability)) return undefined;
+  const admissions = new McpHealthProbeAdmissions();
+  return {
+    healthProbeCapability: admissions.issue(),
+    healthProbeAdmissions: admissions,
+  };
+}
+
 async function main(): Promise<unknown> {
   if (process.env.LLV_DEPLOYMENT_ADAPTER_PROTOCOL !== "1") throw new Error("deployment adapter protocol is required");
   const action = process.argv[2];
   const input = JSON.parse(await Bun.stdin.text()) as Record<string, unknown>;
-  if (action === "bootstrap-release") {
-    return bootstrapViewerRelease(String(input.revision ?? "origin/main"), `bootstrap-${randomUUID()}`, {
-      targetExists: () => fs.existsSync(targetFile),
-      resolveRevision,
-      buildCandidate,
-      startCandidate,
-      verifyCandidate: (candidate) => verify(candidate, candidate.endpoint),
-      publishTarget: async (candidate) => { switchTarget(candidate, "activate"); },
-      targetMatches: (candidate) => releasesEqual(readTarget(), candidate),
-      retireCandidate: retireRelease,
-    });
-  }
+  if (action === "bootstrap-release") return runBootstrapRelease(input);
+  const healthProbeCapability = typeof input.healthProbeCapability === "string"
+    ? input.healthProbeCapability
+    : undefined;
   if (action === "resolve-revision") return { revision: await resolveRevision(String(input.revision ?? "")) };
   if (action === "build-candidate") return buildCandidate(String(input.deploymentId ?? ""), String(input.revision ?? ""));
   if (action === "start-candidate") { await startCandidate(release(input.candidate)); return {}; }
@@ -535,14 +603,33 @@ async function main(): Promise<unknown> {
     return current;
   }
   if (action === "current-mcp-runtime") return currentMcpRuntime();
-  if (action === "reconcile-mcp-runtime") return reconcileMcpRuntime(String(input.revision ?? ""));
-  if (action === "verify-candidate") { const candidate = release(input.candidate); return verify(candidate, candidate.endpoint); }
+  if (action === "reconcile-mcp-runtime") {
+    const healthProbe = await delegatedHealthProbeAdmission(healthProbeCapability);
+    return reconcileMcpRuntime(
+      String(input.revision ?? ""),
+      healthProbe,
+    );
+  }
+  if (action === "verify-candidate") {
+    const candidate = release(input.candidate);
+    const healthProbe = await delegatedHealthProbeAdmission(healthProbeCapability);
+    return verify(candidate, candidate.endpoint, {
+      ...(healthProbe ?? {}),
+    });
+  }
   if (action === "promote") {
     const candidate = release(input.candidate);
     if (candidate.mcpRuntime?.source !== "managed") throw new Error("candidate MCP runtime identity is missing");
     return switchTarget(candidate, "activate");
   }
-  if (action === "verify-promoted") { const candidate = release(input.candidate); return verify(candidate, stableEndpoint, candidate.endpoint); }
+  if (action === "verify-promoted") {
+    const candidate = release(input.candidate);
+    const healthProbe = await delegatedHealthProbeAdmission(healthProbeCapability);
+    return verify(candidate, stableEndpoint, {
+      expectedAssetsEndpoint: candidate.endpoint,
+      ...(healthProbe ?? {}),
+    });
+  }
   if (action === "rollback") {
     const previous = release(input.previous);
     await startCandidate(previous);
@@ -574,16 +661,18 @@ async function main(): Promise<unknown> {
   throw new Error("deployment adapter action is unsupported");
 }
 
-let output: string;
-let exitCode = 0;
-try {
-  output = `${JSON.stringify(await main())}\n`;
-} catch (error) {
-  output = `${error instanceof Error ? error.message : "deployment adapter failed"}\n`;
-  exitCode = 1;
+if (import.meta.main) {
+  let output: string;
+  let exitCode = 0;
+  try {
+    output = `${JSON.stringify(await main())}\n`;
+  } catch (error) {
+    output = `${error instanceof Error ? error.message : "deployment adapter failed"}\n`;
+    exitCode = 1;
+  }
+  const stream = exitCode === 0 ? process.stdout : process.stderr;
+  await new Promise<void>((resolve, reject) => {
+    stream.write(output, (error) => error ? reject(error) : resolve());
+  });
+  process.exit(exitCode);
 }
-const stream = exitCode === 0 ? process.stdout : process.stderr;
-await new Promise<void>((resolve, reject) => {
-  stream.write(output, (error) => error ? reject(error) : resolve());
-});
-process.exit(exitCode);
