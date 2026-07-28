@@ -8,6 +8,7 @@ const { createServerRuntimeConsumers } = await import("@/lib/runtime/serverConsu
 const { requestPipelineTick } = await import("@/lib/pipelines/controllerSignal");
 const { RuntimeHost, RuntimeHostFence } = await import("./host");
 const { RuntimeJournal } = await import("./journal");
+const { McpHealthProbeAdmissions } = await import("./mcpHealthProbeAdmission");
 const { createLegacyRuntimeScheduler } = await import("./legacyScheduler");
 const { serveRuntimeHost } = await import("./socket");
 const { ViewerDeploymentCoordinator } = await import("./deployment");
@@ -59,8 +60,9 @@ if (deploymentsEnabled && !deploymentAdapterPath) {
    successor process — a missing record is the legacy fixed-tag image and is
    never provably current. */
 const bootGeneration = currentRuntimeHostGeneration();
+const mcpHealthProbeAdmissions = new McpHealthProbeAdmissions();
 const deploymentAdapter = deploymentAdapterPath
-  ? HostCommandViewerDeploymentAdapter.fromExecutable(deploymentAdapterPath)
+  ? HostCommandViewerDeploymentAdapter.fromExecutable(deploymentAdapterPath, { mcpHealthProbeAdmissions })
   : undefined;
 const bootContainer = process.env[RUNTIME_HOST_CONTAINER_ENV];
 if (deploymentAdapter && bootGeneration.image && bootGeneration.revision && bootContainer) {
@@ -81,7 +83,14 @@ const deployments = deploymentAdapter
     },
   )
   : undefined;
-const host = new RuntimeHost(journal, createServerRuntimeConsumers(), deployments, undefined, requestPipelineTick);
+const host = new RuntimeHost(
+  journal,
+  createServerRuntimeConsumers(),
+  deployments,
+  undefined,
+  requestPipelineTick,
+  mcpHealthProbeAdmissions,
+);
 const deploymentProxy = deployments
   ? serveViewerDeploymentProxy(
     process.env.LLV_VIEWER_DEPLOY_TARGET || statePath("viewer-release.json"),

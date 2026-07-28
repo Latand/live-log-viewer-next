@@ -56,6 +56,13 @@ export const MANAGER_ONLY_TOOLS: readonly McpToolName[] = ["bridge_report"];
 
 const MANAGER_ONLY_TOOL_SET: ReadonlySet<string> = new Set(MANAGER_ONLY_TOOLS);
 
+export const HEALTH_PROBE_ALLOWED_TOOLS: readonly McpToolName[] = [
+  "board_snapshot",
+  "deployment_status",
+];
+
+const HEALTH_PROBE_TOOL_SET: ReadonlySet<string> = new Set(HEALTH_PROBE_ALLOWED_TOOLS);
+
 /** Where the manager currently sits, resolved from its designation record. Both
     addressing forms `send_message` accepts must be checkable, or the restriction
     is bypassed by using the other one. */
@@ -65,6 +72,9 @@ export interface ManagerTarget {
 }
 
 export type McpCallerIdentity =
+  /** A single-use admission minted and redeemed by the runtime host. This
+      identity can exercise only the two reads that gate an exact deployment. */
+  | { kind: "health-probe" }
   /** Held to the gateway allowlist. `gateway` is the voice root; `unidentified`
       is a caller the registry could not name, which is denied for the same
       reason — see {@link mcpCallerIdentity}. */
@@ -134,6 +144,15 @@ export function permitMcpTool(
   args: McpToolArgs,
   manager: ManagerTarget | null,
 ): McpToolVerdict {
+  if (identity.kind === "health-probe") {
+    return HEALTH_PROBE_TOOL_SET.has(toolName)
+      ? ALLOWED
+      : {
+        allowed: false,
+        code: "tool_not_permitted",
+        error: `${toolName} is outside the managed MCP health-probe surface.`,
+      };
+  }
   /* Checked before the restricted branch so it covers every identity that is not
      the manager, in one place: gateway, unidentified, and ordinary workers. */
   if (MANAGER_ONLY_TOOL_SET.has(toolName)

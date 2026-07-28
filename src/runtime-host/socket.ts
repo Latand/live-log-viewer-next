@@ -4,7 +4,7 @@ import path from "node:path";
 
 import type { RuntimeSocketRequest, RuntimeSocketResponse } from "@/lib/runtime/contracts";
 
-import { RuntimeHost } from "./host";
+import type { RuntimeHost } from "./host";
 
 const MAX_FRAME_BYTES = 512 * 1024;
 const DEFAULT_SOCKET_TIMEOUT_MS = 31_000;
@@ -19,8 +19,10 @@ export interface RuntimeHostSocketOptions {
   maxWaitConnections?: number;
 }
 
+export type RuntimeHostSocketHandler = Pick<RuntimeHost, "handle">;
+
 /** Newline-framed local protocol. It intentionally binds a Unix path only. */
-export function serveRuntimeHost(socketPath: string, host: RuntimeHost, options: RuntimeHostSocketOptions = {}): net.Server {
+export function serveRuntimeHost(socketPath: string, host: RuntimeHostSocketHandler, options: RuntimeHostSocketOptions = {}): net.Server {
   const defaultTimeoutMs = options.defaultTimeoutMs ?? DEFAULT_SOCKET_TIMEOUT_MS;
   const deploymentTimeoutMs = options.deploymentTimeoutMs ?? DEPLOYMENT_SOCKET_TIMEOUT_MS;
   const maxConnections = options.maxConnections ?? DEFAULT_MAX_CONNECTIONS;
