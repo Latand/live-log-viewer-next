@@ -132,11 +132,12 @@ test("a release target naming a runtime this host never staged falls back to the
   }
 }, 20_000);
 
-test("absent, forged, and replayed health admissions cannot imitate the runtime host", async () => {
+test("absent, forged, expired, and replayed health admissions cannot imitate the runtime host", async () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-probe-adversarial-"));
   const socketPath = path.join(sandbox, "runtime.sock");
   const journal = new RuntimeJournal(path.join(sandbox, "runtime.sqlite"));
-  const admissions = new McpHealthProbeAdmissions();
+  let now = 100;
+  const admissions = new McpHealthProbeAdmissions(() => now, 10);
   const server = serveRuntimeHost(socketPath, new RuntimeHost(
     journal,
     undefined,
@@ -173,6 +174,10 @@ test("absent, forged, and replayed health admissions cannot imitate the runtime 
   try {
     expect((await run()).calls).toEqual({ deploymentStatus: false, boardSnapshot: false });
     expect((await run("A".repeat(43))).calls).toEqual({ deploymentStatus: false, boardSnapshot: false });
+
+    const expired = admissions.issue();
+    now = 110;
+    expect((await run(expired)).calls).toEqual({ deploymentStatus: false, boardSnapshot: false });
 
     const legitimate = admissions.issue();
     expect((await run(legitimate)).calls).toEqual({ deploymentStatus: true, boardSnapshot: true });

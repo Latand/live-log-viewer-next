@@ -23,6 +23,7 @@ import {
 } from "../src/runtime-host/candidateContainer";
 import { ensureCanonicalMirror } from "../src/runtime-host/canonicalMirror";
 import { allocateBuiltCandidatePort, candidatePortsFromEnvironmentLists, isCandidatePortAvailable } from "../src/runtime-host/candidatePort";
+import { withBootstrapMcpHealthProbeAdmission } from "../src/runtime-host/bootstrapMcpHealthProbeAdmission";
 import { viewerCandidateContainerName, viewerCandidateImageName, viewerComposeSnapshotName } from "../src/runtime-host/deploymentArtifacts";
 import { bootstrapViewerRelease } from "../src/runtime-host/deploymentBootstrap";
 import { probeMcpRuntime } from "../src/runtime-host/mcpRuntimeProbe";
@@ -517,25 +518,50 @@ async function stageRuntimeHostSuccessor(candidate: ViewerReleaseIdentity): Prom
   }, { registryBackendMode });
 }
 
+export interface BootstrapReleaseDependencies {
+  runtimeSocket: string;
+  targetExists(): boolean;
+  resolveRevision(requested: string): Promise<string>;
+  buildCandidate(deploymentId: string, revision: string): Promise<ViewerReleaseIdentity>;
+  startCandidate(candidate: ViewerReleaseIdentity): Promise<void>;
+  verifyCandidate(candidate: ViewerReleaseIdentity, healthProbeCapability: string): Promise<ViewerHealthEvidence>;
+  publishTarget(candidate: ViewerReleaseIdentity): Promise<void>;
+  targetMatches(candidate: ViewerReleaseIdentity): boolean;
+  retireCandidate(candidate: ViewerReleaseIdentity): Promise<void>;
+}
+
+export async function runBootstrapRelease(
+  input: Record<string, unknown>,
+  dependencies: BootstrapReleaseDependencies = {
+    runtimeSocket,
+    targetExists: () => fs.existsSync(targetFile),
+    resolveRevision,
+    buildCandidate,
+    startCandidate,
+    verifyCandidate: (candidate, healthProbeCapability) =>
+      verify(candidate, candidate.endpoint, { healthProbeCapability }),
+    publishTarget: async (candidate) => { switchTarget(candidate, "activate"); },
+    targetMatches: (candidate) => releasesEqual(readTarget(), candidate),
+    retireCandidate: retireRelease,
+  },
+) {
+  return bootstrapViewerRelease(String(input.revision ?? "origin/main"), `bootstrap-${randomUUID()}`, {
+    ...dependencies,
+    verifyCandidate: (candidate) => withBootstrapMcpHealthProbeAdmission(
+      dependencies.runtimeSocket,
+      (healthProbeCapability) => dependencies.verifyCandidate(candidate, healthProbeCapability),
+    ),
+  });
+}
+
 async function main(): Promise<unknown> {
   if (process.env.LLV_DEPLOYMENT_ADAPTER_PROTOCOL !== "1") throw new Error("deployment adapter protocol is required");
   const action = process.argv[2];
   const input = JSON.parse(await Bun.stdin.text()) as Record<string, unknown>;
+  if (action === "bootstrap-release") return runBootstrapRelease(input);
   const healthProbeCapability = typeof input.healthProbeCapability === "string"
     ? input.healthProbeCapability
     : undefined;
-  if (action === "bootstrap-release") {
-    return bootstrapViewerRelease(String(input.revision ?? "origin/main"), `bootstrap-${randomUUID()}`, {
-      targetExists: () => fs.existsSync(targetFile),
-      resolveRevision,
-      buildCandidate,
-      startCandidate,
-      verifyCandidate: (candidate) => verify(candidate, candidate.endpoint, { healthProbeCapability }),
-      publishTarget: async (candidate) => { switchTarget(candidate, "activate"); },
-      targetMatches: (candidate) => releasesEqual(readTarget(), candidate),
-      retireCandidate: retireRelease,
-    });
-  }
   if (action === "resolve-revision") return { revision: await resolveRevision(String(input.revision ?? "")) };
   if (action === "build-candidate") return buildCandidate(String(input.deploymentId ?? ""), String(input.revision ?? ""));
   if (action === "start-candidate") { await startCandidate(release(input.candidate)); return {}; }
@@ -595,16 +621,18 @@ async function main(): Promise<unknown> {
   throw new Error("deployment adapter action is unsupported");
 }
 
-let output: string;
-let exitCode = 0;
-try {
-  output = `${JSON.stringify(await main())}\n`;
-} catch (error) {
-  output = `${error instanceof Error ? error.message : "deployment adapter failed"}\n`;
-  exitCode = 1;
+if (import.meta.main) {
+  let output: string;
+  let exitCode = 0;
+  try {
+    output = `${JSON.stringify(await main())}\n`;
+  } catch (error) {
+    output = `${error instanceof Error ? error.message : "deployment adapter failed"}\n`;
+    exitCode = 1;
+  }
+  const stream = exitCode === 0 ? process.stdout : process.stderr;
+  await new Promise<void>((resolve, reject) => {
+    stream.write(output, (error) => error ? reject(error) : resolve());
+  });
+  process.exit(exitCode);
 }
-const stream = exitCode === 0 ? process.stdout : process.stderr;
-await new Promise<void>((resolve, reject) => {
-  stream.write(output, (error) => error ? reject(error) : resolve());
-});
-process.exit(exitCode);

@@ -10,10 +10,11 @@ function digest(capability: string): string {
 /**
  * Runtime-host-owned, single-use authority for managed MCP health probes.
  *
- * Only the long-lived runtime host holds this set. The short-lived deployment
- * adapter receives a random capability for the probe it is about to launch;
- * the managed MCP child must redeem it back at this host before its two health
- * reads are admitted. Agent registry rows and launch receipts never participate.
+ * A long-lived runtime host, or the fenced bootstrap host that precedes it,
+ * holds this set. A short-lived deployment probe receives a random capability
+ * for the child it is about to launch; the managed MCP child must redeem it
+ * before its two health reads are admitted. Agent registry rows and launch
+ * receipts never participate.
  */
 export class McpHealthProbeAdmissions {
   private readonly pending = new Map<string, number>();

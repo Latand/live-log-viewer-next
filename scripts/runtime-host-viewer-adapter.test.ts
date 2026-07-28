@@ -4,12 +4,15 @@ import os from "node:os";
 import path from "node:path";
 
 import { WAKATIME_CREDENTIAL_ENV, withoutWakatimeCredential } from "../src/lib/wakatime/credential";
+import { MCP_TOOL_NAMES } from "../src/lib/mcp/server";
+import { UnixRuntimeHostClient } from "../src/lib/runtime/client";
 import { viewerComposeSnapshotName } from "../src/runtime-host/deploymentArtifacts";
 import { RuntimeHost } from "../src/runtime-host/host";
 import { RuntimeJournal } from "../src/runtime-host/journal";
 import { McpHealthProbeAdmissions } from "../src/runtime-host/mcpHealthProbeAdmission";
+import { probeMcpRuntime } from "../src/runtime-host/mcpRuntimeProbe";
 import { serveRuntimeHost } from "../src/runtime-host/socket";
-import { MCP_TOOL_NAMES } from "../src/lib/mcp/server";
+import { runBootstrapRelease } from "./runtime-host-viewer-adapter";
 
 const root = path.resolve(import.meta.dir, "..");
 const adapter = path.join(root, "scripts", "runtime-host-viewer-adapter.ts");
@@ -81,6 +84,150 @@ test("malformed rollback target blocks promotion with a durable-target error", a
   const result = await currentRelease({ target: "{broken" });
   expect(result.code).not.toBe(0);
   expect(result.stderr).toContain("current release target is invalid");
+});
+
+test("documented bootstrap input obtains host-owned admission through the final MCP transport", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-bootstrap-admission-"));
+  const state = path.join(sandbox, "state");
+  const socketPath = path.join(state, "runtime-host.sock");
+  const revision = "7".repeat(40);
+  const candidate = {
+    ...release,
+    revision,
+    mcpRuntime: {
+      source: "managed" as const,
+      revision,
+      releaseId: "bootstrap-candidate",
+      artifactDigest: "a".repeat(64),
+      stagedAt: "2026-07-28T00:00:00.000Z",
+    },
+  };
+  const calls: string[] = [];
+  fs.mkdirSync(state, { recursive: true });
+  const environment = Object.fromEntries(Object.entries(withoutWakatimeCredential(process.env))
+    .filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+  Object.assign(environment, {
+    HOME: sandbox,
+    XDG_CONFIG_HOME: path.join(sandbox, "config"),
+    TMPDIR: path.join(sandbox, "tmp"),
+    LLV_STATE_DIR: state,
+    LLV_RUNTIME_EVENTS: "1",
+    LLV_RUNTIME_HOST_SOCKET: socketPath,
+    LLV_AGENT_REGISTRY_SQLITE: "off",
+    LLV_CODEX_HOME: path.join(sandbox, "codex"),
+    LLV_CLAUDE_HOME: path.join(sandbox, "claude"),
+  });
+  fs.mkdirSync(environment.TMPDIR, { recursive: true });
+
+  try {
+    const result = await runBootstrapRelease({ revision: "origin/main" }, {
+      runtimeSocket: socketPath,
+      targetExists: () => false,
+      resolveRevision: async (requested) => {
+        calls.push(`resolve:${requested}`);
+        return revision;
+      },
+      buildCandidate: async () => {
+        calls.push("build");
+        return candidate;
+      },
+      startCandidate: async () => {
+        calls.push("start");
+      },
+      verifyCandidate: async (releaseIdentity, healthProbeCapability) => {
+        calls.push("verify");
+        const mcpRuntime = await probeMcpRuntime({
+          command: process.execPath,
+          args: [path.join(root, "bin", "mcp-server.mjs")],
+          cwd: root,
+          env: environment,
+          runtime: releaseIdentity.mcpRuntime!,
+          healthProbeCapability,
+        });
+        return {
+          checkedAt: mcpRuntime.checkedAt,
+          endpoint: releaseIdentity.endpoint,
+          processReady: true,
+          rootStatus: 200,
+          authenticatedStatus: null,
+          unauthorizedStatus: null,
+          assets: [{ path: "/_next/static/app.js", status: 200 }],
+          mcpRuntime,
+          ok: mcpRuntime.ok,
+          ...(mcpRuntime.detail ? { detail: mcpRuntime.detail } : {}),
+        };
+      },
+      publishTarget: async () => {
+        calls.push("publish");
+      },
+      targetMatches: () => false,
+      retireCandidate: async () => {
+        calls.push("retire");
+      },
+    });
+
+    expect(calls).toEqual(["resolve:origin/main", "build", "start", "verify", "publish"]);
+    expect(result.health.mcpRuntime).toMatchObject({
+      processReady: true,
+      calls: { deploymentStatus: true, boardSnapshot: true },
+      ok: true,
+    });
+    expect(result.health.mcpRuntime?.tools).toHaveLength(MCP_TOOL_NAMES.length);
+    expect(fs.existsSync(socketPath)).toBe(false);
+    expect(fs.existsSync(`${socketPath}.lock`)).toBe(false);
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test("bootstrap rejects caller-selected probe authority and spends its own admission once", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-bootstrap-forgery-"));
+  const socketPath = path.join(sandbox, "state", "runtime-host.sock");
+  const callerCapability = new McpHealthProbeAdmissions().issue();
+  fs.mkdirSync(path.dirname(socketPath), { recursive: true });
+
+  try {
+    const result = await runBootstrapRelease({
+      revision: "origin/main",
+      healthProbeCapability: callerCapability,
+    }, {
+      runtimeSocket: socketPath,
+      targetExists: () => false,
+      resolveRevision: async () => release.revision,
+      buildCandidate: async () => release,
+      startCandidate: async () => {},
+      verifyCandidate: async (candidate, healthProbeCapability) => {
+        const client = new UnixRuntimeHostClient(socketPath);
+        expect(healthProbeCapability).not.toBe(callerCapability);
+        await expect(client.requestViewerDeployment({
+          idempotencyKey: "bootstrap-forgery",
+        })).rejects.toThrow("runtime request method is unsupported");
+        expect((await client.snapshot()).deployments).toEqual([]);
+        expect(await client.admitMcpHealthProbe(callerCapability)).toBe(false);
+        expect(await client.admitMcpHealthProbe(healthProbeCapability)).toBe(true);
+        expect(await client.admitMcpHealthProbe(healthProbeCapability)).toBe(false);
+        return {
+          checkedAt: "2026-07-28T00:00:00.000Z",
+          endpoint: candidate.endpoint,
+          processReady: true,
+          rootStatus: 200,
+          authenticatedStatus: null,
+          unauthorizedStatus: null,
+          assets: [{ path: "/_next/static/app.js", status: 200 }],
+          ok: true,
+        };
+      },
+      publishTarget: async () => {},
+      targetMatches: () => false,
+      retireCandidate: async () => {},
+    });
+
+    expect(result.candidate).toEqual(release);
+    expect(fs.existsSync(socketPath)).toBe(false);
+    expect(fs.existsSync(`${socketPath}.lock`)).toBe(false);
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
 });
 
 function composeSnapshot(): string {
