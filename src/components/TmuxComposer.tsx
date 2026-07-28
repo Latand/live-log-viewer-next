@@ -59,11 +59,6 @@ import {
   withDismissedReceipts,
   writeDismissedReceipts,
 } from "./runtime/deliveryState";
-import {
-  getServerHasOperatorCredential,
-  hasOperatorCredential,
-  subscribeOperatorCredential,
-} from "./operatorCredential";
 import { mintIdempotencyKey, receiptIsAdmitted, receiptIsTerminal } from "./runtime/runtimeModel";
 import { useAgentCapabilities } from "./useAgentCapabilities";
 import { VoiceConversationButton } from "./VoiceConversation";
@@ -1057,16 +1052,12 @@ export function TmuxComposerCore({
      A STALE credential (server restarted, tab kept its sessionStorage value)
      still passes here, reaches the backend, and comes back as the localized
      authorization notice on the voice panel. */
-  /* SUBSCRIBED, not read once: browser-session authority resolves asynchronously
-     (a probe, an establishment from another tab), and hosted acceptance proved
-     this component cannot be assumed to re-render for unrelated reasons in time
-     — the canonical voice button stayed hidden after the probe had resolved.
-     The store notifies on every authority transition; nothing here polls. */
-  const operatorTab = useSyncExternalStore(
-    subscribeOperatorCredential,
-    hasOperatorCredential,
-    getServerHasOperatorCredential,
-  );
+  /* No authorization ceremony gates the voice button (final operator decision):
+     this is a single-user app on loopback, so the local browser IS the operator
+     by construction. Every voice-capable hosted conversation always offers the
+     canonical start control; the backend still refuses AGENT-initiated transport
+     on the agent's own evidence (its capability), which was the guard's real job
+     all along. */
   const voiceWorkerTurn = structuredSession?.session.liveTurn;
   const voice = useCodexRealtime(
     cardId,
@@ -2094,7 +2085,7 @@ export function TmuxComposerCore({
       /* ArrowUp/ArrowDown in an empty composer walk what is queued and what
          was already sent, newest first (issue #561). */
       history={composerHistory}
-      voiceControl={voiceEnabled && operatorTab ? (
+      voiceControl={voiceEnabled ? (
         <>
           <VoiceConversationButton
             phase={voice.phase}
