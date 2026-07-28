@@ -1003,13 +1003,16 @@ async function requestAttention(args: McpToolArgs, dependencies: ViewerMcpDomain
  */
 export function viewerMcpToolPolicy(
   domainDependencies: ViewerMcpDomainDependencies = productionDomainDependencies,
+  hostHealthProbe = false,
 ): McpToolPolicy {
   const manager = (): ManagerTarget | null => {
     const record = readOrchestratorRecord();
     return record ? { conversationId: record.conversationId, path: record.path } : null;
   };
   return mcpToolPolicy(
-    () => mcpCallerIdentity(domainDependencies.attentionAuthority(), manager()),
+    () => hostHealthProbe
+      ? { kind: "health-probe" }
+      : mcpCallerIdentity(domainDependencies.attentionAuthority(), manager()),
     manager,
   );
 }

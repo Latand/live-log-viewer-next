@@ -16,6 +16,7 @@ import type {
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 
 import type { ViewerDeploymentAdapter } from "./deployment";
+import type { McpHealthProbeAdmissions } from "./mcpHealthProbeAdmission";
 
 type CommandRunner = (action: string, input: Record<string, unknown>) => Promise<unknown>;
 type AdapterAction = "resolve-revision" | "build-candidate" | "start-candidate" | "current-release" | "current-mcp-runtime" | "reconcile-mcp-runtime" | "verify-candidate" | "promote" | "verify-promoted" | "rollback" | "retire" | "retain-only" | "stage-host-successor" | "complete-host-handoff";
@@ -37,6 +38,12 @@ const ACTION_TIMEOUTS: Record<AdapterAction, number> = {
   "complete-host-handoff": 60_000,
 };
 
+const MCP_HEALTH_PROBE_ACTIONS: ReadonlySet<AdapterAction> = new Set([
+  "reconcile-mcp-runtime",
+  "verify-candidate",
+  "verify-promoted",
+]);
+
 interface AdapterProcessRecord {
   pid: number;
   startIdentity: string;
@@ -47,6 +54,7 @@ export interface HostCommandViewerDeploymentAdapterOptions {
   stateFile?: string;
   timeouts?: Partial<Record<AdapterAction, number>>;
   proc?: ProcBackend;
+  mcpHealthProbeAdmissions?: Pick<McpHealthProbeAdmissions, "issue" | "revoke">;
 }
 
 function readProcessRecord(filename: string): AdapterProcessRecord | null {
@@ -265,9 +273,7 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
       await terminateAdapterProcess(previous, proc);
       clearProcessRecord(stateFile, previous);
     };
-    return new HostCommandViewerDeploymentAdapter(async (rawAction, input) => {
-      const action = rawAction as AdapterAction;
-      await reconcile();
+    const runAction = async (action: AdapterAction, input: Record<string, unknown>): Promise<unknown> => {
       const child = spawn("/usr/bin/setpriv", ["--pdeathsig", "KILL", "--", executable, action], {
         stdio: ["pipe", "pipe", "pipe"],
         env: { ...withoutWakatimeCredential(process.env), LLV_DEPLOYMENT_ADAPTER_PROTOCOL: "1" },
@@ -309,7 +315,21 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
         if (timer) clearTimeout(timer);
         clearProcessRecord(stateFile, record);
       }
-    }, reconcile);
+    };
+    const run: CommandRunner = async (rawAction, input) => {
+      const action = rawAction as AdapterAction;
+      await reconcile();
+      if (!MCP_HEALTH_PROBE_ACTIONS.has(action) || !options.mcpHealthProbeAdmissions) {
+        return runAction(action, input);
+      }
+      const healthProbeCapability = options.mcpHealthProbeAdmissions.issue();
+      try {
+        return await runAction(action, { ...input, healthProbeCapability });
+      } finally {
+        options.mcpHealthProbeAdmissions.revoke(healthProbeCapability);
+      }
+    };
+    return new HostCommandViewerDeploymentAdapter(run, reconcile);
   }
 
   reconcile(): Promise<void> { return this.reconcileProcess(); }

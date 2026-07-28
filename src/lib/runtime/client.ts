@@ -48,6 +48,7 @@ export interface RuntimeHostClient {
   ): Promise<RuntimeOperationResult>;
   requestViewerDeployment(request: ViewerDeploymentRequest): Promise<ViewerDeploymentReceipt>;
   readViewerDeployment(deploymentId: string): Promise<ViewerDeploymentStatus | null>;
+  admitMcpHealthProbe?(capability: string): Promise<boolean>;
 }
 
 export class UnixRuntimeHostClient implements RuntimeHostClient {
@@ -96,6 +97,7 @@ export class UnixRuntimeHostClient implements RuntimeHostClient {
   }
   requestViewerDeployment(request: ViewerDeploymentRequest): Promise<ViewerDeploymentReceipt> { return this.call("viewer-deployment-request", request as unknown as Record<string, unknown>, this.deploymentTimeoutMs) as Promise<ViewerDeploymentReceipt>; }
   readViewerDeployment(deploymentId: string): Promise<ViewerDeploymentStatus | null> { return this.call("viewer-deployment-read", { deploymentId }) as Promise<ViewerDeploymentStatus | null>; }
+  admitMcpHealthProbe(capability: string): Promise<boolean> { return this.call("mcp-health-probe-admission", { capability }) as Promise<boolean>; }
 
   private call(method: RuntimeSocketRequest["method"], params?: Record<string, unknown>, timeoutMs = this.timeoutMs, signal?: AbortSignal): Promise<unknown> {
     return new Promise((resolve, reject) => {

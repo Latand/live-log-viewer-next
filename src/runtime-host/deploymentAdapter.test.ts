@@ -110,6 +110,51 @@ test("host adapter exposes fixed actions and carries structured release data", a
   expect(calls.every((call) => !Object.hasOwn(call.input, "command") && !Object.hasOwn(call.input, "args"))).toBe(true);
 });
 
+test("the host injects and revokes health authority only around probe-bearing adapter actions", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-adapter-health-authority-"));
+  sandboxes.push(directory);
+  const executable = path.join(directory, "adapter.sh");
+  const capture = path.join(directory, "input.json");
+  const stateFile = path.join(directory, "adapter-process.json");
+  const revision = "a".repeat(40);
+  const capability = "H".repeat(43);
+  fs.writeFileSync(executable, `#!/bin/sh
+payload="$(cat)"
+printf '%s' "$payload" > ${JSON.stringify(capture)}
+if [ "$1" = "resolve-revision" ]; then
+  printf '%s\\n' '{"revision":"${revision}"}'
+else
+  printf '%s\\n' '{"checkedAt":"2026-07-28T00:00:00.000Z","endpoint":"http://127.0.0.1:18001","processReady":true,"rootStatus":200,"authenticatedStatus":null,"unauthorizedStatus":null,"assets":[],"ok":true}'
+fi
+`, { mode: 0o700 });
+  const issued: string[] = [];
+  const revoked: string[] = [];
+  const adapter = HostCommandViewerDeploymentAdapter.fromExecutable(executable, {
+    stateFile,
+    mcpHealthProbeAdmissions: {
+      issue: () => { issued.push(capability); return capability; },
+      revoke: (value) => { revoked.push(value); },
+    },
+  });
+  const candidate = {
+    image: "viewer:test",
+    container: "viewer-candidate",
+    endpoint: "http://127.0.0.1:18001",
+    revision,
+  };
+
+  await adapter.verifyCandidate(candidate);
+  expect(JSON.parse(fs.readFileSync(capture, "utf8"))).toEqual({
+    candidate,
+    healthProbeCapability: capability,
+  });
+  expect({ issued, revoked }).toEqual({ issued: [capability], revoked: [capability] });
+
+  await adapter.resolveRevision(revision);
+  expect(JSON.parse(fs.readFileSync(capture, "utf8"))).toEqual({ revision });
+  expect({ issued, revoked }).toEqual({ issued: [capability], revoked: [capability] });
+});
+
 test("a boot whose MCP runtime is already published carries no reconciliation", async () => {
   const adapter = new HostCommandViewerDeploymentAdapter(async () => null);
 

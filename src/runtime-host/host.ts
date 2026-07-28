@@ -8,6 +8,7 @@ import { procBackend } from "@/lib/proc";
 
 import { RuntimeJournal } from "./journal";
 import type { ViewerDeploymentCoordinator } from "./deployment";
+import type { McpHealthProbeAdmissions } from "./mcpHealthProbeAdmission";
 
 export class RuntimeHostFence {
   private held = false;
@@ -51,6 +52,7 @@ export class RuntimeHost {
     private readonly deployments?: ViewerDeploymentCoordinator,
     private readonly structuredHosts = structuredHostsEnabled(),
     private readonly signalFlowPipelineProgress?: () => void,
+    private readonly mcpHealthProbeAdmissions?: McpHealthProbeAdmissions,
   ) {}
 
   async recoverConsumers(): Promise<number> {
@@ -214,6 +216,8 @@ export class RuntimeHost {
       } else if (request.method === "viewer-deployment-read") {
         if (!this.deployments) throw new Error("viewer deployments are disabled");
         result = this.deployments.readViewerDeployment(String(request.params?.deploymentId ?? ""));
+      } else if (request.method === "mcp-health-probe-admission") {
+        result = this.mcpHealthProbeAdmissions?.consume(request.params?.capability) ?? false;
       } else throw new Error("runtime request method is unsupported");
       return { id: request.id, ok: true, result };
     } catch (error) {

@@ -7,7 +7,9 @@ import { WAKATIME_CREDENTIAL_ENV, withoutWakatimeCredential } from "../src/lib/w
 import { viewerComposeSnapshotName } from "../src/runtime-host/deploymentArtifacts";
 import { RuntimeHost } from "../src/runtime-host/host";
 import { RuntimeJournal } from "../src/runtime-host/journal";
+import { McpHealthProbeAdmissions } from "../src/runtime-host/mcpHealthProbeAdmission";
 import { serveRuntimeHost } from "../src/runtime-host/socket";
+import { MCP_TOOL_NAMES } from "../src/lib/mcp/server";
 
 const root = path.resolve(import.meta.dir, "..");
 const adapter = path.join(root, "scripts", "runtime-host-viewer-adapter.ts");
@@ -204,7 +206,10 @@ function successorPackage(prefix: string, options: { revision: string; bundle?: 
   return { sandbox, state, packageRoot, stableRuntime, target };
 }
 
-async function runReconcile(fixture: ReturnType<typeof successorPackage>, options: { revision: string; socketPath?: string }) {
+async function runReconcile(
+  fixture: ReturnType<typeof successorPackage>,
+  options: { revision: string; socketPath?: string; healthProbeCapability?: string },
+) {
   const child = Bun.spawn([process.execPath, adapter, "reconcile-mcp-runtime"], {
     cwd: root,
     env: {
@@ -224,7 +229,10 @@ async function runReconcile(fixture: ReturnType<typeof successorPackage>, option
     stdout: "pipe",
     stderr: "pipe",
   });
-  child.stdin.write(`${JSON.stringify({ revision: options.revision })}\n`);
+  child.stdin.write(`${JSON.stringify({
+    revision: options.revision,
+    ...(options.healthProbeCapability ? { healthProbeCapability: options.healthProbeCapability } : {}),
+  })}\n`);
   child.stdin.end();
   const [code, stdout, stderr] = await Promise.all([
     child.exited,
@@ -239,11 +247,23 @@ test("the first successor boot publishes and probes the MCP runtime after an old
   const fixture = successorPackage("llv-mcp-successor-reconcile-", { revision });
   const socketPath = path.join(fixture.state, "runtime-host.sock");
   const journal = new RuntimeJournal(path.join(fixture.state, "runtime.sqlite"));
-  const server = serveRuntimeHost(socketPath, new RuntimeHost(journal));
+  const admissions = new McpHealthProbeAdmissions();
+  const server = serveRuntimeHost(socketPath, new RuntimeHost(
+    journal,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    admissions,
+  ));
   await new Promise<void>((resolve) => server.once("listening", resolve));
 
   try {
-    const { code, stdout, stderr } = await runReconcile(fixture, { revision, socketPath });
+    const { code, stdout, stderr } = await runReconcile(fixture, {
+      revision,
+      socketPath,
+      healthProbeCapability: admissions.issue(),
+    });
 
     expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
     const result = JSON.parse(stdout);
@@ -262,7 +282,7 @@ test("the first successor boot publishes and probes the MCP runtime after an old
         },
       },
     });
-    expect(result.health.tools).toHaveLength(23);
+    expect(result.health.tools).toHaveLength(MCP_TOOL_NAMES.length);
     const target = JSON.parse(fs.readFileSync(path.join(fixture.state, "viewer-release.json"), "utf8"));
     expect(target).toMatchObject({
       revision,
@@ -279,7 +299,11 @@ test("the first successor boot publishes and probes the MCP runtime after an old
        published and reconciles nothing. */
     const releases = path.join(fixture.state, "mcp-runtime", "releases");
     const published = fs.readdirSync(releases);
-    const reboot = await runReconcile(fixture, { revision, socketPath });
+    const reboot = await runReconcile(fixture, {
+      revision,
+      socketPath,
+      healthProbeCapability: admissions.issue(),
+    });
 
     expect({ code: reboot.code, stdout: reboot.stdout, stderr: reboot.stderr })
       .toEqual({ code: 0, stdout: "null\n", stderr: "" });

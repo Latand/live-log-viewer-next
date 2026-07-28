@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
+import { MCP_HEALTH_PROBE_CAPABILITY_ENV } from "@/lib/mcp/healthProbeAdmission";
 import { MCP_TOOL_NAMES } from "@/lib/mcp/server";
 import type { ViewerMcpRuntimeHealthEvidence, ViewerMcpRuntimeIdentity } from "@/lib/runtime/contracts";
 
@@ -16,6 +17,7 @@ export interface McpRuntimeProbeOptions {
   cwd: string;
   env: Record<string, string>;
   runtime: ViewerMcpRuntimeIdentity;
+  healthProbeCapability?: string;
   timeoutMs?: number;
   onProcessReady?: (pid: number) => void;
 }
@@ -30,11 +32,16 @@ function successfulToolCall(value: unknown): boolean {
 export async function probeMcpRuntime(options: McpRuntimeProbeOptions): Promise<ViewerMcpRuntimeHealthEvidence> {
   const checkedAt = new Date().toISOString();
   const timeout = Math.max(1, options.timeoutMs ?? 15_000);
+  const environment = { ...options.env };
+  delete environment[MCP_HEALTH_PROBE_CAPABILITY_ENV];
+  if (options.healthProbeCapability) {
+    environment[MCP_HEALTH_PROBE_CAPABILITY_ENV] = options.healthProbeCapability;
+  }
   const transport = new StdioClientTransport({
     command: options.command,
     args: options.args,
     cwd: options.cwd,
-    env: options.env,
+    env: environment,
     stderr: "pipe",
   });
   const client = new Client({ name: "viewer-deployment-mcp-probe", version: "1.0.0" });

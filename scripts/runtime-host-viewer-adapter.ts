@@ -348,13 +348,17 @@ async function verifyViewer(candidate: ViewerReleaseIdentity, endpoint: string, 
   });
 }
 
-async function verify(candidate: ViewerReleaseIdentity, endpoint: string, expectedAssetsEndpoint?: string): Promise<ViewerHealthEvidence> {
-  const viewer = await verifyViewer(candidate, endpoint, expectedAssetsEndpoint);
+async function verify(
+  candidate: ViewerReleaseIdentity,
+  endpoint: string,
+  options: { expectedAssetsEndpoint?: string; healthProbeCapability?: string } = {},
+): Promise<ViewerHealthEvidence> {
+  const viewer = await verifyViewer(candidate, endpoint, options.expectedAssetsEndpoint);
   if (!viewer.ok) return viewer;
   if (!candidate.mcpRuntime || candidate.mcpRuntime.source !== "managed") {
     return { ...viewer, ok: false, detail: "candidate MCP runtime identity is missing" };
   }
-  const promoted = expectedAssetsEndpoint !== undefined;
+  const promoted = options.expectedAssetsEndpoint !== undefined;
   const probeTarget = promoted
     ? targetFile
     : path.join(stateDir, `mcp-candidate-probe-${candidate.mcpRuntime.releaseId}.json`);
@@ -368,6 +372,7 @@ async function verify(candidate: ViewerReleaseIdentity, endpoint: string, expect
     cwd: mcpRuntimeRoot,
     env: probeEnvironment,
     runtime: candidate.mcpRuntime,
+    ...(options.healthProbeCapability ? { healthProbeCapability: options.healthProbeCapability } : {}),
   });
   if (!promoted) {
     fs.rmSync(probeTarget, { force: true });
@@ -445,7 +450,10 @@ async function currentMcpRuntime(): Promise<ViewerMcpRuntimeIdentity> {
    surface. `stagePreparedPackage` derives its release id from the deployment
    id, so a boot that crashed mid-reconcile reuses (never duplicates) the same
    release, and a boot that already matches does nothing at all. */
-async function reconcileMcpRuntime(revision: string): Promise<ViewerMcpRuntimeReconciliation | null> {
+async function reconcileMcpRuntime(
+  revision: string,
+  healthProbeCapability?: string,
+): Promise<ViewerMcpRuntimeReconciliation | null> {
   if (!/^[0-9a-f]{40}$/.test(revision)) throw new Error("runtime-host MCP revision is invalid");
   const previous = readTarget();
   if (previous.revision !== revision) throw new Error("runtime-host MCP revision differs from the active Viewer release");
@@ -464,6 +472,7 @@ async function reconcileMcpRuntime(revision: string): Promise<ViewerMcpRuntimeRe
       cwd: mcpRuntimeRoot,
       env: probeEnvironment,
       runtime,
+      ...(healthProbeCapability ? { healthProbeCapability } : {}),
     });
     if (!health.ok) throw new Error(health.detail ?? "runtime-host MCP reconciliation health gate failed");
     return { publication, health };
@@ -512,13 +521,16 @@ async function main(): Promise<unknown> {
   if (process.env.LLV_DEPLOYMENT_ADAPTER_PROTOCOL !== "1") throw new Error("deployment adapter protocol is required");
   const action = process.argv[2];
   const input = JSON.parse(await Bun.stdin.text()) as Record<string, unknown>;
+  const healthProbeCapability = typeof input.healthProbeCapability === "string"
+    ? input.healthProbeCapability
+    : undefined;
   if (action === "bootstrap-release") {
     return bootstrapViewerRelease(String(input.revision ?? "origin/main"), `bootstrap-${randomUUID()}`, {
       targetExists: () => fs.existsSync(targetFile),
       resolveRevision,
       buildCandidate,
       startCandidate,
-      verifyCandidate: (candidate) => verify(candidate, candidate.endpoint),
+      verifyCandidate: (candidate) => verify(candidate, candidate.endpoint, { healthProbeCapability }),
       publishTarget: async (candidate) => { switchTarget(candidate, "activate"); },
       targetMatches: (candidate) => releasesEqual(readTarget(), candidate),
       retireCandidate: retireRelease,
@@ -535,14 +547,23 @@ async function main(): Promise<unknown> {
     return current;
   }
   if (action === "current-mcp-runtime") return currentMcpRuntime();
-  if (action === "reconcile-mcp-runtime") return reconcileMcpRuntime(String(input.revision ?? ""));
-  if (action === "verify-candidate") { const candidate = release(input.candidate); return verify(candidate, candidate.endpoint); }
+  if (action === "reconcile-mcp-runtime") return reconcileMcpRuntime(String(input.revision ?? ""), healthProbeCapability);
+  if (action === "verify-candidate") {
+    const candidate = release(input.candidate);
+    return verify(candidate, candidate.endpoint, { healthProbeCapability });
+  }
   if (action === "promote") {
     const candidate = release(input.candidate);
     if (candidate.mcpRuntime?.source !== "managed") throw new Error("candidate MCP runtime identity is missing");
     return switchTarget(candidate, "activate");
   }
-  if (action === "verify-promoted") { const candidate = release(input.candidate); return verify(candidate, stableEndpoint, candidate.endpoint); }
+  if (action === "verify-promoted") {
+    const candidate = release(input.candidate);
+    return verify(candidate, stableEndpoint, {
+      expectedAssetsEndpoint: candidate.endpoint,
+      healthProbeCapability,
+    });
+  }
   if (action === "rollback") {
     const previous = release(input.previous);
     await startCandidate(previous);

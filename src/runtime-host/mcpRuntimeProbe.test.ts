@@ -3,16 +3,27 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { MCP_TOOL_NAMES } from "@/lib/mcp/server";
+
 import { RuntimeHost } from "./host";
 import { RuntimeJournal } from "./journal";
+import { McpHealthProbeAdmissions } from "./mcpHealthProbeAdmission";
 import { probeMcpRuntime } from "./mcpRuntimeProbe";
 import { serveRuntimeHost } from "./socket";
 
-test("fresh Claude and Codex MCP processes discover the complete surface, call required reads, and exit", async () => {
+test("host-admitted managed MCP probes discover the complete surface, call required reads, and exit", async () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-probe-"));
   const socketPath = path.join(sandbox, "runtime.sock");
   const journal = new RuntimeJournal(path.join(sandbox, "runtime.sqlite"));
-  const server = serveRuntimeHost(socketPath, new RuntimeHost(journal));
+  const admissions = new McpHealthProbeAdmissions();
+  const server = serveRuntimeHost(socketPath, new RuntimeHost(
+    journal,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    admissions,
+  ));
   await new Promise<void>((resolve) => server.once("listening", resolve));
   const environment = Object.fromEntries(Object.entries(process.env)
     .filter((entry): entry is [string, string] => typeof entry[1] === "string"));
@@ -38,6 +49,7 @@ test("fresh Claude and Codex MCP processes discover the complete surface, call r
           artifactDigest: "a".repeat(64),
           stagedAt: "2026-07-23T08:00:00.000Z",
         },
+        healthProbeCapability: admissions.issue(),
         onProcessReady: (pid) => { processId = pid; },
       });
 
@@ -48,7 +60,7 @@ test("fresh Claude and Codex MCP processes discover the complete surface, call r
         processReady: true,
         calls: { deploymentStatus: true, boardSnapshot: true },
       });
-      expect(evidence.tools).toHaveLength(23);
+      expect(evidence.tools).toHaveLength(MCP_TOOL_NAMES.length);
       expect(evidence.tools).toContain("deployment_status");
       expect(evidence.tools).toContain("board_snapshot");
       expect(processId).not.toBeNull();
@@ -65,7 +77,15 @@ test("a release target naming a runtime this host never staged falls back to the
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-probe-missing-"));
   const socketPath = path.join(sandbox, "runtime.sock");
   const journal = new RuntimeJournal(path.join(sandbox, "runtime.sqlite"));
-  const server = serveRuntimeHost(socketPath, new RuntimeHost(journal));
+  const admissions = new McpHealthProbeAdmissions();
+  const server = serveRuntimeHost(socketPath, new RuntimeHost(
+    journal,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    admissions,
+  ));
   await new Promise<void>((resolve) => server.once("listening", resolve));
   const revision = "7".repeat(40);
   const runtime = {
@@ -100,10 +120,63 @@ test("a release target naming a runtime this host never staged falls back to the
       cwd: process.cwd(),
       env: environment,
       runtime,
+      healthProbeCapability: admissions.issue(),
     });
 
     expect(evidence).toMatchObject({ ok: true, processReady: true });
-    expect(evidence.tools).toHaveLength(23);
+    expect(evidence.tools).toHaveLength(MCP_TOOL_NAMES.length);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    journal.close();
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test("absent, forged, and replayed health admissions cannot imitate the runtime host", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-probe-adversarial-"));
+  const socketPath = path.join(sandbox, "runtime.sock");
+  const journal = new RuntimeJournal(path.join(sandbox, "runtime.sqlite"));
+  const admissions = new McpHealthProbeAdmissions();
+  const server = serveRuntimeHost(socketPath, new RuntimeHost(
+    journal,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    admissions,
+  ));
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const environment = Object.fromEntries(Object.entries(process.env)
+    .filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+  environment.LLV_STATE_DIR = sandbox;
+  environment.LLV_RUNTIME_EVENTS = "1";
+  environment.LLV_RUNTIME_HOST_SOCKET = socketPath;
+  environment.LLV_AGENT_REGISTRY_SQLITE = "off";
+  environment.LLV_CODEX_HOME = path.join(sandbox, "codex");
+  environment.LLV_CLAUDE_HOME = path.join(sandbox, "claude");
+  const runtime = {
+    source: "managed" as const,
+    revision: "7".repeat(40),
+    releaseId: "deploy-adversarial",
+    artifactDigest: "a".repeat(64),
+    stagedAt: "2026-07-23T08:00:00.000Z",
+  };
+  const run = (healthProbeCapability?: string) => probeMcpRuntime({
+    command: process.execPath,
+    args: [path.join(process.cwd(), "bin", "mcp-server.mjs")],
+    cwd: process.cwd(),
+    env: environment,
+    runtime,
+    ...(healthProbeCapability ? { healthProbeCapability } : {}),
+  });
+
+  try {
+    expect((await run()).calls).toEqual({ deploymentStatus: false, boardSnapshot: false });
+    expect((await run("A".repeat(43))).calls).toEqual({ deploymentStatus: false, boardSnapshot: false });
+
+    const legitimate = admissions.issue();
+    expect((await run(legitimate)).calls).toEqual({ deploymentStatus: true, boardSnapshot: true });
+    expect((await run(legitimate)).calls).toEqual({ deploymentStatus: false, boardSnapshot: false });
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     journal.close();
