@@ -143,7 +143,11 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
     leaving.current.set(request.id, before);
     let keepReturnPoint = false;
     try {
-      const accepted = await offers.accept(request);
+      /* `auto-follow`, because that is what this is: nothing was put in front of
+         the operator and nothing was pressed. Recording it as the operator's own
+         act would tell the agent they chose to come — the one thing the record
+         is there to keep honest. */
+      const accepted = await offers.accept(request, "auto-follow");
       if (!accepted.ok) return;
       /* Written after the server confirmed ownership, so a rejected device
          never stores a return point it will never use. */

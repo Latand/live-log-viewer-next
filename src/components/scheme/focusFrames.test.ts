@@ -6,7 +6,7 @@ import type { FileEntry } from "@/lib/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 
 import { buildFocusFrameIndex, stageAnchorAliases, type FocusLayoutSlice } from "./focusFrames";
-import type { SchemeGroup, SchemeNode, SchemeRect } from "./layout";
+import type { MiniStack, SchemeGroup, SchemeNode, SchemeRect } from "./layout";
 
 const rect = (x: number, y: number, w = 600, h = 780): SchemeRect => ({ x, y, w, h });
 
@@ -126,4 +126,79 @@ test("the board reports which card a launched stage's anchor actually resolves t
   });
   expect(orphaned.concreteAnchorKey!("slot::p1::s2")).toBeNull();
   expect(orphaned.rectFor("slot::p1::s2")).toBeNull();
+});
+
+/* ── Cards the board draws inside a container ───────────────────────────── */
+
+function stack(key: string, box: SchemeRect, paths: string[]): MiniStack {
+  return { ...box, key, parent: "/tmp/root.jsonl", items: paths.map((path) => ({ file: { path } as FileEntry, branches: 0 })) };
+}
+
+test("a quiet worker folded into its parent's stack resolves to the stack that is drawing it", () => {
+  /* The live defect: an orchestration worker collapses ~15 minutes after it goes
+     quiet (#112) and stops being a node of its own. It is still on screen — one
+     row inside the mini-stack — but the focus index only knew about placed
+     rects, so every request naming that conversation resolved to `lost`, the
+     view never moved, and no way back was ever offered. */
+  const folded = "/tmp/quiet-worker.jsonl";
+  const stacked: FocusLayoutSlice = {
+    ...layout(),
+    stacks: [stack("/tmp/root.jsonl::stack", rect(2_400, 900, 240, 400), [folded])],
+    byPath: new Map<string, SchemeRect>([["/tmp/root.jsonl::stack", rect(2_400, 900, 240, 400)]]),
+  };
+
+  const index = buildFocusFrameIndex(stacked, "demo", { boardRevision: 12 });
+
+  expect(index.rectFor(folded)).toEqual({ x: 2_400, y: 900, w: 240, h: 400 });
+  /* Named as the key the board is actually drawing, so a surface that navigates
+     by key — the phone — pins the stack rather than hunting for a pane that is
+     not on its own list. */
+  expect(index.concreteAnchorKey!(folded)).toBe("/tmp/root.jsonl::stack");
+  expect(resolveFocusTarget({ kind: "conversation", path: folded }, null, index).resolution).toBe("exact");
+});
+
+test("a full node of its own always wins over the stack that used to hold it", () => {
+  const expanded = "/tmp/quiet-worker.jsonl";
+  const own = rect(120, 240);
+  const both: FocusLayoutSlice = {
+    ...layout(),
+    stacks: [stack("/tmp/root.jsonl::stack", rect(2_400, 900, 240, 400), [expanded])],
+    byPath: new Map<string, SchemeRect>([
+      [expanded, own],
+      ["/tmp/root.jsonl::stack", rect(2_400, 900, 240, 400)],
+    ]),
+  };
+
+  const index = buildFocusFrameIndex(both, "demo");
+
+  expect(index.rectFor(expanded)).toEqual(own);
+  expect(index.concreteAnchorKey!(expanded)).toBe(expanded);
+});
+
+test("a launched stage that has since gone quiet resolves through the stack holding its card", () => {
+  const agent = "/tmp/stage-agent.jsonl";
+  const stacked: FocusLayoutSlice = {
+    ...layout(),
+    stacks: [stack("/tmp/root.jsonl::stack", rect(2_400, 900, 240, 400), [agent])],
+    byPath: new Map<string, SchemeRect>([["/tmp/root.jsonl::stack", rect(2_400, 900, 240, 400)]]),
+  };
+
+  const index = buildFocusFrameIndex(stacked, "demo", { aliases: new Map([["slot::p1::s2", agent]]) });
+
+  expect(resolveFocusTarget({ kind: "stage", pipelineId: "p1", stageId: "s2" }, null, index).resolution).toBe("exact");
+  expect(index.concreteAnchorKey!("slot::p1::s2")).toBe("/tmp/root.jsonl::stack");
+});
+
+test("a conversation no container is drawing is still gone", () => {
+  const stacked: FocusLayoutSlice = {
+    ...layout(),
+    stacks: [stack("/tmp/root.jsonl::stack", rect(2_400, 900, 240, 400), ["/tmp/quiet-worker.jsonl"])],
+  };
+
+  const index = buildFocusFrameIndex(stacked, "demo");
+
+  /* The stack itself is not in `byPath` here, so nothing on this board hosts the
+     folded card — and inventing a rect for it would land the operator nowhere. */
+  expect(index.rectFor("/tmp/quiet-worker.jsonl")).toBeNull();
+  expect(index.rectFor("/tmp/never-here.jsonl")).toBeNull();
 });

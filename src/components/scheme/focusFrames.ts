@@ -3,8 +3,8 @@ import type { FocusRect } from "@/lib/attention/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 import { cleanTitle } from "@/lib/title";
 
-import { stageSlotKey } from "./agentLinks";
-import type { SchemeLayout, SchemeRect } from "./layout";
+import { buildAnchorIndex, stageSlotKey } from "./agentLinks";
+import type { DeckNode, MiniStack, SchemeLayout, SchemeRect } from "./layout";
 
 /**
  * The board's side of #688's target resolution: one read-only view of the
@@ -16,8 +16,19 @@ import type { SchemeLayout, SchemeRect } from "./layout";
  * resolution it feeds stays testable without a renderer or a camera.
  */
 
-/** Exactly the parts of a scheme layout a focus frame comes from. */
-export type FocusLayoutSlice = Pick<SchemeLayout, "byPath" | "groups" | "nodes">;
+/**
+ * Exactly the parts of a scheme layout a focus frame comes from.
+ *
+ * `stacks` and `decks` are here because a conversation the board is DRAWING is
+ * not always a rect of its own: a worker that has gone quiet folds into its
+ * parent's mini-stack, and a reviewer round is drawn inside its flow's deck.
+ * Both are still on screen in front of the operator, and both are absent from
+ * `byPath` under their own transcript path — so a focus request naming one used
+ * to resolve to nothing at all. Optional so a caller with a partial layout (a
+ * fixture) still builds an index; a caller that has them must pass them.
+ */
+export type FocusLayoutSlice = Pick<SchemeLayout, "byPath" | "groups" | "nodes">
+  & Partial<Pick<SchemeLayout, "stacks" | "decks">>;
 
 const toFocusRect = (rect: SchemeRect): FocusRect => ({ x: rect.x, y: rect.y, w: rect.w, h: rect.h });
 
@@ -91,12 +102,29 @@ export function buildFocusFrameIndex(
     return extra ? toFocusRect(extra) : null;
   };
 
+  /* Transcript path → the rect that visually HOSTS it, for the conversations the
+     board draws inside a container rather than as a node of their own. The same
+     resolution the agent links already route through, taken from the same
+     builder on purpose: a card an arrow can point at is a card a focus request
+     can be taken to, and letting the two answer differently is precisely how a
+     conversation on screen came to be reported as gone. */
+  const hosts = buildAnchorIndex(
+    layout.nodes.map((node) => node.file.path),
+    (layout.decks ?? []).map((deck: DeckNode) => ({ key: deck.key, flow: deck.flow })),
+    (layout.stacks ?? []).map((stack: MiniStack) => ({ key: stack.key, paths: stack.items.map((item) => item.file.path) })),
+  );
+
   /** The key the layout genuinely holds this anchor under: itself when it is
-      placed directly, otherwise its alias. Null when neither is on the board. */
+      placed directly, then its alias, then whatever container is drawing it.
+      Null when the board is not showing it at all. */
   const concreteAnchorKey = (anchorKey: string): string | null => {
     if (lookup(anchorKey)) return anchorKey;
     const alias = options.aliases?.get(anchorKey);
-    return alias && lookup(alias) ? alias : null;
+    if (alias && lookup(alias)) return alias;
+    /* A launched stage that has since gone quiet is both aliased AND hosted, so
+       the container is looked up under the alias when there is one. */
+    const host = hosts.get(alias ?? anchorKey);
+    return host && lookup(host) ? host : null;
   };
 
   return {
