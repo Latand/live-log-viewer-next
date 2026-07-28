@@ -1837,6 +1837,11 @@ export const en = {
   "voice.micUnmute": "Unmute microphone",
   "voice.outputMute": "Silence the agent",
   "voice.outputUnmute": "Unsilence the agent",
+  "voice.floatSurface": "Voice conversation",
+  "voice.float": "Open the floating voice window",
+  "voice.dock": "Close the floating window and keep the call",
+  "voice.floatMessage": "Message…",
+  "voice.floatUnsupported": "A floating voice window needs a Chromium browser; the call stays here.",
 
   /* The persistent root-conversation overlay (#691) and the focus handoff it
      surfaces (#688). */

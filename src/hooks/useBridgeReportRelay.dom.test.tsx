@@ -1,0 +1,314 @@
+import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "bun:test";
+import { Window } from "happy-dom";
+import { useEffect } from "react";
+import { flushSync } from "react-dom";
+import { createRoot, type Root } from "react-dom/client";
+
+import { resetBridgeAcknowledgementsForTests } from "@/lib/bridge/pendingAcknowledgements";
+import { installActEnv } from "@/test-helpers/actEnv";
+import type { RuntimeVoiceDelivery } from "@/lib/runtime/voiceDelivery";
+
+import { commitBridgeTurn, useBridgeReportRelay, useBridgeTurnStartDrain } from "./useBridgeReportRelay";
+
+/**
+ * The relay drives the loop, in the order that keeps reports exactly-once.
+ *
+ * Asserted against a scripted server rather than a real one, because what is under
+ * test is the client's obligations: deliver before acknowledging, acknowledge a
+ * lost-ack batch without re-delivering it, and never poll when no call is up.
+ */
+
+installActEnv();
+
+const dom = new Window({ url: "http://localhost/" });
+const G = globalThis as Record<string, unknown>;
+const HAS: Record<string, boolean> = {};
+const SAVED: Record<string, unknown> = {};
+
+const OVERRIDES = (): Record<string, unknown> => ({
+  window: dom,
+  document: dom.document,
+  Node: dom.Node,
+  HTMLElement: dom.HTMLElement,
+});
+
+const settle = async () => { for (let index = 0; index < 10; index += 1) await new Promise((r) => setTimeout(r, 0)); };
+
+beforeAll(() => {
+  const overrides = OVERRIDES();
+  for (const key of Object.keys(overrides)) {
+    HAS[key] = key in G;
+    SAVED[key] = G[key];
+    G[key] = overrides[key];
+  }
+});
+
+afterAll(async () => {
+  await settle();
+  for (const key of Object.keys(HAS)) {
+    if (HAS[key]) G[key] = SAVED[key];
+    else delete G[key];
+  }
+});
+
+let roots: Root[] = [];
+let calls: { url: string; method: string; body: unknown }[] = [];
+let delivered: RuntimeVoiceDelivery[][] = [];
+let plans: unknown[] = [];
+
+/**
+ * Stands in for the realtime client, including the part that matters most here:
+ * `reconcileWorkerDeliveries` only ENQUEUES. Durable delivery is confirmed later,
+ * when the host answers `acknowledged: true`, and the client announces it then.
+ */
+let acknowledgeListeners: ((deliveryId: string) => void)[] = [];
+const client = {
+  reconcileWorkerDeliveries(deliveries: readonly RuntimeVoiceDelivery[]) {
+    delivered.push([...deliveries]);
+  },
+  onDeliveryAcknowledged(listener: (deliveryId: string) => void) {
+    acknowledgeListeners.push(listener);
+    return () => { acknowledgeListeners = acknowledgeListeners.filter((entry) => entry !== listener); };
+  },
+  realtimeSession: () => sessionCredential,
+};
+
+/** The credential this peer holds for its own call; null before the SDP exchange. */
+let sessionCredential: string | null = "rt_sess_relay";
+
+/** The host confirming the write, which is the only thing that may move a cursor. */
+function confirmDurableDelivery(deliveryId: string): void {
+  flushSync(() => {
+    for (const listener of [...acknowledgeListeners]) listener(deliveryId);
+  });
+}
+
+function delivery(seq: number): RuntimeVoiceDelivery {
+  return {
+    deliveryId: `voice:["bridge:${seq}",["report:${seq}"]]`,
+    turnId: `bridge:${seq}`,
+    responses: [{ responseId: `report:${seq}`, text: `[completed] report ${seq}` }],
+    ready: true,
+  };
+}
+
+const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+  const url = String(input);
+  calls.push({
+    url,
+    method: init?.method ?? "GET",
+    body: init?.body ? JSON.parse(String(init.body)) as unknown : null,
+  });
+  if ((init?.method ?? "GET") === "GET") {
+    const plan = plans.shift() ?? { kind: "idle" };
+    return new Response(JSON.stringify({ ok: true, plan }), { status: 200 });
+  }
+  return new Response(JSON.stringify({ ok: true }), { status: 200 });
+}) as unknown as typeof fetch;
+
+beforeEach(() => {
+  roots = [];
+  calls = [];
+  delivered = [];
+  plans = [];
+  acknowledgeListeners = [];
+  sessionCredential = "rt_sess_relay";
+  /* The parked-token store is module-scoped by design (it must outlive components),
+     so it also outlives a test unless cleared. */
+  resetBridgeAcknowledgementsForTests();
+});
+
+afterEach(async () => {
+  for (const root of roots) flushSync(() => root.unmount());
+  roots = [];
+  await settle();
+});
+
+function mount(live: boolean) {
+  function Probe({ isLive }: { isLive: boolean }) {
+    useBridgeReportRelay(client, isLive, { fetchFn, pollMs: 5_000 });
+    return null;
+  }
+  const container = dom.document.createElement("div");
+  dom.document.body.appendChild(container);
+  const root = createRoot(container as unknown as Element);
+  roots.push(root);
+  flushSync(() => root.render(<Probe isLive={live} />));
+  return root;
+}
+
+test("no call means no poll — nothing pushes when there is nothing to interject into", async () => {
+  mount(false);
+  await settle();
+  expect(calls).toEqual([]);
+});
+
+test("the cursor does NOT move on enqueue — only durable delivery may advance it", async () => {
+  /* Inverting this is inverting exactly-once. `reconcileWorkerDeliveries` puts the
+     batch in an in-memory queue; a crash between that and the host's write loses
+     the report while the cursor claims it was delivered. */
+  plans = [{ kind: "deliver", delivery: delivery(4), ackToken: "ack_4" }];
+  mount(true);
+  await settle();
+
+  expect(delivered).toHaveLength(1);
+  expect(calls.filter((call) => call.method === "POST")).toEqual([]);
+});
+
+test("the cursor advances once the host confirms the durable write", async () => {
+  plans = [{ kind: "deliver", delivery: delivery(4), ackToken: "ack_4" }];
+  mount(true);
+  await settle();
+
+  confirmDurableDelivery(delivery(4).deliveryId);
+  await settle();
+
+  const acknowledgement = calls.find((call) => call.method === "POST");
+  expect(acknowledgement?.body).toEqual({ ackToken: "ack_4", realtimeSessionId: "rt_sess_relay" });
+
+  /* Order matters: the cursor must not move past something the call never got. */
+  const deliveryIndex = calls.findIndex((call) => call.method === "GET");
+  const ackIndex = calls.findIndex((call) => call.method === "POST");
+  expect(deliveryIndex).toBeLessThan(ackIndex);
+});
+
+test("a confirmation for some other delivery never advances this batch's cursor", async () => {
+  plans = [{ kind: "deliver", delivery: delivery(4), ackToken: "ack_4" }];
+  mount(true);
+  await settle();
+
+  confirmDurableDelivery("voice:[\"bridge:99\",[\"report:99\"]]");
+  await settle();
+  expect(calls.filter((call) => call.method === "POST")).toEqual([]);
+});
+
+test("a lost-ack batch is acknowledged without being spoken again", async () => {
+  plans = [{ kind: "already-acknowledged", ackToken: "ack_7" }];
+  mount(true);
+  await settle();
+
+  expect(delivered).toEqual([]);
+  expect(calls.find((call) => call.method === "POST")?.body).toEqual({ ackToken: "ack_7", realtimeSessionId: "rt_sess_relay" });
+});
+
+test("hold and idle acknowledge nothing", async () => {
+  plans = [{ kind: "hold" }];
+  mount(true);
+  await settle();
+  expect(calls.filter((call) => call.method === "POST")).toEqual([]);
+  expect(delivered).toEqual([]);
+});
+
+test("the poll carries what this client already played, so the server can suppress it", async () => {
+  plans = [
+    { kind: "deliver", delivery: delivery(2), ackToken: "ack_2" },
+    { kind: "idle" },
+  ];
+  const root = mount(true);
+  await settle();
+  /* Force a second poll by remounting the effect with the same inputs. */
+  flushSync(() => root.render(<div />));
+  await settle();
+
+  const first = calls.find((call) => call.method === "GET")!;
+  expect(first.url).not.toContain("acked=");
+  expect(delivered).toHaveLength(1);
+});
+
+test("a failing poll is a retry, not an incident", async () => {
+  const failing = (async () => { throw new Error("offline"); }) as unknown as typeof fetch;
+  function Probe() {
+    useBridgeReportRelay(client, true, { fetchFn: failing, pollMs: 5_000 });
+    return null;
+  }
+  const container = dom.document.createElement("div");
+  dom.document.body.appendChild(container);
+  const root = createRoot(container as unknown as Element);
+  roots.push(root);
+  flushSync(() => root.render(<Probe />));
+  await settle();
+
+  expect(delivered).toEqual([]);
+});
+
+test("a call with no session credential yet reads nothing at all", async () => {
+  /* The inbox carries deploy nonces, so a peer that has not finished its SDP
+     exchange has nothing to present and must wait rather than be trusted. */
+  sessionCredential = null;
+  plans = [{ kind: "deliver", delivery: delivery(1), ackToken: "ack_1" }];
+  mount(true);
+  await settle();
+
+  expect(calls).toEqual([]);
+  expect(delivered).toEqual([]);
+});
+
+test("the poll presents this call's credential", async () => {
+  plans = [{ kind: "idle" }];
+  mount(true);
+  await settle();
+
+  const poll = calls.find((call) => call.method === "GET");
+  expect(poll?.url).toContain("realtimeSessionId=rt_sess_relay");
+});
+
+test("turn-start drains with NO live call — that is the path it exists for", async () => {
+  /* Requiring a live session here meant the inbox drained only while it was not
+     needed. The turn-start path authenticates as the operator instead. */
+  const requests: { url: string; method: string; body: unknown }[] = [];
+  const turnFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    requests.push({ url, method: init?.method ?? "GET", body: init?.body ? JSON.parse(String(init.body)) as unknown : null });
+    if ((init?.method ?? "GET") === "GET") {
+      return new Response(JSON.stringify({
+        ok: true,
+        prelude: { text: "While you were away…", ackToken: "ack_turn" },
+      }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  }) as unknown as typeof fetch;
+
+  /* Published from an effect, so the probe stays a pure component. */
+  const drains: (() => Promise<{ text: string; ackToken: string; commit: () => void }>)[] = [];
+  function Probe({ publish }: { publish: (drain: () => Promise<{ text: string; ackToken: string; commit: () => void }>) => void }) {
+    const drain = useBridgeTurnStartDrain(true, { fetchFn: turnFetch });
+    useEffect(() => { publish(drain); }, [drain, publish]);
+    return null;
+  }
+  const container = dom.document.createElement("div");
+  dom.document.body.appendChild(container);
+  const root = createRoot(container as unknown as Element);
+  roots.push(root);
+  const publish = (drain: () => Promise<{ text: string; ackToken: string; commit: () => void }>) => { drains.push(drain); };
+  flushSync(() => root.render(<Probe publish={publish} />));
+  await settle();
+
+  const turn = await drains.at(-1)!();
+  expect(turn.text).toContain("While you were away");
+  expect(turn.ackToken).toBe("ack_turn");
+  /* No session id anywhere in the request: there is no call to have one. */
+  expect(requests[0]!.url).not.toContain("realtimeSessionId");
+
+  /* And nothing was acknowledged by draining alone. */
+  expect(requests.filter((entry) => entry.method === "POST")).toEqual([]);
+  turn.commit();
+  await settle();
+  expect(requests.find((entry) => entry.method === "POST")?.body).toEqual({ ackToken: "ack_turn" });
+});
+
+test("commitBridgeTurn settles a batch by token, long after the closure is gone", async () => {
+  const posts: unknown[] = [];
+  const tokenFetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+    posts.push(init?.body ? JSON.parse(String(init.body)) as unknown : null);
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  }) as unknown as typeof fetch;
+
+  commitBridgeTurn("ack_late", tokenFetch);
+  await settle();
+  expect(posts).toEqual([{ ackToken: "ack_late" }]);
+
+  /* An empty token is a no-op rather than a malformed request. */
+  commitBridgeTurn("", tokenFetch);
+  await settle();
+  expect(posts).toHaveLength(1);
+});

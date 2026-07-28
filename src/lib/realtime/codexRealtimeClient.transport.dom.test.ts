@@ -229,9 +229,13 @@ test("a live call keeps worker progress local and sends one completed response t
 
   const delivered = requests.filter((request) =>
     request.action === "deliverWorkerResponse");
+  /* #691 §6: the write carries this call's credential. Injection is authorized
+     against the live session id, so a delivery that omitted it would be refused —
+     absence of evidence grants nothing. */
   expect(delivered).toEqual([{
     action: "deliverWorkerResponse",
     conversationId: "conversation_live_call",
+    realtimeSessionId: null,
     delivery,
   }]);
   expect(peer.channel.sent).toEqual([]);

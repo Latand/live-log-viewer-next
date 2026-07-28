@@ -1115,6 +1115,8 @@ describe("MCP tool service", () => {
         "agent_activity",
         "lifecycle_events",
         "request_attention",
+        "bridge_report",
+        "bridge_directive",
       ]);
       for (const tool of listed.tools) {
         expect(tool.inputSchema.required).toContain("clientRequestId");

@@ -27,6 +27,12 @@ export interface RealtimeSurface {
   stop(): Promise<void>;
   updateWorkerProgress(turnId: string, progress: string, running: boolean): void;
   reconcileWorkerDeliveries(deliveries: readonly RuntimeVoiceDelivery[]): void;
+  /** #691 §6: this call's credential, presented on every write into it and on every
+      read of the inbox that carries its deploy nonces. */
+  realtimeSession(): string | null;
+  /* #691 §4: fires when the runtime host has DURABLY accepted a delivery, which is
+     the only signal that may advance the bridge's cursor. */
+  onDeliveryAcknowledged(listener: (deliveryId: string) => void): () => void;
 }
 
 const NO_LINES: ReadonlySet<string> = new Set();
@@ -150,6 +156,7 @@ export function useCodexRealtime(
     micStream: client?.micStream() ?? null,
     toggleMic: () => client?.toggleMic(),
     toggleOutput: () => client?.toggleOutput(),
+    realtimeSession: () => client?.realtimeSession() ?? null,
     start: () => client?.start() ?? Promise.resolve(),
     stop: () => client?.stop() ?? Promise.resolve(),
   };

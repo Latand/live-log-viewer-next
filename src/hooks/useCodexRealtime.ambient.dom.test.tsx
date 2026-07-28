@@ -100,6 +100,8 @@ function fakeClient() {
       stop: async () => undefined,
       updateWorkerProgress: () => undefined,
       reconcileWorkerDeliveries: () => undefined,
+      onDeliveryAcknowledged: () => () => undefined,
+      realtimeSession: () => null,
       push(patch: Partial<CodexRealtimeSnapshot>) {
         snapshot = { ...snapshot, ...patch };
         for (const listener of listeners) listener();

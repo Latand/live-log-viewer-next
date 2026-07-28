@@ -61,6 +61,15 @@ import {
 import { mintIdempotencyKey, receiptIsAdmitted, receiptIsTerminal } from "./runtime/runtimeModel";
 import { useAgentCapabilities } from "./useAgentCapabilities";
 import { VoiceConversationButton, VoiceConversationPanel } from "./VoiceConversation";
+import { commitBridgeTurn, useBridgeTurnStartDrain } from "@/hooks/useBridgeReportRelay";
+import {
+  bridgeAcknowledgementFor,
+  forgetBridgeAcknowledgement,
+  rememberBridgeAcknowledgement,
+} from "@/lib/bridge/pendingAcknowledgements";
+
+import { composerStore } from "./voice/composerStore";
+import { VoiceFloatButton } from "./voice/VoiceFloatButton";
 
 /** The persisted "on resume" runtime profile as a POST body fragment (issue
     #241 §4). `fast` is a codex-only service-tier override. */
@@ -1013,7 +1022,14 @@ export function TmuxComposer({
     /* Queue-first (issue #561): a submitted message lives in the durable
        outbox, so the field never locks behind an in-flight delivery. */
     holdInputWhileBusy: false,
+    /* #691 U2: the voice conversation's draft is shared with its floating
+       rendering — one draft, one queue, one dispatcher. Every other card owns its
+       draft outright, exactly as before. */
+    shared: voiceEnabled ? composerStore(cardId) : null,
   });
+  /* Pulls the bridge inbox once, at the start of a turn, and only for the voice
+     conversation. Returns "" for every other card and whenever nothing is pending. */
+  const drainBridgeTurnStart = useBridgeTurnStartDrain(voiceEnabled);
   const { text, textRef, setText, setTextState, inputRef, setStatus, busy, setBusy, voiceSending, attachments } = composer;
   const attachmentDraftHydrated = useRef(false);
   const isMobile = useIsMobile();
@@ -1063,6 +1079,26 @@ export function TmuxComposer({
      for a consumed key, must neither report a false failure, re-arm a pending
      entry, nor clear text the user typed afterwards. Bounded, newest last. */
   const settledSendKeys = useRef<Set<string>>(new Set());
+  /* #691 §4 — a drained bridge batch whose turn has not been durably admitted yet.
+     Keyed by the delivery key rather than captured in a closure, because a structured
+     send's admission can arrive later on the receipt stream, when that closure is
+     gone: the token is a value, so it survives the wait. Committed exactly once —
+     the entry is deleted before the request goes out, so a receipt arriving twice
+     acknowledges once. */
+  /* Parked in a module store rather than a ref: a component ref dies with the card,
+     and the admission that settles a batch can arrive after the operator has scrolled
+     it away. Removed only once the server accepts, so a failed POST retries. */
+  const commitBridgeFor = (deliveryKey: string) => {
+    const ackToken = bridgeAcknowledgementFor(deliveryKey);
+    if (!ackToken) return;
+    void commitBridgeTurn(ackToken)
+      .then(() => forgetBridgeAcknowledgement(deliveryKey))
+      .catch(() => {
+        /* The cursor did not move; the token stays parked for the next receipt. */
+      });
+  };
+  const commitBridgeForRef = useRef(commitBridgeFor);
+  useEffect(() => { commitBridgeForRef.current = commitBridgeFor; });
   /* Per-idempotency-key snapshot of the runtime settings a structured send
      carries (issue #390 §10): a same-key replay must re-send *identical*
      settings — a pill selection made between attempts changes only the NEXT
@@ -1073,6 +1109,16 @@ export function TmuxComposer({
      is disabled or the session is legacy/unhosted). */
   const runtimeReceipts = useRuntimeReceiptsForArtifact(file.path, cardId);
   const displayedRuntimeReceipts = mergeRuntimeReceipts(runtimeReceipts, immediateRuntimeReceipts);
+  /* #691 §4 — THE RECEIPT-STREAM CONSUMER for parked bridge batches.
+     A structured send can answer `pending` and settle minutes later on this stream,
+     by which time the closure that drained the batch is gone. Watching the receipts
+     is the only way that admission ever reaches the cursor; without it a batch stays
+     parked and its reports repeat on the next turn. */
+  useEffect(() => {
+    for (const receipt of displayedRuntimeReceipts) {
+      if (receiptIsAdmitted(receipt.status)) commitBridgeForRef.current(receipt.idempotencyKey);
+    }
+  }, [displayedRuntimeReceipts]);
   const assistantTurnReceipt = messageReceiptForAssistantTurn(
     displayedRuntimeReceipts,
     structuredSession?.session.liveTurn?.turnId,
@@ -1512,14 +1558,25 @@ export function TmuxComposer({
       updateOutbox(cardId, outboxId, { state, settledAt: nowMs(), ...(error ? { error } : {}) });
       if (state === "delivered") outboxImages.current.delete(outboxId);
     };
-    const settleOutboxFromReceipt = (receipt: RuntimeReceipt) => settleOutbox(outboxStateForReceiptStatus(receipt.status));
+      const settleOutboxFromReceipt = (receipt: RuntimeReceipt) => {
+      /* The late admission: a send that answered `pending` and settled on the receipt
+         stream. This is the moment its bridge batch became durable. */
+      if (receiptIsAdmitted(receipt.status)) commitBridgeFor(clientMessageId);
+      return settleOutbox(outboxStateForReceiptStatus(receipt.status));
+    };
     /* Resolve the key before selecting the payload. A generation retained after
        uncertain admission owns an immutable text/image snapshot; later edits
        stay in the composer for the following generation while an explicit
        submit replays the original bytes under the original key. */
     const clientMessageId = deliveryAttemptKey(idempotencyKey.current, retry?.clientMessageId);
     const replayGeneration = pendingDeliveries.current.find((entry) => entry.key === clientMessageId);
-    const payloadText = replayGeneration?.text ?? requestedText;
+    /* #691 §4, the no-call path: a turn is opening, so whatever the manager
+       reported while nothing was live rides in with it. Never on a replay — a
+       retained generation replays its original bytes under its original key, and
+       changing them would defeat the idempotency the retry exists for. */
+    const bridgeTurn = replayGeneration ? null : await drainBridgeTurnStart();
+    const payloadText = replayGeneration?.text
+      ?? (bridgeTurn?.text ? `${bridgeTurn.text}\n\n${requestedText}` : requestedText);
     const sentImages: PendingImage[] = replayGeneration
       ? replayGeneration.images.map((image) => ({ ...image }))
       : requestedImages;
@@ -1700,6 +1757,18 @@ export function TmuxComposer({
             return { ...body, status: response.status, ok: response.ok && body.ok === true };
           }));
       const json = await withComposerAdmissionDeadline(admissionRequest, COMPOSER_ADMISSION_DEADLINE_MS);
+      /* #691 §4 — the bridge cursor moves only on DURABLE admission.
+         `json.ok` is not that: a structured send answers ok with a receipt that may
+         still be `pending`, which the server has not committed to holding. So the
+         cursor waits for a receipt the outbox itself calls admitted; the legacy path
+         has no queue to be pending in, so there an ok response IS the admission.
+         Anything still in flight parks its token under the delivery key and is
+         settled by whichever receipt admits it later. */
+      if (bridgeTurn?.ackToken) rememberBridgeAcknowledgement(clientMessageId, bridgeTurn.ackToken);
+      const admittedNow = json.ok
+        && (json.structured ? Boolean(json.receipt && receiptIsAdmitted(json.receipt.status)) : true);
+      if (admittedNow) commitBridgeFor(clientMessageId);
+      else if (!json.ok) forgetBridgeAcknowledgement(clientMessageId);
       if (!json.ok) {
         if (json.structured && json.receipt) {
           /* Keep the payload readable in the compact receipt for retry and
@@ -2022,12 +2091,19 @@ export function TmuxComposer({
            was already sent, newest first (issue #561). */
         history={composerHistory}
         voiceControl={voiceEnabled ? (
-          <VoiceConversationButton
-            phase={voice.phase}
-            start={voice.start}
-            stop={voice.stop}
-            t={t}
-          />
+          <>
+            <VoiceConversationButton
+              phase={voice.phase}
+              start={voice.start}
+              stop={voice.stop}
+              t={t}
+            />
+            {/* #691 §5: re-float a call whose window the operator closed. Only while a
+                call is up, and only where Document PiP exists — the floater opens
+                itself on voice start, so this is the way back, not the way in. It has
+                to be a real click: `requestWindow` needs transient user activation. */}
+            <VoiceFloatButton phase={voice.phase} t={t} />
+          </>
         ) : undefined}
         voicePanel={voiceEnabled ? (
           <VoiceConversationPanel

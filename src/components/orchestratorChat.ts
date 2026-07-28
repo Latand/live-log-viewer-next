@@ -21,6 +21,8 @@ export function orchestratorHash(conversationId: string): string {
   return "#c=" + encodeURIComponent(conversationId);
 }
 
+import { operatorHeaders } from "./operatorCredential";
+
 const JSON_HEADERS = { "content-type": "application/json" };
 
 async function bodyOf<T>(response: Response): Promise<T | null> {
@@ -54,7 +56,9 @@ export async function openOrchestratorConversation(fetchFn: typeof fetch = fetch
 
   const adoptResponse = await fetchFn("/api/orchestrator", {
     method: "POST",
-    headers: JSON_HEADERS,
+    /* Designation is operator-only and needs the capability, not a request that
+       merely looks same-origin (#691 round 6). */
+    headers: { ...JSON_HEADERS, ...operatorHeaders() },
     body: JSON.stringify({ conversationId: spawn.conversationId, path: spawn.path ?? null }),
   });
   const adopt = await bodyOf<{ ok?: boolean; record?: { conversationId: string } }>(adoptResponse);

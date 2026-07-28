@@ -5,6 +5,10 @@ import {
   type RuntimeVoiceDelivery,
 } from "@/lib/runtime/voiceDelivery";
 
+import { operatorHeaders } from "@/components/operatorCredential";
+
+import { reportCallPhase } from "./activeCall";
+
 export type CodexRealtimePhase = "idle" | "connecting" | "live" | "stopping" | "error";
 export type CodexRealtimeRole = "user" | "assistant" | "progress";
 /** The two roles that stream a turn. Worker progress is excluded: its line is
@@ -145,6 +149,13 @@ class CodexRealtimeClient {
   private audio: HTMLAudioElement | null = null;
   private readonly pendingWorkerDeliveries = new Map<string, RuntimeVoiceDelivery>();
   private readonly acknowledgedWorkerDeliveries = new Set<string>();
+  /* Announced only when the HOST has confirmed the write, never on enqueue. The
+     bridge's cursor rides on this signal, so a listener firing early would move a
+     durable cursor past a report the session never actually received. */
+  private readonly deliveryAcknowledgedListeners = new Set<(deliveryId: string) => void>();
+  /* #691 §6: the credential this peer holds for its own call. Presented on every
+     write into the session, because absence of evidence authorizes nothing. */
+  private realtimeSessionId: string | null = null;
   private workerDeliveryFlush: Promise<void> | null = null;
   private workerDeliveryWakeEpoch: number | null = null;
   private unloadHangup: (() => void) | null = null;
@@ -164,6 +175,16 @@ class CodexRealtimeClient {
   };
 
   getSnapshot = (): CodexRealtimeSnapshot => this.snapshot;
+
+  /**
+   * Fires when the runtime host has durably accepted a delivery — the one moment
+   * at which "this reached the session" is true. Consumers that advance a durable
+   * cursor (the #691 bridge) must key on this and on nothing earlier.
+   */
+  onDeliveryAcknowledged = (listener: (deliveryId: string) => void): (() => void) => {
+    this.deliveryAcknowledgedListeners.add(listener);
+    return () => this.deliveryAcknowledgedListeners.delete(listener);
+  };
 
   /** The live microphone stream, for the panel's level meter. Deliberately
       outside the snapshot: the meter animates per frame and must not push
@@ -236,8 +257,14 @@ class CodexRealtimeClient {
         try {
           void fetch("/api/runtime/realtime", {
             method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ action: "stop", conversationId: this.conversationId }),
+            /* The page is unloading; the session id is what proves this peer owns the
+               call it is hanging up. */
+            headers: { "content-type": "application/json", ...operatorHeaders() },
+            body: JSON.stringify({
+              action: "stop",
+              conversationId: this.conversationId,
+              realtimeSessionId: this.realtimeSessionId,
+            }),
             keepalive: true,
           });
         } catch { /* the page is going away regardless */ }
@@ -266,11 +293,17 @@ class CodexRealtimeClient {
       if (!offer) throw new Error("The browser produced no WebRTC offer");
       const answer = await responseJson(await fetch("/api/runtime/realtime", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        /* Opening the operator's call is operator-only: no session exists yet to
+           prove ownership with, so the credential is the only evidence available. */
+        headers: { "content-type": "application/json", ...operatorHeaders() },
         body: JSON.stringify({ action: "start", conversationId: this.conversationId, sdp: offer }),
       }));
       if (epoch !== this.epoch) return;
       if (typeof answer.sdp !== "string") throw new Error("Codex returned no WebRTC answer");
+      /* The credential for this call, minted by the backend during the exchange this
+         peer just ran. Held for the life of the session and presented on every write
+         into it (#691 §6). */
+      this.realtimeSessionId = typeof answer.realtimeSessionId === "string" ? answer.realtimeSessionId : null;
       await peer.setRemoteDescription({ type: "answer", sdp: answer.sdp });
     } catch (error) {
       if (epoch !== this.epoch) return;
@@ -287,8 +320,12 @@ class CodexRealtimeClient {
     try {
       await responseJson(await fetch("/api/runtime/realtime", {
         method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action: "stop", conversationId: this.conversationId }),
+        headers: { "content-type": "application/json", ...operatorHeaders() },
+        body: JSON.stringify({
+          action: "stop",
+          conversationId: this.conversationId,
+          realtimeSessionId: this.realtimeSessionId,
+        }),
       }));
     } catch (error) {
       failure = error instanceof Error ? error.message : String(error);
@@ -348,6 +385,7 @@ class CodexRealtimeClient {
           body: JSON.stringify({
             action: "deliverWorkerResponse",
             conversationId: this.conversationId,
+            realtimeSessionId: this.realtimeSessionId,
             delivery,
           }),
         }));
@@ -357,6 +395,7 @@ class CodexRealtimeClient {
       if (body.acknowledged !== true || body.deliveryId !== delivery.deliveryId) return;
       this.pendingWorkerDeliveries.delete(delivery.deliveryId);
       this.acknowledgedWorkerDeliveries.add(delivery.deliveryId);
+      for (const listener of this.deliveryAcknowledgedListeners) listener(delivery.deliveryId);
     }
   }
 
@@ -448,9 +487,17 @@ class CodexRealtimeClient {
   }
 
   private update(patch: Partial<CodexRealtimeSnapshot>): void {
+    const previousPhase = this.snapshot.phase;
     this.snapshot = { ...this.snapshot, ...patch };
     for (const listener of this.listeners) listener();
+    /* Announced after this client's own subscribers, so the Viewer-level host
+       never sees a phase the card has not rendered yet. */
+    if (this.snapshot.phase !== previousPhase) reportCallPhase(this.conversationId, this.snapshot.phase);
   }
+
+  /** The live session credential, for consumers that must write into this call
+      through the host (the #691 bridge relay). Null when no call is up. */
+  realtimeSession = (): string | null => this.realtimeSessionId;
 
   private cleanupTransport(): void {
     /* No line survives a dead transport as "still streaming": the next call
@@ -466,6 +513,7 @@ class CodexRealtimeClient {
     this.peer = null;
     this.media = null;
     this.audio = null;
+    this.realtimeSessionId = null;
   }
 }
 
