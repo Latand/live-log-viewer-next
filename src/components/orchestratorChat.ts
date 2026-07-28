@@ -21,7 +21,7 @@ export function orchestratorHash(conversationId: string): string {
   return "#c=" + encodeURIComponent(conversationId);
 }
 
-import { operatorHeaders } from "./operatorCredential";
+import { hasOperatorCredential, operatorHeaders } from "./operatorCredential";
 
 const JSON_HEADERS = { "content-type": "application/json" };
 
@@ -50,13 +50,13 @@ export async function openOrchestratorConversation(fetchFn: typeof fetch = fetch
      refused, no record was written — and the NEXT click saw an empty slot and
      spawned again. Four stalled managers on the hosted stage came from exactly
      that loop. The single-instance guarantee still lives in first-write-wins
-     adoption; this check just refuses to create anything it could never seat. */
-  const authorityResponse = await fetchFn("/api/operator/session", {
-    cache: "no-store",
-    headers: operatorHeaders(),
-  });
-  const authority = await bodyOf<{ operator?: boolean }>(authorityResponse);
-  if (!authorityResponse.ok || authority?.operator !== true) {
+     adoption; this check just refuses to create anything it could never seat.
+
+     Asked of the credential this browser holds, not of a probe endpoint: the
+     operator secret is pasted into `OperatorKeyGate` and kept in this tab's
+     memory, so possession is knowable locally and a tab without it is exactly
+     the tab whose adoption the server would refuse. */
+  if (!hasOperatorCredential()) {
     throw new Error("orchestrator spawn requires operator authority in this browser");
   }
 
