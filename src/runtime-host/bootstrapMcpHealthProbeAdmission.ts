@@ -3,7 +3,7 @@ import path from "node:path";
 
 import type { RuntimeSocketRequest, RuntimeSocketResponse } from "@/lib/runtime/contracts";
 
-import { RuntimeHostFence } from "./host";
+import { RuntimeHostFence } from "./runtimeHostFence";
 import { McpHealthProbeAdmissions } from "./mcpHealthProbeAdmission";
 import { serveRuntimeHost, type RuntimeHostSocketHandler } from "./socket";
 
@@ -30,20 +30,6 @@ async function closeServer(server: ReturnType<typeof serveRuntimeHost>): Promise
   await new Promise<void>((resolve, reject) => {
     server.close((error) => error ? reject(error) : resolve());
   });
-}
-
-function removeOwnedSocket(socketPath: string, identity: { dev: number; ino: number }): void {
-  let current: fs.Stats;
-  try {
-    current = fs.lstatSync(socketPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw error;
-  }
-  if (!current.isSocket() || current.dev !== identity.dev || current.ino !== identity.ino) {
-    throw new Error("runtime host socket changed during bootstrap probe");
-  }
-  fs.rmSync(socketPath);
 }
 
 /**
@@ -84,7 +70,7 @@ export async function withBootstrapMcpHealthProbeAdmission<T>(
       if (server) await closeServer(server);
     } finally {
       try {
-        if (socketIdentity) removeOwnedSocket(socketPath, socketIdentity);
+        if (socketIdentity) fence.removeOwnedSocket(socketPath, socketIdentity);
       } finally {
         fence.release();
       }

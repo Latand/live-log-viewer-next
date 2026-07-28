@@ -11,6 +11,7 @@ import { RuntimeHost } from "../src/runtime-host/host";
 import { RuntimeJournal } from "../src/runtime-host/journal";
 import { McpHealthProbeAdmissions } from "../src/runtime-host/mcpHealthProbeAdmission";
 import { probeMcpRuntime } from "../src/runtime-host/mcpRuntimeProbe";
+import { RuntimeHostFence } from "../src/runtime-host/runtimeHostFence";
 import { serveRuntimeHost } from "../src/runtime-host/socket";
 import { runBootstrapRelease } from "./runtime-host-viewer-adapter";
 
@@ -174,7 +175,9 @@ test("documented bootstrap input obtains host-owned admission through the final 
     });
     expect(result.health.mcpRuntime?.tools).toHaveLength(MCP_TOOL_NAMES.length);
     expect(fs.existsSync(socketPath)).toBe(false);
-    expect(fs.existsSync(`${socketPath}.lock`)).toBe(false);
+    const successor = new RuntimeHostFence(`${socketPath}.lock`);
+    successor.acquire();
+    successor.release();
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
@@ -224,7 +227,9 @@ test("bootstrap rejects caller-selected probe authority and spends its own admis
 
     expect(result.candidate).toEqual(release);
     expect(fs.existsSync(socketPath)).toBe(false);
-    expect(fs.existsSync(`${socketPath}.lock`)).toBe(false);
+    const successor = new RuntimeHostFence(`${socketPath}.lock`);
+    successor.acquire();
+    successor.release();
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
