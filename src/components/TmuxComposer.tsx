@@ -59,7 +59,11 @@ import {
   withDismissedReceipts,
   writeDismissedReceipts,
 } from "./runtime/deliveryState";
-import { hasOperatorCredential } from "./operatorCredential";
+import {
+  getServerHasOperatorCredential,
+  hasOperatorCredential,
+  subscribeOperatorCredential,
+} from "./operatorCredential";
 import { mintIdempotencyKey, receiptIsAdmitted, receiptIsTerminal } from "./runtime/runtimeModel";
 import { useAgentCapabilities } from "./useAgentCapabilities";
 import { VoiceConversationButton } from "./VoiceConversation";
@@ -1053,7 +1057,16 @@ export function TmuxComposerCore({
      A STALE credential (server restarted, tab kept its sessionStorage value)
      still passes here, reaches the backend, and comes back as the localized
      authorization notice on the voice panel. */
-  const operatorTab = hasOperatorCredential();
+  /* SUBSCRIBED, not read once: browser-session authority resolves asynchronously
+     (a probe, an establishment from another tab), and hosted acceptance proved
+     this component cannot be assumed to re-render for unrelated reasons in time
+     — the canonical voice button stayed hidden after the probe had resolved.
+     The store notifies on every authority transition; nothing here polls. */
+  const operatorTab = useSyncExternalStore(
+    subscribeOperatorCredential,
+    hasOperatorCredential,
+    getServerHasOperatorCredential,
+  );
   const voiceWorkerTurn = structuredSession?.session.liveTurn;
   const voice = useCodexRealtime(
     cardId,
@@ -2089,10 +2102,12 @@ export function TmuxComposerCore({
             stop={voice.stop}
             t={t}
           />
-          {/* #691 §5: re-float a call whose window the operator closed. Only while a
-              call is up, and only where Document PiP exists — the floater opens
-              itself on voice start, so this is the way back, not the way in. It has
-              to be a real click: `requestWindow` needs transient user activation. */}
+          {/* #691 §5, revised on stage: detaching is the operator's explicit
+              gesture. Voice start shows the transcript here in the card; THIS is
+              the way into the floating window, and the way back after the
+              operator closes it. Only while a call is up, and only where
+              Document PiP exists. It has to be a real click: `requestWindow`
+              needs transient user activation. */}
           <VoiceFloatButton phase={voice.phase} t={t} />
         </>
       ) : undefined}
