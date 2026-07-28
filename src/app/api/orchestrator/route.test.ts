@@ -8,7 +8,7 @@ import { NextRequest } from "next/server";
 import crypto from "node:crypto";
 
 import { setCallerConversationResolverForTests } from "@/lib/agent/operatorAuthority";
-import { ensureOperatorSpawnCapability, rotateOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
+import { operatorSessionSecret, resetOperatorSessionForTests } from "@/lib/agent/operatorSession";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { setRetireManagerForTests } from "@/lib/orchestrator/retire";
 
@@ -56,7 +56,7 @@ function browserRequest(body: unknown): NextRequest {
     headers: {
       host: "127.0.0.1",
       "content-type": "application/json",
-      [VIEWER_SPAWN_CAPABILITY_HEADER]: ensureOperatorSpawnCapability(),
+      [VIEWER_SPAWN_CAPABILITY_HEADER]: operatorSessionSecret(),
     },
     body: JSON.stringify(body),
   });
@@ -115,7 +115,7 @@ test("POST validates its body", async () => {
      point of checking authority first. */
   const invalid = new NextRequest("http://127.0.0.1/api/orchestrator", {
     method: "POST",
-    headers: { host: "127.0.0.1", [VIEWER_SPAWN_CAPABILITY_HEADER]: ensureOperatorSpawnCapability() },
+    headers: { host: "127.0.0.1", [VIEWER_SPAWN_CAPABILITY_HEADER]: operatorSessionSecret() },
     body: "{",
   });
   expect((await POST(invalid)).status).toBe(400);
@@ -303,12 +303,15 @@ test("FORGED same-origin headers cannot replace the manager, and the refusal cha
   expect(retirements).toEqual([]);
 });
 
-test("a stale operator capability cannot replace the manager either", async () => {
+test("a secret from a previous process cannot replace the manager either", async () => {
   const transcript = path.join(sandbox, "orchestrator.jsonl");
   fs.writeFileSync(transcript, "", "utf8");
-  const stale = ensureOperatorSpawnCapability();
+  const stale = operatorSessionSecret();
   await POST(browserRequest({ conversationId: "conv-incumbent", path: transcript }));
-  rotateOperatorSpawnCapability();
+  /* The Viewer restarted: a fresh process mints a fresh secret, so the link the
+     operator was holding is dead. */
+  resetOperatorSessionForTests();
+  expect(operatorSessionSecret()).not.toBe(stale);
 
   const response = await POST(new NextRequest("http://127.0.0.1/api/orchestrator", {
     method: "POST",

@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
+import { resetBridgeAcknowledgementsForTests } from "@/lib/bridge/pendingAcknowledgements";
 import { installActEnv } from "@/test-helpers/actEnv";
 import type { RuntimeVoiceDelivery } from "@/lib/runtime/voiceDelivery";
 
@@ -112,6 +113,9 @@ beforeEach(() => {
   plans = [];
   acknowledgeListeners = [];
   sessionCredential = "rt_sess_relay";
+  /* The parked-token store is module-scoped by design (it must outlive components),
+     so it also outlives a test unless cleared. */
+  resetBridgeAcknowledgementsForTests();
 });
 
 afterEach(async () => {

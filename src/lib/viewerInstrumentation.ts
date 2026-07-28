@@ -176,9 +176,13 @@ export async function initializeOperatorSpawnCapabilityAtStartup(
   log: (line: string) => void = (line) => console.error(line),
 ): Promise<void> {
   const { ensureOperatorSpawnCapability, rotateOperatorSpawnCapability } = await import("@/lib/agent/operatorCapability");
-  const capability = env.LLV_ROTATE_OPERATOR_SPAWN_CAPABILITY === "1"
-    ? rotateOperatorSpawnCapability()
-    : ensureOperatorSpawnCapability();
+  if (env.LLV_ROTATE_OPERATOR_SPAWN_CAPABILITY === "1") rotateOperatorSpawnCapability();
+  else ensureOperatorSpawnCapability();
+
+  /* The link carries the in-memory session secret, never the on-disk spawn
+     capability: a file every worker can read is not a credential. */
+  const { operatorSessionSecret } = await import("@/lib/agent/operatorSession");
+  const capability = operatorSessionSecret();
 
   const port = env.PORT?.trim() || "8898";
   const origin = `http://127.0.0.1:${port}`;

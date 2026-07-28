@@ -5,7 +5,7 @@ import path from "node:path";
 
 import { NextRequest } from "next/server";
 
-import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
+import { operatorSessionSecret } from "@/lib/agent/operatorSession";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { setBridgeGatewaySourcesForTests } from "@/lib/bridge/gatewayAuthority";
 import { recordManagerReport } from "@/lib/bridge/service";
@@ -232,7 +232,7 @@ test("turn-start drains with NO live call at all — the situation it exists for
   recordManagerReport({ key: "a", class: "blocked", at: new Date().toISOString(), body: "needs a decision" });
 
   const response = await GET(new NextRequest(`${ORIGIN}/api/bridge?mode=turn-start`, {
-    headers: { host: "127.0.0.1", [VIEWER_SPAWN_CAPABILITY_HEADER]: ensureOperatorSpawnCapability() },
+    headers: { host: "127.0.0.1", [VIEWER_SPAWN_CAPABILITY_HEADER]: operatorSessionSecret() },
   })) as unknown as Response;
 
   expect(response.status).toBe(200);
@@ -257,7 +257,7 @@ test("the live drain still requires the call's session id", async () => {
   /* An operator credential does not substitute: the live payload carries nonces and
      the peer proof is what bounds who can read them. */
   const response = await GET(new NextRequest(`${ORIGIN}/api/bridge`, {
-    headers: { host: "127.0.0.1", [VIEWER_SPAWN_CAPABILITY_HEADER]: ensureOperatorSpawnCapability() },
+    headers: { host: "127.0.0.1", [VIEWER_SPAWN_CAPABILITY_HEADER]: operatorSessionSecret() },
   })) as unknown as Response;
   expect(response.status).toBe(403);
 });

@@ -7,7 +7,7 @@ import path from "node:path";
 import { NextRequest } from "next/server";
 
 import { setCallerConversationResolverForTests } from "@/lib/agent/operatorAuthority";
-import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
+import { operatorSessionSecret } from "@/lib/agent/operatorSession";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { adoptOrchestratorRecord } from "@/lib/orchestrator/store";
 import {
@@ -164,7 +164,7 @@ test("the operator's capability starts and stops the transport", async () => {
     headers: {
       host: "127.0.0.1",
       "content-type": "application/json",
-      [VIEWER_SPAWN_CAPABILITY_HEADER]: ensureOperatorSpawnCapability(),
+      [VIEWER_SPAWN_CAPABILITY_HEADER]: operatorSessionSecret(),
     },
     body: JSON.stringify({ conversationId: "conversation_root", action: "stop" }),
   })) as unknown as Response;

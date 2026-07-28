@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import type { NextRequest } from "next/server";
 
 import { agentRegistry } from "@/lib/agent/registry";
-import { matchesOperatorSpawnCapability, OperatorSpawnCapabilityError } from "@/lib/agent/operatorCapability";
+import { matchesOperatorSession } from "@/lib/agent/operatorSession";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 
 /**
@@ -24,26 +24,23 @@ import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
  * browser request came from; it is not an identity, and every gate in this feature
  * ultimately resolves here.
  *
- * So authority is possession of the operator capability — the 0600 secret
- * `operatorCapability.ts` already mints for exactly this purpose, and which
- * `spawn/admission.ts` already treats as operator proof. Agents are issued their own
- * per-conversation capability instead; presenting one names the caller as a worker
- * and is refused outright.
+ * So authority is possession of the OPERATOR SESSION SECRET — see
+ * `operatorSession.ts` — which exists only in this server process's memory. Not the
+ * spawn capability: that one lives in a file, and every worker runs as the operator's
+ * uid, so a file the Viewer can read is a file every worker can read. Agents are
+ * issued their own per-conversation capability; presenting one names the caller as a
+ * worker and is refused outright.
  *
- * The operator's browser gets it the only way a browser can hold a server secret: the
- * server renders it into the page it serves. That is a possession check an agent
- * cannot satisfy by writing headers.
- *
- * Not isolation against a process running as the operator's own uid, which could read
- * the file — nothing in this app is, and that is the repo's standing boundary. What it
- * does close is the gap the review found: authority derived from evidence the caller
- * can simply write.
+ * The operator's browser gets the secret out of band, in the URL fragment of the
+ * startup link, and it appears in no response and no file.
  */
 
 export type OperatorAuthority =
   | { ok: true }
   | { ok: false; status: number; error: string };
 
+/* Shape of a per-conversation spawn capability, used only to decide whether the
+   registry is worth asking about the presented value. */
 const AGENT_CAPABILITY = /^[A-Za-z0-9_-]{43}$/;
 
 type ConversationResolver = (digest: string) => string | null;
@@ -69,7 +66,7 @@ export function callerConversationId(request: Pick<NextRequest, "headers">): str
 const MISSING: OperatorAuthority = {
   ok: false,
   status: 403,
-  error: "this is an operator-only action and requires the operator capability; header shape and same-origin do not authorize it",
+  error: "this is an operator-only action and requires the operator session secret from the startup link; header shape, same-origin and the on-disk spawn capability do not authorize it",
 };
 
 export function requireOperatorAuthority(request: Pick<NextRequest, "headers">): OperatorAuthority {
@@ -86,13 +83,9 @@ export function requireOperatorAuthority(request: Pick<NextRequest, "headers">):
       error: "this is an operator-only action; an agent may not perform it, whatever role it holds",
     };
   }
-  try {
-    if (matchesOperatorSpawnCapability(capability)) return { ok: true };
-  } catch (error) {
-    if (error instanceof OperatorSpawnCapabilityError) {
-      return { ok: false, status: 503, error: error.message };
-    }
-    throw error;
-  }
-  return MISSING;
+  /* Compared against a secret that exists only in this process's memory. The spawn
+     capability deliberately is NOT accepted here: it lives in a file, and every
+     worker runs as the operator's uid, so a file the Viewer can read is a file every
+     worker can read. That was the fourth way into this gate. */
+  return matchesOperatorSession(capability) ? { ok: true } : MISSING;
 }

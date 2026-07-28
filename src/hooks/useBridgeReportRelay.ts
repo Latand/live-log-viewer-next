@@ -3,6 +3,12 @@
 import { useCallback, useEffect, useRef } from "react";
 
 import { operatorHeaders } from "@/components/operatorCredential";
+import {
+  bridgeAcknowledgementFor,
+  forgetBridgeAcknowledgement,
+  pendingBridgeAcknowledgements,
+  rememberBridgeAcknowledgement,
+} from "@/lib/bridge/pendingAcknowledgements";
 import { BRIDGE_LIVE_BATCH_INTERVAL_MS } from "@/lib/bridge/types";
 import type { RuntimeVoiceDelivery } from "@/lib/runtime/voiceDelivery";
 
@@ -160,10 +166,6 @@ export function useBridgeReportRelay(
     const request = fetchFn ?? fetch;
     let cancelled = false;
 
-    /* Batches handed to the client and still waiting on the host's confirmation.
-       The cursor for each moves only when its delivery id comes back. */
-    const awaitingConfirmation = new Map<string, string>();
-
     const acknowledgeCursor = async (ackToken: string): Promise<void> => {
       await request("/api/bridge", {
         method: "POST",
@@ -174,14 +176,19 @@ export function useBridgeReportRelay(
       });
     };
 
-    const releaseAcknowledged = client.onDeliveryAcknowledged((deliveryId) => {
-      const ackToken = awaitingConfirmation.get(deliveryId);
-      if (ackToken === undefined || cancelled) return;
-      awaitingConfirmation.delete(deliveryId);
+    const settle = (deliveryId: string): void => {
+      const ackToken = bridgeAcknowledgementFor(deliveryId);
+      if (!ackToken || cancelled) return;
       /* Now — and only now — has the report provably reached the session. */
       acknowledgedRef.current = [...acknowledgedRef.current, deliveryId].slice(-256);
-      void acknowledgeCursor(ackToken).catch(() => undefined);
-    });
+      void acknowledgeCursor(ackToken)
+        .then(() => forgetBridgeAcknowledgement(deliveryId))
+        .catch(() => {
+          /* The cursor did not move, so the token is still the only thing that can
+             settle this batch. It stays parked and the next poll retries it. */
+        });
+    };
+    const releaseAcknowledged = client.onDeliveryAcknowledged(settle);
 
     const poll = async (): Promise<void> => {
       if (busyRef.current) return;
@@ -189,8 +196,20 @@ export function useBridgeReportRelay(
       try {
         const session = client.realtimeSession();
         /* No credential, no read: the inbox carries deploy nonces. A call that has
-           not finished its SDP exchange has nothing to present yet, and waits. */
+           not finished its SDP exchange has nothing to present yet, and waits — and
+           it must not acknowledge anything either, which is why the retry below sits
+           after this check rather than before it. */
         if (!session) return;
+
+        /* Autonomous retry. A token parked by a torn-down effect, a reload mid-call,
+           or a refused POST is spent here rather than waiting for a confirmation that
+           already happened and will not fire again. */
+        for (const entry of pendingBridgeAcknowledgements()) {
+          if (!entry.waitingOn.startsWith("voice:")) continue;
+          void acknowledgeCursor(entry.ackToken)
+            .then(() => forgetBridgeAcknowledgement(entry.waitingOn))
+            .catch(() => undefined);
+        }
         const parameters = new URLSearchParams({ realtimeSessionId: session });
         for (const id of acknowledgedRef.current) parameters.append("acked", id);
         if (lastBatchAtRef.current) parameters.set("lastBatchAt", lastBatchAtRef.current.toISOString());
@@ -206,7 +225,9 @@ export function useBridgeReportRelay(
              Advancing the cursor here would invert exactly-once — a crash in
              between loses the report while the cursor claims it was delivered — so
              the batch is parked until the host confirms, above. */
-          awaitingConfirmation.set(plan.delivery.deliveryId, plan.ackToken);
+          /* Parked OUTSIDE this effect: a call-phase transition tears the effect down,
+             and the host's confirmation would then arrive with nothing left to spend. */
+          rememberBridgeAcknowledgement(plan.delivery.deliveryId, plan.ackToken);
           client.reconcileWorkerDeliveries([plan.delivery]);
           lastBatchAtRef.current = new Date();
           return;

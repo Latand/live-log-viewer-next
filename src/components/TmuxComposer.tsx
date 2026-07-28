@@ -62,6 +62,11 @@ import { mintIdempotencyKey, receiptIsAdmitted, receiptIsTerminal } from "./runt
 import { useAgentCapabilities } from "./useAgentCapabilities";
 import { VoiceConversationButton, VoiceConversationPanel } from "./VoiceConversation";
 import { commitBridgeTurn, useBridgeTurnStartDrain } from "@/hooks/useBridgeReportRelay";
+import {
+  bridgeAcknowledgementFor,
+  forgetBridgeAcknowledgement,
+  rememberBridgeAcknowledgement,
+} from "@/lib/bridge/pendingAcknowledgements";
 
 import { composerStore } from "./voice/composerStore";
 import { VoiceFloatButton } from "./voice/VoiceFloatButton";
@@ -1080,25 +1085,16 @@ export function TmuxComposer({
      gone: the token is a value, so it survives the wait. Committed exactly once —
      the entry is deleted before the request goes out, so a receipt arriving twice
      acknowledges once. */
-  const pendingBridgeCommits = useRef<Map<string, string>>(new Map());
-  /* Tokens already spent, so a receipt arriving twice acknowledges once. Kept
-     separately from the pending map because the entry must SURVIVE a failed
-     acknowledgement: deleting on the way out lost the token when the POST failed,
-     leaving the cursor parked with nothing left to settle it. */
-  const spentBridgeCommits = useRef<Set<string>>(new Set());
+  /* Parked in a module store rather than a ref: a component ref dies with the card,
+     and the admission that settles a batch can arrive after the operator has scrolled
+     it away. Removed only once the server accepts, so a failed POST retries. */
   const commitBridgeFor = (deliveryKey: string) => {
-    const ackToken = pendingBridgeCommits.current.get(deliveryKey);
-    if (!ackToken || spentBridgeCommits.current.has(ackToken)) return;
-    spentBridgeCommits.current.add(ackToken);
-    if (spentBridgeCommits.current.size > 64) {
-      spentBridgeCommits.current.delete(spentBridgeCommits.current.values().next().value as string);
-    }
+    const ackToken = bridgeAcknowledgementFor(deliveryKey);
+    if (!ackToken) return;
     void commitBridgeTurn(ackToken)
-      .then(() => { pendingBridgeCommits.current.delete(deliveryKey); })
+      .then(() => forgetBridgeAcknowledgement(deliveryKey))
       .catch(() => {
-        /* The cursor did not move, so the token is still the only thing that can
-           settle this batch: keep it and let the next admitted receipt retry. */
-        spentBridgeCommits.current.delete(ackToken);
+        /* The cursor did not move; the token stays parked for the next receipt. */
       });
   };
   const commitBridgeForRef = useRef(commitBridgeFor);
@@ -1768,11 +1764,11 @@ export function TmuxComposer({
          has no queue to be pending in, so there an ok response IS the admission.
          Anything still in flight parks its token under the delivery key and is
          settled by whichever receipt admits it later. */
-      if (bridgeTurn?.ackToken) pendingBridgeCommits.current.set(clientMessageId, bridgeTurn.ackToken);
+      if (bridgeTurn?.ackToken) rememberBridgeAcknowledgement(clientMessageId, bridgeTurn.ackToken);
       const admittedNow = json.ok
         && (json.structured ? Boolean(json.receipt && receiptIsAdmitted(json.receipt.status)) : true);
       if (admittedNow) commitBridgeFor(clientMessageId);
-      else if (!json.ok) pendingBridgeCommits.current.delete(clientMessageId);
+      else if (!json.ok) forgetBridgeAcknowledgement(clientMessageId);
       if (!json.ok) {
         if (json.structured && json.receipt) {
           /* Keep the payload readable in the compact receipt for retry and
