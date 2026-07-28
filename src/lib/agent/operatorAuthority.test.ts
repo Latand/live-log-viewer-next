@@ -13,7 +13,7 @@ import {
 } from "./operatorBrowserSession";
 import { ensureOperatorSpawnCapability, operatorSpawnCapabilityPath } from "./operatorCapability";
 import { operatorSessionSecret, resetOperatorSessionForTests } from "./operatorSession";
-import { requireOperatorAuthority, setCallerConversationResolverForTests } from "./operatorAuthority";
+import { requireOperatorAuthority, setCallerConversationResolverForTests, voiceTransportOperator } from "./operatorAuthority";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "./spawnPolicy";
 
 /**
@@ -185,4 +185,36 @@ test("an agent presenting its capability is refused even with a valid cookie", (
   }));
   expect(verdict.ok).toBe(false);
   if (!verdict.ok) expect(verdict.error).toContain("agent");
+});
+
+/* --------------------------------------------------------------------------- *
+ * Voice transport: agent-versus-operator, no human authentication (final
+ * operator decision). Same-origin enforcement lives in the route, before this.
+ * --------------------------------------------------------------------------- */
+
+test("voice transport: an ordinary browser request with no credential at all IS the operator", () => {
+  expect(voiceTransportOperator(request({ host: "127.0.0.1" }))).toBe(true);
+  expect(voiceTransportOperator(request(FORGED_BROWSER))).toBe(true);
+});
+
+test("voice transport: an agent naming itself with its capability is refused", () => {
+  const workerCapability = crypto.randomBytes(32).toString("base64url");
+  setCallerConversationResolverForTests(() => "conversation_worker");
+  expect(voiceTransportOperator(request({ [VIEWER_SPAWN_CAPABILITY_HEADER]: workerCapability }))).toBe(false);
+});
+
+test("voice transport: a stale or unmapped credential does not demote the browser below anonymous", () => {
+  /* A tab that once adopted a link (now stale after a restart) still starts its
+     own call — presenting yesterday's value must not be worse than presenting
+     nothing. Only self-identification as an agent refuses. */
+  operatorSessionSecret();
+  const stale = crypto.randomBytes(32).toString("base64url");
+  expect(voiceTransportOperator(request({ [VIEWER_SPAWN_CAPABILITY_HEADER]: stale }))).toBe(true);
+});
+
+test("voice transport transparency does NOT leak into possession-gated authority", () => {
+  /* The same anonymous request that may start a call still may NOT designate a
+     manager, spawn, or read the bridge: requireOperatorAuthority is untouched. */
+  expect(voiceTransportOperator(request({ host: "127.0.0.1" }))).toBe(true);
+  expect(requireOperatorAuthority(request({ host: "127.0.0.1" })).ok).toBe(false);
 });

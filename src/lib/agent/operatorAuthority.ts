@@ -90,6 +90,29 @@ function browserSessionCookie(request: Pick<NextRequest, "headers">): string {
   return "";
 }
 
+/**
+ * Operator authority FOR THE VOICE TRANSPORT ONLY (final operator product
+ * decision, stage acceptance): starting and stopping the operator's own call.
+ *
+ * The transport guard's real job was always AGENT-versus-OPERATOR, never human
+ * authentication — this is a single-user application bound to loopback, so a
+ * same-origin request from the local browser IS the operator by construction.
+ * An agent is distinguishable on entirely different grounds: it names itself by
+ * presenting its conversation capability. So the only disqualifier here is that
+ * self-naming; everything else that reached the route — which enforces
+ * same-origin BEFORE consulting this — is the operator's browser. No link, no
+ * cookie, no secret, no ceremony.
+ *
+ * Scope, deliberately narrow: every OTHER operator-only action — manager
+ * designation, spawn capability, deployment gates, bridge reads — keeps
+ * requiring possession via `requireOperatorAuthority` below. Injection into a
+ * live call is not decided here either: `permitRealtimeAction` grants that to
+ * the live session peer alone, whatever this returns.
+ */
+export function voiceTransportOperator(request: Pick<NextRequest, "headers">): boolean {
+  return callerConversationId(request) === null;
+}
+
 export function requireOperatorAuthority(request: Pick<NextRequest, "headers">): OperatorAuthority {
   /* An agent that presented its own capability has named itself. Refused before
      every acceptance path — including the browser cookie — so the answer cannot
