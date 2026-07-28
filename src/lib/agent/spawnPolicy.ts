@@ -29,7 +29,10 @@ export const NATIVE_MULTI_AGENT_HOOK_MATCHER = NATIVE_MULTI_AGENT_TOOLS.join("|"
 
 export const VIEWER_SPAWN_ENDPOINT = "http://127.0.0.1:8898/api/spawn";
 export const VIEWER_SPAWN_CAPABILITY_ENV = "LLV_SPAWN_CAPABILITY";
-export const VIEWER_SPAWN_CAPABILITY_HEADER = "x-llv-spawn-capability";
+/* Defined in an import-free module so client bundles can use it too; re-exported
+   here so every existing importer is unaffected. */
+export { VIEWER_SPAWN_CAPABILITY_HEADER } from "./capabilityHeader";
+import { VIEWER_SPAWN_CAPABILITY_HEADER } from "./capabilityHeader";
 const SPAWN_AUTH_GUIDANCE = `Send header ${VIEWER_SPAWN_CAPABILITY_HEADER}: $${VIEWER_SPAWN_CAPABILITY_ENV}.`;
 export const NATIVE_SUBAGENT_DENY_MESSAGE = `Sub-agents are disabled on this surface. Spawn через POST ${VIEWER_SPAWN_ENDPOINT} with {engine, model, cwd, prompt, src: <your transcript path>, role, reviews?} and ${SPAWN_AUTH_GUIDANCE} The worker then appears on the board with correct lineage.`;
 export const VIEWER_SPAWN_PROMPT_FENCE = `Viewer spawn policy: avoid native sub-agent, collaboration, and background-agent features. Spawn every helper through POST ${VIEWER_SPAWN_ENDPOINT} with {engine, model, cwd, prompt, src: <your transcript path>, role, reviews?}. ${SPAWN_AUTH_GUIDANCE} The worker appears on the board with correct lineage.`;

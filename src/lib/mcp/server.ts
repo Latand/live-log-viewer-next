@@ -9,6 +9,8 @@ import { z } from "zod";
 import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
 
+import type { McpToolPolicy } from "./toolAllowlist";
+
 export const MCP_SERVER_NAME = "viewer";
 
 export const MCP_TOOL_NAMES = [
@@ -38,6 +40,8 @@ export const MCP_TOOL_NAMES = [
   "agent_activity",
   "lifecycle_events",
   "request_attention",
+  "bridge_report",
+  "bridge_directive",
 ] as const;
 
 export type McpToolName = typeof MCP_TOOL_NAMES[number];
@@ -64,6 +68,12 @@ const MUTATING_MCP_TOOL_NAMES = new Set<McpToolName>([
      is classified the same way rather than looking read-only by name. */
   "agent_activity",
   "request_attention",
+  /* Appends to the durable bridge log, so a replayed clientRequestId must return
+     the original receipt rather than append the report a second time. */
+  "bridge_report",
+  /* Delivers an instruction to the manager. Its own derived id is what makes a
+     retry idempotent, and the receipt must outlive the MCP process for that. */
+  "bridge_directive",
 ]);
 
 export type McpToolArgs = Record<string, unknown> & { clientRequestId?: unknown };
@@ -865,6 +875,9 @@ export interface McpToolService {
 export function createMcpToolService(
   bindings: McpToolBindings,
   receipts: McpReceiptStore,
+  /** #691 §6: the per-identity fence. Absent means "no fence", which is what every
+      existing caller of this factory means and gets. */
+  policy?: McpToolPolicy,
 ): McpToolService {
   const inFlight = new Map<string, { digest: string; result: Promise<McpToolResult> }>();
   return {
@@ -876,6 +889,15 @@ export function createMcpToolService(
       const retention: ReceiptRetention = MUTATING_MCP_TOOL_NAMES.has(typedTool) ? "durable" : "bounded";
       const requestId = clientRequestId(args);
       if (!requestId) return failure(toolName, null, "invalid_request", "clientRequestId is required", false);
+
+      /* Refused before the receipt is claimed, on purpose. A refusal is a
+         property of who is calling, not of the operation, so it must not burn the
+         clientRequestId — the same call becomes legitimate the moment the operator
+         grants the tool, and a spent receipt would answer it with a stale no. */
+      const verdict = policy?.permit(typedTool, args);
+      if (verdict && !verdict.allowed) {
+        return failure(typedTool, requestId, verdict.code, verdict.error, false);
+      }
 
       const digest = requestDigest(typedTool, args);
       const key = `${typedTool}:${requestId}`;
@@ -933,7 +955,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   link_task_to_pipeline: "Attach a board task to a conversation owned by a pipeline.",
   list_conversations: "List scanned Viewer conversations with durable ids and transcript paths.",
   get_conversation: "Read a conversation summary and its recent messages and tools.",
-  deploy_exact_sha: "Deploy one full commit SHA after the caller supplies confirm=deploy.",
+  deploy_exact_sha: "Deploy one full commit SHA. Requires confirm=deploy AND the bridge confirmation the user authorized (bridgeRef + bridgeNonce from the gateway's trailer); one confirmation authorizes one SHA once.",
   get_pipeline: "Read one pipeline by durable id.",
   board_snapshot: "Read a bounded, redacted snapshot of the Viewer board and durable placement.",
   list_flows: "List durable implement-review flows.",
@@ -950,6 +972,8 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   agent_activity: "Read agent liveness: last transcript record, turn state, whether the host is alive or gone, and how long a stalled conversation has been silent.",
   lifecycle_events: "Query the durable lifecycle event journal by lineage and cursor, or poll a bounded relay digest of what changed since the last one.",
   request_attention: "Ask the operator to look at something: raise an attention request that offers to move their Viewer to a target and waits for their yes.",
+  bridge_report: "Manager only: append one bounded report to the durable bridge log so the voice gateway can relay it to the user. The only channel from the manager to the user.",
+  bridge_directive: "Voice gateway only: relay the user's intent to the manager. The recipient and the delivery id are derived server-side, so a retry of the same root turn is one instruction, never two.",
 };
 
 const clientRequestIdSchema = z.string().min(1).describe("Stable idempotency key for this logical call.");
@@ -1035,6 +1059,11 @@ const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     clientRequestId: clientRequestIdSchema,
     revision: z.string().regex(/^[0-9a-f]{40}$/i),
     confirm: z.literal("deploy"),
+    /* #691 §4: the user's spoken yes, relayed by the gateway. Required — a deploy
+       issued without one has bypassed the only gate between a spoken yes and
+       production. */
+    bridgeRef: z.number().int().positive().describe("seq of the confirmation_request report the user answered."),
+    bridgeNonce: z.string().min(1).describe("Single-use nonce from that report's trailer. Verified against SHA and expiry, then spent."),
   }).passthrough(),
   get_pipeline: z.object({
     clientRequestId: clientRequestIdSchema,
@@ -1152,6 +1181,26 @@ const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     contextLabel: z.string().optional().describe("Named in the spoken sentence but never navigated to."),
     project: z.string().optional().describe("Required only for a target the server cannot attribute on its own (a board draft)."),
   }).passthrough(),
+  bridge_report: z.object({
+    clientRequestId: clientRequestIdSchema,
+    key: z.string().min(1).describe("Stable identity of this report. The same key always yields one log entry, so a retry after a host death is a no-op."),
+    class: z.enum(["status", "completed", "failed", "blocked", "review_verdict", "question", "confirmation_request"]),
+    body: z.string().min(1).describe("Short prose for the gateway to relay. Bounded to 2 KB and secret-redacted at write. Never transcript payloads or raw tool output."),
+    correlatesDirective: z.string().optional().describe("clientRequestId of the directive this answers."),
+    confirmation: z.object({
+      sha: z.string().regex(/^[0-9a-f]{40}$/).describe("Full lowercase 40-hex commit SHA this authorization is for."),
+      expiresMinutes: z.number().int().positive().max(60).optional(),
+    }).optional().describe("confirmation_request only: mints the single-use nonce the gateway must echo back before a deploy."),
+  }).passthrough(),
+  bridge_directive: z.object({
+    clientRequestId: clientRequestIdSchema,
+    rootTurnId: z.string().regex(/^[A-Za-z0-9_.:-]+$/).describe("The realtime turn this instruction came from. The delivery id derives from it, so a retry must reuse the same value."),
+    utterance: z.number().int().min(0).describe("Index of this instruction within that turn, from 0."),
+    instruction: z.string().min(1).describe("What the user asked for, in plain words. No board state, no tool output."),
+    ref: z.number().int().positive().optional().describe("seq of the report this answers, when it answers one."),
+    nonce: z.string().optional().describe("With sha: the deploy authorization the user just gave aloud."),
+    sha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
+  }).passthrough(),
 };
 
 export function createViewerMcpServer(service: McpToolService): McpServer {
@@ -1175,10 +1224,11 @@ export function createViewerMcpServer(service: McpToolService): McpServer {
 }
 
 export async function startViewerMcpServer(): Promise<void> {
-  const { viewerMcpBindings } = await import("./bindings");
+  const { viewerMcpBindings, viewerMcpToolPolicy } = await import("./bindings");
   const service = createMcpToolService(
     viewerMcpBindings(),
     new FileMcpReceiptStore(statePath("mcp-receipts.json")),
+    viewerMcpToolPolicy(),
   );
   const server = createViewerMcpServer(service);
   const transport = new StdioServerTransport();

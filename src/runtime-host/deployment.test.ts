@@ -156,12 +156,22 @@ class FakeDeploymentAdapter implements ViewerDeploymentAdapter {
   async retainOnly(releases: ViewerReleaseIdentity[]): Promise<void> { this.calls.push(`retain-only:${releases.map((item) => item.container).join(",")}`); }
 }
 
+/**
+ * These cover admission, idempotency, ownership and health — not authorization.
+ *
+ * #691 §4 put the user's deploy confirmation on the admission path, so every
+ * coordinator here opts out of it explicitly rather than minting a confirmation per
+ * case, which would bury what each test is actually about. The gate itself is
+ * covered in `deployment.authorization.test.ts`, against the default.
+ */
+const ALREADY_AUTHORIZED = () => ({ ok: true }) as const;
+
 test("deployment admission is serialized and idempotent", async () => {
   const store = journal("admission");
   const adapter = new FakeDeploymentAdapter();
   let releaseBuild!: () => void;
   adapter.buildGate = new Promise<void>((resolve) => { releaseBuild = resolve; });
-  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" });
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" }, { authorizeDeploy: ALREADY_AUTHORIZED });
 
   const first = await coordinator.requestViewerDeployment({ idempotencyKey: "deploy-one" });
   const replay = await coordinator.requestViewerDeployment({ idempotencyKey: "deploy-one" });
@@ -185,7 +195,7 @@ test("genuinely concurrent requests serialize revision resolution and return bus
   const adapter = new FakeDeploymentAdapter();
   let releaseResolve!: () => void;
   adapter.resolveGate = new Promise<void>((resolve) => { releaseResolve = resolve; });
-  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" });
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" }, { authorizeDeploy: ALREADY_AUTHORIZED });
 
   const firstPromise = coordinator.requestViewerDeployment({ idempotencyKey: "concurrent-one" });
   await Promise.resolve();
@@ -205,7 +215,7 @@ test("failed revision resolution releases admission for a deterministic retry", 
   const store = journal("admission-timeout");
   const adapter = new FakeDeploymentAdapter();
   adapter.resolveFailures = 1;
-  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" });
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" }, { authorizeDeploy: ALREADY_AUTHORIZED });
 
   await expect(coordinator.requestViewerDeployment({ idempotencyKey: "timed-out" })).rejects.toThrow("timed out");
   const retry = await coordinator.requestViewerDeployment({ idempotencyKey: "retry-after-timeout" });
@@ -221,7 +231,7 @@ test("an unhealthy candidate leaves the serving release unchanged", async () => 
   const previous = adapter.current;
   const previousMcpRuntime = adapter.currentMcp;
   adapter.candidateHealth = { ...healthy("http://127.0.0.1/candidate"), ok: false, assets: [{ path: "/_next/static/app.js", status: 404 }], detail: "asset gate failed" };
-  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" });
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" }, { authorizeDeploy: ALREADY_AUTHORIZED });
 
   const receipt = await coordinator.requestViewerDeployment({ idempotencyKey: "unhealthy" });
   if (receipt.state !== "accepted") throw new Error("deployment was not accepted");
@@ -244,7 +254,7 @@ test("an unhealthy candidate leaves the serving release unchanged", async () => 
 test("deployment status exposes exact MCP runtime staging and atomic publication evidence", async () => {
   const store = journal("mcp-publication-status");
   const adapter = new FakeDeploymentAdapter();
-  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" });
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" }, { authorizeDeploy: ALREADY_AUTHORIZED });
   const revision = "7".repeat(40);
 
   const receipt = await coordinator.requestViewerDeployment({
@@ -300,7 +310,7 @@ test("a successor records first-boot MCP publication on the old terminal deploym
        evidence had a home on the receipt. */
     mcpRuntime: { candidate: null, previous: null, publications: [] } as unknown as ViewerDeploymentStatus["mcpRuntime"],
   });
-  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:new" });
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:new" }, { authorizeDeploy: ALREADY_AUTHORIZED });
   const reconciliation = await adapter.reconcileMcpRuntime(revision);
 
   const updated = coordinator.recordMcpRuntimeReconciliation(reconciliation);
@@ -343,7 +353,7 @@ test("a post-promotion failure restores the previous healthy release", async () 
   const previous = adapter.current;
   const previousMcpRuntime = adapter.currentMcp;
   adapter.promotedHealth = { ...healthy("http://127.0.0.1:8898"), ok: false, rootStatus: 503, detail: "stable listener failed" };
-  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" });
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" }, { authorizeDeploy: ALREADY_AUTHORIZED });
 
   const receipt = await coordinator.requestViewerDeployment({ idempotencyKey: "rollback" });
   if (receipt.state !== "accepted") throw new Error("deployment was not accepted");
@@ -374,6 +384,7 @@ test("issue 518: a succeeded exact-SHA deployment stages the candidate image as 
   const adapter = new FakeDeploymentAdapter();
   const handoffs: Array<Record<string, unknown>> = [];
   const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" }, {
+    authorizeDeploy: ALREADY_AUTHORIZED,
     hostGeneration: () => ({ image: "agent-log-viewer:node22", revision: null }),
     onHostHandoff: (context) => {
       handoffs.push({
@@ -418,6 +429,7 @@ test("issue 518: a runtime host already on the deployed generation stages no suc
   const adapter = new FakeDeploymentAdapter();
   const handoffs: string[] = [];
   const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" }, {
+    authorizeDeploy: ALREADY_AUTHORIZED,
     hostGeneration: () => ({ image: `viewer:${"b".repeat(40)}`, revision: "b".repeat(40) }),
     onHostHandoff: (context) => { handoffs.push(context.deploymentId); },
   });
@@ -451,6 +463,7 @@ test("issue 521 review: consecutive same-revision deployments stage each distinc
   };
   let running = { image: "agent-log-viewer:node22", revision: null as string | null };
   const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" }, {
+    authorizeDeploy: ALREADY_AUTHORIZED,
     hostGeneration: () => running,
     onHostHandoff: (context) => { running = { image: context.successor.image, revision: context.successor.revision }; },
   });
@@ -477,6 +490,7 @@ test("issue 518: failed successor staging never hands the host back to the stale
   adapter.stageHostFailure = new Error("docker tag failed");
   const handoffs: string[] = [];
   const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" }, {
+    authorizeDeploy: ALREADY_AUTHORIZED,
     hostGeneration: () => ({ image: "agent-log-viewer:node22", revision: null }),
     onHostHandoff: (context) => { handoffs.push(context.deploymentId); },
   });
@@ -516,6 +530,7 @@ test("issue 518: a failed candidate never stages a runtime-host successor", asyn
   adapter.candidateHealth = { ...healthy("http://127.0.0.1/candidate"), ok: false, detail: "candidate health gate failed" };
   const handoffs: string[] = [];
   const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" }, {
+    authorizeDeploy: ALREADY_AUTHORIZED,
     hostGeneration: () => ({ image: "agent-log-viewer:node22", revision: null }),
     onHostHandoff: (context) => { handoffs.push(context.deploymentId); },
   });
@@ -533,7 +548,7 @@ test("issue 518: a failed candidate never stages a runtime-host successor", asyn
 test("successful cleanup retains the serving and immediate rollback releases", async () => {
   const store = journal("release-retention");
   const adapter = new FakeDeploymentAdapter();
-  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" });
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" }, { authorizeDeploy: ALREADY_AUTHORIZED });
 
   const first = await coordinator.requestViewerDeployment({ idempotencyKey: "retention-one", revision: "1".repeat(40) });
   if (first.state !== "accepted") throw new Error("deployment was not accepted");
@@ -565,7 +580,8 @@ test("restart recovery reclaims a stale build lease and completes the deployment
     afterRestart,
     adapter,
     { pid: 92, startIdentity: "92:new" },
-    { ownerAlive: () => false },
+    {
+    authorizeDeploy: ALREADY_AUTHORIZED, ownerAlive: () => false },
   );
   await coordinator.recover();
   const status = await coordinator.waitForDeployment(receipt.deploymentId);
@@ -602,6 +618,7 @@ test("issue 518: restart recovery resumes a durable host-handoff phase", async (
     adapter,
     { pid: 92, startIdentity: "92:new" },
     {
+    authorizeDeploy: ALREADY_AUTHORIZED,
       ownerAlive: () => false,
       hostGeneration: () => ({ image: "agent-log-viewer:node22", revision: null }),
       onHostHandoff: (context) => { handoffs.push(context.deploymentId); },
@@ -667,7 +684,8 @@ test("restart recovery finishes rollback from a journaled promotion phase", asyn
     afterRestart,
     adapter,
     { pid: 92, startIdentity: "92:new" },
-    { ownerAlive: () => false },
+    {
+    authorizeDeploy: ALREADY_AUTHORIZED, ownerAlive: () => false },
   );
   await coordinator.recover();
   const status = await coordinator.waitForDeployment(receipt.deploymentId);
@@ -688,7 +706,7 @@ test("staged end-to-end build survives a host restart and a later release rolls 
   const filename = journalFile("staged-e2e");
   const firstJournal = new RuntimeJournal(filename, { now: () => 1_000 });
   const adapter = new FakeDeploymentAdapter();
-  const firstCoordinator = new ViewerDeploymentCoordinator(firstJournal, adapter, { pid: 71, startIdentity: "71:first" });
+  const firstCoordinator = new ViewerDeploymentCoordinator(firstJournal, adapter, { pid: 71, startIdentity: "71:first" }, { authorizeDeploy: ALREADY_AUTHORIZED });
   const first = await firstCoordinator.requestViewerDeployment({ idempotencyKey: "staged-first" });
   if (first.state !== "accepted") throw new Error("deployment was not accepted");
   expect((await firstCoordinator.waitForDeployment(first.deploymentId))?.phase).toBe("succeeded");
@@ -697,7 +715,7 @@ test("staged end-to-end build survives a host restart and a later release rolls 
 
   const restartedJournal = new RuntimeJournal(filename, { now: () => 2_000 });
   adapter.promotedHealth = { ...healthy(stableEndpointForTest()), ok: false, detail: "staged post-promotion failure" };
-  const restartedCoordinator = new ViewerDeploymentCoordinator(restartedJournal, adapter, { pid: 72, startIdentity: "72:restarted" });
+  const restartedCoordinator = new ViewerDeploymentCoordinator(restartedJournal, adapter, { pid: 72, startIdentity: "72:restarted" }, { authorizeDeploy: ALREADY_AUTHORIZED });
   expect(await restartedCoordinator.recover()).toBeNull();
   const second = await restartedCoordinator.requestViewerDeployment({ idempotencyKey: "staged-second", revision: "d".repeat(40) });
   if (second.state !== "accepted") throw new Error("deployment was not accepted");
@@ -713,7 +731,7 @@ test("newly promoted Viewer environment requests the next deployment through run
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-deploy-socket-"));
   sandboxes.push(dir);
   const store = new RuntimeJournal(path.join(dir, "runtime.sqlite"), { now: () => 1_000 });
-  const coordinator = new ViewerDeploymentCoordinator(store, new FakeDeploymentAdapter(), { pid: 10, startIdentity: "10:1" });
+  const coordinator = new ViewerDeploymentCoordinator(store, new FakeDeploymentAdapter(), { pid: 10, startIdentity: "10:1" }, { authorizeDeploy: ALREADY_AUTHORIZED });
   const socketPath = path.join(dir, "runtime.sock");
   const server = serveRuntimeHost(socketPath, new RuntimeHost(store, undefined, coordinator));
   await new Promise<void>((resolve) => server.once("listening", resolve));
@@ -751,7 +769,7 @@ test("Viewer socket admission outlives the ordinary client timeout during delaye
   const store = new RuntimeJournal(path.join(dir, "runtime.sqlite"), { now: () => 1_000 });
   const adapter = new FakeDeploymentAdapter();
   adapter.resolveGate = new Promise<void>((resolve) => setTimeout(resolve, 30));
-  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" });
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" }, { authorizeDeploy: ALREADY_AUTHORIZED });
   const server = serveRuntimeHost(
     path.join(dir, "runtime.sock"),
     new RuntimeHost(store, undefined, coordinator),

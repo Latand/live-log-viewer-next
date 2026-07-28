@@ -20,6 +20,11 @@ import { queryLifecycleEvents, type LifecycleEventQuery } from "@/lib/lifecycle/
 import { agentLivenessSnapshot, productionLivenessSources, type AgentLivenessSources } from "@/lib/lifecycle/liveness";
 import { refreshLifecycleJournal } from "@/lib/lifecycle/projector";
 import { isLifecycleEventType } from "@/lib/lifecycle/vocabulary";
+import { recordManagerReport } from "@/lib/bridge/service";
+import { bridgeDirectiveBody, bridgeDirectiveId } from "@/lib/bridge/directive";
+import { mintBridgeConfirmation } from "@/lib/bridge/confirmation";
+import { isBridgeReportClass } from "@/lib/bridge/types";
+import { readOrchestratorRecord } from "@/lib/orchestrator/store";
 import { createPipelineFromRequest, getPipelines, patchPipeline } from "@/lib/pipelines/engine";
 import { latestOperationalPipelineAttempt } from "@/lib/pipelines/attemptSelection";
 import { requestPipelineTick } from "@/lib/pipelines/controllerSignal";
@@ -43,6 +48,7 @@ import { hardenedRedact } from "@/lib/view/compactText";
 import { validateSnapshotRequest } from "@/lib/view/validation";
 
 import { McpToolRefusal, type McpToolArgs, type McpToolBindings, type McpToolPayload } from "./server";
+import { mcpCallerIdentity, mcpToolPolicy, type ManagerTarget, type McpToolPolicy } from "./toolAllowlist";
 
 const PIPELINE_CONTROLLER_ACTIONS = new Set<PipelineAction>(["start", "resume", "retry-stage", "skip-stage"]);
 
@@ -413,12 +419,150 @@ async function deployExactSha(args: McpToolArgs, control: ViewerControlDependenc
   if (args.confirm !== "deploy") throw new Error('confirm must equal "deploy"');
   const revision = required(args, "revision");
   if (!/^[0-9a-f]{40}$/i.test(revision)) throw new Error("revision must be a full 40-character commit SHA");
-  const receipt = await control.post("/api/runtime/deployments", { revision, idempotencyKey: requestId(args) });
+
+  /* #691 §4 — the user's spoken yes, verified and spent here rather than trusted.
+     The manager relays a trailer it received; presenting it authorizes exactly this
+     SHA exactly once, and every refusal (replay, expiry, wrong nonce, wrong SHA)
+     stops the deploy instead of downgrading to an unauthorized one. The consume is
+     atomic with the check, so two answers racing cannot both pass. */
+  /* Shape-checked here so the manager gets a useful refusal without a round trip;
+     VERIFIED AND SPENT at runtime-host admission, the one checkpoint this tool, the
+     HTTP route and a raw socket client all converge on. */
+  const bridgeRef = args.bridgeRef;
+  const bridgeNonce = text(args.bridgeNonce);
+  if (typeof bridgeRef !== "number" || !Number.isInteger(bridgeRef) || bridgeRef < 1 || !bridgeNonce) {
+    throw new McpToolRefusal(
+      "a deploy requires the bridge confirmation the user authorized: pass bridgeRef (the confirmation_request's seq) and bridgeNonce from the trailer the gateway relayed. Ask for a confirmation first and deploy nothing until it comes back.",
+      { code: "bridge_confirmation_required", revision },
+    );
+  }
+
+  const receipt = await control.post("/api/runtime/deployments", {
+    revision,
+    idempotencyKey: requestId(args),
+    bridgeRef,
+    bridgeNonce,
+  });
   return {
     deploymentId: receipt.deploymentId,
     revision: receipt.revision,
     replayed: receipt.state === "accepted" && receipt.replayed === true,
     state: receipt.state,
+  };
+}
+
+/**
+ * The manager's only channel to the user (#691 §4).
+ *
+ * Deliberately thin: everything that makes a report safe — the 2 KB bound, the
+ * secret redaction, the idempotent key, the monotonic seq — lives in the store, so
+ * this cannot weaken any of it by being called differently. What it does own is
+ * minting the confirmation nonce, because a nonce the caller supplied would be a
+ * nonce the caller could replay.
+ */
+function bridgeReport(args: McpToolArgs): McpToolPayload {
+  const key = required(args, "key");
+  const reportClass = text(args.class);
+  if (!isBridgeReportClass(reportClass)) throw new Error("class must be one of the bridge report classes");
+  const body = text(args.body);
+  if (!body) throw new Error("body is required");
+
+  const requested = args.confirmation && typeof args.confirmation === "object" && !Array.isArray(args.confirmation)
+    ? args.confirmation as { sha?: unknown; expiresMinutes?: unknown }
+    : null;
+  if (requested && reportClass !== "confirmation_request") {
+    throw new Error("only a confirmation_request may carry a confirmation");
+  }
+  if (reportClass === "confirmation_request" && !requested) {
+    throw new Error("a confirmation_request must carry the SHA it authorizes");
+  }
+  const confirmation = requested
+    ? mintBridgeConfirmation({
+      sha: text(requested.sha),
+      ...(typeof requested.expiresMinutes === "number"
+        ? { ttlMs: requested.expiresMinutes * 60_000 }
+        : {}),
+    })
+    : null;
+
+  const appended = recordManagerReport({
+    key,
+    class: reportClass,
+    at: new Date().toISOString(),
+    body,
+    correlatesDirective: text(args.correlatesDirective) || null,
+    confirmation,
+  });
+
+  /* A replay under the same key appends nothing, and says so rather than pretending
+     to have delivered a second report. */
+  if (!appended) return { recorded: false, replayed: true };
+  return {
+    recorded: true,
+    replayed: false,
+    seq: appended.seq,
+    reportId: appended.id,
+    ...(appended.confirmation
+      ? { confirmation: { nonce: appended.confirmation.nonce, sha: appended.confirmation.sha, expiresAt: appended.confirmation.expiresAt } }
+      : {}),
+  };
+}
+
+/**
+ * The gateway's relay to the manager (#691 §4) — user intent, flowing onward.
+ *
+ * Two things are deliberately NOT the caller's to choose, because both are how a
+ * relay stops being exactly-once:
+ *
+ * - The RECIPIENT is resolved from the designation record here. A gateway that
+ *   could name a conversation could message a worker directly, which is the one
+ *   sentence the whole architecture exists to prevent.
+ * - The DELIVERY ID is derived from the root turn. `send_message`-style receipts
+ *   are durable and recognize a replayed id, so a retry after a lost receipt
+ *   answers from the receipt instead of delivering the instruction a second time —
+ *   but only if the id is a function of the turn rather than freshly minted.
+ */
+async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependencies): Promise<McpToolPayload> {
+  const instruction = text(args.instruction);
+  if (!instruction) throw new Error("instruction is required");
+  const utterance = args.utterance;
+  if (typeof utterance !== "number") throw new Error("utterance must be a non-negative integer");
+  /* Both throw on anything that would not round-trip through the parser. */
+  const deliveryId = bridgeDirectiveId(text(args.rootTurnId), utterance);
+
+  const manager = readOrchestratorRecord();
+  if (!manager) {
+    throw new McpToolRefusal(
+      "no manager conversation is designated, so there is nobody to relay this to; tell the user the manager is not running",
+      { code: "manager_not_designated" },
+    );
+  }
+
+  const ref = args.ref;
+  const trailer = typeof ref === "number" && Number.isInteger(ref) && ref > 0
+    ? {
+      ref,
+      ...(text(args.nonce) ? { nonce: text(args.nonce) } : {}),
+      ...(text(args.sha) ? { sha: text(args.sha).toLowerCase() } : {}),
+    }
+    : undefined;
+  /* Composes and validates together: a nonce without a SHA would otherwise reach
+     the manager as a bare reference and read as an unconditional yes. */
+  const body = bridgeDirectiveBody(instruction, trailer);
+
+  const outcome = await control.post("/api/tmux", {
+    pid: null,
+    path: manager.path,
+    conversationId: manager.conversationId,
+    clientMessageId: deliveryId,
+    text: body,
+    images: [],
+  });
+  return {
+    directiveId: deliveryId,
+    managerConversationId: manager.conversationId,
+    operationId: outcome.operationId ?? null,
+    outcome: outcome.outcome ?? "delivered",
   };
 }
 
@@ -847,6 +991,29 @@ async function requestAttention(args: McpToolArgs, dependencies: ViewerMcpDomain
   });
 }
 
+/**
+ * #691 §6 — the live per-identity fence.
+ *
+ * Built from the same evidence `request_attention` already trusts: this process's
+ * ancestry and the registry's recorded host pids, resolved by
+ * {@link attentionCallerAuthority}. Nothing the caller says participates.
+ *
+ * The manager is resolved per call rather than captured, so seating a new
+ * incumbent takes effect without restarting anything.
+ */
+export function viewerMcpToolPolicy(
+  domainDependencies: ViewerMcpDomainDependencies = productionDomainDependencies,
+): McpToolPolicy {
+  const manager = (): ManagerTarget | null => {
+    const record = readOrchestratorRecord();
+    return record ? { conversationId: record.conversationId, path: record.path } : null;
+  };
+  return mcpToolPolicy(
+    () => mcpCallerIdentity(domainDependencies.attentionAuthority(), manager()),
+    manager,
+  );
+}
+
 export function viewerMcpBindings(
   linkTaskDependencies: LinkTaskToPipelineDependencies = productionLinkTaskDependencies,
   controlDependencies: ViewerControlDependencies = productionViewerControlDependencies,
@@ -879,5 +1046,7 @@ export function viewerMcpBindings(
     agent_activity: (args) => agentActivity(args, domainDependencies),
     lifecycle_events: (args) => lifecycleEvents(args, domainDependencies),
     request_attention: (args) => requestAttention(args, domainDependencies),
+    bridge_report: (args) => Promise.resolve(bridgeReport(args)),
+    bridge_directive: (args) => bridgeDirective(args, controlDependencies),
   };
 }
