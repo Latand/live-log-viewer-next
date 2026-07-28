@@ -3,6 +3,10 @@ import crypto from "node:crypto";
 import type { NextRequest } from "next/server";
 
 import { agentRegistry } from "@/lib/agent/registry";
+import {
+  matchesOperatorBrowserSession,
+  OPERATOR_SESSION_COOKIE,
+} from "@/lib/agent/operatorBrowserSession";
 import { matchesOperatorSession } from "@/lib/agent/operatorSession";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 
@@ -69,13 +73,27 @@ const MISSING: OperatorAuthority = {
   error: "this is an operator-only action and requires the operator session secret from the startup link; header shape, same-origin and the on-disk spawn capability do not authorize it",
 };
 
-export function requireOperatorAuthority(request: Pick<NextRequest, "headers">): OperatorAuthority {
-  const capability = request.headers.get(VIEWER_SPAWN_CAPABILITY_HEADER)?.trim() ?? "";
-  if (!capability) return MISSING;
+/** The browser-session cookie, read straight off the header so this primitive
+    keeps its narrow `Pick<NextRequest, "headers">` surface. */
+function browserSessionCookie(request: Pick<NextRequest, "headers">): string {
+  const header = request.headers.get("cookie") ?? "";
+  for (const part of header.split(";")) {
+    const separator = part.indexOf("=");
+    if (separator === -1) continue;
+    if (part.slice(0, separator).trim() !== OPERATOR_SESSION_COOKIE) continue;
+    try {
+      return decodeURIComponent(part.slice(separator + 1).trim());
+    } catch {
+      return part.slice(separator + 1).trim();
+    }
+  }
+  return "";
+}
 
-  /* An agent that presented its own capability has named itself. Refused before the
-     operator comparison so the answer cannot depend on anything else about the
-     request. */
+export function requireOperatorAuthority(request: Pick<NextRequest, "headers">): OperatorAuthority {
+  /* An agent that presented its own capability has named itself. Refused before
+     every acceptance path — including the browser cookie — so the answer cannot
+     depend on anything else about the request. */
   if (callerConversationId(request)) {
     return {
       ok: false,
@@ -87,5 +105,12 @@ export function requireOperatorAuthority(request: Pick<NextRequest, "headers">):
      capability deliberately is NOT accepted here: it lives in a file, and every
      worker runs as the operator's uid, so a file the Viewer can read is a file every
      worker can read. That was the fourth way into this gate. */
-  return matchesOperatorSession(capability) ? { ok: true } : MISSING;
+  const capability = request.headers.get(VIEWER_SPAWN_CAPABILITY_HEADER)?.trim() ?? "";
+  if (capability && matchesOperatorSession(capability)) return { ok: true };
+  /* The browser session: an httpOnly cookie the server set for a browser that
+     once presented the startup link (`operatorBrowserSession.ts`). Possession
+     still, in a place page JavaScript cannot read and a local process cannot
+     write; `SameSite=Strict` keeps foreign origins from riding it. */
+  if (matchesOperatorBrowserSession(browserSessionCookie(request))) return { ok: true };
+  return MISSING;
 }
