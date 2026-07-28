@@ -27,13 +27,16 @@ function index(project: string, rects: Record<string, FocusRect>): FocusFrameInd
 interface Moves {
   moved: FocusDestination[];
   restored: { x: number; y: number; zoom: number }[];
+  /** NAVIGATIONS: `openPath` places a card and glides the camera to it. */
   opened: string[];
+  /** PLACEMENTS: the card enters the layout and the camera does not move. */
+  placed: string[];
   projects: string[];
 }
 
 function harness(project: string, rects: Record<string, FocusRect>, shellProject: string | null = project) {
   const bus = createFocusHandoffBus();
-  const log: Moves = { moved: [], restored: [], opened: [], projects: [] };
+  const log: Moves = { moved: [], restored: [], opened: [], placed: [], projects: [] };
   const board: BoardFocusController = {
     project,
     index: index(project, rects),
@@ -44,6 +47,7 @@ function harness(project: string, rects: Record<string, FocusRect>, shellProject
     project: shellProject,
     openProject: (next) => log.projects.push(next),
     openPath: (path) => log.opened.push(path),
+    placePath: (path) => log.placed.push(path),
   };
   bus.setBoard(board);
   bus.setShell(shell);
@@ -120,8 +124,9 @@ test("a vanished anchor whose request never read a board reports lost rather tha
 
 test("a target in another project opens that project first and waits for its board", async () => {
   const bus = createFocusHandoffBus();
-  const log: Moves = { moved: [], restored: [], opened: [], projects: [] };
+  const log: Moves = { moved: [], restored: [], opened: [], placed: [], projects: [] };
   bus.setShell({
+    placePath: () => {},
     project: "demo",
     openProject: (next) => {
       log.projects.push(next);
@@ -150,8 +155,8 @@ test("a target in another project opens that project first and waits for its boa
 
 test("nothing moves when no board ever answers for the target's project", async () => {
   const bus = createFocusHandoffBus();
-  const log: Moves = { moved: [], restored: [], opened: [], projects: [] };
-  bus.setShell({ project: "demo", openProject: (next) => log.projects.push(next), openPath: (path) => log.opened.push(path) });
+  const log: Moves = { moved: [], restored: [], opened: [], placed: [], projects: [] };
+  bus.setShell({ project: "demo", openProject: (next) => { log.projects.push(next); }, openPath: (path) => { log.opened.push(path); }, placePath: (path) => { log.placed.push(path); } });
 
   const outcome = await runFocusHandoff(request({ frameAtCreation: frame("gone") }), bus, { timeoutMs: 5, pollMs: 1 });
 
@@ -185,7 +190,7 @@ test("returning on a camera-less surface falls back to what was focused there", 
   const bus = createFocusHandoffBus();
   const opened: string[] = [];
   bus.setBoard({ project: "demo", index: index("demo", {}), moveTo: () => true, restoreCamera: () => false });
-  bus.setShell({ project: "demo", openProject: () => {}, openPath: (path) => opened.push(path) });
+  bus.setShell({ project: "demo", openProject: () => {}, openPath: (path) => { opened.push(path); }, placePath: () => {} });
 
   const restored = await restoreFocusPoint(
     { camera: { x: 1, y: 2, zoom: 3 }, focusedPath: "/tmp/what-i-was-reading.jsonl" },
@@ -209,9 +214,48 @@ test("returning restores the exact camera the device left, and does not re-open 
   );
 
   expect(restored).toBe(true);
+  /* Exactly where the operator was: the same three numbers, once, and nothing
+     else touching the camera afterwards. */
   expect(log.restored).toEqual([{ x: 120, y: 340, zoom: 0.55 }]);
+  expect(log.moved).toEqual([]);
   /* Opening the focused path would glide the board to that node and undo the
      framing that was just restored, so the captured camera wins outright. */
+  expect(log.opened).toEqual([]);
+  expect(log.placed).toEqual([]);
+});
+
+test("Back after a recovered handoff returns to the exact camera the operator left", async () => {
+  /* End to end over the fixed path: the request reveals a card that was not on
+     the board, lands one move on it, and Back puts the operator back on the
+     precise framing they were reading before they agreed — not near it. */
+  const rects: Record<string, FocusRect> = {};
+  const { bus, log } = harness("demo", rects);
+  bus.setShell({
+    project: "demo",
+    openProject: (next) => log.projects.push(next),
+    openPath: (path) => log.opened.push(path),
+    placePath: (path) => { log.placed.push(path); rects[path] = { x: 40, y: 60, w: 600, h: 780 }; },
+  });
+  const wasReading = { x: 1_204, y: 88, zoom: 0.42 };
+
+  await runFocusHandoff(
+    request({ zoom: "inspect", frameAtCreation: { project: "demo", rect: UNREAD_FRAME_RECT, boardRevision: null } }),
+    bus,
+    NO_WAIT,
+  );
+  expect(log.moved).toHaveLength(1);
+
+  const restored = await restoreFocusPoint(
+    { camera: wasReading, focusedPath: "/tmp/what-i-was-reading.jsonl" },
+    "demo",
+    bus,
+    NO_WAIT,
+  );
+
+  expect(restored).toBe(true);
+  expect(log.restored).toEqual([wasReading]);
+  /* Back restores a framing; it must not frame a thing on the way. */
+  expect(log.moved).toHaveLength(1);
   expect(log.opened).toEqual([]);
 });
 
@@ -291,7 +335,7 @@ test("a launched stage reaches a key-navigating surface as the card the board is
     },
     restoreCamera: () => false,
   });
-  bus.setShell({ project: "demo", openProject: () => {}, openPath: () => {} });
+  bus.setShell({ project: "demo", openProject: () => {}, openPath: () => {}, placePath: () => {} });
 
   const outcome = await runFocusHandoff({
     target: { kind: "stage", pipelineId: "p1", stageId: "review" },
@@ -323,7 +367,7 @@ test("a stage still waiting to launch is pinned by its own slot", async () => {
     moveTo: (destination) => { destinations.push(destination); return true; },
     restoreCamera: () => false,
   });
-  bus.setShell({ project: "demo", openProject: () => {}, openPath: () => {} });
+  bus.setShell({ project: "demo", openProject: () => {}, openPath: () => {}, placePath: () => {} });
 
   await runFocusHandoff({
     target: { kind: "stage", pipelineId: "p1", stageId: "deploy" },
@@ -347,8 +391,10 @@ test("a conversation the board is not showing is asked for, and the handoff land
   bus.setShell({
     project: "demo",
     openProject: (next) => log.projects.push(next),
-    /* What `openPath` does on the real board: the card enters the layout. */
-    openPath: (path) => { log.opened.push(path); rects[path] = landed; },
+    openPath: (path) => log.opened.push(path),
+    /* What placement does on the real board: the card enters the layout, and
+       the camera stays exactly where the operator left it. */
+    placePath: (path) => { log.placed.push(path); rects[path] = landed; },
   });
 
   const outcome = await runFocusHandoff(
@@ -357,30 +403,74 @@ test("a conversation the board is not showing is asked for, and the handoff land
     NO_WAIT,
   );
 
-  expect(log.opened).toEqual(["/tmp/reviewer.jsonl"]);
+  expect(log.placed).toEqual(["/tmp/reviewer.jsonl"]);
   expect(outcome.resolution).toBe("exact");
   expect(outcome.moved).toBe(true);
   expect(log.moved).toEqual([{ rect: landed, zoom: "situate", anchorKeys: ["/tmp/reviewer.jsonl"] }]);
+  /* The recovery reveals; it never navigates. A single production-path move
+     stands between the operator and the target. */
+  expect(log.opened).toEqual([]);
 });
 
-test("asking for the card is one focus edge, never two", async () => {
-  /* `openPath` is an edge the board consumes by nonce: asking twice for the same
-     path glides the camera a second time, over the move that just finished. */
+test("recovering a missing card still moves the camera exactly once, at the requested zoom", async () => {
+  /* The defect this pins: recovery used `openPath`, which places the card AND
+     glides the camera through the production focus pipeline. The handoff then
+     issued its own `moveTo` at its own zoom — two competing moves for one
+     camera, and the operator watched the view arrive and slide off again.
+     Placement carries no camera, so `moveTo` is the whole of the navigation.
+
+     `intent: "open"` is the strictest case: it is the one intent that legitimately
+     calls `openPath` afterwards, so if anything is going to move twice it is
+     this. The surface opens; the camera does not move again. */
   const rects: Record<string, FocusRect> = {};
+  const landed: FocusRect = { x: 0, y: 0, w: 600, h: 780 };
   const { bus, log } = harness("demo", rects);
   bus.setShell({
     project: "demo",
     openProject: (next) => log.projects.push(next),
-    openPath: (path) => { log.opened.push(path); rects[path] = { x: 0, y: 0, w: 600, h: 780 }; },
+    /* Modelled as the shell really behaves: `openPath` arms the board's
+       pending-focus channel, which flashes the node and GLIDES THE CAMERA. It
+       is a move, and counting it is the whole point of this test — a recovery
+       routed through here shows up below as a second entry in `log.moved`. */
+    openPath: (path) => {
+      log.opened.push(path);
+      rects[path] ??= landed;
+      log.moved.push({ rect: rects[path]!, zoom: "situate", anchorKeys: [path] });
+    },
+    placePath: (path) => { log.placed.push(path); rects[path] = landed; },
   });
 
-  await runFocusHandoff(
-    request({ intent: "open", frameAtCreation: { project: "demo", rect: UNREAD_FRAME_RECT, boardRevision: null } }),
+  const outcome = await runFocusHandoff(
+    request({ intent: "open", zoom: "inspect", frameAtCreation: { project: "demo", rect: UNREAD_FRAME_RECT, boardRevision: null } }),
     bus,
     NO_WAIT,
   );
 
+  /* Exactly one move through the production path, and it carries the zoom the
+     request asked for rather than whatever the focus pipeline would have used.
+     Asserted FIRST: when this regresses, the count is the diagnosis. */
+  expect(log.moved).toHaveLength(1);
+  expect(log.placed).toEqual(["/tmp/reviewer.jsonl"]);
+  expect(log.moved[0]!.zoom).toBe("inspect");
+  expect(log.moved[0]!.rect).toEqual(landed);
+  /* No navigation edge at all: the card is already placed and framed, so the
+     only thing `openPath` could add here is the glide `moveTo` just performed. */
+  expect(log.opened).toEqual([]);
+  expect(outcome.moved).toBe(true);
+});
+
+test("an open intent with the card already on the board opens the surface and still moves once", async () => {
+  /* The path that does NOT go through recovery: nothing is missing, so `open`
+     opens the conversation's own surface as it always did — and that is still
+     one camera move, not two. */
+  const { bus, log } = harness("demo", { "/tmp/reviewer.jsonl": RECT });
+
+  await runFocusHandoff(request({ intent: "open", zoom: "inspect" }), bus, NO_WAIT);
+
+  expect(log.placed).toEqual([]);
   expect(log.opened).toEqual(["/tmp/reviewer.jsonl"]);
+  expect(log.moved).toHaveLength(1);
+  expect(log.moved[0]!.zoom).toBe("inspect");
 });
 
 test("a board that never produces the card still reports lost rather than a false arrival", async () => {
@@ -393,7 +483,8 @@ test("a board that never produces the card still reports lost rather than a fals
   );
 
   /* Asked for, never delivered: the request is still owed an honest answer. */
-  expect(log.opened).toEqual(["/tmp/reviewer.jsonl"]);
+  expect(log.placed).toEqual(["/tmp/reviewer.jsonl"]);
   expect(outcome.resolution).toBe("lost");
   expect(log.moved).toEqual([]);
+  expect(log.opened).toEqual([]);
 });

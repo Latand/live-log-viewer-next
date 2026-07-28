@@ -51,22 +51,59 @@ export function presenceFile(): string {
   return statePath("view-presence.json");
 }
 
-function isStoredSession(value: unknown): value is StoredViewSession {
+/** How far ahead of this clock a mirrored timestamp may sit before the entry is
+    treated as untrustworthy rather than as merely early. Two machines sharing a
+    state dir disagree by a little; a session claiming a future far past that is
+    not a clock skew, it is a record nobody should be believing. */
+const CLOCK_SKEW_MS = 5_000;
+
+function finiteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+/**
+ * Whether a mirrored entry can be believed, in full.
+ *
+ * Presence answers "is someone watching?", and both ways of being wrong are NOT
+ * equal. Reading nothing makes an attention request fail visibly, which is the
+ * defect this mirror exists to fix. Reading a session that is not really there
+ * makes it succeed silently in front of nobody, which is worse: the request is
+ * marked delivered and the operator never learns it was raised. So a partial or
+ * impossible entry is discarded, never repaired into an optimistic one.
+ *
+ * Two shapes get in past a `typeof` check and have to be named:
+ *
+ * - a finite number outside the range `Date` can represent is still a number,
+ *   and unlike `NaN` it round-trips through JSON intact. It reaches
+ *   `sessionSummary`, where `new Date(…).toISOString()` throws `RangeError` —
+ *   and that summary is built on the read path of `request_attention` and
+ *   `operator_snapshot`, so one malformed record in a shared file takes down
+ *   the tool for every caller. The future bound below is what catches it, which
+ *   is why that bound is a rejection and not a clamp.
+ * - a FUTURE `lastSeenAt` is the phantom. `freshness` clamps the age at zero,
+ *   so the entry reads `active` forever, and `expire` — which needs the age to
+ *   exceed retention — can never remove it. One such record advertises a
+ *   desktop that does not exist, permanently.
+ */
+function isStoredSession(value: unknown, now: number): value is StoredViewSession {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const session = value as Partial<StoredViewSession>;
-  return typeof session.viewSessionId === "string" && session.viewSessionId.length > 0
-    && typeof session.deviceId === "string"
-    && (session.visibility === "visible" || session.visibility === "hidden")
-    && typeof session.sequence === "number"
-    && typeof session.lastSeenAt === "number"
-    && typeof session.lastInteractionAt === "number";
+  if (typeof session.viewSessionId !== "string" || session.viewSessionId.length === 0) return false;
+  if (typeof session.deviceId !== "string" || session.deviceId.length === 0) return false;
+  if (session.visibility !== "visible" && session.visibility !== "hidden") return false;
+  if (!finiteNumber(session.sequence) || !finiteNumber(session.inputSequence)) return false;
+  if (!finiteNumber(session.lastSeenAt) || !finiteNumber(session.lastInteractionAt)) return false;
+  if (session.lastSeenAt <= 0 || session.lastInteractionAt <= 0) return false;
+  if (session.lastSeenAt > now + CLOCK_SKEW_MS) return false;
+  if (session.lastInteractionAt > now + CLOCK_SKEW_MS) return false;
+  return true;
 }
 
 /** The mirrored sessions, or nothing at all when the file is missing or has
     been corrupted. Presence is an observation, so an unreadable mirror degrades
     to "this process knows only what it was told" rather than throwing into a
     heartbeat or a snapshot. */
-function readMirror(): StoredViewSession[] {
+function readMirror(now: number): StoredViewSession[] {
   let text: string;
   try {
     text = fs.readFileSync(presenceFile(), "utf8");
@@ -76,7 +113,7 @@ function readMirror(): StoredViewSession[] {
   try {
     const parsed = JSON.parse(text) as Partial<PresenceFileV1>;
     if (parsed.schemaVersion !== PRESENCE_SCHEMA_VERSION || !Array.isArray(parsed.sessions)) return [];
-    return parsed.sessions.filter(isStoredSession);
+    return parsed.sessions.filter((session): session is StoredViewSession => isStoredSession(session, now));
   } catch {
     return [];
   }
@@ -112,7 +149,7 @@ function writeMirror(sessions: Iterable<StoredViewSession>, now: number): void {
  */
 function sessions(now: number): Store {
   const current = store();
-  for (const mirrored of readMirror()) {
+  for (const mirrored of readMirror(now)) {
     const held = current.get(mirrored.viewSessionId);
     if (!held || mirrored.sequence > held.sequence) current.set(mirrored.viewSessionId, mirrored);
   }

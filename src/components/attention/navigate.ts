@@ -126,19 +126,25 @@ export async function runFocusHandoff(
   let resolved = resolveFocusTarget(request.target, usableFrame(request.frameAtCreation), board?.index ?? null);
 
   /* Last resort for a conversation the board is not showing: ASK for it.
-     `openPath` is the same door the operator's own attention jump uses, and it
-     places a card the board would otherwise leave out — one folded away, or one
-     that has not entered this layout at all. Until this existed, a request
-     raised through the agent's tool (which carries no frame, so the anchor is
-     the whole of the resolution) was reported `lost` for a conversation the
-     shell could have put on screen in a hundred milliseconds, and the operator
-     saw nothing move and got no way back. Tried only after a plain resolution
-     failed, so nothing that already worked changes, and bounded by the same
-     wait as everything else here. */
+     This places a card the board would otherwise leave out — one folded away,
+     or one that has not entered this layout at all. Until this existed, a
+     request raised through the agent's tool (which carries no frame, so the
+     anchor is the whole of the resolution) was reported `lost` for a
+     conversation the shell could have put on screen in a hundred milliseconds,
+     and the operator saw nothing move and got no way back. Tried only after a
+     plain resolution failed, so nothing that already worked changes, and
+     bounded by the same wait as everything else here.
+
+     `placePath`, NOT `openPath`: the recovery wants the card in the layout, and
+     nothing else. `openPath` would also arm the board's pending-focus channel,
+     which glides the camera on its own — so the handoff's own `moveTo` below
+     became the SECOND move of two, at a different zoom, each fighting the
+     other for the same camera. The operator saw the view arrive somewhere and
+     then slide off it. Placement here, navigation once, further down. */
   let asked = false;
   if (board && resolved.resolution === "lost" && request.target.kind === "conversation" && shell) {
     const wanted = request.target.path;
-    shell.openPath(wanted);
+    shell.placePath(wanted);
     asked = true;
     board = await waitForBoard(bus, timing, (candidate) => candidate.project === project && candidate.index.rectFor(wanted) !== null)
       ?? board;
@@ -164,9 +170,9 @@ export async function runFocusHandoff(
   /* `open` also opens the target's own surface; `show` frames it and stops
      there. Only a conversation has a surface to open — a geometric target is
      refused the intent at creation, and the rest are board objects the frame
-     itself puts on screen. Skipped when the recovery above already asked for
-     exactly this path: each ask is a fresh focus EDGE, and a second one would
-     glide the camera again over the move that just finished. */
+     itself puts on screen. Skipped when the recovery above already placed
+     exactly this path: the card is in the layout and framed, so the only thing
+     `openPath` would add here is the camera glide that `moveTo` just made. */
   if (!asked && request.intent === "open" && request.target.kind === "conversation") shell?.openPath(request.target.path);
   return { resolution: resolved.resolution, moved: true, frame: resolved.frame };
 }

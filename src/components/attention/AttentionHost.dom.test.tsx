@@ -140,6 +140,7 @@ function board(rects: Record<string, FocusRect>, project = "demo") {
   const bus = createFocusHandoffBus();
   const log: BoardLog = { moved: [], restored: [] };
   const opened: string[] = [];
+  const placed: string[] = [];
   const controller: BoardFocusController = {
     project,
     index: {
@@ -152,8 +153,13 @@ function board(rects: Record<string, FocusRect>, project = "demo") {
     restoreCamera: (camera) => { log.restored.push(camera); return true; },
   };
   bus.setBoard(controller);
-  bus.setShell({ project, openProject: () => {}, openPath: (path) => { opened.push(path); } });
-  return { bus, log, opened };
+  bus.setShell({
+    project,
+    openProject: () => {},
+    openPath: (path) => { opened.push(path); },
+    placePath: (path) => { placed.push(path); },
+  });
+  return { bus, log, opened, placed };
 }
 
 function raise(rect: FocusRect = RAISED_RECT) {
@@ -469,6 +475,7 @@ function layoutBoard(slice: FocusLayoutSlice, onOpenPath?: (path: string, publis
   const bus = createFocusHandoffBus();
   const log: BoardLog = { moved: [], restored: [] };
   const opened: string[] = [];
+  const placed: string[] = [];
   const publish = (next: FocusLayoutSlice) => {
     bus.setBoard({
       project: "demo",
@@ -481,9 +488,13 @@ function layoutBoard(slice: FocusLayoutSlice, onOpenPath?: (path: string, publis
   bus.setShell({
     project: "demo",
     openProject: () => {},
-    openPath: (path) => { opened.push(path); onOpenPath?.(path, publish); },
+    openPath: (path) => { opened.push(path); },
+    /* Placement is what the recovery asks for now, so this is the stub that has
+       to make the card appear. The camera is untouched: the only entry that
+       reaches `log.moved` is the handoff's own `moveTo`. */
+    placePath: (path) => { placed.push(path); onOpenPath?.(path, publish); },
   });
-  return { bus, log, opened };
+  return { bus, log, opened, placed };
 }
 
 test("a worker folded into its parent's stack is followed to the stack that is drawing it", async () => {
@@ -518,7 +529,7 @@ test("a worker folded into its parent's stack is followed to the stack that is d
 test("a conversation the board is not showing is asked for, followed once, and returned from", async () => {
   raise(UNREAD_FRAME_RECT);
   const empty: FocusLayoutSlice = { nodes: [], groups: [], stacks: [], byPath: new Map() };
-  const { bus, log, opened } = layoutBoard(empty, (path, publish) => {
+  const { bus, log, opened, placed } = layoutBoard(empty, (path, publish) => {
     /* What the shell does with a path the layout left out: the card enters. */
     publish({ ...empty, byPath: new Map<string, SchemeRect>([[path, LIVE_RECT as SchemeRect]]) });
   });
@@ -526,7 +537,12 @@ test("a conversation the board is not showing is asked for, followed once, and r
   mount(bus);
   await settle();
 
-  expect(opened).toEqual([ANCHOR]);
+  /* Placed, not navigated to: the recovery reveals the card and the handoff's
+     own `moveTo` is the only thing that moves the camera. Routing this through
+     `openPath` put the production focus glide in front of that move and the two
+     fought over the same camera. */
+  expect(placed).toEqual([ANCHOR]);
+  expect(opened).toEqual([]);
   expect(log.moved).toEqual([LIVE_RECT]);
   expect(record().state).toBe("following");
 
@@ -534,7 +550,8 @@ test("a conversation the board is not showing is asked for, followed once, and r
      and the card was placed by an edge that must not re-arm. */
   for (let i = 0; i < 5; i += 1) await poll();
   expect(log.moved).toHaveLength(1);
-  expect(opened).toEqual([ANCHOR]);
+  expect(placed).toEqual([ANCHOR]);
+  expect(opened).toEqual([]);
 
   click(one("[data-testid='attention-return']")!);
   await settle();
