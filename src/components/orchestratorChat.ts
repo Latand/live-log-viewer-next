@@ -44,6 +44,22 @@ export async function openOrchestratorConversation(fetchFn: typeof fetch = fetch
   if (!statusResponse.ok || !status) throw new Error("orchestrator status unavailable");
   if (status.record && status.exists) return status.record.conversationId;
 
+  /* NO SPAWN WITHOUT THE AUTHORITY TO ADOPT. The spawn is the side effect and
+     the adoption is the gate, so their old order inverted the invariant for an
+     unauthorized browser: the spawn succeeded, the operator-only adoption was
+     refused, no record was written — and the NEXT click saw an empty slot and
+     spawned again. Four stalled managers on the hosted stage came from exactly
+     that loop. The single-instance guarantee still lives in first-write-wins
+     adoption; this check just refuses to create anything it could never seat. */
+  const authorityResponse = await fetchFn("/api/operator/session", {
+    cache: "no-store",
+    headers: operatorHeaders(),
+  });
+  const authority = await bodyOf<{ operator?: boolean }>(authorityResponse);
+  if (!authorityResponse.ok || authority?.operator !== true) {
+    throw new Error("orchestrator spawn requires operator authority in this browser");
+  }
+
   const spawnResponse = await fetchFn("/api/spawn", {
     method: "POST",
     headers: JSON_HEADERS,
