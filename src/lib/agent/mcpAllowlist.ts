@@ -411,8 +411,11 @@ function receiptAttestations(file: StoredGrantFile, ownership: StoredGrantOwners
          supplements the evidence index above rather than replacing it. */
       const namedEdge = file.lineageEdges?.[namedId];
       if (namedEdge?.parentConversationId && namedEdge.parentConversationId !== namedId) attest(launchId, "delegated");
-      const named = ownership.conversationOrigins.get(namedId);
-      if (named) attest(launchId, named);
+      /* The conversation a receipt NAMES may only ever contradict it, never
+         vouch for it: the subject picks this id, so letting a root reading here
+         grant would let a delegated receipt retarget itself at the operator
+         root and be vouched for by its own choice. */
+      if (ownership.conversationOrigins.get(namedId) === "delegated") attest(launchId, "delegated");
     }
     if (!receipt.key) continue;
     const rowKey = sessionKeyId({ engine: receipt.key.engine as never, sessionId: receipt.key.sessionId });
@@ -463,8 +466,19 @@ function receiptGrant(
     delegationDepth: receipt.delegationDepth,
     parentConversationId: receipt.parentConversationId,
   });
+  /* UNATTESTED DENIES. A receipt has to be vouched for by a row it does not
+     own, because a subject that can delete the rows naming it would otherwise
+     delete its way to a grant.
+
+     BLOCKED ON AN OPERATOR DECISION (#739): nothing in the registry attests
+     "operator-root" for a launch id — admission writes a lineage edge only for
+     DELEGATED launches — so an un-parented launch that has not settled yet can
+     never be attested, and its receipt is denied here. That is why three
+     honest-root controls in this file fail. They are left failing deliberately;
+     do not relax this rule to make them pass. Inert in tranche 1, where the
+     bound is empty and every grant is already the baseline. */
   const attested = attestations.get(launchId);
-  if (attested && (attested.size > 1 || !attested.has(described))) return null;
+  if (!attested || attested.size !== 1 || !attested.has(described)) return null;
   return mcpServersForSession({ origin: described, requested: receipt.launchProfile!.mcpServers }, policy);
 }
 
