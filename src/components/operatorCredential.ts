@@ -65,11 +65,17 @@ function store(value: string): void {
  */
 export function adoptOperatorCredentialFromLocation(): void {
   if (typeof window === "undefined") return;
-  if (capability) return;
 
   const hash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : window.location.hash;
   const fragment = new URLSearchParams(hash);
   const claimed = fragment.get(OPERATOR_CREDENTIAL_FRAGMENT)?.trim();
+  /* A link in the address bar wins over anything already held. The credential is
+     minted per server process, so after a restart the freshly printed link is how
+     a tab recovers — and the stage launch flow opens that link into a tab that
+     may already exist, as a same-document hash navigation with no reload. The
+     old value must not shadow the new one there, and the fragment must still be
+     stripped. Without a link this stays the idempotent per-render read. */
+  if (!claimed && capability) return;
   if (claimed) {
     capability = claimed;
     store(claimed);
