@@ -261,6 +261,7 @@ function isPipeline(value: unknown): value is Pipeline {
     typeof pipeline.baseBranch === "string" &&
     typeof pipeline.baseRef === "string" &&
     typeof pipeline.lastPassedCommit === "string" &&
+    (pipeline.publishedCommit === undefined || isNullableString(pipeline.publishedCommit)) &&
     Array.isArray(pipeline.stages) &&
     pipeline.stages.every(isStage) &&
     Array.isArray(pipeline.runs) &&
@@ -403,6 +404,7 @@ export function loadPipelines(): Pipeline[] {
     baseBranch: pipeline.baseBranch ?? "",
     baseRef: pipeline.baseRef ?? "",
     lastPassedCommit: pipeline.lastPassedCommit ?? "",
+    publishedCommit: pipeline.publishedCommit ?? null,
     pausedState: pipeline.pausedState ?? null,
     stateDetail: pipeline.stateDetail ?? null,
     srcPath: pipeline.srcPath ?? null,
@@ -524,6 +526,7 @@ export function buildPipeline(input: {
     baseBranch: "",
     baseRef: "",
     lastPassedCommit: "",
+    publishedCommit: null,
     stages: (JSON.parse(JSON.stringify(input.stages)) as PipelineStage[]).map((stage) => ({ ...stage, onFail: stage.onFail ?? null })),
     runs: input.stages.map((stage) => ({ stageId: stage.id, attempts: [] })),
     cursor: input.stages.length ? { stageId: input.stages[0]!.id, state: "pending", input: null, activatedBy: null } : null,

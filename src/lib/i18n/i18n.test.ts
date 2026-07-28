@@ -19,6 +19,31 @@ describe("translation parity between en and uk", () => {
   });
 });
 
+describe("background music copy (#732)", () => {
+  const keys = ["sound.ambientViewer", "sound.ambient", "sound.ambientVolume", "sound.ambientHint"] as const;
+
+  test("both locales name both music settings and the level they share", () => {
+    for (const key of keys) {
+      expect(en[key], `en ${key}`).toBeTruthy();
+      expect(uk[key], `uk ${key}`).toBeTruthy();
+    }
+    /* One shared level, so exactly one level label — a second one would be the
+       tell that the two switches grew separate volumes. */
+    expect(new Set(keys.map((key) => en[key])).size).toBe(keys.length);
+  });
+
+  test("the settings read as music, in the operator's own words", () => {
+    expect(en["sound.ambientViewer"]).toContain("Background music");
+    expect(en["sound.ambient"]).toContain("Background music");
+    /* The Ukrainian call label used to read as an engineering term ("фоновий
+       шар"); it is music now, and the Viewer one matches it. */
+    expect(uk["sound.ambient"]).toBe("Фонова музика під час дзвінка");
+    expect(uk["sound.ambientViewer"]).toContain("Фонова музика");
+    expect(uk["sound.ambient"]).not.toContain("шар");
+    expect(uk["sound.ambientVolume"]).not.toContain("фону");
+  });
+});
+
 describe("compact pipeline lineage copy (#353)", () => {
   const keys = [
     "pipelineStrip.configureStage",

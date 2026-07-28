@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
+import type { LoopTransport, LoopVoiceHandle } from "./ambientLoop";
+
 /**
  * The app-facing façade, on a device with no audio graph at all.
  *
@@ -9,9 +11,17 @@ import { afterEach, describe, expect, test } from "bun:test";
  * wedges" is the property under test — not the sound.
  */
 
-const { ambientLoop, ambientLoopAvailable, ensureAmbientLoop, playCue, resetAppAudioForTests, setVoiceConnected } =
-  await import("./app");
+const {
+  ambientLoop,
+  ambientLoopAvailable,
+  configureAmbientTransportForTests,
+  ensureAmbientLoop,
+  playCue,
+  resetAppAudioForTests,
+  setVoiceConnected,
+} = await import("./app");
 const { configureAudioPrefsStorage, setAudioPrefs } = await import("./prefs");
+const { FADE_OUT_SECONDS } = await import("./ambientLoop");
 
 afterEach(() => {
   resetAppAudioForTests();
@@ -63,7 +73,7 @@ describe("no audio graph", () => {
     expect(() => ensureAmbientLoop()).not.toThrow();
   });
 
-  test("one card cannot disconnect the ambient bed owned by another live call", () => {
+  test("one card cannot disconnect the ambient bed owned by another live call", async () => {
     const store = new Map<string, string>();
     configureAudioPrefsStorage({
       getItem: (key) => store.get(key) ?? null,
@@ -77,8 +87,103 @@ describe("no audio graph", () => {
 
     expect(ambientLoop().wanted()).toBe(true);
 
+    /* The last lease going away settles at the end of the tick, so a keyed card
+       swap — cleanup then mount, one commit — is never mistaken for a hangup. */
     setVoiceConnected("live-call", false);
+    expect(ambientLoop().wanted()).toBe(true);
+    await Promise.resolve();
     expect(ambientLoop().wanted()).toBe(false);
+  });
+});
+
+/**
+ * Ambient ownership, on a device that CAN play audio.
+ *
+ * Several conversation cards mount composers in the same tab, and the operator
+ * moves between them constantly. The lease model above is what keeps that from
+ * being audible, and it is only observable through a transport.
+ */
+describe("ownership across conversation cards", () => {
+  function fakeTransport() {
+    const starts: { gain: number; offsetSeconds?: number }[] = [];
+    const pauses: number[] = [];
+    const stops: number[] = [];
+    const transport: LoopTransport = {
+      start(request) {
+        starts.push({ gain: request.gain, offsetSeconds: request.offsetSeconds });
+        const handle: LoopVoiceHandle = {
+          rampTo: () => undefined,
+          pause: (seconds) => {
+            pauses.push(seconds);
+            return 12;
+          },
+          /* The fade has long finished by the time anything asks. */
+          resume: () => false,
+          stop: (seconds) => void stops.push(seconds),
+        };
+        return handle;
+      },
+    };
+    return { transport, starts, pauses, stops };
+  }
+
+  function device(seed: Record<string, string> = {}) {
+    const values = new Map(Object.entries(seed));
+    configureAudioPrefsStorage({
+      getItem: (key) => values.get(key) ?? null,
+      setItem: (key, value) => void values.set(key, value),
+    });
+    resetAppAudioForTests();
+  }
+
+  test("switching the selected card hands the lease over without touching the track", async () => {
+    device();
+    const sink = fakeTransport();
+    configureAmbientTransportForTests(sink.transport);
+    setAudioPrefs({ loopEnabled: true });
+
+    setVoiceConnected("card-a", true);
+    expect(sink.starts).toHaveLength(1);
+
+    /* A keyed card replacement, in the order React actually runs it: the old
+       card's cleanup FIRST, the new card's mount second. */
+    setVoiceConnected("card-a", false);
+    setVoiceConnected("card-b", true);
+    await Promise.resolve();
+
+    /* One track throughout — no restart, no duplicate, nothing dropped. */
+    expect(sink.starts).toHaveLength(1);
+    expect(sink.pauses).toEqual([]);
+    expect(sink.stops).toEqual([]);
+    expect(ambientLoop().state().playing).toBe(true);
+
+    /* And the last card leaving is still what ends the call side of it. */
+    setVoiceConnected("card-b", false);
+    await Promise.resolve();
+    expect(sink.pauses).toEqual([FADE_OUT_SECONDS]);
+  });
+
+  test("with music in the Viewer on, a card switch is not even a boundary", async () => {
+    device();
+    const sink = fakeTransport();
+    configureAmbientTransportForTests(sink.transport);
+    setAudioPrefs({ loopEnabled: true, viewerLoopEnabled: true });
+    ensureAmbientLoop();
+
+    expect(sink.starts).toHaveLength(1);
+    setVoiceConnected("card-a", true);
+    setVoiceConnected("card-a", false);
+    setVoiceConnected("card-b", true);
+    setVoiceConnected("card-b", false);
+    await Promise.resolve();
+
+    /* The music started before the first call and is still the same track after
+       the last one ended. */
+    expect(sink.starts).toHaveLength(1);
+    expect(sink.pauses).toEqual([]);
+    expect(sink.stops).toEqual([]);
+    expect(ambientLoop().state().playing).toBe(true);
+    expect(ambientLoop().state().resumeAt).toBe(0);
   });
 });
 

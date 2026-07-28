@@ -26,6 +26,7 @@ import { requestPipelineTick } from "@/lib/pipelines/controllerSignal";
 import { projectTaskPipelineIds } from "@/lib/pipelines/taskBinding";
 import type { CreatePipelineRequest, PatchPipelineRequest, PipelineAction } from "@/lib/pipelines/types";
 import { listFiles } from "@/lib/scanner";
+import { completedFileScan } from "@/lib/scanner/scanCache";
 import { readResources } from "@/lib/resources";
 import { adoptLiveRootSession, conversationRole, liveRootSession, type RootSessionSource } from "@/lib/root/adopt";
 import { runtimeHostClient, type RuntimeHostClient } from "@/lib/runtime/client";
@@ -92,6 +93,7 @@ type RegistrySnapshot = ReturnType<ReturnType<typeof agentRegistry>["readOnlySna
 
 export interface ViewerMcpDomainDependencies {
   listFiles(options?: Parameters<typeof listFiles>[0]): Promise<FileEntry[]>;
+  completedFileScan(): ReturnType<typeof completedFileScan>;
   registrySnapshot(): RegistrySnapshot;
   boardFor(project: string): ReturnType<typeof boardFor>;
   getFlowsWithPresets(): ReturnType<typeof getFlowsWithPresets>;
@@ -177,6 +179,7 @@ function attentionCallerSources(): AttentionCallerSources {
 
 const productionDomainDependencies: ViewerMcpDomainDependencies = {
   listFiles,
+  completedFileScan,
   registrySnapshot: () => agentRegistry().readOnlySnapshot(),
   boardFor,
   getFlowsWithPresets,
@@ -450,7 +453,8 @@ async function boardSnapshot(
     for (const generation of conversation.generations) conversationsByPath.set(generation.path, conversation);
     for (const pathname of conversation.continuityPaths ?? []) conversationsByPath.set(pathname, conversation);
   }
-  const conversations = (await dependencies.listFiles({ fresh: true, persist: false }))
+  const files = (await dependencies.completedFileScan()).snapshot.files;
+  const conversations = files
     .filter((entry) => entry.engine === "claude" || entry.engine === "codex")
     .filter((entry) => !project || entry.project === project)
     .filter((entry) => !activity || entry.activity === activity)

@@ -604,9 +604,10 @@ export const uk: Record<keyof typeof en, Message> = {
   "sound.unmute": "Увімкнути звукові сповіщення",
   "sound.settings": "Рівні звуку",
   "sound.cueVolume": "Звукові сигнали",
-  "sound.ambient": "Фоновий шар під час дзвінка",
-  "sound.ambientVolume": "Рівень фону",
-  "sound.ambientHint": "Тихо звучить, поки триває голосовий дзвінок, і стишується під мову.",
+  "sound.ambientViewer": "Фонова музика у переглядачі",
+  "sound.ambient": "Фонова музика під час дзвінка",
+  "sound.ambientVolume": "Рівень музики",
+  "sound.ambientHint": "Тихо звучить на цьому рівні й стишується під мову під час дзвінка. Якщо ввімкнено обидва, той самий трек продовжує грати через дзвінок.",
 
   "keepAwake.label": "Не гасити екран",
   "keepAwake.enableAria": "Не давати екрану гаснути на цьому пристрої",

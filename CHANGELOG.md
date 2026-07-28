@@ -7,6 +7,26 @@ versions follow [SemVer](https://semver.org/) (0.x — the API may still move).
 ## [Unreleased]
 
 ### Fixed
+- An agent asking for the operator's attention reaches the desktop that is
+  actually open, and the automatic focus lands (#688). Three things had to be
+  true for that and none of them were. Presence — who is looking at the viewer —
+  lived in one process's memory, written only by the server that receives the
+  browser's heartbeat, so every other process on the machine (the MCP server,
+  where the agent's tools run) read an empty map and concluded nobody was there;
+  it is now mirrored to the shared state dir, which is also what stops
+  `operator_snapshot` reporting no active view while the board is open. A raised
+  request now names the views that are open at the moment it is raised, rather
+  than filling that list in seconds later on some browser's next poll, so the
+  answer the agent gets can say who it reached — a phone, a hidden tab and a
+  long-silent view are still named by nobody, because none of them will move.
+  And the move itself now finds conversations the board draws inside a container
+  — a worker that folded into its parent's stack once it went quiet, a reviewer
+  round drawn in its flow's deck — instead of reporting a card on the operator's
+  screen as gone: the focus index resolves through the same layout the board's
+  own links route through, and a conversation the layout left out entirely is
+  asked for through the shell before the handoff gives up. A move that happens
+  this way is recorded as the automatic follow it is, and leaves the Back
+  control that returns the operator to where they were.
 - Agent chips on the conversation canvas report the agent's real output, not
   the state of its process (#669). Chip activity now derives from how long ago
   the conversation's transcript last grew, so a lane appending records every
@@ -89,6 +109,31 @@ versions follow [SemVer](https://semver.org/) (0.x — the API may still move).
   so it is visible and usable at 390px instead of painting under the backdrop.
 
 ### Added
+- Background music in the Viewer, and one track across the call boundary
+  (#732). The Audio settings now carry two independent switches sharing one
+  level: music while using the Viewer, and music during a call — the latter the
+  renamed old ambient setting, whose Ukrainian label read as an engineering term
+  («фоновий шар») rather than as music. With both on, the same track simply
+  keeps playing across the call edge in either direction: no teardown, no
+  re-init, no position reset, and speech ducking applies for the duration of the
+  call as before. With only one on, the edge that silences the music parks it —
+  the voice fades out and the position it reached is retained, so the edge that
+  brings it back resumes from there instead of replaying the same opening on
+  every call — and the parked voice stays alive for its whole fade, so a call
+  that ends inside it returns to that very voice instead of stacking a second
+  one over the music still sounding. Only a device that wants no music at all
+  (the sound master off, both switches off, no asset) tears the track down. The
+  music ducks under whoever is talking, read off the transcript the call already
+  produces, with the duck owned per mounted composer so a card nobody is
+  speaking in cannot let the music back up over the one they are. Every line a
+  call inherits is disqualified as speech the moment it goes live, so the line a
+  dropped call left mid-sentence — never marked final, and kept on screen on
+  purpose — cannot open the next call already ducked. Ambient
+  ownership across conversation cards holds through a keyed card switch: React
+  destroys the outgoing card's effects before creating the incoming one's, so
+  the last lease going away is settled at the end of the tick rather than on the
+  instant — a swipe between conversations never restarts, duplicates or drops
+  the track.
 - On-canvas pipeline stage reordering (#507). A draft's stage cards carry their
   own move-earlier / move-later controls, so the whole conversation graph is
   composed in place on the canvas — no nested form. Each move is offered only

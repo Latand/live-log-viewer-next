@@ -628,9 +628,10 @@ export const en = {
   "sound.unmute": "Enable sound notifications",
   "sound.settings": "Sound levels",
   "sound.cueVolume": "Notification cues",
-  "sound.ambient": "Ambient bed during calls",
-  "sound.ambientVolume": "Ambient level",
-  "sound.ambientHint": "Plays quietly while a voice call is connected, and ducks under speech.",
+  "sound.ambientViewer": "Background music in the Viewer",
+  "sound.ambient": "Background music during a call",
+  "sound.ambientVolume": "Music level",
+  "sound.ambientHint": "Plays quietly at this level, and ducks under speech during a call. With both on, the same track keeps playing across the call.",
 
   // KeepAwakeControl — the phone-only screen wake lock (issue #712). Every
   // caption states what is true right now; only `active` says the screen is

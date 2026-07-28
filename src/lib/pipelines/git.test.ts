@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { commitPipelineStage, pipelineWorktreeChanges, provisionPipelineWorktree, resetPipelineStage, resolvePipelineBase, synchronizePipelineRetryHead } from "./git";
+import { commitPipelineStage, pipelineWorktreeChanges, provisionPipelineWorktree, publishPipelineBranch, resetPipelineStage, resolvePipelineBase, synchronizePipelineRetryHead } from "./git";
 import type { Pipeline } from "./types";
 import { realExec, type ExecPort } from "@/lib/workflows/provision";
 
@@ -263,4 +263,228 @@ test("worktree change reporting truncates long lists and surfaces an unreadable 
     ok: false,
     error: "checking the pipeline worktree: fatal: not a git repository",
   });
+});
+
+/* --- publishPipelineBranch (#729): the orchestrator owns publication ------- */
+
+interface PublishSandbox {
+  root: string;
+  origin: string;
+  repo: string;
+  subject: Pipeline;
+  commit: (name: string, body: string) => string;
+  originHead: () => string;
+}
+
+function publishSandbox(withOrigin = true): PublishSandbox {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-publish-"));
+  const origin = path.join(root, "origin.git");
+  const repo = path.join(root, "repo");
+  fs.mkdirSync(repo);
+  git(repo, "init", "--initial-branch=main");
+  git(repo, "config", "user.email", "pipeline-test@example.com");
+  git(repo, "config", "user.name", "Pipeline Test");
+  git(repo, "config", "commit.gpgSign", "false");
+  fs.writeFileSync(path.join(repo, "base.txt"), "base\n");
+  git(repo, "add", "base.txt");
+  git(repo, "commit", "-m", "base");
+  if (withOrigin) {
+    git(root, "init", "--bare", "--initial-branch=main", origin);
+    git(repo, "remote", "add", "origin", origin);
+    git(repo, "push", "-u", "origin", "main");
+  }
+
+  const subject = pipeline();
+  subject.repoDir = repo;
+  subject.worktreeDir = path.join(root, "repo-pipeline-12345678");
+  subject.baseBranch = "main";
+  subject.baseRef = git(repo, "rev-parse", "HEAD");
+  subject.lastPassedCommit = subject.baseRef;
+  const provisioned = provisionPipelineWorktree(subject, realExec);
+  if (!provisioned.ok) throw new Error(provisioned.error);
+
+  return {
+    root,
+    origin,
+    repo,
+    subject,
+    commit: (name, body) => {
+      fs.writeFileSync(path.join(subject.worktreeDir, name), body);
+      git(subject.worktreeDir, "add", "-A");
+      git(subject.worktreeDir, "commit", "-m", `stage ${name}`);
+      return git(subject.worktreeDir, "rev-parse", "HEAD");
+    },
+    originHead: () => {
+      const listed = git(subject.worktreeDir, "ls-remote", "--heads", "origin", `refs/heads/${subject.branch}`);
+      return listed.split(/\s+/)[0] ?? "";
+    },
+  };
+}
+
+test("publishPipelineBranch pushes the passed commit and confirms origin carries it", () => {
+  const box = publishSandbox();
+  try {
+    const passed = box.commit("stage.txt", "stage work\n");
+    expect(box.originHead()).toBe("");
+
+    expect(publishPipelineBranch(box.subject, realExec, { acceptedSha: passed })).toEqual({ ok: true, sha: passed, remote: "published" });
+    expect(box.originHead()).toBe(passed);
+  } finally {
+    fs.rmSync(box.root, { recursive: true, force: true });
+  }
+});
+
+test("publishPipelineBranch fast-forwards a branch it already published", () => {
+  const box = publishSandbox();
+  try {
+    const first = box.commit("one.txt", "one\n");
+    expect(publishPipelineBranch(box.subject, realExec, { acceptedSha: first })).toMatchObject({ ok: true, sha: first });
+    const second = box.commit("two.txt", "two\n");
+
+    expect(publishPipelineBranch(box.subject, realExec, { acceptedSha: second, publishedSha: first })).toEqual({ ok: true, sha: second, remote: "published" });
+    expect(box.originHead()).toBe(second);
+  } finally {
+    fs.rmSync(box.root, { recursive: true, force: true });
+  }
+});
+
+test("publishPipelineBranch refuses a diverged remote and leaves both revisions intact", () => {
+  const box = publishSandbox();
+  try {
+    const shared = box.commit("shared.txt", "shared\n");
+    expect(publishPipelineBranch(box.subject, realExec, { acceptedSha: shared })).toMatchObject({ ok: true, sha: shared });
+
+    /* Someone else's repair lands on the remote branch; the local head does not
+       contain it. Publishing it away would destroy that work. */
+    const other = path.join(box.root, "other");
+    git(box.root, "clone", "--branch", box.subject.branch, box.origin, other);
+    git(other, "config", "user.email", "pipeline-test@example.com");
+    git(other, "config", "user.name", "Pipeline Test");
+    git(other, "config", "commit.gpgSign", "false");
+    fs.writeFileSync(path.join(other, "repair.txt"), "remote repair\n");
+    git(other, "add", "-A");
+    git(other, "commit", "-m", "remote repair");
+    git(other, "push", "origin", box.subject.branch);
+    const remoteRepair = git(other, "rev-parse", "HEAD");
+
+    const local = box.commit("local.txt", "local\n");
+    const refused = publishPipelineBranch(box.subject, realExec, { acceptedSha: local, publishedSha: shared });
+
+    expect(refused).toEqual({
+      ok: false,
+      error: "the local and remote pipeline branches diverged; choose which revision to publish before the review stage can start",
+    });
+    expect(box.originHead()).toBe(remoteRepair);
+    expect(git(box.subject.worktreeDir, "rev-parse", "HEAD")).toBe(local);
+  } finally {
+    fs.rmSync(box.root, { recursive: true, force: true });
+  }
+});
+
+test("publishPipelineBranch reports a repo with no origin as unavailable rather than a failure", () => {
+  const box = publishSandbox(false);
+  try {
+    const passed = box.commit("stage.txt", "stage work\n");
+    expect(publishPipelineBranch(box.subject, realExec, { acceptedSha: passed })).toEqual({ ok: true, sha: passed, remote: "unavailable" });
+  } finally {
+    fs.rmSync(box.root, { recursive: true, force: true });
+  }
+});
+
+test("publishPipelineBranch refuses a dirty worktree and preserves the uncommitted work", () => {
+  const box = publishSandbox();
+  try {
+    const passed = box.commit("stage.txt", "stage work\n");
+    fs.writeFileSync(path.join(box.subject.worktreeDir, "in-progress.txt"), "unfinished\n");
+
+    expect(publishPipelineBranch(box.subject, realExec, { acceptedSha: passed })).toEqual({
+      ok: false,
+      error: "the pipeline worktree has uncommitted changes; choose whether to commit or discard them before retrying review",
+    });
+    expect(git(box.subject.worktreeDir, "status", "--porcelain")).toBe("?? in-progress.txt");
+    expect(fs.readFileSync(path.join(box.subject.worktreeDir, "in-progress.txt"), "utf8")).toBe("unfinished\n");
+  } finally {
+    fs.rmSync(box.root, { recursive: true, force: true });
+  }
+});
+
+test("a head already recorded as published costs no remote probe at all", () => {
+  const head = "a".repeat(40);
+  const calls: string[] = [];
+  const exec: ExecPort = (command, args) => {
+    calls.push(`${command} ${args.join(" ")}`);
+    if (args[0] === "status") return { code: 0, stdout: "", stderr: "" };
+    if (args[0] === "branch") return { code: 0, stdout: `${pipeline().branch}\n`, stderr: "" };
+    if (args[0] === "rev-parse") return { code: 0, stdout: `${head}\n`, stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  };
+
+  expect(publishPipelineBranch(pipeline(), exec, { acceptedSha: head, publishedSha: head })).toEqual({ ok: true, sha: head, remote: "published" });
+  expect(calls.some((call) => call.includes("ls-remote"))).toBe(false);
+  expect(calls.some((call) => call.includes("push"))).toBe(false);
+  expect(calls.some((call) => call.includes("remote get-url"))).toBe(false);
+});
+
+test("publication pushes only the immutable accepted revision when the branch advances mid-publish", () => {
+  const box = publishSandbox();
+  try {
+    const accepted = box.commit("accepted.txt", "accepted\n");
+    let racy: string | null = null;
+
+    /* The branch advances in the window between the publisher capturing the
+       accepted revision and the push running — here on the remote probe, which
+       sits exactly in that window. Pushing `refs/heads/<branch>` would carry
+       this unaccepted commit to origin and leave review fenced on a target that
+       never passed; pushing the accepted object cannot. */
+    const racing: ExecPort = (command, args, cwd) => {
+      if (command === "git" && args[0] === "ls-remote" && racy === null) {
+        racy = box.commit("racy.txt", "never accepted\n");
+      }
+      return realExec(command, args, cwd);
+    };
+
+    const published = publishPipelineBranch(box.subject, racing, { acceptedSha: accepted });
+
+    expect(racy).not.toBeNull();
+    expect(racy).not.toBe(accepted);
+    /* The local branch really did move on mid-publish ... */
+    expect(git(box.subject.worktreeDir, "rev-parse", "HEAD")).toBe(racy!);
+    /* ... and origin carries exactly the accepted revision, never the racy one. */
+    expect(published).toEqual({ ok: true, sha: accepted, remote: "published" });
+    expect(box.originHead()).toBe(accepted);
+  } finally {
+    fs.rmSync(box.root, { recursive: true, force: true });
+  }
+});
+
+test("a worktree that has moved past the accepted revision publishes nothing", () => {
+  const box = publishSandbox();
+  try {
+    const accepted = box.commit("accepted.txt", "accepted\n");
+    const advanced = box.commit("later.txt", "later\n");
+
+    const result = publishPipelineBranch(box.subject, realExec, { acceptedSha: accepted });
+
+    expect(result).toEqual({
+      ok: false,
+      error: `the pipeline worktree is at ${advanced}, not the accepted revision ${accepted}; nothing was published`,
+    });
+    expect(box.originHead()).toBe("");
+  } finally {
+    fs.rmSync(box.root, { recursive: true, force: true });
+  }
+});
+
+test("publication refuses an accepted revision that is not an exact commit SHA", () => {
+  const calls: string[] = [];
+  const exec: ExecPort = (command, args) => {
+    calls.push(`${command} ${args.join(" ")}`);
+    return { code: 0, stdout: "", stderr: "" };
+  };
+
+  expect(publishPipelineBranch(pipeline(), exec, { acceptedSha: "HEAD" })).toEqual({
+    ok: false,
+    error: "the accepted pipeline revision is not an exact commit SHA: HEAD",
+  });
+  expect(calls).toEqual([]);
 });

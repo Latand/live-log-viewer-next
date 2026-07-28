@@ -13,7 +13,10 @@ import type { CueTransport, CueVoiceHandle } from "./cuePlayer";
  *   clock. Re-triggering on `ended`, or scheduling the next pass from a timer,
  *   both put a main-thread hop between the last sample and the first — that hop
  *   is the click. Neither appears here, and `onended` is deliberately left unset
- *   on the loop voice;
+ *   on the loop voice. `pause` does release its node, and the resume builds a
+ *   new one — but only across a stretch that has already faded to silence, and
+ *   it opens at the position the parked voice reported, so the operator hears a
+ *   continuation rather than the same opening again;
  * - fades and ducks have to be ramps on the same clock. `AudioParam`
  *   `linearRampToValueAtTime` is sample-accurate; stepping `.volume` from a
  *   `setInterval` is not, and the steps are audible;
@@ -56,7 +59,9 @@ export interface BufferSourceLike {
   loopStart: number;
   loopEnd: number;
   connect(destination: never): unknown;
-  start(when?: number): void;
+  /** `offset` is where in the buffer playback begins — how a parked loop
+      resumes at the position it was paused at. */
+  start(when?: number, offset?: number): void;
   stop(when?: number): void;
 }
 
@@ -71,6 +76,26 @@ export interface AudioContextLike {
   decodeAudioData(data: ArrayBuffer): Promise<AudioBufferLike>;
 }
 
+/**
+ * The one thing here that has to happen LATER: releasing a parked node.
+ *
+ * A park stays audible for its whole fade, so the node may only be stopped once
+ * the fade has run — and a call that ends inside that window has to be able to
+ * call the release off and return to the very same voice. An audio-clock
+ * `stop(when)` cannot be taken back, so the release rides an ordinary timer,
+ * which can. Precision does not matter: by the time it fires, the node is
+ * silent.
+ */
+export interface TransportTimers {
+  schedule(run: () => void, ms: number): number;
+  cancel(handle: number): void;
+}
+
+const REAL_TIMERS: TransportTimers = {
+  schedule: (run, ms) => setTimeout(run, ms) as unknown as number,
+  cancel: (handle) => clearTimeout(handle),
+};
+
 export interface WebAudioTransports {
   cues: CueTransport;
   loop: LoopTransport;
@@ -84,9 +109,62 @@ export interface WebAudioTransports {
 /** The shortest ramp worth scheduling; below this the ear hears a step. */
 const MIN_RAMP_SECONDS = 0.01;
 
+/**
+ * One gain node's level, as THIS module commanded it.
+ *
+ * A ramp has to start from the level that is currently sounding, and the graph
+ * is the wrong place to ask for it. Every ramp begins by cancelling what was
+ * scheduled, and `cancelScheduledValues(t)` drops the events at `t` as well —
+ * including the one that established the starting level a moment earlier, in the
+ * same tick. Reading `AudioParam.value` back after that answers from a timeline
+ * with nothing left on it: the param's own 1.0 default. That is how a bed asked
+ * to open in silence opened at full volume and slid down to its level (#728).
+ *
+ * So the level is kept here instead, on the audio clock. A start value, a target
+ * and the window between them are all it takes to know what is sounding at any
+ * instant, and none of it can be erased by a cancel.
+ */
+interface Level {
+  /** Ramp to `target` over `seconds`, from whatever is sounding now. */
+  rampTo(target: number, seconds: number): void;
+}
+
+function createLevel(context: AudioContextLike, param: AudioParamLike, initial: number): Level {
+  let from = initial;
+  let to = initial;
+  let startedAt = context.currentTime;
+  let endsAt = context.currentTime;
+
+  /** The level right now, interpolated across a ramp in flight. */
+  const current = (): number => {
+    const now = context.currentTime;
+    if (now >= endsAt) return to;
+    if (now <= startedAt) return from;
+    return from + (to - from) * ((now - startedAt) / (endsAt - startedAt));
+  };
+
+  return {
+    rampTo(target, seconds): void {
+      const now = context.currentTime;
+      const value = current();
+      const ends = now + Math.max(MIN_RAMP_SECONDS, seconds);
+      param.cancelScheduledValues(now);
+      /* Re-anchored at the known level, which is also what puts the opening
+         silence back on the timeline after the cancel above took it off. */
+      param.setValueAtTime(value, now);
+      param.linearRampToValueAtTime(target, ends);
+      from = value;
+      to = target;
+      startedAt = now;
+      endsAt = ends;
+    },
+  };
+}
+
 export function createWebAudioTransports(
   getContext: () => AudioContextLike | null,
   fetchFn: typeof fetch | null = typeof fetch === "function" ? fetch : null,
+  timers: TransportTimers = REAL_TIMERS,
 ): WebAudioTransports {
   const buffers = new Map<string, AudioBufferLike>();
   /** A source that failed to fetch or decode is never retried: a 404 asset
@@ -125,15 +203,6 @@ export function createWebAudioTransports(
     }
     const buffer = ensureBuffer(context, src);
     return buffer ? { context, buffer } : null;
-  };
-
-  const ramp = (context: AudioContextLike, param: AudioParamLike, target: number, seconds: number): void => {
-    const now = context.currentTime;
-    param.cancelScheduledValues(now);
-    /* Anchor at the CURRENT value: without this the ramp starts from whatever
-       was last scheduled and a duck that interrupts a fade-in jumps. */
-    param.setValueAtTime(param.value, now);
-    param.linearRampToValueAtTime(target, now + Math.max(MIN_RAMP_SECONDS, seconds));
   };
 
   return {
@@ -189,21 +258,97 @@ export function createWebAudioTransports(
           source.loopStart = 0;
           source.loopEnd = buffer.duration;
           const gain = context.createGain();
+          /* The level is settled BEFORE the node is started below, and it is
+             settled in both places that can answer for it: on the param, and in
+             the level that every later ramp anchors from. Neither the graph nor
+             this module can report the bed as louder than it was asked to open. */
           gain.gain.value = request.gain;
+          const level = createLevel(context, gain.gain, request.gain);
           source.connect(gain as never);
           gain.connect(context.destination as never);
-          source.start();
-          let stopped = false;
+          /* Where this pass opens. A resumed bed carries the position its
+             predecessor was parked at, so the operator hears a continuation and
+             not the same eight bars again. */
+          const duration = buffer.duration > 0 ? buffer.duration : 0;
+          const offset = duration > 0 ? Math.max(0, request.offsetSeconds ?? 0) % duration : 0;
+          const openedAt = context.currentTime;
+          source.start(openedAt, offset);
+          /** The node is gone: nothing can be ramped, resumed or heard again. */
+          let released = false;
+          /** A park in flight — the node is fading but still audible. */
+          let park: number | null = null;
+          /**
+           * When that fade ends, ON THE AUDIO CLOCK.
+           *
+           * The timer below only carries out the release; this is what DECIDES
+           * whether the park is over. The two clocks disagree whenever the page
+           * is throttled — a hidden tab's timers are held back while the audio
+           * thread keeps running — and only one of them can be right about
+           * whether the bed is still sounding. It is this one: the fade, the
+           * position and the silence are all on it.
+           */
+          let parkEndsAt = 0;
+          /** Where the parked track will be picked up from. */
+          let retained = 0;
+          /** How far into the track playback has got, wrapped at the loop. */
+          const at = (seconds: number): number => (duration > 0 ? seconds % duration : 0);
+          const position = (): number => at(offset + Math.max(0, context.currentTime - openedAt));
+          const cancelPark = (): void => {
+            if (park === null) return;
+            timers.cancel(park);
+            park = null;
+          };
+          const release = (): void => {
+            cancelPark();
+            released = true;
+            try {
+              source.stop();
+            } catch {
+              /* already stopped */
+            }
+          };
+          /** A park is still takeable only while its fade has not run out. */
+          const parking = (): boolean => park !== null && context.currentTime < parkEndsAt;
           return {
             rampTo(target, seconds) {
-              if (stopped) return;
-              ramp(context, gain.gain, Math.max(0, target), seconds);
+              if (released) return;
+              level.rampTo(Math.max(0, target), seconds);
+            },
+            pause(seconds) {
+              if (released || park !== null) return retained;
+              const fade = Math.max(MIN_RAMP_SECONDS, seconds);
+              /* The bed plays through its whole fade, so the position to come
+                 back to is where the fade ENDS. Retaining where it began would
+                 replay the fade — the same seconds twice, every call. */
+              retained = at(position() + fade);
+              level.rampTo(0, fade);
+              /* And the node lives until then, so a call that ends inside the
+                 fade can take the park back instead of stacking a second voice
+                 on top of one that is still sounding. */
+              parkEndsAt = context.currentTime + fade;
+              park = timers.schedule(release, fade * 1000);
+              return retained;
+            },
+            resume() {
+              if (released) return false;
+              if (park === null) return true;
+              /* The fade has run out: this voice is silent and has played on
+                 past the position anybody retained, so it is NOT the voice to
+                 come back to however late its release timer is. Finish the park
+                 here and make the caller open a fresh one at that position. */
+              if (!parking()) {
+                release();
+                return false;
+              }
+              cancelPark();
+              return true;
             },
             stop(seconds) {
-              if (stopped) return;
-              stopped = true;
+              if (released) return;
+              cancelPark();
+              released = true;
               const fade = Math.max(MIN_RAMP_SECONDS, seconds);
-              ramp(context, gain.gain, 0, fade);
+              level.rampTo(0, fade);
               try {
                 /* Stop only AFTER the fade has run to zero. */
                 source.stop(context.currentTime + fade + 0.05);

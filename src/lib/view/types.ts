@@ -112,6 +112,17 @@ export interface BoardProjectStateV1 {
   updatedAt: string;
   pathAliases?: Record<string, string>;
   explicitManual?: string[];
+  /* Per-key causal revisions: key → the board revision at which that key last
+     changed (see `@/lib/board/keys`). Server-authored on every write and never
+     supplied by a client. This is what lets a device tell "nobody has written
+     this key since I formed my intent" from "it was written twice and happens to
+     read the same" — the ABA case a snapshot comparison cannot see. Optional
+     because boards written before it existed omit it; the store defaults it. */
+  keyRevisions?: Record<string, number>;
+  /* What an ABSENT key reports. Retired-key compaction is bounded, so evicted
+     history must not read as "never written" — every key missing from
+     `keyRevisions` reads this floor instead. Monotonic; server-authored. */
+  keyRevisionFloor?: number;
   prefs: {
     manual: string[];
     hidden: string[];

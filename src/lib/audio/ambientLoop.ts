@@ -5,22 +5,30 @@ import { ambientLoopConfigured } from "./loopAsset";
 import type { AudioPrefs } from "./prefs";
 
 /**
- * The ambient loop: a bed under a live voice call, and nothing else.
+ * The ambient loop: background music in the Viewer, under a call, or both.
  *
  * Rules, in the order they bite:
  *
  * - the sound MASTER setting governs it, exactly as it governs the earcons. One
  *   switch turns product audio on or off; a bed that survived the mute would be
  *   the one sound the operator could not stop;
- * - on top of that master it is opt-in, with its OWN volume — a bed at earcon
- *   volume would be a bed nobody asked for at a level nobody chose. Both are
- *   device-local and persisted, so first run is silent but a device that has
- *   said yes once never has to say it again: persisted-enabled plus a connected
- *   call starts the bed on its own;
- * - it is eligible ONLY while realtime voice is connected. Outside a call there
- *   is nothing for a bed to sit under, so there is no loop;
- * - it fades. Connecting ramps it up over {@link FADE_IN_SECONDS}; the call
- *   ending ramps it down over {@link FADE_OUT_SECONDS} and only then stops the
+ * - on top of that master there are TWO opt-ins — music in the Viewer and music
+ *   during a call — sharing ONE volume. Both are device-local and persisted, so
+ *   first run is silent but a device that has said yes once never has to say it
+ *   again;
+ * - which switch applies is decided by where the operator is: in a call it is
+ *   `loopEnabled`, outside one it is `viewerLoopEnabled`. With BOTH on the
+ *   answer never changes at the call edge, so the same track simply keeps
+ *   playing across it — no teardown, no re-init, no position reset;
+ * - with only one of them on, the edge that silences the music PARKS it: the
+ *   voice fades out and the position that fade ENDS on is retained, so the edge
+ *   that brings it back resumes from there rather than replaying the opening —
+ *   or, if the boundary reverses while the parked voice is still fading, returns
+ *   to that very voice instead of stacking a second one over it. Only a device
+ *   that wants no music at all (master off, both switches off, no asset) tears
+ *   the track down and forgets where it was;
+ * - it fades. Becoming audible ramps up over {@link FADE_IN_SECONDS}; becoming
+ *   silent ramps down over {@link FADE_OUT_SECONDS} and only then releases the
  *   voice. A hard cut on either edge reads as a fault;
  * - it ducks SMOOTHLY under EITHER participant speaking and under priority
  *   cues, and recovers smoothly — every level change here is a ramp, never a
@@ -57,8 +65,27 @@ export type Speaker = "operator" | "agent";
 export interface LoopVoiceHandle {
   /** Ramp the loop gain to `gain` over `seconds`. Always a ramp, never a set. */
   rampTo(gain: number, seconds: number): void;
+  /**
+   * Fade out over `seconds` and park the voice, answering the position the track
+   * will have reached when that fade ENDS — what {@link LoopTransport.start}
+   * resumes from. The voice stays audible for the whole fade.
+   */
+  pause(seconds: number): number;
+  /**
+   * Take a park back. `true` when the voice is still alive and is now playing
+   * again (the caller ramps it up); `false` when the park already completed and
+   * the caller must start a fresh voice at the retained position.
+   */
+  resume(): boolean;
   /** Fade out over `seconds`, then stop. Never an abrupt cut. */
   stop(seconds: number): void;
+}
+
+export interface LoopStartRequest {
+  src: string;
+  gain: number;
+  /** Where in the track to begin; omitted or `0` opens it from the top. */
+  offsetSeconds?: number;
 }
 
 export interface LoopTransport {
@@ -67,7 +94,7 @@ export interface LoopTransport {
    * answers `null` when this device will not play audio right now — the autoplay
    * policy still holds, or the buffer has not decoded yet. Never throws.
    */
-  start(request: { src: string; gain: number }): LoopVoiceHandle | null;
+  start(request: LoopStartRequest): LoopVoiceHandle | null;
 }
 
 export interface AmbientLoopOptions {
@@ -86,6 +113,8 @@ export interface AmbientLoopState {
   /** The gain the loop is heading for, after the ceiling and any duck. */
   gain: number;
   ducked: boolean;
+  /** Position a parked track will resume from; `0` means "open from the top". */
+  resumeAt: number;
 }
 
 export interface AmbientLoop {
@@ -103,9 +132,10 @@ export interface AmbientLoop {
    * makes a persisted "enabled" resume without another gesture.
    */
   refresh(): void;
-  /** Whether the bed SHOULD be sounding: asset, master, opt-in and a connected
-      call all say yes. True while a start attempt is still being refused by the
-      autoplay policy, which is what lets the caller retry. */
+  /** Whether the bed SHOULD be sounding right here: asset, master and the switch
+      that governs the current side of the call boundary all say yes. True while
+      a start attempt is still being refused by the autoplay policy, which is
+      what lets the caller retry. */
   wanted(): boolean;
   state(): AmbientLoopState;
 }
@@ -120,6 +150,11 @@ export function createAmbientLoop(options: AmbientLoopOptions): AmbientLoop {
   const cancel = options.cancel ?? ((handle: number) => clearTimeout(handle));
 
   let voice: LoopVoiceHandle | null = null;
+  /** The voice fading out under a park. Still alive, and still the right one to
+      come back to if the boundary reverses before its fade has run. */
+  let parked: LoopVoiceHandle | null = null;
+  /** Where a parked track resumes: the position its fade-out ends on. */
+  let resumeAt = 0;
   let connected = false;
   let speaking: Speaker | null = null;
   let cueDuck = false;
@@ -132,27 +167,58 @@ export function createAmbientLoop(options: AmbientLoopOptions): AmbientLoop {
     return base;
   };
 
-  /* The master governs the bed and the cues alike; `loopEnabled` is the bed's
-     own opt-in on top of it. */
-  const eligible = (): boolean => {
-    const { cuesEnabled, loopEnabled } = options.prefs();
-    return ambientLoopConfigured(options.asset) && connected && cuesEnabled && loopEnabled;
+  /* The master governs the bed and the cues alike; the two music switches are
+     the bed's own opt-ins on top of it, one per side of the call boundary. */
+  const audible = (): boolean => {
+    const { cuesEnabled, loopEnabled, viewerLoopEnabled } = options.prefs();
+    if (!ambientLoopConfigured(options.asset) || !cuesEnabled) return false;
+    return connected ? loopEnabled : viewerLoopEnabled;
+  };
+
+  /** Whether this device wants music at all — the difference between parking a
+      track for the other side of the boundary and tearing it down for good. */
+  const armed = (): boolean => {
+    const { cuesEnabled, loopEnabled, viewerLoopEnabled } = options.prefs();
+    return ambientLoopConfigured(options.asset) && cuesEnabled && (loopEnabled || viewerLoopEnabled);
   };
 
   /** Bring the voice into line with the current inputs. */
   const apply = (rampSeconds: number): void => {
-    if (!eligible()) {
+    if (!audible()) {
       if (voice) {
-        voice.stop(FADE_OUT_SECONDS);
+        /* Parked, not destroyed, while the other switch still wants this track:
+           the position is what makes the return leg a continuation. */
+        if (armed()) {
+          resumeAt = voice.pause(FADE_OUT_SECONDS);
+          parked = voice;
+        } else {
+          voice.stop(FADE_OUT_SECONDS);
+          parked = null;
+          resumeAt = 0;
+        }
         voice = null;
+      } else if (!armed()) {
+        /* Nothing wants music any more, so there is nothing to come back to. */
+        parked = null;
+        resumeAt = 0;
       }
       return;
     }
     if (!voice) {
+      /* A boundary reversed inside the fade: the parked voice is still sounding,
+         so it is the one to come back to. Opening a second one over it would
+         double the music and flam against itself. */
+      if (parked?.resume()) {
+        voice = parked;
+        parked = null;
+        voice.rampTo(targetGain(), FADE_IN_SECONDS);
+        return;
+      }
+      parked = null;
       /* Starts silent: the fade-in is the whole point of the first ramp. A
          `null` here is the autoplay policy still holding — nothing throws, and
          the next `refresh()` after the unlocking gesture starts the bed. */
-      voice = options.transport.start({ src: options.asset as string, gain: 0 });
+      voice = options.transport.start({ src: options.asset as string, gain: 0, offsetSeconds: resumeAt });
       voice?.rampTo(targetGain(), FADE_IN_SECONDS);
       return;
     }
@@ -204,13 +270,14 @@ export function createAmbientLoop(options: AmbientLoopOptions): AmbientLoop {
       apply(DUCK_RELEASE_SECONDS);
     },
 
-    wanted: eligible,
+    wanted: audible,
 
     state(): AmbientLoopState {
       return {
         playing: voice !== null,
         gain: voice ? targetGain() : 0,
         ducked: Boolean(speaking) || cueDuck,
+        resumeAt,
       };
     },
   };

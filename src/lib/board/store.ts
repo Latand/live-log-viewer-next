@@ -5,6 +5,7 @@ import path from "node:path";
 import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
 
+import { type BoardCausalHistory, canonicalizeKeyRevisions, stampKeyRevisions } from "@/lib/board/keys";
 import { applyBoardMutations, type BoardMutationV1 } from "@/lib/board/mutations";
 import type { BoardFileV1, BoardProjectStateV1 } from "@/lib/view/types";
 
@@ -28,6 +29,10 @@ function aliases(value: unknown): value is Record<string, string> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   return Object.values(value).every((item) => typeof item === "string");
 }
+function keyRevisions(value: unknown): value is Record<string, number> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return Object.values(value).every((item) => Number.isInteger(item) && (item as number) >= 0);
+}
 function projectState(value: unknown): value is BoardProjectStateV1 {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const state = value as Partial<BoardProjectStateV1>;
@@ -39,11 +44,41 @@ function projectState(value: unknown): value is BoardProjectStateV1 {
     (prefs!.expandedEngineTrayParentIds === undefined || stringArray(prefs!.expandedEngineTrayParentIds)) &&
     (state.explicitManual === undefined || stringArray(state.explicitManual)) &&
     (state.pathAliases === undefined || aliases(state.pathAliases)) &&
+    (state.keyRevisions === undefined || keyRevisions(state.keyRevisions)) &&
+    (state.keyRevisionFloor === undefined || (Number.isInteger(state.keyRevisionFloor) && state.keyRevisionFloor! >= 0)) &&
     (prefs!.viewMode === null || prefs!.viewMode === "scheme" || prefs!.viewMode === "list") && typeof prefs!.taskPanelOpen === "boolean";
 }
 
 function emptyBoard(): BoardProjectStateV1 {
-  return { schemaVersion: 1, revision: 0, updatedAt: new Date(0).toISOString(), pathAliases: {}, explicitManual: [], prefs: { ...EMPTY_PREFS, manual: [], hidden: [], expanded: [] } };
+  return { schemaVersion: 1, revision: 0, updatedAt: new Date(0).toISOString(), pathAliases: {}, explicitManual: [], keyRevisions: {}, keyRevisionFloor: 0, prefs: { ...EMPTY_PREFS, manual: [], hidden: [], expanded: [] } };
+}
+
+/** The durable form of a reduction: the new revision, plus a causal revision
+    stamped onto every key this write changed. Every write path goes through
+    here, so no path can advance the board without advancing its keys — a key
+    that changed without its revision moving is a silent hole in the fence. */
+function committed(
+  current: BoardProjectStateV1,
+  reduced: BoardProjectStateV1,
+  revision: number,
+  inherited: readonly BoardCausalHistory[] = [],
+): BoardProjectStateV1 {
+  return {
+    ...reduced,
+    schemaVersion: 1,
+    revision,
+    updatedAt: new Date().toISOString(),
+    pathAliases: reduced.pathAliases ?? {},
+    ...stampKeyRevisions(current, reduced, revision, inherited),
+  };
+}
+
+/** Two boards carry the same durable causal history. A migration that moves no
+    content can still move history, and that has to be persisted — otherwise the
+    source's clocks are silently discarded on the "nothing changed" path. */
+function sameCausalHistory(left: BoardProjectStateV1, right: BoardProjectStateV1): boolean {
+  return JSON.stringify({ keys: left.keyRevisions ?? {}, floor: left.keyRevisionFloor ?? 0 })
+    === JSON.stringify({ keys: right.keyRevisions ?? {}, floor: right.keyRevisionFloor ?? 0 });
 }
 
 function read(filePath: string): BoardFileV1 {
@@ -55,6 +90,14 @@ function read(filePath: string): BoardFileV1 {
       ...state,
       pathAliases: state.pathAliases ?? {},
       explicitManual: state.explicitManual ?? state.prefs.manual,
+      /* A board written before per-key causal revisions existed reads back with
+         an empty map: every key then looks never-written, which is exactly right
+         — no client can hold intent that predates a revision nobody recorded. */
+      /* Canonicalized on read: an alias source must never keep a clock of its
+         own, or two names for one conversation carry independent causal history
+         and a stale writer holding the old name looks unopposed. */
+      keyRevisions: canonicalizeKeyRevisions(state.keyRevisions ?? {}, state.pathAliases ?? {}),
+      keyRevisionFloor: state.keyRevisionFloor ?? 0,
       /* Boards written before favorites / tray intent existed lack the fields;
          default them so every GET response and reducer input carries the
          durable-id lists (issue #185 favorites, issue #142 tray pins). */
@@ -173,7 +216,15 @@ export function boardFor(project: string, filePath = boardFileForTests ?? BOARD_
   return read(filePath).projects[project] ?? emptyBoard();
 }
 export type BoardPatch = Partial<BoardProjectStateV1["prefs"]>;
-type BoardWriteResult = { ok: true; board: BoardProjectStateV1 } | { ok: false; board: BoardProjectStateV1 };
+/* `applied` distinguishes a write that committed from one the reducer turned
+   into a no-op. A no-op is accepted from ANY base revision, so an accepted
+   response can carry a board a DIFFERENT writer produced — and when both writers
+   made the same change the two boards are indistinguishable by content. Only the
+   server knows which happened, so it says so, and the client uses it to decide
+   whether the response is its own work or a foreign adoption (#38). */
+type BoardWriteResult =
+  | { ok: true; applied: boolean; board: BoardProjectStateV1 }
+  | { ok: false; board: BoardProjectStateV1 };
 
 function applyLegacyPatch(current: BoardProjectStateV1, patch: BoardPatch): BoardProjectStateV1 {
   const hidden = patch.hidden === undefined
@@ -196,12 +247,12 @@ function writeReduced(project: string, baseRevision: number, reduce: (current: B
     const value = read(filePath);
     const current = value.projects[project] ?? emptyBoard();
     const reduced = reduce(current);
-    if (sameReduced(current, reduced)) return { ok: true, board: current };
+    if (sameReduced(current, reduced)) return { ok: true, applied: false, board: current };
     if (current.revision !== baseRevision) return { ok: false, board: current };
-    const next: BoardProjectStateV1 = { ...reduced, schemaVersion: 1, revision: current.revision + 1, updatedAt: new Date().toISOString(), pathAliases: reduced.pathAliases ?? {} };
+    const next = committed(current, reduced, current.revision + 1);
     value.projects[project] = next;
     write(value, filePath);
-    return { ok: true, board: next };
+    return { ok: true, applied: true, board: next };
   });
 }
 
@@ -211,20 +262,14 @@ function writeLatest(project: string, reduce: (current: BoardProjectStateV1) => 
     const current = value.projects[project] ?? emptyBoard();
     const reduced = reduce(current);
     if (sameReduced(current, reduced)) return current;
-    const next: BoardProjectStateV1 = {
-      ...reduced,
-      schemaVersion: 1,
-      revision: current.revision + 1,
-      updatedAt: new Date().toISOString(),
-      pathAliases: reduced.pathAliases ?? {},
-    };
+    const next = committed(current, reduced, current.revision + 1);
     value.projects[project] = next;
     write(value, filePath);
     return next;
   });
 }
 
-export function patchBoard(project: string, baseRevision: number, patch: BoardPatch, filePath = boardFileForTests ?? BOARD_FILE): { ok: true; board: BoardProjectStateV1 } | { ok: false; board: BoardProjectStateV1 } {
+export function patchBoard(project: string, baseRevision: number, patch: BoardPatch, filePath = boardFileForTests ?? BOARD_FILE): BoardWriteResult {
   return writeReduced(project, baseRevision, (current) => applyLegacyPatch(current, patch), filePath);
 }
 
@@ -336,20 +381,12 @@ export function transferBoardPathPlacements(
         };
       }
       if (!sameReduced(storedSource, source)) {
-        value.projects[transfer.fromProject] = {
-          ...source,
-          revision: storedSource.revision + 1,
-          updatedAt: new Date().toISOString(),
-        };
+        value.projects[transfer.fromProject] = committed(storedSource, source, storedSource.revision + 1);
         changed = true;
       }
       const storedTarget = value.projects[transfer.toProject] ?? emptyBoard();
       if (!sameReduced(storedTarget, target)) {
-        value.projects[transfer.toProject] = {
-          ...target,
-          revision: storedTarget.revision + 1,
-          updatedAt: new Date().toISOString(),
-        };
+        value.projects[transfer.toProject] = committed(storedTarget, target, storedTarget.revision + 1);
         changed = true;
       }
     }
@@ -438,13 +475,22 @@ export function migrateBoardProjects(
       try {
         const states = target ? [target, ...sources] : sources;
         const merged = mergedBoards(states);
-        value.projects[targetProject] = target && sameReduced(target, merged)
+        /* The sources' causal history comes along. A migrated key is the SAME
+           logical key, so dropping the clocks of the boards being folded in
+           rewinds those keys past writes that really happened and un-fences
+           intent formed before them. Merged by maximum, so the unified board is
+           never behind any contributor. Note this can differ from the target
+           even when the CONTENT is identical, which is exactly the case that was
+           silently losing history. */
+        const next = committed(
+          target ?? emptyBoard(),
+          merged,
+          Math.max(...states.map((state) => state.revision)) + 1,
+          sources,
+        );
+        value.projects[targetProject] = target && sameReduced(target, next) && sameCausalHistory(target, next)
           ? target
-          : {
-              ...merged,
-              revision: Math.max(...states.map((state) => state.revision)) + 1,
-              updatedAt: new Date().toISOString(),
-            };
+          : next;
         for (const sourceProject of sourceProjects) delete value.projects[sourceProject];
         changed = true;
       } catch {
