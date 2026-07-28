@@ -87,6 +87,13 @@ function stagingEnvironment(context: StagingContainerContext): Record<string, st
     LLV_RUNTIME_HOST_SOCKET: context.paths.runtimeSocket,
     LLV_LEGACY_TMUX_EXTERNAL: context.tmux.legacyTmuxExternal,
     TMUX_TMPDIR: context.tmux.tmuxTmpdir,
+    /* The manager's default cwd must name a checkout the HOST can see. Inside the
+       container process.cwd() is /app, which the orchestrator route would fall back
+       to and file the manager under a phantom "-app" project. Passed through from
+       the deploying shell so no host path is baked into the repo. */
+    ...(process.env.LLV_ORCHESTRATOR_CWD?.trim()
+      ? { LLV_ORCHESTRATOR_CWD: process.env.LLV_ORCHESTRATOR_CWD.trim() }
+      : {}),
   });
   delete snapshot.LLV_VIEWER_DEPLOY_TARGET;
   delete snapshot.LLV_VIEWER_PORT;

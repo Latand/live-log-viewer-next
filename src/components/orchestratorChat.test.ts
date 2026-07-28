@@ -19,9 +19,9 @@ function fetchStub(handlers: Record<string, (init?: RequestInit) => Response>): 
   return { calls, fetch: stub };
 }
 
-test("spawn body carries the fable-low orchestrator preset and the system prompt", () => {
+test("spawn body carries the opus-low orchestrator preset and the system prompt", () => {
   const body = orchestratorSpawnBody("/repo");
-  expect(body).toMatchObject({ engine: "claude", model: "fable", effort: "low", role: "orchestrator", cwd: "/repo" });
+  expect(body).toMatchObject({ engine: "claude", model: "opus", effort: "low", role: "orchestrator", cwd: "/repo" });
   expect(String(body.prompt)).toContain("NEVER auto-start pipelines");
 });
 
