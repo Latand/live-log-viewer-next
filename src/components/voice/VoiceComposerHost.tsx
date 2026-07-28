@@ -4,17 +4,19 @@ import { useEffect, useSyncExternalStore } from "react";
 
 import { TmuxComposerCore } from "@/components/TmuxComposer";
 import {
-  getActiveCall,
-  getServerActiveCall,
+  getLiveCall,
+  getServerLiveCall,
   subscribeActiveCall,
 } from "@/lib/realtime/activeCall";
 
 import {
   announceVoiceComposerHost,
+  forgetVoiceComposerCardProps,
   getServerVoiceSlotsVersion,
   getVoiceComposerCardIds,
   getVoiceComposerCardNode,
   getVoiceComposerCardProps,
+  getVoiceComposerCardPropsIds,
   getVoiceSlotsVersion,
   subscribeVoiceSlots,
 } from "./voiceSlots";
@@ -32,14 +34,19 @@ import {
  *
  * One instance per conversation, keyed by the stable card identity:
  * - a mounted card publishes its place and fresh props → the form renders there;
- * - the card leaves while its conversation has (or last had) the call → the
- *   composer parks hidden, still mounted: the recording keeps recording, object
- *   URLs stay valid, the outbox keeps draining, and the PiP window — whose
- *   composer slot the form's `ComposerBar` portals into independently — keeps
- *   its fully working composer;
- * - the card leaves with no call on that conversation → the composer unmounts,
+ * - the card leaves while a call is UP on its conversation → the composer parks
+ *   hidden, still mounted: the recording keeps recording, object URLs stay valid,
+ *   the outbox keeps draining, and the PiP window — whose composer slot the
+ *   form's `ComposerBar` portals into independently — keeps its fully working
+ *   composer;
+ * - the card leaves with no call up on that conversation → the composer unmounts,
  *   exactly as a card-scoped one always did (the draft survives in
  *   sessionStorage either way).
+ *
+ * Liveness is read from `getLiveCall`, NOT from the retained `getActiveCall`.
+ * The retained projection keeps naming the last conversation that had a call so
+ * its ended transcript stays on screen — read here, that would park a hidden
+ * composer for a call that finished hours ago and never release it.
  *
  * Cards only defer to this host while one is mounted (`announceVoiceComposerHost`),
  * so isolated trees — component tests, the demo renderer — keep today's inline
@@ -49,14 +56,25 @@ export function VoiceComposerHost() {
   /* One subscription for the whole registry: places, props and host presence all
      notify through it, and the version number is the stable snapshot. */
   useSyncExternalStore(subscribeVoiceSlots, getVoiceSlotsVersion, getServerVoiceSlotsVersion);
-  const activeCall = useSyncExternalStore(subscribeActiveCall, getActiveCall, getServerActiveCall);
+  const liveCall = useSyncExternalStore(subscribeActiveCall, getLiveCall, getServerLiveCall);
 
   useEffect(() => announceVoiceComposerHost(), []);
 
-  /* Every conversation with a card on screen, plus the one whose call outlives
-     its card (`activeCall` retains the last call's conversation on purpose). */
+  /* Every conversation with a card on screen, plus the one whose LIVE call
+     outlives its card. */
   const conversationIds = new Set(getVoiceComposerCardIds());
-  if (activeCall) conversationIds.add(activeCall.conversationId);
+  if (liveCall) conversationIds.add(liveCall.conversationId);
+
+  /* The card's props are retained past its unmount on purpose — a parked composer
+     needs something to render with — so nothing retracts them at the seam. This
+     is where they stop being needed: a conversation this host no longer renders a
+     composer for keeps no `FileEntry` snapshot alive. Runs after commit, so the
+     render above always had the props it was about to use. */
+  useEffect(() => {
+    for (const cardId of getVoiceComposerCardPropsIds()) {
+      if (!conversationIds.has(cardId)) forgetVoiceComposerCardProps(cardId);
+    }
+  });
 
   return (
     <>
