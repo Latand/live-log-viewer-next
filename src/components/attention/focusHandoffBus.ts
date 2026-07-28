@@ -54,8 +54,33 @@ export interface ShellNavigator {
   /** The open project, or null on the overview. */
   project: string | null;
   openProject(project: string): void;
-  /** Open a conversation by transcript path — what `intent: "open"` means. */
+  /** Open a conversation by transcript path — what `intent: "open"` means.
+      This is a NAVIGATION: it places the card and glides the camera to it. */
   openPath(path: string): void;
+  /**
+   * Put a card into the layout WITHOUT moving the camera to it.
+   *
+   * `openPath` does two things at once — it materializes the node and it arms
+   * the board's pending-focus channel, which flashes the node and glides the
+   * camera. A handoff needs only the first: it has its own destination, at its
+   * own zoom, and issues it through `moveTo`. Calling `openPath` to reveal a
+   * missing card therefore bought the placement at the price of a second,
+   * competing camera move that raced the one the handoff actually wanted.
+   *
+   * So placement is separable and this is the half that does it.
+   */
+  placePath(path: string): void;
+  /**
+   * Leave every project and show the overview.
+   *
+   * `openProject` cannot express this: the overview is the ABSENCE of an open
+   * project, which is why `project` reads null there. Without a way to say it,
+   * a return point captured on the overview had nowhere to go — the restore
+   * skipped the project switch, found no camera (the overview has none) and no
+   * focused path, and the Back control the operator had been offered did
+   * nothing at all.
+   */
+  openOverview(): void;
 }
 
 export interface FocusHandoffBus {
