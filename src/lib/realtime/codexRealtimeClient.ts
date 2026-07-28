@@ -118,9 +118,42 @@ export function parseCodexRealtimeEvent(value: unknown): ParsedRealtimeEvent {
   return { kind: "ignored" };
 }
 
+/**
+ * The screen-facing marker for an authorization refusal on the transport controls.
+ *
+ * The backend's refusal text is internal English written for agents and logs
+ * (`realtimeInjection.ts`), and it must never reach the operator's screen raw. The
+ * client cannot localize — it holds no locale — so it stores this marker and the
+ * one status surface (the panel's error strip) maps it to `t("voice.unauthorized")`.
+ * The stale-credential tab is the real case: the operator credential is minted per
+ * server process, so after a restart an open tab still presents yesterday's value
+ * and the backend rightly refuses it.
+ */
+export const VOICE_UNAUTHORIZED = "__voice_unauthorized__";
+
+class RealtimeRequestError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
+/** The status-aware error text a failed call stores: authorization refusals become
+    the localizable marker, everything else stays verbatim (#664). */
+function callErrorText(error: unknown): string {
+  if (error instanceof RealtimeRequestError && (error.status === 401 || error.status === 403)) {
+    return VOICE_UNAUTHORIZED;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
 async function responseJson(response: Response): Promise<Record<string, unknown>> {
   const body = await response.json().catch(() => ({})) as Record<string, unknown>;
-  if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : `Realtime request failed (${response.status})`);
+  if (!response.ok) {
+    throw new RealtimeRequestError(
+      typeof body.error === "string" ? body.error : `Realtime request failed (${response.status})`,
+      response.status,
+    );
+  }
   return body;
 }
 
@@ -308,7 +341,7 @@ class CodexRealtimeClient {
     } catch (error) {
       if (epoch !== this.epoch) return;
       this.cleanupTransport();
-      this.setError(error instanceof Error ? error.message : String(error));
+      this.setError(callErrorText(error));
     }
   }
 
@@ -328,7 +361,7 @@ class CodexRealtimeClient {
         }),
       }));
     } catch (error) {
-      failure = error instanceof Error ? error.message : String(error);
+      failure = callErrorText(error);
     }
     /* Canonical pending deliveries intentionally survive an explicit hangup.
        A later Live Mode start retries the same stable id and the host resumes

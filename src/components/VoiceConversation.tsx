@@ -7,9 +7,10 @@ import { AudioLines, Mic, MicOff, Volume2, VolumeX } from "lucide-react";
 import { Loader2, RotateCw, Square } from "@/components/icons";
 import { Hint } from "@/components/Hint";
 import type { TFunction } from "@/lib/i18n";
-import type {
-  CodexRealtimeLine,
-  CodexRealtimePhase,
+import {
+  VOICE_UNAUTHORIZED,
+  type CodexRealtimeLine,
+  type CodexRealtimePhase,
 } from "@/lib/realtime/codexRealtimeClient";
 
 export function VoiceConversationButton({
@@ -342,13 +343,18 @@ export function VoiceConversationPanel({
 
       {/* A failed call is the one state that needs an action attached: the
           reason comes from the backend verbatim (#664) and the operator's next
-          move is almost always to try again. */}
+          move is almost always to try again. The one exception is an
+          authorization refusal — its backend text is internal English written
+          for agents, so the client stores a marker and THIS strip (the single
+          authoritative status surface) renders the localized explanation. */}
       {error ? (
         <div
           role="alert"
           className="flex items-start gap-2 border-t border-danger/30 bg-danger/5 px-2 py-1.5"
         >
-          <p className="min-w-0 flex-1 text-label text-danger">{error}</p>
+          <p className="min-w-0 flex-1 text-label text-danger">
+            {error === VOICE_UNAUTHORIZED ? t("voice.unauthorized") : error}
+          </p>
           {onRetry ? (
             <button
               type="button"
