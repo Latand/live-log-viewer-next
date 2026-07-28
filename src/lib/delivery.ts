@@ -135,6 +135,9 @@ export async function reconfigureConversation(
     permissionMode: profile?.permissionMode ?? null,
     allowSubagents: profile?.allowSubagents ?? false,
     plugins: profile?.plugins,
+    /* Every relaunch carries the durable grant (#739); dropping it here rebuilt
+       the command on the Viewer baseline while the profile still claimed it. */
+    mcpServers: profile?.mcpServers,
   });
   const deliver = overrides.deliver ?? deliverToTranscriptHost;
   const observedHost = await (overrides.livePaneHost ?? livePaneHost)(filePath);
@@ -359,11 +362,17 @@ export async function resumeConversation(
   }
   const entry = (await (overrides.listFiles ?? listFiles)()).find((item) => item.path === filePath);
   if (!entry) return failure("file is unknown to the viewer", 403);
+  const profile = registry.launchProfileForPath(entry.path);
   const spec = (overrides.resumeSpecFor ?? resumeSpecFor)(entry.root, entry.path, {
     model: entry.launchModel ?? entry.model,
     effort: entry.effort,
-    allowSubagents: registry.launchProfileForPath(entry.path)?.allowSubagents,
-    plugins: registry.launchProfileForPath(entry.path)?.plugins,
+    allowSubagents: profile?.allowSubagents,
+    plugins: profile?.plugins,
+    /* The durable grant travels with the resume (#739). Omitting it silently
+       relaunched the session on the Viewer baseline while the profile went on
+       claiming the grant — durable state and running process disagreeing. The
+       stored list is already origin-bounded when the registry reads it. */
+    mcpServers: profile?.mcpServers,
   });
   if (!spec) return failure("this conversation cannot be resumed", 409);
   try {
@@ -640,12 +649,14 @@ export async function deliverConversationMessage(message: ConversationMessage, o
     if (!entry) {
       return settle(failure("file is unknown to the viewer", 403));
     }
+    const entryProfile = registry.launchProfileForPath(entry.path);
     const spec = (overrides.resumeSpecFor ?? resumeSpecFor)(entry.root, entry.path, {
       model: message.resumeModel ?? entry.launchModel ?? entry.model,
       effort: message.resumeEffort ?? entry.effort,
       ...(typeof message.resumeFast === "boolean" ? { fast: message.resumeFast } : {}),
-      allowSubagents: registry.launchProfileForPath(entry.path)?.allowSubagents,
-      plugins: registry.launchProfileForPath(entry.path)?.plugins,
+      allowSubagents: entryProfile?.allowSubagents,
+      plugins: entryProfile?.plugins,
+      mcpServers: entryProfile?.mcpServers,
     });
     if (spec) {
       const bundle = materializePayload();
@@ -669,11 +680,13 @@ export async function deliverConversationMessage(message: ConversationMessage, o
     }
     /* Resolved before saving anything: the root's live pane or resume spec
        must exist, or the request is rejected without ever writing an image. */
+    const rootProfile = registry.launchProfileForPath(root.path);
     const rootSpec = (overrides.resumeSpecFor ?? resumeSpecFor)(root.root, root.path, {
       model: root.launchModel ?? root.model,
       effort: root.effort,
-      allowSubagents: registry.launchProfileForPath(root.path)?.allowSubagents,
-      plugins: registry.launchProfileForPath(root.path)?.plugins,
+      allowSubagents: rootProfile?.allowSubagents,
+      plugins: rootProfile?.plugins,
+      mcpServers: rootProfile?.mcpServers,
     });
     if (!rootSpec) {
       return settle(failure("root session is unavailable for messaging", 409));

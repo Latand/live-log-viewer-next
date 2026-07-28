@@ -87,7 +87,7 @@ test("spawn admission rejects malformed MCP allowlists", async () => {
   expect(await response.json()).toEqual({ error: "mcpServers must be an array of non-empty server names" });
 });
 
-test("spawn admission persists Viewer-only defaults and normalized custom MCP allowlists", async () => {
+test("spawn admission grants MCP servers by session origin and refuses ungranted names", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "mcp-allowlist-"));
   const store = registry();
   const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
@@ -103,23 +103,37 @@ test("spawn admission persists Viewer-only defaults and normalized custom MCP al
   try {
     const dependencies = { ...structuredRouteDependencies(cwd), registry: () => store };
     const capability = rotateOperatorSpawnCapability();
-    const post = async (clientAttemptId: string, mcpServers?: unknown) => POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+    const post = async (clientAttemptId: string, mcpServers?: unknown, role: string | null = "builder") => POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
       method: "POST",
       headers: {
         origin: "http://127.0.0.1",
         host: "127.0.0.1",
         "content-type": "application/json",
         "x-llv-spawn-capability": capability,
+        /* No role means the operator lane: a same-origin launch with no lineage
+           parent and no preset is the operator-root session class. */
+        ...(role ? {} : { "sec-fetch-site": "same-origin" }),
       },
-      body: JSON.stringify({ engine: "claude", model: "claude-sonnet-4-6", cwd, prompt: "inspect", role: "builder", clientAttemptId, ...(mcpServers === undefined ? {} : { mcpServers }) }),
+      body: JSON.stringify({ engine: "claude", model: "claude-sonnet-4-6", cwd, prompt: "inspect", ...(role ? { role } : {}), clientAttemptId, ...(mcpServers === undefined ? {} : { mcpServers }) }),
     }), dependencies);
 
     const defaultResponse = await post("mcp_default_20260723");
     expect({ status: defaultResponse.status, body: await defaultResponse.clone().json() }).toMatchObject({ status: 202 });
-    expect((await post("mcp_custom_20260723", ["agent-browser", "viewer", "agent-browser"])).status).toBe(202);
+    /* An explicit opt-out is honoured on both lanes and still yields Viewer. */
+    expect((await post("mcp_optout_20260723", [])).status).toBe(202);
+    /* A name outside the grant bound is refused, not trimmed — from the
+       operator lane as much as from a delegated one (issue #739). Tranche 1
+       ships that bound empty of connectors, so this covers every configured
+       server, `agent-browser` included. */
+    for (const [attempt, role] of [["mcp_ungranted_delegated_20260727", "builder"], ["mcp_ungranted_root_20260727", null]] as const) {
+      const ungranted = await post(attempt, ["agent-browser"], role);
+      expect(ungranted.status).toBe(400);
+      expect(await ungranted.json()).toMatchObject({ error: expect.stringContaining("agent-browser") });
+      expect(store.spawnReceiptForClientAttempt(attempt)).toBeNull();
+    }
 
     expect(store.spawnReceiptForClientAttempt("mcp_default_20260723")?.launchProfile.mcpServers).toEqual(["viewer"]);
-    expect(store.spawnReceiptForClientAttempt("mcp_custom_20260723")?.launchProfile.mcpServers).toEqual(["viewer", "agent-browser"]);
+    expect(store.spawnReceiptForClientAttempt("mcp_optout_20260723")?.launchProfile.mcpServers).toEqual(["viewer"]);
   } finally {
     if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
     else process.env.LLV_SPAWN_TRANSPORT = previousTransport;

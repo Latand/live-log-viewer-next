@@ -120,7 +120,7 @@ test("Claude spawn policy seeds a fresh account from the shared user settings sn
   expect(settings.hooks.PreToolUse).toHaveLength(1);
 });
 
-test("Claude native MCP config forces Viewer into a custom allowlist and omits unrelated servers", () => {
+test("Claude native MCP config keeps only granted servers out of the operator's registrations", () => {
   const accountHome = home();
   fs.writeFileSync(path.join(accountHome, ".claude.json"), JSON.stringify({
     mcpServers: {
@@ -139,9 +139,10 @@ test("Claude native MCP config forces Viewer into a custom allowlist and omits u
     mcpServers: Record<string, unknown>;
   };
 
+  /* Viewer is forced in; every other registered server stays out, including the
+     one the allowlist named, because the grant bound excludes it (#739). */
   expect(mcpConfig.mcpServers).toEqual({
     viewer: { type: "stdio", command: "viewer-mcp", args: ["--viewer"] },
-    "agent-browser": { type: "stdio", command: "browser-mcp" },
   });
 });
 
@@ -169,26 +170,26 @@ test("Claude native MCP config merges project scope between user and local scope
   const cwd = path.join(projectRoot, "packages", "worker");
   fs.mkdirSync(path.join(projectRoot, ".git"), { recursive: true });
   fs.mkdirSync(cwd, { recursive: true });
+  /* Scope precedence is exercised on `viewer`: it is the only server the grant
+     bound admits this tranche, and every scope may redefine it. */
   fs.writeFileSync(path.join(accountHome, "settings.json"), JSON.stringify({
-    enabledMcpjsonServers: ["project-allowed"],
+    enabledMcpjsonServers: ["viewer"],
   }));
   fs.writeFileSync(path.join(accountHome, ".claude.json"), JSON.stringify({
     mcpServers: {
       viewer: { type: "stdio", command: "viewer-user" },
-      "project-allowed": { type: "stdio", command: "user-version" },
-      "local-wins": { type: "stdio", command: "user-local" },
     },
     projects: {
       [cwd]: {
         mcpServers: {
-          "local-wins": { type: "stdio", command: "local-version", env: { LOCAL_AUTH: "kept" } },
+          viewer: { type: "stdio", command: "local-version", env: { LOCAL_AUTH: "kept" } },
         },
       },
     },
   }));
   fs.writeFileSync(path.join(projectRoot, ".mcp.json"), JSON.stringify({
     mcpServers: {
-      "project-allowed": {
+      viewer: {
         type: "stdio",
         command: "project-version",
         args: ["--project"],
@@ -196,15 +197,31 @@ test("Claude native MCP config merges project scope between user and local scope
         timeout: 12_345,
         alwaysLoad: true,
       },
-      "local-wins": { type: "stdio", command: "project-local" },
       "project-unrelated": { type: "stdio", command: "unrelated-project" },
     },
   }));
 
+  /* Shared project scope wins over the user root definition where the launch
+     directory carries no local override of its own. */
+  const sharedInstalled = applyClaudeSpawnPolicy(accountHome, {
+    profileId: "project-scopes-shared",
+    cwd: projectRoot,
+  });
+  const sharedConfig = JSON.parse(fs.readFileSync(sharedInstalled.mcpConfigPath, "utf8")) as {
+    mcpServers: Record<string, unknown>;
+  };
+  expect(sharedConfig.mcpServers.viewer).toEqual({
+    type: "stdio",
+    command: "project-version",
+    args: ["--project"],
+    env: { PROJECT_AUTH: "kept" },
+    timeout: 12_345,
+    alwaysLoad: true,
+  });
+
   const installed = applyClaudeSpawnPolicy(accountHome, {
     profileId: "project-scopes",
     cwd,
-    mcpServers: ["project-allowed", "local-wins"],
   });
   const mcpConfig = JSON.parse(fs.readFileSync(installed.mcpConfigPath, "utf8")) as {
     mcpServers: Record<string, unknown>;
@@ -214,21 +231,37 @@ test("Claude native MCP config merges project scope between user and local scope
     disabledMcpjsonServers: string[];
   };
 
+  /* The launch directory's local definition wins over both. */
   expect(mcpConfig.mcpServers).toEqual({
-    viewer: { type: "stdio", command: "viewer-user" },
-    "project-allowed": {
-      type: "stdio",
-      command: "project-version",
-      args: ["--project"],
-      env: { PROJECT_AUTH: "kept" },
-      timeout: 12_345,
-      alwaysLoad: true,
-    },
-    "local-wins": { type: "stdio", command: "local-version", env: { LOCAL_AUTH: "kept" } },
+    viewer: { type: "stdio", command: "local-version", env: { LOCAL_AUTH: "kept" } },
   });
   expect(mcpConfig.mcpServers).not.toHaveProperty("project-unrelated");
-  expect(settings.enabledMcpjsonServers).toEqual(["project-allowed"]);
+  expect(settings.enabledMcpjsonServers).toEqual(["viewer"]);
   expect(settings.disabledMcpjsonServers).toEqual(["project-unrelated"]);
+});
+
+test("an ungranted server in a stored allowlist never reaches the Claude MCP config", () => {
+  const accountHome = home();
+  fs.writeFileSync(path.join(accountHome, ".claude.json"), JSON.stringify({
+    mcpServers: {
+      viewer: { type: "stdio", command: "viewer-mcp" },
+      "agent-browser": { type: "stdio", command: "browser-mcp" },
+      telegram: { type: "stdio", command: "telegram-mcp" },
+    },
+  }));
+
+  /* A launch profile hand-edited to name an ungranted server is re-bounded
+     where the command materializes it, not trusted from storage (issue #739). */
+  const installed = applyClaudeSpawnPolicy(accountHome, {
+    profileId: "rebounded",
+    cwd: "/repo",
+    mcpServers: ["viewer", "telegram", "agent-browser"],
+  });
+  const mcpConfig = JSON.parse(fs.readFileSync(installed.mcpConfigPath, "utf8")) as {
+    mcpServers: Record<string, unknown>;
+  };
+
+  expect(Object.keys(mcpConfig.mcpServers)).toEqual(["viewer"]);
 });
 
 test("allowSubagents uses an isolated profile while the denied profile stays enforced", () => {

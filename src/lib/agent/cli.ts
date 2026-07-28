@@ -8,7 +8,7 @@ import { accountForSpawn, codexHomeOwningSessionPath, isManagedCodexHome } from 
 import { claudeHomeOwningTranscript, claudeSettingsPath, isManagedClaudeHome, legacyClaudeHome } from "@/lib/accounts/claude";
 
 import { claudeTranscriptPath, headCwd } from "./transcript";
-import { normalizeSpawnMcpServers } from "./mcpAllowlist";
+import { grantedMcpServers } from "./mcpAllowlist";
 import { grantedPlugins } from "./pluginAllowlist";
 import { normalizeClaudeLaunchModel } from "./models";
 import { applyClaudeSpawnPolicy, claudeSpawnPolicyPaths, VIEWER_SPAWN_CAPABILITY_ENV } from "./spawnPolicy";
@@ -164,10 +164,12 @@ export interface ResumeSpecOptions {
   hostTerminal?: boolean;
 }
 
+/* Re-validation on the way out of the durable launch profile (issue #739): a
+   resume or attach replays a stored allowlist, and a stored allowlist can be
+   edited by hand, so the command is rendered from the re-bounded list instead
+   of the stored one. A resume can therefore never widen its own surface. */
 function normalizedMcpServers(value: readonly string[] | undefined): string[] {
-  const normalized = normalizeSpawnMcpServers(value);
-  if (!normalized.ok) throw new Error(normalized.error);
-  return normalized.value;
+  return grantedMcpServers(value);
 }
 
 function configuredCodexMcpServers(home: string, cwd: string): string[] {
