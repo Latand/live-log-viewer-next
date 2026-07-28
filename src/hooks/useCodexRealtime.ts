@@ -115,6 +115,16 @@ export function useAmbientCallLease(live: boolean, speaking: Speaker | null = nu
   }, [live, speaking]);
 }
 
+/**
+ * The call's whole claim on the ambient bed — the lease plus the speaker read off
+ * the transcript. Mounted by `VoicePipHost`, the Viewer-level owner of the call's
+ * presentation, and nowhere else: a card-scoped lease died with its card on board
+ * navigation and let the music back up mid-call.
+ */
+export function useCallAmbience(live: boolean, lines: readonly CodexRealtimeLine[]): void {
+  useAmbientCallLease(live, useCurrentCallSpeaker(live, lines));
+}
+
 export function useCodexRealtime(
   conversationId: string,
   enabled: boolean,
@@ -140,14 +150,9 @@ export function useCodexRealtime(
     client?.reconcileWorkerDeliveries(workerDeliveries);
   }, [client, snapshot.phase, workerDeliveries]);
 
-  /* Which side of the call boundary the background music is on, and who has the
-     floor. `live` is the only phase with two participants who can talk;
-     connecting, stopping and error are not a call. Speech is read off the
-     transcript this call already produces — no analyser node, no second event
-     path — and the music ducks under it. */
-  const live = snapshot.phase === "live";
-  const speaking = useCurrentCallSpeaker(live, snapshot.lines);
-  useAmbientCallLease(live, speaking);
+  /* The ambient lease deliberately does NOT live here any more: this hook is
+     card-scoped and the card unmounts mid-call on board navigation. The music's
+     lease and duck belong to `VoicePipHost` via `useCallAmbience`. */
 
   return {
     ...snapshot,
