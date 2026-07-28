@@ -124,7 +124,9 @@ export async function PATCH(request: NextRequest): Promise<NextResponse> {
       ? mutateBoard(payload.project, payload.baseRevision, mutationsWithConversationAliases(payload.mutations))
       : patchBoard(payload.project, payload.baseRevision, payload.patch!);
     if (!result.ok) return NextResponse.json({ error: "BOARD_REVISION_CONFLICT", board: result.board }, { status: 409, headers });
-    return NextResponse.json({ ok: true, board: result.board }, { headers });
+    /* `applied` lets the caller tell its own committed write from a no-op that
+       was accepted against a board some other writer produced (#38). */
+    return NextResponse.json({ ok: true, applied: result.applied, board: result.board }, { headers });
   } catch (error) {
     if (error instanceof ViewValidationError) return NextResponse.json({ error: error.code, message: error.message }, { status: error.status, headers });
     if (error instanceof BoardStoreError) return NextResponse.json({ error: "INTERNAL_ERROR", message: "board state unavailable" }, { status: 500, headers });
