@@ -1191,27 +1191,24 @@ test("an entry no conversation owns keeps its grant per row and loses it in an a
   expect(assembled.entries["codex:orphan"]!.launchProfile!.mcpServers).toEqual(["viewer"]);
 });
 
+const STORE_SOURCE = () => fs.readFileSync(path.join(import.meta.dir, "sqliteRegistryStore.ts"), "utf8");
+
 /**
- * Every `SqliteAgentRegistryStore` method that reaches a row writer, read out of
- * the SOURCE rather than listed by hand.
+ * Every `SqliteAgentRegistryStore` method that writes a registry row, found by
+ * what it CALLS rather than by name, so a new one cannot be added quietly.
  *
- * The origin half of the grant bound is a PRECONDITION of a row being observed
- * or written, and this lane has now reopened that ordering twice — once because
- * a mutation ran on lazily normalized rows, once because a wholesale
- * replacement carried its payload in from outside. A new mutation path is the
- * obvious third way in, so it has to fail here until somebody exercises it,
- * rather than quietly inheriting whatever gate the path it was copied from had.
+ * `upsertRow` is the single statement that puts a row in the table, so any
+ * method reaching it is a row writer whatever it is called.
  */
-function storeMutationEntryPoints(): string[] {
-  const lines = fs.readFileSync(path.join(import.meta.dir, "sqliteRegistryStore.ts"), "utf8").split("\n");
-  const writes = /this\.(persistAll|persistDiff|persistChanges)\(/;
+function storeRowWriters(): string[] {
+  const lines = STORE_SOURCE().split("\n");
   const signature = /^ {2}(?:private |protected |public |static )*(?:async )?([A-Za-z_]\w*)\s*(?:<[^(]*>)?\(/;
   const found = new Set<string>();
   for (const [index, line] of lines.entries()) {
-    if (!writes.test(line)) continue;
+    if (!/this\.upsertRow\(/.test(line)) continue;
     for (let above = index; above >= 0; above -= 1) {
       const match = signature.exec(lines[above]!);
-      if (!match) continue;
+      if (!match || match[1] === "upsertRow") continue;
       found.add(match[1]!);
       break;
     }
@@ -1389,6 +1386,59 @@ test("every SQLite store mutation entry point re-decides grants before it can pe
     },
   };
 
-  expect(storeMutationEntryPoints()).toEqual(Object.keys(exercises).sort());
   for (const exercise of Object.values(exercises)) exercise();
+});
+
+/**
+ * The ordering has been reopened three times in this lane — a mutation running
+ * on lazily normalized rows, a wholesale replacement carrying its payload in
+ * from outside, and a first-boot import. Enumerating today's callers only
+ * NOTICES a fourth after somebody writes it. This asserts the construction that
+ * refuses to let a fourth be written: every row writer takes a file the grant
+ * decision has been run over, and there is exactly one place that can mint one.
+ */
+test("a registry row cannot be persisted without a completed grant re-decision", () => {
+  const source = STORE_SOURCE();
+
+  /* Discovered by what they call, so renaming or adding a writer cannot dodge
+     this. Each must take the branded file AND assert it at runtime, because the
+     type alone is defeated by an `as` cast. */
+  const writers = storeRowWriters();
+  expect(writers.length).toBeGreaterThan(0);
+  for (const writer of writers) {
+    const gated = new RegExp(
+      `private ${writer}\\([^)]*\\b(\\w+): DecidedRegistryFile[^)]*\\)[^{]*\\{\\s*this\\.assertDecided\\(\\1\\);`,
+    );
+    expect({ writer, gated: gated.test(source) }).toEqual({ writer, gated: true });
+  }
+
+  /* One mint. `markDecided` is the only place the brand is applied, so every
+     route to a row writer runs through it — the assembled decision for a
+     payload from outside, the gated accessors for a lazily loaded file. */
+  expect(source.match(/as DecidedRegistryFile/g)).toHaveLength(1);
+  expect(source).toMatch(/private markDecided\(file: RegistryFile\): DecidedRegistryFile \{\s*this\.decidedFiles\.add\(file\);\s*return file as DecidedRegistryFile;/);
+
+  /* And the runtime half actually fires: a file that skipped the mint is
+     refused at the write rather than persisted. This is the future path the
+     type system would have caught at compile time, run anyway. */
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-undecided-"));
+  try {
+    const store = new SqliteAgentRegistryStore(path.join(directory, "agent-registry.sqlite"), {
+      normalize: (value: unknown) => normalizeRegistry(value, WITH_CONNECTOR),
+      mcpGrantPolicy: WITH_CONNECTOR,
+      initialSnapshot: normalizeRegistry({ version: 2, entries: {}, receipts: {} }, WITH_CONNECTOR),
+    });
+    const smuggled = normalizeRegistry({ version: 2, entries: {}, receipts: {} }, WITH_CONNECTOR);
+    const reachWriters = store as unknown as {
+      persistAll(file: RegistryFile, revision: number): void;
+      persistDiff(before: RegistryFile, after: RegistryFile, revision: number): void;
+      persistChanges(file: RegistryFile, changes: unknown, revision: number): void;
+    };
+    expect(() => reachWriters.persistAll(smuggled, 1)).toThrow(/before the MCP grant decision has run/);
+    expect(() => reachWriters.persistDiff(smuggled, smuggled, 1)).toThrow(/before the MCP grant decision has run/);
+    expect(() => reachWriters.persistChanges(smuggled, { rows: new Map(), meta: new Set(), order: new Set() }, 1))
+      .toThrow(/before the MCP grant decision has run/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });

@@ -411,11 +411,8 @@ function receiptAttestations(file: StoredGrantFile, ownership: StoredGrantOwners
          supplements the evidence index above rather than replacing it. */
       const namedEdge = file.lineageEdges?.[namedId];
       if (namedEdge?.parentConversationId && namedEdge.parentConversationId !== namedId) attest(launchId, "delegated");
-      /* The conversation a receipt NAMES may only ever contradict it, never
-         vouch for it: the subject picks this id, so letting a root reading here
-         grant would let a delegated receipt retarget itself at the operator
-         root and be vouched for by its own choice. */
-      if (ownership.conversationOrigins.get(namedId) === "delegated") attest(launchId, "delegated");
+      const named = ownership.conversationOrigins.get(namedId);
+      if (named) attest(launchId, named);
     }
     if (!receipt.key) continue;
     const rowKey = sessionKeyId({ engine: receipt.key.engine as never, sessionId: receipt.key.sessionId });
@@ -454,6 +451,34 @@ function receiptAttestations(file: StoredGrantFile, ownership: StoredGrantOwners
  * admission wrote for it is indexed by the launch id in the EDGE's evidence, so
  * rewriting the receipt into root shape leaves the edge still attesting
  * delegated and the contradiction still denying.
+ *
+ * WHY ATTESTATION ONLY REFUSES, AND NEVER VOUCHES. Round 5 tried the stronger
+ * shape — unattested denies, so a receipt must be vouched for by a row it does
+ * not own — and it inverted: it denied the honest operator root and admitted
+ * the attacker. Both halves are structural, not incidental.
+ *
+ *  - Nothing in the registry attests operator-ROOT for a launch id. Admission
+ *    (#393) writes a lineage edge only for DELEGATED launches, so an
+ *    un-parented launch that has not settled has no second row by construction
+ *    and can never be vouched for. It is denied before settlement can own its
+ *    entry row, and never recovers, because the first read strips the grant
+ *    settlement would have carried.
+ *  - Adding a root attestation would not fix that, because a row that GRANTS is
+ *    a row the subject gains by writing. Under the voucher rule a worker still
+ *    reached a connector by fabricating a root-shaped conversation and pointing
+ *    its own `key` at that conversation's generation — the voucher was three
+ *    lines of forged JSON. Evidence that can only REFUSE is the only evidence a
+ *    subject cannot forge in its own favour, which is why every attestor here
+ *    is wired to refuse and none to authorise.
+ *
+ * The one thing the voucher rule did add was denying a receipt that rewrites
+ * itself into root shape AND deletes the lineage edge naming it. That same
+ * attacker reaches the same connector by fabricating a root conversation and
+ * entry row outright, which the CONVERSATION path grants and this tranche
+ * already accepts (see the lineage-edge control in `mcpAllowlist.test.ts`).
+ * Wholesale fabrication is the registry file's integrity boundary, not this
+ * one; closing it here alone would cost the operator's own root its grant and
+ * leave the attacker the door beside it.
  */
 function receiptGrant(
   attestations: Map<string, Set<SessionOrigin>>,
@@ -466,19 +491,8 @@ function receiptGrant(
     delegationDepth: receipt.delegationDepth,
     parentConversationId: receipt.parentConversationId,
   });
-  /* UNATTESTED DENIES. A receipt has to be vouched for by a row it does not
-     own, because a subject that can delete the rows naming it would otherwise
-     delete its way to a grant.
-
-     BLOCKED ON AN OPERATOR DECISION (#739): nothing in the registry attests
-     "operator-root" for a launch id — admission writes a lineage edge only for
-     DELEGATED launches — so an un-parented launch that has not settled yet can
-     never be attested, and its receipt is denied here. That is why three
-     honest-root controls in this file fail. They are left failing deliberately;
-     do not relax this rule to make them pass. Inert in tranche 1, where the
-     bound is empty and every grant is already the baseline. */
   const attested = attestations.get(launchId);
-  if (!attested || attested.size !== 1 || !attested.has(described)) return null;
+  if (attested && (attested.size > 1 || !attested.has(described))) return null;
   return mcpServersForSession({ origin: described, requested: receipt.launchProfile!.mcpServers }, policy);
 }
 
