@@ -72,8 +72,12 @@ import {
 
 import { VoiceFloatButton } from "./voice/VoiceFloatButton";
 import {
+  getServerVoiceComposerHostMounted,
   getServerVoiceSlot,
   getVoiceComposerSlot,
+  isVoiceComposerHostMounted,
+  publishVoiceComposerCardNode,
+  publishVoiceComposerCardProps,
   publishVoiceDockSlot,
   subscribeVoiceSlots,
 } from "./voice/voiceSlots";
@@ -948,18 +952,7 @@ export function structuredComposerSession(runtimeSession: RuntimeSessionView | n
     : null;
 }
 
-/**
- * Chat-style composer pinned under the feed. A live pane gets the text typed
- * straight into its tmux pane; a finished resumable conversation boots a new
- * agent window in the current tmux session with the text as the first prompt.
- * Sent messages stay visible as a queue above the input until dismissed.
- */
-export function TmuxComposer({
-  file,
-  pollPaused = false,
-  deadHost = false,
-  sendBlockedReason = null,
-}: {
+export interface TmuxComposerProps {
   file: FileEntry;
   pollPaused?: boolean;
   deadHost?: boolean;
@@ -968,6 +961,73 @@ export function TmuxComposer({
       is attempted while it is set, so no /api/tmux request can fire against an
       as-yet-unclassified host. */
   sendBlockedReason?: string | null;
+}
+
+/**
+ * Chat-style composer pinned under the feed. A live pane gets the text typed
+ * straight into its tmux pane; a finished resumable conversation boots a new
+ * agent window in the current tmux session with the text as the first prompt.
+ * Sent messages stay visible as a queue above the input until dismissed.
+ *
+ * OWNERSHIP (#691 hoist): for a conversation card this component is only a
+ * dispatcher. The composer machinery — draft, dictation, attachments and their
+ * object URLs, the outbox and the whole send path — must survive the card
+ * unmounting mid-call, so `VoiceComposerHost` (Viewer level) renders the one
+ * `TmuxComposerCore` and portals its form into the place this card publishes.
+ * The card contributes a place and fresh props, never a second composer. Trees
+ * with no host mounted (component tests, the demo renderer) keep the inline
+ * card-scoped composer unchanged, as does every non-conversation surface.
+ */
+export function TmuxComposer(props: TmuxComposerProps) {
+  const hostMounted = useSyncExternalStore(
+    subscribeVoiceSlots,
+    isVoiceComposerHostMounted,
+    getServerVoiceComposerHostMounted,
+  );
+  const cardId = conversationIdentity(props.file);
+  if (!hostMounted || !cardId.startsWith("conversation_")) return <TmuxComposerCore {...props} />;
+  return <VoiceComposerCardSlot cardId={cardId} composerProps={props} />;
+}
+
+/** The card's half of the hoist: a place (a `display: contents` div the host
+    portals the form into) and the props the composer needs, republished every
+    render because `file` is a fresh snapshot each board poll. */
+function VoiceComposerCardSlot({ cardId, composerProps }: { cardId: string; composerProps: TmuxComposerProps }) {
+  const publishNode = useCallback(
+    (node: HTMLDivElement | null) => {
+      if (!node) return undefined;
+      return publishVoiceComposerCardNode(cardId, node);
+    },
+    [cardId],
+  );
+  useEffect(() => {
+    publishVoiceComposerCardProps(cardId, {
+      file: composerProps.file,
+      pollPaused: composerProps.pollPaused ?? false,
+      deadHost: composerProps.deadHost ?? false,
+      sendBlockedReason: composerProps.sendBlockedReason ?? null,
+    });
+  });
+  return <div ref={publishNode} data-testid="voice-composer-card-slot" className="contents" />;
+}
+
+/**
+ * The canonical composer machinery. Rendered inline by ordinary cards, and by
+ * `VoiceComposerHost` for conversation cards — where `dockNode` says where the
+ * form goes: a card's published slot, or (null) a hidden Viewer-level container
+ * that keeps everything mounted while no card is on screen. State never lives in
+ * the portal target; moving containment moves DOM, not lifetimes.
+ */
+export function TmuxComposerCore({
+  file,
+  pollPaused = false,
+  deadHost = false,
+  sendBlockedReason = null,
+  dockNode,
+}: TmuxComposerProps & {
+  /** Absent: render the form inline (the card owns the composer, as ever).
+      A node: portal the form there. Null: keep the form mounted but hidden. */
+  dockNode?: HTMLElement | null;
 }) {
   const { t } = useLocale();
   /* Draft text and delivery receipts key on the stable conversation identity,
@@ -2093,7 +2153,7 @@ export function TmuxComposer({
     />
   );
 
-  return (
+  const body = (
     <form
       onSubmit={handleSubmit}
       data-testid={isMobile ? "bounded-mobile-composer" : undefined}
@@ -2223,4 +2283,13 @@ export function TmuxComposer({
         : composerBar}
     </form>
   );
+
+  /* Inline for a card that owns its composer; portalled into the card's slot for
+     a hoisted one; parked hidden — mounted, draining, recording — when the card
+     is gone mid-call. The `hidden` container is what keeps a dictation, a staged
+     image's object URL and the outbox dispatcher alive across board navigation. */
+  if (dockNode === undefined) return body;
+  return dockNode
+    ? createPortal(body, dockNode)
+    : <div hidden data-testid="voice-composer-parked">{body}</div>;
 }

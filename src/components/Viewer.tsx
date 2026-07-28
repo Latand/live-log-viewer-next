@@ -22,6 +22,7 @@ import { attentionId, buildAttentionQueue, nextAttention, STALLED_ATTENTION_TTL,
 import { AttentionHost } from "./attention/AttentionHost";
 import { adoptOperatorCredentialFromLocation } from "./operatorCredential";
 import { VoiceBridgeRelayHost } from "./voice/VoiceBridgeRelayHost";
+import { VoiceComposerHost } from "./voice/VoiceComposerHost";
 import { VoicePipHost } from "./voice/VoicePipHost";
 import { focusHandoffBus } from "./attention/focusHandoffBus";
 import { ConnectionPill } from "./ConnectionPill";
@@ -712,6 +713,10 @@ export function Viewer() {
       {/* #691 §4: the manager→call report relay, on its own mount because its
           lifetime is the call's, never the floating window's. */}
       <VoiceBridgeRelayHost />
+      {/* #691 hoist: the owner of every conversation card's composer machinery.
+          Cards publish a place; the composer's lifetimes (dictation, attachment
+          object URLs, outbox) live here and survive the card unmounting mid-call. */}
+      <VoiceComposerHost />
       {/* Staging instances (#659) announce themselves on every device; prod
           renders nothing. Top-center, clear of both corner anchors. */}
       <StagingBadge />
