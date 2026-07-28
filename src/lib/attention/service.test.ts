@@ -3,6 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { resetPresenceForTest, upsertPresence } from "@/lib/view/presenceStore";
+import type { PresencePayloadV1 } from "@/lib/view/types";
+
 import { readAttentionFile } from "./store";
 import { answerAttentionRequest, attentionForDevice, autoFollowEligible, raiseAttentionRequest } from "./service";
 import { AttentionRequestError, validateAttentionCreate, validateAttentionEvent } from "./validation";
@@ -19,9 +22,13 @@ beforeEach(() => {
   previousStateDir = process.env.LLV_STATE_DIR;
   sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-attention-service-"));
   process.env.LLV_STATE_DIR = sandbox;
+  /* Presence decides who a request is offered to, so a view left over from
+     another test would answer this one's question for it. */
+  resetPresenceForTest();
 });
 
 afterEach(() => {
+  resetPresenceForTest();
   if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
   else process.env.LLV_STATE_DIR = previousStateDir;
   fs.rmSync(sandbox, { recursive: true, force: true });
@@ -288,4 +295,97 @@ test("a conversation target with no durable owner is left exactly as raised", ()
   }, { now: T0, id: "attention_unknown", conversations });
 
   expect(raised.request.target).toEqual({ kind: "conversation", path: unknown });
+});
+
+/* ── Who the request is put in front of ─────────────────────────────────── */
+
+function view(overrides: Partial<PresencePayloadV1> = {}): PresencePayloadV1 {
+  return {
+    schemaVersion: 1,
+    viewSessionId: "view-1",
+    deviceId: DEVICE,
+    device: { kind: "desktop", browser: "chrome" },
+    visibility: "visible",
+    sequence: 1,
+    inputSequence: 1,
+    project: "demo",
+    mode: "scheme",
+    viewport: { width: 1_600, height: 900, dpr: 2 },
+    camera: { x: 10, y: 20, zoom: 0.6, worldRect: { x: 0, y: 0, width: 100, height: 80 } },
+    focusedPath: "/tmp/reviewer.jsonl",
+    selectedPaths: [],
+    visiblePaths: [],
+    board: { renderedRevision: 4, durableRevision: 4, sync: "current" },
+    ...overrides,
+  };
+}
+
+test("a request names the desktop views that are open when it is raised", () => {
+  /* The operator's symptom: the agent's tool answers synchronously and then
+     speaks about what it asked for, so an `offeredTo` that only fills in on some
+     browser's next poll told every caller that nobody was there. */
+  upsertPresence(view(), T0.getTime());
+
+  const raised = raise().request;
+
+  expect(raised.offeredTo).toEqual([DEVICE]);
+  /* Naming the device is not agreeing on its behalf: the request is still
+     waiting for a surface to render it. */
+  expect(raised.state).toBe("pending");
+  expect(raised.acknowledgedBy).toBeUndefined();
+});
+
+test("the phone is never named: it cannot render an offer and cannot move its board", () => {
+  upsertPresence(view({ viewSessionId: "view-phone", deviceId: "device-phone", device: { kind: "mobile", browser: "safari" } }), T0.getTime());
+
+  expect(raise().request.offeredTo).toEqual([]);
+});
+
+test("a backgrounded or long-silent view is not somewhere the operator can be taken", () => {
+  upsertPresence(view({ viewSessionId: "view-hidden", deviceId: "device-hidden", visibility: "hidden" }), T0.getTime());
+  /* Visible, but last heard from long enough ago that it may be a laptop that
+     was shut. */
+  upsertPresence(view({ viewSessionId: "view-stale", deviceId: "device-stale" }), T0.getTime() - 120_000);
+
+  expect(raise().request.offeredTo).toEqual([]);
+});
+
+test("two tabs on one machine are one place to be taken", () => {
+  upsertPresence(view({ viewSessionId: "view-a" }), T0.getTime());
+  upsertPresence(view({ viewSessionId: "view-b" }), T0.getTime());
+
+  expect(raise().request.offeredTo).toEqual([DEVICE]);
+});
+
+test("a device offered at creation may answer the request without any further ceremony", () => {
+  upsertPresence(view(), T0.getTime());
+  raise();
+
+  /* The seeded list is the same list the machine checks, so the surface that was
+     named can take the request through its whole life. */
+  answerAttentionRequest("attention_1", { kind: "offer", deviceId: DEVICE }, { now: T0 });
+  expect(attentionForDevice(DEVICE, { now: T0 }).offer!.status).toBe("actionable");
+  expect(readAttentionFile().requests[0]!.offeredTo).toEqual([DEVICE]);
+
+  const accepted = answerAttentionRequest("attention_1", { kind: "accept", deviceId: DEVICE, via: "auto-follow" }, { now: T0 });
+  expect(accepted.ok).toBe(true);
+});
+
+test("an operator command still names its own device and nothing else", () => {
+  /* An operator command is their own act on one surface; presence must never
+     widen it, because the first named device is the one recorded as having
+     accepted it. */
+  upsertPresence(view({ viewSessionId: "view-other", deviceId: "device-elsewhere" }), T0.getTime());
+
+  const raised = raiseAttentionRequest({
+    origin: "operator",
+    target: { kind: "conversation", path: "/tmp/reviewer.jsonl" },
+    frameAtCreation: frame,
+    intent: "show",
+    reason: "Take me to the reviewer.",
+    offeredTo: [DEVICE],
+  }, { now: T0, id: "attention_operator" }).request;
+
+  expect(raised.offeredTo).toEqual([DEVICE]);
+  expect(raised.acknowledgedBy).toBe(DEVICE);
 });
