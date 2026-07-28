@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 import { MCP_HEALTH_PROBE_CAPABILITY_ENV } from "@/lib/mcp/healthProbeAdmission";
 import { MCP_TOOL_NAMES } from "@/lib/mcp/server";
 import type { ViewerMcpRuntimeHealthEvidence, ViewerMcpRuntimeIdentity } from "@/lib/runtime/contracts";
+
+import { McpProbeStdioTransport } from "./mcpProbeStdioTransport";
+import type { McpHealthProbeAdmissionConsumer } from "./mcpHealthProbeAdmissionChannel";
 
 /* The probe gate is the tool surface this generation ships; a duplicated list
    silently stops gating whenever a tool is added. */
@@ -18,6 +20,7 @@ export interface McpRuntimeProbeOptions {
   env: Record<string, string>;
   runtime: ViewerMcpRuntimeIdentity;
   healthProbeCapability?: string;
+  healthProbeAdmissions?: McpHealthProbeAdmissionConsumer;
   timeoutMs?: number;
   onProcessReady?: (pid: number) => void;
 }
@@ -37,12 +40,12 @@ export async function probeMcpRuntime(options: McpRuntimeProbeOptions): Promise<
   if (options.healthProbeCapability) {
     environment[MCP_HEALTH_PROBE_CAPABILITY_ENV] = options.healthProbeCapability;
   }
-  const transport = new StdioClientTransport({
+  const transport = new McpProbeStdioTransport({
     command: options.command,
     args: options.args,
     cwd: options.cwd,
     env: environment,
-    stderr: "pipe",
+    ...(options.healthProbeAdmissions ? { healthAdmissions: options.healthProbeAdmissions } : {}),
   });
   const client = new Client({ name: "viewer-deployment-mcp-probe", version: "1.0.0" });
   let processReady = false;

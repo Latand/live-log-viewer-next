@@ -38,7 +38,7 @@ test("host-admitted managed MCP probes discover the complete surface, call requi
     for (const host of ["claude", "codex"]) {
       let processId: number | null = null;
       const evidence = await probeMcpRuntime({
-        command: process.execPath,
+        command: host === "claude" ? process.execPath : "/usr/bin/node",
         args: [path.join(process.cwd(), "bin", "mcp-server.mjs")],
         cwd: process.cwd(),
         env: { ...environment, LLV_TEST_HOST: host },
@@ -50,6 +50,7 @@ test("host-admitted managed MCP probes discover the complete surface, call requi
           stagedAt: "2026-07-23T08:00:00.000Z",
         },
         healthProbeCapability: admissions.issue(),
+        healthProbeAdmissions: admissions,
         onProcessReady: (pid) => { processId = pid; },
       });
 
@@ -115,12 +116,13 @@ test("a release target naming a runtime this host never staged falls back to the
 
   try {
     const evidence = await probeMcpRuntime({
-      command: process.execPath,
+      command: "/usr/bin/node",
       args: [path.join(process.cwd(), "bin", "mcp-server.mjs")],
       cwd: process.cwd(),
       env: environment,
       runtime,
       healthProbeCapability: admissions.issue(),
+      healthProbeAdmissions: admissions,
     });
 
     expect(evidence).toMatchObject({ ok: true, processReady: true });
@@ -162,14 +164,17 @@ test("absent, forged, expired, and replayed health admissions cannot imitate the
     artifactDigest: "a".repeat(64),
     stagedAt: "2026-07-23T08:00:00.000Z",
   };
-  const run = (healthProbeCapability?: string) => probeMcpRuntime({
-    command: process.execPath,
-    args: [path.join(process.cwd(), "bin", "mcp-server.mjs")],
-    cwd: process.cwd(),
-    env: environment,
-    runtime,
-    ...(healthProbeCapability ? { healthProbeCapability } : {}),
-  });
+  const run = async (healthProbeCapability?: string) => {
+    return await probeMcpRuntime({
+      command: process.execPath,
+      args: [path.join(process.cwd(), "bin", "mcp-server.mjs")],
+      cwd: process.cwd(),
+      env: environment,
+      runtime,
+      ...(healthProbeCapability ? { healthProbeCapability } : {}),
+      healthProbeAdmissions: admissions,
+    });
+  };
 
   try {
     expect((await run()).calls).toEqual({ deploymentStatus: false, boardSnapshot: false });
@@ -185,6 +190,54 @@ test("absent, forged, expired, and replayed health admissions cannot imitate the
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     journal.close();
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test("the final launcher rejects capability approval from a caller-selected runtime socket", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-probe-forged-socket-"));
+  const socketPath = path.join(sandbox, "forged-runtime.sock");
+  const server = serveRuntimeHost(socketPath, {
+    async handle(request) {
+      if (request.method === "mcp-health-probe-admission") {
+        return { id: request.id, ok: true, result: true };
+      }
+      if (request.method === "snapshot") {
+        return { id: request.id, ok: true, result: { deployments: [] } };
+      }
+      return { id: request.id, ok: false, error: "unsupported" };
+    },
+  });
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const environment = Object.fromEntries(Object.entries(process.env)
+    .filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+  environment.LLV_STATE_DIR = sandbox;
+  environment.LLV_RUNTIME_EVENTS = "1";
+  environment.LLV_RUNTIME_HOST_SOCKET = socketPath;
+  environment.LLV_AGENT_REGISTRY_SQLITE = "off";
+  environment.LLV_CODEX_HOME = path.join(sandbox, "codex");
+  environment.LLV_CLAUDE_HOME = path.join(sandbox, "claude");
+
+  try {
+    const evidence = await probeMcpRuntime({
+      command: process.execPath,
+      args: [path.join(process.cwd(), "bin", "mcp-server.mjs")],
+      cwd: process.cwd(),
+      env: environment,
+      runtime: {
+        source: "managed",
+        revision: "7".repeat(40),
+        releaseId: "deploy-forged-socket",
+        artifactDigest: "a".repeat(64),
+        stagedAt: "2026-07-23T08:00:00.000Z",
+      },
+      healthProbeCapability: "A".repeat(43),
+    });
+
+    expect(evidence.calls).toEqual({ deploymentStatus: false, boardSnapshot: false });
+    expect(evidence.ok).toBe(false);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
 }, 20_000);

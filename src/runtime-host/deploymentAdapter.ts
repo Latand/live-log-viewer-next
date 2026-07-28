@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, type StdioOptions } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
 import { statePath } from "@/lib/configDir";
@@ -17,6 +17,10 @@ import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 
 import type { ViewerDeploymentAdapter } from "./deployment";
 import type { McpHealthProbeAdmissions } from "./mcpHealthProbeAdmission";
+import {
+  createMcpHealthProbeAdmissionChannel,
+  serveMcpHealthProbeAdmissionChannel,
+} from "./mcpHealthProbeAdmissionChannel";
 
 type CommandRunner = (action: string, input: Record<string, unknown>) => Promise<unknown>;
 type AdapterAction = "resolve-revision" | "build-candidate" | "start-candidate" | "current-release" | "current-mcp-runtime" | "reconcile-mcp-runtime" | "verify-candidate" | "promote" | "verify-promoted" | "rollback" | "retire" | "retain-only" | "stage-host-successor" | "complete-host-handoff";
@@ -54,7 +58,7 @@ export interface HostCommandViewerDeploymentAdapterOptions {
   stateFile?: string;
   timeouts?: Partial<Record<AdapterAction, number>>;
   proc?: ProcBackend;
-  mcpHealthProbeAdmissions?: Pick<McpHealthProbeAdmissions, "issue" | "revoke">;
+  mcpHealthProbeAdmissions?: Pick<McpHealthProbeAdmissions, "issue" | "consume" | "revoke">;
 }
 
 function readProcessRecord(filename: string): AdapterProcessRecord | null {
@@ -273,25 +277,68 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
       await terminateAdapterProcess(previous, proc);
       clearProcessRecord(stateFile, previous);
     };
-    const runAction = async (action: AdapterAction, input: Record<string, unknown>): Promise<unknown> => {
-      const child = spawn("/usr/bin/setpriv", ["--pdeathsig", "KILL", "--", executable, action], {
-        stdio: ["pipe", "pipe", "pipe"],
-        env: { ...withoutWakatimeCredential(process.env), LLV_DEPLOYMENT_ADAPTER_PROTOCOL: "1" },
-        detached: true,
-      });
+    const runAction = async (
+      action: AdapterAction,
+      input: Record<string, unknown>,
+      healthAdmissions?: Pick<McpHealthProbeAdmissions, "consume">,
+    ): Promise<unknown> => {
+      const admissionChannel = healthAdmissions
+        ? await createMcpHealthProbeAdmissionChannel()
+        : null;
+      const stdio: StdioOptions = admissionChannel
+        ? ["pipe", "pipe", "pipe", admissionChannel.childFd]
+        : ["pipe", "pipe", "pipe"];
+      let child: ReturnType<typeof spawn>;
+      try {
+        child = spawn("/usr/bin/setpriv", ["--pdeathsig", "KILL", "--", executable, action], {
+          stdio,
+          env: { ...withoutWakatimeCredential(process.env), LLV_DEPLOYMENT_ADAPTER_PROTOCOL: "1" },
+          detached: true,
+        });
+      } catch (error) {
+        admissionChannel?.close();
+        throw error;
+      } finally {
+        admissionChannel?.closeChildFd();
+      }
+      const closeHealthAdmission = healthAdmissions && admissionChannel
+        ? (() => {
+            const closeServing = serveMcpHealthProbeAdmissionChannel(
+              admissionChannel.channel,
+              healthAdmissions,
+            );
+            return () => {
+              closeServing();
+              admissionChannel.close();
+            };
+          })()
+        : null;
       child.stdin?.on("error", () => {});
       child.stdin?.end(JSON.stringify(input));
-      if (!child.pid) throw new Error("deployment adapter process did not start");
+      if (!child.pid) {
+        closeHealthAdmission?.();
+        throw new Error("deployment adapter process did not start");
+      }
       const exitPromise = new Promise<number>((resolve, reject) => {
         child.once("error", reject);
         child.once("close", (code) => resolve(code ?? 1));
       });
       let startIdentity: string;
       try { startIdentity = await waitForProcessIdentity(child.pid, proc); }
-      catch (error) { signalProcessGroup(child.pid, "SIGKILL"); await exitPromise; throw error; }
+      catch (error) {
+        signalProcessGroup(child.pid, "SIGKILL");
+        await exitPromise;
+        closeHealthAdmission?.();
+        throw error;
+      }
       const record: AdapterProcessRecord = { pid: child.pid, startIdentity, action };
       try { writeProcessRecord(stateFile, record); }
-      catch (error) { await terminateAdapterProcess(record, proc); await exitPromise; throw error; }
+      catch (error) {
+        await terminateAdapterProcess(record, proc);
+        await exitPromise;
+        closeHealthAdmission?.();
+        throw error;
+      }
       const stdoutPromise = readStream(child.stdout);
       const stderrPromise = readStream(child.stderr);
       let timer: ReturnType<typeof setTimeout> | null = null;
@@ -313,6 +360,7 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
         catch { throw new Error(`deployment adapter ${action} returned invalid JSON`); }
       } finally {
         if (timer) clearTimeout(timer);
+        closeHealthAdmission?.();
         clearProcessRecord(stateFile, record);
       }
     };
@@ -324,7 +372,7 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
       }
       const healthProbeCapability = options.mcpHealthProbeAdmissions.issue();
       try {
-        return await runAction(action, { ...input, healthProbeCapability });
+        return await runAction(action, { ...input, healthProbeCapability }, options.mcpHealthProbeAdmissions);
       } finally {
         options.mcpHealthProbeAdmissions.revoke(healthProbeCapability);
       }

@@ -20,7 +20,7 @@ function sleepingAdapter(): { executable: string; stateFile: string } {
 }
 
 async function waitForFile(filename: string): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
     if (fs.existsSync(filename)) return;
     await new Promise((resolve) => setTimeout(resolve, 2));
   }
@@ -133,6 +133,7 @@ fi
     stateFile,
     mcpHealthProbeAdmissions: {
       issue: () => { issued.push(capability); return capability; },
+      consume: (value) => value === capability,
       revoke: (value) => { revoked.push(value); },
     },
   });
@@ -168,7 +169,13 @@ test("replacement host reconciles an orphaned adapter process before replay", as
   const outcome: Promise<Error | null> = pending
     .then(() => null)
     .catch((error: unknown) => error instanceof Error ? error : new Error(String(error)));
-  await waitForFile(fixture.stateFile);
+  await Promise.race([
+    waitForFile(fixture.stateFile),
+    outcome.then((error) => {
+      if (error) throw error;
+      throw new Error("orphaned adapter exited before publishing ownership");
+    }),
+  ]);
   const orphanedPid = recordedPid(fixture.stateFile);
 
   const replacement = HostCommandViewerDeploymentAdapter.fromExecutable(fixture.executable, { stateFile: fixture.stateFile });

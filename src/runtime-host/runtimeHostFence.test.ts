@@ -7,7 +7,9 @@ import path from "node:path";
 import { RuntimeHostFence } from "./runtimeHostFence";
 
 const fixture = path.join(import.meta.dir, "fixtures", "runtimeHostFenceContender.ts");
+const legacyFixture = path.join(import.meta.dir, "fixtures", "runtimeHostFenceLegacyNullIdentity.ts");
 const hostModule = path.join(import.meta.dir, "runtimeHostFence.ts");
+const procModule = path.join(import.meta.dir, "..", "lib", "proc", "index.ts");
 
 async function waitForFiles(filenames: string[]): Promise<void> {
   const deadline = Date.now() + 10_000;
@@ -79,6 +81,43 @@ test("legacy live-owner metadata remains a rolling-upgrade fence", () => {
     expect(() => new RuntimeHostFence(fenceFilename, () => true).acquire()).toThrow("singleton fence is held");
     expect(fs.readFileSync(fenceFilename, "utf8")).toBe(metadata);
   } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("a live legacy owner remains the only listener when its start identity is temporarily unreadable", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-fence-legacy-null-"));
+  const fenceFilename = path.join(sandbox, "runtime-host.lock");
+  const releaseFilename = path.join(sandbox, "release");
+  const owner = Bun.spawn(
+    [process.execPath, legacyFixture, "owner", hostModule, procModule, fenceFilename, sandbox],
+    { cwd: import.meta.dir, stdout: "pipe", stderr: "pipe" },
+  );
+  let contender: ReturnType<typeof Bun.spawn> | null = null;
+
+  try {
+    await waitForFiles([path.join(sandbox, "owner-ready")]);
+    const ownerMetadata = fs.readFileSync(fenceFilename, "utf8");
+    contender = Bun.spawn(
+      [process.execPath, legacyFixture, "contender", hostModule, procModule, fenceFilename, sandbox],
+      { cwd: import.meta.dir, stdout: "pipe", stderr: "pipe" },
+    );
+    const outcomeFilename = path.join(sandbox, "contender-outcome");
+    await waitForFiles([outcomeFilename]);
+
+    expect(fs.readFileSync(outcomeFilename, "utf8")).toStartWith("blocked:");
+    expect([
+      path.join(sandbox, "listener-owner.sock"),
+      path.join(sandbox, "listener-contender.sock"),
+    ].filter((filename) => fs.existsSync(filename))).toHaveLength(1);
+    expect(await readListener(path.join(sandbox, "listener-owner.sock"))).toBe("owner");
+    expect(fs.readFileSync(fenceFilename, "utf8")).toBe(ownerMetadata);
+  } finally {
+    fs.writeFileSync(releaseFilename, "");
+    await Promise.all([
+      owner.exited,
+      ...(contender ? [contender.exited] : []),
+    ]);
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
 });

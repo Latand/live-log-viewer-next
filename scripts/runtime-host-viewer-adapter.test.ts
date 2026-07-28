@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { Readable } from "node:stream";
 
 import { WAKATIME_CREDENTIAL_ENV, withoutWakatimeCredential } from "../src/lib/wakatime/credential";
 import { MCP_TOOL_NAMES } from "../src/lib/mcp/server";
@@ -10,6 +12,10 @@ import { viewerComposeSnapshotName } from "../src/runtime-host/deploymentArtifac
 import { RuntimeHost } from "../src/runtime-host/host";
 import { RuntimeJournal } from "../src/runtime-host/journal";
 import { McpHealthProbeAdmissions } from "../src/runtime-host/mcpHealthProbeAdmission";
+import {
+  createMcpHealthProbeAdmissionChannel,
+  serveMcpHealthProbeAdmissionChannel,
+} from "../src/runtime-host/mcpHealthProbeAdmissionChannel";
 import { probeMcpRuntime } from "../src/runtime-host/mcpRuntimeProbe";
 import { RuntimeHostFence } from "../src/runtime-host/runtimeHostFence";
 import { serveRuntimeHost } from "../src/runtime-host/socket";
@@ -135,7 +141,7 @@ test("documented bootstrap input obtains host-owned admission through the final 
       startCandidate: async () => {
         calls.push("start");
       },
-      verifyCandidate: async (releaseIdentity, healthProbeCapability) => {
+      verifyCandidate: async (releaseIdentity, healthProbeCapability, healthProbeAdmissions) => {
         calls.push("verify");
         const mcpRuntime = await probeMcpRuntime({
           command: process.execPath,
@@ -144,6 +150,7 @@ test("documented bootstrap input obtains host-owned admission through the final 
           env: environment,
           runtime: releaseIdentity.mcpRuntime!,
           healthProbeCapability,
+          healthProbeAdmissions,
         });
         return {
           checkedAt: mcpRuntime.checkedAt,
@@ -360,37 +367,72 @@ function successorPackage(prefix: string, options: { revision: string; bundle?: 
 
 async function runReconcile(
   fixture: ReturnType<typeof successorPackage>,
-  options: { revision: string; socketPath?: string; healthProbeCapability?: string },
+  options: {
+    revision: string;
+    socketPath?: string;
+    healthProbeCapability?: string;
+    healthProbeAdmissions?: McpHealthProbeAdmissions;
+  },
 ) {
-  const child = Bun.spawn([process.execPath, adapter, "reconcile-mcp-runtime"], {
-    cwd: root,
-    env: {
-      ...withoutWakatimeCredential(process.env),
-      LLV_AGENT_REGISTRY_SQLITE: "off",
-      LLV_CLAUDE_HOME: path.join(fixture.sandbox, "claude"),
-      LLV_CODEX_HOME: path.join(fixture.sandbox, "codex"),
-      LLV_DEPLOYMENT_ADAPTER_PROTOCOL: "1",
-      LLV_DEPLOYMENT_PACKAGE_ROOT: fixture.packageRoot,
-      LLV_MCP_RUNTIME_ROOT: fixture.stableRuntime,
-      LLV_RUNTIME_EVENTS: "1",
-      ...(options.socketPath ? { LLV_RUNTIME_HOST_SOCKET: options.socketPath } : {}),
-      LLV_STATE_DIR: fixture.state,
-      LLV_VIEWER_PORT: "1",
-    },
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  child.stdin.write(`${JSON.stringify({
+  const admissionChannel = options.healthProbeAdmissions
+    ? await createMcpHealthProbeAdmissionChannel()
+    : null;
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(process.execPath, [adapter, "reconcile-mcp-runtime"], {
+      cwd: root,
+      env: {
+        ...withoutWakatimeCredential(process.env),
+        LLV_AGENT_REGISTRY_SQLITE: "off",
+        LLV_CLAUDE_HOME: path.join(fixture.sandbox, "claude"),
+        LLV_CODEX_HOME: path.join(fixture.sandbox, "codex"),
+        LLV_DEPLOYMENT_ADAPTER_PROTOCOL: "1",
+        LLV_DEPLOYMENT_PACKAGE_ROOT: fixture.packageRoot,
+        LLV_MCP_RUNTIME_ROOT: fixture.stableRuntime,
+        LLV_RUNTIME_EVENTS: "1",
+        ...(options.socketPath ? { LLV_RUNTIME_HOST_SOCKET: options.socketPath } : {}),
+        LLV_STATE_DIR: fixture.state,
+        LLV_VIEWER_PORT: "1",
+      },
+      stdio: ["pipe", "pipe", "pipe", admissionChannel?.childFd ?? "ignore"],
+    });
+  } catch (error) {
+    admissionChannel?.close();
+    throw error;
+  } finally {
+    admissionChannel?.closeChildFd();
+  }
+  const closeHealthAdmission = options.healthProbeAdmissions && admissionChannel
+    ? (() => {
+        const closeServing = serveMcpHealthProbeAdmissionChannel(
+          admissionChannel.channel,
+          options.healthProbeAdmissions,
+        );
+        return () => {
+          closeServing();
+          admissionChannel.close();
+        };
+      })()
+    : null;
+  child.stdin?.write(`${JSON.stringify({
     revision: options.revision,
     ...(options.healthProbeCapability ? { healthProbeCapability: options.healthProbeCapability } : {}),
   })}\n`);
-  child.stdin.end();
+  child.stdin?.end();
+  const readStream = async (stream: Readable | null): Promise<string> => {
+    let body = "";
+    if (!stream) return body;
+    for await (const chunk of stream) body += String(chunk);
+    return body;
+  };
   const [code, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
+    new Promise<number>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (exitCode) => resolve(exitCode ?? 1));
+    }),
+    readStream(child.stdout),
+    readStream(child.stderr),
+  ]).finally(() => closeHealthAdmission?.());
   return { code, stdout, stderr };
 }
 
@@ -415,6 +457,7 @@ test("the first successor boot publishes and probes the MCP runtime after an old
       revision,
       socketPath,
       healthProbeCapability: admissions.issue(),
+      healthProbeAdmissions: admissions,
     });
 
     expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
@@ -455,6 +498,7 @@ test("the first successor boot publishes and probes the MCP runtime after an old
       revision,
       socketPath,
       healthProbeCapability: admissions.issue(),
+      healthProbeAdmissions: admissions,
     });
 
     expect({ code: reboot.code, stdout: reboot.stdout, stderr: reboot.stderr })

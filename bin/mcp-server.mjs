@@ -2,7 +2,7 @@
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, fstatSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -77,7 +77,16 @@ const bundled = join(selectedPackageRoot, "dist", "mcp-server.mjs");
 const source = join(selectedPackageRoot, "src", "lib", "mcp", "entry.ts");
 
 async function runChild(runtime, entry) {
-  const child = spawn(runtime, [entry], viewerChildProcessOptions({ cwd: selectedPackageRoot, stdio: "inherit" }));
+  let admissionChannel = false;
+  try {
+    admissionChannel = fstatSync(3).isSocket();
+  } catch {
+    admissionChannel = false;
+  }
+  const child = spawn(runtime, [entry], viewerChildProcessOptions({
+    cwd: selectedPackageRoot,
+    stdio: admissionChannel ? [0, 1, 2, 3] : [0, 1, 2, "ignore"],
+  }));
   let childExited = false;
   const forwardInterrupt = () => {
     if (!childExited) child.kill("SIGINT");

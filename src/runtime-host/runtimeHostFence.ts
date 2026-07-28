@@ -85,8 +85,16 @@ export class RuntimeHostFence {
 
   constructor(
     private readonly filename: string,
-    private readonly ownerAlive: (owner: { pid: number; startIdentity: string | null }) => boolean = (owner) =>
-      procBackend.pidAlive(owner.pid) && (owner.startIdentity === null || procBackend.processIdentity(owner.pid) === owner.startIdentity),
+    private readonly ownerAlive: (owner: { pid: number; startIdentity: string | null }) => boolean = (owner) => {
+      try {
+        if (!procBackend.pidAlive(owner.pid)) return false;
+        if (owner.startIdentity === null) return true;
+        const currentIdentity = procBackend.processIdentity(owner.pid);
+        return currentIdentity === null || currentIdentity === owner.startIdentity;
+      } catch {
+        return true;
+      }
+    },
   ) {}
 
   acquire(): void {

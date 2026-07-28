@@ -5,6 +5,7 @@ import type { RuntimeSocketRequest, RuntimeSocketResponse } from "@/lib/runtime/
 
 import { RuntimeHostFence } from "./runtimeHostFence";
 import { McpHealthProbeAdmissions } from "./mcpHealthProbeAdmission";
+import type { McpHealthProbeAdmissionConsumer } from "./mcpHealthProbeAdmissionChannel";
 import { serveRuntimeHost, type RuntimeHostSocketHandler } from "./socket";
 
 function admissionHandler(admissions: McpHealthProbeAdmissions): RuntimeHostSocketHandler {
@@ -42,7 +43,10 @@ async function closeServer(server: ReturnType<typeof serveRuntimeHost>): Promise
  */
 export async function withBootstrapMcpHealthProbeAdmission<T>(
   socketPath: string,
-  operation: (capability: string) => Promise<T>,
+  operation: (
+    capability: string,
+    admissions: McpHealthProbeAdmissionConsumer,
+  ) => Promise<T>,
 ): Promise<T> {
   if (!path.isAbsolute(socketPath)) throw new Error("runtime host socket must be absolute");
   const fence = new RuntimeHostFence(`${socketPath}.lock`);
@@ -61,7 +65,7 @@ export async function withBootstrapMcpHealthProbeAdmission<T>(
     socketIdentity = { dev: stat.dev, ino: stat.ino };
     const capability = admissions.issue();
     try {
-      return await operation(capability);
+      return await operation(capability, admissions);
     } finally {
       admissions.revoke(capability);
     }

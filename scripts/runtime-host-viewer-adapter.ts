@@ -11,6 +11,7 @@ import type {
   ViewerMcpRuntimeReconciliation,
   ViewerReleaseIdentity,
 } from "../src/lib/runtime/contracts";
+import { admittedMcpHealthProbe } from "../src/lib/mcp/healthProbeAdmission";
 import {
   obsoleteManagedViewerContainers,
   viewerAuthenticationTokenFromConfig,
@@ -26,6 +27,8 @@ import { allocateBuiltCandidatePort, candidatePortsFromEnvironmentLists, isCandi
 import { withBootstrapMcpHealthProbeAdmission } from "../src/runtime-host/bootstrapMcpHealthProbeAdmission";
 import { viewerCandidateContainerName, viewerCandidateImageName, viewerComposeSnapshotName } from "../src/runtime-host/deploymentArtifacts";
 import { bootstrapViewerRelease } from "../src/runtime-host/deploymentBootstrap";
+import { McpHealthProbeAdmissions } from "../src/runtime-host/mcpHealthProbeAdmission";
+import type { McpHealthProbeAdmissionConsumer } from "../src/runtime-host/mcpHealthProbeAdmissionChannel";
 import { probeMcpRuntime } from "../src/runtime-host/mcpRuntimeProbe";
 import { McpRuntimeReleaseStore } from "../src/runtime-host/mcpRuntimeRelease";
 import {
@@ -352,7 +355,11 @@ async function verifyViewer(candidate: ViewerReleaseIdentity, endpoint: string, 
 async function verify(
   candidate: ViewerReleaseIdentity,
   endpoint: string,
-  options: { expectedAssetsEndpoint?: string; healthProbeCapability?: string } = {},
+  options: {
+    expectedAssetsEndpoint?: string;
+    healthProbeCapability?: string;
+    healthProbeAdmissions?: McpHealthProbeAdmissionConsumer;
+  } = {},
 ): Promise<ViewerHealthEvidence> {
   const viewer = await verifyViewer(candidate, endpoint, options.expectedAssetsEndpoint);
   if (!viewer.ok) return viewer;
@@ -374,6 +381,7 @@ async function verify(
     env: probeEnvironment,
     runtime: candidate.mcpRuntime,
     ...(options.healthProbeCapability ? { healthProbeCapability: options.healthProbeCapability } : {}),
+    ...(options.healthProbeAdmissions ? { healthProbeAdmissions: options.healthProbeAdmissions } : {}),
   });
   if (!promoted) {
     fs.rmSync(probeTarget, { force: true });
@@ -453,7 +461,10 @@ async function currentMcpRuntime(): Promise<ViewerMcpRuntimeIdentity> {
    release, and a boot that already matches does nothing at all. */
 async function reconcileMcpRuntime(
   revision: string,
-  healthProbeCapability?: string,
+  healthProbe?: {
+    healthProbeCapability: string;
+    healthProbeAdmissions: McpHealthProbeAdmissionConsumer;
+  },
 ): Promise<ViewerMcpRuntimeReconciliation | null> {
   if (!/^[0-9a-f]{40}$/.test(revision)) throw new Error("runtime-host MCP revision is invalid");
   const previous = readTarget();
@@ -473,7 +484,7 @@ async function reconcileMcpRuntime(
       cwd: mcpRuntimeRoot,
       env: probeEnvironment,
       runtime,
-      ...(healthProbeCapability ? { healthProbeCapability } : {}),
+      ...(healthProbe ?? {}),
     });
     if (!health.ok) throw new Error(health.detail ?? "runtime-host MCP reconciliation health gate failed");
     return { publication, health };
@@ -524,7 +535,11 @@ export interface BootstrapReleaseDependencies {
   resolveRevision(requested: string): Promise<string>;
   buildCandidate(deploymentId: string, revision: string): Promise<ViewerReleaseIdentity>;
   startCandidate(candidate: ViewerReleaseIdentity): Promise<void>;
-  verifyCandidate(candidate: ViewerReleaseIdentity, healthProbeCapability: string): Promise<ViewerHealthEvidence>;
+  verifyCandidate(
+    candidate: ViewerReleaseIdentity,
+    healthProbeCapability: string,
+    healthProbeAdmissions: McpHealthProbeAdmissionConsumer,
+  ): Promise<ViewerHealthEvidence>;
   publishTarget(candidate: ViewerReleaseIdentity): Promise<void>;
   targetMatches(candidate: ViewerReleaseIdentity): boolean;
   retireCandidate(candidate: ViewerReleaseIdentity): Promise<void>;
@@ -538,8 +553,8 @@ export async function runBootstrapRelease(
     resolveRevision,
     buildCandidate,
     startCandidate,
-    verifyCandidate: (candidate, healthProbeCapability) =>
-      verify(candidate, candidate.endpoint, { healthProbeCapability }),
+    verifyCandidate: (candidate, healthProbeCapability, healthProbeAdmissions) =>
+      verify(candidate, candidate.endpoint, { healthProbeCapability, healthProbeAdmissions }),
     publishTarget: async (candidate) => { switchTarget(candidate, "activate"); },
     targetMatches: (candidate) => releasesEqual(readTarget(), candidate),
     retireCandidate: retireRelease,
@@ -549,9 +564,24 @@ export async function runBootstrapRelease(
     ...dependencies,
     verifyCandidate: (candidate) => withBootstrapMcpHealthProbeAdmission(
       dependencies.runtimeSocket,
-      (healthProbeCapability) => dependencies.verifyCandidate(candidate, healthProbeCapability),
+      (healthProbeCapability, healthProbeAdmissions) =>
+        dependencies.verifyCandidate(candidate, healthProbeCapability, healthProbeAdmissions),
     ),
   });
+}
+
+async function delegatedHealthProbeAdmission(
+  hostCapability: string | undefined,
+): Promise<{
+  healthProbeCapability: string;
+  healthProbeAdmissions: McpHealthProbeAdmissionConsumer;
+} | undefined> {
+  if (!await admittedMcpHealthProbe(hostCapability)) return undefined;
+  const admissions = new McpHealthProbeAdmissions();
+  return {
+    healthProbeCapability: admissions.issue(),
+    healthProbeAdmissions: admissions,
+  };
 }
 
 async function main(): Promise<unknown> {
@@ -573,10 +603,19 @@ async function main(): Promise<unknown> {
     return current;
   }
   if (action === "current-mcp-runtime") return currentMcpRuntime();
-  if (action === "reconcile-mcp-runtime") return reconcileMcpRuntime(String(input.revision ?? ""), healthProbeCapability);
+  if (action === "reconcile-mcp-runtime") {
+    const healthProbe = await delegatedHealthProbeAdmission(healthProbeCapability);
+    return reconcileMcpRuntime(
+      String(input.revision ?? ""),
+      healthProbe,
+    );
+  }
   if (action === "verify-candidate") {
     const candidate = release(input.candidate);
-    return verify(candidate, candidate.endpoint, { healthProbeCapability });
+    const healthProbe = await delegatedHealthProbeAdmission(healthProbeCapability);
+    return verify(candidate, candidate.endpoint, {
+      ...(healthProbe ?? {}),
+    });
   }
   if (action === "promote") {
     const candidate = release(input.candidate);
@@ -585,9 +624,10 @@ async function main(): Promise<unknown> {
   }
   if (action === "verify-promoted") {
     const candidate = release(input.candidate);
+    const healthProbe = await delegatedHealthProbeAdmission(healthProbeCapability);
     return verify(candidate, stableEndpoint, {
       expectedAssetsEndpoint: candidate.endpoint,
-      healthProbeCapability,
+      ...(healthProbe ?? {}),
     });
   }
   if (action === "rollback") {
