@@ -145,6 +145,9 @@ export function Viewer() {
   /* The jump channel into the board: nonce so repeated jumps to the same node
      re-flash (D9); consumed by ProjectDashboard's pendingFocusRef path. */
   const [focusRequest, setFocusRequest] = useState<{ path: string; nonce: number; catalog: boolean } | null>(null);
+  /* Placement without navigation — see `placePath` below. Its own state and its
+     own nonce, so a place and a focus can never consume each other's edge. */
+  const [placeRequest, setPlaceRequest] = useState<{ path: string; nonce: number } | null>(null);
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
@@ -363,6 +366,15 @@ export function Viewer() {
     setFocusRequest((prev) => ({ path, nonce: (prev?.nonce ?? 0) + 1, catalog: false }));
   }, []);
 
+  /* Reveal a card without going to it. `requestFocus` above both materializes
+     the node and arms the board's glide; a focus handoff wants only the first,
+     because it frames its own destination at its own zoom through the board
+     controller. Asking through `requestFocus` gave the handoff a competing
+     camera move it then had to race. */
+  const placeOnBoard = useCallback((path: string) => {
+    setPlaceRequest((prev) => ({ path, nonce: (prev?.nonce ?? 0) + 1 }));
+  }, []);
+
   /* #688: the shell half of a focus handoff. An accepted request opens the
      project it lives in and, when its intent is `open`, the conversation
      itself — the same hand-off an attention jump already uses, so a handoff and
@@ -371,7 +383,12 @@ export function Viewer() {
     project: project === OVERVIEW ? null : project,
     openProject: selectProject,
     openPath: requestFocus,
-  }), [project, selectProject, requestFocus]);
+    placePath: placeOnBoard,
+    /* The overview is a project selection like any other here — it just is not
+       a project. `selectProject` already speaks the sentinel; the bus should
+       not have to. */
+    openOverview: () => selectProject(OVERVIEW),
+  }), [project, selectProject, requestFocus, placeOnBoard]);
 
   /* The N-cycle position anchors to an id: an item answered elsewhere drops
      out without moving the pointer's neighbors (D12). */
@@ -681,6 +698,7 @@ export function Viewer() {
             catalogFailures={catalogFailures}
             openNonce={openNonce}
             focusRequest={focusRequest?.catalog && catalogPin?.path !== focusRequest.path ? null : focusRequest}
+            placeRequest={placeRequest}
             attentionPaths={attentionPaths}
             archived={archivedProjects.has(project)}
             catalogKnown={catalogProjects.has(project)}

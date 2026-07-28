@@ -106,6 +106,11 @@ interface Props {
       re-flashes repeated jumps to the same path; prefs stay untouched — a
       read-only jump must not mutate manual column state. */
   focusRequest?: { path: string; nonce: number } | null;
+  /** Put this node in the layout and DO NOT move the camera to it. The focus
+      handoff frames its own destination through the board controller, so the
+      card only has to exist; arming the glide channel too would race that move
+      with a second one. Same one-shot nonce discipline as `focusRequest`. */
+  placeRequest?: { path: string; nonce: number } | null;
   /** «Show only needs me»: non-null dims every scheme node not in the set. */
   attentionPaths?: ReadonlySet<string> | null;
   /** The project is shelved: hidden from the rail and the overview. */
@@ -319,6 +324,7 @@ export function ProjectDashboard({
   catalogFailures = 0,
   openNonce,
   focusRequest,
+  placeRequest,
   attentionPaths,
   archived,
   catalogKnown,
@@ -348,6 +354,9 @@ export function ProjectDashboard({
      gate lives for the mount, so a consumed edge stays consumed across every
      poll, render and idempotent replay. */
   const focusEdge = useRef(createFocusEdgeGate());
+  /* Its own gate: placement and navigation are separate edges and one must
+     never consume the other's nonce. */
+  const placeEdge = useRef(createFocusEdgeGate());
   /* The board arrangement (which windows, hidden/expanded, view mode, task
      panel) now lives in the shared server store, synced across devices, with a
      one-time seed from the old per-browser localStorage (#38). Reads stay
@@ -888,6 +897,23 @@ export function ProjectDashboard({
       ? replaceCompactPipelineEphemeral(prev, path, pipelines, deckFlows, files)
       : prev.includes(path) ? prev : [...prev, path]);
   }, [focusRequest, compactPipelinePaths, pipelines, deckFlows, files]);
+
+  /* Placement with no navigation: the same materialization as above, minus the
+     line that arms `pendingFocusRef`. That ref is what the next effect turns
+     into `flashNode`, and `flashNode` is what glides the camera — so leaving it
+     alone is precisely the difference between putting a card on the board and
+     taking the operator to it. Waits for placeability and consumes the edge on
+     the same terms, for the same reasons. */
+  useEffect(() => {
+    if (!placeRequest) return;
+    const placeable = pendingFocusTarget(placeRequest.path, files) !== null
+      || compactPipelinePaths.has(placeRequest.path);
+    if (!placeable || !placeEdge.current.consume(placeRequest)) return;
+    const { path } = placeRequest;
+    setEphemeral((prev) => compactPipelinePaths.has(path)
+      ? replaceCompactPipelineEphemeral(prev, path, pipelines, deckFlows, files)
+      : prev.includes(path) ? prev : [...prev, path]);
+  }, [placeRequest, compactPipelinePaths, pipelines, deckFlows, files]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   /* A node added from the switchboard enters the layout on the next render;

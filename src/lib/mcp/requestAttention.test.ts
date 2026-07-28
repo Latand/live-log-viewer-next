@@ -12,6 +12,8 @@ import { adoptLiveRootSession } from "@/lib/root/adopt";
 import { readRootLineage } from "@/lib/root/store";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
+import { resetPresenceForTest, upsertPresence } from "@/lib/view/presenceStore";
+import type { PresencePayloadV1 } from "@/lib/view/types";
 
 import { viewerMcpBindings } from "./bindings";
 import { createMcpToolService, MemoryMcpReceiptStore, MCP_TOOL_NAMES, type McpToolResult } from "./server";
@@ -347,4 +349,55 @@ test("a caller no recorded host names is allowed through", async () => {
 
   expect(result.ok).toBe(true);
   expect(readAttentionFile().requests).toHaveLength(1);
+});
+
+/* ── What the answer says about who will see it ─────────────────────────── */
+
+function openView(overrides: Partial<PresencePayloadV1> = {}): PresencePayloadV1 {
+  return {
+    schemaVersion: 1,
+    viewSessionId: "view-1",
+    deviceId: "device-desktop",
+    device: { kind: "desktop", browser: "chrome" },
+    visibility: "visible",
+    sequence: 1,
+    inputSequence: 1,
+    project: "live-log-viewer-next",
+    mode: "scheme",
+    viewport: { width: 1_600, height: 900, dpr: 2 },
+    camera: { x: 10, y: 20, zoom: 0.6, worldRect: { x: 0, y: 0, width: 100, height: 80 } },
+    focusedPath: null,
+    selectedPaths: [],
+    visiblePaths: [],
+    board: { renderedRevision: 4, durableRevision: 4, sync: "current" },
+    ...overrides,
+  };
+}
+
+test("the answer names the desktop the operator is sitting in front of", async () => {
+  /* The reported defect, at the exact surface it was reported from: an open,
+     visible desktop viewer, and a tool answering `offeredTo: []`. The presence
+     the browser publishes lives in the server's process; the tool runs in
+     another one, so the answer has to come off the shared record rather than
+     out of whichever map this process happens to hold. */
+  resetPresenceForTest();
+  upsertPresence(openView());
+
+  const result = await service().callTool("request_attention", ask()) as McpToolResult & { request?: { offeredTo?: string[]; state?: string } };
+
+  expect(result.ok).toBe(true);
+  expect(result.request!.offeredTo).toEqual(["device-desktop"]);
+  /* Still only an ask: naming the desktop is not agreeing on its behalf. */
+  expect(result.request!.state).toBe("pending");
+  resetPresenceForTest();
+});
+
+test("with nobody at a desk the answer says so rather than naming a device that will not move", async () => {
+  resetPresenceForTest();
+  upsertPresence(openView({ viewSessionId: "view-phone", deviceId: "device-phone", device: { kind: "mobile", browser: "safari" } }));
+
+  const result = await service().callTool("request_attention", ask()) as McpToolResult & { request?: { offeredTo?: string[] } };
+
+  expect(result.request!.offeredTo).toEqual([]);
+  resetPresenceForTest();
 });

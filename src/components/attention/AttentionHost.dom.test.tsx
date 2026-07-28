@@ -13,6 +13,9 @@ import { OFFER_TTL_MS, type FocusRect } from "@/lib/attention/types";
 import { UNREAD_FRAME_RECT } from "@/lib/attention/frames";
 import { validateAttentionEvent } from "@/lib/attention/validation";
 
+import { buildFocusFrameIndex, type FocusLayoutSlice } from "@/components/scheme/focusFrames";
+import type { MiniStack, SchemeRect } from "@/components/scheme/layout";
+
 import { AttentionHost } from "./AttentionHost";
 import { createFocusHandoffBus, type BoardFocusController } from "./focusHandoffBus";
 
@@ -137,6 +140,7 @@ function board(rects: Record<string, FocusRect>, project = "demo") {
   const bus = createFocusHandoffBus();
   const log: BoardLog = { moved: [], restored: [] };
   const opened: string[] = [];
+  const placed: string[] = [];
   const controller: BoardFocusController = {
     project,
     index: {
@@ -149,8 +153,14 @@ function board(rects: Record<string, FocusRect>, project = "demo") {
     restoreCamera: (camera) => { log.restored.push(camera); return true; },
   };
   bus.setBoard(controller);
-  bus.setShell({ project, openProject: () => {}, openPath: (path) => { opened.push(path); } });
-  return { bus, log, opened };
+  bus.setShell({
+    project,
+    openProject: () => {},
+    openPath: (path) => { opened.push(path); },
+    placePath: (path) => { placed.push(path); },
+    openOverview: () => {},
+  });
+  return { bus, log, opened, placed };
 }
 
 function raise(rect: FocusRect = RAISED_RECT) {
@@ -218,7 +228,9 @@ test("an explicit focus event moves the desktop view immediately, with no prompt
      to agree to. */
   expect(log.moved).toEqual([LIVE_RECT]);
   expect(record().state).toBe("following");
-  expect(record().acceptedVia).toBe("operator");
+  /* And the record says what it was: the desktop followed on its own. Calling
+     this the operator's own act would tell the agent they chose to come. */
+  expect(record().acceptedVia).toBe("auto-follow");
 });
 
 test("the whole confirmation panel is gone: no accept, preview, decline, message or pop-out control renders", async () => {
@@ -438,4 +450,113 @@ test("a hidden desktop surface moves nothing and reports nothing, and the reques
 
   expect(swept.expired).toEqual(["attention_1"]);
   expect(record().expiredCause).toBe("ttl");
+});
+
+/* ── Cards the board is drawing, but not as a rect of their own ─────────── */
+
+const STACK_KEY = "/tmp/root.jsonl::stack";
+const STACK_RECT: FocusRect = { x: 2_400, y: 900, w: 240, h: 400 };
+
+function stackHolding(paths: string[]): MiniStack {
+  return {
+    ...(STACK_RECT as SchemeRect),
+    key: STACK_KEY,
+    parent: "/tmp/root.jsonl",
+    items: paths.map((path) => ({ file: { path } as never, branches: 0 })),
+  };
+}
+
+/**
+ * A board that resolves through the REAL frame index, over a layout the board
+ * would actually produce. The seam this closes is between the two: the record
+ * and the host were both fine, and the request still died because the index the
+ * board publishes did not know its own layout was drawing the target.
+ */
+function layoutBoard(slice: FocusLayoutSlice, onOpenPath?: (path: string, publish: (next: FocusLayoutSlice) => void) => void) {
+  const bus = createFocusHandoffBus();
+  const log: BoardLog = { moved: [], restored: [] };
+  const opened: string[] = [];
+  const placed: string[] = [];
+  const publish = (next: FocusLayoutSlice) => {
+    bus.setBoard({
+      project: "demo",
+      index: buildFocusFrameIndex(next, "demo", { boardRevision: 9 }),
+      moveTo: ({ rect }) => { log.moved.push(rect); return true; },
+      restoreCamera: (camera) => { log.restored.push(camera); return true; },
+    });
+  };
+  publish(slice);
+  bus.setShell({
+    project: "demo",
+    openProject: () => {},
+    openPath: (path) => { opened.push(path); },
+    /* Placement is what the recovery asks for now, so this is the stub that has
+       to make the card appear. The camera is untouched: the only entry that
+       reaches `log.moved` is the handoff's own `moveTo`. */
+    placePath: (path) => { placed.push(path); onOpenPath?.(path, publish); },
+    openOverview: () => {},
+  });
+  return { bus, log, opened, placed };
+}
+
+test("a worker folded into its parent's stack is followed to the stack that is drawing it", async () => {
+  /* The live failure, end to end. An orchestration worker collapses once it goes
+     quiet, so the board draws it as a row inside a mini-stack rather than as a
+     node — and a request raised through the agent's tool carries no frame to
+     fall back on. Nothing moved, the record was closed as `lost`, and the agent
+     was told the operator never arrived while its card was on their screen. */
+  raise(UNREAD_FRAME_RECT);
+  const { bus, log } = layoutBoard({
+    nodes: [],
+    groups: [],
+    stacks: [stackHolding([ANCHOR])],
+    byPath: new Map<string, SchemeRect>([[STACK_KEY, STACK_RECT as SchemeRect]]),
+  });
+
+  mount(bus);
+  await settle();
+
+  expect(log.moved).toEqual([STACK_RECT]);
+  expect(record().state).toBe("following");
+  expect(record().resolution).toBe("exact");
+
+  /* And the way back is on offer, which is the half the operator loses when the
+     move never happens. */
+  click(one("[data-testid='attention-return']")!);
+  await settle();
+  expect(log.restored).toEqual([{ x: 120, y: 340, zoom: 0.55 }]);
+  expect(record().state).toBe("returned");
+});
+
+test("a conversation the board is not showing is asked for, followed once, and returned from", async () => {
+  raise(UNREAD_FRAME_RECT);
+  const empty: FocusLayoutSlice = { nodes: [], groups: [], stacks: [], byPath: new Map() };
+  const { bus, log, opened, placed } = layoutBoard(empty, (path, publish) => {
+    /* What the shell does with a path the layout left out: the card enters. */
+    publish({ ...empty, byPath: new Map<string, SchemeRect>([[path, LIVE_RECT as SchemeRect]]) });
+  });
+
+  mount(bus);
+  await settle();
+
+  /* Placed, not navigated to: the recovery reveals the card and the handoff's
+     own `moveTo` is the only thing that moves the camera. Routing this through
+     `openPath` put the production focus glide in front of that move and the two
+     fought over the same camera. */
+  expect(placed).toEqual([ANCHOR]);
+  expect(opened).toEqual([]);
+  expect(log.moved).toEqual([LIVE_RECT]);
+  expect(record().state).toBe("following");
+
+  /* Once, and only once: the poll re-delivers the same offer every few seconds
+     and the card was placed by an edge that must not re-arm. */
+  for (let i = 0; i < 5; i += 1) await poll();
+  expect(log.moved).toHaveLength(1);
+  expect(placed).toEqual([ANCHOR]);
+  expect(opened).toEqual([]);
+
+  click(one("[data-testid='attention-return']")!);
+  await settle();
+  expect(log.restored).toEqual([{ x: 120, y: 340, zoom: 0.55 }]);
+  expect(record().state).toBe("returned");
 });

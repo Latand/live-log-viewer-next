@@ -1,5 +1,7 @@
 import { agentRegistry, type ConversationLookup } from "@/lib/agent/registry";
 import { rootIdentity } from "@/lib/root/store";
+import { freshness, listPresence } from "@/lib/view/presenceStore";
+import type { ViewMode } from "@/lib/view/types";
 
 import {
   applyAttentionEvent,
@@ -108,9 +110,69 @@ export function raiseAttentionRequest(
 ): ReturnType<typeof createAttentionRequest> {
   return createAttentionRequest({
     ...input,
+    /* Who this is being put in front of, answered AT CREATION rather than left
+       for whichever surface polls next. The caller — the agent's tool, most of
+       all — gets one synchronous response and then goes on talking to the
+       operator about it; an `offeredTo` that only fills in seconds later, on a
+       browser's next poll, meant that response could never name a device and
+       the agent was told nobody was there while the operator watched the board.
+       An explicit list still wins: the operator's own commands name their own
+       device, and nothing here may overrule that. */
+    offeredTo: input.offeredTo ?? (input.origin === "root-agent" ? followCapableDevices(options.now) : undefined),
     target: canonicalConversationTarget(input.target, options.conversations),
     rootId: rootIdentity(),
   }, options);
+}
+
+/**
+ * The devices that could actually follow this request right now.
+ *
+ * Read from presence, which is where "a view is open" is already recorded — and
+ * filtered by the same two rules the surfaces enforce, so the list never
+ * promises the agent a device that will not move:
+ *
+ * - VISIBLE AND ACTIVE. A backgrounded tab neither renders an offer nor follows
+ *   one, and a stale one may be a laptop that was shut hours ago;
+ * - NOT A PHONE. Mobile is chat-only by design: it withholds its device id, so
+ *   it can neither report the offer nor move its board. Counting it would tell
+ *   an agent its request had somewhere to land when it has not.
+ *
+ * One entry per device, newest interaction first — two tabs on one machine are
+ * one place to be taken.
+ */
+/**
+ * Modes a desktop can actually BE moved in.
+ *
+ * A focus handoff needs a board controller, and only the scheme board and the
+ * phone's focus view ever register one. A desktop sitting in the history list
+ * has no camera and no anchors to select: the handoff finds no controller,
+ * reports `lost`, and nothing on screen moves. Offering to it is therefore the
+ * silent failure this whole surface exists to remove — the request is accepted,
+ * the agent is told which desktop is watching, and the operator sees nothing.
+ *
+ * `overview` stays offerable, and the distinction is not arbitrary: a handoff
+ * from the overview OPENS the target's project, which mounts the board, and
+ * `runFocusHandoff` already waits for that board to publish. The list is the
+ * mode the operator has chosen INSTEAD of a board, so no wait can produce one.
+ *
+ * The mode reported by presence is the only signal that crosses the process
+ * boundary here — the bus lives in the browser and this runs wherever the tool
+ * was called — so it is what the offer has to answer from.
+ */
+const FOLLOWABLE_MODES = new Set<ViewMode>(["overview", "scheme", "mobile-focus", "mobile-map"]);
+
+function followCapableDevices(now = new Date()): string[] {
+  const at = now.getTime();
+  const devices: string[] = [];
+  for (const session of listPresence(at)) {
+    if (session.device.kind === "mobile") continue;
+    if (!FOLLOWABLE_MODES.has(session.mode)) continue;
+    /* The same guard a standing auto-follow passes, so "who was this offered
+       to" and "who may be moved" can never drift apart. */
+    if (!autoFollowEligible({ visibility: session.visibility, freshness: freshness(session, at) })) continue;
+    if (!devices.includes(session.deviceId)) devices.push(session.deviceId);
+  }
+  return devices;
 }
 
 /**
