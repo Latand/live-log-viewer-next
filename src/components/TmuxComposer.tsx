@@ -70,6 +70,7 @@ import {
 } from "@/lib/bridge/pendingAcknowledgements";
 
 import { VoiceFloatButton } from "./voice/VoiceFloatButton";
+import { viewerContextPrelude } from "./voice/viewerContextPrelude";
 import {
   getServerVoiceComposerHostMounted,
   getServerVoiceSlot,
@@ -1654,8 +1655,19 @@ export function TmuxComposerCore({
        retained generation replays its original bytes under its original key, and
        changing them would defeat the idempotency the retry exists for. */
     const bridgeTurn = replayGeneration ? null : await drainBridgeTurnStart();
+    /* The Viewer-global orchestrator travels with the operator: what they are
+       looking at right now — current project, focused conversation, explicit
+       selection, read from the same view bus presence publishes from — rides
+       into the turn, so "do this in the project I'm viewing" resolves without
+       re-docking the floating window. Composed at dispatch and never on a
+       replay, exactly like the bridge prelude above; empty whenever the operator
+       is simply looking at this conversation itself. */
+    const viewerPrelude = replayGeneration || !voiceEnabled
+      ? ""
+      : viewerContextPrelude({ path: file.path, project: file.project });
+    const composedText = viewerPrelude ? `${viewerPrelude}\n${requestedText}` : requestedText;
     const payloadText = replayGeneration?.text
-      ?? (bridgeTurn?.text ? `${bridgeTurn.text}\n\n${requestedText}` : requestedText);
+      ?? (bridgeTurn?.text ? `${bridgeTurn.text}\n\n${composedText}` : composedText);
     const sentImages: PendingImage[] = replayGeneration
       ? replayGeneration.images.map((image) => ({ ...image }))
       : requestedImages;
