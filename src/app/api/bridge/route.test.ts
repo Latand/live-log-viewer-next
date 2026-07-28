@@ -5,7 +5,7 @@ import path from "node:path";
 
 import { NextRequest } from "next/server";
 
-import { operatorSessionSecret } from "@/lib/agent/operatorSession";
+import { setCallerConversationResolverForTests } from "@/lib/agent/operatorAuthority";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { setBridgeGatewaySourcesForTests } from "@/lib/bridge/gatewayAuthority";
 import { recordManagerReport } from "@/lib/bridge/service";
@@ -150,18 +150,34 @@ test("an acknowledgement cannot name a sequence the caller never received", asyn
   expect(readBridgeChannel()?.managerReportCursor).toBe(3);
 });
 
-test("an acknowledgement without the credential is refused", async () => {
+test("an acknowledgement from an AGENT is refused; the operator's own browser settles the batch", async () => {
   sandbox();
   recordManagerReport({ key: "a", class: "status", at: new Date().toISOString(), body: "one" });
   const drained = await (await get()).json() as { plan: { ackToken: string } };
 
+  /* An agent names itself with its capability and may not move the cursor. */
+  setCallerConversationResolverForTests(() => "conversation_worker");
+  const refused = await POST(new NextRequest(`${ORIGIN}/api/bridge`, {
+    method: "POST",
+    headers: {
+      host: "127.0.0.1",
+      "content-type": "application/json",
+      [VIEWER_SPAWN_CAPABILITY_HEADER]: "a".repeat(43),
+    },
+    body: JSON.stringify({ ackToken: drained.plan.ackToken }),
+  })) as unknown as Response;
+  expect(refused.status).toBe(403);
+  expect(readBridgeChannel()?.managerReportCursor).toBe(0);
+  setCallerConversationResolverForTests(null);
+
+  /* The Viewer's own same-origin POST presents nothing and settles it — the tab
+     that just voiced the batch is the operator, with no key to hold. */
   const response = await POST(new NextRequest(`${ORIGIN}/api/bridge`, {
     method: "POST",
     headers: { host: "127.0.0.1", "content-type": "application/json" },
     body: JSON.stringify({ ackToken: drained.plan.ackToken }),
   })) as unknown as Response;
-  expect(response.status).toBe(403);
-  expect(readBridgeChannel()?.managerReportCursor).toBe(0);
+  expect(response.status).toBe(200);
 });
 
 test("the coalescing window is honoured through the route", async () => {
@@ -232,7 +248,7 @@ test("turn-start drains with NO live call at all — the situation it exists for
   recordManagerReport({ key: "a", class: "blocked", at: new Date().toISOString(), body: "needs a decision" });
 
   const response = await GET(new NextRequest(`${ORIGIN}/api/bridge?mode=turn-start`, {
-    headers: { host: "127.0.0.1", [VIEWER_SPAWN_CAPABILITY_HEADER]: operatorSessionSecret() },
+    headers: { host: "127.0.0.1" },
   })) as unknown as Response;
 
   expect(response.status).toBe(200);
@@ -241,23 +257,39 @@ test("turn-start drains with NO live call at all — the situation it exists for
   expect(payload.prelude?.ackToken).toBeTruthy();
 });
 
-test("turn-start still refuses a caller with no operator credential", async () => {
+test("turn-start serves the Viewer's own same-origin drain, and refuses an agent", async () => {
   sandbox();
   recordManagerReport({ key: "a", class: "status", at: new Date().toISOString(), body: "one" });
   const response = await GET(new NextRequest(`${ORIGIN}/api/bridge?mode=turn-start`, {
     headers: { host: "127.0.0.1" },
   })) as unknown as Response;
+  expect(response.status).toBe(200);
+
+  setCallerConversationResolverForTests(() => "conversation_worker");
+  const agent = await GET(new NextRequest(`${ORIGIN}/api/bridge?mode=turn-start`, {
+    headers: { host: "127.0.0.1", [VIEWER_SPAWN_CAPABILITY_HEADER]: "a".repeat(43) },
+  })) as unknown as Response;
+  expect(agent.status).toBe(403);
+  expect(await agent.text()).not.toContain("needs a decision");
+  setCallerConversationResolverForTests(null);
+});
+
+test("turn-start keeps the cross-origin perimeter: the payload carries deploy nonces", async () => {
+  sandbox();
+  recordManagerReport({ key: "a", class: "status", at: new Date().toISOString(), body: "one" });
+  const response = await GET(new NextRequest(`${ORIGIN}/api/bridge?mode=turn-start`, {
+    headers: { host: "127.0.0.1", origin: "https://evil.example", "sec-fetch-site": "cross-site" },
+  })) as unknown as Response;
   expect(response.status).toBe(403);
-  expect(await response.text()).not.toContain("needs a decision");
 });
 
 test("the live drain still requires the call's session id", async () => {
   sandbox();
   recordManagerReport({ key: "a", class: "status", at: new Date().toISOString(), body: "one" });
-  /* An operator credential does not substitute: the live payload carries nonces and
-     the peer proof is what bounds who can read them. */
+  /* Being the operator does not substitute: the live payload carries nonces and the
+     peer proof is what bounds who can read them. */
   const response = await GET(new NextRequest(`${ORIGIN}/api/bridge`, {
-    headers: { host: "127.0.0.1", [VIEWER_SPAWN_CAPABILITY_HEADER]: operatorSessionSecret() },
+    headers: { host: "127.0.0.1" },
   })) as unknown as Response;
   expect(response.status).toBe(403);
 });

@@ -41,20 +41,40 @@ let lastCallConversationId: string | null = null;
  * store change and re-render the floater forever.
  */
 let snapshot: ActiveCall | null = null;
+/**
+ * The same question WITHOUT the retention: a call that is actually up.
+ *
+ * `snapshot` deliberately survives the hangup so the ended transcript stays on
+ * screen, and `lastCallConversationId` is never cleared — the operator keeps
+ * reading it, possibly for the rest of the session. That retention is right for
+ * the PANEL and wrong for anything that must END with the call: read through
+ * `snapshot`, a composer parked for a call that finished hours ago stays mounted
+ * and hidden forever, on a card the operator left long ago.
+ *
+ * So panel retention and call liveness are two projections rather than one:
+ * whoever asks gets to say which of the two they meant.
+ */
+let liveSnapshot: ActiveCall | null = null;
+
+function same(a: ActiveCall | null, b: ActiveCall | null): boolean {
+  return a?.conversationId === b?.conversationId && a?.phase === b?.phase;
+}
 
 function recompute(): void {
-  let next: ActiveCall | null = null;
+  let live: ActiveCall | null = null;
   for (const [conversationId, phase] of phases) {
-    if (phase !== "idle") next = { conversationId, phase };
+    if (phase !== "idle") live = { conversationId, phase };
   }
   /* No live call: the last conversation that had one keeps its (idle) panel, so
      the ended-call transcript stays on screen exactly as it did when the card
      rendered the panel itself. */
+  let next = live;
   if (!next && lastCallConversationId) {
     next = { conversationId: lastCallConversationId, phase: phases.get(lastCallConversationId) ?? "idle" };
   }
-  if (next?.conversationId === snapshot?.conversationId && next?.phase === snapshot?.phase) return;
+  if (same(next, snapshot) && same(live, liveSnapshot)) return;
   snapshot = next;
+  liveSnapshot = live;
   for (const listener of listeners) listener();
 }
 
@@ -76,6 +96,16 @@ export function getActiveCall(): ActiveCall | null {
   return snapshot;
 }
 
+/** The call that is actually up, with no retention: null the moment every phase
+    is back to `idle`. What machinery whose lifetime IS the call subscribes to. */
+export function getLiveCall(): ActiveCall | null {
+  return liveSnapshot;
+}
+
+export function getServerLiveCall(): ActiveCall | null {
+  return null;
+}
+
 /** The server render has no calls, and must not invent one — a floater in the
     server HTML would hydrate against a window that does not exist. */
 export function getServerActiveCall(): ActiveCall | null {
@@ -88,5 +118,6 @@ export function resetActiveCallsForTest(): void {
   phases.clear();
   lastCallConversationId = null;
   snapshot = null;
+  liveSnapshot = null;
   listeners.clear();
 }
