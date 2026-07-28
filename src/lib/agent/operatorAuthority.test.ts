@@ -6,6 +6,11 @@ import path from "node:path";
 
 import { NextRequest } from "next/server";
 
+import {
+  establishOperatorBrowserSession,
+  OPERATOR_SESSION_COOKIE,
+  resetOperatorBrowserSessionsForTests,
+} from "./operatorBrowserSession";
 import { ensureOperatorSpawnCapability, operatorSpawnCapabilityPath } from "./operatorCapability";
 import { operatorSessionSecret, resetOperatorSessionForTests } from "./operatorSession";
 import { requireOperatorAuthority, setCallerConversationResolverForTests } from "./operatorAuthority";
@@ -28,6 +33,7 @@ beforeEach(() => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-operator-authority-"));
   sandboxes.push(dir);
   process.env.LLV_STATE_DIR = path.join(dir, "state");
+  resetOperatorBrowserSessionsForTests();
 });
 
 afterEach(() => {
@@ -130,4 +136,53 @@ test("the session secret is written to no file under the state dir", () => {
   for (const file of walk(root)) {
     expect(fs.readFileSync(file, "utf8")).not.toContain(sessionValue);
   }
+});
+
+/* --------------------------------------------------------------------------- *
+ * The browser session cookie — possession in a place page JS cannot read and a
+ * local process cannot write (`operatorBrowserSession.ts`).
+ * --------------------------------------------------------------------------- */
+
+test("an established browser-session cookie grants authority, with no header at all", () => {
+  const token = establishOperatorBrowserSession();
+  expect(requireOperatorAuthority(request({ cookie: `${OPERATOR_SESSION_COOKIE}=${token}` })).ok).toBe(true);
+  /* Alongside other cookies and forged browser shape, exactly as a real request. */
+  expect(requireOperatorAuthority(request({
+    ...FORGED_BROWSER,
+    cookie: `theme=dark; ${OPERATOR_SESSION_COOKIE}=${token}; locale=uk`,
+  })).ok).toBe(true);
+});
+
+test("a guessed or absent cookie grants nothing", () => {
+  establishOperatorBrowserSession();
+  expect(requireOperatorAuthority(request({ cookie: `${OPERATOR_SESSION_COOKIE}=guess-guess-guess` })).ok).toBe(false);
+  expect(requireOperatorAuthority(request({ cookie: "theme=dark" })).ok).toBe(false);
+});
+
+test("the cookie survives a restart while the link secret does not", () => {
+  const token = establishOperatorBrowserSession();
+  const stale = operatorSessionSecret();
+  /* The restart: fresh process memory, same state dir. */
+  resetOperatorSessionForTests();
+  resetOperatorBrowserSessionsForTests();
+  expect(requireOperatorAuthority(request({ [VIEWER_SPAWN_CAPABILITY_HEADER]: stale })).ok).toBe(false);
+  expect(requireOperatorAuthority(request({ cookie: `${OPERATOR_SESSION_COOKIE}=${token}` })).ok).toBe(true);
+  /* A stale header riding beside the valid cookie must not block it — that IS
+     the operator's tab after a stage refresh. */
+  expect(requireOperatorAuthority(request({
+    [VIEWER_SPAWN_CAPABILITY_HEADER]: stale,
+    cookie: `${OPERATOR_SESSION_COOKIE}=${token}`,
+  })).ok).toBe(true);
+});
+
+test("an agent presenting its capability is refused even with a valid cookie", () => {
+  const token = establishOperatorBrowserSession();
+  const workerCapability = crypto.randomBytes(32).toString("base64url");
+  setCallerConversationResolverForTests(() => "conversation_worker");
+  const verdict = requireOperatorAuthority(request({
+    [VIEWER_SPAWN_CAPABILITY_HEADER]: workerCapability,
+    cookie: `${OPERATOR_SESSION_COOKIE}=${token}`,
+  }));
+  expect(verdict.ok).toBe(false);
+  if (!verdict.ok) expect(verdict.error).toContain("agent");
 });

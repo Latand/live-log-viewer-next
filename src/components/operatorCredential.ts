@@ -30,6 +30,15 @@ import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/capabilityHeader";
  * This does NOT defend against a process reading the capability file directly. Nothing
  * in this app does; agents run as the operator's own uid. That is the repo's standing
  * boundary, and it is a different question from the one this file answers.
+ *
+ * THE BROWSER SESSION (`operatorBrowserSession.ts`) is the durable layer above all
+ * of that. Hosted acceptance showed the tab scope is wrong for the operator: the
+ * link authorizes the tab that opened it, while the operator is looking at another
+ * tab — and every restart re-mints the secret. So a tab that adopts the fragment
+ * immediately trades it (once) for a browser-scoped httpOnly cookie, and every tab
+ * — including ones that never saw a link — asks the server "is this browser the
+ * operator's?" and renders the operator controls on a yes. The cookie is invisible
+ * to this module by design; only the server's boolean answer is held here.
  */
 
 /** The fragment key the startup link uses. */
@@ -37,6 +46,71 @@ export const OPERATOR_CREDENTIAL_FRAGMENT = "llv-operator";
 const STORAGE_KEY = "llv.operator.capability";
 
 let capability: string | null = null;
+
+/* The server's answer to "does this browser hold the operator session cookie?".
+   Page JavaScript cannot see the httpOnly cookie itself — that is the point — so
+   the boolean is learned by probing and updated by establishment. */
+let browserAuthorized = false;
+let probeInFlight = false;
+let lastProbeAt = 0;
+/* The credential value already traded for a cookie, so one adoption establishes
+   once rather than on every render. */
+let establishedFor: string | null = null;
+let probeTriggersInstalled = false;
+
+const PROBE_INTERVAL_MS = 15_000;
+
+/** Trade the adopted link credential for the browser-scoped cookie. Fire and
+    forget: a failure (stale credential, offline) leaves this tab exactly where
+    the pre-cookie design left it, and the next fresh link tries again. */
+function establishBrowserSession(value: string): void {
+  if (establishedFor === value) return;
+  establishedFor = value;
+  void fetch("/api/operator/session", {
+    method: "POST",
+    headers: { [VIEWER_SPAWN_CAPABILITY_HEADER]: value },
+  })
+    .then((response) => {
+      if (response.ok) browserAuthorized = true;
+    })
+    .catch(() => undefined);
+}
+
+function probeBrowserSession(): void {
+  if (probeInFlight) return;
+  probeInFlight = true;
+  void fetch("/api/operator/session", { cache: "no-store" })
+    .then((response) => (response.ok ? response.json() : null))
+    .then((body: unknown) => {
+      if (body && typeof body === "object" && typeof (body as { operator?: unknown }).operator === "boolean") {
+        browserAuthorized = (body as { operator: boolean }).operator;
+      }
+    })
+    .catch(() => undefined)
+    .finally(() => {
+      probeInFlight = false;
+    });
+}
+
+/** The operator authorizes the browser from SOME tab; the tab they are looking
+    at learns it here — on focus/visibility, and on a slow render-driven cadence
+    (the Viewer re-renders with every poll). Stops asking once authorized. */
+function keepBrowserSessionFresh(): void {
+  if (!probeTriggersInstalled) {
+    probeTriggersInstalled = true;
+    window.addEventListener("focus", () => {
+      if (!browserAuthorized) probeBrowserSession();
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden && !browserAuthorized) probeBrowserSession();
+    });
+  }
+  if (browserAuthorized) return;
+  const now = Date.now();
+  if (now - lastProbeAt < PROBE_INTERVAL_MS) return;
+  lastProbeAt = now;
+  probeBrowserSession();
+}
 
 function readStored(): string | null {
   try {
@@ -84,18 +158,28 @@ export function adoptOperatorCredentialFromLocation(): void {
     fragment.delete(OPERATOR_CREDENTIAL_FRAGMENT);
     const remaining = fragment.toString();
     window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${remaining ? `#${remaining}` : ""}`);
+    /* The link authorizes the BROWSER, not just this tab: trade the credential
+       for the httpOnly session cookie so every other tab — including the one the
+       operator is actually looking at — picks the authority up on its next probe. */
+    establishBrowserSession(claimed);
+    keepBrowserSessionFresh();
     return;
   }
-  capability = readStored();
+  if (capability === null) capability = readStored();
+  /* A tab that adopted earlier in this process's lifetime can still seed the
+     browser session (e.g. the cookie era beginning after the link was opened). */
+  if (capability) establishBrowserSession(capability);
+  keepBrowserSessionFresh();
 }
 
 export function operatorCredential(): string | null {
   return capability;
 }
 
-/** Whether operator-only controls can work at all in this tab. */
+/** Whether operator-only controls can work at all in this tab: the tab's own
+    adopted credential, or the browser-scoped session the server confirmed. */
 export function hasOperatorCredential(): boolean {
-  return capability !== null;
+  return capability !== null || browserAuthorized;
 }
 
 /**
@@ -111,6 +195,10 @@ export function operatorHeaders(): Record<string, string> {
 /** Tests only. */
 export function resetOperatorCredentialForTests(): void {
   capability = null;
+  browserAuthorized = false;
+  probeInFlight = false;
+  lastProbeAt = 0;
+  establishedFor = null;
   try {
     window.sessionStorage.removeItem(STORAGE_KEY);
   } catch {
