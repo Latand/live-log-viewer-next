@@ -10,13 +10,15 @@ import { requestVoiceFloat } from "./floatRequest";
 import { documentPictureInPictureSupported } from "./useDocumentPictureInPicture";
 
 /**
- * The card's way back to the floating window (#691 §5).
+ * The card's way INTO the floating window, and back after a close (#691 §5,
+ * revised on stage).
  *
- * Deliberately not a dock/float toggle. U4 settles that the floater opens on every
- * voice start and remembers nothing, so there is no arrangement to toggle — there is
- * only the case where the operator closed the window and wants it again. Absent
- * outside a live call, and absent where Document PiP does not exist, because a control
- * that cannot work is worse than no control.
+ * Detaching is the operator's explicit gesture: starting a voice call shows the
+ * transcript in the card, and pressing this is what floats it — nothing opens a
+ * window automatically. Deliberately not a dock/float toggle: the window's own
+ * dock button closes it, so the only case here is "float it (again)". Absent
+ * outside a live call, and absent where Document PiP does not exist, because a
+ * control that cannot work is worse than no control.
  */
 export function VoiceFloatButton({ phase, t }: { phase: CodexRealtimePhase; t: TFunction }) {
   const live = phase === "connecting" || phase === "live";
