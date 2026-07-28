@@ -1,6 +1,19 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 
+import { adoptOperatorCredential, resetOperatorCredentialForTests } from "./operatorCredential";
 import { openOrchestratorConversation, orchestratorHash, orchestratorSpawnBody, type OrchestratorStatusBody } from "./orchestratorChat";
+
+/** A well-shaped operator key: 32 random bytes base64url, as the server mints. */
+const OPERATOR_KEY = "A".repeat(43);
+
+/** The tab has been through `OperatorKeyGate` — it holds the operator secret. */
+function authorizeBrowser(): void {
+  expect(adoptOperatorCredential(OPERATOR_KEY)).toBe(true);
+}
+
+afterEach(() => {
+  resetOperatorCredentialForTests();
+});
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -19,9 +32,9 @@ function fetchStub(handlers: Record<string, (init?: RequestInit) => Response>): 
   return { calls, fetch: stub };
 }
 
-test("spawn body carries the fable-low orchestrator preset and the system prompt", () => {
+test("spawn body carries the opus-low orchestrator preset and the system prompt", () => {
   const body = orchestratorSpawnBody("/repo");
-  expect(body).toMatchObject({ engine: "claude", model: "fable", effort: "low", role: "orchestrator", cwd: "/repo" });
+  expect(body).toMatchObject({ engine: "claude", model: "opus", effort: "low", role: "orchestrator", cwd: "/repo" });
   expect(String(body.prompt)).toContain("NEVER auto-start pipelines");
 });
 
@@ -37,6 +50,7 @@ test("a live record opens without spawning", async () => {
 });
 
 test("an empty slot spawns, adopts, and returns the canonical winner", async () => {
+  authorizeBrowser();
   const { calls, fetch } = fetchStub({
     "GET /api/orchestrator": () => jsonResponse({ record: null, exists: false, defaultCwd: "/repo" }),
     "POST /api/spawn": () => jsonResponse({ ok: true, conversationId: "conv-new", path: "/new.jsonl", state: "settled" }),
@@ -50,6 +64,7 @@ test("an empty slot spawns, adopts, and returns the canonical winner", async () 
 });
 
 test("a dead transcript respawns instead of navigating to the tombstone", async () => {
+  authorizeBrowser();
   const { calls, fetch } = fetchStub({
     "GET /api/orchestrator": () => jsonResponse({ record: { conversationId: "conv-old", path: "/gone.jsonl" }, exists: false, defaultCwd: "/repo" }),
     "POST /api/spawn": () => jsonResponse({ ok: true, conversationId: "conv-new", path: null }),
@@ -60,9 +75,31 @@ test("a dead transcript respawns instead of navigating to the tombstone", async 
 });
 
 test("spawn failures surface the server error", async () => {
+  authorizeBrowser();
   const { fetch } = fetchStub({
     "GET /api/orchestrator": () => jsonResponse({ record: null, exists: false, defaultCwd: "/repo" }),
     "POST /api/spawn": () => jsonResponse({ error: "directory does not exist: /repo" }, 400),
   });
   await expect(openOrchestratorConversation(fetch)).rejects.toThrow("directory does not exist: /repo");
+});
+
+test("an unauthorized browser spawns NOTHING — no spawn, no adoption, four stalled managers never again", async () => {
+  /* No credential adopted: this tab never went through the operator key gate. */
+  const { calls, fetch } = fetchStub({
+    "GET /api/orchestrator": () => jsonResponse({ record: null, exists: false, defaultCwd: "/repo" }),
+  });
+  await expect(openOrchestratorConversation(fetch)).rejects.toThrow("operator authority");
+  /* The old order spawned first and failed adoption after — every click leaked
+     one live manager. The refusal must come before any side effect. */
+  expect(calls.map((call) => `${call.init?.method ?? "GET"} ${call.url}`)).toEqual([
+    "GET /api/orchestrator",
+  ]);
+});
+
+test("an existing live record opens even in an unauthorized browser", async () => {
+  const { calls, fetch } = fetchStub({
+    "GET /api/orchestrator": () => jsonResponse({ record: { conversationId: "conv-1", path: "/t.jsonl" }, exists: true, defaultCwd: "/repo" }),
+  });
+  expect(await openOrchestratorConversation(fetch)).toBe("conv-1");
+  expect(calls).toHaveLength(1);
 });

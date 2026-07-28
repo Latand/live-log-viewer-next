@@ -72,6 +72,29 @@ export function callerConversationId(request: Pick<NextRequest, "headers">): str
   return resolveConversation(crypto.createHash("sha256").update(capability).digest("hex"));
 }
 
+/**
+ * Operator authority FOR THE VOICE TRANSPORT ONLY: starting and stopping the
+ * operator's own call.
+ *
+ * The transport guard's real job was always AGENT-versus-OPERATOR, never human
+ * authentication. This is a single-user application bound to loopback, so a
+ * same-origin request from the local browser IS the operator by construction —
+ * the route enforces same-origin BEFORE consulting this, and that is the
+ * perimeter. An agent is distinguishable on entirely different grounds: it names
+ * itself by presenting its conversation capability. So the only disqualifier
+ * here is that self-naming. No link, no cookie, no secret, no ceremony.
+ *
+ * Scope, deliberately narrow: every OTHER operator-only action — manager
+ * designation, spawn capability, deployment gates, bridge reads — keeps
+ * requiring possession via `requireOperatorAuthority` below, and this
+ * transparency must not leak into it. Injection into a live call is not decided
+ * here either: `permitRealtimeAction` grants that to the live session peer
+ * alone, whatever this returns.
+ */
+export function voiceTransportOperator(request: Pick<NextRequest, "headers">): boolean {
+  return callerConversationId(request) === null;
+}
+
 const MISSING: OperatorAuthority = {
   ok: false,
   status: 403,

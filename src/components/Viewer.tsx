@@ -22,6 +22,8 @@ import { attentionId, buildAttentionQueue, nextAttention, STALLED_ATTENTION_TTL,
 import { AttentionHost } from "./attention/AttentionHost";
 import { OperatorKeyGate } from "./OperatorKeyGate";
 import { purgeLegacyOperatorCredential } from "./operatorCredential";
+import { VoiceBridgeRelayHost } from "./voice/VoiceBridgeRelayHost";
+import { VoiceComposerHost } from "./voice/VoiceComposerHost";
 import { VoicePipHost } from "./voice/VoicePipHost";
 import { focusHandoffBus } from "./attention/focusHandoffBus";
 import { ConnectionPill } from "./ConnectionPill";
@@ -723,11 +725,18 @@ export function Viewer() {
           root agent's focus handoff when there is one to answer. Renders
           nothing at all the rest of the time. */}
       <AttentionHost mobile={isMobile} />
-      {/* #691: the floating rendering of whichever conversation has a voice call.
-          Mounted here rather than in the card because the card unmounts on board
-          navigation while the call keeps running. Renders nothing until a call
-          starts, and nothing at all on mobile. */}
+      {/* #691: the ONE voice conversation panel, portalled into the card's dock
+          slot or the floating PiP window. Mounted here rather than in the card
+          because the card unmounts on board navigation while the call keeps
+          running. Renders nothing until a call starts. */}
       <VoicePipHost mobile={isMobile} />
+      {/* #691 §4: the manager→call report relay, on its own mount because its
+          lifetime is the call's, never the floating window's. */}
+      <VoiceBridgeRelayHost />
+      {/* #691 hoist: the owner of every conversation card's composer machinery.
+          Cards publish a place; the composer's lifetimes (dictation, attachment
+          object URLs, outbox) live here and survive the card unmounting mid-call. */}
+      <VoiceComposerHost />
       {/* Staging instances (#659) announce themselves on every device; prod
           renders nothing. Top-center, clear of both corner anchors. */}
       <StagingBadge />

@@ -6,19 +6,18 @@ import { createRoot, type Root } from "react-dom/client";
 import { installActEnv } from "@/test-helpers/actEnv";
 import { reportCallPhase, resetActiveCallsForTest } from "@/lib/realtime/activeCall";
 
-import { composerStore, resetComposerStoresForTest } from "./composerStore";
 import { requestVoiceFloat, resetVoiceFloatRequestForTest } from "./floatRequest";
+import { publishVoiceDockSlot, resetVoiceSlotsForTest } from "./voiceSlots";
 import { VoicePipHost } from "./VoicePipHost";
 
 /**
- * #691 §4 — one source, two renderings, on the seam where duplication would happen.
+ * #691, ownership inverted — one panel, two containments.
  *
- * The failures this closes are all "a second one of something": a second realtime
- * client, a second `<audio>`, a second `getUserMedia`, a second dispatcher, a second
- * draft. So the assertions are mostly counts and identities, and the doubles are
- * placed at the browser boundary — a stub PiP window and spies on the audio/media
- * constructors — rather than at the app's own seams, because the app's seams are
- * exactly what is under test.
+ * The host is the SOLE renderer of the voice panel; the card publishes an empty
+ * dock slot and the floating window is a PiP document the host owns. So the
+ * assertions here are about placement and window lifetime: the panel is in exactly
+ * one document at a time, the window opens once per call and closes with it, and
+ * the PiP tree constructs no second transport.
  */
 
 installActEnv();
@@ -79,6 +78,7 @@ afterAll(async () => {
 });
 
 let roots: Root[] = [];
+let retractDockSlot: (() => void) | null = null;
 
 beforeEach(() => {
   dom.document.body.replaceChildren();
@@ -92,8 +92,9 @@ beforeEach(() => {
   requestWindowRejects = false;
   supported = true;
   closed = 0;
+  retractDockSlot = null;
   resetActiveCallsForTest();
-  resetComposerStoresForTest();
+  resetVoiceSlotsForTest();
   resolutions = [];
   listeners.clear();
   clientSnapshot = snapshotFor("idle");
@@ -120,6 +121,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  retractDockSlot?.();
   for (const root of roots) flushSync(() => root.unmount());
   roots = [];
   await settle();
@@ -127,15 +129,6 @@ afterEach(async () => {
 
 const CONVERSATION = "conversation_root_691";
 
-/**
- * One fake standing in for the single realtime client.
- *
- * `resolveClient` is counted, which is how the "one client" invariant is asserted:
- * the host may resolve the conversation's client, but every resolution for one
- * conversation must return one instance. The real factory has that property already
- * (a module-scoped registry); this proves the host does not defeat it by resolving a
- * new one per render.
- */
 type Phase = "idle" | "connecting" | "live" | "stopping" | "error";
 
 let resolutions: string[] = [];
@@ -166,9 +159,6 @@ const CLIENT = {
   toggleOutput: () => undefined,
   start: async () => undefined,
   stop: async () => undefined,
-  reconcileWorkerDeliveries: () => undefined,
-  onDeliveryAcknowledged: () => () => undefined,
-  realtimeSession: () => "rt_sess_test",
 };
 
 const resolveClient = (conversationId: string) => {
@@ -189,6 +179,15 @@ function mount(props: Partial<Parameters<typeof VoicePipHost>[0]> = {}) {
   return { root, render };
 }
 
+/** The card's side of the seam: an empty dock slot published for the conversation. */
+function publishDockSlot(): HTMLElement {
+  const slot = dom.document.createElement("div") as unknown as HTMLElement;
+  slot.setAttribute("data-testid", "voice-dock-slot");
+  dom.document.body.appendChild(slot as never);
+  flushSync(() => { retractDockSlot = publishVoiceDockSlot(CONVERSATION, slot); });
+  return slot;
+}
+
 /** A call starting: the client's phase moves and the registry hears about it, in the
     order production does it (client subscribers first, then the registry). */
 function startCall(phase: Phase = "connecting") {
@@ -199,38 +198,82 @@ function startCall(phase: Phase = "connecting") {
   });
 }
 
-function floatSurface() {
-  return pip.document.querySelector("[data-testid='voice-float-surface']");
+const panelIn = (doc: typeof dom.document | typeof pip.document) =>
+  doc.querySelector("section[data-phase]");
+
+/** The operator's explicit detach gesture — floating is never automatic. */
+function requestFloat() {
+  flushSync(() => requestVoiceFloat());
 }
 
-test("no call means no window and no floater", async () => {
+test("no call means no window, no panel, nothing rendered", async () => {
+  publishDockSlot();
   mount();
   await settle();
   expect(requestedWindows).toBe(0);
-  expect(floatSurface()).toBeNull();
+  expect(panelIn(pip.document)).toBeNull();
+  expect(panelIn(dom.document)).toBeNull();
 });
 
-test("a voice start opens exactly one window and portals the surface into it (U4)", async () => {
+test("a voice start docks the transcript into the card and opens NO window (revised on stage)", async () => {
+  const slot = publishDockSlot();
+  const { render } = mount();
+  startCall("live");
+  await settle();
+  render();
+  await settle();
+
+  expect(requestedWindows).toBe(0);
+  expect(panelIn(pip.document)).toBeNull();
+  expect(slot.querySelector("section[data-phase='live']")).not.toBeNull();
+});
+
+test("the explicit float gesture opens exactly one window and the ONE panel moves into it", async () => {
+  const slot = publishDockSlot();
   const { render } = mount();
   startCall();
+  await settle();
+  requestFloat();
   await settle();
   render();
   await settle();
 
   expect(requestedWindows).toBe(1);
-  expect(floatSurface()).not.toBeNull();
-  /* The surface lives in the PiP document, not in the page. */
-  expect(dom.document.querySelector("[data-testid='voice-float-surface']")).toBeNull();
+  expect(panelIn(pip.document)).not.toBeNull();
+  /* One containment at a time: the dock slot is empty while the window is open. */
+  expect(slot.querySelector("section[data-phase]")).toBeNull();
+  /* And the host offered the card a composer slot inside the window. */
+  expect(pip.document.querySelector("[data-testid='voice-pip-composer-slot']")).not.toBeNull();
+  expect(pip.document.querySelector("[data-testid='voice-float-dock']")).not.toBeNull();
 });
 
-test("the PiP tree constructs no audio, no microphone and no peer connection (§4 rules 1–2)", async () => {
+test("without PiP support the panel docks into the card's published slot (AC8)", async () => {
+  supported = false;
+  const slot = publishDockSlot();
   const { render } = mount();
-  startCall();
+  startCall("live");
+  await settle();
+  requestFloat();
   await settle();
   render();
   await settle();
 
-  expect(floatSurface()).not.toBeNull();
+  expect(requestedWindows).toBe(0);
+  expect(slot.querySelector("section[data-phase='live']")).not.toBeNull();
+  expect(dom.document.querySelector("[role='alert']")).toBeNull();
+});
+
+test("the PiP tree constructs no audio, no microphone and no peer connection (§4 rules 1–2)", async () => {
+  publishDockSlot();
+  const { render } = mount();
+  startCall();
+  await settle();
+  requestFloat();
+  await settle();
+  render();
+  await settle();
+
+  expect(panelIn(pip.document)).not.toBeNull();
   expect(audioConstructions).toBe(0);
   expect(userMediaCalls).toBe(0);
   expect(peerConstructions).toBe(0);
@@ -238,112 +281,26 @@ test("the PiP tree constructs no audio, no microphone and no peer connection (§
   expect(pip.document.querySelectorAll("audio, video")).toHaveLength(0);
 });
 
-test("no work-log rows, tool-call rows or lifecycle journal entries render in the floater (AC12)", async () => {
-  const { render } = mount();
-  startCall();
-  await settle();
-  render();
-  await settle();
-
-  const text = pip.document.body.textContent ?? "";
-  for (const forbidden of ["tool", "Tool", "lifecycle", "journal", "stage_", "pipeline"]) {
-    expect(text).not.toContain(forbidden);
-  }
-  expect(pip.document.querySelector("[data-testid='log-feed']")).toBeNull();
-});
-
-test("the manager conversation never renders in the floater (AC19)", async () => {
-  const { render } = mount();
-  startCall();
-  await settle();
-  render();
-  await settle();
-
-  /* Only the conversation that has the call is rendered, by construction: the host
-     resolves exactly one conversation id from the registry. */
-  flushSync(() => reportCallPhase("conversation_manager", "idle"));
-  await settle();
-  expect(pip.document.body.textContent ?? "").not.toContain("conversation_manager");
-});
-
-test("the floater's composer writes the one shared draft (U2, AC4)", async () => {
-  const { render } = mount();
-  startCall();
-  await settle();
-  render();
-  await settle();
-
-  const input = pip.document.querySelector("[data-testid='voice-float-input']") as unknown as HTMLTextAreaElement;
-  expect(input).not.toBeNull();
-
-  /* Typing in the floater must land in the store the card reads, not in local state. */
-  flushSync(() => composerStore(CONVERSATION).setDraft("start a reviewer"));
-  await settle();
-  expect((pip.document.querySelector("[data-testid='voice-float-input']") as unknown as HTMLTextAreaElement).value)
-    .toBe("start a reviewer");
-});
-
-test("with no send prop the floater delivers through the card's registered sender (§4 rule 5)", async () => {
-  const sends: number[] = [];
-  const store = composerStore(CONVERSATION);
-  const release = store.registerSender(() => { sends.push(1); });
+test("docking is presentation only — the panel returns to the card and the call is untouched (AC6)", async () => {
+  const slot = publishDockSlot();
   const { render } = mount();
   startCall("live");
   await settle();
-  render();
-  await settle();
-
-  flushSync(() => store.setDraft("deploy it"));
-  await settle();
-  const button = pip.document.querySelector("[data-testid='voice-float-send']") as unknown as HTMLButtonElement;
-  flushSync(() => button.click());
-  await settle();
-
-  /* Production passes no onSend: the only path out of this window is the one the
-     card published, so there is no second dispatcher to race. */
-  expect(sends).toEqual([1]);
-  release();
-});
-
-test("send goes through the opener's one send path, carrying the shared key (§4 rule 5)", async () => {
-  const sends: { conversationId: string; draft: string; sendKey: string }[] = [];
-  const { render } = mount({
-    onSend: (conversationId, draft, sendKey) => { sends.push({ conversationId, draft, sendKey }); },
-  });
-  startCall();
+  requestFloat();
   await settle();
   render();
-  await settle();
-
-  const store = composerStore(CONVERSATION);
-  flushSync(() => store.setDraft("deploy it"));
-  await settle();
-
-  const button = pip.document.querySelector("[data-testid='voice-float-send']") as unknown as HTMLButtonElement;
-  flushSync(() => button.click());
-  await settle();
-
-  expect(sends).toHaveLength(1);
-  expect(sends[0]).toMatchObject({ conversationId: CONVERSATION, draft: "deploy it", sendKey: store.sendKey()! });
-});
-
-test("closing the floater is presentation only — the call is untouched (AC6)", async () => {
-  const { render } = mount();
-  startCall();
-  await settle();
-  render();
-  await settle();
-  flushSync(() => composerStore(CONVERSATION).setDraft("still typing"));
   await settle();
 
   const dock = pip.document.querySelector("[data-testid='voice-float-dock']") as unknown as HTMLButtonElement;
   flushSync(() => dock.click());
   await settle();
+  render();
+  await settle();
 
   expect(closed).toBe(1);
-  expect(floatSurface()).toBeNull();
-  /* The draft and the call survived: nothing was torn down but a window. */
-  expect(composerStore(CONVERSATION).getSnapshot().draft).toBe("still typing");
+  expect(panelIn(pip.document)).toBeNull();
+  /* The same panel, back in the card's slot: containment changed, nothing else. */
+  expect(slot.querySelector("section[data-phase='live']")).not.toBeNull();
   expect(audioConstructions).toBe(0);
 
   /* And it stays closed. A host that re-opened whenever a call was up with no window
@@ -353,12 +310,15 @@ test("closing the floater is presentation only — the call is untouched (AC6)",
     await settle();
   }
   expect(requestedWindows).toBe(1);
-  expect(floatSurface()).toBeNull();
+  expect(panelIn(pip.document)).toBeNull();
 });
 
 test("the card's float control re-opens the same call without a new window per render (§5)", async () => {
+  publishDockSlot();
   const { render } = mount();
   startCall("live");
+  await settle();
+  requestFloat();
   await settle();
   render();
   await settle();
@@ -366,14 +326,14 @@ test("the card's float control re-opens the same call without a new window per r
   const dock = pip.document.querySelector("[data-testid='voice-float-dock']") as unknown as HTMLButtonElement;
   flushSync(() => dock.click());
   await settle();
-  expect(floatSurface()).toBeNull();
+  expect(panelIn(pip.document)).toBeNull();
 
   flushSync(() => requestVoiceFloat());
   await settle();
   render();
   await settle();
   expect(requestedWindows).toBe(2);
-  expect(floatSurface()).not.toBeNull();
+  expect(panelIn(pip.document)).not.toBeNull();
 
   /* One request, one window: further renders do not ask again. */
   for (let renders = 0; renders < 3; renders += 1) {
@@ -384,6 +344,7 @@ test("the card's float control re-opens the same call without a new window per r
 });
 
 test("the host resolves one client per conversation, never one per render", async () => {
+  publishDockSlot();
   const { render } = mount();
   startCall("live");
   await settle();
@@ -397,81 +358,89 @@ test("the host resolves one client per conversation, never one per render", asyn
   expect(resolutions[0]).toBe(CONVERSATION);
 });
 
-test("the call ending closes the floater", async () => {
+test("the call ending closes the window and the ended transcript stays docked", async () => {
+  const slot = publishDockSlot();
   const { render } = mount();
-  startCall();
+  startCall("live");
+  await settle();
+  requestFloat();
   await settle();
   render();
   await settle();
-  expect(floatSurface()).not.toBeNull();
+  expect(panelIn(pip.document)).not.toBeNull();
 
-  startCall("idle");
+  /* Hang up: phase back to idle, but the transcript lines survive in the client. */
+  clientSnapshot = { ...snapshotFor("live"), phase: "idle" as Phase } as typeof clientSnapshot;
+  flushSync(() => {
+    for (const listener of listeners) listener();
+    reportCallPhase(CONVERSATION, "idle");
+  });
   await settle();
   render();
   await settle();
 
   expect(closed).toBe(1);
-  expect(floatSurface()).toBeNull();
-});
-
-test("an unsupported browser leaves the call docked with no window and no error (AC8)", async () => {
-  supported = false;
-  const { render } = mount();
-  startCall();
-  await settle();
-  render();
-  await settle();
-
-  expect(requestedWindows).toBe(0);
-  expect(floatSurface()).toBeNull();
-  expect(dom.document.querySelector("[role='alert']")).toBeNull();
+  expect(panelIn(pip.document)).toBeNull();
+  /* The panel outlives the call, exactly as it did when the card rendered it:
+     the operator keeps reading the transcript after a hangup. */
+  expect(slot.querySelector("section[data-phase='idle']")).not.toBeNull();
 });
 
 test("a refused requestWindow is asked once, not in a loop", async () => {
   requestWindowRejects = true;
+  publishDockSlot();
   const { render } = mount();
   startCall();
+  await settle();
+  requestFloat();
   await settle();
   for (let attempt = 0; attempt < 3; attempt += 1) {
     render();
     await settle();
   }
   expect(requestedWindows).toBe(1);
-  expect(floatSurface()).toBeNull();
+  expect(panelIn(pip.document)).toBeNull();
 });
 
-test("mobile never opens a floater (§7)", async () => {
+test("mobile never opens a floater, and still docks the panel (§7)", async () => {
+  const slot = publishDockSlot();
   const { render } = mount({ mobile: true });
-  startCall();
+  startCall("live");
+  await settle();
+  requestFloat();
   await settle();
   render();
   await settle();
 
   expect(requestedWindows).toBe(0);
-  expect(floatSurface()).toBeNull();
+  expect(panelIn(pip.document)).toBeNull();
+  expect(slot.querySelector("section[data-phase='live']")).not.toBeNull();
 });
 
-test("the floater keeps working while the board is elsewhere (AC13)", async () => {
+test("the floating window keeps working while the board is elsewhere (AC13)", async () => {
+  /* No dock slot at all: the card is unmounted. The window must not care. */
   const { render } = mount();
   startCall("live");
+  await settle();
+  requestFloat();
   await settle();
   render();
   await settle();
 
-  /* Navigating the board re-renders the Viewer; the host is above it and the
-     conversation it resolved has not changed. */
   for (let navigation = 0; navigation < 3; navigation += 1) {
     render();
     await settle();
   }
   expect(requestedWindows).toBe(1);
-  expect(floatSurface()).not.toBeNull();
-  expect(pip.document.querySelector("[data-testid='voice-float-input']")).not.toBeNull();
+  expect(panelIn(pip.document)).not.toBeNull();
 });
 
-test("the transcript keeps its live region and the controls their pressed state (AC14)", async () => {
+test("the transcript keeps its live region and the dock control its label (AC14)", async () => {
+  publishDockSlot();
   const { render } = mount();
   startCall("live");
+  await settle();
+  requestFloat();
   await settle();
   render();
   await settle();
@@ -485,66 +454,15 @@ test("the transcript keeps its live region and the controls their pressed state 
 test("the floater adopts the opener's styles, language and direction", async () => {
   dom.document.documentElement.lang = "uk";
   dom.document.documentElement.dir = "ltr";
+  publishDockSlot();
   const { render } = mount();
   startCall();
+  await settle();
+  requestFloat();
   await settle();
   render();
   await settle();
 
   expect(pip.document.documentElement.lang).toBe("uk");
   expect(pip.document.documentElement.dir).toBe("ltr");
-});
-
-test("a card that unmounts disables the floater's Send rather than swallowing it", async () => {
-  const store = composerStore(CONVERSATION);
-  const release = store.registerSender(() => undefined);
-  const { render } = mount();
-  startCall("live");
-  await settle();
-  render();
-  await settle();
-
-  flushSync(() => store.setDraft("start a reviewer"));
-  await settle();
-  const enabled = pip.document.querySelector("[data-testid='voice-float-send']") as unknown as HTMLButtonElement;
-  expect(enabled.disabled).toBe(false);
-
-  /* The card leaves the viewport — different window, different lifetime. The draft
-     and the transcript survive; the delivery path does not, and the button says so
-     instead of accepting a press that goes nowhere. */
-  flushSync(() => release());
-  await settle();
-  render();
-  await settle();
-
-  const disabled = pip.document.querySelector("[data-testid='voice-float-send']") as unknown as HTMLButtonElement;
-  expect(disabled.disabled).toBe(true);
-  expect(store.getSnapshot().draft).toBe("start a reviewer");
-  expect(floatSurface()).not.toBeNull();
-});
-
-test("a card that unmounts disables the floater's tile controls too", async () => {
-  const store = composerStore(CONVERSATION);
-  const release = store.registerAttachmentOwner({ remove: () => undefined, clearAll: () => undefined });
-  const { render } = mount();
-  startCall("live");
-  await settle();
-  flushSync(() => store.setAttachments([
-    { id: "one", status: "ready", name: "shot.png", mime: "image/png", preview: "blob:one" },
-  ]));
-  render();
-  await settle();
-
-  const enabled = pip.document.querySelector("[data-testid='voice-float-attachments'] button") as unknown as HTMLButtonElement;
-  expect(enabled.disabled).toBe(false);
-
-  /* The tray goes with the card; the tile stays on screen. The button must say so
-     rather than accepting a press that removes nothing. */
-  flushSync(() => release());
-  await settle();
-  render();
-  await settle();
-
-  const disabled = pip.document.querySelector("[data-testid='voice-float-attachments'] button") as unknown as HTMLButtonElement;
-  expect(disabled.disabled).toBe(true);
 });

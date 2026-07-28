@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
+import { createPortal } from "react-dom";
 
 import { ArrowRight, ArrowUpToLine, Check, ChevronRight, Loader2, Play, X } from "@/components/icons";
 import { RotateCcw } from "lucide-react";
@@ -60,7 +61,7 @@ import {
 } from "./runtime/deliveryState";
 import { mintIdempotencyKey, receiptIsAdmitted, receiptIsTerminal } from "./runtime/runtimeModel";
 import { useAgentCapabilities } from "./useAgentCapabilities";
-import { VoiceConversationButton, VoiceConversationPanel } from "./VoiceConversation";
+import { VoiceConversationButton } from "./VoiceConversation";
 import { commitBridgeTurn, useBridgeTurnStartDrain } from "@/hooks/useBridgeReportRelay";
 import {
   bridgeAcknowledgementFor,
@@ -68,8 +69,18 @@ import {
   rememberBridgeAcknowledgement,
 } from "@/lib/bridge/pendingAcknowledgements";
 
-import { composerStore } from "./voice/composerStore";
 import { VoiceFloatButton } from "./voice/VoiceFloatButton";
+import { viewerContextPrelude } from "./voice/viewerContextPrelude";
+import {
+  getServerVoiceComposerHostMounted,
+  getServerVoiceSlot,
+  getVoiceComposerSlot,
+  isVoiceComposerHostMounted,
+  publishVoiceComposerCardNode,
+  publishVoiceComposerCardProps,
+  publishVoiceDockSlot,
+  subscribeVoiceSlots,
+} from "./voice/voiceSlots";
 
 /** The persisted "on resume" runtime profile as a POST body fragment (issue
     #241 §4). `fast` is a codex-only service-tier override. */
@@ -941,18 +952,7 @@ export function structuredComposerSession(runtimeSession: RuntimeSessionView | n
     : null;
 }
 
-/**
- * Chat-style composer pinned under the feed. A live pane gets the text typed
- * straight into its tmux pane; a finished resumable conversation boots a new
- * agent window in the current tmux session with the text as the first prompt.
- * Sent messages stay visible as a queue above the input until dismissed.
- */
-export function TmuxComposer({
-  file,
-  pollPaused = false,
-  deadHost = false,
-  sendBlockedReason = null,
-}: {
+export interface TmuxComposerProps {
   file: FileEntry;
   pollPaused?: boolean;
   deadHost?: boolean;
@@ -961,6 +961,73 @@ export function TmuxComposer({
       is attempted while it is set, so no /api/tmux request can fire against an
       as-yet-unclassified host. */
   sendBlockedReason?: string | null;
+}
+
+/**
+ * Chat-style composer pinned under the feed. A live pane gets the text typed
+ * straight into its tmux pane; a finished resumable conversation boots a new
+ * agent window in the current tmux session with the text as the first prompt.
+ * Sent messages stay visible as a queue above the input until dismissed.
+ *
+ * OWNERSHIP (#691 hoist): for a conversation card this component is only a
+ * dispatcher. The composer machinery — draft, dictation, attachments and their
+ * object URLs, the outbox and the whole send path — must survive the card
+ * unmounting mid-call, so `VoiceComposerHost` (Viewer level) renders the one
+ * `TmuxComposerCore` and portals its form into the place this card publishes.
+ * The card contributes a place and fresh props, never a second composer. Trees
+ * with no host mounted (component tests, the demo renderer) keep the inline
+ * card-scoped composer unchanged, as does every non-conversation surface.
+ */
+export function TmuxComposer(props: TmuxComposerProps) {
+  const hostMounted = useSyncExternalStore(
+    subscribeVoiceSlots,
+    isVoiceComposerHostMounted,
+    getServerVoiceComposerHostMounted,
+  );
+  const cardId = conversationIdentity(props.file);
+  if (!hostMounted || !cardId.startsWith("conversation_")) return <TmuxComposerCore {...props} />;
+  return <VoiceComposerCardSlot cardId={cardId} composerProps={props} />;
+}
+
+/** The card's half of the hoist: a place (a `display: contents` div the host
+    portals the form into) and the props the composer needs, republished every
+    render because `file` is a fresh snapshot each board poll. */
+function VoiceComposerCardSlot({ cardId, composerProps }: { cardId: string; composerProps: TmuxComposerProps }) {
+  const publishNode = useCallback(
+    (node: HTMLDivElement | null) => {
+      if (!node) return undefined;
+      return publishVoiceComposerCardNode(cardId, node);
+    },
+    [cardId],
+  );
+  useEffect(() => {
+    publishVoiceComposerCardProps(cardId, {
+      file: composerProps.file,
+      pollPaused: composerProps.pollPaused ?? false,
+      deadHost: composerProps.deadHost ?? false,
+      sendBlockedReason: composerProps.sendBlockedReason ?? null,
+    });
+  });
+  return <div ref={publishNode} data-testid="voice-composer-card-slot" className="contents" />;
+}
+
+/**
+ * The canonical composer machinery. Rendered inline by ordinary cards, and by
+ * `VoiceComposerHost` for conversation cards — where `dockNode` says where the
+ * form goes: a card's published slot, or (null) a hidden Viewer-level container
+ * that keeps everything mounted while no card is on screen. State never lives in
+ * the portal target; moving containment moves DOM, not lifetimes.
+ */
+export function TmuxComposerCore({
+  file,
+  pollPaused = false,
+  deadHost = false,
+  sendBlockedReason = null,
+  dockNode,
+}: TmuxComposerProps & {
+  /** Absent: render the form inline (the card owns the composer, as ever).
+      A node: portal the form there. Null: keep the form mounted but hidden. */
+  dockNode?: HTMLElement | null;
 }) {
   const { t } = useLocale();
   /* Draft text and delivery receipts key on the stable conversation identity,
@@ -986,6 +1053,23 @@ export function TmuxComposer({
     voiceWorkerTurn?.text ?? "",
     Boolean(voiceWorkerTurn?.turnId && structuredSession?.session.activeTurnId === voiceWorkerTurn.turnId),
     structuredSession?.session.voiceDeliveries ?? [],
+  );
+  /* #691, ownership inverted: the voice panel is rendered by `VoicePipHost`, the
+     Viewer-level owner that survives this card unmounting. Docked, the panel lands
+     in the slot node this card publishes; floating, the HOST publishes a composer
+     slot inside the PiP window and this card portals its one `ComposerBar` there.
+     Containment is the only thing that changes — same panel, same composer. */
+  const pipComposerSlot = useSyncExternalStore(
+    subscribeVoiceSlots,
+    () => (voiceEnabled ? getVoiceComposerSlot(cardId) : null),
+    getServerVoiceSlot,
+  );
+  const publishDockSlot = useCallback(
+    (node: HTMLDivElement | null) => {
+      if (!node) return undefined;
+      return publishVoiceDockSlot(cardId, node);
+    },
+    [cardId],
   );
   const structuredImageCapability = structuredSession?.session.capabilities?.imageInput;
   const structuredImageControl = caps.controls.images;
@@ -1022,10 +1106,6 @@ export function TmuxComposer({
     /* Queue-first (issue #561): a submitted message lives in the durable
        outbox, so the field never locks behind an in-flight delivery. */
     holdInputWhileBusy: false,
-    /* #691 U2: the voice conversation's draft is shared with its floating
-       rendering — one draft, one queue, one dispatcher. Every other card owns its
-       draft outright, exactly as before. */
-    shared: voiceEnabled ? composerStore(cardId) : null,
   });
   /* Pulls the bridge inbox once, at the start of a turn, and only for the voice
      conversation. Returns "" for every other card and whenever nothing is pending. */
@@ -1575,8 +1655,19 @@ export function TmuxComposer({
        retained generation replays its original bytes under its original key, and
        changing them would defeat the idempotency the retry exists for. */
     const bridgeTurn = replayGeneration ? null : await drainBridgeTurnStart();
+    /* The Viewer-global orchestrator travels with the operator: what they are
+       looking at right now — current project, focused conversation, explicit
+       selection, read from the same view bus presence publishes from — rides
+       into the turn, so "do this in the project I'm viewing" resolves without
+       re-docking the floating window. Composed at dispatch and never on a
+       replay, exactly like the bridge prelude above; empty whenever the operator
+       is simply looking at this conversation itself. */
+    const viewerPrelude = replayGeneration || !voiceEnabled
+      ? ""
+      : viewerContextPrelude({ path: file.path, project: file.project });
+    const composedText = viewerPrelude ? `${viewerPrelude}\n${requestedText}` : requestedText;
     const payloadText = replayGeneration?.text
-      ?? (bridgeTurn?.text ? `${bridgeTurn.text}\n\n${requestedText}` : requestedText);
+      ?? (bridgeTurn?.text ? `${bridgeTurn.text}\n\n${composedText}` : composedText);
     const sentImages: PendingImage[] = replayGeneration
       ? replayGeneration.images.map((image) => ({ ...image }))
       : requestedImages;
@@ -1953,7 +2044,119 @@ export function TmuxComposer({
   const composerHistory = outboxHistory(outbox);
   const quickAckDisabled = busy || voiceSending || attachments.images.length > 0;
 
-  return (
+  const composerAriaLabel = structuredSession
+    ? t("composer.sendStructuredAria")
+    : unresolvedOwnership
+      ? t("composer.resolvingAria")
+      : spawnMode
+        ? t("composer.spawnAria")
+        : t("composer.sendAria", { target: target ?? "" });
+
+  const composerBar = (
+    <ComposerBar
+      composer={composer}
+      placeholder={unresolvedOwnership
+        ? t("composer.placeholderResolving")
+        : relayMode
+          ? t("composer.placeholderRelay")
+          : spawnMode
+            ? t("composer.placeholderSpawn")
+            : t("composer.placeholderSend")}
+      textareaAriaLabel={t("composer.textAria")}
+      imageAriaLabel={t("composer.addImages")}
+      sendLabelIdle={spawnMode ? t("composer.launchAgent") : t("composer.sendToAgent")}
+      sendLabelRecording={t("composer.stopAndSend")}
+      sendTitleRecording={t("composer.stopAndSendTitle")}
+      sendIdleClassName="border-accent bg-accent hover:opacity-90"
+      sendMenuLabel={t("composer.sendMenuTitle")}
+      /* ArrowUp/ArrowDown in an empty composer walk what is queued and what
+         was already sent, newest first (issue #561). */
+      history={composerHistory}
+      voiceControl={voiceEnabled ? (
+        <>
+          <VoiceConversationButton
+            phase={voice.phase}
+            start={voice.start}
+            stop={voice.stop}
+            t={t}
+          />
+          {/* #691 §5: re-float a call whose window the operator closed. Only while a
+              call is up, and only where Document PiP exists — the floater opens
+              itself on voice start, so this is the way back, not the way in. It has
+              to be a real click: `requestWindow` needs transient user activation. */}
+          <VoiceFloatButton phase={voice.phase} t={t} />
+        </>
+      ) : undefined}
+      voicePanel={voiceEnabled && !pipComposerSlot ? (
+        /* An empty slot, not a panel: `VoicePipHost` owns the ONE panel rendering
+           and portals it here while no floating window is open. While one is,
+           the panel lives in the PiP window and this slot stands down. */
+        <div ref={publishDockSlot} data-testid="voice-dock-slot" className="flex flex-col" />
+      ) : undefined}
+      sendMenuActions={
+        canQuickAck
+          ? [
+              {
+                id: "quick-ack",
+                label: t("composer.quickAckLabel"),
+                description: t("composer.quickAck"),
+                disabled: quickAckDisabled,
+                tone: "ok",
+                /* Queue-first like every other submission (finding 5): the ack
+                   enqueues behind any active delivery, renders immediately, is
+                   cancellable, joins history, and dispatches once — while the
+                   operator's typed draft and staged tiles stay put. */
+                onSelect: () => queueSubmit(t("composer.quickAck"), { preserveDraft: true }),
+              },
+            ]
+          : []
+      }
+      showImage={!deadHostBlocksSend}
+      /* A dead structured surface can still recover TEXT while its image
+         pipeline waits for the host to recover (finding 4): the picker stays
+         visible so staged tiles remain removable, and disables with the
+         localized recovery reason so an image submission holds until recovery. */
+      imageDisabled={structuredImagesDisabled}
+      imageDisabledReason={structuredImagesReason}
+      sendPayloadAvailable={replayGenerationAvailable}
+      sendDisabledReason={deadHostBlocksSend
+        ? t("deadHost.sendBlocked")
+        : reconcilingSend
+          ? t("composer.admissionTimedOut")
+          : effectiveSendBlockedReason ?? undefined}
+      /* Every blocked state keeps one recovery route (issue #499): Re-check
+         forces a fresh runtime snapshot, which resolves an unresolved host,
+         surfaces a recovered one, and reconciles a timed-out admission. */
+      onSendBlockedRecover={() => void refreshRuntime()}
+      receipts={
+        displayedRuntimeReceipts.length
+          ? <RuntimeComposerReceipts
+              receipts={displayedRuntimeReceipts}
+              actionsDisabled={busy || voiceSending || deadHostBlocksSend}
+              dismissed={dismissedReceipts}
+              onRetry={(receipt) => void retryRuntimeReceipt(receipt)}
+              onEdit={editRuntimeReceipt}
+              onDismiss={dismissReceipts}
+            />
+          : undefined
+      }
+      leftSlot={
+        /* The compact model/reasoning pill (issue #390): lives in the quiet
+           bottom row, left of the image picker, on exactly the surfaces the
+           capability matrix keeps the runtime control visible. */
+        caps.controls.runtime.state !== "hidden" ? (
+          <RuntimePill
+            file={file}
+            surface={caps.surface}
+            runtimeSettings={structuredSession?.session.capabilities?.runtimeSettings ?? null}
+            runtimeSession={structuredSession?.session ?? null}
+          />
+        ) : null
+      }
+    />
+  );
+
+  const body = (
     <form
       onSubmit={handleSubmit}
       data-testid={isMobile ? "bounded-mobile-composer" : undefined}
@@ -1966,13 +2169,7 @@ export function TmuxComposer({
           ? "max-h-[min(38dvh,20rem)] overflow-x-clip overflow-y-auto overscroll-y-contain py-1.5"
           : "py-2"
       }`}
-      aria-label={structuredSession
-        ? t("composer.sendStructuredAria")
-        : unresolvedOwnership
-          ? t("composer.resolvingAria")
-          : spawnMode
-            ? t("composer.spawnAria")
-            : t("composer.sendAria", { target: target ?? "" })}
+      aria-label={composerAriaLabel}
     >
       {/* Unmounts exactly when the textarea does (a key-churn remount, an
           adoption flap, a pane-target flap hiding the composer), so its
@@ -2071,116 +2268,31 @@ export function TmuxComposer({
           })}
         </div>
       ) : null}
-      <ComposerBar
-        composer={composer}
-        placeholder={unresolvedOwnership
-          ? t("composer.placeholderResolving")
-          : relayMode
-            ? t("composer.placeholderRelay")
-            : spawnMode
-              ? t("composer.placeholderSpawn")
-              : t("composer.placeholderSend")}
-        textareaAriaLabel={t("composer.textAria")}
-        imageAriaLabel={t("composer.addImages")}
-        sendLabelIdle={spawnMode ? t("composer.launchAgent") : t("composer.sendToAgent")}
-        sendLabelRecording={t("composer.stopAndSend")}
-        sendTitleRecording={t("composer.stopAndSendTitle")}
-        sendIdleClassName="border-accent bg-accent hover:opacity-90"
-        sendMenuLabel={t("composer.sendMenuTitle")}
-        /* ArrowUp/ArrowDown in an empty composer walk what is queued and what
-           was already sent, newest first (issue #561). */
-        history={composerHistory}
-        voiceControl={voiceEnabled ? (
-          <>
-            <VoiceConversationButton
-              phase={voice.phase}
-              start={voice.start}
-              stop={voice.stop}
-              t={t}
-            />
-            {/* #691 §5: re-float a call whose window the operator closed. Only while a
-                call is up, and only where Document PiP exists — the floater opens
-                itself on voice start, so this is the way back, not the way in. It has
-                to be a real click: `requestWindow` needs transient user activation. */}
-            <VoiceFloatButton phase={voice.phase} t={t} />
-          </>
-        ) : undefined}
-        voicePanel={voiceEnabled ? (
-          <VoiceConversationPanel
-            phase={voice.phase}
-            lines={voice.lines}
-            error={voice.error}
-            startedAt={voice.startedAt}
-            stream={voice.micStream}
-            micMuted={voice.micMuted}
-            outputMuted={voice.outputMuted}
-            onToggleMic={voice.toggleMic}
-            onToggleOutput={voice.toggleOutput}
-            onRetry={() => void voice.start()}
-            t={t}
-          />
-        ) : undefined}
-        sendMenuActions={
-          canQuickAck
-            ? [
-                {
-                  id: "quick-ack",
-                  label: t("composer.quickAckLabel"),
-                  description: t("composer.quickAck"),
-                  disabled: quickAckDisabled,
-                  tone: "ok",
-                  /* Queue-first like every other submission (finding 5): the ack
-                     enqueues behind any active delivery, renders immediately, is
-                     cancellable, joins history, and dispatches once — while the
-                     operator's typed draft and staged tiles stay put. */
-                  onSelect: () => queueSubmit(t("composer.quickAck"), { preserveDraft: true }),
-                },
-              ]
-            : []
-        }
-        showImage={!deadHostBlocksSend}
-        /* A dead structured surface can still recover TEXT while its image
-           pipeline waits for the host to recover (finding 4): the picker stays
-           visible so staged tiles remain removable, and disables with the
-           localized recovery reason so an image submission holds until recovery. */
-        imageDisabled={structuredImagesDisabled}
-        imageDisabledReason={structuredImagesReason}
-        sendPayloadAvailable={replayGenerationAvailable}
-        sendDisabledReason={deadHostBlocksSend
-          ? t("deadHost.sendBlocked")
-          : reconcilingSend
-            ? t("composer.admissionTimedOut")
-            : effectiveSendBlockedReason ?? undefined}
-        /* Every blocked state keeps one recovery route (issue #499): Re-check
-           forces a fresh runtime snapshot, which resolves an unresolved host,
-           surfaces a recovered one, and reconciles a timed-out admission. */
-        onSendBlockedRecover={() => void refreshRuntime()}
-        receipts={
-          displayedRuntimeReceipts.length
-            ? <RuntimeComposerReceipts
-                receipts={displayedRuntimeReceipts}
-                actionsDisabled={busy || voiceSending || deadHostBlocksSend}
-                dismissed={dismissedReceipts}
-                onRetry={(receipt) => void retryRuntimeReceipt(receipt)}
-                onEdit={editRuntimeReceipt}
-                onDismiss={dismissReceipts}
-              />
-            : undefined
-        }
-        leftSlot={
-          /* The compact model/reasoning pill (issue #390): lives in the quiet
-             bottom row, left of the image picker, on exactly the surfaces the
-             capability matrix keeps the runtime control visible. */
-          caps.controls.runtime.state !== "hidden" ? (
-            <RuntimePill
-              file={file}
-              surface={caps.surface}
-              runtimeSettings={structuredSession?.session.capabilities?.runtimeSettings ?? null}
-              runtimeSession={structuredSession?.session ?? null}
-            />
-          ) : null
-        }
-      />
+      {pipComposerSlot
+        ? /* Floating (#691): the SAME ComposerBar, moved into the PiP window
+             through the slot the host published. The wrapper form re-creates the
+             submit surface the card's form provides here — the handler is the
+             identical `handleSubmit`, so there is still exactly one send path. */
+          createPortal(
+            <form
+              onSubmit={handleSubmit}
+              aria-label={composerAriaLabel}
+              className="flex flex-col gap-1.5"
+            >
+              {composerBar}
+            </form>,
+            pipComposerSlot,
+          )
+        : composerBar}
     </form>
   );
+
+  /* Inline for a card that owns its composer; portalled into the card's slot for
+     a hoisted one; parked hidden — mounted, draining, recording — when the card
+     is gone mid-call. The `hidden` container is what keeps a dictation, a staged
+     image's object URL and the outbox dispatcher alive across board navigation. */
+  if (dockNode === undefined) return body;
+  return dockNode
+    ? createPortal(body, dockNode)
+    : <div hidden data-testid="voice-composer-parked">{body}</div>;
 }

@@ -28,12 +28,12 @@ Object.assign(globalThis, {
   Event: dom.Event,
 });
 
-const { configureRealtimeClientForTests, useAmbientCallLease, useCodexRealtime } = await import("./useCodexRealtime");
+const { configureRealtimeClientForTests, useAmbientCallLease, useCallAmbience } = await import("./useCodexRealtime");
 const { ambientLoop, configureAmbientTransportForTests, resetAppAudioForTests } = await import("@/lib/audio/app");
 const { configureAudioPrefsStorage, setAudioPrefs } = await import("@/lib/audio/prefs");
 const { FADE_OUT_SECONDS, loopGain, SPEECH_DUCK } = await import("@/lib/audio/ambientLoop");
 
-import type { ReactNode } from "react";
+import { useSyncExternalStore, type ReactNode } from "react";
 
 import type { LoopTransport, LoopVoiceHandle } from "@/lib/audio/ambientLoop";
 import type { CodexRealtimeSnapshot } from "@/lib/realtime/codexRealtimeClient";
@@ -230,16 +230,20 @@ describe("music during calls only", () => {
 /**
  * Ducking, end to end from the transcript the call already produces.
  *
- * The composer never tells the music who is talking; the transcript does. These
- * tests drive `useCodexRealtime` itself — the same hook the composer mounts —
+ * Nobody tells the music who is talking; the transcript does. These tests drive
+ * `useCallAmbience` — the composition `VoicePipHost`, the call's Viewer-level
+ * owner, mounts (the card-scoped lease died with its card on board navigation) —
  * and assert the gain the bed is actually asked for, so a wiring that never
  * reaches the loop controller fails here however well the controller behaves on
  * its own.
  */
 describe("ducking under whoever is talking", () => {
-  /** The full composer surface, exactly as a conversation card mounts it. */
+  /** The ambience owner, reduced to exactly what `VoicePipHost` mounts: the one
+      client's snapshot feeding the lease and the transcript-read speaker. */
   function Composer({ id }: { id: string }) {
-    useCodexRealtime(id, true, "", "", false, []);
+    const client = realtime.of(id);
+    const snapshot = useSyncExternalStore(client.subscribe, client.getSnapshot, () => IDLE);
+    useCallAmbience(snapshot.phase === "live", snapshot.lines);
     return null;
   }
 

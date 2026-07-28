@@ -167,6 +167,7 @@ export function ComposerBar({
   const {
     displayText,
     inputRef,
+    attachInput,
     dictation,
     setText,
     attachments,
@@ -322,7 +323,10 @@ export function ComposerBar({
         }`}
       >
         <textarea
-          ref={inputRef}
+          /* The callback ref keeps `inputRef` current and re-attaches the IME
+             mirror when the field remounts — which it does whenever this bar
+             moves between the card and the floating PiP document. */
+          ref={attachInput}
           value={displayText}
           rows={1}
           readOnly={Boolean(dictation.liveText)}
