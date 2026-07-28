@@ -28,7 +28,12 @@ export async function GET(): Promise<NextResponse<OrchestratorStatus>> {
   return NextResponse.json({
     record,
     exists: record !== null && orchestratorRecordExists(record),
-    defaultCwd: process.cwd(),
+    /* `process.cwd()` is only right when the server runs from the checkout. A
+       containerized deployment's cwd is container-internal (the stage's `/app`),
+       and a manager spawned there lands in a bogus path-encoded project
+       (`-app`) with a fallback working directory. Deployments that do not run
+       from the checkout must pin the manager's home explicitly. */
+    defaultCwd: process.env.LLV_ORCHESTRATOR_CWD?.trim() || process.cwd(),
   });
 }
 
