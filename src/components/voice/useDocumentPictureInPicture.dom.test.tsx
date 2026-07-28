@@ -35,15 +35,42 @@ const OVERRIDES = (): Record<string, unknown> => ({
   Node: dom.Node,
   HTMLElement: dom.HTMLElement,
   Event: dom.Event,
+  /* A recording stand-in for the browser's own. The module's late-CSS follower is
+     only reachable through it, and happy-dom delivers real mutation records on a
+     schedule this harness cannot pin down — which would make the coalescing
+     assertions below a race rather than a test. Firing the callbacks by hand is
+     exactly what the browser does, minus the timing. */
+  MutationObserver: class {
+    static instances: { targets: unknown[]; options: unknown[]; fire: () => void; disconnected: number }[] = [];
+    private record: { targets: unknown[]; options: unknown[]; fire: () => void; disconnected: number };
+    constructor(callback: () => void) {
+      this.record = { targets: [], options: [], fire: callback, disconnected: 0 };
+      (this.constructor as typeof this.constructor & { instances: unknown[] }).instances.push(this.record);
+    }
+    observe(target: unknown, options: unknown) {
+      this.record.targets.push(target);
+      this.record.options.push(options);
+    }
+    disconnect() { this.record.disconnected += 1; }
+    takeRecords() { return []; }
+  },
 });
 
 const settle = async () => { for (let i = 0; i < 8; i += 1) await new Promise((r) => setTimeout(r, 0)); };
+
+/** The observers the module attached, in construction order. */
+type ObserverRecord = { targets: unknown[]; options: unknown[]; fire: () => void; disconnected: number };
+const observers = (): ObserverRecord[] =>
+  (G.MutationObserver as unknown as { instances: ObserverRecord[] }).instances;
 
 let supported = true;
 let rejects = false;
 let requested: { width?: number; height?: number }[] = [];
 let closes = 0;
 let sheets: unknown[] = [];
+/* Every `adoptStyles` run reads the opener's stylesheet list exactly once, so this
+   counts ADOPTIONS — the number the coalescing exists to keep at one per burst. */
+let adoptions = 0;
 
 beforeAll(() => {
   const overrides = OVERRIDES();
@@ -52,7 +79,10 @@ beforeAll(() => {
     SAVED[key] = G[key];
     G[key] = overrides[key];
   }
-  Object.defineProperty(dom.document, "styleSheets", { configurable: true, get: () => sheets });
+  Object.defineProperty(dom.document, "styleSheets", {
+    configurable: true,
+    get: () => { adoptions += 1; return sheets; },
+  });
 });
 
 afterAll(async () => {
@@ -75,6 +105,8 @@ beforeEach(() => {
   requested = [];
   closes = 0;
   sheets = [];
+  adoptions = 0;
+  observers().length = 0;
   Object.defineProperty(dom, "documentPictureInPicture", {
     configurable: true,
     get: () => (supported
@@ -225,4 +257,81 @@ test("the operator or the OS closing the window is reported back as docked", asy
 
   expect(handle().pipWindow).toBeNull();
   expect(closes).toBe(0);
+});
+
+test("late CSS and a theme toggle reach the open window, coalesced into ONE re-adoption", async () => {
+  /* `adoptStyles` runs once at open, but the opener keeps moving: a theme toggle
+     rewrites the root classes and a route's CSS chunk lands in `document.head`
+     mid-call. Both would silently never reach the floater. And a burst — a chunk
+     load inserts several nodes, across three observers — must produce ONE
+     re-adoption, or the PiP document gets n copies of every sheet. */
+  sheets = [{ get cssRules() { return [{ cssText: ".a{color:red}" }]; }, href: null }];
+  const handle = await mountHook();
+  await handle().open();
+  await settle();
+  expect(handle().pipWindow).not.toBeNull();
+  expect(pip.document.head.querySelectorAll("style")).toHaveLength(1);
+
+  /* Head, root classes, body classes: the three things that change under an open
+     window, each with its own observer. */
+  expect(observers()).toHaveLength(3);
+  expect(observers().map((observer) => observer.targets[0])).toEqual([
+    dom.document.head,
+    dom.document.documentElement,
+    dom.document.body,
+  ]);
+
+  const adoptionsAtOpen = adoptions;
+  sheets = [
+    { get cssRules() { return [{ cssText: ".a{color:red}" }]; }, href: null },
+    { get cssRules() { return [{ cssText: ".late{color:green}" }]; }, href: null },
+  ];
+  dom.document.documentElement.className = "dark";
+
+  /* The burst: two head insertions and a class change, delivered in one tick. */
+  observers()[0]!.fire();
+  observers()[0]!.fire();
+  observers()[1]!.fire();
+  await settle();
+
+  /* ONE re-adoption for the whole burst, not one per record. */
+  expect(adoptions - adoptionsAtOpen).toBe(1);
+
+  const styles = Array.from(pip.document.head.querySelectorAll("style"));
+  expect(styles).toHaveLength(2);
+  expect(styles.map((style) => style.textContent)).toEqual([".a{color:red}", ".late{color:green}"]);
+  /* And the late arrivals actually arrived. */
+  expect(pip.document.documentElement.className).toBe("dark");
+
+  /* A LATER burst re-adopts again: coalescing is per burst, never a one-shot. */
+  observers()[0]!.fire();
+  await settle();
+  expect(adoptions - adoptionsAtOpen).toBe(2);
+  expect(pip.document.head.querySelectorAll("style")).toHaveLength(2);
+});
+
+test("the observers stop with the window, and a window that dies mid-tick is not written into", async () => {
+  sheets = [{ get cssRules() { return [{ cssText: ".a{color:red}" }]; }, href: null }];
+  const handle = await mountHook();
+  await handle().open();
+  await settle();
+  const attached = observers();
+  expect(attached).toHaveLength(3);
+
+  /* The race the guard exists for: a mutation is recorded, and the window goes
+     away before the coalescing tick runs. Adopting into a dead document is the
+     one thing that throws in production. */
+  const adoptionsBeforeRace = adoptions;
+  attached[0]!.fire();
+  Object.defineProperty(pip, "closed", { configurable: true, get: () => true });
+  await settle();
+  expect(adoptions).toBe(adoptionsBeforeRace);
+  Object.defineProperty(pip, "closed", { configurable: true, get: () => false });
+
+  flushSync(() => handle().close());
+  await settle();
+
+  /* And every observer is released — an opener that kept them would go on copying
+     stylesheets into a window nobody can see for the rest of the session. */
+  for (const observer of attached) expect(observer.disconnected).toBeGreaterThan(0);
 });
