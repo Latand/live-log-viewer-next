@@ -1841,7 +1841,12 @@ export const en = {
   "voice.float": "Open the floating voice window",
   "voice.dock": "Close the floating window and keep the call",
   "voice.floatUnsupported": "A floating voice window needs a Chromium browser; the call stays here.",
-  "voice.unauthorized": "Voice calls need the operator link. Open the Viewer through the link printed in its terminal, then try again.",
+  "voice.unauthorized": "Voice calls need the operator link. Open the Viewer through the link printed in its terminal, or paste it into the voice control, then try again.",
+  "voice.needsOperator": "Voice needs the operator link",
+  "voice.operatorGateHint": "Voice unlocks in a tab opened through the operator link the server prints in its terminal at startup. Paste that link (or its key) here to unlock this tab.",
+  "voice.operatorGatePaste": "Paste the operator link",
+  "voice.operatorGateApply": "Unlock",
+  "voice.operatorGateInvalid": "This does not look like an operator link or key.",
 
   /* The persistent root-conversation overlay (#691) and the focus handoff it
      surfaces (#688). */
