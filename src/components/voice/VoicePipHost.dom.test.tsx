@@ -201,6 +201,11 @@ function startCall(phase: Phase = "connecting") {
 const panelIn = (doc: typeof dom.document | typeof pip.document) =>
   doc.querySelector("section[data-phase]");
 
+/** The operator's explicit detach gesture — floating is never automatic. */
+function requestFloat() {
+  flushSync(() => requestVoiceFloat());
+}
+
 test("no call means no window, no panel, nothing rendered", async () => {
   publishDockSlot();
   mount();
@@ -210,10 +215,25 @@ test("no call means no window, no panel, nothing rendered", async () => {
   expect(panelIn(dom.document)).toBeNull();
 });
 
-test("a voice start opens exactly one window and the ONE panel moves into it (U4)", async () => {
+test("a voice start docks the transcript into the card and opens NO window (revised on stage)", async () => {
+  const slot = publishDockSlot();
+  const { render } = mount();
+  startCall("live");
+  await settle();
+  render();
+  await settle();
+
+  expect(requestedWindows).toBe(0);
+  expect(panelIn(pip.document)).toBeNull();
+  expect(slot.querySelector("section[data-phase='live']")).not.toBeNull();
+});
+
+test("the explicit float gesture opens exactly one window and the ONE panel moves into it", async () => {
   const slot = publishDockSlot();
   const { render } = mount();
   startCall();
+  await settle();
+  requestFloat();
   await settle();
   render();
   await settle();
@@ -233,6 +253,8 @@ test("without PiP support the panel docks into the card's published slot (AC8)",
   const { render } = mount();
   startCall("live");
   await settle();
+  requestFloat();
+  await settle();
   render();
   await settle();
 
@@ -245,6 +267,8 @@ test("the PiP tree constructs no audio, no microphone and no peer connection (§
   publishDockSlot();
   const { render } = mount();
   startCall();
+  await settle();
+  requestFloat();
   await settle();
   render();
   await settle();
@@ -261,6 +285,8 @@ test("docking is presentation only — the panel returns to the card and the cal
   const slot = publishDockSlot();
   const { render } = mount();
   startCall("live");
+  await settle();
+  requestFloat();
   await settle();
   render();
   await settle();
@@ -291,6 +317,8 @@ test("the card's float control re-opens the same call without a new window per r
   publishDockSlot();
   const { render } = mount();
   startCall("live");
+  await settle();
+  requestFloat();
   await settle();
   render();
   await settle();
@@ -335,6 +363,8 @@ test("the call ending closes the window and the ended transcript stays docked", 
   const { render } = mount();
   startCall("live");
   await settle();
+  requestFloat();
+  await settle();
   render();
   await settle();
   expect(panelIn(pip.document)).not.toBeNull();
@@ -362,6 +392,8 @@ test("a refused requestWindow is asked once, not in a loop", async () => {
   const { render } = mount();
   startCall();
   await settle();
+  requestFloat();
+  await settle();
   for (let attempt = 0; attempt < 3; attempt += 1) {
     render();
     await settle();
@@ -375,6 +407,8 @@ test("mobile never opens a floater, and still docks the panel (§7)", async () =
   const { render } = mount({ mobile: true });
   startCall("live");
   await settle();
+  requestFloat();
+  await settle();
   render();
   await settle();
 
@@ -387,6 +421,8 @@ test("the floating window keeps working while the board is elsewhere (AC13)", as
   /* No dock slot at all: the card is unmounted. The window must not care. */
   const { render } = mount();
   startCall("live");
+  await settle();
+  requestFloat();
   await settle();
   render();
   await settle();
@@ -404,6 +440,8 @@ test("the transcript keeps its live region and the dock control its label (AC14)
   const { render } = mount();
   startCall("live");
   await settle();
+  requestFloat();
+  await settle();
   render();
   await settle();
 
@@ -419,6 +457,8 @@ test("the floater adopts the opener's styles, language and direction", async () 
   publishDockSlot();
   const { render } = mount();
   startCall();
+  await settle();
+  requestFloat();
   await settle();
   render();
   await settle();

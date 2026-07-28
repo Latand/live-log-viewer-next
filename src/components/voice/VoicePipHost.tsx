@@ -112,41 +112,25 @@ export function VoicePipHost({ mobile, resolveClient = codexRealtimeClient }: Vo
      mid-call (#691 known trap). */
   useCallAmbience(snapshot.phase === "live", snapshot.lines);
 
-  /* U4: the floater opens on every voice start, remembers nothing, and there is no
-     preference to consult. `requestWindow` needs transient user activation, which
-     the operator's press of the call button provides — the phase reaches
-     `connecting` synchronously inside `start()`, so this effect still runs inside
-     that activation. When it has lapsed anyway, `requestWindow` rejects and the hook
-     leaves the call docked, which is the documented fallback rather than an error. */
+  /* DETACHING IS THE OPERATOR'S EXPLICIT GESTURE, never automatic (operator
+     decision on stage): starting a voice call shows the transcript in the card,
+     and only the float control opens the window. So there is no auto-open here —
+     the ONLY way a window appears is the consumed float-request edge below, which
+     carries the click's transient user activation `requestWindow` needs. */
   const phase = activeCall?.phase ?? "idle";
   const calling = phase === "connecting" || phase === "live";
-
-  /* Once per call, not once per render with a call up. Without this latch, closing the
-     floater mid-call would satisfy "a call is up and no window is open" on the very
-     next render and put the window straight back — the close button would appear
-     broken, and the two effects would trade turns forever. Re-floating is a separate,
-     explicit gesture (below). */
-  const autoOpenedFor = useRef<string | null>(null);
-  useEffect(() => {
-    if (mobile || !supported) return;
-    if (!calling || pipWindow) return;
-    if (autoOpenedFor.current === conversationId) return;
-    autoOpenedFor.current = conversationId;
-    void open();
-  }, [calling, conversationId, mobile, open, pipWindow, supported]);
 
   /* The call ending closes the window; the window closing does not end the call.
      `error` and `stopping` keep the floater up — the operator's next move on a failed
      call is Retry, and taking the window away would take the button with it. */
   useEffect(() => {
     if (phase !== "idle") return;
-    /* Armed again for the next call, whichever conversation it belongs to. */
-    autoOpenedFor.current = null;
     if (pipWindow) close();
   }, [close, phase, pipWindow]);
 
-  /* The card's float control. An edge consumed once, so a re-render cannot re-open a
-     window the operator has just closed. */
+  /* The card's float control — the way in, and the way back after a close. An edge
+     consumed once, so a re-render cannot re-open a window the operator has just
+     closed. */
   const floatRequest = useSyncExternalStore(
     subscribeVoiceFloatRequest,
     getVoiceFloatRequest,
