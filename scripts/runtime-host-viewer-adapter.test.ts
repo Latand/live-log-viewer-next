@@ -1,13 +1,25 @@
 import { expect, test } from "bun:test";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { Readable } from "node:stream";
 
 import { WAKATIME_CREDENTIAL_ENV, withoutWakatimeCredential } from "../src/lib/wakatime/credential";
+import { MCP_TOOL_NAMES } from "../src/lib/mcp/server";
+import { UnixRuntimeHostClient } from "../src/lib/runtime/client";
 import { viewerComposeSnapshotName } from "../src/runtime-host/deploymentArtifacts";
 import { RuntimeHost } from "../src/runtime-host/host";
 import { RuntimeJournal } from "../src/runtime-host/journal";
+import { McpHealthProbeAdmissions } from "../src/runtime-host/mcpHealthProbeAdmission";
+import {
+  createMcpHealthProbeAdmissionChannel,
+  serveMcpHealthProbeAdmissionChannel,
+} from "../src/runtime-host/mcpHealthProbeAdmissionChannel";
+import { probeMcpRuntime } from "../src/runtime-host/mcpRuntimeProbe";
+import { RuntimeHostFence } from "../src/runtime-host/runtimeHostFence";
 import { serveRuntimeHost } from "../src/runtime-host/socket";
+import { runBootstrapRelease } from "./runtime-host-viewer-adapter";
 
 const root = path.resolve(import.meta.dir, "..");
 const adapter = path.join(root, "scripts", "runtime-host-viewer-adapter.ts");
@@ -79,6 +91,155 @@ test("malformed rollback target blocks promotion with a durable-target error", a
   const result = await currentRelease({ target: "{broken" });
   expect(result.code).not.toBe(0);
   expect(result.stderr).toContain("current release target is invalid");
+});
+
+test("documented bootstrap input obtains host-owned admission through the final MCP transport", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-bootstrap-admission-"));
+  const state = path.join(sandbox, "state");
+  const socketPath = path.join(state, "runtime-host.sock");
+  const revision = "7".repeat(40);
+  const candidate = {
+    ...release,
+    revision,
+    mcpRuntime: {
+      source: "managed" as const,
+      revision,
+      releaseId: "bootstrap-candidate",
+      artifactDigest: "a".repeat(64),
+      stagedAt: "2026-07-28T00:00:00.000Z",
+    },
+  };
+  const calls: string[] = [];
+  fs.mkdirSync(state, { recursive: true });
+  const environment = Object.fromEntries(Object.entries(withoutWakatimeCredential(process.env))
+    .filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+  Object.assign(environment, {
+    HOME: sandbox,
+    XDG_CONFIG_HOME: path.join(sandbox, "config"),
+    TMPDIR: path.join(sandbox, "tmp"),
+    LLV_STATE_DIR: state,
+    LLV_RUNTIME_EVENTS: "1",
+    LLV_RUNTIME_HOST_SOCKET: socketPath,
+    LLV_AGENT_REGISTRY_SQLITE: "off",
+    LLV_CODEX_HOME: path.join(sandbox, "codex"),
+    LLV_CLAUDE_HOME: path.join(sandbox, "claude"),
+  });
+  fs.mkdirSync(environment.TMPDIR, { recursive: true });
+
+  try {
+    const result = await runBootstrapRelease({ revision: "origin/main" }, {
+      runtimeSocket: socketPath,
+      targetExists: () => false,
+      resolveRevision: async (requested) => {
+        calls.push(`resolve:${requested}`);
+        return revision;
+      },
+      buildCandidate: async () => {
+        calls.push("build");
+        return candidate;
+      },
+      startCandidate: async () => {
+        calls.push("start");
+      },
+      verifyCandidate: async (releaseIdentity, healthProbeCapability, healthProbeAdmissions) => {
+        calls.push("verify");
+        const mcpRuntime = await probeMcpRuntime({
+          command: process.execPath,
+          args: [path.join(root, "bin", "mcp-server.mjs")],
+          cwd: root,
+          env: environment,
+          runtime: releaseIdentity.mcpRuntime!,
+          healthProbeCapability,
+          healthProbeAdmissions,
+        });
+        return {
+          checkedAt: mcpRuntime.checkedAt,
+          endpoint: releaseIdentity.endpoint,
+          processReady: true,
+          rootStatus: 200,
+          authenticatedStatus: null,
+          unauthorizedStatus: null,
+          assets: [{ path: "/_next/static/app.js", status: 200 }],
+          mcpRuntime,
+          ok: mcpRuntime.ok,
+          ...(mcpRuntime.detail ? { detail: mcpRuntime.detail } : {}),
+        };
+      },
+      publishTarget: async () => {
+        calls.push("publish");
+      },
+      targetMatches: () => false,
+      retireCandidate: async () => {
+        calls.push("retire");
+      },
+    });
+
+    expect(calls).toEqual(["resolve:origin/main", "build", "start", "verify", "publish"]);
+    expect(result.health.mcpRuntime).toMatchObject({
+      processReady: true,
+      calls: { deploymentStatus: true, boardSnapshot: true },
+      ok: true,
+    });
+    expect(result.health.mcpRuntime?.tools).toHaveLength(MCP_TOOL_NAMES.length);
+    expect(fs.existsSync(socketPath)).toBe(false);
+    const successor = new RuntimeHostFence(`${socketPath}.lock`);
+    successor.acquire();
+    successor.release();
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test("bootstrap rejects caller-selected probe authority and spends its own admission once", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-bootstrap-forgery-"));
+  const socketPath = path.join(sandbox, "state", "runtime-host.sock");
+  const callerCapability = new McpHealthProbeAdmissions().issue();
+  fs.mkdirSync(path.dirname(socketPath), { recursive: true });
+
+  try {
+    const result = await runBootstrapRelease({
+      revision: "origin/main",
+      healthProbeCapability: callerCapability,
+    }, {
+      runtimeSocket: socketPath,
+      targetExists: () => false,
+      resolveRevision: async () => release.revision,
+      buildCandidate: async () => release,
+      startCandidate: async () => {},
+      verifyCandidate: async (candidate, healthProbeCapability) => {
+        const client = new UnixRuntimeHostClient(socketPath);
+        expect(healthProbeCapability).not.toBe(callerCapability);
+        await expect(client.requestViewerDeployment({
+          idempotencyKey: "bootstrap-forgery",
+        })).rejects.toThrow("runtime request method is unsupported");
+        expect((await client.snapshot()).deployments).toEqual([]);
+        expect(await client.admitMcpHealthProbe(callerCapability)).toBe(false);
+        expect(await client.admitMcpHealthProbe(healthProbeCapability)).toBe(true);
+        expect(await client.admitMcpHealthProbe(healthProbeCapability)).toBe(false);
+        return {
+          checkedAt: "2026-07-28T00:00:00.000Z",
+          endpoint: candidate.endpoint,
+          processReady: true,
+          rootStatus: 200,
+          authenticatedStatus: null,
+          unauthorizedStatus: null,
+          assets: [{ path: "/_next/static/app.js", status: 200 }],
+          ok: true,
+        };
+      },
+      publishTarget: async () => {},
+      targetMatches: () => false,
+      retireCandidate: async () => {},
+    });
+
+    expect(result.candidate).toEqual(release);
+    expect(fs.existsSync(socketPath)).toBe(false);
+    const successor = new RuntimeHostFence(`${socketPath}.lock`);
+    successor.acquire();
+    successor.release();
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
 });
 
 function composeSnapshot(): string {
@@ -204,33 +365,74 @@ function successorPackage(prefix: string, options: { revision: string; bundle?: 
   return { sandbox, state, packageRoot, stableRuntime, target };
 }
 
-async function runReconcile(fixture: ReturnType<typeof successorPackage>, options: { revision: string; socketPath?: string }) {
-  const child = Bun.spawn([process.execPath, adapter, "reconcile-mcp-runtime"], {
-    cwd: root,
-    env: {
-      ...withoutWakatimeCredential(process.env),
-      LLV_AGENT_REGISTRY_SQLITE: "off",
-      LLV_CLAUDE_HOME: path.join(fixture.sandbox, "claude"),
-      LLV_CODEX_HOME: path.join(fixture.sandbox, "codex"),
-      LLV_DEPLOYMENT_ADAPTER_PROTOCOL: "1",
-      LLV_DEPLOYMENT_PACKAGE_ROOT: fixture.packageRoot,
-      LLV_MCP_RUNTIME_ROOT: fixture.stableRuntime,
-      LLV_RUNTIME_EVENTS: "1",
-      ...(options.socketPath ? { LLV_RUNTIME_HOST_SOCKET: options.socketPath } : {}),
-      LLV_STATE_DIR: fixture.state,
-      LLV_VIEWER_PORT: "1",
-    },
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  child.stdin.write(`${JSON.stringify({ revision: options.revision })}\n`);
-  child.stdin.end();
+async function runReconcile(
+  fixture: ReturnType<typeof successorPackage>,
+  options: {
+    revision: string;
+    socketPath?: string;
+    healthProbeCapability?: string;
+    healthProbeAdmissions?: McpHealthProbeAdmissions;
+  },
+) {
+  const admissionChannel = options.healthProbeAdmissions
+    ? await createMcpHealthProbeAdmissionChannel()
+    : null;
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(process.execPath, [adapter, "reconcile-mcp-runtime"], {
+      cwd: root,
+      env: {
+        ...withoutWakatimeCredential(process.env),
+        LLV_AGENT_REGISTRY_SQLITE: "off",
+        LLV_CLAUDE_HOME: path.join(fixture.sandbox, "claude"),
+        LLV_CODEX_HOME: path.join(fixture.sandbox, "codex"),
+        LLV_DEPLOYMENT_ADAPTER_PROTOCOL: "1",
+        LLV_DEPLOYMENT_PACKAGE_ROOT: fixture.packageRoot,
+        LLV_MCP_RUNTIME_ROOT: fixture.stableRuntime,
+        LLV_RUNTIME_EVENTS: "1",
+        ...(options.socketPath ? { LLV_RUNTIME_HOST_SOCKET: options.socketPath } : {}),
+        LLV_STATE_DIR: fixture.state,
+        LLV_VIEWER_PORT: "1",
+      },
+      stdio: ["pipe", "pipe", "pipe", admissionChannel?.childFd ?? "ignore"],
+    });
+  } catch (error) {
+    admissionChannel?.close();
+    throw error;
+  } finally {
+    admissionChannel?.closeChildFd();
+  }
+  const closeHealthAdmission = options.healthProbeAdmissions && admissionChannel
+    ? (() => {
+        const closeServing = serveMcpHealthProbeAdmissionChannel(
+          admissionChannel.channel,
+          options.healthProbeAdmissions,
+        );
+        return () => {
+          closeServing();
+          admissionChannel.close();
+        };
+      })()
+    : null;
+  child.stdin?.write(`${JSON.stringify({
+    revision: options.revision,
+    ...(options.healthProbeCapability ? { healthProbeCapability: options.healthProbeCapability } : {}),
+  })}\n`);
+  child.stdin?.end();
+  const readStream = async (stream: Readable | null): Promise<string> => {
+    let body = "";
+    if (!stream) return body;
+    for await (const chunk of stream) body += String(chunk);
+    return body;
+  };
   const [code, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
+    new Promise<number>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (exitCode) => resolve(exitCode ?? 1));
+    }),
+    readStream(child.stdout),
+    readStream(child.stderr),
+  ]).finally(() => closeHealthAdmission?.());
   return { code, stdout, stderr };
 }
 
@@ -239,11 +441,24 @@ test("the first successor boot publishes and probes the MCP runtime after an old
   const fixture = successorPackage("llv-mcp-successor-reconcile-", { revision });
   const socketPath = path.join(fixture.state, "runtime-host.sock");
   const journal = new RuntimeJournal(path.join(fixture.state, "runtime.sqlite"));
-  const server = serveRuntimeHost(socketPath, new RuntimeHost(journal));
+  const admissions = new McpHealthProbeAdmissions();
+  const server = serveRuntimeHost(socketPath, new RuntimeHost(
+    journal,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    admissions,
+  ));
   await new Promise<void>((resolve) => server.once("listening", resolve));
 
   try {
-    const { code, stdout, stderr } = await runReconcile(fixture, { revision, socketPath });
+    const { code, stdout, stderr } = await runReconcile(fixture, {
+      revision,
+      socketPath,
+      healthProbeCapability: admissions.issue(),
+      healthProbeAdmissions: admissions,
+    });
 
     expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
     const result = JSON.parse(stdout);
@@ -262,7 +477,7 @@ test("the first successor boot publishes and probes the MCP runtime after an old
         },
       },
     });
-    expect(result.health.tools).toHaveLength(23);
+    expect(result.health.tools).toHaveLength(MCP_TOOL_NAMES.length);
     const target = JSON.parse(fs.readFileSync(path.join(fixture.state, "viewer-release.json"), "utf8"));
     expect(target).toMatchObject({
       revision,
@@ -279,7 +494,12 @@ test("the first successor boot publishes and probes the MCP runtime after an old
        published and reconciles nothing. */
     const releases = path.join(fixture.state, "mcp-runtime", "releases");
     const published = fs.readdirSync(releases);
-    const reboot = await runReconcile(fixture, { revision, socketPath });
+    const reboot = await runReconcile(fixture, {
+      revision,
+      socketPath,
+      healthProbeCapability: admissions.issue(),
+      healthProbeAdmissions: admissions,
+    });
 
     expect({ code: reboot.code, stdout: reboot.stdout, stderr: reboot.stderr })
       .toEqual({ code: 0, stdout: "null\n", stderr: "" });
