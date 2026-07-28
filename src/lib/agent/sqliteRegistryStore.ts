@@ -7,6 +7,12 @@ import type { Database as BunDatabase } from "bun:sqlite";
 import { reboundAssembledMcpGrants, type McpGrantPolicy } from "./mcpAllowlist";
 import type { RegistryFile } from "./registry";
 
+/** The collections the MCP grant decision reads and writes. Touching any one of
+    them requires the decision to have run over ALL of them, because an entry or
+    a receipt is only decidable against the conversations and lineage edges that
+    attest to it (#739). */
+const GRANT_COLLECTIONS = new Set(["entries", "receipts", "conversations", "lineageEdges"]);
+
 const ROW_COLLECTIONS = [
   "entries",
   "receipts",
@@ -255,6 +261,10 @@ export class SqliteAgentRegistryStore {
   }
 
   replace(file: RegistryFile, expectedRevision?: number): SqliteRegistryReplacement {
+    /* A wholesale replacement is a mutation like any other, and its payload
+       arrives from outside this store, so it is re-decided before it lands
+       rather than on the way back out (#739). */
+    reboundAssembledMcpGrants(file, this.mcpGrantPolicy);
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const current = this.loadInTransaction();
@@ -281,7 +291,7 @@ export class SqliteAgentRegistryStore {
     try {
       const complete = this.meta("migration_complete");
       if (complete !== "1") {
-        this.persistAll(initialSnapshot, 1);
+        this.persistAll(reboundAssembledMcpGrants(initialSnapshot, this.mcpGrantPolicy), 1);
         this.setMeta("schema_version", "2");
         this.setMeta("migration_complete", "1");
       }
@@ -295,20 +305,40 @@ export class SqliteAgentRegistryStore {
 
   private loadInTransaction(useRowCache = false): SqliteRegistrySnapshot {
     const snapshot = this.loadLazyInTransaction(false, useRowCache);
+    /* Touching the grant-bearing collections runs the assembled re-decision
+       through the same gate every other path goes through (#739); the rest are
+       materialized because a snapshot is by definition complete. */
     for (const collection of ROW_COLLECTIONS) void snapshot.file[collection];
     for (const field of META_FIELDS) void snapshot.file[field];
-    /* Rows are normalized one collection — one row, even — at a time, so an
-       entry row is normalized with no conversations in sight and the origin
-       half of the MCP grant bound cannot be decided there (#739). The assembled
-       snapshot is the first point where an entry can be matched to the
-       conversation that owns it, so the decision lands here, before any reader
-       (startup adoption, structured recovery) sees a profile. */
-    reboundAssembledMcpGrants(snapshot.file, this.mcpGrantPolicy);
     return snapshot;
   }
 
   private loadLazyInTransaction(trackMutations = true, useRowCache = trackMutations): LazyRegistrySnapshot {
     const file = this.normalize({ version: 2, entries: {}, receipts: {} });
+    /* The assembled origin re-decision is a PRECONDITION of observing a grant,
+       not a step some paths reach later (#739). Rows are normalized one
+       collection — one row, even — at a time, so a row loaded lazily has had
+       only the global bound applied; the origin half needs the conversations,
+       lineage edges and receipts together. `mutate` used to hand its operation
+       the lazily normalized file directly, which put every store mutation —
+       settlement, structured claim, upsert — underneath the gate that `snapshot`
+       passed through.
+       Gating the collection ACCESSORS instead of a call site means the ordering
+       cannot be got wrong by a future path: the first read of any grant-bearing
+       collection runs the decision over all of them before it returns a row, and
+       a mutation that never touches one still pays nothing for it. */
+    let grantsDecided = false;
+    let decidingGrants = false;
+    const decideGrants = () => {
+      if (grantsDecided || decidingGrants) return;
+      decidingGrants = true;
+      try {
+        reboundAssembledMcpGrants(file, this.mcpGrantPolicy);
+        grantsDecided = true;
+      } finally {
+        decidingGrants = false;
+      }
+    };
     const loadedCollections = new Map<RowCollection, RegistryFile[RowCollection]>();
     const baselineCollections = new Map<RowCollection, Map<string, string | null>>();
     const dirtyRows = new Map<RowCollection, Set<string>>();
@@ -499,6 +529,7 @@ export class SqliteAgentRegistryStore {
         enumerable: true,
         get: () => {
           load();
+          if (GRANT_COLLECTIONS.has(collection)) decideGrants();
           return value;
         },
         set: (next: typeof value) => {

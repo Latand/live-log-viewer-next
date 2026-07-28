@@ -199,9 +199,15 @@ type StoredReceipt = {
   agentRole?: string | null;
   delegationDepth?: number | null;
   parentConversationId?: string | null;
+  key?: { engine: string; sessionId: string } | null;
   launchProfile?: { mcpServers: string[] } | null;
 };
-type StoredLineageEdge = { parentConversationId?: string | null };
+type StoredLineageEdge = {
+  parentConversationId?: string | null;
+  /** Which launch the edge was written for. Admission (#393) records it, and it
+      lives on the EDGE, so a receipt cannot choose which edge names it. */
+  evidence?: { launchId?: string | null } | null;
+};
 export interface StoredGrantFile {
   conversations: Record<string, StoredConversation>;
   entries: Record<string, StoredEntry>;
@@ -251,6 +257,10 @@ function generationEntryRowKey(engine: string, generation: StoredGeneration): st
 interface StoredGrantOwnership {
   grants: Map<string, string[] | null>;
   pathOwner: Map<string, string | null>;
+  /** The ORIGIN of the generation owning each entry row key, so a receipt can
+      be attested by the conversation that owns the row it settled onto rather
+      than by the conversation it names. `null` where owners disagree. */
+  origins: Map<string, SessionOrigin | null>;
 }
 
 function storedGrantOwnership(
@@ -260,13 +270,23 @@ function storedGrantOwnership(
 ): StoredGrantOwnership {
   const grants = new Map<string, string[] | null>();
   const pathOwner = new Map<string, string | null>();
+  const origins = new Map<string, SessionOrigin | null>();
   for (const [conversationId, conversation] of Object.entries(file.conversations)) {
     const edge = file.lineageEdges?.[conversationId];
     const lineageDelegated = Boolean(edge?.parentConversationId && edge.parentConversationId !== conversationId);
     for (const generation of conversation.generations) {
       const rowKey = generationEntryRowKey(conversation.engine, generation);
       const granted = decideStoredGrant(conversation, generation, policy, lineageDelegated);
-      if (decideGenerations) generation.launchProfile.mcpServers = granted;
+      if (decideGenerations && !sameGrant(generation.launchProfile.mcpServers, granted)) {
+        generation.launchProfile.mcpServers = granted;
+      }
+      const origin = lineageDelegated ? "delegated" : storedSessionOriginFor({
+        parentConversationId: generation.launchProfile.parentConversationId,
+        agentRole: conversation.agentRole,
+        delegationDepth: conversation.delegationDepth,
+      });
+      if (!origins.has(rowKey)) origins.set(rowKey, origin);
+      else if (origins.get(rowKey) !== origin) origins.set(rowKey, null);
       if (!grants.has(rowKey)) grants.set(rowKey, granted);
       else {
         const claimed = grants.get(rowKey)!;
@@ -278,7 +298,7 @@ function storedGrantOwnership(
       else if (pathOwner.get(recorded) !== rowKey) pathOwner.set(recorded, null);
     }
   }
-  return { grants, pathOwner };
+  return { grants, pathOwner, origins };
 }
 
 /**
@@ -309,38 +329,50 @@ function entryGrant(id: string, entry: StoredEntry, ownership: StoredGrantOwners
 }
 
 /**
- * What OTHER rows attest about a receipt's origin.
+ * Who attests to a receipt's origin — chosen by the VERIFIER, keyed by the
+ * launch id the receipt is stored under.
  *
- * A receipt's own `agentRole`, `delegationDepth` and `parentConversationId` are
- * fields on the very row being authorised, so a row rewritten into root shape
- * would authorise itself. The rows that attest independently are:
+ * A receipt's `agentRole`, `delegationDepth` and `parentConversationId` are
+ * fields on the row being authorised, so a row rewritten into root shape
+ * authorises itself. But so is `conversationId`: letting the receipt name the
+ * conversation whose origin vouches for it lets the subject pick its own
+ * attestor — retarget it at an operator root, or at an id nothing attests to,
+ * and the vouching changes with it. Selection has to run the other way.
  *
- *  - the LINEAGE EDGE, which admission (#393) writes for every delegated launch
- *    as its own row keyed by the child conversation — present before a
- *    conversation record exists, and not reachable by editing the receipt's own
- *    fields;
- *  - the CONVERSATION row once the launch has settled, which is the
- *    origin-bearing row every generation and entry grant is already decided
- *    from.
+ * So attestations are indexed from the attesting rows inward:
  *
- * Both are looked up by the receipt's conversation id, and the conversation map
- * key is storage identity in the same sense an entry's row key is.
+ *  - a LINEAGE EDGE attests DELEGATED for the launch id in its own `evidence`.
+ *    The edge is a separate row, keyed by the child conversation, written by
+ *    admission (#393) before any conversation record exists. A receipt cannot
+ *    choose which edge names it, so retargeting its `conversationId` does not
+ *    move or shed the attestation.
+ *  - a CONVERSATION attests ROOT for a settled receipt only through generation
+ *    OWNERSHIP: the entry row key the receipt settled onto must be owned by one
+ *    of that conversation's generations, by the same row-key rule entries use.
+ *    Forging the receipt's own key just points it at a row some OTHER
+ *    conversation owns, and the attestation follows the owner, not the pointer.
+ *
+ * A launch id no row attests to is UNATTESTED, and unattested denies.
  */
-function anchoredReceiptOrigins(file: StoredGrantFile, receipt: StoredReceipt): Set<SessionOrigin> {
-  const anchors = new Set<SessionOrigin>();
-  const conversationId = receipt.conversationId;
-  if (!conversationId) return anchors;
-  const edge = file.lineageEdges?.[conversationId];
-  if (edge?.parentConversationId && edge.parentConversationId !== conversationId) anchors.add("delegated");
-  const conversation = file.conversations[conversationId];
-  if (conversation) {
-    anchors.add(storedSessionOriginFor({
-      agentRole: conversation.agentRole,
-      delegationDepth: conversation.delegationDepth,
-      parentConversationId: conversation.generations.at(-1)?.launchProfile.parentConversationId ?? null,
-    }));
+function receiptAttestations(file: StoredGrantFile, ownership: StoredGrantOwnership): Map<string, Set<SessionOrigin>> {
+  const attested = new Map<string, Set<SessionOrigin>>();
+  const attest = (launchId: string, origin: SessionOrigin) => {
+    const seen = attested.get(launchId) ?? new Set<SessionOrigin>();
+    seen.add(origin);
+    attested.set(launchId, seen);
+  };
+  for (const [childConversationId, edge] of Object.entries(file.lineageEdges ?? {})) {
+    if (!edge.parentConversationId || edge.parentConversationId === childConversationId) continue;
+    const launchId = edge.evidence?.launchId;
+    if (typeof launchId === "string" && launchId) attest(launchId, "delegated");
   }
-  return anchors;
+  for (const [launchId, receipt] of Object.entries(file.receipts ?? {})) {
+    if (!receipt.key) continue;
+    const rowKey = sessionKeyId({ engine: receipt.key.engine as never, sessionId: receipt.key.sessionId });
+    const owner = ownership.origins.get(rowKey);
+    if (owner) attest(launchId, owner);
+  }
+  return attested;
 }
 
 /**
@@ -349,28 +381,33 @@ function anchoredReceiptOrigins(file: StoredGrantFile, receipt: StoredReceipt): 
  * Settlement copies `receipt.launchProfile` onto the conversation generation
  * and the entry row, and stamps the receipt's role and depth onto a brand-new
  * conversation, so a receipt that keeps a connector does not merely hold one —
- * it MANUFACTURES the origin evidence every later read trusts. Deciding that
- * from the receipt's own fields would let a row promote itself.
+ * it MANUFACTURES the origin evidence every later read trusts.
  *
- * So the attesting rows win, and a receipt whose self-description CONTRADICTS
- * them is denied outright: a contradiction is a tamper signal, not a tie to
- * break in the caller's favour. Anchors that disagree with each other deny for
- * the same reason. Only where nothing attests at all — an un-parented launch
- * that has not settled yet, which has no other row by construction — does the
- * receipt's own shape decide, and there it can still only narrow.
+ * A receipt therefore has to be VOUCHED FOR, not merely un-contradicted:
+ *
+ *  - unattested denies, because absence is not attestation and a subject that
+ *    can delete the rows naming it would otherwise delete its way to a grant;
+ *  - attestors that disagree with each other deny;
+ *  - an attestation the receipt's own self-description contradicts denies,
+ *    because a contradiction is a tamper signal rather than a tie to resolve in
+ *    the caller's favour.
  */
-function receiptGrant(file: StoredGrantFile, receipt: StoredReceipt, policy: McpGrantPolicy): string[] | null {
-  const stored = receipt.launchProfile!.mcpServers;
+function receiptGrant(
+  attestations: Map<string, Set<SessionOrigin>>,
+  launchId: string,
+  receipt: StoredReceipt,
+  policy: McpGrantPolicy,
+): string[] | null {
+  const attested = attestations.get(launchId);
+  if (!attested || attested.size !== 1) return null;
+  const [origin] = attested;
   const described = storedSessionOriginFor({
     agentRole: receipt.agentRole,
     delegationDepth: receipt.delegationDepth,
     parentConversationId: receipt.parentConversationId,
   });
-  const anchors = anchoredReceiptOrigins(file, receipt);
-  if (anchors.size > 1) return null;
-  const [anchored] = anchors;
-  if (anchored !== undefined && anchored !== described) return null;
-  return mcpServersForSession({ origin: anchored ?? described, requested: stored }, policy);
+  if (origin !== described) return null;
+  return mcpServersForSession({ origin: origin!, requested: receipt.launchProfile!.mcpServers }, policy);
 }
 
 function reboundGrants<T extends StoredGrantFile>(file: T, policy: McpGrantPolicy, assembled: boolean): T {
@@ -385,10 +422,11 @@ function reboundGrants<T extends StoredGrantFile>(file: T, policy: McpGrantPolic
     const next = granted ?? DEFAULT_SPAWN_MCP_SERVERS;
     if (!sameGrant(stored, next)) entry.launchProfile!.mcpServers = [...next];
   }
-  for (const receipt of Object.values(file.receipts ?? {})) {
+  const attestations = receiptAttestations(file, ownership);
+  for (const [launchId, receipt] of Object.entries(file.receipts ?? {})) {
     const stored = receipt.launchProfile?.mcpServers;
     if (!stored || isBaselineGrant(stored)) continue;
-    const granted = receiptGrant(file, receipt, policy) ?? DEFAULT_SPAWN_MCP_SERVERS;
+    const granted = receiptGrant(attestations, launchId, receipt, policy) ?? DEFAULT_SPAWN_MCP_SERVERS;
     if (!sameGrant(stored, granted)) receipt.launchProfile!.mcpServers = [...granted];
   }
   return file;
