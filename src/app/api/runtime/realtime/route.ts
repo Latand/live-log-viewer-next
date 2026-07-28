@@ -30,8 +30,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<Record<string
        single-user app the same-origin browser IS the operator (the cross-origin
        rejection above is the perimeter). The only caller refused transport is an
        AGENT, which names itself by presenting its capability — the distinction this
-       guard was always about. Designation and every other operator-only action keep
-       the stricter possession check. */
+       guard was always about. Designation and every other operator-only action ask
+       the SAME question through `requireOperatorAuthority`: there is no possession
+       check anywhere any more. What does NOT follow from being the operator is
+       injection — `permitRealtimeAction` grants `appendSpeech` and
+       `deliverWorkerResponse` to the peer holding the call's minted session id and
+       to nobody else, whatever this resolves to. */
     operator: voiceTransportOperator(req),
   });
   return NextResponse.json(result.body, { status: result.status });

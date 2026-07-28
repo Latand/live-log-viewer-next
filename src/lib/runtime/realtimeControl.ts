@@ -45,11 +45,13 @@ function byteLength(value: string): number {
 export async function executeRealtimeControl(
   body: unknown,
   resolveHost: (conversationId: string) => unknown = structuredDeliveryHostForConversation,
-  /* #691 §6: who is calling, and which conversation the designation record names as
-     the manager. Defaulted to the operator so every existing caller of this function
-     (the browser's own control path, and its tests) keeps its behaviour; the route
-     resolves the real caller from the capability header. */
-  authority: { caller?: RealtimeCaller; managerConversationId?: string | null; operator?: boolean } = {},
+  /* #691 §6: who is calling, which conversation the designation record names as the
+     manager, and whether this request carries the operator's own authority.
+     `operator` is REQUIRED and never defaulted: it is the answer to a question only
+     the caller's transport can ask (`voiceTransportOperator` reads the request's
+     headers), so a call site that omits it has not asked — and an unasked authority
+     question must resolve to "no", not to "yes". */
+  authority: { caller?: RealtimeCaller; managerConversationId?: string | null; operator: boolean },
 ): Promise<RealtimeControlResult> {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     return { status: 400, body: { error: "body must be an object" } };
@@ -72,13 +74,11 @@ export async function executeRealtimeControl(
     authority.caller ?? { kind: "anonymous" },
     authority.managerConversationId ?? null,
     host?.currentRealtimeSessionId?.() ?? null,
-    /* Defaulted to the operator, as this function's contract says above and as its
-       one production caller always resolves explicitly. Defaulting to `false`
-       contradicted that: every in-process caller — the browser's own control path
-       and its tests — had its `start`/`stop` refused for want of an authority the
-       route is the only thing able to compute. Injection is unaffected: it is
-       granted to the live session peer alone and never by this flag. */
-    authority.operator ?? true,
+    /* Passed straight through, with no default on either side of it. A default of
+       `true` is an open door for any future call site that forgets the question;
+       a default of `false` silently refuses the browser's own one-click start.
+       Requiring it makes both mistakes a type error instead. */
+    authority.operator,
   );
   if (!permitted.allowed) {
     return { status: permitted.status, body: { error: permitted.error } };

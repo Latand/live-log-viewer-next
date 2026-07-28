@@ -33,13 +33,18 @@ test("starts V3 WebRTC through the active hosted conversation", async () => {
       return "live-1";
     },
   };
-  const peer = { caller: { kind: "session" as const, realtimeSessionId: "live-1" } };
+  /* The browser's own control path: it opened this call, so it is BOTH the operator
+     (transport) and the peer holding the minted session id (injection). The two are
+     separate authorities and are passed separately. */
+  const operator = { operator: true };
+  const peer = { caller: { kind: "session" as const, realtimeSessionId: "live-1" }, operator: false };
 
   // The trailing CRLF is part of the SDP payload and must survive untrimmed
   // (issue #621: a trimmed offer dies upstream with "unmarshal SDP: EOF").
   const started = await executeRealtimeControl(
     { action: "start", conversationId: "conversation_voice", sdp: "v=0\r\noffer\r\n" },
     () => host,
+    operator,
   );
   expect(started).toEqual({
     status: 200,
@@ -53,6 +58,7 @@ test("starts V3 WebRTC through the active hosted conversation", async () => {
   await executeRealtimeControl(
     { action: "stop", conversationId: "conversation_voice" },
     () => host,
+    operator,
   );
   expect(calls).toEqual([
     ["start", "v=0\r\noffer\r\n"],
@@ -84,7 +90,9 @@ test("acknowledges a stable completed-response delivery through the hosted recei
     },
     async stopRealtime() {},
     currentRealtimeSessionId() { return "live-delivery"; },
-  }), { caller: { kind: "session", realtimeSessionId: "live-delivery" } });
+    /* `operator: false` on purpose: injection is the PEER's right, and proving it
+       does not ride on being the operator is the point of passing both. */
+  }), { caller: { kind: "session", realtimeSessionId: "live-delivery" }, operator: false });
 
   expect(calls).toEqual([delivery]);
   expect(result).toEqual({
@@ -94,12 +102,16 @@ test("acknowledges a stable completed-response delivery through the hosted recei
 });
 
 test("keeps validation and backend admission errors bounded", async () => {
-  expect((await executeRealtimeControl({ action: "start", conversationId: "other", sdp: "v=0" })).status).toBe(400);
+  expect((await executeRealtimeControl(
+    { action: "start", conversationId: "other", sdp: "v=0" },
+    undefined,
+    { operator: true },
+  )).status).toBe(400);
   expect((await executeRealtimeControl({
     action: "start",
     conversationId: "conversation_voice",
     sdp: "broken",
-  }, () => ({}))).status).toBe(409);
+  }, () => ({}), { operator: true })).status).toBe(409);
 
   const result = await executeRealtimeControl({
     action: "start",
@@ -109,7 +121,7 @@ test("keeps validation and backend admission errors bounded", async () => {
     async startRealtimeWebRtc() { throw new Error("AVAS 404"); },
     async appendRealtimeSpeech() {},
     async stopRealtime() {},
-  }));
+  }), { operator: true });
   expect(result).toEqual({ status: 409, body: { error: "AVAS 404" } });
 });
 
@@ -142,6 +154,7 @@ test("issue 664: status reports the backend's own reason for a call that died af
   const status = await executeRealtimeControl(
     { action: "status", conversationId: "conversation_voice" },
     () => host,
+    { operator: true },
   );
   expect(status.status).toBe(200);
   expect(status.body).toEqual({
@@ -162,18 +175,56 @@ test("issue 664: a host with no recorded failure, or none at all, reports none",
     async appendRealtimeSpeech() {},
     async stopRealtime() {},
   };
-  expect(await executeRealtimeControl({ action: "status", conversationId: "conversation_voice" }, () => bare))
-    .toEqual({ status: 200, body: { ok: true, failure: null } });
+  expect(await executeRealtimeControl(
+    { action: "status", conversationId: "conversation_voice" },
+    () => bare,
+    { operator: true },
+  )).toEqual({ status: 200, body: { ok: true, failure: null } });
   expect(await executeRealtimeControl(
     { action: "status", conversationId: "conversation_voice" },
     () => ({ ...bare, lastRealtimeFailure: () => null }),
+    { operator: true },
   )).toEqual({ status: 200, body: { ok: true, failure: null } });
 });
 
 test("issue 664: status on a conversation with no hosted realtime thread stays a 409", async () => {
-  expect(await executeRealtimeControl({ action: "status", conversationId: "conversation_cold" }, () => null))
+  expect(await executeRealtimeControl(
+    { action: "status", conversationId: "conversation_cold" },
+    () => null,
+    { operator: true },
+  ))
     .toEqual({
       status: 409,
       body: { error: "the active conversation has no hosted Codex realtime thread" },
     });
+});
+
+test("the transport authority is required, and an unasked question fails closed", async () => {
+  /* `operator` used to default. Either default is a bug: `true` opens the transport
+     to any future call site that forgets to ask, `false` refuses the browser's own
+     one-click start. It is required now, so forgetting is a type error — and a call
+     site that passes the honest answer for "nobody asked" gets a refusal, never an
+     open door. */
+  const host = {
+    async startRealtimeWebRtc() { return { sdp: "v=0\r\nanswer", realtimeSessionId: "live-x" }; },
+    async appendRealtimeSpeech() {},
+    async stopRealtime() {},
+  };
+  for (const action of ["start", "stop"]) {
+    const refused = await executeRealtimeControl(
+      { action, conversationId: "conversation_voice", sdp: "v=0\r\noffer\r\n" },
+      () => host,
+      { operator: false },
+    );
+    expect(refused.status).toBe(403);
+    expect(String(refused.body.error)).toContain("transport");
+
+    /* And the operator's own request, the one gesture this must never break. */
+    const admitted = await executeRealtimeControl(
+      { action, conversationId: "conversation_voice", sdp: "v=0\r\noffer\r\n" },
+      () => host,
+      { operator: true },
+    );
+    expect(admitted.status).toBe(200);
+  }
 });

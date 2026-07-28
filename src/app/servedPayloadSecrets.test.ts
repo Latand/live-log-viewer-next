@@ -5,36 +5,50 @@ import os from "node:os";
 import path from "node:path";
 
 /**
- * Nothing a local process can FETCH may carry operator authority.
+ * THE REAL PRODUCTION BUILD HANDS NOBODY A CREDENTIAL — because there is none.
  *
- * THE FIRST VERSION OF THIS FILE WAS WORSE THAN NOTHING. It called
- * `renderToStaticMarkup(Home())`, which is not how Next serves anything: a credential
- * passed as a PROP to a client component travels in the RSC flight payload, not in
- * static markup, so the test passed against the exact leak it was written to prove
- * gone. A regression test that cannot reproduce its own bug converts an open question
- * into false assurance, which is the worse of the two states.
+ * This file has been wrong twice, in opposite directions, and both failures are why
+ * it fetches from a real server instead of asserting about source:
  *
- * So this one fetches from a REAL SERVER: the production build, started on an
- * ephemeral port, asked for the document and for the RSC payload. The secret is not a
- * sentinel we invent — it is read out of the startup banner the server itself prints,
- * so the value searched for is the value that actually grants authority.
+ * 1. Its first version called `renderToStaticMarkup(Home())`, which is not how Next
+ *    serves anything. A credential passed as a PROP to a client component travels in
+ *    the RSC flight payload, not in static markup, so the test passed against the
+ *    exact leak it was written to prove gone.
+ * 2. Its second version was written for the operator-key ceremony: it started the
+ *    server with `LLV_OPERATOR_KEY_FD=3` and READ that descriptor until a key
+ *    arrived. Startup emits no key any more, so nothing was ever written and nothing
+ *    ever closed the write end — the read never resolved and the suite hung forever.
+ *    A test that cannot terminate proves less than no test at all.
  *
- * Verified to go red against the round-7 leak (`<Viewer operatorCredential={cap} />`)
- * before being kept.
+ * What it proves now is the CURRENT invariant, which is stronger and simpler than
+ * the one it replaced: the operator ceremony is gone, so there is no bearer to leak
+ * into a document, a flight payload, a captured log, a build artifact or a
+ * supervisor's descriptor. The descriptor is still opened — deliberately — because
+ * "the supervisor channel stays SILENT" is exactly the regression that would fire if
+ * key emission came back.
  *
- * Round 9 changed what the banner looks like — the key is printed bare, because the
- * round-7 clickable link put it in a URL and Chromium writes URLs to a History
- * database on disk. The parse follows the banner rather than the other way round.
+ * Every read is bounded. Nothing here waits on a write that may never happen.
  */
 
 const BUILD_DIR = path.join(process.cwd(), ".next");
 const built = fs.existsSync(path.join(BUILD_DIR, "BUILD_ID"));
 
+/** Shape of everything this app has ever called a credential: 32 random bytes,
+    base64url. Searched for as a CLASS, because the point is that no such value
+    exists to name. */
+const CREDENTIAL_SHAPE = /[A-Za-z0-9_-]{43}/;
+
+const START_TIMEOUT_MS = 45_000;
+
 let server: ReturnType<typeof Bun.spawn> | null = null;
 let origin = "";
-let sessionValue = "";
 let sandbox = "";
-let capturedOutput: () => string = () => "";
+let supervisorChannel = "";
+let capturedOutput = "";
+/** The agent capability the server mints on disk. A real secret-shaped value that
+    genuinely exists, so "no build artifact carries a secret" is asserted against
+    something rather than against nothing. */
+let spawnCapability = "";
 
 async function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -48,9 +62,34 @@ async function freePort(): Promise<number> {
   });
 }
 
+/** Read whatever is available within a budget, then stop. Never waits for EOF: the
+    child holds the write end of these pipes open for its whole life. */
+async function readAvailable(stream: ReadableStream<Uint8Array> | null | undefined, budgetMs: number): Promise<string> {
+  if (!stream) return "";
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  const deadline = Date.now() + budgetMs;
+  let seen = "";
+  try {
+    while (Date.now() < deadline) {
+      const chunk = await Promise.race([
+        reader.read(),
+        Bun.sleep(Math.max(0, deadline - Date.now())).then(() => "timeout" as const),
+      ]);
+      if (chunk === "timeout") break;
+      if (chunk.done) break;
+      seen += decoder.decode(chunk.value, { stream: true });
+    }
+  } finally {
+    void reader.cancel().catch(() => undefined);
+  }
+  return seen;
+}
+
 beforeAll(async () => {
   if (!built) return;
   sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-served-payload-"));
+  const stateDir = path.join(sandbox, "state");
   const port = await freePort();
   origin = `http://127.0.0.1:${port}`;
   server = Bun.spawn(["bunx", "next", "start", "--hostname", "127.0.0.1", "--port", String(port)], {
@@ -58,46 +97,18 @@ beforeAll(async () => {
     env: {
       ...process.env,
       PORT: String(port),
-      LLV_STATE_DIR: path.join(sandbox, "state"),
+      LLV_STATE_DIR: stateDir,
       HOME: sandbox,
       XDG_CONFIG_HOME: path.join(sandbox, ".config"),
-      /* ROUND 10: the key is no longer printed to stderr, because stderr is captured
-         and persisted by the managed start. It goes to the controlling terminal, or —
-         as here — to a supervisor's descriptor. This test IS that supervisor. */
+      TMPDIR: path.join(sandbox, "tmp"),
+      /* The channel the rejected ceremony wrote its key to. Opened here so the
+         assertion below can prove it stays silent. */
       LLV_OPERATOR_KEY_FD: "3",
     },
     stdio: ["ignore", "pipe", "pipe", "pipe"] as never,
   });
 
-  const deadline = Date.now() + 45_000;
-  const keyFd = (server as unknown as { stdio: (number | null)[] }).stdio[3];
-  const capturedStreams: string[] = [];
-
-  /* Read the key off the private descriptor — the FIRST LINE only. Reading to EOF
-     would block until the server exits, because it holds the write end open. */
-  if (typeof keyFd === "number") {
-    const reader = Bun.file(keyFd).stream().getReader();
-    const decoder = new TextDecoder();
-    let handed = "";
-    while (Date.now() < deadline && !handed.includes("\n")) {
-      const chunk = await reader.read();
-      if (chunk.done) break;
-      handed += decoder.decode(chunk.value, { stream: true });
-    }
-    void reader.cancel().catch(() => undefined);
-    sessionValue = handed.split("\n")[0]!.trim();
-  }
-
-  /* And keep everything the process wrote to its CAPTURED streams, so the assertions
-     below can prove the key is not in them. */
-  const drain = async (stream: ReadableStream<Uint8Array> | null | undefined): Promise<void> => {
-    if (!stream) return;
-    capturedStreams.push(await new Response(stream).text().catch(() => ""));
-  };
-  void drain(server.stdout as ReadableStream<Uint8Array>);
-  void drain(server.stderr as ReadableStream<Uint8Array>);
-  capturedOutput = () => capturedStreams.join("\n");
-
+  const deadline = Date.now() + START_TIMEOUT_MS;
   while (Date.now() < deadline) {
     try {
       const probe = await fetch(origin, { redirect: "manual" });
@@ -106,6 +117,20 @@ beforeAll(async () => {
       await Bun.sleep(200);
     }
   }
+
+  /* Everything the server said, and everything it handed the supervisor, both read
+     with a budget so a silent channel costs a second rather than the suite. */
+  const keyFd = (server as unknown as { stdio: (ReadableStream<Uint8Array> | number | null)[] }).stdio[3];
+  supervisorChannel = typeof keyFd === "number"
+    ? await readAvailable(Bun.file(keyFd).stream(), 1_000)
+    : await readAvailable(keyFd as ReadableStream<Uint8Array>, 1_000);
+  capturedOutput = [
+    await readAvailable(server.stdout as ReadableStream<Uint8Array>, 1_000),
+    await readAvailable(server.stderr as ReadableStream<Uint8Array>, 1_000),
+  ].join("\n");
+
+  const capabilityFile = path.join(stateDir, "operator-spawn-capability");
+  spawnCapability = fs.existsSync(capabilityFile) ? fs.readFileSync(capabilityFile, "utf8").trim() : "";
 });
 
 afterAll(() => {
@@ -114,48 +139,64 @@ afterAll(() => {
 });
 
 /** Fails loudly rather than skipping: a security regression test that quietly does
-    nothing when the build is missing is the same false assurance in another costume. */
+    nothing when the build is missing is false assurance in another costume. */
 test("the production build exists, so this test can actually run", () => {
   expect(built).toBe(true);
 });
 
-test("the key reaches the supervisor's descriptor, not a captured stream", () => {
-  expect(sessionValue).toMatch(/^[A-Za-z0-9_-]{20,}$/);
+test("the supervisor's descriptor receives NOTHING — no key is minted to hand over", () => {
+  /* The regression that ends the ceremony: round 10 wrote a bearer here and told the
+     operator to paste it. If key emission ever comes back, this is where it shows. */
+  expect(supervisorChannel.trim()).toBe("");
+  expect(supervisorChannel).not.toMatch(CREDENTIAL_SHAPE);
 });
 
-test("neither stdout nor stderr carries the key", async () => {
-  /* The round-10 finding: stderr belongs to the container logging driver, so a key
-     written there is a bearer at rest in a log file that every same-uid process can
-     read. Give the streams a moment to flush, then look. */
-  await Bun.sleep(300);
-  const captured = capturedOutput();
-  expect(captured).not.toContain(sessionValue);
+test("the startup says where to look and nothing about unlocking anything", () => {
+  expect(capturedOutput).toContain("[viewer] Open http://127.0.0.1:");
+  for (const ceremony of ["operator key", "paste", "unlock", "stand down"]) {
+    expect(capturedOutput.toLowerCase()).not.toContain(ceremony);
+  }
 });
 
-test("an anonymously fetched document carries no operator secret", async () => {
+test("neither stdout nor stderr carries the agent capability", () => {
+  /* stderr belongs to the container logging driver under a managed start, so a
+     bearer written there is a bearer at rest in a file every same-uid process can
+     read. The one credential-shaped value that still exists must not appear there. */
+  expect(spawnCapability).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  expect(capturedOutput).not.toContain(spawnCapability);
+});
+
+test("an anonymously fetched document carries no credential and asks for none", async () => {
   const response = await fetch(origin, { headers: { accept: "text/html" } });
   const html = await response.text();
+
   expect(html.length).toBeGreaterThan(0);
-  expect(html).not.toContain(sessionValue);
-  /* The round-7 fragment name must not come back: its presence in a served document
-     would mean the page is once again expecting a credential to arrive through a URL. */
-  expect(html).not.toContain("llv-operator");
+  /* The round-7 fragment name, the round-8 storage key, the round-9 prop, and the
+     header an agent identifies itself with: a served document that mentions any of
+     them is a document expecting a credential to arrive. */
+  for (const ceremony of ["llv-operator", "llv.operator.capability", "operatorCredential", "x-viewer-spawn-capability"]) {
+    expect(html).not.toContain(ceremony);
+  }
+  expect(html).not.toContain(spawnCapability);
 });
 
-test("the RSC flight payload carries no operator secret", async () => {
+test("the RSC flight payload carries no credential either", async () => {
   /* Where the round-7 leak actually lived: a prop handed to a client component is
-     serialized here, never into the static markup the first version of this test
-     inspected. */
+     serialized here, never into the static markup this file once inspected. */
   const response = await fetch(origin, {
     headers: { rsc: "1", "next-router-state-tree": "%5B%22%22%2C%7B%7D%5D", accept: "text/x-component" },
   });
   const flight = await response.text();
-  expect(flight).not.toContain(sessionValue);
-  expect(flight).not.toContain("operatorCredential");
+
+  for (const ceremony of ["llv-operator", "operatorCredential", "x-viewer-spawn-capability"]) {
+    expect(flight).not.toContain(ceremony);
+  }
+  expect(flight).not.toContain(spawnCapability);
 });
 
-test("no build artifact on disk carries the session secret either", () => {
-  /* It is minted per process, so it must not have been baked in. */
+test("no build artifact carries the per-process agent capability", () => {
+  /* It is minted per state directory, so finding it baked into the build would mean
+     a shipped artifact carries one machine's credential. */
   const walk = (dir: string): string[] => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     if (entry.name === "cache") return [];
     const target = path.join(dir, entry.name);
@@ -163,6 +204,26 @@ test("no build artifact on disk carries the session secret either", () => {
   });
   for (const file of walk(path.join(BUILD_DIR, "server"))) {
     if (!/\.(js|json|html|rsc|txt)$/.test(file)) continue;
-    expect(fs.readFileSync(file, "utf8")).not.toContain(sessionValue);
+    expect(fs.readFileSync(file, "utf8")).not.toContain(spawnCapability);
   }
+});
+
+test("ONE CLICK, END TO END: a bare same-origin request designates a manager on the real build", async () => {
+  /* The invariant the ceremony removal is for, proven against the ARTIFACT rather
+     than in-process — which is the only place the last mechanism's failure was
+     visible at all (Next compiles each route into its own bundle, the secret was
+     module state, and the operator's own key got a 403 from the route it was minted
+     for). Nothing is presented here: no key, no cookie, no capability. */
+  const response = await fetch(`${origin}/api/orchestrator`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin, "sec-fetch-site": "same-origin" },
+    body: JSON.stringify({ conversationId: "conversation_served_payload_one_click", path: null }),
+  });
+
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({
+    ok: true,
+    adopted: true,
+    record: { conversationId: "conversation_served_payload_one_click" },
+  });
 });
