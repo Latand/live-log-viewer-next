@@ -20,7 +20,8 @@ import type { FileEntry } from "@/lib/types";
 
 import { attentionId, buildAttentionQueue, nextAttention, STALLED_ATTENTION_TTL, type AttentionItem } from "./attention";
 import { AttentionHost } from "./attention/AttentionHost";
-import { adoptOperatorCredentialFromLocation } from "./operatorCredential";
+import { OperatorKeyGate } from "./OperatorKeyGate";
+import { purgeLegacyOperatorCredential } from "./operatorCredential";
 import { VoicePipHost } from "./voice/VoicePipHost";
 import { focusHandoffBus } from "./attention/focusHandoffBus";
 import { ConnectionPill } from "./ConnectionPill";
@@ -103,9 +104,10 @@ function attentionSnippet(t: TFunction, item: AttentionItem): string {
 
 export function Viewer() {
   const { t } = useLocale();
-  /* Claimed from the URL fragment on first render — before any control can issue an
-     operator-only request, and never from anything the server served. */
-  adoptOperatorCredentialFromLocation();
+  /* No credential is claimed on load any more: it is pasted into `OperatorKeyGate`
+     below and held in memory for the tab. This only clears what earlier rounds left
+     on disk — a stored bearer, a stale startup fragment. */
+  purgeLegacyOperatorCredential();
   /* The one presence publisher for the whole app: it reads the shared view bus
      that the board/scheme/mobile components report into and ships an ephemeral
      per-tab snapshot to the server. Renders nothing. */
@@ -711,6 +713,9 @@ export function Viewer() {
       {/* Staging instances (#659) announce themselves on every device; prod
           renders nothing. Top-center, clear of both corner anchors. */}
       <StagingBadge />
+      {/* #691: where the operator pastes the key printed at startup. Renders
+          nothing once this tab holds one, which is the usual case. */}
+      <OperatorKeyGate />
     </div>
   );
 

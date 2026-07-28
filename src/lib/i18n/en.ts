@@ -633,6 +633,14 @@ export const en = {
   "sound.ambientVolume": "Music level",
   "sound.ambientHint": "Plays quietly at this level, and ducks under speech during a call. With both on, the same track keeps playing across the call.",
 
+  // OperatorKeyGate — the operator key is pasted, never stored (#691). The copy
+  // has to earn the paste, so it says where the key is and what it unlocks, and
+  // it is honest that a reload asks again.
+  "operator.keyPrompt": "Operator key",
+  "operator.keyHint": "Printed in the terminal you started the Viewer from. Held for this tab only — a reload asks again, because anywhere it could be saved is readable by the agents running on this machine.",
+  "operator.keyRefused": "Paste the key first.",
+  "operator.keyApply": "Unlock",
+
   // KeepAwakeControl — the phone-only screen wake lock (issue #712). Every
   // caption states what is true right now; only `active` says the screen is
   // held, and it is the one that names the battery cost.

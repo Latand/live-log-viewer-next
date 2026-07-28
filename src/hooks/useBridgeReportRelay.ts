@@ -131,12 +131,13 @@ export function useBridgeTurnStartDrain(
       return {
         text: prelude.text,
         ackToken: prelude.ackToken,
+        /* Through `commitBridgeTurn` rather than its own fetch, so this path gets the
+           same rule as every other acknowledgement: a refusal is a refusal. The inline
+           version treated any response as a settle, which turned a 403 or a 409 into a
+           silently lost batch. Fire-and-forget by contract — the caller holds the
+           token and can spend it again — so the rejection is absorbed here. */
         commit: () => {
-          void request("/api/bridge", {
-            method: "POST",
-            headers: { "content-type": "application/json", ...operatorHeaders() },
-            body: JSON.stringify({ ackToken: prelude.ackToken }),
-          }).catch(() => undefined);
+          void commitBridgeTurn(prelude.ackToken, request).catch(() => undefined);
         },
       };
     } catch {
@@ -166,14 +167,28 @@ export function useBridgeReportRelay(
     const request = fetchFn ?? fetch;
     let cancelled = false;
 
+    /**
+     * Settle a batch, and REPORT WHETHER IT SETTLED.
+     *
+     * The version this replaces awaited the fetch and then resolved, whatever came
+     * back. `fetch` rejects only on transport failure, so a 403 from an unauthenticated
+     * poll, a 409 on a token the server no longer holds, and a 500 mid-write all
+     * resolved as success — and every caller here treats success as permission to
+     * delete the token. The one thing that could settle the batch was thrown away
+     * precisely when the batch had NOT been settled, which loses the reports
+     * permanently: the server's cursor never moved, and nothing is left to move it.
+     *
+     * So a refusal throws, and the token stays parked for the next poll to spend.
+     */
     const acknowledgeCursor = async (ackToken: string): Promise<void> => {
-      await request("/api/bridge", {
+      const response = await request("/api/bridge", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...operatorHeaders() },
         /* The token the batch was handed out with — never a sequence of our own
            choosing, which the server would be right to refuse. */
         body: JSON.stringify({ ackToken, realtimeSessionId: client.realtimeSession() }),
       });
+      if (!response.ok) throw new Error(`bridge acknowledgement refused with ${response.status}`);
     };
 
     const settle = (deliveryId: string): void => {
@@ -182,10 +197,13 @@ export function useBridgeReportRelay(
       /* Now — and only now — has the report provably reached the session. */
       acknowledgedRef.current = [...acknowledgedRef.current, deliveryId].slice(-256);
       void acknowledgeCursor(ackToken)
+        /* Only an ACCEPTED acknowledgement drops the token. `acknowledgeCursor` now
+           throws on a refusal, so this `.then` no longer fires for a 403 or a 409 —
+           which is what used to delete the token while the cursor stood still. */
         .then(() => forgetBridgeAcknowledgement(deliveryId))
         .catch(() => {
           /* The cursor did not move, so the token is still the only thing that can
-             settle this batch. It stays parked and the next poll retries it. */
+             settle this batch. It stays parked, and the poll's retry sweep spends it. */
         });
     };
     const releaseAcknowledged = client.onDeliveryAcknowledged(settle);
@@ -203,13 +221,26 @@ export function useBridgeReportRelay(
 
         /* Autonomous retry. A token parked by a torn-down effect, a reload mid-call,
            or a refused POST is spent here rather than waiting for a confirmation that
-           already happened and will not fire again. */
-        for (const entry of pendingBridgeAcknowledgements()) {
-          if (!entry.waitingOn.startsWith("voice:")) continue;
-          void acknowledgeCursor(entry.ackToken)
-            .then(() => forgetBridgeAcknowledgement(entry.waitingOn))
-            .catch(() => undefined);
-        }
+           already happened and will not fire again.
+
+           AWAITED, not fired off. The drain below reports what is still outstanding,
+           and starting it while these are in flight asks the server a question whose
+           answer these retries are busy changing: the GET would see the batch still
+           unsettled and hand out a second token for it, so the same reports come back
+           and the acknowledgement that lands second is refused against a cursor that
+           already moved. One at a time is also cheap here — the whole point is that
+           there is usually nothing parked. */
+        await Promise.all(pendingBridgeAcknowledgements().map(async (entry) => {
+          if (!entry.waitingOn.startsWith("voice:")) return;
+          try {
+            await acknowledgeCursor(entry.ackToken);
+            forgetBridgeAcknowledgement(entry.waitingOn);
+          } catch {
+            /* Still the only thing that can settle this batch; the next poll retries. */
+          }
+        }));
+        if (cancelled) return;
+
         const parameters = new URLSearchParams({ realtimeSessionId: session });
         for (const id of acknowledgedRef.current) parameters.append("acked", id);
         if (lastBatchAtRef.current) parameters.set("lastBatchAt", lastBatchAtRef.current.toISOString());
@@ -233,7 +264,10 @@ export function useBridgeReportRelay(
           return;
         }
         if (plan.kind !== "already-acknowledged") return;
-        /* Already spoken and provably received; this only heals the cursor. */
+        /* Already spoken and provably received; this only heals the cursor. A refusal
+           throws into the poll's own catch, and the server hands out a fresh token for
+           the same batch on the next GET — nothing is parked here because there is no
+           delivery left to wait on. */
         await acknowledgeCursor(plan.ackToken);
       } catch {
         /* A dropped poll is a retry, not an incident: the reports are durable and

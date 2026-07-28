@@ -3,84 +3,128 @@
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/capabilityHeader";
 
 /**
- * The operator capability, as the browser holds it (#691 rounds 6–7).
+ * The operator capability, as the browser holds it (#691 round 9).
  *
- * Three deliveries have been tried on this feature and two were broken in the same
- * way, so the reasoning is worth keeping:
+ * WHAT ACTUALLY DISTINGUISHES THE BROWSER FROM A WORKER, which is the question five
+ * rounds of this feature have been answering wrongly:
+ *
+ * Nothing about the browser's IDENTITY does. A worker runs as the operator's uid; it
+ * can write any header, any `Origin`, any `User-Agent`, open the same loopback port,
+ * read any file the operator can read, and read any environment it can ptrace. There
+ * is no request a browser can make that a worker cannot make identically, and no place
+ * a browser can put a value AT REST that a worker cannot read. Every delivery tried so
+ * far failed on that single fact:
  *
  * 1. Trust the ROUTE's caller — a claim, and claims are free.
  * 2. Trust the HEADER SHAPE (`sec-fetch-site: same-origin`) — forbidden to page
  *    JavaScript, trivially written by a local process.
- * 3. SERVE it in the page — worst of the three: the page is fetched anonymously over
- *    loopback, so any local process could GET it and become the operator. A sound
- *    credential leaked by its delivery is worse than none, because it looks
- *    authenticated.
+ * 3. SERVE it in the page — the page is fetched anonymously over loopback.
+ * 4. A FILE — every worker runs as the operator's uid.
+ * 5. `sessionStorage` — 4 again. Web storage is not a browser-private compartment; it
+ *    is a LevelDB directory in the Chromium profile (`Session Storage/`,
+ *    `Local Storage/leveldb`), owned by the operator's uid and readable by every
+ *    worker. Cookies, IndexedDB and the History database are the same story.
  *
- * What survives is the constraint all three failed: the credential must never appear
- * in anything a local process can request. So it arrives in the URL FRAGMENT of a
- * one-time link the server prints to the terminal the operator launched it from.
- * Fragments are never transmitted to the server, never appear in a response body, and
- * never land in request logs — there is nothing to fetch and nothing to replay.
+ * ONE thing does distinguish them, and it is not identity — it is REACHABILITY OF
+ * VOLATILE MEMORY, seeded by a human. Under Linux `yama/ptrace_scope >= 1` a process
+ * may read another's memory only if it is an ancestor of it. A worker is a DESCENDANT
+ * of the Viewer, so the server's heap is closed to it; a worker is a stranger to the
+ * browser, so the tab's JS heap is closed to it too. The credential is therefore a real
+ * credential exactly while it exists in only those two heaps plus the operator's screen,
+ * and it stops being one the instant it touches a file, a URL, an environment, a
+ * response body, or any web-storage API.
  *
- * The fragment is stripped from the address bar the moment it is read, so it does not
- * linger in history, and the value is kept in `sessionStorage`: per-tab, gone when the
- * tab closes, and reachable only by script on this origin — which an agent, being a
- * separate process rather than a page, is not running.
+ * So this module keeps it in a module variable and NOWHERE ELSE. Not stored, not
+ * mirrored, not recoverable. The consequence is deliberate and is the price of the
+ * property: A RELOAD LOSES IT, and the operator pastes it again. Every mechanism that
+ * would survive a reload is, by definition, a persistence mechanism, and every
+ * persistence mechanism a browser has is a file in a directory a worker can read.
  *
- * This does NOT defend against a process reading the capability file directly. Nothing
- * in this app does; agents run as the operator's own uid. That is the repo's standing
- * boundary, and it is a different question from the one this file answers.
+ * The URL fragment is gone for the same reason, and it is worth being precise about why
+ * round 7 was nearly right: fragments genuinely never reach the server, appear in no
+ * response and no request log. But Chromium records the committed URL — fragment
+ * included — in the History database on disk, and the `replaceState` that scrubbed the
+ * address bar was racing that write, not preventing it. A printed clickable link is a
+ * persistence channel. So the server prints the BARE key to the terminal it was
+ * launched from, and the operator pastes it into the tab. That paste is the part a
+ * worker cannot perform.
+ *
+ * Residual, stated plainly rather than papered over: if `ptrace_scope` is 0, or a
+ * worker runs as root, or the browser was started with `--remote-debugging-port`, or
+ * the terminal tees its scrollback to a file, the distinction collapses — and at that
+ * point there is no credential to be had, because the attacker can read the server's
+ * memory directly.
  */
 
-/** The fragment key the startup link uses. */
-export const OPERATOR_CREDENTIAL_FRAGMENT = "llv-operator";
-const STORAGE_KEY = "llv.operator.capability";
+/** The fragment the round-7 startup link used. Recognized only so it can be scrubbed. */
+const LEGACY_FRAGMENT = "llv-operator";
+/** Where round 8 mirrored the bearer. Recognized only so it can be deleted. */
+const LEGACY_STORAGE_KEY = "llv.operator.capability";
 
+/* The whole credential. Volatile by design: see above. */
 let capability: string | null = null;
 
-function readStored(): string | null {
-  try {
-    return window.sessionStorage.getItem(STORAGE_KEY);
-  } catch {
-    /* Private mode or disabled storage: the credential simply lives for this
-       render tree, which still covers the tab that opened the link. */
-    return null;
-  }
+type Listener = () => void;
+const listeners = new Set<Listener>();
+
+/** Re-render operator-gated UI when the credential arrives or is dropped. */
+export function subscribeOperatorCredential(listener: Listener): () => void {
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
 }
 
-function store(value: string): void {
-  try {
-    window.sessionStorage.setItem(STORAGE_KEY, value);
-  } catch {
-    /* see readStored */
-  }
+function announce(): void {
+  for (const listener of [...listeners]) listener();
 }
 
 /**
- * Take the credential out of the URL fragment, if this is the one-time link, and
- * remember it for the tab.
+ * Take the key the operator pasted.
  *
- * Idempotent and safe to call during render: it touches no React state, and the
- * history rewrite happens at most once because the fragment is gone afterwards.
+ * Returns whether anything was adopted, so the caller can keep the field open on an
+ * empty paste rather than silently appearing to have worked.
  */
-export function adoptOperatorCredentialFromLocation(): void {
-  if (typeof window === "undefined") return;
-  if (capability) return;
+export function adoptOperatorCredential(pasted: string): boolean {
+  const value = pasted.trim();
+  if (!value) return false;
+  capability = value;
+  announce();
+  return true;
+}
 
-  const hash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : window.location.hash;
-  const fragment = new URLSearchParams(hash);
-  const claimed = fragment.get(OPERATOR_CREDENTIAL_FRAGMENT)?.trim();
-  if (claimed) {
-    capability = claimed;
-    store(claimed);
-    /* Out of the address bar immediately: a fragment that stays put ends up in
-       history, in a screenshot, and in whatever the operator pastes next. */
-    fragment.delete(OPERATOR_CREDENTIAL_FRAGMENT);
-    const remaining = fragment.toString();
-    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${remaining ? `#${remaining}` : ""}`);
-    return;
+/** Drop it for this tab. The server keeps its secret; only this browser forgets. */
+export function forgetOperatorCredential(): void {
+  if (capability === null) return;
+  capability = null;
+  announce();
+}
+
+/**
+ * Erase what earlier rounds left behind on disk, and scrub a stale startup link.
+ *
+ * An upgrade does not clean the previous version's leavings: a profile that ever held
+ * the round-8 bearer still has it in `Session Storage/`, and a bookmarked round-7 link
+ * still carries one in the address bar. Neither is adopted — a value that has been
+ * through a file or a URL is spent — but both are removed, so the fix does not ship
+ * while the hole it closes is still sitting in the profile.
+ *
+ * Idempotent and safe to call during render: it touches no React state.
+ */
+export function purgeLegacyOperatorCredential(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.removeItem(LEGACY_STORAGE_KEY);
+    window.localStorage.removeItem(LEGACY_STORAGE_KEY);
+  } catch {
+    /* Private mode or disabled storage: there was nothing persisted to begin with. */
   }
-  capability = readStored();
+
+  const raw = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : window.location.hash;
+  if (!raw.includes(LEGACY_FRAGMENT)) return;
+  const fragment = new URLSearchParams(raw);
+  if (!fragment.has(LEGACY_FRAGMENT)) return;
+  fragment.delete(LEGACY_FRAGMENT);
+  const remaining = fragment.toString();
+  window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${remaining ? `#${remaining}` : ""}`);
 }
 
 export function operatorCredential(): string | null {
@@ -105,9 +149,5 @@ export function operatorHeaders(): Record<string, string> {
 /** Tests only. */
 export function resetOperatorCredentialForTests(): void {
   capability = null;
-  try {
-    window.sessionStorage.removeItem(STORAGE_KEY);
-  } catch {
-    /* nothing stored */
-  }
+  listeners.clear();
 }

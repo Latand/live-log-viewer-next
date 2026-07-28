@@ -155,22 +155,6 @@ export async function startCurrentReleaseControllers(
   scheduleAccountMigrationController(startAccountMigrationController, accountControllerDelayMs(env));
 }
 
-/**
- * The operator's one-time link (#691 round 7).
- *
- * The capability reaches the browser through the URL FRAGMENT of this link and
- * nowhere else. It is printed to the terminal the operator started the Viewer from —
- * a channel a local process cannot fetch — and the fragment never travels to the
- * server, so it appears in no response and no request log.
- *
- * Returned as well as printed so a caller can place it somewhere else; kept off every
- * HTTP surface deliberately, because an endpoint that hands out the credential is the
- * anonymous page all over again.
- */
-export function operatorCredentialLink(capability: string, origin: string): string {
-  return `${origin}/#llv-operator=${encodeURIComponent(capability)}`;
-}
-
 export async function initializeOperatorSpawnCapabilityAtStartup(
   env: Readonly<Record<string, string | undefined>> = process.env,
   log: (line: string) => void = (line) => console.error(line),
@@ -179,16 +163,23 @@ export async function initializeOperatorSpawnCapabilityAtStartup(
   if (env.LLV_ROTATE_OPERATOR_SPAWN_CAPABILITY === "1") rotateOperatorSpawnCapability();
   else ensureOperatorSpawnCapability();
 
-  /* The link carries the in-memory session secret, never the on-disk spawn
+  /* The printed key is the in-memory session secret, never the on-disk spawn
      capability: a file every worker can read is not a credential. */
   const { operatorSessionSecret } = await import("@/lib/agent/operatorSession");
   const capability = operatorSessionSecret();
 
   const port = env.PORT?.trim() || "8898";
   const origin = `http://127.0.0.1:${port}`;
-  log(`[viewer] operator link (grants operator-only actions in the browser you open it in):`);
-  log(`[viewer]   ${operatorCredentialLink(capability, origin)}`);
-  log(`[viewer] Opening ${origin} without it still shows everything; designation and voice transport controls stand down.`);
+  /* THE BARE KEY, not a clickable link (#691 round 9). Round 7 printed the capability
+     in a URL fragment: fragments genuinely never reach the server, but Chromium records
+     the committed URL — fragment and all — in the History database on disk, which every
+     worker can read as the operator's own uid. A value that goes through a URL has been
+     through a file. So this terminal is the handoff, and the operator pastes it into
+     the tab (`components/OperatorKeyGate.tsx`). */
+  log(`[viewer] operator key (paste it into the Viewer to unlock operator-only actions):`);
+  log(`[viewer]   ${capability}`);
+  log(`[viewer] Open ${origin}. Without the key everything still shows; designation and voice transport controls stand down.`);
+  log(`[viewer] The tab holds it in memory only, so a reload asks for it again — this terminal is the one place it exists at rest.`);
 }
 
 export async function startWakatimeIntegrationIfEnabled(

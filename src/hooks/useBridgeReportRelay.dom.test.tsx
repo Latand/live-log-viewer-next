@@ -4,7 +4,7 @@ import { useEffect } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
-import { resetBridgeAcknowledgementsForTests } from "@/lib/bridge/pendingAcknowledgements";
+import { pendingBridgeAcknowledgements, resetBridgeAcknowledgementsForTests } from "@/lib/bridge/pendingAcknowledgements";
 import { installActEnv } from "@/test-helpers/actEnv";
 import type { RuntimeVoiceDelivery } from "@/lib/runtime/voiceDelivery";
 
@@ -92,6 +92,16 @@ function delivery(seq: number): RuntimeVoiceDelivery {
   };
 }
 
+/**
+ * Scripted acknowledgement outcomes, consumed in order; anything unscripted is a
+ * plain 200.
+ *
+ * `hold` keeps the POST in flight until the test releases it, which is the only way to
+ * observe the ordering the relay owes: a drain started while a retry is still
+ * outstanding asks the server a question that retry is busy changing.
+ */
+let postOutcomes: { status: number; hold?: Promise<void> }[] = [];
+
 const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
   const url = String(input);
   calls.push({
@@ -103,7 +113,10 @@ const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
     const plan = plans.shift() ?? { kind: "idle" };
     return new Response(JSON.stringify({ ok: true, plan }), { status: 200 });
   }
-  return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  const outcome = postOutcomes.shift();
+  if (outcome?.hold) await outcome.hold;
+  const status = outcome?.status ?? 200;
+  return new Response(JSON.stringify(status === 200 ? { ok: true } : { error: "refused" }), { status });
 }) as unknown as typeof fetch;
 
 beforeEach(() => {
@@ -111,6 +124,7 @@ beforeEach(() => {
   calls = [];
   delivered = [];
   plans = [];
+  postOutcomes = [];
   acknowledgeListeners = [];
   sessionCredential = "rt_sess_relay";
   /* The parked-token store is module-scoped by design (it must outlive components),
@@ -124,9 +138,9 @@ afterEach(async () => {
   await settle();
 });
 
-function mount(live: boolean) {
+function mount(live: boolean, pollMs = 5_000) {
   function Probe({ isLive }: { isLive: boolean }) {
-    useBridgeReportRelay(client, isLive, { fetchFn, pollMs: 5_000 });
+    useBridgeReportRelay(client, isLive, { fetchFn, pollMs });
     return null;
   }
   const container = dom.document.createElement("div");
@@ -311,4 +325,118 @@ test("commitBridgeTurn settles a batch by token, long after the closure is gone"
   commitBridgeTurn("", tokenFetch);
   await settle();
   expect(posts).toHaveLength(1);
+});
+
+/**
+ * What an acknowledgement RESPONSE means (#691 round 9).
+ *
+ * The relay used to await the acknowledgement fetch and treat whatever came back as a
+ * settle. `fetch` rejects only on transport failure, so a 403, a 409 on a token the
+ * server no longer holds, and a 500 mid-write all arrived as success — and success is
+ * what deletes the token. The one thing that could settle the batch was destroyed in
+ * exactly the case where the batch had NOT settled: the server's cursor never moved,
+ * and nothing was left able to move it, so those reports were gone for good.
+ */
+
+test("a REFUSED acknowledgement keeps the token — the cursor did not move", async () => {
+  plans = [{ kind: "deliver", delivery: delivery(11), ackToken: "ack_11" }];
+  postOutcomes = [{ status: 403 }];
+  mount(true);
+  await settle();
+
+  confirmDurableDelivery(delivery(11).deliveryId);
+  await settle();
+
+  expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
+  /* Still parked, and still the only thing that can settle this batch. */
+  expect(pendingBridgeAcknowledgements().map((entry) => entry.ackToken)).toEqual(["ack_11"]);
+});
+
+test("a server error keeps it too — 500 is not a settle", async () => {
+  plans = [{ kind: "deliver", delivery: delivery(12), ackToken: "ack_12" }];
+  postOutcomes = [{ status: 500 }];
+  mount(true);
+  await settle();
+  confirmDurableDelivery(delivery(12).deliveryId);
+  await settle();
+
+  expect(pendingBridgeAcknowledgements().map((entry) => entry.ackToken)).toEqual(["ack_12"]);
+});
+
+test("an ACCEPTED acknowledgement is the only thing that drops the token", async () => {
+  plans = [{ kind: "deliver", delivery: delivery(13), ackToken: "ack_13" }];
+  mount(true);
+  await settle();
+  confirmDurableDelivery(delivery(13).deliveryId);
+  await settle();
+
+  expect(pendingBridgeAcknowledgements()).toEqual([]);
+});
+
+/* A fresh mount polls immediately, so remounting drives the next poll without racing
+   an interval — and it is also the real case the retry exists for: a call-phase
+   transition tears the effect down, and the confirmation that would have settled the
+   batch has already fired and will not fire again. */
+async function repoll(): Promise<void> {
+  for (const root of roots) flushSync(() => root.unmount());
+  roots = [];
+  await settle();
+  mount(true);
+  await settle();
+}
+
+test("a token refused once is spent by the next poll, without re-delivering the batch", async () => {
+  plans = [{ kind: "deliver", delivery: delivery(14), ackToken: "ack_14" }, { kind: "idle" }];
+  postOutcomes = [{ status: 503 }];
+  mount(true);
+  await settle();
+  confirmDurableDelivery(delivery(14).deliveryId);
+  await settle();
+  expect(pendingBridgeAcknowledgements()).toHaveLength(1);
+
+  /* The POST is unscripted now, so it succeeds. */
+  await repoll();
+
+  const acknowledgements = calls.filter((call) => call.method === "POST");
+  expect(acknowledgements).toHaveLength(2);
+  expect(acknowledgements.every((call) => (call.body as { ackToken: string }).ackToken === "ack_14")).toBe(true);
+  expect(pendingBridgeAcknowledgements()).toEqual([]);
+  /* Retried, never re-spoken: the batch reached the session the first time. */
+  expect(delivered).toHaveLength(1);
+});
+
+test("the drain waits for the retry it just started", async () => {
+  /* Unfenced, the GET went out while the retry was still in flight — so the server
+     answered about a batch that was in the act of settling, handed out a SECOND token
+     for it, and the acknowledgement that landed second was refused against a cursor
+     that had already moved. */
+  let release = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+
+  plans = [{ kind: "deliver", delivery: delivery(15), ackToken: "ack_15" }, { kind: "idle" }];
+  postOutcomes = [{ status: 503 }, { status: 200, hold: held }];
+  mount(true);
+  await settle();
+  confirmDurableDelivery(delivery(15).deliveryId);
+  await settle();
+
+  const beforeRetry = calls.length;
+  await repoll();
+
+  /* The retry POST is out; the drain GET behind it must NOT be. */
+  const since = calls.slice(beforeRetry);
+  expect(since.filter((call) => call.method === "POST")).toHaveLength(1);
+  expect(since.filter((call) => call.method === "GET")).toEqual([]);
+
+  release();
+  await settle();
+
+  expect(calls.slice(beforeRetry).filter((call) => call.method === "GET")).toHaveLength(1);
+});
+
+test("a turn-start commit that is refused does not report success", async () => {
+  /* The inline commit closure posted its own fetch and swallowed the outcome, so a
+     403 read as a settled batch on the one path that runs when no call is live. */
+  const refusing = (async () => new Response(JSON.stringify({ error: "refused" }), { status: 403 })) as unknown as typeof fetch;
+  await expect(commitBridgeTurn("ack_refused", refusing)).rejects.toThrow(/403/);
 });

@@ -16,11 +16,15 @@ import path from "node:path";
  *
  * So this one fetches from a REAL SERVER: the production build, started on an
  * ephemeral port, asked for the document and for the RSC payload. The secret is not a
- * sentinel we invent — it is read out of the startup link the server itself prints,
+ * sentinel we invent — it is read out of the startup banner the server itself prints,
  * so the value searched for is the value that actually grants authority.
  *
  * Verified to go red against the round-7 leak (`<Viewer operatorCredential={cap} />`)
  * before being kept.
+ *
+ * Round 9 changed what the banner looks like — the key is printed bare, because the
+ * round-7 clickable link put it in a URL and Chromium writes URLs to a History
+ * database on disk. The parse follows the banner rather than the other way round.
  */
 
 const BUILD_DIR = path.join(process.cwd(), ".next");
@@ -61,7 +65,7 @@ beforeAll(async () => {
     stderr: "pipe",
   });
 
-  /* The secret exists only in that process's memory; the startup link is the only
+  /* The secret exists only in that process's memory; the startup banner is the only
      place it is ever emitted, which is precisely the property under test. */
   const deadline = Date.now() + 60_000;
   const reader = (server.stderr as ReadableStream<Uint8Array>).getReader();
@@ -71,8 +75,8 @@ beforeAll(async () => {
     const chunk = await reader.read();
     if (chunk.done) break;
     seen += decoder.decode(chunk.value, { stream: true });
-    const match = /#llv-operator=([A-Za-z0-9_-]+)/.exec(seen);
-    if (match) sessionValue = decodeURIComponent(match[1]!);
+    const match = /\[viewer\] operator key \(paste it[^\n]*\n\[viewer\]\s+([A-Za-z0-9_-]+)/.exec(seen);
+    if (match) sessionValue = match[1]!;
   }
   void reader.cancel().catch(() => undefined);
 
@@ -97,7 +101,7 @@ test("the production build exists, so this test can actually run", () => {
   expect(built).toBe(true);
 });
 
-test("the startup link is the only place the session secret appears", () => {
+test("the startup banner is the only place the session secret appears", () => {
   expect(sessionValue).toMatch(/^[A-Za-z0-9_-]{20,}$/);
 });
 
@@ -106,6 +110,8 @@ test("an anonymously fetched document carries no operator secret", async () => {
   const html = await response.text();
   expect(html.length).toBeGreaterThan(0);
   expect(html).not.toContain(sessionValue);
+  /* The round-7 fragment name must not come back: its presence in a served document
+     would mean the page is once again expecting a credential to arrive through a URL. */
   expect(html).not.toContain("llv-operator");
 });
 
