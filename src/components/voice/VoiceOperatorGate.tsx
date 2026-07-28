@@ -26,9 +26,11 @@ import type { TFunction } from "@/lib/i18n";
  */
 export function VoiceOperatorGate({ t }: { t: TFunction }) {
   const [open, setOpen] = useState(false);
-  const [value, setValue] = useState("");
   const [rejected, setRejected] = useState(false);
   const rootRef = useRef<HTMLSpanElement>(null);
+  /* Uncontrolled on purpose: a paste-once link needs no render-cycle mirror of
+     the secret, so the field is read (and cleared) through this ref at submit. */
+  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -73,10 +75,10 @@ export function VoiceOperatorGate({ t }: { t: TFunction }) {
             className="flex items-center gap-1.5"
             onSubmit={(event) => {
               event.preventDefault();
-              if (adoptOperatorCredentialFromPaste(value)) {
+              if (adoptOperatorCredentialFromPaste(inputRef.current?.value ?? "")) {
                 /* The subscribers re-render and the real start control replaces
                    this gate; nothing to clean up beyond the field. */
-                setValue("");
+                if (inputRef.current) inputRef.current.value = "";
                 setRejected(false);
                 setOpen(false);
                 return;
@@ -89,11 +91,8 @@ export function VoiceOperatorGate({ t }: { t: TFunction }) {
                  screen — a screenshot, a stream — must not. */
               type="password"
               data-testid="voice-operator-gate-input"
-              value={value}
-              onChange={(event) => {
-                setValue(event.target.value);
-                setRejected(false);
-              }}
+              ref={inputRef}
+              onChange={() => setRejected(false)}
               placeholder={t("voice.operatorGatePaste")}
               aria-label={t("voice.operatorGatePaste")}
               autoComplete="off"
