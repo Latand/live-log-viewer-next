@@ -3,7 +3,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 
 import type { AgentEngine } from "./cli";
-import { normalizeSpawnMcpServers } from "./mcpAllowlist";
+import { grantedMcpServers } from "./mcpAllowlist";
 
 type JsonObject = Record<string, unknown>;
 
@@ -125,8 +125,10 @@ function claudeMcpServers(
   const sharedProjectServers = claudeProjectMcpServers(cwd);
   const localProjectServers = record(project?.mcpServers) ?? {};
   const registered = { ...rootServers, ...sharedProjectServers, ...localProjectServers };
-  const normalized = normalizeSpawnMcpServers(allowlist);
-  const names = normalized.ok ? normalized.value : ["viewer"];
+  /* The grant bound is enforced again here (issue #739): the per-spawn
+     `--strict-mcp-config` file is copied from the re-validated list, so a
+     server the Viewer cannot grant is never written into it. */
+  const names = grantedMcpServers(allowlist);
   return Object.fromEntries(names.flatMap((name) => {
     const definition = record(registered[name]);
     return definition ? [[name, definition]] : [];

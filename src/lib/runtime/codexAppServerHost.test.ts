@@ -492,12 +492,13 @@ describe("CodexAppServerHost", () => {
     });
 
     /* The hosted thread is the only place the MCP table lives: thread/start
-       enables the allowlisted servers and restates realtime_conversation. */
+       enables the granted servers and restates realtime_conversation. The grant
+       bound ships empty of connectors, so Viewer is the whole surface (#739). */
     expect(server.requests.find((request) => request.method === "thread/start")?.params).toMatchObject({
       config: {
         mcp_servers: {
           viewer: { enabled: true, default_tools_approval_mode: "approve" },
-          "agent-browser": { enabled: true, default_tools_approval_mode: "writes" },
+          "agent-browser": { enabled: false, default_tools_approval_mode: "writes" },
           "telegram-readonly": { enabled: false },
         },
         features: { realtime_conversation: true },
@@ -538,7 +539,7 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
-  test("fresh structured threads enable a custom MCP allowlist and disable unrelated servers", async () => {
+  test("fresh structured threads enable only granted servers and disable the rest", async () => {
     const server = new FakeAppServer("custom-mcp-thread");
     server.mcpServers = {
       viewer: { command: "agent-log-viewer-mcp", enabled: true, default_tools_approval_mode: "prompt" },
@@ -556,7 +557,7 @@ describe("CodexAppServerHost", () => {
       config: {
         mcp_servers: {
           viewer: { enabled: true, default_tools_approval_mode: "approve" },
-          "agent-browser": { enabled: true, default_tools_approval_mode: "writes" },
+          "agent-browser": { enabled: false, default_tools_approval_mode: "writes" },
           "telegram-readonly": { enabled: false, default_tools_approval_mode: "prompt" },
         },
       },

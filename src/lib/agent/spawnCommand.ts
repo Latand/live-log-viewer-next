@@ -11,7 +11,7 @@ import { emptyLaunchProfile, validExplicitProject } from "@/lib/accounts/migrati
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
 import { agentRegistry, SpawnChildLimitError } from "@/lib/agent/registry";
 import { reasoningFromBody } from "@/lib/agent/efforts";
-import { normalizeSpawnMcpServers } from "@/lib/agent/mcpAllowlist";
+import { mcpServersForSession, normalizeSpawnMcpServers } from "@/lib/agent/mcpAllowlist";
 import { normalizeSpawnPlugins, pluginAllowlistForSession, sessionOriginFor } from "@/lib/agent/pluginAllowlist";
 import { codexModelSupportsImages, modelFromBody } from "@/lib/agent/models";
 import { resolveSpawnRole } from "@/lib/roles/registry";
@@ -148,8 +148,13 @@ export async function executeSpawnRequest(
     return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
 
+  /* Requested MCP grant (issue #739). A name outside the grantable bound is
+     rejected here with 400, exactly like a rejected plugin, instead of being
+     trimmed. Absence leaves the decision to policy; an explicit list — `[]`
+     included — can only narrow what the session's origin already allows. */
   const mcpServers = normalizeSpawnMcpServers(body.mcpServers);
   if (!mcpServers.ok) return NextResponse.json({ error: mcpServers.error }, { status: 400 });
+  const requestedMcpServers = body.mcpServers === undefined ? null : mcpServers.value;
   /* Requested plugin grant (issue #687). Absent leaves the decision to policy;
      `[]` is the operator's explicit opt-out for this root session. Anything
      outside the grantable set is rejected here, never trimmed silently. */
@@ -332,19 +337,26 @@ export async function executeSpawnRequest(
       : null;
     const parentSessionKey = parent?.sessionKey ?? null;
     const parentArtifactPath = parent?.artifactPath ?? null;
-    /* Session-origin policy (issue #687): an operator-launched root session —
-       no agent caller, no lineage parent, no role preset — carries the Computer
-       Use grant by default; every delegated launch carries none, and the
-       request can only narrow that, never widen it. */
+    /* Session origin, and with it every grant this launch receives: an
+       operator-launched root session is one with no agent caller, no lineage
+       parent and no role preset. Plugins (#687) and MCP servers (#739) read the
+       same classification, so a session cannot be a root for one and delegated
+       for the other. */
+    const sessionOrigin = sessionOriginFor({
+      origin: { kind: authenticatedCaller?.kind === "agent" ? "agent" : "operator" },
+      parentConversationId,
+      agentRole: role.value?.role ?? null,
+    });
+    /* An operator root carries the Computer Use grant by default; every
+       delegated launch carries none, and the request can only narrow that. */
     const plugins = pluginAllowlistForSession({
       engine,
-      origin: sessionOriginFor({
-        origin: { kind: authenticatedCaller?.kind === "agent" ? "agent" : "operator" },
-        parentConversationId,
-        agentRole: role.value?.role ?? null,
-      }),
+      origin: sessionOrigin,
       requested: requestedPlugins.value,
     });
+    /* Same shape for MCP: a delegated launch holds the Viewer baseline whatever
+       it asked for, so a granted connector cannot travel down a spawn chain. */
+    const grantedServers = mcpServersForSession({ origin: sessionOrigin, requested: requestedMcpServers });
     const digest = spawnRequestDigest({
       engine,
       cwd,
@@ -353,7 +365,7 @@ export async function executeSpawnRequest(
       fast: reasoning.fast,
       accountId: account.accountId,
       role: role.value?.role ?? null,
-      mcpServers: mcpServers.value,
+      mcpServers: grantedServers,
       ...(plugins.length ? { plugins } : {}),
       ...(body.allowSubagents === true ? { allowSubagents: true } : {}),
       ...(explicitProject ? { project: explicitProject } : {}),
@@ -374,7 +386,7 @@ export async function executeSpawnRequest(
       claudeConfigDir: engine === "claude" ? account.home : null,
       claudeProjectsDir: engine === "claude" ? account.transcriptRoot : null,
       allowSubagents: body.allowSubagents === true,
-      mcpServers: mcpServers.value,
+      mcpServers: grantedServers,
       deferClaudeSpawnPolicy: true,
     });
     const permissionMode = engine === "claude" && transport === "structured"
@@ -391,7 +403,7 @@ export async function executeSpawnRequest(
         cwd,
         parentConversationId,
         allowSubagents: body.allowSubagents === true,
-        mcpServers: mcpServers.value,
+        mcpServers: grantedServers,
         plugins,
         permissionMode,
         ...(explicitProject ? { project: explicitProject } : {}),
@@ -588,7 +600,7 @@ export async function executeSpawnRequest(
         baseSettingsPath: isManagedClaudeHome(account.home) ? claudeSettingsPath() : null,
         profileId,
         cwd,
-        mcpServers: mcpServers.value,
+        mcpServers: grantedServers,
         mcpStatePath: account.kind === "managed"
           ? path.join(account.home, ".claude.json")
           : path.join(path.dirname(account.home), ".claude.json"),

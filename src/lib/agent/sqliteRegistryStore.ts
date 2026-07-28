@@ -4,7 +4,14 @@ import { isDeepStrictEqual } from "node:util";
 
 import type { Database as BunDatabase } from "bun:sqlite";
 
+import { reboundAssembledMcpGrants, rowClaimsBeyondBaselineGrant, type McpGrantPolicy } from "./mcpAllowlist";
 import type { RegistryFile } from "./registry";
+
+/** The collections the MCP grant decision reads and writes. Touching any one of
+    them requires the decision to have run over ALL of them, because an entry or
+    a receipt is only decidable against the conversations and lineage edges that
+    attest to it (#739). */
+const GRANT_COLLECTIONS = new Set(["entries", "receipts", "conversations", "lineageEdges"]);
 
 const ROW_COLLECTIONS = [
   "entries",
@@ -58,6 +65,11 @@ export interface SqliteRegistryMutation<T> {
 export interface SqliteRegistryStoreOptions {
   initialSnapshot: RegistryFile;
   normalize(value: unknown): RegistryFile;
+  /** Grant bound for the assembled-snapshot rebound below, matching whatever
+      `normalize` enforces. Production omits both; a test supplies a policy that
+      HAS a grantable connector, because the shipped bound has none and an empty
+      bound cannot tell an origin reset from itself (issue #739). */
+  mcpGrantPolicy?: McpGrantPolicy;
   onWriterWait?(durationMs: number): void;
   onSnapshotLoad?(): void;
   onRowPayloadRead?(collection: RowCollection, count: number): void;
@@ -65,7 +77,33 @@ export interface SqliteRegistryStoreOptions {
   onRevisionQuery?(): void;
 }
 
+/**
+ * A registry file no undecided MCP grant can leave (#739).
+ *
+ * The three row writers below take ONLY this type, and `markDecided` is the one
+ * place that mints it, so a new persist path cannot be written without the
+ * decision — it is a compile error, not a convention a future path has to know
+ * about. That is the difference between this and enumerating today's callers:
+ * enumeration notices a fourth entry point after somebody adds it, this one
+ * refuses to let it be expressed.
+ *
+ * A file earns the brand two ways, and they are the same guarantee reached
+ * differently:
+ *
+ *  - `decideAssembled` has run {@link reboundAssembledMcpGrants} over the whole
+ *    of it, which is what a payload arriving from OUTSIDE the store needs;
+ *  - it came from the lazy loader, whose row accessors run that same decision
+ *    before handing out any row that claims more than the baseline, which is
+ *    what a mutation reading rows one at a time needs.
+ *
+ * The brand is a runtime WeakSet as well as a type, so an `as` cast that skips
+ * `markDecided` still throws at the write rather than silently persisting.
+ */
+declare const DECIDED: unique symbol;
+export type DecidedRegistryFile = RegistryFile & { readonly [DECIDED]: true };
+
 interface LazyRegistrySnapshot extends SqliteRegistrySnapshot {
+  file: DecidedRegistryFile;
   changes(): RegistryChanges;
 }
 
@@ -109,6 +147,29 @@ export class SqliteAgentRegistryStore {
   private revisionCache: { signature: string; revision: number } | null = null;
   private readOnlyCache: SqliteRegistrySnapshot | null = null;
 
+  private readonly mcpGrantPolicy: McpGrantPolicy | undefined;
+  /** Runtime half of {@link DecidedRegistryFile}: the files this store has
+      actually seen the decision run over, so an `as` cast cannot mint one. */
+  private readonly decidedFiles = new WeakSet<object>();
+
+  /** The sole mint. Everything that reaches a row writer passes through here. */
+  private markDecided(file: RegistryFile): DecidedRegistryFile {
+    this.decidedFiles.add(file);
+    return file as DecidedRegistryFile;
+  }
+
+  /** For a payload arriving from outside the store, which has had no accessor
+      gate applied to it: run the assembled decision over the whole file. */
+  private decideAssembled(file: RegistryFile): DecidedRegistryFile {
+    reboundAssembledMcpGrants(file, this.mcpGrantPolicy);
+    return this.markDecided(file);
+  }
+
+  private assertDecided(file: DecidedRegistryFile): void {
+    if (this.decidedFiles.has(file)) return;
+    throw new Error("agent registry rows cannot be persisted before the MCP grant decision has run (#739)");
+  }
+
   constructor(readonly filename: string, options: SqliteRegistryStoreOptions) {
     fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
     const sqlite = process.getBuiltinModule?.("bun:sqlite") as typeof import("bun:sqlite") | undefined;
@@ -121,6 +182,7 @@ export class SqliteAgentRegistryStore {
     this.onRowPayloadRead = options.onRowPayloadRead;
     this.onRowPayloadParse = options.onRowPayloadParse;
     this.onRevisionQuery = options.onRevisionQuery;
+    this.mcpGrantPolicy = options.mcpGrantPolicy;
     this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL;");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS registry_meta (
@@ -246,6 +308,12 @@ export class SqliteAgentRegistryStore {
   }
 
   replace(file: RegistryFile, expectedRevision?: number): SqliteRegistryReplacement {
+    /* A wholesale replacement is a mutation like any other, and its payload
+       arrives from outside this store, so it is re-decided before it lands
+       rather than on the way back out (#739). `persistDiff` takes only a
+       DecidedRegistryFile, so this line cannot be dropped without the store
+       failing to compile. */
+    const decided = this.decideAssembled(file);
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const current = this.loadInTransaction();
@@ -254,7 +322,7 @@ export class SqliteAgentRegistryStore {
         return { ...current, replaced: false };
       }
       const revision = current.revision + 1;
-      this.persistDiff(current.file, file, revision);
+      this.persistDiff(current.file, decided, revision);
       this.db.exec("COMMIT");
       this.secureFiles();
       this.rowCache.clear();
@@ -272,7 +340,7 @@ export class SqliteAgentRegistryStore {
     try {
       const complete = this.meta("migration_complete");
       if (complete !== "1") {
-        this.persistAll(initialSnapshot, 1);
+        this.persistAll(this.decideAssembled(initialSnapshot), 1);
         this.setMeta("schema_version", "2");
         this.setMeta("migration_complete", "1");
       }
@@ -286,13 +354,54 @@ export class SqliteAgentRegistryStore {
 
   private loadInTransaction(useRowCache = false): SqliteRegistrySnapshot {
     const snapshot = this.loadLazyInTransaction(false, useRowCache);
+    /* Touching the grant-bearing collections runs the assembled re-decision
+       through the same gate every other path goes through (#739); the rest are
+       materialized because a snapshot is by definition complete. */
     for (const collection of ROW_COLLECTIONS) void snapshot.file[collection];
     for (const field of META_FIELDS) void snapshot.file[field];
     return snapshot;
   }
 
   private loadLazyInTransaction(trackMutations = true, useRowCache = trackMutations): LazyRegistrySnapshot {
-    const file = this.normalize({ version: 2, entries: {}, receipts: {} });
+    /* Branded here because the row ACCESSORS below carry the guarantee: every
+       row this file can hand out goes through `admitRow`, which runs the
+       assembled decision before returning anything claiming more than the
+       baseline. The brand is what lets `persistChanges` accept it. */
+    const file = this.markDecided(this.normalize({ version: 2, entries: {}, receipts: {} }));
+    /* The assembled origin re-decision is a PRECONDITION of observing a grant,
+       not a step some paths reach later (#739). Rows are normalized one
+       collection — one row, even — at a time, so a row loaded lazily has had
+       only the global bound applied; the origin half needs the conversations,
+       lineage edges and receipts together. `mutate` used to hand its operation
+       the lazily normalized file directly, which put every store mutation —
+       settlement, structured claim, upsert — underneath the gate that `snapshot`
+       passed through.
+       Gating the ACCESSORS rather than a call site means the ordering cannot be
+       got wrong by a future path. The gate hangs off the ROW, not the
+       collection: a row already at the baseline is returned byte-identical by
+       the decision, so skipping it there is the gate answering trivially rather
+       than a way around it, and a keyed mutation still reads exactly the one row
+       it asked for. The first row that claims anything MORE runs the decision
+       over the whole file before it is handed out. */
+    let grantsDecided = false;
+    let decidingGrants = false;
+    const decideGrants = () => {
+      if (grantsDecided || decidingGrants) return;
+      decidingGrants = true;
+      try {
+        reboundAssembledMcpGrants(file, this.mcpGrantPolicy);
+        grantsDecided = true;
+      } finally {
+        decidingGrants = false;
+      }
+    };
+    /* Every row leaves a loader through here. A row at the baseline is admitted
+       untouched; anything claiming more is only returned once the decision has
+       run over the whole file, including the rows attesting to this one. */
+    const admitRow = <T>(collection: RowCollection, row: T): T => {
+      if (GRANT_COLLECTIONS.has(collection) && rowClaimsBeyondBaselineGrant(row)) decideGrants();
+      return row;
+    };
     const loadedCollections = new Map<RowCollection, RegistryFile[RowCollection]>();
     const baselineCollections = new Map<RowCollection, Map<string, string | null>>();
     const dirtyRows = new Map<RowCollection, Set<string>>();
@@ -383,17 +492,25 @@ export class SqliteAgentRegistryStore {
             baseline.set(key, stored);
             return stored;
           };
+          /* Every row this collection hands out leaves through here — the keyed
+             read below, and equally the rows `loadAllRows` has already cached,
+             which an enumeration reaches through `getOwnPropertyDescriptor`. So
+             the gate sits on the single exit rather than on the load, and no
+             route to a row can arrive before the decision it needs. */
           const readRow = (key: string): unknown => {
-            if (Object.hasOwn(rows, key)) return rows[key];
-            if (deleted.has(key)) return undefined;
-            const stored = readBaseline(key);
-            if (stored === null) return undefined;
-            const input: Record<string, unknown> = { version: 2, entries: {}, receipts: {} };
-            input[collection] = { [key]: structuredClone(this.parseRow(collection, key, stored, useRowCache)) };
-            const normalized = this.normalize(input)[collection] as Record<string, unknown>;
-            if (!Object.hasOwn(normalized, key)) return undefined;
-            rows[key] = normalized[key];
-            return rows[key];
+            if (!Object.hasOwn(rows, key)) {
+              if (deleted.has(key)) return undefined;
+              const stored = readBaseline(key);
+              if (stored === null) return undefined;
+              const input: Record<string, unknown> = { version: 2, entries: {}, receipts: {} };
+              input[collection] = { [key]: structuredClone(this.parseRow(collection, key, stored, useRowCache)) };
+              const normalized = this.normalize(input)[collection] as Record<string, unknown>;
+              if (!Object.hasOwn(normalized, key)) return undefined;
+              rows[key] = normalized[key];
+            }
+            /* The decision rewrites `rows[key]` in place where it denies, so the
+               caller never holds the undecided object. */
+            return admitRow(collection, rows[key]);
           };
           const loadAllRows = () => {
             if (allRowsLoaded) return;
@@ -483,6 +600,11 @@ export class SqliteAgentRegistryStore {
         enumerable: true,
         get: () => {
           load();
+          /* The eager loader has materialized the whole collection by now, so
+             there is no laziness left to protect and the decision runs on the
+             collection. The lazy loader gates each ROW instead, on `readRow`'s
+             single exit, so a keyed read stays keyed. */
+          if (!trackMutations && GRANT_COLLECTIONS.has(collection)) decideGrants();
           return value;
         },
         set: (next: typeof value) => {
@@ -628,7 +750,8 @@ export class SqliteAgentRegistryStore {
     }
   }
 
-  private persistAll(file: RegistryFile, revision: number): void {
+  private persistAll(file: DecidedRegistryFile, revision: number): void {
+    this.assertDecided(file);
     this.db.exec("DELETE FROM registry_rows");
     for (const collection of ROW_COLLECTIONS) {
       for (const [order, [key, value]] of Object.entries(file[collection]).entries()) {
@@ -639,7 +762,8 @@ export class SqliteAgentRegistryStore {
     this.setMeta("revision", String(revision));
   }
 
-  private persistDiff(before: RegistryFile, after: RegistryFile, revision: number): void {
+  private persistDiff(before: RegistryFile, after: DecidedRegistryFile, revision: number): void {
+    this.assertDecided(after);
     for (const collection of ROW_COLLECTIONS) {
       const previous = before[collection] as Record<string, unknown>;
       const next = after[collection] as Record<string, unknown>;
@@ -661,7 +785,8 @@ export class SqliteAgentRegistryStore {
     this.setMeta("revision", String(revision));
   }
 
-  private persistChanges(file: RegistryFile, changes: RegistryChanges, revision: number): void {
+  private persistChanges(file: DecidedRegistryFile, changes: RegistryChanges, revision: number): void {
+    this.assertDecided(file);
     for (const [collection, keys] of changes.rows) {
       const rows = file[collection] as Record<string, unknown>;
       for (const key of keys) {

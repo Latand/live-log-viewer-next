@@ -363,18 +363,19 @@ test.skipIf(!mcpHome)("real structured Codex enforces default and custom MCP all
     expect(fs.existsSync(markerPath)).toBeFalse();
 
     fs.rmSync(viewerPidPath);
+    /* Naming a configured server does not enable it: the grant bound admits
+       none beyond the Viewer baseline, so the optional server never starts and
+       Viewer remains the whole surface (#739). */
     custom = await CodexAppServerHost.start({ ...options, mcpServers: ["agent-browser"] });
-    await exerciseNativeViewer(custom, pipeline.id, "custom", "agent-browser");
+    await exerciseNativeViewer(custom, pipeline.id, "custom");
     expect(fs.existsSync(markerPath)).toBeFalse();
     const customHealth = await custom.health();
     if (!customHealth.pid) throw new Error("custom app-server pid is unavailable");
     const customProcesses = processTree(customHealth.pid);
     const customViewer = recordedProcess(viewerPidPath);
-    const customOptional = recordedProcess(optionalPidPath);
     addProcessTree(customProcesses, customViewer.pid);
-    addProcessTree(customProcesses, customOptional.pid);
     expect(customProcesses.get(customViewer.pid)).toBe(customViewer.identity);
-    expect(customProcesses.get(customOptional.pid)).toBe(customOptional.identity);
+    expect(fs.existsSync(optionalPidPath)).toBeFalse();
     await custom.release();
     custom = null;
     await expectProcessesReaped(customProcesses);

@@ -276,6 +276,9 @@ test.skipIf(!layeredHome)("native Codex enumeration enforces the allowlist for t
     'trust_level = "trusted"',
     "",
   ].join("\n"), { mode: 0o600 });
+  /* Project configuration is enumerated, then filtered by the grant: nothing
+     outside the grantable bound can be enabled, whichever scope declared it and
+     whatever the allowlist names (issue #739). */
   fs.writeFileSync(path.join(projectRoot, ".codex", "config.toml"), [
     "[mcp_servers.project-allowed]",
     'command = "/bin/true"',
@@ -289,16 +292,18 @@ test.skipIf(!layeredHome)("native Codex enumeration enforces the allowlist for t
     mcpServers: ["project-allowed"],
   });
 
-  expect(spec.command).toContain("'mcp_servers.project-allowed.enabled=true'");
+  expect(spec.command).toContain("'mcp_servers.project-allowed.enabled=false'");
   expect(spec.command).toContain("'mcp_servers.project-unrelated.enabled=false'");
 });
 
-test.skipIf(!customHome)("real custom tmux Codex enables the optional server, force-enables Viewer, excludes sentinels, and reaps its MCP processes", async () => {
+test.skipIf(!customHome)("real custom tmux Codex leaves an ungranted optional server off, force-enables Viewer, and reaps its MCP processes", async () => {
   if (!customHome) throw new Error("isolated Codex subscription home is unavailable");
-  await exerciseTmuxCodex({ home: customHome, mcpServers: ["agent-browser"], expectedServer: "agent-browser" });
+  /* The allowlist names the optional server; the grant bound admits none, so
+     only Viewer runs and the optional server's process never starts (#739). */
+  await exerciseTmuxCodex({ home: customHome, mcpServers: ["agent-browser"], expectedServer: "viewer" });
 }, 300_000);
 
-test.skipIf(!claudeProjectHome)("real tmux Claude loads an allowed project MCP server, excludes its project sentinel, and reaps the fleet", async () => {
+test.skipIf(!claudeProjectHome)("real tmux Claude keeps every ungranted project MCP server out of the session and reaps the fleet", async () => {
   if (!claudeProjectHome) throw new Error("isolated Claude subscription home is unavailable");
   const projectRoot = path.join(claudeProjectHome.directory, "project");
   const stateDir = path.join(claudeProjectHome.directory, "viewer-state");
@@ -404,35 +409,32 @@ test.skipIf(!claudeProjectHome)("real tmux Claude loads an allowed project MCP s
       "spawn-settings",
       `${sessionId}.json`,
     ), "utf8")) as { enabledMcpjsonServers?: string[]; disabledMcpjsonServers?: string[] };
-    expect(mcpConfig.mcpServers["agent-browser"]).toMatchObject({
-      env: { PROJECT_AUTH: "preserved" },
-      timeout: 120_000,
-      alwaysLoad: true,
-    });
-    expect(mcpConfig.mcpServers).not.toHaveProperty("project-unrelated");
-    expect(launchSettings.enabledMcpjsonServers).toEqual(["agent-browser"]);
-    expect(launchSettings.disabledMcpjsonServers).toEqual(["project-unrelated"]);
-    const prompt = `Call the exact native tool mcp__agent-browser__get_pipeline with clientRequestId "tmux-claude-project" and pipelineId "${pipeline.id}". Do not use mcp__viewer__get_pipeline or shell execution. Reply after the successful result.`;
+    /* Both project-scoped servers stay out of the exclusive config: the grant
+       bound admits neither, however the allowlist and the operator's own
+       approval list name them (#739). */
+    expect(Object.keys(mcpConfig.mcpServers)).toEqual(["viewer"]);
+    expect(launchSettings.enabledMcpjsonServers ?? []).not.toContain("agent-browser");
+    expect(launchSettings.disabledMcpjsonServers ?? []).toContain("project-unrelated");
+    const prompt = `Call the exact native tool mcp__viewer__get_pipeline with clientRequestId "tmux-claude-project" and pipelineId "${pipeline.id}". Do not use shell execution. Reply after the successful result.`;
     const isolatedCommand = `env HOME=${shellQuote(claudeProjectHome.directory)} CLAUDE_CONFIG_DIR=${shellQuote(claudeProjectHome.claudeConfigDir)} ${spec.command}`;
     const launched = await runTmux(tmuxTmpdir, ["send-keys", "-t", `${session}:0.0`, "-l", `${isolatedCommand} -- ${shellQuote(prompt)}`]);
     if (launched.code !== 0) throw new Error(launched.stderr || "tmux command delivery failed");
     await runTmux(tmuxTmpdir, ["send-keys", "-t", `${session}:0.0`, "Enter"]);
     try {
-      await waitFor(() => nativeClaudeMcpResult(spec.transcript!, "agent-browser", pipeline.id));
+      await waitFor(() => nativeClaudeMcpResult(spec.transcript!, "viewer", pipeline.id));
     } catch (error) {
       const pane = await runTmux(tmuxTmpdir, ["capture-pane", "-p", "-S", "-200", "-t", `${session}:0.0`]);
       const transcript = fs.existsSync(spec.transcript!) ? fs.readFileSync(spec.transcript!, "utf8") : "<missing>";
       throw new Error(`${String(error)}\n--- tmux pane ---\n${pane.stdout}${pane.stderr}\n--- transcript ---\n${transcript}`);
     }
     expect(fs.existsSync(viewerPidPath)).toBeTrue();
-    expect(fs.existsSync(optionalPidPath)).toBeTrue();
+    expect(fs.existsSync(optionalPidPath)).toBeFalse();
     expect(fs.existsSync(unrelatedPath)).toBeFalse();
     const pane = await runTmux(tmuxTmpdir, ["display-message", "-p", "-t", `${session}:0.0`, "#{pane_pid}"]);
     const panePid = Number(pane.stdout.trim());
     if (!Number.isInteger(panePid)) throw new Error("tmux pane pid is unavailable");
     processes = processTree(panePid);
     addRecordedProcess(processes, viewerPidPath);
-    addRecordedProcess(processes, optionalPidPath);
     await runTmux(tmuxTmpdir, ["kill-server"]);
     await expectProcessesReaped(processes);
     expect(fs.existsSync(unrelatedPath)).toBeFalse();

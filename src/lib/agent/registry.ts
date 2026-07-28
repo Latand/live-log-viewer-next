@@ -28,6 +28,7 @@ import {
 } from "@/lib/accounts/migration/contracts";
 
 import type { AgentEngine } from "./cli";
+import { mcpServersForStoredSession, reboundAssembledMcpGrants, reboundEntryMcpGrant, reboundStoredMcpGrants, type McpGrantPolicy } from "./mcpAllowlist";
 import { liveAccountConversationIds, type AccountLivenessOptions } from "./accountLiveness";
 import { loadSpawnNestingPolicy } from "./nestingPolicy";
 import {
@@ -1006,10 +1007,10 @@ function nativeGenerationId(pathname: string): string {
   return path.basename(pathname).match(/([0-9a-f-]{36})(?:\.jsonl)?$/i)?.[1] ?? crypto.randomUUID();
 }
 
-function normalizeGeneration(value: NativeGeneration): NativeGeneration {
+function normalizeGeneration(value: NativeGeneration, policy?: McpGrantPolicy): NativeGeneration {
   return {
     ...value,
-    launchProfile: emptyLaunchProfile(value.launchProfile ?? {}),
+    launchProfile: emptyLaunchProfile(value.launchProfile ?? {}, policy),
     historyHash: typeof value.historyHash === "string" ? value.historyHash : null,
     host: value.host && typeof value.host === "object" ? value.host : null,
   };
@@ -1044,10 +1045,10 @@ function normalizeStructuredHost(value: unknown): StructuredHostColumns | null {
   };
 }
 
-function normalizeEntry(value: AgentRegistryEntry): AgentRegistryEntry {
+function normalizeEntry(value: AgentRegistryEntry, policy?: McpGrantPolicy): AgentRegistryEntry {
   return {
     ...value,
-    ...(value.launchProfile ? { launchProfile: emptyLaunchProfile(value.launchProfile) } : {}),
+    ...(value.launchProfile ? { launchProfile: emptyLaunchProfile(value.launchProfile, policy) } : {}),
     host: value.host && typeof value.host === "object" && value.host.kind === "tmux" ? value.host : null,
     structuredHost: normalizeStructuredHost(value.structuredHost),
   };
@@ -1145,8 +1146,10 @@ function normalizeConversationReconfigure(value: unknown): ConversationReconfigu
   };
 }
 
-function normalizeConversation(value: RegistryConversation): RegistryConversation {
-  const generations = Array.isArray(value.generations) ? value.generations.map(normalizeGeneration) : [];
+function normalizeConversation(value: RegistryConversation, policy?: McpGrantPolicy): RegistryConversation {
+  const generations = Array.isArray(value.generations)
+    ? value.generations.map((generation) => normalizeGeneration(generation, policy))
+    : [];
   const current = generations.at(-1);
   const legacyContinuity = (value.migration as (ConversationMigration & { continuityPaths?: unknown }) | null)?.continuityPaths;
   const providerReceipt = normalizeProviderReceipt(value.migration?.providerReceipt);
@@ -2126,7 +2129,21 @@ function observationIsCurrent(currentObservedAt: string | null, observedAt: stri
   return observedAt >= currentObservedAt;
 }
 
-function normalizeReceipt(value: SpawnReceipt): SpawnReceipt {
+/** A receipt's launch profile, held to the GLOBAL grant bound (#739).
+
+    The origin half of the decision is deliberately NOT made here. Settlement
+    copies `receipt.launchProfile` onto the conversation generation and the
+    entry row, and stamps the receipt's own role and depth onto a brand-new
+    conversation, so a receipt does not merely hold a grant — it manufactures
+    the origin evidence every later read trusts. Deciding it from the fields
+    travelling on the receipt would let the row authorise itself, whatever its
+    lineage says. That decision belongs to `reboundStoredMcpGrants`, which sees
+    the lineage edge and the conversation row the receipt cannot rewrite. */
+function receiptLaunchProfile(value: SpawnReceipt, policy?: McpGrantPolicy): LaunchProfile {
+  return emptyLaunchProfile({ ...(value.launchProfile ?? {}), cwd: value.launchProfile?.cwd ?? value.cwd }, policy);
+}
+
+function normalizeReceipt(value: SpawnReceipt, policy?: McpGrantPolicy): SpawnReceipt {
   const state = value.state === "completed" || value.state === "failed" || value.state === "pane-bound" || value.state === "host-verified" || value.state === "prompt-delivered" || value.state === "path-pending" || value.state === "conflicted"
     ? value.state
     : "starting";
@@ -2184,7 +2201,7 @@ function normalizeReceipt(value: SpawnReceipt): SpawnReceipt {
     agentRole: normalizeAgentRole(value.agentRole),
     delegationDepth: normalizeDelegationDepth(value.delegationDepth),
     rejection: normalizeSpawnRejection(value.rejection),
-    launchProfile: emptyLaunchProfile({ ...(value.launchProfile ?? {}), cwd: value.launchProfile?.cwd ?? value.cwd }),
+    launchProfile: receiptLaunchProfile(value, policy),
     explicitProject: validExplicitProject(value.explicitProject),
     launchDisplay: normalizeLaunchDisplay(value.launchDisplay),
     ...(value.retryClaim
@@ -2285,7 +2302,7 @@ function normalizePendingSupersedence(value: unknown): RegistryFile["pendingSupe
   return records;
 }
 
-function upgradeV1(parsed: Omit<Partial<RegistryFile>, "version">): RegistryFile {
+function upgradeV1(parsed: Omit<Partial<RegistryFile>, "version">, policy?: McpGrantPolicy): RegistryFile {
   const legacy = parsed.legacyResumePanes;
   return {
     ...clone(EMPTY),
@@ -2294,7 +2311,7 @@ function upgradeV1(parsed: Omit<Partial<RegistryFile>, "version">): RegistryFile
       codex: emptyPolicy(LEGACY_POLICY_RESTARTED_AT),
     },
     entries: (parsed.entries as RegistryFile["entries"]) ?? {},
-    receipts: Object.fromEntries(Object.entries((parsed.receipts as RegistryFile["receipts"]) ?? {}).map(([id, receipt]) => [id, normalizeReceipt(receipt)])),
+    receipts: Object.fromEntries(Object.entries((parsed.receipts as RegistryFile["receipts"]) ?? {}).map(([id, receipt]) => [id, normalizeReceipt(receipt, policy)])),
     conversationAliases: {},
     importedResumePanes: parsed.importedResumePanes === true,
     legacyResumePanes: legacy && typeof legacy === "object" && "panes" in legacy
@@ -2303,10 +2320,12 @@ function upgradeV1(parsed: Omit<Partial<RegistryFile>, "version">): RegistryFile
   };
 }
 
-export function normalizeRegistry(value: unknown): RegistryFile {
+export function normalizeRegistry(value: unknown, policy?: McpGrantPolicy): RegistryFile {
   const parsed = value as Omit<Partial<RegistryFile>, "version"> & { version?: unknown };
   if (parsed.version === 1 && parsed.entries && parsed.receipts && typeof parsed.entries === "object" && typeof parsed.receipts === "object") {
-    return upgradeV1(parsed);
+    /* The v1 upgrade carries entries across verbatim, so it needs the same
+       grant decision every other read gets (#739). */
+    return reboundStoredMcpGrants(upgradeV1(parsed, policy), policy);
   }
   if (parsed.version !== 2 || !parsed.entries || !parsed.receipts || typeof parsed.entries !== "object" || typeof parsed.receipts !== "object") {
     throw new RegistryReadError("agent registry schema is unsupported");
@@ -2315,10 +2334,10 @@ export function normalizeRegistry(value: unknown): RegistryFile {
   const heldDeliveries = parsed.heldDeliveries && typeof parsed.heldDeliveries === "object"
     ? Object.fromEntries(Object.entries(parsed.heldDeliveries).map(([id, delivery]) => [id, normalizeHeldDelivery(delivery)]))
     : {};
-  return backfillMaterializedSpawnArtifacts({
+  return reboundStoredMcpGrants(backfillMaterializedSpawnArtifacts({
       version: 2,
-      entries: Object.fromEntries(Object.entries(parsed.entries).map(([id, entry]) => [id, normalizeEntry(entry)])),
-      receipts: Object.fromEntries(Object.entries(parsed.receipts).map(([id, receipt]) => [id, normalizeReceipt(receipt)])),
+      entries: Object.fromEntries(Object.entries(parsed.entries).map(([id, entry]) => [id, normalizeEntry(entry, policy)])),
+      receipts: Object.fromEntries(Object.entries(parsed.receipts).map(([id, receipt]) => [id, normalizeReceipt(receipt, policy)])),
       lineageEdges: parsed.lineageEdges && typeof parsed.lineageEdges === "object"
         ? Object.fromEntries(Object.entries(parsed.lineageEdges).map(([id, edge]) => [id, normalizeLineageEdge(edge)]))
         : {},
@@ -2328,7 +2347,7 @@ export function normalizeRegistry(value: unknown): RegistryFile {
         ? { serverPid: typeof (legacy as { serverPid?: unknown }).serverPid === "number" ? (legacy as { serverPid: number }).serverPid : null, panes: ((legacy as { panes?: unknown }).panes as Record<string, ResumePaneRecord>) ?? {} }
         : { serverPid: null, panes: {} },
       conversations: parsed.conversations && typeof parsed.conversations === "object"
-        ? Object.fromEntries(Object.entries(parsed.conversations).map(([id, conversation]) => [id, normalizeConversation(conversation)]))
+        ? Object.fromEntries(Object.entries(parsed.conversations).map(([id, conversation]) => [id, normalizeConversation(conversation, policy)]))
         : {},
       conversationAliases: parsed.conversationAliases && typeof parsed.conversationAliases === "object"
         ? Object.fromEntries(Object.entries(parsed.conversationAliases).filter(([alias, destination]) => alias.startsWith("conversation_") && typeof destination === "string" && destination.startsWith("conversation_"))) as RegistryFile["conversationAliases"]
@@ -2353,13 +2372,15 @@ export function normalizeRegistry(value: unknown): RegistryFile {
         ? parsed.pendingSuccessorCleanups
         : {},
       pendingSupersedence: normalizePendingSupersedence(parsed.pendingSupersedence),
-  });
+  }), policy);
 }
 
-function readFileWithPayload(filename: string): { file: RegistryFile; payload: string | null } {
+function readFileWithPayload(filename: string, policy?: McpGrantPolicy): { file: RegistryFile; payload: string | null } {
   try {
     const payload = fs.readFileSync(filename, "utf8");
-    return { file: normalizeRegistry(JSON.parse(payload)), payload };
+    /* A whole file, so an entry no conversation owns is genuinely unowned and
+       falls back to the baseline rather than keeping a claimed grant (#739). */
+    return { file: reboundAssembledMcpGrants(normalizeRegistry(JSON.parse(payload), policy), policy), payload };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { file: clone(EMPTY), payload: null };
     if (error instanceof RegistryReadError) throw error;
@@ -2367,8 +2388,8 @@ function readFileWithPayload(filename: string): { file: RegistryFile; payload: s
   }
 }
 
-function readFile(filename: string): RegistryFile {
-  return readFileWithPayload(filename).file;
+function readFile(filename: string, policy?: McpGrantPolicy): RegistryFile {
+  return readFileWithPayload(filename, policy).file;
 }
 
 function registryFileSignature(filename: string): string {
@@ -2444,6 +2465,10 @@ export type AgentRegistrySqliteMode = "off" | "dual-write" | "read" | "sqlite";
 
 export interface AgentRegistryStorageOptions {
   sqliteMode?: AgentRegistrySqliteMode;
+  /** Grant bound for the MCP origin rebound (issue #739). Production omits it;
+      a test supplies a policy that HAS a grantable connector, since the shipped
+      bound has none and an empty bound proves nothing about the origin rule. */
+  mcpGrantPolicy?: McpGrantPolicy;
   sqliteFilename?: string;
   onSqliteWriterWait?: (durationMs: number) => void;
   onSqliteSnapshotLoad?: () => void;
@@ -2508,6 +2533,7 @@ function isRecoverableSpawnReadinessFailure(error: string | null): boolean {
     cannot leave an imaginary owner behind. */
 export class AgentRegistry {
   private readonly sqliteMode: AgentRegistrySqliteMode;
+  private readonly mcpGrantPolicy: McpGrantPolicy | undefined;
   private readonly sqliteStore: SqliteAgentRegistryStore | null;
   private readonly beforeDualWriteMutationReplace: (() => void) | undefined;
   private readOnlyCache: { signature: string; snapshot: RegistryFile } | null = null;
@@ -2533,6 +2559,7 @@ export class AgentRegistry {
     storage: AgentRegistryStorageOptions = {},
   ) {
     this.sqliteMode = storage.sqliteMode ?? sqliteModeFromEnvironment();
+    this.mcpGrantPolicy = storage.mcpGrantPolicy;
     this.mirrorCheckpointMs = Math.max(0, storage.mirrorCheckpointMs ?? 5_000);
     this.now = storage.now ?? Date.now;
     this.scheduleMirrorCheckpoint = storage.scheduleMirrorCheckpoint
@@ -2542,8 +2569,9 @@ export class AgentRegistry {
     this.sqliteStore = this.sqliteMode === "off"
       ? null
       : new SqliteAgentRegistryStore(storage.sqliteFilename ?? defaultSqliteFilename(filename), {
-          initialSnapshot: readFile(filename),
-          normalize: normalizeRegistry,
+          initialSnapshot: readFile(filename, storage.mcpGrantPolicy),
+          normalize: (value) => normalizeRegistry(value, storage.mcpGrantPolicy),
+          mcpGrantPolicy: storage.mcpGrantPolicy,
           onWriterWait: (duration) => {
             this.recordMetric(this.writerWaits, duration);
             storage.onSqliteWriterWait?.(duration);
@@ -2579,7 +2607,7 @@ export class AgentRegistry {
   }
 
   private assertSqliteParity(snapshot: SqliteRegistrySnapshot = this.sqliteStore!.snapshot()): void {
-    const json = readFile(this.filename);
+    const json = readFile(this.filename, this.mcpGrantPolicy);
     if (!isDeepStrictEqual(snapshot.file, json)) {
       const fields = [...new Set([...Object.keys(snapshot.file), ...Object.keys(json)])]
         .filter((field) => !isDeepStrictEqual(
@@ -2718,7 +2746,7 @@ export class AgentRegistry {
     }
     let file: RegistryFile;
     try {
-      file = readFile(this.filename);
+      file = readFile(this.filename, this.mcpGrantPolicy);
     } catch (error) {
       if (error instanceof RegistryReadError) {
         console.error("agent registry startup compaction skipped:", error);
@@ -2744,7 +2772,7 @@ export class AgentRegistry {
       }
       this.assertSqliteParity(sqlite);
       this.compactAtStartupLocked();
-      const file = readFile(this.filename);
+      const file = readFile(this.filename, this.mcpGrantPolicy);
       beforeReplace?.();
       const replacement = this.sqliteStore!.replace(file, sqlite.revision);
       if (!replacement.replaced) {
@@ -3126,7 +3154,7 @@ export class AgentRegistry {
         }
         this.assertSqliteParity(sqlite);
       }
-      const original = readFileWithPayload(this.filename);
+      const original = readFileWithPayload(this.filename, this.mcpGrantPolicy);
       const file = original.file;
       const result = mutator(file);
       const payload = serializeRegistry(file);
@@ -3153,7 +3181,7 @@ export class AgentRegistry {
   snapshot(): RegistryFile {
     return this.sqliteMode === "read" || this.sqliteMode === "sqlite"
       ? this.sqliteStore!.snapshot().file
-      : readFile(this.filename);
+      : readFile(this.filename, this.mcpGrantPolicy);
   }
 
   /** Shared process-local snapshot for projections that never mutate registry
@@ -3164,13 +3192,13 @@ export class AgentRegistry {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const before = registryFileSignature(this.filename);
       if (this.readOnlyCache?.signature === before) return this.readOnlyCache.snapshot;
-      const snapshot = readFile(this.filename);
+      const snapshot = readFile(this.filename, this.mcpGrantPolicy);
       const after = registryFileSignature(this.filename);
       if (before !== after) continue;
       this.readOnlyCache = { signature: after, snapshot };
       return snapshot;
     }
-    return readFile(this.filename);
+    return readFile(this.filename, this.mcpGrantPolicy);
   }
 
   spawnReceiptForClientAttempt(clientAttemptId: string): SpawnReceipt | null {
@@ -3307,6 +3335,26 @@ export class AgentRegistry {
         ? existingConversation?.delegationDepth ?? null
         : resolvedOrigin ? resolvedOrigin.depth + 1 : 0;
       const childRole = successorIdentity ? existingConversation?.agentRole ?? null : role;
+      /* Same rule as the plugin grant above, for the MCP grant (#739), decided
+         from the very evidence this receipt is about to record: the role preset,
+         the lineage parent, the admitted delegation depth and — for a genuinely
+         new launch — the request origin, so an `external` origin that resolves
+         to no parent is still not an operator root. Deciding it HERE rather than
+         from the requested profile means the grant on the receipt and the origin
+         stamped beside it can never disagree, and every later re-decision of
+         that row is idempotent. A successor or resume relaunch carries the
+         conversation's own identity, so its `successor` origin must not be
+         mistaken for a fresh delegation signal. */
+      const launchOrigin = purpose === "launch" && input.origin && input.origin.kind !== "successor"
+        ? { kind: input.origin.kind }
+        : undefined;
+      profile.mcpServers = mcpServersForStoredSession({
+        origin: launchOrigin,
+        parentConversationId: parentConversationId ?? profile.parentConversationId,
+        agentRole: childRole,
+        delegationDepth: childDepth,
+        requested: profile.mcpServers,
+      }, this.mcpGrantPolicy);
       let rejection: SpawnRejection | null = null;
       if (resolvedOrigin) {
         const maxDepth = loadSpawnNestingPolicy().maxAgentNestingDepth;
@@ -4266,6 +4314,10 @@ export class AgentRegistry {
       const entry = file.entries[sessionKeyId(key)];
       if (!entry?.structuredHost) return null;
       if (entry.status === "unhosted" && options.allowUnhosted !== true) return null;
+      /* Adoption builds its host options from the entry this returns, and a
+         mutation loads rows lazily rather than from an assembled snapshot, so
+         the origin decision is applied to this one row here (#739). */
+      reboundEntryMcpGrant(file, key, this.mcpGrantPolicy);
       const liveHost = entry.structuredHost.process;
       if (liveHost && this.ownerAlive(liveHost)) return null;
       const requestedOwner = structuredClaimOwner(owner);
