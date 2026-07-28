@@ -72,7 +72,13 @@ export async function executeRealtimeControl(
     authority.caller ?? { kind: "anonymous" },
     authority.managerConversationId ?? null,
     host?.currentRealtimeSessionId?.() ?? null,
-    authority.operator ?? false,
+    /* Defaulted to the operator, as this function's contract says above and as its
+       one production caller always resolves explicitly. Defaulting to `false`
+       contradicted that: every in-process caller — the browser's own control path
+       and its tests — had its `start`/`stop` refused for want of an authority the
+       route is the only thing able to compute. Injection is unaffected: it is
+       granted to the live session peer alone and never by this flag. */
+    authority.operator ?? true,
   );
   if (!permitted.allowed) {
     return { status: permitted.status, body: { error: permitted.error } };

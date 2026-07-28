@@ -7,7 +7,6 @@ import path from "node:path";
 import { NextRequest } from "next/server";
 
 import { setCallerConversationResolverForTests } from "@/lib/agent/operatorAuthority";
-import { operatorSessionSecret } from "@/lib/agent/operatorSession";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { adoptOrchestratorRecord } from "@/lib/orchestrator/store";
 import {
@@ -138,9 +137,22 @@ test("status from an agent is not blocked: it writes nothing", async () => {
   expect(response.status).not.toBe(403);
 });
 
-test("forged same-origin headers cannot start or stop the transport", async () => {
-  /* Same forgery as the designation finding, on the surface that opens and closes
-     the operator's call. */
+/**
+ * THE NO-CEREMONY CONTRACT, PINNED AT THE ROUTE.
+ *
+ * These two cases used to assert the opposite — that a browser presenting nothing
+ * was refused `start`/`stop` until the operator pasted a secret. The operator's
+ * final decision replaced that: this app is single-user and loopback-bound, the
+ * route rejects cross-origin BEFORE consulting authority, so a same-origin browser
+ * request IS the operator, and the transport guard's only job is refusing an AGENT
+ * — which names itself by presenting its conversation capability.
+ *
+ * They live here as the regression, at the route rather than in the DOM, because
+ * restoring `requireOperatorAuthority` on this handler is the exact way the
+ * ceremony comes back: an empty capability header is `MISSING` to that function,
+ * so both cases below flip from the host's 409 to a 403 the moment it returns.
+ */
+test("a plain browser tab — nothing presented — opens and closes the operator's call", async () => {
   for (const action of ["start", "stop"]) {
     const response = await POST(new NextRequest("http://127.0.0.1/api/runtime/realtime", {
       method: "POST",
@@ -152,19 +164,28 @@ test("forged same-origin headers cannot start or stop the transport", async () =
       },
       body: JSON.stringify({ conversationId: "conversation_root", action, sdp: "v=0\r\noffer\r\n" }),
     })) as unknown as Response;
-    expect(response.status).toBe(403);
+
+    /* Past the gate and into the host: refused for want of a hosted realtime
+       thread, which is what a request that was ACTED ON looks like. */
+    expect(response.status).toBe(409);
+    const payload = await response.json() as { error: string };
+    expect(payload.error).toContain("hosted");
+    /* And no authorization step is described anywhere in the answer. */
+    expect(payload.error).not.toContain("operator");
+    expect(payload.error).not.toContain("secret");
   }
 });
 
-test("the operator's capability starts and stops the transport", async () => {
+test("a stale value from an older process does not demote the browser below anonymous", async () => {
   /* Reaches the host rather than the gate: refused for want of a hosted realtime
-     thread, not for want of authority. */
+     thread, not for want of authority. Presenting something the registry cannot map
+     names no agent, so it must be no worse than presenting nothing. */
   const response = await POST(new NextRequest("http://127.0.0.1/api/runtime/realtime", {
     method: "POST",
     headers: {
       host: "127.0.0.1",
       "content-type": "application/json",
-      [VIEWER_SPAWN_CAPABILITY_HEADER]: operatorSessionSecret(),
+      [VIEWER_SPAWN_CAPABILITY_HEADER]: crypto.randomBytes(32).toString("base64url"),
     },
     body: JSON.stringify({ conversationId: "conversation_root", action: "stop" }),
   })) as unknown as Response;
@@ -190,9 +211,28 @@ test("an agent cannot start or stop the operator's transport, and reaches no hos
   setCallerConversationResolverForTests(null);
 });
 
-test("a bare local caller cannot stop the operator's call either", async () => {
+test("a bare local caller stops the call it opened — no header, no secret, no cookie", async () => {
+  /* The second half of the regression: not even a `sec-fetch-site` hint, which is
+     the shape a fetch from an ordinary tab actually arrives in. */
   const response = await POST(realtimeRequest({ conversationId: "conversation_root", action: "stop" }));
-  expect(response.status).toBe(403);
+  expect(response.status).toBe(409);
+  expect((await response.json() as { error: string }).error).toContain("hosted");
+});
+
+test("what the transparency does NOT extend to: an agent, and injection", async () => {
+  /* The two things the operator kept. An agent is refused the transport, and
+     writing into a live call belongs to the peer that established it — neither
+     follows from "the browser is the operator". */
+  const { requireOperatorAuthority } = await import("@/lib/agent/operatorAuthority");
+  setCallerConversationResolverForTests(() => "conversation_worker");
+  const agent = realtimeRequest({ conversationId: "conversation_root", action: "stop" }, WORKER_CAPABILITY);
+  expect(requireOperatorAuthority(agent).ok).toBe(false);
+  expect((await POST(agent)).status).toBe(403);
+  setCallerConversationResolverForTests(null);
+
+  /* And the operator's own browser, which may open and close the call, still may
+     not put words in its own session: only the peer holding the minted id can. */
+  expect(permitRealtimeAction("appendSpeech", { kind: "anonymous" }, null, "rt_live", true).allowed).toBe(false);
 });
 
 test("the designated manager is refused injection at the route too", async () => {

@@ -51,3 +51,30 @@ test("a migrated catalog pin follows the current generation and releases from it
   expect(state).toEqual({ path: successor, hydrated: true, conversationId: "conversation-1" });
   expect(reduceCatalogPin(state, { kind: "release", path: successor })).toBeNull();
 });
+
+test("REGRESSION: the Viewer renders no operator ceremony — no gate, no paste field, no unlock", async () => {
+  /* The screenshot the operator rejected: an "Operator key" affordance sitting in
+     the shell, and a voice control that answered 403 until it was used. The gate
+     component is gone; this reads the Viewer's own source so reintroducing any
+     paste/unlock surface — under whatever name — fails here rather than on a
+     screenshot two rounds later. */
+  const source = await Bun.file(new URL("./Viewer.tsx", import.meta.url)).text();
+
+  expect(source).not.toContain("OperatorKeyGate");
+  expect(source).not.toContain("operatorHeaders");
+  expect(source).not.toContain("hasOperatorCredential");
+  for (const ceremony of ["operator.keyPrompt", "operator.keyApply", "type=\"password\""]) {
+    expect(source).not.toContain(ceremony);
+  }
+  /* What stays: the eraser for what earlier rounds left in the profile. */
+  expect(source).toContain("purgeLegacyOperatorCredential");
+});
+
+test("REGRESSION: no surface in the app asks for an operator key any more", async () => {
+  /* The copy went with the component. A translation key that still exists is a
+     surface waiting to be rendered. */
+  for (const locale of ["en", "uk"]) {
+    const source = await Bun.file(new URL(`../lib/i18n/${locale}.ts`, import.meta.url)).text();
+    expect(source).not.toContain("operator.key");
+  }
+});

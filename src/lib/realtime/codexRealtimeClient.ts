@@ -5,7 +5,6 @@ import {
   type RuntimeVoiceDelivery,
 } from "@/lib/runtime/voiceDelivery";
 
-import { operatorHeaders } from "@/components/operatorCredential";
 
 import { reportCallPhase } from "./activeCall";
 
@@ -257,9 +256,11 @@ class CodexRealtimeClient {
         try {
           void fetch("/api/runtime/realtime", {
             method: "POST",
-            /* The page is unloading; the session id is what proves this peer owns the
-               call it is hanging up. */
-            headers: { "content-type": "application/json", ...operatorHeaders() },
+            /* The page is unloading; the session id in the body is what proves this
+               peer owns the call it is hanging up. Nothing else is presented — a
+               capability header here would name this browser an AGENT and get the
+               operator's own hangup refused. */
+            headers: { "content-type": "application/json" },
             body: JSON.stringify({
               action: "stop",
               conversationId: this.conversationId,
@@ -293,9 +294,11 @@ class CodexRealtimeClient {
       if (!offer) throw new Error("The browser produced no WebRTC offer");
       const answer = await responseJson(await fetch("/api/runtime/realtime", {
         method: "POST",
-        /* Opening the operator's call is operator-only: no session exists yet to
-           prove ownership with, so the credential is the only evidence available. */
-        headers: { "content-type": "application/json", ...operatorHeaders() },
+        /* ONE CLICK STARTS THE CALL. This request presents nothing but its own
+           same-origin shape, which is what the server reads as the operator; the one
+           thing that would break it is presenting a conversation capability, because
+           that is precisely how an agent names itself. */
+        headers: { "content-type": "application/json" },
         body: JSON.stringify({ action: "start", conversationId: this.conversationId, sdp: offer }),
       }));
       if (epoch !== this.epoch) return;
@@ -320,7 +323,7 @@ class CodexRealtimeClient {
     try {
       await responseJson(await fetch("/api/runtime/realtime", {
         method: "POST",
-        headers: { "content-type": "application/json", ...operatorHeaders() },
+        headers: { "content-type": "application/json" },
         body: JSON.stringify({
           action: "stop",
           conversationId: this.conversationId,

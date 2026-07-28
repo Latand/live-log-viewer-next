@@ -1,19 +1,14 @@
-import { afterEach, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 
-import { adoptOperatorCredential, resetOperatorCredentialForTests } from "./operatorCredential";
 import { openOrchestratorConversation, orchestratorHash, orchestratorSpawnBody, type OrchestratorStatusBody } from "./orchestratorChat";
 
-/** A well-shaped operator key: 32 random bytes base64url, as the server mints. */
-const OPERATOR_KEY = "A".repeat(43);
-
-/** The tab has been through `OperatorKeyGate` — it holds the operator secret. */
-function authorizeBrowser(): void {
-  expect(adoptOperatorCredential(OPERATOR_KEY)).toBe(true);
-}
-
-afterEach(() => {
-  resetOperatorCredentialForTests();
-});
+/**
+ * ONE CLICK, FROM AN ORDINARY TAB.
+ *
+ * Nothing here authorizes the browser first, and nothing may need to: the paste
+ * ceremony that used to stand between the click and the manager was rejected on
+ * stage. Every case below runs in a tab that has never seen a key.
+ */
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -50,7 +45,6 @@ test("a live record opens without spawning", async () => {
 });
 
 test("an empty slot spawns, adopts, and returns the canonical winner", async () => {
-  authorizeBrowser();
   const { calls, fetch } = fetchStub({
     "GET /api/orchestrator": () => jsonResponse({ record: null, exists: false, defaultCwd: "/repo" }),
     "POST /api/spawn": () => jsonResponse({ ok: true, conversationId: "conv-new", path: "/new.jsonl", state: "settled" }),
@@ -64,7 +58,6 @@ test("an empty slot spawns, adopts, and returns the canonical winner", async () 
 });
 
 test("a dead transcript respawns instead of navigating to the tombstone", async () => {
-  authorizeBrowser();
   const { calls, fetch } = fetchStub({
     "GET /api/orchestrator": () => jsonResponse({ record: { conversationId: "conv-old", path: "/gone.jsonl" }, exists: false, defaultCwd: "/repo" }),
     "POST /api/spawn": () => jsonResponse({ ok: true, conversationId: "conv-new", path: null }),
@@ -75,7 +68,6 @@ test("a dead transcript respawns instead of navigating to the tombstone", async 
 });
 
 test("spawn failures surface the server error", async () => {
-  authorizeBrowser();
   const { fetch } = fetchStub({
     "GET /api/orchestrator": () => jsonResponse({ record: null, exists: false, defaultCwd: "/repo" }),
     "POST /api/spawn": () => jsonResponse({ error: "directory does not exist: /repo" }, 400),
@@ -83,20 +75,45 @@ test("spawn failures surface the server error", async () => {
   await expect(openOrchestratorConversation(fetch)).rejects.toThrow("directory does not exist: /repo");
 });
 
-test("an unauthorized browser spawns NOTHING — no spawn, no adoption, four stalled managers never again", async () => {
-  /* No credential adopted: this tab never went through the operator key gate. */
+test("REGRESSION: a fresh tab with no key, no cookie and nothing pasted opens the manager in one click", async () => {
+  /* The rejected build refused here — `hasOperatorCredential()` was false in every
+     tab that had not been through the paste gate, so the click threw instead of
+     spawning, and a reload put the operator back in that state. */
   const { calls, fetch } = fetchStub({
     "GET /api/orchestrator": () => jsonResponse({ record: null, exists: false, defaultCwd: "/repo" }),
+    "POST /api/spawn": () => jsonResponse({ ok: true, conversationId: "conv-fresh", path: "/fresh.jsonl" }),
+    "POST /api/orchestrator": () => jsonResponse({ ok: true, adopted: true, record: { conversationId: "conv-fresh", path: "/fresh.jsonl" } }),
   });
-  await expect(openOrchestratorConversation(fetch)).rejects.toThrow("operator authority");
-  /* The old order spawned first and failed adoption after — every click leaked
-     one live manager. The refusal must come before any side effect. */
+
+  expect(await openOrchestratorConversation(fetch)).toBe("conv-fresh");
+  /* Reuse-or-spawn-or-adopt, in one gesture and with no unlock step between. */
   expect(calls.map((call) => `${call.init?.method ?? "GET"} ${call.url}`)).toEqual([
     "GET /api/orchestrator",
+    "POST /api/spawn",
+    "POST /api/orchestrator",
   ]);
 });
 
-test("an existing live record opens even in an unauthorized browser", async () => {
+test("REGRESSION: the adoption presents no credential header of any kind", async () => {
+  const { calls, fetch } = fetchStub({
+    "GET /api/orchestrator": () => jsonResponse({ record: null, exists: false, defaultCwd: "/repo" }),
+    "POST /api/spawn": () => jsonResponse({ ok: true, conversationId: "conv-bare", path: null }),
+    "POST /api/orchestrator": () => jsonResponse({ ok: true, adopted: true, record: { conversationId: "conv-bare", path: null } }),
+  });
+  await openOrchestratorConversation(fetch);
+
+  for (const call of calls) {
+    const headers = new Headers(call.init?.headers ?? {});
+    /* Not the capability header, and not anything else that smells like one: the
+       browser proves nothing and needs to prove nothing. */
+    expect(headers.get("x-viewer-spawn-capability")).toBeNull();
+    expect(headers.get("authorization")).toBeNull();
+    expect(headers.get("cookie")).toBeNull();
+    expect([...headers.keys()].filter((name) => name !== "content-type")).toEqual([]);
+  }
+});
+
+test("an existing live record opens in one call", async () => {
   const { calls, fetch } = fetchStub({
     "GET /api/orchestrator": () => jsonResponse({ record: { conversationId: "conv-1", path: "/t.jsonl" }, exists: true, defaultCwd: "/repo" }),
   });
