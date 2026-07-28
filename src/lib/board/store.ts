@@ -5,7 +5,7 @@ import path from "node:path";
 import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
 
-import { canonicalizeKeyRevisions, stampKeyRevisions } from "@/lib/board/keys";
+import { type BoardCausalHistory, canonicalizeKeyRevisions, stampKeyRevisions } from "@/lib/board/keys";
 import { applyBoardMutations, type BoardMutationV1 } from "@/lib/board/mutations";
 import type { BoardFileV1, BoardProjectStateV1 } from "@/lib/view/types";
 
@@ -57,15 +57,28 @@ function emptyBoard(): BoardProjectStateV1 {
     stamped onto every key this write changed. Every write path goes through
     here, so no path can advance the board without advancing its keys — a key
     that changed without its revision moving is a silent hole in the fence. */
-function committed(current: BoardProjectStateV1, reduced: BoardProjectStateV1, revision: number): BoardProjectStateV1 {
+function committed(
+  current: BoardProjectStateV1,
+  reduced: BoardProjectStateV1,
+  revision: number,
+  inherited: readonly BoardCausalHistory[] = [],
+): BoardProjectStateV1 {
   return {
     ...reduced,
     schemaVersion: 1,
     revision,
     updatedAt: new Date().toISOString(),
     pathAliases: reduced.pathAliases ?? {},
-    ...stampKeyRevisions(current, reduced, revision),
+    ...stampKeyRevisions(current, reduced, revision, inherited),
   };
+}
+
+/** Two boards carry the same durable causal history. A migration that moves no
+    content can still move history, and that has to be persisted — otherwise the
+    source's clocks are silently discarded on the "nothing changed" path. */
+function sameCausalHistory(left: BoardProjectStateV1, right: BoardProjectStateV1): boolean {
+  return JSON.stringify({ keys: left.keyRevisions ?? {}, floor: left.keyRevisionFloor ?? 0 })
+    === JSON.stringify({ keys: right.keyRevisions ?? {}, floor: right.keyRevisionFloor ?? 0 });
 }
 
 function read(filePath: string): BoardFileV1 {
@@ -462,9 +475,22 @@ export function migrateBoardProjects(
       try {
         const states = target ? [target, ...sources] : sources;
         const merged = mergedBoards(states);
-        value.projects[targetProject] = target && sameReduced(target, merged)
+        /* The sources' causal history comes along. A migrated key is the SAME
+           logical key, so dropping the clocks of the boards being folded in
+           rewinds those keys past writes that really happened and un-fences
+           intent formed before them. Merged by maximum, so the unified board is
+           never behind any contributor. Note this can differ from the target
+           even when the CONTENT is identical, which is exactly the case that was
+           silently losing history. */
+        const next = committed(
+          target ?? emptyBoard(),
+          merged,
+          Math.max(...states.map((state) => state.revision)) + 1,
+          sources,
+        );
+        value.projects[targetProject] = target && sameReduced(target, next) && sameCausalHistory(target, next)
           ? target
-          : committed(target ?? emptyBoard(), merged, Math.max(...states.map((state) => state.revision)) + 1);
+          : next;
         for (const sourceProject of sourceProjects) delete value.projects[sourceProject];
         changed = true;
       } catch {

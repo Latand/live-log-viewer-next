@@ -658,6 +658,47 @@ test("intent formed after an authored seed survives that seed landing", async ()
   store.dispose();
 });
 
+test("a late response carrying an older revision never rolls the board backward", async () => {
+  const server = durableBoard();
+  server.otherDevice("proj", [{ kind: "restore", path: "/a", placement: "manual" }]);
+  /* Captured eagerly: this is the body of a GET that was already in flight when
+     the board moved on, and it will be delivered after the newer one. */
+  const staleResponse = server.board("proj");
+
+  let deliverStale = false;
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if ((!init || (init.method ?? "GET") === "GET") && deliverStale) {
+      deliverStale = false;
+      return { ok: true, status: 200, json: async () => ({ ok: true, board: staleResponse }) };
+    }
+    return server.fetcher(input, init);
+  };
+  const sched = idleScheduler();
+  const store = createBoardStore({ project: "proj", fetcher, storage: null, scheduler: sched.scheduler });
+  await settle();
+  expect(store.getSnapshot().revision).toBe(1);
+
+  server.otherDevice("proj", [{ kind: "restore", path: "/b", placement: "manual" }]);
+  sched.tick();
+  await settle();
+  expect(store.getSnapshot()).toMatchObject({ revision: 2, prefs: { manual: ["/a", "/b"] } });
+
+  /* Now the older in-flight read lands. Overlapping polls, or a load racing a
+     write, deliver responses out of order; adoption must be monotonic or the
+     board visibly loses a window that is durably present. */
+  deliverStale = true;
+  sched.tick();
+  await settle();
+  expect(store.getSnapshot()).toMatchObject({ revision: 2, prefs: { manual: ["/a", "/b"] } });
+
+  /* And the session cache must not have been rewound either — a remount primes
+     from it, so a backward write there resurfaces the stale board later. */
+  store.dispose();
+  const remounted = createBoardStore({ project: "proj", fetcher: server.fetcher, storage: null, scheduler: idleScheduler().scheduler });
+  expect(remounted.getSnapshot()).toMatchObject({ loaded: true, revision: 2 });
+  remounted.dispose();
+});
+
 test("a stale view loses only the keys another device wrote, and keeps the rest", async () => {
   const server = durableBoard();
   server.otherDevice("proj", [

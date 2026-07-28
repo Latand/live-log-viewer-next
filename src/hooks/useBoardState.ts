@@ -328,8 +328,8 @@ export interface BoardStore {
  *
  *   One project-scoped shared store over a revision-fenced durable API, fencing
  *   every authoritative adoption with server-authored monotonic revisions per
- *   logical key, canonical across aliases and preserved through restart and
- *   causally safe tombstone GC.
+ *   logical key, canonical across aliases and preserved through restart,
+ *   migration and causally safe tombstone GC.
  *
  * Every clause is load-bearing, and each was a real defect before it was true:
  *
@@ -352,6 +352,11 @@ export interface BoardStore {
  *   transcript path and the board aliases old onto new. Two names with
  *   independent clocks is ABA across an alias boundary, so the clocks merge by
  *   maximum onto one canonical key.
+ * - **preserved through migration** — a project-key repair that folds boards
+ *   together inherits their causal history by maximum. A migrated key is the
+ *   same logical key, so restarting its clock from the target's history rewinds
+ *   the class past writes that really happened. This holds even when the merge
+ *   moves no CONTENT: history alone moving is still a change worth persisting.
  * - **causally safe tombstone GC** — retired keys are evicted under a bound, and
  *   whatever is dropped raises `keyRevisionFloor`, which every absent key reads.
  *   Evicting without a floor makes forgotten keys read as never-written and
@@ -364,6 +369,16 @@ export interface BoardStore {
  *   paints from the session cache and is live before its load lands, so intent
  *   queued against the cached revision has to be fenced against what the load
  *   reveals. A gate only some entry points use is not a gate.
+ * - **monotonic adoption** — and the gate owes the same invariant it enforces.
+ *   Responses arrive out of order, so `adopt` refuses any board older than what
+ *   is confirmed; otherwise a late read rewinds the rendered board AND the
+ *   session cache a later remount primes from. That comparison lives in the gate
+ *   alone, so a sixth entry point cannot arrive without it.
+ *   The deliberate cost: if the durable board itself ever goes backward — a
+ *   state directory reset, a restore from an older backup — an open tab refuses
+ *   the rewind for the rest of its session. A page reload clears the session
+ *   cache and recovers. Refusing a real rewind costs a reload; accepting a late
+ *   echo silently deletes work, so the bias is chosen.
  *
  * The store itself: it holds the last server-confirmed board plus an outbox of
  * unacknowledged semantic mutations (close/restore/reconcile/remap/presentation),
@@ -479,8 +494,22 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
    * intent queued behind it — the operator formed that intent already knowing
    * what they had just done — so it must not fence itself. Pass null whenever
    * the board might carry another writer's work.
+   *
+   * The gate also owns MONOTONICITY, and owns it in exactly one place. Responses
+   * arrive out of order — overlapping polls, a load racing the write that
+   * overtakes it — and installing an older revision rewinds both the rendered
+   * board and the session cache a later remount primes from, so a window that is
+   * durably present visibly disappears. Every adoption path passes through here,
+   * so this single comparison is the invariant rather than something each new
+   * entry point has to remember.
    */
   const adopt = (board: BoardProjectStateV1, ownKeys: ReadonlySet<string> | null = null) => {
+    if (board.revision < confirmed.revision) {
+      /* A late echo of a board we have already moved past. Nothing to adopt, but
+         `loaded` may have flipped on the way in, so the snapshot still publishes. */
+      refresh();
+      return;
+    }
     confirmed = board;
     unavailable = false;
     if (outbox.length > 0) {
@@ -719,6 +748,18 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
       refresh();
       return;
     }
+    /* The first load is authoritative too. A remount for a project already
+       loaded this session paints from the session cache and is live before this
+       lands (#172), so the operator can queue intent against the cached
+       revision — which the gate must fence against whatever the load reveals.
+       Decide monotonicity BEFORE the seed branch: a late response can arrive
+       reporting revision 0, and the seed path would otherwise assign it
+       straight to `confirmed` and rewind a board we have already moved past. */
+    loaded = true;
+    if (board.revision < confirmed.revision) {
+      adopt(board);
+      return;
+    }
     if (board.revision === 0 && isEmptyPrefs(board.prefs)) {
       const seed = readLegacyPrefs(project, storage);
       if (seed && isMeaningfulPrefs(seed)) {
@@ -727,7 +768,6 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
            PATCH answers. Keeping the loaded board's `keyRevisions` means intent
            the operator forms against this paint observes real causal history. */
         confirmed = { ...board, prefs: seed };
-        loaded = true;
         inflight = true;
         refresh();
         const result = await attemptSeed(seed, 0);
@@ -752,11 +792,6 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
         return;
       }
     }
-    /* The first load is authoritative too. A remount for a project already
-       loaded this session paints from the session cache and is live before this
-       lands (#172), so the operator can queue intent against the cached
-       revision — which the gate must fence against whatever the load reveals. */
-    loaded = true;
     adopt(board);
   };
 

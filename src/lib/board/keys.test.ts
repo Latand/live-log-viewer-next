@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { keyRevisionAt, MAX_RETIRED_KEY_REVISIONS, mutationKeys, pathKey, VIEW_MODE_KEY } from "./keys";
-import { boardFor, mutateBoard, remapBoardPaths } from "./store";
+import { boardFor, migrateBoardProjects, mutateBoard, remapBoardPaths } from "./store";
 
 /*
  * The durable contract behind convergence (#38): every write stamps the causal
@@ -135,6 +135,30 @@ test("a board written before keys were unified normalizes its alias clocks on re
      lost, and both names answer with it. */
   expect(board.keyRevisions?.[pathKey("/new")]).toBe(7);
   expect(keyRevisionAt(board, pathKey("/old"))).toBe(7);
+});
+
+test("a project-key migration carries source causal history forward", () => {
+  const file = temporaryFile();
+  const state = (revision: number, keyRevisions: Record<string, number>) => ({
+    schemaVersion: 1, revision, updatedAt: "2026-07-27T00:00:00.000Z",
+    pathAliases: {}, explicitManual: ["/x"], keyRevisions,
+    prefs: { manual: ["/x"], hidden: [], expanded: [], favorites: [], viewMode: null, taskPanelOpen: false },
+  });
+  /* The same project under two keys — a catalog repair is about to unify them.
+     The source has seen far more of this conversation's history than the target:
+     /x was closed and reopened there, ending exactly where the target has it. */
+  fs.writeFileSync(file, JSON.stringify({ projects: {
+    "old-key": state(40, { "path:/x": 40 }),
+    "new-key": state(3, { "path:/x": 3 }),
+  } }), "utf8");
+
+  expect(migrateBoardProjects(new Map([["old-key", "new-key"]]), file)).toBe(true);
+  const board = boardFor("new-key", file);
+  expect(board.prefs.manual).toEqual(["/x"]);
+  /* A migrated key is the SAME logical key, so its clock has to survive the
+     move. Restarting it from the target's history rewinds the class past writes
+     that really happened, and intent formed before them stops being fenced. */
+  expect(keyRevisionAt(board, pathKey("/x"))).toBeGreaterThanOrEqual(40);
 });
 
 test("compaction raises a floor instead of erasing causal history", () => {

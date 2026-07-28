@@ -189,10 +189,14 @@ export function keyRevisionAt(board: BoardProjectStateV1, key: string): number {
  * Three things happen here, and each exists because dropping it lets a stale
  * writer win:
  *
- * 1. **Alias merge.** Keys carried forward are canonicalized first, and two
- *    names that now resolve to one class keep the MAXIMUM of their clocks. A
- *    remap can only ever move a class's clock forward, so no observation is
- *    un-superseded by a rename.
+ * 1. **Alias and provenance merge.** Keys carried forward are canonicalized
+ *    first, and two names that now resolve to one class keep the MAXIMUM of
+ *    their clocks. `inherited` carries the same treatment across a document
+ *    boundary: when a project-key migration folds other boards into this one,
+ *    their histories merge in rather than being dropped, because a migrated key
+ *    is the SAME logical key and restarting its clock rewinds the class past
+ *    writes that really happened. Merging by maximum means neither a rename nor
+ *    a migration can ever move a clock backward.
  * 2. **Stamping.** Keys this write changed take the new revision.
  * 3. **Bounded compaction with a floor.** Keys the board still carries are kept
  *    exactly. Retired keys are kept most-recently-written first up to
@@ -205,16 +209,21 @@ export function keyRevisionAt(board: BoardProjectStateV1, key: string): number {
  *    high: it can fence intent whose own key was never actually written, which
  *    costs a dropped mutation rather than a lost write.
  */
+export type BoardCausalHistory = Pick<BoardProjectStateV1, "keyRevisions" | "keyRevisionFloor">;
+
 export function stampKeyRevisions(
   before: BoardProjectStateV1,
   after: BoardProjectStateV1,
   revision: number,
+  inherited: readonly BoardCausalHistory[] = [],
 ): { keyRevisions: BoardKeyRevisions; keyRevisionFloor: number } {
   const aliases = after.pathAliases ?? {};
   const merged: BoardKeyRevisions = {};
-  for (const [key, at] of Object.entries(before.keyRevisions ?? {})) {
-    const canonical = canonicalKey(key, aliases);
-    merged[canonical] = Math.max(merged[canonical] ?? 0, at);
+  for (const source of [before as BoardCausalHistory, ...inherited]) {
+    for (const [key, at] of Object.entries(source.keyRevisions ?? {})) {
+      const canonical = canonicalKey(key, aliases);
+      merged[canonical] = Math.max(merged[canonical] ?? 0, at);
+    }
   }
   for (const key of boardKeysChanged(before, after)) merged[key] = revision;
 
@@ -227,7 +236,13 @@ export function stampKeyRevisions(
   }
   retired.sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
 
-  let keyRevisionFloor = before.keyRevisionFloor ?? 0;
+  /* A floor is a claim about history that has been forgotten, so folding
+     documents together has to take the highest of them — the lowest would
+     under-report what every absent key has already seen. */
+  let keyRevisionFloor = Math.max(
+    before.keyRevisionFloor ?? 0,
+    ...inherited.map((source) => source.keyRevisionFloor ?? 0),
+  );
   for (const [key, at] of retired.slice(0, MAX_RETIRED_KEY_REVISIONS)) keyRevisions[key] = at;
   for (const [, at] of retired.slice(MAX_RETIRED_KEY_REVISIONS)) keyRevisionFloor = Math.max(keyRevisionFloor, at);
   /* A retained entry at or below the floor carries nothing the floor does not

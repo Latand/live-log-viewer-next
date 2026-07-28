@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -48,7 +48,12 @@ afterAll(() => {
   dom.close();
 });
 
-afterEach(() => resetPendingOpensForTest());
+/* Reset BEFORE each case, not only after: the session board cache and the
+   shared per-project stores are module-level, so a case in another file that
+   settled the same project name leaves a confirmed board behind. Adoption is
+   monotonic, so priming from that leftover would make this file's revision-1
+   stub look like a backward response and never load. */
+beforeEach(() => resetPendingOpensForTest());
 
 /** Minimal in-memory board API stubbed onto global fetch, which is what the
     hook's default fetcher calls. Counts GETs so a second store is detectable. */
