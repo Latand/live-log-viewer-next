@@ -377,6 +377,10 @@ export function Viewer() {
     openProject: selectProject,
     openPath: requestFocus,
     placePath: placeOnBoard,
+    /* The overview is a project selection like any other here — it just is not
+       a project. `selectProject` already speaks the sentinel; the bus should
+       not have to. */
+    openOverview: () => selectProject(OVERVIEW),
   }), [project, selectProject, requestFocus, placeOnBoard]);
 
   /* The N-cycle position anchors to an id: an item answered elsewhere drops

@@ -70,6 +70,17 @@ export interface ShellNavigator {
    * So placement is separable and this is the half that does it.
    */
   placePath(path: string): void;
+  /**
+   * Leave every project and show the overview.
+   *
+   * `openProject` cannot express this: the overview is the ABSENCE of an open
+   * project, which is why `project` reads null there. Without a way to say it,
+   * a return point captured on the overview had nowhere to go — the restore
+   * skipped the project switch, found no camera (the overview has none) and no
+   * focused path, and the Back control the operator had been offered did
+   * nothing at all.
+   */
+  openOverview(): void;
 }
 
 export interface FocusHandoffBus {

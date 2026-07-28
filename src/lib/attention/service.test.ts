@@ -341,6 +341,28 @@ test("the phone is never named: it cannot render an offer and cannot move its bo
   expect(raise().request.offeredTo).toEqual([]);
 });
 
+test("a desktop reading the history list is not named: there is no board to move", () => {
+  /* The silent failure this offer exists to remove, reappearing one level up. A
+     board controller is registered by the scheme board and the phone's focus
+     view and by nothing else, so a desktop sitting in the list has no camera and
+     no anchors: the handoff finds no controller, resolves `lost`, and NOTHING
+     ON SCREEN MOVES. Naming it anyway means the request is accepted, the agent
+     is told which desktop is watching, and the operator is shown nothing. */
+  upsertPresence(view({ viewSessionId: "view-list", deviceId: "device-list", mode: "list" }), T0.getTime());
+
+  expect(raise().request.offeredTo).toEqual([]);
+});
+
+test("a desktop on the overview is still named: landing there opens a project and mounts a board", () => {
+  /* Not symmetric with the list, and the difference is the whole point. A
+     handoff from the overview OPENS the target's project, which mounts the
+     board, and the handoff already waits for that board to publish. The list is
+     the mode the operator chose INSTEAD of a board, so no wait can produce one. */
+  upsertPresence(view({ viewSessionId: "view-overview", deviceId: DEVICE, mode: "overview", project: null, camera: null }), T0.getTime());
+
+  expect(raise().request.offeredTo).toEqual([DEVICE]);
+});
+
 test("a backgrounded or long-silent view is not somewhere the operator can be taken", () => {
   upsertPresence(view({ viewSessionId: "view-hidden", deviceId: "device-hidden", visibility: "hidden" }), T0.getTime());
   /* Visible, but last heard from long enough ago that it may be a laptop that

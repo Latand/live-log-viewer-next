@@ -31,12 +31,14 @@ interface Moves {
   opened: string[];
   /** PLACEMENTS: the card enters the layout and the camera does not move. */
   placed: string[];
+  /** How many times the shell was sent back to the overview. */
+  overview: number;
   projects: string[];
 }
 
 function harness(project: string, rects: Record<string, FocusRect>, shellProject: string | null = project) {
   const bus = createFocusHandoffBus();
-  const log: Moves = { moved: [], restored: [], opened: [], placed: [], projects: [] };
+  const log: Moves = { moved: [], restored: [], opened: [], placed: [], projects: [], overview: 0 };
   const board: BoardFocusController = {
     project,
     index: index(project, rects),
@@ -47,7 +49,8 @@ function harness(project: string, rects: Record<string, FocusRect>, shellProject
     project: shellProject,
     openProject: (next) => log.projects.push(next),
     openPath: (path) => log.opened.push(path),
-    placePath: (path) => log.placed.push(path),
+    placePath: (path) => { log.placed.push(path); },
+    openOverview: () => { log.overview += 1; },
   };
   bus.setBoard(board);
   bus.setShell(shell);
@@ -124,9 +127,10 @@ test("a vanished anchor whose request never read a board reports lost rather tha
 
 test("a target in another project opens that project first and waits for its board", async () => {
   const bus = createFocusHandoffBus();
-  const log: Moves = { moved: [], restored: [], opened: [], placed: [], projects: [] };
+  const log: Moves = { moved: [], restored: [], opened: [], placed: [], projects: [], overview: 0 };
   bus.setShell({
     placePath: () => {},
+    openOverview: () => {},
     project: "demo",
     openProject: (next) => {
       log.projects.push(next);
@@ -155,8 +159,8 @@ test("a target in another project opens that project first and waits for its boa
 
 test("nothing moves when no board ever answers for the target's project", async () => {
   const bus = createFocusHandoffBus();
-  const log: Moves = { moved: [], restored: [], opened: [], placed: [], projects: [] };
-  bus.setShell({ project: "demo", openProject: (next) => { log.projects.push(next); }, openPath: (path) => { log.opened.push(path); }, placePath: (path) => { log.placed.push(path); } });
+  const log: Moves = { moved: [], restored: [], opened: [], placed: [], projects: [], overview: 0 };
+  bus.setShell({ project: "demo", openProject: (next) => { log.projects.push(next); }, openPath: (path) => { log.opened.push(path); }, placePath: (path) => { log.placed.push(path); }, openOverview: () => {} });
 
   const outcome = await runFocusHandoff(request({ frameAtCreation: frame("gone") }), bus, { timeoutMs: 5, pollMs: 1 });
 
@@ -190,10 +194,10 @@ test("returning on a camera-less surface falls back to what was focused there", 
   const bus = createFocusHandoffBus();
   const opened: string[] = [];
   bus.setBoard({ project: "demo", index: index("demo", {}), moveTo: () => true, restoreCamera: () => false });
-  bus.setShell({ project: "demo", openProject: () => {}, openPath: (path) => { opened.push(path); }, placePath: () => {} });
+  bus.setShell({ project: "demo", openProject: () => {}, openPath: (path) => { opened.push(path); }, placePath: () => {}, openOverview: () => {} });
 
   const restored = await restoreFocusPoint(
-    { camera: { x: 1, y: 2, zoom: 3 }, focusedPath: "/tmp/what-i-was-reading.jsonl" },
+    { mode: "scheme" as const, camera: { x: 1, y: 2, zoom: 3 }, focusedPath: "/tmp/what-i-was-reading.jsonl" },
     "demo",
     bus,
     NO_WAIT,
@@ -207,7 +211,7 @@ test("returning restores the exact camera the device left, and does not re-open 
   const { bus, log } = harness("demo", { "/tmp/reviewer.jsonl": RECT });
 
   const restored = await restoreFocusPoint(
-    { camera: { x: 120, y: 340, zoom: 0.55 }, focusedPath: "/tmp/what-i-was-reading.jsonl" },
+    { mode: "scheme" as const, camera: { x: 120, y: 340, zoom: 0.55 }, focusedPath: "/tmp/what-i-was-reading.jsonl" },
     "demo",
     bus,
     NO_WAIT,
@@ -235,6 +239,7 @@ test("Back after a recovered handoff returns to the exact camera the operator le
     openProject: (next) => log.projects.push(next),
     openPath: (path) => log.opened.push(path),
     placePath: (path) => { log.placed.push(path); rects[path] = { x: 40, y: 60, w: 600, h: 780 }; },
+    openOverview: () => {},
   });
   const wasReading = { x: 1_204, y: 88, zoom: 0.42 };
 
@@ -246,7 +251,7 @@ test("Back after a recovered handoff returns to the exact camera the operator le
   expect(log.moved).toHaveLength(1);
 
   const restored = await restoreFocusPoint(
-    { camera: wasReading, focusedPath: "/tmp/what-i-was-reading.jsonl" },
+    { mode: "scheme" as const, camera: wasReading, focusedPath: "/tmp/what-i-was-reading.jsonl" },
     "demo",
     bus,
     NO_WAIT,
@@ -268,7 +273,7 @@ test("a camera is never restored into a project it was not captured in", async (
   const { bus, log } = harness("some-other-project", { "/tmp/reviewer.jsonl": RECT });
 
   const restored = await restoreFocusPoint(
-    { camera: { x: 120, y: 340, zoom: 0.55 }, focusedPath: "/tmp/what-i-was-reading.jsonl" },
+    { mode: "scheme" as const, camera: { x: 120, y: 340, zoom: 0.55 }, focusedPath: "/tmp/what-i-was-reading.jsonl" },
     null,
     bus,
     NO_WAIT,
@@ -286,7 +291,7 @@ test("returning to a camera-less mode restores what was focused there instead", 
   const { bus, log } = harness("demo", {}, "other");
 
   const restored = await restoreFocusPoint(
-    { camera: null, focusedPath: "/tmp/what-i-was-reading.jsonl" },
+    { mode: "scheme" as const, camera: null, focusedPath: "/tmp/what-i-was-reading.jsonl" },
     "demo",
     bus,
     NO_WAIT,
@@ -335,7 +340,7 @@ test("a launched stage reaches a key-navigating surface as the card the board is
     },
     restoreCamera: () => false,
   });
-  bus.setShell({ project: "demo", openProject: () => {}, openPath: () => {}, placePath: () => {} });
+  bus.setShell({ project: "demo", openProject: () => {}, openPath: () => {}, placePath: () => {}, openOverview: () => {} });
 
   const outcome = await runFocusHandoff({
     target: { kind: "stage", pipelineId: "p1", stageId: "review" },
@@ -367,7 +372,7 @@ test("a stage still waiting to launch is pinned by its own slot", async () => {
     moveTo: (destination) => { destinations.push(destination); return true; },
     restoreCamera: () => false,
   });
-  bus.setShell({ project: "demo", openProject: () => {}, openPath: () => {}, placePath: () => {} });
+  bus.setShell({ project: "demo", openProject: () => {}, openPath: () => {}, placePath: () => {}, openOverview: () => {} });
 
   await runFocusHandoff({
     target: { kind: "stage", pipelineId: "p1", stageId: "deploy" },
@@ -395,6 +400,7 @@ test("a conversation the board is not showing is asked for, and the handoff land
     /* What placement does on the real board: the card enters the layout, and
        the camera stays exactly where the operator left it. */
     placePath: (path) => { log.placed.push(path); rects[path] = landed; },
+    openOverview: () => {},
   });
 
   const outcome = await runFocusHandoff(
@@ -438,6 +444,7 @@ test("recovering a missing card still moves the camera exactly once, at the requ
       log.moved.push({ rect: rects[path]!, zoom: "situate", anchorKeys: [path] });
     },
     placePath: (path) => { log.placed.push(path); rects[path] = landed; },
+    openOverview: () => {},
   });
 
   const outcome = await runFocusHandoff(
@@ -487,4 +494,61 @@ test("a board that never produces the card still reports lost rather than a fals
   expect(outcome.resolution).toBe("lost");
   expect(log.moved).toEqual([]);
   expect(log.opened).toEqual([]);
+});
+
+test("Back from a handoff that began on the overview returns to the overview", async () => {
+  /* The inert-Back defect. A request raised while the operator was on the
+     overview opens a project to land, so every step of the old restore
+     described somewhere INSIDE a project: the project switch, the camera, the
+     focused path. None of them can say "no project at all", so pressing Back
+     did nothing at all — the control was rendered, the record moved on, and the
+     view stayed exactly where the handoff had put it. */
+  const { bus, log } = harness("demo", { "/tmp/reviewer.jsonl": RECT });
+
+  const restored = await restoreFocusPoint(
+    { mode: "overview", camera: null, focusedPath: null },
+    null,
+    bus,
+    NO_WAIT,
+  );
+
+  expect(restored).toBe(true);
+  expect(log.overview).toBe(1);
+  /* Nothing else fires: the overview is the destination, not a stop on the way
+     to one, and opening a project or a path here would undo it. */
+  expect(log.projects).toEqual([]);
+  expect(log.opened).toEqual([]);
+  expect(log.moved).toEqual([]);
+  expect(log.restored).toEqual([]);
+});
+
+test("an overview return point is honoured even when a project and a path were captured with it", async () => {
+  /* The mode is what says where they were, and it outranks the rest of the
+     record. A capture can carry a stale project or a focused path from before
+     the operator stepped out to the overview; restoring either would put them
+     back in the project they were being brought out of. */
+  const { bus, log } = harness("demo", { "/tmp/reviewer.jsonl": RECT });
+
+  const restored = await restoreFocusPoint(
+    { mode: "overview", camera: { x: 5, y: 6, zoom: 0.7 }, focusedPath: "/tmp/reviewer.jsonl" },
+    "demo",
+    bus,
+    NO_WAIT,
+  );
+
+  expect(restored).toBe(true);
+  expect(log.overview).toBe(1);
+  expect(log.projects).toEqual([]);
+  expect(log.restored).toEqual([]);
+  expect(log.opened).toEqual([]);
+});
+
+test("an overview return with no shell to steer reports that it did not restore", async () => {
+  /* Honesty at the boundary, the same rule the rest of this module follows: a
+     restore that could not happen must not report that it did, or the record
+     leaves `following` and the way back disappears with it. */
+  const bus = createFocusHandoffBus();
+
+  expect(await restoreFocusPoint({ mode: "overview", camera: null, focusedPath: null }, null, bus, NO_WAIT))
+    .toBe(false);
 });

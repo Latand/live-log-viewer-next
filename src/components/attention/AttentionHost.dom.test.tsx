@@ -158,6 +158,7 @@ function board(rects: Record<string, FocusRect>, project = "demo") {
     openProject: () => {},
     openPath: (path) => { opened.push(path); },
     placePath: (path) => { placed.push(path); },
+    openOverview: () => {},
   });
   return { bus, log, opened, placed };
 }
@@ -493,6 +494,7 @@ function layoutBoard(slice: FocusLayoutSlice, onOpenPath?: (path: string, publis
        to make the card appear. The camera is untouched: the only entry that
        reaches `log.moved` is the handoff's own `moveTo`. */
     placePath: (path) => { placed.push(path); onOpenPath?.(path, publish); },
+    openOverview: () => {},
   });
   return { bus, log, opened, placed };
 }

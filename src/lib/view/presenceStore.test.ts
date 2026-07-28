@@ -237,3 +237,43 @@ test("a mirror of nothing but junk leaves a real local session standing", () => 
 
   expect(listPresence(T0 + 1_000).map((session) => session.viewSessionId)).toEqual(["view-1"]);
 });
+
+test("a record whose nested shape is incomplete is discarded, however plausible its surface", () => {
+  /* The quiet one, and the reason this matters more than its severity: a record
+     can be well-formed exactly where the offer path looks and arbitrary
+     everywhere else. `followCapableDevices` reads `session.device.kind` and
+     nothing more, so such an entry advertises a desktop that does not exist —
+     the request is recorded as offered, nobody is watching, and the operator is
+     never told. A partial record is untrustworthy, not degraded. */
+  const cases: Record<string, unknown>[] = [
+    { ...stored({ viewSessionId: "no-device" }), device: undefined },
+    { ...stored({ viewSessionId: "device-not-an-object" }), device: "desktop" },
+    { ...stored({ viewSessionId: "device-half" }), device: { kind: "desktop" } },
+    { ...stored({ viewSessionId: "device-unknown-kind" }), device: { kind: "toaster", browser: "chrome" } },
+    { ...stored({ viewSessionId: "device-unknown-browser" }), device: { kind: "desktop", browser: "netscape" } },
+    { ...stored({ viewSessionId: "no-viewport" }), viewport: undefined },
+    { ...stored({ viewSessionId: "viewport-half" }), viewport: { width: 1_600 } },
+    { ...stored({ viewSessionId: "camera-half" }), camera: { x: 1, y: 2, zoom: 3 } },
+    { ...stored({ viewSessionId: "camera-world-half" }), camera: { x: 1, y: 2, zoom: 3, worldRect: { x: 0, y: 0 } } },
+    { ...stored({ viewSessionId: "no-board" }), board: undefined },
+    { ...stored({ viewSessionId: "board-unknown-sync" }), board: { renderedRevision: 1, durableRevision: 1, sync: "vibes" } },
+    { ...stored({ viewSessionId: "unknown-mode" }), mode: "hologram" },
+    { ...stored({ viewSessionId: "paths-not-strings" }), visiblePaths: [1, 2] },
+    { ...stored({ viewSessionId: "wrong-schema" }), schemaVersion: 99 },
+  ];
+  mirror([...cases, stored({ viewSessionId: "whole" })]);
+
+  expect(anotherProcess(() => listPresence(T0)).map((session) => session.viewSessionId)).toEqual(["whole"]);
+});
+
+test("a session with no device never reaches the code that dereferences it", () => {
+  /* `followCapableDevices` — inside `request_attention` — reads
+     `session.device.kind` with no guard. An entry that got that far without a
+     device does not degrade the answer, it throws and takes the tool call down
+     for every caller on the machine. */
+  mirror([{ ...stored({ viewSessionId: "no-device" }), device: undefined }]);
+
+  const seen = anotherProcess(() => listPresence(T0));
+  expect(seen).toEqual([]);
+  expect(() => seen.map((session) => session.device.kind)).not.toThrow();
+});

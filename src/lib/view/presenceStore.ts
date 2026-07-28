@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
 
-import type { PresencePayloadV1, StoredViewSession, ViewFreshness, ViewSessionSummary } from "./types";
+import { VIEW_SCHEMA_VERSION, type PresencePayloadV1, type StoredViewSession, type ViewFreshness, type ViewSessionSummary } from "./types";
 
 /**
  * Who is looking at the viewer right now.
@@ -57,40 +57,107 @@ export function presenceFile(): string {
     not a clock skew, it is a record nobody should be believing. */
 const CLOCK_SKEW_MS = 5_000;
 
+const DEVICE_KINDS = new Set(["desktop", "tablet", "mobile"]);
+const BROWSER_KINDS = new Set(["chrome", "firefox", "safari", "other"]);
+const VIEW_MODES = new Set(["overview", "scheme", "list", "mobile-focus", "mobile-map"]);
+const BOARD_SYNC = new Set(["current", "pending", "stale", "unavailable"]);
+
 function finiteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
+function object(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function stringOrNull(value: unknown): boolean {
+  return value === null || typeof value === "string";
+}
+
+function stringArray(value: unknown): boolean {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+function numberOrNull(value: unknown): boolean {
+  return value === null || finiteNumber(value);
+}
+
+function validDevice(value: unknown): boolean {
+  const device = object(value);
+  return device !== null
+    && typeof device.kind === "string" && DEVICE_KINDS.has(device.kind)
+    && typeof device.browser === "string" && BROWSER_KINDS.has(device.browser);
+}
+
+function validViewport(value: unknown): boolean {
+  const viewport = object(value);
+  return viewport !== null
+    && finiteNumber(viewport.width) && finiteNumber(viewport.height) && finiteNumber(viewport.dpr);
+}
+
+function validCamera(value: unknown): boolean {
+  if (value === null) return true;
+  const camera = object(value);
+  if (!camera) return false;
+  const world = object(camera.worldRect);
+  return finiteNumber(camera.x) && finiteNumber(camera.y) && finiteNumber(camera.zoom)
+    && world !== null
+    && finiteNumber(world.x) && finiteNumber(world.y)
+    && finiteNumber(world.width) && finiteNumber(world.height);
+}
+
+function validBoard(value: unknown): boolean {
+  const board = object(value);
+  return board !== null
+    && numberOrNull(board.renderedRevision) && numberOrNull(board.durableRevision)
+    && typeof board.sync === "string" && BOARD_SYNC.has(board.sync);
+}
+
 /**
- * Whether a mirrored entry can be believed, in full.
+ * Whether a mirrored entry can be believed, in full and all the way down.
  *
  * Presence answers "is someone watching?", and both ways of being wrong are NOT
  * equal. Reading nothing makes an attention request fail visibly, which is the
  * defect this mirror exists to fix. Reading a session that is not really there
- * makes it succeed silently in front of nobody, which is worse: the request is
- * marked delivered and the operator never learns it was raised. So a partial or
- * impossible entry is discarded, never repaired into an optimistic one.
+ * makes it succeed silently in front of nobody: the request is marked delivered,
+ * the desktop it named does not exist, and nothing ever says so. So a partial
+ * record is not a degraded record to be repaired with defaults — it is an
+ * untrustworthy one, and it is dropped whole.
  *
- * Two shapes get in past a `typeof` check and have to be named:
+ * The nested shape is the part that bites, because a top-level `typeof` sweep
+ * makes a record look answered while the fields anyone actually USES are still
+ * arbitrary:
  *
- * - a finite number outside the range `Date` can represent is still a number,
- *   and unlike `NaN` it round-trips through JSON intact. It reaches
- *   `sessionSummary`, where `new Date(…).toISOString()` throws `RangeError` —
- *   and that summary is built on the read path of `request_attention` and
- *   `operator_snapshot`, so one malformed record in a shared file takes down
- *   the tool for every caller. The future bound below is what catches it, which
- *   is why that bound is a rejection and not a clamp.
- * - a FUTURE `lastSeenAt` is the phantom. `freshness` clamps the age at zero,
- *   so the entry reads `active` forever, and `expire` — which needs the age to
- *   exceed retention — can never remove it. One such record advertises a
- *   desktop that does not exist, permanently.
+ * - `device` is dereferenced unguarded by the offer path — `session.device.kind`
+ *   in `followCapableDevices`, which runs inside `request_attention`. A record
+ *   without it does not degrade, it throws, and takes the whole tool call down.
+ * - `device` present but the rest of the record junk is the worse case, and the
+ *   quiet one: the entry is well-formed exactly where the offer looks, so a
+ *   desktop that does not exist is advertised as followable and the request is
+ *   recorded as offered to it.
+ * - a finite number outside the range `Date` can represent still round-trips
+ *   through JSON, unlike `NaN`, and reaches `toISOString` in `sessionSummary` —
+ *   also on the read path of `request_attention` and `operator_snapshot`.
+ * - a FUTURE `lastSeenAt` is the permanent phantom. `freshness` clamps the age
+ *   at zero, so the entry reads `active` forever, and `expire` — which needs the
+ *   age to exceed retention — can never remove it.
  */
 function isStoredSession(value: unknown, now: number): value is StoredViewSession {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const session = value as Partial<StoredViewSession>;
+  const session = object(value);
+  if (!session) return false;
+  if (session.schemaVersion !== VIEW_SCHEMA_VERSION) return false;
   if (typeof session.viewSessionId !== "string" || session.viewSessionId.length === 0) return false;
   if (typeof session.deviceId !== "string" || session.deviceId.length === 0) return false;
   if (session.visibility !== "visible" && session.visibility !== "hidden") return false;
+  if (typeof session.mode !== "string" || !VIEW_MODES.has(session.mode)) return false;
+  if (!stringOrNull(session.project) || !stringOrNull(session.focusedPath)) return false;
+  if (!stringArray(session.selectedPaths) || !stringArray(session.visiblePaths)) return false;
+  if (!validDevice(session.device)) return false;
+  if (!validViewport(session.viewport)) return false;
+  if (!validCamera(session.camera)) return false;
+  if (!validBoard(session.board)) return false;
   if (!finiteNumber(session.sequence) || !finiteNumber(session.inputSequence)) return false;
   if (!finiteNumber(session.lastSeenAt) || !finiteNumber(session.lastInteractionAt)) return false;
   if (session.lastSeenAt <= 0 || session.lastInteractionAt <= 0) return false;

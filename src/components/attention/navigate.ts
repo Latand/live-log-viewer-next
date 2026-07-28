@@ -195,12 +195,28 @@ export async function runFocusHandoff(
  * comes back instead.
  */
 export async function restoreFocusPoint(
-  point: Pick<ReturnPoint, "camera" | "focusedPath">,
+  point: Pick<ReturnPoint, "camera" | "focusedPath" | "mode">,
   project: string | null,
   bus: FocusHandoffBus,
   timing: HandoffTiming = {},
 ): Promise<boolean> {
   const shell = bus.shell();
+
+  /* The mode is part of where they were, not decoration on it. The overview is
+     the case that proves it: a handoff raised from there opens a project, and
+     every step below — the project switch, the camera, the focused path — then
+     describes somewhere INSIDE a project. None of them can express "no project
+     at all", so a return point captured on the overview restored nothing and
+     the Back control sat there doing nothing every time it was pressed.
+
+     Answered before anything else, because the steps below would otherwise put
+     the operator back into the project they were being brought out of. */
+  if (point.mode === "overview") {
+    if (!shell) return false;
+    shell.openOverview();
+    return true;
+  }
+
   if (project && shell && shell.project !== project) shell.openProject(project);
 
   if (point.camera && project) {
