@@ -26,7 +26,14 @@ test("starts V3 WebRTC through the active hosted conversation", async () => {
     async stopRealtime() {
       calls.push(["stop"]);
     },
+    /* The credential the backend minted during the exchange above. Injection is
+       authorized against THIS and nothing else, so a test that drives the
+       injection plumbing has to present it exactly as the live peer does. */
+    currentRealtimeSessionId() {
+      return "live-1";
+    },
   };
+  const peer = { caller: { kind: "session" as const, realtimeSessionId: "live-1" } };
 
   // The trailing CRLF is part of the SDP payload and must survive untrimmed
   // (issue #621: a trimmed offer dies upstream with "unmarshal SDP: EOF").
@@ -41,6 +48,7 @@ test("starts V3 WebRTC through the active hosted conversation", async () => {
   await executeRealtimeControl(
     { action: "appendSpeech", conversationId: "conversation_voice", text: "progress" },
     () => host,
+    peer,
   );
   await executeRealtimeControl(
     { action: "stop", conversationId: "conversation_voice" },
@@ -75,7 +83,8 @@ test("acknowledges a stable completed-response delivery through the hosted recei
       return { deliveryId: delivery.deliveryId, acknowledged: true as const };
     },
     async stopRealtime() {},
-  }));
+    currentRealtimeSessionId() { return "live-delivery"; },
+  }), { caller: { kind: "session", realtimeSessionId: "live-delivery" } });
 
   expect(calls).toEqual([delivery]);
   expect(result).toEqual({

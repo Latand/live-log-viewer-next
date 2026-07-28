@@ -8,7 +8,6 @@ import { NextRequest } from "next/server";
 import crypto from "node:crypto";
 
 import { setCallerConversationResolverForTests } from "@/lib/agent/operatorAuthority";
-import { operatorSessionSecret, resetOperatorSessionForTests } from "@/lib/agent/operatorSession";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { setRetireManagerForTests } from "@/lib/orchestrator/retire";
 
@@ -49,14 +48,15 @@ afterEach(() => {
 
 const WORKER_CAPABILITY = crypto.randomBytes(32).toString("base64url");
 
-/** The operator's own Viewer, holding the capability the server rendered to it. */
+/** The operator's own Viewer: an ordinary same-origin fetch, presenting nothing. */
 function browserRequest(body: unknown): NextRequest {
   return new NextRequest("http://127.0.0.1/api/orchestrator", {
     method: "POST",
     headers: {
       host: "127.0.0.1",
+      origin: "http://127.0.0.1",
+      "sec-fetch-site": "same-origin",
       "content-type": "application/json",
-      [VIEWER_SPAWN_CAPABILITY_HEADER]: operatorSessionSecret(),
     },
     body: JSON.stringify(body),
   });
@@ -110,12 +110,12 @@ test("POST validates its body", async () => {
   expect((await POST(adoptRequest({}))).status).toBe(400);
   expect((await POST(adoptRequest({ conversationId: "  " }))).status).toBe(400);
   expect((await POST(adoptRequest({ conversationId: "conv-1", path: 7 }))).status).toBe(400);
-  /* Malformed body from the Viewer itself: the operator gate passes, the parse does
-     not. A bare local caller gets 403 before the body is read at all, which is the
-     point of checking authority first. */
+  /* Malformed body from the Viewer itself: the agent check passes, the parse does
+     not. An AGENT gets 403 before the body is read at all, which is the point of
+     checking authority first. */
   const invalid = new NextRequest("http://127.0.0.1/api/orchestrator", {
     method: "POST",
-    headers: { host: "127.0.0.1", [VIEWER_SPAWN_CAPABILITY_HEADER]: operatorSessionSecret() },
+    headers: { host: "127.0.0.1" },
     body: "{",
   });
   expect((await POST(invalid)).status).toBe(400);
@@ -268,57 +268,34 @@ test("a worker cannot adopt the slot when no manager is designated either", asyn
   expect((await (await GET()).json()).record).toBeNull();
 });
 
-test("a caller presenting no credential is refused", async () => {
+test("REGRESSION: one click adopts — a bare same-origin browser designates with nothing presented", async () => {
+  /* The rejected build answered 403 here unless the operator had pasted a key into
+     the tab, which is what left the manager unopenable after every reload. */
   const bare = new NextRequest("http://127.0.0.1/api/orchestrator", {
     method: "POST",
     headers: { host: "127.0.0.1", "content-type": "application/json" },
-    body: JSON.stringify({ conversationId: "conv-1", path: null }),
+    body: JSON.stringify({ conversationId: "conversation_one_click", path: null }),
   });
-  expect((await POST(bare)).status).toBe(403);
-  expect((await (await GET()).json()).record).toBeNull();
+  const response = await POST(bare);
+
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ ok: true, adopted: true, record: { conversationId: "conversation_one_click" } });
+  expect((await (await GET()).json()).record).toMatchObject({ conversationId: "conversation_one_click" });
 });
 
-test("FORGED same-origin headers cannot replace the manager, and the refusal changes nothing", async () => {
-  /* The round-6 finding: authority used to be inferred from headers a local process
-     writes freely, so a worker could omit its capability, look like the Viewer, and
-     take the designation. */
+test("an AGENT still cannot replace the manager, and the refusal changes nothing", async () => {
+  /* The gate that matters and stays: designation is the one authority every other
+     bridge gate keys off, so a worker able to appoint itself would inherit all of
+     it in one move. */
   const transcript = path.join(sandbox, "orchestrator.jsonl");
   fs.writeFileSync(transcript, "", "utf8");
   await POST(browserRequest({ conversationId: "conv-incumbent", path: transcript }));
 
-  const forged = new NextRequest("http://127.0.0.1/api/orchestrator", {
-    method: "POST",
-    headers: {
-      host: "127.0.0.1",
-      origin: "http://127.0.0.1",
-      "sec-fetch-site": "same-origin",
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({ conversationId: "conversation_impostor", path: null, replace: true }),
-  });
-  expect((await POST(forged)).status).toBe(403);
+  setCallerConversationResolverForTests(() => "conversation_worker");
+  const response = await POST(workerRequest({ conversationId: "conversation_impostor", path: null, replace: true }));
+  expect(response.status).toBe(403);
 
   /* BOTH untouched. */
-  expect((await (await GET()).json()).record).toMatchObject({ conversationId: "conv-incumbent" });
-  expect(retirements).toEqual([]);
-});
-
-test("a secret from a previous process cannot replace the manager either", async () => {
-  const transcript = path.join(sandbox, "orchestrator.jsonl");
-  fs.writeFileSync(transcript, "", "utf8");
-  const stale = operatorSessionSecret();
-  await POST(browserRequest({ conversationId: "conv-incumbent", path: transcript }));
-  /* The Viewer restarted: a fresh process mints a fresh secret, so the link the
-     operator was holding is dead. */
-  resetOperatorSessionForTests();
-  expect(operatorSessionSecret()).not.toBe(stale);
-
-  const response = await POST(new NextRequest("http://127.0.0.1/api/orchestrator", {
-    method: "POST",
-    headers: { host: "127.0.0.1", "content-type": "application/json", [VIEWER_SPAWN_CAPABILITY_HEADER]: stale },
-    body: JSON.stringify({ conversationId: "conversation_impostor", path: null, replace: true }),
-  }));
-  expect(response.status).toBe(403);
   expect((await (await GET()).json()).record).toMatchObject({ conversationId: "conv-incumbent" });
   expect(retirements).toEqual([]);
 });

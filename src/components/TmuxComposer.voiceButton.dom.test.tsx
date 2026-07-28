@@ -82,7 +82,6 @@ afterAll(() => {
 
 const { TmuxComposer } = await import("./TmuxComposer");
 const { configureRealtimeClientForTests } = await import("@/hooks/useCodexRealtime");
-const { resetOperatorCredentialForTests } = await import("./operatorCredential");
 
 const realFetch = globalThis.fetch;
 let roots: Root[] = [];
@@ -111,7 +110,6 @@ afterEach(() => {
   document.body.replaceChildren();
   localStorage.clear();
   sessionStorage.clear();
-  resetOperatorCredentialForTests();
 });
 
 const file: FileEntry = {

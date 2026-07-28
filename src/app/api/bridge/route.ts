@@ -56,7 +56,12 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
      the dispatch made the no-call path answer 403 in the one situation it was built
      for — reachable only while unnecessary. */
   if (parameters.get("mode") === "turn-start") {
-    /* The operator's own composer is opening a turn; the credential is what says so. */
+    /* The operator's own composer is opening a turn. Same-origin IS the operator on
+       this loopback single-user app, so the perimeter has to be enforced HERE —
+       explicitly, on a GET that returns deploy nonces — rather than inherited from
+       a POST handler that never runs for this path. */
+    const rejection = rejectCrossOrigin(request);
+    if (rejection) return rejection;
     const operator = requireOperatorAuthority(request);
     if (!operator.ok) return NextResponse.json({ error: operator.error }, { status: operator.status, headers });
     try {

@@ -1,31 +1,23 @@
 import { afterEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 
-import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/capabilityHeader";
-
-import {
-  adoptOperatorCredential,
-  forgetOperatorCredential,
-  hasOperatorCredential,
-  operatorCredential,
-  operatorHeaders,
-  purgeLegacyOperatorCredential,
-  resetOperatorCredentialForTests,
-  subscribeOperatorCredential,
-} from "./operatorCredential";
+import * as operatorCredentialModule from "./operatorCredential";
+import { purgeLegacyOperatorCredential } from "./operatorCredential";
 
 /**
- * The operator bearer never reaches anything a same-uid worker can read (#691 round 9).
+ * THE CEREMONY IS GONE, AND ITS LEAVINGS ARE ERASED.
  *
- * Round 8 put it in `sessionStorage`, which reads as "per-tab, gone when the tab
- * closes" and is in fact a LevelDB directory in the Chromium profile — owned by the
- * operator's uid, and so readable by every agent on the machine, which is the same hole
- * as the capability file two rounds earlier. Round 7 put it in a URL fragment, which
- * never reaches the server but does reach the on-disk History database.
+ * Rounds 7–9 of #691 built an operator bearer: printed at startup, pasted into a
+ * gate, held in one volatile slot, lost on reload. The operator rejected it on
+ * stage — it broke one-click manager and one-click voice, which is what the
+ * product is for — so nothing in the browser holds, stores or presents a
+ * credential any more (see `operatorAuthority`: same-origin IS the operator).
  *
- * So the assertions here are about ABSENCE, and they are deliberately written against
- * the whole store rather than against the key round 8 happened to use: a future round
- * that persists the bearer under some other name has to make these fail.
+ * Two things are asserted. That no credential API exists to come back through,
+ * written against the module's whole surface so a future round cannot reintroduce
+ * one under a new name. And that a profile which ran an earlier round has its
+ * leavings removed — a bearer in web storage, a key in a bookmarked fragment (and
+ * so in Chromium's on-disk History database).
  */
 
 const dom = new Window({ url: "http://127.0.0.1:8898/" });
@@ -48,76 +40,39 @@ function persisted(): { where: string; key: string; value: string }[] {
 }
 
 afterEach(() => {
-  resetOperatorCredentialForTests();
   dom.sessionStorage.clear();
   dom.localStorage.clear();
   dom.history.replaceState(null, "", "/");
 });
 
-test("an adopted credential is held in memory and written to no store at all", () => {
-  expect(adoptOperatorCredential(KEY)).toBe(true);
-
-  expect(hasOperatorCredential()).toBe(true);
-  expect(operatorCredential()).toBe(KEY);
-  expect(operatorHeaders()).toEqual({ [VIEWER_SPAWN_CAPABILITY_HEADER]: KEY });
-
-  /* The round-8 regression, stated as the thing it actually was: something on disk. */
-  expect(persisted()).toEqual([]);
+test("no credential mechanism exists in the browser at all — the eraser is the whole module", () => {
+  expect(Object.keys(operatorCredentialModule).sort()).toEqual(["purgeLegacyOperatorCredential"]);
+  /* Named individually too, so reintroducing any one of them fails here rather
+     than quietly widening the surface. */
+  for (const banned of [
+    "adoptOperatorCredential",
+    "forgetOperatorCredential",
+    "hasOperatorCredential",
+    "operatorCredential",
+    "operatorHeaders",
+    "subscribeOperatorCredential",
+  ]) {
+    expect(operatorCredentialModule).not.toHaveProperty(banned);
+  }
 });
 
-test("no store anywhere holds the value, under any key", () => {
-  adoptOperatorCredential(KEY);
-  /* Not "the key we know about is absent" — nothing that could be flushed to the
-     profile contains the bearer, whatever it might be called. */
-  expect(persisted().some((entry) => entry.value.includes(KEY))).toBe(false);
-});
-
-test("the URL never carries it either — a fragment is a row in the History database", () => {
-  adoptOperatorCredential(KEY);
-  expect(dom.location.href).not.toContain(KEY);
-  expect(dom.location.hash).toBe("");
-});
-
-test("an empty paste is refused rather than silently adopted", () => {
-  expect(adoptOperatorCredential("   ")).toBe(false);
-  expect(hasOperatorCredential()).toBe(false);
-  expect(operatorHeaders()).toEqual({});
-});
-
-test("surrounding whitespace from the terminal copy is trimmed, not presented", () => {
-  adoptOperatorCredential(`  ${KEY}\n`);
-  expect(operatorCredential()).toBe(KEY);
-});
-
-test("subscribers learn when the credential arrives and when the tab drops it", () => {
-  const seen: boolean[] = [];
-  const release = subscribeOperatorCredential(() => { seen.push(hasOperatorCredential()); });
-
-  adoptOperatorCredential(KEY);
-  forgetOperatorCredential();
-  /* Already gone: nothing to announce, so no redundant render. */
-  forgetOperatorCredential();
-  release();
-  adoptOperatorCredential(KEY);
-
-  expect(seen).toEqual([true, false]);
-});
-
-test("a bearer left in the profile by round 8 is deleted, and never adopted from", () => {
+test("a bearer left in the profile by round 8 is deleted", () => {
   dom.sessionStorage.setItem(LEGACY_STORAGE_KEY, KEY);
   dom.localStorage.setItem(LEGACY_STORAGE_KEY, KEY);
 
   purgeLegacyOperatorCredential();
 
-  /* Deleted, because shipping the fix while the hole it closes still sits in the
-     profile would leave the credential exactly where the review found it. */
+  /* Deleted, because removing the mechanism while its bearer still sits in the
+     profile would leave the value exactly where the review found it. */
   expect(persisted()).toEqual([]);
-  /* And NOT adopted: a value that has been through a file is spent, whoever else has
-     already read it. */
-  expect(hasOperatorCredential()).toBe(false);
 });
 
-test("a stale round-7 startup link is scrubbed from the address bar, and never adopted from", () => {
+test("a stale round-7 startup link is scrubbed from the address bar", () => {
   dom.history.replaceState(null, "", `/?project=alpha#llv-operator=${encodeURIComponent(KEY)}&tab=board`);
 
   purgeLegacyOperatorCredential();
@@ -126,7 +81,6 @@ test("a stale round-7 startup link is scrubbed from the address bar, and never a
   expect(dom.location.hash).toBe("#tab=board");
   /* The query string is the caller's, not ours, and survives untouched. */
   expect(dom.location.search).toBe("?project=alpha");
-  expect(hasOperatorCredential()).toBe(false);
 });
 
 test("purging is idempotent and leaves an ordinary fragment alone", () => {

@@ -70,6 +70,7 @@ import {
 } from "@/lib/bridge/pendingAcknowledgements";
 
 import { VoiceFloatButton } from "./voice/VoiceFloatButton";
+import { isDesignatedManagerConversation } from "./voice/managerIdentity";
 import { viewerContextPrelude } from "./voice/viewerContextPrelude";
 import {
   getServerVoiceComposerHostMounted,
@@ -1661,8 +1662,14 @@ export function TmuxComposerCore({
        into the turn, so "do this in the project I'm viewing" resolves without
        re-docking the floating window. Composed at dispatch and never on a
        replay, exactly like the bridge prelude above; empty whenever the operator
-       is simply looking at this conversation itself. */
-    const viewerPrelude = replayGeneration || !voiceEnabled
+       is simply looking at this conversation itself.
+
+       SCOPED TO THE MANAGER'S IDENTITY, not to a capability. `voiceEnabled` is
+       true of every hosted codex-app-server conversation, so gating on it
+       prepended the operator's view to unrelated workers' turns. The one thing
+       that names the manager is the designation record (`managerIdentity`), so
+       that is what is asked, per dispatch and cached. */
+    const viewerPrelude = replayGeneration || !(await isDesignatedManagerConversation(cardId))
       ? ""
       : viewerContextPrelude({ path: file.path, project: file.project });
     const composedText = viewerPrelude ? `${viewerPrelude}\n${requestedText}` : requestedText;

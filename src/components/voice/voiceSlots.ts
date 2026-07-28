@@ -107,7 +107,8 @@ export function publishVoiceComposerCardNode(cardId: string, node: HTMLElement):
 
 /** The card's latest props for the hoisted composer. Kept after the card goes:
     the composer of an active call outlives its card and needs SOMETHING to render
-    with; stale runtime detail refreshes through the composer's own hooks. */
+    with; stale runtime detail refreshes through the composer's own hooks. Released
+    by `forgetVoiceComposerCardProps` once no composer renders from them. */
 export function publishVoiceComposerCardProps(cardId: string, props: VoiceComposerCardProps): void {
   const current = composerCardProps.get(cardId);
   if (current
@@ -121,8 +122,28 @@ export function publishVoiceComposerCardProps(cardId: string, props: VoiceCompos
   notify();
 }
 
+/**
+ * Drop a retained props snapshot.
+ *
+ * The retraction of a card's NODE cannot do this: the whole point of retaining
+ * props is that they outlive the card while its composer is parked mid-call. So
+ * the release is the composer owner's call — `VoiceComposerHost` forgets a
+ * conversation once it renders no composer for it — and without that release the
+ * map keeps one `FileEntry` snapshot per conversation ever rendered, for the life
+ * of the tab.
+ */
+export function forgetVoiceComposerCardProps(cardId: string): void {
+  if (!composerCardProps.delete(cardId)) return;
+  notify();
+}
+
 export function getVoiceComposerCardIds(): readonly string[] {
   return [...composerCardNodes.keys()];
+}
+
+/** Which conversations still hold a retained props snapshot. */
+export function getVoiceComposerCardPropsIds(): readonly string[] {
+  return [...composerCardProps.keys()];
 }
 
 export function getVoiceComposerCardNode(cardId: string): HTMLElement | null {

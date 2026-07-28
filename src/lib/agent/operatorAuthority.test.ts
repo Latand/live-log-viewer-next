@@ -6,19 +6,25 @@ import path from "node:path";
 
 import { NextRequest } from "next/server";
 
-import { ensureOperatorSpawnCapability, operatorSpawnCapabilityPath } from "./operatorCapability";
-import { operatorSessionSecret, resetOperatorSessionForTests } from "./operatorSession";
+import { ensureOperatorSpawnCapability } from "./operatorCapability";
 import { requireOperatorAuthority, setCallerConversationResolverForTests, voiceTransportOperator } from "./operatorAuthority";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "./spawnPolicy";
 
 /**
- * Authority is possession, not request shape.
+ * ONE QUESTION: agent, or operator?
  *
- * The first version of this primitive accepted `sec-fetch-site: same-origin` with a
- * matching `Origin`/`Host`. A forbidden header name is forbidden to page JavaScript,
- * not to a local process, so any worker could omit its own capability, write those
- * three headers, and inherit the right to appoint itself the manager. Every gate in
- * this feature resolves here, so these enumerate the forgeries.
+ * Authority used to be POSSESSION of an operator session secret, and these cases
+ * enumerated the forgeries it refused. The operator rejected that mechanism after
+ * using it: a tab that had not been through the paste gate could neither open the
+ * manager nor start a call from a card, and every reload put it back there. So the
+ * possession question is gone and the agent question is all that is left — a
+ * same-origin request on this loopback single-user app IS the operator, and an
+ * agent is the caller that names itself with the conversation capability the
+ * registry issued it.
+ *
+ * The perimeter is `rejectCrossOrigin`, enforced by the routes BEFORE they reach
+ * here; injection into a live call is decided by `permitRealtimeAction` and is not
+ * relaxed by anything in this file.
  */
 
 const sandboxes: string[] = [];
@@ -41,105 +47,60 @@ function request(headers: Record<string, string>): NextRequest {
   return new NextRequest("http://127.0.0.1/api/orchestrator", { method: "POST", headers });
 }
 
-/** Exactly what a local process can write, and what used to be believed. */
-const FORGED_BROWSER = {
+/** What an ordinary tab's fetch actually looks like on the wire. */
+const BROWSER = {
   host: "127.0.0.1",
   origin: "http://127.0.0.1",
   "sec-fetch-site": "same-origin",
   "content-type": "application/json",
 };
 
-test("forged same-origin headers grant nothing", () => {
-  const verdict = requireOperatorAuthority(request(FORGED_BROWSER));
-  expect(verdict.ok).toBe(false);
-  if (!verdict.ok) {
-    expect(verdict.status).toBe(403);
-    expect(verdict.error).toContain("operator session secret");
-  }
+test("REGRESSION: an ordinary browser request — nothing presented — may perform operator-only actions", () => {
+  /* The rejected build answered `false` here, which is what made one-click
+     designation impossible in a fresh tab. */
+  expect(requireOperatorAuthority(request(BROWSER)).ok).toBe(true);
+  expect(requireOperatorAuthority(request({ host: "127.0.0.1" })).ok).toBe(true);
 });
 
-test("no headers at all grant nothing", () => {
-  expect(requireOperatorAuthority(request({ host: "127.0.0.1" })).ok).toBe(false);
-});
-
-test("the in-memory operator session secret grants authority", () => {
-  const capability = operatorSessionSecret();
-  expect(requireOperatorAuthority(request({ ...FORGED_BROWSER, [VIEWER_SPAWN_CAPABILITY_HEADER]: capability })).ok)
-    .toBe(true);
-  /* And without any browser-shaped headers at all, since shape is not the point. */
-  expect(requireOperatorAuthority(request({ [VIEWER_SPAWN_CAPABILITY_HEADER]: capability })).ok).toBe(true);
-});
-
-test("a restarted process revokes the old secret", () => {
-  const stale = operatorSessionSecret();
-  const fresh = (resetOperatorSessionForTests(), operatorSessionSecret());
-  expect(stale).not.toBe(fresh);
-  expect(requireOperatorAuthority(request({ [VIEWER_SPAWN_CAPABILITY_HEADER]: stale })).ok).toBe(false);
-  expect(requireOperatorAuthority(request({ [VIEWER_SPAWN_CAPABILITY_HEADER]: fresh })).ok).toBe(true);
-});
-
-test("a worker's own capability is refused, even alongside forged browser headers", () => {
+test("an agent naming itself with its capability is refused, whatever else it sends", () => {
   const workerCapability = crypto.randomBytes(32).toString("base64url");
   setCallerConversationResolverForTests(() => "conversation_worker");
 
-  const verdict = requireOperatorAuthority(request({
-    ...FORGED_BROWSER,
-    [VIEWER_SPAWN_CAPABILITY_HEADER]: workerCapability,
-  }));
-  expect(verdict.ok).toBe(false);
-  if (!verdict.ok) expect(verdict.error).toContain("agent");
-});
-
-test("a guessed capability of the right shape is refused", () => {
-  operatorSessionSecret();
-  const guess = crypto.randomBytes(32).toString("base64url");
-  expect(requireOperatorAuthority(request({ [VIEWER_SPAWN_CAPABILITY_HEADER]: guess })).ok).toBe(false);
-});
-
-test("a malformed capability is refused without being looked up", () => {
-  operatorSessionSecret();
-  for (const candidate of ["", "  ", "short", "x".repeat(200)]) {
-    expect(requireOperatorAuthority(request({ [VIEWER_SPAWN_CAPABILITY_HEADER]: candidate })).ok).toBe(false);
+  for (const headers of [
+    { [VIEWER_SPAWN_CAPABILITY_HEADER]: workerCapability },
+    { ...BROWSER, [VIEWER_SPAWN_CAPABILITY_HEADER]: workerCapability },
+  ]) {
+    const verdict = requireOperatorAuthority(request(headers));
+    expect(verdict.ok).toBe(false);
+    if (!verdict.ok) {
+      expect(verdict.status).toBe(403);
+      expect(verdict.error).toContain("agent");
+    }
   }
 });
 
-test("the on-disk spawn capability does NOT grant operator authority", () => {
-  /* The fourth way in: every worker runs as the operator's uid, so a file the Viewer
-     can read is a file every worker can read. Authority moved off the filesystem
-     entirely, and this holds that line. */
+test("a capability the registry cannot map is not an agent, and is not demoted below anonymous", () => {
+  /* A stale value from an older process, or a guess: it names no conversation, so
+     it names no agent. Presenting yesterday's value must not be worse than
+     presenting nothing. */
+  for (const candidate of ["", "  ", "short", "x".repeat(200), crypto.randomBytes(32).toString("base64url")]) {
+    expect(requireOperatorAuthority(request({ [VIEWER_SPAWN_CAPABILITY_HEADER]: candidate })).ok).toBe(true);
+  }
+});
+
+test("the on-disk spawn capability names no conversation, so it neither grants nor refuses", () => {
   const onDisk = ensureOperatorSpawnCapability();
   expect(onDisk).toMatch(/^[A-Za-z0-9_-]{43}$/);
-  expect(requireOperatorAuthority(request({ [VIEWER_SPAWN_CAPABILITY_HEADER]: onDisk })).ok).toBe(false);
-
-  /* And the real secret is not the file's contents, so reading the file tells a
-     worker nothing about it. */
-  expect(operatorSessionSecret()).not.toBe(onDisk);
-  expect(fs.readFileSync(operatorSpawnCapabilityPath(), "utf8")).not.toContain(operatorSessionSecret());
-});
-
-test("the session secret is written to no file under the state dir", () => {
-  const sessionValue = operatorSessionSecret();
-  const root = process.env.LLV_STATE_DIR!;
-  fs.mkdirSync(root, { recursive: true });
-  ensureOperatorSpawnCapability();
-
-  const walk = (dir: string): string[] => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-    const target = path.join(dir, entry.name);
-    return entry.isDirectory() ? walk(target) : [target];
-  });
-  for (const file of walk(root)) {
-    expect(fs.readFileSync(file, "utf8")).not.toContain(sessionValue);
-  }
+  expect(requireOperatorAuthority(request({ [VIEWER_SPAWN_CAPABILITY_HEADER]: onDisk })).ok).toBe(true);
 });
 
 /* --------------------------------------------------------------------------- *
- * Voice transport: agent-versus-operator, no human authentication (final
- * operator decision). Same-origin enforcement lives in the route, before this.
+ * Voice transport asks the identical question — the two are one rule now.
  * --------------------------------------------------------------------------- */
 
-test("voice transport: an ordinary browser request with no credential at all IS the operator", () => {
+test("REGRESSION: a card's voice click, presenting nothing, IS the operator", () => {
   expect(voiceTransportOperator(request({ host: "127.0.0.1" }))).toBe(true);
-  expect(voiceTransportOperator(request(FORGED_BROWSER))).toBe(true);
+  expect(voiceTransportOperator(request(BROWSER))).toBe(true);
 });
 
 test("voice transport: an agent naming itself with its capability is refused", () => {
@@ -148,18 +109,15 @@ test("voice transport: an agent naming itself with its capability is refused", (
   expect(voiceTransportOperator(request({ [VIEWER_SPAWN_CAPABILITY_HEADER]: workerCapability }))).toBe(false);
 });
 
-test("voice transport: a stale or unmapped credential does not demote the browser below anonymous", () => {
-  /* A tab that once adopted a link (now stale after a restart) still starts its
-     own call — presenting yesterday's value must not be worse than presenting
-     nothing. Only self-identification as an agent refuses. */
-  operatorSessionSecret();
-  const stale = crypto.randomBytes(32).toString("base64url");
-  expect(voiceTransportOperator(request({ [VIEWER_SPAWN_CAPABILITY_HEADER]: stale }))).toBe(true);
-});
+test("transport and operator-only actions agree: one rule, asked twice", () => {
+  const workerCapability = crypto.randomBytes(32).toString("base64url");
+  setCallerConversationResolverForTests(() => "conversation_worker");
+  const agent = request({ [VIEWER_SPAWN_CAPABILITY_HEADER]: workerCapability });
+  expect(voiceTransportOperator(agent)).toBe(false);
+  expect(requireOperatorAuthority(agent).ok).toBe(false);
 
-test("voice transport transparency does NOT leak into possession-gated authority", () => {
-  /* The same anonymous request that may start a call still may NOT designate a
-     manager, spawn, or read the bridge: requireOperatorAuthority is untouched. */
-  expect(voiceTransportOperator(request({ host: "127.0.0.1" }))).toBe(true);
-  expect(requireOperatorAuthority(request({ host: "127.0.0.1" })).ok).toBe(false);
+  setCallerConversationResolverForTests(() => null);
+  const browser = request(BROWSER);
+  expect(voiceTransportOperator(browser)).toBe(true);
+  expect(requireOperatorAuthority(browser).ok).toBe(true);
 });

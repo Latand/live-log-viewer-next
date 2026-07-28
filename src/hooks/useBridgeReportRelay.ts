@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useRef } from "react";
 
-import { operatorHeaders } from "@/components/operatorCredential";
 import {
   bridgeAcknowledgementFor,
   forgetBridgeAcknowledgement,
@@ -102,7 +101,7 @@ export async function commitBridgeTurn(ackToken: string, fetchFn: typeof fetch =
      parked with nothing able to settle them. */
   const response = await fetchFn("/api/bridge", {
     method: "POST",
-    headers: { "content-type": "application/json", ...operatorHeaders() },
+    headers: { "content-type": "application/json" },
     body: JSON.stringify({ ackToken }),
   });
   if (!response.ok) throw new Error(`bridge acknowledgement refused with ${response.status}`);
@@ -146,12 +145,10 @@ export function useBridgeTurnStartDrain(
     await retirePendingBridgeAcknowledgements(request, (waitingOn) => !waitingOn.startsWith("voice:"));
     try {
       /* No session id, deliberately: this is the path taken when NO call is live, so
-         requiring one would mean the inbox drains only while it is not needed. The
-         operator credential is what proves this is the Viewer opening a turn. */
-      const response = await request("/api/bridge?mode=turn-start", {
-        cache: "no-store",
-        headers: operatorHeaders(),
-      });
+         requiring one would mean the inbox drains only while it is not needed. This
+         is the Viewer's own same-origin fetch, which is what says it is the operator
+         opening a turn — it presents no capability, and must not. */
+      const response = await request("/api/bridge?mode=turn-start", { cache: "no-store" });
       if (!response.ok) return NOTHING_PENDING;
       const payload = await response.json() as { prelude?: { text: string; ackToken: string } | null };
       const prelude = payload.prelude;
@@ -211,7 +208,7 @@ export function useBridgeReportRelay(
     const acknowledgeCursor = async (ackToken: string): Promise<void> => {
       const response = await request("/api/bridge", {
         method: "POST",
-        headers: { "content-type": "application/json", ...operatorHeaders() },
+        headers: { "content-type": "application/json" },
         /* The token the batch was handed out with — never a sequence of our own
            choosing, which the server would be right to refuse. */
         body: JSON.stringify({ ackToken, realtimeSessionId: client.realtimeSession() }),

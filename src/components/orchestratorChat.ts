@@ -21,8 +21,6 @@ export function orchestratorHash(conversationId: string): string {
   return "#c=" + encodeURIComponent(conversationId);
 }
 
-import { hasOperatorCredential, operatorHeaders } from "./operatorCredential";
-
 const JSON_HEADERS = { "content-type": "application/json" };
 
 async function bodyOf<T>(response: Response): Promise<T | null> {
@@ -44,22 +42,14 @@ export async function openOrchestratorConversation(fetchFn: typeof fetch = fetch
   if (!statusResponse.ok || !status) throw new Error("orchestrator status unavailable");
   if (status.record && status.exists) return status.record.conversationId;
 
-  /* NO SPAWN WITHOUT THE AUTHORITY TO ADOPT. The spawn is the side effect and
-     the adoption is the gate, so their old order inverted the invariant for an
-     unauthorized browser: the spawn succeeded, the operator-only adoption was
-     refused, no record was written — and the NEXT click saw an empty slot and
-     spawned again. Four stalled managers on the hosted stage came from exactly
-     that loop. The single-instance guarantee still lives in first-write-wins
-     adoption; this check just refuses to create anything it could never seat.
-
-     Asked of the credential this browser holds, not of a probe endpoint: the
-     operator secret is pasted into `OperatorKeyGate` and kept in this tab's
-     memory, so possession is knowable locally and a tab without it is exactly
-     the tab whose adoption the server would refuse. */
-  if (!hasOperatorCredential()) {
-    throw new Error("orchestrator spawn requires operator authority in this browser");
-  }
-
+  /* ONE CLICK, ALWAYS: reuse, spawn, or adopt, with nothing to unlock first.
+     The stage failure this replaces was a browser that could spawn but not adopt —
+     the record stayed empty, the next click spawned again, and four stalled
+     managers piled up. That was a consequence of possession-based designation, and
+     it is gone with it: a same-origin browser IS the operator, so the adoption
+     below cannot be refused for want of a credential and the spawn cannot create
+     something it could never seat. The single-instance guarantee still lives where
+     it always did — first-write-wins adoption on the server. */
   const spawnResponse = await fetchFn("/api/spawn", {
     method: "POST",
     headers: JSON_HEADERS,
@@ -72,9 +62,10 @@ export async function openOrchestratorConversation(fetchFn: typeof fetch = fetch
 
   const adoptResponse = await fetchFn("/api/orchestrator", {
     method: "POST",
-    /* Designation is operator-only and needs the capability, not a request that
-       merely looks same-origin (#691 round 6). */
-    headers: { ...JSON_HEADERS, ...operatorHeaders() },
+    /* Designation is operator-only, and this request IS the operator: same-origin
+       from the local browser, carrying no conversation capability, which is exactly
+       what the server distinguishes an agent by. */
+    headers: JSON_HEADERS,
     body: JSON.stringify({ conversationId: spawn.conversationId, path: spawn.path ?? null }),
   });
   const adopt = await bodyOf<{ ok?: boolean; record?: { conversationId: string } }>(adoptResponse);
