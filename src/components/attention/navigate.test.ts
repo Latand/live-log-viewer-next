@@ -334,3 +334,66 @@ test("a stage still waiting to launch is pinned by its own slot", async () => {
 
   expect(destinations[0]!.anchorKeys).toEqual(["slot::p1::deploy"]);
 });
+
+test("a conversation the board is not showing is asked for, and the handoff lands once it arrives", async () => {
+  /* The live failure this closes: a worker conversation that has folded away or
+     never entered this layout is not in the index, and a request raised through
+     the agent's tool carries no frame to fall back on — so the handoff reported
+     `lost`, nothing moved, and no way back was ever offered. The shell can place
+     that card; it was simply never asked. */
+  const rects: Record<string, FocusRect> = {};
+  const landed: FocusRect = { x: 320, y: 880, w: 600, h: 780 };
+  const { bus, log } = harness("demo", rects);
+  bus.setShell({
+    project: "demo",
+    openProject: (next) => log.projects.push(next),
+    /* What `openPath` does on the real board: the card enters the layout. */
+    openPath: (path) => { log.opened.push(path); rects[path] = landed; },
+  });
+
+  const outcome = await runFocusHandoff(
+    request({ frameAtCreation: { project: "demo", rect: UNREAD_FRAME_RECT, boardRevision: null } }),
+    bus,
+    NO_WAIT,
+  );
+
+  expect(log.opened).toEqual(["/tmp/reviewer.jsonl"]);
+  expect(outcome.resolution).toBe("exact");
+  expect(outcome.moved).toBe(true);
+  expect(log.moved).toEqual([{ rect: landed, zoom: "situate", anchorKeys: ["/tmp/reviewer.jsonl"] }]);
+});
+
+test("asking for the card is one focus edge, never two", async () => {
+  /* `openPath` is an edge the board consumes by nonce: asking twice for the same
+     path glides the camera a second time, over the move that just finished. */
+  const rects: Record<string, FocusRect> = {};
+  const { bus, log } = harness("demo", rects);
+  bus.setShell({
+    project: "demo",
+    openProject: (next) => log.projects.push(next),
+    openPath: (path) => { log.opened.push(path); rects[path] = { x: 0, y: 0, w: 600, h: 780 }; },
+  });
+
+  await runFocusHandoff(
+    request({ intent: "open", frameAtCreation: { project: "demo", rect: UNREAD_FRAME_RECT, boardRevision: null } }),
+    bus,
+    NO_WAIT,
+  );
+
+  expect(log.opened).toEqual(["/tmp/reviewer.jsonl"]);
+});
+
+test("a board that never produces the card still reports lost rather than a false arrival", async () => {
+  const { bus, log } = harness("demo", {});
+
+  const outcome = await runFocusHandoff(
+    request({ frameAtCreation: { project: "demo", rect: UNREAD_FRAME_RECT, boardRevision: null } }),
+    bus,
+    NO_WAIT,
+  );
+
+  /* Asked for, never delivered: the request is still owed an honest answer. */
+  expect(log.opened).toEqual(["/tmp/reviewer.jsonl"]);
+  expect(outcome.resolution).toBe("lost");
+  expect(log.moved).toEqual([]);
+});
