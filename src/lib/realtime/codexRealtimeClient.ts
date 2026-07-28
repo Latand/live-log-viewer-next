@@ -5,6 +5,8 @@ import {
   type RuntimeVoiceDelivery,
 } from "@/lib/runtime/voiceDelivery";
 
+import { operatorHeaders } from "@/components/operatorCredential";
+
 import { reportCallPhase } from "./activeCall";
 
 export type CodexRealtimePhase = "idle" | "connecting" | "live" | "stopping" | "error";
@@ -255,8 +257,14 @@ class CodexRealtimeClient {
         try {
           void fetch("/api/runtime/realtime", {
             method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ action: "stop", conversationId: this.conversationId }),
+            /* The page is unloading; the session id is what proves this peer owns the
+               call it is hanging up. */
+            headers: { "content-type": "application/json", ...operatorHeaders() },
+            body: JSON.stringify({
+              action: "stop",
+              conversationId: this.conversationId,
+              realtimeSessionId: this.realtimeSessionId,
+            }),
             keepalive: true,
           });
         } catch { /* the page is going away regardless */ }
@@ -285,7 +293,9 @@ class CodexRealtimeClient {
       if (!offer) throw new Error("The browser produced no WebRTC offer");
       const answer = await responseJson(await fetch("/api/runtime/realtime", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        /* Opening the operator's call is operator-only: no session exists yet to
+           prove ownership with, so the credential is the only evidence available. */
+        headers: { "content-type": "application/json", ...operatorHeaders() },
         body: JSON.stringify({ action: "start", conversationId: this.conversationId, sdp: offer }),
       }));
       if (epoch !== this.epoch) return;
@@ -310,8 +320,12 @@ class CodexRealtimeClient {
     try {
       await responseJson(await fetch("/api/runtime/realtime", {
         method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action: "stop", conversationId: this.conversationId }),
+        headers: { "content-type": "application/json", ...operatorHeaders() },
+        body: JSON.stringify({
+          action: "stop",
+          conversationId: this.conversationId,
+          realtimeSessionId: this.realtimeSessionId,
+        }),
       }));
     } catch (error) {
       failure = error instanceof Error ? error.message : String(error);

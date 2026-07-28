@@ -7,6 +7,7 @@ import path from "node:path";
 import { NextRequest } from "next/server";
 
 import { setCallerConversationResolverForTests } from "@/lib/agent/operatorAuthority";
+import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { adoptOrchestratorRecord } from "@/lib/orchestrator/store";
 import {
@@ -134,6 +135,39 @@ test("status from an agent is not blocked: it writes nothing", async () => {
     conversationId: "conversation_root",
     action: "status",
   }, WORKER_CAPABILITY));
+  expect(response.status).not.toBe(403);
+});
+
+test("forged same-origin headers cannot start or stop the transport", async () => {
+  /* Same forgery as the designation finding, on the surface that opens and closes
+     the operator's call. */
+  for (const action of ["start", "stop"]) {
+    const response = await POST(new NextRequest("http://127.0.0.1/api/runtime/realtime", {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1",
+        origin: "http://127.0.0.1",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ conversationId: "conversation_root", action, sdp: "v=0\r\noffer\r\n" }),
+    })) as unknown as Response;
+    expect(response.status).toBe(403);
+  }
+});
+
+test("the operator's capability starts and stops the transport", async () => {
+  /* Reaches the host rather than the gate: refused for want of a hosted realtime
+     thread, not for want of authority. */
+  const response = await POST(new NextRequest("http://127.0.0.1/api/runtime/realtime", {
+    method: "POST",
+    headers: {
+      host: "127.0.0.1",
+      "content-type": "application/json",
+      [VIEWER_SPAWN_CAPABILITY_HEADER]: ensureOperatorSpawnCapability(),
+    },
+    body: JSON.stringify({ conversationId: "conversation_root", action: "stop" }),
+  })) as unknown as Response;
   expect(response.status).not.toBe(403);
 });
 

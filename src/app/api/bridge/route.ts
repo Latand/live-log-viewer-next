@@ -6,6 +6,7 @@ import {
   pendingBridgeDelivery,
   redeemBridgeAcknowledgement,
 } from "@/lib/bridge/service";
+import { requireOperatorAuthority } from "@/lib/agent/operatorAuthority";
 import { authenticateBridgeGateway } from "@/lib/bridge/gatewayAuthority";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { FileTransactionBusyError } from "@/lib/state/fileTransaction";
@@ -47,6 +48,8 @@ const MAX_ACKNOWLEDGED_IDS = 256;
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const parameters = request.nextUrl.searchParams;
+  /* The LIVE path: the drain carries deploy nonces, so reading it needs the same
+     proof writing into the call does. */
   const gateway = authenticateBridgeGateway(parameters.get("realtimeSessionId"));
   if (!gateway.ok) return NextResponse.json({ error: gateway.error }, { status: 403, headers });
 
@@ -54,6 +57,11 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
      into, so its inbox becomes part of that turn's own input. Same cursor, same
      caps, same "read moves nothing" rule as the live drain. */
   if (parameters.get("mode") === "turn-start") {
+    /* The NO-CALL path, so a live session id is exactly what does not exist here —
+       requiring one defeated the branch it was added to protect. The operator's own
+       composer is opening a turn, so the operator credential is the right proof. */
+    const operator = requireOperatorAuthority(request);
+    if (!operator.ok) return NextResponse.json({ error: operator.error }, { status: operator.status, headers });
     try {
       const prelude = bridgeTurnStartPrelude({ now: new Date() });
       return NextResponse.json({
@@ -101,10 +109,14 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   } catch {
     return NextResponse.json({ error: "invalid JSON" }, { status: 400, headers });
   }
+  /* Either proof settles a batch: the live peer that received it, or the operator
+     whose turn carried it. Both are the gateway surface; neither is an agent. */
   const gateway = authenticateBridgeGateway(
     typeof body.realtimeSessionId === "string" ? body.realtimeSessionId : null,
   );
-  if (!gateway.ok) return NextResponse.json({ error: gateway.error }, { status: 403, headers });
+  if (!gateway.ok && !requireOperatorAuthority(request).ok) {
+    return NextResponse.json({ error: gateway.error }, { status: 403, headers });
+  }
 
   /* The batch, by the token it was handed out with. A caller cannot name a sequence:
      acknowledging reports it never received is how the whole inbox goes quiet. */

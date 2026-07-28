@@ -15,40 +15,36 @@ import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
  * operator's own call, therefore need a different question answered — not "which
  * conversation are you" but "are you a conversation at all".
  *
- * Two signals, in the order that matters:
+ * A CREDENTIAL, NOT A HEADER SHAPE. The first version of this accepted
+ * `sec-fetch-site: same-origin` with a matching `Origin`/`Host` as proof of being the
+ * operator's browser. That was wrong, and wrong in the way that matters most here: a
+ * forbidden header name is forbidden to page JavaScript, not to a local process, so
+ * any worker could omit its own capability, write those three headers, and inherit
+ * the right to appoint itself the manager. Same-origin is a CSRF signal about where a
+ * browser request came from; it is not an identity, and every gate in this feature
+ * ultimately resolves here.
  *
- * 1. A caller presenting a spawn capability the registry can NAME is a worker, and is
- *    refused outright. This is the positive identification, and it is the one that
- *    closes the reported hole: a local worker holds exactly this.
- * 2. Otherwise the request must look like the operator's own browser — `sec-fetch-site:
- *    same-origin` with a matching `Origin`/`Host` — or carry the operator capability.
- *    `sec-fetch-site` is a forbidden header name, so page JavaScript cannot forge it,
- *    and this is the same discrimination `spawn/admission.ts` already trusts to decide
- *    whether a spawn needs a capability at all.
+ * So authority is possession of the operator capability — the 0600 secret
+ * `operatorCapability.ts` already mints for exactly this purpose, and which
+ * `spawn/admission.ts` already treats as operator proof. Agents are issued their own
+ * per-conversation capability instead; presenting one names the caller as a worker
+ * and is refused outright.
  *
- * Not cryptographic isolation against a process running as the operator — nothing in
- * this app is, since the capability file is readable by the same uid. What it does do
- * is stop an agent from making these calls with the credentials it actually has.
+ * The operator's browser gets it the only way a browser can hold a server secret: the
+ * server renders it into the page it serves. That is a possession check an agent
+ * cannot satisfy by writing headers.
+ *
+ * Not isolation against a process running as the operator's own uid, which could read
+ * the file — nothing in this app is, and that is the repo's standing boundary. What it
+ * does close is the gap the review found: authority derived from evidence the caller
+ * can simply write.
  */
 
 export type OperatorAuthority =
-  | { ok: true; via: "browser" | "capability" }
+  | { ok: true }
   | { ok: false; status: number; error: string };
 
 const AGENT_CAPABILITY = /^[A-Za-z0-9_-]{43}$/;
-
-/** A genuine same-origin browser request. Mirrors `isAgentInitiatedSpawn`, inverted. */
-function fromOperatorBrowser(request: Pick<NextRequest, "headers">): boolean {
-  if (request.headers.get("sec-fetch-site") !== "same-origin") return false;
-  const origin = request.headers.get("origin");
-  const host = request.headers.get("host");
-  if (!origin || !host) return false;
-  try {
-    return new URL(origin).host === host;
-  } catch {
-    return false;
-  }
-}
 
 type ConversationResolver = (digest: string) => string | null;
 
@@ -70,39 +66,33 @@ export function callerConversationId(request: Pick<NextRequest, "headers">): str
   return resolveConversation(crypto.createHash("sha256").update(capability).digest("hex"));
 }
 
+const MISSING: OperatorAuthority = {
+  ok: false,
+  status: 403,
+  error: "this is an operator-only action and requires the operator capability; header shape and same-origin do not authorize it",
+};
+
 export function requireOperatorAuthority(request: Pick<NextRequest, "headers">): OperatorAuthority {
   const capability = request.headers.get(VIEWER_SPAWN_CAPABILITY_HEADER)?.trim() ?? "";
+  if (!capability) return MISSING;
 
-  /* An agent that presented its own capability has named itself. Refused before
-     anything else, so a worker cannot reach the browser branch by ALSO looking like
-     a browser. */
-  if (capability) {
-    if (callerConversationId(request)) {
-      return {
-        ok: false,
-        status: 403,
-        error: "this is an operator-only action; an agent may not perform it, whatever role it holds",
-      };
-    }
-    try {
-      if (matchesOperatorSpawnCapability(capability)) return { ok: true, via: "capability" };
-    } catch (error) {
-      if (error instanceof OperatorSpawnCapabilityError) {
-        return { ok: false, status: 503, error: error.message };
-      }
-      throw error;
-    }
+  /* An agent that presented its own capability has named itself. Refused before the
+     operator comparison so the answer cannot depend on anything else about the
+     request. */
+  if (callerConversationId(request)) {
     return {
       ok: false,
       status: 403,
-      error: "the presented capability does not authorize this operator-only action",
+      error: "this is an operator-only action; an agent may not perform it, whatever role it holds",
     };
   }
-
-  if (fromOperatorBrowser(request)) return { ok: true, via: "browser" };
-  return {
-    ok: false,
-    status: 403,
-    error: "this is an operator-only action: call it from the Viewer, or present the operator capability",
-  };
+  try {
+    if (matchesOperatorSpawnCapability(capability)) return { ok: true };
+  } catch (error) {
+    if (error instanceof OperatorSpawnCapabilityError) {
+      return { ok: false, status: 503, error: error.message };
+    }
+    throw error;
+  }
+  return MISSING;
 }

@@ -61,7 +61,7 @@ import {
 import { mintIdempotencyKey, receiptIsAdmitted, receiptIsTerminal } from "./runtime/runtimeModel";
 import { useAgentCapabilities } from "./useAgentCapabilities";
 import { VoiceConversationButton, VoiceConversationPanel } from "./VoiceConversation";
-import { useBridgeTurnStartDrain } from "@/hooks/useBridgeReportRelay";
+import { commitBridgeTurn, useBridgeTurnStartDrain } from "@/hooks/useBridgeReportRelay";
 
 import { composerStore } from "./voice/composerStore";
 import { VoiceFloatButton } from "./voice/VoiceFloatButton";
@@ -1024,7 +1024,7 @@ export function TmuxComposer({
   });
   /* Pulls the bridge inbox once, at the start of a turn, and only for the voice
      conversation. Returns "" for every other card and whenever nothing is pending. */
-  const drainBridgeTurnStart = useBridgeTurnStartDrain(voiceEnabled, { realtimeSession: voice.realtimeSession });
+  const drainBridgeTurnStart = useBridgeTurnStartDrain(voiceEnabled);
   const { text, textRef, setText, setTextState, inputRef, setStatus, busy, setBusy, voiceSending, attachments } = composer;
   const attachmentDraftHydrated = useRef(false);
   const isMobile = useIsMobile();
@@ -1074,6 +1074,19 @@ export function TmuxComposer({
      for a consumed key, must neither report a false failure, re-arm a pending
      entry, nor clear text the user typed afterwards. Bounded, newest last. */
   const settledSendKeys = useRef<Set<string>>(new Set());
+  /* #691 §4 — a drained bridge batch whose turn has not been durably admitted yet.
+     Keyed by the delivery key rather than captured in a closure, because a structured
+     send's admission can arrive later on the receipt stream, when that closure is
+     gone: the token is a value, so it survives the wait. Committed exactly once —
+     the entry is deleted before the request goes out, so a receipt arriving twice
+     acknowledges once. */
+  const pendingBridgeCommits = useRef<Map<string, string>>(new Map());
+  const commitBridgeFor = (deliveryKey: string) => {
+    const ackToken = pendingBridgeCommits.current.get(deliveryKey);
+    if (!ackToken) return;
+    pendingBridgeCommits.current.delete(deliveryKey);
+    commitBridgeTurn(ackToken);
+  };
   /* Per-idempotency-key snapshot of the runtime settings a structured send
      carries (issue #390 §10): a same-key replay must re-send *identical*
      settings — a pill selection made between attempts changes only the NEXT
@@ -1523,7 +1536,12 @@ export function TmuxComposer({
       updateOutbox(cardId, outboxId, { state, settledAt: nowMs(), ...(error ? { error } : {}) });
       if (state === "delivered") outboxImages.current.delete(outboxId);
     };
-    const settleOutboxFromReceipt = (receipt: RuntimeReceipt) => settleOutbox(outboxStateForReceiptStatus(receipt.status));
+      const settleOutboxFromReceipt = (receipt: RuntimeReceipt) => {
+      /* The late admission: a send that answered `pending` and settled on the receipt
+         stream. This is the moment its bridge batch became durable. */
+      if (receiptIsAdmitted(receipt.status)) commitBridgeFor(clientMessageId);
+      return settleOutbox(outboxStateForReceiptStatus(receipt.status));
+    };
     /* Resolve the key before selecting the payload. A generation retained after
        uncertain admission owns an immutable text/image snapshot; later edits
        stay in the composer for the following generation while an explicit
@@ -1718,17 +1736,17 @@ export function TmuxComposer({
           }));
       const json = await withComposerAdmissionDeadline(admissionRequest, COMPOSER_ADMISSION_DEADLINE_MS);
       /* #691 §4 — the bridge cursor moves only on DURABLE admission.
-         `json.ok` is not that. A structured send answers ok with a receipt that may
-         still be `pending`, which is a message the server has not committed to
-         holding; retiring the reports on that would lose them if it never settles.
-         So the cursor waits for a receipt the outbox itself would call admitted, and
-         for the legacy path — which has no receipt and no queue behind it — an ok
-         response IS the admission. */
-      const durablyAdmitted = json.ok
-        && (json.structured
-          ? Boolean(json.receipt && receiptIsAdmitted(json.receipt.status))
-          : true);
-      if (durablyAdmitted) bridgeTurn?.commit();
+         `json.ok` is not that: a structured send answers ok with a receipt that may
+         still be `pending`, which the server has not committed to holding. So the
+         cursor waits for a receipt the outbox itself calls admitted; the legacy path
+         has no queue to be pending in, so there an ok response IS the admission.
+         Anything still in flight parks its token under the delivery key and is
+         settled by whichever receipt admits it later. */
+      if (bridgeTurn?.ackToken) pendingBridgeCommits.current.set(clientMessageId, bridgeTurn.ackToken);
+      const admittedNow = json.ok
+        && (json.structured ? Boolean(json.receipt && receiptIsAdmitted(json.receipt.status)) : true);
+      if (admittedNow) commitBridgeFor(clientMessageId);
+      else if (!json.ok) pendingBridgeCommits.current.delete(clientMessageId);
       if (!json.ok) {
         if (json.structured && json.receipt) {
           /* Keep the payload readable in the compact receipt for retry and

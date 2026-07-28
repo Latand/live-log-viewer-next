@@ -20,6 +20,7 @@ import type { FileEntry } from "@/lib/types";
 
 import { attentionId, buildAttentionQueue, nextAttention, STALLED_ATTENTION_TTL, type AttentionItem } from "./attention";
 import { AttentionHost } from "./attention/AttentionHost";
+import { seedOperatorCredential } from "./operatorCredential";
 import { VoicePipHost } from "./voice/VoicePipHost";
 import { focusHandoffBus } from "./attention/focusHandoffBus";
 import { ConnectionPill } from "./ConnectionPill";
@@ -100,8 +101,12 @@ function attentionSnippet(t: TFunction, item: AttentionItem): string {
   return t("status.stalled");
 }
 
-export function Viewer() {
+export function Viewer({ operatorCredential = null }: { operatorCredential?: string | null } = {}) {
   const { t } = useLocale();
+  /* Seeded from the server render, before anything can issue an operator-only
+     request. Not an effect: an effect runs after the first paint, and a control
+     pressed in between would send an unauthenticated call. */
+  seedOperatorCredential(operatorCredential);
   /* The one presence publisher for the whole app: it reads the shared view bus
      that the board/scheme/mobile components report into and ships an ephemeral
      per-tab snapshot to the server. Renders nothing. */

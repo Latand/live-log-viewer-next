@@ -1,12 +1,13 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
+import { useEffect } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
 import { installActEnv } from "@/test-helpers/actEnv";
 import type { RuntimeVoiceDelivery } from "@/lib/runtime/voiceDelivery";
 
-import { useBridgeReportRelay } from "./useBridgeReportRelay";
+import { commitBridgeTurn, useBridgeReportRelay, useBridgeTurnStartDrain } from "./useBridgeReportRelay";
 
 /**
  * The relay drives the loop, in the order that keeps reports exactly-once.
@@ -245,4 +246,65 @@ test("the poll presents this call's credential", async () => {
 
   const poll = calls.find((call) => call.method === "GET");
   expect(poll?.url).toContain("realtimeSessionId=rt_sess_relay");
+});
+
+test("turn-start drains with NO live call — that is the path it exists for", async () => {
+  /* Requiring a live session here meant the inbox drained only while it was not
+     needed. The turn-start path authenticates as the operator instead. */
+  const requests: { url: string; method: string; body: unknown }[] = [];
+  const turnFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    requests.push({ url, method: init?.method ?? "GET", body: init?.body ? JSON.parse(String(init.body)) as unknown : null });
+    if ((init?.method ?? "GET") === "GET") {
+      return new Response(JSON.stringify({
+        ok: true,
+        prelude: { text: "While you were away…", ackToken: "ack_turn" },
+      }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  }) as unknown as typeof fetch;
+
+  /* Published from an effect, so the probe stays a pure component. */
+  const drains: (() => Promise<{ text: string; ackToken: string; commit: () => void }>)[] = [];
+  function Probe({ publish }: { publish: (drain: () => Promise<{ text: string; ackToken: string; commit: () => void }>) => void }) {
+    const drain = useBridgeTurnStartDrain(true, { fetchFn: turnFetch });
+    useEffect(() => { publish(drain); }, [drain, publish]);
+    return null;
+  }
+  const container = dom.document.createElement("div");
+  dom.document.body.appendChild(container);
+  const root = createRoot(container as unknown as Element);
+  roots.push(root);
+  const publish = (drain: () => Promise<{ text: string; ackToken: string; commit: () => void }>) => { drains.push(drain); };
+  flushSync(() => root.render(<Probe publish={publish} />));
+  await settle();
+
+  const turn = await drains.at(-1)!();
+  expect(turn.text).toContain("While you were away");
+  expect(turn.ackToken).toBe("ack_turn");
+  /* No session id anywhere in the request: there is no call to have one. */
+  expect(requests[0]!.url).not.toContain("realtimeSessionId");
+
+  /* And nothing was acknowledged by draining alone. */
+  expect(requests.filter((entry) => entry.method === "POST")).toEqual([]);
+  turn.commit();
+  await settle();
+  expect(requests.find((entry) => entry.method === "POST")?.body).toEqual({ ackToken: "ack_turn" });
+});
+
+test("commitBridgeTurn settles a batch by token, long after the closure is gone", async () => {
+  const posts: unknown[] = [];
+  const tokenFetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+    posts.push(init?.body ? JSON.parse(String(init.body)) as unknown : null);
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  }) as unknown as typeof fetch;
+
+  commitBridgeTurn("ack_late", tokenFetch);
+  await settle();
+  expect(posts).toEqual([{ ackToken: "ack_late" }]);
+
+  /* An empty token is a no-op rather than a malformed request. */
+  commitBridgeTurn("", tokenFetch);
+  await settle();
+  expect(posts).toHaveLength(1);
 });

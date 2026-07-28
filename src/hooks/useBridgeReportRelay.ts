@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef } from "react";
 
+import { operatorHeaders } from "@/components/operatorCredential";
 import { BRIDGE_LIVE_BATCH_INTERVAL_MS } from "@/lib/bridge/types";
 import type { RuntimeVoiceDelivery } from "@/lib/runtime/voiceDelivery";
 
@@ -65,6 +66,9 @@ const POLL_MS = Math.floor(BRIDGE_LIVE_BATCH_INTERVAL_MS / 3);
 export interface BridgeTurnStart {
   /** Prepended to the turn's own input; "" when nothing is pending. */
   text: string;
+  /** The token that settles this batch, or "" when nothing was drained. Handed to
+      the caller so a send that settles LATER can still acknowledge it. */
+  ackToken: string;
   /**
    * Advance the cursor — call ONLY once the turn carrying `text` has been durably
    * admitted. Same rule as the live path, same reason: a batch folded into a
@@ -74,37 +78,54 @@ export interface BridgeTurnStart {
   commit: () => void;
 }
 
-const NOTHING_PENDING: BridgeTurnStart = { text: "", commit: () => undefined };
+const NOTHING_PENDING: BridgeTurnStart = { text: "", ackToken: "", commit: () => undefined };
+
+/**
+ * Settle a batch whose turn was admitted after the fact.
+ *
+ * A structured send answers `ok` with a receipt that may still be `pending`, and the
+ * durable admission arrives later on the receipt stream — by which time the closure
+ * that drained the batch is long gone. Acknowledging by TOKEN rather than by closure
+ * is what lets the cursor move then: the token is a value, so it survives being
+ * stored beside the delivery key and replayed once.
+ */
+export function commitBridgeTurn(ackToken: string, fetchFn: typeof fetch = fetch): void {
+  if (!ackToken) return;
+  void fetchFn("/api/bridge", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...operatorHeaders() },
+    body: JSON.stringify({ ackToken }),
+  }).catch(() => undefined);
+}
 
 export function useBridgeTurnStartDrain(
   enabled: boolean,
-  options: { fetchFn?: typeof fetch; realtimeSession?: () => string | null } = {},
+  options: { fetchFn?: typeof fetch } = {},
 ): () => Promise<BridgeTurnStart> {
   const fetchFn = options.fetchFn;
-  const realtimeSession = options.realtimeSession;
   return useCallback(async () => {
     if (!enabled) return NOTHING_PENDING;
     const request = fetchFn ?? fetch;
-    const session = realtimeSession?.() ?? null;
-    /* Same credential as the live drain: the inbox carries deploy nonces, so a turn
-       that cannot prove it is the gateway reads nothing. */
-    if (!session) return NOTHING_PENDING;
     try {
-      const response = await request(
-        `/api/bridge?mode=turn-start&realtimeSessionId=${encodeURIComponent(session)}`,
-        { cache: "no-store" },
-      );
+      /* No session id, deliberately: this is the path taken when NO call is live, so
+         requiring one would mean the inbox drains only while it is not needed. The
+         operator credential is what proves this is the Viewer opening a turn. */
+      const response = await request("/api/bridge?mode=turn-start", {
+        cache: "no-store",
+        headers: operatorHeaders(),
+      });
       if (!response.ok) return NOTHING_PENDING;
       const payload = await response.json() as { prelude?: { text: string; ackToken: string } | null };
       const prelude = payload.prelude;
       if (!prelude?.text) return NOTHING_PENDING;
       return {
         text: prelude.text,
+        ackToken: prelude.ackToken,
         commit: () => {
           void request("/api/bridge", {
             method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ ackToken: prelude.ackToken, realtimeSessionId: session }),
+            headers: { "content-type": "application/json", ...operatorHeaders() },
+            body: JSON.stringify({ ackToken: prelude.ackToken }),
           }).catch(() => undefined);
         },
       };
@@ -113,7 +134,7 @@ export function useBridgeTurnStartDrain(
          again. A blocked send would be a far worse failure than a late report. */
       return NOTHING_PENDING;
     }
-  }, [enabled, fetchFn, realtimeSession]);
+  }, [enabled, fetchFn]);
 }
 
 export function useBridgeReportRelay(

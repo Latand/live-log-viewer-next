@@ -8,6 +8,7 @@ import { NextRequest } from "next/server";
 import crypto from "node:crypto";
 
 import { setCallerConversationResolverForTests } from "@/lib/agent/operatorAuthority";
+import { ensureOperatorSpawnCapability, rotateOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { setRetireManagerForTests } from "@/lib/orchestrator/retire";
 
@@ -48,15 +49,14 @@ afterEach(() => {
 
 const WORKER_CAPABILITY = crypto.randomBytes(32).toString("base64url");
 
-/** The operator's own Viewer: a real browser's same-origin fetch. */
+/** The operator's own Viewer, holding the capability the server rendered to it. */
 function browserRequest(body: unknown): NextRequest {
   return new NextRequest("http://127.0.0.1/api/orchestrator", {
     method: "POST",
     headers: {
       host: "127.0.0.1",
-      origin: "http://127.0.0.1",
-      "sec-fetch-site": "same-origin",
       "content-type": "application/json",
+      [VIEWER_SPAWN_CAPABILITY_HEADER]: ensureOperatorSpawnCapability(),
     },
     body: JSON.stringify(body),
   });
@@ -115,7 +115,7 @@ test("POST validates its body", async () => {
      point of checking authority first. */
   const invalid = new NextRequest("http://127.0.0.1/api/orchestrator", {
     method: "POST",
-    headers: { host: "127.0.0.1", origin: "http://127.0.0.1", "sec-fetch-site": "same-origin" },
+    headers: { host: "127.0.0.1", [VIEWER_SPAWN_CAPABILITY_HEADER]: ensureOperatorSpawnCapability() },
     body: "{",
   });
   expect((await POST(invalid)).status).toBe(400);
@@ -268,7 +268,7 @@ test("a worker cannot adopt the slot when no manager is designated either", asyn
   expect((await (await GET()).json()).record).toBeNull();
 });
 
-test("a caller that presents no credential and does not look like the Viewer is refused", async () => {
+test("a caller presenting no credential is refused", async () => {
   const bare = new NextRequest("http://127.0.0.1/api/orchestrator", {
     method: "POST",
     headers: { host: "127.0.0.1", "content-type": "application/json" },
@@ -276,6 +276,48 @@ test("a caller that presents no credential and does not look like the Viewer is 
   });
   expect((await POST(bare)).status).toBe(403);
   expect((await (await GET()).json()).record).toBeNull();
+});
+
+test("FORGED same-origin headers cannot replace the manager, and the refusal changes nothing", async () => {
+  /* The round-6 finding: authority used to be inferred from headers a local process
+     writes freely, so a worker could omit its capability, look like the Viewer, and
+     take the designation. */
+  const transcript = path.join(sandbox, "orchestrator.jsonl");
+  fs.writeFileSync(transcript, "", "utf8");
+  await POST(browserRequest({ conversationId: "conv-incumbent", path: transcript }));
+
+  const forged = new NextRequest("http://127.0.0.1/api/orchestrator", {
+    method: "POST",
+    headers: {
+      host: "127.0.0.1",
+      origin: "http://127.0.0.1",
+      "sec-fetch-site": "same-origin",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ conversationId: "conversation_impostor", path: null, replace: true }),
+  });
+  expect((await POST(forged)).status).toBe(403);
+
+  /* BOTH untouched. */
+  expect((await (await GET()).json()).record).toMatchObject({ conversationId: "conv-incumbent" });
+  expect(retirements).toEqual([]);
+});
+
+test("a stale operator capability cannot replace the manager either", async () => {
+  const transcript = path.join(sandbox, "orchestrator.jsonl");
+  fs.writeFileSync(transcript, "", "utf8");
+  const stale = ensureOperatorSpawnCapability();
+  await POST(browserRequest({ conversationId: "conv-incumbent", path: transcript }));
+  rotateOperatorSpawnCapability();
+
+  const response = await POST(new NextRequest("http://127.0.0.1/api/orchestrator", {
+    method: "POST",
+    headers: { host: "127.0.0.1", "content-type": "application/json", [VIEWER_SPAWN_CAPABILITY_HEADER]: stale },
+    body: JSON.stringify({ conversationId: "conversation_impostor", path: null, replace: true }),
+  }));
+  expect(response.status).toBe(403);
+  expect((await (await GET()).json()).record).toMatchObject({ conversationId: "conv-incumbent" });
+  expect(retirements).toEqual([]);
 });
 
 test("the operator's own Viewer may still designate", async () => {
