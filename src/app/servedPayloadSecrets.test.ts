@@ -34,6 +34,7 @@ let server: ReturnType<typeof Bun.spawn> | null = null;
 let origin = "";
 let sessionValue = "";
 let sandbox = "";
+let capturedOutput: () => string = () => "";
 
 async function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -60,25 +61,42 @@ beforeAll(async () => {
       LLV_STATE_DIR: path.join(sandbox, "state"),
       HOME: sandbox,
       XDG_CONFIG_HOME: path.join(sandbox, ".config"),
+      /* ROUND 10: the key is no longer printed to stderr, because stderr is captured
+         and persisted by the managed start. It goes to the controlling terminal, or —
+         as here — to a supervisor's descriptor. This test IS that supervisor. */
+      LLV_OPERATOR_KEY_FD: "3",
     },
-    stdout: "pipe",
-    stderr: "pipe",
+    stdio: ["ignore", "pipe", "pipe", "pipe"] as never,
   });
 
-  /* The secret exists only in that process's memory; the startup banner is the only
-     place it is ever emitted, which is precisely the property under test. */
-  const deadline = Date.now() + 60_000;
-  const reader = (server.stderr as ReadableStream<Uint8Array>).getReader();
-  const decoder = new TextDecoder();
-  let seen = "";
-  while (Date.now() < deadline && !sessionValue) {
-    const chunk = await reader.read();
-    if (chunk.done) break;
-    seen += decoder.decode(chunk.value, { stream: true });
-    const match = /\[viewer\] operator key \(paste it[^\n]*\n\[viewer\]\s+([A-Za-z0-9_-]+)/.exec(seen);
-    if (match) sessionValue = match[1]!;
+  const deadline = Date.now() + 45_000;
+  const keyFd = (server as unknown as { stdio: (number | null)[] }).stdio[3];
+  const capturedStreams: string[] = [];
+
+  /* Read the key off the private descriptor — the FIRST LINE only. Reading to EOF
+     would block until the server exits, because it holds the write end open. */
+  if (typeof keyFd === "number") {
+    const reader = Bun.file(keyFd).stream().getReader();
+    const decoder = new TextDecoder();
+    let handed = "";
+    while (Date.now() < deadline && !handed.includes("\n")) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      handed += decoder.decode(chunk.value, { stream: true });
+    }
+    void reader.cancel().catch(() => undefined);
+    sessionValue = handed.split("\n")[0]!.trim();
   }
-  void reader.cancel().catch(() => undefined);
+
+  /* And keep everything the process wrote to its CAPTURED streams, so the assertions
+     below can prove the key is not in them. */
+  const drain = async (stream: ReadableStream<Uint8Array> | null | undefined): Promise<void> => {
+    if (!stream) return;
+    capturedStreams.push(await new Response(stream).text().catch(() => ""));
+  };
+  void drain(server.stdout as ReadableStream<Uint8Array>);
+  void drain(server.stderr as ReadableStream<Uint8Array>);
+  capturedOutput = () => capturedStreams.join("\n");
 
   while (Date.now() < deadline) {
     try {
@@ -101,8 +119,17 @@ test("the production build exists, so this test can actually run", () => {
   expect(built).toBe(true);
 });
 
-test("the startup banner is the only place the session secret appears", () => {
+test("the key reaches the supervisor's descriptor, not a captured stream", () => {
   expect(sessionValue).toMatch(/^[A-Za-z0-9_-]{20,}$/);
+});
+
+test("neither stdout nor stderr carries the key", async () => {
+  /* The round-10 finding: stderr belongs to the container logging driver, so a key
+     written there is a bearer at rest in a log file that every same-uid process can
+     read. Give the streams a moment to flush, then look. */
+  await Bun.sleep(300);
+  const captured = capturedOutput();
+  expect(captured).not.toContain(sessionValue);
 });
 
 test("an anonymously fetched document carries no operator secret", async () => {

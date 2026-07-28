@@ -155,31 +155,80 @@ export async function startCurrentReleaseControllers(
   scheduleAccountMigrationController(startAccountMigrationController, accountControllerDelayMs(env));
 }
 
+/**
+ * Hand the operator key to a channel that is NOT captured output (#691 round 10).
+ *
+ * `console.error` is stderr, and under the managed/detached start stderr belongs to
+ * the container logging driver, which writes it to a JSON file on disk. A bearer in a
+ * log file is a bearer at rest, readable by every same-uid process — the same defect
+ * as the served page and the state file, arriving through the one channel that looked
+ * like it was only for humans.
+ *
+ * Two acceptable sinks, both of which vanish when the process ends:
+ *
+ * - the CONTROLLING TERMINAL (`/dev/tty`), which exists only for an interactive
+ *   launch and is never the log stream, even when stdout and stderr are redirected;
+ * - an inherited FILE DESCRIPTOR named by `LLV_OPERATOR_KEY_FD`, for a supervisor
+ *   that wants to collect the key over a pipe without it touching a log.
+ *
+ * When neither exists — precisely the detached case — NOTHING IS EMITTED. The startup
+ * says so in a line carrying no key material, and operator-only actions stay locked
+ * until the operator starts the Viewer somewhere they can read it. Silence is the
+ * correct behaviour: a key nobody can safely receive should not be broadcast.
+ *
+ * Returns where it went, so the caller can log THAT rather than the key.
+ */
+export function emitOperatorKey(
+  capability: string,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  writeTo: (target: string | number, line: string) => void = (target, line) => {
+    fs.writeFileSync(typeof target === "number" ? target : target, line);
+  },
+): "tty" | "fd" | "withheld" {
+  const line = `${capability}\n`;
+
+  const descriptor = Number.parseInt(env.LLV_OPERATOR_KEY_FD?.trim() ?? "", 10);
+  if (Number.isInteger(descriptor) && descriptor > 2) {
+    try {
+      writeTo(descriptor, line);
+      return "fd";
+    } catch {
+      /* The supervisor closed it; fall through rather than falling back to stderr. */
+    }
+  }
+
+  try {
+    writeTo("/dev/tty", line);
+    return "tty";
+  } catch {
+    /* No controlling terminal: detached, containerised, or supervised. */
+  }
+  return "withheld";
+}
+
 export async function initializeOperatorSpawnCapabilityAtStartup(
   env: Readonly<Record<string, string | undefined>> = process.env,
   log: (line: string) => void = (line) => console.error(line),
+  emit: typeof emitOperatorKey = emitOperatorKey,
 ): Promise<void> {
   const { ensureOperatorSpawnCapability, rotateOperatorSpawnCapability } = await import("@/lib/agent/operatorCapability");
   if (env.LLV_ROTATE_OPERATOR_SPAWN_CAPABILITY === "1") rotateOperatorSpawnCapability();
   else ensureOperatorSpawnCapability();
 
-  /* The printed key is the in-memory session secret, never the on-disk spawn
-     capability: a file every worker can read is not a credential. */
+  /* The key is the in-memory session secret, never the on-disk spawn capability: a
+     file every worker can read is not a credential. */
   const { operatorSessionSecret } = await import("@/lib/agent/operatorSession");
-  const capability = operatorSessionSecret();
+  const delivered = emit(operatorSessionSecret(), env);
 
   const port = env.PORT?.trim() || "8898";
   const origin = `http://127.0.0.1:${port}`;
-  /* THE BARE KEY, not a clickable link (#691 round 9). Round 7 printed the capability
-     in a URL fragment: fragments genuinely never reach the server, but Chromium records
-     the committed URL — fragment and all — in the History database on disk, which every
-     worker can read as the operator's own uid. A value that goes through a URL has been
-     through a file. So this terminal is the handoff, and the operator pastes it into
-     the tab (`components/OperatorKeyGate.tsx`). */
-  log(`[viewer] operator key (paste it into the Viewer to unlock operator-only actions):`);
-  log(`[viewer]   ${capability}`);
-  log(`[viewer] Open ${origin}. Without the key everything still shows; designation and voice transport controls stand down.`);
-  log(`[viewer] The tab holds it in memory only, so a reload asks for it again — this terminal is the one place it exists at rest.`);
+  /* Every line below is key-free by construction. Nothing here may interpolate the
+     capability: this function's output IS the captured log. */
+  log(`[viewer] Open ${origin}.`);
+  log(delivered === "withheld"
+    ? "[viewer] operator key withheld: no controlling terminal and no LLV_OPERATOR_KEY_FD, so there is no channel that is not a log. Operator-only actions stay locked; start the Viewer from a terminal to receive one."
+    : `[viewer] operator key written to ${delivered === "tty" ? "this terminal" : "the supervisor's descriptor"}; paste it into the Viewer to unlock operator-only actions.`);
+  log("[viewer] Without the key everything still shows; designation and voice transport controls stand down.");
 }
 
 export async function startWakatimeIntegrationIfEnabled(

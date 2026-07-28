@@ -61,6 +61,9 @@ const LEGACY_FRAGMENT = "llv-operator";
 /** Where round 8 mirrored the bearer. Recognized only so it can be deleted. */
 const LEGACY_STORAGE_KEY = "llv.operator.capability";
 
+/** What `operatorSessionSecret()` mints: 32 random bytes, base64url — 43 characters. */
+const OPERATOR_KEY_SHAPE = /^[A-Za-z0-9_-]{43}$/;
+
 /* The whole credential. Volatile by design: see above. */
 let capability: string | null = null;
 
@@ -85,7 +88,11 @@ function announce(): void {
  */
 export function adoptOperatorCredential(pasted: string): boolean {
   const value = pasted.trim();
-  if (!value) return false;
+  /* Shape-checked, so a stray paste — a URL, a log line, half a token — closes the
+     gate on a value that cannot possibly work and then fails silently at every
+     operator action. The server still decides; this only refuses what could never be
+     a key. */
+  if (!OPERATOR_KEY_SHAPE.test(value)) return false;
   capability = value;
   announce();
   return true;

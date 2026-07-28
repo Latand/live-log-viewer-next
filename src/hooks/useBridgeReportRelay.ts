@@ -108,6 +108,31 @@ export async function commitBridgeTurn(ackToken: string, fetchFn: typeof fetch =
   if (!response.ok) throw new Error(`bridge acknowledgement refused with ${response.status}`);
 }
 
+/**
+ * Settle every token still parked from an earlier turn, to completion.
+ *
+ * Run BEFORE a drain, and awaited, so the two cannot interleave: draining first would
+ * hand out a fresh batch while an older one is still unacknowledged, and the cursor
+ * would move past reports the operator never heard. A token that is refused stays
+ * parked and is tried again at the next drain, so a transient failure costs a delay
+ * rather than a batch.
+ */
+export async function retirePendingBridgeAcknowledgements(
+  fetchFn: typeof fetch = fetch,
+  subject: (waitingOn: string) => boolean = () => true,
+): Promise<void> {
+  for (const entry of pendingBridgeAcknowledgements()) {
+    if (!subject(entry.waitingOn)) continue;
+    try {
+      await commitBridgeTurn(entry.ackToken, fetchFn);
+      forgetBridgeAcknowledgement(entry.waitingOn);
+    } catch {
+      /* Kept: the cursor did not move, so this token is still the only thing that can
+         settle its batch. The next drain tries again. */
+    }
+  }
+}
+
 export function useBridgeTurnStartDrain(
   enabled: boolean,
   options: { fetchFn?: typeof fetch } = {},
@@ -116,6 +141,9 @@ export function useBridgeTurnStartDrain(
   return useCallback(async () => {
     if (!enabled) return NOTHING_PENDING;
     const request = fetchFn ?? fetch;
+    /* Ahead of the GET, and awaited. A drain that ran first would hand out a new
+       batch on top of an unsettled one. */
+    await retirePendingBridgeAcknowledgements(request, (waitingOn) => !waitingOn.startsWith("voice:"));
     try {
       /* No session id, deliberately: this is the path taken when NO call is live, so
          requiring one would mean the inbox drains only while it is not needed. The

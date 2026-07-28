@@ -4,11 +4,15 @@ import { useEffect } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
-import { pendingBridgeAcknowledgements, resetBridgeAcknowledgementsForTests } from "@/lib/bridge/pendingAcknowledgements";
+import {
+  pendingBridgeAcknowledgements,
+  rememberBridgeAcknowledgement,
+  resetBridgeAcknowledgementsForTests,
+} from "@/lib/bridge/pendingAcknowledgements";
 import { installActEnv } from "@/test-helpers/actEnv";
 import type { RuntimeVoiceDelivery } from "@/lib/runtime/voiceDelivery";
 
-import { commitBridgeTurn, useBridgeReportRelay, useBridgeTurnStartDrain } from "./useBridgeReportRelay";
+import { commitBridgeTurn, retirePendingBridgeAcknowledgements, useBridgeReportRelay, useBridgeTurnStartDrain } from "./useBridgeReportRelay";
 
 /**
  * The relay drives the loop, in the order that keeps reports exactly-once.
@@ -439,4 +443,60 @@ test("a turn-start commit that is refused does not report success", async () => 
      403 read as a settled batch on the one path that runs when no call is live. */
   const refusing = (async () => new Response(JSON.stringify({ error: "refused" }), { status: 403 })) as unknown as typeof fetch;
   await expect(commitBridgeTurn("ack_refused", refusing)).rejects.toThrow(/403/);
+});
+
+test("a refused composer token is retained and retried to completion before the next drain", async () => {
+  /* The failure this closes: a refused acknowledgement was dropped, so the cursor sat
+     parked and the batch's reports repeated on every later turn. */
+  let refuse = true;
+  const seen: { url: string; method: string; body: unknown }[] = [];
+  const flaky = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    seen.push({ url, method, body: init?.body ? JSON.parse(String(init.body)) as unknown : null });
+    if (method === "POST") {
+      if (refuse) return new Response("no", { status: 503 });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ ok: true, prelude: null }), { status: 200 });
+  }) as unknown as typeof fetch;
+
+  rememberBridgeAcknowledgement("composer-key-1", "ack_parked");
+
+  await retirePendingBridgeAcknowledgements(flaky);
+  /* Refused, so it is NOT forgotten. */
+  expect(pendingBridgeAcknowledgements()).toEqual([{ waitingOn: "composer-key-1", ackToken: "ack_parked" }]);
+
+  refuse = false;
+  await retirePendingBridgeAcknowledgements(flaky);
+  expect(pendingBridgeAcknowledgements()).toEqual([]);
+  expect(seen.filter((entry) => entry.method === "POST")).toHaveLength(2);
+});
+
+test("the retry runs BEFORE the drain, so a new batch never lands on an unsettled one", async () => {
+  const order: string[] = [];
+  const ordered = (async (input: string | URL | Request, init?: RequestInit) => {
+    const method = init?.method ?? "GET";
+    order.push(method === "POST" ? "settle" : "drain");
+    if (method === "POST") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    return new Response(JSON.stringify({ ok: true, prelude: null }), { status: 200 });
+  }) as unknown as typeof fetch;
+
+  rememberBridgeAcknowledgement("composer-key-1", "ack_parked");
+
+  const drains: (() => Promise<{ text: string; ackToken: string; commit: () => void }>)[] = [];
+  function Probe({ publish }: { publish: (drain: () => Promise<{ text: string; ackToken: string; commit: () => void }>) => void }) {
+    const drain = useBridgeTurnStartDrain(true, { fetchFn: ordered });
+    useEffect(() => { publish(drain); }, [drain, publish]);
+    return null;
+  }
+  const container = dom.document.createElement("div");
+  dom.document.body.appendChild(container);
+  const root = createRoot(container as unknown as Element);
+  roots.push(root);
+  flushSync(() => root.render(<Probe publish={(drain) => { drains.push(drain); }} />));
+  await settle();
+
+  await drains.at(-1)!();
+  expect(order).toEqual(["settle", "drain"]);
 });

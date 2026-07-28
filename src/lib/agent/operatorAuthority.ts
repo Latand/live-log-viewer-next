@@ -31,8 +31,17 @@ import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
  * issued their own per-conversation capability; presenting one names the caller as a
  * worker and is refused outright.
  *
- * The operator's browser gets the secret out of band, in the URL fragment of the
- * startup link, and it appears in no response and no file.
+ * The operator's browser gets the secret out of band: the server hands it to the
+ * controlling terminal (or a supervisor's descriptor) at startup, never to captured
+ * output, and the operator pastes it into the tab. It appears in no response, no file,
+ * no URL and no log.
+ *
+ * KNOWN INCOMPLETE, and stated here because the comment is the thing that misleads the
+ * next reader: the paste itself crosses the desktop session — clipboard, clipboard
+ * history, accessibility APIs, input automation — all of which a same-uid process can
+ * observe. This gate raises the cost of impersonating the operator; it does not
+ * exclude a same-uid worker, and no arrangement of software on one uid can. See the
+ * round-10 discussion on #691.
  */
 
 export type OperatorAuthority =

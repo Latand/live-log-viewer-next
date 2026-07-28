@@ -53,7 +53,10 @@ afterAll(async () => {
   }
 });
 
-const KEY = "pasted-operator-key-4Kq2Zx";
+/* Exactly what `operatorSessionSecret()` mints: 32 random bytes, base64url — 43
+   characters. The gate now shape-checks, so a plausible-looking-but-wrong string is
+   refused, which is the point of the check. */
+const KEY = "4Kq2ZxPmR7tVbN3wLcJyH8sGdF1aQeU0oI6zXrTvBnM";
 let roots: Root[] = [];
 
 /* `useSyncExternalStore` re-renders off the store notification, which lands after the
@@ -139,4 +142,24 @@ test("an empty submit refuses instead of appearing to unlock", async () => {
   expect(hasOperatorCredential()).toBe(false);
   /* Still open, and saying so, rather than silently closing on a failed paste. */
   expect(container.querySelector("form")).not.toBeNull();
+});
+
+test("a key of the wrong shape is refused rather than closing the gate", async () => {
+  /* Before the shape check, ANY non-empty paste closed the gate — a URL, a log line,
+     half a token — and every operator action then failed with no explanation of why. */
+  const container = render();
+  open(container);
+  for (const wrong of ["not-a-key", "http://127.0.0.1:8898/#llv-operator=abc", KEY.slice(0, 20), `${KEY}extra`]) {
+    /* Re-queried each time: a refused paste re-renders the gate, so a field captured
+       before the attempt is a detached node. */
+    paste(container.querySelector("input") as unknown as HTMLInputElement, wrong);
+    await settle();
+    expect(hasOperatorCredential()).toBe(false);
+    /* Still open, so the operator can see the attempt did not take. */
+    expect(container.querySelector("form")).not.toBeNull();
+  }
+
+  paste(container.querySelector("input") as unknown as HTMLInputElement, KEY);
+  await settle();
+  expect(hasOperatorCredential()).toBe(true);
 });
