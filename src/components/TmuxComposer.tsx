@@ -59,7 +59,11 @@ import {
   withDismissedReceipts,
   writeDismissedReceipts,
 } from "./runtime/deliveryState";
-import { hasOperatorCredential } from "./operatorCredential";
+import {
+  getServerHasOperatorCredential,
+  hasOperatorCredential,
+  subscribeOperatorCredential,
+} from "./operatorCredential";
 import { mintIdempotencyKey, receiptIsAdmitted, receiptIsTerminal } from "./runtime/runtimeModel";
 import { useAgentCapabilities } from "./useAgentCapabilities";
 import { VoiceConversationButton } from "./VoiceConversation";
@@ -71,9 +75,15 @@ import {
 } from "@/lib/bridge/pendingAcknowledgements";
 
 import { VoiceFloatButton } from "./voice/VoiceFloatButton";
+import { VoiceOperatorGate } from "./voice/VoiceOperatorGate";
+import { viewerContextPrelude } from "./voice/viewerContextPrelude";
 import {
+  getServerVoiceComposerHostMounted,
   getServerVoiceSlot,
   getVoiceComposerSlot,
+  isVoiceComposerHostMounted,
+  publishVoiceComposerCardNode,
+  publishVoiceComposerCardProps,
   publishVoiceDockSlot,
   subscribeVoiceSlots,
 } from "./voice/voiceSlots";
@@ -948,18 +958,7 @@ export function structuredComposerSession(runtimeSession: RuntimeSessionView | n
     : null;
 }
 
-/**
- * Chat-style composer pinned under the feed. A live pane gets the text typed
- * straight into its tmux pane; a finished resumable conversation boots a new
- * agent window in the current tmux session with the text as the first prompt.
- * Sent messages stay visible as a queue above the input until dismissed.
- */
-export function TmuxComposer({
-  file,
-  pollPaused = false,
-  deadHost = false,
-  sendBlockedReason = null,
-}: {
+export interface TmuxComposerProps {
   file: FileEntry;
   pollPaused?: boolean;
   deadHost?: boolean;
@@ -968,6 +967,73 @@ export function TmuxComposer({
       is attempted while it is set, so no /api/tmux request can fire against an
       as-yet-unclassified host. */
   sendBlockedReason?: string | null;
+}
+
+/**
+ * Chat-style composer pinned under the feed. A live pane gets the text typed
+ * straight into its tmux pane; a finished resumable conversation boots a new
+ * agent window in the current tmux session with the text as the first prompt.
+ * Sent messages stay visible as a queue above the input until dismissed.
+ *
+ * OWNERSHIP (#691 hoist): for a conversation card this component is only a
+ * dispatcher. The composer machinery — draft, dictation, attachments and their
+ * object URLs, the outbox and the whole send path — must survive the card
+ * unmounting mid-call, so `VoiceComposerHost` (Viewer level) renders the one
+ * `TmuxComposerCore` and portals its form into the place this card publishes.
+ * The card contributes a place and fresh props, never a second composer. Trees
+ * with no host mounted (component tests, the demo renderer) keep the inline
+ * card-scoped composer unchanged, as does every non-conversation surface.
+ */
+export function TmuxComposer(props: TmuxComposerProps) {
+  const hostMounted = useSyncExternalStore(
+    subscribeVoiceSlots,
+    isVoiceComposerHostMounted,
+    getServerVoiceComposerHostMounted,
+  );
+  const cardId = conversationIdentity(props.file);
+  if (!hostMounted || !cardId.startsWith("conversation_")) return <TmuxComposerCore {...props} />;
+  return <VoiceComposerCardSlot cardId={cardId} composerProps={props} />;
+}
+
+/** The card's half of the hoist: a place (a `display: contents` div the host
+    portals the form into) and the props the composer needs, republished every
+    render because `file` is a fresh snapshot each board poll. */
+function VoiceComposerCardSlot({ cardId, composerProps }: { cardId: string; composerProps: TmuxComposerProps }) {
+  const publishNode = useCallback(
+    (node: HTMLDivElement | null) => {
+      if (!node) return undefined;
+      return publishVoiceComposerCardNode(cardId, node);
+    },
+    [cardId],
+  );
+  useEffect(() => {
+    publishVoiceComposerCardProps(cardId, {
+      file: composerProps.file,
+      pollPaused: composerProps.pollPaused ?? false,
+      deadHost: composerProps.deadHost ?? false,
+      sendBlockedReason: composerProps.sendBlockedReason ?? null,
+    });
+  });
+  return <div ref={publishNode} data-testid="voice-composer-card-slot" className="contents" />;
+}
+
+/**
+ * The canonical composer machinery. Rendered inline by ordinary cards, and by
+ * `VoiceComposerHost` for conversation cards — where `dockNode` says where the
+ * form goes: a card's published slot, or (null) a hidden Viewer-level container
+ * that keeps everything mounted while no card is on screen. State never lives in
+ * the portal target; moving containment moves DOM, not lifetimes.
+ */
+export function TmuxComposerCore({
+  file,
+  pollPaused = false,
+  deadHost = false,
+  sendBlockedReason = null,
+  dockNode,
+}: TmuxComposerProps & {
+  /** Absent: render the form inline (the card owns the composer, as ever).
+      A node: portal the form there. Null: keep the form mounted but hidden. */
+  dockNode?: HTMLElement | null;
 }) {
   const { t } = useLocale();
   /* Draft text and delivery receipts key on the stable conversation identity,
@@ -987,12 +1053,19 @@ export function TmuxComposer({
     && structuredSession.session.host === "hosted";
   /* The start control stands down in a tab that never adopted the operator
      credential, exactly as the startup link promises — the backend guard
-     (realtimeInjection) would refuse the start anyway, in internal English. Read
-     at render: adoption runs during the Viewer's render, before any card mounts.
-     A STALE credential (server restarted, tab kept its sessionStorage value)
-     still passes here, reaches the backend, and comes back as the localized
-     authorization notice on the voice panel. */
-  const operatorTab = hasOperatorCredential();
+     (realtimeInjection) would refuse the start anyway, in internal English.
+     STANDS DOWN, never disappears: without the credential the slot renders
+     `VoiceOperatorGate`, which says why in the operator's language and adopts a
+     pasted operator link — the legitimate way in for a tab opened by plain
+     navigation. Subscribed rather than read once, so the paste flips this tab
+     live without a reload. A STALE credential (server restarted, tab kept its
+     sessionStorage value) still passes here, reaches the backend, and comes back
+     as the localized authorization notice on the voice panel. */
+  const operatorTab = useSyncExternalStore(
+    subscribeOperatorCredential,
+    hasOperatorCredential,
+    getServerHasOperatorCredential,
+  );
   const voiceWorkerTurn = structuredSession?.session.liveTurn;
   const voice = useCodexRealtime(
     cardId,
@@ -1603,8 +1676,19 @@ export function TmuxComposer({
        retained generation replays its original bytes under its original key, and
        changing them would defeat the idempotency the retry exists for. */
     const bridgeTurn = replayGeneration ? null : await drainBridgeTurnStart();
+    /* The Viewer-global orchestrator travels with the operator: what they are
+       looking at right now — current project, focused conversation, explicit
+       selection, read from the same view bus presence publishes from — rides
+       into the turn, so "do this in the project I'm viewing" resolves without
+       re-docking the floating window. Composed at dispatch and never on a
+       replay, exactly like the bridge prelude above; empty whenever the operator
+       is simply looking at this conversation itself. */
+    const viewerPrelude = replayGeneration || !voiceEnabled
+      ? ""
+      : viewerContextPrelude({ path: file.path, project: file.project });
+    const composedText = viewerPrelude ? `${viewerPrelude}\n${requestedText}` : requestedText;
     const payloadText = replayGeneration?.text
-      ?? (bridgeTurn?.text ? `${bridgeTurn.text}\n\n${requestedText}` : requestedText);
+      ?? (bridgeTurn?.text ? `${bridgeTurn.text}\n\n${composedText}` : composedText);
     const sentImages: PendingImage[] = replayGeneration
       ? replayGeneration.images.map((image) => ({ ...image }))
       : requestedImages;
@@ -2009,20 +2093,27 @@ export function TmuxComposer({
       /* ArrowUp/ArrowDown in an empty composer walk what is queued and what
          was already sent, newest first (issue #561). */
       history={composerHistory}
-      voiceControl={voiceEnabled && operatorTab ? (
-        <>
-          <VoiceConversationButton
-            phase={voice.phase}
-            start={voice.start}
-            stop={voice.stop}
-            t={t}
-          />
-          {/* #691 §5: re-float a call whose window the operator closed. Only while a
-              call is up, and only where Document PiP exists — the floater opens
-              itself on voice start, so this is the way back, not the way in. It has
-              to be a real click: `requestWindow` needs transient user activation. */}
-          <VoiceFloatButton phase={voice.phase} t={t} />
-        </>
+      voiceControl={voiceEnabled ? (
+        operatorTab ? (
+          <>
+            <VoiceConversationButton
+              phase={voice.phase}
+              start={voice.start}
+              stop={voice.stop}
+              t={t}
+            />
+            {/* #691 §5: re-float a call whose window the operator closed. Only while a
+                call is up, and only where Document PiP exists — the floater opens
+                itself on voice start, so this is the way back, not the way in. It has
+                to be a real click: `requestWindow` needs transient user activation. */}
+            <VoiceFloatButton phase={voice.phase} t={t} />
+          </>
+        ) : (
+          /* The only entry point to voice must never be a blank space: without
+             the credential the control stands down visibly and offers the
+             operator link paste as the way in. */
+          <VoiceOperatorGate t={t} />
+        )
       ) : undefined}
       voicePanel={voiceEnabled && !pipComposerSlot ? (
         /* An empty slot, not a panel: `VoicePipHost` owns the ONE panel rendering
@@ -2093,7 +2184,7 @@ export function TmuxComposer({
     />
   );
 
-  return (
+  const body = (
     <form
       onSubmit={handleSubmit}
       data-testid={isMobile ? "bounded-mobile-composer" : undefined}
@@ -2223,4 +2314,13 @@ export function TmuxComposer({
         : composerBar}
     </form>
   );
+
+  /* Inline for a card that owns its composer; portalled into the card's slot for
+     a hoisted one; parked hidden — mounted, draining, recording — when the card
+     is gone mid-call. The `hidden` container is what keeps a dictation, a staged
+     image's object URL and the outbox dispatcher alive across board navigation. */
+  if (dockNode === undefined) return body;
+  return dockNode
+    ? createPortal(body, dockNode)
+    : <div hidden data-testid="voice-composer-parked">{body}</div>;
 }
