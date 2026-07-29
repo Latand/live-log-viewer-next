@@ -174,6 +174,22 @@ export interface JournalEventRef {
   kind?: string;
 }
 
+/**
+ * Durable, SERVER-DERIVED attribution of who actually raised a request.
+ *
+ * Typed focus is available to every caller, so the record has to say which one
+ * asked: the designated orchestrator, an ordinary agent conversation, the voice
+ * gateway, or a caller the registry could not name. Resolved from the durable
+ * caller identity (process ancestry merged with the admission-injected spawn
+ * capability) — never from anything the caller supplies, so it cannot be
+ * self-asserted and a worker's ask can never masquerade as the root agent's.
+ */
+export interface AttentionRaisedBy {
+  kind: "manager" | "agent" | "gateway" | "unidentified";
+  conversationId: string | null;
+  role: string | null;
+}
+
 /** The viewport captured immediately before a move, so return restores it
     exactly. Per-device, because presence is per-device and two devices in the
     same seat do not want the same framing. */
@@ -205,6 +221,9 @@ export interface AttentionRequestV1 {
       still resolve after it. */
   requestedBy: { rootId: string };
   origin: AttentionOrigin;
+  /** Who actually raised it, server-derived. Absent on legacy records written
+      before attribution existed. */
+  raisedBy?: AttentionRaisedBy;
   target: FocusTarget;
   frameAtCreation: FocusFrame;
   intent: FocusIntent;

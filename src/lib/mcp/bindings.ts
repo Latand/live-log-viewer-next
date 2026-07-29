@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import { agentRegistry } from "@/lib/agent/registry";
 import { procBackend } from "@/lib/proc";
 import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
-import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
+import { VIEWER_SPAWN_CAPABILITY_ENV, VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { applyConversationMigration } from "@/lib/accounts/migration/conversationCommand";
 import { attentionCallerAuthority, processAncestry, type AttentionCallerAuthority, type AttentionCallerSources } from "@/lib/attention/callerAuthority";
 import { UNREAD_FRAME_RECT } from "@/lib/attention/frames";
@@ -25,6 +25,8 @@ import { bridgeDirectiveBody, bridgeDirectiveId } from "@/lib/bridge/directive";
 import { mintBridgeConfirmation } from "@/lib/bridge/confirmation";
 import { isBridgeReportClass } from "@/lib/bridge/types";
 import { readOrchestratorRecord } from "@/lib/orchestrator/store";
+import { authorizedManagerSeats, type ManagerAuthoritySources } from "@/lib/orchestrator/authority";
+import { activeOrchestratorSeats, orchestratorRevocations } from "@/lib/orchestrator/seats";
 import { createPipelineFromRequest, getPipelines, patchPipeline } from "@/lib/pipelines/engine";
 import { latestOperationalPipelineAttempt } from "@/lib/pipelines/attemptSelection";
 import { requestPipelineTick } from "@/lib/pipelines/controllerSignal";
@@ -124,10 +126,45 @@ export interface ViewerMcpDomainDependencies {
       from. Called on the raise path, which is the moment that identity matters. */
   adoptRootSession(): void;
   raiseAttentionRequest: typeof raiseAttentionRequest;
-  /** #688 D4: whether whoever is running this MCP server may ask for the
-      operator's screen at all. Resolved from process ancestry and the registry's
-      recorded hosts, never from anything the caller says. */
+  /** Who is running this MCP server. Resolved from process ancestry and the
+      registry's recorded hosts merged with the admission-injected spawn
+      capability, never from anything the caller says. Under B+ it ATTRIBUTES —
+      it does not gate tool availability. */
   attentionAuthority(): AttentionCallerAuthority;
+  /** The same identity folded with the durable orchestrator designation, as
+      the server-derived origin label for attention requests and bridge
+      reports. Optional so partial test harnesses fall back to a label derived
+      from {@link attentionAuthority} alone (manager reads as agent there). */
+  callerAttribution?(): CallerAttribution;
+}
+
+/** Server-derived origin of the current caller. Shared by the attention record
+    (`raisedBy`) and the bridge report log (`origin`), which store the same
+    shape. */
+export interface CallerAttribution {
+  kind: "manager" | "agent" | "gateway" | "unidentified";
+  conversationId: string | null;
+  role: string | null;
+}
+
+/** Fold the caller authority with "is this the designated orchestrator" into
+    one label. Pure, so every mapping is testable without a process tree. */
+export function callerAttributionFrom(
+  authority: AttentionCallerAuthority,
+  isManagerConversation: (conversationId: string) => boolean,
+): CallerAttribution {
+  if (authority.kind === "root") return { kind: "gateway", conversationId: authority.conversationId, role: null };
+  if (authority.kind === "unidentified") return { kind: "unidentified", conversationId: null, role: null };
+  return {
+    kind: isManagerConversation(authority.conversationId) ? "manager" : "agent",
+    conversationId: authority.conversationId,
+    role: authority.role,
+  };
+}
+
+function attributionOf(dependencies: ViewerMcpDomainDependencies): CallerAttribution {
+  return dependencies.callerAttribution?.()
+    ?? callerAttributionFrom(dependencies.attentionAuthority(), () => false);
 }
 
 /**
@@ -155,31 +192,56 @@ function rootSessionSource(): RootSessionSource {
  * common. Both host shapes count: a tmux-hosted agent is the CLI process that
  * parents this MCP server directly, and a structured host is the app-server or
  * broker that parents it instead.
+ *
+ * A conversation whose entry recorded NO host pid stays in the list with an
+ * empty pid set. It can never win the ancestry walk — there is nothing to match
+ * — but it is still an identity the durable capability lineage may name, and
+ * dropping it was exactly the measured bug: a designated manager whose entry
+ * carried null pids while its host was alive resolved to "unidentified" and was
+ * refused every manager-only tool.
  */
+export function hostedConversationsFromSnapshot(
+  snapshot: Pick<RegistrySnapshot, "conversations" | "entries">,
+): { conversationId: string; role: string | null; pids: number[] }[] {
+  const owners = new Map<string, { id: string; role: string | null }>();
+  const hosted = new Map<string, { conversationId: string; role: string | null; pids: number[] }>();
+  for (const conversation of Object.values(snapshot.conversations)) {
+    const owner = { id: conversation.id, role: conversationRole(conversation) };
+    for (const generation of conversation.generations) owners.set(generation.path, owner);
+    hosted.set(owner.id, { conversationId: owner.id, role: owner.role, pids: [] });
+  }
+  for (const entry of Object.values(snapshot.entries)) {
+    const owner = owners.get(entry.artifactPath);
+    if (!owner) continue;
+    const pids = [entry.host?.agent?.pid, entry.structuredHost?.process?.pid]
+      .filter((pid): pid is number => typeof pid === "number" && pid > 0);
+    hosted.get(owner.id)!.pids.push(...pids);
+  }
+  return [...hosted.values()];
+}
+
+/** The value of the launch-injected spawn capability, resolved to the
+    conversation whose receipt holds its digest. Pure over its resolver so the
+    admission lineage can be exercised without a registry on disk. */
+export function capabilityConversationResolver(
+  capability: string | null | undefined,
+  resolveDigest: (digest: string) => string | null,
+): () => string | null {
+  const value = capability?.trim() ?? "";
+  if (!/^[A-Za-z0-9_-]{43}$/.test(value)) return () => null;
+  const digest = crypto.createHash("sha256").update(value).digest("hex");
+  return () => resolveDigest(digest);
+}
+
 function attentionCallerSources(): AttentionCallerSources {
   return {
     ancestry: () => processAncestry(process.pid, (pid) => procBackend.readPpid(pid)),
     rootConversationId: () => liveRootSession(rootSessionSource())?.conversationId ?? null,
-    hosted: () => {
-      const snapshot = agentRegistry().readOnlySnapshot();
-      const owners = new Map<string, { id: string; role: string | null }>();
-      for (const conversation of Object.values(snapshot.conversations)) {
-        const owner = { id: conversation.id, role: conversationRole(conversation) };
-        for (const generation of conversation.generations) owners.set(generation.path, owner);
-      }
-      const hosted = new Map<string, { conversationId: string; role: string | null; pids: number[] }>();
-      for (const entry of Object.values(snapshot.entries)) {
-        const owner = owners.get(entry.artifactPath);
-        if (!owner) continue;
-        const pids = [entry.host?.agent?.pid, entry.structuredHost?.process?.pid]
-          .filter((pid): pid is number => typeof pid === "number" && pid > 0);
-        if (pids.length === 0) continue;
-        const existing = hosted.get(owner.id);
-        if (existing) existing.pids.push(...pids);
-        else hosted.set(owner.id, { conversationId: owner.id, role: owner.role, pids: [...pids] });
-      }
-      return [...hosted.values()];
-    },
+    hosted: () => hostedConversationsFromSnapshot(agentRegistry().readOnlySnapshot()),
+    capabilityCallerConversationId: capabilityConversationResolver(
+      process.env[VIEWER_SPAWN_CAPABILITY_ENV],
+      (digest) => agentRegistry().conversationIdForSpawnCapabilityDigest(digest),
+    ),
   };
 }
 
@@ -208,6 +270,11 @@ const productionDomainDependencies: ViewerMcpDomainDependencies = {
   adoptRootSession: () => { adoptLiveRootSession(rootSessionSource()); },
   raiseAttentionRequest,
   attentionAuthority: () => attentionCallerAuthority(attentionCallerSources()),
+  callerAttribution: () => callerAttributionFrom(
+    attentionCallerAuthority(attentionCallerSources()),
+    (conversationId) => authorizedManagerSeats(productionManagerAuthoritySources())
+      .some((seat) => seat.conversationId === conversationId),
+  ),
 };
 
 function text(value: unknown): string {
@@ -452,21 +519,29 @@ async function deployExactSha(args: McpToolArgs, control: ViewerControlDependenc
 }
 
 /**
- * The manager's only channel to the user (#691 §4).
+ * The channel the user hears from, callable from EVERY session (B+ item 3).
  *
  * Deliberately thin: everything that makes a report safe — the 2 KB bound, the
  * secret redaction, the idempotent key, the monotonic seq — lives in the store, so
- * this cannot weaken any of it by being called differently. What it does own is
- * minting the confirmation nonce, because a nonce the caller supplied would be a
- * nonce the caller could replay.
+ * this cannot weaken any of it by being called differently. What it does own:
+ *
+ *  - the ORIGIN LABEL, derived server-side from the durable caller identity and
+ *    stored on the row. A non-orchestrator report additionally gets a visible
+ *    attribution prefix in its body, ahead of anything the caller wrote, so the
+ *    gateway can never mistake it for — or speak it as — the manager's voice.
+ *  - minting the confirmation nonce, because a nonce the caller supplied would
+ *    be a nonce the caller could replay. Only the designated orchestrator may
+ *    mint one (B+ item 4); the policy layer refuses everyone else and this
+ *    check is the same contract enforced a second time.
  */
-function bridgeReport(args: McpToolArgs): McpToolPayload {
+function bridgeReport(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): McpToolPayload {
   const key = required(args, "key");
   const reportClass = text(args.class);
   if (!isBridgeReportClass(reportClass)) throw new Error("class must be one of the bridge report classes");
   const body = text(args.body);
   if (!body) throw new Error("body is required");
 
+  const origin = attributionOf(dependencies);
   const requested = args.confirmation && typeof args.confirmation === "object" && !Array.isArray(args.confirmation)
     ? args.confirmation as { sha?: unknown; expiresMinutes?: unknown }
     : null;
@@ -475,6 +550,12 @@ function bridgeReport(args: McpToolArgs): McpToolPayload {
   }
   if (reportClass === "confirmation_request" && !requested) {
     throw new Error("a confirmation_request must carry the SHA it authorizes");
+  }
+  if ((requested || reportClass === "confirmation_request") && origin.kind !== "manager") {
+    throw new McpToolRefusal(
+      "only the designated orchestrator may request a deployment confirmation",
+      { code: "confirmation_not_permitted" },
+    );
   }
   const confirmation = requested
     ? mintBridgeConfirmation({
@@ -485,11 +566,18 @@ function bridgeReport(args: McpToolArgs): McpToolPayload {
     })
     : null;
 
+  /* The visible attribution is SERVER-composed and leads the body, so whatever
+     a caller writes inside its own text appears after the authoritative label. */
+  const attributedBody = origin.kind === "manager"
+    ? body
+    : `[${origin.kind === "gateway" ? "voice gateway" : origin.role ?? "agent"}${origin.conversationId ? ` ${origin.conversationId}` : ""} — not the manager] ${body}`;
+
   const appended = recordManagerReport({
     key,
     class: reportClass,
     at: new Date().toISOString(),
-    body,
+    origin,
+    body: attributedBody,
     correlatesDirective: text(args.correlatesDirective) || null,
     confirmation,
   });
@@ -923,31 +1011,20 @@ async function focusTargetProject(
 }
 
 /**
- * The root agent's own door into #688: ask the operator to look at something.
+ * Typed focus for every agent session (B+ item 2): move the operator's active
+ * Viewer to a typed target, immediately.
  *
- * It only ASKS. The request lands at `pending`, nothing moves until the
- * operator agrees on a device, and their refusal comes back as a refusal rather
- * than as silence. The root identity is resolved server-side by the service, so
- * a caller cannot name a root other than the operator's own — which is the
- * whole of D4's authority rule and why no rootId appears in this schema.
+ * The desktop follows an explicit focus event with no consent step — see
+ * `AttentionHost` — and the record keeps a one-action way back: the return
+ * point is captured before the move and a single Return control restores it.
+ * What replaced the old worker refusal is ATTRIBUTION: `raisedBy` is derived
+ * server-side from the durable caller identity and stored on the record, so a
+ * worker's ask is visibly a worker's ask and can never masquerade as the
+ * operator's own root agent. The root identity is still resolved server-side,
+ * which is why no rootId appears in this schema.
  */
 async function requestAttention(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): Promise<McpToolPayload> {
-  /* Before anything else, and before any state is touched. Every Viewer-spawned
-     worker holds this same tool, and until this check existed a reviewer three
-     levels down could raise a request that landed under `origin: "root-agent"`
-     and the operator's own root identity — the operator could not tell it from
-     the root agent asking, and the root agent would be told "they declined"
-     about something it never asked. Refused rather than silently downgraded to
-     some lesser origin: D4 gives a worker no claim on the screen at all, and an
-     agent that is told no can say so instead of waiting on an answer that is
-     never coming. */
-  const authority = dependencies.attentionAuthority();
-  if (authority.kind === "worker") {
-    throw new McpToolRefusal("only the operator's root session may raise an attention request", {
-      callerConversationId: authority.conversationId,
-      callerRole: authority.role,
-    });
-  }
+  const raisedBy = attributionOf(dependencies);
 
   const target = args.target;
   if (!isFocusTarget(target)) throw new Error("target must be a typed focus target");
@@ -964,6 +1041,7 @@ async function requestAttention(args: McpToolArgs, dependencies: ViewerMcpDomain
   dependencies.adoptRootSession();
   const created = dependencies.raiseAttentionRequest({
     origin: "root-agent",
+    raisedBy,
     target,
     /* Geometric targets ARE their own frame; everything else records that no
        board was read, so a vanished anchor reports `lost` rather than landing
@@ -1001,19 +1079,48 @@ async function requestAttention(args: McpToolArgs, dependencies: ViewerMcpDomain
  * The manager is resolved per call rather than captured, so seating a new
  * incumbent takes effect without restarting anything.
  */
+/** Production evidence for the durable manager-authority resolver: seats and
+    revocations from their store, the legacy record, and fresh registry facts.
+    All resolved per call so replacement, revocation and supersedence take
+    effect on the next tool call. */
+function productionManagerAuthoritySources(): ManagerAuthoritySources {
+  const registry = agentRegistry();
+  return {
+    activeSeats: activeOrchestratorSeats,
+    revocations: orchestratorRevocations,
+    legacyManagerConversationId: () => readOrchestratorRecord()?.conversationId ?? null,
+    conversationFacts: (conversationId) => {
+      const conversation = registry.conversation(conversationId as `conversation_${string}`);
+      if (!conversation) return null;
+      return {
+        superseded: conversation.supersededBy !== null,
+        hasGeneration: conversation.generations.length > 0,
+        project: conversation.projectOwnership?.project ?? null,
+      };
+    },
+    resolveAlias: (conversationId) => registry.conversation(conversationId as `conversation_${string}`)?.id ?? conversationId,
+  };
+}
+
 export function viewerMcpToolPolicy(
   domainDependencies: ViewerMcpDomainDependencies = productionDomainDependencies,
   hostHealthProbe = false,
+  managerAuthoritySources: () => ManagerAuthoritySources = productionManagerAuthoritySources,
 ): McpToolPolicy {
-  const manager = (): ManagerTarget | null => {
-    const record = readOrchestratorRecord();
-    return record ? { conversationId: record.conversationId, path: record.path } : null;
-  };
+  /* Manager identity is fail-closed: only identities the durable resolver
+     authorized count as the manager, whatever the raw record says. Under B+
+     that identity labels origins and gates confirmation minting; it never
+     decides whether a tool is callable. */
+  const callerManagerTarget = (): ManagerTarget => ({
+    conversationId: null,
+    path: null,
+    seats: authorizedManagerSeats(managerAuthoritySources())
+      .map((seat) => ({ conversationId: seat.conversationId, path: seat.path })),
+  });
   return mcpToolPolicy(
     () => hostHealthProbe
       ? { kind: "health-probe" }
-      : mcpCallerIdentity(domainDependencies.attentionAuthority(), manager()),
-    manager,
+      : mcpCallerIdentity(domainDependencies.attentionAuthority(), callerManagerTarget()),
   );
 }
 
@@ -1049,7 +1156,7 @@ export function viewerMcpBindings(
     agent_activity: (args) => agentActivity(args, domainDependencies),
     lifecycle_events: (args) => lifecycleEvents(args, domainDependencies),
     request_attention: (args) => requestAttention(args, domainDependencies),
-    bridge_report: (args) => Promise.resolve(bridgeReport(args)),
+    bridge_report: (args) => Promise.resolve(bridgeReport(args, domainDependencies)),
     bridge_directive: (args) => bridgeDirective(args, controlDependencies),
   };
 }

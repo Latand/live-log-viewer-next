@@ -1,22 +1,20 @@
 /**
- * Who is actually calling `request_attention` (#688 D4).
+ * Who is actually calling the Viewer MCP server.
  *
- * D4 gives the root agent and the operator a claim on the operator's screen,
- * and gives workers none. The record enforces half of that already: `rootId` is
- * resolved server-side, so no caller can name a root of its choosing. The other
- * half was missing. Every Viewer-spawned worker is registered with the same
- * `viewer` MCP server the operator's own session uses, so a worker holding that
- * tool raised a request that landed under `origin: "root-agent"` and the
- * operator's own root identity — indistinguishable, on the record and on the
- * card, from the root agent asking. A reviewer three levels down could take over
- * the operator's screen, and the agent that gets told "they declined" would be
- * one that never asked.
+ * Under B+ this identity ATTRIBUTES rather than gates: every session holds the
+ * full tool surface, and what identity decides is the durable origin written
+ * on attention requests and bridge reports, plus whether the caller is the
+ * designated orchestrator for the one gated operation (minting a deployment
+ * confirmation). `rootId` is still resolved server-side, so no caller can name
+ * a root of its choosing, and a worker's ask is durably a worker's ask.
  *
  * The caller is identified from facts neither side can restate: this process's
- * own ancestry, and the host process ids the registry recorded when it launched
- * each conversation. An MCP server is a child of the agent that started it, so
- * walking up from here reaches that agent's pid, and the registry says which
- * conversation that pid is hosting.
+ * own ancestry, the host process ids the registry recorded when it launched
+ * each conversation, and the spawn capability the Viewer minted at admission
+ * and injected into the launch environment. An MCP server is a child of the
+ * agent that started it, so walking up from here reaches that agent's pid, and
+ * the registry says which conversation that pid is hosting; the capability
+ * digest names the same conversation when every pid is gone.
  *
  * Deliberately pure over supplied sources: the decision is a function of an
  * ancestry and a registry snapshot, so it is testable without a process tree.
@@ -40,35 +38,41 @@ export interface AttentionCallerSources {
   hosted(): readonly HostedConversation[];
   /** The conversation the root lineage currently names, when one is adopted. */
   rootConversationId(): string | null;
+  /** The conversation named by the spawn capability the Viewer minted at
+      admission and injected into this launch's environment — immutable launch
+      lineage that no caller can restate (only its digest is ever stored) and
+      that survives host death, PID change, resume, migration and generation
+      change. Null when no capability is present or it resolves to nothing;
+      the operator's own terminals are launched by nobody and carry none. */
+  capabilityCallerConversationId?(): string | null;
 }
 
 export type AttentionCallerAuthority =
-  /** The operator's own root session. May ask for the screen. */
+  /** The operator's own root session. */
   | { kind: "root"; conversationId: string | null }
-  /** A conversation that is positively NOT the root. May not. */
+  /** A conversation that is positively NOT the root. */
   | { kind: "worker"; conversationId: string; role: string | null }
-  /** No ancestor matched any recorded host. See {@link attentionCallerAuthority}. */
+  /** No evidence named the caller. See {@link attentionCallerAuthority}. */
   | { kind: "unidentified" };
 
 /**
  * The authority of whoever is running this process.
  *
- * `unidentified` is allowed through, and that is a deliberate, bounded choice
- * rather than an oversight. The root session is frequently a terminal the
- * operator started themselves, which the Viewer observes rather than launches,
- * so there are ordinary setups in which no host evidence names it. Refusing
- * those would take the feature away from the very person it exists for, to stop
- * an attack that requires already running code as them. Refusing every caller
- * the registry CAN name as a non-root closes the reachable hole: a worker the
- * Viewer spawned is, by construction, a conversation the registry recorded a
- * host for.
+ * `unidentified` is an honest answer, not a failure mode to hide: the root
+ * session is frequently a terminal the operator started themselves, which the
+ * Viewer observes rather than launches, so there are ordinary setups in which
+ * no evidence names it. The label is recorded as-is wherever attribution is
+ * written, and the only operation it costs anyone is the orchestrator-only
+ * confirmation mint — which an unattributable caller must never hold.
  */
 export function attentionCallerAuthority(sources: AttentionCallerSources): AttentionCallerAuthority {
   const hosted = sources.hosted();
-  if (hosted.length === 0) return { kind: "unidentified" };
+  const capabilityConversationId = sources.capabilityCallerConversationId?.() ?? null;
 
   const byPid = new Map<number, HostedConversation>();
+  const byId = new Map<string, HostedConversation>();
   for (const conversation of hosted) {
+    byId.set(conversation.conversationId, conversation);
     for (const pid of conversation.pids) {
       /* First writer wins: the nearest generation to have claimed a pid is the
          one hosting it, and a pid reused across conversations would otherwise
@@ -80,15 +84,35 @@ export function attentionCallerAuthority(sources: AttentionCallerSources): Atten
   /* Nearest ancestor first. An agent may itself be a descendant of another
      agent's process tree — a worker started from a pane the root also owns —
      and the conversation actually running this tool is the closest one. */
+  let pidMatch: HostedConversation | null = null;
   for (const pid of sources.ancestry()) {
-    const conversation = byPid.get(pid);
-    if (!conversation) continue;
-    if (isRootConversation(conversation, sources.rootConversationId())) {
-      return { kind: "root", conversationId: conversation.conversationId };
-    }
-    return { kind: "worker", conversationId: conversation.conversationId, role: conversation.role };
+    const candidate = byPid.get(pid);
+    if (!candidate) continue;
+    pidMatch = candidate;
+    break;
   }
-  return { kind: "unidentified" };
+
+  /* Two independent evidence chains that DISAGREE identify nobody. Neither is
+     the caller's to restate, so a disagreement means the registry is racing,
+     stale or tampered with — every reading fails closed. */
+  if (pidMatch && capabilityConversationId && pidMatch.conversationId !== capabilityConversationId) {
+    return { kind: "unidentified" };
+  }
+
+  /* The pid walk is physical and ephemeral; the capability is admission
+     lineage and durable. Either alone identifies the caller — the capability
+     is what keeps a correctly designated conversation identified after its
+     host pids were never recorded, changed, or died (the measured null-pid
+     manager refusal). */
+  const conversation = pidMatch
+    ?? (capabilityConversationId
+      ? byId.get(capabilityConversationId) ?? { conversationId: capabilityConversationId, pids: [], role: null }
+      : null);
+  if (!conversation) return { kind: "unidentified" };
+  if (isRootConversation(conversation, sources.rootConversationId())) {
+    return { kind: "root", conversationId: conversation.conversationId };
+  }
+  return { kind: "worker", conversationId: conversation.conversationId, role: conversation.role };
 }
 
 /**

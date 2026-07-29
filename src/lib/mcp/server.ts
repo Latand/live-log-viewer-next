@@ -971,9 +971,9 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   conversation_migration: "Reseat, retry, or roll back a conversation account migration.",
   agent_activity: "Read agent liveness: last transcript record, turn state, whether the host is alive or gone, and how long a stalled conversation has been silent.",
   lifecycle_events: "Query the durable lifecycle event journal by lineage and cursor, or poll a bounded relay digest of what changed since the last one.",
-  request_attention: "Ask the operator to look at something: raise an attention request that offers to move their Viewer to a target and waits for their yes.",
-  bridge_report: "Manager only: append one bounded report to the durable bridge log so the voice gateway can relay it to the user. The only channel from the manager to the user.",
-  bridge_directive: "Voice gateway only: relay the user's intent to the manager. The recipient and the delivery id are derived server-side, so a retry of the same root turn is one instruction, never two.",
+  request_attention: "Move the operator's active Viewer to a typed target immediately — no confirmation prompt. The request is durably attributed to the calling session, and the operator keeps a one-action Return control that restores exactly where they were.",
+  bridge_report: "Append one bounded report to the durable bridge log for the voice gateway to relay. Callable from any session; the origin is labeled server-side, a non-orchestrator report is visibly attributed to its own session, and only the designated orchestrator may carry a confirmation_request.",
+  bridge_directive: "Relay the user's intent to the designated manager. The recipient and the delivery id are derived server-side, so a retry of the same root turn is one instruction, never two.",
 };
 
 const clientRequestIdSchema = z.string().min(1).describe("Stable idempotency key for this logical call.");
@@ -1190,7 +1190,7 @@ const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     confirmation: z.object({
       sha: z.string().regex(/^[0-9a-f]{40}$/).describe("Full lowercase 40-hex commit SHA this authorization is for."),
       expiresMinutes: z.number().int().positive().max(60).optional(),
-    }).optional().describe("confirmation_request only: mints the single-use nonce the gateway must echo back before a deploy."),
+    }).optional().describe("confirmation_request only, designated orchestrator only: mints the single-use nonce the gateway must echo back before a deploy."),
   }).passthrough(),
   bridge_directive: z.object({
     clientRequestId: clientRequestIdSchema,

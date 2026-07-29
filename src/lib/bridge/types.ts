@@ -79,6 +79,23 @@ export interface BridgeConfirmation {
   consumedAt?: string;
 }
 
+/**
+ * SERVER-AUTHENTICATED origin of a report (B+ items 3/4).
+ *
+ * `bridge_report` is callable from every session, so the log has to say which
+ * session each row came from. The label is derived server-side from the
+ * durable caller identity — process ancestry merged with the admission-injected
+ * spawn capability, checked against the durable orchestrator designation —
+ * never from anything the caller supplies. `manager` is the one voice the
+ * gateway relays as the manager's own; every other kind is visibly somebody
+ * else, and only `manager` may carry a `confirmation_request`.
+ */
+export interface BridgeReportOrigin {
+  kind: "manager" | "agent" | "gateway" | "unidentified";
+  conversationId: string | null;
+  role: string | null;
+}
+
 export interface BridgeReportV1 {
   /** Monotonic, never reused — THE cursor unit. */
   seq: number;
@@ -86,6 +103,9 @@ export interface BridgeReportV1 {
   id: string;
   at: string;
   class: BridgeReportClass;
+  /** Server-derived origin. Absent on rows written before origin labeling
+      existed, which were manager-only by the gate of that era. */
+  origin?: BridgeReportOrigin;
   /** `clientRequestId` of the directive this answers, when it answers one. */
   correlatesDirective?: string;
   /** Bounded and secret-redacted at write. Transcript payloads never reach it. */
@@ -102,6 +122,8 @@ export interface BridgeReportInput {
   key: string;
   class: BridgeReportClass;
   at: string;
+  /** Server-derived origin label; callers never supply one. */
+  origin?: BridgeReportOrigin | null;
   correlatesDirective?: string | null;
   /** Raw candidate text; bounded and redacted before it is stored. */
   body?: string | null;
