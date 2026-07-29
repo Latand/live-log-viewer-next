@@ -138,6 +138,8 @@ scanner interface:
 ```ts
 interface RecentTurnWindows {
   windows: TurnBoundary[];
+  operatorActionsAtMs: number[];
+  unprovenancedUserActionsAtMs: number[];
   prefixTruncated: boolean;
   complete: boolean;
 }
@@ -150,6 +152,15 @@ every initiator-to-terminal window in the existing 128 KiB transcript tail,
 including the final open window. `lastTurnFromRecords()` returns the final item
 from that shared parser, preserving the UI contract and all issue #268/#406
 semantics.
+
+The parser also preserves direct operator action timestamps. Claude uses the
+shared user/system classification, including explicit human and typed
+provenance. Legacy bare Claude input is retained separately and becomes
+operator engagement only for a root conversation; delegated launch input keeps
+agent-only accounting. Codex accepts Viewer-structured user input and
+deduplicates its `message` plus `user_message` copies by timestamp. SDK, peer,
+coordinator, spawn, command, notification, and harness envelopes keep their
+agent semantics and never create operator engagement intervals.
 
 `prefixTruncated` comes from the tail read offset. A truncated prefix can omit
 old windows after a long outage or an unusually large turn. The sync module
@@ -172,7 +183,10 @@ up an entry after registry adoption or complete derivation.
 
 ## WakaTime field mapping
 
-One scanner turn becomes one stable heartbeat stream.
+Each scanner turn and each direct operator engagement interval becomes a stable
+heartbeat stream. Separate digest namespaces let overlapping agent and operator
+intervals retain independent durable boundaries while WakaTime unions them on
+the account timeline.
 
 | WakaTime field | value | rule |
 |---|---|---|
@@ -213,6 +227,20 @@ For each turn:
 effectiveStart = max(turn.startedAt, enabledAtMs)
 effectiveEnd   = turn.endedAt ?? now
 ```
+
+Each direct operator action contributes a conservative ten-minute engagement
+interval:
+
+```text
+engagementStart = max(action.at, enabledAtMs)
+engagementEnd   = action.at + 10 minutes
+```
+
+The scheduler emits only samples due at the current clock. Agent turn intervals
+and operator engagement intervals are unioned on the WakaTime timeline. Short
+turns retain the operator engagement tail, steering input receives its own
+interval, and agent execution continues through its full observed end,
+including silent tool calls and orchestrated work.
 
 The module materializes heartbeats at:
 
@@ -271,6 +299,13 @@ interface WakatimeStateV1 {
     endedAtMs: number | null;
     lastMaterializedAtMs: number;
     lastObservedAtMs: number;
+    boundaryFinalizedAtMs: number | null;
+  }>;
+  retiredStreams: Record<string, {
+    lastMaterializedAtMs: number;
+    lastObservedAtMs: number;
+    boundaryFinalizedAtMs: number | null;
+    expiresAtMs: number;
   }>;
   pending: Array<{
     key: string;
@@ -319,6 +354,12 @@ Bounds:
 - delivered closed-stream retention: 30 days;
 - bulk request size: 25;
 - bulk requests per tick: one.
+
+When the stream cap evicts a delivered stream, a compact 30-day retired
+watermark preserves its last materialized sample and finalized boundary.
+Rediscovery resumes after that watermark. Boundary finalization is durable, so
+a covering overlap disappearing from a later transcript tail cannot mint a
+stale boundary for an interval already settled.
 
 At the pending limit, compact each stream while preserving its first sample,
 exact final sample, newest sample, and interior samples no farther than ten

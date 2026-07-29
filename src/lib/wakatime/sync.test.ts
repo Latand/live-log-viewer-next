@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type { RegistryFile } from "@/lib/agent/registry";
+import { recentTurnActivityFromRecords } from "@/lib/scanner/turnDuration";
 import type { FileEntry } from "@/lib/types";
 import {
   createWakatimeSync,
@@ -563,6 +564,44 @@ describe("WakaTime activity sync", () => {
     sync.stop();
   });
 
+  test("legacy root input gets engagement while delegated launch input remains agent-only", async () => {
+    const durationAtDepth = async (delegationDepth: number) => {
+      const snapshot = registrySnapshot();
+      snapshot.conversations.conversation_test!.delegationDepth = delegationDepth;
+      const initialState: WakatimeStateV1 = {
+        version: 1,
+        enabledAtMs: NOW - 1,
+        credentialGeneration: null,
+        streams: {},
+        pending: [],
+        retry: { failures: 0, retryAtMs: 0, reason: null },
+        counters: { accepted: 0, permanentlyRejected: 0, compacted: 0, dropped: 0, historyGaps: 0 },
+      };
+      const fixture = harness({
+        now: () => NOW + 15 * 60_000,
+        readState: async () => initialState,
+        registrySnapshot: () => snapshot,
+        recentTurnWindows: () => ({
+          windows: [{ startedAt: NOW, endedAt: NOW + 30_000 }],
+          operatorActionsAtMs: [],
+          unprovenancedUserActionsAtMs: [NOW],
+          prefixTruncated: false,
+          complete: true,
+        }),
+      });
+      await fixture.sync.tick();
+      const duration = projectDurationSeconds(
+        fixture.state()!.pending.map((event) => event.heartbeat),
+        "-repo",
+      );
+      fixture.sync.stop();
+      return duration;
+    };
+
+    expect(await durationAtDepth(0)).toBe(10 * 60);
+    expect(await durationAtDepth(1)).toBe(30);
+  });
+
   test("overlapping same-project turns contribute their wall-clock union", async () => {
     const { sync, state } = harness({
       recentTurnWindows: () => ({
@@ -581,6 +620,145 @@ describe("WakaTime activity sync", () => {
     expect(projectDurationSeconds(heartbeats, "-repo")).toBe(90);
     expect(heartbeats.filter((heartbeat) => heartbeat.project === "agent-log-viewer-boundary")).toHaveLength(1);
     sync.stop();
+  });
+
+  test("an overlap-finalized stream never mints a stale boundary when the covering tail disappears", async () => {
+    let windows = [
+      { startedAt: NOW, endedAt: NOW + 60_000 },
+      { startedAt: NOW + 30_000, endedAt: NOW + 90_000 },
+    ];
+    const { sync, state } = harness({
+      recentTurnWindows: () => ({ windows, prefixTruncated: false, complete: true }),
+    });
+
+    await sync.tick();
+    windows = [windows[0]!];
+    await sync.tick();
+
+    expect(state()?.pending.filter((event) =>
+      event.kind === "boundary" && event.heartbeat.time === (NOW + 60_000) / 1_000
+    )).toHaveLength(0);
+    sync.stop();
+  });
+
+  test("operator engagement ending on a live tick never cuts off a continuing silent agent", async () => {
+    let clock = NOW;
+    const { sync, state } = harness({
+      now: () => clock,
+      scan: async () => ({
+        complete: true,
+        files: [entry({
+          proc: "running",
+          pid: 42,
+          activity: "recent",
+          activityReason: "jsonl_turn_active",
+          mtime: clock / 1_000,
+        })],
+      }),
+      recentTurnWindows: () => ({
+        windows: [{ startedAt: NOW, endedAt: null }],
+        operatorActionsAtMs: [NOW],
+        prefixTruncated: false,
+        complete: true,
+      }),
+    });
+
+    await sync.tick();
+    clock += 10 * 60_000;
+    await sync.tick();
+
+    expect(state()?.pending.filter((event) =>
+      event.kind === "boundary" && event.heartbeat.time === clock / 1_000
+    )).toHaveLength(0);
+    expect(state()?.pending.some((event) =>
+      event.kind === "activity" && event.heartbeat.time === clock / 1_000
+    )).toBe(true);
+    sync.stop();
+  });
+
+  test("production-shaped replay preserves operator engagement, agent overlap, idle gaps, resume, and retry", async () => {
+    const secondPath = "/sessions/overlap.jsonl";
+    const snapshot = registrySnapshot();
+    snapshot.conversations.conversation_overlap = structuredClone(snapshot.conversations.conversation_test!);
+    snapshot.conversations.conversation_overlap!.id = "conversation_overlap";
+    snapshot.conversations.conversation_overlap!.generations[0]!.path = secondPath;
+    const structuredUser = (timestamp: number, text: string) => ({
+      timestamp: new Date(timestamp).toISOString(),
+      payload: { type: "user_message", message: `<!-- llv:structured-user -->\n${text}` },
+    });
+    const primaryActivity = recentTurnActivityFromRecords(
+      [
+        structuredUser(NOW, "start"),
+        { timestamp: new Date(NOW + 1_000).toISOString(), payload: { type: "task_started" } },
+        { timestamp: new Date(NOW + 60_000).toISOString(), payload: { type: "turn_aborted" } },
+        structuredUser(NOW + 25 * 60_000, "resume"),
+        { timestamp: new Date(NOW + 25 * 60_000 + 1_000).toISOString(), payload: { type: "task_started" } },
+        { timestamp: new Date(NOW + 26 * 60_000).toISOString(), payload: { type: "task_complete" } },
+      ],
+      true,
+    );
+    let clock = NOW + 40 * 60_000;
+    const initialState: WakatimeStateV1 = {
+      version: 1,
+      enabledAtMs: NOW - 1,
+      credentialGeneration: null,
+      streams: {},
+      pending: [],
+      retry: { failures: 0, retryAtMs: 0, reason: null },
+      counters: { accepted: 0, permanentlyRejected: 0, compacted: 0, dropped: 0, historyGaps: 0 },
+    };
+    const attempted: WakatimeStateV1["pending"][number]["heartbeat"][][] = [];
+    const accepted: WakatimeStateV1["pending"][number]["heartbeat"][] = [];
+    const fixture = harness({
+      now: () => clock,
+      readState: async () => initialState,
+      readCredential: async () => ({ value: TEST_CREDENTIAL, sourceStamp: "fixture" }),
+      scan: async () => ({
+        complete: true,
+        files: [
+          entry({ mtime: (NOW + 26 * 60_000) / 1_000 }),
+          entry({ path: secondPath, name: "overlap.jsonl", mtime: (NOW + 15 * 60_000) / 1_000 }),
+        ],
+      }),
+      registrySnapshot: () => snapshot,
+      recentTurnWindows: (candidate) => candidate.path === PATH
+        ? { ...primaryActivity, prefixTruncated: false, complete: true }
+        : {
+            windows: [{ startedAt: NOW + 2 * 60_000, endedAt: NOW + 15 * 60_000 }],
+            operatorActionsAtMs: [],
+            prefixTruncated: false,
+            complete: true,
+          },
+      fetch: async (_url, init) => {
+        const body = JSON.parse(String(init.body)) as WakatimeStateV1["pending"][number]["heartbeat"][];
+        attempted.push(body);
+        if (attempted.length === 1) {
+          return { status: 500, headers: new Headers(), text: async () => "" };
+        }
+        accepted.push(...body);
+        return {
+          status: 201,
+          headers: new Headers(),
+          text: async () => JSON.stringify({
+            responses: body.map((_, index) => [{ data: { id: `accepted-${index}` } }, 201]),
+          }),
+        };
+      },
+    });
+
+    await fixture.sync.tick();
+    clock += 30_000;
+    await fixture.sync.tick();
+    await fixture.sync.tick();
+
+    expect(attempted).toHaveLength(2);
+    expect(attempted[1]).toEqual(attempted[0]);
+    expect(projectDurationSeconds(accepted, "-repo")).toBe(25 * 60);
+    expect(accepted.some((heartbeat) =>
+      heartbeat.project === "-repo" && heartbeat.time === (NOW + 12 * 60_000) / 1_000
+    )).toBe(true);
+    expect(fixture.state()?.pending).toHaveLength(0);
+    fixture.sync.stop();
   });
 
   test("an archived generation cannot create a second heartbeat stream", async () => {
@@ -1026,6 +1204,79 @@ describe("WakaTime activity sync", () => {
     expect(state()?.pending).toHaveLength(4);
     expect(state()?.counters.dropped).toBe(2);
     sync.stop();
+  });
+
+  test("max-stream eviction preserves the delivered watermark when an open stream resumes", async () => {
+    let clock = NOW + 10 * 60_000;
+    let active = true;
+    let windows = [
+      { startedAt: NOW, endedAt: null },
+      { startedAt: NOW + 9 * 60_000, endedAt: NOW + 10 * 60_000 },
+    ];
+    const openWindow = windows[0]!;
+    const scan = async () => ({
+      files: [entry({
+        activity: active ? "recent" : "idle",
+        activityReason: active ? "jsonl_turn_active" : "pane_at_composer",
+        proc: active ? "running" : "done",
+        pid: active ? 42 : null,
+        mtime: (active ? clock : NOW + 10 * 60_000) / 1_000,
+      })],
+      complete: true,
+    });
+    const first = harness({
+      now: () => clock,
+      limits: { maxStreams: 2 },
+      scan,
+      recentTurnWindows: () => ({ windows, prefixTruncated: false, complete: true }),
+      readCredential: async () => ({ value: TEST_CREDENTIAL, sourceStamp: "fixture" }),
+      readState: async () => ({
+        version: 1,
+        enabledAtMs: NOW - 1,
+        credentialGeneration: null,
+        streams: {},
+        pending: [],
+        retry: { failures: 0, retryAtMs: 0, reason: null },
+        counters: { accepted: 0, permanentlyRejected: 0, compacted: 0, dropped: 0, historyGaps: 0 },
+      } satisfies WakatimeStateV1),
+    });
+    await first.sync.tick();
+    const persisted = structuredClone(first.state());
+    first.sync.stop();
+
+    active = false;
+    clock += 60_000;
+    const resumedBodies: WakatimeStateV1["pending"][number]["heartbeat"][][] = [];
+    const resumed = harness({
+      now: () => clock,
+      limits: { maxStreams: 1 },
+      scan,
+      recentTurnWindows: () => ({ windows, prefixTruncated: false, complete: true }),
+      readCredential: async () => ({ value: TEST_CREDENTIAL, sourceStamp: "fixture" }),
+      readState: async () => persisted,
+      fetch: async (_url, init) => {
+        const body = JSON.parse(String(init.body)) as WakatimeStateV1["pending"][number]["heartbeat"][];
+        resumedBodies.push(body);
+        return {
+          status: 201,
+          headers: new Headers(),
+          text: async () => JSON.stringify({
+            responses: body.map((_, index) => [{ data: { id: `accepted-${index}` } }, 201]),
+          }),
+        };
+      },
+    });
+    windows = [windows[1]!];
+    await resumed.sync.tick();
+
+    active = true;
+    windows = [openWindow];
+    clock += 60_000;
+    await resumed.sync.tick();
+
+    expect(resumedBodies).toHaveLength(1);
+    expect(resumedBodies.at(-1)?.map((heartbeat) => heartbeat.time)).toEqual([clock / 1_000]);
+    resumed.sync.stop();
   });
 
   test("a pruned delivered stream cannot be rediscovered from an old transcript tail", async () => {
