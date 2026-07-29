@@ -55,7 +55,7 @@ import type {
   PipelineStageAttempt,
   PipelineUnconfirmedHost,
 } from "./types";
-import { parseStageVerdict, type ParsedStageVerdict } from "./verdict";
+import { parseStageVerdict, stageVerdictRejectionReason, type ParsedStageVerdict } from "./verdict";
 
 export type PipelineStageSpawn = {
   launchId: string;
@@ -621,6 +621,9 @@ export function defaultPipelinePorts(): PipelinePorts {
 
 const spawnsThisProcess = new Set<string>();
 const TERMINAL_STATES = new Set<Pipeline["state"]>(["completed", "closed"]);
+const MISSING_STAGE_VERDICT = "stage completed without a valid final JSON verdict";
+const VERDICT_RECOVERY_MAX_CHECKS = 3;
+const VERDICT_RECOVERY_INTERVAL_MS = 30_000;
 /** Attempt states that end a round; a pending cursor over one of these queues a
     fresh attempt on the next tick (tickRunStage/tickReviewStage). */
 const TERMINAL_ATTEMPT_STATES = new Set<PipelineStageAttempt["state"]>(["passed", "failed", "needs_decision", "skipped"]);
@@ -650,6 +653,66 @@ function currentAttempt(pipeline: Pipeline, stageId: string): PipelineStageAttem
 function unixMs(value: string | null): number {
   const parsed = value ? Date.parse(value) : 0;
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function recoveryCheckAt(now: string): string {
+  return new Date(unixMs(now) + VERDICT_RECOVERY_INTERVAL_MS).toISOString();
+}
+
+function markVerdictRecoverySucceeded(attempt: PipelineStageAttempt, now: string, messageTs: number): void {
+  const recovery = attempt.verdictRecovery;
+  if (!recovery || recovery.state === "recovered") return;
+  attempt.verdictRecovery = {
+    ...recovery,
+    state: "recovered",
+    lastCheckedAt: now,
+    nextCheckAt: null,
+    messageTs,
+  };
+}
+
+function recordVerdictRecoveryMiss(
+  pipeline: Pipeline,
+  attempt: PipelineStageAttempt,
+  ports: PipelinePorts,
+  reason: string,
+  messageTs: number | null,
+): void {
+  const now = ports.now();
+  const recovery = attempt.verdictRecovery?.state === "pending"
+    ? attempt.verdictRecovery
+    : null;
+  const newerMessage = messageTs !== null
+    && recovery?.messageTs !== null
+    && recovery?.messageTs !== undefined
+    && messageTs > recovery.messageTs;
+  if (recovery && !newerMessage && unixMs(now) < unixMs(recovery.nextCheckAt)) return;
+
+  const checks = (recovery?.checks ?? 0) + 1;
+  const next = {
+    state: checks >= VERDICT_RECOVERY_MAX_CHECKS ? "exhausted" as const : "pending" as const,
+    checks,
+    maxChecks: VERDICT_RECOVERY_MAX_CHECKS,
+    startedAt: recovery?.startedAt ?? now,
+    lastCheckedAt: now,
+    nextCheckAt: checks >= VERDICT_RECOVERY_MAX_CHECKS ? null : recoveryCheckAt(now),
+    reason,
+    messageTs,
+  };
+  attempt.verdictRecovery = next;
+  if (next.state === "exhausted") {
+    attempt.completedAt = now;
+    park(
+      pipeline,
+      `stage verdict recovery exhausted after ${VERDICT_RECOVERY_MAX_CHECKS} checks: ${reason}`,
+      attempt,
+    );
+    return;
+  }
+  attempt.state = "running";
+  attempt.error = null;
+  pipeline.state = "running";
+  pipeline.stateDetail = `re-evaluating terminal stage verdict (${checks}/${VERDICT_RECOVERY_MAX_CHECKS}): ${reason}`;
 }
 
 function park(pipeline: Pipeline, detail: string, attempt?: PipelineStageAttempt | null): void {
@@ -1397,17 +1460,40 @@ async function tickRunStage(
   if (durable && durableTerminal) {
     const parsed = parseStageVerdict(durable.message!.text);
     if (parsed) {
+      markVerdictRecoverySucceeded(attempt, ports.now(), durable.message!.ts);
       settleStageVerdict(pipeline, stage, attempt, parsed, ports, persist);
       return;
     }
+    recordVerdictRecoveryMiss(
+      pipeline,
+      attempt,
+      ports,
+      stageVerdictRejectionReason(durable.message!.text),
+      durable.message!.ts,
+    );
+    return;
   }
   if (!entry) {
-    if (durableTerminal) park(pipeline, "stage completed without a valid final JSON verdict", attempt);
     /* A readable durable artifact means the disappearance is a projection loss,
        not an ended stage — wait for the scan or the terminal turn evidence. */
-    else if (durable) return;
-    else if (structuredActive === false) park(pipeline, "structured stage ended after its transcript disappeared from the scan", attempt);
-    else if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) park(pipeline, "stage agent exited after its transcript disappeared from the scan", attempt);
+    if (durable) return;
+    if (structuredActive === false) {
+      recordVerdictRecoveryMiss(
+        pipeline,
+        attempt,
+        ports,
+        "canonical stage transcript is not yet readable after structured stage termination",
+        null,
+      );
+    } else if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) {
+      recordVerdictRecoveryMiss(
+        pipeline,
+        attempt,
+        ports,
+        "canonical stage transcript is not yet readable after agent termination",
+        null,
+      );
+    }
     return;
   }
   if (structuredActive === true) return;
@@ -1417,15 +1503,37 @@ async function tickRunStage(
   if (durable?.turn === "busy" && !attempt.paneId) return;
   const message = ports.lastMessage(entry);
   if (!message || message.ts <= unixMs(attempt.startedAt)) {
-    if (structuredActive === false) park(pipeline, "structured stage ended without producing a verdict", attempt);
-    else if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) park(pipeline, "stage agent exited without producing a verdict", attempt);
+    if (structuredActive === false) {
+      recordVerdictRecoveryMiss(
+        pipeline,
+        attempt,
+        ports,
+        "canonical completed assistant turn has not been ingested after structured stage termination",
+        message?.ts ?? null,
+      );
+    } else if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) {
+      recordVerdictRecoveryMiss(
+        pipeline,
+        attempt,
+        ports,
+        "canonical completed assistant turn has not been ingested after agent termination",
+        message?.ts ?? null,
+      );
+    }
     return;
   }
   const parsed = parseStageVerdict(message.text);
   if (!parsed) {
-    park(pipeline, "stage completed without a valid final JSON verdict", attempt);
+    recordVerdictRecoveryMiss(
+      pipeline,
+      attempt,
+      ports,
+      stageVerdictRejectionReason(message.text),
+      message.ts,
+    );
     return;
   }
+  markVerdictRecoverySucceeded(attempt, ports.now(), message.ts);
   settleStageVerdict(pipeline, stage, attempt, parsed, ports, persist);
 }
 
@@ -1796,6 +1904,70 @@ function reconcileParkedStructuredSpawn(pipeline: Pipeline, ports: PipelinePorts
   return true;
 }
 
+async function reconcileExhaustedVerdictRecovery(
+  pipeline: Pipeline,
+  ports: PipelinePorts,
+  persist: () => void,
+): Promise<boolean> {
+  if (pipeline.state !== "needs_decision") return false;
+  const stage = currentStage(pipeline);
+  if (!stage || stage.kind !== "run") return false;
+  const attempt = currentAttempt(pipeline, stage.id);
+  const recovery = attempt?.verdictRecovery;
+  if (!attempt?.agentPath || recovery?.state !== "exhausted") return false;
+
+  const durable = await ports.durableTurnEvidence(attempt.effectiveRole.engine, attempt.agentPath);
+  const message = durable?.turn === "terminal" ? durable.message : null;
+  if (
+    !message
+    || message.ts <= unixMs(attempt.startedAt)
+    || message.ts <= (recovery.messageTs ?? 0)
+  ) return false;
+  const parsed = parseStageVerdict(message.text);
+  if (!parsed || "failureReason" in parsed) return false;
+
+  attempt.state = "running";
+  attempt.completedAt = null;
+  attempt.error = null;
+  pipeline.state = "running";
+  pipeline.stateDetail = null;
+  markVerdictRecoverySucceeded(attempt, ports.now(), message.ts);
+  settleStageVerdict(pipeline, stage, attempt, parsed, ports, persist);
+  return true;
+}
+
+function reconcileParkedVerdictMiss(pipeline: Pipeline, ports: PipelinePorts): boolean {
+  if (pipeline.state !== "needs_decision") return false;
+  const stage = currentStage(pipeline);
+  if (!stage || stage.kind !== "run") return false;
+  const attempt = currentAttempt(pipeline, stage.id);
+  if (
+    !attempt
+    || attempt.state !== "needs_decision"
+    || attempt.completedAt !== null
+    || attempt.output !== null
+    || attempt.verdict !== null
+    || attempt.error !== MISSING_STAGE_VERDICT
+  ) return false;
+  const now = ports.now();
+  attempt.verdictRecovery = {
+    state: "pending",
+    checks: 0,
+    maxChecks: VERDICT_RECOVERY_MAX_CHECKS,
+    startedAt: now,
+    lastCheckedAt: now,
+    nextCheckAt: now,
+    reason: MISSING_STAGE_VERDICT,
+    messageTs: null,
+  };
+  attempt.state = "running";
+  attempt.error = null;
+  pipeline.state = "running";
+  pipeline.stateDetail = null;
+  setCursorState(pipeline, stage.id, "running");
+  return true;
+}
+
 function isStructuredSpawnPark(pipeline: Pipeline, attempt: PipelineStageAttempt): boolean {
   const failure = attempt.error ?? pipeline.stateDetail ?? "";
   return failure.startsWith("stage spawn")
@@ -1848,6 +2020,8 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
         pipelineChanged = reconcilePendingPipelineAdoptions(pipeline, ports) || pipelineChanged;
         pipelineChanged = await reconcileHistoricalAttempts(pipeline, entries, ports) || pipelineChanged;
         pipelineChanged = rebindPipelineAttemptPaths(pipeline, ports) || pipelineChanged;
+        pipelineChanged = await reconcileExhaustedVerdictRecovery(pipeline, ports, persist) || pipelineChanged;
+        pipelineChanged = reconcileParkedVerdictMiss(pipeline, ports) || pipelineChanged;
         pipelineChanged = reconcileParkedStructuredSpawn(pipeline, ports) || pipelineChanged;
         pipelineChanged = reconcileBoundReviewFlow(pipeline, ports) || pipelineChanged;
         pipelineChanged = await reconcileUnconfirmedHosts(pipeline, ports) || pipelineChanged;
@@ -2264,6 +2438,14 @@ async function orphanAgentPane(
   return { error: `stage agent may still be running in pane ${attempt.paneId}; wait for it to exit or kill the pane first`, status: 409 };
 }
 
+function verdictRecoveryResetRefusal(attempt: PipelineStageAttempt | null): { error: string; status: number } | null {
+  if (attempt?.verdictRecovery?.state !== "exhausted") return null;
+  return {
+    error: "automatic verdict recovery exhausted; preserve its worktree and conversation lineage, then continue the same conversation or close the pipeline",
+    status: 409,
+  };
+}
+
 /**
  * Every host this pipeline ever launched, as a close must consider it.
  *
@@ -2595,6 +2777,8 @@ export async function patchPipeline(
       if (flow?.state === "paused") ports.patchFlow(flow.id, "resume");
     } else if (req.action === "retry-stage") {
       if (pipeline.state !== "needs_decision") return { error: "pipeline does not have a stage awaiting retry", status: 409 };
+      const recoveryRefusal = verdictRecoveryResetRefusal(attempt);
+      if (recoveryRefusal) return recoveryRefusal;
       const explicitReceiptRetry = req.stageId !== undefined || req.launchId !== undefined;
       if (explicitReceiptRetry && (typeof req.stageId !== "string" || typeof req.launchId !== "string")) {
         return { error: "receipt retry requires both stageId and launchId", status: 400 };
@@ -2702,6 +2886,8 @@ export async function patchPipeline(
       pipeline.stateDetail = null;
     } else if (req.action === "skip-stage") {
       if (pipeline.state !== "needs_decision" || !stage) return { error: "pipeline does not have a stage awaiting a decision", status: 409 };
+      const recoveryRefusal = verdictRecoveryResetRefusal(attempt);
+      if (recoveryRefusal) return recoveryRefusal;
       const orphan = await orphanAgentPane(attempt, ports);
       if (orphan) return orphan;
       if (flow && flow.state !== "closed") {

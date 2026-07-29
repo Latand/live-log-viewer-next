@@ -98,6 +98,28 @@ function isActivation(value: unknown): value is PipelineEdgeActivation | null {
   );
 }
 
+function isVerdictRecovery(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const recovery = value as Record<string, unknown>;
+  return (
+    ["pending", "recovered", "exhausted"].includes(String(recovery.state))
+    && Number.isInteger(recovery.checks)
+    && (recovery.checks as number) >= 0
+    && Number.isInteger(recovery.maxChecks)
+    && (recovery.maxChecks as number) >= 1
+    && (recovery.checks as number) <= (recovery.maxChecks as number)
+    && typeof recovery.startedAt === "string"
+    && typeof recovery.lastCheckedAt === "string"
+    && isNullableString(recovery.nextCheckAt)
+    && typeof recovery.reason === "string"
+    && recovery.reason.length > 0
+    && recovery.reason.length <= 1_000
+    && (recovery.messageTs === null
+      || (typeof recovery.messageTs === "number" && Number.isFinite(recovery.messageTs) && recovery.messageTs >= 0))
+  );
+}
+
 function isAttempt(value: unknown, index: number): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const attempt = value as Record<string, unknown>;
@@ -121,7 +143,8 @@ function isAttempt(value: unknown, index: number): boolean {
     isActivation(attempt.activatedBy) &&
     isNullableString(attempt.output) &&
     isVerdict(attempt.verdict) &&
-    isNullableString(attempt.error)
+    isNullableString(attempt.error) &&
+    isVerdictRecovery(attempt.verdictRecovery)
   );
 }
 
@@ -440,6 +463,7 @@ export function loadPipelines(): Pipeline[] {
             output: attempt.output ?? null,
             verdict: attempt.verdict ?? null,
             error: attempt.error ?? null,
+            verdictRecovery: attempt.verdictRecovery ? { ...attempt.verdictRecovery } : undefined,
           }))
         : [],
     })),

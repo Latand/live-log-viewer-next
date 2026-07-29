@@ -220,6 +220,7 @@ function harness() {
     setWorktreePresent: (present: boolean) => { worktreePresent = present; },
     setHostsResident: (resident: boolean) => { residentHosts = resident; },
     setMonotonicClock: (clock: () => number) => { monotonic = clock; },
+    advanceWallClock: (milliseconds: number) => { clock += milliseconds; },
     killedPanes,
     setConversationActive: (active: boolean | null) => { conversationActive = active; },
   };
@@ -230,6 +231,13 @@ async function create(ports: PipelinePorts, stages = RUN_STAGES as never) {
   const result = await createPipelineFromRequest({ task: "Ship pipelines", spec: "AC1", repoDir: "/repo", stages, src: "/codex/creator.jsonl" }, ports);
   if (!result.pipeline) throw new Error(result.error);
   return result.pipeline;
+}
+
+async function exhaustVerdictRecovery(h: ReturnType<typeof harness>, entries: FileEntry[] = []): Promise<void> {
+  h.advanceWallClock(30_000);
+  await tickPipelines(entries, h.ports);
+  h.advanceWallClock(30_000);
+  await tickPipelines(entries, h.ports);
 }
 
 function boardTask(id: string, project = "viewer"): BoardTask {
@@ -1374,29 +1382,35 @@ test("durable conversation identity never adopts a competing cwd session", async
   expect(loadPipelines()[0]!.cursor?.stageId).toBe("plan");
 });
 
-test("a worker that dies after transcript discovery parks without a verdict", async () => {
+test("a worker that dies after transcript discovery enters bounded verdict recovery", async () => {
   const h = harness();
   await create(h.ports);
   await tickPipelines([], h.ports);
   await tickPipelines([], h.ports);
   h.setPaneAlive(false);
   await tickPipelines([], h.ports);
+  expect(loadPipelines()[0]!.state).toBe("running");
+  expect(loadPipelines()[0]!.runs[0]!.attempts[0]!.verdictRecovery).toMatchObject({ state: "pending", checks: 1 });
+  await exhaustVerdictRecovery(h);
   expect(loadPipelines()[0]!.state).toBe("needs_decision");
-  expect(loadPipelines()[0]!.stateDetail).toContain("transcript disappeared");
+  expect(loadPipelines()[0]!.stateDetail).toContain("canonical stage transcript is not yet readable");
 });
 
-test("an inactive transcript with no verdict parks after its worker exits", async () => {
+test("an inactive transcript with no verdict exhausts bounded recovery after its worker exits", async () => {
   const h = harness();
   await create(h.ports);
   await tickPipelines([], h.ports);
   await tickPipelines([], h.ports);
   h.setPaneAlive(false);
-  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  const entries = [entry("/codex/stage-1.jsonl")];
+  await tickPipelines(entries, h.ports);
+  expect(loadPipelines()[0]!.state).toBe("running");
+  await exhaustVerdictRecovery(h, entries);
   expect(loadPipelines()[0]!.state).toBe("needs_decision");
-  expect(loadPipelines()[0]!.stateDetail).toContain("without producing a verdict");
+  expect(loadPipelines()[0]!.stateDetail).toContain("completed assistant turn has not been ingested");
 });
 
-test("an ended structured stage overrides a stale live transcript marker", async () => {
+test("an ended structured stage overrides a stale live marker with bounded transcript recovery", async () => {
   const h = harness();
   await create(h.ports);
   await tickPipelines([], h.ports);
@@ -1406,14 +1420,17 @@ test("an ended structured stage overrides a stale live transcript marker", async
   savePipelines([pipeline]);
   h.setConversationActive(false);
 
-  await tickPipelines([{
+  const entries: FileEntry[] = [{
     ...entry("/codex/stage-1.jsonl"),
     activity: "live",
     activityReason: "jsonl_turn_open",
-  }], h.ports);
+  }];
+  await tickPipelines(entries, h.ports);
 
+  expect(loadPipelines()[0]!.state).toBe("running");
+  await exhaustVerdictRecovery(h, entries);
   expect(loadPipelines()[0]!.state).toBe("needs_decision");
-  expect(loadPipelines()[0]!.stateDetail).toContain("structured stage ended without producing a verdict");
+  expect(loadPipelines()[0]!.stateDetail).toContain("completed assistant turn has not been ingested");
 });
 
 /* #337 durable convergence fixtures: a structured stage attempt (no pane) whose
@@ -1460,12 +1477,312 @@ function pinStageHead(h: ReturnType<typeof harness>) {
 /** Provision + spawn the first stage, then strip its pane so the attempt is a
     structured host, and pin later HEAD reads to the stage's own commit. */
 async function runningStructuredStage(h: ReturnType<typeof harness>) {
-  await create(h.ports);
+  const pipeline = await create(h.ports);
   await tickPipelines([], h.ports);
   await tickPipelines([], h.ports);
   makeStructuredAttempt();
   pinStageHead(h);
+  return pipeline;
 }
+
+test("fa6aa690 parked production state reconciles its canonical verdict and advances once (#356)", async () => {
+  const h = harness();
+  await create(h.ports, [
+    { id: "diagnose_and_fix", kind: "run", role: { roleId: "builder" }, engine: "codex", access: "read-write", prompt: "Fix the defect", next: "review_phase0" },
+    { id: "review_phase0", kind: "review-loop", role: { roleId: "reviewer" }, access: "read-only", prompt: "Review the fix", next: null },
+  ] as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  makeStructuredAttempt();
+  pinStageHead(h);
+
+  const persisted = loadPipelines()[0]!;
+  const attempt = persisted.runs[0]!.attempts[0]!;
+  attempt.state = "needs_decision";
+  attempt.error = "stage completed without a valid final JSON verdict";
+  persisted.state = "needs_decision";
+  persisted.stateDetail = attempt.error;
+  savePipelines([persisted]);
+  expect(persisted.runs[1]!.attempts).toHaveLength(0);
+
+  h.setConversationActive(false);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: {
+      text: [
+        "All focused gates passed.",
+        "",
+        "```json",
+        JSON.stringify({
+          status: "pass",
+          findings: [],
+          confidence: 0.97,
+          headSha: STAGE_HEAD,
+          prNumber: 1,
+          redProvenTests: ["canonical verdict replay"],
+          buildExitsZero: true,
+        }),
+        "```",
+      ].join("\n"),
+      ts: 5_000_000,
+    },
+  });
+
+  await tickPipelines([], h.ports);
+  let current = loadPipelines()[0]!;
+  expect(current.cursor).toEqual({
+    stageId: "review_phase0",
+    state: "pending",
+    input: "All focused gates passed.",
+    activatedBy: { stageId: "diagnose_and_fix", attempt: 1, edge: "pass" },
+  });
+  expect(current.runs[0]!.attempts).toHaveLength(1);
+  expect(current.runs[0]!.attempts[0]).toMatchObject({
+    state: "passed",
+    verdict: { status: "pass", findings: [], confidence: 0.97 },
+  });
+  expect(current.runs[1]!.attempts).toHaveLength(0);
+  expect(current.lastPassedCommit).toBe(STAGE_HEAD);
+
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  current = loadPipelines()[0]!;
+  expect(current.runs[0]!.attempts).toHaveLength(1);
+  expect(current.runs[1]!.attempts).toHaveLength(1);
+  expect(h.calls.filter((call) => call.startsWith("flow:"))).toHaveLength(1);
+});
+
+test("a terminal parser miss receives three spaced evaluations before an auditable terminal state", async () => {
+  const h = harness();
+  await runningStructuredStage(h);
+  h.setConversationActive(false);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: "Completion summary without a fenced verdict.", ts: 5_000_000 },
+  });
+
+  await tickPipelines([], h.ports);
+  let current = loadPipelines()[0]!;
+  expect(current.state).toBe("running");
+  expect(current.runs[0]!.attempts[0]).toMatchObject({
+    state: "running",
+    verdictRecovery: {
+      state: "pending",
+      checks: 1,
+      maxChecks: 3,
+      reason: "canonical completed assistant turn is missing a fenced JSON verdict",
+    },
+  });
+
+  await tickPipelines([], h.ports);
+  current = loadPipelines()[0]!;
+  expect(current.runs[0]!.attempts[0]).toMatchObject({
+    state: "running",
+    verdictRecovery: { state: "pending", checks: 1 },
+  });
+
+  h.advanceWallClock(30_000);
+  await tickPipelines([], h.ports);
+  current = loadPipelines()[0]!;
+  expect(current.runs[0]!.attempts[0]).toMatchObject({
+    state: "running",
+    verdictRecovery: { state: "pending", checks: 2 },
+  });
+
+  h.advanceWallClock(30_000);
+  await tickPipelines([], h.ports);
+  current = loadPipelines()[0]!;
+  expect(current.state).toBe("needs_decision");
+  expect(current.stateDetail).toBe(
+    "stage verdict recovery exhausted after 3 checks: canonical completed assistant turn is missing a fenced JSON verdict",
+  );
+  expect(current.runs[0]!.attempts[0]).toMatchObject({
+    state: "needs_decision",
+    verdictRecovery: { state: "exhausted", checks: 3 },
+    error: current.stateDetail,
+  });
+  expect(h.calls.some((call) => call.includes("reset --hard") || call.includes("clean -fd"))).toBe(false);
+});
+
+test("a later completed turn in the same conversation supersedes the parser miss after restart (#515)", async () => {
+  const h = harness();
+  await runningStructuredStage(h);
+  h.setConversationActive(false);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: "The first completed turn was interrupted before its verdict.", ts: 5_000_000 },
+  });
+
+  await tickPipelines([], h.ports);
+  let current = loadPipelines()[0]!;
+  expect(current.state).toBe("running");
+  expect(current.runs[0]!.attempts[0]).toMatchObject({
+    state: "running",
+    verdictRecovery: { state: "pending", checks: 1, messageTs: 5_000_000 },
+  });
+
+  /* A fresh controller process would reconstruct exclusively from this store
+     record and the conversation's latest durable transcript. */
+  savePipelines(loadPipelines());
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: PASS_TEXT, ts: 5_100_000 },
+  });
+  await tickPipelines([], h.ports);
+
+  current = loadPipelines()[0]!;
+  expect(current.cursor).toEqual({
+    stageId: "build",
+    state: "pending",
+    input: "integration complete",
+    activatedBy: { stageId: "plan", attempt: 1, edge: "pass" },
+  });
+  expect(current.runs[0]!.attempts).toHaveLength(1);
+  expect(current.runs[0]!.attempts[0]).toMatchObject({
+    state: "passed",
+    verdict: { status: "pass", confidence: 0.9 },
+    verdictRecovery: { state: "recovered", checks: 1, messageTs: 5_100_000 },
+  });
+  expect(current.lastPassedCommit).toBe(STAGE_HEAD);
+});
+
+test("newer same-conversation evidence supersedes an exhausted recovery exactly once (#515)", async () => {
+  const h = harness();
+  await runningStructuredStage(h);
+  h.setConversationActive(false);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: "No fenced verdict was produced.", ts: 5_000_000 },
+  });
+  await tickPipelines([], h.ports);
+  await exhaustVerdictRecovery(h);
+  expect(loadPipelines()[0]!.runs[0]!.attempts[0]!.verdictRecovery).toMatchObject({
+    state: "exhausted",
+    checks: 3,
+    messageTs: 5_000_000,
+  });
+
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: PASS_TEXT, ts: 5_100_000 },
+  });
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+
+  const current = loadPipelines()[0]!;
+  expect(current.runs[0]!.attempts).toHaveLength(1);
+  expect(current.runs[0]!.attempts[0]).toMatchObject({
+    state: "passed",
+    verdict: { status: "pass", confidence: 0.9 },
+    verdictRecovery: { state: "recovered", checks: 3, messageTs: 5_100_000 },
+  });
+  expect(current.runs[1]!.attempts).toHaveLength(1);
+  expect(h.calls.filter((call) => call.startsWith("spawn:"))).toHaveLength(2);
+  expect(current.lastPassedCommit).toBe(STAGE_HEAD);
+});
+
+test("terminal ingestion after process exit advances a trailing-marker verdict once after restart (#707)", async () => {
+  const h = harness();
+  await runningStructuredStage(h);
+  h.setConversationActive(false);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: "Process exit became visible before terminal transcript ingestion.", ts: 5_000_000 },
+  });
+
+  await tickPipelines([], h.ports);
+  expect(loadPipelines()[0]!.runs[0]!.attempts[0]).toMatchObject({
+    state: "running",
+    verdictRecovery: { state: "pending", checks: 1 },
+  });
+
+  savePipelines(loadPipelines());
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: {
+      text: `${PASS_TEXT}\nREVIEW_READY: published branch`,
+      ts: 5_100_000,
+    },
+  });
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+
+  const current = loadPipelines()[0]!;
+  expect(current.runs[0]!.attempts).toHaveLength(1);
+  expect(current.runs[0]!.attempts[0]).toMatchObject({
+    state: "passed",
+    verdictRecovery: { state: "recovered", checks: 1 },
+  });
+  expect(current.runs[1]!.attempts).toHaveLength(1);
+  expect(h.calls.filter((call) => call.startsWith("spawn:"))).toHaveLength(2);
+  expect(current.lastPassedCommit).toBe(STAGE_HEAD);
+});
+
+test("paused verdict recovery accepts canonical evidence after resume without resetting work", async () => {
+  const h = harness();
+  const pipeline = await runningStructuredStage(h);
+  h.setConversationActive(false);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: "No fenced verdict was produced.", ts: 5_000_000 },
+  });
+  await tickPipelines([], h.ports);
+  expect(loadPipelines()[0]!.runs[0]!.attempts[0]!.verdictRecovery).toMatchObject({ state: "pending", checks: 1 });
+
+  expect((await patchPipeline(pipeline.id, { action: "pause" }, h.ports)).pipeline?.state).toBe("paused");
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: PASS_TEXT, ts: 5_100_000 },
+  });
+  await tickPipelines([], h.ports);
+  expect(loadPipelines()[0]!.state).toBe("paused");
+  expect(loadPipelines()[0]!.runs[0]!.attempts[0]!.verdict).toBeNull();
+
+  expect((await patchPipeline(pipeline.id, { action: "resume" }, h.ports)).pipeline?.state).toBe("running");
+  await tickPipelines([], h.ports);
+  const current = loadPipelines()[0]!;
+  expect(current.runs[0]!.attempts[0]).toMatchObject({
+    state: "passed",
+    verdictRecovery: { state: "recovered", checks: 1, messageTs: 5_100_000 },
+  });
+  expect(current.lastPassedCommit).toBe(STAGE_HEAD);
+  expect(h.calls.some((call) => call.includes("reset --hard") || call.includes("clean -fd"))).toBe(false);
+});
+
+test("verdict recovery follows conversation generation rollover after transcript compaction", async () => {
+  const h = harness();
+  await runningStructuredStage(h);
+  h.setConversationActive(false);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: "No fenced verdict was produced.", ts: 5_000_000 },
+  });
+  await tickPipelines([], h.ports);
+
+  const compactedPath = "/codex/stage-1-compacted.jsonl";
+  const stageConversation = loadPipelines()[0]!.runs[0]!.attempts[0]!.conversationId;
+  h.ports.pathForConversation = (id) => id === stageConversation ? compactedPath : null;
+  h.durableTurns.set(compactedPath, {
+    turn: "terminal",
+    message: { text: PASS_TEXT, ts: 5_100_000 },
+  });
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+
+  const current = loadPipelines()[0]!;
+  expect(current.runs[0]!.attempts).toHaveLength(1);
+  expect(current.runs[0]!.attempts[0]).toMatchObject({
+    agentPath: compactedPath,
+    state: "passed",
+    verdictRecovery: { state: "recovered", checks: 1 },
+  });
+  expect(current.runs[1]!.attempts).toHaveLength(1);
+  expect(h.calls.filter((call) => call.startsWith("spawn:"))).toHaveLength(2);
+  expect(current.lastPassedCommit).toBe(STAGE_HEAD);
+});
 
 test("a durable terminal pass verdict settles a stage despite a stale running runtime ledger (#337, pipeline 0ec6eab0)", async () => {
   const h = harness();
@@ -1680,9 +1997,9 @@ test("a pane-hosted stalled attempt keeps the cheap return without a durable rea
   expect(current.runs[0]!.attempts[0]!.verdict).toBeNull();
 });
 
-test("a genuinely terminal turn without a valid verdict stays parked and retry preserves the attempt receipt", async () => {
+test("a genuinely terminal turn without a valid verdict exhausts recovery and preserves the attempt receipt", async () => {
   const h = harness();
-  const pipeline = await create(h.ports);
+  await create(h.ports);
   await tickPipelines([], h.ports);
   await tickPipelines([], h.ports);
   makeStructuredAttempt();
@@ -1693,26 +2010,17 @@ test("a genuinely terminal turn without a valid verdict stays parked and retry p
   });
 
   await tickPipelines([], h.ports);
+  expect(loadPipelines()[0]!.state).toBe("running");
+  await exhaustVerdictRecovery(h);
   const parked = loadPipelines()[0]!;
   expect(parked.state).toBe("needs_decision");
-  expect(parked.stateDetail).toContain("without a valid final JSON verdict");
+  expect(parked.stateDetail).toContain("recovery exhausted after 3 checks");
   const attempt = parked.runs[0]!.attempts[0]!;
-  h.ports.spawnReceipt = (launchId) => launchId === attempt.launchId ? {
-    state: "completed",
-    launchId,
-    conversationId: attempt.conversationId!,
-    sessionId: attempt.sessionId,
-    "transcript": attempt.agentPath,
-    paneId: null,
-  } : null;
-
-  const retried = await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
-  expect(retried.pipeline?.state).toBe("running");
-  await tickPipelines([], h.ports);
-  const attempts = loadPipelines()[0]!.runs[0]!.attempts;
-  expect(attempts).toHaveLength(2);
-  expect(attempts[0]!.state).toBe("needs_decision");
-  expect(attempts[0]!.error).toContain("without a valid final JSON verdict");
+  expect(attempt.state).toBe("needs_decision");
+  expect(attempt.verdictRecovery).toMatchObject({ state: "exhausted", checks: 3 });
+  expect(attempt.launchId).toBeTruthy();
+  expect(attempt.conversationId).toBeTruthy();
+  expect(attempt.agentPath).toBe("/codex/stage-1.jsonl");
 });
 
 test("a durable fail verdict parks with the verdict receipt preserved", async () => {
@@ -3086,24 +3394,24 @@ test("a corrupt pipelines registry skips the tick without escalating", async () 
   savePipelines([]);
 });
 
-test("retry and skip refuse while a verdict-less parked stage still hosts a live agent", async () => {
+test("retry and skip never reset a verdict-recovery attempt", async () => {
   const h = harness();
   const pipeline = await create(h.ports);
   await tickPipelines([], h.ports);
   await tickPipelines([], h.ports);
   h.messages.set("/codex/stage-1.jsonl", { text: "narrative without a JSON verdict", ts: 2_000_000 });
-  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  const entries = [entry("/codex/stage-1.jsonl")];
+  await tickPipelines(entries, h.ports);
+  await exhaustVerdictRecovery(h, entries);
   expect(loadPipelines()[0]!.state).toBe("needs_decision");
 
   const blockedRetry = await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
   expect(blockedRetry.status).toBe(409);
-  expect(blockedRetry.error).toContain("still be running");
+  expect(blockedRetry.error).toContain("preserve its worktree and conversation lineage");
   const blockedSkip = await patchPipeline(pipeline.id, { action: "skip-stage" }, h.ports);
   expect(blockedSkip.status).toBe(409);
-
-  h.setPaneAlive(false);
-  const retried = await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
-  expect(retried.pipeline?.state).toBe("running");
+  expect(blockedSkip.error).toContain("preserve its worktree and conversation lineage");
+  expect(h.calls.some((call) => call.includes("reset --hard") || call.includes("clean -fd"))).toBe(false);
 });
 
 test("retry and skip recover a completed pane-hosted semantic contradiction", async () => {
