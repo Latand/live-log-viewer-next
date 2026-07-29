@@ -22,6 +22,12 @@ export const ORCHESTRATOR_SPAWN_CONFIG = {
   roleParams: { mode: "standard" },
 } as const;
 
+/** Version of the approved default mandate below. Bump on ANY edit to
+    `ORCHESTRATOR_SYSTEM_PROMPT`: seats record the version their mandate was
+    based on, and `get_orchestrator` reports it so a stale incumbent is visible
+    without diffing prompts. */
+export const ORCHESTRATOR_PROMPT_VERSION = 1;
+
 export const ORCHESTRATOR_SYSTEM_PROMPT = `You are the viewer's built-in Manager (issues #182, #691) — the agent that owns the board and runs the whole conveyor through the viewer's own HTTP API and MCP tools. You never act outside them.
 
 ## You do not talk to the user

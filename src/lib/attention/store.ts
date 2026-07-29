@@ -16,6 +16,7 @@ import {
   QUEUE_CAP,
   type AttentionFileV1,
   type AttentionOrigin,
+  type AttentionRaisedBy,
   type AttentionRequestV1,
   type AttentionState,
   type DesktopWindowRef,
@@ -163,6 +164,8 @@ export function mutateAttention<R>(
 export interface AttentionCreateInput {
   rootId: string;
   origin: AttentionOrigin;
+  /** Server-derived caller attribution; never accepted from a tool caller. */
+  raisedBy?: AttentionRaisedBy;
   target: FocusTarget;
   frameAtCreation: FocusFrame;
   intent: FocusIntent;
@@ -237,6 +240,7 @@ export function createAttentionRequest(
       createdAt: now.toISOString(),
       requestedBy: { rootId: input.rootId },
       origin: input.origin,
+      ...(input.raisedBy !== undefined ? { raisedBy: input.raisedBy } : {}),
       target: input.target,
       frameAtCreation: input.frameAtCreation,
       intent: input.intent,

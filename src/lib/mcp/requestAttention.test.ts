@@ -288,14 +288,15 @@ test("no rootId can be named by the caller", async () => {
 });
 
 /*
- * D4's authority rule, on the side the record could never enforce.
+ * B+ item 2: typed focus belongs to EVERY caller — the Viewer surface is one
+ * management plane, and a session losing it because it was classified as a
+ * worker is the defect the operator escalated (the voice coordinator and the
+ * designated manager were both refused, and the historical root conversation
+ * was unresumable, so nothing could focus a session at all).
  *
- * `rootId` was already resolved server-side, so nobody could name a root of
- * their choosing — and that was read as the rule being enforced. It was not.
- * Every Viewer-spawned worker is registered with this same `viewer` MCP server,
- * so a worker calling this tool got the operator's own root identity written
- * onto a request `origin: "root-agent"`: not a forged root, the REAL one, asked
- * for by something that holds no claim on the operator's screen.
+ * What replaces the refusal is ATTRIBUTION: the record durably names WHO
+ * raised it, derived server-side from the durable caller identity, never from
+ * anything the caller states.
  */
 
 const workerCaller: AttentionCallerAuthority = {
@@ -308,47 +309,32 @@ function serviceAs(authority: AttentionCallerAuthority) {
   return createMcpToolService(bindings(undefined, undefined, () => authority), new MemoryMcpReceiptStore());
 }
 
-test("a worker holding this tool is refused, and nothing reaches the record", async () => {
-  const refused = await serviceAs(workerCaller).callTool("request_attention", ask()) as McpToolResult;
+test("a worker holding this tool raises the focus request — refused for nobody", async () => {
+  const result = await serviceAs(workerCaller).callTool("request_attention", ask()) as McpToolResult & { attentionId?: string };
 
-  expect(refused).toMatchObject({
-    ok: false,
-    error: "only the operator's root session may raise an attention request",
-  });
-  /* Named, so the agent can say why it was refused rather than retrying into a
-     wall — and so the operator can see which worker tried. */
-  expect((refused as { details?: Record<string, unknown> }).details)
-    .toMatchObject({ callerConversationId: "conversation_reviewer", callerRole: "reviewer" });
-  /* The whole point: no card, no queue entry, no expiry the root agent would
-     later be told about as if it had asked. */
-  expect(readAttentionFile().requests).toEqual([]);
+  expect(result.ok).toBe(true);
+  expect(result.attentionId).toStartWith("attention_");
+  /* The record durably attributes the actual caller: a worker's ask never
+     masquerades as the operator's own root agent asking. */
+  expect(readAttentionFile().requests[0]!.raisedBy)
+    .toEqual({ kind: "agent", conversationId: "conversation_reviewer", role: "reviewer" });
 });
 
-test("the refusal lands before the root lineage is touched", async () => {
-  const adoptions = { count: 0 };
-  const tools = createMcpToolService(
-    bindings(adoptions, undefined, () => workerCaller),
-    new MemoryMcpReceiptStore(),
-  );
-
-  await tools.callTool("request_attention", ask());
-
-  /* A worker must not be able to drive root-session adoption either: the raise
-     path writes the durable lineage, and a refused caller reaching it would let
-     a worker move the operator's root identity forward as a side effect. */
-  expect(adoptions.count).toBe(0);
+test("the gateway's raise is attributed as the gateway, a worker's as its own conversation", async () => {
+  await serviceAs(ROOT_CALLER).callTool("request_attention", ask({ clientRequestId: "raise-root" }));
+  const stored = readAttentionFile().requests[0]!;
+  expect(stored.raisedBy).toEqual({ kind: "gateway", conversationId: "conversation_root", role: null });
 });
 
-test("a caller no recorded host names is allowed through", async () => {
-  /* Deliberate, and the reason is in `callerAuthority.ts`: the operator's root
-     session is often a terminal the Viewer observes rather than launched, so
-     there are ordinary setups with no host evidence naming it. Refusing those
-     would take the feature from the person it exists for, to stop something
-     that already requires running code as them. */
+test("a caller no recorded host names is allowed through, attributed as unidentified", async () => {
+  /* The operator's root session is often a terminal the Viewer observes rather
+     than launched, so there are ordinary setups with no host evidence naming
+     it. The record says so instead of guessing. */
   const result = await serviceAs({ kind: "unidentified" }).callTool("request_attention", ask()) as McpToolResult;
 
   expect(result.ok).toBe(true);
   expect(readAttentionFile().requests).toHaveLength(1);
+  expect(readAttentionFile().requests[0]!.raisedBy).toEqual({ kind: "unidentified", conversationId: null, role: null });
 });
 
 /* ── What the answer says about who will see it ─────────────────────────── */
