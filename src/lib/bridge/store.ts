@@ -20,6 +20,7 @@ import {
   type BridgeReportBatch,
   type BridgeReportInput,
   type BridgeReportLogV1,
+  type BridgeReportOrigin,
   type BridgeReportV1,
 } from "./types";
 
@@ -118,6 +119,18 @@ function normalizeConfirmation(value: unknown): BridgeConfirmation | undefined {
   };
 }
 
+function normalizeOrigin(value: unknown): BridgeReportOrigin | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const candidate = value as { kind?: unknown; conversationId?: unknown; role?: unknown };
+  if (candidate.kind !== "manager" && candidate.kind !== "agent" && candidate.kind !== "gateway" && candidate.kind !== "unidentified") return undefined;
+  if (candidate.kind === "unidentified") return { kind: "unidentified", conversationId: null, role: null };
+  return {
+    kind: candidate.kind,
+    conversationId: typeof candidate.conversationId === "string" ? candidate.conversationId : null,
+    role: typeof candidate.role === "string" ? candidate.role : null,
+  };
+}
+
 function normalizeReport(value: unknown): BridgeReportV1 | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const candidate = value as Partial<BridgeReportV1>;
@@ -128,12 +141,14 @@ function normalizeReport(value: unknown): BridgeReportV1 | null {
   const confirmation = candidate.class === "confirmation_request"
     ? normalizeConfirmation(candidate.confirmation)
     : undefined;
+  const origin = normalizeOrigin(candidate.origin);
   return {
     id: candidate.id,
     seq: candidate.seq as number,
     at: candidate.at,
     class: candidate.class,
     body: typeof candidate.body === "string" ? candidate.body : "",
+    ...(origin ? { origin } : {}),
     ...(typeof candidate.correlatesDirective === "string" ? { correlatesDirective: candidate.correlatesDirective } : {}),
     ...(confirmation ? { confirmation } : {}),
   };
@@ -328,6 +343,7 @@ export function appendBridgeReports(
         at: input.at,
         class: input.class,
         body: bridgeReportBody(input.body),
+        ...(input.origin ? { origin: normalizeOrigin(input.origin) } : {}),
         ...(input.correlatesDirective ? { correlatesDirective: input.correlatesDirective } : {}),
         ...(confirmation ? { confirmation } : {}),
       };

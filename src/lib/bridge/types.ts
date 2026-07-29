@@ -79,6 +79,37 @@ export interface BridgeConfirmation {
   consumedAt?: string;
 }
 
+/**
+ * SERVER-AUTHENTICATED origin of a report (B+ items 3/4).
+ *
+ * `bridge_report` is callable from every session, so the log has to say which
+ * session each row came from. The label is derived server-side from the
+ * durable caller identity — process ancestry merged with the admission-injected
+ * spawn capability, checked against the durable orchestrator designation —
+ * never from anything the caller supplies. `manager` is the one voice the
+ * gateway relays as the manager's own; every other kind is visibly somebody
+ * else, and only `manager` may carry a `confirmation_request`.
+ */
+export interface BridgeReportOrigin {
+  kind: "manager" | "agent" | "gateway" | "unidentified";
+  conversationId: string | null;
+  role: string | null;
+}
+
+/**
+ * How a report's origin reads on the way OUT — the label every delivery
+ * composer must frame a non-manager row with (HIGH 3 of the #758 review: an
+ * origin that is written but never read is not a control). Null means the row
+ * speaks in the manager's voice: the designated orchestrator's own reports,
+ * and legacy rows written before origin labeling existed, which were
+ * manager-only by the gate of that era.
+ */
+export function bridgeReportOriginLabel(origin: BridgeReportOrigin | undefined): string | null {
+  if (!origin || origin.kind === "manager") return null;
+  const who = origin.kind === "gateway" ? "voice gateway" : origin.role ?? "agent";
+  return origin.conversationId ? `${who} ${origin.conversationId}` : who;
+}
+
 export interface BridgeReportV1 {
   /** Monotonic, never reused — THE cursor unit. */
   seq: number;
@@ -86,6 +117,9 @@ export interface BridgeReportV1 {
   id: string;
   at: string;
   class: BridgeReportClass;
+  /** Server-derived origin. Absent on rows written before origin labeling
+      existed, which were manager-only by the gate of that era. */
+  origin?: BridgeReportOrigin;
   /** `clientRequestId` of the directive this answers, when it answers one. */
   correlatesDirective?: string;
   /** Bounded and secret-redacted at write. Transcript payloads never reach it. */
@@ -102,6 +136,8 @@ export interface BridgeReportInput {
   key: string;
   class: BridgeReportClass;
   at: string;
+  /** Server-derived origin label; callers never supply one. */
+  origin?: BridgeReportOrigin | null;
   correlatesDirective?: string | null;
   /** Raw candidate text; bounded and redacted before it is stored. */
   body?: string | null;

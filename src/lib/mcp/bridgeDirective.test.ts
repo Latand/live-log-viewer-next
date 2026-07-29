@@ -183,3 +183,56 @@ test("a directive refuses input that would break its own id derivation", async (
   }
   expect(posted).toEqual([]);
 });
+
+/* ── MEDIUM 6 (#758 review): per-project directive routing ───────────────── */
+
+/* CHOSEN SEMANTICS: the legacy single-instance record remains the DEFAULT
+   recipient for an un-scoped directive; a directive carrying `project` resolves
+   through the VALIDATED per-project seat authority, so seating project B never
+   redirects project A's directives. */
+
+function seatedBindings() {
+  posted = [];
+  const control: ViewerControlDependencies = {
+    async post(pathname, body) {
+      posted.push({ pathname, body });
+      return { outcome: "delivered", operationId: "op-1" };
+    },
+  };
+  return viewerMcpBindings(undefined, control, {
+    authorizedSeats: () => [
+      { conversationId: "conversation_a", path: "/tmp/a.jsonl", project: "proj-a" },
+      { conversationId: "conversation_b", path: "/tmp/b.jsonl", project: "proj-b" },
+    ],
+  } as never);
+}
+
+test("a project-scoped directive reaches THAT project's orchestrator even after another project was seated", async () => {
+  sandbox();
+  const tools = seatedBindings();
+
+  await tools.bridge_directive({ clientRequestId: "d-a", rootTurnId: "turn_a", utterance: 0, instruction: "status?", project: "proj-a" });
+  await tools.bridge_directive({ clientRequestId: "d-b", rootTurnId: "turn_b", utterance: 0, instruction: "status?", project: "proj-b" });
+
+  expect(posted.map((post) => post.body.conversationId)).toEqual(["conversation_a", "conversation_b"]);
+});
+
+test("an un-scoped directive keeps the legacy primary recipient", async () => {
+  sandbox();
+  const tools = seatedBindings();
+  await tools.bridge_directive({ clientRequestId: "d-l", rootTurnId: "turn_l", utterance: 0, instruction: "status?" });
+  expect(posted[0]!.body.conversationId).toBe("conversation_manager");
+});
+
+test("a project with no VALIDATED seat refuses rather than falling back to another project's orchestrator", async () => {
+  sandbox();
+  const tools = seatedBindings();
+  await expect(tools.bridge_directive({
+    clientRequestId: "d-x",
+    rootTurnId: "turn_x",
+    utterance: 0,
+    instruction: "status?",
+    project: "proj-unknown",
+  })).rejects.toThrow();
+  expect(posted).toEqual([]);
+});

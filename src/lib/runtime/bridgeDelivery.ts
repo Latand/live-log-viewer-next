@@ -1,5 +1,6 @@
 import {
   BRIDGE_LIVE_BATCH_INTERVAL_MS,
+  bridgeReportOriginLabel,
   type BridgeReportBatch,
   type BridgeReportV1,
 } from "@/lib/bridge/types";
@@ -107,7 +108,12 @@ export type BridgeDeliveryPlan =
  */
 function reportText(report: BridgeReportV1): string {
   const body = report.body.trim();
-  const head = `[${report.class}]${body ? ` ${body}` : ""}`;
+  /* Origin-framed on the way out (HIGH 3, #758 review): a non-manager row is
+     spoken as its own agent's report, never in the manager's voice. The label
+     comes from the server-authenticated origin field, not from body text the
+     caller owns. */
+  const label = bridgeReportOriginLabel(report.origin);
+  const head = `[${report.class}]${label ? ` (from ${label} — NOT the manager)` : ""}${body ? ` ${body}` : ""}`;
   if (report.class !== "confirmation_request" || !report.confirmation) return head;
   const { sha, nonce, expiresAt } = report.confirmation;
   return [

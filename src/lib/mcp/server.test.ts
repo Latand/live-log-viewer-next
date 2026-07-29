@@ -1117,6 +1117,10 @@ describe("MCP tool service", () => {
         "request_attention",
         "bridge_report",
         "bridge_directive",
+        "get_orchestrator",
+        "create_orchestrator",
+        "send_message_to_orchestrator",
+        "rotate_orchestrator",
       ]);
       for (const tool of listed.tools) {
         expect(tool.inputSchema.required).toContain("clientRequestId");
