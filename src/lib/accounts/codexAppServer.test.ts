@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 
 import { expect, test } from "bun:test";
 
-import { CodexAppServerClient } from "./codexAppServer";
+import { CodexAppServerClient, type CodexAppServerOptions } from "./codexAppServer";
 
 class FakeChild extends EventEmitter {
   readonly pid = 4242;
@@ -62,10 +62,16 @@ function requestId(message: Record<string, unknown>): number {
   return message.id as number;
 }
 
-function clientWith(handler: (child: FakeChild, message: Record<string, unknown>) => void): { child: FakeChild; start: () => Promise<CodexAppServerClient> } {
+function clientWith(handler: (child: FakeChild, message: Record<string, unknown>) => void): {
+  child: FakeChild;
+  start: (options?: Partial<CodexAppServerOptions>) => Promise<CodexAppServerClient>;
+} {
   const child = new FakeChild();
   child.onWrite = (message) => handler(child, message);
-  return { child, start: () => CodexAppServerClient.start({ home: "/fake/home", spawn: () => child as never }) };
+  return {
+    child,
+    start: (options = {}) => CodexAppServerClient.start({ ...options, home: "/fake/home", spawn: () => child as never }),
+  };
 }
 
 test("account-management app-server retains zero-MCP process isolation", async () => {
@@ -209,7 +215,7 @@ test("successor thread methods use the structured fork, resume, read, name, and 
     sandbox: "read-only",
     config: {
       mcp_servers: { playwright: { enabled: false }, "telegram-readonly": { enabled: false } },
-      features: { apps: false, plugins: false, multi_agent: false },
+      features: { apps: false, plugins: false, multi_agent: false, realtime_conversation: true },
       include_apps_instructions: false,
       model_reasoning_effort: "high",
     },
@@ -348,11 +354,56 @@ test("oversized unterminated JSONL fails with a bounded buffer", async () => {
   const { child, start } = clientWith((fake, message) => {
     if (message.method === "initialize") fake.respond(requestId(message), {});
   });
-  const client = await start();
+  const client = await start({ maxStdoutBufferBytes: 128 });
   const pending = client.readAccount();
-  child.output("x".repeat(1024 * 1024 + 1));
+  child.output("x".repeat(129));
   await expect(pending).rejects.toThrow("oversized unterminated JSONL line");
   expect(child.signals).toContain("SIGTERM");
+});
+
+test("the default transport accepts a JSONL response larger than the legacy one-megabyte cap", async () => {
+  const { child, start } = clientWith((fake, message) => {
+    if (message.method === "initialize") fake.respond(requestId(message), {});
+  });
+  const client = await start();
+  const pending = client.readAccount();
+  child.output(JSON.stringify({
+    jsonrpc: "2.0",
+    id: 2,
+    result: {
+      account: { type: "chatgpt", padding: "x".repeat(2 * 1024 * 1024) },
+      requiresOpenaiAuth: true,
+    },
+  }) + "\n");
+  await expect(pending).resolves.toEqual({ account: { type: "chatgpt" }, requiresOpenaiAuth: true });
+  client.close();
+});
+
+test("a fragmented 25 MB JSONL response is accumulated without quadratic event-loop work", async () => {
+  const { child, start } = clientWith((fake, message) => {
+    if (message.method === "initialize") fake.respond(requestId(message), {});
+  });
+  const client = await start();
+  const pending = client.readAccount();
+  const frame = JSON.stringify({
+    jsonrpc: "2.0",
+    id: 2,
+    result: {
+      account: { type: "chatgpt", padding: "x".repeat(25 * 1024 * 1024) },
+      requiresOpenaiAuth: true,
+    },
+  }) + "\n";
+  const startedAt = performance.now();
+  for (let offset = 0; offset < frame.length; offset += 64 * 1024) {
+    child.output(frame.slice(offset, offset + 64 * 1024));
+  }
+  const synchronousMs = performance.now() - startedAt;
+  await expect(pending).resolves.toEqual({ account: { type: "chatgpt" }, requiresOpenaiAuth: true });
+  /* The former repeated concat + full byteLength scan took about 3 seconds on
+     this payload. The chunk accumulator stays comfortably below this loose CI
+     bound while keeping the regression test insensitive to normal host load. */
+  expect(synchronousMs).toBeLessThan(2_000);
+  client.close();
 });
 
 test("SIGTERM acknowledgement and escalation both end in a reaped child", async () => {

@@ -535,7 +535,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   markTiming("files-project-rate-limits");
   const effectiveProjectCatalog = projectedProjectCatalog(projectCatalog, registrySnapshot);
   /* GitHub repository identity for readiness issue links (issue #290): cached
-     per project root with a bounded git probe, nullable on any failure. */
+     per project root from local .git/config, nullable on any failure. */
   for (const entry of effectiveProjectCatalog) {
     entry.repository = entry.projectRoot ? repositoryForProjectRoot(entry.projectRoot) : null;
   }

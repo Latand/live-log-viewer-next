@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
+import { authorizeCodexForkRetry } from "@/lib/accounts/migration/provider";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 
 export async function updateMigrationAction(
@@ -9,6 +10,7 @@ export async function updateMigrationAction(
   { params }: { params: Promise<{ intentId: string }> },
   registry: AgentRegistry = agentRegistry(),
   requestTick: () => void = requestAccountMigrationTick,
+  authorizeForkRetry: typeof authorizeCodexForkRetry = authorizeCodexForkRetry,
 ) {
   const rejected = rejectCrossOrigin(req); if (rejected) return rejected;
   let body: { action?: unknown; expectedRevision?: unknown }; try { body = await req.json() as typeof body; } catch { return NextResponse.json({ error: "invalid JSON" }, { status: 400 }); }
@@ -24,9 +26,16 @@ export async function updateMigrationAction(
     const intent = snapshot.migrationIntents[intentId];
     if (!intent) return NextResponse.json({ error: "migration intent is unknown" }, { status: 404 });
     if (body.expectedRevision !== undefined && intent.revision !== body.expectedRevision) return NextResponse.json({ error: "migration intent revision is stale" }, { status: 409 });
-    const retried = Object.values(snapshot.conversations)
-      .filter((conversation) => conversation.migration?.intentId === intentId && conversation.migration.phase === "failed-recoverable")
-      .map((conversation) => registry.retryConversationMigration(conversation.id, conversation.migration?.revision));
+    const failed = Object.values(snapshot.conversations)
+      .filter((conversation) => conversation.migration?.intentId === intentId && conversation.migration.phase === "failed-recoverable");
+    const retried = [];
+    for (const conversation of failed) {
+      const migration = conversation.migration!;
+      if (conversation.engine === "codex" && migration.errorCode === "codex-fork-outcome-unknown") {
+        await authorizeForkRetry(migration.operationId, conversation.id);
+      }
+      retried.push(registry.retryConversationMigration(conversation.id, migration.revision));
+    }
     if (retried.length > 0) requestTick();
     return NextResponse.json({ intent, retried: retried.length });
   }

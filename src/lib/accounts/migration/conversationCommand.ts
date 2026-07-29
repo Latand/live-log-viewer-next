@@ -5,8 +5,8 @@ import { chooseReseatTarget } from "@/lib/accounts/reseat";
 
 import { advanceConversationMigration, drainHeldDeliveries } from "./coordinator";
 import { createMigrationDeliveryPort } from "./deliveryPort";
-import { RegisteredSuccessorProvider } from "./provider";
-import type { ViewerConversationId } from "./contracts";
+import { authorizeCodexForkRetry, RegisteredSuccessorProvider } from "./provider";
+import type { SuccessorProviderPort, ViewerConversationId } from "./contracts";
 
 export type ConversationMigrationCommand = {
   conversationId: string;
@@ -20,12 +20,22 @@ export type ConversationMigrationCommandResult = {
   body: Record<string, unknown>;
 };
 
+export interface ConversationMigrationCommandDependencies {
+  registry?: typeof agentRegistry;
+  provider?: () => SuccessorProviderPort;
+  authorizeForkRetry?: typeof authorizeCodexForkRetry;
+}
+
 const deliveryPort = createMigrationDeliveryPort();
 const IN_FLIGHT_PHASES = new Set(["requested", "waiting-turn", "preparing", "successor-starting", "verifying"]);
 
 export async function applyConversationMigration(
   command: ConversationMigrationCommand,
+  dependencies: ConversationMigrationCommandDependencies = {},
 ): Promise<ConversationMigrationCommandResult> {
+  const registryForCommand = dependencies.registry ?? agentRegistry;
+  const providerForCommand = dependencies.provider ?? (() => new RegisteredSuccessorProvider());
+  const authorizeForkRetry = dependencies.authorizeForkRetry ?? authorizeCodexForkRetry;
   if (!command.conversationId.startsWith("conversation_")) {
     return { status: 400, body: { error: "invalid conversation id" } };
   }
@@ -34,7 +44,7 @@ export async function applyConversationMigration(
     if (command.path !== undefined && typeof command.path !== "string") {
       return { status: 400, body: { error: "path must be a string" } };
     }
-    const registry = agentRegistry();
+    const registry = registryForCommand();
     const conversation = registry.conversation(conversationId);
     if (!conversation) return { status: 404, body: { error: "viewer conversation is unknown" } };
     const source = conversation.generations.at(-1);
@@ -56,7 +66,7 @@ export async function applyConversationMigration(
     let final = requested;
     if (requested.migration) {
       try {
-        final = await advanceConversationMigration(conversationId, registry, new RegisteredSuccessorProvider());
+        final = await advanceConversationMigration(conversationId, registry, providerForCommand());
         if (final.migration?.phase === "committed") await drainHeldDeliveries(final.id, deliveryPort, registry);
       } catch {
         final = registry.conversation(conversationId) ?? requested;
@@ -79,7 +89,7 @@ export async function applyConversationMigration(
   }
   if (command.action === "rollback") {
     try {
-      const registry = agentRegistry();
+      const registry = registryForCommand();
       const conversation = registry.rollbackConversationMigration(conversationId, command.expectedRevision);
       await drainHeldDeliveries(conversation.id, deliveryPort, registry);
       return { status: 200, body: conversation as unknown as Record<string, unknown> };
@@ -93,9 +103,18 @@ export async function applyConversationMigration(
   }
   if (command.action === "retry") {
     try {
-      const registry = agentRegistry();
+      const registry = registryForCommand();
+      const failed = registry.conversation(conversationId);
+      const migration = failed?.migration;
+      if (!failed || !migration) throw new Error("conversation has no migration");
+      if (migration.revision !== command.expectedRevision) throw new Error("migration revision is stale");
+      if (failed.engine === "codex"
+        && migration.phase === "failed-recoverable"
+        && migration.errorCode === "codex-fork-outcome-unknown") {
+        await authorizeForkRetry(migration.operationId, failed.id);
+      }
       registry.retryConversationMigration(conversationId, command.expectedRevision);
-      const conversation = await advanceConversationMigration(conversationId, registry, new RegisteredSuccessorProvider());
+      const conversation = await advanceConversationMigration(conversationId, registry, providerForCommand());
       if (conversation.migration?.phase === "committed") await drainHeldDeliveries(conversation.id, deliveryPort, registry);
       return { status: 200, body: conversation as unknown as Record<string, unknown> };
     } catch {
