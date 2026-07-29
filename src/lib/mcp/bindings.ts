@@ -36,6 +36,7 @@ import { requestPipelineTick } from "@/lib/pipelines/controllerSignal";
 import { projectTaskPipelineIds } from "@/lib/pipelines/taskBinding";
 import type { CreatePipelineRequest, PatchPipelineRequest, PipelineAction } from "@/lib/pipelines/types";
 import { listFiles } from "@/lib/scanner";
+import { projectForCwd } from "@/lib/scanner/describe";
 import { completedFileScan } from "@/lib/scanner/scanCache";
 import { readResources } from "@/lib/resources";
 import { adoptLiveRootSession, conversationRole, liveRootSession, type RootSessionSource } from "@/lib/root/adopt";
@@ -143,6 +144,29 @@ export interface ViewerMcpDomainDependencies {
       `@/lib/orchestrator/authority`), for project-scoped directive routing.
       Optional so partial harnesses fall back to the production resolver. */
   authorizedSeats?(): ReturnType<typeof authorizedManagerSeats>;
+  /** The calling voice session's CANONICAL PROJECT — production resolves it
+      from the caller's conversation cwd through the worktree-grouping path
+      (`projectInfoFromCwd`), the same attribution every other surface uses.
+      Null means the invariant "a registered session has a canonical project"
+      is violated, and unscoped directive routing fails closed diagnostically. */
+  callerProject?(): string | null;
+}
+
+/**
+ * FIX 2's production resolver: the caller's conversation (pid ancestry merged
+ * with capability lineage — the identity chain everything else trusts), its
+ * newest generation's cwd, and the canonical project that cwd groups under.
+ * No second resolution scheme: `projectForCwd` IS `projectInfoFromCwd`.
+ */
+function productionCallerProject(): string | null {
+  const authority = attentionCallerAuthority(attentionCallerSources());
+  const conversationId = authority.kind === "root" || authority.kind === "worker" ? authority.conversationId : null;
+  if (!conversationId) return null;
+  const conversation = agentRegistry().conversation(conversationId as `conversation_${string}`);
+  if (!conversation) return null;
+  if (conversation.projectOwnership?.project) return conversation.projectOwnership.project;
+  const cwd = conversation.generations.at(-1)?.launchProfile?.cwd?.trim();
+  return cwd ? projectForCwd(cwd) : null;
 }
 
 /** Server-derived origin of the current caller. Shared by the attention record
@@ -625,35 +649,37 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
   /* Both throw on anything that would not round-trip through the parser. */
   const deliveryId = bridgeDirectiveId(text(args.rootTurnId), utterance);
 
-  /* Recipient resolution (MEDIUM 6, #758 review). Per-project seats share one
-     legacy record, so an UN-SCOPED directive keeps the legacy primary — the
-     conversation the newest designation synced — while a directive carrying
-     `project` resolves through the VALIDATED seat authority, never the raw
-     record: seating project B must not redirect project A's directives, and a
-     project whose seat fails the fail-closed checks gets a refusal rather than
-     somebody else's orchestrator. */
-  const project = text(args.project);
-  let manager: { conversationId: string; path: string | null };
-  if (project) {
-    const seats = dependencies.authorizedSeats?.() ?? authorizedManagerSeats(productionManagerAuthoritySources());
-    const seat = seats.find((candidate) => candidate.project === project);
-    if (!seat) {
-      throw new McpToolRefusal(
-        `no validated orchestrator is designated for ${project}; create one first, then relay again`,
-        { code: "manager_not_designated", project },
-      );
-    }
-    manager = { conversationId: seat.conversationId, path: seat.path };
-  } else {
-    const record = readOrchestratorRecord();
-    if (!record) {
-      throw new McpToolRefusal(
-        "no manager conversation is designated, so there is nobody to relay this to; tell the user the manager is not running",
-        { code: "manager_not_designated" },
-      );
-    }
-    manager = { conversationId: record.conversationId, path: record.path };
+  /* Recipient resolution (FIX 2, post-#758 operator decision). Every directive
+     routes through the VALIDATED per-project seat authority — the global
+     last-seated legacy record is NEVER consulted, because that was the defect:
+     seating project B silently redirected project A's directives.
+
+     An explicitly named project overrides. An UN-SCOPED directive follows the
+     CALLING VOICE SESSION'S canonical project, resolved from the conversation's
+     cwd through the same worktree-grouping path (`projectInfoFromCwd`) every
+     other project attribution uses — never a second scheme. */
+  const callerProject = dependencies.callerProject ? dependencies.callerProject() : productionCallerProject();
+  const project = text(args.project) || callerProject;
+  if (!project) {
+    /* Diagnostic, not a menu: a REGISTERED voice session always has a cwd and
+       therefore a canonical project. Reaching this line means the invariant is
+       violated — corrupted or incomplete registry state — and the refusal names
+       that rather than modelling it as an ordinary choice or falling back to
+       whatever project was seated last. */
+    throw new McpToolRefusal(
+      "INVARIANT VIOLATION: the calling voice session resolves to no canonical project — a registered conversation must derive one from its cwd through the worktree-grouping path. Routing fails closed; investigate the session's registry record (an explicit project can be named meanwhile).",
+      { code: "caller_project_unresolved" },
+    );
   }
+  const seats = dependencies.authorizedSeats?.() ?? authorizedManagerSeats(productionManagerAuthoritySources());
+  const seat = seats.find((candidate) => candidate.project === project);
+  if (!seat) {
+    throw new McpToolRefusal(
+      `no validated orchestrator is designated for ${project}; create one first, then relay again`,
+      { code: "manager_not_designated", project },
+    );
+  }
+  const manager: { conversationId: string; path: string | null } = { conversationId: seat.conversationId, path: seat.path };
 
   const ref = args.ref;
   const trailer = typeof ref === "number" && Number.isInteger(ref) && ref > 0

@@ -7,6 +7,13 @@ import { mintBridgeConfirmation } from "@/lib/bridge/confirmation";
 import { parseBridgeTrailer } from "@/lib/bridge/directive";
 import { recordManagerReport } from "@/lib/bridge/service";
 import { drainBridgeReports, openBridgeChannel } from "@/lib/bridge/store";
+import { authorizedManagerSeats } from "@/lib/orchestrator/authority";
+import {
+  activeOrchestratorSeats,
+  beginOrchestratorSeatIntent,
+  completeOrchestratorSeatIntent,
+  orchestratorRevocations,
+} from "@/lib/orchestrator/seats";
 import { adoptOrchestratorRecord } from "@/lib/orchestrator/store";
 
 import { viewerMcpBindings, type ViewerControlDependencies } from "./bindings";
@@ -32,21 +39,43 @@ afterEach(() => {
 
 let posted: { pathname: string; body: Record<string, unknown> }[] = [];
 
+/** REAL seat activation through the durable store — the designation evidence
+    routing actually reads. */
+function seatProject(project: string, conversationId: string): void {
+  beginOrchestratorSeatIntent({ project, mandate: "own the board", clientRequestId: `seed_${project}`, mode: "spawn" });
+  completeOrchestratorSeatIntent({ project, clientRequestId: `seed_${project}`, conversationId, path: null });
+}
+
+/** The validated seat authority over the REAL store, with permissive registry
+    facts — designation evidence is real, only the registry is stubbed. */
+function realSeatAuthority() {
+  return authorizedManagerSeats({
+    activeSeats: activeOrchestratorSeats,
+    revocations: orchestratorRevocations,
+    legacyManagerConversationId: () => null,
+    conversationFacts: () => ({ superseded: false, hasGeneration: true, project: null }),
+    resolveAlias: (id) => id,
+  });
+}
+
 function sandbox(withManager = true): void {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-bridge-directive-"));
   sandboxes.push(dir);
   process.env.LLV_STATE_DIR = path.join(dir, "state");
   openBridgeChannel("root_directive");
   if (withManager) {
+    /* The caller's own project holds the designated orchestrator; a legacy
+       record is ALSO written and must be irrelevant to routing. */
+    seatProject("proj-voice", "conversation_manager");
     adoptOrchestratorRecord({
-      conversationId: "conversation_manager",
+      conversationId: "conversation_legacy_pointer",
       path: null,
       createdAt: new Date().toISOString(),
     });
   }
 }
 
-function bindings() {
+function bindings(callerProject: string | null = "proj-voice") {
   posted = [];
   const control: ViewerControlDependencies = {
     async post(pathname, body) {
@@ -54,7 +83,12 @@ function bindings() {
       return { outcome: "delivered", operationId: "op-1" };
     },
   };
-  return viewerMcpBindings(undefined, control);
+  /* The caller's canonical project as the production resolver would derive it
+     from the voice conversation's cwd through projectInfoFromCwd. */
+  return viewerMcpBindings(undefined, control, {
+    callerProject: () => callerProject,
+    authorizedSeats: realSeatAuthority,
+  } as never);
 }
 
 test("a directive is addressed to the manager the record names, not to whoever the caller says", async () => {
@@ -159,7 +193,7 @@ test("a half-formed confirmation answer is refused rather than relayed as a bare
   expect(posted).toEqual([]);
 });
 
-test("with no manager designated the directive is refused, not delivered somewhere else", async () => {
+test("with no orchestrator designated for the caller's project the directive is refused, not delivered somewhere else", async () => {
   sandbox(false);
   const tools = bindings();
   await expect(tools.bridge_directive({
@@ -167,7 +201,7 @@ test("with no manager designated the directive is refused, not delivered somewhe
     rootTurnId: "turn_0203",
     utterance: 0,
     instruction: "start a reviewer",
-  })).rejects.toThrow(/manager/i);
+  })).rejects.toThrow(/orchestrator|manager/i);
   expect(posted).toEqual([]);
 });
 
@@ -217,11 +251,44 @@ test("a project-scoped directive reaches THAT project's orchestrator even after 
   expect(posted.map((post) => post.body.conversationId)).toEqual(["conversation_a", "conversation_b"]);
 });
 
-test("an un-scoped directive keeps the legacy primary recipient", async () => {
+/* ── FIX 2 (post-#758 operator decision): unscoped routing follows the CALLING
+      VOICE SESSION'S canonical project, never a global last-writer record ──── */
+
+test("FIX 2 ACCEPTANCE: seat A, then seat B — an unscoped directive from a voice session in project A reaches A's orchestrator", async () => {
+  sandbox(false);
+  /* REAL seat activations, in this order: A first, then B, so B is the most
+     recently seated project AND the one the last-writer legacy record names. */
+  seatProject("proj-a", "conversation_a");
+  seatProject("proj-b", "conversation_b");
+  adoptOrchestratorRecord({ conversationId: "conversation_b", path: null, createdAt: new Date().toISOString() });
+
+  /* The caller is a voice session whose canonical project is A. */
+  const tools = bindings("proj-a");
+  const receipt = await tools.bridge_directive({
+    clientRequestId: "d-unscoped",
+    rootTurnId: "turn_unscoped",
+    utterance: 0,
+    instruction: "status?",
+  });
+
+  expect(posted).toHaveLength(1);
+  expect(posted[0]!.body.conversationId).toBe("conversation_a");
+  expect(receipt).toMatchObject({ managerConversationId: "conversation_a" });
+});
+
+test("FIX 2: an unresolvable caller project fails closed DIAGNOSTICALLY — never another project's orchestrator", async () => {
   sandbox();
-  const tools = seatedBindings();
-  await tools.bridge_directive({ clientRequestId: "d-l", rootTurnId: "turn_l", utterance: 0, instruction: "status?" });
-  expect(posted[0]!.body.conversationId).toBe("conversation_manager");
+  /* A registered voice session always has a cwd and therefore a canonical
+     project; this state is invariant-violating, and the refusal says so
+     instead of guessing or falling back to whatever was seated last. */
+  const tools = bindings(null);
+  await expect(tools.bridge_directive({
+    clientRequestId: "d-lost",
+    rootTurnId: "turn_lost",
+    utterance: 0,
+    instruction: "status?",
+  })).rejects.toThrow(/invariant/i);
+  expect(posted).toEqual([]);
 });
 
 test("a project with no VALIDATED seat refuses rather than falling back to another project's orchestrator", async () => {
