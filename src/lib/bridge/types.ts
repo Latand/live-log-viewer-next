@@ -96,6 +96,20 @@ export interface BridgeReportOrigin {
   role: string | null;
 }
 
+/**
+ * How a report's origin reads on the way OUT — the label every delivery
+ * composer must frame a non-manager row with (HIGH 3 of the #758 review: an
+ * origin that is written but never read is not a control). Null means the row
+ * speaks in the manager's voice: the designated orchestrator's own reports,
+ * and legacy rows written before origin labeling existed, which were
+ * manager-only by the gate of that era.
+ */
+export function bridgeReportOriginLabel(origin: BridgeReportOrigin | undefined): string | null {
+  if (!origin || origin.kind === "manager") return null;
+  const who = origin.kind === "gateway" ? "voice gateway" : origin.role ?? "agent";
+  return origin.conversationId ? `${who} ${origin.conversationId}` : who;
+}
+
 export interface BridgeReportV1 {
   /** Monotonic, never reused — THE cursor unit. */
   seq: number;

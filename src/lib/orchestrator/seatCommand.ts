@@ -270,6 +270,23 @@ export async function executeOrchestratorSeatRequest(
 
   /* Spawn mode: a fresh orchestrator whose FIRST PROMPT is the mandate, so the
      durable launch receipt is the exactly-once delivery mechanism. */
+  const incumbent = orchestratorSeatFor(project).active;
+  if (incumbent && incumbent.intent.clientRequestId !== clientRequestId && rawBody.replaceIncumbent !== true) {
+    /* HIGH 5 (#758 review): a fresh spawn-mode designation over a live seat is
+       an ACCIDENTAL rotation — no handoff, no lineage notes, no stated intent —
+       and an agent regenerating its idempotency key on retry would trigger it.
+       Refused; rotation is the explicit way through, and callers that really
+       mean "replace" (the rotation command, a deliberate board replace) say so
+       with `replaceIncumbent: true`. */
+    return {
+      status: 409,
+      body: {
+        error: `an orchestrator is already designated for ${project}; use rotate_orchestrator for an explicit handoff, or pass replaceIncumbent: true to replace deliberately`,
+        code: "already_designated",
+        incumbentSeatEpoch: incumbent.seatEpoch,
+      },
+    };
+  }
   const begun = beginOrchestratorSeatIntent({ project, mandate, clientRequestId, mode: "spawn", promptVersion, now: dependencies.now() });
   if (begun.kind === "completed") return replayedSeatResponse(begun.seat);
   /* A pending replay spawns the ORIGINAL intent's mandate: the spawn receipt is
@@ -375,7 +392,10 @@ export async function executeOrchestratorRotation(
     project,
     mandate: `${baseMandate}\n\n${handoff}`,
     clientRequestId,
-    promptVersion: rawBody.promptVersion ?? incumbent.promptVersion,
+    /* Rotation IS the explicit replacement, so it carries the opt-in the plain
+       spawn-mode guard requires. */
+    replaceIncumbent: true,
+    promptVersion: incumbent.promptVersion,
     ...(rawBody.engine !== undefined ? { engine: rawBody.engine } : {}),
     ...(rawBody.model !== undefined ? { model: rawBody.model } : {}),
     ...(rawBody.cwd !== undefined ? { cwd: rawBody.cwd } : {}),

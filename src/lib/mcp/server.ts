@@ -1211,6 +1211,7 @@ const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     rootTurnId: z.string().regex(/^[A-Za-z0-9_.:-]+$/).describe("The realtime turn this instruction came from. The delivery id derives from it, so a retry must reuse the same value."),
     utterance: z.number().int().min(0).describe("Index of this instruction within that turn, from 0."),
     instruction: z.string().min(1).describe("What the user asked for, in plain words. No board state, no tool output."),
+    project: z.string().optional().describe("Route to THIS project's designated orchestrator (validated seat). Absent: the legacy primary recipient."),
     ref: z.number().int().positive().optional().describe("seq of the report this answers, when it answers one."),
     nonce: z.string().optional().describe("With sha: the deploy authorization the user just gave aloud."),
     sha: z.string().regex(/^[0-9a-f]{40}$/).optional(),

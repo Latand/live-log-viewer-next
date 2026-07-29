@@ -3,20 +3,32 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { setRetireManagerForTests } from "./retire";
 import { executeOrchestratorRotation, executeOrchestratorSeatRequest, type SeatCommandDependencies } from "./seatCommand";
 import { orchestratorRevocations, orchestratorSeatFor } from "./seats";
 import { readOrchestratorRecord } from "./store";
 
 let sandbox = "";
 let previousStateDir: string | undefined;
+/** Every host-retirement the production module would perform, observed at the
+    REAL seam (`setRetireManagerForTests`), so a mutation that reintroduces a
+    retireOutgoingManager call anywhere in the seat flow turns the axis-1
+    assertions red instead of silently killing a real agent. */
+let retiredHosts: string[] = [];
 
 beforeEach(() => {
   previousStateDir = process.env.LLV_STATE_DIR;
   sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-seat-command-"));
   process.env.LLV_STATE_DIR = sandbox;
+  retiredHosts = [];
+  setRetireManagerForTests(async (conversationId) => {
+    retiredHosts.push(conversationId);
+    return "killed";
+  });
 });
 
 afterEach(() => {
+  setRetireManagerForTests(null);
   if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
   else process.env.LLV_STATE_DIR = previousStateDir;
   fs.rmSync(sandbox, { recursive: true, force: true });
@@ -30,13 +42,10 @@ interface Recorded {
   spawns: Record<string, unknown>[];
   deliveries: { conversationId: string; clientMessageId: string; text: string }[];
   legacySyncs: { conversationId: string }[];
-  /** Ordinary-session mutations against either conversation. The two-axis
-      contract requires this to stay EMPTY on every seat operation. */
-  retired: string[];
 }
 
 function dependencies(overrides: Partial<SeatCommandDependencies> = {}): { deps: SeatCommandDependencies; recorded: Recorded } {
-  const recorded: Recorded = { spawns: [], deliveries: [], legacySyncs: [], retired: [] };
+  const recorded: Recorded = { spawns: [], deliveries: [], legacySyncs: [] };
   const deps: SeatCommandDependencies = {
     spawn: async (body) => {
       recorded.spawns.push(body);
@@ -162,7 +171,7 @@ test("a failed delivery keeps the incumbent seated and reports a recoverable sta
 });
 
 test("AXIS 1/2 SEPARATION: replacement revokes MANAGER-LEVEL authority only — the predecessor's session is never touched", async () => {
-  const { deps, recorded } = dependencies();
+  const { deps } = dependencies();
   await executeOrchestratorSeatRequest(spawnRequest(), deps);
   const result = await executeOrchestratorSeatRequest({
     project: "proj-a",
@@ -174,8 +183,10 @@ test("AXIS 1/2 SEPARATION: replacement revokes MANAGER-LEVEL authority only — 
   /* Designation switched, predecessor durably revoked as manager… */
   expect(orchestratorSeatFor("proj-a").active?.conversationId).toBe(OLD_ID);
   /* …and its host and ordinary Viewer access are left exactly as they were:
-     revocation is an axis-2 act, killing a session would be an axis-1 one. */
-  expect(recorded.retired).toEqual([]);
+     revocation is an axis-2 act, killing a session would be an axis-1 one.
+     Observed at the REAL retire seam, so a production call to
+     retireOutgoingManager anywhere in this flow turns this red. */
+  expect(retiredHosts).toEqual([]);
 });
 
 test("an unknown existing conversation is refused before any intent exists", async () => {
@@ -195,7 +206,7 @@ test("rotation composes a bounded handoff, switches designation atomically, and 
   await executeOrchestratorSeatRequest(spawnRequest(), deps);
 
   const SUCCESSOR = "conversation_55555555-5555-4555-8555-555555555555";
-  const { deps: rotating, recorded } = dependencies({
+  const { deps: rotating } = dependencies({
     spawn: async (body) => {
       recorded2.push(body);
       return { status: 200, body: { ok: true, conversationId: SUCCESSOR, path: "/tmp/successor.jsonl" } };
@@ -232,7 +243,31 @@ test("rotation composes a bounded handoff, switches designation atomically, and 
     conversationId: NEW_ID,
     successorConversationId: SUCCESSOR,
   })]);
-  expect(recorded.retired).toEqual([]);
+  expect(retiredHosts).toEqual([]);
+});
+
+test("HIGH 5: a spawn-mode designation for an ALREADY-SEATED project refuses instead of silently unseating the incumbent", async () => {
+  const { deps, recorded } = dependencies();
+  await executeOrchestratorSeatRequest(spawnRequest(), deps);
+  expect(recorded.spawns).toHaveLength(1);
+
+  /* An ordinary retry-with-a-fresh-key, or a second create for a project that
+     already has its orchestrator: this must NOT become an accidental rotation
+     with no handoff. */
+  const refused = await executeOrchestratorSeatRequest(spawnRequest("req_00000099"), deps);
+  expect(refused.status).toBe(409);
+  expect(refused.body.code).toBe("already_designated");
+  expect(String(refused.body.error)).toContain("rotate_orchestrator");
+  /* Nothing spawned, nothing revoked, incumbent untouched. */
+  expect(recorded.spawns).toHaveLength(1);
+  expect(orchestratorRevocations()).toEqual([]);
+  expect(orchestratorSeatFor("proj-a").active?.conversationId).toBe(NEW_ID);
+  expect(orchestratorSeatFor("proj-a").pending).toBeNull();
+
+  /* Rotation remains the explicit way through (proven in the rotation test),
+     and the internal replaceIncumbent opt-in it uses works: */
+  const replaced = await executeOrchestratorSeatRequest({ ...spawnRequest("req_00000100"), replaceIncumbent: true }, deps);
+  expect(replaced.status).toBe(200);
 });
 
 test("rotation with no incumbent refuses and points at create", async () => {

@@ -181,11 +181,14 @@ test("POST refuses a non-string engine or model rather than storing it", async (
   }
 });
 
-/* Round 2 — a swap must leave exactly ONE live manager. Rewriting the record while
-   the predecessor is still running is split-brain: two agents both believe they own
-   the board, and the bridge references whichever the record happens to name. */
+/* HIGH 4 (#758 review) — AXIS SEPARATION applies to the legacy flow too.
+   Replacement is a DESIGNATION act: it rewrites the record, and with it every
+   manager-level privilege (manager voice, confirmation minting) moves to the
+   successor on the next tool call. It must never strip the predecessor's
+   ordinary Viewer access or kill its host — split-brain is prevented by the
+   record and the seat authority rejecting the predecessor, not by a kill. */
 
-test("replacing a live incumbent retires the predecessor", async () => {
+test("replacing a live incumbent NEVER touches the predecessor's conversation-action surface", async () => {
   const transcript = path.join(sandbox, "orchestrator.jsonl");
   fs.writeFileSync(transcript, "", "utf8");
   await POST(adoptRequest({ conversationId: "conv-1", path: transcript }));
@@ -198,26 +201,16 @@ test("replacing a live incumbent retires the predecessor", async () => {
     model: "sol",
   }))).json();
 
-  expect(swapped.retired).toEqual({ conversationId: "conv-1", outcome: "killed" });
-  expect(retirements).toEqual([{ conversationId: "conv-1", action: "kill" }]);
-});
-
-test("a replacement that cannot retire the predecessor does not seat the successor", async () => {
-  const transcript = path.join(sandbox, "orchestrator.jsonl");
-  fs.writeFileSync(transcript, "", "utf8");
-  await POST(adoptRequest({ conversationId: "conv-1", path: transcript }));
-  retireOutcome = "fail";
-
-  const response = await POST(adoptRequest({ conversationId: "conv-2", path: null, replace: true }));
-  expect(response.status).toBe(409);
-
-  /* Split-brain avoided by refusing the swap: the record still names the only
-     manager that is actually running. */
+  /* The record moved — designation is complete… */
+  expect(swapped.record).toMatchObject({ conversationId: "conv-2" });
+  expect(swapped.replaced).toBe(true);
+  /* …and the predecessor's host and session were left exactly as they were. */
+  expect(retirements).toEqual([]);
   const status = await (await GET()).json();
-  expect(status.record).toMatchObject({ conversationId: "conv-1" });
+  expect(status.record).toMatchObject({ conversationId: "conv-2" });
 });
 
-test("replacing the same conversation is a no-op rather than a self-kill", async () => {
+test("replacing the same conversation is a plain record update", async () => {
   await POST(adoptRequest({ conversationId: "conv-1", path: null }));
   const swapped = await (await POST(adoptRequest({
     conversationId: "conv-1", path: null, replace: true, model: "sonnet",
@@ -227,9 +220,9 @@ test("replacing the same conversation is a no-op rather than a self-kill", async
   expect(swapped.record).toMatchObject({ conversationId: "conv-1", model: "sonnet" });
 });
 
-test("a replacement with no live predecessor retires nothing", async () => {
+test("a replacement with no live predecessor behaves identically", async () => {
   const swapped = await (await POST(adoptRequest({ conversationId: "conv-1", path: null, replace: true }))).json();
-  expect(swapped.retired).toBeNull();
+  expect(swapped.record).toMatchObject({ conversationId: "conv-1" });
   expect(retirements).toEqual([]);
 });
 

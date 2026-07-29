@@ -14,7 +14,7 @@ import {
   openBridgeChannel,
   redeemBridgeAckToken,
 } from "./store";
-import type { BridgeReportInput, BridgeReportV1 } from "./types";
+import { bridgeReportOriginLabel, type BridgeReportInput, type BridgeReportV1 } from "./types";
 
 /**
  * The bridge's production orchestration (#691 §4).
@@ -123,11 +123,23 @@ export function bridgeTurnStartPrelude(
   const batch = drainBridgeReports({ now: request.now });
   if (batch.reports.length === 0) return null;
 
-  const lines = batch.reports.map((report) => `- [${report.class}] ${report.body}`);
+  /* Framed from the row's server-authenticated ORIGIN, never from the body a
+     caller owns: manager rows speak under the manager header, everything else
+     under its own explicit not-the-manager framing (HIGH 3, #758 review). */
+  const managerRows = batch.reports.filter((report) => bridgeReportOriginLabel(report.origin) === null);
+  const otherRows = batch.reports.filter((report) => bridgeReportOriginLabel(report.origin) !== null);
+  const lines: string[] = [];
+  if (managerRows.length > 0) {
+    lines.push("While you were away the manager reported:");
+    lines.push(...managerRows.map((report) => `- [${report.class}] ${report.body}`));
+  }
+  if (otherRows.length > 0) {
+    lines.push("Other sessions also reported (NOT the manager — attribute these to their own agent):");
+    lines.push(...otherRows.map((report) => `- [${report.class}] from ${bridgeReportOriginLabel(report.origin)}: ${report.body}`));
+  }
   if (batch.remaining > 0) lines.push(`- (${batch.remaining} more waiting; they arrive next turn.)`);
   return {
     text: [
-      "While you were away the manager reported:",
       ...lines,
       "",
       "Mention what matters in your own words. Do not read this list aloud.",

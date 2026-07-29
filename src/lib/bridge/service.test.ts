@@ -230,3 +230,55 @@ test("a turn with an empty inbox opens with nothing at all", () => {
   sandbox();
   expect(bridgeTurnStartPrelude({ rootIdentity, now: NOW })).toBeNull();
 });
+
+/* ── HIGH 3 (#758 review): the delivery composer must READ origin ────────── */
+
+test("a mixed batch never covers a non-manager row with the manager-voice header", () => {
+  sandbox();
+  recordManagerReport({
+    key: "mgr-progress",
+    class: "status",
+    at: NOW.toISOString(),
+    body: "merge queue is moving",
+    origin: { kind: "manager", conversationId: "conversation_mgr", role: "orchestrator" },
+  });
+  recordManagerReport({
+    key: "builder-note",
+    class: "status",
+    at: NOW.toISOString(),
+    body: "builder wants attention",
+    origin: { kind: "agent", conversationId: "conversation_builder", role: "builder" },
+  });
+
+  const prelude = bridgeTurnStartPrelude({ rootIdentity, now: NOW });
+  expect(prelude).not.toBeNull();
+  const text = prelude!.text;
+
+  /* The manager framing exists and covers the manager's own row… */
+  const managerHeader = text.indexOf("the manager reported");
+  expect(managerHeader).toBeGreaterThan(-1);
+  expect(text.indexOf("merge queue is moving")).toBeGreaterThan(managerHeader);
+
+  /* …and the agent row sits under its OWN explicit non-manager framing, after
+     the manager section, never inside it. The origin field on the row — not
+     the caller-owned body text — is what decides the framing. */
+  const otherHeader = text.indexOf("NOT the manager");
+  expect(otherHeader).toBeGreaterThan(managerHeader);
+  expect(text.indexOf("builder wants attention")).toBeGreaterThan(otherHeader);
+  expect(text).toContain("builder conversation_builder");
+});
+
+test("a batch of only non-manager rows carries no manager-voice header at all", () => {
+  sandbox();
+  recordManagerReport({
+    key: "builder-only",
+    class: "status",
+    at: NOW.toISOString(),
+    body: "just the builder",
+    origin: { kind: "agent", conversationId: "conversation_builder", role: "builder" },
+  });
+
+  const prelude = bridgeTurnStartPrelude({ rootIdentity, now: NOW });
+  expect(prelude!.text).not.toContain("the manager reported");
+  expect(prelude!.text).toContain("NOT the manager");
+});

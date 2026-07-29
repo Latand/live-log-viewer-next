@@ -139,6 +139,10 @@ export interface ViewerMcpDomainDependencies {
       reports. Optional so partial test harnesses fall back to a label derived
       from {@link attentionAuthority} alone (manager reads as agent there). */
   callerAttribution?(): CallerAttribution;
+  /** Validated per-project manager seats (fail-closed — see
+      `@/lib/orchestrator/authority`), for project-scoped directive routing.
+      Optional so partial harnesses fall back to the production resolver. */
+  authorizedSeats?(): ReturnType<typeof authorizedManagerSeats>;
 }
 
 /** Server-derived origin of the current caller. Shared by the attention record
@@ -613,7 +617,7 @@ function bridgeReport(args: McpToolArgs, dependencies: ViewerMcpDomainDependenci
  *   answers from the receipt instead of delivering the instruction a second time —
  *   but only if the id is a function of the turn rather than freshly minted.
  */
-async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependencies): Promise<McpToolPayload> {
+async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependencies, dependencies: ViewerMcpDomainDependencies): Promise<McpToolPayload> {
   const instruction = text(args.instruction);
   if (!instruction) throw new Error("instruction is required");
   const utterance = args.utterance;
@@ -621,12 +625,34 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
   /* Both throw on anything that would not round-trip through the parser. */
   const deliveryId = bridgeDirectiveId(text(args.rootTurnId), utterance);
 
-  const manager = readOrchestratorRecord();
-  if (!manager) {
-    throw new McpToolRefusal(
-      "no manager conversation is designated, so there is nobody to relay this to; tell the user the manager is not running",
-      { code: "manager_not_designated" },
-    );
+  /* Recipient resolution (MEDIUM 6, #758 review). Per-project seats share one
+     legacy record, so an UN-SCOPED directive keeps the legacy primary — the
+     conversation the newest designation synced — while a directive carrying
+     `project` resolves through the VALIDATED seat authority, never the raw
+     record: seating project B must not redirect project A's directives, and a
+     project whose seat fails the fail-closed checks gets a refusal rather than
+     somebody else's orchestrator. */
+  const project = text(args.project);
+  let manager: { conversationId: string; path: string | null };
+  if (project) {
+    const seats = dependencies.authorizedSeats?.() ?? authorizedManagerSeats(productionManagerAuthoritySources());
+    const seat = seats.find((candidate) => candidate.project === project);
+    if (!seat) {
+      throw new McpToolRefusal(
+        `no validated orchestrator is designated for ${project}; create one first, then relay again`,
+        { code: "manager_not_designated", project },
+      );
+    }
+    manager = { conversationId: seat.conversationId, path: seat.path };
+  } else {
+    const record = readOrchestratorRecord();
+    if (!record) {
+      throw new McpToolRefusal(
+        "no manager conversation is designated, so there is nobody to relay this to; tell the user the manager is not running",
+        { code: "manager_not_designated" },
+      );
+    }
+    manager = { conversationId: record.conversationId, path: record.path };
   }
 
   const ref = args.ref;
@@ -661,6 +687,31 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
     effect that must replay with its parent call. */
 function derivedRequestId(base: string, suffix: string): string {
   return spawnAttemptId(`${base}:${suffix}`);
+}
+
+/**
+ * The calling session's own conversation capability, forwarded so the
+ * designation routes' operator gate can fire (BLOCKING 1 of the #758 review).
+ *
+ * Designation is an OPERATION contract, exactly like the confirmation mint:
+ * the tools stay on every session's surface (axis 1), but a caller that the
+ * registry names as an agent conversation may not seat, rotate or auto-create
+ * an orchestrator — otherwise any session could hand ITSELF manager voice and
+ * the deploy-nonce mint in one call. The Viewer injected this capability into
+ * the launch environment; presenting it is how an agent names itself, and the
+ * routes' `requireOperatorAuthority` refuses a self-named caller. An operator
+ * lane (no capability in the environment) forwards nothing and passes.
+ */
+function callerCapabilityHeaders(): Record<string, string> {
+  const capability = process.env[VIEWER_SPAWN_CAPABILITY_ENV]?.trim() ?? "";
+  return /^[A-Za-z0-9_-]{43}$/.test(capability) ? { [VIEWER_SPAWN_CAPABILITY_HEADER]: capability } : {};
+}
+
+/** Explicitly allowlisted launch fields for the designation routes. NEVER a
+    denylist: `conversationId` (seat an existing session — the self-designation
+    vector) and `promptVersion` (mandate provenance) are server-owned. */
+function allowedSeatFields(args: McpToolArgs, keys: readonly string[]): Record<string, unknown> {
+  return Object.fromEntries(keys.flatMap((key) => (args[key] === undefined ? [] : [[key, args[key]]])));
 }
 
 /**
@@ -777,8 +828,8 @@ async function createOrchestrator(args: McpToolArgs, control: ViewerControlDepen
     mandate: text(args.mandate) || ORCHESTRATOR_SYSTEM_PROMPT,
     promptVersion: ORCHESTRATOR_PROMPT_VERSION,
     clientRequestId: spawnAttemptId(requestId(args)),
-    ...withoutKeys(args, ["clientRequestId", "project", "mandate"]),
-  });
+    ...allowedSeatFields(args, ["cwd", "engine", "model", "effort", "accountId"]),
+  }, callerCapabilityHeaders());
   return redactPayload({
     project,
     conversationId: result.conversationId ?? null,
@@ -810,7 +861,7 @@ async function sendMessageToOrchestrator(args: McpToolArgs, control: ViewerContr
       mandate: ORCHESTRATOR_SYSTEM_PROMPT,
       promptVersion: ORCHESTRATOR_PROMPT_VERSION,
       clientRequestId: derivedRequestId(key, "create"),
-    });
+    }, callerCapabilityHeaders());
     created = true;
     seat = (outcome.seat as OrchestratorSeat | undefined) ?? orchestratorSeatFor(project).active;
     if (!seat?.conversationId) throw new Error("orchestrator creation did not settle a conversation to deliver to");
@@ -843,8 +894,8 @@ async function rotateOrchestrator(args: McpToolArgs, control: ViewerControlDepen
   const result = await control.post("/api/orchestrator/rotate", {
     project,
     clientRequestId: spawnAttemptId(requestId(args)),
-    ...withoutKeys(args, ["clientRequestId", "project"]),
-  });
+    ...allowedSeatFields(args, ["mandate", "handoffNotes", "cwd", "engine", "model", "accountId"]),
+  }, callerCapabilityHeaders());
   return redactPayload({
     project,
     conversationId: result.conversationId ?? null,
@@ -1358,7 +1409,7 @@ export function viewerMcpBindings(
     lifecycle_events: (args) => lifecycleEvents(args, domainDependencies),
     request_attention: (args) => requestAttention(args, domainDependencies),
     bridge_report: (args) => Promise.resolve(bridgeReport(args, domainDependencies)),
-    bridge_directive: (args) => bridgeDirective(args, controlDependencies),
+    bridge_directive: (args) => bridgeDirective(args, controlDependencies, domainDependencies),
     get_orchestrator: (args) => getOrchestrator(args, domainDependencies),
     create_orchestrator: (args) => createOrchestrator(args, controlDependencies),
     send_message_to_orchestrator: (args) => sendMessageToOrchestrator(args, controlDependencies),

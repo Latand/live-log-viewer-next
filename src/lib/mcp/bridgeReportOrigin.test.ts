@@ -102,3 +102,16 @@ test("origin round-trips through the durable log", async () => {
   const reread = readBridgeReportLog().reports[0]!;
   expect(reread.origin).toEqual({ kind: "agent", conversationId: "conversation_builder", role: "builder" });
 });
+
+test("MEDIUM 7 (#758 review): an origin supplied in the TOOL ARGS is ignored — the server-derived attribution wins", async () => {
+  const result = await serviceAs(WORKER).callTool("bridge_report", report({
+    /* A worker claiming manager shape in the arguments themselves. If the
+       binding ever read args.origin, this row would wear manager voice. */
+    origin: { kind: "manager", conversationId: "conversation_mgr", role: "orchestrator" },
+  })) as McpToolResult;
+  expect(result.ok).toBe(true);
+
+  const row = readBridgeReportLog().reports[0]!;
+  expect(row.origin).toEqual({ kind: "agent", conversationId: "conversation_builder", role: "builder" });
+  expect(row.body).toStartWith("[builder conversation_builder — not the manager] ");
+});

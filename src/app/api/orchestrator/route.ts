@@ -1,16 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { requireOperatorAuthority } from "@/lib/agent/operatorAuthority";
-import { retireOutgoingManager } from "@/lib/orchestrator/retire";
 import { adoptOrchestratorRecord, orchestratorRecordExists, readOrchestratorRecord, replaceOrchestratorIncumbent, type OrchestratorRecord } from "@/lib/orchestrator/store";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import type { ApiError } from "@/lib/types";
 
 /* A route module may export ONLY the documented route fields — the HTTP method
-   handlers and the segment config below. Next.js validates that list at build time,
-   so a helper, a type or a test seam exported from here fails `next build` even
-   though `tsc --noEmit` accepts it. Retiring the outgoing manager therefore lives in
-   `@/lib/orchestrator/retire`, which both this route and its tests import. */
+   handlers and the segment config below. Next.js validates that list at build
+   time, so a helper, a type or a test seam exported from here fails
+   `next build` even though `tsc --noEmit` accepts it. */
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -84,34 +82,16 @@ export async function POST(req: NextRequest): Promise<NextResponse<{ ok: true; r
     ...(typeof body.model === "string" ? { model: body.model.trim() } : {}),
   };
   if (body.replace === true) {
-    const current = readOrchestratorRecord();
-    const supersedes = current
-      && current.conversationId !== candidate.conversationId
-      && orchestratorRecordExists(current)
-      ? current
-      : null;
-
-    /* Retire BEFORE seating, and refuse the swap if that fails. A record rewritten
-       over a predecessor still running is split-brain: two agents each believe they
-       own the board, both act on it, and the bridge speaks to whichever the record
-       happens to name. Leaving the record on the manager that is demonstrably alive
-       is the safer of the two failures. */
-    let retired: { conversationId: string; outcome: string } | null = null;
-    if (supersedes) {
-      try {
-        retired = {
-          conversationId: supersedes.conversationId,
-          outcome: await retireOutgoingManager(supersedes.conversationId, supersedes.path ?? ""),
-        };
-      } catch (error) {
-        return NextResponse.json({
-          error: "MANAGER_RETIREMENT_FAILED",
-          message: `the outgoing manager ${supersedes.conversationId} could not be stopped, so the replacement was refused to avoid two live managers: ${error instanceof Error ? error.message : String(error)}`,
-        }, { status: 409 });
-      }
-    }
+    /* AXIS SEPARATION (two-axis contract; HIGH 4 of the #758 review): a
+       replacement is a DESIGNATION act and nothing more. The predecessor's
+       host, session, card and ordinary Viewer access are untouched — the era
+       in which this route killed the outgoing manager is over. Split-brain is
+       prevented where authority is decided, per call: the record now names the
+       successor, so the predecessor's next manager-voice or confirmation-mint
+       attempt is refused by the durable designation checks, and the epoch
+       guard in the seat store keeps a revoked identity from returning. */
     const record = replaceOrchestratorIncumbent(candidate);
-    return NextResponse.json({ ok: true, record, adopted: true, replaced: true, retired });
+    return NextResponse.json({ ok: true, record, adopted: true, replaced: true });
   }
   const { record, adopted } = adoptOrchestratorRecord(candidate);
   return NextResponse.json({ ok: true, record, adopted, replaced: false });

@@ -1,8 +1,11 @@
+import crypto from "node:crypto";
+
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { requireOperatorAuthority, setCallerConversationResolverForTests } from "@/lib/agent/operatorAuthority";
 import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
 import { beginOrchestratorSeatIntent, completeOrchestratorSeatIntent, orchestratorSeatFor } from "@/lib/orchestrator/seats";
 import { replaceOrchestratorIncumbent } from "@/lib/orchestrator/store";
@@ -39,14 +42,33 @@ function seatActive(project: string, conversationId: string, transcriptPath: str
 }
 
 function controlStub(responses: Record<string, Record<string, unknown>> = {}) {
-  const posts: { pathname: string; body: Record<string, unknown> }[] = [];
+  const posts: { pathname: string; body: Record<string, unknown>; headers: Record<string, string> }[] = [];
   const control: ViewerControlDependencies = {
-    post: async (pathname, body) => {
-      posts.push({ pathname, body });
+    post: async (pathname, body, headers) => {
+      posts.push({ pathname, body, headers: headers ?? {} });
       return responses[pathname] ?? { ok: true, outcome: "delivered" };
     },
   };
   return { posts, control };
+}
+
+/** A control plane whose DESIGNATION endpoints run the REAL operator gate
+    against exactly the headers the binding forwarded — the same check the seat
+    and rotation routes make first, without reaching a real spawn. */
+function gatedControlStub() {
+  const designations: string[] = [];
+  const control: ViewerControlDependencies = {
+    post: async (pathname, _body, headers) => {
+      if (pathname === "/api/orchestrator/seat" || pathname === "/api/orchestrator/rotate") {
+        const operator = requireOperatorAuthority({ headers: new Headers(headers ?? {}) });
+        if (!operator.ok) throw new Error(operator.error);
+        designations.push(pathname);
+        return { ok: true, conversationId: SEATED_ID, seat: { conversationId: SEATED_ID } };
+      }
+      return { ok: true, outcome: "delivered" };
+    },
+  };
+  return { designations, control };
 }
 
 function bindingsWith(control: ViewerControlDependencies) {
@@ -184,6 +206,82 @@ test("send_message_to_orchestrator with nothing designated creates one first, th
   expect(posts[0]!.body).toMatchObject({ mandate: ORCHESTRATOR_SYSTEM_PROMPT, promptVersion: ORCHESTRATOR_PROMPT_VERSION });
   expect(posts[1]!.body).toMatchObject({ conversationId: SEATED_ID, clientMessageId: "send-2", text: "kick off" });
   expect(result).toMatchObject({ created: true, conversationId: SEATED_ID, seatEpoch: 1 });
+});
+
+/* ── BLOCKING 1: designation is an OPERATION contract, not self-service ──── */
+
+const WORKER_CAPABILITY = crypto.randomBytes(32).toString("base64url");
+let previousCapability: string | undefined;
+
+function asCapabilityCaller(): void {
+  previousCapability = process.env.LLV_SPAWN_CAPABILITY;
+  process.env.LLV_SPAWN_CAPABILITY = WORKER_CAPABILITY;
+  setCallerConversationResolverForTests((digest) =>
+    digest === crypto.createHash("sha256").update(WORKER_CAPABILITY).digest("hex")
+      ? "conversation_worker"
+      : null);
+}
+
+function restoreCapabilityCaller(): void {
+  if (previousCapability === undefined) delete process.env.LLV_SPAWN_CAPABILITY;
+  else process.env.LLV_SPAWN_CAPABILITY = previousCapability;
+  setCallerConversationResolverForTests(null);
+}
+
+test("a NON-OPERATOR caller cannot designate itself or anyone: create, rotate and send's create branch are refused by the real operator gate, writing nothing — while the tools stay callable", async () => {
+  asCapabilityCaller();
+  try {
+    const { designations, control } = gatedControlStub();
+    const tools = bindingsWith(control);
+
+    /* All three designation paths run — the tools are ON the surface for this
+       session (axis 1) — and every one is refused by the gate that reads the
+       forwarded conversation capability, before anything durable changes. */
+    await expect(tools.create_orchestrator({ clientRequestId: "create-x", project: "proj-a" })).rejects.toThrow();
+    await expect(tools.rotate_orchestrator({ clientRequestId: "rotate-x", project: "proj-a" })).rejects.toThrow();
+    await expect(tools.send_message_to_orchestrator({ clientRequestId: "send-x", project: "proj-a", text: "hi" })).rejects.toThrow();
+
+    expect(designations).toEqual([]);
+    const { active, pending } = orchestratorSeatFor("proj-a");
+    expect(active).toBeNull();
+    expect(pending).toBeNull();
+  } finally {
+    restoreCapabilityCaller();
+  }
+});
+
+test("an operator-lane caller (no conversation capability) still designates through the same gate", async () => {
+  const { designations, control } = gatedControlStub();
+  const result = await bindingsWith(control).create_orchestrator({ clientRequestId: "create-y", project: "proj-a" });
+  expect(designations).toEqual(["/api/orchestrator/seat"]);
+  expect(result).toMatchObject({ conversationId: SEATED_ID });
+});
+
+test("caller-supplied conversationId and promptVersion NEVER reach the seat route", async () => {
+  const { posts, control } = controlStub({
+    "/api/orchestrator/seat": { ok: true, conversationId: SEATED_ID, seat: { conversationId: SEATED_ID } },
+  });
+  await bindingsWith(control).create_orchestrator({
+    clientRequestId: "create-z",
+    project: "proj-a",
+    /* A caller that could name a conversation here would seat an EXISTING
+       session — itself — instead of spawning a fresh one; a caller that could
+       set promptVersion would forge mandate provenance. Both are dropped. */
+    conversationId: "conversation_worker",
+    promptVersion: 99,
+  });
+  expect(posts[0]!.body).not.toHaveProperty("conversationId");
+  expect(posts[0]!.body.promptVersion).toBe(ORCHESTRATOR_PROMPT_VERSION);
+
+  await bindingsWith(control).rotate_orchestrator({
+    clientRequestId: "rotate-z",
+    project: "proj-a",
+    conversationId: "conversation_worker",
+    promptVersion: 99,
+  });
+  const rotate = posts.find((post) => post.pathname === "/api/orchestrator/rotate");
+  expect(rotate!.body).not.toHaveProperty("conversationId");
+  expect(rotate!.body).not.toHaveProperty("promptVersion");
 });
 
 test("rotate_orchestrator relays to the rotation route and reports the lineage it produced", async () => {
