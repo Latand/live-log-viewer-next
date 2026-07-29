@@ -36,6 +36,7 @@ export interface CodexAppServerOptions {
   clock?: CodexAppServerClock;
   requestTimeoutMs?: number;
   shutdownGraceMs?: number;
+  maxStdoutBufferBytes?: number;
   signalProcess?: ProcessSignal;
 }
 
@@ -95,7 +96,10 @@ export interface CodexAppServerLifecycleEvent {
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
-const MAX_STDOUT_BUFFER_BYTES = 1024 * 1024;
+/* Resume/read responses can contain a whole long-running thread in one JSONL
+   envelope. Keep the transport bounded while allowing realistic coordinator
+   histories to cross the app-server boundary. */
+const DEFAULT_MAX_STDOUT_BUFFER_BYTES = 64 * 1024 * 1024;
 const CODEX_ACCOUNT_APP_SERVER_ARGS = [
   "-c",
   "cli_auth_credentials_store=file",
@@ -183,7 +187,8 @@ export class CodexAppServerClient {
   private readonly requestListeners = new Set<(request: AppServerRequest) => unknown | Promise<unknown>>();
   private readonly lifecycleListeners = new Set<(event: CodexAppServerLifecycleEvent) => void>();
   private nextId = 1;
-  private stdoutBuffer = "";
+  private stdoutChunks: string[] = [];
+  private stdoutBufferBytes = 0;
   private stderrTail = "";
   private lastInboundEnvelope: AppServerEnvelope | null = null;
   private closed = false;
@@ -195,6 +200,7 @@ export class CodexAppServerClient {
     private readonly clock: CodexAppServerClock,
     private readonly requestTimeoutMs: number,
     private readonly shutdownGraceMs: number,
+    private readonly maxStdoutBufferBytes: number,
     private readonly signalProcess: ProcessSignal,
   ) {
     child.stdout.on("data", (chunk: Buffer | string) => this.acceptStdout(String(chunk)));
@@ -216,6 +222,7 @@ export class CodexAppServerClient {
       options.clock ?? defaultClock,
       options.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS,
       options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS,
+      options.maxStdoutBufferBytes ?? DEFAULT_MAX_STDOUT_BUFFER_BYTES,
       options.signalProcess ?? process.kill,
     );
     try {
@@ -355,6 +362,8 @@ export class CodexAppServerClient {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.stdoutChunks = [];
+    this.stdoutBufferBytes = 0;
     for (const pending of this.pending.values()) {
       this.clock.clearTimeout(pending.timeout);
       pending.reject(new CodexAppServerError("Codex app-server client closed", "unknown"));
@@ -402,22 +411,35 @@ export class CodexAppServerClient {
 
   private acceptStdout(chunk: string): void {
     if (this.closed) return;
-    this.stdoutBuffer += chunk;
-    let newline = this.stdoutBuffer.indexOf("\n");
+    let offset = 0;
+    let newline = chunk.indexOf("\n", offset);
     while (newline >= 0) {
-      const rawLine = this.stdoutBuffer.slice(0, newline);
-      this.stdoutBuffer = this.stdoutBuffer.slice(newline + 1);
-      if (Buffer.byteLength(rawLine, "utf8") > MAX_STDOUT_BUFFER_BYTES) {
+      const fragment = chunk.slice(offset, newline);
+      const lineBytes = this.stdoutBufferBytes + Buffer.byteLength(fragment, "utf8");
+      if (lineBytes > this.maxStdoutBufferBytes) {
         this.fail(protocolError("received an oversized JSONL line"));
         return;
       }
+      const rawLine = this.stdoutChunks.length > 0
+        ? this.stdoutChunks.join("") + fragment
+        : fragment;
+      this.stdoutChunks = [];
+      this.stdoutBufferBytes = 0;
       const line = rawLine.trim();
       if (line) this.acceptMessage(line);
-      newline = this.stdoutBuffer.indexOf("\n");
+      if (this.closed) return;
+      offset = newline + 1;
+      newline = chunk.indexOf("\n", offset);
     }
-    if (Buffer.byteLength(this.stdoutBuffer, "utf8") > MAX_STDOUT_BUFFER_BYTES) {
+    const remainder = chunk.slice(offset);
+    if (!remainder) return;
+    const remainderBytes = Buffer.byteLength(remainder, "utf8");
+    if (this.stdoutBufferBytes + remainderBytes > this.maxStdoutBufferBytes) {
       this.fail(protocolError("received an oversized unterminated JSONL line"));
+      return;
     }
+    this.stdoutChunks.push(remainder);
+    this.stdoutBufferBytes += remainderBytes;
   }
 
   private acceptMessage(line: string): void {
@@ -477,6 +499,8 @@ export class CodexAppServerClient {
   private fail(error: CodexAppServerError): void {
     if (this.closed) return;
     this.closed = true;
+    this.stdoutChunks = [];
+    this.stdoutBufferBytes = 0;
     for (const pending of this.pending.values()) {
       this.clock.clearTimeout(pending.timeout);
       pending.reject(error);

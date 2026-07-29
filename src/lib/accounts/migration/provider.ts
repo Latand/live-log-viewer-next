@@ -138,6 +138,10 @@ interface CodexProviderOperationJournal {
   sourceRoot: string;
   targetRoot: string;
   createdAtMs: number;
+  /** Earliest uncertain fork request that still needs recovery scanning. Unlike
+      `forkRequestedAtMs`, this survives an explicit operator retry so a late
+      artifact from any earlier attempt is adopted or retained as continuity. */
+  forkRecoveryFloorMs: number | null;
   forkRequestedAtMs: number | null;
   fork: CodexForkArtifact | null;
   /** The source identity `fork` was taken from, observed just before the fork
@@ -633,6 +637,11 @@ function normalizeCodexOperationJournal(value: unknown): CodexProviderOperationJ
     sourceRoot: journal.sourceRoot,
     targetRoot: journal.targetRoot,
     createdAtMs: journal.createdAtMs,
+    forkRecoveryFloorMs: typeof journal.forkRecoveryFloorMs === "number" && Number.isFinite(journal.forkRecoveryFloorMs)
+      ? journal.forkRecoveryFloorMs
+      : (typeof journal.forkRequestedAtMs === "number" && Number.isFinite(journal.forkRequestedAtMs)
+        ? journal.forkRequestedAtMs
+        : null),
     forkRequestedAtMs: typeof journal.forkRequestedAtMs === "number" && Number.isFinite(journal.forkRequestedAtMs)
       ? journal.forkRequestedAtMs
       : null,
@@ -683,6 +692,7 @@ function prepareCodexOperationJournal(
     sourceRoot,
     targetRoot,
     createdAtMs: Date.now(),
+    forkRecoveryFloorMs: null,
     forkRequestedAtMs: null,
     fork: null,
     forkSource: null,
@@ -827,14 +837,64 @@ function recoverCodexFork(
       superseded: [],
     };
   }
-  if (journal.forkRequestedAtMs === null) return { fork: null, forkSource: null, superseded: [] };
+  const recoveryFloor = journal.forkRecoveryFloorMs ?? journal.forkRequestedAtMs;
+  if (recoveryFloor === null) return { fork: null, forkSource: null, superseded: [] };
   const setAside = new Set(journal.supersededForks.map((artifact) => artifact.id));
-  const candidates = newestForkFirst(scan(journal.sourceRoot, journal.sourceNativeId, journal.forkRequestedAtMs)
+  const candidates = newestForkFirst(scan(journal.sourceRoot, journal.sourceNativeId, recoveryFloor)
     .filter((candidate) => !setAside.has(candidate.id))
-    .map((candidate) => validatedCodexFork(candidate, journal.sourceNativeId, journal.sourceRoot)));
+    .flatMap((candidate) => {
+      try { return [validatedCodexFork(candidate, journal.sourceNativeId, journal.sourceRoot)]; }
+      catch { return []; }
+    }));
   /* This operation requested the fork itself, so the identity it recorded before
      asking describes whichever artifact that request produced. */
   return { fork: candidates[0] ?? null, forkSource: journal.forkSource, superseded: candidates.slice(1) };
+}
+
+export type CodexForkRetryAuthorization = "not-needed" | "recovery-ready" | "reauthorized";
+
+/**
+ * Converts an explicit operator retry into one new fork attempt when recovery
+ * found no artifact for the prior unknown outcome. Automatic controller ticks
+ * never call this seam, so an app-server timeout cannot become a fork loop.
+ *
+ * The recovery floor remains anchored to the first uncertain request. A late
+ * artifact visible before the operation adopts a fork is therefore recovered;
+ * ambiguity keeps the newest and records every other validated candidate as
+ * continuity.
+ */
+export async function authorizeCodexForkRetry(
+  operationId: string,
+  conversationId: string,
+  journalRoot = statePath("migration-provider-operations"),
+  scan: NonNullable<ProviderDependencies["scanCodexForkArtifacts"]> = codexForkArtifacts,
+): Promise<CodexForkRetryAuthorization> {
+  const filename = operationJournalPath(journalRoot, operationId);
+  let initial: CodexProviderOperationJournal | null;
+  try {
+    initial = normalizeCodexOperationJournal(JSON.parse(fs.readFileSync(filename, "utf8")));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "not-needed";
+    throw error;
+  }
+  if (!initial || initial.operationId !== operationId
+    || (initial.conversationId && initial.conversationId !== conversationId)) {
+    throw new Error("Codex provider operation journal does not match");
+  }
+  return withCodexOperationLease(journalRoot, `move:${initial.sourceNativeId}`, async (assertLeaseOwned) => {
+    const journal = normalizeCodexOperationJournal(JSON.parse(fs.readFileSync(filename, "utf8")));
+    if (!journal || journal.operationId !== operationId
+      || (journal.conversationId && journal.conversationId !== conversationId)) {
+      throw new Error("Codex provider operation journal does not match");
+    }
+    if (journal.fork || journal.forkRequestedAtMs === null) return "not-needed";
+    const recovered = recoverCodexFork(journal, scan);
+    if (recovered.fork) return "recovery-ready";
+    journal.forkRequestedAtMs = null;
+    assertLeaseOwned();
+    writeCodexOperationJournal(journalRoot, journal);
+    return "reauthorized";
+  });
 }
 
 function ensureTargetRoot(account: AccountContext): void {
@@ -1266,6 +1326,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
         const account = await sourceClient.readAccount();
         if (!account.account) throw new Error("source Codex account is not authenticated");
         journal.forkRequestedAtMs = Date.now();
+        journal.forkRecoveryFloorMs ??= journal.forkRequestedAtMs;
         /* Observed before the request, so it names the state the fork copies.
            Reading it afterwards would count a turn that landed in between as
            already forked, which is the loss this whole check exists to stop. */
