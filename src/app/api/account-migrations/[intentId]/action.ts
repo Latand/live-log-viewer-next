@@ -1,12 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
-import { drainHeldDeliveries } from "@/lib/accounts/migration/coordinator";
-import { createMigrationDeliveryPort } from "@/lib/accounts/migration/deliveryPort";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
-
-const deliveryPort = createMigrationDeliveryPort();
 
 export async function updateMigrationAction(
   req: NextRequest,
@@ -22,11 +18,6 @@ export async function updateMigrationAction(
   try {
     if (body.action === "stop") {
       const stopped = registry.setMigrationIntentState(intentId, "stopped", body.expectedRevision as number | undefined);
-      for (const conversation of Object.values(registry.readOnlySnapshot().conversations)) {
-        if (conversation.migration?.intentId === intentId && conversation.migration.phase === "rolled-back") {
-          await drainHeldDeliveries(conversation.id, deliveryPort, registry);
-        }
-      }
       return NextResponse.json(stopped);
     }
     const snapshot = registry.readOnlySnapshot();

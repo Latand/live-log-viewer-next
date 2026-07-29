@@ -2178,7 +2178,7 @@ describe("durable account migration coordinator", () => {
       .toThrow(MigrationRevisionError);
   });
 
-  test("returning to the source before commit drains held input once after restart", async () => {
+  test("returning to the source before commit cancels old held input after restart", async () => {
     const store = registry();
     store.reconcileConversations([observation("/return-source.jsonl", "a", "idle")]);
     const conversation = store.conversationForPath("/return-source.jsonl")!;
@@ -2202,8 +2202,9 @@ describe("durable account migration coordinator", () => {
     expect(restarted.conversation(conversation.id)?.migration).toBeNull();
     expect(restarted.pendingDeliveries(conversation.id)).toMatchObject([{
       clientMessageId: "return-source-message",
-      state: "assigned",
-      generationId: conversation.generations[0]?.id,
+      state: "failed",
+      generationId: null,
+      error: expect.stringContaining("migration was stopped"),
     }]);
     const delivered: string[] = [];
     await reconcileMigrations(provider([]), {
@@ -2213,8 +2214,8 @@ describe("durable account migration coordinator", () => {
       },
     }, restarted);
 
-    expect(delivered).toEqual(["return-source-message"]);
-    expect(restarted.pendingDeliveries(conversation.id)).toEqual([]);
+    expect(delivered).toEqual([]);
+    expect(restarted.pendingDeliveries(conversation.id)).toHaveLength(1);
   });
 
   test("A to B to A preserves one owner, the full profile, and drains held input once", async () => {
@@ -2358,7 +2359,42 @@ describe("durable account migration coordinator", () => {
       .toThrow(MigrationRevisionError);
   });
 
-  test("rollback reassigns held delivery to the healthy source generation", async () => {
+  test("stopping a migration terminalizes held input and never drains it after restart", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/stopped-source.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/stopped-source.jsonl")!;
+    const intent = store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "stop-with-held-input",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    const held = store.holdDelivery(conversation.id, "old queued input", "stopped-held-input");
+
+    store.setMigrationIntentState(intent.id, "stopped", intent.revision);
+
+    const restarted = new AgentRegistry(store.filename);
+    const cancelled = restarted.snapshot().heldDeliveries[held.id]!;
+    expect(cancelled).toMatchObject({
+      state: "failed",
+      attempts: 0,
+      generationId: null,
+      deliveredAt: null,
+    });
+    expect(cancelled.error).toContain("migration was stopped");
+    const delivered: string[] = [];
+    await reconcileMigrations(provider([]), {
+      async deliver({ clientMessageId }) {
+        delivered.push(clientMessageId);
+        return "delivered";
+      },
+    }, restarted);
+    expect(delivered).toEqual([]);
+    expect(restarted.snapshot().heldDeliveries[held.id]).toEqual(cancelled);
+  });
+
+  test("rollback terminalizes held delivery on the source generation", async () => {
     const store = registry();
     store.reconcileConversations([observation("/source.jsonl", "a", "idle")]);
     const conversation = store.conversationForPath("/source.jsonl")!;
@@ -2366,10 +2402,41 @@ describe("durable account migration coordinator", () => {
     store.holdDelivery(conversation.id, "safe retry", "client-rollback");
     const revision = store.conversation(conversation.id)!.migration!.revision;
     store.rollbackConversationMigration(conversation.id, revision);
-    const assigned = store.pendingDeliveries(conversation.id)[0]!;
-    expect(assigned).toMatchObject({ state: "assigned", generationId: conversation.generations[0]?.id });
-    await drainHeldDeliveries(conversation.id, { async deliver() { return "delivered"; } }, store);
-    expect(store.pendingDeliveries(conversation.id)).toEqual([]);
+    expect(store.pendingDeliveries(conversation.id)[0]).toMatchObject({
+      state: "failed",
+      generationId: null,
+      attempts: 0,
+      error: expect.stringContaining("migration was rolled back"),
+    });
+  });
+
+  test("a fresh explicit delivery after cancellation still requires current generation ownership", () => {
+    const store = registry();
+    store.reconcileConversations([observation("/fresh-after-stop.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/fresh-after-stop.jsonl")!;
+    const intent = store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "cancel-before-fresh-delivery",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    const old = store.holdDelivery(conversation.id, "old input", "old-input");
+    store.setMigrationIntentState(intent.id, "stopped", intent.revision);
+    expect(store.snapshot().heldDeliveries[old.id]).toMatchObject({ state: "failed", attempts: 0 });
+
+    const fresh = store.holdDelivery(conversation.id, "fresh input", "fresh-input");
+    const current = store.conversation(conversation.id)!.generations.at(-1)!;
+    expect(fresh).toMatchObject({ state: "assigned", generationId: current.id, attempts: 0 });
+    expect(store.beginDeliveryAttempt(fresh.id, "superseded-generation")).toBeNull();
+    expect(store.beginDeliveryAttempt(fresh.id, current.id)).toMatchObject({
+      state: "delivery-uncertain",
+      generationId: current.id,
+      attempts: 1,
+    });
+    store.recordDeliveryOutcome(fresh.id, "delivered");
+    expect(store.snapshot().heldDeliveries[fresh.id]?.state).toBe("delivered");
+    expect(store.snapshot().heldDeliveries[old.id]).toMatchObject({ state: "failed", attempts: 0 });
   });
 
   test("a root session preserves its active goal and drains held delivery through the successor", async () => {
@@ -2406,7 +2473,11 @@ describe("durable account migration coordinator", () => {
     expect(attempts).toBe(1);
     expect(store.pendingDeliveries(conversation.id)[0]).toMatchObject({ state: "delivery-uncertain", attempts: 1 });
     store.rollbackConversationMigration(conversation.id, store.conversation(conversation.id)!.migration!.revision);
-    expect(store.pendingDeliveries(conversation.id)[0]?.state).toBe("delivery-uncertain");
+    expect(store.pendingDeliveries(conversation.id)[0]).toMatchObject({
+      state: "failed",
+      attempts: 1,
+      error: expect.stringContaining("migration was rolled back"),
+    });
   });
 
   test("a durable delivery port reconciles its uncertain claim to journal completion", async () => {
@@ -2564,7 +2635,7 @@ describe("durable account migration coordinator", () => {
     }
   });
 
-  test("retiring a migration target cleans its successor and drains held input once after restart", async () => {
+  test("retiring a migration target cleans its successor and cancels held input after restart", async () => {
     for (const engine of ["claude", "codex"] as const) {
       const store = registry();
       const sourcePath = `/retired-target-${engine}.jsonl`;
@@ -2599,7 +2670,11 @@ describe("durable account migration coordinator", () => {
       expect(restarted.snapshot().migrationIntents[intent.id]?.state).toBe("stopped");
       expect(restarted.conversation(conversation.id)?.migration).toBeNull();
       expect(Object.values(restarted.snapshot().pendingSuccessorCleanups)).toMatchObject([{ receipt: { nativeId: `retired-successor-${engine}` } }]);
-      expect(restarted.pendingDeliveries(conversation.id)).toMatchObject([{ state: "assigned", generationId: conversation.generations[0]!.id }]);
+      expect(restarted.pendingDeliveries(conversation.id)).toMatchObject([{
+        state: "failed",
+        generationId: null,
+        error: expect.stringContaining("migration was stopped"),
+      }]);
 
       const cleaned: string[] = [];
       const delivered: string[] = [];
@@ -2619,8 +2694,8 @@ describe("durable account migration coordinator", () => {
       await reconcileMigrations(cleanupProvider, delivery, restarted);
 
       expect(cleaned).toEqual([`retired-successor-${engine}`]);
-      expect(delivered).toEqual([`continue-${engine}`]);
-      expect(restarted.pendingDeliveries(conversation.id)).toEqual([]);
+      expect(delivered).toEqual([]);
+      expect(restarted.pendingDeliveries(conversation.id)).toHaveLength(1);
     }
   });
 

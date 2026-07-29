@@ -858,10 +858,11 @@ export async function reconcileMigrations(
       await drainHeldDeliveries(conversation.id, delivery, registry);
       conversation = registry.conversation(conversation.id) ?? conversation;
     }
-    if (!conversation.migration || conversation.migration.phase === "rolled-back") {
+    if (!conversation.migration) {
       if (pendingDeliveries.has(conversation.id)) await drainHeldDeliveries(conversation.id, delivery, registry);
       return;
     }
+    if (conversation.migration.phase === "rolled-back") return;
     if (conversation.migration.phase === "committed") {
       if (pendingDeliveries.has(conversation.id)) await drainHeldDeliveries(conversation.id, delivery, registry);
       return;
