@@ -788,7 +788,9 @@ function SelectionCheck({
        outside the close button, so no part of the card's chrome loses a click. */
     <div
       data-scheme-ui
-      className="pointer-events-auto absolute -right-5 -top-5 z-[8] h-7 w-7"
+      /* `scheme-select-check-zone` is the hook the session dim excludes, so this
+         control keeps full contrast while its card recedes. */
+      className="scheme-select-check-zone pointer-events-auto absolute -right-5 -top-5 z-[8] h-7 w-7"
       onPointerEnter={() => hover(true)}
       onPointerLeave={() => hover(false)}
     >
@@ -799,9 +801,19 @@ function SelectionCheck({
         aria-pressed={marked}
         title={marked ? t("scheme.selectCheckOff") : t("scheme.selectCheckOn")}
         aria-label={marked ? t("scheme.selectCheckOff") : t("scheme.selectCheckOn")}
+        /* Three weights: a member's check is solid accent; a non-member inside a
+           running session carries more weight than the idle reveal, because in a
+           session it is an active invitation to extend the set rather than a hint
+           that a control exists at all. */
         className={`scheme-select-check absolute bottom-0.5 left-0.5 flex h-6 w-6 items-center justify-center rounded-full border-2 border-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 ${
           revealed ? "opacity-100" : "opacity-0"
-        } ${marked ? "bg-accent text-white shadow-1" : "bg-accent/35 text-white/85 hover:bg-accent/70"}`}
+        } ${
+          marked
+            ? "bg-accent text-white shadow-1"
+            : session
+              ? "bg-accent/60 text-white shadow-1 hover:bg-accent/80"
+              : "bg-accent/35 text-white/85 hover:bg-accent/70"
+        }`}
         onClick={(event) => {
           event.stopPropagation();
           onToggle(path);

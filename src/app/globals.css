@@ -219,17 +219,25 @@ body {
    so the ephemeral "group" reads at a glance. Driven by one class on the
    nodes-layer root plus a data attribute on selected shells — no per-shell
    prop threading, one NodesLayer render per selection change. */
-.scheme-session [data-scheme-node]:not([data-lasso-selected="true"]) {
+/* The dim lands on the shell's CHILDREN, not on the shell — deliberately. An
+   ancestor's `opacity`/`filter` composites its whole subtree and no descendant
+   can opt out, so dimming the shell also greyed the selection check inside it:
+   a faint grey circle, which is the visual grammar of "disabled", on precisely
+   the control that invites the operator to extend the selection. Excluding the
+   check's zone from this list keeps the card receded while its toggle stays
+   legibly interactive. The card's content is one child (the pane wrapper), so it
+   still fades as a single layer. */
+.scheme-session [data-scheme-node]:not([data-lasso-selected="true"]) > *:not(.scheme-select-check-zone) {
   opacity: 0.35;
   filter: grayscale(0.7);
   transition: opacity 0.2s, filter 0.2s;
 }
-.scheme-session [data-lasso-selected="true"] {
+.scheme-session [data-lasso-selected="true"] > * {
   transition: opacity 0.2s, filter 0.2s;
 }
-/* Pointing at a non-member's check inside a session lifts that card back out of
-   the dim, so the toggle about to be clicked is readable (issue #771). */
-.scheme-session [data-scheme-node][data-select-check-hover="true"] {
+/* Pointing at a non-member's check inside a session brings that card fully back,
+   so what is about to be toggled is readable before the click (issue #771). */
+.scheme-session [data-scheme-node][data-select-check-hover="true"] > * {
   opacity: 1;
   filter: none;
 }
