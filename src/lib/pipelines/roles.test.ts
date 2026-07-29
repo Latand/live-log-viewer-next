@@ -162,6 +162,12 @@ test("operator role params substitute into the resolved prompt scaffold", () => 
   expect(resolved.role?.promptScaffold).toContain("lens scope");
 });
 
+test("pipeline role lookup defaults omitted orchestrator maxWorkers to three", () => {
+  expect(pipelineRoleLookup("orchestrator")?.promptScaffold).toContain("Maximum workers: 3");
+  expect(pipelineRoleLookup("orchestrator", { maxWorkers: 1 })?.promptScaffold).toContain("Maximum workers: 1");
+  expect(pipelineRoleLookup("reviewer")?.promptScaffold).toContain("Run 1 independent pass(es)");
+});
+
 test("blank role params fall back to the registry default token value", () => {
   const resolved = resolvePipelineRole(
     { role: { roleId: "reviewer", params: { diffSource: "", lens: "" } } },

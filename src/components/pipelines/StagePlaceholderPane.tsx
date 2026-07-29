@@ -15,6 +15,7 @@ import type { FlowEngine } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
 import type { PatchPipelineRequest, PipelineRoleId } from "@/lib/pipelines/types";
 import { renderStagePrompt } from "@/lib/pipelines/prompts";
+import { defaultRoleParameterValues } from "@/lib/roles/parameters";
 
 import {
   PIPELINE_ROLE_OPTIONS,
@@ -170,12 +171,7 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
   const selectRole = (next: string) => {
     setRoleId(next);
     const selected = roles.find((role) => role.id === next);
-    const params = selected
-      ? Object.fromEntries(selected.parameters.map((parameter) => [
-          parameter.key,
-          parameter.kind === "integer" ? parameter.min ?? 1 : parameter.options?.[0] ?? "",
-        ]))
-      : {};
+    const params = selected ? defaultRoleParameterValues(selected) : {};
     setRoleParams(params);
     /* A role change hands unpinned runtime back to the new role's defaults
        server-side; the echo re-seeds the pickers above. */

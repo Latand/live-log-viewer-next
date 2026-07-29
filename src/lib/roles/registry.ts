@@ -2,6 +2,7 @@ import { isEngineEffort } from "@/lib/agent/efforts";
 import { normalizeClaudeLaunchModel } from "@/lib/agent/models";
 
 import { BUILDER_APPLY_FIXES_CONFIG, BUILDER_FRONTEND_CONFIG } from "./paramConfig";
+import { defaultRoleParameterValue } from "./parameters";
 import { loadRoleDefinitions } from "./store";
 import type { ResolvedRole, RoleConfig, RoleDefinition, RoleId, RoleParamValues } from "./types";
 
@@ -38,7 +39,7 @@ export function validateRoleParams(
     const input = source[parameter.key];
     if (input === undefined || input === "") {
       if (parameter.required && requireRequired) return { ok: false, error: `missing required role parameter: ${parameter.key}` };
-      values[parameter.key] = parameter.kind === "integer" ? parameter.min ?? 1 : parameter.options?.[0] ?? "";
+      values[parameter.key] = defaultRoleParameterValue(parameter);
       continue;
     }
     if (parameter.kind === "integer") {
@@ -113,7 +114,7 @@ export function resolveRole(role: string, params: unknown = {}, explicit: Explic
       definition,
       config: config.value,
       params: parsedParams.value,
-      prompt: promptWithFences(definition, parsedParams.value),
+      "prompt": promptWithFences(definition, parsedParams.value),
       requiresDeploymentConfirmation: definition.id === "deployer",
     },
   };

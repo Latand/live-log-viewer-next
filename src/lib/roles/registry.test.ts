@@ -109,3 +109,13 @@ test("spawn role resolution injects the scaffold and requires deploy confirmatio
   expect(spawn.value.config).toEqual({ engine: "claude", model: "opus", effort: "high" });
   expect(spawn.value.scaffold).toContain("Builder in tdd mode");
 });
+
+test("orchestrator spawn defaults omitted maxWorkers to three and preserves explicit one", () => {
+  const omitted = resolveSpawnRole({ role: "orchestrator" });
+  if (!omitted.ok || !omitted.value) throw new Error("expected resolved orchestrator role");
+  expect(omitted.value.scaffold).toContain("Maximum workers: 3");
+
+  const explicit = resolveSpawnRole({ role: "orchestrator", roleParams: { maxWorkers: 1 } });
+  if (!explicit.ok || !explicit.value) throw new Error("expected resolved orchestrator role");
+  expect(explicit.value.scaffold).toContain("Maximum workers: 1");
+});
