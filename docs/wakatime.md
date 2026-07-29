@@ -36,21 +36,31 @@ restart.
 
 ## Activity mapping
 
-Each observed agent turn becomes a WakaTime `app` heartbeat stream:
+Each observed agent turn and direct operator engagement interval becomes a
+WakaTime `app` heartbeat stream:
 
 | WakaTime field | Value |
 | --- | --- |
 | Project | The Viewer's canonical project attribution, including parent-repository grouping for worktrees. |
-| Entity | An opaque, stable per-turn identifier such as `agent-log-viewer/codex/0123abcd…`. |
+| Entity | An opaque, stable per-interval identifier such as `agent-log-viewer/codex/0123abcd…`. |
 | Category | `ai coding`. |
 | Language | Omitted because transcript activity does not identify a source-file language. |
-| Time | Turn start, 120-second active samples, and an exact interval-boundary marker at the end. |
-| AI session | An opaque SHA-256 turn identifier. |
+| Time | Interval start, 120-second active samples, and an exact interval-boundary marker at the end. |
+| AI session | An opaque SHA-256 interval identifier. |
 
 Project names, engine names, opaque turn identifiers, the category, and
 timestamps leave the machine. Titles, prompts, responses, transcript paths,
 working directories, model names, account ids, source contents, and branch
 names stay local.
+
+A direct operator action contributes a ten-minute engagement interval sampled
+at the same 120-second cadence. Viewer-structured Codex input and Claude input
+classified as human are eligible. Legacy bare Claude input is eligible in root
+conversations; delegated launch input remains agent-only. Harness, spawn,
+command, notification, SDK, peer, and coordinator envelopes do not create
+operator intervals. These intervals union with agent turns on the same
+timeline. Short turns retain the engagement tail, while long and silent agent
+turns continue through their full observed execution.
 
 The first enabled start creates a forward-only boundary. Completed work from
 before that timestamp remains local. A turn that crosses the boundary begins
@@ -93,6 +103,10 @@ The outbox retains at most 10,000 events and 5,000 streams. During a long
 outage, the Viewer compacts interior samples to ten-minute spacing and can
 drop the oldest whole streams to stay within those bounds. Scanner requests,
 agent execution, and browser responses do not wait for WakaTime delivery.
+Compact retired watermarks keep delivered stream cursors for 30 days after a
+stream-cap eviction, preventing a visible transcript from replaying its
+already delivered history. Finalized boundary state also prevents later tail
+changes from creating delayed boundaries for settled overlaps.
 
 Blue-green releases coordinate through a process-shared scheduler lease in the
 common state directory. The live owner retains that fence through promotion,
