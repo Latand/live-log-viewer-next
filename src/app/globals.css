@@ -227,6 +227,45 @@ body {
 .scheme-session [data-lasso-selected="true"] {
   transition: opacity 0.2s, filter 0.2s;
 }
+/* Pointing at a non-member's check inside a session lifts that card back out of
+   the dim, so the toggle about to be clicked is readable (issue #771). */
+.scheme-session [data-scheme-node][data-select-check-hover="true"] {
+  opacity: 1;
+  filter: none;
+}
+
+/* The hover-revealed selection check (#771): the fade is the whole reveal — the
+   control is always mounted at the card's corner, outside its content box, so
+   nothing moves and nothing is covered when it appears. */
+.scheme-select-check {
+  transition:
+    opacity 0.16s var(--ease-standard, ease-out),
+    background-color 0.16s var(--ease-standard, ease-out);
+}
+/* Pointing anywhere at the card reveals its check too — the corner zone is the
+   precise target, the card is the discovery surface. Outside a session only:
+   inside one the panes are click-through, and the rule below covers that. */
+[data-scheme-node]:hover .scheme-select-check {
+  opacity: 1;
+}
+/* Touch has no hover, so the checks stay visible there, and the tap area grows
+   away from the card — up and to the right, never back over the pane's own
+   header controls. */
+@media (hover: none) {
+  .scheme-select-check {
+    opacity: 1;
+  }
+  .scheme-select-check::after {
+    content: "";
+    position: absolute;
+    inset: -10px -10px 0 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .scheme-select-check {
+    transition: none;
+  }
+}
 
 /* Review-round deck: the front card sits on a shallow 3D stage, past rounds
    peek from under it as card spines receding into the perspective. */

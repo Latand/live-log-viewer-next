@@ -55,6 +55,7 @@ import {
   type SchemeRect,
 } from "./taskGeometry";
 import { resolveTaskPlacements } from "./taskPlacement";
+import { toggleSelected } from "./selectionGesture";
 import { useLasso } from "./useLasso";
 import { useSchemeCamera } from "./useSchemeCamera";
 import { useSpatialNav } from "./useSpatialNav";
@@ -313,13 +314,11 @@ export function SchemeBoard({
     setMulti(EMPTY_PATHS);
     setArmed(false);
   }, []);
+  /* The one membership writer: the background tap, Shift+click and the hover
+     check all route here, so `selectedPaths` republishes the same way whichever
+     gesture produced the change (issue #771). */
   const toggleMember = useCallback((path: string) => {
-    setMulti((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
-    });
+    setMulti((prev) => toggleSelected(prev, path));
   }, []);
 
   const selectedRef = useRef(selected);
@@ -1120,9 +1119,13 @@ export function SchemeBoard({
     <>
     <div
       ref={viewportRef}
+      /* select-none is scoped to a gesture, never to the transcripts: it covers
+         the pan and the live marquee, so a rect crossing cards cannot leave
+         highlighted text behind, and lifts the moment the drag commits or
+         cancels (issue #771). */
       className={`relative min-h-0 flex-1 overflow-clip ${
-        panning ? "cursor-grabbing select-none" : taskTool ? "cursor-crosshair" : handLike ? "cursor-grab" : ""
-      } ${handLike ? "touch-none" : ""}`}
+        panning ? "cursor-grabbing" : taskTool ? "cursor-crosshair" : handLike ? "cursor-grab" : ""
+      } ${panning || marquee ? "select-none" : ""} ${handLike ? "touch-none" : ""}`}
       tabIndex={mapMode ? undefined : 0}
       aria-label={mapMode ? undefined : t("scheme.boardAria")}
       onPointerDown={onPointerDown}
@@ -1216,6 +1219,7 @@ export function SchemeBoard({
           onSpawnRetry={onSpawnRetry ? stableSpawnRetry : undefined}
           onOpenTask={onOpenTask ? stableOpenTask : undefined}
           onExpand={stableExpand}
+          onToggleMember={mapMode ? undefined : toggleMember}
           onPipelineCreated={handlePipelineCreated}
         />
         <TaskEdgesLayer edges={taskEdges} world={world} routes={taskRoutes} onRetry={retryEdge} />
