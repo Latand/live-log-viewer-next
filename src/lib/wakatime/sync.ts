@@ -16,6 +16,7 @@ const SAMPLE_INTERVAL_MS = 120_000;
 const TICK_INTERVAL_MS = 60_000;
 const REQUEST_TIMEOUT_MS = 5_000;
 const MAX_BATCH = 25;
+const OPERATOR_ENGAGEMENT_MS = 10 * 60_000;
 const DEFAULT_MAX_PENDING = 10_000;
 const DEFAULT_MAX_STREAMS = 5_000;
 const CLOSED_STREAM_RETENTION_MS = 30 * 24 * 60 * 60_000;
@@ -48,6 +49,13 @@ export interface WakatimeStateV1 {
     endedAtMs: number | null;
     lastMaterializedAtMs: number;
     lastObservedAtMs: number;
+    boundaryFinalizedAtMs?: number | null;
+  }>;
+  retiredStreams?: Record<string, {
+    lastMaterializedAtMs: number;
+    lastObservedAtMs: number;
+    boundaryFinalizedAtMs: number | null;
+    expiresAtMs: number;
   }>;
   pending: Array<{
     key: string;
@@ -116,6 +124,10 @@ function turnDigest(conversationId: string, startedAtMs: number): string {
   return digest("llv-wakatime-v1", conversationId, startedAtMs);
 }
 
+function operatorDigest(conversationId: string, actionAtMs: number): string {
+  return digest("llv-wakatime-operator-v1", conversationId, actionAtMs);
+}
+
 function eventKey(stream: string, sampleTimeMs: number, kind: "activity" | "boundary" = "activity"): string {
   return digest(kind === "activity" ? "llv-wakatime-heartbeat-v1" : "llv-wakatime-boundary-v1", stream, sampleTimeMs);
 }
@@ -126,6 +138,7 @@ function freshState(now: number): WakatimeStateV1 {
     enabledAtMs: now,
     credentialGeneration: null,
     streams: {},
+    retiredStreams: {},
     pending: [],
     retry: { failures: 0, retryAtMs: 0, reason: null },
     counters: { accepted: 0, permanentlyRejected: 0, compacted: 0, dropped: 0, historyGaps: 0 },
@@ -179,6 +192,9 @@ function stateFrom(value: unknown): WakatimeStateV1 | null {
       || !(candidate.endedAtMs === null || finite(candidate.endedAtMs))
       || !finite(candidate.lastMaterializedAtMs)
       || !finite(candidate.lastObservedAtMs)
+      || !(candidate.boundaryFinalizedAtMs === undefined
+        || candidate.boundaryFinalizedAtMs === null
+        || finite(candidate.boundaryFinalizedAtMs))
       || (candidate.endedAtMs !== null && candidate.endedAtMs <= candidate.startedAtMs)
       || candidate.lastMaterializedAtMs < candidate.startedAtMs - 1) return null;
     streams[key] = {
@@ -189,6 +205,23 @@ function stateFrom(value: unknown): WakatimeStateV1 | null {
       endedAtMs: candidate.endedAtMs,
       lastMaterializedAtMs: candidate.lastMaterializedAtMs,
       lastObservedAtMs: candidate.lastObservedAtMs,
+      boundaryFinalizedAtMs: candidate.boundaryFinalizedAtMs ?? null,
+    };
+  }
+  const retiredStreams: NonNullable<WakatimeStateV1["retiredStreams"]> = {};
+  const rawRetiredStreams = value.retiredStreams ?? {};
+  if (!record(rawRetiredStreams)) return null;
+  for (const [key, candidate] of Object.entries(rawRetiredStreams)) {
+    if (!/^[a-f0-9]{64}$/.test(key) || !record(candidate)
+      || !finite(candidate.lastMaterializedAtMs)
+      || !finite(candidate.lastObservedAtMs)
+      || !(candidate.boundaryFinalizedAtMs === null || finite(candidate.boundaryFinalizedAtMs))
+      || !finite(candidate.expiresAtMs)) return null;
+    retiredStreams[key] = {
+      lastMaterializedAtMs: candidate.lastMaterializedAtMs,
+      lastObservedAtMs: candidate.lastObservedAtMs,
+      boundaryFinalizedAtMs: candidate.boundaryFinalizedAtMs,
+      expiresAtMs: candidate.expiresAtMs,
     };
   }
   const pending: WakatimeStateV1["pending"] = [];
@@ -234,6 +267,7 @@ function stateFrom(value: unknown): WakatimeStateV1 | null {
       dropped: counters.dropped,
       historyGaps: counters.historyGaps,
     },
+    retiredStreams,
   };
 }
 
@@ -258,7 +292,7 @@ function sampleTimes(start: number, end: number, closed: boolean, last: number |
 function addWindow(
   state: WakatimeStateV1,
   entry: FileEntry,
-  conversationId: string,
+  streamKey: string,
   project: string,
   window: TurnBoundary,
   now: number,
@@ -270,31 +304,37 @@ function addWindow(
   if (window.endedAt !== null && window.endedAt <= state.enabledAtMs) return;
   if (window.endedAt !== null && window.endedAt < now - CLOSED_STREAM_RETENTION_MS) return;
   const start = Math.max(window.startedAt, state.enabledAtMs);
-  const streamKey = turnDigest(conversationId, window.startedAt);
   const existing = state.streams[streamKey];
-  if (window.endedAt === null && !openWindowActive && !existing && entry.mtime * 1_000 <= state.enabledAtMs) return;
+  const retired = state.retiredStreams?.[streamKey];
+  if (window.endedAt === null && !openWindowActive && !existing && !retired && entry.mtime * 1_000 <= state.enabledAtMs) return;
   const lastProvenActivityAt = Math.min(now, Math.max(
     start,
     entry.mtime * 1_000,
-    existing?.lastObservedAtMs ?? start,
+    existing?.lastObservedAtMs ?? retired?.lastObservedAtMs ?? start,
   ));
   const end = window.endedAt ?? (openWindowActive ? now : lastProvenActivityAt);
   if (end < start) return;
+  if (!existing && retired
+    && end <= retired.lastMaterializedAtMs
+    && retired.boundaryFinalizedAtMs === end) return;
   const stream = existing ?? {
     entity: `agent-log-viewer/${entry.engine}/${streamKey.slice(0, 16)}`,
     engine: entry.engine as "claude" | "codex",
     project,
     startedAtMs: window.startedAt,
     endedAtMs: window.endedAt,
-    lastMaterializedAtMs: start - 1,
-    lastObservedAtMs: now,
+    lastMaterializedAtMs: Math.max(start - 1, retired?.lastMaterializedAtMs ?? start - 1),
+    lastObservedAtMs: retired?.lastObservedAtMs ?? now,
+    boundaryFinalizedAtMs: retired?.boundaryFinalizedAtMs ?? null,
   };
+  if (retired) delete state.retiredStreams?.[streamKey];
   stream.endedAtMs = window.endedAt;
   stream.lastObservedAtMs = window.endedAt ?? (openWindowActive ? now : lastProvenActivityAt);
   state.streams[streamKey] = stream;
   const last = stream.lastMaterializedAtMs < start ? null : stream.lastMaterializedAtMs;
   const closesObservedInterval = window.endedAt !== null || !openWindowActive;
-  for (const sampleTimeMs of sampleTimes(start, end, closesObservedInterval, last)) {
+  const boundaryAlreadyFinalized = stream.boundaryFinalizedAtMs === end;
+  for (const sampleTimeMs of sampleTimes(start, end, closesObservedInterval && !boundaryAlreadyFinalized, last)) {
     const kind = closesObservedInterval && sampleTimeMs === end && emitEndBoundary ? "boundary" : "activity";
     const key = eventKey(streamKey, sampleTimeMs, kind);
     if (existingKeys.has(key)) continue;
@@ -315,6 +355,7 @@ function addWindow(
     existingKeys.add(key);
   }
   stream.lastMaterializedAtMs = Math.max(stream.lastMaterializedAtMs, end);
+  if (closesObservedInterval) stream.boundaryFinalizedAtMs = end;
 }
 
 function openTurnIsActive(entry: FileEntry): boolean {
@@ -364,6 +405,10 @@ function compactPending(state: WakatimeStateV1): number {
 }
 
 function enforceBounds(state: WakatimeStateV1, now: number, maxPending: number, maxStreams: number): void {
+  state.retiredStreams ??= {};
+  for (const [key, retired] of Object.entries(state.retiredStreams)) {
+    if (retired.expiresAtMs < now) delete state.retiredStreams[key];
+  }
   const pendingStreams = new Set(state.pending.map((event) => event.stream));
   for (const [key, stream] of Object.entries(state.streams)) {
     if (stream.endedAtMs !== null && stream.endedAtMs < now - CLOSED_STREAM_RETENTION_MS && !pendingStreams.has(key)) {
@@ -383,12 +428,24 @@ function enforceBounds(state: WakatimeStateV1, now: number, maxPending: number, 
     delete state.streams[oldest];
     state.counters.dropped += before - state.pending.length;
   }
-  const orderedStreams = Object.entries(state.streams).sort((a, b) => a[1].lastObservedAtMs - b[1].lastObservedAtMs);
+  const orderedStreams = Object.entries(state.streams).sort((a, b) => {
+    const pendingDifference = Number(pendingStreams.has(a[0])) - Number(pendingStreams.has(b[0]));
+    return pendingDifference || a[1].lastObservedAtMs - b[1].lastObservedAtMs;
+  });
   while (orderedStreams.length > maxStreams) {
     const [key] = orderedStreams.shift()!;
+    const stream = state.streams[key]!;
     const before = state.pending.length;
     state.pending = state.pending.filter((event) => event.stream !== key);
     state.counters.dropped += before - state.pending.length;
+    if (before === state.pending.length) {
+      state.retiredStreams[key] = {
+        lastMaterializedAtMs: stream.lastMaterializedAtMs,
+        lastObservedAtMs: stream.lastObservedAtMs,
+        boundaryFinalizedAtMs: stream.boundaryFinalizedAtMs ?? null,
+        expiresAtMs: Math.max(now, stream.endedAtMs ?? stream.lastObservedAtMs) + CLOSED_STREAM_RETENTION_MS,
+      };
+    }
     delete state.streams[key];
   }
 }
@@ -501,7 +558,7 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
     const existingKeys = new Set(current.pending.map((event) => event.key));
     const observations: Array<{
       entry: FileEntry;
-      conversationId: string;
+      streamKey: string;
       project: string;
       window: TurnBoundary;
       openWindowActive: boolean;
@@ -528,32 +585,58 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
       }).project;
       if (!project) continue;
       const openWindowActive = openTurnIsActive(entry);
-      for (const window of recent.windows) observations.push({ entry, conversationId: conversation.id, project, window, openWindowActive });
+      for (const window of recent.windows) {
+        observations.push({
+          entry,
+          streamKey: turnDigest(conversation.id, window.startedAt),
+          project,
+          window,
+          openWindowActive,
+        });
+      }
+      const actionTimes = new Set<number>();
+      if (conversation.delegationDepth === 0) {
+        for (const actionAtMs of recent.operatorActionsAtMs ?? []) actionTimes.add(actionAtMs);
+        for (const actionAtMs of recent.unprovenancedUserActionsAtMs ?? []) actionTimes.add(actionAtMs);
+      }
+      for (const actionAtMs of actionTimes) {
+        if (!finite(actionAtMs) || actionAtMs <= 0) continue;
+        const engagementEndMs = actionAtMs + OPERATOR_ENGAGEMENT_MS;
+        const engagementActive = engagementEndMs > now;
+        observations.push({
+          entry,
+          streamKey: operatorDigest(conversation.id, actionAtMs),
+          project,
+          window: { startedAt: actionAtMs, endedAt: engagementActive ? null : engagementEndMs },
+          openWindowActive: engagementActive,
+        });
+      }
     }
     const effectiveEnd = (observation: typeof observations[number]): number => {
       if (observation.window.endedAt !== null) return observation.window.endedAt;
       if (observation.openWindowActive) return now;
-      const key = turnDigest(observation.conversationId, observation.window.startedAt);
       return Math.min(now, Math.max(
         observation.window.startedAt,
         observation.entry.mtime * 1_000,
-        current.streams[key]?.lastObservedAtMs ?? observation.window.startedAt,
+        current.streams[observation.streamKey]?.lastObservedAtMs ?? observation.window.startedAt,
       ));
     };
     for (let index = 0; index < observations.length; index += 1) {
       const observation = observations[index]!;
       const end = effectiveEnd(observation);
       const closesObservedInterval = observation.window.endedAt !== null || !observation.openWindowActive;
-      const coveredBySameProject = closesObservedInterval && observations.some((candidate, candidateIndex) =>
-        candidateIndex !== index
-        && candidate.project === observation.project
-        && candidate.window.startedAt <= end
-        && effectiveEnd(candidate) > end,
-      );
+      const coveredBySameProject = closesObservedInterval && observations.some((candidate, candidateIndex) => {
+        const candidateEnd = effectiveEnd(candidate);
+        return candidateIndex !== index
+          && candidate.project === observation.project
+          && candidate.window.startedAt <= end
+          && (candidateEnd > end
+            || (candidateEnd === end && candidate.window.endedAt === null && candidate.openWindowActive));
+      });
       addWindow(
         current,
         observation.entry,
-        observation.conversationId,
+        observation.streamKey,
         observation.project,
         observation.window,
         now,

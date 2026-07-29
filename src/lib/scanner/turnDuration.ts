@@ -1,5 +1,6 @@
 import type { FileEntry, TurnBoundary } from "../types";
-import { isClaudeTurnWindowMeta } from "@/lib/claudeProtocolUser";
+import { isClaudeProtocolUser, isClaudeTurnWindowMeta } from "@/lib/claudeProtocolUser";
+import { decodeCodexStructuredUserText } from "@/lib/runtime/codexStructuredUserText";
 import { tailRecordsResult } from "./activity";
 import { globalCache } from "./caches";
 import { recordValue, recordsValue, stringValue } from "./json";
@@ -9,10 +10,12 @@ type RecordLike = Record<string, unknown>;
 // v5: meta/command user records no longer open windows (issue #406) — persisted
 // v4 boundaries could start before the real initiating prompt.
 const turnBoundaryCache = globalCache<[number, number, TurnBoundary | null]>("last-turn-v5");
-const recentTurnWindowsCache = globalCache<[number, number, RecentTurnWindows]>("recent-turn-windows-v1");
+const recentTurnWindowsCache = globalCache<[number, number, RecentTurnWindows]>("recent-turn-windows-v2");
 
 export interface RecentTurnWindows {
   windows: TurnBoundary[];
+  operatorActionsAtMs?: number[];
+  unprovenancedUserActionsAtMs?: number[];
   prefixTruncated: boolean;
   complete: boolean;
 }
@@ -154,6 +157,51 @@ export function recentTurnWindowsFromRecords(records: RecordLike[], codex: boole
   return windows;
 }
 
+/** Direct operator actions are preserved independently from turn windows.
+    A short agent turn can end before the operator's engagement window, and a
+    steering action can occur inside an already-open turn. Codex Viewer input
+    carries the structured-user marker; Claude uses the feed's user/system
+    classification so SDK, peer, coordinator, and automation envelopes remain
+    agent activity without being reclassified as operator input. */
+export function recentTurnActivityFromRecords(
+  records: RecordLike[],
+  codex: boolean,
+): Pick<RecentTurnWindows, "windows" | "operatorActionsAtMs" | "unprovenancedUserActionsAtMs"> {
+  const operatorActions = new Set<number>();
+  const unprovenancedUserActions = new Set<number>();
+  for (const record of records) {
+    const atMs = parseMillis(record.timestamp);
+    if (atMs === null) continue;
+    if (codex) {
+      const payload = recordValue(record.payload) ?? {};
+      let text = "";
+      if (stringValue(payload.type) === "user_message") {
+        text = stringValue(payload.message) ?? "";
+      } else if (stringValue(payload.type) === "message" && payload.role === "user") {
+        text = recordsValue(payload.content)
+          .map((part) => stringValue(part.text) ?? stringValue(part.input_text) ?? "")
+          .join("\n");
+      }
+      if (text && decodeCodexStructuredUserText(text).structured) operatorActions.add(atMs);
+      continue;
+    }
+    if (!isTurnStart(record, false)) continue;
+    const originKind = typeof record.origin === "string"
+      ? record.origin
+      : stringValue(recordValue(record.origin)?.kind);
+    if (originKind === "human" || record.promptSource === "typed") {
+      operatorActions.add(atMs);
+    } else if (!isClaudeProtocolUser(record)) {
+      unprovenancedUserActions.add(atMs);
+    }
+  }
+  return {
+    windows: recentTurnWindowsFromRecords(records, codex),
+    operatorActionsAtMs: [...operatorActions].sort((left, right) => left - right),
+    unprovenancedUserActionsAtMs: [...unprovenancedUserActions].sort((left, right) => left - right),
+  };
+}
+
 export function lastTurnFromRecords(records: RecordLike[], codex: boolean): TurnBoundary | null {
   return recentTurnWindowsFromRecords(records, codex).at(-1) ?? null;
 }
@@ -168,8 +216,9 @@ export function recentTurnWindowsFor(entry: FileEntry): RecentTurnWindows {
   const cached = recentTurnWindowsCache.get(entry.path);
   if (cached?.[0] === entry.size && cached[1] === mtimeMs) return structuredClone(cached[2]);
   const tail = tailRecordsResult(entry.path, entry.size, mtimeMs);
+  const activity = recentTurnActivityFromRecords(tail.records, entry.root === "codex-sessions");
   const result: RecentTurnWindows = {
-    windows: recentTurnWindowsFromRecords(tail.records, entry.root === "codex-sessions"),
+    ...activity,
     prefixTruncated: tail.prefixTruncated,
     complete: tail.complete,
   };

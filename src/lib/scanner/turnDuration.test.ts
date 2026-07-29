@@ -4,7 +4,12 @@ import os from "node:os";
 import path from "node:path";
 
 import type { FileEntry } from "../types";
-import { lastTurnFromRecords, recentTurnWindowsFor, recentTurnWindowsFromRecords } from "./turnDuration";
+import {
+  lastTurnFromRecords,
+  recentTurnActivityFromRecords,
+  recentTurnWindowsFor,
+  recentTurnWindowsFromRecords,
+} from "./turnDuration";
 
 const ms = (iso: string) => Date.parse(iso);
 
@@ -65,6 +70,34 @@ const codexToolOutput = (timestamp: string, id: string) => ({
 const codexTaskComplete = (timestamp: string) => ({ timestamp, payload: { type: "task_complete" } });
 
 describe("lastTurnFromRecords — Claude", () => {
+  test("preserves direct operator action times without treating relayed work as operator input", () => {
+    const result = recentTurnActivityFromRecords(
+      [
+        claudeUser("2026-07-14T10:00:00.000+03:00", "start"),
+        claudeAssistantOpen("2026-07-14T07:00:05.000Z"),
+        {
+          ...claudeUser("2026-07-14T07:03:00.000Z", "steer"),
+          promptSource: "typed",
+          origin: { kind: "human" },
+        },
+        {
+          ...claudeUser("2026-07-14T07:04:00.000Z", "relayed"),
+          isMeta: true,
+          origin: { kind: "coordinator" },
+        },
+        claudeAssistantEnd("2026-07-14T07:05:00.000Z"),
+      ],
+      false,
+    );
+
+    expect(result.operatorActionsAtMs).toEqual([ms("2026-07-14T07:03:00.000Z")]);
+    expect(result.unprovenancedUserActionsAtMs).toEqual([ms("2026-07-14T07:00:00.000Z")]);
+    expect(result.windows).toEqual([{
+      startedAt: ms("2026-07-14T07:00:00.000Z"),
+      endedAt: ms("2026-07-14T07:05:00.000Z"),
+    }]);
+  });
+
   test("enumerates every completed turn in chronological order", () => {
     const result = recentTurnWindowsFromRecords(
       [
@@ -420,6 +453,28 @@ describe("lastTurnFromRecords — Claude", () => {
 });
 
 describe("lastTurnFromRecords — Codex", () => {
+  test("deduplicates Viewer operator input and excludes unstructured harness prompts", () => {
+    const at = "2026-07-14T10:00:00.000Z";
+    const structured = "<!-- llv:structured-user -->\ncontinue";
+    const result = recentTurnActivityFromRecords(
+      [
+        {
+          type: "response_item",
+          timestamp: at,
+          payload: { type: "message", role: "user", content: [{ type: "input_text", text: structured }] },
+        },
+        codexUser(at, structured),
+        codexTaskStarted("2026-07-14T10:00:01.000Z"),
+        codexTaskComplete("2026-07-14T10:01:00.000Z"),
+        codexUser("2026-07-14T10:02:00.000Z", "# AGENTS.md instructions for a worker"),
+      ],
+      true,
+    );
+
+    expect(result.operatorActionsAtMs).toEqual([ms(at)]);
+    expect(result.unprovenancedUserActionsAtMs).toEqual([]);
+  });
+
   test("enumerates completed turns followed by the final open turn", () => {
     expect(recentTurnWindowsFromRecords(
       [
@@ -541,6 +596,8 @@ test("a truncated transcript prefix reports the gap and never fabricates a turn 
     expect(recentTurnWindowsFor(entry)).toEqual({
       prefixTruncated: true,
       complete: true,
+      operatorActionsAtMs: [],
+      unprovenancedUserActionsAtMs: [ms("2026-07-14T10:00:00.000Z")],
       windows: [{
         startedAt: ms("2026-07-14T10:00:00.000Z"),
         endedAt: ms("2026-07-14T10:01:00.000Z"),
