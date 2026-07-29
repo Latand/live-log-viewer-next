@@ -36,6 +36,7 @@ export interface CodexAppServerOptions {
   clock?: CodexAppServerClock;
   requestTimeoutMs?: number;
   shutdownGraceMs?: number;
+  maxStdoutBufferBytes?: number;
   signalProcess?: ProcessSignal;
 }
 
@@ -95,7 +96,10 @@ export interface CodexAppServerLifecycleEvent {
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
-const MAX_STDOUT_BUFFER_BYTES = 1024 * 1024;
+/* Resume/read responses can contain a whole long-running thread in one JSONL
+   envelope. Keep the transport bounded while allowing realistic coordinator
+   histories to cross the app-server boundary. */
+const DEFAULT_MAX_STDOUT_BUFFER_BYTES = 64 * 1024 * 1024;
 const CODEX_ACCOUNT_APP_SERVER_ARGS = [
   "-c",
   "cli_auth_credentials_store=file",
@@ -195,6 +199,7 @@ export class CodexAppServerClient {
     private readonly clock: CodexAppServerClock,
     private readonly requestTimeoutMs: number,
     private readonly shutdownGraceMs: number,
+    private readonly maxStdoutBufferBytes: number,
     private readonly signalProcess: ProcessSignal,
   ) {
     child.stdout.on("data", (chunk: Buffer | string) => this.acceptStdout(String(chunk)));
@@ -216,6 +221,7 @@ export class CodexAppServerClient {
       options.clock ?? defaultClock,
       options.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS,
       options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS,
+      options.maxStdoutBufferBytes ?? DEFAULT_MAX_STDOUT_BUFFER_BYTES,
       options.signalProcess ?? process.kill,
     );
     try {
@@ -407,7 +413,7 @@ export class CodexAppServerClient {
     while (newline >= 0) {
       const rawLine = this.stdoutBuffer.slice(0, newline);
       this.stdoutBuffer = this.stdoutBuffer.slice(newline + 1);
-      if (Buffer.byteLength(rawLine, "utf8") > MAX_STDOUT_BUFFER_BYTES) {
+      if (Buffer.byteLength(rawLine, "utf8") > this.maxStdoutBufferBytes) {
         this.fail(protocolError("received an oversized JSONL line"));
         return;
       }
@@ -415,7 +421,7 @@ export class CodexAppServerClient {
       if (line) this.acceptMessage(line);
       newline = this.stdoutBuffer.indexOf("\n");
     }
-    if (Buffer.byteLength(this.stdoutBuffer, "utf8") > MAX_STDOUT_BUFFER_BYTES) {
+    if (Buffer.byteLength(this.stdoutBuffer, "utf8") > this.maxStdoutBufferBytes) {
       this.fail(protocolError("received an oversized unterminated JSONL line"));
     }
   }

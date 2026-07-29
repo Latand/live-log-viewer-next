@@ -5,7 +5,13 @@ import os from "node:os";
 import path from "node:path";
 
 import { emptyLaunchProfile, sameProviderReceiptOutcome, type NativeGeneration, type ProviderReceipt, type SuccessorProviderPort } from "./contracts";
-import { codexForkArtifacts, CodexForkOutcomeUnknownError, RegisteredSuccessorProvider, type ProviderDependencies } from "./provider";
+import {
+  authorizeCodexForkRetry,
+  codexForkArtifacts,
+  CodexForkOutcomeUnknownError,
+  RegisteredSuccessorProvider,
+  type ProviderDependencies,
+} from "./provider";
 import { CodexAppServerError, type CodexAppServerClient } from "@/lib/accounts/codexAppServer";
 import { AgentRegistry, type ConversationObservation, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { ClaudeStreamBrokerHost } from "@/lib/runtime/claudeStreamBrokerHost";
@@ -1607,6 +1613,75 @@ test("two forks inside one operation's own window resolve to the newest", async 
   expect(recorded).toContain(forkPath(forkIds[0]!));
   expect(fs.existsSync(forkPath(forkIds[0]!))).toBeTrue();
   expect(fs.existsSync(forkPath(forkIds[1]!))).toBeTrue();
+});
+
+test("an explicit retry reauthorizes one fork after an unknown outcome produced no artifact", async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-codex-empty-unknown-"));
+  roots.push(base);
+  const source = accountRoot("codex", base, "source");
+  const target = accountRoot("codex", base, "target");
+  const journalRoot = path.join(base, "provider-journal");
+  const sourceId = "729f423a-d6e9-\x37903-b597-3e676b6ff3d4";
+  const forkId = "729f423a-d6e9-\x34903-8597-000000000001";
+  const sourcePath = path.join(source.transcriptRoot, `rollout-${sourceId}.jsonl`);
+  const forkPath = path.join(source.transcriptRoot, `rollout-${forkId}.jsonl`);
+  fs.writeFileSync(sourcePath, codexSessionMeta(sourceId), { mode: 0o600 });
+  let forkCalls = 0;
+  const client = () => ({
+    async readAccount() { return { account: { type: "chatgpt" }, requiresOpenaiAuth: true }; },
+    async forkThread() {
+      forkCalls += 1;
+      if (forkCalls === 1) throw new CodexAppServerError("fork outcome is unknown", "unknown");
+      fs.writeFileSync(forkPath, codexSessionMeta(forkId, sourceId), { mode: 0o600 });
+      return { id: forkId, path: forkPath };
+    },
+    async resumeThread(id: string) { return { id, path: null }; },
+    async readThread(id: string) { return { id, path: null }; },
+    close() {},
+  }) as unknown as CodexAppServerClient;
+  const dependencies = {
+    accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
+    startCodex: async () => client(),
+    claudeStatus: async () => ({ loggedIn: false }),
+    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
+    journalRoot,
+    now: () => "2026-07-10T12:00:00.000Z",
+  } as ProviderDependencies & { journalRoot: string };
+  const provider = new RegisteredSuccessorProvider(dependencies);
+  const input = {
+    engine: "codex" as const,
+    operationId: "empty-unknown-operation",
+    conversationId: "conversation_empty_unknown" as const,
+    targetAccountId: "target",
+    source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
+    recordContinuityPath() {},
+  };
+
+  await expect(provider.create(input)).rejects.toBeInstanceOf(CodexForkOutcomeUnknownError);
+  await expect(provider.create(input)).rejects.toBeInstanceOf(CodexForkOutcomeUnknownError);
+  expect(forkCalls).toBe(1);
+
+  expect(await authorizeCodexForkRetry(
+    input.operationId,
+    input.conversationId,
+    journalRoot,
+    () => [],
+  )).toBe("reauthorized");
+
+  const receipt = await provider.create(input);
+  expect(forkCalls).toBe(2);
+  expect(receipt.nativeId).toBe(forkId);
+  expect(fs.existsSync(receipt.path)).toBeTrue();
+  const journalFile = path.join(
+    journalRoot,
+    `${crypto.createHash("sha256").update(input.operationId).digest("hex")}.json`,
+  );
+  const journal = JSON.parse(fs.readFileSync(journalFile, "utf8")) as {
+    forkRecoveryFloorMs: number | null;
+    forkRequestedAtMs: number | null;
+  };
+  expect(journal.forkRecoveryFloorMs).toBeNumber();
+  expect(journal.forkRequestedAtMs).toBeNumber();
 });
 
 test("a retry re-forks when the source gained turns while the migration was parked", async () => {

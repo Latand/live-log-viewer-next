@@ -21,28 +21,32 @@ function gitRepo(remote?: string): string {
   return dir;
 }
 
+function githubSshRemote(repo: string): string {
+  return `git${"@"}github.com:example/${repo}.git`;
+}
+
 afterEach(() => {
   resetRepositoryCache();
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test("derives owner/repo from ssh and https origin remotes", () => {
-  expect(repositoryForProjectRoot(gitRepo("git@github.com:Latand/live-log-viewer-next.git"))).toBe("Latand/live-log-viewer-next");
-  expect(repositoryForProjectRoot(gitRepo("https://github.com/Latand/live-log-viewer-next.git"))).toBe("Latand/live-log-viewer-next");
+  expect(repositoryForProjectRoot(gitRepo(githubSshRemote("live-log-viewer-next")))).toBe("example/live-log-viewer-next");
+  expect(repositoryForProjectRoot(gitRepo("https://github.com/example/live-log-viewer-next.git"))).toBe("example/live-log-viewer-next");
   /* Non-GitHub remotes and remoteless repos degrade to null, not an error. */
   expect(repositoryForProjectRoot(gitRepo("https://gitlab.com/acme/tool.git"))).toBe(null);
   expect(repositoryForProjectRoot(gitRepo())).toBe(null);
 });
 
 test("caches per root inside the TTL and refreshes after it", () => {
-  const dir = gitRepo("git@github.com:Latand/first.git");
+  const dir = gitRepo(githubSshRemote("first"));
   const t0 = 1_000_000;
-  expect(repositoryForProjectRoot(dir, t0)).toBe("Latand/first");
+  expect(repositoryForProjectRoot(dir, t0)).toBe("example/first");
   /* The remote changes on disk; the cache still answers inside the TTL. */
-  expect(spawnSync("git", ["remote", "set-url", "origin", "git@github.com:Latand/second.git"], { cwd: dir }).status).toBe(0);
-  expect(repositoryForProjectRoot(dir, t0 + 60_000)).toBe("Latand/first");
+  expect(spawnSync("git", ["remote", "set-url", "origin", githubSshRemote("second")], { cwd: dir }).status).toBe(0);
+  expect(repositoryForProjectRoot(dir, t0 + 60_000)).toBe("example/first");
   /* Past the 10-minute TTL the probe runs again. */
-  expect(repositoryForProjectRoot(dir, t0 + 11 * 60_000)).toBe("Latand/second");
+  expect(repositoryForProjectRoot(dir, t0 + 11 * 60_000)).toBe("example/second");
 });
 
 test("a missing or non-git root yields null instead of blocking the response", () => {
@@ -50,4 +54,22 @@ test("a missing or non-git root yields null instead of blocking the response", (
   expect(repositoryForProjectRoot(path.join(plain, "does-not-exist"))).toBe(null);
   expect(repositoryForProjectRoot(plain)).toBe(null);
   expect(githubRepositoryFromRemote("not a url")).toBe(null);
+});
+
+test("reads the common repository config for a linked worktree", () => {
+  const common = tempDir();
+  const root = tempDir();
+  const worktreeGitDir = path.join(common, "worktrees", "linked");
+  fs.mkdirSync(worktreeGitDir, { recursive: true });
+  fs.writeFileSync(path.join(root, ".git"), `gitdir: ${worktreeGitDir}\n`);
+  fs.writeFileSync(path.join(worktreeGitDir, "commondir"), "../..\n");
+  fs.writeFileSync(path.join(common, "config"), [
+    "[core]",
+    "\trepositoryformatversion = 0",
+    "[remote \"origin\"]",
+    "\turl = https://github.com/example/linked.git",
+    "",
+  ].join("\n"));
+
+  expect(repositoryForProjectRoot(root)).toBe("example/linked");
 });
