@@ -11,7 +11,13 @@ import { mutateBoard, setBoardFileForTests } from "@/lib/board/store";
 import type { Flow } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
 
-import { killHeadlessReviewerIfMatches, readReaperReport, refreshMergedFlowIds, runReaperCycle } from "./reaperRuntime";
+import {
+  killHeadlessReviewerIfMatches,
+  readReaperReport,
+  refreshMergedFlowIds,
+  runReaperCycle,
+  terminalizeStaleUndeliverableHeldDeliveries,
+} from "./reaperRuntime";
 
 const originalStateDir = process.env.LLV_STATE_DIR;
 const originalEnabled = process.env.LLV_REAPER_ENABLED;
@@ -50,6 +56,264 @@ test("runtime cycle enters active mode only for the exact opt-in flag", async ()
     expect((await runReaperCycle({ registry, hosts: [], files: [] })).mode).toBe("dry-run");
     process.env.LLV_REAPER_ENABLED = "1";
     expect((await runReaperCycle({ registry, hosts: [], files: [] })).mode).toBe("active");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("the issue 652 convergence pass stops a no-progress intent and terminalizes its held delivery", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-stale-migration-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const conversation = registry.ensureConversation("codex", "/stale-migration.jsonl", "source");
+  const intent = registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "target",
+    origin: "manual",
+    requestId: "stale-migration",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+  const held = registry.holdDelivery(conversation.id, "queued before abandonment", "stale-held");
+
+  try {
+    const terminalized = terminalizeStaleUndeliverableHeldDeliveries(
+      registry,
+      Date.now() + 6 * 60_000,
+    );
+
+    expect(terminalized).toEqual([held.id]);
+    expect(registry.snapshot().migrationIntents[intent.id]).toMatchObject({ state: "stopped" });
+    expect(registry.snapshot().heldDeliveries[held.id]).toMatchObject({
+      state: "failed",
+      attempts: 0,
+      deliveredAt: null,
+      error: expect.stringContaining("made no progress"),
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("the issue 652 convergence pass settles a requested member with no live source owner", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-dead-migration-source-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const conversation = registry.ensureConversation("codex", "/dead-migration-source.jsonl", "source");
+  const intent = registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "target",
+    origin: "manual",
+    requestId: "dead-migration-source",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+  const held = registry.holdDelivery(conversation.id, "queued without an owner", "dead-source-held");
+
+  try {
+    const terminalized = terminalizeStaleUndeliverableHeldDeliveries(registry);
+
+    expect(terminalized).toEqual([held.id]);
+    expect(registry.snapshot().migrationIntents[intent.id]).toMatchObject({ state: "draining" });
+    expect(registry.conversation(conversation.id)?.migration).toMatchObject({ phase: "rolled-back" });
+    expect(registry.snapshot().heldDeliveries[held.id]).toMatchObject({
+      state: "failed",
+      attempts: 0,
+      deliveredAt: null,
+      error: expect.stringContaining(conversation.id),
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("the issue 652 convergence pass terminalizes assigned delivery under a rolled-back migration", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-rolled-back-delivery-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const conversation = registry.ensureConversation("codex", "/rolled-back-delivery.jsonl", "source");
+  registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "target",
+    origin: "manual",
+    requestId: "rolled-back-delivery",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+  const revision = registry.conversation(conversation.id)!.migration!.revision;
+  registry.rollbackConversationMigration(conversation.id, revision);
+  const assigned = registry.holdDelivery(conversation.id, "fixture", "rolled-back-delivery");
+  expect(assigned).toMatchObject({ state: "assigned", attempts: 0 });
+
+  try {
+    const terminalized = terminalizeStaleUndeliverableHeldDeliveries(registry);
+
+    expect(terminalized).toEqual([assigned.id]);
+    expect(registry.snapshot().heldDeliveries[assigned.id]).toMatchObject({
+      state: "failed",
+      attempts: 0,
+      generationId: null,
+      deliveredAt: null,
+      error: expect.stringContaining("rolled back"),
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a live structured source with no migration progress reaches terminal accounting", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-live-migration-source-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const pathname = "/live-migration-source.jsonl";
+  const conversation = registry.ensureConversation("codex", pathname, "source");
+  const intent = registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "target",
+    origin: "manual",
+    requestId: "live-migration-source",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+  const held = registry.holdDelivery(conversation.id, "fixture", "live-source-held");
+  const generation = conversation.generations.at(-1)!;
+  registry.upsert({
+    key: { engine: conversation.engine, sessionId: generation.id },
+    artifactPath: generation.path,
+    cwd: generation.launchProfile.cwd,
+    accountId: generation.accountId,
+    launchProfile: generation.launchProfile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:live-no-progress",
+      process: { pid: 4242, startIdentity: "4242:live-no-progress" },
+      eventCursor: 0,
+      protocolVersion: "v2",
+      writerClaimEpoch: 1,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 1,
+    claimOwner: "structured-host:live-no-progress",
+    pendingAction: null,
+  });
+
+  try {
+    const terminalized = terminalizeStaleUndeliverableHeldDeliveries(
+      registry,
+      Date.now() + 6 * 60_000,
+      {
+        pidAlive: (pid) => pid === 4242,
+        processIdentity: (pid) => pid === 4242 ? "4242:live-no-progress" : null,
+      },
+    );
+
+    expect(terminalized).toEqual([held.id]);
+    expect(registry.snapshot().migrationIntents[intent.id]).toMatchObject({ state: "stopped" });
+    expect(registry.conversation(conversation.id)?.migration).toMatchObject({ phase: "rolled-back" });
+    expect(registry.snapshot().heldDeliveries[held.id]).toMatchObject({
+      state: "failed",
+      attempts: 0,
+      error: expect.stringContaining("made no progress"),
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a source host on another engine cannot prove current migration ownership", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-wrong-engine-source-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const pathname = "/wrong-engine-source.jsonl";
+  const conversation = registry.ensureConversation("codex", pathname, "source");
+  const intent = registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "target",
+    origin: "manual",
+    requestId: "wrong-engine-source",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+  const held = registry.holdDelivery(conversation.id, "fixture", "wrong-engine-held");
+
+  try {
+    const wrongEngineHost = { ...runtimeHost(pathname), engine: "claude" as const };
+    const terminalized = terminalizeStaleUndeliverableHeldDeliveries(
+      registry,
+      Date.now(),
+      {},
+      [wrongEngineHost],
+    );
+
+    expect(terminalized).toEqual([held.id]);
+    expect(registry.snapshot().migrationIntents[intent.id]).toMatchObject({ state: "draining" });
+    expect(registry.conversation(conversation.id)?.migration).toMatchObject({ phase: "rolled-back" });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a dead requested member without its own held input cannot cancel a live-owned member", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-member-delivery-owner-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const dead = registry.ensureConversation("codex", "/dead-member.jsonl", "source");
+  const live = registry.ensureConversation("codex", "/live-member.jsonl", "source");
+  const intent = registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "target",
+    origin: "manual",
+    requestId: "member-delivery-owner",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+  const held = registry.holdDelivery(live.id, "fixture", "live-member-held");
+
+  try {
+    expect(registry.conversation(dead.id)?.migration?.phase).toBe("requested");
+    const terminalized = terminalizeStaleUndeliverableHeldDeliveries(
+      registry,
+      Date.now(),
+      {},
+      [runtimeHost("/live-member.jsonl")],
+    );
+
+    expect(terminalized).toEqual([]);
+    expect(registry.snapshot().migrationIntents[intent.id]).toMatchObject({ state: "draining" });
+    expect(registry.snapshot().heldDeliveries[held.id]).toMatchObject({ state: "held", attempts: 0 });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a dead requested member settles only its own delivery while a live member keeps the intent active", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-member-scope-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const dead = registry.ensureConversation("codex", "/dead-owned-member.jsonl", "source");
+  const live = registry.ensureConversation("codex", "/live-owned-member.jsonl", "source");
+  const intent = registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "target",
+    origin: "manual",
+    requestId: "member-scope",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+  const deadHeld = registry.holdDelivery(dead.id, "fixture", "dead-member-delivery");
+  const liveHeld = registry.holdDelivery(live.id, "fixture", "live-member-delivery");
+
+  try {
+    const terminalized = terminalizeStaleUndeliverableHeldDeliveries(
+      registry,
+      Date.now(),
+      {},
+      [runtimeHost("/live-owned-member.jsonl")],
+    );
+
+    expect(terminalized).toEqual([deadHeld.id]);
+    expect(registry.snapshot().migrationIntents[intent.id]).toMatchObject({ state: "draining" });
+    expect(registry.conversation(dead.id)?.migration).toMatchObject({ phase: "rolled-back" });
+    expect(registry.snapshot().heldDeliveries[deadHeld.id]).toMatchObject({
+      state: "failed",
+      attempts: 0,
+      error: expect.stringContaining(dead.id),
+    });
+    expect(registry.snapshot().heldDeliveries[liveHeld.id]).toMatchObject({
+      state: "held",
+      attempts: 0,
+      error: null,
+    });
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

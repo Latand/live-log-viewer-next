@@ -4,7 +4,7 @@ import { managedCodexRuntime } from "@/lib/accounts/codexRuntime";
 import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
 import { agentRegistry, conversationLookupFromSnapshot, type AgentRegistry } from "@/lib/agent/registry";
 import { readTranscriptHosts } from "@/lib/agent/transcriptHost";
-import { forEachCooperatively, yieldToRuntime } from "@/lib/cooperative";
+import { yieldToRuntime } from "@/lib/cooperative";
 import { loadFlows, reconcileFlowConversationOwnershipCooperatively } from "@/lib/flows/store";
 import { reconcileHandoffConversationOwnershipCooperatively } from "@/lib/handoffLineage";
 import { listFilesWithProjectCatalog, reconcileFileControllers } from "@/lib/scanner";
@@ -17,7 +17,7 @@ import { mutateTasks } from "@/lib/tasks/store";
 import { reconcileWorkflowConversationOwnershipCooperatively } from "@/lib/workflows/store";
 import { paneInfo } from "@/lib/tmux";
 
-import { drainHeldDeliveries, reconcileMigrationInventory, reconcileMigrations, type HeldDeliveryPort } from "./coordinator";
+import { reconcileMigrationInventory, reconcileMigrations, type HeldDeliveryPort } from "./coordinator";
 import { createMigrationDeliveryPort } from "./deliveryPort";
 export { createMigrationDeliveryPort } from "./deliveryPort";
 import { registerAccountMigrationTick } from "./controllerSignal";
@@ -39,10 +39,6 @@ export async function reconcileAccountMigrationCycle(
   registry.compactDeliveryReservations();
   await yieldToRuntime();
   await reconcileMigrations(provider, delivery, registry);
-  await yieldToRuntime();
-  await forEachCooperatively(Object.values(registry.readOnlySnapshot().conversations), async (conversation) => {
-    if (conversation.migration?.phase === "rolled-back") await drainHeldDeliveries(conversation.id, delivery, registry);
-  });
   await yieldToRuntime();
   await Promise.all([quota.tick("claude"), quota.tick("codex")]);
 }

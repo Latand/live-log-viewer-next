@@ -92,6 +92,30 @@ for (const mode of ["off", "sqlite"] as const) {
        after restart — an engine-scoped survivor would drain the whole engine. */
     expect(intents[0]).toMatchObject({ scope: "conversation", targetId: "healthy", state: "draining" });
   });
+
+  test(`stopped migration delivery settlement survives a ${mode === "off" ? "JSON" : "SQLite"} registry restart`, () => {
+    const filename = registryFile();
+    const { store, id } = seededRegistry(mode, filename);
+    const intent = store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "healthy",
+      origin: "manual",
+      requestId: `stop-parity-${mode}`,
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    const held = store.holdDelivery(id, "fixture", `stop-parity-${mode}`);
+    store.setMigrationIntentState(intent.id, "stopped", intent.revision);
+
+    const reopened = new AgentRegistry(filename, undefined, undefined, { sqliteMode: mode });
+    expect(reopened.snapshot().migrationIntents[intent.id]).toMatchObject({ state: "stopped" });
+    expect(reopened.snapshot().heldDeliveries[held.id]).toMatchObject({
+      state: "failed",
+      attempts: 0,
+      generationId: null,
+      deliveredAt: null,
+      error: expect.stringContaining("migration was stopped"),
+    });
+  });
 }
 
 test("a conversation reseat never reuses or retargets the single engine drain intent", () => {
@@ -147,6 +171,190 @@ test("a new spawn during a conversation reseat is never adopted into the drain",
   const second = store.beginSpawn("codex", "/repo/checkout");
   expect(store.settleSpawn(second.launchId, spawnEntry("019f4906-3f67-\x37b72-9fbc-9ec3b5ad1327", "/sessions/adopted-spawn.jsonl")).kind).toBe("settled");
   expect(store.conversationForPath("/sessions/adopted-spawn.jsonl")!.migration).toMatchObject({ targetId: "engine-target" });
+});
+
+test("a stale engine intent cannot adopt a future spawn", () => {
+  const filename = registryFile();
+  const { store } = seededRegistry("off", filename);
+  const intent = store.commitMigrationIntent({
+    engine: "codex",
+    targetId: "target",
+    origin: "manual",
+    requestId: "stale-engine-intent",
+    expectedRevision: store.engineRouting("codex").revision,
+  });
+  const snapshot = store.snapshot();
+  snapshot.migrationIntents[intent.id]!.updatedAt = "2026-07-01T00:00:00.000Z";
+  snapshot.migrationIntents[intent.id]!.createdAt = "2026-07-01T00:00:00.000Z";
+  for (const conversation of Object.values(snapshot.conversations)) {
+    if (conversation.migration?.intentId === intent.id) {
+      conversation.migration.updatedAt = "2026-07-01T00:00:00.000Z";
+    }
+  }
+  fs.writeFileSync(filename, JSON.stringify(snapshot));
+
+  const restarted = new AgentRegistry(filename);
+  const spawn = restarted.beginSpawn("codex", "/repo/checkout");
+  const settled = restarted.settleSpawn(spawn.launchId, {
+    key: { engine: "codex", sessionId: "future-spawn" },
+    artifactPath: "/sessions/future-spawn.jsonl",
+    cwd: "/repo/checkout",
+    accountId: "source",
+    status: "live",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+
+  expect(settled.kind).toBe("settled");
+  expect(restarted.conversationForPath("/sessions/future-spawn.jsonl")?.migration).toBeNull();
+});
+
+test("stopped and non-active-target intents cannot adopt unrelated spawns", () => {
+  for (const state of ["stopped", "non-active-target"] as const) {
+    const { store } = seededRegistry("off", registryFile());
+    const intent = store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "target",
+      origin: "manual",
+      requestId: `${state}-intent`,
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    if (state === "stopped") store.setMigrationIntentState(intent.id, "stopped", intent.revision);
+    else store.setEngineRouting("codex", "other-active-account");
+
+    const pathname = `/sessions/${state}-spawn.jsonl`;
+    const spawn = store.beginSpawn("codex", "/repo/checkout");
+    const settled = store.settleSpawn(spawn.launchId, {
+      key: { engine: "codex", sessionId: `${state}-spawn` },
+      artifactPath: pathname,
+      cwd: "/repo/checkout",
+      accountId: "source",
+      status: "live",
+      host: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    });
+
+    expect(settled.kind).toBe("settled");
+    expect(store.conversationForPath(pathname)?.migration).toBeNull();
+  }
+});
+
+test("resume generation rollover cannot revive delivery cancelled by Stop", () => {
+  const { store, id } = seededRegistry("off", registryFile());
+  const intent = store.commitMigrationIntent({
+    engine: "codex",
+    targetId: "healthy",
+    origin: "manual",
+    requestId: "stop-before-resume",
+    expectedRevision: store.engineRouting("codex").revision,
+  });
+  const held = store.holdDelivery(id, "fixture", "held-before-resume");
+  store.setMigrationIntentState(intent.id, "stopped", intent.revision);
+  const resume = store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo/checkout",
+    accountId: "limited",
+    conversationId: id,
+    purpose: "resume-successor",
+  });
+  if (resume.kind !== "created") throw new Error("expected resume create");
+  expect(store.settleSpawn(resume.receipt.launchId, {
+    key: { engine: "codex", sessionId: "resumed-generation" },
+    artifactPath: "/sessions/resumed-generation.jsonl",
+    cwd: "/repo/checkout",
+    accountId: "limited",
+    status: "live",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  }).kind).toBe("settled");
+
+  expect(store.conversation(id)?.generations.at(-1)?.path).toBe("/sessions/resumed-generation.jsonl");
+  expect(store.snapshot().heldDeliveries[held.id]).toMatchObject({
+    state: "failed",
+    attempts: 0,
+    generationId: null,
+    error: expect.stringContaining("migration was stopped"),
+  });
+});
+
+test("one hundred cancelled deliveries stay auditable without blocking a fresh action", () => {
+  const { store, id } = seededRegistry("off", registryFile());
+  const intent = store.commitMigrationIntent({
+    engine: "codex",
+    targetId: "healthy",
+    origin: "manual",
+    requestId: "retain-cancelled-history",
+    expectedRevision: store.engineRouting("codex").revision,
+  });
+  const ids = Array.from({ length: 100 }, (_, index) =>
+    store.holdDelivery(id, "fixture", `cancelled-history-${index}`).id);
+  store.setMigrationIntentState(intent.id, "stopped", intent.revision);
+
+  store.compactDeliveryReservations();
+  const fresh = store.holdDelivery(id, "fresh fixture", "fresh-after-cancelled-history");
+
+  expect(ids.every((deliveryId) =>
+    store.snapshot().heldDeliveries[deliveryId]?.state === "failed")).toBe(true);
+  expect(fresh).toMatchObject({ state: "assigned", attempts: 0 });
+});
+
+test("migration cancellation blanks payload text while preserving audit metadata", () => {
+  const { store, id } = seededRegistry("off", registryFile());
+  const intent = store.commitMigrationIntent({
+    engine: "codex",
+    targetId: "healthy",
+    origin: "manual",
+    requestId: "redact-cancelled-payload",
+    expectedRevision: store.engineRouting("codex").revision,
+  });
+  const held = store.holdDelivery(id, "fixture payload", "redact-cancelled-payload");
+
+  store.setMigrationIntentState(intent.id, "stopped", intent.revision);
+
+  expect(store.snapshot().heldDeliveries[held.id]).toMatchObject({
+    state: "failed",
+    text: "",
+    createdAt: held.createdAt,
+    clientMessageId: held.clientMessageId,
+    requestDigest: held.requestDigest,
+    attempts: 0,
+    assignedAt: null,
+    deliveredAt: null,
+    error: expect.stringContaining("migration was stopped"),
+  });
+});
+
+test("stopping a migration records that an uncertain delivery may already have landed", () => {
+  const { store, id } = seededRegistry("off", registryFile());
+  const generation = store.conversation(id)!.generations.at(-1)!;
+  const assigned = store.holdDelivery(id, "fixture payload", "uncertain-before-stop");
+  expect(store.beginDeliveryAttempt(assigned.id, generation.id)).toMatchObject({
+    state: "delivery-uncertain",
+    attempts: 1,
+  });
+  const intent = store.commitMigrationIntent({
+    engine: "codex",
+    targetId: "healthy",
+    origin: "manual",
+    requestId: "stop-uncertain",
+    expectedRevision: store.engineRouting("codex").revision,
+  });
+
+  store.setMigrationIntentState(intent.id, "stopped", intent.revision);
+
+  expect(store.snapshot().heldDeliveries[assigned.id]).toMatchObject({
+    state: "failed",
+    text: "",
+    attempts: 1,
+    generationId: null,
+    error: expect.stringContaining("may have been delivered"),
+  });
 });
 
 test("repeat reseat clicks never mint a second successor operation", () => {

@@ -4,7 +4,14 @@ import fs from "node:fs";
 import { accountManager } from "@/lib/accounts/manager";
 import { listClaudeAccounts } from "@/lib/accounts/claude";
 import { listCodexAccounts } from "@/lib/accounts/codex";
-import { agentRegistry, type AgentRegistry, type ConversationObservation, type MigrationScope, type RegistryConversation } from "@/lib/agent/registry";
+import {
+  agentRegistry,
+  type AgentRegistry,
+  type ConversationObservation,
+  type MigrationScope,
+  type RegistryConversation,
+  type RegistryFile,
+} from "@/lib/agent/registry";
 import { headCwd, headSessionStartedAt } from "@/lib/agent/transcript";
 import {
   boardFor,
@@ -37,6 +44,7 @@ import {
 import { CodexForkOutcomeUnknownError, RegisteredSuccessorProvider, SuccessorPendingError } from "./provider";
 import { safeProviderDiagnostic, sanitizeProviderError } from "./safeHistoryCopy";
 import { AUTO_BALANCE_COOLDOWN_MS } from "./quotaPolicy";
+import { MIGRATION_DELIVERY_CANCELLATION_PREFIX } from "./intentLiveness";
 
 export interface MigrationPreview {
   targetId: string;
@@ -48,6 +56,27 @@ export interface MigrationPreview {
 export interface HeldDeliveryPort {
   deliver(input: { delivery: HeldDelivery; path: string; clientMessageId: string }): Promise<"delivered" | "failed" | "delivery-uncertain" | "held">;
   reconcileUncertain?(input: { delivery: HeldDelivery; path: string; clientMessageId: string }): Promise<"delivered" | "failed" | "delivery-uncertain" | "held">;
+}
+
+const CLAIMABLE_RECEIPT_STATES = new Set(["starting", "pane-bound", "host-verified", "prompt-delivered", "path-pending"]);
+
+function deliveryHasDurableClaimOwner(
+  snapshot: RegistryFile,
+  conversation: RegistryConversation,
+  delivery: HeldDelivery,
+): boolean {
+  const current = conversation.generations.at(-1);
+  if (!current || delivery.generationId !== current.id) return false;
+  if (current.host !== null && current.host !== undefined) return true;
+  if (Object.values(snapshot.entries).some((entry) =>
+    entry.key.engine === conversation.engine
+    && entry.key.sessionId === current.id
+    && entry.artifactPath === current.path
+    && ((entry.structuredHost !== null && entry.structuredHost !== undefined) !== (entry.host !== null)))) return true;
+  return Object.values(snapshot.receipts).some((receipt) =>
+    receipt.engine === conversation.engine
+    && receipt.conversationId === conversation.id
+    && CLAIMABLE_RECEIPT_STATES.has(receipt.state));
 }
 
 function engineOf(entry: FileEntry): MigrationEngine | null {
@@ -836,6 +865,8 @@ export async function reconcileMigrations(
   registry: AgentRegistry = agentRegistry(),
   options: MigrationCoordinatorOptions = {},
 ): Promise<void> {
+  const orphanedDeliveryReason =
+    `${MIGRATION_DELIVERY_CANCELLATION_PREFIX} its upgrade-era reservation has no durable owner evidence; send again to authorize a fresh delivery action`;
   const before = registry.readOnlySnapshot();
   await forEachCooperatively(Object.values(before.pendingSuccessorCleanups), async (pending) => {
     const owner = registry.conversation(pending.conversationId);
@@ -858,12 +889,38 @@ export async function reconcileMigrations(
       await drainHeldDeliveries(conversation.id, delivery, registry);
       conversation = registry.conversation(conversation.id) ?? conversation;
     }
-    if (!conversation.migration || conversation.migration.phase === "rolled-back") {
-      if (pendingDeliveries.has(conversation.id)) await drainHeldDeliveries(conversation.id, delivery, registry);
+    if (!conversation.migration) {
+      const pending = registry.pendingDeliveries(conversation.id);
+      for (const item of pending) {
+        if ((item.state === "held" || item.state === "assigned")
+          && !deliveryHasDurableClaimOwner(before, conversation, item)) {
+          registry.terminalizeHeldDelivery(item.id, orphanedDeliveryReason);
+        }
+      }
+      if (pending.some((item) =>
+        (item.state === "assigned" && deliveryHasDurableClaimOwner(before, conversation, item))
+        || (item.state === "delivery-uncertain" && delivery.reconcileUncertain))) {
+        await drainHeldDeliveries(conversation.id, delivery, registry);
+      }
+      return;
+    }
+    if (conversation.migration.phase === "rolled-back") {
+      for (const item of registry.pendingDeliveries(conversation.id)) {
+        if (item.state === "held" || item.state === "assigned" || item.state === "delivery-uncertain") {
+          registry.terminalizeHeldDelivery(
+            item.id,
+            "delivery cancelled because its owning account migration was rolled back; send again to authorize a fresh delivery action",
+          );
+        }
+      }
       return;
     }
     if (conversation.migration.phase === "committed") {
-      if (pendingDeliveries.has(conversation.id)) await drainHeldDeliveries(conversation.id, delivery, registry);
+      if (registry.pendingDeliveries(conversation.id).some((item) =>
+        item.state === "assigned"
+        || (item.state === "delivery-uncertain" && delivery.reconcileUncertain))) {
+        await drainHeldDeliveries(conversation.id, delivery, registry);
+      }
       return;
     }
     const migration = conversation.migration;
@@ -874,7 +931,12 @@ export async function reconcileMigrations(
       return;
     }
     const advanced = await advanceConversationMigration(conversation.id, registry, provider, { ...options, deferBoardRepair: true });
-    if (advanced.migration?.phase === "committed" && pendingDeliveries.has(advanced.id)) await drainHeldDeliveries(advanced.id, delivery, registry);
+    if (advanced.migration?.phase === "committed"
+      && registry.pendingDeliveries(advanced.id).some((item) =>
+        item.state === "assigned"
+        || (item.state === "delivery-uncertain" && delivery.reconcileUncertain))) {
+      await drainHeldDeliveries(advanced.id, delivery, registry);
+    }
   });
   await yieldToRuntime();
   const after = registry.readOnlySnapshot();

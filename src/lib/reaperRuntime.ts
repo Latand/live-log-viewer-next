@@ -3,8 +3,16 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { staleUndeliverableHeldDeliveryIds } from "@/lib/agent/accountLiveness";
-import { agentRegistry, type AgentRegistry, type RegistryFile, type TmuxHostEvidence } from "@/lib/agent/registry";
+import {
+  entryIsLive,
+  identityAlive,
+  livenessProbe,
+  receiptIsLive,
+  staleUndeliverableHeldDeliveryIds,
+  type AccountLivenessOptions,
+  type LivenessProbe,
+} from "@/lib/agent/accountLiveness";
+import { agentRegistry, type AgentRegistry, type RegistryConversation, type RegistryFile, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { readTranscriptHosts, type TranscriptHost, type TranscriptHostSnapshot } from "@/lib/agent/transcriptHost";
 import { boardFor } from "@/lib/board/store";
 import { statePath } from "@/lib/configDir";
@@ -13,6 +21,11 @@ import { resolveFlowMergeIdentity } from "@/lib/flows/git";
 import { loadFlows, saveFlows } from "@/lib/flows/store";
 import type { Flow, FlowMergeEvidence } from "@/lib/flows/types";
 import { reconcileMigrationInventory } from "@/lib/accounts/migration/coordinator";
+import {
+  MIGRATION_INTENT_PROGRESS_TIMEOUT_MS,
+  migrationIntentIsStale,
+  ROLLED_BACK_MIGRATION_DELIVERY_REASON,
+} from "@/lib/accounts/migration/intentLiveness";
 import { procBackend } from "@/lib/proc";
 import { runtimeHostClient } from "@/lib/runtime/client";
 import { reconcileStaleSpawnsHeldByLiveOwners } from "@/lib/runtime/staleSpawnOwner";
@@ -806,24 +819,111 @@ export interface ReaperActuationOverrides {
   terminalizeStaleSpawns?: typeof terminalizeStaleStructuredSpawns;
 }
 
-/** Fails every held delivery the liveness contract has abandoned (#652). Each
-    settle is one guarded registry mutation, so a race that re-settled a delivery
-    since the snapshot is a no-op rather than a clobber. Returns the ids failed. */
+/** Generalizes the issue #652 terminal convergence path. It retains the
+    settled-migration predicate for uncertain attempts and also stops an intent
+    whose progress bound expired or whose requested delivery lost its source
+    owner. Every affected reservation becomes a durable failed record with an
+    actionable cancellation reason. */
+function migrationSourceHasLiveOwner(
+  snapshot: RegistryFile,
+  conversation: RegistryConversation,
+  probe: LivenessProbe,
+  observedSourcePaths: ReadonlySet<string>,
+): boolean {
+  const migration = conversation.migration;
+  if (!migration) return false;
+  const source = conversation.generations.find((generation) => generation.id === migration.sourceGenerationId);
+  if (!source) return false;
+  const sourceOwnerKey = `${conversation.engine}:${source.path}`;
+  if (observedSourcePaths.has(sourceOwnerKey)) return true;
+  if (identityAlive(source.host?.tmuxHost?.agent, probe)) return true;
+  if (Object.values(snapshot.entries).some((entry) =>
+    entry.key.engine === conversation.engine
+    && entry.artifactPath === source.path
+    && entryIsLive(entry, probe))) return true;
+  return Object.values(snapshot.receipts).some((receipt) =>
+    receipt.engine === conversation.engine
+    && receipt.conversationId === conversation.id
+    && receiptIsLive(snapshot, receipt, probe));
+}
+
+function unsettledDeliveryIdsForIntent(
+  snapshot: RegistryFile,
+  intentId: string,
+): string[] {
+  const conversationIds = new Set(Object.values(snapshot.conversations)
+    .filter((conversation) => conversation.migration?.intentId === intentId)
+    .map((conversation) => conversation.id));
+  return Object.values(snapshot.heldDeliveries)
+    .filter((delivery) =>
+      conversationIds.has(delivery.conversationId)
+      && ["held", "assigned", "delivery-uncertain"].includes(delivery.state))
+    .map((delivery) => delivery.id);
+}
+
 export function terminalizeStaleUndeliverableHeldDeliveries(
   registry: AgentRegistry,
   now: number = Date.now(),
+  liveness: AccountLivenessOptions = {},
+  observedHosts: readonly TranscriptHost[] = [],
 ): string[] {
-  const ids = staleUndeliverableHeldDeliveryIds(registry.readOnlySnapshot(), { now: () => now });
-  const terminalized: string[] = [];
-  for (const id of ids) {
+  const snapshot = registry.readOnlySnapshot();
+  const probe = livenessProbe({ ...liveness, now: () => now });
+  const observedSourcePaths = new Set(observedHosts.flatMap((host) =>
+    (host.primaryPath ? [host.primaryPath, ...host.claimedPaths] : host.claimedPaths)
+      .map((pathname) => `${host.engine}:${pathname}`)));
+  const terminalized = new Set<string>();
+  for (const id of staleUndeliverableHeldDeliveryIds(snapshot, { ...liveness, now: () => now })) {
     const settled = registry.recordDeliveryOutcome(
       id,
       "failed",
       "delivery-uncertain abandoned: owning migration settled with no live host or receipt (#652)",
     );
-    if (settled.state === "failed") terminalized.push(id);
+    if (settled.state === "failed") terminalized.add(id);
   }
-  return terminalized;
+  for (const intent of Object.values(snapshot.migrationIntents)) {
+    const owned = Object.values(snapshot.conversations)
+      .filter((conversation) => conversation.migration?.intentId === intent.id);
+    const ids = unsettledDeliveryIdsForIntent(snapshot, intent.id);
+    const rolledBackConversationIds = new Set(owned
+      .filter((conversation) => conversation.migration?.phase === "rolled-back")
+      .map((conversation) => conversation.id));
+    let activeIds = ids.filter((id) => {
+      const delivery = snapshot.heldDeliveries[id];
+      if (!delivery || !rolledBackConversationIds.has(delivery.conversationId)) return true;
+      const settled = registry.terminalizeHeldDelivery(id, ROLLED_BACK_MIGRATION_DELIVERY_REASON);
+      if (settled.state === "failed") terminalized.add(id);
+      return false;
+    });
+    if (intent.state !== "draining") continue;
+    const deliveryConversationIds = new Set(activeIds.map((id) =>
+      snapshot.heldDeliveries[id]?.conversationId).filter((id): id is RegistryConversation["id"] => Boolean(id)));
+    const noProgress = migrationIntentIsStale(snapshot, intent, now);
+    if (!noProgress) {
+      for (const conversation of owned) {
+        if (conversation.migration?.phase !== "requested"
+          || !deliveryConversationIds.has(conversation.id)
+          || migrationSourceHasLiveOwner(snapshot, conversation, probe, observedSourcePaths)) continue;
+        const reason = `delivery cancelled because source conversation ${conversation.id} has no live owner; send again to authorize a fresh delivery`;
+        for (const id of activeIds) {
+          if (snapshot.heldDeliveries[id]?.conversationId !== conversation.id) continue;
+          const settled = registry.terminalizeHeldDelivery(id, reason);
+          if (settled.state === "failed") terminalized.add(id);
+        }
+        registry.rollbackConversationMigration(conversation.id, conversation.migration.revision);
+        activeIds = activeIds.filter((id) => snapshot.heldDeliveries[id]?.conversationId !== conversation.id);
+      }
+    }
+    if (!noProgress) continue;
+    const reason =
+      `delivery cancelled because its owning account migration made no progress for ${MIGRATION_INTENT_PROGRESS_TIMEOUT_MS}ms; send again to authorize a fresh delivery`;
+    registry.setMigrationIntentState(intent.id, "stopped", intent.revision, reason);
+    const settledSnapshot = registry.readOnlySnapshot();
+    for (const id of activeIds) {
+      if (settledSnapshot.heldDeliveries[id]?.state === "failed") terminalized.add(id);
+    }
+  }
+  return [...terminalized];
 }
 
 export async function runReaperCycle(options: {
@@ -844,7 +944,7 @@ export async function runReaperCycle(options: {
      so it runs regardless of `LLV_REAPER_ENABLED`; failure never blocks the
      reaper. */
   try {
-    terminalizeStaleUndeliverableHeldDeliveries(registry, now);
+    terminalizeStaleUndeliverableHeldDeliveries(registry, now, {}, options.hosts);
   } catch (error) {
     console.error("[reaper] stale undeliverable held-delivery convergence failed", error);
   }
