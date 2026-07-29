@@ -108,6 +108,19 @@ export type PipelineAttemptState =
     records (never a separate counter), so counts cannot drift from evidence. */
 export type PipelineEdgeActivation = { stageId: string; attempt: number; edge: PipelineEdgeKind };
 
+export type PipelineVerdictRecovery = {
+  state: "pending" | "recovered" | "exhausted";
+  checks: number;
+  maxChecks: number;
+  startedAt: string;
+  lastCheckedAt: string;
+  nextCheckAt: string | null;
+  /** Content-free parser diagnostic for the latest rejected canonical turn. */
+  reason: string;
+  /** Identifies the selected assistant message without persisting its content. */
+  messageTs: number | null;
+};
+
 export type PipelineStageAttempt = {
   n: number;
   /** Lineage-adopted evidence. Historical attempts never drive the execution cursor. */
@@ -150,6 +163,8 @@ export type PipelineStageAttempt = {
   output: string | null;
   verdict: StageVerdict | null;
   error: string | null;
+  /** Bounded, append-only reconciliation receipt for terminal parser misses. */
+  verdictRecovery?: PipelineVerdictRecovery;
 };
 
 export type PipelineStageRun = {

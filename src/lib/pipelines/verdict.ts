@@ -11,6 +11,7 @@ const PROSE_VERDICT_STATUSES = {
   "NO FINDINGS": "pass",
 } as const satisfies Record<string, StageVerdict["status"]>;
 const PROSE_VERDICT_LINE_RE = /^\s*(?:VERDICT:\s*(APPROVE|REQUEST_CHANGES|COMMENT)|(NO FINDINGS))\s*$/i;
+const TERMINAL_HANDOFF_RE = /^REVIEW_READY(?::[^\r\n]*)?$/;
 
 type ProseVerdictMarker = keyof typeof PROSE_VERDICT_STATUSES;
 
@@ -61,22 +62,63 @@ export function stageVerdictFrom(value: unknown): StageVerdict | null {
   }
   return verdict;
 }
-/** Completion authority is the final fenced JSON block in a completed turn. */
-export function parseStageVerdict(text: string): ParsedStageVerdict | RejectedStageVerdict | null {
+
+function completionVerdictFrom(value: unknown): StageVerdict | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  return stageVerdictFrom({
+    status: record.status,
+    ...(Object.hasOwn(record, "findings") ? { findings: record.findings } : {}),
+    ...(Object.hasOwn(record, "confidence") ? { confidence: record.confidence } : {}),
+  });
+}
+
+type FinalVerdictCandidate = {
+  index: number;
+  verdict: StageVerdict;
+};
+
+function finalVerdictCandidate(text: string): FinalVerdictCandidate | { failureReason: string } {
   const matches = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
   const last = matches.at(-1);
-  if (!last || last.index === undefined) return null;
+  if (!last || last.index === undefined) {
+    return { failureReason: "canonical completed assistant turn is missing a fenced JSON verdict" };
+  }
   const suffix = text.slice(last.index + last[0].length).trim();
-  if (suffix) return null;
+  if (suffix && !TERMINAL_HANDOFF_RE.test(suffix)) {
+    return { failureReason: "canonical completed assistant turn has unsupported text after the final fenced JSON verdict" };
+  }
   let raw: unknown;
   try {
     raw = JSON.parse(last[1] ?? "");
   } catch {
-    return null;
+    return { failureReason: "canonical completed assistant turn has malformed JSON in the final fenced verdict" };
   }
-  const verdict = stageVerdictFrom(raw);
-  if (!verdict) return null;
-  const prose = text.slice(0, last.index).trim();
+  const verdict = completionVerdictFrom(raw);
+  if (!verdict) {
+    return { failureReason: "canonical completed assistant turn is missing a valid status, findings, or confidence field" };
+  }
+  return { index: last.index, verdict };
+}
+
+export function stageVerdictRejectionReason(text: string): string {
+  const candidate = finalVerdictCandidate(text);
+  if ("failureReason" in candidate) return candidate.failureReason;
+  const parsed = parseStageVerdict(text);
+  return parsed && "failureReason" in parsed
+    ? parsed.failureReason
+    : "canonical completed assistant turn did not yield a valid final JSON verdict";
+}
+
+/** Completion authority is the final fenced JSON block in a completed turn. */
+export function parseStageVerdict(text: string): ParsedStageVerdict | RejectedStageVerdict | null {
+  const candidate = finalVerdictCandidate(text);
+  if ("failureReason" in candidate) return null;
+  /* Stage directives may require their own completion evidence beside the
+     controller's three core fields. Persist only the bounded core verdict; the
+     stage-specific evidence remains in the canonical transcript. */
+  const verdict = candidate.verdict;
+  const prose = text.slice(0, candidate.index).trim();
   const output = prose.slice(0, MAX_OUTPUT_CHARS);
   if (verdict.status === "pass" && verdict.findings?.length) {
     return {

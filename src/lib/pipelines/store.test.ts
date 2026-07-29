@@ -147,6 +147,51 @@ function v3Stages(): PipelineStage[] {
   ];
 }
 
+test("current production records without verdict recovery metadata load and round-trip", () => {
+  sandboxed((sandbox) => {
+    const pipeline = buildPipeline({
+      id: "premiss1",
+      task: "task",
+      project: "viewer",
+      repoDir: "/repo",
+      stages: v3Stages(),
+      srcPath: null,
+      srcConversationId: null,
+      now: "2026-07-29T00:00:00.000Z",
+    });
+    pipeline.state = "needs_decision";
+    pipeline.stateDetail = "stage completed without a valid final JSON verdict";
+    pipeline.cursor = { stageId: "build", state: "running", input: null, activatedBy: null };
+    pipeline.runs[0]!.attempts.push({
+      n: 1,
+      state: "needs_decision",
+      effectiveRole: { ...v3Role },
+      launchId: null,
+      conversationId: null,
+      sessionId: null,
+      agentPath: "/codex/stage.jsonl",
+      paneId: null,
+      flowId: null,
+      startedAt: "2026-07-29T00:00:00.000Z",
+      completedAt: null,
+      input: null,
+      activatedBy: null,
+      output: null,
+      verdict: null,
+      error: pipeline.stateDetail,
+    });
+    fs.writeFileSync(path.join(sandbox, "pipelines.json"), JSON.stringify({
+      schemaVersion: PIPELINES_SCHEMA_VERSION,
+      pipelines: [pipeline],
+    }), "utf8");
+
+    const loaded = loadPipelines();
+    expect(loaded[0]!.runs[0]!.attempts[0]!.verdictRecovery).toBeUndefined();
+    savePipelines(loaded);
+    expect(loadPipelines()).toEqual(loaded);
+  });
+});
+
 test("a v2 registry migrates in memory preserving all attempt history (#353)", () => {
   sandboxed((sandbox) => {
     const pipeline = buildPipeline({ id: "mig00001", task: "task", project: "viewer", repoDir: "/repo", stages: v3Stages(), srcPath: null, srcConversationId: null, now: "now" });

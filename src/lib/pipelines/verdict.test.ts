@@ -26,6 +26,43 @@ test("the final fenced JSON block is completion authority and preserves prose ou
   expect(parseStageVerdict("VERDICT: pass")).toBeNull();
 });
 
+test("the fa6aa690 production shape accepts stage-specific completion metadata", () => {
+  expect(parseStageVerdict([
+    "Completed every requested gate.",
+    "",
+    "```json",
+    JSON.stringify({
+      status: "pass",
+      findings: [],
+      confidence: 0.97,
+      headSha: "d".repeat(40),
+      prNumber: 1,
+      confirmedDirection: true,
+      redProvenTests: ["focused regression"],
+      e2eReplayCovers: true,
+      buildExitsZero: true,
+    }),
+    "```",
+  ].join("\n"))).toEqual({
+    verdict: { status: "pass", findings: [], confidence: 0.97 },
+    output: "Completed every requested gate.",
+  });
+});
+
+test("a terminal REVIEW_READY marker after the fenced verdict remains canonical (#707)", () => {
+  expect(parseStageVerdict([
+    "Implementation is ready for review.",
+    "",
+    "```json",
+    '{"status":"pass","findings":[],"confidence":0.95}',
+    "```",
+    "REVIEW_READY: published branch",
+  ].join("\n"))).toEqual({
+    verdict: { status: "pass", findings: [], confidence: 0.95 },
+    output: "Implementation is ready for review.",
+  });
+});
+
 test("a pass verdict with findings returns an explicit contradiction", () => {
   expect(parseStageVerdict([
     "VERDICT: REQUEST_CHANGES",
