@@ -1,5 +1,7 @@
 import fs from "node:fs";
 
+import { ROTATION_THRESHOLD_FRACTION, type ContextWindowPolicy } from "./contextPolicy";
+
 /* get_orchestrator's reporting core (two-axis contract).
  *
  * Everything here is a READ and a RECOMMENDATION. Context pressure produces a
@@ -16,11 +18,6 @@ import fs from "node:fs";
 /** How many tail bytes are scanned for a provider-reported usage record. */
 const USAGE_SCAN_TAIL_BYTES = 256 * 1024;
 
-/** Claude context window; the one limit this codebase can state for its own
-    managed engines. Codex model limits vary by account tier and are reported
-    as unknown rather than guessed. */
-const CLAUDE_CONTEXT_LIMIT_TOKENS = 200_000;
-
 export interface OrchestratorContextReading {
   /** Tokens currently in context, or null when nothing could be read at all. */
   tokens: number | null;
@@ -31,6 +28,9 @@ export interface OrchestratorContextReading {
   estimated: boolean;
   /** Where the numbers came from, operator-readable. */
   basis: string;
+  /** Which context-window policy row supplied the limit; null when none is
+      configured for this model — in which case no window was assumed. */
+  policy: string | null;
 }
 
 export interface OrchestratorTranscriptFacts {
@@ -130,15 +130,17 @@ function codexUsageTokens(row: Record<string, unknown>): number | null {
 
 /**
  * The context reading, with its provenance. A provider-reported count is the
- * real number; with nothing reported, the byte-derived guess is returned but
- * LABELLED — `estimated: true`, basis naming the arithmetic — and a limit is
- * only stated for engines whose window this codebase actually knows.
+ * real number and always beats a derived one; with nothing reported, the
+ * byte-derived guess is returned but LABELLED — `estimated: true`, basis
+ * naming the arithmetic. The limit comes from the named window policy
+ * (`./contextPolicy`) and is never assumed for a model with no entry.
  */
 export function contextReading(input: {
-  engine: string | null;
+  policy: ContextWindowPolicy | null;
   facts: OrchestratorTranscriptFacts;
 }): OrchestratorContextReading {
-  const limit = input.engine === "claude" ? CLAUDE_CONTEXT_LIMIT_TOKENS : null;
+  const limit = input.policy?.windowTokens ?? null;
+  const policy = input.policy?.policy ?? null;
   const reported = input.facts.reportedContextTokens;
   if (reported !== null) {
     return {
@@ -147,6 +149,7 @@ export function contextReading(input: {
       percent: limit ? Math.min(100, Math.round((reported / limit) * 100)) : null,
       estimated: false,
       basis: "provider-reported usage from the transcript's newest turn",
+      policy,
     };
   }
   if (input.facts.transcriptBytes !== null) {
@@ -157,36 +160,61 @@ export function contextReading(input: {
       percent: limit ? Math.min(100, Math.round((guess / limit) * 100)) : null,
       estimated: true,
       basis: "ESTIMATE: transcript bytes / 4 — no provider-reported usage found",
+      policy,
     };
   }
-  return { tokens: null, limit, percent: null, estimated: true, basis: "no transcript to read" };
+  return { tokens: null, limit, percent: null, estimated: true, basis: "no transcript to read", policy };
 }
+
+/** The prominent advisory marker (operator decision): present in the payload
+    exactly when usage reached the configured threshold, and never anything
+    but a string. */
+export const STRONGLY_RECOMMEND_ROTATION = "STRONGLY_RECOMMEND_ROTATION" as const;
 
 export interface RotationRecommendation {
   /** A recommendation and NOTHING more: no caller may act on it automatically. */
   recommended: boolean;
+  /** `strongly_recommend` exactly when usage reached the configured threshold;
+      `recommend` for secondary wear signals; `none` otherwise. */
+  level: "none" | "recommend" | "strongly_recommend";
+  /** {@link STRONGLY_RECOMMEND_ROTATION} at strongly_recommend, else null. */
+  advisory: typeof STRONGLY_RECOMMEND_ROTATION | null;
   reasons: string[];
+  /** The policy that was applied, spelled out, or null when none is
+      configured for this model. */
+  threshold: { windowTokens: number; thresholdTokens: number; fraction: number; policy: string } | null;
+  /** TRUE when usage is known but no window policy exists to judge it by —
+      stated plainly instead of inventing a window. */
+  thresholdUnknown: boolean;
 }
 
-const ROTATION_CONTEXT_PERCENT = 70;
 const ROTATION_TRANSCRIPT_BYTES = 8 * 1024 * 1024;
 const ROTATION_COMPACTIONS = 2;
 const MAX_REASONS = 4;
 
 /**
- * Bounded rotation advice. Every reason names its threshold and whether the
- * number behind it is an estimate. Deliberately incapable of acting: rotation
- * happens only when an operator (or an agent the operator directed) calls
- * rotate_orchestrator explicitly.
+ * Bounded rotation advice (operator decision). Reaching the configured
+ * context threshold changes exactly ONE thing: what this function SAYS —
+ * `strongly_recommend` with the {@link STRONGLY_RECOMMEND_ROTATION} advisory.
+ * The return value is plain serializable data with no action, no target and
+ * no side effect on any path; rotation happens only when rotate_orchestrator
+ * is explicitly called. Every reason names its threshold and whether the
+ * number behind it is an estimate.
  */
 export function rotationRecommendation(input: {
   context: OrchestratorContextReading;
   facts: OrchestratorTranscriptFacts;
   activity: string | null;
+  policy: ContextWindowPolicy | null;
 }): RotationRecommendation {
   const reasons: string[] = [];
-  if (input.context.percent !== null && input.context.percent >= ROTATION_CONTEXT_PERCENT) {
-    reasons.push(`context at ${input.context.percent}% of the window${input.context.estimated ? " (estimate)" : ""}, threshold ${ROTATION_CONTEXT_PERCENT}%`);
+  let level: RotationRecommendation["level"] = "none";
+
+  if (input.policy && input.context.tokens !== null && input.context.tokens >= input.policy.rotationThresholdTokens) {
+    level = "strongly_recommend";
+    reasons.push(
+      `context usage ${input.context.tokens.toLocaleString("en-US")} tokens${input.context.estimated ? " (estimate)" : ""} has reached the rotation threshold of ${input.policy.rotationThresholdTokens.toLocaleString("en-US")} tokens (${input.policy.policy}: ${Math.round(ROTATION_THRESHOLD_FRACTION * 100)}% of a ${input.policy.windowTokens.toLocaleString("en-US")}-token window)`,
+    );
   }
   if (input.facts.compactionCount !== null && input.facts.compactionCount >= ROTATION_COMPACTIONS) {
     reasons.push(`${input.facts.compactionCount} compaction(s) recorded in the transcript, threshold ${ROTATION_COMPACTIONS}`);
@@ -197,5 +225,21 @@ export function rotationRecommendation(input: {
   if (input.activity === "dead") {
     reasons.push("the designated conversation's host is gone; rotate, or resume it with send_message_to_orchestrator");
   }
-  return { recommended: reasons.length > 0, reasons: reasons.slice(0, MAX_REASONS) };
+  if (level === "none" && reasons.length > 0) level = "recommend";
+
+  return {
+    recommended: reasons.length > 0,
+    level,
+    advisory: level === "strongly_recommend" ? STRONGLY_RECOMMEND_ROTATION : null,
+    reasons: reasons.slice(0, MAX_REASONS),
+    threshold: input.policy
+      ? {
+        windowTokens: input.policy.windowTokens,
+        thresholdTokens: input.policy.rotationThresholdTokens,
+        fraction: ROTATION_THRESHOLD_FRACTION,
+        policy: input.policy.policy,
+      }
+      : null,
+    thresholdUnknown: !input.policy && input.context.tokens !== null,
+  };
 }

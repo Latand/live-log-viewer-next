@@ -29,6 +29,7 @@ import { authorizedManagerSeats, type ManagerAuthoritySources } from "@/lib/orch
 import { activeOrchestratorSeats, orchestratorRevocations, orchestratorSeatFor, type OrchestratorSeat } from "@/lib/orchestrator/seats";
 import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
 import { contextReading, readOrchestratorTranscriptFacts, rotationRecommendation } from "@/lib/orchestrator/health";
+import { contextWindowPolicyFor } from "@/lib/orchestrator/contextPolicy";
 import { createPipelineFromRequest, getPipelines, patchPipeline } from "@/lib/pipelines/engine";
 import { latestOperationalPipelineAttempt } from "@/lib/pipelines/attemptSelection";
 import { requestPipelineTick } from "@/lib/pipelines/controllerSignal";
@@ -692,7 +693,13 @@ async function getOrchestrator(args: McpToolArgs, dependencies: ViewerMcpDomainD
   const conversation = agentRegistry().conversation(active.conversationId as `conversation_${string}`);
   const generation = conversation?.generations.at(-1);
   const transcriptPath = generation?.path ?? active.path;
-  const engine = conversation?.engine ?? null;
+  /* Engine/model resolve from the registry, falling back to the legacy manager
+     record activation keeps in sync — the boot window in which the registry has
+     not yet settled a generation must not read as "unknown model". */
+  const legacyRecord = readOrchestratorRecord();
+  const legacyMatches = legacyRecord?.conversationId === active.conversationId;
+  const engine = conversation?.engine ?? (legacyMatches ? legacyRecord!.engine : null);
+  const model = generation?.launchProfile?.model ?? (legacyMatches ? legacyRecord!.model : null);
   let session: { messages: number; tools: number; compactions: number } | null = null;
   if (transcriptPath && (engine === "claude" || engine === "codex")) {
     try {
@@ -707,7 +714,8 @@ async function getOrchestrator(args: McpToolArgs, dependencies: ViewerMcpDomainD
     }
   }
   const facts = readOrchestratorTranscriptFacts(transcriptPath, session);
-  const context = contextReading({ engine, facts });
+  const windowPolicy = contextWindowPolicyFor(engine, model);
+  const context = contextReading({ policy: windowPolicy, facts });
 
   let liveness: { lifecycle: string; hostState: string; silentForMs: number | null } | null = null;
   try {
@@ -725,7 +733,7 @@ async function getOrchestrator(args: McpToolArgs, dependencies: ViewerMcpDomainD
     conversationId: active.conversationId,
     transcriptPath,
     engine,
-    model: generation?.launchProfile?.model ?? null,
+    model,
     promptVersion: active.promptVersion,
     predecessorConversationId: active.predecessorConversationId,
     health: {
@@ -743,7 +751,17 @@ async function getOrchestrator(args: McpToolArgs, dependencies: ViewerMcpDomainD
       context,
     },
     rotation: {
-      ...rotationRecommendation({ context, facts, activity: liveness?.lifecycle === "gone" ? "dead" : liveness?.lifecycle ?? null }),
+      /* WORDS ONLY, structurally: this block is serialized recommendation data
+         from a pure function. Nothing on this code path spawns, delivers,
+         designates, revokes, interrupts, or calls the control plane at all —
+         crossing the threshold changes what this payload SAYS and nothing
+         else. Rotation happens only through an explicit rotate_orchestrator. */
+      ...rotationRecommendation({
+        context,
+        facts,
+        activity: liveness?.lifecycle === "gone" ? "dead" : liveness?.lifecycle ?? null,
+        policy: windowPolicy,
+      }),
       note: "recommendation only — rotation never happens automatically; call rotate_orchestrator explicitly",
     },
   });

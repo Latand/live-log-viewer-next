@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 
 import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
-import { beginOrchestratorSeatIntent, completeOrchestratorSeatIntent } from "@/lib/orchestrator/seats";
+import { beginOrchestratorSeatIntent, completeOrchestratorSeatIntent, orchestratorSeatFor } from "@/lib/orchestrator/seats";
+import { replaceOrchestratorIncumbent } from "@/lib/orchestrator/store";
 
 import { viewerMcpBindings, type ViewerControlDependencies } from "./bindings";
 
@@ -84,6 +85,35 @@ test("get_orchestrator reports health with labelled estimates and a recommendati
   expect(health.context.basis).toContain("ESTIMATE");
   const rotation = result.rotation as { recommended: boolean; reasons: string[]; note: string };
   expect(rotation.note).toContain("never happens automatically");
+});
+
+test("crossing the rotation threshold changes WORDS ONLY: prominent advisory, zero side effects", async () => {
+  const transcript = path.join(sandbox, "hot-orchestrator.jsonl");
+  /* Provider-reported usage far over the reference threshold (500k of 1M). */
+  fs.writeFileSync(transcript, JSON.stringify({
+    type: "assistant",
+    message: { usage: { input_tokens: 600_000, cache_read_input_tokens: 50_000 } },
+  }) + "\n", "utf8");
+  seatActive("proj-a", SEATED_ID, transcript);
+  /* The incumbent's engine/model as activation records them — Opus-class, so
+     the reference policy (1M window, 500k threshold) applies. */
+  replaceOrchestratorIncumbent({ conversationId: SEATED_ID, path: transcript, createdAt: AT, engine: "claude", model: "opus" });
+  const before = JSON.stringify(orchestratorSeatFor("proj-a"));
+
+  const { posts, control } = controlStub();
+  const result = await bindingsWith(control).get_orchestrator({ clientRequestId: "get-hot", project: "proj-a" }) as Record<string, unknown>;
+
+  const rotation = result.rotation as { level: string; advisory: string | null; reasons: string[] };
+  expect(rotation.level).toBe("strongly_recommend");
+  expect(rotation.advisory).toBe("STRONGLY_RECOMMEND_ROTATION");
+
+  /* The absence of side effects, asserted rather than assumed: no control-plane
+     call of any kind (no rotate, no create, no message, no interrupt), and the
+     designation exactly as it was — same seat, no pending intent, no
+     revocation. The incumbent was not touched in any way. */
+  expect(posts).toEqual([]);
+  expect(JSON.stringify(orchestratorSeatFor("proj-a"))).toBe(before);
+  expect(orchestratorSeatFor("proj-a").pending).toBeNull();
 });
 
 test("get_orchestrator surfaces bidirectional predecessor lineage after a replacement", async () => {
