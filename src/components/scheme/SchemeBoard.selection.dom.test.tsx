@@ -61,6 +61,7 @@ function bindDomGlobals() {
 }
 bindDomGlobals();
 
+const { resetSelectionSessionsForTest } = await import("@/hooks/useBoardState");
 const { SchemeBoard } = await import("./SchemeBoard");
 
 const roots = new Set<Root>();
@@ -73,6 +74,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   globalThis.fetch = previousFetch;
+  resetSelectionSessionsForTest();
   for (const root of roots) flushSync(() => root.unmount());
   roots.clear();
   dom.document.body.replaceChildren();
@@ -112,7 +114,7 @@ const beta = file("/beta", "Beta conversation", 1);
 
 const VIEWPORT = { x: 0, y: 0, left: 0, top: 0, right: 1400, bottom: 900, width: 1400, height: 900 };
 
-function mountBoard(): HTMLElement {
+function mountBoard(): { host: HTMLElement; root: Root } {
   const host = dom.document.createElement("div") as unknown as HTMLElement;
   dom.document.body.append(host as never);
   const root = createRoot(host);
@@ -135,7 +137,7 @@ function mountBoard(): HTMLElement {
       />,
     ),
   );
-  return host;
+  return { host, root };
 }
 
 function viewportOf(host: HTMLElement): HTMLElement {
@@ -250,7 +252,7 @@ function pressKey(element: HTMLElement, key: "Enter" | " ") {
 }
 
 test("a background drag across a card lassos it and leaves no native text selection", async () => {
-  const host = mountBoard();
+  const { host } = mountBoard();
   await settle();
   const viewport = viewportOf(host);
   const shell = host.querySelector('[data-scheme-node="/alpha"]') as HTMLElement;
@@ -291,7 +293,7 @@ test("a background drag across a card lassos it and leaves no native text select
 });
 
 test("a cancelled background drag also releases the selection suppression", async () => {
-  const host = mountBoard();
+  const { host } = mountBoard();
   await settle();
   const viewport = viewportOf(host);
   const shell = host.querySelector('[data-scheme-node="/alpha"]') as HTMLElement;
@@ -311,7 +313,7 @@ test("a cancelled background drag also releases the selection suppression", asyn
 });
 
 test("the hover check reveals on approach and toggles one card in and out of the selection", async () => {
-  const host = mountBoard();
+  const { host } = mountBoard();
   await settle();
   viewportOf(host);
 
@@ -361,7 +363,7 @@ test("the hover check reveals on approach and toggles one card in and out of the
 });
 
 test("the check is keyboard reachable and Enter / Space toggle the same set", async () => {
-  const host = mountBoard();
+  const { host } = mountBoard();
   await settle();
   viewportOf(host);
 
@@ -378,7 +380,7 @@ test("the check is keyboard reachable and Enter / Space toggle the same set", as
 });
 
 test("a lasso commit and a check toggle write the same set, in layout order", async () => {
-  const host = mountBoard();
+  const { host } = mountBoard();
   await settle();
   const viewport = viewportOf(host);
 
@@ -397,4 +399,121 @@ test("a lasso commit and a check toggle write the same set, in layout order", as
   await settle();
 
   expect(selectedPaths()).toEqual(["/alpha", "/beta"]);
+});
+
+test("the selection survives the board being unmounted and remounted (#771 lift)", async () => {
+  const first = mountBoard();
+  await settle();
+  viewportOf(first.host);
+
+  flushSync(() => checkFor(first.host, "/beta").dispatchEvent(new dom.MouseEvent("click", { bubbles: true, cancelable: true }) as never));
+  await settle();
+  expect(selectedPaths()).toEqual(["/beta"]);
+
+  /* Leaving scheme mode unmounts this component. When it owned `multi` in local
+     state, that destroyed the selection outright — this is the regression. */
+  flushSync(() => first.root.unmount());
+  roots.delete(first.root);
+  await settle();
+
+  const second = mountBoard();
+  await settle();
+  viewportOf(second.host);
+  /* Back in scheme mode: same set, still a running session, and the check on the
+     member still reads as pressed. */
+  expect(selectedPaths()).toEqual(["/beta"]);
+  expect(second.host.querySelector('[data-scheme-node="/beta"]')?.getAttribute("data-lasso-selected")).toBe("true");
+  expect(checkFor(second.host, "/beta").getAttribute("aria-pressed")).toBe("true");
+  expect(second.host.textContent).toContain("1 selected");
+
+  /* And the remounted board writes into the SAME set rather than a fresh one. */
+  flushSync(() => checkFor(second.host, "/alpha").dispatchEvent(new dom.MouseEvent("click", { bubbles: true, cancelable: true }) as never));
+  await settle();
+  expect(selectedPaths()).toEqual(["/alpha", "/beta"]);
+});
+
+test("a board relayout that no longer places a selected card keeps it selected", async () => {
+  const { host, root } = mountBoard();
+  await settle();
+  viewportOf(host);
+  flushSync(() => checkFor(host, "/beta").dispatchEvent(new dom.MouseEvent("click", { bubbles: true, cancelable: true }) as never));
+  await settle();
+  expect(selectedPaths()).toEqual(["/beta"]);
+
+  /* /beta leaves THIS view's layout while its conversation still exists. The
+     board must not prune it — only the dashboard's scan-driven prune may, and
+     only for a conversation that is actually gone. */
+  flushSync(() =>
+    root.render(
+      <SchemeBoard
+        project="selection-ux"
+        groups={[]}
+        manual={[alpha]}
+        files={[alpha, beta]}
+        flows={[]}
+        tasks={[]}
+        drafts={[]}
+        focus={null}
+        onSelect={() => {}}
+        onClose={() => {}}
+        onDraftClose={() => {}}
+        onDraftSpawned={() => {}}
+      />,
+    ),
+  );
+  await settle();
+  expect(host.querySelector('[data-scheme-node="/beta"]')).toBeNull();
+  /* Not in THIS view's published order (it renders no such card) — but still in
+     the canonical set, so bringing the card back brings the membership back. */
+  expect(selectedPaths()).toEqual([]);
+
+  flushSync(() =>
+    root.render(
+      <SchemeBoard
+        project="selection-ux"
+        groups={[]}
+        manual={[alpha, beta]}
+        files={[alpha, beta]}
+        flows={[]}
+        tasks={[]}
+        drafts={[]}
+        focus={null}
+        onSelect={() => {}}
+        onClose={() => {}}
+        onDraftClose={() => {}}
+        onDraftSpawned={() => {}}
+      />,
+    ),
+  );
+  await settle();
+  expect(selectedPaths()).toEqual(["/beta"]);
+});
+
+test("a non-member's check is exempt from the session dim and carries session weight", async () => {
+  const { host } = mountBoard();
+  await settle();
+  viewportOf(host);
+
+  const idle = checkFor(host, "/alpha");
+  expect(idle.className).toContain("bg-accent/35");
+
+  flushSync(() => checkFor(host, "/beta").dispatchEvent(new dom.MouseEvent("click", { bubbles: true, cancelable: true }) as never));
+  await settle();
+
+  /* The session dim is applied to the shell's CHILDREN, and the check's zone is
+     the one child excluded — an ancestor opacity/filter would have greyed the
+     control itself, which reads as disabled. */
+  const shell = host.querySelector('[data-scheme-node="/alpha"]') as HTMLElement;
+  const zone = checkFor(host, "/alpha").parentElement as HTMLElement;
+  expect(zone.className).toContain("scheme-select-check-zone");
+  expect(zone.parentElement).toBe(shell);
+
+  /* Inside a session the non-member's toggle is an active invitation, so it
+     carries more weight than the idle reveal — never the faint idle circle. */
+  const inSession = checkFor(host, "/alpha");
+  expect(inSession.getAttribute("aria-pressed")).toBe("false");
+  expect(inSession.className).toContain("bg-accent/60");
+  expect(inSession.className).not.toContain("bg-accent/35");
+  /* The member's own check stays the solid one. */
+  expect(checkFor(host, "/beta").className).toContain("bg-accent ");
 });
