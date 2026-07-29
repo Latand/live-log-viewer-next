@@ -187,7 +187,8 @@ export class CodexAppServerClient {
   private readonly requestListeners = new Set<(request: AppServerRequest) => unknown | Promise<unknown>>();
   private readonly lifecycleListeners = new Set<(event: CodexAppServerLifecycleEvent) => void>();
   private nextId = 1;
-  private stdoutBuffer = "";
+  private stdoutChunks: string[] = [];
+  private stdoutBufferBytes = 0;
   private stderrTail = "";
   private lastInboundEnvelope: AppServerEnvelope | null = null;
   private closed = false;
@@ -361,6 +362,8 @@ export class CodexAppServerClient {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.stdoutChunks = [];
+    this.stdoutBufferBytes = 0;
     for (const pending of this.pending.values()) {
       this.clock.clearTimeout(pending.timeout);
       pending.reject(new CodexAppServerError("Codex app-server client closed", "unknown"));
@@ -408,22 +411,35 @@ export class CodexAppServerClient {
 
   private acceptStdout(chunk: string): void {
     if (this.closed) return;
-    this.stdoutBuffer += chunk;
-    let newline = this.stdoutBuffer.indexOf("\n");
+    let offset = 0;
+    let newline = chunk.indexOf("\n", offset);
     while (newline >= 0) {
-      const rawLine = this.stdoutBuffer.slice(0, newline);
-      this.stdoutBuffer = this.stdoutBuffer.slice(newline + 1);
-      if (Buffer.byteLength(rawLine, "utf8") > this.maxStdoutBufferBytes) {
+      const fragment = chunk.slice(offset, newline);
+      const lineBytes = this.stdoutBufferBytes + Buffer.byteLength(fragment, "utf8");
+      if (lineBytes > this.maxStdoutBufferBytes) {
         this.fail(protocolError("received an oversized JSONL line"));
         return;
       }
+      const rawLine = this.stdoutChunks.length > 0
+        ? this.stdoutChunks.join("") + fragment
+        : fragment;
+      this.stdoutChunks = [];
+      this.stdoutBufferBytes = 0;
       const line = rawLine.trim();
       if (line) this.acceptMessage(line);
-      newline = this.stdoutBuffer.indexOf("\n");
+      if (this.closed) return;
+      offset = newline + 1;
+      newline = chunk.indexOf("\n", offset);
     }
-    if (Buffer.byteLength(this.stdoutBuffer, "utf8") > this.maxStdoutBufferBytes) {
+    const remainder = chunk.slice(offset);
+    if (!remainder) return;
+    const remainderBytes = Buffer.byteLength(remainder, "utf8");
+    if (this.stdoutBufferBytes + remainderBytes > this.maxStdoutBufferBytes) {
       this.fail(protocolError("received an oversized unterminated JSONL line"));
+      return;
     }
+    this.stdoutChunks.push(remainder);
+    this.stdoutBufferBytes += remainderBytes;
   }
 
   private acceptMessage(line: string): void {
@@ -483,6 +499,8 @@ export class CodexAppServerClient {
   private fail(error: CodexAppServerError): void {
     if (this.closed) return;
     this.closed = true;
+    this.stdoutChunks = [];
+    this.stdoutBufferBytes = 0;
     for (const pending of this.pending.values()) {
       this.clock.clearTimeout(pending.timeout);
       pending.reject(error);

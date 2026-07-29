@@ -5,6 +5,8 @@ import path from "node:path";
 import { NextRequest } from "next/server";
 
 import { emptyLaunchProfile, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
+import type { SuccessorProviderPort } from "@/lib/accounts/migration/contracts";
+import { applyConversationMigration } from "@/lib/accounts/migration/conversationCommand";
 import { AgentRegistry, setAgentRegistryForTests, type ConversationObservation } from "@/lib/agent/registry";
 
 const { POST } = await import("./route");
@@ -135,4 +137,53 @@ test("retry reaches normal migration handling", async () => {
   const response = await POST(request, { params: Promise.resolve({ conversationId: "conversation_missing" }) });
 
   expect(await response.json()).toEqual({ error: "migration retry failed a recoverable preflight" });
+});
+
+test("the operator-facing conversation retry authorizes an unknown Codex fork before advancing", async () => {
+  const { registry, id } = seededRegistry(false);
+  const requested = registry.requestConversationReseat(id, "default");
+  const failed = registry.transitionConversationMigration(
+    id,
+    requested.migration!.revision,
+    ["requested"],
+    {
+      phase: "failed-recoverable",
+      error: "Codex fork outcome is awaiting recovery",
+      errorCode: "codex-fork-outcome-unknown",
+    },
+  );
+  let authorized = false;
+  const provider: SuccessorProviderPort = {
+    virtualSource: true,
+    async create(input) {
+      expect(authorized).toBeTrue();
+      return {
+        operationId: input.operationId,
+        nativeId: "successor",
+        path: "/sessions/successor.jsonl",
+        continuityPaths: [],
+        historyHash: "hash",
+        host: { kind: "codex-app-server", identity: "successor", epoch: 1, verifiedAt: "now" },
+      };
+    },
+    async verify() {},
+  };
+
+  const result = await applyConversationMigration(
+    { conversationId: id, action: "retry", expectedRevision: failed.migration!.revision },
+    {
+      registry: () => registry,
+      provider: () => provider,
+      authorizeForkRetry: async (operationId, conversationId) => {
+        expect(operationId).toBe(failed.migration!.operationId);
+        expect(conversationId).toBe(id);
+        authorized = true;
+        return "reauthorized";
+      },
+    },
+  );
+
+  expect(result.status).toBe(200);
+  expect(authorized).toBeTrue();
+  expect(registry.conversation(id)!.migration?.phase).toBe("committed");
 });

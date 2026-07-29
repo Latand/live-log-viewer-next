@@ -95,7 +95,8 @@ function originRemoteFromConfig(root: string): string | null {
       continue;
     }
     if (!origin) continue;
-    const url = /^\s*url\s*=\s*(.*?)\s*$/i.exec(line)?.[1];
+    const value = /^\s*url\s*=\s*(.*?)\s*$/i.exec(line)?.[1];
+    const url = value?.replace(/\s+[;#].*$/, "").trim();
     if (url) return url;
   }
   return null;

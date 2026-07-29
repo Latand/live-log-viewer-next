@@ -361,6 +361,51 @@ test("oversized unterminated JSONL fails with a bounded buffer", async () => {
   expect(child.signals).toContain("SIGTERM");
 });
 
+test("the default transport accepts a JSONL response larger than the legacy one-megabyte cap", async () => {
+  const { child, start } = clientWith((fake, message) => {
+    if (message.method === "initialize") fake.respond(requestId(message), {});
+  });
+  const client = await start();
+  const pending = client.readAccount();
+  child.output(JSON.stringify({
+    jsonrpc: "2.0",
+    id: 2,
+    result: {
+      account: { type: "chatgpt", padding: "x".repeat(2 * 1024 * 1024) },
+      requiresOpenaiAuth: true,
+    },
+  }) + "\n");
+  await expect(pending).resolves.toEqual({ account: { type: "chatgpt" }, requiresOpenaiAuth: true });
+  client.close();
+});
+
+test("a fragmented 25 MB JSONL response is accumulated without quadratic event-loop work", async () => {
+  const { child, start } = clientWith((fake, message) => {
+    if (message.method === "initialize") fake.respond(requestId(message), {});
+  });
+  const client = await start();
+  const pending = client.readAccount();
+  const frame = JSON.stringify({
+    jsonrpc: "2.0",
+    id: 2,
+    result: {
+      account: { type: "chatgpt", padding: "x".repeat(25 * 1024 * 1024) },
+      requiresOpenaiAuth: true,
+    },
+  }) + "\n";
+  const startedAt = performance.now();
+  for (let offset = 0; offset < frame.length; offset += 64 * 1024) {
+    child.output(frame.slice(offset, offset + 64 * 1024));
+  }
+  const synchronousMs = performance.now() - startedAt;
+  await expect(pending).resolves.toEqual({ account: { type: "chatgpt" }, requiresOpenaiAuth: true });
+  /* The former repeated concat + full byteLength scan took about 3 seconds on
+     this payload. The chunk accumulator stays comfortably below this loose CI
+     bound while keeping the regression test insensitive to normal host load. */
+  expect(synchronousMs).toBeLessThan(2_000);
+  client.close();
+});
+
 test("SIGTERM acknowledgement and escalation both end in a reaped child", async () => {
   const acknowledged = clientWith((fake, message) => {
     if (message.method === "initialize") fake.respond(requestId(message), {});

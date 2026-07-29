@@ -842,7 +842,10 @@ function recoverCodexFork(
   const setAside = new Set(journal.supersededForks.map((artifact) => artifact.id));
   const candidates = newestForkFirst(scan(journal.sourceRoot, journal.sourceNativeId, recoveryFloor)
     .filter((candidate) => !setAside.has(candidate.id))
-    .map((candidate) => validatedCodexFork(candidate, journal.sourceNativeId, journal.sourceRoot)));
+    .flatMap((candidate) => {
+      try { return [validatedCodexFork(candidate, journal.sourceNativeId, journal.sourceRoot)]; }
+      catch { return []; }
+    }));
   /* This operation requested the fork itself, so the identity it recorded before
      asking describes whichever artifact that request produced. */
   return { fork: candidates[0] ?? null, forkSource: journal.forkSource, superseded: candidates.slice(1) };
@@ -856,8 +859,8 @@ export type CodexForkRetryAuthorization = "not-needed" | "recovery-ready" | "rea
  * never call this seam, so an app-server timeout cannot become a fork loop.
  *
  * The recovery floor remains anchored to the first uncertain request. A late
- * artifact from any attempt is therefore adopted on the next provider pass;
- * ambiguity keeps the newest and records every other validated fork as
+ * artifact visible before the operation adopts a fork is therefore recovered;
+ * ambiguity keeps the newest and records every other validated candidate as
  * continuity.
  */
 export async function authorizeCodexForkRetry(
@@ -887,7 +890,6 @@ export async function authorizeCodexForkRetry(
     if (journal.fork || journal.forkRequestedAtMs === null) return "not-needed";
     const recovered = recoverCodexFork(journal, scan);
     if (recovered.fork) return "recovery-ready";
-    journal.forkRecoveryFloorMs ??= journal.forkRequestedAtMs;
     journal.forkRequestedAtMs = null;
     assertLeaseOwned();
     writeCodexOperationJournal(journalRoot, journal);

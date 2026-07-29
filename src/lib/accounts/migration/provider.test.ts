@@ -1665,7 +1665,7 @@ test("an explicit retry reauthorizes one fork after an unknown outcome produced 
     input.operationId,
     input.conversationId,
     journalRoot,
-    () => [],
+    () => [{ id: forkId, path: path.join(source.transcriptRoot, "vanished-fork.jsonl") }],
   )).toBe("reauthorized");
 
   const receipt = await provider.create(input);
@@ -1682,6 +1682,93 @@ test("an explicit retry reauthorizes one fork after an unknown outcome produced 
   };
   expect(journal.forkRecoveryFloorMs).toBeNumber();
   expect(journal.forkRequestedAtMs).toBeNumber();
+});
+
+test("a late artifact from the first uncertain attempt is adopted after an operator retry", async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-codex-late-fork-"));
+  roots.push(base);
+  const source = accountRoot("codex", base, "source");
+  const target = accountRoot("codex", base, "target");
+  const journalRoot = path.join(base, "provider-journal");
+  const sourceId = "739f423a-d6e9-\x37903-b597-3e676b6ff3d4";
+  const lateForkId = "739f423a-d6e9-\x34903-8597-000000000001";
+  const sourcePath = path.join(source.transcriptRoot, `rollout-${sourceId}.jsonl`);
+  const lateForkPath = path.join(source.transcriptRoot, `rollout-${lateForkId}.jsonl`);
+  fs.writeFileSync(sourcePath, codexSessionMeta(sourceId), { mode: 0o600 });
+  let forkCalls = 0;
+  const client = () => ({
+    async readAccount() { return { account: { type: "chatgpt" }, requiresOpenaiAuth: true }; },
+    async forkThread() {
+      forkCalls += 1;
+      throw new CodexAppServerError("fork outcome is unknown", "unknown");
+    },
+    async resumeThread(id: string) { return { id, path: null }; },
+    async readThread(id: string) { return { id, path: null }; },
+    close() {},
+  }) as unknown as CodexAppServerClient;
+  const dependencies = {
+    accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
+    startCodex: async () => client(),
+    claudeStatus: async () => ({ loggedIn: false }),
+    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
+    journalRoot,
+    now: () => "2026-07-10T12:00:00.000Z",
+  } as ProviderDependencies & { journalRoot: string };
+  const provider = new RegisteredSuccessorProvider(dependencies);
+  const input = {
+    engine: "codex" as const,
+    operationId: "late-fork-operation",
+    conversationId: "conversation_late_fork" as const,
+    targetAccountId: "target",
+    source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
+    recordContinuityPath() {},
+  };
+
+  await expect(provider.create(input)).rejects.toBeInstanceOf(CodexForkOutcomeUnknownError);
+  expect(forkCalls).toBe(1);
+  expect(await authorizeCodexForkRetry(input.operationId, input.conversationId, journalRoot, () => [])).toBe("reauthorized");
+  fs.writeFileSync(lateForkPath, codexSessionMeta(lateForkId, sourceId), { mode: 0o600 });
+
+  const receipt = await provider.create(input);
+  expect(forkCalls).toBe(1);
+  expect(receipt.nativeId).toBe(lateForkId);
+});
+
+test("a legacy journal backfills its first recovery floor before retry authorization clears the request", async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-codex-legacy-floor-"));
+  roots.push(base);
+  const journalRoot = path.join(base, "provider-journal");
+  fs.mkdirSync(journalRoot, { recursive: true, mode: 0o700 });
+  const operationId = "legacy-floor-operation";
+  const conversationId = "conversation_legacy_floor";
+  const requestedAt = 1_700_000_000_000;
+  const filename = path.join(
+    journalRoot,
+    `${crypto.createHash("sha256").update(operationId).digest("hex")}.json`,
+  );
+  fs.writeFileSync(filename, JSON.stringify({
+    version: 1,
+    operationId,
+    conversationId,
+    sourceNativeId: "749f423a-d6e9-\x37903-b597-3e676b6ff3d4",
+    sourceRoot: path.join(base, "source"),
+    targetRoot: path.join(base, "target"),
+    createdAtMs: requestedAt - 5_000,
+    forkRequestedAtMs: requestedAt,
+    fork: null,
+    forkSource: null,
+    supersededForks: [],
+  }, null, 2));
+
+  expect(await authorizeCodexForkRetry(operationId, conversationId, journalRoot, () => [])).toBe("reauthorized");
+  const after = JSON.parse(fs.readFileSync(filename, "utf8")) as {
+    forkRecoveryFloorMs: number | null;
+    forkRequestedAtMs: number | null;
+  };
+  expect(after.forkRecoveryFloorMs).toBe(requestedAt);
+  expect(after.forkRequestedAtMs).toBe(null);
+  expect(await authorizeCodexForkRetry(operationId, conversationId, journalRoot, () => [])).toBe("not-needed");
+  expect((JSON.parse(fs.readFileSync(filename, "utf8")) as { forkRecoveryFloorMs: number }).forkRecoveryFloorMs).toBe(requestedAt);
 });
 
 test("a retry re-forks when the source gained turns while the migration was parked", async () => {

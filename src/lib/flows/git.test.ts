@@ -73,3 +73,17 @@ test("reads the common repository config for a linked worktree", () => {
 
   expect(repositoryForProjectRoot(root)).toBe("example/linked");
 });
+
+test("matches Git when an origin URL has an unquoted trailing comment", () => {
+  for (const marker of ["#", ";"]) {
+    const root = tempDir();
+    const gitDir = path.join(root, ".git");
+    fs.mkdirSync(gitDir);
+    fs.writeFileSync(path.join(gitDir, "config"), [
+      "[remote \"origin\"]",
+      `\turl = https://github.com/example/commented.git ${marker} primary`,
+      "",
+    ].join("\n"));
+    expect(repositoryForProjectRoot(root)).toBe("example/commented");
+  }
+});
