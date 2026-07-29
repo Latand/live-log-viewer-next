@@ -283,7 +283,7 @@ test("resume generation rollover cannot revive delivery cancelled by Stop", () =
   });
 });
 
-test("cancelled migration delivery history remains auditable through compaction", () => {
+test("one hundred cancelled deliveries stay auditable without blocking a fresh action", () => {
   const { store, id } = seededRegistry("off", registryFile());
   const intent = store.commitMigrationIntent({
     engine: "codex",
@@ -292,14 +292,16 @@ test("cancelled migration delivery history remains auditable through compaction"
     requestId: "retain-cancelled-history",
     expectedRevision: store.engineRouting("codex").revision,
   });
-  const ids = Array.from({ length: 75 }, (_, index) =>
+  const ids = Array.from({ length: 100 }, (_, index) =>
     store.holdDelivery(id, "fixture", `cancelled-history-${index}`).id);
   store.setMigrationIntentState(intent.id, "stopped", intent.revision);
 
   store.compactDeliveryReservations();
+  const fresh = store.holdDelivery(id, "fresh fixture", "fresh-after-cancelled-history");
 
   expect(ids.every((deliveryId) =>
     store.snapshot().heldDeliveries[deliveryId]?.state === "failed")).toBe(true);
+  expect(fresh).toMatchObject({ state: "assigned", attempts: 0 });
 });
 
 test("repeat reseat clicks never mint a second successor operation", () => {

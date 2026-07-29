@@ -836,6 +836,8 @@ export async function reconcileMigrations(
   registry: AgentRegistry = agentRegistry(),
   options: MigrationCoordinatorOptions = {},
 ): Promise<void> {
+  const orphanedDeliveryReason =
+    "delivery cancelled during upgrade because no migration owns it; send again to authorize a fresh delivery action";
   const before = registry.readOnlySnapshot();
   await forEachCooperatively(Object.values(before.pendingSuccessorCleanups), async (pending) => {
     const owner = registry.conversation(pending.conversationId);
@@ -859,12 +861,33 @@ export async function reconcileMigrations(
       conversation = registry.conversation(conversation.id) ?? conversation;
     }
     if (!conversation.migration) {
-      if (pendingDeliveries.has(conversation.id)) await drainHeldDeliveries(conversation.id, delivery, registry);
+      const pending = registry.pendingDeliveries(conversation.id);
+      for (const item of pending) {
+        if (item.state === "held" || item.state === "assigned") {
+          registry.terminalizeHeldDelivery(item.id, orphanedDeliveryReason);
+        }
+      }
+      if (pending.some((item) => item.state === "delivery-uncertain") && delivery.reconcileUncertain) {
+        await drainHeldDeliveries(conversation.id, delivery, registry);
+      }
       return;
     }
-    if (conversation.migration.phase === "rolled-back") return;
+    if (conversation.migration.phase === "rolled-back") {
+      for (const item of registry.pendingDeliveries(conversation.id)) {
+        if (item.state === "held" || item.state === "assigned" || item.state === "delivery-uncertain") {
+          registry.terminalizeHeldDelivery(
+            item.id,
+            "delivery cancelled because its owning account migration was rolled back; send again to authorize a fresh delivery action",
+          );
+        }
+      }
+      return;
+    }
     if (conversation.migration.phase === "committed") {
-      if (pendingDeliveries.has(conversation.id)) await drainHeldDeliveries(conversation.id, delivery, registry);
+      if (delivery.reconcileUncertain
+        && registry.pendingDeliveries(conversation.id).some((item) => item.state === "delivery-uncertain")) {
+        await drainHeldDeliveries(conversation.id, delivery, registry);
+      }
       return;
     }
     const migration = conversation.migration;
@@ -875,7 +898,11 @@ export async function reconcileMigrations(
       return;
     }
     const advanced = await advanceConversationMigration(conversation.id, registry, provider, { ...options, deferBoardRepair: true });
-    if (advanced.migration?.phase === "committed" && pendingDeliveries.has(advanced.id)) await drainHeldDeliveries(advanced.id, delivery, registry);
+    if (advanced.migration?.phase === "committed"
+      && delivery.reconcileUncertain
+      && registry.pendingDeliveries(advanced.id).some((item) => item.state === "delivery-uncertain")) {
+      await drainHeldDeliveries(advanced.id, delivery, registry);
+    }
   });
   await yieldToRuntime();
   const after = registry.readOnlySnapshot();

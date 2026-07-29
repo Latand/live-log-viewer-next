@@ -6,6 +6,8 @@ export const STOPPED_MIGRATION_DELIVERY_REASON =
   `${MIGRATION_DELIVERY_CANCELLATION_PREFIX} its owning account migration was stopped; send again to authorize a fresh delivery`;
 export const ROLLED_BACK_MIGRATION_DELIVERY_REASON =
   `${MIGRATION_DELIVERY_CANCELLATION_PREFIX} its owning account migration was rolled back; send again to authorize a fresh delivery`;
+export const COMMITTED_MIGRATION_DELIVERY_REASON =
+  `${MIGRATION_DELIVERY_CANCELLATION_PREFIX} its owning account migration committed; send again to authorize a fresh delivery action`;
 
 interface MigrationIntentContext {
   engineRouting: Record<MigrationEngine, { activeAccountId: string | null }>;

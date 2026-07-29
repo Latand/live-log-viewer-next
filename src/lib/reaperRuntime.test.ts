@@ -122,7 +122,39 @@ test("the issue 652 convergence pass immediately stops requested delivery with n
   }
 });
 
-test("a currently observed source host keeps a fresh requested migration active", () => {
+test("the issue 652 convergence pass terminalizes assigned delivery under a rolled-back migration", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-rolled-back-delivery-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const conversation = registry.ensureConversation("codex", "/rolled-back-delivery.jsonl", "source");
+  registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "target",
+    origin: "manual",
+    requestId: "rolled-back-delivery",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+  const revision = registry.conversation(conversation.id)!.migration!.revision;
+  registry.rollbackConversationMigration(conversation.id, revision);
+  const assigned = registry.holdDelivery(conversation.id, "fixture", "rolled-back-delivery");
+  expect(assigned).toMatchObject({ state: "assigned", attempts: 0 });
+
+  try {
+    const terminalized = terminalizeStaleUndeliverableHeldDeliveries(registry);
+
+    expect(terminalized).toEqual([assigned.id]);
+    expect(registry.snapshot().heldDeliveries[assigned.id]).toMatchObject({
+      state: "failed",
+      attempts: 0,
+      generationId: null,
+      deliveredAt: null,
+      error: expect.stringContaining("rolled back"),
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a currently observed source host keeps a no-progress requested migration active", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-live-migration-source-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
   const pathname = "/live-migration-source.jsonl";
@@ -139,7 +171,7 @@ test("a currently observed source host keeps a fresh requested migration active"
   try {
     const terminalized = terminalizeStaleUndeliverableHeldDeliveries(
       registry,
-      Date.now(),
+      Date.now() + 6 * 60_000,
       {},
       [runtimeHost(pathname)],
     );

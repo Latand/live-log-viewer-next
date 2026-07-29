@@ -27,6 +27,7 @@ import {
   type ViewerConversationId,
 } from "@/lib/accounts/migration/contracts";
 import {
+  COMMITTED_MIGRATION_DELIVERY_REASON,
   MIGRATION_DELIVERY_CANCELLATION_PREFIX,
   migrationIntentCanEnroll,
   ROLLED_BACK_MIGRATION_DELIVERY_REASON,
@@ -809,14 +810,24 @@ function terminalizeCancelledMigrationDeliveries(
   reason: string,
 ): void {
   for (const delivery of Object.values(file.heldDeliveries)) {
-    if (delivery.conversationId !== conversation.id || delivery.state === "delivered") continue;
-    delivery.state = "failed";
-    delivery.generationId = null;
-    delivery.assignedAt = null;
-    delivery.deliveredAt = null;
-    delivery.error = reason;
-    syncDeliveryOperationOwnerState(file, delivery);
+    if (delivery.conversationId !== conversation.id
+      || delivery.state === "delivered"
+      || delivery.state === "failed") continue;
+    terminalizeHeldDelivery(file, delivery, reason);
   }
+}
+
+function terminalizeHeldDelivery(
+  file: RegistryFile,
+  delivery: HeldDelivery,
+  reason: string,
+): void {
+  delivery.state = "failed";
+  delivery.generationId = null;
+  delivery.assignedAt = null;
+  delivery.deliveredAt = null;
+  delivery.error = reason.slice(0, 240);
+  syncDeliveryOperationOwnerState(file, delivery);
 }
 
 function reconfigureMigrationRequestId(owner: { operationId: string; revision: number }): string {
@@ -5544,14 +5555,7 @@ export class AgentRegistry {
       );
       conversation.migration = { ...migration, phase: "committed", updatedAt: now() };
       conversation.updatedAt = now();
-      for (const delivery of Object.values(file.heldDeliveries)) {
-        if (delivery.conversationId !== id || delivery.state !== "held") continue;
-        delivery.state = "assigned";
-        delivery.generationId = generation.id;
-        delivery.assignedAt = committedAt;
-        delivery.error = null;
-        syncDeliveryOperationOwnerState(file, delivery);
-      }
+      terminalizeCancelledMigrationDeliveries(file, conversation, COMMITTED_MIGRATION_DELIVERY_REASON);
       file.conversationRevision[conversation.engine] += 1;
       file.engineRouting[conversation.engine].revision += 1;
       return clone(conversation);
@@ -5818,6 +5822,15 @@ export class AgentRegistry {
     return clone(Object.values(snapshot.heldDeliveries)
       .filter((item) => item.conversationId === canonicalId && item.state !== "delivered")
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)));
+  }
+
+  terminalizeHeldDelivery(id: string, reason: string): HeldDelivery {
+    return this.mutate((file) => {
+      const delivery = file.heldDeliveries[id];
+      if (!delivery) throw new Error("held delivery is unknown");
+      if (delivery.state !== "delivered") terminalizeHeldDelivery(file, delivery, reason);
+      return clone(delivery);
+    });
   }
 
   compactDeliveryReservations(): number {

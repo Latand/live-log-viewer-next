@@ -3191,6 +3191,7 @@ describe("agent registry", () => {
     const store = registry();
     const receipt = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "birth" });
     if (receipt.kind !== "created") throw new Error("expected create");
+    store.setEngineRouting("codex", "target");
     const intent = store.upsertMigrationIntent("codex", "target", "manual", "move-after-spawn");
     const path = "/sessions/019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl";
 
