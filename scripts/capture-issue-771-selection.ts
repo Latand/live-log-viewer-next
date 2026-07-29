@@ -279,11 +279,107 @@ async function main(): Promise<void> {
     );
     must(neighbourRevealed === "1", `a running session must show every card's toggle, neighbour opacity was ${neighbourRevealed}`);
 
+    /* The non-member's check must NOT read as disabled while the session recedes
+       its card. Ancestor opacity/filter composites a whole subtree and no
+       descendant can opt out, so the dim is applied to the shell's children with
+       the check's zone excluded — assert exactly that, with the real cascade. */
+    const dimShape = await page.evaluate((p) => {
+      const shell = document.querySelector(`[data-scheme-node="${p}"]`) as HTMLElement;
+      const zone = document.querySelector(`[data-select-check="${p}"]`)!.parentElement as HTMLElement;
+      const content = Array.from(shell.children).find((child) => child !== zone) as HTMLElement;
+      const read = (element: HTMLElement) => {
+        const style = getComputedStyle(element);
+        return { opacity: style.opacity, filter: style.filter };
+      };
+      return { shell: read(shell), zone: read(zone), content: read(content), zoneIsChild: zone.parentElement === shell };
+    }, target.path);
+    must(dimShape.zoneIsChild, "the check's zone must be a direct child of the card shell for the dim exclusion to apply");
+    must(dimShape.shell.opacity === "1", `the shell itself must not be faded, was ${dimShape.shell.opacity}`);
+    must(dimShape.shell.filter === "none", `the shell itself must not be greyed, was ${dimShape.shell.filter}`);
+    must(dimShape.zone.opacity === "1", `the check's zone must stay at full opacity, was ${dimShape.zone.opacity}`);
+    must(dimShape.zone.filter === "none", `the check's zone must not be greyed, was ${dimShape.zone.filter}`);
+    must(Number(dimShape.content.opacity) < 0.5, `the card content must still recede, was ${dimShape.content.opacity}`);
+    must(dimShape.content.filter.includes("grayscale"), `the card content must still grey, was ${dimShape.content.filter}`);
+    await page.screenshot({
+      path: path.join(outDir, "771-session-nonmember-check.png"),
+      clip: { x: Math.max(0, Math.round(target.x - 30)), y: Math.max(0, Math.round(target.y - 40)), width: Math.min(1400, Math.round(target.w + 70)), height: 170 },
+    });
+
     await check.click();
     await page.waitForTimeout(400);
     const afterSecond = await selectedPaths(page);
     must(afterSecond.length === 0, `a second click must deselect, selection was ${afterSecond.join(", ")}`);
     await page.screenshot({ path: path.join(outDir, "771-check-deselected.png") });
+
+    /* ── The selection survives a MODE SWITCH (#771 part 2) ──────────────── */
+    await check.click();
+    await page.waitForTimeout(400);
+    must((await selectedPaths(page)).length === 1, "expected one member before the mode switch");
+
+    /* Click the view toggle the operator clicks. The board unmounts — when it
+       owned the selection in local state, that destroyed it outright. */
+    const switched = await page.evaluate(() => {
+      const tab = Array.from(document.querySelectorAll("button[aria-pressed]")).find(
+        (button) => (button.getAttribute("aria-label") ?? "") === "conversations",
+      );
+      if (!(tab instanceof HTMLElement)) return false;
+      tab.click();
+      return true;
+    });
+    must(switched, "found no conversations/list view tab to switch with");
+    await page.waitForFunction(() => document.querySelector("[data-scheme-node]") === null, undefined, { timeout: 15_000 });
+    await page.waitForTimeout(600);
+    await page.screenshot({ path: path.join(outDir, "771-list-mode.png") });
+
+    /* The board is gone, so read what the ORCHESTRATOR would read: ask the real
+       snapshot endpoint from inside the page (it is same-origin gated), scoped to
+       `selected`. This is requirement (c) end to end — the selection was made in
+       scheme mode and is being asked for from list mode. */
+    /* Presence is debounced (500 ms, min 500 ms gap) and the snapshot reads the
+       server's presence store, so poll until the switch has been reported. */
+    const askSnapshot = () =>
+      page.evaluate(async () => {
+        const response = await fetch("/api/agent/snapshot", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ schemaVersion: 1, scope: { kind: "selected" }, text: { lastMessages: 2 } }),
+        });
+        const body = (await response.json()) as {
+          error?: string;
+          view?: { mode: string; selectedPaths: string[]; visiblePaths: string[] };
+          scope?: { kind: string; returnedPaths: string[] };
+          conversations?: Array<{ path: string; text?: { messages: Array<{ text: string }> } }>;
+        };
+        return { status: response.status, body };
+      });
+    let published = await askSnapshot();
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (published.status === 200 && published.body.view?.mode === "list" && (published.body.view?.selectedPaths.length ?? 0) > 0) break;
+      await page.waitForTimeout(600);
+      published = await askSnapshot();
+    }
+    must(published.status === 200, `the snapshot endpoint answered ${published.status}: ${JSON.stringify(published.body.error ?? published.body)}`);
+    const view = published.body.view!;
+    must(view.mode === "list", `expected the snapshot to see list mode, saw ${view.mode}`);
+    must(view.selectedPaths.length === 1, `the selection must survive the mode switch, snapshot saw ${JSON.stringify(view.selectedPaths)}`);
+    must(view.visiblePaths.length > 0, "list mode must report its visible rows");
+    must(published.body.scope!.kind === "selected", `expected the selected scope, got ${published.body.scope!.kind}`);
+    must(published.body.scope!.returnedPaths.length === 1, `the selected scope must resolve the member, got ${JSON.stringify(published.body.scope!.returnedPaths)}`);
+    const messageCount = (published.body.conversations ?? []).reduce((total, item) => total + (item.text?.messages.length ?? 0), 0);
+    must(messageCount > 0, "the selected conversation's content must come back with it");
+
+    /* Back to the board: the same set is still there, no re-selection needed. */
+    await page.evaluate(() => {
+      const tab = Array.from(document.querySelectorAll("button[aria-pressed]")).find(
+        (button) => (button.getAttribute("aria-label") ?? "") === "scheme",
+      );
+      if (tab instanceof HTMLElement) tab.click();
+    });
+    await page.waitForSelector("[data-scheme-node]", { timeout: 15_000 });
+    await page.waitForTimeout(800);
+    const afterRoundTrip = await selectedPaths(page);
+    must(afterRoundTrip.length === 1, `the selection must survive the round trip, board shows ${JSON.stringify(afterRoundTrip)}`);
+    await page.screenshot({ path: path.join(outDir, "771-back-in-scheme.png") });
 
     console.log(
       [
@@ -292,6 +388,8 @@ async function main(): Promise<void> {
         `  background drag across ${target.path}: selected it, native selection empty mid-drag and after`,
         `  transcript drag after the lasso highlighted ${insideText.trim().length} chars — selection handed back`,
         `  check on ${other.path}: click selects, second click deselects`,
+        `  session dim: shell opacity ${dimShape.shell.opacity} / filter ${dimShape.shell.filter}, check zone ${dimShape.zone.opacity} / ${dimShape.zone.filter}, content ${dimShape.content.opacity} / ${dimShape.content.filter}`,
+        `  mode switch: snapshot saw mode=${view.mode} selectedPaths=${view.selectedPaths.length} visiblePaths=${view.visiblePaths.length}, selected scope returned ${published.body.scope!.returnedPaths.length} conversation(s) with ${messageCount} message(s); back in scheme ${afterRoundTrip.length} member(s)`,
       ].join("\n"),
     );
   } finally {
