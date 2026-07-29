@@ -594,8 +594,9 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
           openWindowActive,
         });
       }
-      const actionTimes = new Set(recent.operatorActionsAtMs ?? []);
-      if ((conversation.delegationDepth ?? 0) === 0) {
+      const actionTimes = new Set<number>();
+      if (conversation.delegationDepth === 0) {
+        for (const actionAtMs of recent.operatorActionsAtMs ?? []) actionTimes.add(actionAtMs);
         for (const actionAtMs of recent.unprovenancedUserActionsAtMs ?? []) actionTimes.add(actionAtMs);
       }
       for (const actionAtMs of actionTimes) {

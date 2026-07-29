@@ -602,6 +602,45 @@ describe("WakaTime activity sync", () => {
     expect(await durationAtDepth(1)).toBe(30);
   });
 
+  test("structured engagement requires root provenance while delegated agent seconds stay unchanged", async () => {
+    const durationAtDepth = async (delegationDepth: number, operatorActionsAtMs: number[]) => {
+      const snapshot = registrySnapshot();
+      snapshot.conversations.conversation_test!.delegationDepth = delegationDepth;
+      const fixture = harness({
+        now: () => NOW + 15 * 60_000,
+        readState: async () => ({
+          version: 1,
+          enabledAtMs: NOW - 1,
+          credentialGeneration: null,
+          streams: {},
+          pending: [],
+          retry: { failures: 0, retryAtMs: 0, reason: null },
+          counters: { accepted: 0, permanentlyRejected: 0, compacted: 0, dropped: 0, historyGaps: 0 },
+        }),
+        registrySnapshot: () => snapshot,
+        recentTurnWindows: () => ({
+          windows: [{ startedAt: NOW, endedAt: NOW + 30_000 }],
+          operatorActionsAtMs,
+          unprovenancedUserActionsAtMs: [],
+          prefixTruncated: false,
+          complete: true,
+        }),
+      });
+      await fixture.sync.tick();
+      const duration = projectDurationSeconds(
+        fixture.state()!.pending.map((event) => event.heartbeat),
+        "-repo",
+      );
+      fixture.sync.stop();
+      return duration;
+    };
+
+    const agentOnlySeconds = await durationAtDepth(1, []);
+    expect(agentOnlySeconds).toBe(30);
+    expect(await durationAtDepth(1, [NOW])).toBe(agentOnlySeconds);
+    expect(await durationAtDepth(0, [NOW])).toBe(10 * 60);
+  });
+
   test("overlapping same-project turns contribute their wall-clock union", async () => {
     const { sync, state } = harness({
       recentTurnWindows: () => ({
@@ -643,8 +682,11 @@ describe("WakaTime activity sync", () => {
 
   test("operator engagement ending on a live tick never cuts off a continuing silent agent", async () => {
     let clock = NOW;
+    const snapshot = registrySnapshot();
+    snapshot.conversations.conversation_test!.delegationDepth = 0;
     const { sync, state } = harness({
       now: () => clock,
+      registrySnapshot: () => snapshot,
       scan: async () => ({
         complete: true,
         files: [entry({
@@ -679,6 +721,7 @@ describe("WakaTime activity sync", () => {
   test("production-shaped replay preserves operator engagement, agent overlap, idle gaps, resume, and retry", async () => {
     const secondPath = "/sessions/overlap.jsonl";
     const snapshot = registrySnapshot();
+    snapshot.conversations.conversation_test!.delegationDepth = 0;
     snapshot.conversations.conversation_overlap = structuredClone(snapshot.conversations.conversation_test!);
     snapshot.conversations.conversation_overlap!.id = "conversation_overlap";
     snapshot.conversations.conversation_overlap!.generations[0]!.path = secondPath;
