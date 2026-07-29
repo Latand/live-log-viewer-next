@@ -6,7 +6,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, X } from "@/components/icons";
 import { TaskSheet, type TaskSheetView } from "@/components/tasks/TaskSheet";
 import { taskRelationsByPath } from "@/components/tasks/taskRelations";
-import { viewBus } from "@/hooks/viewPresenceBus";
+import { useBoardState } from "@/hooks/useBoardState";
+import { selectionInOrder, viewBus } from "@/hooks/viewPresenceBus";
 import { projectDisplayName } from "@/lib/displayNames";
 import type { Flow } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -133,6 +134,10 @@ export function pipelinesToDock(pipelines: readonly Pipeline[], memberfulGroupId
  */
 export function MobileFocusView({ project, groups, manual, files, flows, reviewGroups = [], pipelines, surfacePipelines = [], workerStacks = [], tasks, sheetTasks, drafts, favorites, isolatedManualPaths = EMPTY_PATHS, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onActiveChange, taskSheetNonce = 0, trayApi }: Props) {
   const { t } = useLocale();
+  /* The project-scoped board store, read here for the ONE canonical selection
+     (#771). Same store the desktop board and the dashboard bind — stores are
+     refcounted per project, so this is the same instance, never a copy. */
+  const board = useBoardState(project);
   const [focusPath, setFocusPath] = useState<string | null>(null);
   const [mapOpen, setMapOpen] = useState(false);
   const [pipelineSheetOpen, setPipelineSheetOpen] = useState(false);
@@ -294,13 +299,18 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
      The nested map camera is not surfaced to observers in this MVP. */
   useEffect(() => {
     const focusedPath = activeNode ? activeNode.file.path : null;
+    const boardOrder = layout.nodes.map((node) => node.file.path);
     const visiblePaths = mapOpen
-      ? layout.nodes.slice(0, MAX_VISIBLE_PATHS).map((node) => node.file.path)
+      ? boardOrder.slice(0, MAX_VISIBLE_PATHS)
       : activeNode
         ? [activeNode.file.path]
         : [];
-    viewBus.reportSlice({ mode: mapOpen ? "mobile-map" : "mobile-focus", focusedPath, selectedPaths: [], visiblePaths, camera: null });
-  }, [activeNode, mapOpen, layout]);
+    /* The SAME canonical selection the desktop board writes, projected onto the
+       phone's own board order (#771). It used to hardcode `[]`, so a selection
+       made on the desktop — or on this phone's map — vanished from the snapshot
+       as soon as this view took over the slice. */
+    viewBus.reportSlice({ mode: mapOpen ? "mobile-map" : "mobile-focus", focusedPath, selectedPaths: selectionInOrder(boardOrder, board.selection), visiblePaths, camera: null });
+  }, [activeNode, mapOpen, layout, board.selection]);
 
   /* When the focused pane is a pipeline stage, a compact chain row rides above
      it: position, current stage/state, and prev/next stage chips to hop along

@@ -9,7 +9,7 @@ import { FavoritesProvider, type FavoritesApi } from "./favorites/FavoritesConte
 import { resolveFavoriteRows } from "./favorites/favoriteRows";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useNowSeconds } from "@/hooks/useNowSeconds";
-import { viewBus } from "@/hooks/viewPresenceBus";
+import { selectionInOrder, viewBus } from "@/hooks/viewPresenceBus";
 import { projectDisplayName } from "@/lib/displayNames";
 import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
@@ -1388,6 +1388,12 @@ export function ProjectDashboard({
      pipelineLayout can't be preserved. */
   const deckReviewerPaths = new Set<string>();
   for (const deck of pipelineLayout.decks) for (const round of deck.rounds) if (round.file) deckReviewerPaths.add(round.file.path);
+  /* The board's placed conversation windows, in layout order — the fallback the
+     non-scheme publisher below reports as visible when the history list has no
+     rows of its own (#771 requirement a). Carried as a newline-joined signature
+     rather than a fresh array so the effect's dependency compares BY VALUE:
+     `pipelineLayout` is derived inline and has a new identity every render. */
+  const boardWindowSignature = pipelineLayout.nodes.map((node) => node.file.path).join("\n");
   /* Stacks render regardless of `hasNodes` (the WorkerStacks strip sits outside
      the scheme/list switch), so a worker-only or fully-closed project still
      shows its folded workers instead of an empty board. `hiddenSet` joins the
@@ -1414,17 +1420,43 @@ export function ProjectDashboard({
     viewBus.reportContext({ project, board: { renderedRevision: revision, durableRevision: revision, sync: board.sync } });
   }, [project, board.revision, board.sync]);
 
+  /* THE ONLY LEGITIMATE PRUNE of the canonical selection (#771): a selected
+     conversation that no longer exists. Driven from here because this is where
+     the scan lives, and because the selection outlives every view — pruning it
+     against one view's layout would delete it on a mode switch.
+     Never prunes against an empty or unloaded scan: a failed poll or the frame
+     before the first load must not read as "every conversation disappeared".
+     pruneSelection returns the same set when nothing was dropped, so the store's
+     write bails out and this cannot cascade a render. */
+  useEffect(() => {
+    if (!loaded || files.length === 0) return;
+    board.pruneSelectionTo(new Set(files.map((file) => file.path)));
+    /* eslint-disable-next-line react-hooks/exhaustive-deps -- board is rebuilt
+       every render; pruneSelectionTo delegates to the project-scoped store */
+  }, [files, loaded]);
+
   /* Presence slice for the non-scheme leaves: the flat history list reports its
      rows in rendered (visual) order; an empty project reports an empty view.
-     When the scheme is shown, SchemeBoard / MobileFocusView owns the slice. */
+     When the scheme is shown, SchemeBoard / MobileFocusView owns the slice.
+
+     `selectedPaths` is the SAME canonical set the scheme publishes, projected
+     onto this view's order (see selectionInOrder) — switching out of scheme mode
+     must never look like the operator deselected everything.
+
+     `visiblePaths` falls back to the board's placed conversation windows when
+     the history list has no rows of its own: an operator whose project is
+     rendered as board windows still has visible conversations, and reporting an
+     empty list there told observers nothing was on screen. */
   useEffect(() => {
     if (projectView === "scheme" && schemeAvailable) return;
-    const visiblePaths = listAvailable ? historyRows.map((row) => row.path).slice(0, MAX_VISIBLE_PATHS) : [];
+    const rows = listAvailable ? historyRows.map((row) => row.path) : [];
+    const order = rows.length > 0 ? rows : boardWindowSignature ? boardWindowSignature.split("\n") : [];
+    const visiblePaths = order.slice(0, MAX_VISIBLE_PATHS);
     /* A quiet history list is "list" on either platform; a truly empty project
        on the phone is the mobile-focus empty state. */
     const mode = listAvailable ? "list" : isMobile ? "mobile-focus" : "list";
-    viewBus.reportSlice({ mode, focusedPath: null, selectedPaths: [], visiblePaths, camera: null });
-  }, [projectView, schemeAvailable, listAvailable, historyRows, isMobile]);
+    viewBus.reportSlice({ mode, focusedPath: null, selectedPaths: selectionInOrder(order, board.selection), visiblePaths, camera: null });
+  }, [projectView, schemeAvailable, listAvailable, historyRows, isMobile, boardWindowSignature, board.selection]);
 
   /* Shelf totals for the phone header trigger (issue #419 reopened). The full
      strips live in the overlay the trigger opens; here we only need the count
