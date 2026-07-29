@@ -2,6 +2,7 @@ import { configForParams, listRoles, roleFenceBlock, roleScaffoldBody, validateR
 import { MAX_SCAFFOLD_LENGTH } from "@/lib/roles/store";
 import { isEngineEffort } from "@/lib/agent/efforts";
 import { isCodexLaunchModel, normalizeClaudeLaunchModel } from "@/lib/agent/models";
+import { defaultRoleParameterValue } from "@/lib/roles/parameters";
 
 import { PIPELINE_DISALLOWED_ROLE_IDS, type EffectivePipelineRole, type PipelineRoleId, type PipelineStage, type PipelineStageKind } from "./types";
 
@@ -31,11 +32,6 @@ export type PipelineRoleLookup = (roleId: string, params?: Record<string, string
 
 let installedLookup: PipelineRoleLookup | null = null;
 
-function defaultParameterValue(parameter: ReturnType<typeof listRoles>[number]["parameters"][number]): string | number {
-  if (parameter.kind === "integer") return parameter.min ?? 1;
-  return parameter.options?.[0] ?? "";
-}
-
 /** Production adapter for the shared issue-35 registry. */
 export const pipelineRoleLookup: PipelineRoleLookup = (roleId, params) => {
   const definition = listRoles().find((candidate) => candidate.id === roleId);
@@ -46,7 +42,7 @@ export const pipelineRoleLookup: PipelineRoleLookup = (roleId, params) => {
          non-empty value; a blank field keeps the default, so the scaffold token
          stays intact. */
       const chosen = params?.[parameter.key];
-      const value = chosen !== undefined && chosen !== "" ? chosen : defaultParameterValue(parameter);
+      const value = chosen !== undefined && chosen !== "" ? chosen : defaultRoleParameterValue(parameter);
       return [parameter.key, value];
     }),
   );

@@ -18,7 +18,7 @@ export const ROLE_DEFAULTS: readonly RoleDefinition[] = [
       { key: "repo", label: "Repository", description: "Repository for backlog-campaign mode.", kind: "text" },
       { key: "issueQuery", label: "Issue query", description: "GitHub issue query for backlog-campaign mode.", kind: "text" },
       { key: "urgent", label: "Urgent list", description: "Comma-separated urgent issue ids.", kind: "text" },
-      { key: "maxWorkers", label: "Maximum workers", description: "Worker cap for backlog-campaign mode.", kind: "integer", min: 1, max: 20 },
+      { key: "maxWorkers", label: "Maximum workers", description: "Worker cap for backlog-campaign mode.", kind: "integer", default: 3, min: 1, max: 20 },
       { key: "mergePolicy", label: "Merge policy", description: "Delivery policy for backlog-campaign mode.", kind: "select", options: ["pr", "merge"] },
       { key: "completionPolicy", label: "Completion policy", description: "Terminal policy for backlog-campaign mode.", kind: "select", options: ["pr-opened", "merged", "released"] },
     ],

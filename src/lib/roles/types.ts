@@ -16,16 +16,26 @@ export type RoleConfig = {
   effort: string;
 };
 
-export type RoleParameter = {
+type RoleParameterBase = {
   key: string;
   label: string;
   description: string;
-  kind: "text" | "integer" | "select";
   required?: boolean;
-  options?: readonly string[];
+};
+
+export type RoleParameter = RoleParameterBase & ({
+  kind: "text";
+  default?: string;
+} | {
+  kind: "integer";
+  default?: number;
   min?: number;
   max?: number;
-};
+} | {
+  kind: "select";
+  default?: string;
+  options?: readonly string[];
+});
 
 export type RoleDefinition = {
   id: RoleId;
@@ -54,6 +64,6 @@ export type ResolvedRole = {
   definition: RoleDefinition;
   config: RoleConfig;
   params: RoleParamValues;
-  prompt: string;
+  "prompt": string;
   requiresDeploymentConfirmation: boolean;
 };

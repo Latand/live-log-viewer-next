@@ -13,6 +13,7 @@ import { codexModelSupportsImages, defaultModelFor } from "@/lib/agent/models";
 import { useLocale } from "@/lib/i18n";
 import { requestFilesRefresh } from "@/lib/filesEvents";
 import { BUILDER_APPLY_FIXES_CONFIG, BUILDER_FRONTEND_CONFIG } from "@/lib/roles/paramConfig";
+import { defaultRoleParameterValues } from "@/lib/roles/parameters";
 import type { RoleDefinition } from "@/lib/roles/types";
 import type { FileEntry } from "@/lib/types";
 import { conversationIdentity, withoutArchivedPredecessors } from "@/lib/accounts/identity";
@@ -249,7 +250,7 @@ export function RoleSection({
                         ))}
                       </Select>
                     ) : (
-                      <input type={parameter.kind === "integer" ? "number" : "text"} min={parameter.min} max={parameter.max} value={String(roleParams[parameter.key] ?? "")} disabled={disabled} onChange={(event) => onSetParam(parameter.key, parameter.kind === "integer" && event.target.value ? Number(event.target.value) : event.target.value)} aria-label={label} className="h-7 min-w-0 rounded-control border border-border bg-card px-1.5 text-ui text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60" />
+                      <input type={parameter.kind === "integer" ? "number" : "text"} min={parameter.kind === "integer" ? parameter.min : undefined} max={parameter.kind === "integer" ? parameter.max : undefined} value={String(roleParams[parameter.key] ?? "")} disabled={disabled} onChange={(event) => onSetParam(parameter.key, parameter.kind === "integer" && event.target.value ? Number(event.target.value) : event.target.value)} aria-label={label} className="h-7 min-w-0 rounded-control border border-border bg-card px-1.5 text-ui text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60" />
                     )}
                     <span className="leading-3">{roleParamDescription(t, selectedRole.id, parameter)}</span>
                   </label>
@@ -541,10 +542,7 @@ export function DraftAgentPane({
       setDeployConfirm("");
       return;
     }
-    const params = Object.fromEntries(selected.parameters.map((parameter) => [
-      parameter.key,
-      parameter.kind === "integer" ? parameter.min ?? 1 : parameter.options?.[0] ?? "",
-    ]));
+    const params = defaultRoleParameterValues(selected);
     setRoleParams(params);
     setDeployConfirm("");
     setEngine(selected.config.engine);
