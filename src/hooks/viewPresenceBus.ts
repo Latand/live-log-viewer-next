@@ -93,22 +93,35 @@ export function schemeVisiblePaths(layout: SchemeLayout, cam: CameraLike, vp: { 
   return out;
 }
 
-/** Lasso selection in visual order: the layout node order filtered to the set.
-    A path that has left the board drops out (the set is transcript paths, so a
-    relayout keeps membership for free). Capped at MAX_SELECTED_PATHS in visual
-    order — the server rejects a larger selection outright (400), so a marquee
-    over 65+ panes must not kill every presence POST; the freshest-last nodes
-    off the right are dropped, matching the visible-paths cap. */
-export function orderedSelection(layout: SchemeLayout, selected: ReadonlySet<string>): string[] {
+/**
+ * THE `selectedPaths` ORDERING CONTRACT (#771), one rule for all three
+ * publishers: `selectedPaths` is the canonical selection PROJECTED ONTO THE
+ * CURRENT VIEW'S RENDER ORDER. The set is the same in every view — it lives at
+ * project scope and outlives any of them — and only the order differs: the
+ * scheme walks its layout nodes, the list walks its rows, the phone walks its
+ * own board order. The stored set is never reordered by publishing it, and a
+ * path the current view does not render is NOT dropped from the set — it simply
+ * has no position in this view's order, so it is not listed here.
+ *
+ * Capped at MAX_SELECTED_PATHS in that same order — the server rejects a larger
+ * selection outright (400), so a marquee over 65+ panes must not kill every
+ * presence POST; the tail of the order is dropped, matching the visible cap.
+ */
+export function selectionInOrder(order: readonly string[], selected: ReadonlySet<string>): string[] {
   if (selected.size === 0) return [];
   const out: string[] = [];
-  for (const node of layout.nodes) {
-    if (selected.has(node.file.path)) {
-      out.push(node.file.path);
+  for (const path of order) {
+    if (selected.has(path)) {
+      out.push(path);
       if (out.length >= MAX_SELECTED_PATHS) break;
     }
   }
   return out;
+}
+
+/** The scheme's projection: its layout node order. */
+export function orderedSelection(layout: SchemeLayout, selected: ReadonlySet<string>): string[] {
+  return selectionInOrder(layout.nodes.map((node) => node.file.path), selected);
 }
 
 /** Desktop focus precedence: the full-window expanded pane wins over the single

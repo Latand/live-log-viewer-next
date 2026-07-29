@@ -10,6 +10,7 @@ import {
   OVERVIEW_CONTEXT,
   OVERVIEW_SLICE,
   orderedSelection,
+  selectionInOrder,
   schemeFocusedPath,
   schemeVisiblePaths,
   UNAVAILABLE_BOARD,
@@ -52,6 +53,36 @@ test("selection is reported in visual (layout) order regardless of set insertion
   expect(orderedSelection(layout, new Set())).toEqual([]);
   /* A selected path no longer on the board drops out. */
   expect(orderedSelection(layout, new Set(["a", "gone"]))).toEqual(["a"]);
+});
+
+test("one selection, three per-view orders — the #771 publication contract", () => {
+  const selected = new Set(["/c", "/a", "/b"]);
+  /* The SAME set, published by three views. The scheme walks its layout nodes,
+     the list its rows, the phone its own board order. Each order is that view's
+     render order; the stored set is never reordered by publishing it. */
+  const scheme = layoutOf(node("/a", 0, 0), node("/b", 100, 0), node("/c", 200, 0));
+  expect(orderedSelection(scheme, selected)).toEqual(["/a", "/b", "/c"]);
+  expect(selectionInOrder(["/c", "/b", "/a"], selected)).toEqual(["/c", "/b", "/a"]);
+  expect(selectionInOrder(["/b", "/c", "/a"], selected)).toEqual(["/b", "/c", "/a"]);
+  expect([...selected]).toEqual(["/c", "/a", "/b"]);
+});
+
+test("a view that does not render a selected path simply omits it, and keeps the rest", () => {
+  const selected = new Set(["/a", "/b"]);
+  /* Omission from ONE view's published order is not removal from the set: the
+     canonical selection outlives every view (see pruneSelection). */
+  expect(selectionInOrder(["/a"], selected)).toEqual(["/a"]);
+  expect(selectionInOrder([], selected)).toEqual([]);
+  expect(selectionInOrder(["/x", "/b"], selected)).toEqual(["/b"]);
+});
+
+test("every view's projection is capped at MAX_SELECTED_PATHS in that view's order", () => {
+  const paths = Array.from({ length: 70 }, (_, i) => `/p${String(i).padStart(2, "0")}`);
+  const all = new Set(paths);
+  const reversed = selectionInOrder([...paths].reverse(), all);
+  expect(reversed.length).toBe(MAX_SELECTED_PATHS);
+  /* The cap follows the ORDER, not the set: reversed order keeps the other end. */
+  expect(reversed[0]).toBe("/p69");
 });
 
 test("selection is capped at MAX_SELECTED_PATHS in visual order before publishing", () => {
