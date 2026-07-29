@@ -7,7 +7,7 @@ import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { deliverConversationMessage } from "@/lib/delivery";
 import { structuredHostsEnabled } from "@/lib/runtime/flags";
 
-import { retireOutgoingManager } from "./retire";
+import { loadTasks } from "@/lib/tasks/store";
 import {
   beginOrchestratorSeatIntent,
   completeOrchestratorSeatIntent,
@@ -55,10 +55,8 @@ export interface SeatCommandDependencies {
   /** Keep the legacy single-instance manager record pointing at the newest
       operator-selected seat, so the bridge follows the selection. */
   syncLegacyRecord(input: { conversationId: string; path: string | null; engine?: string; model?: string }): void;
-  /** Best-effort host retirement of a REVOKED predecessor. Authority is
-      already durably revoked before this runs; a predecessor that cannot be
-      stopped is powerless, not resurrected. */
-  retirePredecessor(conversationId: string, path: string | null): Promise<void>;
+  /** Bounded open work for a rotation handoff; empty when unknown. */
+  projectTasks(project: string): { id: string; status: string; text: string }[];
   now(): string;
 }
 
@@ -126,9 +124,9 @@ export const productionSeatCommandDependencies: SeatCommandDependencies = {
       ...(input.model ? { model: input.model } : {}),
     });
   },
-  retirePredecessor: async (conversationId, path) => {
-    await retireOutgoingManager(conversationId, path ?? "");
-  },
+  projectTasks: (project) => loadTasks()
+    .filter((task) => task.project === project && task.status !== "done")
+    .map((task) => ({ id: task.id, status: task.status, text: task.text })),
   now: () => new Date().toISOString(),
 };
 
@@ -158,14 +156,21 @@ function replayedSeatResponse(seat: OrchestratorSeat): SeatCommandResult {
   };
 }
 
-/** Activation epilogue shared by both modes: seat the conversation, revoke a
-    differing predecessor, sync the legacy record, then best-effort retire the
-    revoked incumbent's host. Retirement failure is reported, never fatal:
-    the durable revocation has already removed the predecessor's authority. */
+/**
+ * Activation epilogue shared by both modes: seat the conversation, revoke a
+ * differing predecessor, sync the legacy record.
+ *
+ * AXIS SEPARATION (two-axis contract): revocation removes MANAGER-LEVEL
+ * authority — manager voice and confirmation minting — and nothing else. The
+ * predecessor's session, host and ordinary Viewer access are untouched; its
+ * card stays on the board, linked to its successor by the durable lineage the
+ * seat store records. Ordinary permissions are axis 1 and no seat operation
+ * may reach them.
+ */
 async function activate(
   input: { project: string; clientRequestId: string; conversationId: string; path: string | null; engine?: string; model?: string },
   dependencies: SeatCommandDependencies,
-): Promise<{ seat: OrchestratorSeat; retireError: string | null } | null> {
+): Promise<{ seat: OrchestratorSeat } | null> {
   const completed = completeOrchestratorSeatIntent({
     project: input.project,
     clientRequestId: input.clientRequestId,
@@ -174,7 +179,6 @@ async function activate(
     now: dependencies.now(),
   });
   if (completed.kind === "missing") return null;
-  let retireError: string | null = null;
   if (completed.kind === "activated") {
     dependencies.syncLegacyRecord({
       conversationId: input.conversationId,
@@ -182,16 +186,8 @@ async function activate(
       ...(input.engine ? { engine: input.engine } : {}),
       ...(input.model ? { model: input.model } : {}),
     });
-    if (completed.revoked) {
-      const predecessor = dependencies.conversationTarget(completed.revoked.conversationId);
-      try {
-        await dependencies.retirePredecessor(completed.revoked.conversationId, predecessor?.path ?? null);
-      } catch (error) {
-        retireError = error instanceof Error ? error.message : String(error);
-      }
-    }
   }
-  return { seat: completed.seat, retireError };
+  return { seat: completed.seat };
 }
 
 export async function executeOrchestratorSeatRequest(
@@ -213,6 +209,9 @@ export async function executeOrchestratorSeatRequest(
   if (existingConversationId && !existingConversationId.startsWith("conversation_")) {
     return { status: 400, body: { error: "conversationId is invalid" } };
   }
+  const promptVersion = typeof rawBody.promptVersion === "number" && Number.isInteger(rawBody.promptVersion)
+    ? rawBody.promptVersion
+    : null;
 
   if (existingConversationId) {
     const target = dependencies.conversationTarget(existingConversationId);
@@ -224,6 +223,7 @@ export async function executeOrchestratorSeatRequest(
       clientRequestId,
       mode: "existing",
       conversationId: target.conversationId,
+      promptVersion,
       now: dependencies.now(),
     });
     if (begun.kind === "completed") return replayedSeatResponse(begun.seat);
@@ -234,7 +234,9 @@ export async function executeOrchestratorSeatRequest(
       /* Derived, never minted: a retry after a lost response reuses the same
          id and the delivery receipts answer it instead of delivering twice. */
       clientMessageId: `orchmandate_${clientRequestId}`,
-      text: mandate,
+      /* On a pending replay the ORIGINAL intent's mandate is what completes:
+         a retry that recomposed its text must not deliver a second variant. */
+      text: begun.kind === "replay" ? begun.seat.mandate : mandate,
     });
     if (!delivery.ok) {
       const error = delivery.error ?? "mandate delivery failed";
@@ -262,15 +264,18 @@ export async function executeOrchestratorSeatRequest(
         path: target.path,
         delivery: delivery.outcome ?? "delivered",
         seat: activated.seat,
-        ...(activated.retireError ? { retireError: activated.retireError } : {}),
       },
     };
   }
 
   /* Spawn mode: a fresh orchestrator whose FIRST PROMPT is the mandate, so the
      durable launch receipt is the exactly-once delivery mechanism. */
-  const begun = beginOrchestratorSeatIntent({ project, mandate, clientRequestId, mode: "spawn", now: dependencies.now() });
+  const begun = beginOrchestratorSeatIntent({ project, mandate, clientRequestId, mode: "spawn", promptVersion, now: dependencies.now() });
   if (begun.kind === "completed") return replayedSeatResponse(begun.seat);
+  /* A pending replay spawns the ORIGINAL intent's mandate: the spawn receipt is
+     matched by clientAttemptId AND request digest, so a recomposed retry would
+     otherwise conflict with its own first attempt. */
+  const spawnMandate = begun.kind === "replay" ? begun.seat.mandate : mandate;
 
   const spawnFields = ["engine", "model", "cwd", "effort", "fast", "accountId", "images", "roleParams", "allowSubagents"] as const;
   const spawnBody: Record<string, unknown> = {
@@ -278,7 +283,12 @@ export async function executeOrchestratorSeatRequest(
     role: "orchestrator",
     roleParams: rawBody.roleParams ?? { mode: "standard" },
     project,
-    ["prompt"]: mandate,
+    /* A fresh orchestrator spawns in the Viewer's own checkout unless the
+       caller names a directory — same default the legacy chat-button flow uses. */
+    cwd: typeof rawBody.cwd === "string" && rawBody.cwd.trim()
+      ? rawBody.cwd
+      : (process.env.LLV_ORCHESTRATOR_CWD?.trim() || process.cwd()),
+    ["prompt"]: spawnMandate,
     clientAttemptId: clientRequestId,
   };
   const spawned = await dependencies.spawn(spawnBody);
@@ -303,7 +313,79 @@ export async function executeOrchestratorSeatRequest(
     body: {
       ...spawned.body,
       seat: activated.seat,
-      ...(activated.retireError ? { retireError: activated.retireError } : {}),
+    },
+  };
+}
+
+const HANDOFF_TASK_CAP = 12;
+const HANDOFF_TASK_TEXT_CAP = 140;
+const HANDOFF_NOTES_CAP = 2_000;
+
+/**
+ * Rotation (two-axis contract): hand the seat to a fresh successor.
+ *
+ * The handoff is BOUNDED and durable-state-based: the successor's launch
+ * prompt carries the incumbent's mandate, the predecessor's identity and
+ * transcript path (the complete record of its decisions — reviewable whether
+ * the incumbent is alive or dead, which matters because a dead incumbent is a
+ * common reason to rotate), the project's open board tasks, and any caller
+ * notes. Designation switches atomically with the successor's activation; the
+ * predecessor loses MANAGER-LEVEL authority only — its session, host, card and
+ * ordinary Viewer access are untouched (axis 1) — and both cards stay linked
+ * by the bidirectional lineage the seat store records.
+ *
+ * Never automatic: context pressure only ever produces a recommendation
+ * (`./health`), and this function runs solely when explicitly called.
+ */
+export async function executeOrchestratorRotation(
+  rawBody: Record<string, unknown>,
+  dependencies: SeatCommandDependencies = productionSeatCommandDependencies,
+): Promise<SeatCommandResult> {
+  const project = typeof rawBody.project === "string" ? validExplicitProject(rawBody.project) : null;
+  if (!project) return { status: 400, body: { error: "project must be a valid project key" } };
+  const clientRequestId = text(rawBody.clientRequestId);
+  if (!CLIENT_REQUEST_ID.test(clientRequestId)) {
+    return { status: 400, body: { error: "clientRequestId must be 8-128 URL-safe characters" } };
+  }
+  const incumbent = orchestratorSeatFor(project).active;
+  if (!incumbent?.conversationId) {
+    return {
+      status: 409,
+      body: { error: "no orchestrator is designated for this project — use create_orchestrator instead of rotating", code: "no_incumbent" },
+    };
+  }
+
+  const predecessor = dependencies.conversationTarget(incumbent.conversationId);
+  const tasks = dependencies.projectTasks(project).slice(0, HANDOFF_TASK_CAP);
+  const notes = text(rawBody.handoffNotes).slice(0, HANDOFF_NOTES_CAP);
+  const handoff = [
+    "## Handoff from your predecessor (rotation)",
+    `You are replacing orchestrator conversation ${incumbent.conversationId} for project ${project}. Its manager authority is revoked; its session and card remain on the board, linked to yours.`,
+    predecessor?.path ?? incumbent.path
+      ? `Your predecessor's full transcript — decisions, blockers, in-flight work — is at: ${predecessor?.path ?? incumbent.path}. Review its recent turns before acting.`
+      : "Your predecessor's transcript path is not recorded; reconstruct state from the board before acting.",
+    tasks.length
+      ? `Open board tasks for this project:\n${tasks.map((task) => `- [${task.status}] ${task.text.slice(0, HANDOFF_TASK_TEXT_CAP)} (${task.id})`).join("\n")}`
+      : "No open board tasks are recorded for this project.",
+    ...(notes ? [`Notes from the caller:\n${notes}`] : []),
+  ].join("\n\n");
+
+  const baseMandate = text(rawBody.mandate) || incumbent.mandate;
+  const outcome = await executeOrchestratorSeatRequest({
+    project,
+    mandate: `${baseMandate}\n\n${handoff}`,
+    clientRequestId,
+    promptVersion: rawBody.promptVersion ?? incumbent.promptVersion,
+    ...(rawBody.engine !== undefined ? { engine: rawBody.engine } : {}),
+    ...(rawBody.model !== undefined ? { model: rawBody.model } : {}),
+    ...(rawBody.cwd !== undefined ? { cwd: rawBody.cwd } : {}),
+    ...(rawBody.accountId !== undefined ? { accountId: rawBody.accountId } : {}),
+  }, dependencies);
+  return {
+    status: outcome.status,
+    body: {
+      ...outcome.body,
+      rotatedFrom: { conversationId: incumbent.conversationId, path: predecessor?.path ?? incumbent.path, seatEpoch: incumbent.seatEpoch },
     },
   };
 }

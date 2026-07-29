@@ -3,8 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { executeOrchestratorSeatRequest, type SeatCommandDependencies } from "./seatCommand";
-import { orchestratorSeatFor } from "./seats";
+import { executeOrchestratorRotation, executeOrchestratorSeatRequest, type SeatCommandDependencies } from "./seatCommand";
+import { orchestratorRevocations, orchestratorSeatFor } from "./seats";
 import { readOrchestratorRecord } from "./store";
 
 let sandbox = "";
@@ -30,6 +30,8 @@ interface Recorded {
   spawns: Record<string, unknown>[];
   deliveries: { conversationId: string; clientMessageId: string; text: string }[];
   legacySyncs: { conversationId: string }[];
+  /** Ordinary-session mutations against either conversation. The two-axis
+      contract requires this to stay EMPTY on every seat operation. */
   retired: string[];
 }
 
@@ -46,7 +48,7 @@ function dependencies(overrides: Partial<SeatCommandDependencies> = {}): { deps:
     },
     conversationTarget: (conversationId) => ({ conversationId, path: `/tmp/${conversationId.slice(-4)}.jsonl` }),
     syncLegacyRecord: (input) => { recorded.legacySyncs.push({ conversationId: input.conversationId }); },
-    retirePredecessor: async (conversationId) => { recorded.retired.push(conversationId); },
+    projectTasks: () => [],
     now: () => AT,
     ...overrides,
   };
@@ -159,7 +161,7 @@ test("a failed delivery keeps the incumbent seated and reports a recoverable sta
   expect(recorded.legacySyncs).toEqual([]);
 });
 
-test("replacement revokes the predecessor durably and retires its host best-effort", async () => {
+test("AXIS 1/2 SEPARATION: replacement revokes MANAGER-LEVEL authority only — the predecessor's session is never touched", async () => {
   const { deps, recorded } = dependencies();
   await executeOrchestratorSeatRequest(spawnRequest(), deps);
   const result = await executeOrchestratorSeatRequest({
@@ -169,25 +171,11 @@ test("replacement revokes the predecessor durably and retires its host best-effo
     conversationId: OLD_ID,
   }, deps);
   expect(result.status).toBe(200);
-  expect(recorded.retired).toEqual([NEW_ID]);
+  /* Designation switched, predecessor durably revoked as manager… */
   expect(orchestratorSeatFor("proj-a").active?.conversationId).toBe(OLD_ID);
-});
-
-test("a predecessor host that cannot be stopped stays revoked: retirement failure is reported, not fatal", async () => {
-  const { deps } = dependencies();
-  await executeOrchestratorSeatRequest(spawnRequest(), deps);
-  const { deps: stubborn } = dependencies({
-    retirePredecessor: async () => { throw new Error("kill refused"); },
-  });
-  const result = await executeOrchestratorSeatRequest({
-    project: "proj-a",
-    mandate: "successor mandate",
-    clientRequestId: "req_00000005",
-    conversationId: OLD_ID,
-  }, stubborn);
-  expect(result.status).toBe(200);
-  expect(result.body.retireError).toBe("kill refused");
-  expect(orchestratorSeatFor("proj-a").active?.conversationId).toBe(OLD_ID);
+  /* …and its host and ordinary Viewer access are left exactly as they were:
+     revocation is an axis-2 act, killing a session would be an axis-1 one. */
+  expect(recorded.retired).toEqual([]);
 });
 
 test("an unknown existing conversation is refused before any intent exists", async () => {
@@ -200,6 +188,75 @@ test("an unknown existing conversation is refused before any intent exists", asy
   }, deps);
   expect(result.status).toBe(404);
   expect(orchestratorSeatFor("proj-a").pending).toBeNull();
+});
+
+test("rotation composes a bounded handoff, switches designation atomically, and links both cards", async () => {
+  const { deps } = dependencies();
+  await executeOrchestratorSeatRequest(spawnRequest(), deps);
+
+  const SUCCESSOR = "conversation_55555555-5555-4555-8555-555555555555";
+  const { deps: rotating, recorded } = dependencies({
+    spawn: async (body) => {
+      recorded2.push(body);
+      return { status: 200, body: { ok: true, conversationId: SUCCESSOR, path: "/tmp/successor.jsonl" } };
+    },
+    projectTasks: () => [
+      { id: "task_1", status: "doing", text: "Ship the handoff", },
+      { id: "task_2", status: "inbox", text: "Review the successor", },
+    ],
+  });
+  const recorded2: Record<string, unknown>[] = [];
+  const result = await executeOrchestratorRotation({
+    project: "proj-a",
+    clientRequestId: "req_00000010",
+    handoffNotes: "Prioritize the review queue.",
+  }, rotating);
+
+  expect(result.status).toBe(200);
+  expect(result.body.rotatedFrom).toMatchObject({ conversationId: NEW_ID });
+  const spawnedPrompt = String(recorded2[0]!.prompt);
+  /* Successor mandate = incumbent mandate + bounded handoff naming the
+     predecessor, its transcript, the open tasks and the caller's notes. */
+  expect(spawnedPrompt).toStartWith("own the board");
+  expect(spawnedPrompt).toContain(NEW_ID);
+  expect(spawnedPrompt).toContain("[doing] Ship the handoff (task_1)");
+  expect(spawnedPrompt).toContain("Prioritize the review queue.");
+
+  const { active } = orchestratorSeatFor("proj-a");
+  expect(active?.conversationId).toBe(SUCCESSOR);
+  /* Bidirectional lineage, both cards preserved: the seat names its
+     predecessor, the revocation names its successor, and nothing killed or
+     superseded the incumbent's session. */
+  expect(active?.predecessorConversationId).toBe(NEW_ID);
+  expect(orchestratorRevocations()).toEqual([expect.objectContaining({
+    conversationId: NEW_ID,
+    successorConversationId: SUCCESSOR,
+  })]);
+  expect(recorded.retired).toEqual([]);
+});
+
+test("rotation with no incumbent refuses and points at create", async () => {
+  const { deps } = dependencies();
+  const result = await executeOrchestratorRotation({ project: "proj-a", clientRequestId: "req_00000011" }, deps);
+  expect(result.status).toBe(409);
+  expect(result.body.code).toBe("no_incumbent");
+});
+
+test("a pending replay completes with the ORIGINAL mandate, not a recomposed one", async () => {
+  let attempts = 0;
+  const { deps, recorded } = dependencies({
+    spawn: async (body) => {
+      recorded.spawns.push(body);
+      attempts += 1;
+      return attempts === 1
+        ? { status: 500, body: { error: "transient" } }
+        : { status: 200, body: { ok: true, conversationId: NEW_ID, path: null } };
+    },
+  });
+  await executeOrchestratorSeatRequest(spawnRequest(), deps);
+  /* The retry recomposes a different mandate; the durable intent's text wins. */
+  await executeOrchestratorSeatRequest({ ...spawnRequest(), mandate: "recomposed differently" }, deps);
+  expect(recorded.spawns.map((body) => body.prompt)).toEqual(["own the board", "own the board"]);
 });
 
 test("validation refuses a missing project, empty mandate, and malformed request id", async () => {

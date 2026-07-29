@@ -68,8 +68,17 @@ test("replacement revokes the predecessor in the same write and bumps the epoch"
   const swapped = completeOrchestratorSeatIntent({ project: "proj-a", clientRequestId: "req_0000002", conversationId: "conversation_b", path: null, now: AT });
   expect(swapped.kind).toBe("activated");
   if (swapped.kind === "activated") {
-    expect(swapped.revoked).toEqual({ project: "proj-a", conversationId: "conversation_a", seatEpoch: 1, revokedAt: AT });
+    expect(swapped.revoked).toEqual({
+      project: "proj-a",
+      conversationId: "conversation_a",
+      seatEpoch: 1,
+      revokedAt: AT,
+      /* Bidirectional lineage: the revocation names its successor… */
+      successorConversationId: "conversation_b",
+    });
     expect(swapped.seat.seatEpoch).toBe(2);
+    /* …and the successor seat names its predecessor. */
+    expect(swapped.seat.predecessorConversationId).toBe("conversation_a");
   }
   expect(orchestratorSeatFor("proj-a").active?.conversationId).toBe("conversation_b");
 });

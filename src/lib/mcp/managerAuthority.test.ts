@@ -57,6 +57,8 @@ function activeSeat(conversationId: string, seatEpoch = 1): OrchestratorSeat {
     conversationId,
     path: MANAGER_PATH,
     mandate: "own the board",
+    promptVersion: null,
+    predecessorConversationId: null,
     state: "active",
     intent: { clientRequestId: "req_0000001", mode: "spawn", error: null },
     designatedAt: "2026-07-29T00:00:00.000Z",

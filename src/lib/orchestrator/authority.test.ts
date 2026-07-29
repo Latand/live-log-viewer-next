@@ -7,6 +7,8 @@ function seat(overrides: Partial<OrchestratorSeat> & { conversationId: string; p
   return {
     path: null,
     mandate: "m",
+    promptVersion: null,
+    predecessorConversationId: null,
     state: "active",
     intent: { clientRequestId: "req_0000001", mode: "spawn", error: null },
     designatedAt: "2026-07-29T00:00:00.000Z",

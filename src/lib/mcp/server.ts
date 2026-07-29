@@ -42,6 +42,10 @@ export const MCP_TOOL_NAMES = [
   "request_attention",
   "bridge_report",
   "bridge_directive",
+  "get_orchestrator",
+  "create_orchestrator",
+  "send_message_to_orchestrator",
+  "rotate_orchestrator",
 ] as const;
 
 export type McpToolName = typeof MCP_TOOL_NAMES[number];
@@ -74,6 +78,12 @@ const MUTATING_MCP_TOOL_NAMES = new Set<McpToolName>([
   /* Delivers an instruction to the manager. Its own derived id is what makes a
      retry idempotent, and the receipt must outlive the MCP process for that. */
   "bridge_directive",
+  /* Designation, delivery and rotation are durable side effects: a replayed
+     clientRequestId must return the original receipt, never designate, spawn
+     or deliver a second time. get_orchestrator is a read and stays bounded. */
+  "create_orchestrator",
+  "send_message_to_orchestrator",
+  "rotate_orchestrator",
 ]);
 
 export type McpToolArgs = Record<string, unknown> & { clientRequestId?: unknown };
@@ -974,6 +984,10 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   request_attention: "Move the operator's active Viewer to a typed target immediately — no confirmation prompt. The request is durably attributed to the calling session, and the operator keeps a one-action Return control that restores exactly where they were.",
   bridge_report: "Append one bounded report to the durable bridge log for the voice gateway to relay. Callable from any session; the origin is labeled server-side, a non-orchestrator report is visibly attributed to its own session, and only the designated orchestrator may carry a confirmation_request.",
   bridge_directive: "Relay the user's intent to the designated manager. The recipient and the delivery id are derived server-side, so a retry of the same root turn is one instruction, never two.",
+  get_orchestrator: "Read a project's designated orchestrator: designation, health and activity, model and prompt version, transcript size, message/tool/compaction counts, context usage (clearly labelled when estimated), predecessor lineage, and a bounded rotation recommendation. Never rotates anything itself.",
+  create_orchestrator: "Create a project's orchestrator: atomically spawn it, designate it as the project's selected orchestrator, and deliver the approved versioned mandate (editable). Idempotent by clientRequestId.",
+  send_message_to_orchestrator: "Deliver a message to the project's selected orchestrator, resolved server-side. A dead selected conversation is resumed; with none designated, one is created first and then delivered to. Idempotent by clientRequestId.",
+  rotate_orchestrator: "Explicitly hand a project's orchestrator seat to a fresh successor: bounded handoff (predecessor transcript reference, open tasks, optional notes), atomic designation switch, manager-authority-only revocation of the predecessor, bidirectional lineage. Never triggered automatically.",
 };
 
 const clientRequestIdSchema = z.string().min(1).describe("Stable idempotency key for this logical call.");
@@ -1200,6 +1214,35 @@ const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     ref: z.number().int().positive().optional().describe("seq of the report this answers, when it answers one."),
     nonce: z.string().optional().describe("With sha: the deploy authorization the user just gave aloud."),
     sha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
+  }).passthrough(),
+  get_orchestrator: z.object({
+    clientRequestId: clientRequestIdSchema,
+    project: z.string().min(1).describe("Project key whose designated orchestrator to report on."),
+  }).passthrough(),
+  create_orchestrator: z.object({
+    clientRequestId: clientRequestIdSchema,
+    project: z.string().min(1).describe("Project key this orchestrator will own."),
+    mandate: z.string().optional().describe("Edited mandate text; defaults to the approved versioned orchestrator prompt."),
+    cwd: z.string().optional().describe("Working directory; defaults to the Viewer's own checkout."),
+    engine: z.enum(["claude", "codex"]).optional(),
+    model: z.string().optional(),
+    effort: z.string().optional(),
+    accountId: z.string().optional(),
+  }).passthrough(),
+  send_message_to_orchestrator: z.object({
+    clientRequestId: clientRequestIdSchema,
+    project: z.string().min(1).describe("Project whose selected orchestrator receives the message."),
+    text: z.string().min(1).describe("The message. The recipient is resolved server-side; a dead session is resumed, a missing one created first."),
+  }).passthrough(),
+  rotate_orchestrator: z.object({
+    clientRequestId: clientRequestIdSchema,
+    project: z.string().min(1).describe("Project whose orchestrator seat rotates to a fresh successor."),
+    mandate: z.string().optional().describe("Successor mandate; defaults to the incumbent's current mandate."),
+    handoffNotes: z.string().optional().describe("Bounded free-text handoff notes appended for the successor."),
+    cwd: z.string().optional(),
+    engine: z.enum(["claude", "codex"]).optional(),
+    model: z.string().optional(),
+    accountId: z.string().optional(),
   }).passthrough(),
 };
 

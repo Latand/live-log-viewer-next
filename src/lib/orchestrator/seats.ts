@@ -53,6 +53,13 @@ export interface OrchestratorSeat {
   path: string | null;
   /** The mandate text delivered (active) or to be delivered (pending). */
   mandate: string;
+  /** Version of the approved default prompt the mandate was based on; null
+      when the designation predates versioning or the mandate is bespoke. */
+  promptVersion: number | null;
+  /** Rotation lineage: the conversation this seat replaced, when any. The
+      matching revocation carries `successorConversationId`, so the link is
+      bidirectional and both cards stay navigable. */
+  predecessorConversationId: string | null;
   state: "pending" | "active";
   intent: OrchestratorSeatIntent;
   designatedAt: string;
@@ -66,6 +73,8 @@ export interface OrchestratorRevocation {
       revocation is >= every active seat naming it. */
   seatEpoch: number;
   revokedAt: string;
+  /** The seat that replaced it — the other half of the rotation lineage. */
+  successorConversationId?: string | null;
 }
 
 interface OrchestratorSeatFile {
@@ -111,6 +120,8 @@ function normalizeSeat(value: unknown): OrchestratorSeat | null {
     conversationId: seat.conversationId ?? null,
     path: seat.path ?? null,
     mandate: seat.mandate,
+    promptVersion: typeof seat.promptVersion === "number" && Number.isInteger(seat.promptVersion) ? seat.promptVersion : null,
+    predecessorConversationId: typeof seat.predecessorConversationId === "string" ? seat.predecessorConversationId : null,
     state: seat.state,
     intent: { clientRequestId: intent.clientRequestId, mode: intent.mode, error: typeof intent.error === "string" ? intent.error : null },
     designatedAt: seat.designatedAt,
@@ -156,6 +167,7 @@ export function readOrchestratorSeatFile(): OrchestratorSeatFile {
           conversationId: revocation.conversationId,
           seatEpoch: revocation.seatEpoch,
           revokedAt: revocation.revokedAt,
+          successorConversationId: typeof revocation.successorConversationId === "string" ? revocation.successorConversationId : null,
         });
       }
     }
@@ -202,6 +214,7 @@ export function beginOrchestratorSeatIntent(input: {
   clientRequestId: string;
   mode: "spawn" | "existing";
   conversationId?: string | null;
+  promptVersion?: number | null;
   now?: string;
 }): BeginSeatIntentResult {
   const file = readOrchestratorSeatFile();
@@ -219,6 +232,8 @@ export function beginOrchestratorSeatIntent(input: {
     conversationId: input.conversationId ?? null,
     path: null,
     mandate: input.mandate,
+    promptVersion: input.promptVersion ?? null,
+    predecessorConversationId: null,
     state: "pending",
     intent: { clientRequestId: input.clientRequestId, mode: input.mode, error: null },
     designatedAt: input.now ?? new Date().toISOString(),
@@ -264,6 +279,9 @@ export function completeOrchestratorSeatIntent(input: {
       conversationId: active.conversationId,
       seatEpoch: active.seatEpoch,
       revokedAt: now,
+      /* Bidirectional lineage: the revocation names its successor, the
+         successor seat names its predecessor, and both cards stay navigable. */
+      successorConversationId: input.conversationId,
     };
     file.revocations.push(revoked);
   }
@@ -271,6 +289,7 @@ export function completeOrchestratorSeatIntent(input: {
     ...pending,
     conversationId: input.conversationId,
     path: input.path,
+    predecessorConversationId: revoked?.conversationId ?? pending.predecessorConversationId,
     state: "active",
     intent: { ...pending.intent, error: null },
     activatedAt: now,
