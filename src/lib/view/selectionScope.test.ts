@@ -11,7 +11,7 @@
  * snapshot.ts changed for #771. This file pins that down, so a later edit cannot
  * quietly turn `selected` into a scheme-only scope.
  */
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -23,11 +23,15 @@ import { composeSnapshot } from "./snapshot";
 import type { PresencePayloadV1 } from "./types";
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-selection-scope-"));
+/* The presence store is module state shared by every test file in the process.
+   Clearing it on BOTH sides means a session another file left behind cannot win
+   `choose()` over the one under test, and this file leaves nothing behind either. */
+beforeEach(() => resetPresenceForTest());
 afterEach(() => resetPresenceForTest());
 
 function presence(overrides: Partial<PresencePayloadV1> = {}): PresencePayloadV1 {
   return {
-    schemaVersion: 1, viewSessionId: "view-a", deviceId: "desktop", device: { kind: "desktop", browser: "chrome" },
+    schemaVersion: 1, viewSessionId: "selection-scope-view", deviceId: "selection-scope-device", device: { kind: "desktop", browser: "chrome" },
     visibility: "visible", sequence: 1, inputSequence: 1, project: "viewer", mode: "scheme",
     viewport: { width: 100, height: 100, dpr: 1 }, camera: null, focusedPath: null, selectedPaths: [], visiblePaths: [],
     board: { renderedRevision: 1, durableRevision: 1, sync: "current" }, ...overrides,
