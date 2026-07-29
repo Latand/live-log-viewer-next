@@ -183,7 +183,8 @@ const betaOf = () => file("/beta", "Beta", 1);
 const alpha = { path: "/alpha" };
 const beta = { path: "/beta" };
 
-function mount(files: FileEntry[] = [alphaOf(), betaOf()]): HTMLElement {
+function mount(files: FileEntry[] = [alphaOf(), betaOf()], manual?: string[]): HTMLElement {
+  if (manual) boards = { [PROJECT]: { ...seededBoard(), explicitManual: manual, prefs: { ...seededBoard().prefs, manual } } };
   const host = dom.document.createElement("div");
   dom.document.body.appendChild(host);
   const root = createRoot(host as unknown as Element);
@@ -258,6 +259,28 @@ test("a selection made in scheme mode is still published after switching to the 
   await settle();
   expect(slice().selectedPaths).toEqual(["/beta"]);
   expect(host.querySelector('[data-scheme-node="/beta"]')?.getAttribute("data-lasso-selected")).toBe("true");
+});
+
+test("a selected board card that the list has no row for is still published", async () => {
+  /* The real shape this was found in: the flat list only lists ROOT conversations,
+     so a selected non-root board card (a subagent leaf, or this compaction-chain
+     child) appears in no row. Projecting onto the list's rows and stopping there
+     published `[]` — indistinguishable, to the orchestrator, from the operator
+     having deselected everything. */
+  const leaf = { ...file("/alpha-child", "Child", 3), parent: "/alpha" };
+  const host = mount([alphaOf(), leaf], ["/alpha", leaf.path]);
+  expect(await waitFor(() => checkIn(host, leaf.path) !== null)).toBe(true);
+  await settle();
+  clickCheck(host, leaf.path);
+  await settle();
+  expect(slice().selectedPaths).toEqual([leaf.path]);
+
+  clickViewTab(host, "list");
+  expect(await waitFor(() => slice().mode === "list")).toBe(true);
+  await settle();
+  /* The leaf is in no list row, and is published anyway. */
+  expect(slice().visiblePaths).not.toContain(leaf.path);
+  expect(slice().selectedPaths).toEqual([leaf.path]);
 });
 
 test("the list publishes a multi-card selection in its own row order", async () => {
@@ -335,6 +358,36 @@ function rescan(files: FileEntry[]) {
     ),
   );
 }
+
+test("the phone publishes a member its own board order does not place", async () => {
+  const desktop = mount();
+  expect(await waitFor(() => checkIn(desktop, "/beta") !== null)).toBe(true);
+  await settle();
+  clickCheck(desktop, "/beta");
+  await settle();
+  expect(slice().selectedPaths).toEqual(["/beta"]);
+
+  /* Close /beta's window: it leaves the board layout while its conversation stays
+     in the scan, so the phone — whose order IS the board — has no position for it. */
+  const closeBeta = Array.from(desktop.querySelectorAll('[data-scheme-node="/beta"] button')).find(
+    (button) => (button.getAttribute("aria-label") ?? "").startsWith("Remove column"),
+  ) as HTMLButtonElement | undefined;
+  expect(closeBeta).toBeTruthy();
+  flushSync(() => closeBeta!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true, cancelable: true }) as never));
+  expect(await waitFor(() => desktop.querySelector('[data-scheme-node="/beta"]') === null)).toBe(true);
+  await settle();
+
+  flushSync(() => roots.pop()!.unmount());
+  await settle();
+  mobile = true;
+  mount();
+  expect(await waitFor(() => slice().mode === "mobile-focus")).toBe(true);
+  await settle();
+  /* Not on the phone's board, and published anyway — the set is what the
+     orchestrator needs, and this view is not the authority on membership. */
+  expect(slice().visiblePaths).not.toContain("/beta");
+  expect(slice().selectedPaths).toEqual(["/beta"]);
+});
 
 test("a conversation that disappears from the scan is dropped from the SET, not just from this view's order", async () => {
   const host = mount();

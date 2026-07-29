@@ -1440,8 +1440,10 @@ export function ProjectDashboard({
      When the scheme is shown, SchemeBoard / MobileFocusView owns the slice.
 
      `selectedPaths` is the SAME canonical set the scheme publishes, projected
-     onto this view's order (see selectionInOrder) — switching out of scheme mode
-     must never look like the operator deselected everything.
+     onto this view's order (see selectionInOrder). `includeUnordered` keeps a
+     member this list has no row for — it only lists ROOT conversations, so a
+     selected subagent leaf appears in none of them — because switching out of
+     scheme mode must never look like the operator deselected everything.
 
      `visiblePaths` falls back to the board's placed conversation windows when
      the history list has no rows of its own: an operator whose project is
@@ -1455,7 +1457,7 @@ export function ProjectDashboard({
     /* A quiet history list is "list" on either platform; a truly empty project
        on the phone is the mobile-focus empty state. */
     const mode = listAvailable ? "list" : isMobile ? "mobile-focus" : "list";
-    viewBus.reportSlice({ mode, focusedPath: null, selectedPaths: selectionInOrder(order, board.selection), visiblePaths, camera: null });
+    viewBus.reportSlice({ mode, focusedPath: null, selectedPaths: selectionInOrder(order, board.selection, { includeUnordered: true }), visiblePaths, camera: null });
   }, [projectView, schemeAvailable, listAvailable, historyRows, isMobile, boardWindowSignature, board.selection]);
 
   /* Shelf totals for the phone header trigger (issue #419 reopened). The full

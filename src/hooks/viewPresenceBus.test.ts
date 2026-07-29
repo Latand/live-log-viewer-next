@@ -67,13 +67,40 @@ test("one selection, three per-view orders — the #771 publication contract", (
   expect([...selected]).toEqual(["/c", "/a", "/b"]);
 });
 
-test("a view that does not render a selected path simply omits it, and keeps the rest", () => {
+test("the scheme omits a member its board does not place, and that is the only omitting view", () => {
   const selected = new Set(["/a", "/b"]);
-  /* Omission from ONE view's published order is not removal from the set: the
-     canonical selection outlives every view (see pruneSelection). */
+  /* Omission from the scheme's order is not removal from the set: the canonical
+     selection outlives every view (see pruneSelection). */
   expect(selectionInOrder(["/a"], selected)).toEqual(["/a"]);
   expect(selectionInOrder([], selected)).toEqual([]);
   expect(selectionInOrder(["/x", "/b"], selected)).toEqual(["/b"]);
+});
+
+test("the list and the phone publish the WHOLE set — a member with no row is appended", () => {
+  const selected = new Set(["/root", "/root/subagents/leaf"]);
+  /* The real case: the flat list only lists ROOT conversations, so a selected
+     subagent leaf appears in no row. Dropping it there would make a mode switch
+     read as "the operator deselected everything" — the #771 regression itself. */
+  expect(selectionInOrder(["/root"], selected, { includeUnordered: true })).toEqual(["/root", "/root/subagents/leaf"]);
+  /* View-ordered members first, in the view's order; the rest in the set's order. */
+  expect(selectionInOrder(["/root/subagents/leaf"], selected, { includeUnordered: true })).toEqual(["/root/subagents/leaf", "/root"]);
+  /* A view that renders none of them still publishes all of them. */
+  expect(selectionInOrder([], selected, { includeUnordered: true })).toEqual(["/root", "/root/subagents/leaf"]);
+  /* An empty selection stays empty — nothing is invented. */
+  expect(selectionInOrder(["/root"], new Set(), { includeUnordered: true })).toEqual([]);
+  /* An order naming the same path twice must not publish it twice. */
+  expect(selectionInOrder(["/root", "/root"], selected, { includeUnordered: true })).toEqual(["/root", "/root/subagents/leaf"]);
+});
+
+test("the cap holds across both phases of the complete projection", () => {
+  const paths = Array.from({ length: 70 }, (_, i) => `/p${String(i).padStart(2, "0")}`);
+  const all = new Set(paths);
+  /* Only two paths are in this view's order; the appended remainder must still
+     stop at the cap the server enforces. */
+  const out = selectionInOrder(["/p69", "/p68"], all, { includeUnordered: true });
+  expect(out.length).toBe(MAX_SELECTED_PATHS);
+  expect(out.slice(0, 2)).toEqual(["/p69", "/p68"]);
+  expect(new Set(out).size).toBe(out.length);
 });
 
 test("every view's projection is capped at MAX_SELECTED_PATHS in that view's order", () => {

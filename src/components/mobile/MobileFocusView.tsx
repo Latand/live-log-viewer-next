@@ -306,10 +306,11 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
         ? [activeNode.file.path]
         : [];
     /* The SAME canonical selection the desktop board writes, projected onto the
-       phone's own board order (#771). It used to hardcode `[]`, so a selection
-       made on the desktop — or on this phone's map — vanished from the snapshot
-       as soon as this view took over the slice. */
-    viewBus.reportSlice({ mode: mapOpen ? "mobile-map" : "mobile-focus", focusedPath, selectedPaths: selectionInOrder(boardOrder, board.selection), visiblePaths, camera: null });
+       phone's own board order (#771), with members this order does not mention
+       appended rather than dropped. It used to hardcode `[]`, so a selection made
+       on the desktop — or on this phone's map — vanished from the snapshot as
+       soon as this view took over the slice. */
+    viewBus.reportSlice({ mode: mapOpen ? "mobile-map" : "mobile-focus", focusedPath, selectedPaths: selectionInOrder(boardOrder, board.selection, { includeUnordered: true }), visiblePaths, camera: null });
   }, [activeNode, mapOpen, layout, board.selection]);
 
   /* When the focused pane is a pipeline stage, a compact chain row rides above

@@ -97,29 +97,51 @@ export function schemeVisiblePaths(layout: SchemeLayout, cam: CameraLike, vp: { 
  * THE `selectedPaths` ORDERING CONTRACT (#771), one rule for all three
  * publishers: `selectedPaths` is the canonical selection PROJECTED ONTO THE
  * CURRENT VIEW'S RENDER ORDER. The set is the same in every view — it lives at
- * project scope and outlives any of them — and only the order differs: the
+ * project scope and outlives any of them — and only the ORDER differs: the
  * scheme walks its layout nodes, the list walks its rows, the phone walks its
- * own board order. The stored set is never reordered by publishing it, and a
- * path the current view does not render is NOT dropped from the set — it simply
- * has no position in this view's order, so it is not listed here.
+ * own board order. Publishing never reorders the stored set.
+ *
+ * `includeUnordered` decides what happens to a member this view's order does not
+ * mention, and the two answers are both deliberate:
+ *
+ * - The SCHEME passes false. Its order IS the board, so a path the board does not
+ *   place has no board presence to report, and this keeps `orderedSelection`
+ *   byte-identical to what it always published.
+ * - The LIST and the PHONE pass true. Their orders are not the authority on
+ *   membership — the list only lists ROOT conversations, so a selected subagent
+ *   leaf appears in no row at all. Dropping it there would make a mode switch
+ *   indistinguishable from the operator deselecting everything, which is exactly
+ *   the regression this issue is about. Those members are appended after the
+ *   view-ordered ones, in the set's own order.
  *
  * Capped at MAX_SELECTED_PATHS in that same order — the server rejects a larger
  * selection outright (400), so a marquee over 65+ panes must not kill every
  * presence POST; the tail of the order is dropped, matching the visible cap.
  */
-export function selectionInOrder(order: readonly string[], selected: ReadonlySet<string>): string[] {
+export function selectionInOrder(
+  order: readonly string[],
+  selected: ReadonlySet<string>,
+  options: { includeUnordered?: boolean } = {},
+): string[] {
   if (selected.size === 0) return [];
   const out: string[] = [];
+  const seen = new Set<string>();
   for (const path of order) {
-    if (selected.has(path)) {
-      out.push(path);
-      if (out.length >= MAX_SELECTED_PATHS) break;
-    }
+    if (!selected.has(path) || seen.has(path)) continue;
+    seen.add(path);
+    out.push(path);
+    if (out.length >= MAX_SELECTED_PATHS) return out;
+  }
+  if (!options.includeUnordered) return out;
+  for (const path of selected) {
+    if (seen.has(path)) continue;
+    out.push(path);
+    if (out.length >= MAX_SELECTED_PATHS) return out;
   }
   return out;
 }
 
-/** The scheme's projection: its layout node order. */
+/** The scheme's projection: its layout node order, members off the board omitted. */
 export function orderedSelection(layout: SchemeLayout, selected: ReadonlySet<string>): string[] {
   return selectionInOrder(layout.nodes.map((node) => node.file.path), selected);
 }
