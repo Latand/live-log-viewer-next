@@ -41,6 +41,13 @@ import {
   type SpawnRejection,
 } from "./spawnAdmission";
 import { sessionKeyFromTranscript, sessionKeyId, type SessionKey } from "./sessionKey";
+import {
+  defaultRegistrySqliteFilename,
+  publishRegistryBackendIdentity,
+  registryBackendModeFromEnvironment,
+  resolveRegistryBackend,
+  type RegistryBackendResolution,
+} from "./registryBackendIdentity";
 import { SqliteAgentRegistryStore, type SqliteRegistrySnapshot } from "./sqliteRegistryStore";
 import type { ResumePaneRecord } from "@/lib/resumePanesFile";
 import { assertStructuredTextEnvelope, parseStructuredImageRefs, structuredContent, type StructuredImageRef } from "@/lib/runtime/structuredContent";
@@ -2465,6 +2472,11 @@ export type AgentRegistrySqliteMode = "off" | "dual-write" | "read" | "sqlite";
 
 export interface AgentRegistryStorageOptions {
   sqliteMode?: AgentRegistrySqliteMode;
+  /** Resolve (and, for a writer, publish) the durable backend identity instead
+      of trusting this process's environment. Only the process-wide registry
+      sets it: a reader that guesses wrong opens a store the writer does not
+      own. See {@link resolveRegistryBackend}. */
+  resolveBackendIdentity?: boolean;
   /** Grant bound for the MCP origin rebound (issue #739). Production omits it;
       a test supplies a policy that HAS a grantable connector, since the shipped
       bound has none and an empty bound proves nothing about the origin rule. */
@@ -2502,13 +2514,7 @@ export class RegistryParityError extends Error {
 /** Pure env read: lets health/capability probes answer without paying the
     full registry load (a multi-MB JSON parse) on first touch. */
 export function sqliteModeFromEnvironment(): AgentRegistrySqliteMode {
-  const configured = process.env.LLV_AGENT_REGISTRY_SQLITE ?? "off";
-  if (configured === "off" || configured === "dual-write" || configured === "read" || configured === "sqlite") return configured;
-  throw new Error("LLV_AGENT_REGISTRY_SQLITE must be off, dual-write, read, or sqlite");
-}
-
-function defaultSqliteFilename(jsonFilename: string): string {
-  return jsonFilename.endsWith(".json") ? `${jsonFilename.slice(0, -5)}.sqlite` : `${jsonFilename}.sqlite`;
+  return registryBackendModeFromEnvironment();
 }
 
 function sqliteMirrorRevision(filename: string): number | null {
@@ -2558,7 +2564,27 @@ export class AgentRegistry {
     private readonly lockTiming: RegistryLockTiming = SYSTEM_LOCK_TIMING,
     storage: AgentRegistryStorageOptions = {},
   ) {
-    this.sqliteMode = storage.sqliteMode ?? sqliteModeFromEnvironment();
+    /* Which store the PROCESS-WIDE registry opens is never guessed. A writer
+       states its mode in the environment and publishes it; every other process
+       — the MCP server above all, which Claude launches with an empty env —
+       resolves that published identity, and an unprovable identity throws here
+       rather than opening a stale JSON mirror behind the writer's back. That
+       mirror read is what reported every MCP caller as unidentified.
+
+       Identity resolution is a property of the shared registry, not of an
+       AgentRegistry value: only `agentRegistry()` opts in. Fixtures and the
+       SQLite child processes construct their own files directly and keep the
+       historical env default, so a test directory that happens to hold a store
+       is not mistaken for a deployment whose writer went silent. */
+    const backend: RegistryBackendResolution = storage.sqliteMode !== undefined
+      ? { mode: storage.sqliteMode, sqliteFilename: null, source: "explicit" }
+      : storage.resolveBackendIdentity === true
+        ? resolveRegistryBackend(filename)
+        : { mode: registryBackendModeFromEnvironment(), sqliteFilename: null, source: "unmanaged" };
+    this.sqliteMode = backend.mode;
+    const sqliteFilename = storage.sqliteFilename
+      ?? backend.sqliteFilename
+      ?? defaultRegistrySqliteFilename(filename);
     this.mcpGrantPolicy = storage.mcpGrantPolicy;
     this.mirrorCheckpointMs = Math.max(0, storage.mirrorCheckpointMs ?? 5_000);
     this.now = storage.now ?? Date.now;
@@ -2568,7 +2594,7 @@ export class AgentRegistry {
     this.beforeDualWriteMutationReplace = storage.beforeDualWriteMutationReplace;
     this.sqliteStore = this.sqliteMode === "off"
       ? null
-      : new SqliteAgentRegistryStore(storage.sqliteFilename ?? defaultSqliteFilename(filename), {
+      : new SqliteAgentRegistryStore(sqliteFilename, {
           initialSnapshot: readFile(filename, storage.mcpGrantPolicy),
           normalize: (value) => normalizeRegistry(value, storage.mcpGrantPolicy),
           mcpGrantPolicy: storage.mcpGrantPolicy,
@@ -2603,6 +2629,12 @@ export class AgentRegistry {
         throw new RegistryParityError("agent registry JSON mirror revision is ahead of SQLite");
       }
       this.mirrorSqliteSnapshot(sqlite);
+    }
+    /* Only the writer that was TOLD its mode publishes it. Test and child
+       constructions pass `sqliteMode` explicitly and stay silent, so a
+       fixture can never install an identity a reader would then trust. */
+    if (backend.source === "environment") {
+      publishRegistryBackendIdentity(filename, this.sqliteMode, sqliteFilename);
     }
   }
 
@@ -6056,7 +6088,7 @@ const registryProcessState = process as typeof process & {
 };
 
 export function agentRegistry(): AgentRegistry {
-  registryProcessState.__llvAgentRegistry ??= new AgentRegistry();
+  registryProcessState.__llvAgentRegistry ??= new AgentRegistry(undefined, undefined, undefined, { resolveBackendIdentity: true });
   return registryProcessState.__llvAgentRegistry;
 }
 
