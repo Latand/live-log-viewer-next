@@ -26,6 +26,13 @@ import {
   type TurnState,
   type ViewerConversationId,
 } from "@/lib/accounts/migration/contracts";
+import {
+  COMMITTED_MIGRATION_DELIVERY_REASON,
+  MIGRATION_DELIVERY_CANCELLATION_PREFIX,
+  migrationIntentCanEnroll,
+  ROLLED_BACK_MIGRATION_DELIVERY_REASON,
+  STOPPED_MIGRATION_DELIVERY_REASON,
+} from "@/lib/accounts/migration/intentLiveness";
 
 import type { AgentEngine } from "./cli";
 import { mcpServersForStoredSession, reboundAssembledMcpGrants, reboundEntryMcpGrant, reboundStoredMcpGrants, type McpGrantPolicy } from "./mcpAllowlist";
@@ -797,6 +804,36 @@ function queueAbandonedMigrationCleanup(
   };
 }
 
+function terminalizeCancelledMigrationDeliveries(
+  file: RegistryFile,
+  conversation: RegistryConversation,
+  reason: string,
+): void {
+  for (const delivery of Object.values(file.heldDeliveries)) {
+    if (delivery.conversationId !== conversation.id
+      || delivery.state === "delivered"
+      || delivery.state === "failed") continue;
+    terminalizeHeldDelivery(file, delivery, reason);
+  }
+}
+
+function terminalizeHeldDelivery(
+  file: RegistryFile,
+  delivery: HeldDelivery,
+  reason: string,
+): void {
+  const terminalReason = delivery.state === "delivery-uncertain"
+    ? `${reason}; a prior delivery attempt may have been delivered because its journal outcome is unknown`
+    : reason;
+  delivery.state = "failed";
+  delivery.text = "";
+  delivery.generationId = null;
+  delivery.assignedAt = null;
+  delivery.deliveredAt = null;
+  delivery.error = terminalReason.slice(0, 240);
+  syncDeliveryOperationOwnerState(file, delivery);
+}
+
 function reconfigureMigrationRequestId(owner: { operationId: string; revision: number }): string {
   return `reconfigure:${owner.operationId}:${owner.revision}`;
 }
@@ -822,19 +859,7 @@ function retireReconfigureOwnedMigration(
   }
   queueAbandonedMigrationCleanup(file, conversation, changedAt);
   abandonPendingContinuityPaths(conversation);
-  const source = conversation.generations.find((generation) => generation.id === migration.sourceGenerationId)
-    ?? conversation.generations.at(-1);
-  if (!source) throw new Error("conversation has no source generation");
-  for (const delivery of Object.values(file.heldDeliveries)) {
-    if (delivery.conversationId !== conversation.id
-      || delivery.state === "delivered"
-      || delivery.state === "delivery-uncertain") continue;
-    delivery.state = "assigned";
-    delivery.generationId = source.id;
-    delivery.assignedAt = changedAt;
-    delivery.error = null;
-    syncDeliveryOperationOwnerState(file, delivery);
-  }
+  terminalizeCancelledMigrationDeliveries(file, conversation, STOPPED_MIGRATION_DELIVERY_REASON);
   conversation.migration = {
     ...migration,
     phase: "rolled-back",
@@ -1604,7 +1629,8 @@ function compactDeliveryReservations(file: RegistryFile, onlyConversationId?: Vi
       const group = deliveredGroups.get(canonicalId) ?? [];
       group.push(delivery);
       deliveredGroups.set(canonicalId, group);
-    } else if (delivery.state === "failed") {
+    } else if (delivery.state === "failed"
+      && !delivery.error?.startsWith(MIGRATION_DELIVERY_CANCELLATION_PREFIX)) {
       const group = failedGroups.get(canonicalId) ?? [];
       group.push(delivery);
       failedGroups.set(canonicalId, group);
@@ -3906,7 +3932,10 @@ export class AgentRegistry {
        birth account. The already-active engine-wide migration intent still
        applies to the new conversation through the existing coordinator
        contract; a conversation-scoped reseat moves only its own thread. */
-    const activeIntent = Object.values(file.migrationIntents).find((intent) => intent.engine === conversation.engine && intent.state === "draining" && engineScopedIntent(intent));
+    const activeIntent = Object.values(file.migrationIntents).find((intent) =>
+      intent.engine === conversation.engine
+      && engineScopedIntent(intent)
+      && migrationIntentCanEnroll(file, intent, Date.parse(createdAt)));
     const source = conversation.generations.at(-1);
     if (activeIntent && source && source.accountId !== activeIntent.targetId && !conversation.migration) {
       conversation.migration = {
@@ -5031,18 +5060,7 @@ export class AgentRegistry {
         if (!conversation.migration || !retiredIntentIds.has(conversation.migration.intentId)) continue;
         abandonPendingContinuityPaths(conversation);
         queueAbandonedMigrationCleanup(file, conversation, changedAt);
-        const source = conversation.generations.find((generation) => generation.id === conversation.migration?.sourceGenerationId)
-          ?? conversation.generations.at(-1);
-        if (source) {
-          for (const delivery of Object.values(file.heldDeliveries)) {
-            if (delivery.conversationId !== conversation.id || delivery.state === "delivered" || delivery.state === "delivery-uncertain") continue;
-            delivery.state = "assigned";
-            delivery.generationId = source.id;
-            delivery.assignedAt = changedAt;
-            delivery.error = null;
-            syncDeliveryOperationOwnerState(file, delivery);
-          }
-        }
+        terminalizeCancelledMigrationDeliveries(file, conversation, STOPPED_MIGRATION_DELIVERY_REASON);
         conversation.migration = null;
         conversation.updatedAt = changedAt;
         file.conversationRevision[conversation.engine] += 1;
@@ -5106,16 +5124,7 @@ export class AgentRegistry {
           if (source && conversation.migration && conversation.migration.phase !== "committed") {
             abandonPendingContinuityPaths(conversation);
             queueAbandonedMigrationCleanup(file, conversation, changedAt);
-            for (const delivery of Object.values(file.heldDeliveries)) {
-              if (delivery.conversationId !== conversation.id
-                || delivery.state === "delivered"
-                || delivery.state === "delivery-uncertain") continue;
-              delivery.state = "assigned";
-              delivery.generationId = source.id;
-              delivery.assignedAt = changedAt;
-              delivery.error = null;
-              syncDeliveryOperationOwnerState(file, delivery);
-            }
+            terminalizeCancelledMigrationDeliveries(file, conversation, STOPPED_MIGRATION_DELIVERY_REASON);
             conversation.migration = null;
             conversation.updatedAt = changedAt;
           }
@@ -5550,21 +5559,19 @@ export class AgentRegistry {
       );
       conversation.migration = { ...migration, phase: "committed", updatedAt: now() };
       conversation.updatedAt = now();
-      for (const delivery of Object.values(file.heldDeliveries)) {
-        if (delivery.conversationId !== id || delivery.state !== "held") continue;
-        delivery.state = "assigned";
-        delivery.generationId = generation.id;
-        delivery.assignedAt = committedAt;
-        delivery.error = null;
-        syncDeliveryOperationOwnerState(file, delivery);
-      }
+      terminalizeCancelledMigrationDeliveries(file, conversation, COMMITTED_MIGRATION_DELIVERY_REASON);
       file.conversationRevision[conversation.engine] += 1;
       file.engineRouting[conversation.engine].revision += 1;
       return clone(conversation);
     });
   }
 
-  setMigrationIntentState(id: string, state: MigrationIntent["state"], expectedRevision?: number): MigrationIntent {
+  setMigrationIntentState(
+    id: string,
+    state: MigrationIntent["state"],
+    expectedRevision?: number,
+    stoppedDeliveryReason: string = STOPPED_MIGRATION_DELIVERY_REASON,
+  ): MigrationIntent {
     return this.mutate((file) => {
       const intent = file.migrationIntents[id];
       if (!intent) throw new Error("migration intent is unknown");
@@ -5587,18 +5594,8 @@ export class AgentRegistry {
           }
           if (conversation.migration?.intentId !== id || conversation.migration.phase === "committed") continue;
           queueAbandonedMigrationCleanup(file, conversation, intent.updatedAt);
-          const source = conversation.generations.find((generation) => generation.id === conversation.migration?.sourceGenerationId)
-            ?? conversation.generations.at(-1);
-          if (!source) continue;
           conversation.migration = { ...conversation.migration, phase: "rolled-back", error: null, errorCode: null, updatedAt: intent.updatedAt };
-          for (const delivery of Object.values(file.heldDeliveries)) {
-            if (delivery.conversationId !== conversation.id || delivery.state === "delivered" || delivery.state === "delivery-uncertain") continue;
-            delivery.state = "assigned";
-            delivery.generationId = source.id;
-            delivery.assignedAt = intent.updatedAt;
-            delivery.error = null;
-            syncDeliveryOperationOwnerState(file, delivery);
-          }
+          terminalizeCancelledMigrationDeliveries(file, conversation, stoppedDeliveryReason.slice(0, 240));
         }
       }
       advanceMigrationScopeRevision(file, intent.engine, signature, paths);
@@ -5778,7 +5775,9 @@ export class AgentRegistry {
         error: null,
       };
       compactDeliveryReservations(file, canonicalId);
-      const count = Object.values(file.heldDeliveries).filter((item) => item.conversationId === canonicalId && item.state !== "delivered").length;
+      const count = Object.values(file.heldDeliveries).filter((item) =>
+        item.conversationId === canonicalId
+        && ["held", "assigned", "delivery-uncertain"].includes(item.state)).length;
       if (count >= 100) throw new Error("held delivery limit reached for conversation");
       file.heldDeliveries[held.id] = held;
       if (commandInput.operationId) {
@@ -5827,6 +5826,15 @@ export class AgentRegistry {
     return clone(Object.values(snapshot.heldDeliveries)
       .filter((item) => item.conversationId === canonicalId && item.state !== "delivered")
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)));
+  }
+
+  terminalizeHeldDelivery(id: string, reason: string): HeldDelivery {
+    return this.mutate((file) => {
+      const delivery = file.heldDeliveries[id];
+      if (!delivery) throw new Error("held delivery is unknown");
+      if (delivery.state !== "delivered") terminalizeHeldDelivery(file, delivery, reason);
+      return clone(delivery);
+    });
   }
 
   compactDeliveryReservations(): number {
@@ -6052,9 +6060,6 @@ export class AgentRegistry {
       if (expectedRevision !== undefined && conversation.migration.revision !== expectedRevision) throw new Error("migration revision is stale");
       const paths = new Set([conversation.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
       const signature = migrationReadinessSignature(file, conversation.engine, paths);
-      const source = conversation.generations.find((generation) => generation.id === conversation.migration?.sourceGenerationId)
-        ?? conversation.generations.at(-1);
-      if (!source) throw new Error("conversation has no source generation");
       const rolledAt = now();
       queueAbandonedMigrationCleanup(file, conversation, rolledAt);
       const route = file.engineRouting[conversation.engine];
@@ -6064,14 +6069,7 @@ export class AgentRegistry {
           updatedAt: rolledAt,
         };
       }
-      for (const delivery of Object.values(file.heldDeliveries)) {
-        if (delivery.conversationId !== canonicalId || delivery.state === "delivered" || delivery.state === "delivery-uncertain") continue;
-        delivery.state = "assigned";
-        delivery.generationId = source.id;
-        delivery.assignedAt = rolledAt;
-        delivery.error = null;
-        syncDeliveryOperationOwnerState(file, delivery);
-      }
+      terminalizeCancelledMigrationDeliveries(file, conversation, ROLLED_BACK_MIGRATION_DELIVERY_REASON);
       conversation.migration = { ...conversation.migration, phase: "rolled-back", error: null, errorCode: null, updatedAt: rolledAt };
       conversation.updatedAt = rolledAt;
       advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
