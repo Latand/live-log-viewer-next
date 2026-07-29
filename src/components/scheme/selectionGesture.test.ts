@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { planBackgroundPress, toggleSelected } from "./selectionGesture";
+import { commitMarqueeSelection, planBackgroundPress, pruneSelection, toggleSelected } from "./selectionGesture";
 
 const mouse = { pointerType: "mouse", isPrimary: true, button: 0 };
 
@@ -70,5 +70,42 @@ describe("selection toggle reducer (#771 gap 2)", () => {
     const next = toggleSelected(start, "/b");
     expect([...start]).toEqual(["/a"]);
     expect(next).not.toBe(start);
+  });
+});
+
+describe("marquee commit reducer", () => {
+  test("a plain release replaces the set, an additive one unions into it", () => {
+    const start: ReadonlySet<string> = new Set(["/a"]);
+    expect([...commitMarqueeSelection(start, ["/b", "/c"], false)]).toEqual(["/b", "/c"]);
+    expect([...commitMarqueeSelection(start, ["/b", "/c"], true)]).toEqual(["/a", "/b", "/c"]);
+  });
+
+  test("an empty plain release clears, an empty additive release changes nothing", () => {
+    const start: ReadonlySet<string> = new Set(["/a"]);
+    expect([...commitMarqueeSelection(start, [], false)]).toEqual([]);
+    expect(commitMarqueeSelection(start, [], true)).toBe(start);
+  });
+});
+
+describe("selection pruning (#771 — the mode-switch trap)", () => {
+  test("keeps every path whose conversation still exists", () => {
+    const selected = new Set(["/a", "/b"]);
+    /* The pruning input is what EXISTS, never what the current view renders: the
+       list mode draws neither of these as a board node, and both must survive. */
+    expect(pruneSelection(selected, new Set(["/a", "/b", "/c"]))).toBe(selected);
+    expect(pruneSelection(selected, new Set(["/b", "/a"]))).toBe(selected);
+  });
+
+  test("drops only the paths that are gone, keeping the rest in order", () => {
+    const selected = new Set(["/a", "/b", "/c"]);
+    const pruned = pruneSelection(selected, new Set(["/c", "/a"]));
+    expect(pruned).not.toBe(selected);
+    expect([...pruned]).toEqual(["/a", "/c"]);
+    expect([...pruneSelection(selected, new Set())]).toEqual([]);
+  });
+
+  test("returns the same reference when nothing was dropped, so a store write bails", () => {
+    const empty: ReadonlySet<string> = new Set();
+    expect(pruneSelection(empty, new Set(["/a"]))).toBe(empty);
   });
 });

@@ -53,3 +53,38 @@ export function toggleSelected(paths: ReadonlySet<string>, path: string): Readon
   if (!next.delete(path)) next.add(path);
   return next;
 }
+
+/** A marquee release: additive unions the intersected paths into the set, a
+    plain drag replaces it. An empty additive release changes nothing. */
+export function commitMarqueeSelection(
+  paths: ReadonlySet<string>,
+  committed: readonly string[],
+  additive: boolean,
+): ReadonlySet<string> {
+  if (!additive) return new Set(committed);
+  if (committed.length === 0) return paths;
+  const next = new Set(paths);
+  for (const path of committed) next.add(path);
+  return next;
+}
+
+/**
+ * THE ONLY GROUND FOR DROPPING A SELECTED PATH: the conversation no longer
+ * exists. `existing` is the set of paths that still exist — the SCANNED files —
+ * and never one view's layout.
+ *
+ * The selection outlives every view (it lives beside the durable board, not
+ * inside the component that drew it), so pruning it against what the current
+ * view happens to render would delete it on a mode switch: a path absent from
+ * the scheme's nodes may well be a list row, and vice versa. That is the same
+ * bug one layer up.
+ *
+ * Returns the same reference when nothing was dropped, so the store's write
+ * bails out instead of cascading a render.
+ */
+export function pruneSelection(paths: ReadonlySet<string>, existing: ReadonlySet<string>): ReadonlySet<string> {
+  for (const path of paths) {
+    if (!existing.has(path)) return new Set([...paths].filter((selected) => existing.has(selected)));
+  }
+  return paths;
+}
