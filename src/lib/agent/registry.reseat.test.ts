@@ -304,6 +304,59 @@ test("one hundred cancelled deliveries stay auditable without blocking a fresh a
   expect(fresh).toMatchObject({ state: "assigned", attempts: 0 });
 });
 
+test("migration cancellation blanks payload text while preserving audit metadata", () => {
+  const { store, id } = seededRegistry("off", registryFile());
+  const intent = store.commitMigrationIntent({
+    engine: "codex",
+    targetId: "healthy",
+    origin: "manual",
+    requestId: "redact-cancelled-payload",
+    expectedRevision: store.engineRouting("codex").revision,
+  });
+  const held = store.holdDelivery(id, "fixture payload", "redact-cancelled-payload");
+
+  store.setMigrationIntentState(intent.id, "stopped", intent.revision);
+
+  expect(store.snapshot().heldDeliveries[held.id]).toMatchObject({
+    state: "failed",
+    text: "",
+    createdAt: held.createdAt,
+    clientMessageId: held.clientMessageId,
+    requestDigest: held.requestDigest,
+    attempts: 0,
+    assignedAt: null,
+    deliveredAt: null,
+    error: expect.stringContaining("migration was stopped"),
+  });
+});
+
+test("stopping a migration records that an uncertain delivery may already have landed", () => {
+  const { store, id } = seededRegistry("off", registryFile());
+  const generation = store.conversation(id)!.generations.at(-1)!;
+  const assigned = store.holdDelivery(id, "fixture payload", "uncertain-before-stop");
+  expect(store.beginDeliveryAttempt(assigned.id, generation.id)).toMatchObject({
+    state: "delivery-uncertain",
+    attempts: 1,
+  });
+  const intent = store.commitMigrationIntent({
+    engine: "codex",
+    targetId: "healthy",
+    origin: "manual",
+    requestId: "stop-uncertain",
+    expectedRevision: store.engineRouting("codex").revision,
+  });
+
+  store.setMigrationIntentState(intent.id, "stopped", intent.revision);
+
+  expect(store.snapshot().heldDeliveries[assigned.id]).toMatchObject({
+    state: "failed",
+    text: "",
+    attempts: 1,
+    generationId: null,
+    error: expect.stringContaining("may have been delivered"),
+  });
+});
+
 test("repeat reseat clicks never mint a second successor operation", () => {
   const { store, id } = seededRegistry("off", registryFile());
   const first = store.requestConversationReseat(id, "healthy");

@@ -7,11 +7,13 @@ import { AgentRegistry, MigrationRevisionError, type ConversationObservation } f
 import { boardFor, mutateBoard, setBoardFileForTests } from "@/lib/board/store";
 import { tailRecordsResult } from "@/lib/scanner/activity";
 import type { FileEntry } from "@/lib/types";
+import { enqueueStructuredMessage } from "@/lib/runtime/structuredMessageDelivery";
 
 import { advanceConversationMigration, createMigrationIntent, drainHeldDeliveries, previewMigration, reconcileMigrationInventory, reconcileMigrations } from "./coordinator";
 import { emptyLaunchProfile, type ProviderReceipt, type SuccessorProviderPort } from "./contracts";
 import { oauthFailureWithRecoveryTail } from "./fixtures/claudeRecoveryTail";
 import { CodexForkOutcomeUnknownError, RegisteredSuccessorProvider, SuccessorPendingError } from "./provider";
+import { MIGRATION_DELIVERY_CANCELLATION_PREFIX } from "./intentLiveness";
 
 const roots: string[] = [];
 
@@ -2450,6 +2452,91 @@ describe("durable account migration coordinator", () => {
     });
   });
 
+  test("a runtime synchronization reservation survives migration ticks until its owner appears", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/deployment-window.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/deployment-window.jsonl")!;
+    const generation = conversation.generations.at(-1)!;
+    store.upsert({
+      key: { engine: conversation.engine, sessionId: generation.id },
+      artifactPath: generation.path,
+      cwd: generation.launchProfile.cwd,
+      accountId: generation.accountId,
+      launchProfile: generation.launchProfile,
+      status: "idle",
+      host: null,
+      structuredHost: {
+        kind: "codex-app-server",
+        endpoint: "stdio:deployment-window",
+        process: { pid: 101, startIdentity: "runtime-before-restart" },
+        eventCursor: 17,
+        protocolVersion: "v2",
+        writerClaimEpoch: 4,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      },
+      claimEpoch: 4,
+      claimOwner: "structured-host:runtime-before-restart",
+      pendingAction: null,
+    });
+    expect(await enqueueStructuredMessage({
+      path: generation.path,
+      conversationId: conversation.id,
+      clientMessageId: "deployment-window",
+      text: "fixture payload",
+      hasImages: false,
+    }, {
+      enabled: () => true,
+      client: () => null,
+      registry: () => store,
+      requestMigrationTick: () => {},
+    })).toMatchObject({ ok: true, outcome: "held" });
+
+    const duringDeployment = new AgentRegistry(store.filename);
+    let hostReady = false;
+    const delivered: string[] = [];
+    const delivery = {
+      async deliver({ clientMessageId }: { clientMessageId: string }) {
+        if (!hostReady) return "held" as const;
+        delivered.push(clientMessageId);
+        return "delivered" as const;
+      },
+    };
+    await reconcileMigrations(provider([]), delivery, duringDeployment);
+    await reconcileMigrations(provider([]), delivery, duringDeployment);
+    expect(duringDeployment.pendingDeliveries(conversation.id)[0]).toMatchObject({ state: "assigned" });
+
+    hostReady = true;
+    await reconcileMigrations(provider([]), delivery, duringDeployment);
+
+    expect(delivered).toEqual(["deployment-window"]);
+    expect(duringDeployment.pendingDeliveries(conversation.id)).toEqual([]);
+  });
+
+  test("more than one hundred upgrade-orphan cancellations retain their audit records", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/orphan-retention.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/orphan-retention.jsonl")!;
+    const ids: string[] = [];
+    for (let batch = 0; batch < 2; batch += 1) {
+      for (let index = 0; index < 60; index += 1) {
+        ids.push(store.holdDelivery(
+          conversation.id,
+          "fixture payload",
+          `upgrade-orphan-${batch}-${index}`,
+        ).id);
+      }
+      await reconcileMigrations(provider([]), { async deliver() { return "delivered"; } }, store);
+    }
+
+    store.compactDeliveryReservations();
+    const snapshot = store.snapshot();
+    expect(ids.every((id) => snapshot.heldDeliveries[id]?.state === "failed")).toBeTrue();
+    expect(ids.every((id) =>
+      snapshot.heldDeliveries[id]?.error?.startsWith(MIGRATION_DELIVERY_CANCELLATION_PREFIX))).toBeTrue();
+  });
+
   test("rollback terminalizes held delivery on the source generation", async () => {
     const store = registry();
     store.reconcileConversations([observation("/source.jsonl", "a", "idle")]);
@@ -2593,6 +2680,34 @@ describe("durable account migration coordinator", () => {
     });
   });
 
+  test("a fresh assigned reservation on a committed migration converges on the next tick", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/committed-fresh-source.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/committed-fresh-source.jsonl")!;
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "committed-fresh",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    await advanceConversationMigration(conversation.id, store, provider(["/committed-fresh-target.jsonl"]));
+    const current = store.conversation(conversation.id)!.generations.at(-1)!;
+    const fresh = store.holdDelivery(conversation.id, "fresh fixture", "committed-fresh");
+    expect(fresh).toMatchObject({ state: "assigned", generationId: current.id, attempts: 0 });
+
+    const delivered: string[] = [];
+    await reconcileMigrations(provider([]), {
+      async deliver({ clientMessageId }) {
+        delivered.push(clientMessageId);
+        return "delivered";
+      },
+    }, store);
+
+    expect(delivered).toEqual(["committed-fresh"]);
+    expect(store.pendingDeliveries(conversation.id)).toEqual([]);
+  });
+
   test("an ambiguous held delivery is claimed once and never replayed automatically", async () => {
     const store = registry();
     store.reconcileConversations([observation("/source.jsonl", "a", "idle")]);
@@ -2614,6 +2729,7 @@ describe("durable account migration coordinator", () => {
       attempts: 1,
       error: expect.stringContaining("migration was rolled back"),
     });
+    expect(store.pendingDeliveries(conversation.id)[0]?.error).toContain("may have been delivered");
   });
 
   test("a durable delivery port reconciles its uncertain claim to journal completion", async () => {

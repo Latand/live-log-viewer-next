@@ -888,7 +888,7 @@ export function terminalizeStaleUndeliverableHeldDeliveries(
     const rolledBackConversationIds = new Set(owned
       .filter((conversation) => conversation.migration?.phase === "rolled-back")
       .map((conversation) => conversation.id));
-    const activeIds = ids.filter((id) => {
+    let activeIds = ids.filter((id) => {
       const delivery = snapshot.heldDeliveries[id];
       if (!delivery || !rolledBackConversationIds.has(delivery.conversationId)) return true;
       const settled = registry.terminalizeHeldDelivery(id, ROLLED_BACK_MIGRATION_DELIVERY_REASON);
@@ -899,17 +899,24 @@ export function terminalizeStaleUndeliverableHeldDeliveries(
     const deliveryConversationIds = new Set(activeIds.map((id) =>
       snapshot.heldDeliveries[id]?.conversationId).filter((id): id is RegistryConversation["id"] => Boolean(id)));
     const noProgress = migrationIntentIsStale(snapshot, intent, now);
-    const hasLiveSource = owned.some((conversation) =>
-      migrationSourceHasLiveOwner(snapshot, conversation, probe, observedSourcePaths));
-    const deadRequestedSource = owned.some((conversation) =>
-      conversation.migration?.phase === "requested"
-      && deliveryConversationIds.has(conversation.id)
-      && !migrationSourceHasLiveOwner(snapshot, conversation, probe, observedSourcePaths));
-    const abandonedNoProgress = noProgress && !hasLiveSource;
-    if (!abandonedNoProgress && !deadRequestedSource) continue;
-    const reason = abandonedNoProgress
-      ? `delivery cancelled because its owning account migration made no progress for ${MIGRATION_INTENT_PROGRESS_TIMEOUT_MS}ms; send again to authorize a fresh delivery`
-      : "delivery cancelled because its source conversation has no live owner; send again to authorize a fresh delivery";
+    if (!noProgress) {
+      for (const conversation of owned) {
+        if (conversation.migration?.phase !== "requested"
+          || !deliveryConversationIds.has(conversation.id)
+          || migrationSourceHasLiveOwner(snapshot, conversation, probe, observedSourcePaths)) continue;
+        const reason = `delivery cancelled because source conversation ${conversation.id} has no live owner; send again to authorize a fresh delivery`;
+        for (const id of activeIds) {
+          if (snapshot.heldDeliveries[id]?.conversationId !== conversation.id) continue;
+          const settled = registry.terminalizeHeldDelivery(id, reason);
+          if (settled.state === "failed") terminalized.add(id);
+        }
+        registry.rollbackConversationMigration(conversation.id, conversation.migration.revision);
+        activeIds = activeIds.filter((id) => snapshot.heldDeliveries[id]?.conversationId !== conversation.id);
+      }
+    }
+    if (!noProgress) continue;
+    const reason =
+      `delivery cancelled because its owning account migration made no progress for ${MIGRATION_INTENT_PROGRESS_TIMEOUT_MS}ms; send again to authorize a fresh delivery`;
     registry.setMigrationIntentState(intent.id, "stopped", intent.revision, reason);
     const settledSnapshot = registry.readOnlySnapshot();
     for (const id of activeIds) {

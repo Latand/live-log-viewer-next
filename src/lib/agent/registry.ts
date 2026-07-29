@@ -822,11 +822,15 @@ function terminalizeHeldDelivery(
   delivery: HeldDelivery,
   reason: string,
 ): void {
+  const terminalReason = delivery.state === "delivery-uncertain"
+    ? `${reason}; a prior delivery attempt may have been delivered because its journal outcome is unknown`
+    : reason;
   delivery.state = "failed";
+  delivery.text = "";
   delivery.generationId = null;
   delivery.assignedAt = null;
   delivery.deliveredAt = null;
-  delivery.error = reason.slice(0, 240);
+  delivery.error = terminalReason.slice(0, 240);
   syncDeliveryOperationOwnerState(file, delivery);
 }
 
