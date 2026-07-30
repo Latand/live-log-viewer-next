@@ -1,4 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import fs from "node:fs";
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
 
 import { RUNTIME_PLANE_ABSENT } from "@/lib/runtime/flags";
 
@@ -7,16 +12,116 @@ import { createMcpToolService, McpToolRefusal, MemoryMcpReceiptStore } from "./s
 
 const originalRuntimeEvents = process.env.LLV_RUNTIME_EVENTS;
 const originalRuntimeSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
+const originalRuntimeJournal = process.env.LLV_RUNTIME_JOURNAL;
 const originalViewerControlUrl = process.env.LLV_VIEWER_CONTROL_URL;
+const sandboxes: string[] = [];
+const netServers: net.Server[] = [];
+const netSockets = new Set<net.Socket>();
 
-afterEach(() => {
+afterEach(async () => {
+  for (const socket of netSockets) socket.destroy();
+  netSockets.clear();
+  await Promise.all(netServers.splice(0).map((server) => new Promise<void>((resolve) => {
+    if (!server.listening) return resolve();
+    server.close(() => resolve());
+  })));
+  for (const sandbox of sandboxes.splice(0)) fs.rmSync(sandbox, { recursive: true, force: true });
   if (originalRuntimeEvents === undefined) delete process.env.LLV_RUNTIME_EVENTS;
   else process.env.LLV_RUNTIME_EVENTS = originalRuntimeEvents;
   if (originalRuntimeSocket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
   else process.env.LLV_RUNTIME_HOST_SOCKET = originalRuntimeSocket;
+  if (originalRuntimeJournal === undefined) delete process.env.LLV_RUNTIME_JOURNAL;
+  else process.env.LLV_RUNTIME_JOURNAL = originalRuntimeJournal;
   if (originalViewerControlUrl === undefined) delete process.env.LLV_VIEWER_CONTROL_URL;
   else process.env.LLV_VIEWER_CONTROL_URL = originalViewerControlUrl;
 });
+
+function deployment(deploymentId: string, revision = "a".repeat(40)) {
+  return {
+    deploymentId,
+    phase: "succeeded",
+    revision,
+  };
+}
+
+function installLedger(
+  rows: Array<{ id: string; value?: unknown; raw?: string; updatedAt?: number }>,
+): string {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-deployment-ledger-"));
+  sandboxes.push(sandbox);
+  const filename = path.join(sandbox, "runtime-events.sqlite");
+  const db = new Database(filename);
+  db.exec(`
+    CREATE TABLE entities (
+      kind TEXT NOT NULL, id TEXT NOT NULL, revision INTEGER NOT NULL,
+      state_json TEXT NOT NULL, checkpoint_seq INTEGER NOT NULL,
+      PRIMARY KEY(kind, id)
+    );
+    CREATE TABLE viewer_deployments (
+      deployment_id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE,
+      request_hash TEXT NOT NULL, status_json TEXT NOT NULL,
+      active INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
+  `);
+  const entityInsert = db.query(
+    "INSERT INTO entities(kind, id, revision, state_json, checkpoint_seq) VALUES (?, ?, 1, ?, 1)",
+  );
+  const legacyInsert = db.query(
+    "INSERT INTO viewer_deployments(deployment_id, idempotency_key, request_hash, status_json, active, updated_at) VALUES (?, ?, ?, ?, 0, ?)",
+  );
+  for (const [index, row] of rows.entries()) {
+    const raw = row.raw ?? JSON.stringify(row.value);
+    entityInsert.run("deployment", row.id, raw);
+    legacyInsert.run(row.id, `key-${index}`, `hash-${index}`, raw, row.updatedAt ?? index);
+  }
+  db.close();
+  process.env.LLV_RUNTIME_JOURNAL = filename;
+  return filename;
+}
+
+async function listenTcp(onSocket: (socket: net.Socket) => void): Promise<{ origin: string; server: net.Server }> {
+  const server = net.createServer((socket) => {
+    netSockets.add(socket);
+    socket.on("close", () => netSockets.delete(socket));
+    onSocket(socket);
+  });
+  netServers.push(server);
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("test TCP server did not bind");
+  return { origin: `http://127.0.0.1:${address.port}`, server };
+}
+
+async function serveRuntimeSnapshot(deployments: unknown[]): Promise<string[]> {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-deployment-runtime-"));
+  sandboxes.push(sandbox);
+  const socketPath = path.join(sandbox, "runtime.sock");
+  const methods: string[] = [];
+  const server = net.createServer((socket) => {
+    netSockets.add(socket);
+    socket.on("close", () => netSockets.delete(socket));
+    let frame = "";
+    socket.on("data", (chunk) => {
+      frame += String(chunk);
+      const newline = frame.indexOf("\n");
+      if (newline < 0) return;
+      const request = JSON.parse(frame.slice(0, newline)) as { id: string; method: string };
+      methods.push(request.method);
+      socket.end(`${JSON.stringify({ id: request.id, ok: true, result: { deployments } })}\n`);
+    });
+  });
+  netServers.push(server);
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, resolve);
+  });
+  process.env.LLV_RUNTIME_HOST_SOCKET = socketPath;
+  delete process.env.LLV_RUNTIME_EVENTS;
+  return methods;
+}
 
 test("deployment_status reads the live plane through Viewer HTTP when the MCP environment has no runtime variables", async () => {
   delete process.env.LLV_RUNTIME_EVENTS;
@@ -335,6 +440,8 @@ test("lifecycle_events distinguishes an unreachable deployment plane from an hon
  * `calls.deploymentStatus: false` and every other check green.
  */
 test("a control surface that does not serve the route yet falls back instead of failing the probe", async () => {
+  const ledgerDeployment = deployment("deployment_legacy");
+  installLedger([{ id: ledgerDeployment.deploymentId, value: ledgerDeployment }]);
   let sawGet = false;
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -349,12 +456,13 @@ test("a control surface that does not serve the route yet falls back instead of 
   process.env.LLV_VIEWER_CONTROL_URL = server.url.origin;
 
   try {
-    /* No runtime socket in this process, so the fallback surfaces its own honest
-       refusal rather than a silent empty ledger — the #777 guarantee holds. */
-    await expect(viewerMcpBindings().deployment_status({
+    expect(await viewerMcpBindings().deployment_status({
       clientRequestId: "deployment-legacy-surface",
       limit: 1,
-    })).rejects.toThrow(/runtime host socket is unavailable|runtime events are disabled/);
+    })).toEqual({
+      count: 1,
+      deployments: [ledgerDeployment],
+    });
     expect(sawGet).toBe(true);
   } finally {
     server.stop(true);
@@ -389,6 +497,8 @@ test("a 404 keeps its domain meaning and is never mistaken for an unserved route
  * evidence.
  */
 test("a null response body is classified by status instead of crashing the read", async () => {
+  const ledgerDeployment = deployment("deployment_null_body");
+  installLedger([{ id: ledgerDeployment.deploymentId, value: ledgerDeployment }]);
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -397,13 +507,160 @@ test("a null response body is classified by status instead of crashing the read"
   process.env.LLV_VIEWER_CONTROL_URL = server.url.origin;
 
   try {
-    /* Reaches the fallback and refuses honestly for want of a socket, rather
-       than dying on `null.error`. */
-    await expect(viewerMcpBindings().deployment_status({
+    expect(await viewerMcpBindings().deployment_status({
       clientRequestId: "deployment-null-body",
       limit: 1,
-    })).rejects.toThrow(/runtime host socket is unavailable|runtime events are disabled/);
+    })).toEqual({
+      count: 1,
+      deployments: [ledgerDeployment],
+    });
   } finally {
     server.stop(true);
   }
 });
+
+test("ledger fallback matches control ordering and tail limits even when legacy update order opposes ids", async () => {
+  const deployments = [
+    deployment("deployment_a"),
+    deployment("deployment_b"),
+    deployment("deployment_c"),
+  ];
+  installLedger([
+    { id: deployments[0]!.deploymentId, value: deployments[0], updatedAt: 300 },
+    { id: deployments[1]!.deploymentId, value: deployments[1], updatedAt: 100 },
+    { id: deployments[2]!.deploymentId, value: deployments[2], updatedAt: 200 },
+  ]);
+  const control: ViewerControlDependencies = {
+    async get() {
+      throw new McpToolRefusal("Method Not Allowed", { error: "Method Not Allowed", status: 405 });
+    },
+    async post() {
+      throw new Error("unexpected control write");
+    },
+  };
+
+  expect(await viewerMcpBindings(undefined, control).deployment_status({
+    clientRequestId: "deployment-ledger-order",
+    limit: 2,
+  })).toEqual({
+    count: 2,
+    deployments: deployments.slice(-2),
+  });
+});
+
+test("an unreadable ledger terminates fallback with explicit evidence and zero runtime-socket calls", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-deployment-missing-ledger-"));
+  sandboxes.push(sandbox);
+  process.env.LLV_RUNTIME_JOURNAL = path.join(sandbox, "missing.sqlite");
+  const runtimeMethods = await serveRuntimeSnapshot([deployment("deployment_socket")]);
+  const control: ViewerControlDependencies = {
+    async get() {
+      throw new Error("Viewer control is unreachable");
+    },
+    async post() {
+      throw new Error("unexpected control write");
+    },
+  };
+
+  await expect(viewerMcpBindings(undefined, control).deployment_status({
+    clientRequestId: "deployment-unreadable-ledger",
+  })).rejects.toThrow("deployment ledger is unreadable");
+  expect(runtimeMethods).toEqual([]);
+});
+
+test("a malformed ledger entity stays distinct from a genuine absent deployment", async () => {
+  installLedger([{ id: "deployment_malformed", raw: "{" }]);
+  const control: ViewerControlDependencies = {
+    async get() {
+      throw new McpToolRefusal("Method Not Allowed", { error: "Method Not Allowed", status: 405 });
+    },
+    async post() {
+      throw new Error("unexpected control write");
+    },
+  };
+  const bindings = viewerMcpBindings(undefined, control);
+
+  await expect(bindings.deployment_status({
+    clientRequestId: "deployment-malformed-ledger",
+    deploymentId: "deployment_malformed",
+  })).rejects.toThrow("deployment ledger is unreadable");
+  await expect(bindings.deployment_status({
+    clientRequestId: "deployment-genuine-miss",
+    deploymentId: "deployment_absent",
+  })).rejects.toThrow("viewer deployment was not found");
+});
+
+test("malformed successful control bodies never become successful undefined deployment data", async () => {
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      return new URL(request.url).searchParams.get("invalid-json") === "1"
+        ? new Response("{", { status: 200, headers: { "content-type": "application/json" } })
+        : Response.json({});
+    },
+  });
+  process.env.LLV_VIEWER_CONTROL_URL = server.url.origin;
+
+  try {
+    await expect(viewerMcpBindings().deployment_status({
+      clientRequestId: "deployment-malformed-success-list",
+    })).rejects.toThrow("malformed deployment list");
+    await expect(viewerMcpBindings().deployment_status({
+      clientRequestId: "deployment-malformed-success-item",
+      deploymentId: "deployment_missing_shape",
+    })).rejects.toThrow("malformed deployment");
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("a timed-out 2xx body is surfaced instead of becoming an empty success", async () => {
+  const { origin } = await listenTcp((socket) => {
+    socket.once("data", () => {
+      socket.write([
+        "HTTP/1.1 200 OK",
+        "Content-Type: application/json",
+        "Content-Length: 128",
+        "Connection: keep-alive",
+        "",
+        "{\"count\":1,",
+      ].join("\r\n"));
+    });
+  });
+  process.env.LLV_VIEWER_CONTROL_URL = origin;
+
+  await expect(viewerMcpBindings().deployment_status({
+    clientRequestId: "deployment-timed-out-success-body",
+  })).rejects.toThrow("unreadable response");
+}, 10_000);
+
+/**
+ * Issue #790, the post-promotion deadlock. After promotion the new web surface
+ * serves the deployments route, and its handler asks the runtime host for a
+ * snapshot — while that same host is synchronously awaiting `verify-promoted`.
+ * A real deploy sat there for the full 90-second budget with no events and was
+ * rolled back. The read is bounded now and answers from the durable ledger the
+ * host writes, so it never waits on the writer.
+ */
+test("a control surface that never answers falls back instead of hanging the probe", async () => {
+  const ledgerDeployment = deployment("deployment_deadlock_ledger");
+  installLedger([{ id: ledgerDeployment.deploymentId, value: ledgerDeployment }]);
+  const runtimeMethods = await serveRuntimeSnapshot([deployment("deployment_socket_bypass")]);
+  const { origin } = await listenTcp(() => {
+    /* Keep the accepted connection open without sending headers. */
+  });
+  process.env.LLV_VIEWER_CONTROL_URL = origin;
+
+  const started = Date.now();
+  expect(await viewerMcpBindings().deployment_status({
+    clientRequestId: "deployment-hanging-control",
+    limit: 1,
+  })).toEqual({
+    count: 1,
+    deployments: [ledgerDeployment],
+  });
+  expect(Date.now() - started).toBeGreaterThanOrEqual(4_500);
+  expect(Date.now() - started).toBeLessThan(8_000);
+  expect(runtimeMethods).toEqual([]);
+}, 9_000);

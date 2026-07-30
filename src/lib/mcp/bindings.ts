@@ -40,9 +40,8 @@ import { projectForCwd } from "@/lib/scanner/describe";
 import { completedFileScan } from "@/lib/scanner/scanCache";
 import { readResources } from "@/lib/resources";
 import { adoptLiveRootSession, conversationRole, liveRootSession, type RootSessionSource } from "@/lib/root/adopt";
-import { runtimeHostClient as directRuntimeHostClient } from "@/lib/runtime/client";
 import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
-import { runtimeEventsEnabled as directRuntimeEventsEnabled } from "@/lib/runtime/flags";
+import { ledgerDeployment, ledgerDeployments } from "@/lib/runtime/deploymentLedger";
 import { readSession } from "@/lib/session/reader";
 import { applyAssignmentPatches, createTask, patchTask, type CreateTaskInput, type PatchTaskInput } from "@/lib/tasks/commands";
 import { isoNow } from "@/lib/tasks/helpers";
@@ -76,6 +75,16 @@ export interface ViewerControlDependencies {
 }
 
 const VIEWER_CONTROL_URL = "http://127.0.0.1:8898";
+/* Well under the MCP health probe's own budget, so a control surface that cannot
+   answer degrades to the ledger long before the probe gives up (#790). */
+const CONTROL_READ_TIMEOUT_MS = 5_000;
+
+class ViewerControlResponseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ViewerControlResponseError";
+  }
+}
 
 async function getViewerControl(pathname: string): Promise<Record<string, unknown>> {
   const baseUrl = process.env.LLV_VIEWER_CONTROL_URL?.trim() || VIEWER_CONTROL_URL;
@@ -85,6 +94,11 @@ async function getViewerControl(pathname: string): Promise<Record<string, unknow
       headers: {
         accept: "application/json",
       },
+      /* Unbounded here meant the post-promotion health probe hung for its whole
+         90-second budget instead of falling back: the promoted surface asks the
+         runtime host for a snapshot while that host is synchronously awaiting the
+         probe (#790). */
+      signal: AbortSignal.timeout(CONTROL_READ_TIMEOUT_MS),
     });
   } catch {
     throw new Error("Viewer control is unreachable");
@@ -93,7 +107,17 @@ async function getViewerControl(pathname: string): Promise<Record<string, unknow
      later `result.x` throws a TypeError before the status can be classified —
      which is how a 405 from a revision that does not serve the route arrived as
      an uncatchable crash instead of a refusal (#790). */
-  const parsed = await response.json().catch(() => null) as unknown;
+  let parsed: unknown;
+  try {
+    parsed = await response.json() as unknown;
+  } catch {
+    if (response.ok) {
+      throw new ViewerControlResponseError(
+        `Viewer control returned an unreadable response with status ${response.status}`,
+      );
+    }
+    parsed = null;
+  }
   const result: Record<string, unknown> = parsed && typeof parsed === "object" && !Array.isArray(parsed)
     ? parsed as Record<string, unknown>
     : {};
@@ -104,6 +128,11 @@ async function getViewerControl(pathname: string): Promise<Record<string, unknow
       status: response.status,
       ...(text(result.code) ? { code: text(result.code) } : {}),
     });
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ViewerControlResponseError(
+      `Viewer control returned a malformed response with status ${response.status}`,
+    );
   }
   return result;
 }
@@ -149,24 +178,6 @@ function readViewerControl(
 ): Promise<Record<string, unknown>> {
   if (!control.get) throw new Error("Viewer control read is unavailable");
   return control.get(pathname);
-}
-
-/**
- * The pre-control read path, kept only as the transition-window fallback for a
- * control surface that does not serve the route yet (#790, see
- * `isUnservedControlRoute`). It reads the runtime host directly, so it depends on
- * this process holding the socket — true for the deployment health probe, whose
- * environment is inherited from the runtime host, and false for an ordinary agent
- * MCP, which is exactly what #777 fixed. When the socket is absent the honest
- * refusal surfaces instead of a silent empty answer.
- */
-async function legacyDeploymentRead<T>(
-  read: (client: NonNullable<ReturnType<typeof directRuntimeHostClient>>) => Promise<T>,
-): Promise<T> {
-  if (!directRuntimeEventsEnabled()) throw new Error("runtime events are disabled");
-  const client = directRuntimeHostClient();
-  if (!client) throw new Error("runtime host socket is unavailable");
-  return read(client);
 }
 
 type RegistrySnapshot = ReturnType<ReturnType<typeof agentRegistry>["readOnlySnapshot"]>;
@@ -1184,8 +1195,35 @@ async function operatorSnapshot(args: McpToolArgs, dependencies: ViewerMcpDomain
  * deployment was not found") and must keep its meaning.
  */
 function isUnservedControlRoute(error: unknown): boolean {
-  if (!(error instanceof McpToolRefusal)) return false;
-  return (error.details as { status?: unknown }).status === 405;
+  /* A refusal carrying a status means the surface answered, so its answer stands:
+     404 is "that deployment is absent", and 503 keeps the absent-versus-
+     unreachable plane distinction #777 established. Only two things mean this
+     reader cannot use the surface at all — a revision that never served the route
+     (405), and a transport failure or timeout, which arrives as a plain Error. */
+  if (error instanceof McpToolRefusal) return (error.details as { status?: unknown }).status === 405;
+  if (error instanceof ViewerControlResponseError) return false;
+  return true;
+}
+
+function isDeploymentStatus(value: unknown, expectedId?: string): value is ViewerDeploymentStatus {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const deployment = value as Partial<ViewerDeploymentStatus>;
+  return typeof deployment.deploymentId === "string"
+    && (!expectedId || deployment.deploymentId === expectedId)
+    && typeof deployment.revision === "string"
+    && typeof deployment.phase === "string";
+}
+
+function deploymentList(result: Record<string, unknown>): ViewerDeploymentStatus[] {
+  if (
+    !Array.isArray(result.deployments)
+    || !result.deployments.every((deployment) => isDeploymentStatus(deployment))
+    || !Number.isInteger(result.count)
+    || result.count !== result.deployments.length
+  ) {
+    throw new ViewerControlResponseError("Viewer control returned a malformed deployment list");
+  }
+  return result.deployments;
 }
 
 async function deploymentStatus(
@@ -1199,9 +1237,14 @@ async function deploymentStatus(
       `/api/runtime/deployments/${encodeURIComponent(deploymentId)}`,
     ).catch((error: unknown) => {
       if (!isUnservedControlRoute(error)) throw error;
-      return legacyDeploymentRead((client) => client.readViewerDeployment(deploymentId));
+      const fromLedger = ledgerDeployment(deploymentId);
+      if (fromLedger.state === "unreadable") throw new Error(fromLedger.error);
+      return fromLedger.value ?? null;
     });
     if (!deployment) throw new Error("viewer deployment was not found");
+    if (!isDeploymentStatus(deployment, deploymentId)) {
+      throw new ViewerControlResponseError("Viewer control returned a malformed deployment");
+    }
     return redactPayload({ deploymentId, deployment });
   }
   const operationId = text(args.operationId);
@@ -1211,6 +1254,14 @@ async function deploymentStatus(
       control,
       `/api/runtime/operations/${encodeURIComponent(operationId)}`,
     );
+    if (
+      result.operationId !== operationId
+      || !result.receipt
+      || typeof result.receipt !== "object"
+      || Array.isArray(result.receipt)
+    ) {
+      throw new ViewerControlResponseError("Viewer control returned a malformed operation");
+    }
     const operation = {
       operationId: result.operationId,
       receipt: result.receipt,
@@ -1222,11 +1273,13 @@ async function deploymentStatus(
   const result = await readViewerControl(control, `/api/runtime/deployments?limit=${limit}`)
     .catch(async (error: unknown) => {
       if (!isUnservedControlRoute(error)) throw error;
-      const ledger = await legacyDeploymentRead(async (client) => (await client.snapshot()).deployments);
-      const deployments = ledger.slice(-limit);
+      const fromLedger = ledgerDeployments(limit);
+      if (fromLedger.state === "unreadable") throw new Error(fromLedger.error);
+      const deployments = fromLedger.value;
       return { count: deployments.length, deployments };
     });
-  return redactPayload({ count: result.count, deployments: result.deployments });
+  const deployments = deploymentList(result);
+  return redactPayload({ count: deployments.length, deployments });
 }
 
 async function resources(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): Promise<McpToolPayload> {
