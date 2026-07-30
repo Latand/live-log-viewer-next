@@ -4,7 +4,9 @@ import path from "node:path";
 
 import { stateDir } from "@/lib/configDir";
 
-export const PROJECT_RESOLUTION_VERSION = 4;
+/* 5: canonicalRemote no longer parses scheme remotes (https://…) through the
+   scp matcher, so identities minted from the misparse must re-derive. */
+export const PROJECT_RESOLUTION_VERSION = 5;
 
 /* Project summaries depend on the attribution facts consumed by
    persistedProjects(). Hashing these stable projections keeps controller
