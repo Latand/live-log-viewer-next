@@ -1832,7 +1832,7 @@ test.each([
   },
 );
 
-test("an explicit terminal transcript outranks a stale running runtime projection", async () => {
+test("a reaped terminal pipeline host cannot be revived by stale runtime projection (#798)", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-terminal-runtime-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
   const sessionId = "60000000-0000-0000-0000-000000000000";
@@ -1860,7 +1860,9 @@ test("an explicit terminal transcript outranks a stale running runtime projectio
     },
   });
 
-  expect(await startupAdoptionAttempts(registry, runtimeJournalClient(journal))).toEqual([]);
+  const client = runtimeJournalClient(journal);
+  expect(await startupAdoptionAttempts(registry, client)).toEqual([]);
+  expect(await startupAdoptionAttempts(registry, client)).toEqual([]);
 
   await bindStructuredDeliveryQueue([], { registry, client: null });
   journal.close();

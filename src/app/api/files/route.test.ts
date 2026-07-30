@@ -190,7 +190,51 @@ test("generation completion retries skip the stale projection while its refresh 
   }
 });
 
-test("issue 532: files response returns the transaction-captured flow generation", async () => {
+test("continuous files requests share one target generation and settle after its scan completes", async () => {
+  scannedFiles = [file("/sessions/continuous-generation-1.jsonl")];
+  const initial = await GET(new Request("http://127.0.0.1/api/files"));
+  const etag = initial.headers.get("etag")!;
+
+  let releaseRefresh!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { releaseRefresh = resolve; }));
+  scannedFiles = [file("/sessions/continuous-generation-2.jsonl")];
+  const stale = await GET(new Request("http://127.0.0.1/api/files", {
+    headers: {
+      "if-none-match": etag,
+      "x-llv-files-revision": "42",
+    },
+  }));
+  const target = stale.headers.get("x-llv-files-target-generation");
+  expect(stale.headers.get("x-llv-files-generation")).toBe("1");
+  expect(target).toBe("2");
+
+  const traffic = await Promise.all(Array.from({ length: 32 }, () =>
+    GET(new Request("http://127.0.0.1/api/files", {
+      headers: {
+        "if-none-match": etag,
+        "x-llv-files-generation": target!,
+      },
+    }))));
+  expect(traffic.every((response) =>
+    response.headers.get("x-llv-files-generation") === "1"
+    && response.headers.get("x-llv-files-target-generation") === target)).toBeTrue();
+
+  const completed = currentFileScan();
+  releaseRefresh();
+  await completed;
+  const settled = await GET(new Request("http://127.0.0.1/api/files", {
+    headers: {
+      "if-none-match": etag,
+      "x-llv-files-generation": target!,
+    },
+  }));
+
+  expect(settled.headers.get("x-llv-files-generation")).toBe(target);
+  expect(settled.headers.get("x-llv-files-target-generation")).toBe(target);
+  expect(scans).toBe(2);
+});
+
+test("files response reads one immutable flow generation without reconciling on GET", async () => {
   const oldFlow = {
     id: "flow-atomic-projection", template: "implement-review-loop", project: "demo", cwd: "/repo",
     implementerPath: "/missing/implementer.jsonl", roles: {
@@ -214,10 +258,10 @@ test("issue 532: files response returns the transaction-captured flow generation
 
   const response = await GET(new Request("http://127.0.0.1/api/files"));
   const body = await response.json() as { flows: Array<{ id: string; rounds: Array<{ n: number }> }> };
-  expect(reads).toBeGreaterThanOrEqual(2);
+  expect(reads).toBe(1);
   expect(body.flows).toEqual([expect.objectContaining({
-    id: currentFlow.id,
-    rounds: [expect.objectContaining({ n: 1 }), expect.objectContaining({ n: 2 })],
+    id: oldFlow.id,
+    rounds: [expect.objectContaining({ n: 1 })],
   })]);
 });
 

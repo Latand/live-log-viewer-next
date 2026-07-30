@@ -53,6 +53,7 @@ import type {
   PipelineStage,
   PipelineStageInput,
   PipelineStageAttempt,
+  PipelineTerminalReap,
   PipelineUnconfirmedHost,
 } from "./types";
 import { parseStageVerdict, stageVerdictRejectionReason, type ParsedStageVerdict } from "./verdict";
@@ -2008,6 +2009,96 @@ async function reconcileUnconfirmedHosts(pipeline: Pipeline, ports: PipelinePort
   return true;
 }
 
+/** Ceiling on one terminal reap sweep. Like a close's teardown, the sweep runs
+    inside the pipelines transaction, so a slow host defers the rest of its
+    pipeline's candidates to the next tick instead of stalling every mutation. */
+const TERMINAL_REAP_BUDGET_MS = 5_000;
+/** Sweeps one pipeline's terminal reap may spend before surfacing survivors. */
+const TERMINAL_REAP_MAX_ROUNDS = 5;
+
+/**
+ * Reaps a completed pipeline's finished stage hosts (#574).
+ *
+ * advancePipeline marks the pipeline completed the moment its last stage
+ * passes, but nothing stopped the hosts its stages left behind: every finished
+ * builder kept an idle resume process resident on a paid quota, and a machine
+ * running many pipelines accumulated hundreds of them. A close tears hosts
+ * down (#670); completion now does the same, through the identical
+ * identity-verified control path, with `closed` staying the close action's job
+ * so an operator's acknowledge decision is never overridden by a later sweep.
+ *
+ * Only hosts whose attempt finished its turn (a verdict or a completion stamp)
+ * are candidates, and the runtime gets the last word: a conversation it
+ * reports actively running is preserved, as are the pipeline's creator
+ * conversation and transcript. The sweep is bounded twice — a per-sweep budget
+ * so the transaction cannot stall behind slow kills, and a durable round
+ * ceiling so a host that will not die becomes a visible unconfirmed host
+ * (retired by reconcileUnconfirmedHosts once it is demonstrably gone) instead
+ * of receiving a kill on every tick forever.
+ */
+async function reconcileTerminalStageHosts(pipeline: Pipeline, ports: PipelinePorts): Promise<boolean> {
+  if (pipeline.state !== "completed" || pipeline.terminalReap?.settledAt) return false;
+  const reap: PipelineTerminalReap = pipeline.terminalReap
+    ?? { rounds: 0, stopped: 0, lastAt: ports.now(), settledAt: null };
+  const deadline = ports.monotonicNow() + TERMINAL_REAP_BUDGET_MS;
+  const candidates = launchedStageHosts(pipeline).filter(({ target, turnSettled }) => turnSettled
+    && !(target.conversationId && target.conversationId === pipeline.srcConversationId)
+    && !(target.agentPath && target.agentPath === pipeline.srcPath));
+  const survivors: Array<PipelineStageHostRef & { operationId: string | null; detail: string }> = [];
+  let attempted = false;
+  let deferred = false;
+  for (const [index, { target }] of candidates.entries()) {
+    if (ports.monotonicNow() >= deadline) {
+      deferred = true;
+      /* Normally the next sweep picks these up; recorded here so that a reap
+         whose every round expires still names what it never probed once the
+         round ceiling settles it below. */
+      if (reap.rounds + 1 >= TERMINAL_REAP_MAX_ROUNDS) {
+        survivors.push(...candidates.slice(index).map(({ target: remaining }) => ({
+          ...remaining,
+          operationId: null,
+          detail: "terminal reap budget expired before this host was probed",
+        })));
+      }
+      break;
+    }
+    if (!(await ports.stageHostResident(target))) continue;
+    /* The attempt's own evidence says its turn ended, but a host the runtime
+       still reports mid-turn (an adopted helper on a fresh turn) is live work,
+       so it stays; the idle-TTL reaper owns it from here. */
+    if (target.conversationId && await ports.conversationAgentActive(target.conversationId) === true) continue;
+    attempted = true;
+    const result = await ports.stopStageAgent(target);
+    if (result.outcome === "stopped") reap.stopped += 1;
+    else if (result.outcome === "unconfirmed") survivors.push({ ...target, operationId: result.operationId, detail: result.detail });
+    else if (result.outcome === "failed") survivors.push({ ...target, operationId: null, detail: result.error });
+  }
+  reap.lastAt = ports.now();
+  if (attempted || deferred) reap.rounds += 1;
+  const clean = !deferred && survivors.length === 0;
+  if (clean || reap.rounds >= TERMINAL_REAP_MAX_ROUNDS) {
+    reap.settledAt = reap.lastAt;
+    if (survivors.length > 0) {
+      const known = new Set((pipeline.unconfirmedHosts ?? []).map((host) => `${host.stageId}:${host.attempt}`));
+      pipeline.unconfirmedHosts = [
+        ...(pipeline.unconfirmedHosts ?? []),
+        ...survivors.filter((host) => !known.has(`${host.stageId}:${host.attempt}`)).map((host) => ({
+          stageId: host.stageId,
+          attempt: host.attempt,
+          conversationId: host.conversationId,
+          agentPath: host.agentPath,
+          paneId: host.paneId,
+          operationId: host.operationId,
+          detail: host.detail,
+          at: reap.settledAt!,
+        })),
+      ];
+    }
+  }
+  pipeline.terminalReap = reap;
+  return true;
+}
+
 export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts = defaultPipelinePorts()): Promise<{ pipelines: Pipeline[]; changed: boolean }> {
   if (tickStore.__llvPipelineTick) return { pipelines: [], changed: false };
   tickStore.__llvPipelineTick = true;
@@ -2025,6 +2116,7 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
         pipelineChanged = reconcileParkedStructuredSpawn(pipeline, ports) || pipelineChanged;
         pipelineChanged = reconcileBoundReviewFlow(pipeline, ports) || pipelineChanged;
         pipelineChanged = await reconcileUnconfirmedHosts(pipeline, ports) || pipelineChanged;
+        pipelineChanged = await reconcileTerminalStageHosts(pipeline, ports) || pipelineChanged;
         if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused" && pipeline.state !== "needs_decision") {
           pipelineChanged = await tickPipeline(pipeline, entries, ports, persist) || pipelineChanged;
         }

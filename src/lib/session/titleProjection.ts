@@ -1,6 +1,13 @@
 import fs from "node:fs";
 
-import { agentRegistry, normalizeRegistry, RegistryReadError } from "@/lib/agent/registry";
+import {
+  agentRegistry,
+  normalizeRegistry,
+  readOnlyConversationLookupFromSnapshot,
+  RegistryReadError,
+  type ReadOnlyConversationLookup,
+  type RegistryFile,
+} from "@/lib/agent/registry";
 import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { statePath } from "@/lib/configDir";
 import { projectInfoFromCwd } from "@/lib/scanner/describe";
@@ -12,11 +19,12 @@ import { isRenameableSessionEntry } from "./renameEligibility";
 import { applyTitleOverride, indexSessionTitles, loadSessionTitles } from "./titleStore";
 
 type Registry = ReturnType<typeof agentRegistry>;
-type RegistrySnapshot = ReturnType<Registry["snapshot"]>;
+type RegistrySnapshot = RegistryFile;
 
-interface RegistryProjection {
+export interface SessionRegistryProjection {
   signature: string;
   snapshot: RegistrySnapshot;
+  conversationLookup: ReadOnlyConversationLookup;
   conversationByPath: Map<string, ViewerConversationId>;
   aliasesByCanonical: Map<string, string[]>;
   ownedPathsByConversation: Map<string, string[]>;
@@ -25,17 +33,8 @@ interface RegistryProjection {
   archivedPaths: Set<string>;
 }
 
-const registryProjectionCache = new WeakMap<Registry, RegistryProjection>();
-let readOnlyRegistryProjectionCache: RegistryProjection | null = null;
-
-function registrySignature(registry: Registry): string {
-  try {
-    const stat = fs.statSync(registry.filename, { bigint: true });
-    return `${stat.mtimeNs}:${stat.size}`;
-  } catch {
-    return "missing";
-  }
-}
+const registryProjectionCache = new WeakMap<RegistrySnapshot, SessionRegistryProjection>();
+let readOnlyRegistryProjectionCache: SessionRegistryProjection | null = null;
 
 function canonicalConversationId(snapshot: RegistrySnapshot, alias: string): string {
   let current = alias;
@@ -49,13 +48,14 @@ function canonicalConversationId(snapshot: RegistrySnapshot, alias: string): str
   return current;
 }
 
-function projectRegistrySnapshot(snapshot: RegistrySnapshot, signature: string): RegistryProjection {
+function projectRegistrySnapshot(snapshot: RegistrySnapshot, signature: string): SessionRegistryProjection {
   const conversationByPath = new Map<string, ViewerConversationId>();
   const aliasesByCanonical = new Map<string, string[]>();
   const ownedPathsByConversation = new Map<string, string[]>();
   const projectByPath = new Map<string, string>();
   const projectMetadataByPath = new Map<string, { displayName: string; projectRoot?: string; unresolved?: true }>();
   const archivedPaths = new Set<string>();
+  const projectInfoByCwd = new Map<string, ReturnType<typeof projectInfoFromCwd>>();
   for (const conversation of Object.values(snapshot.conversations)) {
     const owned = [...conversation.generations.map((generation) => generation.path), ...conversation.continuityPaths];
     ownedPathsByConversation.set(conversation.id, owned);
@@ -69,7 +69,12 @@ function projectRegistrySnapshot(snapshot: RegistrySnapshot, signature: string):
     });
     if (project) {
       projectByPath.set(latest.path, project);
-      const cwdInfo = latest.launchProfile.cwd ? projectInfoFromCwd(latest.launchProfile.cwd) : null;
+      const cwd = latest.launchProfile.cwd;
+      let cwdInfo = cwd ? projectInfoByCwd.get(cwd) : null;
+      if (cwd && cwdInfo === undefined) {
+        cwdInfo = projectInfoFromCwd(cwd);
+        projectInfoByCwd.set(cwd, cwdInfo);
+      }
       if (cwdInfo?.project === project) {
         projectMetadataByPath.set(latest.path, {
           displayName: cwdInfo.displayName,
@@ -94,6 +99,7 @@ function projectRegistrySnapshot(snapshot: RegistrySnapshot, signature: string):
   const projection = {
     signature,
     snapshot,
+    conversationLookup: readOnlyConversationLookupFromSnapshot(snapshot, conversationByPath),
     conversationByPath,
     aliasesByCanonical,
     ownedPathsByConversation,
@@ -101,26 +107,35 @@ function projectRegistrySnapshot(snapshot: RegistrySnapshot, signature: string):
     projectMetadataByPath,
     archivedPaths,
   };
+  registryProjectionCache.set(snapshot, projection);
   return projection;
 }
 
-function registryProjection(registry: Registry, surfaceUnexpectedError = false): RegistryProjection | null {
-  const signature = registrySignature(registry);
-  const cached = registryProjectionCache.get(registry);
-  if (cached?.signature === signature) return cached;
-  let snapshot: RegistrySnapshot;
+/** Builds the reusable title/catalog read model for an already acquired
+    immutable registry snapshot. SQLite returns the same snapshot object for one
+    revision, so mirror checkpoints cannot invalidate this cache. */
+export function sessionRegistryProjectionFromSnapshot(
+  snapshot: RegistrySnapshot,
+  signature = "registry-snapshot",
+): SessionRegistryProjection {
+  return registryProjectionCache.get(snapshot) ?? projectRegistrySnapshot(snapshot, signature);
+}
+
+/** Acquires at most one immutable registry snapshot and returns its reusable
+    title/catalog projection. */
+export function sessionRegistryProjection(
+  registry: Registry = agentRegistry(),
+  surfaceUnexpectedError = false,
+): SessionRegistryProjection | null {
   try {
-    snapshot = registry.readOnlySnapshot();
+    return sessionRegistryProjectionFromSnapshot(registry.readOnlySnapshot());
   } catch (error) {
     if (surfaceUnexpectedError && !(error instanceof RegistryReadError)) throw error;
     return null;
   }
-  const projection = projectRegistrySnapshot(snapshot, signature);
-  registryProjectionCache.set(registry, projection);
-  return projection;
 }
 
-function readOnlyRegistryProjection(): RegistryProjection | null {
+function readOnlyRegistryProjection(): SessionRegistryProjection | null {
   const filename = statePath("agent-registry.json");
   let signature: string;
   try {
@@ -151,8 +166,11 @@ function readOnlyRegistryProjection(): RegistryProjection | null {
  * safe to run after the files response has already stamped identity/launch
  * profile — it never re-derives `autoTitle` once set.
  */
-export function overlaySessionTitles(entries: FileEntry[]): void {
-  const project = sessionTitleProjector();
+export function overlaySessionTitles(
+  entries: FileEntry[],
+  projection?: SessionRegistryProjection | null,
+): void {
+  const project = sessionTitleProjector(true, projection);
   for (const entry of entries) project(entry);
 }
 
@@ -165,10 +183,10 @@ export function overlayResourceSessionTitles(entries: FileEntry[]): void {
 
 function sessionTitleProjector(
   includeRenameEligibility = true,
-  suppliedProjection?: RegistryProjection | null,
+  suppliedProjection?: SessionRegistryProjection | null,
 ): (entry: FileEntry) => void {
   const index = indexSessionTitles(loadSessionTitles());
-  const projection = suppliedProjection === undefined ? registryProjection(agentRegistry()) : suppliedProjection;
+  const projection = suppliedProjection === undefined ? sessionRegistryProjection() : suppliedProjection;
   const snapshot = projection?.snapshot ?? null;
   const conversationByPath = projection?.conversationByPath ?? new Map<string, ViewerConversationId>();
   const aliasesByCanonical = projection?.aliasesByCanonical ?? new Map<string, string[]>();
@@ -244,7 +262,7 @@ export function sessionProjectProjection(surfaceUnexpectedError = false): {
   projectMetadataByPath: ReadonlyMap<string, { displayName: string; projectRoot?: string; unresolved?: true }>;
   archivedPaths: ReadonlySet<string>;
 } {
-  const projection = registryProjection(agentRegistry(), surfaceUnexpectedError);
+  const projection = sessionRegistryProjection(agentRegistry(), surfaceUnexpectedError);
   if (!projection) return { projectByPath: new Map(), projectMetadataByPath: new Map(), archivedPaths: new Set() };
   return {
     projectByPath: projection.projectByPath,

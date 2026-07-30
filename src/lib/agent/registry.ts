@@ -461,6 +461,14 @@ export interface ConversationLookup {
   conversation(id: ViewerConversationId): RegistryConversation | null;
 }
 
+/** Read model over one immutable registry snapshot. Returned conversations are
+    the snapshot's own objects; callers must never mutate them. */
+export interface ReadOnlyConversationLookup {
+  conversationForPath(artifactPath: string): Readonly<RegistryConversation> | null;
+  canonicalConversationId(id: ViewerConversationId): ViewerConversationId;
+  conversation(id: ViewerConversationId): Readonly<RegistryConversation> | null;
+}
+
 type ConversationMigrationInput = Omit<ConversationMigration, "errorCode" | "operationId" | "sourceGenerationId" | "providerReceipt" | "pendingContinuityPaths" | "boardProject" | "boardOperationId" | "boardPlacementProject"> &
   Partial<Pick<ConversationMigration, "errorCode" | "operationId" | "sourceGenerationId" | "providerReceipt" | "pendingContinuityPaths" | "boardProject" | "boardOperationId" | "boardPlacementProject">>;
 type SuccessorGenerationInput = Omit<NativeGeneration, "createdAt" | "archivedAt" | "launchProfile" | "historyHash" | "host"> &
@@ -1946,26 +1954,52 @@ function recordMembership(
   return membership;
 }
 
-export function conversationLookupFromSnapshot(snapshot: RegistryFile): ConversationLookup {
+export function readOnlyConversationLookupFromSnapshot(
+  snapshot: RegistryFile,
+  conversationIdByPath?: ReadonlyMap<string, ViewerConversationId>,
+): ReadOnlyConversationLookup {
   const byPath = new Map<string, RegistryConversation>();
-  for (const conversation of Object.values(snapshot.conversations)) {
-    for (const generation of conversation.generations) {
-      if (!byPath.has(generation.path)) byPath.set(generation.path, conversation);
+  if (conversationIdByPath) {
+    for (const [pathname, conversationId] of conversationIdByPath) {
+      const conversation = snapshot.conversations[conversationId];
+      if (conversation) byPath.set(pathname, conversation);
     }
-    for (const pathname of conversation.continuityPaths) {
-      if (!byPath.has(pathname)) byPath.set(pathname, conversation);
+  } else {
+    for (const conversation of Object.values(snapshot.conversations)) {
+      for (const generation of conversation.generations) {
+        if (!byPath.has(generation.path)) byPath.set(generation.path, conversation);
+      }
+      for (const pathname of conversation.continuityPaths) {
+        if (!byPath.has(pathname)) byPath.set(pathname, conversation);
+      }
     }
   }
   return {
     conversationForPath(artifactPath) {
-      const conversation = byPath.get(artifactPath);
-      return conversation ? clone(conversation) : null;
+      return byPath.get(artifactPath) ?? null;
     },
     canonicalConversationId(id) {
       return resolveConversationAlias(snapshot, id);
     },
     conversation(id) {
       const conversation = snapshot.conversations[resolveConversationAlias(snapshot, id)];
+      return conversation ?? null;
+    },
+  };
+}
+
+export function conversationLookupFromSnapshot(snapshot: RegistryFile): ConversationLookup {
+  const readOnly = readOnlyConversationLookupFromSnapshot(snapshot);
+  return {
+    conversationForPath(artifactPath) {
+      const conversation = readOnly.conversationForPath(artifactPath);
+      return conversation ? clone(conversation) : null;
+    },
+    canonicalConversationId(id) {
+      return readOnly.canonicalConversationId(id);
+    },
+    conversation(id) {
+      const conversation = readOnly.conversation(id);
       return conversation ? clone(conversation) : null;
     },
   };

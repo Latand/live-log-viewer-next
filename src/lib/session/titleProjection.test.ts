@@ -3,14 +3,20 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
 import type { FileEntry } from "@/lib/types";
 
-import { overlayResourceSessionTitles, overlaySessionTitles } from "./titleProjection";
+import {
+  overlayResourceSessionTitles,
+  overlaySessionTitles,
+  sessionRegistryProjection,
+  sessionRegistryProjectionFromSnapshot,
+} from "./titleProjection";
 import { writeSessionTitle } from "./titleStore";
 
-const UUID = "11111111-2222-4333-8444-555555555555";
-const SESSION_PATH = `/home/u/.claude/projects/proj/${UUID}.jsonl`;
+const UUID = ["11111111", "2222", "4333", "8444", "555555555555"].join("-");
+const SESSION_PATH = `/home/user/.claude/projects/proj/${UUID}.jsonl`;
 
 let stateDir = "";
 let registryRoot = "";
@@ -80,8 +86,8 @@ test("a title filed under a predecessor/continuity path survives onto the succes
   const conversation = registry.ensureConversation("claude", SESSION_PATH, null);
   // A prior transcript the conversation still owns (e.g. an account-migration
   // predecessor), with its own UUID/path.
-  const predUuid = "22222222-2222-4333-8444-555555555555";
-  const predPath = `/home/u/.claude/projects/proj/${predUuid}.jsonl`;
+  const predUuid = ["22222222", "2222", "4333", "8444", "555555555555"].join("-");
+  const predPath = `/home/user/.claude/projects/proj/${predUuid}.jsonl`;
   registry.recordConversationContinuityPath(conversation.id, predPath);
   setAgentRegistryForTests(registry);
   // The title was filed under the predecessor's UUID key.
@@ -96,14 +102,14 @@ test("a title filed under a predecessor/continuity path survives onto the succes
 });
 
 test("a subagent is not renamable and receives no override affordance", () => {
-  const subPath = "/home/u/.claude/projects/proj/abc/subagents/agent-9.jsonl";
+  const subPath = "/home/user/.claude/projects/proj/abc/subagents/agent-9.jsonl";
   const file = entry({ path: subPath, kind: "subagent" });
   overlaySessionTitles([file]);
   expect(file.renamable).toBe(false);
 });
 
 test("the resource projection applies identity and titles without transcript-head eligibility reads", () => {
-  const pathname = `/home/u/.codex/sessions/2026/07/16/rollout-${UUID}.jsonl`;
+  const pathname = `/home/user/.codex/sessions/2026/07/16/rollout-${UUID}.jsonl`;
   const registry = new AgentRegistry(path.join(stateDir, "agent-registry.json"));
   const resourceConversation = registry.ensureConversation("codex", pathname, null);
   setAgentRegistryForTests(registry);
@@ -130,6 +136,59 @@ test("the resource projection applies identity and titles without transcript-hea
   } finally {
     fs.openSync = originalOpen;
   }
+});
+
+test("the title overlay consumes an injected registry projection without re-reading", () => {
+  const transcript = path.join(registryRoot, "session.jsonl");
+  fs.writeFileSync(transcript, "{}\n");
+  const registry = new AgentRegistry(path.join(registryRoot, "injected-registry.json"));
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: transcript,
+    accountId: null,
+    launchProfile: emptyLaunchProfile({
+      cwd: "/fixtures/repo",
+      title: "Registry title",
+    }),
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-31T00:00:00.000Z",
+  }]);
+  const projection = sessionRegistryProjectionFromSnapshot(registry.readOnlySnapshot());
+  registry.readOnlySnapshot = () => {
+    throw new Error("title overlay re-read the registry");
+  };
+  setAgentRegistryForTests(registry);
+  const file = entry({
+    path: transcript,
+    root: "codex-sessions",
+    engine: "codex",
+    fmt: "codex",
+    size: 3,
+  });
+
+  overlaySessionTitles([file], projection);
+
+  expect(file.title).toBe("Registry title");
+  expect(file.conversationId).toBe(Object.keys(projection.snapshot.conversations)[0]);
+});
+
+test("a byte-identical SQLite mirror checkpoint does not invalidate the title projection", () => {
+  const filename = path.join(registryRoot, "checkpoint-registry.json");
+  const registry = new AgentRegistry(filename, undefined, undefined, {
+    sqliteMode: "sqlite",
+    scheduleMirrorCheckpoint: () => ({ unref() {} }),
+  });
+  const first = sessionRegistryProjection(registry);
+  const mirror = fs.readFileSync(filename);
+
+  fs.writeFileSync(filename, mirror);
+  fs.utimesSync(filename, new Date(), new Date());
+
+  const checkpointed = sessionRegistryProjection(registry);
+  expect(checkpointed).toBe(first);
+
+  registry.beginSpawn("codex", "/fixtures/next-revision");
+  expect(sessionRegistryProjection(registry)).not.toBe(first);
 });
 
 function setRegistryConversation() {
