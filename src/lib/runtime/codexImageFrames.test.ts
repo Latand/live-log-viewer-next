@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { expect, test } from "bun:test";
 
-import { sanitizeCodexImageFrame, type ImageSink } from "./codexImageFrames";
+import { CodexReplayFrameReducer, ReplayFrameOverflowError, sanitizeCodexImageFrame, type ImageSink, type ReplayFrameBudgets } from "./codexImageFrames";
 import { MAX_STRUCTURED_IMAGE_ENCODED_BYTES } from "./runtimeImageStore";
 
 const PNG = Buffer.from(
@@ -133,4 +133,90 @@ test("a store failure still yields a bounded reference", () => {
 test("the reference digest names the stored image bytes", () => {
   const { captured } = sanitizeCodexImageFrame(echoedItem(PNG.toString("base64")), sink());
   expect(captured[0]!.sha256).toBe(crypto.createHash("sha256").update(PNG).digest("hex"));
+});
+
+const budgets = (overrides: Partial<ReplayFrameBudgets> = {}): ReplayFrameBudgets => ({
+  maxStringUnits: 32,
+  maxImageStringUnits: 4096,
+  maxOutputUnits: 1024 * 1024,
+  maxRawUnits: 16 * 1024 * 1024,
+  ...overrides,
+});
+
+function reduce(line: string, limits = budgets(), chunkUnits?: number): string {
+  const reducer = new CodexReplayFrameReducer(limits);
+  if (chunkUnits === undefined) reducer.feed(line);
+  else for (let offset = 0; offset < line.length; offset += chunkUnits) reducer.feed(line.slice(offset, offset + chunkUnits));
+  return reducer.finish();
+}
+
+test("a frame with only short strings is reproduced verbatim", () => {
+  const line = JSON.stringify({ id: 5, result: { thread: { id: "t-1", turns: [{ id: "turn", status: "completed" }] } } });
+  for (const chunk of [undefined, 1, 3, 7]) {
+    expect(reduce(line, budgets(), chunk)).toBe(line);
+  }
+});
+
+test("a long string token keeps a bounded prefix and a truncation marker", () => {
+  const line = JSON.stringify({ result: { text: "a".repeat(500), after: "intact" } });
+  const reduced = reduce(line);
+  const parsed = JSON.parse(reduced) as { result: { text: string; after: string } };
+  expect(parsed.result.text.startsWith("a".repeat(32))).toBeTrue();
+  expect(parsed.result.text).toContain("…[truncated 468 chars]");
+  expect(parsed.result.after).toBe("intact");
+});
+
+test("escape sequences at the cut point stay atomic and the frame stays valid JSON", () => {
+  const noisy = "\\\"\n".repeat(64);
+  const line = JSON.stringify({ result: { text: noisy, tail: "kept" } });
+  for (const chunk of [undefined, 1, 2, 5]) {
+    const reduced = reduce(line, budgets(), chunk);
+    const parsed = JSON.parse(reduced) as { result: { text: string; tail: string } };
+    expect(parsed.result.text).toContain("truncated");
+    expect(parsed.result.tail).toBe("kept");
+  }
+});
+
+test("a surrogate pair is never split in front of the marker", () => {
+  const line = JSON.stringify({ result: { text: `${"x".repeat(31)}😀${"y".repeat(64)}` } });
+  const reduced = reduce(line);
+  const parsed = JSON.parse(reduced) as { result: { text: string } };
+  expect(parsed.result.text.startsWith("x".repeat(31))).toBeTrue();
+  expect(parsed.result.text).not.toContain("😀"[0]! + "…");
+});
+
+test("an image data URL is exempt from the ordinary string budget", () => {
+  const body = PNG.toString("base64").repeat(8);
+  const line = JSON.stringify({ result: { image_url: `data:image/png;base64,${body}` } });
+  expect(body.length).toBeGreaterThan(64);
+  const reduced = reduce(line, budgets(), 11);
+  const parsed = JSON.parse(reduced) as { result: { image_url: string } };
+  expect(parsed.result.image_url).toBe(`data:image/png;base64,${body}`);
+});
+
+test("an image beyond even the image budget is still cut, not passed through", () => {
+  const line = JSON.stringify({ result: { image_url: `data:image/png;base64,${"A".repeat(8192)}` } });
+  const reduced = reduce(line);
+  const parsed = JSON.parse(reduced) as { result: { image_url: string } };
+  expect(parsed.result.image_url.length).toBeLessThan(4200);
+  expect(parsed.result.image_url).toContain("truncated");
+});
+
+test("a structured-user digest prefix survives reduction of a long user text", () => {
+  const digest = "0123456789abcdef".repeat(4);
+  const wire = `<!-- llv:structured-user sha256=${digest} -->\n${"body ".repeat(200)}`;
+  const reduced = reduce(JSON.stringify({ result: { text: wire } }), budgets({ maxStringUnits: 256 }));
+  const parsed = JSON.parse(reduced) as { result: { text: string } };
+  expect(parsed.result.text.startsWith(`<!-- llv:structured-user sha256=${digest} -->`)).toBeTrue();
+});
+
+test("the raw budget fails the frame closed", () => {
+  const reducer = new CodexReplayFrameReducer(budgets({ maxRawUnits: 100 }));
+  expect(() => reducer.feed("x".repeat(101))).toThrow(ReplayFrameOverflowError);
+});
+
+test("the output budget fails the frame closed", () => {
+  const line = JSON.stringify({ result: { items: Array.from({ length: 64 }, () => ({ text: "t".repeat(31) })) } });
+  const reducer = new CodexReplayFrameReducer(budgets({ maxOutputUnits: 256 }));
+  expect(() => { reducer.feed(line); reducer.finish(); }).toThrow(ReplayFrameOverflowError);
 });
