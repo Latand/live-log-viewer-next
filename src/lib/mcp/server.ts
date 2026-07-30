@@ -7,7 +7,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 import { statePath } from "@/lib/configDir";
+import { PIPELINE_ACTIONS } from "@/lib/pipelines/types";
 import { procBackend } from "@/lib/proc";
+import {
+  MAX_SCOPE_PATHS, MAX_SNAPSHOT_CHARS_PER_CONVERSATION, MAX_SNAPSHOT_LAST_MESSAGES, VIEW_RESOLUTIONS, VIEW_SCOPE_KINDS,
+} from "@/lib/view/types";
 
 import type { McpToolPolicy } from "./toolAllowlist";
 
@@ -993,7 +997,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
 const clientRequestIdSchema = z.string().min(1).describe("Stable idempotency key for this logical call.");
 const entityIdSchema = z.string().min(1);
 
-const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
+export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
   spawn_agent: z.object({
     clientRequestId: clientRequestIdSchema,
     cwd: z.string().min(1).describe("Existing working directory for the new agent."),
@@ -1050,7 +1054,8 @@ const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
   pipeline_action: z.object({
     clientRequestId: clientRequestIdSchema,
     pipelineId: entityIdSchema,
-    action: z.string().min(1),
+    /* #774: was `z.string().min(1)` while the route admitted a fixed set. */
+    action: z.enum(PIPELINE_ACTIONS),
   }).passthrough(),
   link_task_to_pipeline: z.object({
     clientRequestId: clientRequestIdSchema,
@@ -1126,13 +1131,33 @@ const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     label: z.string().optional(),
     question: z.string().optional(),
   }).passthrough(),
+  /* #774: these nested objects were `z.record(z.string(), z.unknown())`, so the
+     published schema said "any object" while `validateSnapshotRequest` admitted
+     an exact key set — 119 calls in ten days were rejected for a guessed key the
+     caller had no way to look up. `.strict()` keeps an unknown key a loud
+     rejection; plain `z.object` would silently strip it, which trades a wrong
+     answer for a wasted round trip. */
   operator_snapshot: z.object({
     clientRequestId: clientRequestIdSchema,
     schemaVersion: z.literal(1).optional(),
-    view: z.record(z.string(), z.unknown()).optional(),
-    scope: z.record(z.string(), z.unknown()).optional(),
-    text: z.record(z.string(), z.unknown()).optional(),
-    caller: z.record(z.string(), z.unknown()).optional(),
+    view: z.object({
+      id: z.string().optional(),
+      deviceId: z.string().optional(),
+      resolution: z.enum(VIEW_RESOLUTIONS).optional(),
+    }).strict().optional(),
+    scope: z.object({
+      kind: z.enum(VIEW_SCOPE_KINDS),
+      paths: z.array(z.string()).max(MAX_SCOPE_PATHS).optional().describe("Required for kind=paths, rejected otherwise."),
+    }).strict().optional(),
+    text: z.object({
+      include: z.boolean().optional(),
+      lastMessages: z.number().int().min(1).max(MAX_SNAPSHOT_LAST_MESSAGES).optional(),
+      maxCharsPerConversation: z.number().int().min(1).max(MAX_SNAPSHOT_CHARS_PER_CONVERSATION).optional(),
+    }).strict().optional(),
+    caller: z.object({
+      pid: z.number().int().min(1).optional(),
+      transcriptPath: z.string().optional(),
+    }).strict().optional(),
   }).passthrough(),
   list_tasks: z.object({
     clientRequestId: clientRequestIdSchema,

@@ -14,6 +14,20 @@ export type BrowserKind = "chrome" | "firefox" | "safari" | "other";
 export type ViewFreshness = "active" | "background" | "stale";
 export type ViewScopeKind = "focused" | "selected" | "visible" | "focused-selected" | "paths";
 
+/* The accepted shape of a snapshot request, declared once (#774). The MCP tool
+   schema publishes these to callers and `validateSnapshotRequest` enforces
+   them; a key added to one and forgotten in the other is the defect these
+   constants exist to prevent, so both sides must read from here. */
+export const SNAPSHOT_REQUEST_KEYS = ["schemaVersion", "view", "scope", "text", "caller"] as const;
+export const SNAPSHOT_VIEW_KEYS = ["id", "deviceId", "resolution"] as const;
+export const SNAPSHOT_SCOPE_KEYS = ["kind", "paths"] as const;
+export const SNAPSHOT_TEXT_KEYS = ["include", "lastMessages", "maxCharsPerConversation"] as const;
+export const SNAPSHOT_CALLER_KEYS = ["pid", "transcriptPath"] as const;
+export const VIEW_SCOPE_KINDS = ["focused", "selected", "visible", "focused-selected", "paths"] as const satisfies readonly ViewScopeKind[];
+export const VIEW_RESOLUTIONS = ["latest-interaction", "require-explicit"] as const;
+export const MAX_SNAPSHOT_LAST_MESSAGES = 20;
+export const MAX_SNAPSHOT_CHARS_PER_CONVERSATION = 4000;
+
 export interface PresencePayloadV1 {
   schemaVersion: 1;
   viewSessionId: string;

@@ -1,4 +1,8 @@
-import { MAX_PRESENCE_BYTES, MAX_SCOPE_PATHS, MAX_SELECTED_PATHS, MAX_VISIBLE_PATHS, type PresencePayloadV1, type SnapshotRequestV1 } from "./types";
+import {
+  MAX_PRESENCE_BYTES, MAX_SCOPE_PATHS, MAX_SELECTED_PATHS, MAX_SNAPSHOT_CHARS_PER_CONVERSATION, MAX_SNAPSHOT_LAST_MESSAGES, MAX_VISIBLE_PATHS,
+  SNAPSHOT_CALLER_KEYS, SNAPSHOT_REQUEST_KEYS, SNAPSHOT_SCOPE_KEYS, SNAPSHOT_TEXT_KEYS, SNAPSHOT_VIEW_KEYS, VIEW_RESOLUTIONS, VIEW_SCOPE_KINDS,
+  type PresencePayloadV1, type SnapshotRequestV1,
+} from "./types";
 
 export class ViewValidationError extends Error {
   constructor(readonly code: "INVALID_REQUEST" | "UNSUPPORTED_SCHEMA_VERSION" | "SCOPE_TOO_LARGE" | "PAYLOAD_TOO_LARGE", message: string, readonly status = 400) { super(message); }
@@ -8,9 +12,12 @@ function record(value: unknown, field = "request"): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ViewValidationError("INVALID_REQUEST", `invalid ${field}`);
   return value as Record<string, unknown>;
 }
+/* A rejection names the accepted alternatives (#774): a caller can only see the
+   key it guessed wrong, so withholding the allowed set costs it another round
+   trip to discover a list this function already holds. */
 function exact(value: Record<string, unknown>, allowed: readonly string[], field: string): void {
   const unknown = Object.keys(value).find((key) => !allowed.includes(key));
-  if (unknown) throw new ViewValidationError("INVALID_REQUEST", `unknown ${field}.${unknown}`);
+  if (unknown) throw new ViewValidationError("INVALID_REQUEST", `unknown ${field}.${unknown} (allowed: ${allowed.join(", ")})`);
 }
 function string(value: unknown, field: string, options: { nullable?: boolean; max?: number } = {}): string | null {
   if (options.nullable && value === null) return null;
@@ -27,7 +34,7 @@ function integer(value: unknown, field: string, min = 0, max = Number.MAX_SAFE_I
   return parsed;
 }
 function oneOf<T extends string>(value: unknown, field: string, values: readonly T[]): T {
-  if (typeof value !== "string" || !values.includes(value as T)) throw new ViewValidationError("INVALID_REQUEST", `invalid ${field}`);
+  if (typeof value !== "string" || !values.includes(value as T)) throw new ViewValidationError("INVALID_REQUEST", `invalid ${field} (allowed: ${values.join(", ")})`);
   return value as T;
 }
 function paths(value: unknown, field: string, maximum: number): string[] {
@@ -65,22 +72,22 @@ export function validatePresence(value: unknown): PresencePayloadV1 {
 }
 
 export function validateSnapshotRequest(value: unknown): SnapshotRequestV1 {
-  const body = record(value); exact(body, ["schemaVersion", "view", "scope", "text", "caller"], "request");
+  const body = record(value); exact(body, SNAPSHOT_REQUEST_KEYS, "request");
   if (body.schemaVersion !== 1) throw new ViewValidationError("UNSUPPORTED_SCHEMA_VERSION", "schemaVersion must be 1");
-  const view = optionalRecord(body.view, "view"); if (view) exact(view, ["id", "deviceId", "resolution"], "view");
-  const scope = optionalRecord(body.scope, "scope"); if (scope) exact(scope, ["kind", "paths"], "scope");
-  const textOptions = optionalRecord(body.text, "text"); if (textOptions) exact(textOptions, ["include", "lastMessages", "maxCharsPerConversation"], "text");
-  const caller = optionalRecord(body.caller, "caller"); if (caller) exact(caller, ["pid", "transcriptPath"], "caller");
-  const kind = scope ? oneOf(scope.kind, "scope.kind", ["focused", "selected", "visible", "focused-selected", "paths"] as const) : undefined;
+  const view = optionalRecord(body.view, "view"); if (view) exact(view, SNAPSHOT_VIEW_KEYS, "view");
+  const scope = optionalRecord(body.scope, "scope"); if (scope) exact(scope, SNAPSHOT_SCOPE_KEYS, "scope");
+  const textOptions = optionalRecord(body.text, "text"); if (textOptions) exact(textOptions, SNAPSHOT_TEXT_KEYS, "text");
+  const caller = optionalRecord(body.caller, "caller"); if (caller) exact(caller, SNAPSHOT_CALLER_KEYS, "caller");
+  const kind = scope ? oneOf(scope.kind, "scope.kind", VIEW_SCOPE_KINDS) : undefined;
   const scopePaths = scope?.paths === undefined ? undefined : paths(scope.paths, "scope.paths", MAX_SCOPE_PATHS);
   if (kind === "paths" && !scopePaths) throw new ViewValidationError("INVALID_REQUEST", "scope.paths is required");
   if (kind !== "paths" && scopePaths) throw new ViewValidationError("INVALID_REQUEST", "scope.paths requires paths scope");
   if (textOptions?.include !== undefined && typeof textOptions.include !== "boolean") throw new ViewValidationError("INVALID_REQUEST", "invalid text.include");
   return {
     schemaVersion: 1,
-    view: view ? { id: view.id === undefined ? undefined : string(view.id, "view.id")!, deviceId: view.deviceId === undefined ? undefined : string(view.deviceId, "view.deviceId")!, resolution: view.resolution === undefined ? undefined : oneOf(view.resolution, "view.resolution", ["latest-interaction", "require-explicit"] as const) } : undefined,
+    view: view ? { id: view.id === undefined ? undefined : string(view.id, "view.id")!, deviceId: view.deviceId === undefined ? undefined : string(view.deviceId, "view.deviceId")!, resolution: view.resolution === undefined ? undefined : oneOf(view.resolution, "view.resolution", VIEW_RESOLUTIONS) } : undefined,
     scope: kind ? { kind, paths: scopePaths } : undefined,
-    text: textOptions ? { include: textOptions.include as boolean | undefined, lastMessages: textOptions.lastMessages === undefined ? undefined : integer(textOptions.lastMessages, "text.lastMessages", 1, 20), maxCharsPerConversation: textOptions.maxCharsPerConversation === undefined ? undefined : integer(textOptions.maxCharsPerConversation, "text.maxCharsPerConversation", 1, 4000) } : undefined,
+    text: textOptions ? { include: textOptions.include as boolean | undefined, lastMessages: textOptions.lastMessages === undefined ? undefined : integer(textOptions.lastMessages, "text.lastMessages", 1, MAX_SNAPSHOT_LAST_MESSAGES), maxCharsPerConversation: textOptions.maxCharsPerConversation === undefined ? undefined : integer(textOptions.maxCharsPerConversation, "text.maxCharsPerConversation", 1, MAX_SNAPSHOT_CHARS_PER_CONVERSATION) } : undefined,
     caller: caller ? { pid: caller.pid === undefined ? undefined : integer(caller.pid, "caller.pid", 1), transcriptPath: caller.transcriptPath === undefined ? undefined : string(caller.transcriptPath, "caller.transcriptPath")! } : undefined,
   };
 }
