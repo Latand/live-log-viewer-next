@@ -5,10 +5,8 @@ import path from "node:path";
 
 import { rememberAcknowledgedVoiceDelivery } from "@/lib/runtime/voiceDelivery";
 
-import { mintBridgeConfirmation } from "./confirmation";
 import {
   acknowledgeBridgeDelivery,
-  authorizeBridgeDeploy,
   bridgeTurnStartPrelude,
   pendingBridgeDelivery,
   recordManagerReport as recordBridgeReport,
@@ -43,7 +41,6 @@ function sandbox(): string {
 
 const ROOT_ID = "root_service_0001";
 const NOW = new Date("2026-07-27T12:00:00.000Z");
-const SHA = "4f3c1b9a8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a";
 
 const rootIdentity = () => ROOT_ID;
 const SCOPE = {
@@ -141,56 +138,6 @@ test("a trim that outran the cursor delivers the gap notice rather than dropping
   /* And it is acknowledgeable, so the gap is crossed once rather than every poll. */
   acknowledgeBridgeDelivery(pending.throughSeq, NOW, SCOPE);
   expect(readBridgeChannel(SCOPE)!.managerReportCursor).toBeGreaterThanOrEqual(20);
-});
-
-/* §4 deploy round trip, end to end through the production authorization path. */
-
-test("a confirmed deploy authorizes exactly the confirmed SHA, once", () => {
-  sandbox();
-  const confirmation = mintBridgeConfirmation({ sha: SHA, now: NOW });
-  recordManagerReport({
-    key: "confirm-726",
-    class: "confirmation_request",
-    at: NOW.toISOString(),
-    body: "gates green",
-    confirmation,
-  });
-  const seq = drainBridgeReports().reports[0]!.seq;
-  const answeredAt = new Date(NOW.getTime() + 30_000);
-
-  expect(authorizeBridgeDeploy({ ref: seq, nonce: confirmation.nonce, sha: SHA }, answeredAt))
-    .toEqual({ ok: true, sha: SHA });
-
-  /* Replay of the same authorization deploys nothing more. */
-  expect(authorizeBridgeDeploy({ ref: seq, nonce: confirmation.nonce, sha: SHA }, answeredAt))
-    .toEqual({ ok: false, reason: "consumed" });
-});
-
-test("an expired, mismatched or unknown authorization deploys nothing", () => {
-  sandbox();
-  const confirmation = mintBridgeConfirmation({ sha: SHA, now: NOW });
-  recordManagerReport({
-    key: "confirm-expiry",
-    class: "confirmation_request",
-    at: NOW.toISOString(),
-    confirmation,
-  });
-  const seq = drainBridgeReports().reports[0]!.seq;
-
-  expect(authorizeBridgeDeploy({ ref: seq, nonce: confirmation.nonce, sha: "b".repeat(40) }, NOW))
-    .toEqual({ ok: false, reason: "sha_mismatch" });
-  expect(authorizeBridgeDeploy({ ref: seq, nonce: "wrong", sha: SHA }, NOW))
-    .toEqual({ ok: false, reason: "nonce_mismatch" });
-  expect(authorizeBridgeDeploy({ ref: 9_999, nonce: confirmation.nonce, sha: SHA }, NOW))
-    .toEqual({ ok: false, reason: "no_confirmation" });
-
-  const late = new Date(NOW.getTime() + 11 * 60_000);
-  expect(authorizeBridgeDeploy({ ref: seq, nonce: confirmation.nonce, sha: SHA }, late))
-    .toEqual({ ok: false, reason: "expired" });
-
-  /* Nothing above consumed the confirmation, so the real answer still works. */
-  expect(authorizeBridgeDeploy({ ref: seq, nonce: confirmation.nonce, sha: SHA }, NOW))
-    .toEqual({ ok: true, sha: SHA });
 });
 
 test("a report body is bounded and redacted on the production append path too", () => {

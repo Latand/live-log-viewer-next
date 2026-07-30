@@ -100,26 +100,15 @@ function managerTargetFor(sourcesValue: ManagerAuthoritySources): ManagerTarget 
   };
 }
 
-/** The one operation manager identity still gates under B+: minting the
-    deployment confirmation nonce. Tool AVAILABILITY is no longer gated. */
-const CONFIRMATION_ARGS = {
-  clientRequestId: "r1",
-  key: "k",
-  class: "confirmation_request",
-  body: "deploy?",
-  confirmation: { sha: "a".repeat(40) },
-};
-
 test("pid evidence alone still cannot identify the null-pid manager — the pre-fix behaviour, preserved when no capability exists", () => {
   const authority = attentionCallerAuthority(callerSources({ capabilityCallerConversationId: () => null }));
   expect(authority).toEqual({ kind: "unidentified" });
   const identity = mcpCallerIdentity(authority, managerTargetFor(managerSources()));
-  /* Unidentified callers keep the full ordinary surface under B+, but the
-     manager-only operation — minting a deploy confirmation — stays refused,
+  /* Unidentified callers keep the full ordinary surface under B+, but they are
+     never labeled the manager — and deploy authority is derived from that label,
      which is exactly what the measured bug denied the REAL manager. */
-  const verdict = permitMcpTool(identity, "bridge_report", CONFIRMATION_ARGS);
-  expect(verdict.allowed).toBe(false);
-  if (!verdict.allowed) expect(verdict.code).toBe("confirmation_not_permitted");
+  expect(identity).toEqual({ kind: "restricted", reason: "unidentified" });
+  expect(permitMcpTool(identity, "bridge_report").allowed).toBe(true);
 });
 
 test("MEASURED BUG: the designated null-pid manager with a live host IS the manager through its launch capability", () => {
@@ -128,7 +117,6 @@ test("MEASURED BUG: the designated null-pid manager with a live host IS the mana
   const target = managerTargetFor(managerSources());
   const identity = mcpCallerIdentity(authority, target);
   expect(identity).toEqual({ kind: "unrestricted", reason: "manager" });
-  expect(permitMcpTool(identity, "bridge_report", CONFIRMATION_ARGS).allowed).toBe(true);
 });
 
 test("authority is not self-assertable: a capability resolving to nothing stays unidentified", () => {
@@ -161,7 +149,6 @@ test("a revoked predecessor presenting its still-valid capability holds no manag
   }));
   const identity = mcpCallerIdentity(authority, target);
   expect(identity).toEqual({ kind: "unrestricted", reason: "worker" });
-  expect(permitMcpTool(identity, "bridge_report", CONFIRMATION_ARGS).allowed).toBe(false);
 });
 
 test("authority survives host death and generation change: the same capability keeps resolving after every pid vanished", () => {

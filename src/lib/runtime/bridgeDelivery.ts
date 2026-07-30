@@ -4,7 +4,6 @@ import {
   type BridgeReportBatch,
   type BridgeReportV1,
 } from "@/lib/bridge/types";
-import { formatBridgeTrailer } from "@/lib/bridge/directive";
 
 import {
   appendVoiceResponse,
@@ -102,9 +101,6 @@ export type BridgeDeliveryPlan =
  *
  * The class is stated because the gateway has no work log to infer it from, and
  * a `failed` that reads like a `status` is how a blocker gets voiced as progress.
- * A confirmation request additionally carries the exact strings the gateway must
- * echo back — there is no other channel for them, and paraphrasing a SHA is how a
- * deploy authorizes the wrong commit.
  */
 function reportText(report: BridgeReportV1): string {
   const body = report.body.trim();
@@ -113,14 +109,7 @@ function reportText(report: BridgeReportV1): string {
      comes from the server-authenticated origin field, not from body text the
      caller owns. */
   const label = bridgeReportOriginLabel(report.origin);
-  const head = `[${report.class}]${label ? ` (from ${label} — NOT the manager)` : ""}${body ? ` ${body}` : ""}`;
-  if (report.class !== "confirmation_request" || !report.confirmation) return head;
-  const { sha, nonce, expiresAt } = report.confirmation;
-  return [
-    head,
-    `Deploy authorization requested for commit ${sha} (expires ${expiresAt}).`,
-    `If the user agrees, send the manager exactly this trailer: ${formatBridgeTrailer({ ref: report.seq, nonce, sha })}`,
-  ].join("\n");
+  return `[${report.class}]${label ? ` (from ${label} — NOT the manager)` : ""}${body ? ` ${body}` : ""}`;
 }
 
 /**

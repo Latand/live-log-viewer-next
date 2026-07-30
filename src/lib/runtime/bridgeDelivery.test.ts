@@ -15,7 +15,6 @@ import {
 import { normalizeVoiceDeliveries, rememberAcknowledgedVoiceDelivery } from "./voiceDelivery";
 
 const NOW = new Date("2026-07-27T12:00:00.000Z");
-const SHA = "4f3c1b9a8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a";
 
 function report(seq: number, overrides: Partial<BridgeReportV1> = {}): BridgeReportV1 {
   return {
@@ -128,24 +127,6 @@ test("at most one batch per coalescing window reaches a live call (§4)", () => 
 
 test("an empty batch plans nothing", () => {
   expect(planBridgeReportDelivery({ batch: batch([]), now: NOW, lastBatchAt: null })).toEqual({ kind: "idle" });
-});
-
-test("a confirmation request carries the SHA, nonce and expiry the gateway must echo back", () => {
-  const plan = delivered({
-    batch: batch([report(9, {
-      class: "confirmation_request",
-      body: "gates green on #726",
-      confirmation: { sha: SHA, nonce: "0123456789abcdef0123456789abcdef", expiresAt: "2026-07-27T12:10:00.000Z" },
-    })]),
-    now: NOW,
-    lastBatchAt: null,
-  });
-
-  const text = plan.delivery.responses[0]!.text;
-  expect(text).toContain(SHA);
-  expect(text).toContain("0123456789abcdef0123456789abcdef");
-  expect(text).toContain("2026-07-27T12:10:00.000Z");
-  expect(text).toContain("[bridge ref=9");
 });
 
 test("a gap notice is carried into the call rather than dropped (§7.12)", () => {

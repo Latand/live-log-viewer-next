@@ -194,11 +194,14 @@ export function describeMcpCall(
   }
 
   if (toolName === "deploy_exact_sha") {
+    /* #795: the exact revision is machine evidence; the operator-facing card
+       names the release by its short form and leaves the full SHA to the
+       deployment ledger. */
     const revision = string(result.revision) || string(args.revision);
     return {
       icon: "deploy",
       verb: "Deploying",
-      title: `Deploying revision: ${revision || "current HEAD"}`,
+      title: `Deploying release ${revision ? revision.slice(0, 12) : "(current HEAD)"}`,
       subtitle: replaySubtitle(result, string(result.deploymentId)),
       links: [],
     };

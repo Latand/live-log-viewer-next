@@ -9,20 +9,18 @@
  *
  * The body is plain instruction text, because the manager is a language model
  * reading a message, not a parser. Correlation rides in one optional trailer line
- * so a `question` or `confirmation_request` can be answered unambiguously without
- * turning the whole channel into a wire format.
+ * so a `question` can be answered unambiguously without turning the whole channel
+ * into a wire format. The trailer carries a report reference and nothing else:
+ * it correlates, it never authorizes.
  */
 
 const DIRECTIVE_TOKEN = /^[A-Za-z0-9_.:-]+$/;
-const FULL_SHA = /^[0-9a-f]{40}$/;
 /** Anchored at the end: the trailer is the last line or it is prose. */
-const TRAILER = /^\[bridge ref=(\d+)(?: nonce=([A-Za-z0-9_-]+) sha=([0-9a-f]{40}))?\]$/;
+const TRAILER = /^\[bridge ref=(\d+)\]$/;
 
 export interface BridgeTrailer {
   /** The report `seq` this directive answers. */
   ref: number;
-  nonce?: string;
-  sha?: string;
 }
 
 /**
@@ -43,23 +41,12 @@ export function bridgeDirectiveId(rootTurnId: string, utterance: number): string
   return `bridge_d_${rootTurnId}_${utterance}`;
 }
 
-/** Render the correlation trailer. A confirmation needs the nonce and the SHA
-    together — half of one authorizes nothing, and emitting half would produce a
-    trailer the manager reads as a bare reference. */
+/** Render the correlation trailer. */
 export function formatBridgeTrailer(trailer: BridgeTrailer): string {
   if (!Number.isInteger(trailer.ref) || trailer.ref < 1) {
     throw new Error("a bridge trailer requires the report seq it answers");
   }
-  const hasNonce = typeof trailer.nonce === "string" && trailer.nonce.length > 0;
-  const hasSha = typeof trailer.sha === "string" && trailer.sha.length > 0;
-  if (hasNonce !== hasSha) {
-    throw new Error("a bridge confirmation trailer requires nonce and sha together");
-  }
-  if (!hasNonce) return `[bridge ref=${trailer.ref}]`;
-  if (!FULL_SHA.test(trailer.sha!)) {
-    throw new Error("a bridge confirmation trailer requires a full lowercase 40-hex commit SHA");
-  }
-  return `[bridge ref=${trailer.ref} nonce=${trailer.nonce} sha=${trailer.sha}]`;
+  return `[bridge ref=${trailer.ref}]`;
 }
 
 /**
@@ -67,8 +54,7 @@ export function formatBridgeTrailer(trailer: BridgeTrailer): string {
  *
  * Last non-empty line only. Scanning the whole body would let the manager's own
  * quoted text — a report the gateway is repeating back, say — be mistaken for an
- * authorization, which is the one place in this design where being generous
- * about input would let a deploy through.
+ * answer to a different report.
  */
 export function parseBridgeTrailer(body: string): BridgeTrailer | null {
   const lines = body.split(/\r?\n/);
@@ -84,9 +70,7 @@ export function parseBridgeTrailer(body: string): BridgeTrailer | null {
   if (!match) return null;
   const ref = Number.parseInt(match[1]!, 10);
   if (!Number.isInteger(ref) || ref < 1) return null;
-  return match[2] && match[3]
-    ? { ref, nonce: match[2], sha: match[3] }
-    : { ref };
+  return { ref };
 }
 
 /** Compose the message the gateway sends: the user's intent in words, then the

@@ -4,8 +4,6 @@ import {
 } from "@/lib/runtime/bridgeDelivery";
 import { rootIdentity as readRootIdentity } from "@/lib/root/store";
 
-import { consumeBridgeConfirmation, type BridgeConfirmationOutcome } from "./confirmation";
-import type { BridgeTrailer } from "./directive";
 import {
   acknowledgeBridgeReports,
   appendBridgeReports,
@@ -161,21 +159,4 @@ export function bridgeTurnStartPrelude(
     ].join("\n"),
     throughSeq: batch.throughSeq,
   };
-}
-
-/**
- * Verify and consume the authorization the gateway relayed, immediately before a
- * deploy runs (§4, §7.7).
- *
- * The trailer's three fields are checked together and consumed atomically, so a
- * replay, an expiry, a wrong nonce and a wrong SHA all decline — and a decline
- * leaves the confirmation unconsumed, because refusing an answer must not destroy
- * the operator's ability to give the right one.
- */
-export function authorizeBridgeDeploy(
-  trailer: Pick<BridgeTrailer, "ref"> & { nonce?: string; sha?: string },
-  now = new Date(),
-): BridgeConfirmationOutcome {
-  if (!trailer.nonce || !trailer.sha) return { ok: false, reason: "no_confirmation" };
-  return consumeBridgeConfirmation(trailer.ref, { sha: trailer.sha, nonce: trailer.nonce }, now);
 }

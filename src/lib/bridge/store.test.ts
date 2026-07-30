@@ -183,21 +183,41 @@ test("a trimmed report cannot be resurrected by a late replay", () => {
   expect(replay.skipped).toBe(1);
 });
 
-test("a confirmation_request carries its authorization and nothing else does", () => {
+test("a legacy confirmation_request row still reads, sheds its authorization payload, and never drains", () => {
+  /* Logs written before #795's superseding contract carry the retired operator
+     confirmation rows. The log must keep reading (history survives), the dead
+     nonce must not, and no legacy row may resurface as a conversation. */
   sandbox();
   openBridgeChannel(ROOT_ID);
-  const sha = "a".repeat(40);
-  const { appended } = appendBridgeReports([
-    report("confirm-1", {
+  fs.mkdirSync(path.dirname(bridgeReportLogPath()), { recursive: true });
+  fs.writeFileSync(bridgeReportLogPath(), JSON.stringify({
+    schemaVersion: 1,
+    lastSeq: 1,
+    trimmedThroughSeq: 0,
+    reports: [{
+      id: "rpt_legacy_confirm",
+      seq: 1,
+      at: "2026-07-27T12:00:00.000Z",
       class: "confirmation_request",
+      project: "repo-project-a",
+      targetSeatConversationId: "conversation_seat_a",
       body: "gates green on #726",
-      confirmation: { sha, nonce: "nonce-1", expiresAt: "2026-07-27T12:10:00.000Z" },
-    }),
-    report("plain", { class: "status", confirmation: { sha, nonce: "nope", expiresAt: "2026-07-27T12:10:00.000Z" } }),
-  ]);
+      confirmation: { sha: "a".repeat(40), nonce: "nonce-legacy", expiresAt: "2026-07-27T12:10:00.000Z" },
+      directIntent: true,
+    }],
+    retired: [],
+  }));
 
-  expect(appended[0]!.confirmation).toEqual({ sha, nonce: "nonce-1", expiresAt: "2026-07-27T12:10:00.000Z" });
-  expect(appended[1]!.confirmation).toBeUndefined();
+  const log = readBridgeReportLog();
+  expect(log.reports).toHaveLength(1);
+  expect(log.reports[0]!.class).toBe("confirmation_request");
+  expect(log.reports[0] as unknown as Record<string, unknown>).not.toHaveProperty("confirmation");
+  expect(drainBridgeReports().reports).toEqual([]);
+
+  /* Appends after the legacy row keep working, and only the new row drains. */
+  appendBridgeReports([report("after-legacy")]);
+  expect(drainBridgeReports().reports.map((entry) => entry.id)).toEqual([bridgeReportId("after-legacy")]);
+  expect(fs.readFileSync(bridgeReportLogPath(), "utf8")).not.toContain("nonce-legacy");
 });
 
 test("the drain tolerates a channel that was never opened", () => {

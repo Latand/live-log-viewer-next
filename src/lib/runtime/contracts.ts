@@ -485,16 +485,6 @@ export interface ViewerDeploymentStatus {
 export interface ViewerDeploymentRequest {
   revision?: string;
   idempotencyKey: string;
-  /**
-   * #691 §4 — the user's spoken authorization, carried all the way to host
-   * admission.
-   *
-   * It rides on the request rather than being checked by whoever forwards it
-   * because every caller converges on one checkpoint: the MCP binding, the HTTP
-   * route and a raw socket client all reach the same `admit()`, and a gate at any
-   * earlier layer is a gate on one of several doors.
-   */
-  bridgeProof?: { ref?: unknown; nonce?: unknown };
 }
 
 export type ViewerDeploymentReceipt =

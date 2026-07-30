@@ -12,7 +12,7 @@ import { createMcpToolService, MemoryMcpReceiptStore, type McpToolResult } from 
  * B+ items 3 and 4 at the binding: `bridge_report` is callable from every
  * session, the ORIGIN is server-authenticated — derived from the durable caller
  * identity, never from anything the caller supplies — and only the designated
- * orchestrator speaks in the manager's voice or mints a confirmation.
+ * orchestrator speaks in the manager's voice.
  */
 
 let sandbox = "";
@@ -87,22 +87,6 @@ test("an unidentified caller's report is labeled as such rather than refused", a
   const row = readBridgeReportLog().reports[0]!;
   expect(row.origin).toEqual({ kind: "unidentified", conversationId: null, role: null });
   expect(row.body).toStartWith("[agent — not the manager] ");
-});
-
-test("only the manager mints a confirmation, even at the binding behind the policy", async () => {
-  const refused = await serviceAs(WORKER).callTool("bridge_report", report({
-    class: "confirmation_request",
-    confirmation: { sha: "a".repeat(40) },
-  })) as McpToolResult;
-  expect(refused.ok).toBe(false);
-  expect(readBridgeReportLog().reports).toEqual([]);
-
-  const minted = await serviceAs(MANAGER).callTool("bridge_report", report({
-    class: "confirmation_request",
-    confirmation: { sha: "a".repeat(40) },
-  })) as McpToolResult & { confirmation?: { nonce?: string } };
-  expect(minted.ok).toBe(true);
-  expect(minted.confirmation?.nonce).toBeTruthy();
 });
 
 test("origin round-trips through the durable log", async () => {

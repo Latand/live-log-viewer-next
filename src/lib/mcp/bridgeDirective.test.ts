@@ -3,7 +3,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { mintBridgeConfirmation } from "@/lib/bridge/confirmation";
 import { parseBridgeTrailer } from "@/lib/bridge/directive";
 import { recordManagerReport } from "@/lib/bridge/service";
 import { drainBridgeReports, openBridgeChannel } from "@/lib/bridge/store";
@@ -150,47 +149,6 @@ test("the user's words travel as prose, with the correlation trailer on its own 
   const body = String(posted[0]!.body.text);
   expect(body.startsWith("he says hold it until the test is fixed")).toBe(true);
   expect(parseBridgeTrailer(body)).toEqual({ ref: seq });
-});
-
-test("a deploy answer carries the nonce and SHA the manager must verify", async () => {
-  sandbox();
-  const tools = bindings();
-  const sha = "4f3c1b9a8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a";
-  const confirmation = mintBridgeConfirmation({ sha });
-  recordManagerReport({
-    key: "c1",
-    class: "confirmation_request",
-    at: new Date().toISOString(),
-    body: "gates green",
-    confirmation,
-  });
-  const seq = drainBridgeReports().reports.at(-1)!.seq;
-
-  await tools.bridge_directive({
-    clientRequestId: "d1",
-    rootTurnId: "turn_0201",
-    utterance: 0,
-    instruction: "yes, ship it",
-    ref: seq,
-    nonce: confirmation.nonce,
-    sha,
-  });
-
-  expect(parseBridgeTrailer(String(posted[0]!.body.text))).toEqual({ ref: seq, nonce: confirmation.nonce, sha });
-});
-
-test("a half-formed confirmation answer is refused rather than relayed as a bare reference", async () => {
-  sandbox();
-  const tools = bindings();
-  await expect(tools.bridge_directive({
-    clientRequestId: "d1",
-    rootTurnId: "turn_0202",
-    utterance: 0,
-    instruction: "yes",
-    ref: 1,
-    nonce: "abc",
-  })).rejects.toThrow(/nonce and sha/);
-  expect(posted).toEqual([]);
 });
 
 test("with no orchestrator designated for the caller's project the directive is refused, not delivered somewhere else", async () => {

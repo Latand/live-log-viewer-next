@@ -58,7 +58,6 @@ export const BRIDGE_REPORT_CLASSES = [
   "blocked",
   "review_verdict",
   "question",
-  "confirmation_request",
 ] as const;
 
 export type BridgeReportClass = typeof BRIDGE_REPORT_CLASSES[number];
@@ -67,17 +66,18 @@ export function isBridgeReportClass(value: unknown): value is BridgeReportClass 
   return typeof value === "string" && (BRIDGE_REPORT_CLASSES as readonly string[]).includes(value);
 }
 
-/** A `confirmation_request` report's authorization payload. One nonce
-    authorizes one SHA once; `consumedAt` is the durable single-use record and
-    lives here rather than in channel state so the whole round trip is one
-    auditable row. */
-export interface BridgeConfirmation {
-  /** Full 40-hex commit SHA. Nothing shorter is ever accepted. */
-  sha: string;
-  nonce: string;
-  expiresAt: string;
-  /** Set the moment a matching answer is accepted. A second answer sees this. */
-  consumedAt?: string;
+/** #795 (superseded design): logs written before the designated agent owned the
+    deploy decision contain `confirmation_request` rows — the retired operator
+    confirmation round trip. They must still READ (a durable log that stops
+    parsing loses the manager's history), but nothing writes them, their
+    authorization payloads are dropped at read, and the drain never hands one
+    to a conversation. */
+export const LEGACY_CONFIRMATION_CLASS = "confirmation_request" as const;
+
+export type BridgeStoredReportClass = BridgeReportClass | typeof LEGACY_CONFIRMATION_CLASS;
+
+export function isStoredBridgeReportClass(value: unknown): value is BridgeStoredReportClass {
+  return isBridgeReportClass(value) || value === LEGACY_CONFIRMATION_CLASS;
 }
 
 /**
@@ -89,7 +89,7 @@ export interface BridgeConfirmation {
  * spawn capability, checked against the durable orchestrator designation —
  * never from anything the caller supplies. `manager` is the one voice the
  * gateway relays as the manager's own; every other kind is visibly somebody
- * else, and only `manager` may carry a `confirmation_request`.
+ * else.
  */
 export interface BridgeReportOrigin {
   kind: "manager" | "agent" | "gateway" | "unidentified";
@@ -125,7 +125,7 @@ export interface BridgeReportV1 {
   /** Derived from the caller's stable `key`; a re-append is a no-op. */
   id: string;
   at: string;
-  class: BridgeReportClass;
+  class: BridgeStoredReportClass;
   /** Server-derived origin. Absent on rows written before origin labeling
       existed, which were manager-only by the gate of that era. */
   origin?: BridgeReportOrigin;
@@ -139,7 +139,6 @@ export interface BridgeReportV1 {
   correlatesDirective?: string;
   /** Bounded and secret-redacted at write. Transcript payloads never reach it. */
   body: string;
-  confirmation?: BridgeConfirmation;
   /** Set on the gap notice the drain synthesizes when the log outran a cursor
       (§7.12). Synthetic rows are never stored — they exist for one batch. */
   synthetic?: true;
@@ -159,7 +158,6 @@ export interface BridgeReportInput {
   correlatesDirective?: string | null;
   /** Raw candidate text; bounded and redacted before it is stored. */
   body?: string | null;
-  confirmation?: { sha: string; nonce: string; expiresAt: string } | null;
 }
 
 export interface BridgeReportLogV1 {

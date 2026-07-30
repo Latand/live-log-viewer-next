@@ -18,13 +18,6 @@ import { mcpCallerIdentity, mcpToolPolicy, type ManagerTarget } from "./toolAllo
 
 const MANAGER: ManagerTarget = { conversationId: "conversation_manager", path: null };
 
-const CONFIRMATION_ARGS = {
-  key: "k",
-  class: "confirmation_request",
-  body: "deploy?",
-  confirmation: { sha: "a".repeat(40) },
-};
-
 function service(identity: "gateway" | "worker" | "manager") {
   const calls: string[] = [];
   const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [
@@ -54,22 +47,33 @@ test("every session classification reaches every tool through the service (B+ it
   }
 });
 
-test("a refused confirmation mint never reaches its binding", async () => {
-  const { calls, service: tools } = service("worker");
-  const result = await tools.callTool("bridge_report", { clientRequestId: "r1", ...CONFIRMATION_ARGS });
+test("a refused tool never reaches its binding", async () => {
+  /* The health-probe credential is the one identity the policy still bounds. */
+  const calls: string[] = [];
+  const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [
+    toolName,
+    async (): Promise<Record<string, unknown>> => {
+      calls.push(toolName);
+      return { ran: toolName };
+    },
+  ])) as unknown as McpToolBindings;
+  const tools = createMcpToolService(
+    bindings,
+    new MemoryMcpReceiptStore(),
+    mcpToolPolicy(() => ({ kind: "health-probe" })),
+  );
 
+  const result = await tools.callTool("spawn_agent", { clientRequestId: "r1", cwd: "/repo", prompt: "go" });
   expect(result.ok).toBe(false);
   if (!result.ok) {
-    expect(result.code).toBe("confirmation_not_permitted");
+    expect(result.code).toBe("tool_not_permitted");
     expect(result.retryable).toBe(false);
   }
   expect(calls).toEqual([]);
-});
 
-test("the designated manager's confirmation mint runs", async () => {
-  const { calls, service: tools } = service("manager");
-  expect((await tools.callTool("bridge_report", { clientRequestId: "r1", ...CONFIRMATION_ARGS })).ok).toBe(true);
-  expect(calls).toEqual(["bridge_report"]);
+  /* And the reads it is admitted for do run. */
+  expect((await tools.callTool("deployment_status", { clientRequestId: "r2" })).ok).toBe(true);
+  expect(calls).toEqual(["deployment_status"]);
 });
 
 test("a refusal does not spend the clientRequestId, so a later designation still works", async () => {
@@ -84,17 +88,17 @@ test("a refusal does not spend the clientRequestId, so a later designation still
 
   let designated = false;
   const policy = mcpToolPolicy(
-    () => ({ kind: "unrestricted", reason: designated ? "manager" : "worker" }),
+    () => (designated ? { kind: "unrestricted", reason: "manager" } : { kind: "health-probe" }),
   );
   const tools = createMcpToolService(bindings, new MemoryMcpReceiptStore(), policy);
 
-  const refused = await tools.callTool("bridge_report", { clientRequestId: "same-id", ...CONFIRMATION_ARGS });
+  const refused = await tools.callTool("bridge_report", { clientRequestId: "same-id", key: "k", class: "status", body: "fyi" });
   expect(refused.ok).toBe(false);
 
   /* The operator seats this conversation. The identical call must now run — a
      receipt burned by the refusal would answer it with the stale no forever. */
   designated = true;
-  const granted = await tools.callTool("bridge_report", { clientRequestId: "same-id", ...CONFIRMATION_ARGS });
+  const granted = await tools.callTool("bridge_report", { clientRequestId: "same-id", key: "k", class: "status", body: "fyi" });
   expect(granted.ok).toBe(true);
   expect(calls).toEqual(["bridge_report"]);
 });

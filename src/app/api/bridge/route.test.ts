@@ -129,29 +129,28 @@ test("a manager report is drained through the route and only acknowledged when t
   expect(after.plan.kind).toBe("idle");
 });
 
-test("an unauthenticated reader cannot harvest a confirmation nonce", async () => {
+test("an unauthenticated reader cannot harvest a report body", async () => {
   sandbox();
-  /* The payload of a confirmation_request carries the single-use nonce that
-     authorizes a deploy. A loopback reader who could see it could approve a deploy
-     in the operator's name, which is the whole confirmation design defeated. */
+  /* Report bodies carry whatever the manager is working on — branch names, review
+     verdicts, failures. A loopback reader who could read the channel would see the
+     operator's own working state, so the route answers nothing without credentials. */
   recordManagerReport({
-    key: "confirm-1",
-    class: "confirmation_request",
+    key: "blocked-1",
+    class: "blocked",
     at: new Date().toISOString(),
-    body: "gates green",
-    confirmation: { sha: "a".repeat(40), nonce: "nonce-the-attacker-wants", expiresAt: "2099-01-01T00:00:00.000Z" },
+    body: "gates green on the-branch-the-attacker-wants",
   });
 
   const refused = await getUnauthenticated();
   expect(refused.status).toBe(403);
-  expect(await refused.text()).not.toContain("nonce-the-attacker-wants");
+  expect(await refused.text()).not.toContain("the-branch-the-attacker-wants");
 
   /* And a wrong credential is no better than none. */
   const wrong = await GET(new NextRequest(`${ORIGIN}/api/bridge?realtimeSessionId=rt_sess_guess`, {
     headers: { host: "127.0.0.1" },
   })) as unknown as Response;
   expect(wrong.status).toBe(403);
-  expect(await wrong.text()).not.toContain("nonce-the-attacker-wants");
+  expect(await wrong.text()).not.toContain("the-branch-the-attacker-wants");
 });
 
 test("an acknowledgement cannot name a sequence the caller never received", async () => {

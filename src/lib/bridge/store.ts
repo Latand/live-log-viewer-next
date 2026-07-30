@@ -13,11 +13,11 @@ import {
   BRIDGE_REPORT_CAPACITY,
   BRIDGE_REPORT_LOG_SCHEMA_VERSION,
   BRIDGE_RETIRED_ID_CAPACITY,
-  isBridgeReportClass,
+  isStoredBridgeReportClass,
+  LEGACY_CONFIRMATION_CLASS,
   MANAGER_RECORD_REF,
   type BridgeChannelV1,
   type BridgeChannelScope,
-  type BridgeConfirmation,
   type BridgeReportBatch,
   type BridgeReportInput,
   type BridgeReportLogV1,
@@ -120,19 +120,6 @@ function readJsonFile(target: string): unknown | null {
   }
 }
 
-function normalizeConfirmation(value: unknown): BridgeConfirmation | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const candidate = value as Partial<BridgeConfirmation>;
-  if (typeof candidate.sha !== "string" || typeof candidate.nonce !== "string") return undefined;
-  if (typeof candidate.expiresAt !== "string") return undefined;
-  return {
-    sha: candidate.sha,
-    nonce: candidate.nonce,
-    expiresAt: candidate.expiresAt,
-    ...(typeof candidate.consumedAt === "string" ? { consumedAt: candidate.consumedAt } : {}),
-  };
-}
-
 function normalizeOrigin(value: unknown): BridgeReportOrigin | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const candidate = value as { kind?: unknown; conversationId?: unknown; role?: unknown };
@@ -151,10 +138,10 @@ function normalizeReport(value: unknown): BridgeReportV1 | null {
   if (typeof candidate.id !== "string" || !candidate.id) return null;
   if (!Number.isInteger(candidate.seq) || (candidate.seq as number) < 1) return null;
   if (typeof candidate.at !== "string" || !candidate.at) return null;
-  if (!isBridgeReportClass(candidate.class)) return null;
-  const confirmation = candidate.class === "confirmation_request"
-    ? normalizeConfirmation(candidate.confirmation)
-    : undefined;
+  /* Legacy `confirmation_request` rows (the retired operator-confirmation
+     round trip) still parse so old logs keep reading; their authorization
+     payloads are dead machinery and are dropped here. */
+  if (!isStoredBridgeReportClass(candidate.class)) return null;
   const origin = normalizeOrigin(candidate.origin);
   const project = typeof candidate.project === "string"
     ? candidate.project
@@ -172,7 +159,6 @@ function normalizeReport(value: unknown): BridgeReportV1 | null {
     ...(project !== undefined ? { project } : {}),
     ...(targetSeatConversationId !== undefined ? { targetSeatConversationId } : {}),
     ...(typeof candidate.correlatesDirective === "string" ? { correlatesDirective: candidate.correlatesDirective } : {}),
-    ...(confirmation ? { confirmation } : {}),
   };
 }
 
@@ -401,11 +387,6 @@ export function appendBridgeReports(
       }
       known.add(id);
       file.lastSeq += 1;
-      /* Authorization belongs to `confirmation_request` alone. Accepting it on
-         any other class would create a second, unreviewed path to a deploy. */
-      const confirmation = input.class === "confirmation_request"
-        ? normalizeConfirmation(input.confirmation)
-        : undefined;
       const report: BridgeReportV1 = {
         id,
         seq: file.lastSeq,
@@ -422,7 +403,6 @@ export function appendBridgeReports(
           }
           : {}),
         ...(input.correlatesDirective ? { correlatesDirective: input.correlatesDirective } : {}),
-        ...(confirmation ? { confirmation } : {}),
       };
       file.reports.push(report);
       appended.push(report);
@@ -498,8 +478,12 @@ export function drainBridgeReports(
   const limit = Math.max(1, Math.min(BRIDGE_DRAIN_BATCH_MAX, options.limit ?? BRIDGE_DRAIN_BATCH_MAX));
   const cursor = readBridgeChannel(scope)?.managerReportCursor ?? 0;
   const file = readLog();
+  /* Legacy `confirmation_request` rows are retired authorization state, never
+     conversation. Nothing prompts the operator about a deploy anymore; handing
+     one back would resurrect exactly the confirmation step #795 removed. */
   const pending = file.reports.filter((report) =>
     report.seq > cursor
+    && report.class !== LEGACY_CONFIRMATION_CLASS
     && (!scope
       || (
         report.project === scope.project

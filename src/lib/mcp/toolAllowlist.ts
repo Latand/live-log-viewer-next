@@ -18,15 +18,13 @@ import type { McpToolArgs, McpToolName } from "./server";
  *    (`@/lib/bridge/types`), so a non-orchestrator report is visibly attributed
  *    and can never impersonate the manager's voice. That happens in the
  *    binding, from the same identity resolved here.
- *  - CONFIRMATION MINTING. Only the currently designated durable orchestrator
- *    may append `class=confirmation_request` — the report that mints a
- *    deployment nonce. Anything else minting one would be an unreviewed path to
- *    a deploy, so it is refused HERE, per-call, from evidence the caller cannot
- *    restate.
+ *  - DEPLOY EXECUTION. Only the designated orchestrator seat executes
+ *    `deploy_exact_sha`; that authority is derived and refused in the deploy
+ *    binding itself, from the same server-attributed identity chain.
  *
- * The exact-SHA deploy confirmation, its expiring single-use nonce, idempotency
- * keys, typed-target validation, receipts and redaction are all enforced in
- * their own layers and are untouched by this policy.
+ * The exact-SHA deploy contract, idempotency keys, typed-target validation,
+ * receipts and redaction are all enforced in their own layers and are
+ * untouched by this policy.
  */
 
 export const HEALTH_PROBE_ALLOWED_TOOLS: readonly McpToolName[] = [
@@ -59,8 +57,7 @@ export type McpCallerIdentity =
       apply to it. */
   | { kind: "health-probe" }
   /** The voice gateway (root) or a caller the registry could not name. Holds
-      the full surface; the kind exists for labeling and for the confirmation
-      contract, not for availability. */
+      the full surface; the kind exists for labeling, not for availability. */
   | { kind: "restricted"; reason: "gateway" | "unidentified" }
   /** Positively identified as an agent conversation. `manager` means the
       durable designation names this conversation. */
@@ -68,7 +65,7 @@ export type McpCallerIdentity =
 
 export type McpToolVerdict =
   | { allowed: true }
-  | { allowed: false; code: "tool_not_permitted" | "confirmation_not_permitted"; error: string };
+  | { allowed: false; code: "tool_not_permitted"; error: string };
 
 const ALLOWED: McpToolVerdict = { allowed: true };
 
@@ -92,22 +89,17 @@ export function mcpCallerIdentity(
   return { kind: "unrestricted", reason: isManager ? "manager" : "worker" };
 }
 
-/** Whether a bridge_report call is asking to mint a deployment confirmation. */
-function claimsConfirmation(args: McpToolArgs): boolean {
-  return args.class === "confirmation_request" || (args.confirmation !== undefined && args.confirmation !== null);
-}
-
 /**
  * Whether this call is permitted. Everything is allowed for every agent
- * session; the two exceptions are the health-probe credential's bounded reads
- * and the orchestrator-only confirmation mint. Refusals carry a code the MCP
- * failure envelope surfaces verbatim, so a refused caller learns what to do
- * instead of retrying into a wall.
+ * session; the one exception is the health-probe credential's bounded reads.
+ * Nothing in the ARGUMENTS is consulted — a permit decision reads identity and
+ * tool name only, so no caller can talk its way past this. Refusals carry a
+ * code the MCP failure envelope surfaces verbatim, so a refused caller learns
+ * what to do instead of retrying into a wall.
  */
 export function permitMcpTool(
   identity: McpCallerIdentity,
   toolName: McpToolName,
-  args: McpToolArgs,
 ): McpToolVerdict {
   if (identity.kind === "health-probe") {
     return HEALTH_PROBE_TOOL_SET.has(toolName)
@@ -117,14 +109,6 @@ export function permitMcpTool(
         code: "tool_not_permitted",
         error: `${toolName} is outside the managed MCP health-probe surface.`,
       };
-  }
-  if (toolName === "bridge_report" && claimsConfirmation(args)
-    && !(identity.kind === "unrestricted" && identity.reason === "manager")) {
-    return {
-      allowed: false,
-      code: "confirmation_not_permitted",
-      error: "only the designated orchestrator may request a deployment confirmation: a confirmation_request mints the nonce that authorizes a deploy, and it must come from the conversation the operator seated. Report without a confirmation instead.",
-    };
   }
   return ALLOWED;
 }
@@ -140,6 +124,6 @@ export interface McpToolPolicy {
     server. */
 export function mcpToolPolicy(identity: () => McpCallerIdentity): McpToolPolicy {
   return {
-    permit: (toolName, args) => permitMcpTool(identity(), toolName, args),
+    permit: (toolName) => permitMcpTool(identity(), toolName),
   };
 }
