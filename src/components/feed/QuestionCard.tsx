@@ -10,6 +10,44 @@ import type { FileEntry, PendingQuestionItem } from "@/lib/types";
 
 type CardState = "pending" | "delivering" | "answered" | "superseded" | "failed";
 
+/*
+ * Issue #765: an explicit dismiss on the live composer card. Dismissal is a
+ * view decision, so it mirrors what scanner-side retirement (#775) already
+ * does to the composer region — the card stops rendering there — while the
+ * transcript's own tool record stays as history (#757: nothing vanishes from
+ * the transcript). It is remembered in localStorage per question, the same
+ * store the deck disclosure pins use, so a dead card does not return on every
+ * reload — which is exactly the friction the issue describes.
+ */
+type StorageLike = Pick<Storage, "getItem" | "setItem">;
+type QuestionIdentity = { transcriptPath: string; toolUseId: string };
+
+export function questionDismissKey(question: QuestionIdentity): string {
+  return `llvQuestionDismissed:${question.transcriptPath}:${question.toolUseId}`;
+}
+
+export function isQuestionDismissed(storage: StorageLike | null, question: QuestionIdentity): boolean {
+  try {
+    return storage?.getItem(questionDismissKey(question)) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function rememberQuestionDismissed(storage: StorageLike | null, question: QuestionIdentity): void {
+  try {
+    storage?.setItem(questionDismissKey(question), "1");
+  } catch { /* best-effort: a full or blocked store only costs durability */ }
+}
+
+function browserStorage(): StorageLike | null {
+  try {
+    return typeof window === "undefined" ? null : window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
 /** A submitted answer, kept so a failure can offer a labelled retry (#697). */
 interface Attempt {
   payload: Record<string, unknown>;
@@ -68,6 +106,10 @@ export function QuestionCard({ file }: { file: FileEntry }) {
      (a multi-question form is several decisions), and leaving them looking
      chosen asserted an acceptance that never happened. */
   const [failedAnswers, setFailedAnswers] = useState<Record<number, number[]> | null>(null);
+  /* Issue #765: the toolUseId the operator dismissed in this mount. Keyed by
+     id — the component instance survives one pending question being replaced
+     by the next, and a dismissal must never carry over to the newcomer. */
+  const [dismissedFor, setDismissedFor] = useState<string | null>(null);
   const hasPane = pending ? pending.paneTarget !== null : file.pid !== null && file.proc === "running";
 
   const selectedLabel = useMemo(() => {
@@ -187,6 +229,29 @@ export function QuestionCard({ file }: { file: FileEntry }) {
     );
   }
 
+  /* Issue #765: a dismissed question leaves the composer region entirely —
+     the same exit scanner-side retirement takes — and the transcript's tool
+     record remains the history. The storage read covers a dismissal recorded
+     before this mount (a reload, another pane of the same conversation). */
+  if (dismissedFor === pending.toolUseId || isQuestionDismissed(browserStorage(), pending)) return null;
+
+  const dismiss = () => {
+    rememberQuestionDismissed(browserStorage(), pending);
+    setDismissedFor(pending.toolUseId);
+  };
+  const dismissButton = (
+    <button
+      type="button"
+      aria-label={t("question.dismiss")}
+      className={`ml-auto inline-flex shrink-0 items-center justify-center rounded text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+        isMobile ? "h-11 w-11" : "px-0.5"
+      }`}
+      onClick={dismiss}
+    >
+      <X className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
+    </button>
+  );
+
   const submit = async (payload: Record<string, unknown>, optimistic: string, selection: Record<number, number[]> | null = null) => {
     setState("delivering");
     setMessage("");
@@ -281,8 +346,11 @@ export function QuestionCard({ file }: { file: FileEntry }) {
   if (pending && !hasPane) {
     return (
       <div id="question" className="my-4 rounded-[8px] border border-warning/45 bg-warning-soft p-4 shadow-1">
-        <div className="mb-2 inline-flex items-center gap-1.5 rounded-full bg-warning-soft px-2 py-0.5 text-[11px] font-bold text-warning">
-          <Pause className="h-3.5 w-3.5" aria-hidden /> {t("question.waiting")}
+        <div className="mb-2 flex items-center gap-2">
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-warning-soft px-2 py-0.5 text-[11px] font-bold text-warning">
+            <Pause className="h-3.5 w-3.5" aria-hidden /> {t("question.waiting")}
+          </span>
+          {dismissButton}
         </div>
         <div className="text-[13px] font-semibold text-danger">{t("question.noPane")}</div>
         {pending.kind === "plan" ? (
@@ -310,6 +378,7 @@ export function QuestionCard({ file }: { file: FileEntry }) {
           <Pause className="h-3.5 w-3.5" aria-hidden /> {t("question.waiting")}
         </span>
         {!hasPane ? <span className="text-[12px] font-semibold text-danger">{t("question.noPane")}</span> : null}
+        {dismissButton}
       </div>
       {pending.kind === "plan" ? (
         <>

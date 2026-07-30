@@ -708,6 +708,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "question.approve": "Затвердити",
   "question.reject": "Відхилити",
   "question.ownAnswer": "Своя відповідь…",
+  "question.dismiss": "Прибрати картку запитання",
   "question.deliveryFailed": "Доставка не вдалася",
   "question.failedChoice": "не доставлено",
   "question.retryAnswer": "Спробувати ще",
