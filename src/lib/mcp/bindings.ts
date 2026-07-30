@@ -40,7 +40,9 @@ import { projectForCwd } from "@/lib/scanner/describe";
 import { completedFileScan } from "@/lib/scanner/scanCache";
 import { readResources } from "@/lib/resources";
 import { adoptLiveRootSession, conversationRole, liveRootSession, type RootSessionSource } from "@/lib/root/adopt";
+import { runtimeHostClient as directRuntimeHostClient } from "@/lib/runtime/client";
 import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
+import { runtimeEventsEnabled as directRuntimeEventsEnabled } from "@/lib/runtime/flags";
 import { readSession } from "@/lib/session/reader";
 import { applyAssignmentPatches, createTask, patchTask, type CreateTaskInput, type PatchTaskInput } from "@/lib/tasks/commands";
 import { isoNow } from "@/lib/tasks/helpers";
@@ -133,6 +135,24 @@ function readViewerControl(
 ): Promise<Record<string, unknown>> {
   if (!control.get) throw new Error("Viewer control read is unavailable");
   return control.get(pathname);
+}
+
+/**
+ * The pre-control read path, kept only as the transition-window fallback for a
+ * control surface that does not serve the route yet (#790, see
+ * `isUnservedControlRoute`). It reads the runtime host directly, so it depends on
+ * this process holding the socket — true for the deployment health probe, whose
+ * environment is inherited from the runtime host, and false for an ordinary agent
+ * MCP, which is exactly what #777 fixed. When the socket is absent the honest
+ * refusal surfaces instead of a silent empty answer.
+ */
+async function legacyDeploymentRead<T>(
+  read: (client: NonNullable<ReturnType<typeof directRuntimeHostClient>>) => Promise<T>,
+): Promise<T> {
+  if (!directRuntimeEventsEnabled()) throw new Error("runtime events are disabled");
+  const client = directRuntimeHostClient();
+  if (!client) throw new Error("runtime host socket is unavailable");
+  return read(client);
 }
 
 type RegistrySnapshot = ReturnType<ReturnType<typeof agentRegistry>["readOnlySnapshot"]>;
@@ -1134,6 +1154,26 @@ async function operatorSnapshot(args: McpToolArgs, dependencies: ViewerMcpDomain
   return redactPayload({ ...await dependencies.collectSnapshot(request) });
 }
 
+/**
+ * Whether a control-plane refusal means "this Viewer does not serve that route"
+ * rather than "that thing is not there" (#790).
+ *
+ * Blue/green promotes the web surface before the successor runtime host takes
+ * over, and the deployment health gate probes a CANDIDATE's MCP while the
+ * PREVIOUS revision is still answering on the control port. A read that moved
+ * onto a route introduced in the same revision therefore meets a Viewer that has
+ * never heard of it, and answers 405. Treating that as a hard failure made the
+ * gate unpassable for the very change that added the route, so the transition
+ * window has to be survivable rather than fatal.
+ *
+ * Deliberately 405 only: a 404 from these routes is the domain answer ("that
+ * deployment was not found") and must keep its meaning.
+ */
+function isUnservedControlRoute(error: unknown): boolean {
+  if (!(error instanceof McpToolRefusal)) return false;
+  return (error.details as { status?: unknown }).status === 405;
+}
+
 async function deploymentStatus(
   args: McpToolArgs,
   control: ViewerControlDependencies,
@@ -1143,7 +1183,11 @@ async function deploymentStatus(
     const deployment = await readViewerControl(
       control,
       `/api/runtime/deployments/${encodeURIComponent(deploymentId)}`,
-    );
+    ).catch((error: unknown) => {
+      if (!isUnservedControlRoute(error)) throw error;
+      return legacyDeploymentRead((client) => client.readViewerDeployment(deploymentId));
+    });
+    if (!deployment) throw new Error("viewer deployment was not found");
     return redactPayload({ deploymentId, deployment });
   }
   const operationId = text(args.operationId);
@@ -1161,7 +1205,13 @@ async function deploymentStatus(
     return redactPayload({ operationId, operation });
   }
   const limit = Math.max(1, Math.min(100, integer(args.limit, 25)));
-  const result = await readViewerControl(control, `/api/runtime/deployments?limit=${limit}`);
+  const result = await readViewerControl(control, `/api/runtime/deployments?limit=${limit}`)
+    .catch(async (error: unknown) => {
+      if (!isUnservedControlRoute(error)) throw error;
+      const ledger = await legacyDeploymentRead(async (client) => (await client.snapshot()).deployments);
+      const deployments = ledger.slice(-limit);
+      return { count: deployments.length, deployments };
+    });
   return redactPayload({ count: result.count, deployments: result.deployments });
 }
 

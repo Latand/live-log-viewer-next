@@ -324,3 +324,57 @@ test("lifecycle_events distinguishes an unreachable deployment plane from an hon
     { pipelines: [], deliveries: [], deployments: [] },
   ]);
 });
+
+/**
+ * Issue #790: blue/green promotes the web surface before the successor runtime
+ * host takes over, so the deployment health gate probes a CANDIDATE's MCP while
+ * the PREVIOUS revision still answers on the control port. A read that moved onto
+ * a route introduced in the same revision meets a Viewer that has never served it
+ * and gets 405. Treating that as fatal made the gate unpassable for the very
+ * change that added the route — one real deploy failed exactly this way, with
+ * `calls.deploymentStatus: false` and every other check green.
+ */
+test("a control surface that does not serve the route yet falls back instead of failing the probe", async () => {
+  let sawGet = false;
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      sawGet = true;
+      expect(new URL(request.url).pathname).toBe("/api/runtime/deployments");
+      /* What the previous revision answers: the route exists for POST only. */
+      return new Response("Method Not Allowed", { status: 405 });
+    },
+  });
+  process.env.LLV_VIEWER_CONTROL_URL = server.url.origin;
+
+  try {
+    /* No runtime socket in this process, so the fallback surfaces its own honest
+       refusal rather than a silent empty ledger — the #777 guarantee holds. */
+    await expect(viewerMcpBindings().deployment_status({
+      clientRequestId: "deployment-legacy-surface",
+      limit: 1,
+    })).rejects.toThrow(/runtime host socket is unavailable|runtime events are disabled/);
+    expect(sawGet).toBe(true);
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("a 404 keeps its domain meaning and is never mistaken for an unserved route", async () => {
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => Response.json({ error: "viewer deployment was not found" }, { status: 404 }),
+  });
+  process.env.LLV_VIEWER_CONTROL_URL = server.url.origin;
+
+  try {
+    await expect(viewerMcpBindings().deployment_status({
+      clientRequestId: "deployment-404-domain",
+      deploymentId: "deployment_absent",
+    })).rejects.toThrow(/not found/);
+  } finally {
+    server.stop(true);
+  }
+});
