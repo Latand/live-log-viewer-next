@@ -8,6 +8,7 @@ import {
 } from "@/lib/bridge/service";
 import { requireOperatorAuthority } from "@/lib/agent/operatorAuthority";
 import { authenticateBridgeGateway } from "@/lib/bridge/gatewayAuthority";
+import { bridgeChannelScopeForConversation } from "@/lib/bridge/routing";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { FileTransactionBusyError } from "@/lib/state/fileTransaction";
 
@@ -64,12 +65,22 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     if (rejection) return rejection;
     const operator = requireOperatorAuthority(request);
     if (!operator.ok) return NextResponse.json({ error: operator.error }, { status: operator.status, headers });
+    const scope = bridgeChannelScopeForConversation(parameters.get("conversationId"));
+    if (!scope) {
+      return NextResponse.json(
+        { error: "the bridge inbox is available only to a validated project seat" },
+        { status: 403, headers },
+      );
+    }
     try {
-      const prelude = bridgeTurnStartPrelude({ now: new Date() });
+      const prelude = bridgeTurnStartPrelude({ now: new Date(), scope });
       return NextResponse.json({
         ok: true,
         prelude: prelude
-          ? { text: prelude.text, ackToken: issueBridgeAcknowledgementToken(prelude.throughSeq) }
+          ? {
+            text: prelude.text,
+            ackToken: issueBridgeAcknowledgementToken(prelude.throughSeq, new Date(), scope),
+          }
           : null,
       }, { headers });
     } catch (error) {
@@ -81,6 +92,13 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
      proof writing into the call does. */
   const gateway = authenticateBridgeGateway(parameters.get("realtimeSessionId"));
   if (!gateway.ok) return NextResponse.json({ error: gateway.error }, { status: 403, headers });
+  const scope = bridgeChannelScopeForConversation(gateway.conversationId);
+  if (!scope) {
+    return NextResponse.json(
+      { error: "the live bridge gateway is not a validated project seat" },
+      { status: 403, headers },
+    );
+  }
 
   const acknowledgedDeliveryIds = parameters.getAll("acked").slice(-MAX_ACKNOWLEDGED_IDS);
   const lastBatchAtRaw = parameters.get("lastBatchAt");
@@ -89,13 +107,18 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     : null;
 
   try {
-    const plan = pendingBridgeDelivery({ now: new Date(), lastBatchAt, acknowledgedDeliveryIds });
+    const plan = pendingBridgeDelivery({
+      now: new Date(),
+      lastBatchAt,
+      acknowledgedDeliveryIds,
+      scope,
+    });
     /* The seq never leaves; the token does. A caller settles the batch it was given
        and cannot name another. */
     if (plan.kind === "idle" || plan.kind === "hold") {
       return NextResponse.json({ ok: true, plan }, { headers });
     }
-    const ackToken = issueBridgeAcknowledgementToken(plan.throughSeq);
+    const ackToken = issueBridgeAcknowledgementToken(plan.throughSeq, new Date(), scope);
     return NextResponse.json({
       ok: true,
       plan: plan.kind === "deliver"

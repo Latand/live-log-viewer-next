@@ -8,8 +8,10 @@ import { NextRequest } from "next/server";
 import { setCallerConversationResolverForTests } from "@/lib/agent/operatorAuthority";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { setBridgeGatewaySourcesForTests } from "@/lib/bridge/gatewayAuthority";
-import { recordManagerReport } from "@/lib/bridge/service";
+import { setBridgeScopeResolverForTests } from "@/lib/bridge/routing";
+import { recordManagerReport as recordBridgeReport } from "@/lib/bridge/service";
 import { readBridgeChannel } from "@/lib/bridge/store";
+import type { BridgeReportInput } from "@/lib/bridge/types";
 import { recordRootSession } from "@/lib/root/store";
 
 import { GET, POST } from "./route";
@@ -28,12 +30,29 @@ const originalStateDir = process.env.LLV_STATE_DIR;
 
 afterEach(() => {
   setBridgeGatewaySourcesForTests(null);
+  setBridgeScopeResolverForTests(null);
   if (originalStateDir === undefined) delete process.env.LLV_STATE_DIR;
   else process.env.LLV_STATE_DIR = originalStateDir;
   for (const sandbox of sandboxes.splice(0)) fs.rmSync(sandbox, { recursive: true, force: true });
 });
 
 const SESSION = "rt_sess_gateway";
+const SCOPE = {
+  project: "repo-project-a",
+  seatConversationId: "conversation_root",
+};
+const SCOPE_B = {
+  project: "repo-project-b",
+  seatConversationId: "conversation_project_b_seat",
+};
+
+function recordManagerReport(input: BridgeReportInput) {
+  return recordBridgeReport({
+    ...input,
+    project: SCOPE.project,
+    targetSeatConversationId: SCOPE.seatConversationId,
+  });
+}
 
 function sandbox(): void {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-bridge-route-"));
@@ -48,6 +67,8 @@ function sandbox(): void {
     rootConversationId: () => "conversation_root",
     liveRealtimeSessionId: () => SESSION,
   });
+  setBridgeScopeResolverForTests((conversationId) =>
+    conversationId === SCOPE.seatConversationId ? SCOPE : null);
 }
 
 const ORIGIN = "http://127.0.0.1";
@@ -79,7 +100,7 @@ test("an empty bridge drains nothing and creates the channel for the live root",
   const payload = await (await get()).json() as { ok: boolean; plan: { kind: string } };
   expect(payload.ok).toBe(true);
   expect(payload.plan.kind).toBe("idle");
-  expect(readBridgeChannel()?.rootId).toMatch(/^root_/);
+  expect(readBridgeChannel(SCOPE)?.rootId).toMatch(/^root_/);
 });
 
 test("a manager report is drained through the route and only acknowledged when the caller says so", async () => {
@@ -99,10 +120,10 @@ test("a manager report is drained through the route and only acknowledged when t
 
   /* GET must not have moved the cursor: a batch lost between here and the call has
      to arrive again. */
-  expect(readBridgeChannel()?.managerReportCursor).toBe(0);
+  expect(readBridgeChannel(SCOPE)?.managerReportCursor).toBe(0);
 
   expect((await post({ ackToken: drained.plan.ackToken })).status).toBe(200);
-  expect(readBridgeChannel()?.managerReportCursor).toBe(1);
+  expect(readBridgeChannel(SCOPE)?.managerReportCursor).toBe(1);
 
   const after = await (await get()).json() as { plan: { kind: string } };
   expect(after.plan.kind).toBe("idle");
@@ -143,11 +164,11 @@ test("an acknowledgement cannot name a sequence the caller never received", asyn
      acknowledgement settles the batch it was HANDED, by its token. */
   const forged = await post({ ackToken: "ack_made_up" });
   expect(forged.status).toBe(409);
-  expect(readBridgeChannel()?.managerReportCursor ?? 0).toBe(0);
+  expect(readBridgeChannel(SCOPE)?.managerReportCursor ?? 0).toBe(0);
 
   const drained = await (await get()).json() as { plan: { ackToken: string } };
   expect((await post({ ackToken: drained.plan.ackToken })).status).toBe(200);
-  expect(readBridgeChannel()?.managerReportCursor).toBe(3);
+  expect(readBridgeChannel(SCOPE)?.managerReportCursor).toBe(3);
 });
 
 test("an acknowledgement from an AGENT is refused; the operator's own browser settles the batch", async () => {
@@ -167,7 +188,7 @@ test("an acknowledgement from an AGENT is refused; the operator's own browser se
     body: JSON.stringify({ ackToken: drained.plan.ackToken }),
   })) as unknown as Response;
   expect(refused.status).toBe(403);
-  expect(readBridgeChannel()?.managerReportCursor).toBe(0);
+  expect(readBridgeChannel(SCOPE)?.managerReportCursor).toBe(0);
   setCallerConversationResolverForTests(null);
 
   /* The Viewer's own same-origin POST presents nothing and settles it — the tab
@@ -198,7 +219,7 @@ test("a client that already played a batch gets a healing token, not silence", a
   expect(healing.plan.kind).toBe("already-acknowledged");
 
   await post({ ackToken: healing.plan.ackToken });
-  expect(readBridgeChannel()?.managerReportCursor).toBe(1);
+  expect(readBridgeChannel(SCOPE)?.managerReportCursor).toBe(1);
 });
 
 test("acknowledging refuses a missing or malformed token", async () => {
@@ -247,7 +268,7 @@ test("turn-start drains with NO live call at all — the situation it exists for
   });
   recordManagerReport({ key: "a", class: "blocked", at: new Date().toISOString(), body: "needs a decision" });
 
-  const response = await GET(new NextRequest(`${ORIGIN}/api/bridge?mode=turn-start`, {
+  const response = await GET(new NextRequest(`${ORIGIN}/api/bridge?mode=turn-start&conversationId=${SCOPE.seatConversationId}`, {
     headers: { host: "127.0.0.1" },
   })) as unknown as Response;
 
@@ -257,16 +278,44 @@ test("turn-start drains with NO live call at all — the situation it exists for
   expect(payload.prelude?.ackToken).toBeTruthy();
 });
 
+test("a project B turn cannot receive or consume project A's report", async () => {
+  sandbox();
+  setBridgeScopeResolverForTests((conversationId) => {
+    if (conversationId === SCOPE.seatConversationId) return SCOPE;
+    if (conversationId === SCOPE_B.seatConversationId) return SCOPE_B;
+    return null;
+  });
+  recordManagerReport({
+    key: "project-a-only",
+    class: "blocked",
+    at: new Date().toISOString(),
+    body: "project A needs a decision",
+  });
+
+  const wrong = await GET(new NextRequest(
+    `${ORIGIN}/api/bridge?mode=turn-start&conversationId=${SCOPE_B.seatConversationId}`,
+    { headers: { host: "127.0.0.1" } },
+  )) as unknown as Response;
+  expect((await wrong.json() as { prelude: unknown }).prelude).toBeNull();
+
+  const intended = await GET(new NextRequest(
+    `${ORIGIN}/api/bridge?mode=turn-start&conversationId=${SCOPE.seatConversationId}`,
+    { headers: { host: "127.0.0.1" } },
+  )) as unknown as Response;
+  const payload = await intended.json() as { prelude: { text: string } | null };
+  expect(payload.prelude?.text).toContain("project A needs a decision");
+});
+
 test("turn-start serves the Viewer's own same-origin drain, and refuses an agent", async () => {
   sandbox();
   recordManagerReport({ key: "a", class: "status", at: new Date().toISOString(), body: "one" });
-  const response = await GET(new NextRequest(`${ORIGIN}/api/bridge?mode=turn-start`, {
+  const response = await GET(new NextRequest(`${ORIGIN}/api/bridge?mode=turn-start&conversationId=${SCOPE.seatConversationId}`, {
     headers: { host: "127.0.0.1" },
   })) as unknown as Response;
   expect(response.status).toBe(200);
 
   setCallerConversationResolverForTests(() => "conversation_worker");
-  const agent = await GET(new NextRequest(`${ORIGIN}/api/bridge?mode=turn-start`, {
+  const agent = await GET(new NextRequest(`${ORIGIN}/api/bridge?mode=turn-start&conversationId=${SCOPE.seatConversationId}`, {
     headers: { host: "127.0.0.1", [VIEWER_SPAWN_CAPABILITY_HEADER]: "a".repeat(43) },
   })) as unknown as Response;
   expect(agent.status).toBe(403);
@@ -277,7 +326,7 @@ test("turn-start serves the Viewer's own same-origin drain, and refuses an agent
 test("turn-start keeps the cross-origin perimeter: the payload carries deploy nonces", async () => {
   sandbox();
   recordManagerReport({ key: "a", class: "status", at: new Date().toISOString(), body: "one" });
-  const response = await GET(new NextRequest(`${ORIGIN}/api/bridge?mode=turn-start`, {
+  const response = await GET(new NextRequest(`${ORIGIN}/api/bridge?mode=turn-start&conversationId=${SCOPE.seatConversationId}`, {
     headers: { host: "127.0.0.1", origin: "https://evil.example", "sec-fetch-site": "cross-site" },
   })) as unknown as Response;
   expect(response.status).toBe(403);

@@ -134,9 +134,10 @@ export async function retirePendingBridgeAcknowledgements(
 
 export function useBridgeTurnStartDrain(
   enabled: boolean,
-  options: { fetchFn?: typeof fetch } = {},
+  options: { fetchFn?: typeof fetch; conversationId?: string | null } = {},
 ): () => Promise<BridgeTurnStart> {
   const fetchFn = options.fetchFn;
+  const conversationId = options.conversationId?.trim() ?? "";
   return useCallback(async () => {
     if (!enabled) return NOTHING_PENDING;
     const request = fetchFn ?? fetch;
@@ -148,7 +149,9 @@ export function useBridgeTurnStartDrain(
          requiring one would mean the inbox drains only while it is not needed. This
          is the Viewer's own same-origin fetch, which is what says it is the operator
          opening a turn — it presents no capability, and must not. */
-      const response = await request("/api/bridge?mode=turn-start", { cache: "no-store" });
+      const parameters = new URLSearchParams({ mode: "turn-start" });
+      if (conversationId) parameters.set("conversationId", conversationId);
+      const response = await request(`/api/bridge?${parameters.toString()}`, { cache: "no-store" });
       if (!response.ok) return NOTHING_PENDING;
       const payload = await response.json() as { prelude?: { text: string; ackToken: string } | null };
       const prelude = payload.prelude;
@@ -170,7 +173,7 @@ export function useBridgeTurnStartDrain(
          again. A blocked send would be a far worse failure than a late report. */
       return NOTHING_PENDING;
     }
-  }, [enabled, fetchFn]);
+  }, [conversationId, enabled, fetchFn]);
 }
 
 export function useBridgeReportRelay(

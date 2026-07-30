@@ -159,17 +159,17 @@ test("the manager appending the same report through two hosts yields one deliver
   expect(plan.delivery.responses).toHaveLength(1);
 });
 
-test("a channel opened for a different root identity does not inherit the old cursor", () => {
+test("a second root identity does not reset the existing channel cursor", () => {
   sandbox();
   openBridgeChannel(ROOT_ID);
   appendBridgeReports([report("a")]);
   acknowledgeBridgeReports(1);
 
-  /* Not a rollover — a genuinely different minted root identity. Its position in
-     the manager's stream was never established, so it starts from the top. */
+  /* A root is an opener of the durable channel. The project seat owns the
+     cursor, so another root appearing cannot replay its consumed history. */
   const other = openBridgeChannel("root_0000deadbeef");
-  expect(other.managerReportCursor).toBe(0);
-  expect(drainBridgeReports().reports.map((entry) => entry.seq)).toEqual([1]);
+  expect(other.managerReportCursor).toBe(1);
+  expect(drainBridgeReports().reports).toEqual([]);
 });
 
 test("a lost cursor write cannot hide every later report behind a batch already spoken", () => {

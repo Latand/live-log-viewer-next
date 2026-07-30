@@ -1110,7 +1110,7 @@ export function TmuxComposerCore({
   });
   /* Pulls the bridge inbox once, at the start of a turn, and only for the voice
      conversation. Returns "" for every other card and whenever nothing is pending. */
-  const drainBridgeTurnStart = useBridgeTurnStartDrain(voiceEnabled);
+  const drainBridgeTurnStart = useBridgeTurnStartDrain(voiceEnabled, { conversationId: cardId });
   const { text, textRef, setText, setTextState, inputRef, setStatus, busy, setBusy, voiceSending, attachments } = composer;
   const attachmentDraftHydrated = useRef(false);
   const isMobile = useIsMobile();
