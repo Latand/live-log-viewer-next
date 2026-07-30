@@ -27,6 +27,8 @@ export const VIEW_SCOPE_KINDS = ["focused", "selected", "visible", "focused-sele
 export const VIEW_RESOLUTIONS = ["latest-interaction", "require-explicit"] as const;
 export const MAX_SNAPSHOT_LAST_MESSAGES = 20;
 export const MAX_SNAPSHOT_CHARS_PER_CONVERSATION = 4000;
+export const MIN_SNAPSHOT_STRING_LENGTH = 1;
+export const MAX_SNAPSHOT_STRING_LENGTH = 4096;
 
 export interface PresencePayloadV1 {
   schemaVersion: 1;

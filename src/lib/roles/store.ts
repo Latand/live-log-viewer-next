@@ -6,7 +6,7 @@ import { isEngineEffort } from "@/lib/agent/efforts";
 import { normalizeClaudeLaunchModel } from "@/lib/agent/models";
 
 import { ROLE_DEFAULTS } from "./defaults";
-import type { RoleDefinition, RoleId, RoleOverride, RoleOverridesFile } from "./types";
+import { ROLE_IDS, type RoleDefinition, type RoleId, type RoleOverride, type RoleOverridesFile } from "./types";
 
 export const ROLE_OVERRIDES_SCHEMA_VERSION = 1;
 
@@ -31,7 +31,7 @@ function atomicWriteJson(filePath: string, value: unknown): void {
 }
 
 function isRoleId(value: unknown): value is RoleId {
-  return ROLE_DEFAULTS.some((role) => role.id === value);
+  return typeof value === "string" && (ROLE_IDS as readonly string[]).includes(value);
 }
 
 function isOverride(value: unknown): value is RoleOverride {
