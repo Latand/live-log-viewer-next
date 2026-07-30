@@ -88,7 +88,7 @@ async function getViewerControl(pathname: string): Promise<Record<string, unknow
     throw new Error("Viewer control is unreachable");
   }
   const result = await response.json().catch(() => ({})) as Record<string, unknown>;
-  if (result.error || !response.ok) {
+  if (!response.ok) {
     const error = text(result.error) || `Viewer control request failed with status ${response.status}`;
     throw new McpToolRefusal(error, {
       error,

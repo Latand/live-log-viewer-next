@@ -1,12 +1,15 @@
-export type RoleId =
-  | "orchestrator"
-  | "reviewer"
-  | "verifier"
-  | "builder"
-  | "architect"
-  | "cleaner"
-  | "prod-auditor"
-  | "deployer";
+export const ROLE_IDS = [
+  "orchestrator",
+  "reviewer",
+  "verifier",
+  "builder",
+  "architect",
+  "cleaner",
+  "prod-auditor",
+  "deployer",
+] as const;
+
+export type RoleId = typeof ROLE_IDS[number];
 
 export type RoleEngine = "claude" | "codex";
 

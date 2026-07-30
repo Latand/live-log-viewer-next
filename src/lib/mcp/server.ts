@@ -9,8 +9,10 @@ import { z } from "zod";
 import { statePath } from "@/lib/configDir";
 import { PIPELINE_ACTIONS } from "@/lib/pipelines/types";
 import { procBackend } from "@/lib/proc";
+import { ROLE_IDS } from "@/lib/roles/types";
 import {
-  MAX_SCOPE_PATHS, MAX_SNAPSHOT_CHARS_PER_CONVERSATION, MAX_SNAPSHOT_LAST_MESSAGES, VIEW_RESOLUTIONS, VIEW_SCOPE_KINDS,
+  MAX_SCOPE_PATHS, MAX_SNAPSHOT_CHARS_PER_CONVERSATION, MAX_SNAPSHOT_LAST_MESSAGES, MAX_SNAPSHOT_STRING_LENGTH,
+  MIN_SNAPSHOT_STRING_LENGTH, VIEW_RESOLUTIONS, VIEW_SCOPE_KINDS,
 } from "@/lib/view/types";
 
 import type { McpToolPolicy } from "./toolAllowlist";
@@ -996,6 +998,23 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
 
 const clientRequestIdSchema = z.string().min(1).describe("Stable idempotency key for this logical call.");
 const entityIdSchema = z.string().min(1);
+const snapshotStringSchema = z.string()
+  .min(MIN_SNAPSHOT_STRING_LENGTH)
+  .max(MAX_SNAPSHOT_STRING_LENGTH);
+const snapshotPathsSchema = z.array(snapshotStringSchema)
+  .max(MAX_SCOPE_PATHS)
+  .refine((paths) => new Set(paths).size === paths.length, {
+    message: "scope.paths must contain unique paths",
+  });
+const snapshotScopeSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.enum(VIEW_SCOPE_KINDS).exclude(["paths"]),
+  }).strict(),
+  z.object({
+    kind: z.literal("paths"),
+    paths: snapshotPathsSchema,
+  }).strict(),
+]);
 
 export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
   spawn_agent: z.object({
@@ -1005,7 +1024,7 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     engine: z.enum(["claude", "codex"]).optional(),
     model: z.string().optional(),
     effort: z.string().optional(),
-    role: z.string().optional(),
+    role: z.enum(ROLE_IDS).optional(),
     roleParams: z.record(z.string(), z.unknown()).optional(),
     reviews: z.string().optional(),
     parentConversationId: z.string().optional(),
@@ -1141,14 +1160,11 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     clientRequestId: clientRequestIdSchema,
     schemaVersion: z.literal(1).optional(),
     view: z.object({
-      id: z.string().optional(),
-      deviceId: z.string().optional(),
+      id: snapshotStringSchema.optional(),
+      deviceId: snapshotStringSchema.optional(),
       resolution: z.enum(VIEW_RESOLUTIONS).optional(),
     }).strict().optional(),
-    scope: z.object({
-      kind: z.enum(VIEW_SCOPE_KINDS),
-      paths: z.array(z.string()).max(MAX_SCOPE_PATHS).optional().describe("Required for kind=paths, rejected otherwise."),
-    }).strict().optional(),
+    scope: snapshotScopeSchema.optional(),
     text: z.object({
       include: z.boolean().optional(),
       lastMessages: z.number().int().min(1).max(MAX_SNAPSHOT_LAST_MESSAGES).optional(),
@@ -1156,9 +1172,9 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     }).strict().optional(),
     caller: z.object({
       pid: z.number().int().min(1).optional(),
-      transcriptPath: z.string().optional(),
+      transcriptPath: snapshotStringSchema.optional(),
     }).strict().optional(),
-  }).passthrough(),
+  }).strict(),
   list_tasks: z.object({
     clientRequestId: clientRequestIdSchema,
     project: z.string().optional(),

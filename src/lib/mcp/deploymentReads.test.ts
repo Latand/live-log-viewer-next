@@ -90,6 +90,52 @@ test("the production Viewer control adapter reads a live plane with no runtime v
   }
 });
 
+test("the production Viewer control adapter returns a failed deployment domain object and preserves 404", async () => {
+  const deployment = {
+    deploymentId: "deployment_http_failed",
+    phase: "failed",
+    revision: "d".repeat(40),
+    error: "candidate health check failed",
+  };
+  let missing = false;
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      expect(new URL(request.url).pathname).toBe("/api/runtime/deployments/deployment_http_failed");
+      return missing
+        ? Response.json({ error: "viewer deployment was not found" }, { status: 404 })
+        : Response.json(deployment);
+    },
+  });
+  process.env.LLV_VIEWER_CONTROL_URL = server.url.origin;
+  const bindings = viewerMcpBindings();
+
+  try {
+    expect(await bindings.deployment_status({
+      clientRequestId: "deployment-production-failed",
+      deploymentId: "deployment_http_failed",
+    })).toEqual({
+      deploymentId: "deployment_http_failed",
+      deployment,
+    });
+
+    missing = true;
+    await expect(bindings.deployment_status({
+      clientRequestId: "deployment-production-missing",
+      deploymentId: "deployment_http_failed",
+    })).rejects.toMatchObject({
+      message: "viewer deployment was not found",
+      details: {
+        error: "viewer deployment was not found",
+        status: 404,
+      },
+    });
+  } finally {
+    server.stop(true);
+  }
+});
+
 test("deployment_status exposes the absent-plane code and keeps an unreachable plane distinct", async () => {
   let runtimeUnavailable = false;
   const server = Bun.serve({

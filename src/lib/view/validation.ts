@@ -1,5 +1,6 @@
 import {
-  MAX_PRESENCE_BYTES, MAX_SCOPE_PATHS, MAX_SELECTED_PATHS, MAX_SNAPSHOT_CHARS_PER_CONVERSATION, MAX_SNAPSHOT_LAST_MESSAGES, MAX_VISIBLE_PATHS,
+  MAX_PRESENCE_BYTES, MAX_SCOPE_PATHS, MAX_SELECTED_PATHS, MAX_SNAPSHOT_CHARS_PER_CONVERSATION, MAX_SNAPSHOT_LAST_MESSAGES, MAX_SNAPSHOT_STRING_LENGTH, MAX_VISIBLE_PATHS,
+  MIN_SNAPSHOT_STRING_LENGTH,
   SNAPSHOT_CALLER_KEYS, SNAPSHOT_REQUEST_KEYS, SNAPSHOT_SCOPE_KEYS, SNAPSHOT_TEXT_KEYS, SNAPSHOT_VIEW_KEYS, VIEW_RESOLUTIONS, VIEW_SCOPE_KINDS,
   type PresencePayloadV1, type SnapshotRequestV1,
 } from "./types";
@@ -21,7 +22,11 @@ function exact(value: Record<string, unknown>, allowed: readonly string[], field
 }
 function string(value: unknown, field: string, options: { nullable?: boolean; max?: number } = {}): string | null {
   if (options.nullable && value === null) return null;
-  if (typeof value !== "string" || value.length === 0 || value.length > (options.max ?? 4096)) throw new ViewValidationError("INVALID_REQUEST", `invalid ${field}`);
+  if (
+    typeof value !== "string"
+    || value.length < MIN_SNAPSHOT_STRING_LENGTH
+    || value.length > (options.max ?? MAX_SNAPSHOT_STRING_LENGTH)
+  ) throw new ViewValidationError("INVALID_REQUEST", `invalid ${field}`);
   return value;
 }
 function finite(value: unknown, field: string, min = -1_000_000_000, max = 1_000_000_000): number {

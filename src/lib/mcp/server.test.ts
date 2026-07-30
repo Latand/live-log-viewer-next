@@ -1162,10 +1162,18 @@ test("#774 tool schemas publish the closed sets their servers enforce", () => {
   const snapshot = TOOL_INPUT_SCHEMAS.operator_snapshot.shape;
   expect(Object.keys(snapshot.text.unwrap().shape).sort()).toEqual([...SNAPSHOT_TEXT_KEYS].sort());
   expect(Object.keys(snapshot.view.unwrap().shape).sort()).toEqual([...SNAPSHOT_VIEW_KEYS].sort());
-  expect(Object.keys(snapshot.scope.unwrap().shape).sort()).toEqual([...SNAPSHOT_SCOPE_KEYS].sort());
+  expect([
+    ...new Set(snapshot.scope.unwrap().options.flatMap(
+      (option: { shape: Record<string, unknown> }) => Object.keys(option.shape),
+    )),
+  ].sort()).toEqual([...SNAPSHOT_SCOPE_KEYS].sort());
   expect(Object.keys(snapshot.caller.unwrap().shape).sort()).toEqual([...SNAPSHOT_CALLER_KEYS].sort());
 
   /* Strict, not stripping: an unknown nested key must stay a loud rejection. */
   expect(snapshot.text.unwrap().safeParse({ mode: "digest" }).success).toBe(false);
   expect(snapshot.view.unwrap().safeParse({ includeFrame: true }).success).toBe(false);
+  expect(TOOL_INPUT_SCHEMAS.operator_snapshot.safeParse({
+    clientRequestId: "snapshot-extra-key",
+    unknown: true,
+  }).success).toBe(false);
 });
