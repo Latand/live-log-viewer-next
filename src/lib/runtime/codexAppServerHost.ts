@@ -9,7 +9,8 @@ import { headlessCodexThreadConfig } from "@/lib/codexHeadlessConfig";
 import { grantedPluginServerNames, grantedPlugins } from "@/lib/agent/pluginAllowlist";
 import { hardenedRedact } from "@/lib/view/compactText";
 import { decodeCodexStructuredUserText, encodeCodexStructuredUserText } from "./codexStructuredUserText";
-import { runtimeImageStore } from "./runtimeImageStore";
+import { sanitizeCodexImageFrame, type ImageSink } from "./codexImageFrames";
+import { MAX_STRUCTURED_IMAGE_ENCODED_BYTES, runtimeImageStore } from "./runtimeImageStore";
 import { STRUCTURED_IMAGE_CAPABILITY, type StructuredImageRef } from "./structuredContent";
 import {
   normalizeVoiceDeliveries,
@@ -213,7 +214,8 @@ const REALTIME_HANGUP_TIMEOUT_MS = 2_000;
 const REALTIME_LIVE_MODEL = "gpt-live-1-codex";
 const MAX_REALTIME_SDP_BYTES = 512 * 1024;
 const MAX_REALTIME_SPEECH_BYTES = 8 * 1024;
-const MAX_LINE_BYTES = 16 * 1024 * 1024;
+const MAX_REPLAY_ENVELOPE_BYTES = 256 * 1024;
+const MAX_LINE_BYTES = MAX_STRUCTURED_IMAGE_ENCODED_BYTES + MAX_REPLAY_ENVELOPE_BYTES;
 const MAX_STDERR_TAIL_BYTES = 16 * 1024;
 const MAX_PRE_RESTORE_FRAMES = 256;
 const MAX_PRE_RESTORE_BYTES = 4 * 1024 * 1024;
@@ -1592,6 +1594,20 @@ export class CodexAppServerHost implements EngineHost {
     catch (error) { this.fail(new Error(`Codex app-server stdin failed: ${safeError(error)}`)); }
   }
 
+  private boundImageBodies(item: unknown): unknown {
+    const sink: ImageSink = {
+      store: (data, mime) => {
+        const store = runtimeImageStore();
+        const [ref] = store.putMany([{ base64: data.toString("base64"), mime }]);
+        return ref ? store.pathFor(ref) : null;
+      },
+    };
+    try { return sanitizeCodexImageFrame(item, sink).value; }
+    catch {
+      return item;
+    }
+  }
+
   private acceptStdout(chunk: string): void {
     if (this.dead || this.releasing || this.released) return;
     this.stdoutBuffer += chunk;
@@ -1759,7 +1775,7 @@ export class CodexAppServerHost implements EngineHost {
           this.emit({ kind: "turn-started", turnId: eventTurnId });
         }
       }
-      this.emit({ kind: "item", turnId: eventTurnId, item: params.item, phase });
+      this.emit({ kind: "item", turnId: eventTurnId, item: this.boundImageBodies(params.item), phase });
       return;
     }
     if (method === "turn/completed" && turnId) {
