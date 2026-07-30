@@ -6,6 +6,7 @@ import { accountManager } from "@/lib/accounts/manager";
 import { emptyLaunchProfile, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor } from "@/lib/agent/cli";
 import { agentRegistry, type DurableMembershipInput, type TmuxHostEvidence } from "@/lib/agent/registry";
+import { forEachCooperatively } from "@/lib/cooperative";
 import { transcriptAllowed } from "@/lib/agent/spawnParent";
 import { sessionKeyFromTranscript, sessionKeyId } from "@/lib/agent/sessionKey";
 import { headCwd } from "@/lib/agent/transcript";
@@ -505,13 +506,70 @@ export async function stopPipelineStageAgent(
 
 export function defaultPipelinePorts(): PipelinePorts {
   let runtimeSnapshot: ReturnType<NonNullable<ReturnType<typeof runtimeHostClient>>["snapshot"]> | null = null;
+  const registry = agentRegistry();
+  let registrySnapshot: ReturnType<typeof registry.readOnlySnapshot> | null = null;
+  let adoptionCandidatesByPipeline: Map<string, PipelineAdoptionCandidate[]> | null = null;
+  let flowSnapshot: Flow[] | null = null;
+  const snapshot = () => registrySnapshot ??= registry.readOnlySnapshot();
+  const flows = () => flowSnapshot ??= loadFlows();
+  const invalidateRegistryProjection = () => {
+    registrySnapshot = null;
+    adoptionCandidatesByPipeline = null;
+  };
+  const adoptionCandidates = () => {
+    if (adoptionCandidatesByPipeline) return adoptionCandidatesByPipeline;
+    const current = snapshot();
+    const receiptsByConversation = new Map(
+      Object.values(current.receipts).map((receipt) => [receipt.conversationId, receipt] as const),
+    );
+    const grouped = new Map<string, PipelineAdoptionCandidate[]>();
+    for (const [conversationId, memberships] of Object.entries(current.memberships)) {
+      for (const membership of memberships) {
+        if (membership.kind !== "pipeline" || !membership.containerId
+          || !membership.slot.startsWith("adopt:") || !membership.stageId || !membership.parentConversationId) continue;
+        const receipt = receiptsByConversation.get(conversationId as ViewerConversationId) ?? null;
+        const conversation = current.conversations[conversationId as ViewerConversationId] ?? null;
+        const generation = conversation?.generations.at(-1) ?? null;
+        const agentPath = receipt?.artifactPath ?? generation?.path ?? null;
+        if (!agentPath) continue;
+        const runtime = membership.runtime ?? (receipt ? {
+          engine: receipt.engine,
+          model: receipt.launchProfile.model,
+          effort: receipt.launchProfile.effort,
+        } : conversation ? {
+          engine: conversation.engine,
+          model: generation?.launchProfile.model ?? null,
+          effort: generation?.launchProfile.effort ?? null,
+        } : null);
+        const candidates = grouped.get(membership.containerId) ?? [];
+        candidates.push({
+          stageId: membership.stageId,
+          sourceConversationId: membership.parentConversationId,
+          launchId: receipt?.launchId ?? null,
+          conversationId,
+          sessionId: receipt?.key?.sessionId ?? null,
+          agentPath,
+          paneId: receipt?.verifiedHost?.paneId ?? receipt?.pane?.paneId ?? null,
+          startedAt: receipt?.createdAt ?? membership.createdAt,
+          runtime,
+        });
+        grouped.set(membership.containerId, candidates);
+      }
+    }
+    adoptionCandidatesByPipeline = grouped;
+    return grouped;
+  };
   return {
     exec: realExec,
     preflightRepo: preflightPipelineRepo,
     roleLookup: pipelineRoleLookup,
-    spawnAgent: spawnPipelineAgent,
+    spawnAgent: async (input, onReserved) => {
+      const result = await spawnPipelineAgent(input, onReserved);
+      invalidateRegistryProjection();
+      return result;
+    },
     spawnReceipt: (launchId) => {
-      const receipt = agentRegistry().readOnlySnapshot().receipts[launchId];
+      const receipt = snapshot().receipts[launchId];
       if (!receipt) return null;
       return {
         state: receipt.state,
@@ -522,7 +580,11 @@ export function defaultPipelinePorts(): PipelinePorts {
         paneId: receipt.verifiedHost?.paneId ?? receipt.pane?.paneId ?? null,
       };
     },
-    claimSpawnRetry: (launchId, claimId) => agentRegistry().claimFailedSpawnForRetry(launchId, claimId).kind,
+    claimSpawnRetry: (launchId, claimId) => {
+      const result = registry.claimFailedSpawnForRetry(launchId, claimId).kind;
+      invalidateRegistryProjection();
+      return result;
+    },
     paneAgentAlive: async (paneId) => {
       const info = await paneInfo(paneId);
       return info !== null && !isShellCommand(info.command);
@@ -561,52 +623,33 @@ export function defaultPipelinePorts(): PipelinePorts {
     headCwd: (transcriptPath) => headCwd(transcriptPath),
     lastMessage: lastAssistantMessage,
     pathForConversation: (conversationId) => conversationId.startsWith("conversation_")
-      ? agentRegistry().conversation(conversationId as ViewerConversationId)?.generations.at(-1)?.path ?? null
+      ? snapshot().conversations[conversationId as ViewerConversationId]?.generations.at(-1)?.path ?? null
       : null,
     sourcePathAllowed: transcriptAllowed,
-    conversationIdForPath: (pathname) => agentRegistry().conversationForPath(pathname)?.id ?? null,
-    pipelineAdoptionCandidates: (pipelineId) => {
-      const snapshot = agentRegistry().readOnlySnapshot();
-      const receipts = Object.values(snapshot.receipts);
-      const candidates: PipelineAdoptionCandidate[] = [];
-      for (const [conversationId, memberships] of Object.entries(snapshot.memberships)) {
-        for (const membership of memberships) {
-          if (membership.kind !== "pipeline" || membership.containerId !== pipelineId
-            || !membership.slot.startsWith("adopt:") || !membership.stageId || !membership.parentConversationId) continue;
-          const receipt = receipts.find((candidate) => candidate.conversationId === conversationId) ?? null;
-          const conversation = snapshot.conversations[conversationId as ViewerConversationId] ?? null;
-          const generation = conversation?.generations.at(-1) ?? null;
-          const agentPath = receipt?.artifactPath ?? conversation?.generations.at(-1)?.path ?? null;
-          if (!agentPath) continue;
-          const runtime = membership.runtime ?? (receipt ? {
-            engine: receipt.engine,
-            model: receipt.launchProfile.model,
-            effort: receipt.launchProfile.effort,
-          } : conversation ? {
-            engine: conversation.engine,
-            model: generation?.launchProfile.model ?? null,
-            effort: generation?.launchProfile.effort ?? null,
-          } : null);
-          candidates.push({
-            stageId: membership.stageId,
-            sourceConversationId: membership.parentConversationId,
-            launchId: receipt?.launchId ?? null,
-            conversationId,
-            sessionId: receipt?.key?.sessionId ?? null,
-            agentPath,
-            paneId: receipt?.verifiedHost?.paneId ?? receipt?.pane?.paneId ?? null,
-            startedAt: receipt?.createdAt ?? membership.createdAt,
-            runtime,
-          });
-        }
+    conversationIdForPath: (pathname) => {
+      for (const conversation of Object.values(snapshot().conversations)) {
+        if (conversation.generations.some((generation) => generation.path === pathname)) return conversation.id;
       }
-      return candidates;
+      return null;
     },
-    createFlow: createFlowFromRequest,
-    patchFlow: (id, action, note) => patchFlow(id, { action, ...(note ? { note } : {}) }),
-    closeFlow,
-    getFlow: (id) => loadFlows().find((flow) => flow.id === id) ?? null,
-    findFlow: (implementerPath, implementerConversationId, baseRef, targetSha) => loadFlows()
+    pipelineAdoptionCandidates: (pipelineId) => adoptionCandidates().get(pipelineId) ?? [],
+    createFlow: async (request, entries) => {
+      const result = await createFlowFromRequest(request, entries);
+      flowSnapshot = null;
+      return result;
+    },
+    patchFlow: (id, action, note) => {
+      const result = patchFlow(id, { action, ...(note ? { note } : {}) });
+      flowSnapshot = null;
+      return result;
+    },
+    closeFlow: async (id) => {
+      const result = await closeFlow(id);
+      flowSnapshot = null;
+      return result;
+    },
+    getFlow: (id) => flows().find((flow) => flow.id === id) ?? null,
+    findFlow: (implementerPath, implementerConversationId, baseRef, targetSha) => flows()
       .filter((flow) =>
         flow.baseRef === baseRef
         && flow.targetSha === targetSha
@@ -2106,7 +2149,7 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
   try {
     const result = await withPipelineMutation(async (pipelines, persist) => {
       let changed = false;
-      for (const pipeline of pipelines) {
+      await forEachCooperatively(pipelines, async (pipeline) => {
         let pipelineChanged = reconcilePipelineEmbeddedFlows(pipeline, ports);
         pipelineChanged = reconcilePendingPipelineAdoptions(pipeline, ports) || pipelineChanged;
         pipelineChanged = await reconcileHistoricalAttempts(pipeline, entries, ports) || pipelineChanged;
@@ -2124,7 +2167,7 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
           changed = true;
           persist();
         }
-      }
+      }, { batchSize: 4, timeBudgetMs: 16 });
       if (changed) persist();
       return { pipelines, changed };
     });

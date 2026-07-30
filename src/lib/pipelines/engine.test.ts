@@ -34,15 +34,21 @@ test("default pipeline projections reuse one registry parse across the historica
   const registryPath = path.join(process.env.LLV_STATE_DIR!, "projection-cache-agent-registry.json");
   const registry = new AgentRegistry(registryPath);
   setAgentRegistryForTests(registry);
-  const reads = spyOn(fs, "readFileSync");
+  const reads = spyOn(registry, "readOnlySnapshot");
+  const fileReads = spyOn(fs, "readFileSync");
   try {
     const ports = defaultPipelinePorts();
     for (let index = 0; index < 300; index += 1) {
       expect(ports.pipelineAdoptionCandidates(`historical-${index}`)).toEqual([]);
       expect(ports.spawnReceipt(`missing-${index}`)).toBeNull();
+      expect(ports.pathForConversation(`conversation_${index}`)).toBeNull();
+      expect(ports.getFlow(`flow-${index}`)).toBeNull();
     }
-    expect(reads.mock.calls.filter(([filename]) => filename === registryPath)).toHaveLength(1);
+    expect(reads).toHaveBeenCalledTimes(1);
+    expect(fileReads.mock.calls.filter(([filename]) =>
+      filename === path.join(process.env.LLV_STATE_DIR!, "flows.json"))).toHaveLength(1);
   } finally {
+    fileReads.mockRestore();
     reads.mockRestore();
     setAgentRegistryForTests(null);
   }
