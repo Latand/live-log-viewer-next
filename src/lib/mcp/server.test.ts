@@ -6,8 +6,12 @@ import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
+import { PIPELINE_ACTIONS } from "@/lib/pipelines/types";
+import { SNAPSHOT_CALLER_KEYS, SNAPSHOT_SCOPE_KEYS, SNAPSHOT_TEXT_KEYS, SNAPSHOT_VIEW_KEYS } from "@/lib/view/types";
+
 import {
   MCP_TOOL_NAMES,
+  TOOL_INPUT_SCHEMAS,
   FileMcpReceiptStore,
   MemoryMcpReceiptStore,
   createViewerMcpServer,
@@ -1146,4 +1150,22 @@ describe("MCP tool service", () => {
       await server.close();
     }
   });
+});
+
+/* #774: `pipeline_action.action` was `z.string().min(1)` while the PATCH route
+   admitted a fixed set, and `operator_snapshot`'s nested objects were free-form
+   records against an exact-key validator. Both now read from one constant. */
+test("#774 tool schemas publish the closed sets their servers enforce", () => {
+  const pipelineAction = TOOL_INPUT_SCHEMAS.pipeline_action.shape.action;
+  expect(pipelineAction.options).toEqual([...PIPELINE_ACTIONS]);
+
+  const snapshot = TOOL_INPUT_SCHEMAS.operator_snapshot.shape;
+  expect(Object.keys(snapshot.text.unwrap().shape).sort()).toEqual([...SNAPSHOT_TEXT_KEYS].sort());
+  expect(Object.keys(snapshot.view.unwrap().shape).sort()).toEqual([...SNAPSHOT_VIEW_KEYS].sort());
+  expect(Object.keys(snapshot.scope.unwrap().shape).sort()).toEqual([...SNAPSHOT_SCOPE_KEYS].sort());
+  expect(Object.keys(snapshot.caller.unwrap().shape).sort()).toEqual([...SNAPSHOT_CALLER_KEYS].sort());
+
+  /* Strict, not stripping: an unknown nested key must stay a loud rejection. */
+  expect(snapshot.text.unwrap().safeParse({ mode: "digest" }).success).toBe(false);
+  expect(snapshot.view.unwrap().safeParse({ includeFrame: true }).success).toBe(false);
 });

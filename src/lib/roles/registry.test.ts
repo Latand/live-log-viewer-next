@@ -60,13 +60,19 @@ test("builder parameters select the cheap fixer and the frontend implementation 
 });
 
 test("role registry rejects unknown and missing required parameters with bounded errors", () => {
+  /* #774: a rejection names the accepted alternatives, so the caller can
+     self-correct instead of reading the registry source. */
   expect(resolveRole("reviewer", { lens: "all", unexpected: true })).toEqual({
     ok: false,
-    error: "unknown role parameter: unexpected",
+    error: "unknown role parameter: unexpected (reviewer accepts: diffSource, lens, mode, parallelN)",
   });
   expect(resolveRole("verifier", {})).toEqual({
     ok: false,
     error: "missing required role parameter: claims",
+  });
+  expect(resolveRole("no-such-role", {})).toEqual({
+    ok: false,
+    error: "unknown role: no-such-role (allowed: orchestrator, reviewer, verifier, builder, architect, cleaner, prod-auditor, deployer)",
   });
 });
 
