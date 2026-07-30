@@ -521,12 +521,12 @@ test("deployment_status uses Viewer HTTP while resources keeps its resource read
     get: async (pathname: string) => {
       calls.push(pathname);
       if (pathname.endsWith("deployment_608")) {
-        return { deploymentId: "deployment_608", state: "completed", revision: "a".repeat(40) };
+        return { deploymentId: "deployment_608", phase: "completed", revision: "a".repeat(40) };
       }
       if (pathname.endsWith("operation_608")) {
         return { operationId: "operation_608", receipt: { status: "delivered" } };
       }
-      return { count: 1, deployments: [{ deploymentId: "deployment_recent", state: "running" }] };
+      return { count: 1, deployments: [{ deploymentId: "deployment_recent", phase: "running", revision: "b".repeat(40) }] };
     },
     post: async () => {
       throw new Error("unexpected control write");
@@ -541,7 +541,7 @@ test("deployment_status uses Viewer HTTP while resources keeps its resource read
 
   expect(await bindings.deployment_status({ clientRequestId: "deployment-status", deploymentId: "deployment_608" })).toMatchObject({
     deploymentId: "deployment_608",
-    deployment: { state: "completed" },
+    deployment: { phase: "completed" },
   });
   expect(await bindings.deployment_status({ clientRequestId: "operation-status", operationId: "operation_608" })).toMatchObject({
     operationId: "operation_608",
@@ -549,7 +549,7 @@ test("deployment_status uses Viewer HTTP while resources keeps its resource read
   });
   expect(await bindings.deployment_status({ clientRequestId: "deployment-list" })).toEqual({
     count: 1,
-    deployments: [{ deploymentId: "deployment_recent", state: "running" }],
+    deployments: [{ deploymentId: "deployment_recent", phase: "running", revision: "b".repeat(40) }],
   });
   expect(await bindings.resources({ clientRequestId: "resources-read", fresh: true })).toMatchObject({ system: { ramAvailable: 5 }, sessions: [] });
   expect(calls).toEqual([
