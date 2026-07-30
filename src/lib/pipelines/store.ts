@@ -420,7 +420,14 @@ export function loadPipelines(): Pipeline[] {
   const legacyRecords = file.schemaVersion === 2 ? file.pipelines.map(migrateV2Pipeline) : file.pipelines;
   const records = file.schemaVersion < PIPELINES_SCHEMA_VERSION ? legacyRecords.map(migrateTaskIds) : legacyRecords;
   if (!records.every(isPipeline)) throw new PipelineStoreError("pipeline registry contains malformed records");
-  return records.map((pipeline) => ({
+  return records.map(reviveLoadedPipeline);
+}
+
+/** Fresh per-call copies of every layer a caller may write (pipeline, stage,
+    run, attempt, cursor rows), so cached records stay pristine while callers
+    receive independently mutable structures. Deep config leaves are shared. */
+function reviveLoadedPipeline(pipeline: Pipeline): Pipeline {
+  return {
     ...pipeline,
     project: canonicalProject(pipeline.project),
     taskIds: [...pipeline.taskIds],
@@ -469,7 +476,35 @@ export function loadPipelines(): Pipeline[] {
           }))
         : [],
     })),
-  }));
+  };
+}
+
+let projectionCache: { signature: string; pipelines: Pipeline[] } | null = null;
+
+function pipelinesFileSignature(): string | null {
+  try {
+    const stat = fs.statSync(pipelinesFile(), { bigint: true });
+    return `${stat.mtimeNs}:${stat.size}`;
+  } catch {
+    return null;
+  }
+}
+
+/** Read-only load for request-path projections (issue #798): no lock, and the
+    parse+validation of a large registry is cached against the file signature.
+    Every call still returns independently mutable records via the same revive
+    pass `loadPipelines` uses, so a projection overlay can never write into the
+    cache. Mutating paths keep `withPipelineMutation`, whose persisted rename
+    changes the signature and invalidates this cache. */
+export function loadPipelinesForProjection(): Pipeline[] {
+  const before = pipelinesFileSignature();
+  if (before !== null && projectionCache?.signature === before) {
+    return projectionCache.pipelines.map(reviveLoadedPipeline);
+  }
+  const pipelines = loadPipelines();
+  const after = pipelinesFileSignature();
+  if (after !== null && before === after) projectionCache = { signature: after, pipelines };
+  return pipelines.map(reviveLoadedPipeline);
 }
 
 function savePipelinesUnlocked(pipelines: Pipeline[]): void {

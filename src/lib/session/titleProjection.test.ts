@@ -6,11 +6,11 @@ import path from "node:path";
 import { AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
 import type { FileEntry } from "@/lib/types";
 
-import { overlayResourceSessionTitles, overlaySessionTitles } from "./titleProjection";
+import { overlayResourceSessionTitles, overlaySessionTitles, registryProjectionForSnapshot } from "./titleProjection";
 import { writeSessionTitle } from "./titleStore";
 
-const UUID = "11111111-2222-4333-8444-555555555555";
-const SESSION_PATH = `/home/u/.claude/projects/proj/${UUID}.jsonl`;
+const UUID = "11111111-2222-4333-0444-555555555555";
+const SESSION_PATH = `/home/user/.claude/projects/proj/${UUID}.jsonl`;
 
 let stateDir = "";
 let registryRoot = "";
@@ -80,8 +80,8 @@ test("a title filed under a predecessor/continuity path survives onto the succes
   const conversation = registry.ensureConversation("claude", SESSION_PATH, null);
   // A prior transcript the conversation still owns (e.g. an account-migration
   // predecessor), with its own UUID/path.
-  const predUuid = "22222222-2222-4333-8444-555555555555";
-  const predPath = `/home/u/.claude/projects/proj/${predUuid}.jsonl`;
+  const predUuid = "22222222-2222-4333-0444-555555555555";
+  const predPath = `/home/user/.claude/projects/proj/${predUuid}.jsonl`;
   registry.recordConversationContinuityPath(conversation.id, predPath);
   setAgentRegistryForTests(registry);
   // The title was filed under the predecessor's UUID key.
@@ -96,14 +96,14 @@ test("a title filed under a predecessor/continuity path survives onto the succes
 });
 
 test("a subagent is not renamable and receives no override affordance", () => {
-  const subPath = "/home/u/.claude/projects/proj/abc/subagents/agent-9.jsonl";
+  const subPath = "/home/user/.claude/projects/proj/abc/subagents/agent-9.jsonl";
   const file = entry({ path: subPath, kind: "subagent" });
   overlaySessionTitles([file]);
   expect(file.renamable).toBe(false);
 });
 
 test("the resource projection applies identity and titles without transcript-head eligibility reads", () => {
-  const pathname = `/home/u/.codex/sessions/2026/07/16/rollout-${UUID}.jsonl`;
+  const pathname = `/home/user/.codex/sessions/2026/07/16/rollout-${UUID}.jsonl`;
   const registry = new AgentRegistry(path.join(stateDir, "agent-registry.json"));
   const resourceConversation = registry.ensureConversation("codex", pathname, null);
   setAgentRegistryForTests(registry);
@@ -130,6 +130,35 @@ test("the resource projection applies identity and titles without transcript-hea
   } finally {
     fs.openSync = originalOpen;
   }
+});
+
+test("issue 798: the title overlay consumes the threaded snapshot without re-reading the registry", () => {
+  const registry = new AgentRegistry(path.join(registryRoot, "registry.json"));
+  const conversation = registry.ensureConversation("claude", SESSION_PATH, null);
+  setAgentRegistryForTests(registry);
+  const snapshot = registry.readOnlySnapshot();
+  const target = registry as unknown as { readOnlySnapshot: AgentRegistry["readOnlySnapshot"] };
+  target.readOnlySnapshot = () => {
+    throw new Error("the title projection re-read the registry instead of consuming the threaded snapshot");
+  };
+
+  const file = entry();
+  overlaySessionTitles([file], snapshot);
+  expect(file.conversationId).toBe(conversation.id);
+});
+
+test("issue 798: the registry projection is cached per snapshot revision, not per registry file write", () => {
+  const registry = new AgentRegistry(path.join(registryRoot, "registry.json"));
+  registry.ensureConversation("claude", SESSION_PATH, null);
+  setAgentRegistryForTests(registry);
+  const snapshot = registry.readOnlySnapshot();
+  const projection = registryProjectionForSnapshot(snapshot);
+  /* A sqlite mirror checkpoint rewrites the JSON mirror (new mtime/size
+     signature) while the store revision — and with it the shared snapshot
+     object — is unchanged. The projection must survive that rewrite instead of
+     rebuilding over every conversation. */
+  fs.writeFileSync(registry.filename, fs.readFileSync(registry.filename));
+  expect(registryProjectionForSnapshot(snapshot)).toBe(projection);
 });
 
 function setRegistryConversation() {

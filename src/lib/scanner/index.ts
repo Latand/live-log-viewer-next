@@ -2,7 +2,9 @@ import type { FileEntry, ProjectCatalogEntry } from "../types";
 import { agentRegistry, RegistryReadError } from "../agent/registry";
 import { forEachCooperatively, yieldToRuntime } from "../cooperative";
 import { tickFlows } from "../flows/engine";
-import { tickPipelines } from "../pipelines/engine";
+import { withFlowSnapshot } from "../flows/store";
+import { reconcileEmbeddedReviewFlows, tickPipelines } from "../pipelines/engine";
+import { withPipelineMutation } from "../pipelines/store";
 import { notifyQuestion } from "../push";
 import { overlaySessionTitles, sessionProjectProjection } from "../session/titleProjection";
 import { tickTaskInbox } from "../tasks/inboxScanner";
@@ -301,6 +303,19 @@ export async function reconcileFileControllers(entries: FileEntry[]): Promise<vo
     if (entry.pendingQuestion || entry.waitingInput) void notifyQuestion(entry);
   });
   await tickFlows(entries);
+  await yieldToRuntime();
+  /* Durable half of the embedded review flow reconcile (issue #798): the files
+     GET applies the same function as a read-model overlay only, so the claim
+     of a flow-first crash recovery and the sync generation persist here, on
+     the controller path, never from a request. */
+  try {
+    await withPipelineMutation((pipelines, persist) =>
+      withFlowSnapshot((flows) => {
+        if (reconcileEmbeddedReviewFlows(pipelines, flows)) persist();
+      }));
+  } catch (error) {
+    console.error("[pipelines] skipping embedded review flow reconcile", error);
+  }
   await yieldToRuntime();
   await tickPipelines(entries);
   await yieldToRuntime();
