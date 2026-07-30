@@ -1,4 +1,5 @@
 import type { FileEntry, PendingQuestion, PendingQuestionItem, PendingQuestionOption } from "../types";
+import { claudeUserText, isClaudeProtocolUser } from "../claudeProtocolUser";
 import { tailRecords, tailRecordsResult } from "./activity";
 import { globalCache } from "./caches";
 import { recordValue, recordsValue, stringValue } from "./json";
@@ -6,7 +7,9 @@ import { recordValue, recordsValue, stringValue } from "./json";
 type PendingQuestionDraft = Omit<PendingQuestion, "pid" | "paneTarget">;
 
 globalCache<unknown>("questions").clear();
-const questionCache = globalCache<[number, number, PendingQuestionDraft | null]>("questions-v3");
+const questionCache = globalCache<[number, number, PendingQuestionDraft | null]>("questions-v4");
+const SYSTEM_REMINDER_ONLY_RE = /^<system-reminder\b[^>]*>[\s\S]*<\/system-reminder>$/i;
+const INTERRUPT_SENTINEL_RE = /^\[Request interrupted by user(?: for tool use)?\]$/;
 
 function timestampOf(obj: Record<string, unknown>): string {
   return stringValue(obj.timestamp) ?? stringValue(obj.created_at) ?? new Date().toISOString();
@@ -78,6 +81,14 @@ function assistantToolUse(obj: Record<string, unknown>): { id: string; name: str
   return null;
 }
 
+function isGenuineUserMessage(obj: Record<string, unknown>): boolean {
+  if (obj.type !== "user" || obj.isMeta === true || obj.isSidechain === true || isClaudeProtocolUser(obj)) return false;
+  const content = recordValue(obj.message)?.content;
+  const text = claudeUserText(content).trim();
+  if (text) return !SYSTEM_REMINDER_ONLY_RE.test(text) && !INTERRUPT_SENTINEL_RE.test(text);
+  return recordsValue(content).some((block) => block.type !== "tool_result" && block.type !== "text");
+}
+
 export function recordedToolResult(pathname: string, size: number, mtimeMs: number, toolUseId: string): string | null {
   for (const obj of tailRecords(pathname, size, mtimeMs).reverse()) {
     const text = toolResultText(obj, toolUseId);
@@ -97,13 +108,15 @@ export function pendingQuestionFor(entry: FileEntry): PendingQuestion | null {
     const answered = new Set<string>();
     const tail = tailRecordsResult(entry.path, entry.size, mtimeMs);
     for (const obj of tail.records.reverse()) {
+      if (isGenuineUserMessage(obj)) break;
       const result = toolResultId(obj);
       if (result) {
         answered.add(result);
         continue;
       }
       const use = assistantToolUse(obj);
-      if (!use || answered.has(use.id)) break;
+      if (!use) continue;
+      if (answered.has(use.id)) break;
       if (use.name === "AskUserQuestion") {
         const questions = recordsValue(use.input.questions).map(normalizeQuestion).filter((item): item is PendingQuestionItem => item !== null);
         if (!questions.length) break;
