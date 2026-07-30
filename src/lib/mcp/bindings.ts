@@ -603,6 +603,12 @@ function bridgeReport(args: McpToolArgs, dependencies: ViewerMcpDomainDependenci
   if (!body) throw new Error("body is required");
 
   const origin = attributionOf(dependencies);
+  const project = dependencies.callerProject ? dependencies.callerProject() : productionCallerProject();
+  const seats = dependencies.authorizedSeats?.()
+    ?? authorizedManagerSeats(productionManagerAuthoritySources());
+  const targetSeat = project
+    ? seats.find((seat) => seat.project === project)
+    : undefined;
   const requested = args.confirmation && typeof args.confirmation === "object" && !Array.isArray(args.confirmation)
     ? args.confirmation as { sha?: unknown; expiresMinutes?: unknown }
     : null;
@@ -616,6 +622,19 @@ function bridgeReport(args: McpToolArgs, dependencies: ViewerMcpDomainDependenci
     throw new McpToolRefusal(
       "only the designated orchestrator may request a deployment confirmation",
       { code: "confirmation_not_permitted" },
+    );
+  }
+  if (
+    reportClass === "confirmation_request"
+    && (
+      !project
+      || !origin.conversationId
+      || targetSeat?.conversationId !== origin.conversationId
+    )
+  ) {
+    throw new McpToolRefusal(
+      "a deployment confirmation must stay bound to the project seat that minted it",
+      { code: "confirmation_seat_unresolved" },
     );
   }
   const confirmation = requested
@@ -638,6 +657,8 @@ function bridgeReport(args: McpToolArgs, dependencies: ViewerMcpDomainDependenci
     class: reportClass,
     at: new Date().toISOString(),
     origin,
+    project,
+    targetSeatConversationId: targetSeat?.conversationId ?? null,
     body: attributedBody,
     correlatesDirective: text(args.correlatesDirective) || null,
     confirmation,

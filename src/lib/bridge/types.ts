@@ -38,7 +38,8 @@ export const BRIDGE_REPORT_LOG_SCHEMA_VERSION = 1 as const;
 export const MANAGER_RECORD_REF = "orchestrator" as const;
 export type ManagerRecordRef = typeof MANAGER_RECORD_REF;
 
-/** Reports retained in the log. Older ones are trimmed, their ids retired. */
+/** Routable reports retained in the log. Quarantined rows stay durable until
+    an operator-facing resolution path exists. */
 export const BRIDGE_REPORT_CAPACITY = 500;
 /** Retired ids kept so a trimmed report cannot be re-appended by a late replay. */
 export const BRIDGE_RETIRED_ID_CAPACITY = 2_000;
@@ -96,6 +97,14 @@ export interface BridgeReportOrigin {
   role: string | null;
 }
 
+/** Durable routing identity for one project's designated orchestrator seat.
+    Project is the repository-derived identity key; the display label never
+    participates. */
+export interface BridgeChannelScope {
+  project: string;
+  seatConversationId: string;
+}
+
 /**
  * How a report's origin reads on the way OUT — the label every delivery
  * composer must frame a non-manager row with (HIGH 3 of the #758 review: an
@@ -120,6 +129,12 @@ export interface BridgeReportV1 {
   /** Server-derived origin. Absent on rows written before origin labeling
       existed, which were manager-only by the gate of that era. */
   origin?: BridgeReportOrigin;
+  /** Server-derived repository identity. Absent only on pre-#787 rows. Null
+      means the sender could not be resolved and the row is quarantined. */
+  project?: string | null;
+  /** Server-selected recipient seat. Null or absent rows are unrouted and are
+      never handed to a conversation. */
+  targetSeatConversationId?: string | null;
   /** `clientRequestId` of the directive this answers, when it answers one. */
   correlatesDirective?: string;
   /** Bounded and secret-redacted at write. Transcript payloads never reach it. */
@@ -138,6 +153,9 @@ export interface BridgeReportInput {
   at: string;
   /** Server-derived origin label; callers never supply one. */
   origin?: BridgeReportOrigin | null;
+  /** Server-derived routing fields. MCP callers cannot supply either field. */
+  project?: string | null;
+  targetSeatConversationId?: string | null;
   correlatesDirective?: string | null;
   /** Raw candidate text; bounded and redacted before it is stored. */
   body?: string | null;
@@ -150,6 +168,9 @@ export interface BridgeReportLogV1 {
   /** Highest seq that trimming has removed. A cursor at or below this can no
       longer be resumed exactly, which the drain must say out loud (§7.12). */
   trimmedThroughSeq: number;
+  /** Highest trimmed seq per routable project-seat channel. Missing on
+      pre-#787 files, whose projectless rows are quarantined. */
+  trimmedThroughByChannel?: Record<string, number>;
   reports: BridgeReportV1[];
   retired: string[];
 }
@@ -158,6 +179,9 @@ export interface BridgeChannelV1 {
   schemaVersion: typeof BRIDGE_CHANNEL_SCHEMA_VERSION;
   /** `RootLineageV1.rootId` — survives every root session rollover. */
   rootId: string;
+  /** Present on project-scoped channels; absent on the pre-#787 global file. */
+  project?: string;
+  seatConversationId?: string;
   /** The manager's designation record, by name. Never a conversationId. */
   managerRecordRef: ManagerRecordRef;
   /** Last report seq the gateway has fully consumed. */
@@ -189,4 +213,7 @@ export interface BridgeReportBatch {
   /** Pending reports that did not fit under the batch cap. */
   remaining: number;
   gap: { resumedAtSeq: number; missedThroughSeq: number } | null;
+  /** Quarantined rows visible to this channel without exposing their bodies.
+      `legacy` covers pre-#787 rows whose project is absent. */
+  unrouted?: { count: number; legacy: number; forProject: number };
 }

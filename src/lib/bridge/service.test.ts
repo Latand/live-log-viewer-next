@@ -11,9 +11,10 @@ import {
   authorizeBridgeDeploy,
   bridgeTurnStartPrelude,
   pendingBridgeDelivery,
-  recordManagerReport,
+  recordManagerReport as recordBridgeReport,
 } from "./service";
 import { appendBridgeReports, drainBridgeReports, openBridgeChannel, readBridgeChannel } from "./store";
+import type { BridgeReportInput } from "./types";
 
 /**
  * The production orchestration — the layer the reviewer found missing.
@@ -45,6 +46,18 @@ const NOW = new Date("2026-07-27T12:00:00.000Z");
 const SHA = "4f3c1b9a8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a";
 
 const rootIdentity = () => ROOT_ID;
+const SCOPE = {
+  project: "repo-project-a",
+  seatConversationId: "conversation_manager_a",
+};
+
+function recordManagerReport(input: BridgeReportInput) {
+  return recordBridgeReport({
+    ...input,
+    project: SCOPE.project,
+    targetSeatConversationId: SCOPE.seatConversationId,
+  });
+}
 
 test("the manager's report reaches a live call as one delivery, through one call", () => {
   sandbox();
@@ -55,7 +68,7 @@ test("the manager's report reaches a live call as one delivery, through one call
     body: "builder finished #726",
   });
 
-  const pending = pendingBridgeDelivery({ rootIdentity, now: NOW, lastBatchAt: null });
+  const pending = pendingBridgeDelivery({ rootIdentity, now: NOW, lastBatchAt: null, scope: SCOPE });
   expect(pending.kind).toBe("deliver");
   if (pending.kind !== "deliver") throw new Error("unreachable");
   expect(pending.delivery.responses[0]!.text).toContain("builder finished #726");
@@ -63,7 +76,7 @@ test("the manager's report reaches a live call as one delivery, through one call
 
   /* Opening the channel is part of the production path, not something a caller
      has to remember: a first report on a fresh install must still be deliverable. */
-  expect(readBridgeChannel()?.rootId).toBe(ROOT_ID);
+  expect(readBridgeChannel(SCOPE)?.rootId).toBe(ROOT_ID);
 });
 
 test("acknowledging advances the durable cursor so the next call starts clean", () => {
@@ -71,55 +84,63 @@ test("acknowledging advances the durable cursor so the next call starts clean", 
   recordManagerReport({ key: "a", class: "status", at: NOW.toISOString(), body: "one" });
   recordManagerReport({ key: "b", class: "status", at: NOW.toISOString(), body: "two" });
 
-  const pending = pendingBridgeDelivery({ rootIdentity, now: NOW, lastBatchAt: null });
+  const pending = pendingBridgeDelivery({ rootIdentity, now: NOW, lastBatchAt: null, scope: SCOPE });
   if (pending.kind !== "deliver") throw new Error("expected a delivery");
-  acknowledgeBridgeDelivery(pending.throughSeq);
+  acknowledgeBridgeDelivery(pending.throughSeq, NOW, SCOPE);
 
-  expect(readBridgeChannel()?.managerReportCursor).toBe(2);
-  expect(pendingBridgeDelivery({ rootIdentity, now: NOW, lastBatchAt: null }).kind).toBe("idle");
+  expect(readBridgeChannel(SCOPE)?.managerReportCursor).toBe(2);
+  expect(pendingBridgeDelivery({ rootIdentity, now: NOW, lastBatchAt: null, scope: SCOPE }).kind).toBe("idle");
 });
 
 test("a lost cursor write heals through the production path instead of wedging it", () => {
   sandbox();
   recordManagerReport({ key: "a", class: "status", at: NOW.toISOString(), body: "one" });
 
-  const first = pendingBridgeDelivery({ rootIdentity, now: NOW, lastBatchAt: null });
+  const first = pendingBridgeDelivery({ rootIdentity, now: NOW, lastBatchAt: null, scope: SCOPE });
   if (first.kind !== "deliver") throw new Error("expected a delivery");
   const tombstones = rememberAcknowledgedVoiceDelivery([], first.delivery.deliveryId);
   /* Ack lost: the cursor never moved. */
-  expect(readBridgeChannel()?.managerReportCursor).toBe(0);
+  expect(readBridgeChannel(SCOPE)?.managerReportCursor).toBe(0);
 
   const healing = pendingBridgeDelivery({
     rootIdentity,
     now: new Date(NOW.getTime() + 60_000),
     lastBatchAt: null,
     acknowledgedDeliveryIds: tombstones,
+    scope: SCOPE,
   });
   expect(healing).toEqual({ kind: "already-acknowledged", throughSeq: 1 });
-  acknowledgeBridgeDelivery(healing.kind === "already-acknowledged" ? healing.throughSeq : 0);
-  expect(readBridgeChannel()?.managerReportCursor).toBe(1);
+  acknowledgeBridgeDelivery(healing.kind === "already-acknowledged" ? healing.throughSeq : 0, NOW, SCOPE);
+  expect(readBridgeChannel(SCOPE)?.managerReportCursor).toBe(1);
 });
 
 test("the coalescing window is enforced on the production path, not just in the planner", () => {
   sandbox();
   recordManagerReport({ key: "a", class: "status", at: NOW.toISOString(), body: "one" });
   const justNow = new Date(NOW.getTime() - 1_000);
-  expect(pendingBridgeDelivery({ rootIdentity, now: NOW, lastBatchAt: justNow })).toEqual({ kind: "hold" });
+  expect(pendingBridgeDelivery({ rootIdentity, now: NOW, lastBatchAt: justNow, scope: SCOPE })).toEqual({ kind: "hold" });
 });
 
 test("a trim that outran the cursor delivers the gap notice rather than dropping it (§7.12)", () => {
   sandbox();
-  openBridgeChannel(ROOT_ID);
+  openBridgeChannel(ROOT_ID, NOW, SCOPE);
   for (let index = 0; index < 520; index += 1) {
-    appendBridgeReports([{ key: `r${index}`, class: "status", at: NOW.toISOString(), body: `report ${index}` }]);
+    appendBridgeReports([{
+      key: `r${index}`,
+      class: "status",
+      at: NOW.toISOString(),
+      body: `report ${index}`,
+      project: SCOPE.project,
+      targetSeatConversationId: SCOPE.seatConversationId,
+    }]);
   }
 
-  const pending = pendingBridgeDelivery({ rootIdentity, now: NOW, lastBatchAt: null });
+  const pending = pendingBridgeDelivery({ rootIdentity, now: NOW, lastBatchAt: null, scope: SCOPE });
   if (pending.kind !== "deliver") throw new Error("expected a delivery");
   expect(pending.delivery.responses[0]!.text).toContain("no longer available");
   /* And it is acknowledgeable, so the gap is crossed once rather than every poll. */
-  acknowledgeBridgeDelivery(pending.throughSeq);
-  expect(readBridgeChannel()!.managerReportCursor).toBeGreaterThanOrEqual(20);
+  acknowledgeBridgeDelivery(pending.throughSeq, NOW, SCOPE);
+  expect(readBridgeChannel(SCOPE)!.managerReportCursor).toBeGreaterThanOrEqual(20);
 });
 
 /* §4 deploy round trip, end to end through the production authorization path. */
@@ -194,7 +215,7 @@ test("a turn opened after a quiet night carries one bounded batch, once", () => 
     recordManagerReport({ key: `r${index}`, class: "completed", at: NOW.toISOString(), body: `finished ${index}` });
   }
 
-  const prelude = bridgeTurnStartPrelude({ rootIdentity, now: NOW });
+  const prelude = bridgeTurnStartPrelude({ rootIdentity, now: NOW, scope: SCOPE });
   expect(prelude).not.toBeNull();
   expect(prelude!.text).toContain("finished 0");
   expect(prelude!.text).toContain("finished 4");
@@ -210,25 +231,25 @@ test("a turn opened after a quiet night carries one bounded batch, once", () => 
 test("the turn-start drain does not consume anything by itself", () => {
   sandbox();
   recordManagerReport({ key: "a", class: "status", at: NOW.toISOString(), body: "one" });
-  bridgeTurnStartPrelude({ rootIdentity, now: NOW });
+  bridgeTurnStartPrelude({ rootIdentity, now: NOW, scope: SCOPE });
 
   /* A turn that never reached the agent must not have eaten the report. */
-  expect(readBridgeChannel()?.managerReportCursor).toBe(0);
-  expect(bridgeTurnStartPrelude({ rootIdentity, now: NOW })).not.toBeNull();
+  expect(readBridgeChannel(SCOPE)?.managerReportCursor).toBe(0);
+  expect(bridgeTurnStartPrelude({ rootIdentity, now: NOW, scope: SCOPE })).not.toBeNull();
 });
 
 test("an acknowledged turn-start batch never arrives a second time", () => {
   sandbox();
   recordManagerReport({ key: "a", class: "blocked", at: NOW.toISOString(), body: "needs a decision" });
-  const prelude = bridgeTurnStartPrelude({ rootIdentity, now: NOW })!;
-  acknowledgeBridgeDelivery(prelude.throughSeq);
+  const prelude = bridgeTurnStartPrelude({ rootIdentity, now: NOW, scope: SCOPE })!;
+  acknowledgeBridgeDelivery(prelude.throughSeq, NOW, SCOPE);
 
-  expect(bridgeTurnStartPrelude({ rootIdentity, now: NOW })).toBeNull();
+  expect(bridgeTurnStartPrelude({ rootIdentity, now: NOW, scope: SCOPE })).toBeNull();
 });
 
 test("a turn with an empty inbox opens with nothing at all", () => {
   sandbox();
-  expect(bridgeTurnStartPrelude({ rootIdentity, now: NOW })).toBeNull();
+  expect(bridgeTurnStartPrelude({ rootIdentity, now: NOW, scope: SCOPE })).toBeNull();
 });
 
 /* ── HIGH 3 (#758 review): the delivery composer must READ origin ────────── */
@@ -250,7 +271,7 @@ test("a mixed batch never covers a non-manager row with the manager-voice header
     origin: { kind: "agent", conversationId: "conversation_builder", role: "builder" },
   });
 
-  const prelude = bridgeTurnStartPrelude({ rootIdentity, now: NOW });
+  const prelude = bridgeTurnStartPrelude({ rootIdentity, now: NOW, scope: SCOPE });
   expect(prelude).not.toBeNull();
   const text = prelude!.text;
 
@@ -278,7 +299,7 @@ test("a batch of only non-manager rows carries no manager-voice header at all", 
     origin: { kind: "agent", conversationId: "conversation_builder", role: "builder" },
   });
 
-  const prelude = bridgeTurnStartPrelude({ rootIdentity, now: NOW });
+  const prelude = bridgeTurnStartPrelude({ rootIdentity, now: NOW, scope: SCOPE });
   expect(prelude!.text).not.toContain("the manager reported");
   expect(prelude!.text).toContain("NOT the manager");
 });

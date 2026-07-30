@@ -32,12 +32,19 @@ afterEach(() => {
 function serviceAs(attribution: CallerAttribution) {
   const bindings = viewerMcpBindings(undefined, undefined, {
     callerAttribution: () => attribution,
+    callerProject: () => PROJECT,
+    authorizedSeats: () => [{
+      conversationId: MANAGER.conversationId!,
+      path: null,
+      project: PROJECT,
+    }],
   } as never);
   return createMcpToolService(bindings, new MemoryMcpReceiptStore());
 }
 
 const MANAGER: CallerAttribution = { kind: "manager", conversationId: "conversation_mgr", role: "orchestrator" };
 const WORKER: CallerAttribution = { kind: "agent", conversationId: "conversation_builder", role: "builder" };
+const PROJECT = "repo-project-a";
 
 const report = (overrides: Record<string, unknown> = {}) => ({
   clientRequestId: "rep-1",
@@ -54,6 +61,8 @@ test("a worker's report is recorded with its server-derived origin and a visible
 
   const row = readBridgeReportLog().reports[0]!;
   expect(row.origin).toEqual({ kind: "agent", conversationId: "conversation_builder", role: "builder" });
+  expect(row.project).toBe(PROJECT);
+  expect(row.targetSeatConversationId).toBe(MANAGER.conversationId);
   expect(row.body).toBe("[builder conversation_builder — not the manager] stage settled");
 });
 
@@ -114,4 +123,15 @@ test("MEDIUM 7 (#758 review): an origin supplied in the TOOL ARGS is ignored —
   const row = readBridgeReportLog().reports[0]!;
   expect(row.origin).toEqual({ kind: "agent", conversationId: "conversation_builder", role: "builder" });
   expect(row.body).toStartWith("[builder conversation_builder — not the manager] ");
+});
+
+test("a caller-supplied project cannot override server-derived report routing", async () => {
+  await serviceAs(WORKER).callTool("bridge_report", report({
+    project: "repo-project-b",
+    targetSeatConversationId: "conversation_seat_b",
+  }));
+
+  const row = readBridgeReportLog().reports[0]!;
+  expect(row.project).toBe(PROJECT);
+  expect(row.targetSeatConversationId).toBe(MANAGER.conversationId);
 });

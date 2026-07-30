@@ -46,6 +46,8 @@ function report(key: string, overrides: Partial<BridgeReportInput> = {}): Bridge
     class: "status",
     at: "2026-07-27T12:00:00.000Z",
     body: `report ${key}`,
+    project: "repo-project-a",
+    targetSeatConversationId: "conversation_seat_a",
     ...overrides,
   };
 }

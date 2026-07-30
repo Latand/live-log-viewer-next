@@ -289,7 +289,10 @@ test("turn-start drains with NO live call — that is the path it exists for", a
   /* Published from an effect, so the probe stays a pure component. */
   const drains: (() => Promise<{ text: string; ackToken: string; commit: () => void }>)[] = [];
   function Probe({ publish }: { publish: (drain: () => Promise<{ text: string; ackToken: string; commit: () => void }>) => void }) {
-    const drain = useBridgeTurnStartDrain(true, { fetchFn: turnFetch });
+    const drain = useBridgeTurnStartDrain(true, {
+      fetchFn: turnFetch,
+      conversationId: "conversation_project_a_seat",
+    });
     useEffect(() => { publish(drain); }, [drain, publish]);
     return null;
   }
@@ -306,6 +309,7 @@ test("turn-start drains with NO live call — that is the path it exists for", a
   expect(turn.ackToken).toBe("ack_turn");
   /* No session id anywhere in the request: there is no call to have one. */
   expect(requests[0]!.url).not.toContain("realtimeSessionId");
+  expect(requests[0]!.url).toContain("conversationId=conversation_project_a_seat");
 
   /* And nothing was acknowledged by draining alone. */
   expect(requests.filter((entry) => entry.method === "POST")).toEqual([]);

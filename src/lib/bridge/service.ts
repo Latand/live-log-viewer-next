@@ -14,7 +14,12 @@ import {
   openBridgeChannel,
   redeemBridgeAckToken,
 } from "./store";
-import { bridgeReportOriginLabel, type BridgeReportInput, type BridgeReportV1 } from "./types";
+import {
+  bridgeReportOriginLabel,
+  type BridgeChannelScope,
+  type BridgeReportInput,
+  type BridgeReportV1,
+} from "./types";
 
 /**
  * The bridge's production orchestration (#691 §4).
@@ -39,6 +44,8 @@ import { bridgeReportOriginLabel, type BridgeReportInput, type BridgeReportV1 } 
 export interface BridgeDeliveryRequest {
   /** The root's durable identity. Injected so tests need no lineage file. */
   rootIdentity?: () => string;
+  /** Server-resolved repository identity and designated recipient seat. */
+  scope: BridgeChannelScope;
   now: Date;
   /** When the previous interjection batch reached this call, or null for none. */
   lastBatchAt: Date | null;
@@ -64,9 +71,9 @@ export function recordManagerReport(input: BridgeReportInput): BridgeReportV1 | 
  */
 export function pendingBridgeDelivery(request: BridgeDeliveryRequest): BridgeDeliveryPlan {
   const identity = (request.rootIdentity ?? readRootIdentity)();
-  openBridgeChannel(identity, request.now);
+  openBridgeChannel(identity, request.now, request.scope);
   return planBridgeReportDelivery({
-    batch: drainBridgeReports({ now: request.now }),
+    batch: drainBridgeReports({ now: request.now, scope: request.scope }),
     now: request.now,
     lastBatchAt: request.lastBatchAt,
     acknowledgedDeliveryIds: request.acknowledgedDeliveryIds,
@@ -83,8 +90,12 @@ export function pendingBridgeDelivery(request: BridgeDeliveryRequest): BridgeDel
  * Internal: the HTTP surface goes through {@link redeemBridgeAcknowledgement}, which
  * takes the token the batch was handed out with rather than a caller-named sequence.
  */
-export function acknowledgeBridgeDelivery(throughSeq: number, now = new Date()): void {
-  acknowledgeBridgeReports(throughSeq, now);
+export function acknowledgeBridgeDelivery(
+  throughSeq: number,
+  now = new Date(),
+  scope?: BridgeChannelScope,
+): void {
+  acknowledgeBridgeReports(throughSeq, now, scope);
 }
 
 /** Settle the outstanding batch by the token issued with it. */
@@ -99,8 +110,12 @@ export function redeemBridgeAcknowledgement(token: string, now = new Date()): { 
  * is evidence of having RECEIVED that batch — which is what an acknowledgement is
  * supposed to attest.
  */
-export function issueBridgeAcknowledgementToken(throughSeq: number, now = new Date()): string {
-  return issueBridgeAckToken(throughSeq, now);
+export function issueBridgeAcknowledgementToken(
+  throughSeq: number,
+  now = new Date(),
+  scope?: BridgeChannelScope,
+): string {
+  return issueBridgeAckToken(throughSeq, now, scope);
 }
 
 /**
@@ -116,11 +131,11 @@ export function issueBridgeAcknowledgementToken(throughSeq: number, now = new Da
  * night arrives as one batch, oldest first, not as a night's worth of messages.
  */
 export function bridgeTurnStartPrelude(
-  request: Omit<BridgeDeliveryRequest, "lastBatchAt" | "acknowledgedDeliveryIds"> = { now: new Date() },
+  request: Omit<BridgeDeliveryRequest, "lastBatchAt" | "acknowledgedDeliveryIds">,
 ): { text: string; throughSeq: number } | null {
   const identity = (request.rootIdentity ?? readRootIdentity)();
-  openBridgeChannel(identity, request.now);
-  const batch = drainBridgeReports({ now: request.now });
+  openBridgeChannel(identity, request.now, request.scope);
+  const batch = drainBridgeReports({ now: request.now, scope: request.scope });
   if (batch.reports.length === 0) return null;
 
   /* Framed from the row's server-authenticated ORIGIN, never from the body a
