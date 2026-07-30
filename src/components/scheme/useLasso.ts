@@ -5,10 +5,24 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Camera } from "./Minimap";
 import { dragRect, nodesInRect, screenRectToWorld } from "./lasso";
 import type { SchemeLayout, SchemeRect } from "./layout";
+import { planBackgroundPress } from "./selectionGesture";
 
 /* Movement below this is a click, not a marquee — matches the camera's own
    stationary-tap threshold closely enough that the two never fight. */
 const DRAG_MIN = 4;
+
+/**
+ * Drop whatever the browser had highlighted. A background press is the gesture
+ * that clears a text selection natively — but we suppress its compatibility
+ * mousedown to stop a new selection from being anchored, which suppresses that
+ * clearing too. Without this an older highlight would stay lit under the
+ * marquee and read as the stray selection the lasso is supposed to avoid.
+ */
+function dropNativeSelection(): void {
+  if (typeof window === "undefined") return;
+  const selection = window.getSelection?.();
+  if (selection && selection.rangeCount > 0) selection.removeAllRanges();
+}
 
 export interface MarqueeState {
   /** Viewport-local rect of the drag, for the screen-space overlay. */
@@ -38,7 +52,7 @@ interface LassoOptions {
  */
 export function useLasso({ viewportRef, cam, layout, enabled, session, onCommit }: LassoOptions) {
   const [marquee, setMarquee] = useState<MarqueeState | null>(null);
-  const pendingRef = useRef<{ sx: number; sy: number; additive: boolean; active: boolean } | null>(null);
+  const pendingRef = useRef<{ sx: number; sy: number; additive: boolean; active: boolean; suppressSelection: boolean } | null>(null);
   const camRef = useRef(cam);
   const layoutRef = useRef(layout);
   const commitRef = useRef(onCommit);
@@ -81,15 +95,26 @@ export function useLasso({ viewportRef, cam, layout, enabled, session, onCommit 
     const key = (event: KeyboardEvent) => {
       if (event.key === "Escape" && pendingRef.current?.active) finish(false);
     };
+    /* The gesture's own lifetime, not the transcript's: while a claimed press is
+       pending the browser may neither start a selection nor a native drag under
+       the rect. The listeners see nothing once the press resolves, so deliberate
+       selection inside conversation content is untouched. */
+    const guard = (event: Event) => {
+      if (pendingRef.current?.suppressSelection) event.preventDefault();
+    };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
     window.addEventListener("pointercancel", cancel);
     window.addEventListener("keydown", key);
+    window.addEventListener("selectstart", guard);
+    window.addEventListener("dragstart", guard);
     return () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", cancel);
       window.removeEventListener("keydown", key);
+      window.removeEventListener("selectstart", guard);
+      window.removeEventListener("dragstart", guard);
     };
   }, [localPoint]);
 
@@ -97,14 +122,29 @@ export function useLasso({ viewportRef, cam, layout, enabled, session, onCommit 
      value is the claim contract documented in CameraOptions. */
   const onBackgroundDown = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
-      if (!enabled) return false;
-      if (event.pointerType === "touch") return session;
-      if (!event.isPrimary || event.button !== 0) return false;
+      const plan = planBackgroundPress(event, { enabled, session });
+      if (!plan.track) return plan.claim;
       const point = localPoint(event);
-      pendingRef.current = { sx: point.x, sy: point.y, additive: event.shiftKey, active: false };
-      return true;
+      pendingRef.current = {
+        sx: point.x,
+        sy: point.y,
+        additive: event.shiftKey,
+        active: false,
+        suppressSelection: plan.suppressSelection,
+      };
+      /* Suppressing the compat mousedown is what keeps a drag across cards from
+         highlighting their transcripts — the anchor is never set. */
+      if (plan.suppressSelection) {
+        event.preventDefault();
+        dropNativeSelection();
+        /* preventDefault also cancels the press's focus fixup, so take the focus
+           the background press used to take: the board keeps its arrow-key
+           target and a composer inside a pane still blurs. */
+        viewportRef.current?.focus({ preventScroll: true });
+      }
+      return plan.claim;
     },
-    [enabled, session, localPoint],
+    [enabled, session, localPoint, viewportRef],
   );
 
   return { marquee, onBackgroundDown };

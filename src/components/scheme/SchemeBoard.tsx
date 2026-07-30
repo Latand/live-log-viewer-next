@@ -3,6 +3,7 @@
 import { BoxSelect, Focus, Hand, Maximize2, Minus, MousePointer2, Plus, StickyNote } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { useBoardState } from "@/hooks/useBoardState";
 import { cameraToPresence, orderedSelection, schemeFocusedPath, schemeVisiblePaths, viewBus } from "@/hooks/viewPresenceBus";
 import type { Flow } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -29,7 +30,7 @@ import { INSPECT_ZOOM } from "@/components/attention/navigate";
 import { BulkActionBar } from "./BulkActionBar";
 import { buildFocusFrameIndex, stageAnchorAliases } from "./focusFrames";
 import { EdgeChips } from "./EdgeChips";
-import { nodesInRect, pruneSelection, selectionBBox } from "./lasso";
+import { nodesInRect, selectionBBox } from "./lasso";
 import { resolveExpandedNode } from "./expandedNode";
 import { autoEditTokenFor, clearStaleRename, requestRename, titleUnderRename, type RenameRequest } from "./renameRequest";
 import { currentWorkRect, currentWorkRects, rectUnion } from "./currentWork";
@@ -234,11 +235,17 @@ export function SchemeBoard({
   const handlePipelineCreated = useCallback((created: Pipeline) => {
     setLocalBuilderPipelineId(created.id);
   }, []);
-  /* The ephemeral selection session: a set of node paths plus an "armed"
-     latch for the toolbar button. Session ⇔ armed or non-empty — a plain
-     single-click ring never enters it. */
-  const [multi, setMulti] = useState<ReadonlySet<string>>(EMPTY_PATHS);
-  const [armed, setArmed] = useState(false);
+  /* The selection session — a set of conversation paths plus an "armed" latch
+     for the toolbar button. Session ⇔ armed or non-empty; a plain single-click
+     ring never enters it.
+     NOT OWNED HERE (#771). It lives at project scope in the board store, which
+     outlives this component: when it was `useState` here, leaving scheme mode
+     unmounted the board and destroyed the operator's selection outright, and the
+     list/phone publishers had nothing to report. This board reads and writes
+     that one set; it never keeps a copy. */
+  const board = useBoardState(project);
+  const multi = board.selection;
+  const armed = board.selectionArmed;
 
   /* A focus jump also selects its node (D9): the selection ring stays after
      the 1.8 s highlight expires, marking where the camera landed. */
@@ -298,29 +305,26 @@ export function SchemeBoard({
     [groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths, boardTasks, textExpandedIds],
   );
 
-  /* Selection keys are transcript paths, so the 10s poll relayout keeps the
-     set for free; nodes that left the board are pruned out of the state
-     itself — a path returning later must not resurrect an old selection.
-     pruneSelection returns the same reference when nothing changed, so the
-     write below bails out instead of cascading. */
-  useEffect(() => {
-    /* eslint-disable-next-line react-hooks/set-state-in-effect */
-    setMulti((prev) => pruneSelection(prev, layout.nodes));
-  }, [layout]);
+  /* NO PRUNING HERE (#771). The selection outlives this view, so dropping a path
+     because THIS layout does not place it would delete the operator's selection
+     the moment they switch to the list — the very bug the lift fixes. The only
+     legitimate prune is "the conversation no longer exists", which needs the
+     scan, so ProjectDashboard owns it. */
   const session = !mapMode && (armed || multi.size > 0);
 
-  const clearSession = useCallback(() => {
-    setMulti(EMPTY_PATHS);
-    setArmed(false);
-  }, []);
-  const toggleMember = useCallback((path: string) => {
-    setMulti((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
-    });
-  }, []);
+  /* The store binding is rebuilt every render; its writers all delegate to the
+     one project-scoped store, so a stable ref keeps the handlers below identity-
+     stable for the memoized layers. */
+  const boardRef = useRef(board);
+  useEffect(() => {
+    boardRef.current = board;
+  });
+
+  const clearSession = useCallback(() => boardRef.current.clearSelection(), []);
+  /* The one membership writer: the background tap, Shift+click and the hover
+     check all route here, so `selectedPaths` republishes the same way whichever
+     gesture produced the change (issue #771). */
+  const toggleMember = useCallback((path: string) => boardRef.current.toggleSelection(path), []);
 
   const selectedRef = useRef(selected);
   useEffect(() => {
@@ -338,14 +342,14 @@ export function SchemeBoard({
       }
       if (additive && layout.byPath.has(value) && layout.nodes.some((node) => node.file.path === value)) {
         setSelected(null);
-        setMulti((prev) => {
-          const next = new Set(prev);
-          const ringed = selectedRef.current;
-          if (ringed && ringed !== value && layout.nodes.some((node) => node.file.path === ringed)) next.add(ringed);
-          if (next.has(value)) next.delete(value);
-          else next.add(value);
-          return next;
-        });
+        /* Shift+click lifts the existing single ring into the session first, then
+           toggles the clicked node — two writes through the shared reducers, not
+           set surgery of its own. */
+        const ringed = selectedRef.current;
+        if (ringed && ringed !== value && layout.nodes.some((node) => node.file.path === ringed)) {
+          boardRef.current.commitSelection([ringed], true);
+        }
+        boardRef.current.toggleSelection(value);
         return;
       }
       setSelected(value);
@@ -898,10 +902,10 @@ export function SchemeBoard({
     const group = layout.groups.find((candidate) => candidate.kind === "pipeline" && candidate.id === activeBuilderPipelineId);
     if (!group) return;
     builderRevealed.current = activeBuilderPipelineId;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot reveal syncing camera + selection to a new draft
     clearSession();
     setMode("select");
     centerOn(group, 0.75);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot reveal syncing camera + selection to a new draft
     handleBuilderOpened();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fires when the new draft's halo first renders
   }, [activeBuilderPipelineId, layout.groups]);
@@ -952,13 +956,7 @@ export function SchemeBoard({
   const commitMarquee = useCallback((paths: string[], additive: boolean) => {
     marqueeClickGuard.current = true;
     setSelected(null);
-    setMulti((prev) => {
-      if (!additive) return paths.length ? new Set(paths) : EMPTY_PATHS;
-      if (!paths.length) return prev;
-      const next = new Set(prev);
-      for (const path of paths) next.add(path);
-      return next;
-    });
+    boardRef.current.commitSelection(paths, additive);
   }, []);
   const { marquee, onBackgroundDown } = useLasso({
     viewportRef,
@@ -1120,9 +1118,13 @@ export function SchemeBoard({
     <>
     <div
       ref={viewportRef}
+      /* select-none is scoped to a gesture, never to the transcripts: it covers
+         the pan and the live marquee, so a rect crossing cards cannot leave
+         highlighted text behind, and lifts the moment the drag commits or
+         cancels (issue #771). */
       className={`relative min-h-0 flex-1 overflow-clip ${
-        panning ? "cursor-grabbing select-none" : taskTool ? "cursor-crosshair" : handLike ? "cursor-grab" : ""
-      } ${handLike ? "touch-none" : ""}`}
+        panning ? "cursor-grabbing" : taskTool ? "cursor-crosshair" : handLike ? "cursor-grab" : ""
+      } ${panning || marquee ? "select-none" : ""} ${handLike ? "touch-none" : ""}`}
       tabIndex={mapMode ? undefined : 0}
       aria-label={mapMode ? undefined : t("scheme.boardAria")}
       onPointerDown={onPointerDown}
@@ -1216,6 +1218,7 @@ export function SchemeBoard({
           onSpawnRetry={onSpawnRetry ? stableSpawnRetry : undefined}
           onOpenTask={onOpenTask ? stableOpenTask : undefined}
           onExpand={stableExpand}
+          onToggleMember={mapMode ? undefined : toggleMember}
           onPipelineCreated={handlePipelineCreated}
         />
         <TaskEdgesLayer edges={taskEdges} world={world} routes={taskRoutes} onRetry={retryEdge} />
@@ -1313,7 +1316,7 @@ export function SchemeBoard({
                   clearSession();
                 } else {
                   setMode("select");
-                  setArmed(true);
+                  board.setSelectionArmed(true);
                 }
               }}
             >
