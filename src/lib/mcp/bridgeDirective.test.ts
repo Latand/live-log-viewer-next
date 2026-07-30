@@ -303,3 +303,130 @@ test("a project with no VALIDATED seat refuses rather than falling back to anoth
   })).rejects.toThrow();
   expect(posted).toEqual([]);
 });
+
+/* ── #795: direct operator deploy intent ─────────────────────────────────── */
+
+const PINNED = "4f3c1b9a8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a";
+
+/** Bindings whose caller the server attributes explicitly — the intent path
+    trusts ONLY this attribution, never anything in the arguments. */
+function attributedBindings(
+  kind: "gateway" | "agent" | "manager",
+  resolveRemoteMain: () => Promise<string> = async () => PINNED,
+) {
+  posted = [];
+  const control: ViewerControlDependencies = {
+    async post(pathname, body) {
+      posted.push({ pathname, body });
+      return { outcome: "delivered", operationId: "op-1" };
+    },
+  };
+  return viewerMcpBindings(undefined, control, {
+    callerProject: () => "proj-voice",
+    authorizedSeats: realSeatAuthority,
+    callerAttribution: () => ({
+      kind,
+      conversationId: kind === "manager" ? "conversation_manager" : "conversation_x",
+      role: kind === "agent" ? "builder" : null,
+    }),
+    resolveRemoteMain,
+  } as never);
+}
+
+test("#795: the operator's deploy words pin remote main and ride to the manager as a machine trailer", async () => {
+  sandbox();
+  const tools = attributedBindings("gateway");
+
+  const receipt = await tools.bridge_directive({
+    clientRequestId: "d1",
+    rootTurnId: "turn_dep",
+    utterance: 0,
+    instruction: "deploy it",
+    intent: "deploy",
+  });
+
+  expect(posted).toHaveLength(1);
+  const trailer = parseBridgeTrailer(String(posted[0]!.body.text));
+  expect(trailer?.sha).toBe(PINNED);
+  expect(trailer?.nonce).toBeTruthy();
+
+  /* The gateway hears enough to speak plainly; the nonce stays with the manager. */
+  expect(receipt).toMatchObject({ deployIntent: { revision: PINNED, replayed: false } });
+  expect((receipt as { deployIntent: Record<string, unknown> }).deployIntent.nonce).toBeUndefined();
+
+  /* And the operator is never re-prompted: the authorization row never drains. */
+  expect(drainBridgeReports().reports).toEqual([]);
+});
+
+test("#795: a relay retry of the same turn replays the same authorization", async () => {
+  sandbox();
+  const tools = attributedBindings("gateway");
+  const args = { rootTurnId: "turn_dep", utterance: 0, instruction: "deploy it", intent: "deploy" };
+
+  const first = await tools.bridge_directive({ clientRequestId: "d1", ...args }) as { deployIntent: { ref: number } };
+  const again = await tools.bridge_directive({ clientRequestId: "d2", ...args }) as { deployIntent: { ref: number; replayed: boolean } };
+  expect(again.deployIntent.replayed).toBe(true);
+  expect(again.deployIntent.ref).toBe(first.deployIntent.ref);
+
+  const trailers = posted.map((post) => parseBridgeTrailer(String(post.body.text)));
+  expect(trailers[0]).toEqual(trailers[1]);
+});
+
+test("#795: an agent caller cannot mint a deploy intent — the manager included", async () => {
+  sandbox();
+  for (const kind of ["agent", "manager"] as const) {
+    const tools = attributedBindings(kind);
+    await expect(tools.bridge_directive({
+      clientRequestId: "d1",
+      rootTurnId: `turn_${kind}`,
+      utterance: 0,
+      instruction: "deploy it",
+      intent: "deploy",
+    })).rejects.toThrow(/voice gateway/i);
+    expect(posted).toEqual([]);
+  }
+  expect(drainBridgeReports().reports).toEqual([]);
+});
+
+test("#795: an unpinnable remote refuses fail-closed — nothing authorized, nothing delivered", async () => {
+  sandbox();
+  const tools = attributedBindings("gateway", async () => { throw new Error("remote unreachable"); });
+  await expect(tools.bridge_directive({
+    clientRequestId: "d1",
+    rootTurnId: "turn_dep",
+    utterance: 0,
+    instruction: "deploy it",
+    intent: "deploy",
+  })).rejects.toThrow(/NOT accepted/);
+  expect(posted).toEqual([]);
+  expect(drainBridgeReports().reports).toEqual([]);
+});
+
+test("#795: a deploy intent cannot smuggle an explicit trailer", async () => {
+  sandbox();
+  const tools = attributedBindings("gateway");
+  await expect(tools.bridge_directive({
+    clientRequestId: "d1",
+    rootTurnId: "turn_dep",
+    utterance: 0,
+    instruction: "deploy it",
+    intent: "deploy",
+    ref: 3,
+    nonce: "n",
+    sha: PINNED,
+  })).rejects.toThrow(/cannot be combined/);
+  expect(posted).toEqual([]);
+});
+
+test("#795: an unknown intent value is refused outright", async () => {
+  sandbox();
+  const tools = attributedBindings("gateway");
+  await expect(tools.bridge_directive({
+    clientRequestId: "d1",
+    rootTurnId: "turn_dep",
+    utterance: 0,
+    instruction: "do things",
+    intent: "restart",
+  })).rejects.toThrow(/intent/);
+  expect(posted).toEqual([]);
+});

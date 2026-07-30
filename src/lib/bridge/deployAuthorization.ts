@@ -47,7 +47,7 @@ export function describeDeployProof(
       ok: false,
       status: 403,
       reason: "bridge_confirmation_required",
-      error: "a deploy requires the bridge confirmation the user authorized: bridgeRef (the confirmation_request's seq) and bridgeNonce from the trailer the gateway relayed",
+      error: "a deploy requires the operator's recorded deploy authorization: bridgeRef and bridgeNonce from the trailer minted when their deploy intent was accepted (or a legacy confirmation trailer)",
     };
   }
   return { ok: true, sha: revision.toLowerCase() };

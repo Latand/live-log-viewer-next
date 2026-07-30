@@ -1,0 +1,22 @@
+{
+  "deploy-journey-desktop": {
+    "scrollWidth": 1280,
+    "viewportWidth": 1280,
+    "fullShaInCardText": false,
+    "shortReleaseShown": true,
+    "hashAloudForbidden": true,
+    "userConfirmationForbidden": true,
+    "legacyCommitPhraseGone": true,
+    "trailerStillMachineReadable": true
+  },
+  "deploy-journey-mobile-390": {
+    "scrollWidth": 390,
+    "viewportWidth": 390,
+    "fullShaInCardText": false,
+    "shortReleaseShown": true,
+    "hashAloudForbidden": true,
+    "userConfirmationForbidden": true,
+    "legacyCommitPhraseGone": true,
+    "trailerStillMachineReadable": true
+  }
+}

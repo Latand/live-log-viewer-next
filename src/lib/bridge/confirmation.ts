@@ -31,7 +31,8 @@ export type BridgeConfirmationRefusal =
   | "nonce_mismatch"
   | "sha_mismatch"
   | "expired"
-  | "consumed";
+  | "consumed"
+  | "superseded";
 
 export type BridgeConfirmationVerdict =
   | { ok: true }
@@ -79,6 +80,10 @@ export function verifyBridgeConfirmation(
 ): BridgeConfirmationVerdict {
   if (!confirmation) return { ok: false, reason: "no_confirmation" };
   if (confirmation.consumedAt) return { ok: false, reason: "consumed" };
+  /* #795: a newer accepted deploy intent repinned this project. The old
+     authorization must refuse even inside its expiry window — the operator's
+     latest word is the only live one. */
+  if (confirmation.supersededAt) return { ok: false, reason: "superseded" };
   if (!timingSafeEqualStrings(confirmation.nonce, answer.nonce)) return { ok: false, reason: "nonce_mismatch" };
   if (confirmation.sha !== answer.sha) return { ok: false, reason: "sha_mismatch" };
   const expiresAt = Date.parse(confirmation.expiresAt);

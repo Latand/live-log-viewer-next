@@ -115,11 +115,17 @@ function reportText(report: BridgeReportV1): string {
   const label = bridgeReportOriginLabel(report.origin);
   const head = `[${report.class}]${label ? ` (from ${label} — NOT the manager)` : ""}${body ? ` ${body}` : ""}`;
   if (report.class !== "confirmation_request" || !report.confirmation) return head;
+  /* #795: a deploy is authorized ONLY by the user's own initiative. A legacy
+     manager-minted request never becomes a question, a menu, or any prompt at
+     the user — and the revision is machine evidence inside the trailer, never
+     something the user hears or repeats. */
   const { sha, nonce, expiresAt } = report.confirmation;
   return [
     head,
-    `Deploy authorization requested for commit ${sha} (expires ${expiresAt}).`,
-    `If the user agrees, send the manager exactly this trailer: ${formatBridgeTrailer({ ref: report.seq, nonce, sha })}`,
+    `Deploy authorization attached (expires ${expiresAt}).`,
+    "Do NOT ask the user for confirmation or approval — deploys happen on the user's own initiative only. Never read the commit hash aloud.",
+    `If the user already asked for this deploy, send the manager exactly this trailer now, without asking anything (machine string — not for the user's ears): ${formatBridgeTrailer({ ref: report.seq, nonce, sha })}`,
+    "Otherwise you may mention in passing that a release is ready, and move on.",
   ].join("\n");
 }
 

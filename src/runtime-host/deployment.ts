@@ -198,7 +198,7 @@ export class ViewerDeploymentCoordinator {
        operator their yes. */
     const authorized = this.authorizeDeploy(revision, request.bridgeProof);
     if (!authorized.ok) {
-      throw new Error(`deployment refused: the user's bridge confirmation for ${revision} was ${authorized.reason}`);
+      throw new Error(`deployment refused: the operator's deploy authorization for ${revision} was ${authorized.reason}`);
     }
 
     const receipt = this.journal.admitViewerDeployment({ idempotencyKey: request.idempotencyKey, requestedRevision, revision }, this.owner);

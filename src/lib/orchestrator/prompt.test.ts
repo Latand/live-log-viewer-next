@@ -45,14 +45,24 @@ test("the prompt states the report body bounds so the gateway is never handed ra
 
 test("the prompt carries the directive trailer contract in the exact wire form", () => {
   expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("[bridge ref=<seq> nonce=<nonce> sha=<sha>]");
-  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("never read an answer into unrelated prose");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("never read one into unrelated prose");
 });
 
-test("the prompt encodes the deploy round trip and its refusals", () => {
-  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("40-hex SHA");
+/* #795 — the deploy contract: the operator's own words authorize; the manager
+   executes the internally pinned revision and never routes a hash back through
+   the user or mints authorization itself. */
+test("the prompt encodes the direct-intent deploy contract and its refusals", () => {
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("on the user's own initiative, in their own words");
   expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("confirm: \"deploy\"");
-  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("One confirmation authorizes one SHA once");
-  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("silence past expiry");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("One directive authorizes one deploy once");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("superseded by a newer deploy intent");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("never route it back through the user");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("You never mint deploy authorization yourself and never request it from the user");
+});
+
+test("the prompt forbids any user-facing confirmation step outright", () => {
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("ever asks the user to confirm, approve, repeat, or say a commit hash");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("There is no confirmation step for the user, anywhere");
 });
 
 test("the prompt tells the manager to re-derive board state rather than accumulate it", () => {

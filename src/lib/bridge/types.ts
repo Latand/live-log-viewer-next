@@ -78,6 +78,9 @@ export interface BridgeConfirmation {
   expiresAt: string;
   /** Set the moment a matching answer is accepted. A second answer sees this. */
   consumedAt?: string;
+  /** #795: set when a newer direct deploy intent for the same project repinned
+      the authorization. A superseded authorization refuses without consuming. */
+  supersededAt?: string;
 }
 
 /**
@@ -140,6 +143,11 @@ export interface BridgeReportV1 {
   /** Bounded and secret-redacted at write. Transcript payloads never reach it. */
   body: string;
   confirmation?: BridgeConfirmation;
+  /** #795: a direct operator deploy authorization, recorded at intent
+      acceptance. Exists purely as the durable single-use authorization row —
+      the drain never hands it to a conversation, so the operator is never
+      re-prompted for something they already said. */
+  directIntent?: true;
   /** Set on the gap notice the drain synthesizes when the log outran a cursor
       (§7.12). Synthetic rows are never stored — they exist for one batch. */
   synthetic?: true;

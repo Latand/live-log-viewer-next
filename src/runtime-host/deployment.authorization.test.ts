@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { mintBridgeConfirmation } from "@/lib/bridge/confirmation";
+import { acceptDirectDeployIntent } from "@/lib/bridge/deployIntent";
 import { recordManagerReport } from "@/lib/bridge/service";
 import { drainBridgeReports, openBridgeChannel, readBridgeReportLog } from "@/lib/bridge/store";
 import type { ViewerReleaseIdentity } from "@/lib/runtime/contracts";
@@ -100,7 +101,7 @@ test("a raw socket caller with no bridge proof is refused at admission", async (
      a revision and an idempotency key, and nothing else. This is the shape the third
      door accepted. */
   await expect(deployments.requestViewerDeployment({ revision: SHA, idempotencyKey: "socket-1" }))
-    .rejects.toThrow(/bridge confirmation/i);
+    .rejects.toThrow(/deploy authorization/i);
   expect(adapter.builds).toEqual([]);
 });
 
@@ -201,4 +202,52 @@ test("a refused admission spends nothing, so the record still shows an unused co
 
   const stored = readBridgeReportLog().reports.find((report) => report.seq === ref);
   expect(stored?.confirmation?.consumedAt).toBeUndefined();
+});
+
+/* ── #795: the SAME admission gate consumes a direct operator intent ─────── */
+
+test("#795: a direct operator intent admits a deploy through the unchanged production gate", async () => {
+  const { coordinator: deployments } = coordinator("direct-intent");
+  const intent = await acceptDirectDeployIntent({
+    directiveId: "bridge_d_turn_1_0",
+    project: "proj-a",
+    seatConversationId: "conversation_manager",
+    origin: { kind: "gateway", conversationId: "conversation_root", role: null },
+    instruction: "deploy it",
+    resolveRemoteMain: async () => SHA,
+  });
+
+  const receipt = await deployments.requestViewerDeployment({
+    revision: intent.sha, idempotencyKey: "k1", bridgeProof: { ref: intent.ref, nonce: intent.nonce },
+  });
+  expect(receipt.state).toBe("accepted");
+
+  /* Single-use holds for intents exactly as for legacy confirmations. */
+  await expect(deployments.requestViewerDeployment({
+    revision: intent.sha, idempotencyKey: "k2", bridgeProof: { ref: intent.ref, nonce: intent.nonce },
+  })).rejects.toThrow(/consumed/);
+});
+
+test("#795: an intent superseded by the operator's newer word is refused at admission", async () => {
+  const { coordinator: deployments, adapter } = coordinator("superseded-intent");
+  const accept = (directiveId: string, sha: string) => acceptDirectDeployIntent({
+    directiveId,
+    project: "proj-a",
+    seatConversationId: "conversation_manager",
+    origin: { kind: "gateway", conversationId: "conversation_root", role: null },
+    instruction: "deploy it",
+    resolveRemoteMain: async () => sha,
+  });
+  const stale = await accept("bridge_d_turn_1_0", SHA);
+  const fresh = await accept("bridge_d_turn_2_0", "c".repeat(40));
+
+  await expect(deployments.requestViewerDeployment({
+    revision: stale.sha, idempotencyKey: "k1", bridgeProof: { ref: stale.ref, nonce: stale.nonce },
+  })).rejects.toThrow(/superseded/);
+  expect(adapter.builds).toEqual([]);
+
+  /* The operator's latest word still deploys. */
+  expect((await deployments.requestViewerDeployment({
+    revision: fresh.sha, idempotencyKey: "k2", bridgeProof: { ref: fresh.ref, nonce: fresh.nonce },
+  })).state).toBe("accepted");
 });

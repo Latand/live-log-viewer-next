@@ -75,7 +75,7 @@ test("a deploy with no bridge confirmation is refused and never reaches the endp
     clientRequestId: "d1",
     revision: SHA,
     confirm: "deploy",
-  })).rejects.toThrow(/confirmation/i);
+  })).rejects.toThrow(/authorization/i);
   expect(posted).toEqual([]);
 });
 
@@ -111,10 +111,10 @@ test("a bridgeNonce without a bridgeRef, or the reverse, is refused before any c
 
   await expect(tools.deploy_exact_sha({
     clientRequestId: "d1", revision: SHA, confirm: "deploy", bridgeNonce: nonce,
-  })).rejects.toThrow(/confirmation/i);
+  })).rejects.toThrow(/authorization/i);
   await expect(tools.deploy_exact_sha({
     clientRequestId: "d2", revision: SHA, confirm: "deploy", bridgeRef: seq,
-  })).rejects.toThrow(/confirmation/i);
+  })).rejects.toThrow(/authorization/i);
   expect(posted).toEqual([]);
 });
 
@@ -141,5 +141,71 @@ test("an abbreviated SHA is refused before the endpoint is called at all", async
   await tools.deploy_exact_sha({
     clientRequestId: "d2", revision: SHA, confirm: "deploy", bridgeRef: seq, bridgeNonce: nonce,
   });
+  expect(posted).toHaveLength(1);
+});
+
+/* ── #795: executor caller identity, on top of the bearer nonce ──────────── */
+
+function attributedBindings(kind: "manager" | "agent" | "gateway", callerProject: string | null) {
+  posted = [];
+  const control: ViewerControlDependencies = {
+    async post(pathname, body) {
+      posted.push({ pathname, body });
+      return { deploymentId: "deploy-1", revision: body.revision, state: "accepted" };
+    },
+  };
+  return viewerMcpBindings(undefined, control, {
+    callerAttribution: () => ({ kind, conversationId: "conversation_caller", role: kind === "agent" ? "builder" : null }),
+    callerProject: () => callerProject,
+  } as never);
+}
+
+/** An authorization row BOUND to a project, as direct intents are. */
+function projectBoundDeploy(project: string): { seq: number; nonce: string } {
+  const confirmation = mintBridgeConfirmation({ sha: SHA });
+  recordManagerReport({
+    key: `confirm-${confirmation.nonce}`,
+    class: "confirmation_request",
+    at: new Date().toISOString(),
+    body: "gates green",
+    project,
+    targetSeatConversationId: "conversation_caller",
+    confirmation,
+  });
+  const seq = drainBridgeReports().reports.at(-1)!.seq;
+  return { seq, nonce: confirmation.nonce };
+}
+
+test("#795: a session attributed as an agent (or the gateway) may not execute a deploy", async () => {
+  sandbox();
+  const { seq, nonce } = confirmedDeploy();
+  for (const kind of ["agent", "gateway"] as const) {
+    const tools = attributedBindings(kind, "proj-a");
+    await expect(tools.deploy_exact_sha({
+      clientRequestId: "d1", revision: SHA, confirm: "deploy", bridgeRef: seq, bridgeNonce: nonce,
+    })).rejects.toThrow(/designated orchestrator/i);
+    expect(posted).toEqual([]);
+  }
+
+  /* Neither refusal spent the authorization. */
+  const stored = drainBridgeReports().reports.find((report) => report.seq === seq);
+  expect(stored?.confirmation?.consumedAt).toBeUndefined();
+});
+
+test("#795: a designated seat spends only its OWN project's authorization", async () => {
+  sandbox();
+  const { seq, nonce } = projectBoundDeploy("proj-a");
+
+  const foreign = attributedBindings("manager", "proj-b");
+  await expect(foreign.deploy_exact_sha({
+    clientRequestId: "d1", revision: SHA, confirm: "deploy", bridgeRef: seq, bridgeNonce: nonce,
+  })).rejects.toThrow(/another project/i);
+  expect(posted).toEqual([]);
+
+  const own = attributedBindings("manager", "proj-a");
+  const receipt = await own.deploy_exact_sha({
+    clientRequestId: "d2", revision: SHA, confirm: "deploy", bridgeRef: seq, bridgeNonce: nonce,
+  });
+  expect(receipt).toMatchObject({ revision: SHA });
   expect(posted).toHaveLength(1);
 });

@@ -971,7 +971,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   link_task_to_pipeline: "Attach a board task to a conversation owned by a pipeline.",
   list_conversations: "List scanned Viewer conversations with durable ids and transcript paths.",
   get_conversation: "Read a conversation summary and its recent messages and tools.",
-  deploy_exact_sha: "Deploy one full commit SHA. Requires confirm=deploy AND the bridge confirmation the user authorized (bridgeRef + bridgeNonce from the gateway's trailer); one confirmation authorizes one SHA once.",
+  deploy_exact_sha: "Deploy one full commit SHA. Requires confirm=deploy AND the operator's recorded deploy authorization (bridgeRef + bridgeNonce from the trailer that arrived on their deploy directive); one authorization deploys one pinned revision once. The operator is never asked for a SHA or a phrase.",
   get_pipeline: "Read one pipeline by durable id.",
   board_snapshot: "Read a bounded, redacted snapshot of the Viewer board and durable placement.",
   list_flows: "List durable implement-review flows.",
@@ -989,7 +989,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   lifecycle_events: "Query the durable lifecycle event journal by lineage and cursor, or poll a bounded relay digest of what changed since the last one.",
   request_attention: "Move the operator's active Viewer to a typed target immediately — no confirmation prompt. The request is durably attributed to the calling session, and the operator keeps a one-action Return control that restores exactly where they were.",
   bridge_report: "Append one bounded report to the durable bridge log for the voice gateway to relay. Callable from any session; the origin is labeled server-side, a non-orchestrator report is visibly attributed to its own session, and only the designated orchestrator may carry a confirmation_request.",
-  bridge_directive: "Relay the user's intent to the designated manager. The recipient and the delivery id are derived server-side, so a retry of the same root turn is one instruction, never two.",
+  bridge_directive: "Relay the user's intent to the designated manager. The recipient and the delivery id are derived server-side, so a retry of the same root turn is one instruction, never two. When the user authorizes a deploy in their own words, relay it once with intent=\"deploy\": the product pins current remote main and attaches the single-use authorization itself — never ask the user for a commit hash, a confirmation, a menu, or a repeat — their words were already the authorization.",
   get_orchestrator: "Read a project's designated orchestrator: designation, health and activity, model and prompt version, transcript size, message/tool/compaction counts, context usage against its model's configured window (clearly labelled when estimated), predecessor lineage, and a bounded rotation recommendation — STRONGLY_RECOMMEND_ROTATION once usage reaches the configured threshold. Words only: it never rotates, creates, or interrupts anything itself.",
   create_orchestrator: "Create a project's orchestrator: atomically spawn it, designate it as the project's selected orchestrator, and deliver the approved versioned mandate (editable). Idempotent by clientRequestId.",
   send_message_to_orchestrator: "Deliver a message to the project's selected orchestrator, resolved server-side. A dead selected conversation is resumed; with none designated, one is created first and then delivered to. Idempotent by clientRequestId.",
@@ -1100,8 +1100,8 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     /* #691 §4: the user's spoken yes, relayed by the gateway. Required — a deploy
        issued without one has bypassed the only gate between a spoken yes and
        production. */
-    bridgeRef: z.number().int().positive().describe("seq of the confirmation_request report the user answered."),
-    bridgeNonce: z.string().min(1).describe("Single-use nonce from that report's trailer. Verified against SHA and expiry, then spent."),
+    bridgeRef: z.number().int().positive().describe("ref from the trailer that arrived on the operator's deploy directive (or a legacy confirmation_request's seq)."),
+    bridgeNonce: z.string().min(1).describe("Single-use nonce from that trailer. Verified against the pinned SHA, expiry and supersession, then spent."),
   }).passthrough(),
   get_pipeline: z.object({
     clientRequestId: clientRequestIdSchema,
@@ -1245,7 +1245,7 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     confirmation: z.object({
       sha: z.string().regex(/^[0-9a-f]{40}$/).describe("Full lowercase 40-hex commit SHA this authorization is for."),
       expiresMinutes: z.number().int().positive().max(60).optional(),
-    }).optional().describe("confirmation_request only, designated orchestrator only: mints the single-use nonce the gateway must echo back before a deploy."),
+    }).optional().describe("confirmation_request only, designated orchestrator only: mints the single-use nonce the gateway must echo back before a deploy. LEGACY round trip — prefer reporting readiness and letting the operator's own deploy words mint the authorization (bridge_directive intent=deploy)."),
   }).passthrough(),
   bridge_directive: z.object({
     clientRequestId: clientRequestIdSchema,
@@ -1253,8 +1253,9 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     utterance: z.number().int().min(0).describe("Index of this instruction within that turn, from 0."),
     instruction: z.string().min(1).describe("What the user asked for, in plain words. No board state, no tool output."),
     project: z.string().optional().describe("Route to THIS project's designated orchestrator (validated seat). Absent: routes to the orchestrator of the calling voice session's own canonical project."),
+    intent: z.literal("deploy").optional().describe("The user just authorized a deploy in their own words. Acceptance pins current remote main to an exact revision, records ONE consumable authorization (10-minute expiry; a newer deploy intent supersedes it), and attaches the machine trailer to this directive. Gateway sessions only. Never voice a revision back at the user."),
     ref: z.number().int().positive().optional().describe("seq of the report this answers, when it answers one."),
-    nonce: z.string().optional().describe("With sha: the deploy authorization the user just gave aloud."),
+    nonce: z.string().optional().describe("Legacy manager-initiated round trip only, with sha: echo of a confirmation trailer. Never combined with intent."),
     sha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
   }).passthrough(),
   get_orchestrator: z.object({
