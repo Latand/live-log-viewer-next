@@ -89,7 +89,14 @@ async function getViewerControl(pathname: string): Promise<Record<string, unknow
   } catch {
     throw new Error("Viewer control is unreachable");
   }
-  const result = await response.json().catch(() => ({})) as Record<string, unknown>;
+  /* A body of literal `null` is valid JSON, so `.catch` never fires and every
+     later `result.x` throws a TypeError before the status can be classified —
+     which is how a 405 from a revision that does not serve the route arrived as
+     an uncatchable crash instead of a refusal (#790). */
+  const parsed = await response.json().catch(() => null) as unknown;
+  const result: Record<string, unknown> = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? parsed as Record<string, unknown>
+    : {};
   if (!response.ok) {
     const error = text(result.error) || `Viewer control request failed with status ${response.status}`;
     throw new McpToolRefusal(error, {
@@ -117,7 +124,14 @@ async function postViewerControl(
     },
     body: JSON.stringify(body),
   });
-  const result = await response.json().catch(() => ({})) as Record<string, unknown>;
+  /* A body of literal `null` is valid JSON, so `.catch` never fires and every
+     later `result.x` throws a TypeError before the status can be classified —
+     which is how a 405 from a revision that does not serve the route arrived as
+     an uncatchable crash instead of a refusal (#790). */
+  const parsed = await response.json().catch(() => null) as unknown;
+  const result: Record<string, unknown> = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? parsed as Record<string, unknown>
+    : {};
   if (result.error || (!response.ok && result.state !== "busy")) {
     throw new Error(text(result.error) || `Viewer control request failed with status ${response.status}`);
   }
