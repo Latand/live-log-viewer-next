@@ -1947,6 +1947,20 @@ function recordMembership(
 }
 
 export function conversationLookupFromSnapshot(snapshot: RegistryFile): ConversationLookup {
+  return snapshotConversationLookup(snapshot, clone);
+}
+
+/** Read-only lookup sharing the snapshot's immutable structure. Callers must
+    never mutate the returned conversations; mutating paths keep the cloning
+    `conversationLookupFromSnapshot`. */
+export function readOnlyConversationLookupFromSnapshot(snapshot: RegistryFile): ConversationLookup {
+  return snapshotConversationLookup(snapshot, (conversation) => conversation);
+}
+
+function snapshotConversationLookup(
+  snapshot: RegistryFile,
+  materialize: (conversation: RegistryConversation) => RegistryConversation,
+): ConversationLookup {
   const byPath = new Map<string, RegistryConversation>();
   for (const conversation of Object.values(snapshot.conversations)) {
     for (const generation of conversation.generations) {
@@ -1959,14 +1973,14 @@ export function conversationLookupFromSnapshot(snapshot: RegistryFile): Conversa
   return {
     conversationForPath(artifactPath) {
       const conversation = byPath.get(artifactPath);
-      return conversation ? clone(conversation) : null;
+      return conversation ? materialize(conversation) : null;
     },
     canonicalConversationId(id) {
       return resolveConversationAlias(snapshot, id);
     },
     conversation(id) {
       const conversation = snapshot.conversations[resolveConversationAlias(snapshot, id)];
-      return conversation ? clone(conversation) : null;
+      return conversation ? materialize(conversation) : null;
     },
   };
 }
