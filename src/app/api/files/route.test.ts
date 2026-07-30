@@ -26,6 +26,15 @@ let tmuxHealth: unknown = { status: "healthy" };
 let stateDir = "";
 const previousState = process.env.LLV_STATE_DIR;
 
+function resetFilesProjectionCacheForTests(): void {
+  const store = globalThis as typeof globalThis & {
+    __llvFilesProjectionCache?: Map<string, unknown>;
+    __llvFilesProjectionInflight?: Map<string, Promise<unknown>>;
+  };
+  store.__llvFilesProjectionCache = new Map();
+  store.__llvFilesProjectionInflight = new Map();
+}
+
 beforeEach(() => {
   registryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "llv-files-route-"));
   // Sandbox the title store so the integration test's writeSessionTitle never
@@ -34,6 +43,7 @@ beforeEach(() => {
   process.env.LLV_STATE_DIR = stateDir;
   setAgentRegistryForTests(new AgentRegistry(path.join(registryRoot, "registry.json")));
   resetFilesRouteCacheForTests();
+  resetFilesProjectionCacheForTests();
   scans = 0;
   scanProjects = [];
   scannedFiles = [];
@@ -125,6 +135,14 @@ const { GET } = await import("./route");
 
 test("repeated files reads reuse the pure read snapshot and retain ETag behavior", async () => {
   scannedFiles = [];
+  const registry = agentRegistry();
+  const target = registry as unknown as { readOnlySnapshot: AgentRegistry["readOnlySnapshot"] };
+  const realReadOnlySnapshot = target.readOnlySnapshot.bind(registry);
+  let registryReads = 0;
+  target.readOnlySnapshot = () => {
+    registryReads += 1;
+    return realReadOnlySnapshot();
+  };
   const first = await GET(new Request("http://127.0.0.1/api/files"));
   const etag = first.headers.get("etag");
   const second = await GET(new Request("http://127.0.0.1/api/files", { headers: { "if-none-match": etag! } }));
@@ -143,8 +161,11 @@ test("repeated files reads reuse the pure read snapshot and retain ETag behavior
   }));
   expect(first.headers.get("x-llv-files-cache")).toBe("miss");
   expect(second.headers.get("x-llv-files-cache")).toBe("hit");
+  expect(first.headers.get("x-llv-files-projection-cache")).toBe("miss");
+  expect(second.headers.get("x-llv-files-projection-cache")).toBe("hit");
   expect(first.headers.get("x-llv-files-cache-requests")).toBe("1");
   expect(second.headers.get("x-llv-files-cache-requests")).toBe("2");
+  expect(registryReads).toBe(1);
   expect(first.headers.get("server-timing")).toMatch(/files-clone;dur=\d+(?:\.\d+)?/);
   expect(first.headers.get("server-timing")).toMatch(/files-scan;dur=\d+(?:\.\d+)?;desc="cold generation 1"/);
   expect(first.headers.get("server-timing")).toMatch(/files-(?:source|registry|flows|authorship|stores|projects|json);dur=\d+(?:\.\d+)?/);
@@ -352,7 +373,15 @@ test("files API surfaces degraded tmux endpoint health", async () => {
   }
 });
 
-test("concurrent cold files reads share one scan", async () => {
+test("concurrent cold files reads share one scan and one projection", async () => {
+  const registry = agentRegistry();
+  const target = registry as unknown as { readOnlySnapshot: AgentRegistry["readOnlySnapshot"] };
+  const realReadOnlySnapshot = target.readOnlySnapshot.bind(registry);
+  let registryReads = 0;
+  target.readOnlySnapshot = () => {
+    registryReads += 1;
+    return realReadOnlySnapshot();
+  };
   const [first, second] = await Promise.all([
     GET(new Request("http://127.0.0.1/api/files")),
     GET(new Request("http://127.0.0.1/api/files")),
@@ -361,6 +390,11 @@ test("concurrent cold files reads share one scan", async () => {
   expect(first.status).toBe(200);
   expect(second.status).toBe(200);
   expect(scans).toBe(1);
+  expect(registryReads).toBe(1);
+  expect([
+    first.headers.get("x-llv-files-projection-cache"),
+    second.headers.get("x-llv-files-projection-cache"),
+  ].sort()).toEqual(["joined", "miss"]);
 });
 
 test("a restart serves the persisted completed snapshot while revalidating", async () => {
