@@ -435,6 +435,12 @@ function normalizeCodexUserContent(content: unknown): CodexUserContent {
     if (partText) text.push(partText);
 
     if (type === "input_image" || type === "image") {
+      const referencedPath = textPart(rec(part.image_url).path) || textPart(rec(part.source).path);
+      const referenced = referencedPath ? inboxImagesFromPath(referencedPath) : [];
+      if (referenced.length) {
+        attachments.push(...referenced);
+        continue;
+      }
       const imageUrl = textPart(part.image_url) || textPart(rec(part.image_url).url) || textPart(part.data);
       const image = codexImageFromDataUrl(imageUrl);
       if (image) attachments.push(image);

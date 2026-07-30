@@ -624,6 +624,44 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
+  test("an image echo past the old line bound no longer kills the host, and reaches storage bounded", async () => {
+    const server = new FakeAppServer("oversized-thread");
+    server.modelList = [{ id: "gpt-5.6-sol", isDefault: true, inputModalities: ["text", "image"] }];
+    const store = new MemoryEventStore();
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      model: "gpt-5.6-sol",
+      eventStore: store,
+      resolveImagePath: (ref) => `/runtime-images/${ref.sha256}`,
+      spawnProcess: fakeSpawn(server),
+    });
+
+    const body = Buffer.alloc(18 * 1024 * 1024, 9).toString("base64");
+    expect(body.length).toBeGreaterThan(16 * 1024 * 1024);
+    server.notify("item/completed", {
+      threadId: "oversized-thread",
+      turnId: "turn-1",
+      item: {
+        type: "userMessage",
+        clientId: "oversized-image",
+        content: [
+          { type: "input_image", image_url: `data:image/png;base64,${body}` },
+          { type: "text", text: "look at this" },
+        ],
+      },
+    });
+    await Bun.sleep(50);
+
+    expect((await host.health()).status).not.toBe("dead");
+    const items = store.load("oversized-thread").filter((event) => event.kind === "item");
+    expect(items).not.toHaveLength(0);
+    const serialized = JSON.stringify(items);
+    expect(serialized).not.toContain(body.slice(0, 256));
+    expect(serialized.length).toBeLessThan(64 * 1024);
+    expect(serialized).toContain("localImage");
+    await host.release();
+  });
+
   test("keeps image affordance disabled for a text-only selected model", async () => {
     const server = new FakeAppServer("spark-thread");
     const host = await CodexAppServerHost.start({
