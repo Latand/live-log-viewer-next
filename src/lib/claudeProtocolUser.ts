@@ -50,8 +50,8 @@ function originKindOf(record: Record<string, unknown>): string {
   return typeof record.origin === "string" ? record.origin : str(rec(record.origin).kind);
 }
 
-function isInterruptSentinelText(text: string): boolean {
-  return /^\[Request interrupted by user\]$/.test(text);
+export function isClaudeInterruptSentinelText(text: string): boolean {
+  return /^\[Request interrupted by user(?: for tool use)?\]$/.test(text);
 }
 
 function isCommandCaveatText(text: string): boolean {
@@ -80,7 +80,7 @@ export function isClaudeProtocolUser(record: Record<string, unknown>): boolean {
   }
   const text = claudeUserText(rec(record.message).content).trim();
   return (
-    isInterruptSentinelText(text) ||
+    isClaudeInterruptSentinelText(text) ||
     isCommandCaveatText(text) ||
     isTaskNotificationText(text) ||
     /^This came from another Claude session\b[\s\S]*not typed by your user[\s\S]*$/.test(text)
@@ -105,5 +105,5 @@ export function isClaudeTurnWindowMeta(record: Record<string, unknown>): boolean
   // Remaining isMeta records are injected context (caveats, command output).
   if (record.isMeta === true) return true;
   const text = claudeUserText(rec(record.message).content).trim();
-  return isInterruptSentinelText(text) || isCommandCaveatText(text) || isTaskNotificationText(text);
+  return isClaudeInterruptSentinelText(text) || isCommandCaveatText(text) || isTaskNotificationText(text);
 }
