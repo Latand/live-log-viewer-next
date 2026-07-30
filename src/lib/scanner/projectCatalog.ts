@@ -599,13 +599,23 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
           target,
           displayName: groups.get(target)?.displayName ?? displayNameFromProjectIdentity(target),
         }));
+        /* A poisoned durable source must not defer the whole batch: its
+           evidence lives in flows/pipelines/workflows state and is re-derived
+           on every scan, so skipping it here loses nothing while the clean
+           registrations, the board migration, and the catalog write proceed. */
         const durable = durableProjectAliasCandidates();
-        if (durable.conflicts.length > 0) throw new Error("ambiguous durable project identity");
+        let deferredSources = durable.conflicts.length;
         for (const registration of durable.registrations) {
           const held = migrations.get(registration.source);
-          if (held && held !== registration.target) throw new Error("conflicting project migration");
+          if (held && held !== registration.target) {
+            deferredSources += 1;
+            continue;
+          }
           migrations.set(registration.source, registration.target);
           registrations.push(registration);
+        }
+        if (deferredSources > 0) {
+          console.error(`[project catalog] ${deferredSources} durable project alias source(s) unresolved; persisting the clean batch and retrying them on a later scan`);
         }
         boardHealed = projectAliasesCanAccept(registrations);
         if (boardHealed) boardHealed = migrateBoardProjects(migrations);

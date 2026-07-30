@@ -144,9 +144,13 @@ function collectionRecords(filename: string, collection: string): Record<string,
     : [];
 }
 
-function convergenceIdConflicts(registrations: readonly ProjectAliasRegistration[]): string[] {
+function convergenceIdCollisions(registrations: readonly ProjectAliasRegistration[]): {
+  labels: string[];
+  sources: Set<string>;
+} {
   const proposed = new Map(registrations.map((registration) => [registration.source, registration.target]));
-  const conflicts = new Set<string>();
+  const labels = new Set<string>();
+  const sources = new Set<string>();
   for (const [filename, collection] of [
     ["tasks.json", "tasks"],
     ["flows.json", "flows"],
@@ -161,17 +165,27 @@ function convergenceIdConflicts(registrations: readonly ProjectAliasRegistration
       const target = proposed.get(current) ?? current;
       const key = `${target}\0${record.id}`;
       const held = seen.get(key);
-      if (held && held !== current) conflicts.add(`${collection} id collision`);
-      else seen.set(key, current);
+      if (held && held !== current) {
+        labels.add(`${collection} id collision`);
+        if (proposed.has(held)) sources.add(held);
+        if (proposed.has(current)) sources.add(current);
+      } else {
+        seen.set(key, current);
+      }
     }
   }
-  return [...conflicts];
+  return { labels: [...labels], sources };
 }
+
+type TargetEvidence = { registration: ProjectAliasRegistration; records: number };
 
 /**
  * Pre-change flow, pipeline, and workflow records carry both the legacy
  * project key and a repository path. Re-resolving those paths establishes an
- * alias even when the prior project catalog has already disappeared.
+ * alias even when the prior project catalog has already disappeared. One stale
+ * record stamped with a foreign checkout must not poison a source the rest of
+ * the records agree on, so each source resolves by strict record majority and
+ * only a genuinely split source is reported as a conflict.
  */
 export function durableProjectAliasCandidates(): DurableProjectAliasCandidates {
   const rememberedRepositories = storedWorktreeRepositories();
@@ -180,27 +194,35 @@ export function durableProjectAliasCandidates(): DurableProjectAliasCandidates {
     ...projectPathPairs("pipelines.json", "pipelines", "repoDir"),
     ...projectPathPairs("workflows.json", "workflows", "repoDir"),
   ];
-  const targets = new Map<string, Map<string, ProjectAliasRegistration>>();
+  const targets = new Map<string, Map<string, TargetEvidence>>();
   for (const [source, candidatePath] of pairs) {
     const root = repositoryRootForPath(candidatePath) ?? rememberedRepositories.get(candidatePath);
     const identity = root ? projectIdentityFromRepositoryRoot(root) : null;
     if (!identity || source === identity.project) continue;
-    const sourceTargets = targets.get(source) ?? new Map<string, ProjectAliasRegistration>();
-    sourceTargets.set(identity.project, {
-      source,
-      target: identity.project,
-      displayName: identity.displayName,
-    });
+    const sourceTargets = targets.get(source) ?? new Map<string, TargetEvidence>();
+    const evidence = sourceTargets.get(identity.project) ?? {
+      registration: { source, target: identity.project, displayName: identity.displayName },
+      records: 0,
+    };
+    evidence.records += 1;
+    sourceTargets.set(identity.project, evidence);
     targets.set(source, sourceTargets);
   }
   const registrations: ProjectAliasRegistration[] = [];
   const conflicts: string[] = [];
   for (const [source, sourceTargets] of targets) {
-    if (sourceTargets.size === 1) registrations.push(sourceTargets.values().next().value!);
+    const ranked = [...sourceTargets.values()].sort((left, right) => right.records - left.records);
+    const total = ranked.reduce((sum, evidence) => sum + evidence.records, 0);
+    const leader = ranked[0]!;
+    if (leader.records * 2 > total) registrations.push(leader.registration);
     else conflicts.push(source);
   }
-  conflicts.push(...convergenceIdConflicts(registrations));
-  return { registrations, conflicts };
+  const collisions = convergenceIdCollisions(registrations);
+  conflicts.push(...collisions.labels);
+  return {
+    registrations: registrations.filter((registration) => !collisions.sources.has(registration.source)),
+    conflicts,
+  };
 }
 
 function mergeRegistrations(

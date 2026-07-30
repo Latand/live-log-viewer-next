@@ -107,6 +107,49 @@ test("request refreshes persist the per-file scanner index", async () => {
   }
 });
 
+test("a poisoned durable alias source defers only itself in the persist scan", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-poisoned-alias-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    await mkdir(process.env.LLV_STATE_DIR, { recursive: true });
+    const cleanRepo = path.join(base, "clean-checkout");
+    const tieA = path.join(base, "tie-a-checkout");
+    const tieB = path.join(base, "tie-b-checkout");
+    const cleanProject = await createRepository(cleanRepo, "clean-repository");
+    await createRepository(tieA, "tie-a-repository");
+    await createRepository(tieB, "tie-b-repository");
+    /* The production freeze: one legacy source with contradictory records
+       kept every other alias, the board migration, and the catalog write
+       deferred on every scan. */
+    await writeFile(path.join(process.env.LLV_STATE_DIR, "flows.json"), JSON.stringify({
+      flows: [
+        { project: "legacy-clean", cwd: cleanRepo },
+        { project: "legacy-poisoned", cwd: tieA },
+        { project: "legacy-poisoned", cwd: tieB, closedAt: "2026-07-11T00:00:00.000Z" },
+      ],
+    }));
+    const transcript = path.join(roots["codex-sessions"], "poisoned-alias.jsonl");
+    await writeFixture(transcript, JSON.stringify({ type: "session_meta", payload: { cwd: cleanRepo } }) + "\n", 1_700_000_000);
+
+    await discoverFilesWithProjectCatalog(roots, undefined, {});
+
+    const aliases = JSON.parse(await readFile(path.join(process.env.LLV_STATE_DIR, "project-aliases.json"), "utf8"));
+    expect(aliases.aliases).toEqual({ "legacy-clean": cleanProject });
+    expect(existsSync(path.join(process.env.LLV_STATE_DIR, "project-catalog.json"))).toBe(true);
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
 test("project catalog persistence repairs private modes and atomically replaces symlinks", async () => {
   const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-private-index-"));
   const previousStateDir = process.env.LLV_STATE_DIR;
