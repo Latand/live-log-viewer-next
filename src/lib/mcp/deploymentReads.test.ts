@@ -90,11 +90,15 @@ test("the production Viewer control adapter reads a live plane with no runtime v
   }
 });
 
-test("deployment_status exposes the absent-plane code and keeps an unreachable control distinct", async () => {
+test("deployment_status exposes the absent-plane code and keeps an unreachable plane distinct", async () => {
+  let runtimeUnavailable = false;
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     fetch() {
+      if (runtimeUnavailable) {
+        return Response.json({ error: "runtime host is unavailable" }, { status: 503 });
+      }
       return Response.json(
         { error: "runtime events are disabled", code: RUNTIME_PLANE_ABSENT },
         { status: 503 },
@@ -117,18 +121,21 @@ test("deployment_status exposes the absent-plane code and keeps an unreachable c
     },
   });
 
-  const unreachableUrl = server.url.origin;
-  server.stop(true);
-  process.env.LLV_VIEWER_CONTROL_URL = unreachableUrl;
+  runtimeUnavailable = true;
   const unreachableService = createMcpToolService(viewerMcpBindings(), new MemoryMcpReceiptStore());
   const unreachable = await unreachableService.callTool("deployment_status", {
     clientRequestId: "deployment-plane-unreachable",
   });
   expect(unreachable).toMatchObject({
     ok: false,
-    error: "Viewer control is unreachable",
+    error: "runtime host is unavailable",
+    details: {
+      error: "runtime host is unavailable",
+      status: 503,
+    },
   });
-  expect(unreachable).not.toHaveProperty("details");
+  expect(unreachable).not.toHaveProperty("details.code");
+  server.stop(true);
 });
 
 test("deployment_status preserves the deploymentId lookup and presentation through Viewer HTTP", async () => {
