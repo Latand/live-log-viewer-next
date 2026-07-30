@@ -1,4 +1,5 @@
 import type { ConversationProjectOwnership } from "@/lib/accounts/migration/contracts";
+import { canonicalProject } from "@/lib/projects/aliases";
 import { projectInfoFromCwd } from "@/lib/scanner/describe";
 
 /*
@@ -39,13 +40,13 @@ export function resolveProjectAttribution(input: ProjectAttributionInput): Proje
   const cwdInfo = cwd ? projectInfoFromCwd(cwd) : null;
   const ownership = input.projectOwnership?.project.trim();
   if (ownership) {
-    return { project: ownership, ...(cwdInfo?.worktree ? { worktree: cwdInfo.worktree } : {}), source: "ownership" };
+    return { project: canonicalProject(ownership), ...(cwdInfo?.worktree ? { worktree: cwdInfo.worktree } : {}), source: "ownership" };
   }
   if (cwdInfo?.project) {
     return { project: cwdInfo.project, ...(cwdInfo.worktree ? { worktree: cwdInfo.worktree } : {}), source: "cwd" };
   }
   const profileProject = input.launchProfileProject?.trim();
-  if (profileProject) return { project: profileProject, source: "launch-profile" };
+  if (profileProject) return { project: canonicalProject(profileProject), source: "launch-profile" };
   const fallback = input.fallbackProject?.trim();
-  return fallback ? { project: fallback, source: "fallback" } : { project: null, source: null };
+  return fallback ? { project: canonicalProject(fallback), source: "fallback" } : { project: null, source: null };
 }

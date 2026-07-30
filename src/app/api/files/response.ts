@@ -13,6 +13,7 @@ import { repositoryForProjectRoot } from "@/lib/flows/git";
 import { loadFlows, withFlowSnapshot } from "@/lib/flows/store";
 import { reviewOutcomeFor } from "@/lib/flows/reviewOutcome";
 import { overlayPromptDisplayTitles } from "@/lib/displayNames";
+import { projectAliasSnapshot } from "@/lib/projects/aliases";
 import { projectRestoredFlows } from "@/lib/flows/visibility";
 import { reconcileEmbeddedReviewFlows } from "@/lib/pipelines/engine";
 import { withPipelineMutation } from "@/lib/pipelines/store";
@@ -31,7 +32,7 @@ import { overlayRoleSessionTitles } from "@/lib/session/roleTitles";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { tmuxEndpointHealth } from "@/lib/tmux";
 import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
-import { projectRootForCwd } from "@/lib/scanner/describe";
+import { projectInfoFromCwd, projectRootForCwd } from "@/lib/scanner/describe";
 import { projectDirectoryFallbacks } from "@/lib/scanner/projectDirectories";
 import type { FilesResponse, ProjectCatalogEntry } from "@/lib/types";
 
@@ -49,6 +50,7 @@ function projectedProjectCatalog(
   const source = conversationCatalogSnapshot();
   if (!source.length) return fallback;
   const projectByPath = new Map<string, string>();
+  const projectMetadataByPath = new Map<string, { displayName: string; projectRoot?: string }>();
   const archivedPaths = new Set<string>();
   for (const conversation of Object.values(snapshot.conversations)) {
     const latest = conversation.generations.at(-1);
@@ -58,7 +60,16 @@ function projectedProjectCatalog(
       cwd: latest.launchProfile.cwd,
       launchProfileProject: latest.launchProfile.project,
     });
-    if (project) projectByPath.set(latest.path, project);
+    if (project) {
+      projectByPath.set(latest.path, project);
+      const cwdInfo = latest.launchProfile.cwd ? projectInfoFromCwd(latest.launchProfile.cwd) : null;
+      if (cwdInfo?.project === project) {
+        projectMetadataByPath.set(latest.path, {
+          displayName: cwdInfo.displayName,
+          ...(cwdInfo.repo ? { projectRoot: cwdInfo.repo } : {}),
+        });
+      }
+    }
     for (const generation of conversation.generations) {
       if (generation.path !== latest.path) archivedPaths.add(generation.path);
     }
@@ -67,14 +78,21 @@ function projectedProjectCatalog(
     }
   }
   const groups = new Map<string, ProjectCatalogEntry>();
-  const fallbackRoots = new Map(fallback.map((entry) => [entry.project, entry.projectRoot] as const));
+  const fallbackMetadata = new Map(fallback.map((entry) => [entry.project, entry] as const));
   for (const entry of source) {
     if (archivedPaths.has(entry.path)) continue;
     const project = projectByPath.get(entry.path) ?? entry.project;
-    const group = groups.get(project) ?? { project, smt: 0, conversations: 0 };
+    const metadata = fallbackMetadata.get(project) ?? fallbackMetadata.get(entry.project);
+    const projectedMetadata = projectMetadataByPath.get(entry.path);
+    const group = groups.get(project) ?? {
+      project,
+      displayName: projectedMetadata?.displayName ?? metadata?.displayName ?? entry.projectName,
+      smt: 0,
+      conversations: 0,
+    };
     group.smt = Math.max(group.smt, entry.mtime);
     group.conversations += 1;
-    const projectRoot = fallbackRoots.get(entry.project);
+    const projectRoot = projectedMetadata?.projectRoot ?? metadata?.projectRoot;
     if (!group.projectRoot && projectRoot) group.projectRoot = projectRoot;
     groups.set(project, group);
   }
@@ -539,6 +557,11 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   for (const entry of effectiveProjectCatalog) {
     entry.repository = entry.projectRoot ? repositoryForProjectRoot(entry.projectRoot) : null;
   }
+  const projectNames = new Map(effectiveProjectCatalog.map((entry) => [entry.project, entry.displayName] as const));
+  for (const file of projected.files) {
+    file.projectName = projectNames.get(file.project) ?? file.projectName;
+    if (file.project === "project_unresolved") file.projectUnresolved = true;
+  }
   markTiming("files-project-catalog");
   const projectCwds = projectDirectoryFallbacks([
     ...projected.files.map((file) => file.project),
@@ -562,10 +585,24 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     mirrorCheckpointAtMs: registryDiagnostics.mirrorCheckpointAtMs,
     mirrorDirty: registryDiagnostics.mirrorDirty,
   };
+  const projectAliases = projectAliasSnapshot();
+  const projectDisplayNames = { ...projectAliases.displayNames };
+  for (const entry of effectiveProjectCatalog) {
+    if (entry.displayName?.trim()) projectDisplayNames[entry.project] = entry.displayName;
+  }
+  for (const file of projected.files) {
+    if (file.projectName?.trim()) projectDisplayNames[file.project] = file.projectName;
+  }
+  for (const [project, cwd] of Object.entries(projectCwds)) {
+    const info = projectInfoFromCwd(cwd);
+    if (info?.project === project) projectDisplayNames[project] = info.displayName;
+  }
   const body = JSON.stringify({
     files: projected.files,
     ...(responsePinOverlayPaths.size ? { pinOverlayPaths: [...responsePinOverlayPaths] } : {}),
     projectCatalog: effectiveProjectCatalog,
+    projectAliases: projectAliases.aliases,
+    projectDisplayNames,
     ...(Object.keys(projectCwds).length ? { projectCwds } : {}),
     flows: projected.flows,
     pipelines,

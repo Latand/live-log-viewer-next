@@ -108,7 +108,7 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
           }`}
           title={project}
         >
-          {projectDisplayName(project)}
+          {projectDisplayName(project, file.projectName)}
         </span>
       </div>
       <div className={`relative mt-2 min-w-0 ${large ? "text-[14px]" : "text-[12.5px]"} font-bold leading-snug`} title={title}>

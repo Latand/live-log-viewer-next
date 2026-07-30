@@ -63,7 +63,7 @@ function FavoritesSection({
               <span className="min-w-0 flex-1 truncate text-ui font-semibold">
                 {cleanTitle(file.title, 90) || t("tasks.untitled")}
               </span>
-              {scopeAll ? <span className="max-w-[90px] shrink-0 truncate text-caption text-muted">{projectDisplayName(project)}</span> : null}
+              {scopeAll ? <span className="max-w-[90px] shrink-0 truncate text-caption text-muted">{projectDisplayName(project, file.projectName)}</span> : null}
             </button>
             <button
               type="button"

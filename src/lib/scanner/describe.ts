@@ -1,8 +1,15 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import { stateDir } from "@/lib/configDir";
+import { canonicalProject, projectAliasSnapshot } from "@/lib/projects/aliases";
+import {
+  displayNameFromProjectIdentity,
+  projectIdentityFromRepositoryRoot,
+  repositoryRootForPath,
+  UNRESOLVED_PROJECT,
+  UNRESOLVED_PROJECT_NAME,
+} from "@/lib/projects/identity";
 
 import type { Engine, Fmt, RootKey } from "../types";
 import { cleanTitle } from "../title";
@@ -14,6 +21,8 @@ import { projectResolutionStateKey } from "./projectState";
 
 export interface FileDescription {
   project: string;
+  projectName: string;
+  projectUnresolved?: true;
   worktree?: string;
   cwd?: string;
   sessionStartedAt?: string | null;
@@ -64,6 +73,8 @@ type CachedTranscriptMetadata = {
     this overlay while transcript metadata stays untouched (#287). */
 type ProjectOverlay = {
   project: string;
+  projectName: string;
+  projectUnresolved?: true;
   worktree?: string;
   projectRoot?: string | null;
 };
@@ -82,7 +93,8 @@ globalCache<unknown>("title-v2").clear();
    project-state hash, so reconciliation invalidated it corpus-wide. */
 globalCache<unknown>("meta-v6").clear();
 const transcriptMetaCache = globalCache<CachedTranscriptMetadata>("meta-transcript-v7");
-const projectOverlayCache = globalCache<CachedProjectOverlay>("project-overlay-v1");
+globalCache<unknown>("project-overlay-v1").clear();
+const projectOverlayCache = globalCache<CachedProjectOverlay>("project-overlay-v2");
 // Title and codex project live in the immutable head of a growing transcript.
 // Resolved head values survive append-only growth, while the complete file
 // identity invalidates same-size rewrites and truncations. A head that has not
@@ -167,18 +179,10 @@ function readSearchHead(pathname: string, size: number): { text: string; read: n
   }
 }
 
-// Claude project slugs encode the cwd with "/" and "." replaced by "-":
-// "-home-user-Projects-my-app" → "my-app", plain home dir → its basename.
-const homeSlug = "-" + os.homedir().split(path.sep).filter(Boolean).join("-");
-const slugPrefixes = [homeSlug + "-Projects-", homeSlug + "-"];
 const skipTitlePrefixes = ["<", "#", "Caveat:", "{", "[", "This session is being continued"];
 
 export function projectFromSlug(slug: string): string {
-  if (slug === homeSlug) return path.basename(os.homedir());
-  for (const prefix of slugPrefixes) {
-    if (slug.startsWith(prefix)) return slug.slice(prefix.length) || slug;
-  }
-  return slug;
+  return canonicalProject(slug);
 }
 
 function worktreeFromPath(cwd: string): { repo: string; worktree: string } | null {
@@ -211,40 +215,7 @@ function worktreeFromNested(cwd: string): { repo: string; worktree: string } | n
   return null;
 }
 
-function existingRepoPath(repoName: string): string {
-  const roots = [path.join(os.homedir(), "Projects"), path.join(os.homedir(), ".agents", "tools")];
-  for (const root of roots) {
-    const candidate = path.join(root, repoName);
-    try {
-      if (fs.statSync(candidate).isDirectory()) return candidate;
-    } catch {
-      continue;
-    }
-  }
-  return path.join(os.homedir(), "Projects", repoName);
-}
-
 function repoPathFromSlug(slug: string): string | null {
-  const home = os.homedir();
-  const encodedHome = home.replace(/[^a-zA-Z0-9]/g, "-");
-  const roots: Array<[string, string]> = [
-    [`${encodedHome}-Projects-`, path.join(home, "Projects")],
-    [`${encodedHome}--agents-tools-`, path.join(home, ".agents", "tools")],
-  ];
-  for (const [prefix, root] of roots) {
-    if (!slug.startsWith(prefix)) continue;
-    const encodedName = slug.slice(prefix.length);
-    if (!encodedName) return root;
-    try {
-      for (const name of fs.readdirSync(root)) {
-        if (name.replace(/[^a-zA-Z0-9]/g, "-") === encodedName) return path.join(root, name);
-      }
-    } catch {
-      /* The parent root can be absent after its conversations were recorded. */
-    }
-    return path.join(root, encodedName);
-  }
-  if (slug === encodedHome) return home;
   const cached = repoSlugCache.get(slug);
   if (cached && cached[0] > Date.now()) return cached[1];
 
@@ -254,7 +225,7 @@ function repoPathFromSlug(slug: string): string | null {
      existing directory (preferring a git root when ambiguity remains). */
   if (!slug.startsWith("-")) return null;
   const matches: string[] = [];
-  let frontier: Array<{ pathname: string; encoded: string }> = [{ pathname: path.parse(home).root, encoded: "" }];
+  let frontier: Array<{ pathname: string; encoded: string }> = [{ pathname: path.parse(path.resolve(path.sep)).root, encoded: "" }];
   for (let depth = 0; depth < 32 && frontier.length > 0 && matches.length < 16; depth += 1) {
     const next: Array<{ pathname: string; encoded: string }> = [];
     for (const parent of frontier) {
@@ -297,14 +268,14 @@ function repoPathFromSlug(slug: string): string | null {
     fails and the session can fragment into its own `-codex-worktrees-<hash>-…`
     project. Recover the repo from known local repo roots so a finished
     worktree's session keeps the same project key as a live checkout. */
-function worktreeFromCodexPath(cwd: string): { repo: string; worktree: string } | null {
+function worktreeFromCodexPath(cwd: string): { repo: string; worktree: string; projectHint: string } | null {
   const marker = path.sep + ".codex" + path.sep + "worktrees" + path.sep;
   const index = cwd.indexOf(marker);
   if (index < 0) return null;
   const rest = cwd.slice(index + marker.length).split(path.sep).filter(Boolean);
   const [worktree, repoName] = rest;
   if (!worktree || !repoName) return null;
-  return { repo: existingRepoPath(repoName), worktree };
+  return { repo: "", worktree, projectHint: repoName };
 }
 
 /** Main-repo root + worktree name from a linked checkout's `.git` file
@@ -324,14 +295,52 @@ export function parseWorktreeGitdir(cwd: string, gitFileText: string): { repo: s
    checkout that just became (or stopped being) a worktree is noticed. */
 const worktreeGitCache = globalCache<[number, { repo: string; worktree: string } | null]>("worktree-git");
 const WORKTREE_TTL_MS = 60_000;
-const projectInfoCwdCache = globalCache<[number, { project: string; worktree?: string; repo?: string } | null]>("project-info-cwd-v1");
+type ProjectInfo = {
+  project: string;
+  displayName: string;
+  unresolved?: true;
+  worktree?: string;
+  repo?: string;
+};
+const projectInfoCwdCache = globalCache<[number, string, ProjectInfo | null]>("project-info-cwd-v2");
 const PROJECT_INFO_CWD_TTL_MS = 10_000;
 const persistedProjectCache = globalCache<[number, string, string, {
-  byCwd: Map<string, { project: string; worktree?: string }>;
-  byPath: Map<string, { project: string; worktree?: string }>;
-  bySlug: Map<string, { project: string; worktree?: string }>;
+  byCwd: Map<string, { project: string; worktree?: string; repo?: string }>;
+  byPath: Map<string, { project: string; worktree?: string; repo?: string }>;
+  bySlug: Map<string, { project: string; worktree?: string; repo?: string }>;
 }]>("persisted-project-v2");
 const PERSISTED_PROJECT_TTL_MS = 10_000;
+
+function unresolvedProjectInfo(worktree?: string): ProjectInfo {
+  return {
+    project: UNRESOLVED_PROJECT,
+    displayName: UNRESOLVED_PROJECT_NAME,
+    unresolved: true,
+    ...(worktree ? { worktree } : {}),
+  };
+}
+
+function aliasedProjectInfo(
+  project: string,
+  worktree?: string,
+  repo?: string,
+): ProjectInfo {
+  const canonical = canonicalProject(project);
+  if (canonical === project && canonical !== UNRESOLVED_PROJECT && !/^repo-[0-9a-f]{32}$/.test(canonical)) {
+    return unresolvedProjectInfo(worktree);
+  }
+  const repositoryIdentity = repo ? projectIdentityFromRepositoryRoot(repo) : null;
+  const displayName = repositoryIdentity?.project === canonical
+    ? repositoryIdentity.displayName
+    : projectAliasSnapshot().displayNames[canonical] ?? displayNameFromProjectIdentity(canonical);
+  return {
+    project: canonical,
+    displayName,
+    ...(canonical === UNRESOLVED_PROJECT ? { unresolved: true as const } : {}),
+    ...(worktree ? { worktree } : {}),
+    ...(repo ? { repo } : {}),
+  };
+}
 
 /* A `git worktree add ../foo` checkout has NO recognizable path layout — unlike
    `.claude/worktrees/` (#1) and `.codex/worktrees/` (#3), its sibling path
@@ -439,31 +448,36 @@ function readStateJson(name: string): unknown {
   }
 }
 
-function projectOverride(project: unknown, cwd: unknown, forceWorktree = false): { project: string; worktree?: string } | null {
+function projectOverride(
+  project: unknown,
+  cwd: unknown,
+  forceWorktree = false,
+): { project: string; worktree?: string; repo?: string } | null {
   if (typeof project !== "string" || !project.trim() || typeof cwd !== "string" || !cwd.trim()) return null;
   const cwdProject = projectFromSlug(cwd.replace(/[^a-zA-Z0-9]/g, "-"));
   const worktree = forceWorktree || cwdProject !== project ? path.basename(cwd) : undefined;
-  return { project, worktree };
+  const repo = repositoryRootForPath(cwd);
+  return { project, worktree, ...(repo ? { repo } : {}) };
 }
 
 function persistedProjects(): {
-  byCwd: Map<string, { project: string; worktree?: string }>;
-  byPath: Map<string, { project: string; worktree?: string }>;
-  bySlug: Map<string, { project: string; worktree?: string }>;
+  byCwd: Map<string, { project: string; worktree?: string; repo?: string }>;
+  byPath: Map<string, { project: string; worktree?: string; repo?: string }>;
+  bySlug: Map<string, { project: string; worktree?: string; repo?: string }>;
 } {
   const dir = stateDir();
   const stateKey = projectResolutionStateKey();
   const cached = persistedProjectCache.get("state");
   if (cached && cached[0] > Date.now() && cached[1] === dir && cached[2] === stateKey) return cached[3];
-  const byCwd = new Map<string, { project: string; worktree?: string }>();
-  const byPath = new Map<string, { project: string; worktree?: string }>();
-  const bySlug = new Map<string, { project: string; worktree?: string }>();
-  const rememberSlug = (value: unknown, info: { project: string; worktree?: string } | null) => {
+  const byCwd = new Map<string, { project: string; worktree?: string; repo?: string }>();
+  const byPath = new Map<string, { project: string; worktree?: string; repo?: string }>();
+  const bySlug = new Map<string, { project: string; worktree?: string; repo?: string }>();
+  const rememberSlug = (value: unknown, info: { project: string; worktree?: string; repo?: string } | null) => {
     if (!info || typeof value !== "string" || !value.endsWith(".jsonl")) return;
     const slug = path.basename(path.dirname(value));
     if (slug.startsWith("-")) bySlug.set(slug, info);
   };
-  const rememberPath = (value: unknown, info: { project: string; worktree?: string } | null) => {
+  const rememberPath = (value: unknown, info: { project: string; worktree?: string; repo?: string } | null) => {
     if (info && typeof value === "string" && value.trim()) byPath.set(value, info);
     rememberSlug(value, info);
   };
@@ -504,39 +518,51 @@ function persistedProjects(): {
 }
 
 /** Project identity for a real cwd, shared by both engines: resolve a
-    worktree checkout to its main repo, then name the project the way Claude
-    slugs name it (`projectFromSlug` of the dashed path). One naming scheme
-    means a codex session, a claude session, and any worktree of the same repo
-    all land in the SAME sidebar group instead of lookalike neighbors. */
-export function projectInfoFromCwd(cwd: string): { project: string; worktree?: string; repo?: string } | null {
+    worktree checkout to its main repository, then derive the stable key and
+    human label from that repository's canonical remote. */
+export function projectInfoFromCwd(cwd: string): ProjectInfo | null {
   if (!cwd.trim()) return null;
+  const resolutionState = projectResolutionStateKey();
   const cached = projectInfoCwdCache.get(cwd);
-  if (cached && cached[0] > Date.now()) return cached[1];
+  if (cached && cached[0] > Date.now() && cached[1] === resolutionState) return cached[2];
   const scratchpad = projectInfoFromClaudeTaskCwd(cwd);
   if (scratchpad) {
-    projectInfoCwdCache.set(cwd, [Date.now() + PROJECT_INFO_CWD_TTL_MS, scratchpad]);
+    projectInfoCwdCache.set(cwd, [Date.now() + PROJECT_INFO_CWD_TTL_MS, resolutionState, scratchpad]);
     return scratchpad;
   }
+  const codexWorktree = worktreeFromCodexPath(cwd);
   let worktree =
     worktreeFromPath(cwd) ??
     worktreeFromNested(cwd) ??
-    worktreeFromCodexPath(cwd) ??
-    worktreeFromGitFile(cwd);
+    (codexWorktree ? worktreeFromGitFile(cwd) ?? codexWorktree : worktreeFromGitFile(cwd));
   if (!worktree && !hasGitMarker(cwd)) {
-    const persisted = persistedProjects().byCwd.get(cwd);
-    if (persisted) {
-      projectInfoCwdCache.set(cwd, [Date.now() + PROJECT_INFO_CWD_TTL_MS, persisted]);
-      return persisted;
-    }
     /* An arbitrary-path worktree that has since been deleted: no live
        recognizer matched and its `.git` is gone, but a resolution we recorded
        while it was alive still names the parent repo. */
     worktree = worktreeFromMemory(cwd);
+    if (!worktree) {
+      const persisted = persistedProjects().byCwd.get(cwd);
+      if (persisted) {
+        const resolved = aliasedProjectInfo(persisted.project, persisted.worktree, persisted.repo);
+        projectInfoCwdCache.set(cwd, [Date.now() + PROJECT_INFO_CWD_TTL_MS, resolutionState, resolved]);
+        return resolved;
+      }
+    }
   }
-  const root = worktree ? worktree.repo : cwd;
-  const project = projectFromSlug(root.replace(/[^a-zA-Z0-9]/g, "-"));
-  const resolved = project ? { project, worktree: worktree?.worktree } : null;
-  projectInfoCwdCache.set(cwd, [Date.now() + PROJECT_INFO_CWD_TTL_MS, resolved]);
+  const root = worktree?.repo || repositoryRootForPath(cwd);
+  if (!root) {
+    const hinted = codexWorktree?.projectHint
+      ? aliasedProjectInfo(codexWorktree.projectHint, worktree?.worktree)
+      : unresolvedProjectInfo(worktree?.worktree);
+    const unresolved = hinted;
+    projectInfoCwdCache.set(cwd, [Date.now() + PROJECT_INFO_CWD_TTL_MS, resolutionState, unresolved]);
+    return unresolved;
+  }
+  const identity = projectIdentityFromRepositoryRoot(root);
+  const resolved = identity
+    ? { project: identity.project, displayName: identity.displayName, worktree: worktree?.worktree, repo: root }
+    : unresolvedProjectInfo(worktree?.worktree);
+  projectInfoCwdCache.set(cwd, [Date.now() + PROJECT_INFO_CWD_TTL_MS, resolutionState, resolved]);
   return resolved;
 }
 
@@ -554,10 +580,10 @@ export function projectRootForCwd(cwd: string): string | undefined {
   const worktree =
     worktreeFromPath(cwd) ??
     worktreeFromNested(cwd) ??
-    worktreeFromCodexPath(cwd) ??
+    (worktreeFromCodexPath(cwd) ? worktreeFromGitFile(cwd) ?? worktreeFromCodexPath(cwd) : null) ??
     worktreeFromGitFile(cwd) ??
     worktreeFromMemory(cwd);
-  return worktree?.repo ?? cwd;
+  return worktree?.repo || repositoryRootForPath(cwd) || undefined;
 }
 
 function worktreeFromSlug(slug: string): { project: string; worktree: string; repo?: string } | null {
@@ -585,9 +611,7 @@ function worktreeFromSlug(slug: string): { project: string; worktree: string; re
       .sort((left, right) => left - right)[0];
     const repoName = nestedAt === undefined ? repoAndNested : repoAndNested.slice(0, nestedAt);
     if (!repoName) return null;
-    const repo = existingRepoPath(repoName);
-    const project = projectFromSlug(repo.replace(/[^a-zA-Z0-9]/g, "-"));
-    return project ? { project, worktree, repo } : null;
+    return { project: repoName, worktree };
   }
   const nextAt = ["--claude-worktrees-", "--codex-worktrees-", "--worktrees-", "-worktrees-"]
     .map((candidate) => suffix.indexOf(candidate))
@@ -605,16 +629,25 @@ function worktreeFromSlug(slug: string): { project: string; worktree: string; re
     `<tmp>/claude-<uid>/<encoded-cwd>/<session>/scratchpad/...`. The encoded
     cwd retains dotted worktree containers as `--worktrees-`, which is enough
     to recover the parent project after the checkout and scratchpad disappear. */
-function projectInfoFromClaudeTaskCwd(cwd: string): { project: string; worktree?: string; repo?: string } | null {
+function projectInfoFromClaudeTaskCwd(cwd: string): ProjectInfo | null {
   const parts = cwd.split(path.sep);
   const container = parts.findIndex((part) => /^claude-\d+$/.test(part));
   const slug = container >= 0 ? parts[container + 1] : undefined;
   const session = container >= 0 ? parts[container + 2] : undefined;
   if (!slug || !session || parts[container + 3] !== "scratchpad") return null;
   const worktree = worktreeFromSlug(slug);
-  if (worktree) return worktree;
+  if (worktree?.repo) {
+    const identity = projectIdentityFromRepositoryRoot(worktree.repo);
+    if (identity) return { ...identity, worktree: worktree.worktree, repo: worktree.repo };
+  }
+  if (worktree) return aliasedProjectInfo(worktree.project, worktree.worktree, worktree.repo);
+  const repo = repoPathFromSlug(slug);
+  if (repo) {
+    const identity = projectIdentityFromRepositoryRoot(repo);
+    if (identity) return { ...identity, repo };
+  }
   const project = projectFromSlug(slug);
-  return project ? { project, repo: repoPathFromSlug(slug) ?? undefined } : null;
+  return project ? aliasedProjectInfo(project) : null;
 }
 
 function cwdFromLines(lines: string[]): string | null {
@@ -802,12 +835,14 @@ function transcriptStartedAt(pathname: string, st: fs.Stats): MetadataReadResult
   return { value: startedAt, complete: true, headPreserved: false };
 }
 
-function projectInfoFromTranscript(pathname: string): { project: string; worktree?: string } | null {
-  return persistedProjects().byPath.get(pathname) ?? null;
+function projectInfoFromTranscript(pathname: string): ProjectInfo | null {
+  const persisted = persistedProjects().byPath.get(pathname);
+  return persisted ? aliasedProjectInfo(persisted.project, persisted.worktree, persisted.repo) : null;
 }
 
-function projectInfoFromSlug(slug: string): { project: string; worktree?: string } | null {
-  return persistedProjects().bySlug.get(slug) ?? null;
+function projectInfoFromSlug(slug: string): ProjectInfo | null {
+  const persisted = persistedProjects().bySlug.get(slug);
+  return persisted ? aliasedProjectInfo(persisted.project, persisted.worktree, persisted.repo) : null;
 }
 
 function scanJsonlTitle(pathname: string, st: fs.Stats, wantCodex: boolean): MetadataReadResult<string | null> {
@@ -958,55 +993,40 @@ function resolveProjectOverlay(
 ): ProjectOverlay {
   const cached = projectOverlayCache.get(pathname);
   if (cwdAuthoritative && cached && cached.stateKey === stateKey && cached.cwd === cwd) {
-    return { project: cached.project, worktree: cached.worktree, projectRoot: cached.projectRoot };
+    return {
+      project: cached.project,
+      projectName: cached.projectName,
+      projectUnresolved: cached.projectUnresolved,
+      worktree: cached.worktree,
+      projectRoot: cached.projectRoot,
+    };
   }
-  let project = "other";
-  let worktree: string | undefined;
-  /* An unresolved codex project falls back to the generic "codex" bucket.
-     That terminal fallback stays uncached so a later scan can re-attempt the
-     disk-dependent resolvers once the checkout or persisted map appears. */
-  let cacheable = cwdAuthoritative;
+  let info: ProjectInfo | null = null;
   if (rootName === "codex-sessions") {
-    const info = cwd ? projectInfoFromCwd(cwd) : null;
-    project = info?.project ?? "";
-    worktree = info?.worktree;
-    if (!project) {
-      const persisted = projectInfoFromTranscript(pathname);
-      project = persisted?.project ?? "";
-      worktree = persisted?.worktree;
-    }
-    if (!project) {
-      project = "codex";
-      cacheable = false;
-    }
+    info = (cwd ? projectInfoFromCwd(cwd) : null) ?? projectInfoFromTranscript(pathname);
   } else if (rootName === "claude-projects") {
     const rel = path.relative(root, pathname);
     const slug = rel.split(path.sep)[0] ?? "";
     const worktreeInfo = worktreeFromSlug(slug);
-    project = worktreeInfo?.project ?? projectFromSlug(slug);
-    worktree = worktreeInfo?.worktree;
-    /* The slug alone cannot tell a sibling worktree checkout from a real
-       standalone project — only the cwd's git metadata can. When it proves a
-       worktree, the session regroups under its main repo's project name. */
-    const info = cwd ? projectInfoFromCwd(cwd) : projectInfoFromTranscript(pathname);
-    const persistedInfo = projectInfoFromTranscript(pathname);
-    if (info && (worktreeInfo || info.worktree || persistedInfo)) {
-      project = info.project;
-      worktree = info.worktree ?? worktree;
-    }
+    info = (cwd ? projectInfoFromCwd(cwd) : null)
+      ?? projectInfoFromTranscript(pathname)
+      ?? (worktreeInfo
+        ? aliasedProjectInfo(worktreeInfo.project, worktreeInfo.worktree, worktreeInfo.repo)
+        : aliasedProjectInfo(projectFromSlug(slug)));
   } else if (rootName === "claude-tasks") {
     const rel = path.relative(root, pathname);
     const slug = rel.split(path.sep)[0] ?? "";
-    const info = projectInfoFromSlug(slug);
-    project = info?.project ?? projectFromSlug(slug);
-    worktree = info?.worktree;
+    info = projectInfoFromSlug(slug) ?? aliasedProjectInfo(projectFromSlug(slug));
   }
+  info ??= unresolvedProjectInfo();
   const overlay: ProjectOverlay = {
-    project,
-    worktree,
+    project: info.project,
+    projectName: info.displayName,
+    projectUnresolved: info.unresolved,
+    worktree: info.worktree,
     projectRoot: cwd ? projectRootForCwd(cwd) ?? null : undefined,
   };
-  if (cacheable) projectOverlayCache.set(pathname, { ...overlay, stateKey, cwd });
+  if (cwdAuthoritative) projectOverlayCache.set(pathname, { ...overlay, stateKey, cwd });
   return overlay;
 }
 
@@ -1024,6 +1044,8 @@ export function reprojectFileDescription(
   return {
     ...description,
     project: overlay.project,
+    projectName: overlay.projectName,
+    projectUnresolved: overlay.projectUnresolved,
     worktree: overlay.worktree,
     projectRoot: overlay.projectRoot,
   };
@@ -1055,6 +1077,8 @@ export function describeFile(
   const overlay = resolveProjectOverlay(rootName, root, pathname, metadata.cwd, cwdAuthoritative, stateKey);
   const description: FileDescription = {
     project: overlay.project,
+    projectName: overlay.projectName,
+    projectUnresolved: overlay.projectUnresolved,
     worktree: overlay.worktree,
     cwd: metadata.cwd,
     sessionStartedAt: metadata.sessionStartedAt,

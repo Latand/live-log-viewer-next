@@ -360,12 +360,14 @@ function TaskDetailView({
  */
 export function TaskSheet({
   project,
+  projectName,
   tasks,
   files,
   initialView,
   onClose,
 }: {
   project: string;
+  projectName?: string;
   tasks: BoardTask[];
   files: FileEntry[];
   initialView: TaskSheetView;
@@ -399,7 +401,7 @@ export function TaskSheet({
         <span className="shrink-0 pl-1 text-[13px] font-bold">
           {view === "new" ? t("tasks.sheetNew") : openTask ? taskTitle(openTask.text) || t("tasks.untitled") : t("tasks.panelTitle")}
         </span>
-        <span className="min-w-0 flex-1 truncate text-[11.5px] text-muted" title={project}>{projectDisplayName(project)}</span>
+        <span className="min-w-0 flex-1 truncate text-[11.5px] text-muted" title={projectName ?? project}>{projectDisplayName(project, projectName)}</span>
         <button
           type="button"
           className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"

@@ -7,6 +7,8 @@ export interface ConversationCatalogEntry {
   root: RootKey;
   name: string;
   project: string;
+  projectName?: string;
+  projectUnresolved?: true;
   worktree?: string;
   title: string;
   firstPrompt: string;

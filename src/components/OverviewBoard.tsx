@@ -5,7 +5,6 @@ import { useMemo } from "react";
 
 import { useCoarsePointer } from "@/hooks/useCoarsePointer";
 import { useColumns } from "@/hooks/useColumns";
-import { projectDisplayName } from "@/lib/displayNames";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -19,6 +18,7 @@ import { activityDot, cleanTitle, engineBadge, fmtAge } from "./utils";
 interface Props {
   files: FileEntry[];
   projectCatalog: ProjectCatalogEntry[];
+  projectDisplayNames?: Readonly<Record<string, string>>;
   pipelines: Pipeline[];
   /** Active workflows: their stamped projects get a card even without files. */
   workflows: Workflow[];
@@ -45,12 +45,15 @@ interface Props {
 export const COARSE_TARGET_HEIGHT = 44;
 export const FINE_TARGET_HEIGHT = 22;
 
-export function OverviewBoard({ files, projectCatalog, pipelines, workflows, archivedProjects, now, catalogFailures = 0, onSelectProject, onSelectFile, onMenu, attention }: Props) {
+export function OverviewBoard({ files, projectCatalog, projectDisplayNames = {}, pipelines, workflows, archivedProjects, now, catalogFailures = 0, onSelectProject, onSelectFile, onMenu, attention }: Props) {
   const { t } = useLocale();
   const degraded = catalogFailures > 0;
   const cols = useColumns();
   const targetHeight = useCoarsePointer() ? COARSE_TARGET_HEIGHT : FINE_TARGET_HEIGHT;
-  const allSummaries = useMemo(() => buildProjectSummaries(files, now, workflows, projectCatalog, pipelines), [files, now, workflows, projectCatalog, pipelines]);
+  const allSummaries = useMemo(
+    () => buildProjectSummaries(files, now, workflows, projectCatalog, pipelines, projectDisplayNames),
+    [files, now, workflows, projectCatalog, pipelines, projectDisplayNames],
+  );
   const summaries = useMemo(
     () => allSummaries.filter((summary) => !archivedProjects.has(summary.project)),
     [allSummaries, archivedProjects],
@@ -124,7 +127,7 @@ export function OverviewBoard({ files, projectCatalog, pipelines, workflows, arc
           const projectLabel = (
             <>
               <span className={`h-2 w-2 shrink-0 rounded-full ${summary.liveCount ? "animate-pulse bg-success" : "bg-strong"}`} />
-              <span className="min-w-0 flex-1 truncate text-[13px] font-bold">{projectDisplayName(summary.project)}</span>
+              <span className="min-w-0 flex-1 truncate text-[13px] font-bold">{summary.displayName}</span>
               {summary.liveCount ? (
                 <span className="shrink-0 text-caption font-semibold tabular-nums text-muted">{summary.liveCount}</span>
               ) : null}

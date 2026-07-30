@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { stateDir } from "@/lib/configDir";
 
-export const PROJECT_RESOLUTION_VERSION = 3;
+export const PROJECT_RESOLUTION_VERSION = 4;
 
 /* Project summaries depend on the attribution facts consumed by
    persistedProjects(). Hashing these stable projections keeps controller
@@ -84,6 +84,12 @@ export function projectResolutionStateKey(): string {
   hash.update("\0worktree-map.json\0");
   try {
     hash.update(fs.readFileSync(path.join(dir, "worktree-map.json")));
+  } catch {
+    hash.update("<missing>");
+  }
+  hash.update("\0project-aliases.json\0");
+  try {
+    hash.update(fs.readFileSync(path.join(dir, "project-aliases.json")));
   } catch {
     hash.update("<missing>");
   }

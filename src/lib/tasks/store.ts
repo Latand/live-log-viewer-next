@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
+import { canonicalProject } from "@/lib/projects/aliases";
 import { withFileTransactionSync } from "@/lib/state/fileTransaction";
 
 import { isTaskAttachment } from "./attachments";
@@ -122,7 +123,7 @@ function coerceTask(value: unknown): BoardTask | null {
   const pinned = placement === "pinned" && hasPos;
   return {
     id: raw.id!,
-    project: raw.project!,
+    project: canonicalProject(raw.project!),
     status: raw.status!,
     text: raw.text!,
     placement: placement === "pinned" && !hasPos ? "unplaced" : placement,

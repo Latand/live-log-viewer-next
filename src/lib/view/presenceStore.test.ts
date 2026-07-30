@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { freshness, listPresence, presenceFile, presenceLimits, resetPresenceForTest, sessionSummary, upsertPresence } from "./presenceStore";
+import { persistProjectAliases, resetProjectAliasesForTests } from "@/lib/projects/aliases";
 import type { PresencePayloadV1 } from "./types";
 
 /*
@@ -26,6 +27,7 @@ beforeEach(() => {
   previousStateDir = process.env.LLV_STATE_DIR;
   sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-presence-store-"));
   process.env.LLV_STATE_DIR = sandbox;
+  resetProjectAliasesForTests();
   resetPresenceForTest();
 });
 
@@ -92,6 +94,18 @@ test("a later heartbeat is what another process sees, and an older one is ignore
 
   expect(seen).toHaveLength(1);
   expect(seen[0]!.project).toBe("other");
+});
+
+test("a pre-change presence record follows the durable project alias", () => {
+  const target = "repo-0123456789abcdef0123456789abcdef";
+  upsertPresence(payload({ project: "legacy-demo" }), T0);
+  expect(persistProjectAliases([
+    { source: "legacy-demo", target, displayName: "demo" },
+  ])).toBe(true);
+
+  const seen = anotherProcess(() => listPresence(T0 + 1_000));
+
+  expect(seen[0]!.project).toBe(target);
 });
 
 test("a view that stopped publishing ages out for every reader, not just the one that held it", () => {

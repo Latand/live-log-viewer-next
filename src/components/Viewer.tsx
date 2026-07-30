@@ -15,6 +15,7 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { useViewPresence } from "@/hooks/useViewPresence";
 import { OVERVIEW_CONTEXT, OVERVIEW_SLICE, viewBus } from "@/hooks/viewPresenceBus";
 import { projectDisplayName } from "@/lib/displayNames";
+import { canonicalClientProject } from "@/lib/projects/clientAliases";
 import { type TFunction, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
@@ -117,7 +118,7 @@ export function Viewer() {
   const [project, setProject] = useState<string>(() => initialProject());
   const [pendingHash, setPendingHash] = useState<ConversationHash | null>(null);
   const [catalogPin, dispatchCatalogPin] = useReducer(reduceCatalogPin, null);
-  const { files: allFiles, requestScope, projectCatalog, projectCwds, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, conversationAliases, launchRoutes, loaded, catalogFailures } = useFiles(null, filesRequestPin(pendingHash, catalogPin?.path ?? null));
+  const { files: allFiles, requestScope, projectCatalog, projectAliases, projectDisplayNames, projectCwds, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, conversationAliases, launchRoutes, loaded, catalogFailures } = useFiles(null, filesRequestPin(pendingHash, catalogPin?.path ?? null));
   /* A committed account migration keeps the archived predecessor entry in the
      payload (for chain history) but it must never render as a second standalone
      card — every surface below sees only current generations. A no-op (same
@@ -130,7 +131,7 @@ export function Viewer() {
      on a flow strip clears the reviewer side of the scheme instantly. */
   const flows = useEffectiveFlows(polledFlows);
   useAgentChimes(files, requestScope);
-  const { archivedProjects, archiveProject, unarchiveProject } = useArchivedProjects(files);
+  const { archivedProjects, archiveProject, unarchiveProject } = useArchivedProjects(files, projectAliases);
   const catalogProjects = useMemo(() => new Set(projectCatalog.map((entry) => entry.project)), [projectCatalog]);
   const catalogConversationCounts = useMemo(
     () => new Map(projectCatalog.map((entry) => [entry.project, entry.conversations])),
@@ -158,6 +159,14 @@ export function Viewer() {
     const savedProject = initial.project ?? localStorage.getItem(PROJECT_KEY);
     if (savedProject) setProject(savedProject);
   }, []);
+
+  useEffect(() => {
+    const canonical = canonicalClientProject(project, projectAliases);
+    if (canonical === project) return;
+    setProject(canonical);
+    localStorage.setItem(PROJECT_KEY, canonical);
+    writeHash(canonical);
+  }, [project, projectAliases]);
 
   useEffect(() => {
     const onHash = () => {
@@ -584,7 +593,7 @@ export function Viewer() {
                   {cleanTitle(item.file.title, 90)}
                 </span>
                 <span className="shrink-0 rounded-full border border-border bg-canvas px-1.5 text-[10px] font-semibold text-muted" title={item.project}>
-                  {projectDisplayName(item.project)}
+                  {projectDisplayName(item.project, item.file.projectName)}
                 </span>
                 <span className="shrink-0 text-[10.5px] text-muted">{fmtAge(item.since)}</span>
               </span>
@@ -601,11 +610,11 @@ export function Viewer() {
   const shell = (
     <div className="flex h-full">
       {isMobile ? null : (
-        <ProjectRail files={files} projectCatalog={projectCatalog} pipelines={pipelines} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} loaded={loaded} catalogFailures={catalogFailures} onSelect={selectProject} />
+        <ProjectRail files={files} projectCatalog={projectCatalog} projectDisplayNames={projectDisplayNames} pipelines={pipelines} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} loaded={loaded} catalogFailures={catalogFailures} onSelect={selectProject} />
       )}
       {isMobile && drawerOpen ? (
         <div className="fixed inset-0 z-50 flex">
-          <ProjectRail files={files} projectCatalog={projectCatalog} pipelines={pipelines} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} loaded={loaded} catalogFailures={catalogFailures} onSelect={selectProject} />
+          <ProjectRail files={files} projectCatalog={projectCatalog} projectDisplayNames={projectDisplayNames} pipelines={pipelines} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} loaded={loaded} catalogFailures={catalogFailures} onSelect={selectProject} />
           <button
             type="button"
             className="min-w-0 flex-1 bg-primary/35"
@@ -674,6 +683,7 @@ export function Viewer() {
           <OverviewBoard
             files={files}
             projectCatalog={projectCatalog}
+            projectDisplayNames={projectDisplayNames}
             pipelines={pipelines}
             workflows={workflows}
             archivedProjects={archivedProjects}
@@ -694,6 +704,7 @@ export function Viewer() {
             tasks={tasks}
             conversationAliases={conversationAliases}
             projectCatalog={projectCatalog}
+            projectName={projectDisplayNames[project]}
             projectCwd={projectCwds[project]}
             project={project}
             loaded={loaded}

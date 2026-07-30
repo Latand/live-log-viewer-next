@@ -91,6 +91,7 @@ interface Props {
       direct review grouping resolves `reviewsConversationId` through them. */
   conversationAliases?: Record<string, string>;
   projectCatalog?: ProjectCatalogEntry[];
+  projectName?: string;
   projectCwd?: string;
   project: string;
   loaded: boolean;
@@ -318,6 +319,7 @@ export function ProjectDashboard({
   tasks,
   conversationAliases,
   projectCatalog: projectCatalogEntries = [],
+  projectName: providedProjectName,
   projectCwd,
   project,
   loaded,
@@ -339,6 +341,10 @@ export function ProjectDashboard({
 }: Props) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
+  const projectName = projectDisplayName(
+    project,
+    providedProjectName ?? projectCatalogEntries.find((entry) => entry.project === project)?.displayName,
+  );
   /* Durable flow/pipeline records freeze member transcript paths at launch; an
      account migration rotates a conversation onto a new path and every
      projection that string-matches the frozen one (halos, decks, claiming,
@@ -1511,7 +1517,7 @@ export function ProjectDashboard({
             gives width back when the row runs out (issue #613 — as `shrink-0` it
             held its 45vw and pushed «More actions» off a 390px screen instead).
             Desktop keeps its natural width. */}
-        <h1 className={`truncate text-[13.5px] font-bold ${isMobile ? "min-w-0 max-w-[45vw]" : ""}`} title={project}>{projectDisplayName(project)}</h1>
+        <h1 className={`truncate text-[13.5px] font-bold ${isMobile ? "min-w-0 max-w-[45vw]" : ""}`} title={projectName}>{projectName}</h1>
         <BoardHistoryControls
           canUndo={history.canUndo}
           canRedo={history.canRedo}
@@ -1717,6 +1723,7 @@ export function ProjectDashboard({
           ) : projectView === "scheme" && schemeAvailable ? (
             <MobileFocusView
               project={project}
+              projectName={projectName}
               groups={hasNodes ? schemeGroups : archiveGroups}
               manual={hasNodes ? schemeManual : []}
               files={files}

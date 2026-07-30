@@ -3,7 +3,7 @@ import type { FileEntry } from "@/lib/types";
 /*
  * Presentation names (issue #345, mobile audit finding 3).
  *
- * The canonical project key is a dashed cwd slug (`projectFromSlug`), and a
+ * The canonical project key is derived from repository identity, and a
  * Viewer-spawned session's fallback title is the head of its machine-authored
  * spawn prompt. Both are load-bearing identity — grouping, routing, ownership,
  * lineage and search all key on them — but neither is a name a person should
@@ -30,7 +30,9 @@ const CONTAINER_SLUG_PREFIXES = ["-agents-tools-"];
  * dashes. Everything already readable (plain repo names, the home project,
  * "other") passes through untouched. Never returns an empty string.
  */
-export function projectDisplayName(project: string): string {
+export function projectDisplayName(project: string, displayName?: string): string {
+  if (displayName?.trim()) return displayName.trim();
+  if (project === "project_unresolved") return "Unresolved project";
   for (const prefix of CONTAINER_SLUG_PREFIXES) {
     if (project.startsWith(prefix) && project.length > prefix.length) {
       return project.slice(prefix.length);
@@ -45,10 +47,10 @@ export function projectDisplayName(project: string): string {
  * canonical key OR the presented name, so typing what the row shows works
  * while key-based muscle memory keeps working. An empty query matches all.
  */
-export function projectMatchesQuery(project: string, query: string): boolean {
+export function projectMatchesQuery(project: string, query: string, displayName?: string): boolean {
   const q = query.trim().toLowerCase();
   if (!q) return true;
-  return project.toLowerCase().includes(q) || projectDisplayName(project).toLowerCase().includes(q);
+  return project.toLowerCase().includes(q) || projectDisplayName(project, displayName).toLowerCase().includes(q);
 }
 
 /** Built-in role names (lib/roles/defaults) accepted even when a legacy

@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
+import { canonicalProject } from "@/lib/projects/aliases";
 
 import { VIEW_SCHEMA_VERSION, type PresencePayloadV1, type StoredViewSession, type ViewFreshness, type ViewSessionSummary } from "./types";
 
@@ -180,7 +181,12 @@ function readMirror(now: number): StoredViewSession[] {
   try {
     const parsed = JSON.parse(text) as Partial<PresenceFileV1>;
     if (parsed.schemaVersion !== PRESENCE_SCHEMA_VERSION || !Array.isArray(parsed.sessions)) return [];
-    return parsed.sessions.filter((session): session is StoredViewSession => isStoredSession(session, now));
+    return parsed.sessions
+      .filter((session): session is StoredViewSession => isStoredSession(session, now))
+      .map((session) => ({
+        ...session,
+        project: session.project ? canonicalProject(session.project) : null,
+      }));
   } catch {
     return [];
   }
@@ -216,6 +222,10 @@ function writeMirror(sessions: Iterable<StoredViewSession>, now: number): void {
  */
 function sessions(now: number): Store {
   const current = store();
+  for (const [id, held] of current) {
+    const project = held.project ? canonicalProject(held.project) : null;
+    if (project !== held.project) current.set(id, { ...held, project });
+  }
   for (const mirrored of readMirror(now)) {
     const held = current.get(mirrored.viewSessionId);
     if (!held || mirrored.sequence > held.sequence) current.set(mirrored.viewSessionId, mirrored);
@@ -251,6 +261,7 @@ export function upsertPresence(payload: PresencePayloadV1, now = Date.now()): { 
   const inputAdvanced = !held || payload.inputSequence > held.inputSequence;
   const session: StoredViewSession = {
     ...payload,
+    project: payload.project ? canonicalProject(payload.project) : null,
     inputSequence: Math.max(held?.inputSequence ?? 0, payload.inputSequence),
     lastSeenAt: now,
     lastInteractionAt: inputAdvanced ? now : held?.lastInteractionAt ?? now,

@@ -4,12 +4,16 @@ import path from "node:path";
 
 import { afterAll, expect, test } from "bun:test";
 
+import { persistProjectAliases, resetProjectAliasesForTests } from "@/lib/projects/aliases";
+import { projectIdentityFromRepositoryRoot } from "@/lib/projects/identity";
+
 import { globalCache } from "./caches";
 import {
   describe,
   parseWorktreeGitdir,
   persistWorktreeMap,
   projectForCwd,
+  projectInfoFromCwd,
   projectFromSlug,
   projectRootForCwd,
   searchTextForTranscript,
@@ -17,10 +21,34 @@ import {
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-describe-test-"));
 const REAL_STATE = process.env.LLV_STATE_DIR;
+const REAL_HOME = process.env.HOME;
+
+function createRepository(
+  root: string,
+  remote = "ssh://git@example.invalid/team/shared-repository.git",
+) {
+  fs.mkdirSync(path.join(root, ".git"), { recursive: true });
+  fs.writeFileSync(path.join(root, ".git", "config"), [
+    '[remote "origin"]',
+    `\turl = ${remote}`,
+    "",
+  ].join("\n"));
+  return projectIdentityFromRepositoryRoot(root)!;
+}
+
+function useStateDirectory(name: string): string {
+  const state = path.join(SANDBOX, name);
+  process.env.LLV_STATE_DIR = state;
+  fs.mkdirSync(state, { recursive: true });
+  resetProjectAliasesForTests();
+  return state;
+}
 
 afterAll(() => {
   if (REAL_STATE !== undefined) process.env.LLV_STATE_DIR = REAL_STATE;
   else delete process.env.LLV_STATE_DIR;
+  if (REAL_HOME !== undefined) process.env.HOME = REAL_HOME;
+  else delete process.env.HOME;
   fs.rmSync(SANDBOX, { recursive: true, force: true });
 });
 
@@ -52,6 +80,56 @@ test("an absent cwd cannot inherit the Viewer process project", () => {
   expect(projectForCwd("   ")).toBeNull();
 });
 
+test("repository identity and display name come from the repository across arbitrary checkout roots", () => {
+  const remote = "ssh://git@example.invalid/team/shared-repository.git";
+  const roots = [
+    path.join(SANDBOX, "home", "primary", "Projects", "shared-repository"),
+    path.join(SANDBOX, "home", "primary", "dev", "shared-repository"),
+    path.join(SANDBOX, "home", "primary", ".agents", "tools", "shared-repository"),
+    path.join(SANDBOX, "srv", "repos", "shared-repository"),
+    path.join(SANDBOX, "mnt", "data", "work", "shared-repository"),
+    path.join(SANDBOX, "opt", "src", "shared-repository"),
+    path.join(SANDBOX, "home", "secondary", "Projects", "shared-repository"),
+  ];
+  for (const root of roots) {
+    createRepository(root, remote);
+  }
+
+  const identities = roots.map((root) => projectInfoFromCwd(root));
+  expect(identities.every(Boolean)).toBe(true);
+  expect(new Set(identities.map((identity) => identity?.project))).toHaveLength(1);
+  expect(new Set(identities.map((identity) => identity?.displayName))).toEqual(new Set(["shared-repository"]));
+  expect(identities[0]?.project).not.toBe(identities[0]?.displayName);
+  expect(identities[0]?.project).not.toContain("Projects");
+});
+
+test("repository identity is independent of the resolver HOME", () => {
+  const repository = path.join(SANDBOX, "home-independent-repository");
+  createRepository(repository);
+  const projects: string[] = [];
+  try {
+    for (const home of [path.join(SANDBOX, "resolver-a"), path.join(SANDBOX, "resolver-b")]) {
+      process.env.HOME = home;
+      globalCache("project-info-cwd-v2").clear();
+      projects.push(projectForCwd(repository)!);
+    }
+  } finally {
+    if (REAL_HOME !== undefined) process.env.HOME = REAL_HOME;
+    else delete process.env.HOME;
+  }
+  expect(new Set(projects)).toHaveLength(1);
+});
+
+test("an unidentifiable cwd is projected into one visible unresolved state", () => {
+  const missing = path.join(SANDBOX, "missing-repository");
+  expect(fs.existsSync(missing)).toBe(false);
+  expect(projectInfoFromCwd(missing)).toEqual({
+    project: "project_unresolved",
+    displayName: "Unresolved project",
+    unresolved: true,
+  });
+});
+
 test("search text hydration retries after a transient filesystem failure", () => {
   const transcript = path.join(SANDBOX, "transient-search.jsonl");
   fs.writeFileSync(transcript, JSON.stringify({ type: "user", message: { content: "Recovered search prompt" } }) + "\n");
@@ -76,31 +154,40 @@ test("search text hydration retries after a transient filesystem failure", () =>
 });
 
 test("a deleted codex worktree still groups under its parent repo project", () => {
-  /* Codex removes `~/.codex/worktrees/<hash>/<Repo>` after the task, so the
-     on-disk `.git` pointer is gone — a path with no filesystem presence must
-     still resolve to the repo name a live checkout of the same repo produces. */
-  const dead = path.join(os.homedir(), ".codex", "worktrees", "2d25", "CelestiaCompose");
-  const liveRepo = path.join(os.homedir(), "Projects", "CelestiaCompose");
-  expect(projectForCwd(dead)).toBe("CelestiaCompose");
+  const state = useStateDirectory("deleted-codex-state");
+  const liveRepo = path.join(SANDBOX, "deleted-codex-main");
+  const identity = createRepository(liveRepo);
+  expect(persistProjectAliases([
+    { source: "shared-repository", target: identity.project, displayName: identity.displayName },
+  ])).toBe(true);
+  const dead = path.join(state, ".codex", "worktrees", "2d25", "shared-repository");
+  expect(fs.existsSync(dead)).toBe(false);
+  expect(projectForCwd(dead)).toBe(identity.project);
   expect(projectForCwd(dead)).toBe(projectForCwd(liveRepo));
 });
 
 test("a deleted nested checkout inside a Codex worktree groups under the main repo", () => {
+  const state = useStateDirectory("deleted-nested-codex-state");
+  const identity = createRepository(path.join(SANDBOX, "deleted-nested-codex-main"));
+  expect(persistProjectAliases([
+    { source: "shared-repository", target: identity.project, displayName: identity.displayName },
+  ])).toBe(true);
   const dead = path.join(
-    os.homedir(),
+    state,
     ".codex",
     "worktrees",
     "deleted-catalog-fixture",
-    "CelestiaCompose",
+    "shared-repository",
     "worktrees",
     "deleted-child",
   );
   expect(fs.existsSync(dead)).toBe(false);
-  expect(projectForCwd(dead)).toBe("CelestiaCompose");
+  expect(projectForCwd(dead)).toBe(identity.project);
 });
 
 test("a deleted worktree scratchpad cwd groups under the encoded parent repo", () => {
-  const repo = path.join(os.homedir(), ".agents", "tools", "live-log-viewer-next");
+  const repo = path.join(SANDBOX, "scratchpad-worktree-repository");
+  createRepository(repo);
   const worktree = path.join(repo, ".worktrees", "runtime-host-spike");
   const slug = worktree.replace(/[^a-zA-Z0-9]/g, "-");
   const dead = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, slug, "deleted-session", "scratchpad", "probes");
@@ -110,7 +197,8 @@ test("a deleted worktree scratchpad cwd groups under the encoded parent repo", (
 });
 
 test("a main-checkout scratchpad cwd groups under its encoded project", () => {
-  const repo = path.join(os.homedir(), ".agents", "tools", "live-log-viewer-next");
+  const repo = path.join(SANDBOX, "scratchpad-main-repository");
+  createRepository(repo);
   const slug = repo.replace(/[^a-zA-Z0-9]/g, "-");
   const dead = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, slug, "deleted-session", "scratchpad", "probes");
   expect(fs.existsSync(dead)).toBe(false);
@@ -119,7 +207,7 @@ test("a main-checkout scratchpad cwd groups under its encoded project", () => {
 
 test("a deleted scratchpad encoded from an external repository keeps its canonical root", () => {
   const repo = path.join(SANDBOX, "external-root", "repo.with-hyphen");
-  fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+  createRepository(repo);
   const slug = repo.replace(/[^a-zA-Z0-9]/g, "-");
   const dead = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, slug, "deleted-session", "scratchpad", "probes");
 
@@ -134,13 +222,15 @@ test("a deleted scratchpad encoded from an external repository keeps its canonic
 
 test("the outer nested worktree wins over a later specialized container", () => {
   const repo = path.join(SANDBOX, "outer-repo");
+  createRepository(repo);
   const dead = path.join(repo, "worktrees", "outer", ".codex", "worktrees", "inner-hash", "InnerRepo");
   expect(fs.existsSync(dead)).toBe(false);
   expect(projectForCwd(dead)).toBe(projectForCwd(repo));
 });
 
 test("a scratchpad encoded from nested worktrees keeps the outer project", () => {
-  const repo = path.join(os.homedir(), ".agents", "tools", "live-log-viewer-next");
+  const repo = path.join(SANDBOX, "nested-scratchpad-repository");
+  createRepository(repo);
   const nested = path.join(repo, ".worktrees", "outer", ".claude", "worktrees", "inner");
   const slug = nested.replace(/[^a-zA-Z0-9]/g, "-");
   const dead = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, slug, "deleted-session", "scratchpad");
@@ -157,33 +247,41 @@ test("a scratchpad encoded from nested worktrees keeps the outer project", () =>
 });
 
 test("a scratchpad encoded from a deleted Codex worktree keeps the repo project", () => {
+  const state = useStateDirectory("deleted-codex-scratchpad-state");
+  const identity = createRepository(path.join(SANDBOX, "deleted-codex-scratchpad-main"));
+  expect(persistProjectAliases([
+    { source: "shared-repository", target: identity.project, displayName: identity.displayName },
+  ])).toBe(true);
   const codexWorktree = path.join(
-    os.homedir(),
+    state,
     ".codex",
     "worktrees",
     "2d25",
-    "CelestiaCompose",
+    "shared-repository",
     "worktrees",
     "inner",
   );
   const slug = codexWorktree.replace(/[^a-zA-Z0-9]/g, "-");
   const dead = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, slug, "deleted-session", "scratchpad");
   expect(fs.existsSync(dead)).toBe(false);
-  expect(projectForCwd(dead)).toBe("CelestiaCompose");
+  expect(projectForCwd(dead)).toBe(identity.project);
 });
 
 test("a deleted nested worktree (repo/worktrees/<name>) still groups under its parent repo", () => {
   /* `git worktree add worktrees/foo` and the dotted `.worktrees/foo` nest the
      checkout inside the repo, so the repo is the path prefix — recognizable by
      path even after the checkout is deleted, no on-disk `.git` required. */
-  const repo = `${os.homedir()}/Projects/CelestiaCompose`;
+  const repo = path.join(SANDBOX, "deleted-nested-worktree-main");
+  const identity = createRepository(repo);
   const nested = `${repo}/worktrees/memory-ui-redesign`;
   const nestedDotted = `${repo}/.worktrees/some-branch`;
   const deepNested = `${repo}/worktrees/issue-1424/worktrees/pr-tools`; // worktree of a worktree
+  expect(fs.existsSync(nested)).toBe(false);
   expect(projectForCwd(nested)).toBe(projectForCwd(repo));
   expect(projectForCwd(nestedDotted)).toBe(projectForCwd(repo));
   expect(projectForCwd(deepNested)).toBe(projectForCwd(repo));
-  expect(projectForCwd(nested)).toBe("CelestiaCompose");
+  expect(projectForCwd(nested)).toBe(identity.project);
+  expect(projectInfoFromCwd(nested)?.worktree).toBe("memory-ui-redesign");
 });
 
 test("conversation metadata carries the exact cwd and its canonical project root", () => {
@@ -231,6 +329,7 @@ test("a project-state change recomputes only the overlay, never transcript metad
   fs.mkdirSync(state, { recursive: true });
   process.env.LLV_STATE_DIR = state;
   const repo = path.join(base, "live-log-viewer-next");
+  createRepository(repo);
   const worktree = path.join(base, "live-log-viewer-split-branch");
   const root = path.join(base, "codex-root");
   const transcript = path.join(root, "2026", "07", "rollout-split.jsonl");
@@ -238,8 +337,8 @@ test("a project-state change recomputes only the overlay, never transcript metad
   fs.writeFileSync(transcript, JSON.stringify({ type: "session_meta", payload: { cwd: worktree } }) + "\n");
   const st = fs.statSync(transcript);
 
-  /* The checkout does not exist yet: without its .git pointer the cwd cannot
-     regroup under the parent repo and gets a standalone path-derived name. */
+  /* The checkout does not exist yet: without repository evidence the cwd is
+     held in the visible unresolved group. */
   const before = describe("codex-sessions", root, transcript, st, "state-a");
   expect(before.cwd).toBe(worktree);
   expect(before.worktree).toBeUndefined();
@@ -256,7 +355,7 @@ test("a project-state change recomputes only the overlay, never transcript metad
   /* The cwd-resolution and .git-pointer memos hold the unresolved lookup for
      10–60 s in production; expire them so the overlay recompute sees the live
      checkout the way a later scan generation would. */
-  globalCache("project-info-cwd-v1").clear();
+  globalCache("project-info-cwd-v2").clear();
   globalCache("worktree-git").clear();
 
   /* The overlay recomputes under the new state key without touching the
@@ -290,13 +389,16 @@ test("a project-state change recomputes only the overlay, never transcript metad
 });
 
 test("a nested `worktrees` segment under .claude/.codex is left to its own recognizer", () => {
-  /* `.codex/worktrees/<hash>/<Repo>` must resolve via the codex recognizer to
-     the repo name, not be mis-read as a repo ending in `.codex`. */
-  const codex = `${os.homedir()}/.codex/worktrees/2d25/CelestiaCompose`;
-  expect(projectForCwd(codex)).toBe("CelestiaCompose");
+  const state = useStateDirectory("nested-recognizer-state");
+  const identity = createRepository(path.join(SANDBOX, "nested-recognizer-main"));
+  expect(persistProjectAliases([
+    { source: "shared-repository", target: identity.project, displayName: identity.displayName },
+  ])).toBe(true);
+  const codex = `${state}/.codex/worktrees/2d25/shared-repository`;
+  expect(projectForCwd(codex)).toBe(identity.project);
 });
 
-test("a deleted arbitrary-path git worktree still groups under its parent repo project", () => {
+test("a wrong-HOME durable mapping is corrected by repository evidence after worktree deletion", () => {
   /* `git worktree add ../live-log-viewer-workflows` has no recognizable path
      layout, so once deleted only a resolution recorded while it was alive ties
      it back to the main repo. Live checkout → `.git` pointer is read AND
@@ -306,6 +408,7 @@ test("a deleted arbitrary-path git worktree still groups under its parent repo p
   process.env.LLV_STATE_DIR = state;
   fs.mkdirSync(state, { recursive: true });
   const repo = path.join(base, "live-log-viewer-next");
+  const identity = createRepository(repo);
   const worktree = path.join(base, "live-log-viewer-branchx");
   fs.mkdirSync(path.join(repo, ".git", "worktrees", "live-log-viewer-branchx"), { recursive: true });
   fs.mkdirSync(worktree, { recursive: true });
@@ -313,12 +416,22 @@ test("a deleted arbitrary-path git worktree still groups under its parent repo p
     path.join(worktree, ".git"),
     `gitdir: ${path.join(repo, ".git", "worktrees", "live-log-viewer-branchx")}\n`,
   );
+  fs.writeFileSync(path.join(state, "flows.json"), JSON.stringify({
+    flows: [{
+      project: "-wrong-home-shared-repository",
+      cwd: worktree,
+      implementerPath: path.join(base, "missing-transcript.jsonl"),
+      rounds: [],
+    }],
+  }));
 
   const live = projectForCwd(worktree);
-  expect(live).toBe(projectForCwd(repo));
+  expect(live).toBe(identity.project);
   persistWorktreeMap();
 
   fs.rmSync(worktree, { recursive: true, force: true });
+  globalCache("worktree-git").clear();
+  globalCache("project-info-cwd-v2").clear();
   /* Drop the in-memory map by rebinding to a different state dir, then back —
      the second lookup must reload the resolution from disk, proving it
      survives a process restart, not just an in-memory cache. */
@@ -330,19 +443,24 @@ test("a deleted arbitrary-path git worktree still groups under its parent repo p
   expect(projectForCwd(worktree)).toBe(live);
 });
 
-test("a worktree's main repo slugifies to the same project name its own sessions use", () => {
-  const repo = `${os.homedir()}/.agents/tools/live-log-viewer-next`;
-  const slugOfRepo = repo.replace(/[^a-zA-Z0-9]/g, "-");
-  const slugFromClaudeDir = "-" + os.homedir().split("/").filter(Boolean).join("-") + "--agents-tools-live-log-viewer-next";
-  expect(slugOfRepo).toBe(slugFromClaudeDir);
-  expect(projectFromSlug(slugOfRepo)).toBe("-agents-tools-live-log-viewer-next");
+test("a pre-change slug follows its repository alias", () => {
+  useStateDirectory("slug-alias-state");
+  const identity = createRepository(path.join(SANDBOX, "slug-alias-main"));
+  const legacy = "-legacy-root-shared-repository";
+  expect(persistProjectAliases([
+    { source: legacy, target: identity.project, displayName: identity.displayName },
+  ])).toBe(true);
+  expect(projectFromSlug(legacy)).toBe(identity.project);
 });
 
 test("stale flow cwd keeps a removed sibling worktree under its saved project", () => {
-  const state = path.join(SANDBOX, "state");
-  process.env.LLV_STATE_DIR = state;
+  const state = useStateDirectory("stale-flow-state");
   const cwd = path.join(SANDBOX, "live-log-viewer-workflows");
-  const project = "-agents-tools-live-log-viewer-next";
+  const identity = createRepository(path.join(SANDBOX, "stale-flow-main"));
+  const project = "-legacy-root-shared-repository";
+  expect(persistProjectAliases([
+    { source: project, target: identity.project, displayName: identity.displayName },
+  ])).toBe(true);
   const root = path.join(SANDBOX, "claude-projects");
   const slug = "-home-latand--agents-tools-live-log-viewer-workflows";
   const transcript = path.join(root, slug, "session.jsonl");
@@ -367,15 +485,18 @@ test("stale flow cwd keeps a removed sibling worktree under its saved project", 
   );
 
   const meta = describe("claude-projects", root, transcript, fs.statSync(transcript));
-  expect(meta.project).toBe(project);
+  expect(meta.project).toBe(identity.project);
   expect(meta.worktree).toBe("live-log-viewer-workflows");
 });
 
 test("stale flow slug keeps orphan background tasks under the saved project", () => {
-  const state = path.join(SANDBOX, "task-state");
-  process.env.LLV_STATE_DIR = state;
+  const state = useStateDirectory("task-state");
   const cwd = path.join(SANDBOX, "live-log-viewer-workflows");
-  const project = "-agents-tools-live-log-viewer-next";
+  const identity = createRepository(path.join(SANDBOX, "stale-task-main"));
+  const project = "-legacy-root-shared-repository";
+  expect(persistProjectAliases([
+    { source: project, target: identity.project, displayName: identity.displayName },
+  ])).toBe(true);
   const slug = "-home-latand--agents-tools-live-log-viewer-workflows";
   const transcript = path.join(os.homedir(), ".claude", "projects", slug, "session.jsonl");
   const root = path.join(SANDBOX, "claude-1000");
@@ -398,7 +519,7 @@ test("stale flow slug keeps orphan background tasks under the saved project", ()
   fs.writeFileSync(task, "done\n");
 
   const meta = describe("claude-tasks", root, task, fs.statSync(task));
-  expect(meta.project).toBe(project);
+  expect(meta.project).toBe(identity.project);
   expect(meta.worktree).toBe("live-log-viewer-workflows");
 });
 

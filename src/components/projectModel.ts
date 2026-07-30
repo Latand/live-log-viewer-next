@@ -1,4 +1,5 @@
 import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
+import { projectDisplayName } from "@/lib/displayNames";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { Workflow } from "@/lib/workflows/types";
 
@@ -108,6 +109,7 @@ export function projectDraftWorkingDirectory(
 
 export interface ProjectSummary {
   project: string;
+  displayName: string;
   /** Live entries anywhere in the project (branches running right now). */
   liveCount: number;
   attentionCount: number;
@@ -128,18 +130,19 @@ export function buildProjectSummaries(
   workflows: Workflow[] = [],
   projectCatalog: ProjectCatalogEntry[] = [],
   pipelines: Pipeline[] = [],
+  projectDisplayNames: Readonly<Record<string, string>> = {},
 ): ProjectSummary[] {
   const map = new Map<string, ProjectSummary>();
-  const summaryFor = (key: string): ProjectSummary => {
+  const summaryFor = (key: string, displayName = projectDisplayName(key)): ProjectSummary => {
     let summary = map.get(key);
     if (!summary) {
-      summary = { project: key, liveCount: 0, attentionCount: 0, conversations: 0, smt: 0, catalogOnly: true };
+      summary = { project: key, displayName, liveCount: 0, attentionCount: 0, conversations: 0, smt: 0, catalogOnly: true };
       map.set(key, summary);
     }
     return summary;
   };
   for (const file of files) {
-    const summary = summaryFor(projectKey(file));
+    const summary = summaryFor(projectKey(file), projectDisplayName(projectKey(file), file.projectName));
     summary.catalogOnly = false;
     if (file.activity === "live") summary.liveCount += 1;
     /* Same membership the attention queue counts (hard-blocked plus in-TTL
@@ -150,7 +153,7 @@ export function buildProjectSummaries(
   }
   for (const entry of projectCatalog) {
     if (!entry.project) continue;
-    const summary = summaryFor(entry.project);
+    const summary = summaryFor(entry.project, projectDisplayName(entry.project, entry.displayName));
     summary.conversations = Math.max(summary.conversations, entry.conversations);
     summary.smt = Math.max(summary.smt, entry.smt);
   }
@@ -159,7 +162,7 @@ export function buildProjectSummaries(
      strip's retry/close controls to be reachable at all. */
   for (const wf of workflows) {
     if (wf.state === "closed" || !wf.project) continue;
-    const summary = summaryFor(wf.project);
+    const summary = summaryFor(wf.project, projectDisplayName(wf.project, projectDisplayNames[wf.project]));
     summary.catalogOnly = false;
     if (WF_BUSY.has(wf.state)) summary.liveCount += 1;
     if (wf.state === "needs_decision" || wf.state === "paused") summary.attentionCount += 1;
@@ -167,7 +170,7 @@ export function buildProjectSummaries(
   }
   for (const pipeline of pipelines) {
     if ((pipeline.state === "closed" && !pipeline.restored) || !pipeline.project) continue;
-    const summary = summaryFor(pipeline.project);
+    const summary = summaryFor(pipeline.project, projectDisplayName(pipeline.project, projectDisplayNames[pipeline.project]));
     summary.catalogOnly = false;
     if (pipeline.state === "provisioning" || pipeline.state === "running") summary.liveCount += 1;
     if (pipeline.state === "needs_decision" || pipeline.state === "paused") summary.attentionCount += 1;

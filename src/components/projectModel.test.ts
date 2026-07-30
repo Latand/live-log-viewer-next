@@ -505,6 +505,19 @@ describe("buildProjectSummaries with workflows", () => {
   test("closed workflows leave navigation alone", () => {
     expect(buildProjectSummaries([], 2_000, [wf({ state: "closed" })])).toHaveLength(0);
   });
+
+  test("a workflow-only repository uses its separate display label", () => {
+    const project = "repo-0123456789abcdef0123456789abcdef";
+    const summaries = buildProjectSummaries(
+      [],
+      2_000,
+      [wf({ project })],
+      [],
+      [],
+      { [project]: "workflow-repository" },
+    );
+    expect(summaries[0]).toMatchObject({ project, displayName: "workflow-repository" });
+  });
 });
 
 test("buildProjectSummaries keeps a pipeline-only project reachable and marks decisions", () => {
@@ -521,12 +534,13 @@ test("buildProjectSummaries keeps a pipeline-only project reachable and marks de
 describe("buildProjectSummaries with project catalog", () => {
   test("adds catalog-only projects as muted summaries", () => {
     const summaries = buildProjectSummaries([], 2_000, [], [
-      { project: "Pr-Gram", conversations: 3, smt: 1_700_000_100 },
+      { project: "catalog-project", conversations: 3, smt: 1_700_000_100 },
     ]);
 
     expect(summaries).toEqual([
       {
-        project: "Pr-Gram",
+        project: "catalog-project",
+        displayName: "catalog-project",
         liveCount: 0,
         attentionCount: 0,
         conversations: 3,

@@ -73,6 +73,7 @@ interface Entry {
 
 interface Props {
   project: string;
+  projectName?: string;
   groups: BranchGroup[];
   manual: FileEntry[];
   files: FileEntry[];
@@ -132,7 +133,7 @@ export function pipelinesToDock(pipelines: readonly Pipeline[], memberfulGroupId
  * data the scheme draws — nothing on the diagram is unreachable, it is just
  * shown one pane at a time.
  */
-export function MobileFocusView({ project, groups, manual, files, flows, reviewGroups = [], pipelines, surfacePipelines = [], workerStacks = [], tasks, sheetTasks, drafts, favorites, isolatedManualPaths = EMPTY_PATHS, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onActiveChange, taskSheetNonce = 0, trayApi }: Props) {
+export function MobileFocusView({ project, projectName, groups, manual, files, flows, reviewGroups = [], pipelines, surfacePipelines = [], workerStacks = [], tasks, sheetTasks, drafts, favorites, isolatedManualPaths = EMPTY_PATHS, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onActiveChange, taskSheetNonce = 0, trayApi }: Props) {
   const { t } = useLocale();
   /* The project-scoped board store, read here for the ONE canonical selection
      (#771). Same store the desktop board and the dashboard bind — stores are
@@ -617,7 +618,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
         <div className="fixed inset-0 z-50 flex flex-col bg-canvas pb-[env(safe-area-inset-bottom)]">
           <div className="flex min-h-[52px] shrink-0 items-center gap-2 border-b border-border bg-card px-2 py-1.5">
             <span className="shrink-0 pl-1 text-[13px] font-bold">{t("mobile.map")}</span>
-            <span className="min-w-0 flex-1 truncate text-[11.5px] text-muted">{projectDisplayName(project)}</span>
+            <span className="min-w-0 flex-1 truncate text-[11.5px] text-muted">{projectDisplayName(project, projectName)}</span>
             {/* role="group" — aria-label on a role-less div is ignored by
                 accessibility APIs, so AT would hear two bare toggle buttons
                 with no "Map framing" context (round-1 review). */}
@@ -691,7 +692,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
       ) : null}
 
       {taskSheet ? (
-        <TaskSheet project={project} tasks={sheetTasks ?? tasks} files={files} initialView={taskSheet} onClose={() => setTaskSheet(null)} />
+        <TaskSheet project={project} projectName={projectName} tasks={sheetTasks ?? tasks} files={files} initialView={taskSheet} onClose={() => setTaskSheet(null)} />
       ) : null}
     </div>
   );

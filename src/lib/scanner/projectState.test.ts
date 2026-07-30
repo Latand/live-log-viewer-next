@@ -91,3 +91,17 @@ test("project attribution path changes advance the project resolution state key"
 
   expect(projectResolutionStateKey()).not.toBe(before);
 });
+
+test("project alias publication advances the project resolution state key", () => {
+  writeState("flows.json", { flows: [] });
+  writeState("workflows.json", { workflows: [] });
+  const before = projectResolutionStateKey();
+
+  fs.writeFileSync(path.join(sandbox, "project-aliases.json"), JSON.stringify({
+    schemaVersion: 1,
+    aliases: { "legacy-project": "repo-0123456789abcdef0123456789abcdef" },
+    displayNames: { "repo-0123456789abcdef0123456789abcdef": "shared-repository" },
+  }));
+
+  expect(projectResolutionStateKey()).not.toBe(before);
+});
