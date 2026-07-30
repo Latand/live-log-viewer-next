@@ -4,6 +4,12 @@ import { statePath } from "@/lib/configDir";
 
 import type { ViewerDeploymentStatus } from "./contracts";
 
+export type DeploymentLedgerRead<T> =
+  | { state: "ok"; value: T }
+  | { state: "unreadable"; error: string };
+
+const UNREADABLE_LEDGER = "deployment ledger is unreadable";
+
 /**
  * A read-only view of the durable deployment ledger (#790).
  *
@@ -36,50 +42,73 @@ function openLedger(env: NodeJS.ProcessEnv = process.env): Database | null {
   }
 }
 
-function parse(rows: { status_json: string }[]): ViewerDeploymentStatus[] {
-  const parsed: ViewerDeploymentStatus[] = [];
-  for (const row of rows) {
-    try {
-      parsed.push(JSON.parse(row.status_json) as ViewerDeploymentStatus);
-    } catch {
-      /* One unreadable row must not lose the rest of the ledger. */
-    }
-  }
-  return parsed;
+function unreadable<T>(): DeploymentLedgerRead<T> {
+  return { state: "unreadable", error: UNREADABLE_LEDGER };
 }
 
-/** The most recent deployments, oldest-first to match the control surface. */
-export function ledgerDeployments(limit: number, env: NodeJS.ProcessEnv = process.env): ViewerDeploymentStatus[] | null {
-  const db = openLedger(env);
-  if (!db) return null;
+function deploymentStatus(raw: string, expectedId: string): ViewerDeploymentStatus | null {
   try {
-    const rows = db.query<{ status_json: string }, [number]>(
-      "SELECT status_json FROM viewer_deployments ORDER BY updated_at DESC LIMIT ?",
-    ).all(Math.max(1, limit));
-    return parse(rows).reverse();
+    const value = JSON.parse(raw) as unknown;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const status = value as Partial<ViewerDeploymentStatus>;
+    if (
+      status.deploymentId !== expectedId
+      || typeof status.revision !== "string"
+      || typeof status.phase !== "string"
+    ) return null;
+    return status as ViewerDeploymentStatus;
   } catch {
     return null;
+  }
+}
+
+/**
+ * The same tail the runtime snapshot exposes: deployment entities are ordered
+ * by id, then the route slices the last `limit` entries from that ordering.
+ */
+export function ledgerDeployments(
+  limit: number,
+  env: NodeJS.ProcessEnv = process.env,
+): DeploymentLedgerRead<ViewerDeploymentStatus[]> {
+  const db = openLedger(env);
+  if (!db) return unreadable();
+  try {
+    const rows = db.query<{ id: string; state_json: string }, [string, number]>(
+      "SELECT id, state_json FROM entities WHERE kind = ? ORDER BY id DESC LIMIT ?",
+    ).all("deployment", Math.max(1, limit));
+    const deployments: ViewerDeploymentStatus[] = [];
+    for (const row of rows.reverse()) {
+      const status = deploymentStatus(row.state_json, row.id);
+      if (!status) return unreadable();
+      deployments.push(status);
+    }
+    return { state: "ok", value: deployments };
+  } catch {
+    return unreadable();
   } finally {
     db.close();
   }
 }
 
-/** One deployment by id. `null` means the ledger is unreadable; `undefined`
-    means it is readable and that deployment is genuinely absent. */
+/**
+ * One deployment by id. A readable miss is represented by `undefined`;
+ * malformed state and storage failures remain an explicit unreadable plane.
+ */
 export function ledgerDeployment(
   deploymentId: string,
   env: NodeJS.ProcessEnv = process.env,
-): ViewerDeploymentStatus | null | undefined {
+): DeploymentLedgerRead<ViewerDeploymentStatus | undefined> {
   const db = openLedger(env);
-  if (!db) return null;
+  if (!db) return unreadable();
   try {
-    const row = db.query<{ status_json: string }, [string]>(
-      "SELECT status_json FROM viewer_deployments WHERE deployment_id = ?",
-    ).get(deploymentId);
-    if (!row) return undefined;
-    return parse([row])[0] ?? undefined;
+    const row = db.query<{ state_json: string }, [string, string]>(
+      "SELECT state_json FROM entities WHERE kind = ? AND id = ?",
+    ).get("deployment", deploymentId);
+    if (!row) return { state: "ok", value: undefined };
+    const status = deploymentStatus(row.state_json, deploymentId);
+    return status ? { state: "ok", value: status } : unreadable();
   } catch {
-    return null;
+    return unreadable();
   } finally {
     db.close();
   }
