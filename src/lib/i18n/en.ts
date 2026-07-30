@@ -739,6 +739,9 @@ export const en = {
   "question.approve": "Approve",
   "question.reject": "Reject",
   "question.ownAnswer": "Your own answer…",
+  // Explicit dismiss (issue #765) — retires the card from the composer
+  // region; the transcript's own tool record stays as history.
+  "question.dismiss": "Dismiss the question card",
   // Delivery failure (issue #697) — translated at the boundary, never the
   // server's own exception text.
   "question.deliveryFailed": "Delivery failed",

@@ -2,18 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { requestPipelineTick } from "@/lib/pipelines/controllerSignal";
 import { patchPipeline, type PipelineCloseReport } from "@/lib/pipelines/engine";
-import type { PatchPipelineRequest, Pipeline, PipelineAction, PipelineRepoPreflightErrorCode } from "@/lib/pipelines/types";
+import { PIPELINE_ACTIONS, type PatchPipelineRequest, type Pipeline, type PipelineAction, type PipelineRepoPreflightErrorCode } from "@/lib/pipelines/types";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import type { ApiError } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const ACTIONS = new Set<PipelineAction>([
-  "start", "update-draft", "set-position", "add-stage", "remove-stage", "reorder-stage", "set-edge",
-  "pause", "resume", "retry-stage", "skip-stage", "override-stage", "link-task", "unlink-task", "delete", "close",
-  "set-src",
-]);
+const ACTIONS = new Set<PipelineAction>(PIPELINE_ACTIONS);
 
 const CONTROLLER_ACTIONS = new Set<PipelineAction>(["start", "resume", "retry-stage", "skip-stage"]);
 
@@ -39,7 +35,9 @@ export async function PATCH(
   } catch {
     return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
-  if (!ACTIONS.has(body.action)) return NextResponse.json({ error: "unknown pipeline action" }, { status: 400 });
+  if (!ACTIONS.has(body.action)) {
+    return NextResponse.json({ error: `unknown pipeline action (allowed: ${PIPELINE_ACTIONS.join(", ")})` }, { status: 400 });
+  }
   const { id } = await ctx.params;
   try {
     const result = await patchPipeline(id, body);
