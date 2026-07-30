@@ -53,7 +53,20 @@ function requiredRoleParams(role: ReturnType<typeof listRoles>[number]): Record<
   }));
 }
 
-test("spawn_agent publishes the registry role ids once and rejects unknown roles at the protocol boundary", async () => {
+test("spawn_agent listTools publishes every registry role exactly once", async () => {
+  const roleIds = listRoles().map((role) => role.id);
+
+  await withProtocolClient(inertBindings(), async (client) => {
+    const listed = await client.listTools();
+    const spawnSchema = listed.tools.find((tool) => tool.name === "spawn_agent")?.inputSchema;
+    const roleSchema = spawnSchema?.properties?.role as { enum?: string[] } | undefined;
+
+    expect(roleSchema?.enum).toEqual(roleIds);
+    expect(new Set(roleSchema?.enum).size).toBe(roleIds.length);
+  });
+});
+
+test("spawn_agent rejects unknown roles at the protocol boundary while valid roles and roleParams remain admitted", async () => {
   const roleIds = listRoles().map((role) => role.id);
   let spawnCalls = 0;
 
@@ -63,25 +76,6 @@ test("spawn_agent publishes the registry role ids once and rejects unknown roles
       return {};
     },
   }), async (client) => {
-    const listed = await client.listTools();
-    const spawnSchema = listed.tools.find((tool) => tool.name === "spawn_agent")?.inputSchema;
-    const roleSchema = spawnSchema?.properties?.role as { enum?: string[] } | undefined;
-
-    expect(roleSchema?.enum).toEqual(roleIds);
-    expect(new Set(roleSchema?.enum).size).toBe(roleIds.length);
-
-    const unknownRole = await client.callTool({
-      name: "spawn_agent",
-      arguments: {
-        clientRequestId: "spawn-unknown-role",
-        cwd: ".",
-        "prompt": "Run the assigned check.",
-        role: "unknown-role",
-      },
-    });
-    expect(unknownRole.isError).toBe(true);
-    expect(spawnCalls).toBe(0);
-
     for (const role of roleIds) {
       await client.callTool({
         name: "spawn_agent",
@@ -94,6 +88,18 @@ test("spawn_agent publishes the registry role ids once and rejects unknown roles
         },
       });
     }
+    expect(spawnCalls).toBe(roleIds.length);
+
+    const unknownRole = await client.callTool({
+      name: "spawn_agent",
+      arguments: {
+        clientRequestId: "spawn-unknown-role",
+        cwd: ".",
+        "prompt": "Run the assigned check.",
+        role: "unknown-role",
+      },
+    });
+    expect(unknownRole.isError).toBe(true);
     expect(spawnCalls).toBe(roleIds.length);
   });
 });
@@ -111,8 +117,7 @@ test("every registry role resolves and unknown-role errors enumerate the same al
   });
 });
 
-test("operator_snapshot publishes a strict conditional schema and rejects invalid paths at the protocol boundary", async () => {
-  const oversized = "x".repeat(MAX_SNAPSHOT_STRING_LENGTH + 1);
+test("operator_snapshot publishes a strict top-level schema", async () => {
   let snapshotCalls = 0;
 
   await withProtocolClient(inertBindings({
@@ -125,19 +130,68 @@ test("operator_snapshot publishes a strict conditional schema and rejects invali
     const snapshotSchema = listed.tools.find((tool) => tool.name === "operator_snapshot")?.inputSchema;
     expect(snapshotSchema?.additionalProperties).toBe(false);
 
+    const rejected = await client.callTool({
+      name: "operator_snapshot",
+      arguments: {
+        clientRequestId: "snapshot-invalid-top-level",
+        unexpected: true,
+      },
+    });
+    expect(rejected.isError).toBe(true);
+    expect(snapshotCalls).toBe(0);
+  });
+});
+
+test("operator_snapshot scope discriminates paths from non-path kinds at the protocol boundary", async () => {
+  let snapshotCalls = 0;
+
+  await withProtocolClient(inertBindings({
+    operator_snapshot: async () => {
+      snapshotCalls += 1;
+      return {};
+    },
+  }), async (client) => {
     const invalidArguments = [
-      { unexpected: true },
       { scope: { kind: "paths" } },
       { scope: { kind: "visible", paths: ["sessions/a.jsonl"] } },
-      { scope: { kind: "paths", paths: [""] } },
-      { scope: { kind: "paths", paths: [oversized] } },
-      { scope: { kind: "paths", paths: ["sessions/a.jsonl", "sessions/a.jsonl"] } },
     ];
     for (const [index, invalid] of invalidArguments.entries()) {
       const rejected = await client.callTool({
         name: "operator_snapshot",
         arguments: {
-          clientRequestId: `snapshot-invalid-${index}`,
+          clientRequestId: `snapshot-invalid-scope-${index}`,
+          ...invalid,
+        },
+      });
+      expect(rejected.isError).toBe(true);
+    }
+    expect(snapshotCalls).toBe(0);
+  });
+});
+
+test("operator_snapshot bounds snapshot strings and rejects duplicate paths at the protocol boundary", async () => {
+  const oversized = "x".repeat(MAX_SNAPSHOT_STRING_LENGTH + 1);
+  let snapshotCalls = 0;
+
+  await withProtocolClient(inertBindings({
+    operator_snapshot: async () => {
+      snapshotCalls += 1;
+      return {};
+    },
+  }), async (client) => {
+    const invalidArguments = [
+      { scope: { kind: "paths", paths: [""] } },
+      { scope: { kind: "paths", paths: [oversized] } },
+      { scope: { kind: "paths", paths: ["sessions/a.jsonl", "sessions/a.jsonl"] } },
+      { view: { id: "" } },
+      { view: { deviceId: oversized } },
+      { caller: { transcriptPath: "" } },
+    ];
+    for (const [index, invalid] of invalidArguments.entries()) {
+      const rejected = await client.callTool({
+        name: "operator_snapshot",
+        arguments: {
+          clientRequestId: `snapshot-invalid-string-${index}`,
           ...invalid,
         },
       });
@@ -156,6 +210,7 @@ test("every generated operator_snapshot schema combination is admitted by reques
     { deviceId: "device-a" },
     { resolution: "latest-interaction" },
     { id: "view-a", deviceId: "device-a", resolution: "require-explicit" },
+    { id: "v".repeat(MAX_SNAPSHOT_STRING_LENGTH) },
   ];
   const scopes = [
     undefined,
@@ -181,6 +236,7 @@ test("every generated operator_snapshot schema combination is admitted by reques
     { pid: 1 },
     { transcriptPath: "sessions/caller.jsonl" },
     { pid: Number.MAX_SAFE_INTEGER, transcriptPath: "sessions/caller.jsonl" },
+    { transcriptPath: "t".repeat(MAX_SNAPSHOT_STRING_LENGTH) },
   ];
 
   let accepted = 0;
