@@ -40,9 +40,7 @@ import { projectForCwd } from "@/lib/scanner/describe";
 import { completedFileScan } from "@/lib/scanner/scanCache";
 import { readResources } from "@/lib/resources";
 import { adoptLiveRootSession, conversationRole, liveRootSession, type RootSessionSource } from "@/lib/root/adopt";
-import { runtimeHostClient, type RuntimeHostClient } from "@/lib/runtime/client";
 import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
-import { runtimeEventsEnabled } from "@/lib/runtime/flags";
 import { readSession } from "@/lib/session/reader";
 import { applyAssignmentPatches, createTask, patchTask, type CreateTaskInput, type PatchTaskInput } from "@/lib/tasks/commands";
 import { isoNow } from "@/lib/tasks/helpers";
@@ -71,10 +69,35 @@ const productionLinkTaskDependencies: LinkTaskToPipelineDependencies = {
 };
 
 export interface ViewerControlDependencies {
+  get?(pathname: string): Promise<Record<string, unknown>>;
   post(pathname: string, body: Record<string, unknown>, headers?: Record<string, string>): Promise<Record<string, unknown>>;
 }
 
 const VIEWER_CONTROL_URL = "http://127.0.0.1:8898";
+
+async function getViewerControl(pathname: string): Promise<Record<string, unknown>> {
+  const baseUrl = process.env.LLV_VIEWER_CONTROL_URL?.trim() || VIEWER_CONTROL_URL;
+  let response: Response;
+  try {
+    response = await fetch(new URL(pathname, baseUrl), {
+      headers: {
+        accept: "application/json",
+      },
+    });
+  } catch {
+    throw new Error("Viewer control is unreachable");
+  }
+  const result = await response.json().catch(() => ({})) as Record<string, unknown>;
+  if (result.error || !response.ok) {
+    const error = text(result.error) || `Viewer control request failed with status ${response.status}`;
+    throw new McpToolRefusal(error, {
+      error,
+      status: response.status,
+      ...(text(result.code) ? { code: text(result.code) } : {}),
+    });
+  }
+  return result;
+}
 
 async function postViewerControl(
   pathname: string,
@@ -99,7 +122,18 @@ async function postViewerControl(
   return result;
 }
 
-const productionViewerControlDependencies: ViewerControlDependencies = { post: postViewerControl };
+const productionViewerControlDependencies: ViewerControlDependencies = {
+  get: getViewerControl,
+  post: postViewerControl,
+};
+
+function readViewerControl(
+  control: ViewerControlDependencies,
+  pathname: string,
+): Promise<Record<string, unknown>> {
+  if (!control.get) throw new Error("Viewer control read is unavailable");
+  return control.get(pathname);
+}
 
 type RegistrySnapshot = ReturnType<ReturnType<typeof agentRegistry>["readOnlySnapshot"]>;
 
@@ -116,8 +150,6 @@ export interface ViewerMcpDomainDependencies {
   patchPipeline: typeof patchPipeline;
   loadTasks: typeof loadTasks;
   collectSnapshot: typeof collectSnapshot;
-  runtimeEventsEnabled: typeof runtimeEventsEnabled;
-  runtimeHostClient(): RuntimeHostClient | null;
   readResources: typeof readResources;
   applyConversationAction: typeof applyConversationAction;
   applyConversationMigration: typeof applyConversationMigration;
@@ -289,8 +321,6 @@ const productionDomainDependencies: ViewerMcpDomainDependencies = {
   patchPipeline,
   loadTasks,
   collectSnapshot,
-  runtimeEventsEnabled,
-  runtimeHostClient,
   readResources,
   applyConversationAction,
   applyConversationMigration,
@@ -1083,26 +1113,35 @@ async function operatorSnapshot(args: McpToolArgs, dependencies: ViewerMcpDomain
   return redactPayload({ ...await dependencies.collectSnapshot(request) });
 }
 
-async function deploymentStatus(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): Promise<McpToolPayload> {
-  if (!dependencies.runtimeEventsEnabled()) throw new Error("runtime events are disabled");
-  const client = dependencies.runtimeHostClient();
-  if (!client) throw new Error("runtime host socket is unavailable");
+async function deploymentStatus(
+  args: McpToolArgs,
+  control: ViewerControlDependencies,
+): Promise<McpToolPayload> {
   const deploymentId = text(args.deploymentId);
   if (deploymentId) {
-    const deployment = await client.readViewerDeployment(deploymentId);
-    if (!deployment) throw new Error("viewer deployment was not found");
+    const deployment = await readViewerControl(
+      control,
+      `/api/runtime/deployments/${encodeURIComponent(deploymentId)}`,
+    );
     return redactPayload({ deploymentId, deployment });
   }
   const operationId = text(args.operationId);
   if (operationId) {
     if (operationId.includes(":") || /\s/.test(operationId)) throw new Error("operationId is invalid");
-    const operation = await client.operationStatus(operationId);
-    if (!operation) throw new Error("operation not found");
+    const result = await readViewerControl(
+      control,
+      `/api/runtime/operations/${encodeURIComponent(operationId)}`,
+    );
+    const operation = {
+      operationId: result.operationId,
+      receipt: result.receipt,
+      replayed: false,
+    };
     return redactPayload({ operationId, operation });
   }
   const limit = Math.max(1, Math.min(100, integer(args.limit, 25)));
-  const deployments = (await client.snapshot()).deployments.slice(-limit);
-  return redactPayload({ count: deployments.length, deployments });
+  const result = await readViewerControl(control, `/api/runtime/deployments?limit=${limit}`);
+  return redactPayload({ count: result.count, deployments: result.deployments });
 }
 
 async function resources(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): Promise<McpToolPayload> {
@@ -1192,33 +1231,53 @@ function lifecycleEventType(value: unknown): LifecycleEventQuery["type"] {
  * Both refresh the projection first, so a stage that finished since the last
  * call is already recorded — no background notification service.
  */
-/**
- * Viewer deployments as the journal's deploy events see them. The runtime host
- * owns the deployment ledger, so a disabled or unreachable host simply
- * contributes no deploy events — it must never fail the whole journal read.
- */
+interface DeploymentProjection {
+  deployments: ViewerDeploymentStatus[];
+  error?: string;
+  code?: string;
+}
+
+/** Viewer deployments as the journal's deploy events see them. A deployment
+    read failure leaves the rest of the journal available and travels with that
+    response as explicit degraded-source evidence. */
 async function deploymentsForProjection(
-  dependencies: ViewerMcpDomainDependencies,
-): Promise<ViewerDeploymentStatus[]> {
-  if (!dependencies.runtimeEventsEnabled()) return [];
-  const client = dependencies.runtimeHostClient();
-  if (!client) return [];
+  control: ViewerControlDependencies,
+): Promise<DeploymentProjection> {
   try {
-    return (await client.snapshot()).deployments;
-  } catch {
-    return [];
+    const result = await readViewerControl(control, "/api/runtime/deployments");
+    if (!Array.isArray(result.deployments)) throw new Error("Viewer deployment list is invalid");
+    return { deployments: result.deployments as ViewerDeploymentStatus[] };
+  } catch (error) {
+    return {
+      deployments: [],
+      error: error instanceof Error ? error.message : "Viewer deployments are unreadable",
+      ...(error instanceof McpToolRefusal && text(error.details.code)
+        ? { code: text(error.details.code) }
+        : {}),
+    };
   }
 }
 
-async function lifecycleEvents(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): Promise<McpToolPayload> {
+async function lifecycleEvents(
+  args: McpToolArgs,
+  control: ViewerControlDependencies,
+  dependencies: ViewerMcpDomainDependencies,
+): Promise<McpToolPayload> {
   const mode = text(args.mode) || "query";
   if (mode !== "query" && mode !== "digest") throw new Error('mode must be "query" or "digest"');
   const registry = dependencies.registrySnapshot();
+  const deploymentProjection = await deploymentsForProjection(control);
   const refreshed = dependencies.refreshLifecycleJournal({
     pipelines: dependencies.getPipelines().pipelines,
     deliveries: Object.values(registry.heldDeliveries),
-    deployments: await deploymentsForProjection(dependencies),
+    deployments: deploymentProjection.deployments,
   });
+  const deploymentEvidence = deploymentProjection.error
+    ? {
+        deploymentsError: deploymentProjection.error,
+        ...(deploymentProjection.code ? { deploymentsErrorCode: deploymentProjection.code } : {}),
+      }
+    : {};
   if (mode === "digest") {
     const subscriberId = text(args.subscriberId) || text(args.conversationId);
     if (!subscriberId) throw new Error("subscriberId is required for mode=digest");
@@ -1230,7 +1289,12 @@ async function lifecycleEvents(args: McpToolArgs, dependencies: ViewerMcpDomainD
       maxItems: typeof args.maxItems === "number" ? args.maxItems : undefined,
       acknowledge: args.acknowledge !== false,
     };
-    return redactPayload({ mode, journaled: refreshed.appended, ...dependencies.pollLifecycleDigest(request) });
+    return redactPayload({
+      mode,
+      journaled: refreshed.appended,
+      ...deploymentEvidence,
+      ...dependencies.pollLifecycleDigest(request),
+    });
   }
   const page = dependencies.queryLifecycleEvents({
     project: text(args.project) || undefined,
@@ -1241,7 +1305,7 @@ async function lifecycleEvents(args: McpToolArgs, dependencies: ViewerMcpDomainD
     afterSeq: typeof args.afterSeq === "number" ? args.afterSeq : undefined,
     limit: typeof args.limit === "number" ? args.limit : undefined,
   });
-  return redactPayload({ mode, journaled: refreshed.appended, ...page });
+  return redactPayload({ mode, journaled: refreshed.appended, ...deploymentEvidence, ...page });
 }
 
 /**
@@ -1427,12 +1491,12 @@ export function viewerMcpBindings(
     list_tasks: (args) => Promise.resolve(listTasks(args, domainDependencies)),
     get_task: (args) => Promise.resolve(getTask(args, domainDependencies)),
     operator_snapshot: (args) => operatorSnapshot(args, domainDependencies),
-    deployment_status: (args) => deploymentStatus(args, domainDependencies),
+    deployment_status: (args) => deploymentStatus(args, controlDependencies),
     resources: (args) => resources(args, domainDependencies),
     conversation_action: (args) => conversationAction(args, domainDependencies),
     conversation_migration: (args) => conversationMigration(args, domainDependencies),
     agent_activity: (args) => agentActivity(args, domainDependencies),
-    lifecycle_events: (args) => lifecycleEvents(args, domainDependencies),
+    lifecycle_events: (args) => lifecycleEvents(args, controlDependencies, domainDependencies),
     request_attention: (args) => requestAttention(args, domainDependencies),
     bridge_report: (args) => Promise.resolve(bridgeReport(args, domainDependencies)),
     bridge_directive: (args) => bridgeDirective(args, controlDependencies, domainDependencies),

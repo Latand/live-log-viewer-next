@@ -10,6 +10,7 @@ import { recordManagerReport } from "@/lib/bridge/service";
 import { drainBridgeReports, openBridgeChannel } from "@/lib/bridge/store";
 
 import { setDeploymentRuntimeForTests } from "@/lib/runtime/deploymentRuntime";
+import { RUNTIME_PLANE_ABSENT } from "@/lib/runtime/flags";
 
 import { POST } from "./route";
 
@@ -143,4 +144,30 @@ test("a cross-origin browser is still refused before anything else is read", asy
   }));
   expect(response.status).toBe(403);
   expect(requested).toEqual([]);
+});
+
+test("the deployment endpoint reserves the disabled message for explicit rollback", async () => {
+  process.env.LLV_RUNTIME_EVENTS = "0";
+  const rolledBack = await POST(deployRequest({}));
+  expect(rolledBack.status).toBe(503);
+  expect(await rolledBack.json()).toEqual({
+    error: "runtime events are disabled",
+    code: RUNTIME_PLANE_ABSENT,
+  });
+
+  delete process.env.LLV_RUNTIME_EVENTS;
+  delete process.env.LLV_RUNTIME_HOST_SOCKET;
+  setDeploymentRuntimeForTests(null);
+  const { ref, nonce } = confirmed();
+  const absent = await POST(deployRequest({
+    revision: SHA,
+    idempotencyKey: "missing-runtime",
+    bridgeRef: ref,
+    bridgeNonce: nonce,
+  }));
+  expect(absent.status).toBe(503);
+  expect(await absent.json()).toEqual({
+    error: "runtime host socket is unavailable",
+    code: RUNTIME_PLANE_ABSENT,
+  });
 });

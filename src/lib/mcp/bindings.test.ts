@@ -534,22 +534,24 @@ test("operator_snapshot validates the v1 request and re-redacts the authoritativ
   expect(JSON.stringify(result)).toContain("[redacted]");
 });
 
-test("deployment_status and resources use the runtime and resource read modules directly", async () => {
+test("deployment_status uses Viewer HTTP while resources keeps its resource read module", async () => {
   const calls: string[] = [];
-  const runtimeClient = {
-    readViewerDeployment: async (id: string) => {
-      calls.push(`deployment:${id}`);
-      return { deploymentId: id, state: "completed", revision: "a".repeat(40) };
+  const control = {
+    get: async (pathname: string) => {
+      calls.push(pathname);
+      if (pathname.endsWith("deployment_608")) {
+        return { deploymentId: "deployment_608", state: "completed", revision: "a".repeat(40) };
+      }
+      if (pathname.endsWith("operation_608")) {
+        return { operationId: "operation_608", receipt: { status: "delivered" } };
+      }
+      return { count: 1, deployments: [{ deploymentId: "deployment_recent", state: "running" }] };
     },
-    operationStatus: async (id: string) => {
-      calls.push(`operation:${id}`);
-      return { operationId: id, receipt: { status: "delivered" } };
+    post: async () => {
+      throw new Error("unexpected control write");
     },
-    snapshot: async () => ({ deployments: [{ deploymentId: "deployment_recent", state: "running" }] }),
   };
-  const bindings = viewerMcpBindings(undefined, undefined, {
-    runtimeEventsEnabled: () => true,
-    runtimeHostClient: () => runtimeClient,
+  const bindings = viewerMcpBindings(undefined, control, {
     readResources: async (fresh: boolean) => {
       calls.push(`resources:${fresh}`);
       return { system: { ramTotal: 10, ramAvailable: 5, swapTotal: 2, swapUsed: 1, capturedAt: "2026-07-23T00:00:00.000Z" }, sessions: [] };
@@ -569,7 +571,12 @@ test("deployment_status and resources use the runtime and resource read modules 
     deployments: [{ deploymentId: "deployment_recent", state: "running" }],
   });
   expect(await bindings.resources({ clientRequestId: "resources-read", fresh: true })).toMatchObject({ system: { ramAvailable: 5 }, sessions: [] });
-  expect(calls).toEqual(["deployment:deployment_608", "operation:operation_608", "resources:true"]);
+  expect(calls).toEqual([
+    "/api/runtime/deployments/deployment_608",
+    "/api/runtime/operations/operation_608",
+    "/api/runtime/deployments?limit=25",
+    "resources:true",
+  ]);
 });
 
 test("conversation_action delegates to the ownership-fenced conversation command with a stable receipt", async () => {
@@ -739,41 +746,41 @@ test("lifecycle_events projects the runtime deployment ledger into the journal (
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-deploy-events-"));
   sandboxes.push(sandbox);
   process.env.LLV_STATE_DIR = sandbox;
-  /* Real projector, real journal — only the runtime host is stubbed, because a
-     deploy event has no other durable source. */
-  const bindings = viewerMcpBindings(undefined, undefined, {
+  /* Real projector, real journal — only the Viewer HTTP read is stubbed,
+     because a deploy event has no other durable source. */
+  const deployments = [
+    {
+      deploymentId: "deployment_ready",
+      phase: "admitted",
+      revision: "b".repeat(40),
+      updatedAt: "2026-07-26T10:00:00.000Z",
+      error: null,
+    },
+    {
+      deploymentId: "deployment_done",
+      phase: "succeeded",
+      revision: "c".repeat(40),
+      updatedAt: "2026-07-26T10:05:00.000Z",
+      error: null,
+    },
+    {
+      deploymentId: "deployment_bad",
+      phase: "failed",
+      revision: "d".repeat(40),
+      updatedAt: "2026-07-26T10:09:00.000Z",
+      error: "the health gate never went green",
+    },
+  ];
+  const bindings = viewerMcpBindings(undefined, {
+    get: async () => ({ count: deployments.length, deployments }),
+    post: async () => {
+      throw new Error("unexpected control write");
+    },
+  }, {
     registrySnapshot: () => ({ heldDeliveries: {} }),
     getPipelines: () => ({ pipelines: [] }),
     refreshLifecycleJournal,
     queryLifecycleEvents,
-    runtimeEventsEnabled: () => true,
-    runtimeHostClient: () => ({
-      snapshot: async () => ({
-        deployments: [
-          {
-            deploymentId: "deployment_ready",
-            phase: "admitted",
-            revision: "b".repeat(40),
-            updatedAt: "2026-07-26T10:00:00.000Z",
-            error: null,
-          },
-          {
-            deploymentId: "deployment_done",
-            phase: "succeeded",
-            revision: "c".repeat(40),
-            updatedAt: "2026-07-26T10:05:00.000Z",
-            error: null,
-          },
-          {
-            deploymentId: "deployment_bad",
-            phase: "failed",
-            revision: "d".repeat(40),
-            updatedAt: "2026-07-26T10:09:00.000Z",
-            error: "the health gate never went green",
-          },
-        ],
-      }),
-    }),
   } as never);
 
   const result = await bindings.lifecycle_events({ clientRequestId: "deploy-events-686", type: "deploy_succeeded" });
@@ -791,12 +798,14 @@ test("lifecycle_events projects the runtime deployment ledger into the journal (
 test("lifecycle_events queries the journal by lineage and polls the bounded digest (#686)", async () => {
   const queries: unknown[] = [];
   const digests: unknown[] = [];
-  const bindings = viewerMcpBindings(undefined, undefined, {
+  const bindings = viewerMcpBindings(undefined, {
+    get: async () => ({ count: 0, deployments: [] }),
+    post: async () => {
+      throw new Error("unexpected control write");
+    },
+  }, {
     registrySnapshot: () => ({ heldDeliveries: {} }),
     getPipelines: () => ({ pipelines: [] }),
-    /* No runtime host: the deploy projection contributes nothing and must not
-       fail the journal read. */
-    runtimeEventsEnabled: () => false,
     refreshLifecycleJournal: () => ({ appended: 2, skipped: 5, throttled: false }),
     queryLifecycleEvents: (query: unknown) => {
       queries.push(query);
