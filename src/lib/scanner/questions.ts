@@ -1,15 +1,17 @@
 import type { FileEntry, PendingQuestion, PendingQuestionItem, PendingQuestionOption } from "../types";
-import { claudeUserText, isClaudeProtocolUser } from "../claudeProtocolUser";
+import { claudeUserText, isClaudeInterruptSentinelText, isClaudeTurnWindowMeta } from "../claudeProtocolUser";
 import { tailRecords, tailRecordsResult } from "./activity";
 import { globalCache } from "./caches";
 import { recordValue, recordsValue, stringValue } from "./json";
 
 type PendingQuestionDraft = Omit<PendingQuestion, "pid" | "paneTarget">;
 
-globalCache<unknown>("questions").clear();
-const questionCache = globalCache<[number, number, PendingQuestionDraft | null]>("questions-v4");
-const SYSTEM_REMINDER_ONLY_RE = /^<system-reminder\b[^>]*>[\s\S]*<\/system-reminder>$/i;
-const INTERRUPT_SENTINEL_RE = /^\[Request interrupted by user(?: for tool use)?\]$/;
+export const QUESTION_CACHE_NAME = "questions-v5";
+for (const legacyName of ["questions", "questions-v2", "questions-v3", "questions-v4"]) {
+  globalCache<unknown>(legacyName).clear();
+}
+const questionCache = globalCache<[number, number, PendingQuestionDraft | null]>(QUESTION_CACHE_NAME);
+const SYSTEM_REMINDER_RE = /<system-reminder\b[^>]*>[\s\S]*?<\/system-reminder>/gi;
 
 function timestampOf(obj: Record<string, unknown>): string {
   return stringValue(obj.timestamp) ?? stringValue(obj.created_at) ?? new Date().toISOString();
@@ -82,10 +84,13 @@ function assistantToolUse(obj: Record<string, unknown>): { id: string; name: str
 }
 
 function isGenuineUserMessage(obj: Record<string, unknown>): boolean {
-  if (obj.type !== "user" || obj.isMeta === true || obj.isSidechain === true || isClaudeProtocolUser(obj)) return false;
+  if (obj.type !== "user" || obj.isSidechain === true || obj.isCompactSummary === true || isClaudeTurnWindowMeta(obj)) return false;
   const content = recordValue(obj.message)?.content;
   const text = claudeUserText(content).trim();
-  if (text) return !SYSTEM_REMINDER_ONLY_RE.test(text) && !INTERRUPT_SENTINEL_RE.test(text);
+  if (text) {
+    const withoutReminders = text.replace(SYSTEM_REMINDER_RE, "").trim();
+    return Boolean(withoutReminders) && !isClaudeInterruptSentinelText(withoutReminders);
+  }
   return recordsValue(content).some((block) => block.type !== "tool_result" && block.type !== "text");
 }
 

@@ -73,6 +73,68 @@ function planRecord(id = "plan-1") {
 }
 
 describe("pendingQuestionFor", () => {
+  test("retires a question when an sdk prompt supersedes it amid later agent work", () => {
+    expect(pendingQuestionFor(entry([
+      questionRecord(),
+      {
+        type: "assistant",
+        timestamp: "2026-07-30T10:00:01.000Z",
+        message: { role: "assistant", content: [{ type: "text", text: "Checking context." }] },
+      },
+      {
+        type: "user",
+        timestamp: "2026-07-30T10:00:02.000Z",
+        promptSource: "sdk",
+        message: { role: "user", content: "Proceed with the focused scope." },
+      },
+      {
+        type: "assistant",
+        timestamp: "2026-07-30T10:00:03.000Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "read-1", name: "Read", input: { file_path: "src/example.ts" } }],
+        },
+      },
+      {
+        type: "user",
+        timestamp: "2026-07-30T10:00:04.000Z",
+        message: {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "read-1", content: "Done" }],
+        },
+      },
+      {
+        type: "assistant",
+        timestamp: "2026-07-30T10:00:05.000Z",
+        message: { role: "assistant", content: [{ type: "text", text: "Continuing." }] },
+      },
+    ]))).toBeNull();
+  });
+
+  test.each(["peer", "coordinator"] as const)("retires a question when a %s delivery supersedes it", (kind) => {
+    expect(pendingQuestionFor(entry([
+      questionRecord(),
+      {
+        type: "user",
+        timestamp: "2026-07-30T10:00:01.000Z",
+        isMeta: true,
+        origin: { kind },
+        message: { role: "user", content: [{ type: "text", text: "Proceed with the review." }] },
+      },
+    ]))).toBeNull();
+  });
+
+  test("keeps a question pending when the user message came before it", () => {
+    expect(pendingQuestionFor(entry([
+      {
+        type: "user",
+        timestamp: "2026-07-30T09:59:59.000Z",
+        message: { role: "user", content: "Ask for the scope." },
+      },
+      questionRecord(),
+    ]))?.toolUseId).toBe("question-1");
+  });
+
   test("retires a question after a later genuine user message", () => {
     expect(pendingQuestionFor(entry([
       questionRecord(),
@@ -175,6 +237,43 @@ describe("pendingQuestionFor", () => {
     ]))).toBeNull();
   });
 
+  test("recognizes human input between two injected system reminders", () => {
+    expect(pendingQuestionFor(entry([
+      questionRecord(),
+      {
+        type: "user",
+        timestamp: "2026-07-30T10:00:01.000Z",
+        message: {
+          role: "user",
+          content: [
+            "<system-reminder>Context changed.</system-reminder>",
+            "Proceed with the focused scope.",
+            "<system-reminder>Task state changed.</system-reminder>",
+          ].join("\n\n"),
+        },
+      },
+    ]))).toBeNull();
+  });
+
+  test("keeps a question pending after multiple reminder-only spans", () => {
+    const pending = pendingQuestionFor(entry([
+      questionRecord(),
+      {
+        type: "user",
+        timestamp: "2026-07-30T10:00:01.000Z",
+        message: {
+          role: "user",
+          content: [
+            "<system-reminder>Context changed.</system-reminder>",
+            "<system-reminder>Task state changed.</system-reminder>",
+          ].join("\n\n"),
+        },
+      },
+    ]));
+
+    expect(pending?.toolUseId).toBe("question-1");
+  });
+
   test("invalidates a cached pending question when later user input changes the file identity", () => {
     const original = entry([questionRecord()]);
     expect(pendingQuestionFor(original)?.toolUseId).toBe("question-1");
@@ -196,6 +295,10 @@ describe("pendingQuestionFor", () => {
   test.each([
     ["isMeta user", { type: "user", isMeta: true, message: { role: "user", content: "Injected context." } }],
     ["sidechain user", { type: "user", isSidechain: true, message: { role: "user", content: [{ type: "text", text: "Subagent input." }] } }],
+    ["command prompt", { type: "user", promptSource: "command", message: { role: "user", content: "Command output." } }],
+    ["system prompt", { type: "user", promptSource: "system", message: { role: "user", content: "System context." } }],
+    ["task notification", { type: "user", origin: { kind: "task-notification" }, message: { role: "user", content: "Task completed." } }],
+    ["compaction summary", { type: "user", isCompactSummary: true, message: { role: "user", content: "Conversation summary." } }],
     ["last-prompt", { type: "last-prompt", lastPrompt: "Bookkeeping." }],
     ["ai-title", { type: "ai-title", aiTitle: "Bookkeeping." }],
     ["mode", { type: "mode", mode: "default" }],

@@ -7,6 +7,7 @@ import { listFilesWithProjectCatalog } from "@/lib/scanner";
 import { primeTranscriptTurnEvidence } from "@/lib/scanner/activity";
 import { globalCache } from "@/lib/scanner/caches";
 import { primePersistedLineageFacts } from "@/lib/scanner/links";
+import { QUESTION_CACHE_NAME } from "@/lib/scanner/questions";
 import { coordinatedFileScan, resetFileScanCoordinatorForTests } from "@/lib/scanner/scanCoordinator";
 import type { FileEntry, PendingQuestion } from "@/lib/types";
 import type { TurnState } from "@/lib/accounts/migration/contracts";
@@ -213,7 +214,7 @@ function primePersistedFileDerivations(snapshot: FileScanSnapshot): void {
       globalCache<[number, number, FileEntry["pendingWakeup"]]>("wakeup-v2").set(entry.path, [entry.size, mtimeMs, entry.pendingWakeup]);
     }
     if (entry.root === "claude-projects" && entry.path.endsWith(".jsonl")) {
-      globalCache<[number, number, Omit<PendingQuestion, "pid" | "paneTarget"> | null]>("questions-v3")
+      globalCache<[number, number, Omit<PendingQuestion, "pid" | "paneTarget"> | null]>(QUESTION_CACHE_NAME)
         .set(entry.path, [entry.size, mtimeMs, persistedQuestionDraft(entry)]);
     }
   }
