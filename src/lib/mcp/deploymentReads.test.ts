@@ -378,3 +378,32 @@ test("a 404 keeps its domain meaning and is never mistaken for an unserved route
     server.stop(true);
   }
 });
+
+/**
+ * Issue #790, the actual root cause. A revision that does not serve the route
+ * answers 405 with a body of literal `null`, which is valid JSON — so the
+ * `.catch` guarding the parse never fires and `result.error` threw a TypeError
+ * before the status could be classified. The failure therefore never became a
+ * refusal carrying 405, and no status-based fallback could ever match it. Two
+ * real deploys failed this way with `calls.deploymentStatus: false` as the only
+ * evidence.
+ */
+test("a null response body is classified by status instead of crashing the read", async () => {
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => new Response("null", { status: 405, headers: { "content-type": "application/json" } }),
+  });
+  process.env.LLV_VIEWER_CONTROL_URL = server.url.origin;
+
+  try {
+    /* Reaches the fallback and refuses honestly for want of a socket, rather
+       than dying on `null.error`. */
+    await expect(viewerMcpBindings().deployment_status({
+      clientRequestId: "deployment-null-body",
+      limit: 1,
+    })).rejects.toThrow(/runtime host socket is unavailable|runtime events are disabled/);
+  } finally {
+    server.stop(true);
+  }
+});
