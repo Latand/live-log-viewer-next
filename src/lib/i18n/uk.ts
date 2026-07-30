@@ -1315,6 +1315,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "scheme.roleWorking": "працює",
   "scheme.roleWaiting": "чекає",
   "scheme.lassoTool": "Вибірка — обведи агентів рамкою, кліком додавай чи знімай",
+  "scheme.selectCheckOn": "Додати цього агента до вибірки",
+  "scheme.selectCheckOff": "Прибрати цього агента з вибірки",
   "scheme.boardAria": "Дошка агентів — стрілки переміщують між вікнами агентів",
   "scheme.navStack": { one: "{count} тиха гілка під {title}", few: "{count} тихі гілки під {title}", many: "{count} тихих гілок під {title}", other: "{count} тихих гілок під {title}" },
   "scheme.navStackBare": { one: "{count} тиха гілка", few: "{count} тихі гілки", many: "{count} тихих гілок", other: "{count} тихих гілок" },

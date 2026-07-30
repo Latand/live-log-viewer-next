@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { FileEntry } from "@/lib/types";
 
 import type { SchemeNode } from "./layout";
-import { dragRect, nodesInRect, pruneSelection, rectsIntersect, screenRectToWorld, selectionBBox } from "./lasso";
+import { dragRect, nodesInRect, rectsIntersect, screenRectToWorld, selectionBBox } from "./lasso";
 
 function entry(path: string): FileEntry {
   return {
@@ -70,15 +70,5 @@ describe("lasso geometry", () => {
     const nodes = [node("/a", 0, 10, 20, 30), node("/b", 80, 5, 40, 10), node("/c", 10, 80, 10, 10)];
     expect(selectionBBox(nodes, new Set(["/a", "/b"]))).toEqual({ x: 0, y: 5, w: 120, h: 35 });
     expect(selectionBBox(nodes, new Set(["/missing"]))).toBeNull();
-  });
-
-  test("pruneSelection preserves identity when unchanged and creates a smaller set when pruned", () => {
-    const selected = new Set(["/a", "/b"]);
-    const nodes = [node("/a", 0, 0), node("/b", 100, 0)];
-    expect(pruneSelection(selected, nodes)).toBe(selected);
-
-    const pruned = pruneSelection(selected, [nodes[0]!]);
-    expect(pruned).not.toBe(selected);
-    expect([...pruned]).toEqual(["/a"]);
   });
 });

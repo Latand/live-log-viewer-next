@@ -753,10 +753,84 @@ function MiniStackShell({ stack, dimmed, onSelect }: { stack: MiniStack; dimmed:
   );
 }
 
+/**
+ * The hover-revealed selection check (issue #771): a semi-transparent circle at
+ * the card's top-right corner that fills in once the card is a member. It lives
+ * in a slightly larger hot-zone so pointing *near* the card edge reveals it,
+ * and both sit outside the card's content box — revealing one shifts no layout
+ * and covers nothing. The zone keeps its own pointer events, so it still works
+ * while a selection session makes the panes click-through, and it is
+ * `data-scheme-ui`, so the camera never turns the press into a pan or a clear.
+ */
+function SelectionCheck({
+  path,
+  marked,
+  session,
+  onToggle,
+  onHoverChange,
+}: {
+  path: string;
+  marked: boolean;
+  /** A running session shows every toggle: there is no hover on the way in. */
+  session: boolean;
+  onToggle: (path: string) => void;
+  onHoverChange: (hovering: boolean) => void;
+}) {
+  const { t } = useLocale();
+  const [hovering, setHovering] = useState(false);
+  const hover = (next: boolean) => {
+    setHovering(next);
+    onHoverChange(next);
+  };
+  const revealed = marked || hovering || session;
+  return (
+    /* The zone clears the pane's own header controls: its inner edge stops just
+       outside the close button, so no part of the card's chrome loses a click. */
+    <div
+      data-scheme-ui
+      /* `scheme-select-check-zone` is the hook the session dim excludes, so this
+         control keeps full contrast while its card recedes. */
+      className="scheme-select-check-zone pointer-events-auto absolute -right-5 -top-5 z-[8] h-7 w-7"
+      onPointerEnter={() => hover(true)}
+      onPointerLeave={() => hover(false)}
+    >
+      <button
+        type="button"
+        data-select-check={path}
+        data-select-check-revealed={revealed ? "true" : "false"}
+        aria-pressed={marked}
+        title={marked ? t("scheme.selectCheckOff") : t("scheme.selectCheckOn")}
+        aria-label={marked ? t("scheme.selectCheckOff") : t("scheme.selectCheckOn")}
+        /* Three weights: a member's check is solid accent; a non-member inside a
+           running session carries more weight than the idle reveal, because in a
+           session it is an active invitation to extend the set rather than a hint
+           that a control exists at all. */
+        className={`scheme-select-check absolute bottom-0.5 left-0.5 flex h-6 w-6 items-center justify-center rounded-full border-2 border-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 ${
+          revealed ? "opacity-100" : "opacity-0"
+        } ${
+          marked
+            ? "bg-accent text-white shadow-1"
+            : session
+              ? "bg-accent/60 text-white shadow-1 hover:bg-accent/80"
+              : "bg-accent/35 text-white/85 hover:bg-accent/70"
+        }`}
+        onClick={(event) => {
+          event.stopPropagation();
+          onToggle(path);
+        }}
+      >
+        <Check className="h-3.5 w-3.5" aria-hidden />
+      </button>
+    </div>
+  );
+}
+
 function NodeShell({
   node,
   ringed,
   marked,
+  session,
+  onToggleMember,
   dimmed,
   dormant,
   flow,
@@ -787,6 +861,11 @@ function NodeShell({
   ringed: boolean;
   /** Member of the selection session: checkmark badge + exempt from dimming. */
   marked: boolean;
+  /** Session running: every card shows its toggle, since the panes are then
+      click-through and a card hover can no longer reveal one. */
+  session: boolean;
+  /** Toggles this card in the board's one selection set. Absent on the map. */
+  onToggleMember?: (path: string) => void;
   /** «Show only needs me» attention filter dim. */
   dimmed: boolean;
   /** Far zoom: pane feeds sleep behind the identity labels. */
@@ -836,6 +915,10 @@ function NodeShell({
   const [flowOpen, setFlowOpen] = useState(false);
   const [pipelineOpen, setPipelineOpen] = useState(false);
   const [badgesExpanded, setBadgesExpanded] = useState(false);
+  /* Pointing at the check lifts this card out of the session's dim, so the
+     toggle it is about to flip stays readable (the dim is an opacity on this
+     shell, which every descendant inherits). */
+  const [checkHover, setCheckHover] = useState(false);
   /* The compact board strip sits in FlowStrip's slot; a review-loop current
      stage never reaches here (its node carries the flow, and the strip map
      already excludes it), but gate on !flow so the two can never stack. */
@@ -846,17 +929,22 @@ function NodeShell({
       data-pipeline-stage-card={pipelineStage ? `${pipelineStage.pipeline.id}::${pipelineStage.stage.id}` : undefined}
       data-pipeline-stage-state={pipelineStage ? stageChipState(pipelineStage.pipeline, pipelineStage.stage) : undefined}
       data-lasso-selected={marked ? "true" : undefined}
+      data-select-check-hover={checkHover ? "true" : undefined}
       className={`scheme-enter absolute ${badgesExpanded ? "z-[60]" : underOpen || flowOpen ? "z-20" : ""}${dimClass(dimmed)}`}
       style={{ transform: `translate(${node.x}px, ${node.y}px)`, width: node.w, height: node.h, transition: MOVE_TRANSITION }}
     >
+      {onToggleMember ? (
+        <SelectionCheck
+          path={node.file.path}
+          marked={marked}
+          session={session}
+          onToggle={onToggleMember}
+          onHoverChange={setCheckHover}
+        />
+      ) : null}
       {marked ? (
-        <>
-          <span className="absolute -right-2.5 -top-2.5 z-[5] flex h-6 w-6 items-center justify-center rounded-full border-2 border-canvas bg-accent text-white shadow-1">
-            <Check className="h-3.5 w-3.5" aria-hidden />
-          </span>
-          {/* The promised member tint: readable at far zoom, panes stay legible. */}
-          <div aria-hidden className="pointer-events-none absolute inset-0 z-[4] rounded-[10px] bg-accent/[0.06]" />
-        </>
+        /* The promised member tint: readable at far zoom, panes stay legible. */
+        <div aria-hidden className="pointer-events-none absolute inset-0 z-[4] rounded-[10px] bg-accent/[0.06]" />
       ) : null}
       {pipelineStage ? (
         <span
@@ -1309,6 +1397,7 @@ export const NodesLayer = memo(function NodesLayer({
   onSpawnRetry,
   onOpenTask,
   onExpand,
+  onToggleMember,
   onPipelineCreated,
 }: {
   layout: SchemeLayout;
@@ -1350,6 +1439,9 @@ export const NodesLayer = memo(function NodesLayer({
   onOpenTask?: (task: BoardTask) => void;
   /** Opens a conversation as the full-window overlay (desktop panes only). */
   onExpand: (path: string) => void;
+  /** Toggles one card in the board's canonical selection set from its
+      hover-revealed check (#771). Absent on the lite map. */
+  onToggleMember?: (path: string) => void;
   onPipelineCreated?: (pipeline: Pipeline) => void;
 }) {
   /* Hosted session nodes take their status dot from the runtime bus's
@@ -1477,6 +1569,8 @@ export const NodesLayer = memo(function NodesLayer({
             node={node}
             ringed={session ? multi.has(node.file.path) : selected === node.file.path || focus === node.file.path}
             marked={session && multi.has(node.file.path)}
+            session={session}
+            onToggleMember={onToggleMember}
             dimmed={attentionPaths !== null && !attentionPaths.has(node.file.path)}
             dormant={dormant}
             flow={flowsByImpl.get(node.file.path) ?? null}

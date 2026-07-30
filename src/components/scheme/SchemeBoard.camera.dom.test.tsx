@@ -386,12 +386,17 @@ test("expanding full task text reflows a covered neighbour without persisting po
   document.body.append(host);
   const root = createRoot(host);
   roots.add(root);
-  const fetchCalls: string[] = [];
+  /* Only writes matter here: text expansion must persist nothing. The board's own
+     GET is bookkeeping — the board store backs the canonical selection (#771), so
+     a standalone board mount loads it — and is excluded by method, not by URL, so
+     a set-position PATCH could never hide behind the same path. */
+  const writes: string[] = [];
   const previousFetch = globalThis.fetch;
-  globalThis.fetch = (async (input: string | URL | Request) => {
-    fetchCalls.push(String(input));
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method !== "GET") writes.push(`${method} ${String(input)}`);
     return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-  }) as typeof fetch;
+  }) as unknown as typeof fetch;
   try {
     const longText = Array.from({ length: 30 }, (_, index) => `line ${index}`).join("\n");
     flushSync(() => {
@@ -423,7 +428,7 @@ test("expanding full task text reflows a covered neighbour without persisting po
     flushSync(() => (older.querySelector("[data-task-disclosure]") as HTMLButtonElement).click());
     await settle();
     expect(younger.style.transform).not.toBe("translate(0px, 200px)");
-    expect(fetchCalls).toEqual([]);
+    expect(writes).toEqual([]);
 
     flushSync(() => (older.querySelector("[data-task-disclosure]") as HTMLButtonElement).click());
     await settle();

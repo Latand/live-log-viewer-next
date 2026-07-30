@@ -44,12 +44,6 @@ export function selectionBBox(nodes: readonly SchemeNode[], paths: ReadonlySet<s
   return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
 
-export function pruneSelection(paths: ReadonlySet<string>, nodes: readonly SchemeNode[]): ReadonlySet<string> {
-  const present = new Set(nodes.map((node) => node.file.path));
-  for (const path of paths) {
-    if (!present.has(path)) {
-      return new Set([...paths].filter((selected) => present.has(selected)));
-    }
-  }
-  return paths;
-}
+/* pruneSelection moved to ./selectionGesture with the canonical selection it
+   guards (#771): the set now outlives every view, so it is pruned against the
+   SCANNED files and never against one view's nodes. */

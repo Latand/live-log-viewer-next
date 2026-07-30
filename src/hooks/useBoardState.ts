@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { commitMarqueeSelection, pruneSelection, toggleSelected } from "@/components/scheme/selectionGesture";
 import { boardKeysChanged, type BoardKeyRevisions, canonicalKey, keyRevisionAt, mutationKeys } from "@/lib/board/keys";
 import { applyBoardMutations, type BoardMutationV1 } from "@/lib/board/mutations";
 import type { BoardProjectStateV1 } from "@/lib/view/types";
@@ -76,6 +77,22 @@ export interface BoardSnapshot {
   revision: number;
   sync: BoardSync;
   loaded: boolean;
+  /**
+   * THE canonical board selection (#771): the conversation paths the operator
+   * has picked, as one set every view reads and writes. It lives here — beside
+   * the durable board, at project scope — because the selection has to outlive
+   * the view that made it: it used to be `useState` inside SchemeBoard, so
+   * leaving scheme mode unmounted the component and destroyed the selection,
+   * and the two non-scheme publishers reported an empty list.
+   *
+   * Ephemeral on purpose. It is session state — never written to `prefs`, never
+   * PATCHed, gone on reload — so it also works while the durable board is
+   * unavailable, and the setters below are live even then.
+   */
+  selection: ReadonlySet<string>;
+  /** The selection session's «armed» latch: the lasso toolbar button entered a
+      session that has no members yet. Session ⇔ armed or a non-empty set. */
+  selectionArmed: boolean;
 }
 
 export function isEmptyPrefs(prefs: BoardPrefs): boolean {
@@ -143,6 +160,46 @@ const activeStores = new Map<string, () => void>();
    (non-optimistic, non-unavailable) boards are cached, so a stale entry can
    never widen the board beyond what the server last acknowledged. */
 const confirmedBoards = new Map<string, BoardProjectStateV1>();
+
+/* The ephemeral selection session per project (#771). Module scope for the same
+   reason the confirmed-board cache is: it must survive every mount boundary
+   below it. A view switch unmounts SchemeBoard, and a remount of the project's
+   own binding recreates the store — neither may lose the operator's selection.
+   Cleared only by the operator (or by pruning a conversation that is gone), so
+   there is exactly one place a selection can be. */
+interface SelectionState {
+  paths: ReadonlySet<string>;
+  armed: boolean;
+}
+const EMPTY_SELECTION: SelectionState = { paths: new Set<string>(), armed: false };
+const selectionSessions = new Map<string, SelectionState>();
+
+const selectionFor = (project: string): SelectionState => selectionSessions.get(project) ?? EMPTY_SELECTION;
+
+/* Every live store for a project. The selection is PROJECT state, not store
+   state, so a write has to reach every holder — otherwise a second binding for
+   the same project would keep publishing a set the operator has moved past. */
+const selectionSubscribers = new Map<string, Set<() => void>>();
+
+function subscribeSelection(project: string, listener: () => void): () => void {
+  const listeners = selectionSubscribers.get(project) ?? new Set<() => void>();
+  listeners.add(listener);
+  selectionSubscribers.set(project, listeners);
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0) selectionSubscribers.delete(project);
+  };
+}
+
+function notifySelection(project: string): void {
+  for (const listener of [...(selectionSubscribers.get(project) ?? [])]) listener();
+}
+
+/** Drop every project's selection session. Test-only seam — production clears it
+    through the store's own setters. */
+export function resetSelectionSessionsForTest(): void {
+  selectionSessions.clear();
+}
 
 /**
  * Pre-add a conversation to a project's board. A child conversation (`connected`
@@ -319,6 +376,16 @@ export interface BoardStore {
   getSnapshot(): BoardSnapshot;
   subscribe(listener: () => void): () => void;
   mutate(mutations: readonly BoardMutationV1[]): void;
+  /* The ephemeral selection session (#771). Every membership change in every
+     view lands through one of these three, each a thin wrapper over the pure
+     reducers in `@/components/scheme/selectionGesture`. */
+  toggleSelection(path: string): void;
+  commitSelection(paths: readonly string[], additive: boolean): void;
+  clearSelection(): void;
+  setSelectionArmed(armed: boolean): void;
+  /** Prune against the paths that still EXIST (the scan) — never against one
+      view's layout. See `pruneSelection`. */
+  pruneSelectionTo(existing: ReadonlySet<string>): void;
   dispose(): void;
 }
 
@@ -430,9 +497,13 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
   let inflight = false;
   let loaded = cachedConfirmed !== undefined;
   let unavailable = false;
+  /* The selection is READ THROUGH the project-scoped session map, never copied
+     into a local: a store recreated behind a remount opens with the selection the
+     operator still has, and no second holder of the same project can drift. */
+  const selection = () => selectionFor(project);
   let snapshot: BoardSnapshot = loaded
-    ? { prefs: confirmed.prefs, explicitManual: confirmed.explicitManual ?? [], revision: confirmed.revision, sync: "current", loaded: true }
-    : { prefs: EMPTY_BOARD_PREFS, explicitManual: [], revision: 0, sync: "unavailable", loaded: false };
+    ? { prefs: confirmed.prefs, explicitManual: confirmed.explicitManual ?? [], revision: confirmed.revision, sync: "current", loaded: true, selection: selection().paths, selectionArmed: selection().armed }
+    : { prefs: EMPTY_BOARD_PREFS, explicitManual: [], revision: 0, sync: "unavailable", loaded: false, selection: selection().paths, selectionArmed: selection().armed };
   let disposed = false;
   /* Consecutive revision conflicts: each means a fresh concurrent write, so we
      retry immediately up to a cap before falling back to the backoff timer. */
@@ -470,13 +541,27 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
     /* Every queued intent is acknowledged: this view is no longer behind. */
     if (outbox.length === 0) rebased = false;
     const board = optimisticBoard(confirmed, mutationsOf(outbox));
-    snapshot = { prefs: board.prefs, explicitManual: board.explicitManual ?? [], revision: confirmed.revision, sync: syncFor(), loaded };
+    snapshot = { prefs: board.prefs, explicitManual: board.explicitManual ?? [], revision: confirmed.revision, sync: syncFor(), loaded, selection: selection().paths, selectionArmed: selection().armed };
     /* Cache only a genuinely loaded, available board — never the pre-load empty
        board or an unavailable one — so a later mount primes from the settled
        arrangement and not from a placeholder that would paint an unpruned set. */
     if (loaded && !unavailable) confirmedBoards.set(project, confirmed);
     emit();
   };
+
+  /* The one write path for the selection session. Identity-stable no-ops bail
+     out before emitting, which is what lets the dashboard call
+     `pruneSelectionTo` on every scan without cascading a render. */
+  const writeSelection = (next: SelectionState) => {
+    const current = selection();
+    if (next.paths === current.paths && next.armed === current.armed) return;
+    if (next.paths.size === 0 && !next.armed) selectionSessions.delete(project);
+    else selectionSessions.set(project, next);
+    /* Reaches this store and every other holder of the project — including this
+       one's own refresh, so there is a single republication path. */
+    notifySelection(project);
+  };
+  const releaseSelection = subscribeSelection(project, () => refresh());
 
   /**
    * THE causal gate. Every authoritative board — a poll, a 409, an accepted
@@ -844,8 +929,24 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
     mutate(mutations) {
       mutate(mutations);
     },
+    toggleSelection(path) {
+      writeSelection({ paths: toggleSelected(selection().paths, path), armed: selection().armed });
+    },
+    commitSelection(paths, additive) {
+      writeSelection({ paths: commitMarqueeSelection(selection().paths, paths, additive), armed: selection().armed });
+    },
+    clearSelection() {
+      writeSelection(EMPTY_SELECTION);
+    },
+    setSelectionArmed(armed) {
+      writeSelection({ paths: selection().paths, armed });
+    },
+    pruneSelectionTo(existing) {
+      writeSelection({ paths: pruneSelection(selection().paths, existing), armed: selection().armed });
+    },
     dispose() {
       disposed = true;
+      releaseSelection();
       cancelRetry();
       if (activeStores.get(project) === drainOpens) activeStores.delete(project);
       scheduler.clearInterval(interval);
@@ -854,19 +955,24 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
   };
 }
 
-const UNAVAILABLE_SNAPSHOT: BoardSnapshot = { prefs: EMPTY_BOARD_PREFS, explicitManual: [], revision: 0, sync: "unavailable", loaded: false };
+const UNAVAILABLE_SNAPSHOT: BoardSnapshot = { prefs: EMPTY_BOARD_PREFS, explicitManual: [], revision: 0, sync: "unavailable", loaded: false, selection: EMPTY_SELECTION.paths, selectionArmed: false };
 
 /** The first snapshot a project's binding renders. A project already loaded this
     session starts settled from the session cache (#172) so its board paints the
     pruned arrangement immediately; everything else starts unavailable and holds
     the dashboard skeleton until the store's first load lands. Empty on the
     server (the cache is per-request), so hydration matches the first client
-    render. */
+    render.
+
+    The selection session is read live either way (#771): a binding mounted by a
+    view switch must paint the operator's existing selection on its FIRST frame,
+    not blink empty until the store's snapshot arrives. */
 function initialBoardSnapshot(project: string | null): BoardSnapshot {
   if (typeof window === "undefined" || project === null) return UNAVAILABLE_SNAPSHOT;
+  const selection = selectionFor(project);
   const cached = confirmedBoards.get(project);
-  if (!cached) return UNAVAILABLE_SNAPSHOT;
-  return { prefs: cached.prefs, explicitManual: cached.explicitManual ?? [], revision: cached.revision, sync: "current", loaded: true };
+  if (!cached) return { ...UNAVAILABLE_SNAPSHOT, selection: selection.paths, selectionArmed: selection.armed };
+  return { prefs: cached.prefs, explicitManual: cached.explicitManual ?? [], revision: cached.revision, sync: "current", loaded: true, selection: selection.paths, selectionArmed: selection.armed };
 }
 
 /* One store per project per tab, refcounted across bindings. A project board is
@@ -916,6 +1022,15 @@ export interface BoardState extends BoardSnapshot {
   restore(path: string, placement: "auto" | "manual" | "expanded"): void;
   setViewMode(viewMode: BoardViewMode): void;
   setTaskPanelOpen(open: boolean): void;
+  /* The canonical selection's writers (#771) — the same three every view uses.
+     Live even while the durable board is unavailable: the selection is session
+     state and owes nothing to the server. */
+  toggleSelection(path: string): void;
+  commitSelection(paths: readonly string[], additive: boolean): void;
+  clearSelection(): void;
+  setSelectionArmed(armed: boolean): void;
+  /** Prune against the conversations that still EXIST (the scan). */
+  pruneSelectionTo(existing: ReadonlySet<string>): void;
   /** Toggle a durable conversation id in the per-project favorites set (#185). */
   setFavorite(id: string, favorite: boolean): void;
   /** Durably hand-fold / unfold an engine-native child into its parent tray
@@ -988,6 +1103,21 @@ export function useBoardState(project: string | null): BoardState {
     },
     setEngineTrayExpanded(parentId, expanded) {
       storeRef.current?.mutate([{ kind: "set-engine-tray-expanded", parentId, expanded }]);
+    },
+    toggleSelection(path) {
+      storeRef.current?.toggleSelection(path);
+    },
+    commitSelection(paths, additive) {
+      storeRef.current?.commitSelection(paths, additive);
+    },
+    clearSelection() {
+      storeRef.current?.clearSelection();
+    },
+    setSelectionArmed(armed) {
+      storeRef.current?.setSelectionArmed(armed);
+    },
+    pruneSelectionTo(existing) {
+      storeRef.current?.pruneSelectionTo(existing);
     },
   };
 }
