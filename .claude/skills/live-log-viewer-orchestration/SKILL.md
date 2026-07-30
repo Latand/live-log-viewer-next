@@ -88,6 +88,17 @@ curl -sS -X POST "http://127.0.0.1:8898/api/tmux?k=$TOK" \
 - Snapshots are inert reads — safe to poll before deciding whom to spawn or message.
 - Loopback needs no token; remote callers use `Authorization: Bearer <LLV_TOKEN>`.
 
+## Board maintenance
+
+The operator triggers this capability with “run board maintenance” and natural variants such as
+“clean up the board”, “fix the chat names”, “tidy the review cards”, and “reconcile
+associations”. Read [references/board-maintenance.md](references/board-maintenance.md) completely,
+then follow its scope, evidence, mutation, safety, verification, and reporting contracts.
+
+Board maintenance changes reversible Viewer metadata only. Preserve every transcript and active
+conversation, validate every rename and association, and hide an older review card only after a
+newer card is proven to represent the same review lane.
+
 ## Implement→review flows
 
 The viewer runs implement→review cycles itself (spec: `docs/review-loop-ui.md`): long-lived implementer pane + fresh headless reviewer per round, `REVIEW_READY:` marker protocol, verdicts under `~/.config/agent-log-viewer/state/flows/`. API: `GET/POST /api/flows`, `PATCH /api/flows/<id>` (`pause|resume|advance|retry-round|extend|another-round|close`). Pipeline work declares a `review-loop` stage so the controller creates the flow with pipeline membership. Standalone implement→review work may start a flow directly.
