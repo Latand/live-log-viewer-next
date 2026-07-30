@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { projectKey } from "@/components/projectModel";
+import { remapProjectSet } from "@/lib/projects/clientAliases";
 import type { FileEntry } from "@/lib/types";
 
 const STORAGE_KEY = "llvArchivedProjects";
@@ -39,7 +40,10 @@ export interface UseArchivedProjects {
  * still has a running process is dropped from the set on the next files
  * update, so a new agent run brings the project back to the rail by itself.
  */
-export function useArchivedProjects(files: FileEntry[]): UseArchivedProjects {
+export function useArchivedProjects(
+  files: FileEntry[],
+  projectAliases: Readonly<Record<string, string>> = {},
+): UseArchivedProjects {
   const [archivedProjects, setArchivedProjects] = useState<Set<string>>(() => new Set());
   /* Mirrors `archivedProjects` synchronously so the drop-live-projects effect
      below can read the latest value without listing the state as its own
@@ -52,6 +56,16 @@ export function useArchivedProjects(files: FileEntry[]): UseArchivedProjects {
     /* eslint-disable-next-line react-hooks/set-state-in-effect */
     setArchivedProjects(loaded);
   }, []);
+
+  useEffect(() => {
+    const prev = archivedRef.current;
+    if (!prev.size) return;
+    const next = remapProjectSet(prev, projectAliases);
+    if (next.size === prev.size && [...next].every((project) => prev.has(project))) return;
+    archivedRef.current = next;
+    setArchivedProjects(next);
+    writeStored(next);
+  }, [projectAliases]);
 
   useEffect(() => {
     const prev = archivedRef.current;

@@ -232,6 +232,8 @@ function resourceScopeFromPaths(raw: RawPath[], baseline?: ResourceScopeSnapshot
       root: entry.rootName,
       name: path.relative(entry.root, entry.path),
       project: previous?.project ?? "other",
+      projectName: previous?.projectName,
+      projectUnresolved: previous?.projectUnresolved,
       cwd: previous?.cwd,
       sessionStartedAt: previous?.sessionStartedAt,
       nativeParentThreadId: previous?.nativeParentThreadId,
@@ -267,22 +269,33 @@ async function canonicalProjectCatalog(
   sourceCatalog: readonly ProjectCatalogEntry[] = [],
 ): Promise<{ projectByPath: Map<string, string>; projectCatalog: ProjectCatalogEntry[] }> {
   const canonicalByPath = new Map(projectByPath);
-  await forEachCooperatively([...sessionProjectProjection(true).projectByPath], ([pathname, project]) => {
+  const registryProjection = sessionProjectProjection(true);
+  await forEachCooperatively([...registryProjection.projectByPath], ([pathname, project]) => {
     if (canonicalByPath.has(pathname)) canonicalByPath.set(pathname, project);
   });
   const groups = new Map<string, ProjectCatalogEntry>();
-  const sourceRoots = new Map<string, string | undefined>();
+  const sourceMetadata = new Map<string, Pick<ProjectCatalogEntry, "projectRoot" | "displayName">>();
   await forEachCooperatively(sourceCatalog, (entry) => {
-    sourceRoots.set(entry.project, entry.projectRoot);
+    sourceMetadata.set(entry.project, {
+      projectRoot: entry.projectRoot,
+      displayName: entry.displayName,
+    });
   });
   await forEachCooperatively(conversationCatalog, (entry) => {
     if (excludedSummaryPaths?.has(entry.path)) return;
     const project = canonicalByPath.get(entry.path) ?? entry.project;
-    const group = groups.get(project) ?? { project, smt: 0, conversations: 0 };
+    const sourceProject = projectByPath.get(entry.path) ?? entry.project;
+    const source = sourceMetadata.get(sourceProject);
+    const projectedMetadata = registryProjection.projectMetadataByPath.get(entry.path);
+    const group = groups.get(project) ?? {
+      project,
+      displayName: projectedMetadata?.displayName ?? source?.displayName ?? entry.projectName,
+      smt: 0,
+      conversations: 0,
+    };
     group.smt = Math.max(group.smt, entry.mtime);
     group.conversations += 1;
-    const sourceProject = projectByPath.get(entry.path) ?? entry.project;
-    const projectRoot = sourceRoots.get(sourceProject);
+    const projectRoot = projectedMetadata?.projectRoot ?? source?.projectRoot;
     if (!group.projectRoot && projectRoot) group.projectRoot = projectRoot;
     groups.set(project, group);
   });
@@ -352,6 +365,8 @@ async function entriesFromRaw(
       root: entry.rootName,
       name: path.relative(entry.root, entry.path),
       project: projectByPath?.get(entry.path) ?? meta.project,
+      projectName: meta.projectName,
+      projectUnresolved: meta.projectUnresolved,
       worktree: meta.worktree,
       cwd: meta.cwd,
       sessionStartedAt: meta.sessionStartedAt,

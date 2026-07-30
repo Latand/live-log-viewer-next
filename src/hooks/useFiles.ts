@@ -36,6 +36,8 @@ export interface FilesData {
   /** Successful request URL that produced `files`; used for scope-aware effects. */
   requestScope: string | null;
   projectCatalog: ProjectCatalogEntry[];
+  projectAliases: Record<string, string>;
+  projectDisplayNames: Record<string, string>;
   projectCwds: Record<string, string>;
   flows: Flow[];
   pipelines: Pipeline[];
@@ -56,7 +58,7 @@ export interface FilesData {
 }
 
 const HEALTHY_SYSTEM = { tmux: { status: "healthy" as const } };
-const EMPTY: FilesData = { files: [], pinOverlayPaths: [], requestScope: null, projectCatalog: [], projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, launchRoutes: {}, loaded: false, catalogFailures: 0 };
+const EMPTY: FilesData = { files: [], pinOverlayPaths: [], requestScope: null, projectCatalog: [], projectAliases: {}, projectDisplayNames: {}, projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, launchRoutes: {}, loaded: false, catalogFailures: 0 };
 
 export function filesApiUrl(_project?: string | null, pinnedPath?: string | null): string {
   const params: string[] = [];
@@ -115,13 +117,15 @@ function patchRows<T>(previous: readonly T[], incoming: readonly T[], keyOf: (va
 
 function parsedFilesData(parsed: FilesResponse | FileEntry[], requestScope: string): FilesData {
   if (Array.isArray(parsed)) {
-    return { files: parsed, pinOverlayPaths: [], requestScope, projectCatalog: [], projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, launchRoutes: {}, loaded: true, catalogFailures: 0 };
+    return { files: parsed, pinOverlayPaths: [], requestScope, projectCatalog: [], projectAliases: {}, projectDisplayNames: {}, projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, launchRoutes: {}, loaded: true, catalogFailures: 0 };
   }
   return {
     files: parsed.files ?? [],
     pinOverlayPaths: parsed.pinOverlayPaths ?? [],
     requestScope,
     projectCatalog: parsed.projectCatalog ?? [],
+    projectAliases: parsed.projectAliases ?? {},
+    projectDisplayNames: parsed.projectDisplayNames ?? {},
     projectCwds: parsed.projectCwds ?? {},
     flows: parsed.flows ?? [],
     pipelines: parsed.pipelines ?? [],
@@ -141,6 +145,12 @@ function patchFilesData(previous: FilesData, incoming: FilesData): FilesData {
     ...incoming,
     files: patchRows(previous.files, incoming.files, (file) => file.path),
     projectCatalog: patchRows(previous.projectCatalog, incoming.projectCatalog, (entry) => entry.project),
+    projectAliases: equalValue(previous.projectAliases, incoming.projectAliases)
+      ? previous.projectAliases
+      : incoming.projectAliases,
+    projectDisplayNames: equalValue(previous.projectDisplayNames, incoming.projectDisplayNames)
+      ? previous.projectDisplayNames
+      : incoming.projectDisplayNames,
     projectCwds: equalValue(previous.projectCwds, incoming.projectCwds) ? previous.projectCwds : incoming.projectCwds,
     flows: patchRows(previous.flows, incoming.flows, (flow) => flow.id),
     pipelines: patchRows(previous.pipelines, incoming.pipelines, (pipeline) => pipeline.id),

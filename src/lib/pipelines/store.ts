@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
+import { canonicalProject } from "@/lib/projects/aliases";
 import { isEngineEffort } from "@/lib/agent/efforts";
 import { normalizeClaudeLaunchModel } from "@/lib/agent/models";
 import { MAX_SCAFFOLD_LENGTH } from "@/lib/roles/store";
@@ -421,6 +422,7 @@ export function loadPipelines(): Pipeline[] {
   if (!records.every(isPipeline)) throw new PipelineStoreError("pipeline registry contains malformed records");
   return records.map((pipeline) => ({
     ...pipeline,
+    project: canonicalProject(pipeline.project),
     taskIds: [...pipeline.taskIds],
     creationIntent: pipeline.creationIntent ? { ...pipeline.creationIntent } : undefined,
     spec: typeof pipeline.spec === "string" ? pipeline.spec : undefined,

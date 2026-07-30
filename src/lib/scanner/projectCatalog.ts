@@ -5,6 +5,13 @@ import path from "node:path";
 import { migrateBoardProjects } from "@/lib/board/store";
 import { statePath } from "@/lib/configDir";
 import { forEachCooperatively, mapCooperatively } from "@/lib/cooperative";
+import {
+  durableProjectAliasCandidates,
+  persistProjectAliases,
+  projectAliasesCanAccept,
+  type ProjectAliasRegistration,
+} from "@/lib/projects/aliases";
+import { displayNameFromProjectIdentity } from "@/lib/projects/identity";
 
 import type { ProjectCatalogEntry } from "../types";
 import { replaceConversationCatalog, type ConversationCatalogEntry } from "./conversationCatalog";
@@ -20,7 +27,7 @@ import { PROJECT_RESOLUTION_VERSION, projectResolutionStateKey } from "./project
 /** Project-summary semantic version. Bumped to 3 for issue #339 so a restart
     re-derives engine-native subagent titles and never replays a pre-#339
     generic title or a phantom bookkeeping card. */
-const PROJECT_SUMMARY_VERSION = 3 as const;
+const PROJECT_SUMMARY_VERSION = 4 as const;
 
 type CachedProjectFile = {
   summaryVersion?: typeof PROJECT_SUMMARY_VERSION;
@@ -32,6 +39,8 @@ type CachedProjectFile = {
   sidecarMtimeMs?: number | null;
   stateKey: string;
   project: string;
+  projectName?: string;
+  projectUnresolved?: true;
   projectRoot?: string | null;
   kind: string;
   session: boolean;
@@ -103,6 +112,8 @@ function readState(): ProjectCatalogState {
         typeof file.mtimeMs !== "number" ||
         typeof file.stateKey !== "string" ||
         typeof file.project !== "string" ||
+        (file.projectName !== undefined && typeof file.projectName !== "string") ||
+        (file.projectUnresolved !== undefined && file.projectUnresolved !== true) ||
         (file.projectRoot !== undefined && file.projectRoot !== null && typeof file.projectRoot !== "string") ||
         typeof file.kind !== "string"
       ) {
@@ -126,6 +137,7 @@ function readState(): ProjectCatalogState {
         : file.sidecarMtimeMs === null ? null : undefined;
       const summaryComplete = file.summaryVersion === PROJECT_SUMMARY_VERSION
         && typeof file.title === "string"
+        && typeof file.projectName === "string"
         && engine !== undefined
         && fmt !== undefined
         && cwd !== undefined
@@ -149,6 +161,10 @@ function readState(): ProjectCatalogState {
         sidecarMtimeMs,
         stateKey: file.stateKey,
         project: file.project,
+        projectName: typeof file.projectName === "string"
+          ? file.projectName
+          : displayNameFromProjectIdentity(file.project),
+        projectUnresolved: file.projectUnresolved === true ? true : undefined,
         projectRoot: typeof file.projectRoot === "string" ? file.projectRoot : file.projectRoot === null ? null : undefined,
         kind: file.kind,
         session: isConversation(file.rootName, file.kind),
@@ -239,6 +255,8 @@ function storeCachedFile(state: ProjectCatalogState, file: ProjectCatalogFile): 
     sidecarMtimeMs: file.sidecarMtimeMs,
     stateKey: file.stateKey,
     project: file.project,
+    projectName: file.projectName,
+    projectUnresolved: file.projectUnresolved,
     projectRoot: file.projectRoot,
     kind: file.kind,
     session: file.session,
@@ -269,6 +287,8 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
   )) {
     const description = reprojectFileDescription(raw.rootName, raw.root, raw.path, {
       project: cached.project,
+      projectName: cached.projectName ?? displayNameFromProjectIdentity(cached.project),
+      projectUnresolved: cached.projectUnresolved,
       worktree: cached.worktree,
       cwd: cached.cwd ?? undefined,
       sessionStartedAt: cached.sessionStartedAt,
@@ -285,6 +305,8 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
       path: raw.path,
       stateKey,
       project: description.project,
+      projectName: description.projectName,
+      projectUnresolved: description.projectUnresolved,
       projectRoot: description.projectRoot ?? null,
       worktree: description.worktree,
       cwd: description.cwd,
@@ -323,6 +345,10 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
         sidecarMtimeMs: identity.sidecarMtimeMs,
         path: raw.path,
         project: refreshProjectMetadata ? meta.project || "other" : cached.project,
+        projectName: refreshProjectMetadata
+          ? meta.projectName
+          : cached.projectName ?? displayNameFromProjectIdentity(cached.project),
+        projectUnresolved: refreshProjectMetadata ? meta.projectUnresolved : cached.projectUnresolved,
         projectRoot: refreshProjectMetadata ? meta.projectRoot ?? null : cached.projectRoot,
         kind: refreshProjectMetadata ? meta.kind : cached.kind,
         session: isConversation(raw.rootName, refreshProjectMetadata ? meta.kind : cached.kind),
@@ -365,6 +391,8 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
     sidecarMtimeMs: identity.sidecarMtimeMs,
     stateKey,
     project: prior?.project ?? (meta.project || "other"),
+    projectName: prior?.projectName ?? meta.projectName,
+    projectUnresolved: prior?.projectUnresolved ?? meta.projectUnresolved,
     projectRoot: prior ? prior.projectRoot ?? null : meta.projectRoot ?? null,
     kind: meta.kind,
     session: isConversation(raw.rootName, meta.kind),
@@ -387,14 +415,17 @@ function claudeSlug(raw: RawEntry): string | null {
   return path.relative(raw.root, raw.path).split(path.sep)[0] || null;
 }
 
-function unambiguousMigrations(
+function migrationPlan(
   changes: ReadonlyMap<string, ReadonlySet<string>>,
   groups: ReadonlyMap<string, ProjectCatalogEntry>,
-): Map<string, string> {
+): { migrations: Map<string, string>; conflicts: string[] } {
   const migrations = new Map<string, string>();
+  const conflicts: string[] = [];
   for (const [source, targets] of changes) {
-    if ((groups.get(source)?.conversations ?? 0) > 0) continue;
-    if (targets.size !== 1) continue;
+    if (targets.size !== 1) {
+      conflicts.push(source);
+      continue;
+    }
     let target = targets.values().next().value;
     const seen = new Set([source]);
     while (target && (groups.get(target)?.conversations ?? 0) === 0) {
@@ -409,7 +440,7 @@ function unambiguousMigrations(
     }
     if (target && target !== source && (groups.get(target)?.conversations ?? 0) > 0) migrations.set(source, target);
   }
-  return migrations;
+  return { migrations, conflicts };
 }
 
 export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
@@ -462,6 +493,8 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
       sidecarMtimeMs: file.sidecarMtimeMs,
       stateKey: file.stateKey,
       project: file.project,
+      projectName: file.projectName,
+      projectUnresolved: file.projectUnresolved,
       projectRoot: file.projectRoot,
       kind: file.kind,
       session: file.session,
@@ -484,7 +517,12 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
     projectByPath.set(file.path, project);
     let group = groups.get(project);
     if (!group) {
-      group = { project, smt: 0, conversations: 0 };
+      group = {
+        project,
+        displayName: file.projectName ?? displayNameFromProjectIdentity(project),
+        smt: 0,
+        conversations: 0,
+      };
       groups.set(project, group);
     }
     group.smt = Math.max(group.smt, file.mtimeMs / 1000);
@@ -514,6 +552,8 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
   await forEachCooperatively(files, (file, index) => {
     summaryByPath.set(file.path, {
       project: file.project || "other",
+      projectName: file.projectName ?? displayNameFromProjectIdentity(file.project || "other"),
+      projectUnresolved: file.projectUnresolved,
       worktree: file.worktree,
       cwd: file.cwd ?? undefined,
       sessionStartedAt: file.sessionStartedAt,
@@ -531,6 +571,8 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
       root: file.rootName,
       name: path.relative(raw[index]!.root, file.path),
       project: file.project || "other",
+      projectName: file.projectName,
+      projectUnresolved: file.projectUnresolved,
       worktree: file.worktree,
       title: file.title,
       firstPrompt: "",
@@ -549,7 +591,27 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
     let boardHealed = true;
     if (options.persist !== false) {
       try {
-        boardHealed = migrateBoardProjects(unambiguousMigrations(changes, groups));
+        const plan = migrationPlan(changes, groups);
+        if (plan.conflicts.length > 0) throw new Error("ambiguous catalog project identity");
+        const migrations = plan.migrations;
+        const registrations: ProjectAliasRegistration[] = [...migrations].map(([source, target]) => ({
+          source,
+          target,
+          displayName: groups.get(target)?.displayName ?? displayNameFromProjectIdentity(target),
+        }));
+        const durable = durableProjectAliasCandidates();
+        if (durable.conflicts.length > 0) throw new Error("ambiguous durable project identity");
+        for (const registration of durable.registrations) {
+          const held = migrations.get(registration.source);
+          if (held && held !== registration.target) throw new Error("conflicting project migration");
+          migrations.set(registration.source, registration.target);
+          registrations.push(registration);
+        }
+        boardHealed = projectAliasesCanAccept(registrations);
+        if (boardHealed) boardHealed = migrateBoardProjects(migrations);
+        if (boardHealed) {
+          boardHealed = persistProjectAliases(registrations);
+        }
       } catch {
         boardHealed = false;
       }

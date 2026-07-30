@@ -97,6 +97,10 @@ export interface FileEntry {
   /** Path relative to its root. */
   name: string;
   project: string;
+  /** Human repository label carried separately from the stable project key. */
+  projectName?: string;
+  /** The scanner could not prove a repository identity for this entry. */
+  projectUnresolved?: true;
   /** Durable conversation-level project authority (issue #315): explicit
       operator spawn intent or a completed relocation. When present, `project`
       was resolved from it and derived-attribution overlays must not regroup
@@ -314,6 +318,8 @@ export interface ConversationMigration {
 
 export interface ProjectCatalogEntry {
   project: string;
+  /** Human repository label; grouping and routing continue to use `project`. */
+  displayName?: string;
   /** Canonical repository root derived from every conversation in the full scan. */
   projectRoot?: string;
   /** GitHub `owner/repo` of the projectRoot's origin remote, cached server-side;
@@ -331,6 +337,10 @@ export interface FilesResponse {
   /** Rows added only to resolve the current deep-link pin, including closure. */
   pinOverlayPaths?: string[];
   projectCatalog?: ProjectCatalogEntry[];
+  /** Legacy project key to stable repository identity aliases. */
+  projectAliases?: Record<string, string>;
+  /** Stable repository identity to human display label. */
+  projectDisplayNames?: Record<string, string>;
   /** Existing local repository fallback for projects whose conversations lack cwd metadata. */
   projectCwds?: Record<string, string>;
   flows: Flow[];

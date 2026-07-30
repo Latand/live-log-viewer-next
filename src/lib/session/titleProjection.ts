@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { agentRegistry, normalizeRegistry, RegistryReadError } from "@/lib/agent/registry";
 import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { statePath } from "@/lib/configDir";
+import { projectInfoFromCwd } from "@/lib/scanner/describe";
 import type { FileEntry } from "@/lib/types";
 
 import { resolveProjectAttribution } from "./projectResolution";
@@ -20,6 +21,7 @@ interface RegistryProjection {
   aliasesByCanonical: Map<string, string[]>;
   ownedPathsByConversation: Map<string, string[]>;
   projectByPath: Map<string, string>;
+  projectMetadataByPath: Map<string, { displayName: string; projectRoot?: string; unresolved?: true }>;
   archivedPaths: Set<string>;
 }
 
@@ -52,6 +54,7 @@ function projectRegistrySnapshot(snapshot: RegistrySnapshot, signature: string):
   const aliasesByCanonical = new Map<string, string[]>();
   const ownedPathsByConversation = new Map<string, string[]>();
   const projectByPath = new Map<string, string>();
+  const projectMetadataByPath = new Map<string, { displayName: string; projectRoot?: string; unresolved?: true }>();
   const archivedPaths = new Set<string>();
   for (const conversation of Object.values(snapshot.conversations)) {
     const owned = [...conversation.generations.map((generation) => generation.path), ...conversation.continuityPaths];
@@ -64,7 +67,17 @@ function projectRegistrySnapshot(snapshot: RegistrySnapshot, signature: string):
       cwd: latest.launchProfile.cwd,
       launchProfileProject: latest.launchProfile.project,
     });
-    if (project) projectByPath.set(latest.path, project);
+    if (project) {
+      projectByPath.set(latest.path, project);
+      const cwdInfo = latest.launchProfile.cwd ? projectInfoFromCwd(latest.launchProfile.cwd) : null;
+      if (cwdInfo?.project === project) {
+        projectMetadataByPath.set(latest.path, {
+          displayName: cwdInfo.displayName,
+          ...(cwdInfo.repo ? { projectRoot: cwdInfo.repo } : {}),
+          ...(cwdInfo.unresolved ? { unresolved: true as const } : {}),
+        });
+      }
+    }
     for (const generation of conversation.generations) {
       if (generation.path !== latest.path) archivedPaths.add(generation.path);
     }
@@ -85,6 +98,7 @@ function projectRegistrySnapshot(snapshot: RegistrySnapshot, signature: string):
     aliasesByCanonical,
     ownedPathsByConversation,
     projectByPath,
+    projectMetadataByPath,
     archivedPaths,
   };
   return projection;
@@ -180,6 +194,12 @@ function sessionTitleProjector(
         launchProfileProject: latest.launchProfile.project,
         fallbackProject: entry.project,
       }).project ?? entry.project;
+      const projectMetadata = projection?.projectMetadataByPath.get(entry.path);
+      if (projectMetadata) {
+        entry.projectName = projectMetadata.displayName;
+        entry.projectRoot = projectMetadata.projectRoot ?? entry.projectRoot;
+        entry.projectUnresolved = projectMetadata.unresolved;
+      }
       if (conversation?.projectOwnership) entry.projectOwnership = { ...conversation.projectOwnership };
     }
     if (includeRenameEligibility) entry.renamable = isRenameableSessionEntry(entry);
@@ -221,9 +241,14 @@ export function overlaySessionProjects(entries: FileEntry[]): void {
  * free of another registry parse. */
 export function sessionProjectProjection(surfaceUnexpectedError = false): {
   projectByPath: ReadonlyMap<string, string>;
+  projectMetadataByPath: ReadonlyMap<string, { displayName: string; projectRoot?: string; unresolved?: true }>;
   archivedPaths: ReadonlySet<string>;
 } {
   const projection = registryProjection(agentRegistry(), surfaceUnexpectedError);
-  if (!projection) return { projectByPath: new Map(), archivedPaths: new Set() };
-  return { projectByPath: projection.projectByPath, archivedPaths: projection.archivedPaths };
+  if (!projection) return { projectByPath: new Map(), projectMetadataByPath: new Map(), archivedPaths: new Set() };
+  return {
+    projectByPath: projection.projectByPath,
+    projectMetadataByPath: projection.projectMetadataByPath,
+    archivedPaths: projection.archivedPaths,
+  };
 }

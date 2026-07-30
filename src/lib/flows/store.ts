@@ -7,6 +7,7 @@ import { agentRegistry, type ConversationLookup } from "@/lib/agent/registry";
 import { forEachCooperatively } from "@/lib/cooperative";
 import { withFileTransaction, withFileTransactionSync } from "@/lib/state/fileTransaction";
 import { ROLE_DEFAULTS } from "@/lib/roles/defaults";
+import { canonicalProject } from "@/lib/projects/aliases";
 import { resolveRole } from "@/lib/roles/registry";
 import { loadRoleDefinitionsOrDefaults } from "@/lib/roles/store";
 import type { RoleDefinition } from "@/lib/roles/types";
@@ -174,6 +175,7 @@ export function loadFlows(): Flow[] {
   const flows = Array.isArray(raw?.flows) ? raw.flows.filter(isFlow) : [];
   return flows.map((flow) => ({
     ...flow,
+    project: canonicalProject(flow.project),
     revision: flow.revision ?? 0,
     targetSha: flow.targetSha ?? null,
     implementerConversationId: flow.implementerConversationId ?? null,

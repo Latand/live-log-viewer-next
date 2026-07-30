@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/Badge";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { projectDisplayName, projectMatchesQuery } from "@/lib/displayNames";
+import { projectMatchesQuery } from "@/lib/displayNames";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -24,6 +24,7 @@ import { fmtAge } from "./utils";
 interface Props {
   files: FileEntry[];
   projectCatalog: ProjectCatalogEntry[];
+  projectDisplayNames?: Readonly<Record<string, string>>;
   pipelines: Pipeline[];
   /** Active workflows: their stamped projects stay listed even while no
       transcript of theirs exists yet. */
@@ -41,14 +42,17 @@ interface Props {
   onSelect: (project: string) => void;
 }
 
-export function ProjectRail({ files, projectCatalog, pipelines, workflows, archivedProjects, selected, loaded, catalogFailures = 0, now, onSelect }: Props) {
+export function ProjectRail({ files, projectCatalog, projectDisplayNames = {}, pipelines, workflows, archivedProjects, selected, loaded, catalogFailures = 0, now, onSelect }: Props) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
   const [query, setQuery] = useState("");
   const [archiveOpen, setArchiveOpen] = useState(false);
-  const summaries = useMemo(() => buildProjectSummaries(files, now, workflows, projectCatalog, pipelines), [files, now, workflows, projectCatalog, pipelines]);
+  const summaries = useMemo(
+    () => buildProjectSummaries(files, now, workflows, projectCatalog, pipelines, projectDisplayNames),
+    [files, now, workflows, projectCatalog, pipelines, projectDisplayNames],
+  );
   const visible = useMemo(() => {
-    return summaries.filter((summary) => projectMatchesQuery(summary.project, query));
+    return summaries.filter((summary) => projectMatchesQuery(summary.project, query, summary.displayName));
   }, [summaries, query]);
   const activeRows = useMemo(() => visible.filter((summary) => !archivedProjects.has(summary.project)), [visible, archivedProjects]);
   const archivedRows = useMemo(() => visible.filter((summary) => archivedProjects.has(summary.project)), [visible, archivedProjects]);
@@ -128,7 +132,7 @@ export function ProjectRail({ files, projectCatalog, pipelines, workflows, archi
           {activeRows.map((summary) => (
             <div key={summary.project} data-flip-key={summary.project}>
               <RailRow
-                label={projectDisplayName(summary.project)}
+                label={summary.displayName}
                 live={summary.liveCount}
                 attention={summary.attentionCount}
                 total={summary.conversations}
@@ -161,7 +165,7 @@ export function ProjectRail({ files, projectCatalog, pipelines, workflows, archi
               ? archivedRows.map((summary) => (
                   <RailRow
                     key={summary.project}
-                    label={projectDisplayName(summary.project)}
+                    label={summary.displayName}
                     live={summary.liveCount}
                     attention={summary.attentionCount}
                     total={summary.conversations}

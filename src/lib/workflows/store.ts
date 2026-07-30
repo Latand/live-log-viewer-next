@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
+import { canonicalProject } from "@/lib/projects/aliases";
 import { agentRegistry, type ConversationLookup } from "@/lib/agent/registry";
 import { forEachCooperatively } from "@/lib/cooperative";
 import type { RoleConfig } from "@/lib/flows/types";
@@ -299,7 +300,7 @@ export function loadWorkflows(): Workflow[] {
   const workflows = Array.isArray(raw?.workflows) ? raw.workflows.filter(isWorkflow) : [];
   return workflows.map((wf) => ({
     ...wf,
-    project: wf.project ?? "",
+    project: canonicalProject(wf.project ?? ""),
     pausedState: wf.pausedState ?? null,
     setupPid: wf.setupPid ?? null,
     srcPath: wf.srcPath ?? null,

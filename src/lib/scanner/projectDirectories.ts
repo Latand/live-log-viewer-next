@@ -1,70 +1,117 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
-import { projectForCwd, projectRootForCwd } from "./describe";
-import { globalCache } from "./caches";
+import { stateDir } from "@/lib/configDir";
 
-const PROJECT_DIR_ROOTS = ["Projects", path.join(".agents", "tools")];
+import { globalCache } from "./caches";
+import { projectForCwd, projectRootForCwd } from "./describe";
+
+const PROJECT_STATE_FILES = [
+  "project-catalog.json",
+  "flows.json",
+  "pipelines.json",
+  "workflows.json",
+  "worktree-map.json",
+] as const;
+const PROJECT_DIRECTORY_CACHE_MS = 10_000;
 
 type ProjectDirectory = { cwd: string; project: string; projectRoot: string };
 type ProjectDirectoryCacheEntry = {
   directories: ProjectDirectory[];
-  rootsIdentity: string;
+  expiresAt: number;
+  stateIdentity: string;
 };
 
-const projectDirectoryCache = globalCache<ProjectDirectoryCacheEntry>("project-directories-v1");
+const projectDirectoryCache = globalCache<ProjectDirectoryCacheEntry>("project-directories-v2");
 
-function projectDirectoryRoots(): string[] {
-  return PROJECT_DIR_ROOTS.map((rel) => path.join(os.homedir(), rel));
-}
-
-/** A parent directory's metadata changes when a direct child is added,
-    removed, or renamed. Reading two root stats keeps ordinary polling cheap
-    while still discovering newly created project directories immediately. */
-function projectDirectoryRootsIdentity(roots: string[]): string {
-  return roots.map((root) => {
+function projectStateIdentity(directory: string): string {
+  return PROJECT_STATE_FILES.map((name) => {
+    const filename = path.join(directory, name);
     try {
-      const stat = fs.statSync(root);
-      return `${root}:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+      const stat = fs.statSync(filename);
+      return `${name}:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
     } catch {
-      return `${root}:missing`;
+      return `${name}:missing`;
     }
   }).join("|");
 }
 
+function readObject(filename: string): Record<string, unknown> | null {
+  try {
+    const value = JSON.parse(fs.readFileSync(filename, "utf8")) as unknown;
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function recordPaths(
+  value: unknown,
+  fields: readonly string[],
+  paths: Set<string>,
+): void {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const record = value as Record<string, unknown>;
+  for (const field of fields) {
+    const candidate = record[field];
+    if (typeof candidate === "string" && candidate.trim()) paths.add(candidate);
+  }
+}
+
+function projectPathsFromState(directory: string): string[] {
+  const paths = new Set<string>();
+  const catalog = readObject(path.join(directory, "project-catalog.json"))?.files;
+  if (catalog && typeof catalog === "object" && !Array.isArray(catalog)) {
+    for (const value of Object.values(catalog)) recordPaths(value, ["cwd", "projectRoot"], paths);
+  }
+  for (const [filename, collection, fields] of [
+    ["flows.json", "flows", ["cwd"]],
+    ["pipelines.json", "pipelines", ["repoDir", "worktreeDir"]],
+    ["workflows.json", "workflows", ["repoDir", "worktreeDir"]],
+  ] as const) {
+    const values = readObject(path.join(directory, filename))?.[collection];
+    if (!Array.isArray(values)) continue;
+    for (const value of values) recordPaths(value, fields, paths);
+  }
+  const worktrees = readObject(path.join(directory, "worktree-map.json"));
+  if (worktrees) {
+    for (const [cwd, value] of Object.entries(worktrees)) {
+      paths.add(cwd);
+      recordPaths(value, ["repo"], paths);
+    }
+  }
+  return [...paths];
+}
+
 function localProjectDirectories(): ProjectDirectory[] {
-  const roots = projectDirectoryRoots();
-  const rootsIdentity = projectDirectoryRootsIdentity(roots);
-  const cacheKey = os.homedir();
-  const cached = projectDirectoryCache.get(cacheKey);
-  if (cached && cached.rootsIdentity === rootsIdentity) {
+  const directory = stateDir();
+  const stateIdentity = projectStateIdentity(directory);
+  const cached = projectDirectoryCache.get(directory);
+  if (cached && cached.expiresAt > Date.now() && cached.stateIdentity === stateIdentity) {
     return cached.directories;
   }
 
   const directories: ProjectDirectory[] = [];
-  for (const root of roots) {
-    let entries: string[];
+  const seen = new Set<string>();
+  for (const cwd of projectPathsFromState(directory)) {
     try {
-      entries = fs.readdirSync(root).sort();
+      if (!fs.statSync(cwd).isDirectory()) continue;
     } catch {
       continue;
     }
-    for (const name of entries) {
-      const cwd = path.join(root, name);
-      try {
-        if (!fs.statSync(cwd).isDirectory()) continue;
-      } catch {
-        continue;
-      }
-      const project = projectForCwd(cwd);
-      const projectRoot = projectRootForCwd(cwd);
-      if (project && projectRoot) directories.push({ cwd, project, projectRoot });
-    }
+    const project = projectForCwd(cwd);
+    const projectRoot = projectRootForCwd(cwd);
+    const key = project ? `${project}\0${cwd}` : "";
+    if (!project || !projectRoot || seen.has(key)) continue;
+    seen.add(key);
+    directories.push({ cwd, project, projectRoot });
   }
-  projectDirectoryCache.set(cacheKey, {
+  projectDirectoryCache.set(directory, {
     directories,
-    rootsIdentity,
+    expiresAt: Date.now() + PROJECT_DIRECTORY_CACHE_MS,
+    stateIdentity,
   });
   return directories;
 }

@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
+import { canonicalProject } from "@/lib/projects/aliases";
 
 import { type BoardCausalHistory, canonicalizeKeyRevisions, stampKeyRevisions } from "@/lib/board/keys";
 import { applyBoardMutations, type BoardMutationV1 } from "@/lib/board/mutations";
@@ -213,7 +214,7 @@ function withBoardWriteLock<T>(filePath: string, operation: () => T): T {
 }
 
 export function boardFor(project: string, filePath = boardFileForTests ?? BOARD_FILE): BoardProjectStateV1 {
-  return read(filePath).projects[project] ?? emptyBoard();
+  return read(filePath).projects[canonicalProject(project)] ?? emptyBoard();
 }
 export type BoardPatch = Partial<BoardProjectStateV1["prefs"]>;
 /* `applied` distinguishes a write that committed from one the reducer turned
@@ -270,11 +271,11 @@ function writeLatest(project: string, reduce: (current: BoardProjectStateV1) => 
 }
 
 export function patchBoard(project: string, baseRevision: number, patch: BoardPatch, filePath = boardFileForTests ?? BOARD_FILE): BoardWriteResult {
-  return writeReduced(project, baseRevision, (current) => applyLegacyPatch(current, patch), filePath);
+  return writeReduced(canonicalProject(project), baseRevision, (current) => applyLegacyPatch(current, patch), filePath);
 }
 
 export function mutateBoard(project: string, baseRevision: number, mutations: readonly BoardMutationV1[], filePath = boardFileForTests ?? BOARD_FILE): BoardWriteResult {
-  return writeReduced(project, baseRevision, (current) => applyBoardMutations(current, mutations), filePath);
+  return writeReduced(canonicalProject(project), baseRevision, (current) => applyBoardMutations(current, mutations), filePath);
 }
 
 export function remapBoardPaths(
@@ -283,7 +284,7 @@ export function remapBoardPaths(
   options: { provisionalManual?: readonly string[]; targetPlacementAuthoritative?: boolean; filePath?: string } = {},
 ): BoardProjectStateV1 {
   const filePath = options.filePath ?? boardFileForTests ?? BOARD_FILE;
-  return writeLatest(project, (current) => {
+  return writeLatest(canonicalProject(project), (current) => {
     if (pairs.length === 0 || pairs.every(({ from, to }) => current.pathAliases?.[from] === to)) return current;
     const provisionalManual = options.provisionalManual?.filter((pathname) => (
       current.pathAliases?.[pathname] === undefined && current.prefs.manual.includes(pathname)
