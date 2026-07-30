@@ -11,7 +11,7 @@ import { withFileTransaction, withFileTransactionSync } from "@/lib/state/fileTr
 import type { BoardTask } from "@/lib/tasks/types";
 
 import { MAX_FAIL_EDGE_ROUNDS, MAX_PIPELINE_STAGES } from "./limits";
-import type { EffectivePipelineRole, Pipeline, PipelineCreationIntent, PipelineEdgeActivation, PipelineStage, PipelineUnconfirmedHost } from "./types";
+import type { EffectivePipelineRole, Pipeline, PipelineCreationIntent, PipelineEdgeActivation, PipelineStage, PipelineTerminalReap, PipelineUnconfirmedHost } from "./types";
 import { stageVerdictFrom } from "./verdict";
 
 export const PIPELINES_SCHEMA_VERSION = 4;
@@ -188,6 +188,15 @@ function isUnconfirmedHost(value: unknown): value is PipelineUnconfirmedHost {
     && typeof host.at === "string";
 }
 
+function isTerminalReap(value: unknown): value is PipelineTerminalReap {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const reap = value as Partial<PipelineTerminalReap>;
+  return Number.isInteger(reap.rounds) && (reap.rounds as number) >= 0
+    && Number.isInteger(reap.stopped) && (reap.stopped as number) >= 0
+    && typeof reap.lastAt === "string"
+    && isNullableString(reap.settledAt);
+}
+
 function isStage(value: unknown): value is PipelineStage {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const stage = value as Partial<PipelineStage>;
@@ -302,6 +311,7 @@ function isPipeline(value: unknown): value is Pipeline {
     (pipeline.hiddenAt === undefined || isNullableString(pipeline.hiddenAt)) &&
     (pipeline.unconfirmedHosts === undefined
       || (Array.isArray(pipeline.unconfirmedHosts) && pipeline.unconfirmedHosts.every(isUnconfirmedHost))) &&
+    (pipeline.terminalReap === undefined || isTerminalReap(pipeline.terminalReap)) &&
     (pipeline.restored === undefined || typeof pipeline.restored === "boolean") &&
     (pipeline.pos === undefined || (
       typeof pipeline.pos === "object" && pipeline.pos !== null &&
@@ -446,6 +456,7 @@ function reviveLoadedPipeline(pipeline: Pipeline): Pipeline {
     unconfirmedHosts: pipeline.unconfirmedHosts?.length
       ? pipeline.unconfirmedHosts.map((host) => ({ ...host }))
       : undefined,
+    terminalReap: pipeline.terminalReap ? { ...pipeline.terminalReap } : undefined,
     restored: undefined,
     stages: pipeline.stages.map((stage) => ({ ...stage, onFail: stage.onFail ?? null })),
     cursor: pipeline.cursor
