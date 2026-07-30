@@ -979,7 +979,7 @@ function addStructuredRestartConversation(
   input: {
     engine?: "codex" | "claude";
     sessionId: string;
-    status: "live" | "dead" | "unhosted";
+    status: "live" | "idle" | "dead" | "unhosted";
     turn: "busy" | "terminal" | "unknown";
     activeTurnRef?: string | null;
     transcriptRecords?: Record<string, unknown>[];
@@ -1154,6 +1154,26 @@ test("unknown Codex durable state continues from runtime-running evidence", asyn
   expect(ledger.writes).toEqual([expect.objectContaining({
     id: `recovery-continuation-${sessionId}-3`,
   })]);
+
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+  journal.close();
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("a stale runtime-running projection cannot revive an idle registry host", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-stale-running-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "10000000-0000-0000-0000-000000000001";
+  const { artifactPath, conversation } = addStructuredRestartConversation(registry, directory, {
+    sessionId,
+    status: "idle",
+    turn: "busy",
+    activeTurnRef: null,
+  });
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  projectHostedRestart(journal, "codex", conversation.id, sessionId, directory, artifactPath, "running");
+
+  expect(await startupAdoptionAttempts(registry, runtimeJournalClient(journal))).toEqual([]);
 
   await bindStructuredDeliveryQueue([], { registry, client: null });
   journal.close();

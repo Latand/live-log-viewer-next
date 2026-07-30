@@ -8,7 +8,7 @@ import { primeTranscriptTurnEvidence } from "@/lib/scanner/activity";
 import { globalCache } from "@/lib/scanner/caches";
 import { primePersistedLineageFacts } from "@/lib/scanner/links";
 import { QUESTION_CACHE_NAME } from "@/lib/scanner/questions";
-import { coordinatedFileScan, resetFileScanCoordinatorForTests } from "@/lib/scanner/scanCoordinator";
+import { coordinatedFileScan, resetFileScanCoordinatorForTests, runFileCatalogScan } from "@/lib/scanner/scanCoordinator";
 import type { FileEntry, PendingQuestion } from "@/lib/types";
 import type { TurnState } from "@/lib/accounts/migration/contracts";
 
@@ -388,10 +388,8 @@ function fileScanRefreshPromise(
      merge into the single trailing generation instead (#287). */
   const join = reason === "ordinary" || reason === "cold";
   return instrumentFileScan(slot, generation, reason, async () => {
-    const snapshot = await coordinatedFileScan({ fresh, join }, (intent) => listFilesWithProjectCatalog(undefined, {
-      persist: intent.persist,
+    const snapshot = await coordinatedFileScan({ fresh, join }, (intent) => runFileCatalogScan(intent, {
       persistIndex: process.env.LLV_RESOURCE_OBSERVATION_WORKER !== "1",
-      ...(intent.fresh ? { fresh: true } : {}),
       ...(onResourceSnapshot ? { onResourceSnapshot, resourceBaseline: slot.snapshot } : {}),
     }));
     if (!snapshot.complete) throw new Error("filesystem scan incomplete");
@@ -468,11 +466,9 @@ function beginPinnedFileScanRefresh(
        fences, never adopts a running scan, and never merges with other pending
        callers (their runners cannot reproduce the pin overlay); it still holds
        the process-wide single-generation lease through the coordinator (#287). */
-    const pinnedSnapshot = await coordinatedFileScan({ fresh, join: false, exclusive: true }, (intent) => listFilesWithProjectCatalog(undefined, {
-      persist: intent.persist,
+    const pinnedSnapshot = await coordinatedFileScan({ fresh, join: false, exclusive: true }, (intent) => runFileCatalogScan(intent, {
       persistIndex: process.env.LLV_RESOURCE_OBSERVATION_WORKER !== "1",
       pin: pinnedPath,
-      ...(intent.fresh ? { fresh: true } : {}),
       onResourceSnapshot: publish,
       resourceBaseline: slot.snapshot,
     }));

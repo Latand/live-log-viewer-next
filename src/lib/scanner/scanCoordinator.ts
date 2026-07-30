@@ -1,4 +1,6 @@
-import { listFilesWithProjectCatalog, type FileCatalogScan } from "@/lib/scanner";
+import { listFilesWithProjectCatalog, type FileCatalogScan, type FileScanOptions } from "@/lib/scanner";
+
+import { collectFileScanInWorker, fileScanWorkerEnabled } from "./fileScanWorker";
 
 /**
  * Process-wide filesystem scan coordination (#287).
@@ -84,10 +86,21 @@ function covers(running: ResolvedScanIntent, wanted: ResolvedScanIntent): boolea
   return (running.persist || !wanted.persist) && (running.fresh || !wanted.fresh);
 }
 
-const defaultRunner: CoordinatedScanRunner = (intent) => listFilesWithProjectCatalog(undefined, {
-  persist: intent.persist,
-  ...(intent.fresh ? { fresh: true } : {}),
-});
+export function runFileCatalogScan(
+  intent: ResolvedScanIntent,
+  options: Omit<FileScanOptions, "persist" | "fresh"> = {},
+): Promise<FileCatalogScan> {
+  const scanOptions: FileScanOptions = {
+    ...options,
+    persist: intent.persist,
+    ...(intent.fresh ? { fresh: true } : {}),
+  };
+  if (!fileScanWorkerEnabled()) return listFilesWithProjectCatalog(undefined, scanOptions);
+  const { onResourceSnapshot, ...serializable } = scanOptions;
+  return collectFileScanInWorker(serializable, onResourceSnapshot);
+}
+
+const defaultRunner: CoordinatedScanRunner = (intent) => runFileCatalogScan(intent);
 
 function startGeneration(
   state: CoordinatorState,
