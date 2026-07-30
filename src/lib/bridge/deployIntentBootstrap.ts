@@ -18,8 +18,8 @@ import { acceptDirectDeployIntent, type AcceptedDeployIntent } from "./deployInt
  *      `bridge_directive` call recorded in the ROOT session's transcript, so
  *      the thing being converted is an utterance the gateway actually relayed,
  *      attributed by the same identity chain production trusts;
- *   2. refuses a directive that does not read as a deploy ask, is older than
- *      the bounded bootstrap window, or has no designated seat to bind to;
+ *   2. refuses a directive older than the bounded bootstrap window, or one
+ *      with no designated seat to bind to;
  *   3. pins current remote main and records the existing-format single-use
  *      authorization (`recordDirectDeployIntent` — flagged so the gateway
  *      never drains it back at the operator);
@@ -33,12 +33,6 @@ import { acceptDirectDeployIntent, type AcceptedDeployIntent } from "./deployInt
 /** A directive older than this cannot bootstrap a deploy: a stale "deploy"
     resurfacing days later is exactly the drift the expiry model refuses. */
 export const DEPLOY_INTENT_BOOTSTRAP_MAX_AGE_MS = 24 * 60 * 60 * 1_000;
-
-/** Conservative deploy-ask recognizer over the RECORDED instruction (English
-    and the Ukrainian/Russian the operator actually speaks). An attributed
-    directive that does not match still refuses: being in the root transcript
-    proves who said it, not that it authorized a deployment. */
-const DEPLOY_ASK = /deploy|redeploy|roll\s?-?out|ship\s?(it|this)|release\s?(it|this|now)|депло|розгор|развёр|развер|викат|выкат|реліз|релиз/i;
 
 interface TranscriptToolCall {
   name?: string;
@@ -133,10 +127,6 @@ export async function bootstrapDirectDeployIntent(
   }
 
   const instruction = typeof found.args.instruction === "string" ? found.args.instruction.trim() : "";
-  const asksDeploy = found.args.intent === "deploy" || (instruction !== "" && DEPLOY_ASK.test(instruction));
-  if (!asksDeploy) {
-    throw new DeployIntentBootstrapRefusal("directive_not_a_deploy_ask", "the recorded directive does not read as a deploy authorization; attribution proves who spoke, not that they authorized a deployment");
-  }
 
   const project = (typeof found.args.project === "string" && found.args.project.trim())
     || sources.rootProject();

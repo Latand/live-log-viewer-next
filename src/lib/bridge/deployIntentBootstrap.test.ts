@@ -23,9 +23,9 @@ import { drainBridgeReports, openBridgeChannel, readBridgeReportLog } from "./st
  *     and the root transcript on disk (the sources here contain no control
  *     surface at all), and the row it mints is consumed by the SAME
  *     production admission gate the old executor already runs;
- *  2. it refuses everything that is not the gateway's own recorded deploy
- *     relay — arbitrary prose, unattributed ids, non-deploy directives, stale
- *     directives — because attribution is the entire trust story.
+ *  2. it refuses everything that is not the gateway's own recorded relay —
+ *     arbitrary prose, unattributed ids, stale directives — because
+ *     attribution is the entire trust story.
  */
 
 const sandboxes: string[] = [];
@@ -119,14 +119,6 @@ test("an id the root transcript never relayed is refused as unattributed", async
   expect(readBridgeReportLog().reports).toEqual([]);
 });
 
-test("an attributed directive that is not a deploy ask converts to nothing", async () => {
-  const code = await refusal(bootstrapDirectDeployIntent("bridge_d_turn_7_0", sources({
-    calls: [directiveCall({ rootTurnId: "turn_7", utterance: 0, instruction: "start a reviewer on the auth branch" })],
-  })));
-  expect(code).toBe("directive_not_a_deploy_ask");
-  expect(readBridgeReportLog().reports).toEqual([]);
-});
-
 test("a directive outside the bootstrap window (or without a timestamp) is stale", async () => {
   expect(await refusal(bootstrapDirectDeployIntent("bridge_d_turn_42_0", sources({
     calls: [directiveCall({ rootTurnId: "turn_42", utterance: 0, instruction: "deploy" }, "2100-01-01T11:00:00Z")],
@@ -146,11 +138,4 @@ test("a directive with no designated seat for its project is refused", async () 
   expect(await refusal(bootstrapDirectDeployIntent("bridge_d_turn_42_0", sources({ seats: () => [] }))))
     .toBe("manager_not_designated");
   expect(readBridgeReportLog().reports).toEqual([]);
-});
-
-test("the Ukrainian deploy ask the operator actually speaks is recognized", async () => {
-  const intent = await bootstrapDirectDeployIntent("bridge_d_turn_8_0", sources({
-    calls: [directiveCall({ rootTurnId: "turn_8", utterance: 0, instruction: "задеплой в'ювер" })],
-  }));
-  expect(intent.sha).toBe(SHA);
 });

@@ -96,10 +96,10 @@ bun scripts/bootstrap-direct-deploy-intent.ts <deliveryId> [--execute]
   not from anything typed at the command) — so the thing converted is an
   utterance the gateway actually relayed, attributed by the identity chain
   production already trusts.
-- It refuses: a directive absent from the root transcript, one that does not
-  read as a deploy ask (attribution proves who spoke, not that they authorized
-  a deployment), one older than the 24-hour bootstrap window, and one with no
-  designated seat.
+- It refuses: a directive absent from the root transcript, one older than the
+  24-hour bootstrap window, and one with no designated seat. Attribution plus
+  the operator running the command themselves IS the authorization — no
+  second-guessing heuristics on top.
 - On acceptance it pins current remote main and records the existing-format
   single-use authorization via the same idempotent key the live path derives —
   a re-run replays the same authorization; a later replay of the same turn
