@@ -42,6 +42,7 @@ import { readResources } from "@/lib/resources";
 import { adoptLiveRootSession, conversationRole, liveRootSession, type RootSessionSource } from "@/lib/root/adopt";
 import { runtimeHostClient as directRuntimeHostClient } from "@/lib/runtime/client";
 import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
+import { ledgerDeployment, ledgerDeployments } from "@/lib/runtime/deploymentLedger";
 import { runtimeEventsEnabled as directRuntimeEventsEnabled } from "@/lib/runtime/flags";
 import { readSession } from "@/lib/session/reader";
 import { applyAssignmentPatches, createTask, patchTask, type CreateTaskInput, type PatchTaskInput } from "@/lib/tasks/commands";
@@ -76,6 +77,9 @@ export interface ViewerControlDependencies {
 }
 
 const VIEWER_CONTROL_URL = "http://127.0.0.1:8898";
+/* Well under the MCP health probe's own budget, so a control surface that cannot
+   answer degrades to the ledger long before the probe gives up (#790). */
+const CONTROL_READ_TIMEOUT_MS = 5_000;
 
 async function getViewerControl(pathname: string): Promise<Record<string, unknown>> {
   const baseUrl = process.env.LLV_VIEWER_CONTROL_URL?.trim() || VIEWER_CONTROL_URL;
@@ -85,6 +89,11 @@ async function getViewerControl(pathname: string): Promise<Record<string, unknow
       headers: {
         accept: "application/json",
       },
+      /* Unbounded here meant the post-promotion health probe hung for its whole
+         90-second budget instead of falling back: the promoted surface asks the
+         runtime host for a snapshot while that host is synchronously awaiting the
+         probe (#790). */
+      signal: AbortSignal.timeout(CONTROL_READ_TIMEOUT_MS),
     });
   } catch {
     throw new Error("Viewer control is unreachable");
@@ -1184,8 +1193,13 @@ async function operatorSnapshot(args: McpToolArgs, dependencies: ViewerMcpDomain
  * deployment was not found") and must keep its meaning.
  */
 function isUnservedControlRoute(error: unknown): boolean {
-  if (!(error instanceof McpToolRefusal)) return false;
-  return (error.details as { status?: unknown }).status === 405;
+  /* A refusal carrying a status means the surface answered, so its answer stands:
+     404 is "that deployment is absent", and 503 keeps the absent-versus-
+     unreachable plane distinction #777 established. Only two things mean this
+     reader cannot use the surface at all — a revision that never served the route
+     (405), and a transport failure or timeout, which arrives as a plain Error. */
+  if (error instanceof McpToolRefusal) return (error.details as { status?: unknown }).status === 405;
+  return true;
 }
 
 async function deploymentStatus(
@@ -1199,6 +1213,8 @@ async function deploymentStatus(
       `/api/runtime/deployments/${encodeURIComponent(deploymentId)}`,
     ).catch((error: unknown) => {
       if (!isUnservedControlRoute(error)) throw error;
+      const fromLedger = ledgerDeployment(deploymentId);
+      if (fromLedger !== null) return fromLedger ?? null;
       return legacyDeploymentRead((client) => client.readViewerDeployment(deploymentId));
     });
     if (!deployment) throw new Error("viewer deployment was not found");
@@ -1222,7 +1238,8 @@ async function deploymentStatus(
   const result = await readViewerControl(control, `/api/runtime/deployments?limit=${limit}`)
     .catch(async (error: unknown) => {
       if (!isUnservedControlRoute(error)) throw error;
-      const ledger = await legacyDeploymentRead(async (client) => (await client.snapshot()).deployments);
+      const fromLedger = ledgerDeployments(limit);
+      const ledger = fromLedger ?? await legacyDeploymentRead(async (client) => (await client.snapshot()).deployments);
       const deployments = ledger.slice(-limit);
       return { count: deployments.length, deployments };
     });

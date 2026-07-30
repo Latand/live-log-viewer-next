@@ -407,3 +407,37 @@ test("a null response body is classified by status instead of crashing the read"
     server.stop(true);
   }
 });
+
+/**
+ * Issue #790, the post-promotion deadlock. After promotion the new web surface
+ * serves the deployments route, and its handler asks the runtime host for a
+ * snapshot — while that same host is synchronously awaiting `verify-promoted`.
+ * A real deploy sat there for the full 90-second budget with no events and was
+ * rolled back. The read is bounded now and answers from the durable ledger the
+ * host writes, so it never waits on the writer.
+ */
+test("a control surface that never answers falls back instead of hanging the probe", async () => {
+  let released: (() => void) | null = null;
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    /* Accepts and never responds — the promoted surface blocked on the host. */
+    fetch: () => new Promise<Response>((resolve) => { released = () => resolve(new Response("{}")); }),
+  });
+  process.env.LLV_VIEWER_CONTROL_URL = server.url.origin;
+
+  const started = Date.now();
+  try {
+    await viewerMcpBindings().deployment_status({
+      clientRequestId: "deployment-hanging-control",
+      limit: 1,
+    }).catch(() => undefined);
+    /* The point is that it RETURNS — by ledger, by socket, or by refusal —
+       well inside the probe's budget rather than blocking until the deploy
+       times out. */
+    expect(Date.now() - started).toBeLessThan(15_000);
+  } finally {
+    released?.();
+    server.stop(true);
+  }
+}, 20_000);
