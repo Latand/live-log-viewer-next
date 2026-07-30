@@ -167,17 +167,9 @@ export class RuntimeHost {
         );
       } else if (request.method === "viewer-deployment-request") {
         if (!this.deployments) throw new Error("viewer deployments are disabled");
-        /* #691 §4: the proof is forwarded verbatim to admission, which is the one
-           checkpoint that verifies and spends it. A raw socket client that omits it
-           is refused there, exactly like a caller that came through the HTTP route
-           or the MCP binding. */
-        const bridgeProof = request.params?.bridgeProof;
         result = await this.deployments.requestViewerDeployment({
           revision: typeof request.params?.revision === "string" ? request.params.revision : undefined,
           idempotencyKey: String(request.params?.idempotencyKey ?? ""),
-          bridgeProof: bridgeProof && typeof bridgeProof === "object" && !Array.isArray(bridgeProof)
-            ? bridgeProof as { ref?: unknown; nonce?: unknown }
-            : undefined,
         });
       } else if (request.method === "viewer-deployment-read") {
         if (!this.deployments) throw new Error("viewer deployments are disabled");

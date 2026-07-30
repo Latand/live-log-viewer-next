@@ -1,4 +1,3 @@
-import { authorizeBridgeDeploy } from "@/lib/bridge/service";
 import { procBackend } from "@/lib/proc";
 import type {
   ViewerDeploymentOwner,
@@ -14,26 +13,6 @@ import type {
 import { RuntimeIdempotencyConflictError } from "@/lib/runtime/contracts";
 
 import { RuntimeJournal } from "./journal";
-
-/**
- * #691 §4 — the production authorization: verify the user's confirmation for this
- * exact commit and spend it, atomically, in the bridge's own file transaction.
- *
- * The bridge's state files are resolved per call rather than at import, so a
- * runtime-host that boots before the viewer has ever opened a bridge is unaffected.
- */
-function productionDeployAuthorization(
-  revision: string,
-  proof: ViewerDeploymentRequest["bridgeProof"],
-): { ok: true } | { ok: false; reason: string } {
-  const ref = proof?.ref;
-  const nonce = typeof proof?.nonce === "string" ? proof.nonce.trim() : "";
-  if (!Number.isInteger(ref) || (ref as number) < 1 || !nonce) {
-    return { ok: false, reason: "missing" };
-  }
-  const outcome = authorizeBridgeDeploy({ ref: ref as number, nonce, sha: revision.toLowerCase() });
-  return outcome.ok ? { ok: true } : { ok: false, reason: outcome.reason };
-}
 
 /** The generation identity the running runtime-host process booted from.
     A `null` revision means the process predates staged generations (the
@@ -91,13 +70,6 @@ export interface ViewerDeploymentCoordinatorOptions {
       succeeded deployment AND after the successor staging is durable — never
       as a same-image self-restart, which would boot the stale image again. */
   onHostHandoff?: (context: RuntimeHostHandoffContext) => void;
-  /**
-   * #691 §4 — verify AND spend the user's authorization for a resolved commit.
-   *
-   * Injected so this coordinator's admission contract is testable without the
-   * bridge's files; production passes the real one, which consumes atomically.
-   */
-  authorizeDeploy?: (revision: string, proof: ViewerDeploymentRequest["bridgeProof"]) => { ok: true } | { ok: false; reason: string };
 }
 
 function validRequestedRevision(revision: string): boolean {
@@ -141,7 +113,6 @@ export class ViewerDeploymentCoordinator {
   private readonly defaultRevision: string;
   private readonly ownerAlive: (owner: ViewerDeploymentOwner) => boolean;
   private readonly hostGeneration?: () => RuntimeHostGeneration;
-  private readonly authorizeDeploy: NonNullable<ViewerDeploymentCoordinatorOptions["authorizeDeploy"]>;
   private readonly onHostHandoff?: (context: RuntimeHostHandoffContext) => void;
 
   constructor(
@@ -156,7 +127,6 @@ export class ViewerDeploymentCoordinator {
       && (candidate.startIdentity === null || procBackend.processIdentity(candidate.pid) === candidate.startIdentity));
     this.hostGeneration = options.hostGeneration;
     this.onHostHandoff = options.onHostHandoff;
-    this.authorizeDeploy = options.authorizeDeploy ?? productionDeployAuthorization;
   }
 
   async requestViewerDeployment(request: ViewerDeploymentRequest): Promise<ViewerDeploymentReceipt> {
@@ -169,11 +139,9 @@ export class ViewerDeploymentCoordinator {
     }
     const requestedRevision = request.revision?.trim() || this.defaultRevision;
     if (!validRequestedRevision(requestedRevision)) throw new Error("deployment revision must be origin/main or a full commit SHA");
-    /* REPLAY BEFORE AUTHORIZATION. A retry after a lost response presents the same
-       idempotency key, and the authorization it carried was already spent on the
-       first attempt — checking the confirmation first would refuse that retry as
-       `consumed` and turn a dropped response into a permanently failed deploy. The
-       original receipt IS the proof that this key was authorized once. */
+    /* Replay first: a retry after a lost response presents the same idempotency
+       key, and the original receipt is the record that this key was admitted
+       once. */
     const existing = this.journal.viewerDeploymentByIdempotencyKey(request.idempotencyKey);
     if (existing) {
       if (existing.requestedRevision !== requestedRevision) throw new RuntimeIdempotencyConflictError("idempotency key already belongs to another deployment");
@@ -188,18 +156,6 @@ export class ViewerDeploymentCoordinator {
     if (active) return { state: "busy", deploymentId: active.deploymentId, revision: active.revision };
     const revision = await this.adapter.resolveRevision(requestedRevision);
     if (!/^[0-9a-f]{40}$/.test(revision)) throw new Error("canonical repository did not resolve an immutable commit SHA");
-
-    /* THE AUTHORITATIVE GATE. Last thing before the deployment is admitted, and the
-       one checkpoint every caller converges on — the MCP binding, the HTTP route and
-       a raw socket client all arrive here. Bound to the RESOLVED commit, because that
-       is the one that ships and the one the operator agreed to; a request that named
-       a moving ref cannot borrow a confirmation for whatever it happens to resolve
-       to. Spent only after `busy` and replay are ruled out, so neither costs the
-       operator their yes. */
-    const authorized = this.authorizeDeploy(revision, request.bridgeProof);
-    if (!authorized.ok) {
-      throw new Error(`deployment refused: the operator's deploy authorization for ${revision} was ${authorized.reason}`);
-    }
 
     const receipt = this.journal.admitViewerDeployment({ idempotencyKey: request.idempotencyKey, requestedRevision, revision }, this.owner);
     if (receipt.state === "accepted") {

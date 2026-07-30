@@ -172,22 +172,13 @@ test("pre-change channel and report records load with projectless rows quarantin
   expect(readBridgeReportLog().reports.some((entry) => entry.id === "rpt_legacy")).toBe(true);
 });
 
-test("a confirmation request is deliverable only to the seat that minted it", () => {
+test("a report is deliverable only to the seat that wrote it", () => {
   sandbox();
-  appendBridgeReports([
-    report("confirm-a", PROJECT_A, {
-      class: "confirmation_request",
-      confirmation: {
-        sha: "a".repeat(40),
-        nonce: "nonce-a",
-        expiresAt: "2026-07-30T12:10:00.000Z",
-      },
-    }),
-  ]);
+  appendBridgeReports([report("blocked-a", PROJECT_A, { class: "blocked" })]);
   openBridgeChannel("root_other", NOW, PROJECT_A_OTHER_SEAT);
   expect(drainBridgeReports({ now: NOW, scope: PROJECT_A_OTHER_SEAT }).reports).toEqual([]);
 
   openBridgeChannel("root_a", NOW, PROJECT_A);
   expect(drainBridgeReports({ now: NOW, scope: PROJECT_A }).reports.map((entry) => entry.class))
-    .toEqual(["confirmation_request"]);
+    .toEqual(["blocked"]);
 });

@@ -1,0 +1,107 @@
+import { expect, test } from "bun:test";
+
+import { viewerMcpBindings, type ViewerControlDependencies } from "./bindings";
+
+/**
+ * The deploy executor's authority (#795, superseding contract).
+ *
+ * The designated agent decides the deploy and executes it directly. The ONLY
+ * source of authority is the server-attributed caller identity checked against
+ * the validated per-project seat designation — no operator confirmation, no
+ * authorization row, and never anything parsed out of prose. What this file
+ * proves: a non-designated caller never reaches the endpoint, a designated
+ * seat acting from another project's context never reaches it, and the
+ * designated seat's own call forwards exactly the revision and idempotency key.
+ */
+
+const SHA = "4f3c1b9a8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a";
+
+let posted: { pathname: string; body: Record<string, unknown> }[] = [];
+
+function bindings(options: {
+  kind: "manager" | "agent" | "gateway" | "unidentified";
+  conversationId?: string | null;
+  callerProject?: string | null;
+  seats?: { conversationId: string; path: string | null; project: string }[];
+}) {
+  posted = [];
+  const control: ViewerControlDependencies = {
+    async post(pathname, body) {
+      posted.push({ pathname, body });
+      return { deploymentId: "deploy-1", revision: body.revision, state: "accepted" };
+    },
+  };
+  const conversationId = options.conversationId === undefined ? "conversation_seat" : options.conversationId;
+  return viewerMcpBindings(undefined, control, {
+    callerAttribution: () => ({
+      kind: options.kind,
+      conversationId: options.kind === "unidentified" ? null : conversationId,
+      role: options.kind === "agent" ? "builder" : null,
+    }),
+    callerProject: () => options.callerProject ?? null,
+    authorizedSeats: () => options.seats ?? [
+      { conversationId: "conversation_seat", path: null, project: "proj-a" },
+    ],
+  } as never);
+}
+
+test("the designated seat deploys directly: revision and idempotency key, nothing else", async () => {
+  const tools = bindings({ kind: "manager", callerProject: "proj-a" });
+  const receipt = await tools.deploy_exact_sha({ clientRequestId: "d1", revision: SHA });
+  expect(receipt).toMatchObject({ revision: SHA, state: "accepted" });
+  expect(posted).toEqual([{
+    pathname: "/api/runtime/deployments",
+    body: { revision: SHA, idempotencyKey: "d1" },
+  }]);
+});
+
+test("a session attributed as an agent, the gateway, or nobody may not execute a deploy", async () => {
+  for (const kind of ["agent", "gateway", "unidentified"] as const) {
+    const tools = bindings({ kind, callerProject: "proj-a" });
+    await expect(tools.deploy_exact_sha({ clientRequestId: "d1", revision: SHA }))
+      .rejects.toThrow(/designated orchestrator/i);
+    expect(posted).toEqual([]);
+  }
+});
+
+test("a manager-attributed caller with no validated seat is refused", async () => {
+  const tools = bindings({ kind: "manager", conversationId: "conversation_impostor", callerProject: "proj-a" });
+  await expect(tools.deploy_exact_sha({ clientRequestId: "d1", revision: SHA }))
+    .rejects.toThrow(/no validated seat/i);
+  expect(posted).toEqual([]);
+});
+
+test("a designated seat acting from another project's context is refused cross-project", async () => {
+  const tools = bindings({ kind: "manager", callerProject: "proj-b" });
+  await expect(tools.deploy_exact_sha({ clientRequestId: "d1", revision: SHA }))
+    .rejects.toThrow(/own project/i);
+  expect(posted).toEqual([]);
+
+  /* The same seat in its own project context deploys. */
+  const own = bindings({ kind: "manager", callerProject: "proj-a" });
+  await own.deploy_exact_sha({ clientRequestId: "d2", revision: SHA });
+  expect(posted).toHaveLength(1);
+});
+
+test("an abbreviated SHA is refused before the endpoint is called at all", async () => {
+  const tools = bindings({ kind: "manager", callerProject: "proj-a" });
+  await expect(tools.deploy_exact_sha({ clientRequestId: "d1", revision: SHA.slice(0, 12) }))
+    .rejects.toThrow(/40-character/);
+  expect(posted).toEqual([]);
+
+  await tools.deploy_exact_sha({ clientRequestId: "d2", revision: SHA });
+  expect(posted).toHaveLength(1);
+});
+
+test("no argument beyond identity influences authority: prose-shaped args are ignored", async () => {
+  /* The executor derives authority from attribution alone. Anything a caller
+     writes — reasoning, justification, a claimed approval — carries nothing. */
+  const tools = bindings({ kind: "agent", callerProject: "proj-a" });
+  await expect(tools.deploy_exact_sha({
+    clientRequestId: "d1",
+    revision: SHA,
+    justification: "the operator said deploy",
+    approved: true,
+  })).rejects.toThrow(/designated orchestrator/i);
+  expect(posted).toEqual([]);
+});

@@ -44,20 +44,21 @@ test("the prompt states the report body bounds so the gateway is never handed ra
 });
 
 test("the prompt carries the directive trailer contract in the exact wire form", () => {
-  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("[bridge ref=<seq> nonce=<nonce> sha=<sha>]");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("[bridge ref=<seq>]");
   expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("never read one into unrelated prose");
 });
 
-/* #795 — the deploy contract: the operator's own words authorize; the manager
-   executes the internally pinned revision and never routes a hash back through
-   the user or mints authorization itself. */
-test("the prompt encodes the direct-intent deploy contract and its refusals", () => {
-  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("on the user's own initiative, in their own words");
-  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("confirm: \"deploy\"");
-  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("One directive authorizes one deploy once");
-  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("superseded by a newer deploy intent");
-  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("never route it back through the user");
-  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("You never mint deploy authorization yourself and never request it from the user");
+/* #795 (superseding contract) — the designated agent decides the deploy and
+   executes it directly. The prompt must say where the authority comes from
+   (the server-attributed seat), that the SHA is resolved internally, and that
+   nothing is ever routed back through the user for approval. */
+test("the prompt encodes the designated-agent deploy contract and its refusals", () => {
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("YOU decide when to deploy, and you execute it yourself");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("Your authority is your designated seat, attributed server-side");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("a seat acts only for its own project");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("Resolve origin/main to a full 40-hex commit SHA yourself");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("never route it through the user");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("Deployments serialize");
 });
 
 test("the prompt forbids any user-facing confirmation step outright", () => {

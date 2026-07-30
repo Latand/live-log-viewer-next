@@ -22,9 +22,6 @@ import { refreshLifecycleJournal } from "@/lib/lifecycle/projector";
 import { isLifecycleEventType } from "@/lib/lifecycle/vocabulary";
 import { recordManagerReport } from "@/lib/bridge/service";
 import { bridgeDirectiveBody, bridgeDirectiveId, type BridgeTrailer } from "@/lib/bridge/directive";
-import { mintBridgeConfirmation } from "@/lib/bridge/confirmation";
-import { acceptDirectDeployIntent, type AcceptedDeployIntent } from "@/lib/bridge/deployIntent";
-import { readBridgeReportLog } from "@/lib/bridge/store";
 import { isBridgeReportClass } from "@/lib/bridge/types";
 import { readOrchestratorRecord } from "@/lib/orchestrator/store";
 import { authorizedManagerSeats, type ManagerAuthoritySources } from "@/lib/orchestrator/authority";
@@ -229,10 +226,6 @@ export interface ViewerMcpDomainDependencies {
       Null means the invariant "a registered session has a canonical project"
       is violated, and unscoped directive routing fails closed diagnostically. */
   callerProject?(): string | null;
-  /** #795: pin remote main to an exact revision at deploy-intent acceptance.
-      Production asks the canonical remote; injected so tests never touch the
-      network. A resolver failure mints nothing — fail closed. */
-  resolveRemoteMain?(): Promise<string>;
 }
 
 /**
@@ -599,56 +592,48 @@ async function deployExactSha(
   control: ViewerControlDependencies,
   dependencies: ViewerMcpDomainDependencies,
 ): Promise<McpToolPayload> {
-  if (args.confirm !== "deploy") throw new Error('confirm must equal "deploy"');
   const revision = required(args, "revision");
   if (!/^[0-9a-f]{40}$/i.test(revision)) throw new Error("revision must be a full 40-character commit SHA");
 
-  /* #795 — the operator's deploy words, verified and spent rather than trusted.
-     The manager presents the ref + nonce that arrived on the operator's deploy
-     directive (the product pinned remote main and minted them at acceptance);
-     presenting them authorizes exactly the pinned SHA exactly once, and every
-     refusal (replay, expiry, superseded, wrong nonce, wrong SHA) stops the
-     deploy instead of downgrading to an unauthorized one. */
-  /* Shape-checked here so the manager gets a useful refusal without a round trip;
-     VERIFIED AND SPENT at runtime-host admission, the one checkpoint this tool, the
-     HTTP route and a raw socket client all converge on. */
-  const bridgeRef = args.bridgeRef;
-  const bridgeNonce = text(args.bridgeNonce);
-  if (typeof bridgeRef !== "number" || !Number.isInteger(bridgeRef) || bridgeRef < 1 || !bridgeNonce) {
-    throw new McpToolRefusal(
-      "a deploy requires the operator's recorded authorization: pass bridgeRef and bridgeNonce from the trailer that arrived on the operator's deploy directive. Never ask the operator for a revision, a phrase, or any confirmation — their own deploy words already mint the authorization; deploy nothing until a directive carries one.",
-      { code: "bridge_confirmation_required", revision },
-    );
-  }
-
-  /* Caller identity, on top of the bearer nonce (#795): a session the server
-     positively attributes as NOT the designated orchestrator may not execute a
-     deploy, and a designated seat may only spend its own project's
-     authorization. The nonce remains necessary; identity is the second lock,
-     and an unattributable caller still cannot pass without the secret. */
+  /* #795 (superseding contract) — the designated agent decides the deploy and
+     executes it directly. Authority is derived from the SERVER-ATTRIBUTED
+     caller identity and nothing else: no operator confirmation, no
+     authorization row, and never anything read out of prose or reasoning. The
+     identity chain is the one production already trusts — process ancestry
+     merged with the admission-injected spawn capability, checked against the
+     durable per-project orchestrator designation. */
   const attribution = attributionOf(dependencies);
-  if (attribution.kind === "agent" || attribution.kind === "gateway") {
+  if (attribution.kind !== "manager" || !attribution.conversationId) {
     throw new McpToolRefusal(
-      "only the designated orchestrator executes deploys; this session is attributed as somebody else. Report the request over the bridge instead.",
+      "only the designated orchestrator executes deploys; this session is not attributed as a designated seat. Report the request over the bridge instead.",
       { code: "deploy_caller_not_designated", revision },
     );
   }
-  const authorizationRow = readBridgeReportLog().reports.find((report) => report.seq === bridgeRef);
-  if (authorizationRow?.project) {
-    const callerProject = dependencies.callerProject ? dependencies.callerProject() : productionCallerProject();
-    if (callerProject && callerProject !== authorizationRow.project) {
-      throw new McpToolRefusal(
-        "this deploy authorization belongs to another project's seat; a designated orchestrator spends only its own project's authorization",
-        { code: "deploy_cross_project", revision },
-      );
-    }
+
+  /* A designated seat's authority is scoped to its own project. The seat this
+     conversation holds must be the seat of the caller's own canonical project —
+     a seat exercising deploy authority from another project's context is the
+     cross-project spend this refusal closes. */
+  const seats = dependencies.authorizedSeats?.()
+    ?? authorizedManagerSeats(productionManagerAuthoritySources());
+  const seat = seats.find((candidate) => candidate.conversationId === attribution.conversationId);
+  if (!seat) {
+    throw new McpToolRefusal(
+      "only the designated orchestrator executes deploys; this session holds no validated seat. Report the request over the bridge instead.",
+      { code: "deploy_caller_not_designated", revision },
+    );
+  }
+  const callerProject = dependencies.callerProject ? dependencies.callerProject() : productionCallerProject();
+  if (callerProject && seat.project !== callerProject) {
+    throw new McpToolRefusal(
+      "a designated orchestrator deploys only as its own project's seat; this session's seat belongs to another project",
+      { code: "deploy_cross_project", revision },
+    );
   }
 
   const receipt = await control.post("/api/runtime/deployments", {
     revision,
     idempotencyKey: requestId(args),
-    bridgeRef,
-    bridgeNonce,
   });
   return {
     deploymentId: receipt.deploymentId,
@@ -663,16 +648,11 @@ async function deployExactSha(
  *
  * Deliberately thin: everything that makes a report safe — the 2 KB bound, the
  * secret redaction, the idempotent key, the monotonic seq — lives in the store, so
- * this cannot weaken any of it by being called differently. What it does own:
- *
- *  - the ORIGIN LABEL, derived server-side from the durable caller identity and
- *    stored on the row. A non-orchestrator report additionally gets a visible
- *    attribution prefix in its body, ahead of anything the caller wrote, so the
- *    gateway can never mistake it for — or speak it as — the manager's voice.
- *  - minting the confirmation nonce, because a nonce the caller supplied would
- *    be a nonce the caller could replay. Only the designated orchestrator may
- *    mint one (B+ item 4); the policy layer refuses everyone else and this
- *    check is the same contract enforced a second time.
+ * this cannot weaken any of it by being called differently. What it does own is
+ * the ORIGIN LABEL, derived server-side from the durable caller identity and
+ * stored on the row. A non-orchestrator report additionally gets a visible
+ * attribution prefix in its body, ahead of anything the caller wrote, so the
+ * gateway can never mistake it for — or speak it as — the manager's voice.
  */
 function bridgeReport(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): McpToolPayload {
   const key = required(args, "key");
@@ -688,42 +668,6 @@ function bridgeReport(args: McpToolArgs, dependencies: ViewerMcpDomainDependenci
   const targetSeat = project
     ? seats.find((seat) => seat.project === project)
     : undefined;
-  const requested = args.confirmation && typeof args.confirmation === "object" && !Array.isArray(args.confirmation)
-    ? args.confirmation as { sha?: unknown; expiresMinutes?: unknown }
-    : null;
-  if (requested && reportClass !== "confirmation_request") {
-    throw new Error("only a confirmation_request may carry a confirmation");
-  }
-  if (reportClass === "confirmation_request" && !requested) {
-    throw new Error("a confirmation_request must carry the SHA it authorizes");
-  }
-  if ((requested || reportClass === "confirmation_request") && origin.kind !== "manager") {
-    throw new McpToolRefusal(
-      "only the designated orchestrator may request a deployment confirmation",
-      { code: "confirmation_not_permitted" },
-    );
-  }
-  if (
-    reportClass === "confirmation_request"
-    && (
-      !project
-      || !origin.conversationId
-      || targetSeat?.conversationId !== origin.conversationId
-    )
-  ) {
-    throw new McpToolRefusal(
-      "a deployment confirmation must stay bound to the project seat that minted it",
-      { code: "confirmation_seat_unresolved" },
-    );
-  }
-  const confirmation = requested
-    ? mintBridgeConfirmation({
-      sha: text(requested.sha),
-      ...(typeof requested.expiresMinutes === "number"
-        ? { ttlMs: requested.expiresMinutes * 60_000 }
-        : {}),
-    })
-    : null;
 
   /* The visible attribution is SERVER-composed and leads the body, so whatever
      a caller writes inside its own text appears after the authoritative label. */
@@ -740,7 +684,6 @@ function bridgeReport(args: McpToolArgs, dependencies: ViewerMcpDomainDependenci
     targetSeatConversationId: targetSeat?.conversationId ?? null,
     body: attributedBody,
     correlatesDirective: text(args.correlatesDirective) || null,
-    confirmation,
   });
 
   /* A replay under the same key appends nothing, and says so rather than pretending
@@ -751,9 +694,6 @@ function bridgeReport(args: McpToolArgs, dependencies: ViewerMcpDomainDependenci
     replayed: false,
     seq: appended.seq,
     reportId: appended.id,
-    ...(appended.confirmation
-      ? { confirmation: { nonce: appended.confirmation.nonce, sha: appended.confirmation.sha, expiresAt: appended.confirmation.expiresAt } }
-      : {}),
   };
 }
 
@@ -812,55 +752,9 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
   const manager: { conversationId: string; path: string | null } = { conversationId: seat.conversationId, path: seat.path };
 
   const ref = args.ref;
-  let trailer: BridgeTrailer | undefined = typeof ref === "number" && Number.isInteger(ref) && ref > 0
-    ? {
-      ref,
-      ...(text(args.nonce) ? { nonce: text(args.nonce) } : {}),
-      ...(text(args.sha) ? { sha: text(args.sha).toLowerCase() } : {}),
-    }
+  const trailer: BridgeTrailer | undefined = typeof ref === "number" && Number.isInteger(ref) && ref > 0
+    ? { ref }
     : undefined;
-
-  /* #795 — the operator said a deploy. That single utterance is the whole
-     authorization: remote main is pinned to an exact revision NOW, one
-     consumable authorization is recorded, and the machine trailer rides to the
-     manager on this very directive. No confirmation menu, no hash phrase, no
-     second prompt — and no revision ever routes back through the operator. */
-  const intentValue = text(args.intent);
-  if (intentValue && intentValue !== "deploy") throw new Error('intent must equal "deploy" when present');
-  let acceptedIntent: AcceptedDeployIntent | null = null;
-  if (intentValue === "deploy") {
-    if (trailer) throw new Error("a deploy intent cannot be combined with an explicit trailer; the authorization is minted at acceptance");
-    /* Server-attributed origin, never the caller's word: the authorization is
-       the OPERATOR's, so only their voice gateway may originate it. An agent —
-       the manager included — minting its own deploy authorization is the
-       self-authorization vector this refusal closes. */
-    const origin = attributionOf(dependencies);
-    if (origin.kind !== "gateway") {
-      throw new McpToolRefusal(
-        "only the operator's voice gateway may carry a deploy intent; agents (the manager included) never originate deploy authorization",
-        { code: "deploy_intent_gateway_only" },
-      );
-    }
-    try {
-      acceptedIntent = await acceptDirectDeployIntent({
-        directiveId: deliveryId,
-        project,
-        seatConversationId: seat.conversationId,
-        origin,
-        instruction,
-        ...(dependencies.resolveRemoteMain ? { resolveRemoteMain: dependencies.resolveRemoteMain } : {}),
-      });
-    } catch (error) {
-      throw new McpToolRefusal(
-        `the deploy intent was NOT accepted (${error instanceof Error ? error.message : "unknown failure"}). Nothing was authorized and nothing will deploy; tell the user and retry when the cause is fixed.`,
-        { code: "deploy_intent_unpinned" },
-      );
-    }
-    trailer = { ref: acceptedIntent.ref, nonce: acceptedIntent.nonce, sha: acceptedIntent.sha };
-  }
-
-  /* Composes and validates together: a nonce without a SHA would otherwise reach
-     the manager as a bare reference and read as an unconditional yes. */
   const body = bridgeDirectiveBody(instruction, trailer);
 
   const outcome = await control.post("/api/tmux", {
@@ -876,19 +770,6 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
     managerConversationId: manager.conversationId,
     operationId: outcome.operationId ?? null,
     outcome: outcome.outcome ?? "delivered",
-    /* The nonce stays out on purpose: the manager received it in the trailer,
-       and the gateway needs only enough to speak plainly — "deploying the
-       current main" — without any hash reaching the operator's ears. */
-    ...(acceptedIntent
-      ? {
-        deployIntent: {
-          ref: acceptedIntent.ref,
-          revision: acceptedIntent.sha,
-          expiresAt: acceptedIntent.expiresAt,
-          replayed: acceptedIntent.replayed,
-        },
-      }
-      : {}),
   };
 }
 
@@ -902,11 +783,11 @@ function derivedRequestId(base: string, suffix: string): string {
  * The calling session's own conversation capability, forwarded so the
  * designation routes' operator gate can fire (BLOCKING 1 of the #758 review).
  *
- * Designation is an OPERATION contract, exactly like the confirmation mint:
- * the tools stay on every session's surface (axis 1), but a caller that the
- * registry names as an agent conversation may not seat, rotate or auto-create
- * an orchestrator — otherwise any session could hand ITSELF manager voice and
- * the deploy-nonce mint in one call. The Viewer injected this capability into
+ * Designation is an OPERATION contract, exactly like the deploy executor's
+ * seat check: the tools stay on every session's surface (axis 1), but a caller
+ * that the registry names as an agent conversation may not seat, rotate or
+ * auto-create an orchestrator — otherwise any session could hand ITSELF
+ * manager voice and deploy authority in one call. The Viewer injected this capability into
  * the launch environment; presenting it is how an agent names itself, and the
  * routes' `requireOperatorAuthority` refuses a self-named caller. An operator
  * lane (no capability in the environment) forwards nothing and passes.
@@ -1676,8 +1557,8 @@ export function viewerMcpToolPolicy(
 ): McpToolPolicy {
   /* Manager identity is fail-closed: only identities the durable resolver
      authorized count as the manager, whatever the raw record says. Under B+
-     that identity labels origins and gates confirmation minting; it never
-     decides whether a tool is callable. */
+     that identity labels origins and anchors the deploy executor's seat
+     authority; it never decides whether a tool is callable. */
   const callerManagerTarget = (): ManagerTarget => ({
     conversationId: null,
     path: null,

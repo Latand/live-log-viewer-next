@@ -1134,7 +1134,10 @@ describe("MCP tool service", () => {
       expect(spawnSchema?.properties).toHaveProperty("prompt");
       expect(spawnSchema?.properties).toHaveProperty("mcpServers");
       const deploySchema = listed.tools.find((tool) => tool.name === "deploy_exact_sha")?.inputSchema;
-      expect(deploySchema?.properties).toHaveProperty("confirm");
+      /* #795: the deploy carries WHAT ships and nothing that claims authority —
+         no confirmation flag, no bridge reference, no nonce. */
+      expect(deploySchema?.properties).toHaveProperty("revision");
+      expect(deploySchema?.properties).not.toHaveProperty("confirm");
       const called = await client.callTool({
         name: "send_message",
         arguments: { clientRequestId: "request-protocol", text: "hello" },

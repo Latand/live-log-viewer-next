@@ -7,15 +7,16 @@ import { authorizedManagerSeats, type ManagerAuthoritySources } from "@/lib/orch
 import type { OrchestratorSeat } from "@/lib/orchestrator/seats";
 
 import { capabilityConversationResolver, hostedConversationsFromSnapshot } from "./bindings";
-import { mcpCallerIdentity, permitMcpTool, type ManagerTarget } from "./toolAllowlist";
+import { mcpCallerIdentity, type ManagerTarget } from "./toolAllowlist";
 
 /* THE LIFECYCLE SEAMS.
  *
  * Designation is durable, so manager authority has to outlive every event that
  * moves, restarts or renames the hosting process. Each test here drives the
- * whole seam — attentionCallerAuthority -> mcpCallerIdentity -> permitMcpTool —
- * across one lifecycle event, and asserts the seat still mints a deployment
- * confirmation afterwards.
+ * whole seam — attentionCallerAuthority -> mcpCallerIdentity — across one
+ * lifecycle event, and asserts the caller is still labeled the designated
+ * manager afterwards. That label is what the deploy binding derives its
+ * authority from (#795), so losing it here is losing the deploy.
  *
  * The property under test is that NOTHING on the authorized path reads a
  * process id. Authority comes from the spawn capability the Viewer minted at
@@ -109,22 +110,14 @@ function managerTargetFor(sourcesValue: ManagerAuthoritySources): ManagerTarget 
   };
 }
 
-/** The one operation the seat gates: minting a deployment confirmation. */
-const CONFIRMATION_ARGS = {
-  clientRequestId: "r1",
-  key: "k",
-  class: "confirmation_request",
-  body: "deploy?",
-  confirmation: { sha: "a".repeat(40) },
-};
-
-/** Drive the whole seam and report whether the caller may mint. */
-function mayMint(caller: AttentionCallerSources, manager: ManagerAuthoritySources): boolean {
+/** Drive the whole seam and report whether the caller is the designated seat —
+    the label the deploy binding requires. */
+function isDesignatedSeat(caller: AttentionCallerSources, manager: ManagerAuthoritySources): boolean {
   const identity = mcpCallerIdentity(attentionCallerAuthority(caller), managerTargetFor(manager));
-  return permitMcpTool(identity, "bridge_report", CONFIRMATION_ARGS).allowed;
+  return identity.kind === "unrestricted" && identity.reason === "manager";
 }
 
-test("HOST RETIREMENT: the entry survives with its host cleared and the seat still mints", () => {
+test("HOST RETIREMENT: the entry survives with its host cleared and the seat still holds", () => {
   /* Retirement clears the host record but leaves the conversation and its
      generation on file — the exact shape that resolved to "unidentified"
      before, now indistinguishable from any other zero-pid conversation. */
@@ -132,12 +125,12 @@ test("HOST RETIREMENT: the entry survives with its host cleared and the seat sti
   const caller = callerSources({ hosted: () => hostedConversationsFromSnapshot(retired) });
 
   expect(attentionCallerAuthority(caller)).toEqual({ kind: "worker", conversationId: MANAGER_ID, role: "orchestrator" });
-  expect(mayMint(caller, managerSources())).toBe(true);
+  expect(isDesignatedSeat(caller, managerSources())).toBe(true);
 });
 
 test("HOST RETIREMENT: the entry is dropped entirely and the capability alone still names the manager", () => {
   const evicted = snapshotOf(MANAGER_ID, [MANAGER_PATH], []);
-  expect(mayMint(callerSources({ hosted: () => hostedConversationsFromSnapshot(evicted) }), managerSources())).toBe(true);
+  expect(isDesignatedSeat(callerSources({ hosted: () => hostedConversationsFromSnapshot(evicted) }), managerSources())).toBe(true);
 });
 
 test("RESUME: a resume successor generation with a BRAND NEW live pid keeps the same seat", () => {
@@ -155,16 +148,16 @@ test("RESUME: a resume successor generation with a BRAND NEW live pid keeps the 
   });
 
   expect(attentionCallerAuthority(caller)).toEqual({ kind: "worker", conversationId: MANAGER_ID, role: "orchestrator" });
-  expect(mayMint(caller, managerSources())).toBe(true);
+  expect(isDesignatedSeat(caller, managerSources())).toBe(true);
 });
 
-test("RESUME: the seat still mints from a resumed host whose pid the registry never recorded", () => {
+test("RESUME: the seat still holds from a resumed host whose pid the registry never recorded", () => {
   const resumed = snapshotOf(
     MANAGER_ID,
     [MANAGER_PATH, RESUMED_PATH],
     [{ path: RESUMED_PATH, pid: null }],
   );
-  expect(mayMint(callerSources({ hosted: () => hostedConversationsFromSnapshot(resumed) }), managerSources())).toBe(true);
+  expect(isDesignatedSeat(callerSources({ hosted: () => hostedConversationsFromSnapshot(resumed) }), managerSources())).toBe(true);
 });
 
 test("MIGRATION: the conversation is aliased to a new id and the seat follows it through the alias", () => {
@@ -185,13 +178,13 @@ test("MIGRATION: the conversation is aliased to a new id and the seat follows it
   });
 
   expect(attentionCallerAuthority(caller)).toEqual({ kind: "worker", conversationId: SUCCESSOR_ID, role: "orchestrator" });
-  expect(mayMint(caller, manager)).toBe(true);
+  expect(isDesignatedSeat(caller, manager)).toBe(true);
 });
 
 test("GENERATION CHANGE: rolling a generation neither grants nor removes authority on its own", () => {
   const rolled = snapshotOf(MANAGER_ID, [MANAGER_PATH, RESUMED_PATH, MIGRATED_PATH], []);
   const caller = callerSources({ hosted: () => hostedConversationsFromSnapshot(rolled) });
-  expect(mayMint(caller, managerSources())).toBe(true);
+  expect(isDesignatedSeat(caller, managerSources())).toBe(true);
 
   /* The same rolled conversation with NO generation on the registry facts is
      unattributable and fails closed — a generation change must not become a
@@ -199,7 +192,7 @@ test("GENERATION CHANGE: rolling a generation neither grants nor removes authori
   const ungenerated = managerSources({
     conversationFacts: () => ({ superseded: false, hasGeneration: false, project: "proj-a" }),
   });
-  expect(mayMint(caller, ungenerated)).toBe(false);
+  expect(isDesignatedSeat(caller, ungenerated)).toBe(false);
 });
 
 test("RETIREMENT + RESUME do not resurrect a REVOKED predecessor (ABA across the lifecycle)", () => {
@@ -223,13 +216,13 @@ test("RETIREMENT + RESUME do not resurrect a REVOKED predecessor (ABA across the
 
   /* Still positively IDENTIFIED — it is a real conversation — but not a manager. */
   expect(attentionCallerAuthority(caller)).toEqual({ kind: "worker", conversationId: MANAGER_ID, role: "orchestrator" });
-  expect(mayMint(caller, manager)).toBe(false);
+  expect(isDesignatedSeat(caller, manager)).toBe(false);
 });
 
 test("a lifecycle event that makes the two evidence chains DISAGREE fails closed", () => {
   /* Resume bound a new pid to a DIFFERENT conversation while the capability
      still names the manager. Contradictory evidence identifies nobody, so the
-     mint is refused rather than resolved in either direction. */
+     seat is denied rather than resolved in either direction. */
   const crossed = snapshotOf(SUCCESSOR_ID, [RESUMED_PATH], [{ path: RESUMED_PATH, pid: 9100 }]);
   const caller = callerSources({
     ancestry: () => [9101, 9100, 1],
@@ -237,5 +230,5 @@ test("a lifecycle event that makes the two evidence chains DISAGREE fails closed
   });
 
   expect(attentionCallerAuthority(caller)).toEqual({ kind: "unidentified" });
-  expect(mayMint(caller, managerSources())).toBe(false);
+  expect(isDesignatedSeat(caller, managerSources())).toBe(false);
 });

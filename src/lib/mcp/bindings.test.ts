@@ -8,9 +8,6 @@ import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
-import { mintBridgeConfirmation } from "@/lib/bridge/confirmation";
-import { recordManagerReport } from "@/lib/bridge/service";
-import { drainBridgeReports } from "@/lib/bridge/store";
 import { queryLifecycleEvents } from "@/lib/lifecycle/journal";
 import { refreshLifecycleJournal } from "@/lib/lifecycle/projector";
 
@@ -53,6 +50,14 @@ test("spawn_agent reaches spawn validation through the operator admission lane",
 
 test("runtime-bound MCP tools use the live Viewer control surface", async () => {
   const requests: Array<{ pathname: string; body: Record<string, unknown> }> = [];
+  /* #795: the deploy tool authorizes off the SERVER-ATTRIBUTED caller identity, so
+     the control-surface check attributes this session as the designated seat of its
+     own project. `deployAuthority.test.ts` covers the refusals directly. */
+  const designatedSeat = {
+    callerAttribution: () => ({ kind: "manager" as const, conversationId: "conversation_seat", role: null }),
+    callerProject: () => "proj-a",
+    authorizedSeats: () => [{ conversationId: "conversation_seat", path: null, project: "proj-a" }],
+  } as never;
   const bindings = viewerMcpBindings(undefined, {
     post: async (pathname, body) => {
       requests.push({ pathname, body });
@@ -74,7 +79,7 @@ test("runtime-bound MCP tools use the live Viewer control surface", async () => 
         replayed: false,
       };
     },
-  });
+  }, designatedSeat);
 
   await bindings.spawn_agent({
     clientRequestId: "spawn-http-control",
@@ -93,34 +98,10 @@ test("runtime-bound MCP tools use the live Viewer control surface", async () => 
     conversationId: "conversation_http_control",
     text: " \t\n ",
   })).rejects.toThrow("text is required");
-  /* #691 §4: a deploy now presents the user's spoken authorization as well as
-     confirm=deploy, so this control-surface check mints one and spends it. Without
-     the confirmation the call is refused before it reaches the endpoint, which is
-     the behaviour `deployConfirmation.test.ts` covers directly. */
-  const deployStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-bindings-deploy-"));
-  sandboxes.push(deployStateDir);
-  const previousDeployStateDir = process.env.LLV_STATE_DIR;
-  process.env.LLV_STATE_DIR = deployStateDir;
-  try {
-    const confirmation = mintBridgeConfirmation({ sha: "a".repeat(40) });
-    recordManagerReport({
-      key: "control-surface-deploy",
-      class: "confirmation_request",
-      at: new Date().toISOString(),
-      body: "gates green",
-      confirmation,
-    });
-    await bindings.deploy_exact_sha({
-      clientRequestId: "deploy-http-control",
-      confirm: "deploy",
-      revision: "a".repeat(40),
-      bridgeRef: drainBridgeReports().reports.at(-1)!.seq,
-      bridgeNonce: confirmation.nonce,
-    });
-  } finally {
-    if (previousDeployStateDir === undefined) delete process.env.LLV_STATE_DIR;
-    else process.env.LLV_STATE_DIR = previousDeployStateDir;
-  }
+  await bindings.deploy_exact_sha({
+    clientRequestId: "deploy-http-control",
+    revision: "a".repeat(40),
+  });
 
   expect(requests.map((request) => request.pathname)).toEqual([
     "/api/spawn",

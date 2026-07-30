@@ -7,8 +7,6 @@ import {
   parseBridgeTrailer,
 } from "./directive";
 
-const SHA = "4f3c1b9a8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a";
-
 test("directive ids derive from the root turn and utterance index, not from a clock", () => {
   expect(bridgeDirectiveId("turn_91", 0)).toBe("bridge_d_turn_91_0");
   expect(bridgeDirectiveId("turn_91", 0)).toBe(bridgeDirectiveId("turn_91", 0));
@@ -28,20 +26,10 @@ test("the trailer round-trips a correlation reference", () => {
   expect(parseBridgeTrailer(trailer)).toEqual({ ref: 42 });
 });
 
-test("the trailer round-trips a full deploy confirmation", () => {
-  const trailer = formatBridgeTrailer({ ref: 7, nonce: "0123456789abcdef0123456789abcdef", sha: SHA });
-  expect(trailer).toBe(`[bridge ref=7 nonce=0123456789abcdef0123456789abcdef sha=${SHA}]`);
-  expect(parseBridgeTrailer(trailer)).toEqual({
-    ref: 7,
-    nonce: "0123456789abcdef0123456789abcdef",
-    sha: SHA,
-  });
-});
-
 test("the trailer is read off the last line, so ordinary prose above it survives", () => {
-  const body = bridgeDirectiveBody("Deploy it.", { ref: 7, nonce: "abc", sha: SHA });
-  expect(body).toBe(`Deploy it.\n\n[bridge ref=7 nonce=abc sha=${SHA}]`);
-  expect(parseBridgeTrailer(body)).toEqual({ ref: 7, nonce: "abc", sha: SHA });
+  const body = bridgeDirectiveBody("Deploy it.", { ref: 7 });
+  expect(body).toBe("Deploy it.\n\n[bridge ref=7]");
+  expect(parseBridgeTrailer(body)).toEqual({ ref: 7 });
 });
 
 test("prose that merely mentions a bridge trailer earlier is not a trailer", () => {
@@ -54,15 +42,9 @@ test("a directive without a trailer parses as no correlation", () => {
   expect(bridgeDirectiveBody("Start a reviewer.")).toBe("Start a reviewer.");
 });
 
-test("a malformed trailer is not silently read as a partial confirmation", () => {
+test("a malformed trailer is not read as a partial correlation", () => {
   expect(parseBridgeTrailer("[bridge ref=abc]")).toBeNull();
-  expect(parseBridgeTrailer("[bridge nonce=abc sha=deadbeef]")).toBeNull();
-  expect(parseBridgeTrailer(`[bridge ref=7 sha=${SHA}]`)).toBeNull();
-  expect(parseBridgeTrailer("[bridge ref=7 nonce=abc sha=deadbeef]")).toBeNull();
-});
-
-test("a confirmation trailer requires the nonce and the SHA together", () => {
-  expect(() => formatBridgeTrailer({ ref: 7, nonce: "abc" })).toThrow(/nonce and sha/);
-  expect(() => formatBridgeTrailer({ ref: 7, sha: SHA })).toThrow(/nonce and sha/);
-  expect(() => formatBridgeTrailer({ ref: 7, nonce: "abc", sha: "deadbeef" })).toThrow(/40-hex/);
+  expect(parseBridgeTrailer("[bridge ref=0]")).toBeNull();
+  expect(parseBridgeTrailer("[bridge ref=7 sha=deadbeef]")).toBeNull();
+  expect(() => formatBridgeTrailer({ ref: 0 })).toThrow(/report seq/);
 });

@@ -13,11 +13,11 @@ import {
   BRIDGE_REPORT_CAPACITY,
   BRIDGE_REPORT_LOG_SCHEMA_VERSION,
   BRIDGE_RETIRED_ID_CAPACITY,
-  isBridgeReportClass,
+  isStoredBridgeReportClass,
+  LEGACY_CONFIRMATION_CLASS,
   MANAGER_RECORD_REF,
   type BridgeChannelV1,
   type BridgeChannelScope,
-  type BridgeConfirmation,
   type BridgeReportBatch,
   type BridgeReportInput,
   type BridgeReportLogV1,
@@ -120,20 +120,6 @@ function readJsonFile(target: string): unknown | null {
   }
 }
 
-function normalizeConfirmation(value: unknown): BridgeConfirmation | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const candidate = value as Partial<BridgeConfirmation>;
-  if (typeof candidate.sha !== "string" || typeof candidate.nonce !== "string") return undefined;
-  if (typeof candidate.expiresAt !== "string") return undefined;
-  return {
-    sha: candidate.sha,
-    nonce: candidate.nonce,
-    expiresAt: candidate.expiresAt,
-    ...(typeof candidate.consumedAt === "string" ? { consumedAt: candidate.consumedAt } : {}),
-    ...(typeof candidate.supersededAt === "string" ? { supersededAt: candidate.supersededAt } : {}),
-  };
-}
-
 function normalizeOrigin(value: unknown): BridgeReportOrigin | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const candidate = value as { kind?: unknown; conversationId?: unknown; role?: unknown };
@@ -152,10 +138,10 @@ function normalizeReport(value: unknown): BridgeReportV1 | null {
   if (typeof candidate.id !== "string" || !candidate.id) return null;
   if (!Number.isInteger(candidate.seq) || (candidate.seq as number) < 1) return null;
   if (typeof candidate.at !== "string" || !candidate.at) return null;
-  if (!isBridgeReportClass(candidate.class)) return null;
-  const confirmation = candidate.class === "confirmation_request"
-    ? normalizeConfirmation(candidate.confirmation)
-    : undefined;
+  /* Legacy `confirmation_request` rows (the retired operator-confirmation
+     round trip) still parse so old logs keep reading; their authorization
+     payloads are dead machinery and are dropped here. */
+  if (!isStoredBridgeReportClass(candidate.class)) return null;
   const origin = normalizeOrigin(candidate.origin);
   const project = typeof candidate.project === "string"
     ? candidate.project
@@ -173,8 +159,6 @@ function normalizeReport(value: unknown): BridgeReportV1 | null {
     ...(project !== undefined ? { project } : {}),
     ...(targetSeatConversationId !== undefined ? { targetSeatConversationId } : {}),
     ...(typeof candidate.correlatesDirective === "string" ? { correlatesDirective: candidate.correlatesDirective } : {}),
-    ...(confirmation ? { confirmation } : {}),
-    ...(candidate.directIntent === true ? { directIntent: true as const } : {}),
   };
 }
 
@@ -403,11 +387,6 @@ export function appendBridgeReports(
       }
       known.add(id);
       file.lastSeq += 1;
-      /* Authorization belongs to `confirmation_request` alone. Accepting it on
-         any other class would create a second, unreviewed path to a deploy. */
-      const confirmation = input.class === "confirmation_request"
-        ? normalizeConfirmation(input.confirmation)
-        : undefined;
       const report: BridgeReportV1 = {
         id,
         seq: file.lastSeq,
@@ -424,7 +403,6 @@ export function appendBridgeReports(
           }
           : {}),
         ...(input.correlatesDirective ? { correlatesDirective: input.correlatesDirective } : {}),
-        ...(confirmation ? { confirmation } : {}),
       };
       file.reports.push(report);
       appended.push(report);
@@ -470,86 +448,6 @@ export function appendBridgeReports(
   });
 }
 
-export interface DirectDeployIntentInput {
-  /** Stable identity derived from the directive delivery id, so a relay retry
-      returns the SAME authorization instead of minting a second one. */
-  key: string;
-  project: string;
-  seatConversationId: string;
-  origin: BridgeReportOrigin;
-  /** The operator's words, for the audit row. Bounded and redacted like every
-      other body. */
-  body: string;
-  confirmation: { sha: string; nonce: string; expiresAt: string };
-  at: string;
-}
-
-export interface DirectDeployIntentRecord {
-  report: BridgeReportV1;
-  replayed: boolean;
-  /** Seqs of live authorizations this acceptance superseded. */
-  supersededSeqs: number[];
-}
-
-/**
- * Record one direct operator deploy authorization (#795), atomically.
- *
- * Replay, supersession and append are one file transaction on purpose: two
- * relays racing must not BOTH supersede each other's fresh authorization, and a
- * replayed key must return the original row — the operator said one thing once,
- * so the log holds one authorization for it.
- *
- * A newer intent supersedes every live unconsumed direct intent for the same
- * project: the operator's latest word repins, it never stacks. Legacy
- * manager-minted confirmations are left alone — their lifecycle is expiry.
- */
-export function recordDirectDeployIntent(
-  input: DirectDeployIntentInput,
-  now = new Date(),
-): DirectDeployIntentRecord {
-  return withFileTransactionSync(bridgeReportLogPath(), BRIDGE_LOG_BUSY, () => {
-    const file = readLog();
-    const id = bridgeReportId(input.key);
-    const existing = file.reports.find((report) => report.id === id);
-    if (existing) return { report: existing, replayed: true, supersededSeqs: [] };
-    if (file.retired.includes(id)) {
-      throw new Error("this deploy intent was already retired from the log; the operator must state the deploy again");
-    }
-
-    const supersededSeqs: number[] = [];
-    for (const [index, report] of file.reports.entries()) {
-      if (report.directIntent !== true || report.project !== input.project) continue;
-      const confirmation = report.confirmation;
-      if (!confirmation || confirmation.consumedAt || confirmation.supersededAt) continue;
-      file.reports[index] = {
-        ...report,
-        confirmation: { ...confirmation, supersededAt: now.toISOString() },
-      };
-      supersededSeqs.push(report.seq);
-    }
-
-    const confirmation = normalizeConfirmation(input.confirmation);
-    if (!confirmation) throw new Error("a deploy intent requires a sha, nonce and expiry");
-    const origin = normalizeOrigin(input.origin);
-    file.lastSeq += 1;
-    const report: BridgeReportV1 = {
-      id,
-      seq: file.lastSeq,
-      at: input.at,
-      class: "confirmation_request",
-      ...(origin ? { origin } : {}),
-      project: input.project,
-      targetSeatConversationId: input.seatConversationId,
-      body: bridgeReportBody(input.body),
-      confirmation,
-      directIntent: true,
-    };
-    file.reports.push(report);
-    writeJsonDurably(bridgeReportLogPath(), file);
-    return { report, replayed: false, supersededSeqs };
-  });
-}
-
 function gapNotice(cursor: number, resumedAtSeq: number, missedThroughSeq: number, at: string): BridgeReportV1 {
   const missed = missedThroughSeq - cursor;
   return {
@@ -580,12 +478,12 @@ export function drainBridgeReports(
   const limit = Math.max(1, Math.min(BRIDGE_DRAIN_BATCH_MAX, options.limit ?? BRIDGE_DRAIN_BATCH_MAX));
   const cursor = readBridgeChannel(scope)?.managerReportCursor ?? 0;
   const file = readLog();
-  /* #795: direct-intent rows are authorization state, never conversation. The
-     operator already spoke; handing the row back would be the repeated prompt
-     the direct-intent contract exists to remove. */
+  /* Legacy `confirmation_request` rows are retired authorization state, never
+     conversation. Nothing prompts the operator about a deploy anymore; handing
+     one back would resurrect exactly the confirmation step #795 removed. */
   const pending = file.reports.filter((report) =>
     report.seq > cursor
-    && report.directIntent !== true
+    && report.class !== LEGACY_CONFIRMATION_CLASS
     && (!scope
       || (
         report.project === scope.project
