@@ -9,7 +9,7 @@ import { headlessCodexThreadConfig } from "@/lib/codexHeadlessConfig";
 import { grantedPluginServerNames, grantedPlugins } from "@/lib/agent/pluginAllowlist";
 import { hardenedRedact } from "@/lib/view/compactText";
 import { decodeCodexStructuredUserText, encodeCodexStructuredUserText } from "./codexStructuredUserText";
-import { sanitizeCodexImageFrame, type ImageSink } from "./codexImageFrames";
+import { CodexReplayFrameReducer, ReplayFrameOverflowError, sanitizeCodexImageFrame, type ImageSink, type ReplayFrameBudgets } from "./codexImageFrames";
 import { MAX_STRUCTURED_IMAGE_ENCODED_BYTES, runtimeImageStore } from "./runtimeImageStore";
 import { STRUCTURED_IMAGE_CAPABILITY, type StructuredImageRef } from "./structuredContent";
 import {
@@ -216,6 +216,31 @@ const MAX_REALTIME_SDP_BYTES = 512 * 1024;
 const MAX_REALTIME_SPEECH_BYTES = 8 * 1024;
 const MAX_REPLAY_ENVELOPE_BYTES = 256 * 1024;
 const MAX_LINE_BYTES = MAX_STRUCTURED_IMAGE_ENCODED_BYTES + MAX_REPLAY_ENVELOPE_BYTES;
+/**
+ * A `thread/resume` (or `thread/read`) response replays the whole thread
+ * history as one JSONL frame, and history the operator legally accumulated can
+ * dwarf `MAX_LINE_BYTES` (issue #794: a production resume envelope reached
+ * ~55 MB, dominated by replayed MCP tool-result text). Only the response the
+ * host is itself awaiting for one of these methods may pass the frame guard,
+ * and it is admitted through `CodexReplayFrameReducer`, which bounds every
+ * string token while it streams. Every other oversized frame stays fail-closed.
+ */
+const REPLAY_ENVELOPE_METHODS = new Set(["thread/resume", "thread/read"]);
+const REPLAY_REDUCTION_THRESHOLD_BYTES = MAX_REPLAY_ENVELOPE_BYTES;
+const REPLAY_STRING_UNITS = 16 * 1024;
+const MAX_REPLAY_RAW_UNITS = 512 * 1024 * 1024;
+const MAX_TRACKED_REPLAY_ENVELOPE_REQUESTS = 64;
+/* Codex serializes responses as `{"id":N,"result":…}` (the test fake keeps the
+   `jsonrpc` member first); anything else fails closed like before. */
+const REPLAY_RESPONSE_PREFIX = /^\{(?:"jsonrpc":"2\.0",)?"id":(\d+),"result":/;
+const REPLAY_FRAME_BUDGETS: ReplayFrameBudgets = {
+  maxStringUnits: REPLAY_STRING_UNITS,
+  /* Keep a full admissible image encoding intact (plus data-URL prefix room)
+     so replayed inline images still collapse into bounded references. */
+  maxImageStringUnits: MAX_STRUCTURED_IMAGE_ENCODED_BYTES + 64,
+  maxOutputUnits: MAX_LINE_BYTES,
+  maxRawUnits: MAX_REPLAY_RAW_UNITS,
+};
 const MAX_STDERR_TAIL_BYTES = 16 * 1024;
 const MAX_PRE_RESTORE_FRAMES = 256;
 const MAX_PRE_RESTORE_BYTES = 4 * 1024 * 1024;
@@ -397,6 +422,8 @@ export class CodexAppServerHost implements EngineHost {
   private realtimeFailure: CodexRealtimeFailure | null = null;
   private realtimeSessionId: string | null = null;
   private readonly lateThreadReadResponses = new Map<number, number>();
+  private readonly replayEnvelopeRequestIds = new Set<number>();
+  private replayReduction: CodexReplayFrameReducer | null = null;
   private readonly subscribers = new Set<Subscriber>();
   private readonly events: RuntimeEvent[] = [];
   private readonly confirmedDeliveries = new Map<string, {
@@ -1296,7 +1323,11 @@ export class CodexAppServerHost implements EngineHost {
       completedItems.set(key, (completedItems.get(key) ?? 0) + 1);
     }
     if (Array.isArray(turn.items)) {
-      for (const item of turn.items) {
+      for (const replayed of turn.items) {
+        /* Replayed history items take the same image bounding as live echoes
+           (#773); the ledger only ever holds bounded references, and the
+           replay key must be computed on the same shape the ledger stores. */
+        const item = this.boundImageBodies(replayed);
         const key = itemReplayKey(item);
         const recorded = completedItems.get(key) ?? 0;
         if (recorded > 0) {
@@ -1551,6 +1582,7 @@ export class CodexAppServerHost implements EngineHost {
   private rpc(method: string, params: JsonObject = {}, timeoutMs = this.requestTimeoutMs): Promise<unknown> {
     if (this.dead || this.releasing || this.released) return Promise.reject(new Error("Codex app-server host is unavailable"));
     const id = this.nextRpcId++;
+    if (REPLAY_ENVELOPE_METHODS.has(method)) this.trackReplayEnvelopeRequest(id);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
@@ -1609,24 +1641,113 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   private acceptStdout(chunk: string): void {
-    if (this.dead || this.releasing || this.released) return;
+    let rest = chunk;
+    while (rest) {
+      if (this.dead || this.releasing || this.released) {
+        this.stdoutBuffer = "";
+        this.replayReduction = null;
+        return;
+      }
+      rest = this.replayReduction ? this.feedReplayReduction(rest) : this.acceptPlainStdout(rest);
+    }
+    if (this.dead || this.releasing || this.released) {
+      this.stdoutBuffer = "";
+      this.replayReduction = null;
+    }
+  }
+
+  /** Plain JSONL admission; returns any bytes to reprocess in replay-reduction mode. */
+  private acceptPlainStdout(chunk: string): string {
     this.stdoutBuffer += chunk;
     let newline = this.stdoutBuffer.indexOf("\n");
     while (newline >= 0) {
       const line = this.stdoutBuffer.slice(0, newline).trim();
       this.stdoutBuffer = this.stdoutBuffer.slice(newline + 1);
       if (Buffer.byteLength(line) > MAX_LINE_BYTES) {
-        this.fail(new Error("Codex app-server emitted an oversized JSONL frame"));
-        return;
+        if (this.awaitedReplayEnvelopeId(line) === null) {
+          this.fail(new Error("Codex app-server emitted an oversized JSONL frame"));
+          return "";
+        }
+        const remainder = this.stdoutBuffer;
+        this.stdoutBuffer = "";
+        this.replayReduction = new CodexReplayFrameReducer(REPLAY_FRAME_BUDGETS);
+        if (!this.feedReplayFrame(line)) return "";
+        this.finishReplayReduction();
+        return this.dead || this.releasing || this.released ? "" : remainder;
       }
       if (line) this.acceptMessage(line);
       if (this.dead || this.releasing || this.released) {
         this.stdoutBuffer = "";
-        return;
+        return "";
       }
       newline = this.stdoutBuffer.indexOf("\n");
     }
-    if (Buffer.byteLength(this.stdoutBuffer) > MAX_LINE_BYTES) this.fail(new Error("Codex app-server emitted an oversized JSONL frame"));
+    const bufferedBytes = Buffer.byteLength(this.stdoutBuffer);
+    if (bufferedBytes > REPLAY_REDUCTION_THRESHOLD_BYTES && this.awaitedReplayEnvelopeId(this.stdoutBuffer) !== null) {
+      const buffered = this.stdoutBuffer;
+      this.stdoutBuffer = "";
+      this.replayReduction = new CodexReplayFrameReducer(REPLAY_FRAME_BUDGETS);
+      return buffered;
+    }
+    if (bufferedBytes > MAX_LINE_BYTES) {
+      this.fail(new Error("Codex app-server emitted an oversized JSONL frame"));
+      this.stdoutBuffer = "";
+    }
+    return "";
+  }
+
+  /** Streams the awaited replay envelope; returns bytes after the frame's newline. */
+  private feedReplayReduction(chunk: string): string {
+    const newline = chunk.indexOf("\n");
+    if (!this.feedReplayFrame(newline === -1 ? chunk : chunk.slice(0, newline))) return "";
+    if (newline === -1) return "";
+    this.finishReplayReduction();
+    return this.dead || this.releasing || this.released ? "" : chunk.slice(newline + 1);
+  }
+
+  private feedReplayFrame(text: string): boolean {
+    try {
+      this.replayReduction!.feed(text);
+      return true;
+    } catch (error) {
+      this.replayReduction = null;
+      this.fail(error instanceof ReplayFrameOverflowError ? error : new Error(safeError(error)));
+      return false;
+    }
+  }
+
+  private finishReplayReduction(): void {
+    const reducer = this.replayReduction!;
+    this.replayReduction = null;
+    let reduced: string;
+    try {
+      reduced = reducer.finish().trim();
+    } catch (error) {
+      this.fail(error instanceof ReplayFrameOverflowError ? error : new Error(safeError(error)));
+      return;
+    }
+    if (Buffer.byteLength(reduced) > MAX_LINE_BYTES) {
+      this.fail(new Error("Codex app-server emitted an oversized JSONL frame"));
+      return;
+    }
+    if (reduced) this.acceptMessage(reduced);
+  }
+
+  /** The numeric id when this frame opens as the response to an awaited replay read. */
+  private awaitedReplayEnvelopeId(text: string): number | null {
+    const match = REPLAY_RESPONSE_PREFIX.exec(text.slice(0, 64).trimStart());
+    if (!match) return null;
+    const id = Number(match[1]);
+    return this.replayEnvelopeRequestIds.has(id) ? id : null;
+  }
+
+  private trackReplayEnvelopeRequest(id: number): void {
+    this.replayEnvelopeRequestIds.add(id);
+    while (this.replayEnvelopeRequestIds.size > MAX_TRACKED_REPLAY_ENVELOPE_REQUESTS) {
+      const oldest = this.replayEnvelopeRequestIds.values().next().value;
+      if (oldest === undefined) break;
+      this.replayEnvelopeRequestIds.delete(oldest);
+    }
   }
 
   private acceptStderr(chunk: string): void {
@@ -1662,6 +1783,7 @@ export class CodexAppServerHost implements EngineHost {
     const method = typeof message.method === "string" ? message.method : null;
     if ((typeof id === "number" || typeof id === "string") && !method) {
       if (typeof id !== "number") return this.fail(new Error("Codex app-server response id is invalid"));
+      this.replayEnvelopeRequestIds.delete(id);
       const pending = this.pending.get(id);
       if (!pending && this.consumeLateThreadReadResponse(id)) return;
       if (!pending) return this.fail(new Error("Codex app-server response has no matching request"));

@@ -65,6 +65,8 @@ class FakeAppServer extends EventEmitter {
   modelListFailuresRemaining = 0;
   realtimeStartError: string | null = null;
   realtimeAppendErrorAt: number | null = null;
+  responseChunkBytes: number | null = null;
+  oversizedTurnStartResult = false;
   readonly acceptedRealtimeSpeech: string[] = [];
   injectItemsError: string | null = null;
   private readonly serverRequestIds = new Set<string | number>();
@@ -166,6 +168,9 @@ class FakeAppServer extends EventEmitter {
     }
     if (method === "turn/start") {
       const turnId = `turn-${++this.turn}`;
+      if (this.oversizedTurnStartResult) {
+        return this.respond(message.id, { turn: { id: turnId }, padding: "p".repeat(26 * 1024 * 1024) });
+      }
       this.respond(message.id, { turn: { id: turnId } });
       this.notify("turn/started", { threadId: this.threadId, turn: { id: turnId } });
       this.completeUserMessage(message, turnId);
@@ -218,7 +223,14 @@ class FakeAppServer extends EventEmitter {
   }
 
   private respond(id: number, result: unknown): void {
-    this.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
+    const line = `${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`;
+    if (this.responseChunkBytes) {
+      for (let offset = 0; offset < line.length; offset += this.responseChunkBytes) {
+        this.stdout.write(line.slice(offset, offset + this.responseChunkBytes));
+      }
+      return;
+    }
+    this.stdout.write(line);
   }
 
   private respondError(id: number, message: string): void {
@@ -884,6 +896,174 @@ describe("CodexAppServerHost", () => {
       .toMatchObject({ threadId });
     expect(await host.health()).toMatchObject({ status: "idle", eventCursor: 5 });
     await host.release();
+  });
+
+  /* An mcpToolCall replay item shaped like the production frame: one turn of
+     Viewer tool calls whose result text dominates the envelope's byte count. */
+  const fatReplayTurn = (turnId: string, itemPrefix: string, count: number, text: string) => ({
+    id: turnId,
+    status: "completed",
+    items: Array.from({ length: count }, (_, index) => ({
+      id: `${itemPrefix}-${index}`,
+      type: "mcpToolCall",
+      status: "completed",
+      result: { Ok: { content: [{ type: "text", text }] } },
+    })),
+  });
+
+  test("recovery survives an oversized thread/resume replay envelope with a bounded ledger", async () => {
+    const threadId = "oversized-resume-thread";
+    const fatText = "x".repeat(1024 * 1024);
+    const server = new FakeAppServer(threadId, threadId, false, [fatReplayTurn("fat-turn", "fat-call", 26, fatText)]);
+    const eventStore = new MemoryEventStore();
+    const host = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore,
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect((await host.health()).status).not.toBe("dead");
+    const items = eventStore.load(threadId).filter((event) => event.kind === "item");
+    expect(items).toHaveLength(26);
+    const serialized = JSON.stringify(items);
+    expect(serialized).toContain("truncated");
+    expect(serialized.length).toBeLessThan(2 * 1024 * 1024);
+    expect(await host.send({ id: "post-recovery", text: "ping" })).toMatchObject({ outcome: "turn-started" });
+    await host.release();
+  });
+
+  test("the oversized replay envelope survives arriving in stream chunks", async () => {
+    const threadId = "chunked-resume-thread";
+    const fatText = "x".repeat(1024 * 1024);
+    const server = new FakeAppServer(threadId, threadId, false, [fatReplayTurn("chunk-turn", "chunk-call", 26, fatText)]);
+    server.responseChunkBytes = 64 * 1024;
+    const eventStore = new MemoryEventStore();
+    const host = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore,
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect((await host.health()).status).not.toBe("dead");
+    expect(eventStore.load(threadId).filter((event) => event.kind === "item")).toHaveLength(26);
+    await host.release();
+  });
+
+  test("inline image history in the replay envelope reaches the ledger only as a bounded reference", async () => {
+    const threadId = "image-replay-thread";
+    const body = Buffer.alloc(1024 * 1024, 5).toString("base64");
+    const server = new FakeAppServer(threadId, threadId, false, [{
+      id: "image-turn",
+      status: "completed",
+      items: [{
+        id: "image-echo",
+        type: "userMessage",
+        clientId: "image-echo",
+        content: [
+          { type: "input_image", image_url: `data:image/png;base64,${body}` },
+          { type: "text", text: "replayed screenshot" },
+        ],
+      }],
+    }]);
+    const eventStore = new MemoryEventStore();
+    const host = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore,
+      resolveImagePath: (ref) => `/runtime-images/${ref.sha256}`,
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect((await host.health()).status).not.toBe("dead");
+    const serialized = JSON.stringify(eventStore.load(threadId).filter((event) => event.kind === "item"));
+    expect(serialized).toContain("localImage");
+    expect(serialized).not.toContain(body.slice(0, 256));
+    expect(serialized.length).toBeLessThan(64 * 1024);
+    await host.release();
+  });
+
+  test("a queued send settles exactly once across an oversized thread/read confirmation replay", async () => {
+    const threadId = "oversized-read-thread";
+    const fatText = "y".repeat(1024 * 1024);
+    const server = new FakeAppServer(threadId, threadId);
+    const fatTurn = fatReplayTurn("persisted-turn", "read-call", 26, fatText);
+    server.readTurns = [{
+      ...fatTurn,
+      items: [
+        ...fatTurn.items,
+        { type: "userMessage", clientId: "operation-recovered", content: [{ type: "text", text: "hello" }] },
+      ],
+    }];
+    const host = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(await host.send({ id: "operation-recovered", text: "hello" })).toEqual({
+      outcome: "turn-started",
+      turnId: "persisted-turn",
+    });
+    expect(server.requests.some((request) => request.method === "turn/start" || request.method === "turn/steer")).toBeFalse();
+    expect((await host.health()).status).not.toBe("dead");
+    await host.release();
+  });
+
+  test("an oversized frame that is not the awaited replay envelope still fails closed", async () => {
+    const server = new FakeAppServer("oversized-notification-thread");
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      shutdownGraceMs: 2,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+      ...ownedFakeProcess,
+      signalProcess: (_pid, signal) => {
+        if (signal === "SIGKILL") queueMicrotask(() => server.emit("close", 0, signal));
+      },
+    });
+
+    server.notify("item/completed", {
+      threadId: "oversized-notification-thread",
+      turnId: "turn-9",
+      item: { type: "agentMessage", text: "z".repeat(26 * 1024 * 1024) },
+    });
+    await Bun.sleep(20);
+    expect(await host.health()).toMatchObject({ status: "dead" });
+  });
+
+  test("an oversized response to a pending non-replay request still fails closed", async () => {
+    const server = new FakeAppServer("oversized-turn-start-thread");
+    server.oversizedTurnStartResult = true;
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      shutdownGraceMs: 2,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+      ...ownedFakeProcess,
+      signalProcess: (_pid, signal) => {
+        if (signal === "SIGKILL") queueMicrotask(() => server.emit("close", 0, signal));
+      },
+    });
+
+    await expect(host.send({ id: "oversized-turn-start", text: "hi" })).rejects.toThrow();
+    expect(await host.health()).toMatchObject({ status: "dead" });
+  });
+
+  test("an oversized response that no replay read is awaiting still fails closed", async () => {
+    const server = new FakeAppServer("oversized-response-thread");
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      shutdownGraceMs: 2,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+      ...ownedFakeProcess,
+      signalProcess: (_pid, signal) => {
+        if (signal === "SIGKILL") queueMicrotask(() => server.emit("close", 0, signal));
+      },
+    });
+
+    server.stdout.write(`{"id":777,"result":{"blob":"${"w".repeat(26 * 1024 * 1024)}"}}\n`);
+    await Bun.sleep(20);
+    expect(await host.health()).toMatchObject({ status: "dead" });
   });
 
   test("managed-home adoption discovers Viewer and resumes with every unrelated MCP server disabled", async () => {
