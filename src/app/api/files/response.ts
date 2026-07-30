@@ -5,18 +5,17 @@ import path from "node:path";
 import { NextResponse } from "next/server";
 
 import { listFilesWithProjectCatalog, pinnedPathsFor } from "@/lib/scanner";
-import { agentRegistry, conversationLookupFromSnapshot, supersedenceChainTail } from "@/lib/agent/registry";
+import { agentRegistry, RegistryReadError, supersedenceChainTail } from "@/lib/agent/registry";
 import { projectLaunchConversations } from "@/lib/agent/spawnProjection";
 import { conversationCatalogSnapshot } from "@/lib/scanner/conversationCatalog";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { repositoryForProjectRoot } from "@/lib/flows/git";
-import { loadFlows, withFlowSnapshot } from "@/lib/flows/store";
+import { loadFlows } from "@/lib/flows/store";
 import { reviewOutcomeFor } from "@/lib/flows/reviewOutcome";
 import { overlayPromptDisplayTitles } from "@/lib/displayNames";
 import { projectAliasSnapshot } from "@/lib/projects/aliases";
 import { projectRestoredFlows } from "@/lib/flows/visibility";
-import { reconcileEmbeddedReviewFlows } from "@/lib/pipelines/engine";
-import { withPipelineMutation } from "@/lib/pipelines/store";
+import { loadPipelines } from "@/lib/pipelines/store";
 import type { Pipeline } from "@/lib/pipelines/types";
 import { filterPipelinesForFileScan } from "@/lib/pipelines/visibility";
 import { pathForPanePid, reconcileTasks } from "@/lib/tasks/reconcile";
@@ -29,7 +28,11 @@ import { readAuthorshipEvidence } from "@/lib/reaperAuthorship";
 import { overlayLineageProjectAffinity } from "@/lib/session/projectAffinity";
 import { resolveProjectAttribution } from "@/lib/session/projectResolution";
 import { overlayRoleSessionTitles } from "@/lib/session/roleTitles";
-import { overlaySessionTitles } from "@/lib/session/titleProjection";
+import {
+  overlaySessionTitles,
+  sessionRegistryProjection,
+  type SessionRegistryProjection,
+} from "@/lib/session/titleProjection";
 import { tmuxEndpointHealth } from "@/lib/tmux";
 import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
 import { projectInfoFromCwd, projectRootForCwd } from "@/lib/scanner/describe";
@@ -45,45 +48,17 @@ interface FilesRouteDependencies {
 
 function projectedProjectCatalog(
   fallback: ProjectCatalogEntry[],
-  snapshot: ReturnType<ReturnType<typeof agentRegistry>["snapshot"]>,
+  projection: SessionRegistryProjection,
 ): ProjectCatalogEntry[] {
   const source = conversationCatalogSnapshot();
   if (!source.length) return fallback;
-  const projectByPath = new Map<string, string>();
-  const projectMetadataByPath = new Map<string, { displayName: string; projectRoot?: string }>();
-  const archivedPaths = new Set<string>();
-  for (const conversation of Object.values(snapshot.conversations)) {
-    const latest = conversation.generations.at(-1);
-    if (!latest) continue;
-    const { project } = resolveProjectAttribution({
-      projectOwnership: conversation.projectOwnership,
-      cwd: latest.launchProfile.cwd,
-      launchProfileProject: latest.launchProfile.project,
-    });
-    if (project) {
-      projectByPath.set(latest.path, project);
-      const cwdInfo = latest.launchProfile.cwd ? projectInfoFromCwd(latest.launchProfile.cwd) : null;
-      if (cwdInfo?.project === project) {
-        projectMetadataByPath.set(latest.path, {
-          displayName: cwdInfo.displayName,
-          ...(cwdInfo.repo ? { projectRoot: cwdInfo.repo } : {}),
-        });
-      }
-    }
-    for (const generation of conversation.generations) {
-      if (generation.path !== latest.path) archivedPaths.add(generation.path);
-    }
-    for (const pathname of conversation.continuityPaths) {
-      if (pathname !== latest.path) archivedPaths.add(pathname);
-    }
-  }
   const groups = new Map<string, ProjectCatalogEntry>();
   const fallbackMetadata = new Map(fallback.map((entry) => [entry.project, entry] as const));
   for (const entry of source) {
-    if (archivedPaths.has(entry.path)) continue;
-    const project = projectByPath.get(entry.path) ?? entry.project;
+    if (projection.archivedPaths.has(entry.path)) continue;
+    const project = projection.projectByPath.get(entry.path) ?? entry.project;
     const metadata = fallbackMetadata.get(project) ?? fallbackMetadata.get(entry.project);
-    const projectedMetadata = projectMetadataByPath.get(entry.path);
+    const projectedMetadata = projection.projectMetadataByPath.get(entry.path);
     const group = groups.get(project) ?? {
       project,
       displayName: projectedMetadata?.displayName ?? metadata?.displayName ?? entry.projectName,
@@ -117,7 +92,9 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   // A scan is a read model. Runtime reconciliation and notifications belong to
   // the external scheduler, keeping repeated GETs byte-stable for state files.
   const registry = agentRegistry();
-  const registrySnapshot = registry.readOnlySnapshot();
+  const registryProjection = sessionRegistryProjection(registry, true);
+  if (!registryProjection) throw new RegistryReadError("registry snapshot is unavailable");
+  const registrySnapshot = registryProjection.snapshot;
   /* One launch read-model (issue #569): a launch either projects the
      conversation window itself (nothing materialized yet) or folds into the
      live conversation as transient chips — never both. */
@@ -127,7 +104,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     const launch = launchProjection.facts.get(file.path);
     if (launch) file.launch = launch;
   }
-  const conversationLookup = conversationLookupFromSnapshot(registrySnapshot);
+  const conversationLookup = registryProjection.conversationLookup;
   const conversationForPath = (pathname: string) => conversationLookup.conversationForPath(pathname);
   const filesByPath = new Map(files.map((file) => [file.path, file]));
   for (let index = 0; index < files.length; index += 1) {
@@ -396,7 +373,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      on `autoTitle`; the `renamable` flag is projected too so the client never
      imports the Node-only store. */
   const flowsStartedAt = performance.now();
-  overlaySessionTitles(files);
+  overlaySessionTitles(files, registryProjection);
   markTiming("files-session-titles");
   /* Durable project affinity: a Viewer-launched family whose root transcript
      recorded a bare directory above the repository its lineage works in (an
@@ -406,9 +383,9 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      with no such lineage are untouched. */
   overlayLineageProjectAffinity(files);
   markTiming("files-project-affinity");
-  let storedFlows = loadFlows();
+  const storedFlows = loadFlows();
   markTiming("files-flow-store");
-  let flows = projectRestoredFlows(storedFlows, files, {
+  const flows = projectRestoredFlows(storedFlows, files, {
     pinnedPaths: visibilityPinnedPaths,
     memberships: registrySnapshot.memberships,
   });
@@ -432,11 +409,6 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      a worker that exited before the reaper ever reached it would be falsely
      certified clean. A generation with no stamp stays unverified; an archived
      (out-of-scan) generation is immutable, so any stamp certifies it. */
-  const conversationByPath = new Map<string, (typeof registrySnapshot.conversations)[keyof typeof registrySnapshot.conversations]>();
-  for (const conversation of Object.values(registrySnapshot.conversations)) {
-    for (const generation of conversation.generations) conversationByPath.set(generation.path, conversation);
-    for (const continuityPath of conversation.continuityPaths) conversationByPath.set(continuityPath, conversation);
-  }
   const { userAuthoredPaths, scannedAt } = readAuthorshipEvidence();
   /* Live on-disk mtime probe, memoized per request. A clean stamp must be
      checked against the LIVE filesystem, not the scan snapshot's mtime: the
@@ -464,7 +436,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   };
   for (const file of files) {
     if (file.engine !== "claude" && file.engine !== "codex") continue;
-    const conversation = conversationByPath.get(file.path);
+    const conversation = conversationLookup.conversationForPath(file.path);
     const lineage = new Set<string>([file.path]);
     if (file.predecessorPath) lineage.add(file.predecessorPath);
     if (conversation) {
@@ -518,20 +490,10 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   let pipelines: Pipeline[] = [];
   let pipelinesError: string | undefined;
   try {
-    const reconciled = await withPipelineMutation((current, persist) =>
-      withFlowSnapshot((projectionFlows) => {
-        /* Every cross-store lifecycle path acquires pipeline before flow. The
-           flow lock spans parent persistence and captures the exact array
-           returned below, so the returned deck and parent share a generation. */
-        if (reconcileEmbeddedReviewFlows(current, projectionFlows)) persist();
-        return { pipelines: current, flows: [...projectionFlows] };
-      }));
-    storedFlows = reconciled.flows;
-    flows = projectRestoredFlows(storedFlows, files, {
-      pinnedPaths: visibilityPinnedPaths,
-      memberships: registrySnapshot.memberships,
-    });
-    pipelines = filterPipelinesForFileScan(reconciled.pipelines, files, {
+    /* Pipeline/flow lifecycle reconciliation belongs to the controller tick.
+       This request consumes only durable read models, so a catalog poll never
+       takes a mutation lock or rewrites either store. */
+    pipelines = filterPipelinesForFileScan(loadPipelines(), files, {
       pinnedPaths: visibilityPinnedPaths,
       memberships: registrySnapshot.memberships,
     });
@@ -539,10 +501,8 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     pipelinesError = error instanceof Error ? error.message : "pipeline registry unreadable";
     console.error("[files] pipelines store unreadable; serving without pipelines", error);
   }
-  /* Role titles (issue #325) and the returned flow read model consume the same
-     transaction-captured flow generation as pipelines. A controller advance
-     during the earlier scan can therefore never mix deck/annotation generation
-     N with parent generation N+1. Explicit user titles keep final precedence. */
+  /* Role titles (issue #325) consume the same immutable flow read model returned
+     above. Explicit user titles keep final precedence. */
   overlayRoleSessionTitles({ files, flows, tasks: storedTasks, conversationAliases: registrySnapshot.conversationAliases });
   overlayPromptDisplayTitles(files);
   markTiming("files-role-titles");
@@ -551,7 +511,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   const projectsStartedAt = performance.now();
   const projected = projectRateLimitReadModel(files, flows, registrySnapshot);
   markTiming("files-project-rate-limits");
-  const effectiveProjectCatalog = projectedProjectCatalog(projectCatalog, registrySnapshot);
+  const effectiveProjectCatalog = projectedProjectCatalog(projectCatalog, registryProjection);
   /* GitHub repository identity for readiness issue links (issue #290): cached
      per project root from local .git/config, nullable on any failure. */
   for (const entry of effectiveProjectCatalog) {

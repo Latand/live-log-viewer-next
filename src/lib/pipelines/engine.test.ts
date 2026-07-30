@@ -2589,7 +2589,11 @@ test("a later exact-head approval replaces a stale startup pause and completes a
     conversationId: "conversation_reviewer",
   });
 
-  const afterCompletion = JSON.stringify(completed);
+  /* The first post-completion tick settles the terminal host reap (#574);
+     from there the record is stable. */
+  await tickPipelines([entry("/codex/reviewer.jsonl")], h.ports);
+  expect(loadPipelines()[0]!.terminalReap?.settledAt).toBeTruthy();
+  const afterCompletion = JSON.stringify(loadPipelines()[0]);
   await tickPipelines([entry("/codex/reviewer.jsonl")], h.ports);
   expect(JSON.stringify(loadPipelines()[0])).toBe(afterCompletion);
 });
@@ -2947,7 +2951,11 @@ test("a restarted committing review completes once when its clean head still mat
   expect(completed.state).toBe("completed");
   expect(completed.runs[1]!.attempts[0]).toMatchObject({ state: "passed", reviewHeadSha: ORIGIN_MAIN_SHA });
 
-  const afterCompletion = JSON.stringify(completed);
+  /* The first post-completion tick settles the terminal host reap (#574);
+     from there the record is stable and further ticks change nothing. */
+  await tickPipelines([], h.ports);
+  expect(loadPipelines()[0]!.terminalReap?.settledAt).toBeTruthy();
+  const afterCompletion = JSON.stringify(loadPipelines()[0]);
   expect((await tickPipelines([], h.ports)).changed).toBe(false);
   expect(JSON.stringify(loadPipelines()[0])).toBe(afterCompletion);
 });
