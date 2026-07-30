@@ -265,24 +265,30 @@ export type CreatePipelineRequest = {
   autoStart?: boolean;
 };
 
-export type PipelineAction =
-  | "start"
-  | "update-draft"
-  | "set-position"
-  | "add-stage"
-  | "remove-stage"
-  | "reorder-stage"
-  | "set-edge"
-  | "pause"
-  | "resume"
-  | "retry-stage"
-  | "skip-stage"
-  | "override-stage"
-  | "link-task"
-  | "unlink-task"
-  | "set-src"
-  | "delete"
-  | "close";
+/* The accepted actions, declared once (#774). The MCP tool schema publishes
+   these to callers and the PATCH route admits exactly this set; an action added
+   to one and forgotten in the other is the defect this constant prevents. */
+export const PIPELINE_ACTIONS = [
+  "start",
+  "update-draft",
+  "set-position",
+  "add-stage",
+  "remove-stage",
+  "reorder-stage",
+  "set-edge",
+  "pause",
+  "resume",
+  "retry-stage",
+  "skip-stage",
+  "override-stage",
+  "link-task",
+  "unlink-task",
+  "set-src",
+  "delete",
+  "close",
+] as const;
+
+export type PipelineAction = (typeof PIPELINE_ACTIONS)[number];
 
 export type PatchPipelineRequest = {
   action: PipelineAction;

@@ -32,7 +32,12 @@ export function validateRoleParams(
   const source = (raw ?? {}) as Record<string, unknown>;
   const byKey = new Map(definition.parameters.map((parameter) => [parameter.key, parameter]));
   for (const key of Object.keys(source)) {
-    if (!byKey.has(key)) return { ok: false, error: `unknown role parameter: ${key}` };
+    /* Name the accepted alternatives (#774): the caller can only see the key it
+       guessed wrong, and this role's parameter set is right here. */
+    if (!byKey.has(key)) {
+      const allowed = definition.parameters.map((parameter) => parameter.key).join(", ") || "none";
+      return { ok: false, error: `unknown role parameter: ${key} (${definition.id} accepts: ${allowed})` };
+    }
   }
   const values: RoleParamValues = {};
   for (const parameter of definition.parameters) {
@@ -103,7 +108,7 @@ function resolveConfig(definition: RoleDefinition, params: RoleParamValues, expl
 
 export function resolveRole(role: string, params: unknown = {}, explicit: ExplicitRoleConfig = {}, definitions: RoleDefinition[] = loadRoleDefinitions()): RoleResolution {
   const definition = definitions.find((candidate) => candidate.id === role);
-  if (!definition) return { ok: false, error: "unknown role" };
+  if (!definition) return { ok: false, error: `unknown role: ${role} (allowed: ${definitions.map((candidate) => candidate.id).join(", ")})` };
   const parsedParams = validateRoleParams(definition, params);
   if (!parsedParams.ok) return parsedParams;
   const config = resolveConfig(definition, parsedParams.value, explicit);

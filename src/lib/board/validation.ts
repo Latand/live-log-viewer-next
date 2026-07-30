@@ -17,9 +17,10 @@ import type { BoardMutationV1 } from "@/lib/board/mutations";
 export const MAX_BOARD_BODY_BYTES = 48 * 1024 * 1024;
 export type BoardPatch = Partial<BoardProjectStateV1["prefs"]>;
 
+/* Names the accepted alternatives so a caller can self-correct (#774). */
 function exact(value: Record<string, unknown>, allowed: readonly string[], field: string): void {
   const unknown = Object.keys(value).find((key) => !allowed.includes(key));
-  if (unknown) throw new ViewValidationError("INVALID_REQUEST", `unknown ${field}.${unknown}`);
+  if (unknown) throw new ViewValidationError("INVALID_REQUEST", `unknown ${field}.${unknown} (allowed: ${allowed.join(", ")})`);
 }
 function record(value: unknown, field: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ViewValidationError("INVALID_REQUEST", `invalid ${field}`);
