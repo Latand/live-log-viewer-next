@@ -10,13 +10,17 @@ const nextConfig: NextConfig = {
     "*": ["node_modules/@img/**", "node_modules/sharp/**"],
   },
   outputFileTracingIncludes: {
-    "/*": [".next/server/resource-collector-worker.js"],
+    "/*": [
+      ".next/server/file-scanner-worker.js",
+      ".next/server/resource-collector-worker.js",
+    ],
   },
   webpack(config, { isServer, nextRuntime }) {
     if (isServer && nextRuntime === "nodejs") {
       const originalEntry = config.entry;
       config.entry = async () => ({
         ...(typeof originalEntry === "function" ? await originalEntry() : originalEntry),
+        "file-scanner-worker": "./src/lib/fileScanner.worker.ts",
         "resource-collector-worker": "./src/lib/resourceCollector.worker.ts",
       });
     }

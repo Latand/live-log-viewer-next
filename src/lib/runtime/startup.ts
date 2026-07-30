@@ -343,8 +343,11 @@ function structuredStartupAdoptionFilter(
     const runtimeHostedRunning = signals.hostedRunningConversationIds.has(conversationId);
     const unfinishedTurn = conversation.turn.state === "busy"
       || Boolean(entry.structuredHost?.activeTurnRef)
-      || runtimeHostedRunning;
-    const liveHost = entry.status === "live" || runtimeHostedRunning;
+      || (entry.status === "live" && runtimeHostedRunning);
+    /* Runtime snapshots survive host epochs. A stale hosted/running row cannot
+       resurrect an idle or dead registry host by itself; the registry's live
+       process evidence remains the startup liveness gate. */
+    const liveHost = entry.status === "live";
     return liveHost && unfinishedTurn;
   };
 }
