@@ -44,6 +44,7 @@ beforeEach(() => {
   hydrateScannedFiles = (files) => files;
   tmuxHealth = { status: "healthy" };
   flowsStore = () => [];
+  pipelineMutationCalls = 0;
   replaceConversationCatalog([]);
 });
 
@@ -90,8 +91,16 @@ mock.module("@/lib/scanner", () => ({
 }));
 let pipelinesStore: () => unknown[] = () => [];
 let flowsStore: () => unknown[] = () => [];
+let pipelineMutationCalls = 0;
 mock.module("@/lib/flows/store", () => ({ loadFlows: () => flowsStore() }));
-mock.module("@/lib/pipelines/store", () => ({ loadPipelines: () => pipelinesStore() }));
+mock.module("@/lib/pipelines/store", () => ({
+  loadPipelines: () => pipelinesStore(),
+  withPipelineMutation: (...args: unknown[]) => {
+    pipelineMutationCalls += 1;
+    const real = realModules.get("@/lib/pipelines/store") as { withPipelineMutation: (...call: unknown[]) => unknown };
+    return real.withPipelineMutation(...args);
+  },
+}));
 mock.module("@/lib/pipelines/visibility", () => ({ filterPipelinesForFileScan: () => [] }));
 let boardTasksStore: () => unknown[] = () => [];
 mock.module("@/lib/tasks/store", () => ({
@@ -190,7 +199,7 @@ test("generation completion retries skip the stale projection while its refresh 
   }
 });
 
-test("issue 532: files response returns the transaction-captured flow generation", async () => {
+test("issues 532/798: files response projects exactly one request-level flow read", async () => {
   const oldFlow = {
     id: "flow-atomic-projection", template: "implement-review-loop", project: "demo", cwd: "/repo",
     implementerPath: "/missing/implementer.jsonl", roles: {
@@ -214,11 +223,40 @@ test("issue 532: files response returns the transaction-captured flow generation
 
   const response = await GET(new Request("http://127.0.0.1/api/files"));
   const body = await response.json() as { flows: Array<{ id: string; rounds: Array<{ n: number }> }> };
-  expect(reads).toBeGreaterThanOrEqual(2);
+  /* One flow load per request (issue #798): every consumer — restored flows,
+     the pipeline sync overlay, role titles — shares that single generation, so
+     a store advance mid-request can never mix generations (issue #532). */
+  expect(reads).toBe(1);
   expect(body.flows).toEqual([expect.objectContaining({
-    id: currentFlow.id,
-    rounds: [expect.objectContaining({ n: 1 }), expect.objectContaining({ n: 2 })],
+    id: oldFlow.id,
+    rounds: [expect.objectContaining({ n: 1 })],
   })]);
+});
+
+test("issue 798: a files GET reads the registry once, threads it to titles, and never mutates pipelines", async () => {
+  const sessionPath = "/sessions/threaded-projection.jsonl";
+  const registry = agentRegistry();
+  const conversation = registry.ensureConversation("codex", sessionPath, null);
+  scannedFiles = [file(sessionPath)];
+  const target = registry as unknown as { readOnlySnapshot: AgentRegistry["readOnlySnapshot"] };
+  const realReadOnlySnapshot = target.readOnlySnapshot.bind(registry);
+  let registryReads = 0;
+  target.readOnlySnapshot = () => {
+    registryReads += 1;
+    return realReadOnlySnapshot();
+  };
+  try {
+    const response = await GET(new Request("http://127.0.0.1/api/files"));
+    const body = await response.json() as { files: Array<{ path: string; conversationId?: string }> };
+    expect(response.status).toBe(200);
+    expect(body.files.find((entry) => entry.path === sessionPath)?.conversationId).toBe(conversation.id);
+    /* The single read-only snapshot is threaded to every projection consumer
+       (title overlay included); a second read here is the #798 regression. */
+    expect(registryReads).toBe(1);
+    expect(pipelineMutationCalls).toBe(0);
+  } finally {
+    target.readOnlySnapshot = realReadOnlySnapshot;
+  }
 });
 
 test("volatile registry diagnostics do not invalidate an otherwise stable files ETag", async () => {

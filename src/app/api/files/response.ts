@@ -5,18 +5,18 @@ import path from "node:path";
 import { NextResponse } from "next/server";
 
 import { listFilesWithProjectCatalog, pinnedPathsFor } from "@/lib/scanner";
-import { agentRegistry, conversationLookupFromSnapshot, supersedenceChainTail } from "@/lib/agent/registry";
+import { agentRegistry, readOnlyConversationLookupFromSnapshot, supersedenceChainTail } from "@/lib/agent/registry";
 import { projectLaunchConversations } from "@/lib/agent/spawnProjection";
 import { conversationCatalogSnapshot } from "@/lib/scanner/conversationCatalog";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { repositoryForProjectRoot } from "@/lib/flows/git";
-import { loadFlows, withFlowSnapshot } from "@/lib/flows/store";
+import { loadFlows } from "@/lib/flows/store";
 import { reviewOutcomeFor } from "@/lib/flows/reviewOutcome";
 import { overlayPromptDisplayTitles } from "@/lib/displayNames";
 import { projectAliasSnapshot } from "@/lib/projects/aliases";
 import { projectRestoredFlows } from "@/lib/flows/visibility";
 import { reconcileEmbeddedReviewFlows } from "@/lib/pipelines/engine";
-import { withPipelineMutation } from "@/lib/pipelines/store";
+import { loadPipelinesForProjection } from "@/lib/pipelines/store";
 import type { Pipeline } from "@/lib/pipelines/types";
 import { filterPipelinesForFileScan } from "@/lib/pipelines/visibility";
 import { pathForPanePid, reconcileTasks } from "@/lib/tasks/reconcile";
@@ -29,7 +29,7 @@ import { readAuthorshipEvidence } from "@/lib/reaperAuthorship";
 import { overlayLineageProjectAffinity } from "@/lib/session/projectAffinity";
 import { resolveProjectAttribution } from "@/lib/session/projectResolution";
 import { overlayRoleSessionTitles } from "@/lib/session/roleTitles";
-import { overlaySessionTitles } from "@/lib/session/titleProjection";
+import { overlaySessionTitles, registryProjectionForSnapshot } from "@/lib/session/titleProjection";
 import { tmuxEndpointHealth } from "@/lib/tmux";
 import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
 import { projectInfoFromCwd, projectRootForCwd } from "@/lib/scanner/describe";
@@ -49,34 +49,10 @@ function projectedProjectCatalog(
 ): ProjectCatalogEntry[] {
   const source = conversationCatalogSnapshot();
   if (!source.length) return fallback;
-  const projectByPath = new Map<string, string>();
-  const projectMetadataByPath = new Map<string, { displayName: string; projectRoot?: string }>();
-  const archivedPaths = new Set<string>();
-  for (const conversation of Object.values(snapshot.conversations)) {
-    const latest = conversation.generations.at(-1);
-    if (!latest) continue;
-    const { project } = resolveProjectAttribution({
-      projectOwnership: conversation.projectOwnership,
-      cwd: latest.launchProfile.cwd,
-      launchProfileProject: latest.launchProfile.project,
-    });
-    if (project) {
-      projectByPath.set(latest.path, project);
-      const cwdInfo = latest.launchProfile.cwd ? projectInfoFromCwd(latest.launchProfile.cwd) : null;
-      if (cwdInfo?.project === project) {
-        projectMetadataByPath.set(latest.path, {
-          displayName: cwdInfo.displayName,
-          ...(cwdInfo.repo ? { projectRoot: cwdInfo.repo } : {}),
-        });
-      }
-    }
-    for (const generation of conversation.generations) {
-      if (generation.path !== latest.path) archivedPaths.add(generation.path);
-    }
-    for (const pathname of conversation.continuityPaths) {
-      if (pathname !== latest.path) archivedPaths.add(pathname);
-    }
-  }
+  /* The same per-conversation attribution the title projection computes; the
+     shared per-revision projection replaces a second sweep over every
+     conversation (issue #798). */
+  const { projectByPath, projectMetadataByPath, archivedPaths } = registryProjectionForSnapshot(snapshot);
   const groups = new Map<string, ProjectCatalogEntry>();
   const fallbackMetadata = new Map(fallback.map((entry) => [entry.project, entry] as const));
   for (const entry of source) {
@@ -127,7 +103,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     const launch = launchProjection.facts.get(file.path);
     if (launch) file.launch = launch;
   }
-  const conversationLookup = conversationLookupFromSnapshot(registrySnapshot);
+  const conversationLookup = readOnlyConversationLookupFromSnapshot(registrySnapshot);
   const conversationForPath = (pathname: string) => conversationLookup.conversationForPath(pathname);
   const filesByPath = new Map(files.map((file) => [file.path, file]));
   for (let index = 0; index < files.length; index += 1) {
@@ -396,7 +372,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      on `autoTitle`; the `renamable` flag is projected too so the client never
      imports the Node-only store. */
   const flowsStartedAt = performance.now();
-  overlaySessionTitles(files);
+  overlaySessionTitles(files, registrySnapshot);
   markTiming("files-session-titles");
   /* Durable project affinity: a Viewer-launched family whose root transcript
      recorded a bare directory above the repository its lineage works in (an
@@ -406,9 +382,9 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      with no such lineage are untouched. */
   overlayLineageProjectAffinity(files);
   markTiming("files-project-affinity");
-  let storedFlows = loadFlows();
+  const storedFlows = loadFlows();
   markTiming("files-flow-store");
-  let flows = projectRestoredFlows(storedFlows, files, {
+  const flows = projectRestoredFlows(storedFlows, files, {
     pinnedPaths: visibilityPinnedPaths,
     memberships: registrySnapshot.memberships,
   });
@@ -518,20 +494,14 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   let pipelines: Pipeline[] = [];
   let pipelinesError: string | undefined;
   try {
-    const reconciled = await withPipelineMutation((current, persist) =>
-      withFlowSnapshot((projectionFlows) => {
-        /* Every cross-store lifecycle path acquires pipeline before flow. The
-           flow lock spans parent persistence and captures the exact array
-           returned below, so the returned deck and parent share a generation. */
-        if (reconcileEmbeddedReviewFlows(current, projectionFlows)) persist();
-        return { pipelines: current, flows: [...projectionFlows] };
-      }));
-    storedFlows = reconciled.flows;
-    flows = projectRestoredFlows(storedFlows, files, {
-      pinnedPaths: visibilityPinnedPaths,
-      memberships: registrySnapshot.memberships,
-    });
-    pipelines = filterPipelinesForFileScan(reconciled.pipelines, files, {
+    /* A GET never takes the pipeline lock and never persists (issue #798).
+       The embedded review flow sync is applied to this request's read copy as
+       an overlay against the same flow read above, so the deck and its parent
+       share one request-level generation; the durable claim/sync persists on
+       the controller reconcile pass instead of the request path. */
+    const loaded = loadPipelinesForProjection();
+    reconcileEmbeddedReviewFlows(loaded, storedFlows);
+    pipelines = filterPipelinesForFileScan(loaded, files, {
       pinnedPaths: visibilityPinnedPaths,
       memberships: registrySnapshot.memberships,
     });
@@ -540,9 +510,10 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     console.error("[files] pipelines store unreadable; serving without pipelines", error);
   }
   /* Role titles (issue #325) and the returned flow read model consume the same
-     transaction-captured flow generation as pipelines. A controller advance
-     during the earlier scan can therefore never mix deck/annotation generation
-     N with parent generation N+1. Explicit user titles keep final precedence. */
+     request-level flow read as the pipeline sync overlay above. A controller
+     advance during the earlier scan can therefore never mix deck/annotation
+     generation N with parent generation N+1. Explicit user titles keep final
+     precedence. */
   overlayRoleSessionTitles({ files, flows, tasks: storedTasks, conversationAliases: registrySnapshot.conversationAliases });
   overlayPromptDisplayTitles(files);
   markTiming("files-role-titles");

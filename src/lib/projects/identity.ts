@@ -70,7 +70,12 @@ function originRemote(config: string): string | null {
 }
 
 function canonicalRemote(remote: string, root: string): string | null {
-  const scp = /^(?:[^@\s]+@)?([^:/\s]+):(.+)$/.exec(remote);
+  /* A remote with an explicit scheme must never reach the scp-like matcher:
+     `https://host/team/repo` would otherwise parse as host `https`, minting a
+     second identity for a repository that ssh clones resolve correctly. */
+  const scp = /^[a-z][a-z0-9+.-]*:\/\//i.test(remote)
+    ? null
+    : /^(?:[^@\s]+@)?([^:/\s]+):(.+)$/.exec(remote);
   if (scp) {
     const host = scp[1]!.toLowerCase();
     const pathname = scp[2]!.replace(/^\/+|\/+$/g, "").replace(/\.git$/i, "");

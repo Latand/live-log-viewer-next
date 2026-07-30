@@ -196,6 +196,21 @@ export type PipelineCreationIntent = {
   launchId: string;
 };
 
+/** Durable receipt of the terminal-settlement host reap (#574). Completion
+    sweeps the pipeline's finished stage hosts in bounded rounds; persisting the
+    round count and the settlement is what keeps the sweep from re-killing the
+    same survivor on every tick forever, across process restarts included. */
+export type PipelineTerminalReap = {
+  /** Sweeps that dispatched at least one kill, or were cut off by the budget. */
+  rounds: number;
+  /** Hosts whose termination this reap evidenced, across all rounds. */
+  stopped: number;
+  lastAt: string;
+  /** Set once no finished host remains resident, or the round ceiling is
+      reached — survivors then live on as unconfirmed hosts. Never re-entered. */
+  settledAt: string | null;
+};
+
 export type Pipeline = {
   id: string;
   task: string;
@@ -243,6 +258,9 @@ export type Pipeline = {
   /** Hosts the last close could not confirm terminated. Present only while one
       is outstanding; a close that confirms every kill clears it. */
   unconfirmedHosts?: PipelineUnconfirmedHost[];
+  /** Receipt of the finished-host sweep completion triggers (#574). Absent
+      until the pipeline first settles terminally with launched hosts to check. */
+  terminalReap?: PipelineTerminalReap;
   /** Read-model marker set when a hidden container is projected for a pinned
       member, or for a closed lane still holding an unconfirmed host. */
   restored?: boolean;

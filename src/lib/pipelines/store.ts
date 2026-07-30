@@ -11,7 +11,7 @@ import { withFileTransaction, withFileTransactionSync } from "@/lib/state/fileTr
 import type { BoardTask } from "@/lib/tasks/types";
 
 import { MAX_FAIL_EDGE_ROUNDS, MAX_PIPELINE_STAGES } from "./limits";
-import type { EffectivePipelineRole, Pipeline, PipelineCreationIntent, PipelineEdgeActivation, PipelineStage, PipelineUnconfirmedHost } from "./types";
+import type { EffectivePipelineRole, Pipeline, PipelineCreationIntent, PipelineEdgeActivation, PipelineStage, PipelineTerminalReap, PipelineUnconfirmedHost } from "./types";
 import { stageVerdictFrom } from "./verdict";
 
 export const PIPELINES_SCHEMA_VERSION = 4;
@@ -188,6 +188,15 @@ function isUnconfirmedHost(value: unknown): value is PipelineUnconfirmedHost {
     && typeof host.at === "string";
 }
 
+function isTerminalReap(value: unknown): value is PipelineTerminalReap {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const reap = value as Partial<PipelineTerminalReap>;
+  return Number.isInteger(reap.rounds) && (reap.rounds as number) >= 0
+    && Number.isInteger(reap.stopped) && (reap.stopped as number) >= 0
+    && typeof reap.lastAt === "string"
+    && isNullableString(reap.settledAt);
+}
+
 function isStage(value: unknown): value is PipelineStage {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const stage = value as Partial<PipelineStage>;
@@ -302,6 +311,7 @@ function isPipeline(value: unknown): value is Pipeline {
     (pipeline.hiddenAt === undefined || isNullableString(pipeline.hiddenAt)) &&
     (pipeline.unconfirmedHosts === undefined
       || (Array.isArray(pipeline.unconfirmedHosts) && pipeline.unconfirmedHosts.every(isUnconfirmedHost))) &&
+    (pipeline.terminalReap === undefined || isTerminalReap(pipeline.terminalReap)) &&
     (pipeline.restored === undefined || typeof pipeline.restored === "boolean") &&
     (pipeline.pos === undefined || (
       typeof pipeline.pos === "object" && pipeline.pos !== null &&
@@ -420,7 +430,14 @@ export function loadPipelines(): Pipeline[] {
   const legacyRecords = file.schemaVersion === 2 ? file.pipelines.map(migrateV2Pipeline) : file.pipelines;
   const records = file.schemaVersion < PIPELINES_SCHEMA_VERSION ? legacyRecords.map(migrateTaskIds) : legacyRecords;
   if (!records.every(isPipeline)) throw new PipelineStoreError("pipeline registry contains malformed records");
-  return records.map((pipeline) => ({
+  return records.map(reviveLoadedPipeline);
+}
+
+/** Fresh per-call copies of every layer a caller may write (pipeline, stage,
+    run, attempt, cursor rows), so cached records stay pristine while callers
+    receive independently mutable structures. Deep config leaves are shared. */
+function reviveLoadedPipeline(pipeline: Pipeline): Pipeline {
+  return {
     ...pipeline,
     project: canonicalProject(pipeline.project),
     taskIds: [...pipeline.taskIds],
@@ -439,6 +456,7 @@ export function loadPipelines(): Pipeline[] {
     unconfirmedHosts: pipeline.unconfirmedHosts?.length
       ? pipeline.unconfirmedHosts.map((host) => ({ ...host }))
       : undefined,
+    terminalReap: pipeline.terminalReap ? { ...pipeline.terminalReap } : undefined,
     restored: undefined,
     stages: pipeline.stages.map((stage) => ({ ...stage, onFail: stage.onFail ?? null })),
     cursor: pipeline.cursor
@@ -469,7 +487,35 @@ export function loadPipelines(): Pipeline[] {
           }))
         : [],
     })),
-  }));
+  };
+}
+
+let projectionCache: { signature: string; pipelines: Pipeline[] } | null = null;
+
+function pipelinesFileSignature(): string | null {
+  try {
+    const stat = fs.statSync(pipelinesFile(), { bigint: true });
+    return `${stat.mtimeNs}:${stat.size}`;
+  } catch {
+    return null;
+  }
+}
+
+/** Read-only load for request-path projections (issue #798): no lock, and the
+    parse+validation of a large registry is cached against the file signature.
+    Every call still returns independently mutable records via the same revive
+    pass `loadPipelines` uses, so a projection overlay can never write into the
+    cache. Mutating paths keep `withPipelineMutation`, whose persisted rename
+    changes the signature and invalidates this cache. */
+export function loadPipelinesForProjection(): Pipeline[] {
+  const before = pipelinesFileSignature();
+  if (before !== null && projectionCache?.signature === before) {
+    return projectionCache.pipelines.map(reviveLoadedPipeline);
+  }
+  const pipelines = loadPipelines();
+  const after = pipelinesFileSignature();
+  if (after !== null && before === after) projectionCache = { signature: after, pipelines };
+  return pipelines.map(reviveLoadedPipeline);
 }
 
 function savePipelinesUnlocked(pipelines: Pipeline[]): void {

@@ -25,17 +25,13 @@ interface RegistryProjection {
   archivedPaths: Set<string>;
 }
 
-const registryProjectionCache = new WeakMap<Registry, RegistryProjection>();
+/* Keyed on the snapshot object itself: the registry's readOnlySnapshot returns
+   one shared object per revision (sqlite mode) or per file signature (json
+   mode), so identity IS the revision. A sqlite-mirror checkpoint rewrites the
+   JSON file without changing the revision and therefore no longer invalidates
+   this cache (issue #798). */
+const snapshotProjectionCache = new WeakMap<RegistrySnapshot, RegistryProjection>();
 let readOnlyRegistryProjectionCache: RegistryProjection | null = null;
-
-function registrySignature(registry: Registry): string {
-  try {
-    const stat = fs.statSync(registry.filename, { bigint: true });
-    return `${stat.mtimeNs}:${stat.size}`;
-  } catch {
-    return "missing";
-  }
-}
 
 function canonicalConversationId(snapshot: RegistrySnapshot, alias: string): string {
   let current = alias;
@@ -104,10 +100,18 @@ function projectRegistrySnapshot(snapshot: RegistrySnapshot, signature: string):
   return projection;
 }
 
+/** The one registry projection per snapshot revision. A request that already
+    holds the read-only snapshot threads it here so the projection is computed
+    at most once per revision and never re-reads the registry. */
+export function registryProjectionForSnapshot(snapshot: RegistrySnapshot): RegistryProjection {
+  const cached = snapshotProjectionCache.get(snapshot);
+  if (cached) return cached;
+  const projection = projectRegistrySnapshot(snapshot, "snapshot");
+  snapshotProjectionCache.set(snapshot, projection);
+  return projection;
+}
+
 function registryProjection(registry: Registry, surfaceUnexpectedError = false): RegistryProjection | null {
-  const signature = registrySignature(registry);
-  const cached = registryProjectionCache.get(registry);
-  if (cached?.signature === signature) return cached;
   let snapshot: RegistrySnapshot;
   try {
     snapshot = registry.readOnlySnapshot();
@@ -115,9 +119,7 @@ function registryProjection(registry: Registry, surfaceUnexpectedError = false):
     if (surfaceUnexpectedError && !(error instanceof RegistryReadError)) throw error;
     return null;
   }
-  const projection = projectRegistrySnapshot(snapshot, signature);
-  registryProjectionCache.set(registry, projection);
-  return projection;
+  return registryProjectionForSnapshot(snapshot);
 }
 
 function readOnlyRegistryProjection(): RegistryProjection | null {
@@ -151,8 +153,11 @@ function readOnlyRegistryProjection(): RegistryProjection | null {
  * safe to run after the files response has already stamped identity/launch
  * profile — it never re-derives `autoTitle` once set.
  */
-export function overlaySessionTitles(entries: FileEntry[]): void {
-  const project = sessionTitleProjector();
+export function overlaySessionTitles(entries: FileEntry[], registrySnapshot?: RegistrySnapshot): void {
+  const project = sessionTitleProjector(
+    true,
+    registrySnapshot === undefined ? undefined : registryProjectionForSnapshot(registrySnapshot),
+  );
   for (const entry of entries) project(entry);
 }
 
