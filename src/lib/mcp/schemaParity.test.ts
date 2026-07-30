@@ -203,6 +203,7 @@ test("operator_snapshot bounds snapshot strings and rejects duplicate paths at t
 
 test("every generated operator_snapshot schema combination is admitted by request validation", () => {
   const schema = TOOL_INPUT_SCHEMAS.operator_snapshot;
+  const oversized = "x".repeat(MAX_SNAPSHOT_STRING_LENGTH + 1);
   const views = [
     undefined,
     {},
@@ -240,6 +241,18 @@ test("every generated operator_snapshot schema combination is admitted by reques
   ];
 
   let accepted = 0;
+  const compareAcceptedShape = (candidate: Record<string, unknown>) => {
+    const parsed = schema.safeParse(candidate);
+    if (!parsed.success) return;
+    accepted += 1;
+    const validatorInput = Object.fromEntries(
+      Object.entries(parsed.data).filter(([key]) => key !== "clientRequestId"),
+    );
+    expect(() => validateSnapshotRequest({
+      schemaVersion: 1,
+      ...validatorInput,
+    })).not.toThrow();
+  };
   for (const schemaVersion of [undefined, 1]) {
     for (const view of views) {
       for (const scope of scopes) {
@@ -253,20 +266,27 @@ test("every generated operator_snapshot schema combination is admitted by reques
               ...(text === undefined ? {} : { text }),
               ...(caller === undefined ? {} : { caller }),
             };
-            const parsed = schema.safeParse(candidate);
-            if (!parsed.success) continue;
-            accepted += 1;
-            const validatorInput = Object.fromEntries(
-              Object.entries(parsed.data).filter(([key]) => key !== "clientRequestId"),
-            );
-            expect(() => validateSnapshotRequest({
-              schemaVersion: 1,
-              ...validatorInput,
-            })).not.toThrow();
+            compareAcceptedShape(candidate);
           }
         }
       }
     }
+  }
+  for (const [index, divergent] of [
+    { unexpected: true },
+    { scope: { kind: "paths" } },
+    { scope: { kind: "visible", paths: ["sessions/a.jsonl"] } },
+    { scope: { kind: "paths", paths: [""] } },
+    { scope: { kind: "paths", paths: [oversized] } },
+    { scope: { kind: "paths", paths: ["sessions/a.jsonl", "sessions/a.jsonl"] } },
+    { view: { id: "" } },
+    { view: { deviceId: oversized } },
+    { caller: { transcriptPath: "" } },
+  ].entries()) {
+    compareAcceptedShape({
+      clientRequestId: `snapshot-divergence-${index}`,
+      ...divergent,
+    });
   }
   expect(accepted).toBeGreaterThan(1_000);
 });
