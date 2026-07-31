@@ -5,6 +5,7 @@ import { expect, spyOn, test } from "bun:test";
 
 import type { RuntimeEvent } from "./engineHost";
 import { FileRuntimeEventStore, reconcileRuntimeEventCursor } from "./eventStore";
+import { streamingVoiceDelivery } from "./voiceDelivery";
 
 test("runtime event store durably replays ordered events and ignores a partial tail", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-events-"));
@@ -57,6 +58,32 @@ test("runtime event store durably replays realtime delivery progress and acknowl
       seq: 2,
     },
   ]);
+});
+
+test("runtime event store durably replays a bounded streaming voice chunk", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-voice-chunk-"));
+  const store = new FileRuntimeEventStore(directory);
+  const delivery = streamingVoiceDelivery({
+    sourceTurnId: "turn-voice",
+    chunkIndex: 0,
+    startOffset: 0,
+    endOffset: 18,
+    text: "A complete phrase.",
+  });
+
+  store.append("voice-thread", {
+    kind: "voice-chunk",
+    turnId: "turn-voice",
+    delivery,
+    seq: 1,
+  });
+
+  expect(new FileRuntimeEventStore(directory).load("voice-thread")).toEqual([{
+    kind: "voice-chunk",
+    turnId: "turn-voice",
+    delivery,
+    seq: 1,
+  }]);
 });
 
 test("runtime event store repairs a crash tail after the production 942-record contiguous prefix", () => {
@@ -261,6 +288,19 @@ test("runtime event store rejects every structurally invalid event variant", () 
     { kind: "delta", turnId: "", text: "chunk", seq: 1 },
     { kind: "item", turnId: "turn-1", phase: "completed", seq: 1 },
     { kind: "item", turnId: "", item: {}, phase: "completed", seq: 1 },
+    { kind: "voice-chunk", turnId: "turn-1", delivery: {}, seq: 1 },
+    {
+      kind: "voice-chunk",
+      turnId: "turn-other",
+      delivery: streamingVoiceDelivery({
+        sourceTurnId: "turn-1",
+        chunkIndex: 0,
+        startOffset: 0,
+        endOffset: 5,
+        text: "hello",
+      }),
+      seq: 1,
+    },
     { kind: "turn-ended", turnId: "turn-1", status: "success", seq: 1 },
     { kind: "attention", id: "approval-1", attention: {}, seq: 1 },
     { kind: "attention", id: "", method: "approval", attention: {}, seq: 1 },

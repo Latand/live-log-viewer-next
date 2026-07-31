@@ -1,9 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import { statePath } from "@/lib/configDir";
 
 import type { RuntimeEvent } from "./engineHost";
+import { normalizeVoiceDeliveries } from "./voiceDelivery";
 
 export interface RuntimeEventStore {
   load(threadId: string): RuntimeEvent[];
@@ -146,6 +148,14 @@ function validEvent(value: unknown): value is RuntimeEvent {
       return (nonEmptyString(event.turnId) || event.turnId === null)
         && (event.phase === "started" || event.phase === "completed")
         && Object.hasOwn(event, "item");
+    case "voice-chunk": {
+      if (!nonEmptyString(event.turnId)) return false;
+      const delivery = normalizeVoiceDeliveries([event.delivery])[0];
+      return delivery?.ready === true
+        && delivery.sourceTurnId === event.turnId
+        && delivery.streamChunk !== undefined
+        && isDeepStrictEqual(delivery, event.delivery);
+    }
     case "turn-ended":
       return nonEmptyString(event.turnId)
         && (event.status === "completed" || event.status === "interrupted" || event.status === "error");
