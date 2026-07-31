@@ -944,3 +944,36 @@ test("a batch drained while the session rolls over is dropped rather than misapp
   expect(delivered).toEqual([]);
   expect(pendingBridgeAcknowledgements()).toEqual([]);
 });
+
+test("a 5xx met while suspended does not clear the suspension", async () => {
+  /* Only an ACCEPTED response is evidence that the credential is the live root's. A
+     server being unwell says nothing either way, and clearing on it would swap the
+     retirement backoff for the far more aggressive retryable one. */
+  getStatuses = [403, 503, 503, 503, 503];
+  const { scheduler } = mountWithClock({ pollMs: 10_000 });
+  await runFor(scheduler, 30_000, 10_000);
+  const suspended = bridgeSessionRetirement("rt_sess_relay")!;
+  expect(suspended.status).toBe(403);
+
+  /* Past the suspension: the probe goes out and meets a 503. */
+  await runFor(scheduler, 60_000, 10_000);
+  const after = bridgeSessionRetirement("rt_sess_relay");
+  expect(after).not.toBeNull();
+  expect(after!.attempts).toBe(1);
+});
+
+test("an accepted poll clears the suspension so the next refusal starts from the first step", async () => {
+  getStatuses = [403];
+  plans = [{ kind: "idle" }];
+  const { scheduler } = mountWithClock({ pollMs: 10_000 });
+  await runFor(scheduler, 30_000, 10_000);
+  expect(bridgeSessionRetirement("rt_sess_relay")?.attempts).toBe(1);
+
+  await runFor(scheduler, 90_000, 10_000);
+  expect(bridgeSessionRetirement("rt_sess_relay")).toBeNull();
+
+  /* A later refusal is a fresh incident, not a continuation of the old backoff. */
+  getStatuses = [403];
+  await runFor(scheduler, 30_000, 10_000);
+  expect(bridgeSessionRetirement("rt_sess_relay")?.attempts).toBe(1);
+});

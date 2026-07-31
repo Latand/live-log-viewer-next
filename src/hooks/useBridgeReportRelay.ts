@@ -201,13 +201,6 @@ export function bridgeSessionRetirement(sessionId: string): RetiredSession | nul
   return retiredSessions().find((entry) => entry.sessionId === sessionId) ?? null;
 }
 
-/** Whether this session is suspended RIGHT NOW. A suspension whose window has passed
-    is not a refusal any more — it is one probe waiting to happen. */
-export function isBridgeSessionSuspended(sessionId: string, now: number): boolean {
-  const retirement = bridgeSessionRetirement(sessionId);
-  return retirement !== null && now < retirement.nextAttemptAt;
-}
-
 /** Tests only. */
 export function resetBridgeRelayStateForTests(): void {
   relayHost.__llvRetiredBridgeSessions = [];
@@ -587,14 +580,16 @@ export function useBridgeReportRelay(
       if (isAuthorityRefusal(response.status)) {
         return suspend(session, response.status);
       }
-      /* A poll that got through clears an earlier suspension: the refusal was the
-         transient kind the authority's projection window produces, and the backoff
-         must not carry over into the next one. */
-      clearBridgeSessionRetirement(session);
       if (isRetryableStatus(response.status)) return { kind: "retryable" };
       /* Any other non-2xx is a statement about this request, not about the link.
          Repeating it faster changes nothing, so it rejoins the ordinary cadence. */
       if (!response.ok) return { kind: "settled" };
+      /* ACCEPTED — and only now. The refusal that suspended this session was the
+         transient kind the authority's projection window produces, so the backoff must
+         not carry into the next one. Deliberately not cleared on 429 or 5xx: a server
+         being unwell says nothing about whether this credential is the live root's,
+         and those have their own bounded backoff. */
+      clearBridgeSessionRetirement(session);
 
       const payload = await response.json() as { plan?: BridgeDeliveryPlanPayload };
       const plan = payload.plan;
