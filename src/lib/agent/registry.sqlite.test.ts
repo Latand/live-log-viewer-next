@@ -48,6 +48,65 @@ test("a keyed SQLite mutation reads only the targeted row payload", () => {
   expect(store.snapshot().file.receipts["row-read-1000"]?.error).toBe("updated");
 });
 
+test("a compact spawn lookup reads only requested receipts and their alias chain", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-spawn-lookup-"));
+  const filename = path.join(directory, "agent-registry.json");
+  const seed = new AgentRegistry(filename);
+  const begun = seed.beginSpawn("codex", "/spawn-lookup-seed");
+  const artifactPath = "/sessions/spawn-lookup.jsonl";
+  const settled = seed.settleSpawn(begun.launchId, {
+    key: { engine: "codex", sessionId: "spawn-lookup" },
+    artifactPath,
+    cwd: "/spawn-lookup-seed",
+    accountId: null,
+    launchProfile: emptyLaunchProfile({ cwd: "/spawn-lookup-seed" }),
+    status: "unhosted",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  if (settled.kind !== "settled") throw new Error("expected settled seed spawn");
+  const initial = seed.snapshot();
+  const canonicalId = settled.conversation.id;
+  const aliasA = "conversation_00000000-0000-4000-8000-000000000001" as typeof canonicalId;
+  const aliasB = "conversation_00000000-0000-4000-8000-000000000002" as typeof canonicalId;
+  initial.receipts[begun.launchId]!.conversationId = aliasA;
+  initial.conversationAliases[aliasA] = aliasB;
+  initial.conversationAliases[aliasB] = canonicalId;
+  for (let index = 0; index < 2_000; index += 1) {
+    const launchId = `unrelated-${String(index).padStart(4, "0")}`;
+    initial.receipts[launchId] = { ...structuredClone(begun), launchId };
+  }
+  const reads = new Map<string, number>();
+  let snapshotLoads = 0;
+  const store = new SqliteAgentRegistryStore(path.join(directory, "agent-registry.sqlite"), {
+    initialSnapshot: initial,
+    normalize: normalizeRegistry,
+    onSnapshotLoad: () => { snapshotLoads += 1; },
+    onRowPayloadRead: (collection, count) => {
+      reads.set(collection, (reads.get(collection) ?? 0) + count);
+    },
+  });
+  reads.clear();
+  snapshotLoads = 0;
+
+  const projection = store.snapshotSpawns([begun.launchId, "unknown-launch"]);
+
+  expect(projection[begun.launchId]).toMatchObject({
+    launchId: begun.launchId,
+    state: "completed",
+    materializedPath: artifactPath,
+  });
+  expect(projection["unknown-launch"]).toBeUndefined();
+  expect(reads).toEqual(new Map([
+    ["receipts", 1],
+    ["conversationAliases", 2],
+    ["conversations", 1],
+  ]));
+  expect(snapshotLoads).toBe(0);
+});
+
 test("a committed SQLite mutation patches the read-only snapshot and parsed-row cache", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-row-cache-"));
   const filename = path.join(directory, "agent-registry.json");

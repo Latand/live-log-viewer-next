@@ -73,3 +73,69 @@ test("the agent snapshot shows the custom title on conversations and siblings", 
   const sibling = snapshot.siblings.agents.find((agent) => agent.transcriptPath === SESSION_PATH);
   expect(sibling?.title).toBe("Renamed by user");
 });
+
+test("spawn paths request one compact projection containing only their launch ids", async () => {
+  const spawnPath = "spawn:known-launch";
+  const failedSpawnPath = "spawn:failed-launch";
+  const unknownSpawnPath = "spawn:unknown-launch";
+  const artifactPath = "/sessions/spawned.jsonl";
+  upsertPresence(presence({ visiblePaths: [SESSION_PATH, spawnPath, failedSpawnPath, unknownSpawnPath] }));
+  const requested: string[][] = [];
+
+  const snapshot = await collectSnapshot(
+    { schemaVersion: 1, scope: { kind: "visible" }, text: { include: false } },
+    {
+      completedFileScan: async () => ({
+        snapshot: {
+          files: [file(SESSION_PATH), file(artifactPath, { engine: "codex", fmt: "codex", root: "codex-sessions" })],
+          projectCatalog: [],
+          complete: true,
+        },
+      }) as never,
+      resolveSiblings: async () => ({ selfResolution: "omitted", agents: [] }),
+      snapshotSpawns: (launchIds) => {
+        requested.push([...launchIds]);
+        return {
+          "known-launch": {
+            launchId: "known-launch",
+            state: "completed",
+            error: null,
+            engine: "codex",
+            cwd: "/repo",
+            createdAt: "2026-07-31T00:00:00.000Z",
+            materializedPath: artifactPath,
+          },
+          "failed-launch": {
+            launchId: "failed-launch",
+            state: "failed",
+            error: "launch admission failed",
+            engine: "codex",
+            cwd: "/repo",
+            createdAt: "2026-07-31T00:00:00.000Z",
+            materializedPath: null,
+          },
+        };
+      },
+    },
+  );
+
+  expect(requested).toEqual([["known-launch", "failed-launch", "unknown-launch"]]);
+  expect(snapshot.conversations).toEqual(expect.arrayContaining([
+    expect.objectContaining({ path: SESSION_PATH }),
+    expect.objectContaining({ path: artifactPath, resolvedFrom: spawnPath }),
+  ]));
+  expect(snapshot.stubs).toEqual([{
+    path: failedSpawnPath,
+    kind: "spawn-stub",
+    launch: {
+      launchId: "failed-launch",
+      state: "failed",
+      error: "launch admission failed",
+      retrySafe: true,
+      engine: "codex",
+      cwd: "/repo",
+      createdAt: "2026-07-31T00:00:00.000Z",
+    },
+  }]);
+  expect(snapshot.scope).toMatchObject({ truncated: true, omittedCount: 1 });
+});

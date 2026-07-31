@@ -14,7 +14,7 @@ const SNAPSHOT_DEADLINE_MS = 10_000;
 const productionDependencies = {
   completedFileScan,
   resolveSiblings,
-  registrySnapshot: () => agentRegistry().readOnlySnapshot(),
+  snapshotSpawns: (launchIds: readonly string[]) => agentRegistry().snapshotSpawns(launchIds),
   snapshotDeadlineMs: SNAPSHOT_DEADLINE_MS,
   scheduler: systemScheduler,
 } satisfies Parameters<typeof postSnapshot>[1];

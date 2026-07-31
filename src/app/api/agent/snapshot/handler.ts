@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import type { RegistryFile } from "@/lib/agent/registry";
+import type { RegistryFile, SnapshotSpawnProjection } from "@/lib/agent/registry";
 import { deadlineSignal, isAbortError, type DeadlineScheduler } from "@/lib/deadline";
 import type { completedFileScan } from "@/lib/scanner/scanCache";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
@@ -14,7 +14,8 @@ const headers = { "Cache-Control": "no-store" };
 export interface SnapshotRouteDependencies {
   completedFileScan: typeof completedFileScan;
   resolveSiblings: typeof resolveSiblings;
-  registrySnapshot: () => RegistryFile;
+  registrySnapshot?: () => RegistryFile;
+  snapshotSpawns?: (launchIds: readonly string[]) => SnapshotSpawnProjection;
   snapshotDeadlineMs: number;
   scheduler: DeadlineScheduler;
 }

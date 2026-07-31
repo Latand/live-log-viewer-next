@@ -1,4 +1,4 @@
-import { conversationLookupFromSnapshot, type RegistryFile } from "@/lib/agent/registry";
+import { snapshotSpawnsFromRegistry, type RegistryFile, type SnapshotSpawnProjection } from "@/lib/agent/registry";
 import type { FileEntry } from "@/lib/types";
 
 import { compactText } from "./compactText";
@@ -63,7 +63,7 @@ function conversation(entry: FileEntry): SnapshotConversation {
   return { path: entry.path, project: entry.project, title: entry.title, engine: entry.engine as "claude" | "codex", model: entry.model, activity: entry.activity, proc: entry.proc, attention };
 }
 
-export async function composeSnapshot(input: { request: SnapshotRequestV1; files: FileEntry[]; scannerDurationMs: number; scannerScannedAt?: number; siblings: ViewerSnapshotV1["siblings"]; registry?: RegistryFile; now?: number }): Promise<ViewerSnapshotV1> {
+export async function composeSnapshot(input: { request: SnapshotRequestV1; files: FileEntry[]; scannerDurationMs: number; scannerScannedAt?: number; siblings: ViewerSnapshotV1["siblings"]; registry?: RegistryFile; snapshotSpawns?: (launchIds: readonly string[]) => SnapshotSpawnProjection; now?: number }): Promise<ViewerSnapshotV1> {
   const now = input.now ?? Date.now();
   const scannerScannedAt = Math.min(now, input.scannerScannedAt ?? now);
   const selection = choose(input.request, now);
@@ -76,17 +76,22 @@ export async function composeSnapshot(input: { request: SnapshotRequestV1; files
      (#342): resolve each to its materialized conversation when the scan has
      it, otherwise report a typed stub with the durable launch state. Silent
      omission is reserved for genuinely unknown paths and budget truncation. */
-  const lookup = input.registry ? conversationLookupFromSnapshot(input.registry) : null;
+  const launchIds = [...new Set(scope.all.flatMap((pathname) =>
+    pathname.startsWith("spawn:") ? [pathname.slice("spawn:".length)] : []))];
+  const spawnProjection = launchIds.length === 0
+    ? {}
+    : input.registry
+      ? snapshotSpawnsFromRegistry(input.registry, launchIds)
+      : input.snapshotSpawns?.(launchIds) ?? {};
   const stubs: SnapshotSpawnStub[] = [];
   const resolvedEntries: Array<{ entry: FileEntry; resolvedFrom?: string }> = [];
   const seenPaths = new Set<string>();
   for (const pathname of scope.all) {
     if (resolvedEntries.length + stubs.length >= MAX_SCOPE_PATHS) break;
     const launchId = pathname.startsWith("spawn:") ? pathname.slice("spawn:".length) : null;
-    const receipt = launchId && input.registry ? input.registry.receipts[launchId] : undefined;
+    const receipt = launchId ? spawnProjection[launchId] : undefined;
     if (receipt) {
-      const materializedPath = lookup?.conversation(receipt.conversationId)?.generations.at(-1)?.path
-        ?? receipt.artifactPath;
+      const materializedPath = receipt.materializedPath;
       const entry = materializedPath ? transcriptEntry(byPath, materializedPath) : undefined;
       if (entry) {
         if (!seenPaths.has(entry.path)) {
