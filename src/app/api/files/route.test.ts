@@ -243,6 +243,21 @@ test("registry heartbeat writes do not invalidate the completed files projection
   expect(second.headers.get("x-llv-files-projection-cache")).toBe("stale");
 });
 
+test("a stable scope serves its prior conditional representation while projection inputs advance", async () => {
+  scannedFiles = [file("/sessions/current.jsonl")];
+  const first = await GET(new Request("http://127.0.0.1/api/files"));
+  const etag = first.headers.get("etag");
+
+  fs.writeFileSync(path.join(stateDir, "flows.json"), JSON.stringify({ schemaVersion: 1, flows: [] }));
+  const second = await GET(new Request("http://127.0.0.1/api/files", {
+    headers: { "if-none-match": etag! },
+  }));
+
+  expect(second.status).toBe(304);
+  expect(second.headers.get("x-llv-files-generation")).toBe("1");
+  expect(second.headers.get("x-llv-files-projection-cache")).toBe("stale");
+});
+
 test("generation completion retries skip the stale projection while its refresh is running", async () => {
   scannedFiles = [file("/sessions/generation-1.jsonl")];
   const initial = await GET(new Request("http://127.0.0.1/api/files"));

@@ -345,9 +345,13 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     if (completionRetry && !ownsCompletionRetry(url, completionRetry)) return snapshot;
     const servedGeneration = responseGeneration(response, "x-llv-files-generation");
     const targetGeneration = responseGeneration(response, "x-llv-files-target-generation");
-    const generationIncomplete = servedGeneration !== undefined
+    const projectionIncomplete = response.headers.get("x-llv-files-projection-cache") === "stale";
+    const completionTargetGeneration = targetGeneration ?? servedGeneration ?? requiredGeneration;
+    const generationIncomplete = completionTargetGeneration !== undefined && (
+      projectionIncomplete || (servedGeneration !== undefined
       && targetGeneration !== undefined
-      && servedGeneration < targetGeneration;
+      && servedGeneration < targetGeneration)
+    );
     if (response.status === 304) {
       if (!representation) throw new Error("files request returned 304 without a cached representation");
       if (generation < appliedGeneration) return snapshot;
@@ -356,12 +360,12 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
       rememberRepresentation(url, snapshot, representation.etag);
       settleServerPipelines(logicalGeneration ?? generation, !generationIncomplete);
       publish(url);
-      if (generationIncomplete) {
+      if (generationIncomplete && completionTargetGeneration !== undefined) {
         scheduleCompletionRetry(
           url,
           pinnedPath,
           revision,
-          targetGeneration,
+          completionTargetGeneration,
           logicalGeneration ?? generation,
           completionRetryAttempt,
           completionRetry,
@@ -390,12 +394,12 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     rememberRepresentation(url, snapshot, etag ?? undefined);
     settleServerPipelines(logicalGeneration ?? generation, !generationIncomplete);
     publish(url);
-    if (generationIncomplete) {
+    if (generationIncomplete && completionTargetGeneration !== undefined) {
       scheduleCompletionRetry(
         url,
         pinnedPath,
         revision,
-        targetGeneration,
+        completionTargetGeneration,
         logicalGeneration ?? generation,
         completionRetryAttempt,
         completionRetry,

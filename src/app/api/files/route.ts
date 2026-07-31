@@ -80,6 +80,13 @@ function projectionBaseKey(
   })).digest("hex");
 }
 
+function projectionScopeKey(
+  selectedProject: string | undefined,
+  pinnedPath: string | undefined,
+): string {
+  return JSON.stringify([selectedProject ?? null, pinnedPath ?? null]);
+}
+
 function projectionKey(baseKey: string): string {
   const registryDiagnostics = agentRegistry().storageDiagnostics();
   return `${baseKey}:${registryDiagnostics.revision ?? "json"}:${registryDiagnostics.transactionCount}`;
@@ -94,10 +101,10 @@ function queueProjectionWorker(
   return current;
 }
 
-function rememberProjection(baseKey: string, key: string, representation: ProjectionRepresentation): void {
+function rememberProjection(scopeKey: string, key: string, representation: ProjectionRepresentation): void {
   const cache = projectionCache();
-  cache.delete(baseKey);
-  cache.set(baseKey, { key, representation });
+  cache.delete(scopeKey);
+  cache.set(scopeKey, { key, representation });
   while (cache.size > PROJECTION_CACHE_MAX) {
     const oldest = cache.keys().next().value as string | undefined;
     if (oldest === undefined) break;
@@ -106,15 +113,15 @@ function rememberProjection(baseKey: string, key: string, representation: Projec
 }
 
 async function projectionFor(
-  baseKey: string,
+  scopeKey: string,
   key: string,
   request: Request,
   scan: CachedScan,
 ): Promise<ProjectionResult> {
-  const cached = projectionCache().get(baseKey);
+  const cached = projectionCache().get(scopeKey);
   if (cached?.key === key) return { representation: cached.representation, cacheStatus: "hit" };
 
-  const current = projectionInflight().get(baseKey);
+  const current = projectionInflight().get(scopeKey);
   if (current) {
     if (cached && request.headers.has("if-none-match")) {
       return { representation: cached.representation, cacheStatus: "stale" };
@@ -146,12 +153,12 @@ async function projectionFor(
         timing: response.headers.get("server-timing") ?? "",
       };
     }
-    rememberProjection(baseKey, key, representation);
+    rememberProjection(scopeKey, key, representation);
     return representation;
   })();
-  projectionInflight().set(baseKey, promise);
+  projectionInflight().set(scopeKey, promise);
   void promise.catch(() => undefined).finally(() => {
-    if (projectionInflight().get(baseKey) === promise) projectionInflight().delete(baseKey);
+    if (projectionInflight().get(scopeKey) === promise) projectionInflight().delete(scopeKey);
   });
   if (cached && request.headers.has("if-none-match")) {
     return { representation: cached.representation, cacheStatus: "stale" };
@@ -159,7 +166,7 @@ async function projectionFor(
   try {
     return { representation: await promise, cacheStatus: "miss" };
   } finally {
-    if (projectionInflight().get(baseKey) === promise) projectionInflight().delete(baseKey);
+    if (projectionInflight().get(scopeKey) === promise) projectionInflight().delete(scopeKey);
   }
 }
 
@@ -209,7 +216,8 @@ export async function GET(request: Request): Promise<Response> {
 
   const baseKey = projectionBaseKey(scan, selectedProject, pinnedPath);
   const key = projectionKey(baseKey);
-  const projected = await projectionFor(baseKey, key, request, scan);
+  const scopeKey = projectionScopeKey(selectedProject, pinnedPath);
+  const projected = await projectionFor(scopeKey, key, request, scan);
   const notModified = request.headers.get("if-none-match") === projected.representation.etag;
   const projectionTiming = [
     projected.representation.timing,
