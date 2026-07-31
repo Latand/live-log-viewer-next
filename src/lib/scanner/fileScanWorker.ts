@@ -66,7 +66,14 @@ export function collectFileScanInWorker(
   runtime: FileScanWorkerRuntime = {},
 ): Promise<FileCatalogScan> {
   const launch = runtime.launch ?? workerLaunch(runtime.cwd);
-  const child = spawn(launch.executable, [launch.workerPath], {
+  /* Full-corpus scans are background freshness work. Keep the interactive
+     Next process ahead of their CPU demand on a busy operator host. Explicit
+     test/runtime launch seams retain their exact command. */
+  const useNice = runtime.launch === undefined && fs.existsSync("/usr/bin/nice");
+  const child = spawn(useNice ? "/usr/bin/nice" : launch.executable, [
+    ...(useNice ? ["-n", "10", launch.executable] : []),
+    launch.workerPath,
+  ], {
     cwd: runtime.cwd ?? process.cwd(),
     stdio: ["pipe", "pipe", "pipe"],
     env: {

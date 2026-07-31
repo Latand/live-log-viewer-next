@@ -74,7 +74,10 @@ function projectionBaseKey(
   return createHash("sha1").update(JSON.stringify({
     selectedProject: selectedProject ?? null,
     pinnedPath: pinnedPath ?? null,
-    snapshot: scan.snapshot,
+    /* `generation` is the immutable identity of the published snapshot.
+       Re-stringifying every file row on every poll burns the request thread
+       precisely while a new scan is being published. */
+    generation: scan.generation,
     pinOverlayPaths: scan.pinOverlayPaths ?? [],
     stores: PROJECTION_STATE_FILES.map(stateFileSignature),
   })).digest("hex");
