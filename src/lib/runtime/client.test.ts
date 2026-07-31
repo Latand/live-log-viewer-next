@@ -94,3 +94,16 @@ test("a healthy response resolves once and ignores the pending timeout", async (
   const client = new UnixRuntimeHostClient(socketPath, 5_000, 5_000, 5_000);
   expect(await client.snapshot() as unknown).toEqual({ revision: 7 });
 });
+
+test("snapshot accepts an upgrade-sized frame from the previous runtime host", async () => {
+  const padding = "x".repeat(9 * 1024 * 1024);
+  const socketPath = serve((frame, socket) => {
+    const request = JSON.parse(frame) as { id: string };
+    socket.end(JSON.stringify({ id: request.id, ok: true, result: { padding } }) + "\n");
+  });
+  const client = new UnixRuntimeHostClient(socketPath, 5_000, 5_000, 5_000);
+
+  const snapshot = await client.snapshot() as unknown as { padding: string };
+
+  expect(snapshot.padding.length).toBe(padding.length);
+});
