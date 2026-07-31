@@ -136,6 +136,7 @@ async function projectionFor(
     const headers = new Headers(request.headers);
     headers.delete("if-none-match");
     const snapshot = { ...scan.snapshot, pinOverlayPaths: scan.pinOverlayPaths };
+    const persistedSnapshot = statePath("files-scan-snapshot.json");
     let representation: ProjectionRepresentation;
     if (filesResponseWorkerEnabled()) {
       representation = await queueProjectionWorker(() =>
@@ -143,7 +144,9 @@ async function projectionFor(
           type: "project",
           url: request.url,
           headers: [...headers.entries()],
-          snapshot,
+          ...(scan.pinOverlayPaths?.length || !fs.existsSync(persistedSnapshot)
+            ? { snapshot }
+            : { snapshotFile: persistedSnapshot }),
         }));
     } else {
       const response = await buildFilesResponse(new Request(request.url, { headers }), {
