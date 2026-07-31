@@ -101,7 +101,7 @@ export type BridgeRelayState =
   | { kind: "idle" }
   | { kind: "polling"; sessionId: string }
   | { kind: "backing-off"; sessionId: string; failures: number; delayMs: number }
-  | { kind: "retired"; sessionId: string; status: number };
+  | { kind: "retired"; sessionId: string; status: number; attempts: number; retryInMs: number };
 
 /** Slightly under the coalescing window: polling faster cannot produce a batch any
     sooner, and polling slower would add latency the server already bounds. */
@@ -129,29 +129,83 @@ const BACKOFF_JITTER = 0.3;
  */
 const MAX_ACK_ATTEMPTS_PER_CYCLE = 4;
 
-/** Session ids whose credential the gateway refused. Bounded, and module-scoped
-    so a call-phase transition — which tears the effect down and builds it again
-    with the same credential — does not resurrect a refused poll. */
+/**
+ * Sessions the gateway refused — SUSPENDED, not condemned.
+ *
+ * The first version of this treated one 403 as terminal, on the reasoning that the
+ * credential either is the live root's or is not. That is true of the credential and
+ * false of the ANSWER: the gateway authority resolves the root through a projection
+ * that re-derives at most once per window, so a correct successor can be refused for
+ * up to one window after a handover. A permanent retirement turns that transient,
+ * self-correcting refusal into a call that never speaks again until the tab is
+ * reloaded.
+ *
+ * So a refusal suspends the session until `nextAttemptAt`, and the suspension backs
+ * off from well over the authority's rebuild window up to a ceiling. One probe after
+ * the window is enough to recover; a genuinely dead credential costs a handful of
+ * requests across half an hour instead of one hundred and eighty.
+ *
+ * The record is module-scoped because a call-phase transition tears the effect down
+ * and builds it again with the same credential — an in-effect timer would let that
+ * transition reset the backoff and hand the storm straight back.
+ */
 const RETIRED_SESSION_CAPACITY = 16;
-type RetiredSession = { sessionId: string; status: number };
+
+/** Comfortably above `BRIDGE_ROOT_PROJECTION_REBUILD_MS` (30s), so the first probe
+    lands after the authority has had its chance to re-derive. */
+const RETIREMENT_BASE_MS = 60_000;
+const RETIREMENT_MAX_MS = 900_000;
+const RETIREMENT_JITTER = 0.2;
+
+type RetiredSession = { sessionId: string; status: number; attempts: number; nextAttemptAt: number };
 const relayHost = globalThis as typeof globalThis & { __llvRetiredBridgeSessions?: RetiredSession[] };
 
 function retiredSessions(): RetiredSession[] {
   return relayHost.__llvRetiredBridgeSessions ??= [];
 }
 
-function retireBridgeSession(sessionId: string, status: number): void {
-  const next = retiredSessions().filter((entry) => entry.sessionId !== sessionId);
-  next.push({ sessionId, status });
+function retireBridgeSession(
+  sessionId: string,
+  status: number,
+  now: number,
+  random?: () => number,
+): RetiredSession {
+  const previous = bridgeSessionRetirement(sessionId);
+  const attempts = (previous?.attempts ?? 0) + 1;
+  const entry: RetiredSession = {
+    sessionId,
+    status,
+    attempts,
+    nextAttemptAt: now + backoffDelayMs(attempts, {
+      baseMs: RETIREMENT_BASE_MS,
+      maxMs: RETIREMENT_MAX_MS,
+      jitter: RETIREMENT_JITTER,
+      ...(random ? { random } : {}),
+    }),
+  };
+  const next = retiredSessions().filter((candidate) => candidate.sessionId !== sessionId);
+  next.push(entry);
   relayHost.__llvRetiredBridgeSessions = next.slice(-RETIRED_SESSION_CAPACITY);
+  return entry;
+}
+
+/** Dropped only by a session that went on to succeed — proof the refusal was the
+    transient kind. */
+function clearBridgeSessionRetirement(sessionId: string): void {
+  const next = retiredSessions().filter((entry) => entry.sessionId !== sessionId);
+  if (next.length === retiredSessions().length) return;
+  relayHost.__llvRetiredBridgeSessions = next;
 }
 
 export function bridgeSessionRetirement(sessionId: string): RetiredSession | null {
   return retiredSessions().find((entry) => entry.sessionId === sessionId) ?? null;
 }
 
-export function isBridgeSessionRetired(sessionId: string): boolean {
-  return bridgeSessionRetirement(sessionId) !== null;
+/** Whether this session is suspended RIGHT NOW. A suspension whose window has passed
+    is not a refusal any more — it is one probe waiting to happen. */
+export function isBridgeSessionSuspended(sessionId: string, now: number): boolean {
+  const retirement = bridgeSessionRetirement(sessionId);
+  return retirement !== null && now < retirement.nextAttemptAt;
 }
 
 /** Tests only. */
@@ -354,6 +408,9 @@ export interface BridgeReportRelayOptions {
   requestTimeoutMs?: number;
   /** Injected so thirty simulated minutes cost a few milliseconds. */
   scheduler?: DeadlineScheduler;
+  /** Read whenever a suspension is checked or recorded. Injected alongside the
+      scheduler so a simulated half hour and the backoff it drives share one clock. */
+  now?: () => number;
   random?: () => number;
   onState?: (state: BridgeRelayState) => void;
 }
@@ -362,7 +419,7 @@ export interface BridgeReportRelayOptions {
 type CycleOutcome =
   | { kind: "idle" }
   | { kind: "settled" }
-  | { kind: "retired" }
+  | { kind: "retired"; retryInMs: number }
   | { kind: "retryable" };
 
 export function useBridgeReportRelay(
@@ -373,7 +430,7 @@ export function useBridgeReportRelay(
   const acknowledgedRef = useRef<string[]>([]);
   const lastBatchAtRef = useRef<Date | null>(null);
 
-  const { fetchFn, onState, random, scheduler: injectedScheduler } = options;
+  const { fetchFn, now: injectedNow, onState, random, scheduler: injectedScheduler } = options;
   const pollMs = options.pollMs ?? POLL_MS;
   const requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
 
@@ -388,6 +445,7 @@ export function useBridgeReportRelay(
     if (!client || !live) return;
     const request = fetchFn ?? fetch;
     const scheduler = injectedScheduler ?? systemScheduler;
+    const now = injectedNow ?? Date.now;
 
     /* One owner for the whole effect. Unmount, navigation and a call-phase change
        all abort it, and every request descends from it, so nothing survives the
@@ -480,6 +538,15 @@ export function useBridgeReportRelay(
       return null;
     };
 
+    /* One place that records a refusal, so the backoff, the published state and the
+       delay the loop waits are guaranteed to agree. */
+    const suspend = (session: string, status: number): CycleOutcome => {
+      const retirement = retireBridgeSession(session, status, now(), callbacksRef.current.random);
+      const retryInMs = Math.max(0, retirement.nextAttemptAt - now());
+      publish({ kind: "retired", sessionId: session, status, attempts: retirement.attempts, retryInMs });
+      return { kind: "retired", retryInMs };
+    };
+
     const runCycle = async (): Promise<CycleOutcome> => {
       const session = client.realtimeSession();
       /* No credential, no read: the inbox carries deploy nonces. A call that has
@@ -491,20 +558,24 @@ export function useBridgeReportRelay(
         return { kind: "idle" };
       }
       const retirement = bridgeSessionRetirement(session);
-      if (retirement) {
-        /* Zero requests, for as long as this credential is the one on offer. The
-           timer keeps ticking so a genuinely new session is noticed, which costs one
-           string comparison rather than a round trip. */
-        publish({ kind: "retired", sessionId: session, status: retirement.status });
-        return { kind: "retired" };
+      if (retirement && now() < retirement.nextAttemptAt) {
+        /* Zero requests while the suspension holds. The timer keeps ticking so a
+           genuinely new session is noticed, which costs one string comparison rather
+           than a round trip. */
+        publish({
+          kind: "retired",
+          sessionId: session,
+          status: retirement.status,
+          attempts: retirement.attempts,
+          retryInMs: Math.max(0, retirement.nextAttemptAt - now()),
+        });
+        return { kind: "retired", retryInMs: Math.max(0, retirement.nextAttemptAt - now()) };
       }
       publish({ kind: "polling", sessionId: session });
 
       const refusedBySweep = await sweepParkedAcknowledgements(session);
       if (refusedBySweep !== null) {
-        retireBridgeSession(session, refusedBySweep);
-        publish({ kind: "retired", sessionId: session, status: refusedBySweep });
-        return { kind: "retired" };
+        return suspend(session, refusedBySweep);
       }
       if (stopped || client.realtimeSession() !== session) return { kind: "settled" };
 
@@ -514,10 +585,12 @@ export function useBridgeReportRelay(
       const response = await call(`/api/bridge?${parameters.toString()}`, { cache: "no-store" });
 
       if (isAuthorityRefusal(response.status)) {
-        retireBridgeSession(session, response.status);
-        publish({ kind: "retired", sessionId: session, status: response.status });
-        return { kind: "retired" };
+        return suspend(session, response.status);
       }
+      /* A poll that got through clears an earlier suspension: the refusal was the
+         transient kind the authority's projection window produces, and the backoff
+         must not carry over into the next one. */
+      clearBridgeSessionRetirement(session);
       if (isRetryableStatus(response.status)) return { kind: "retryable" };
       /* Any other non-2xx is a statement about this request, not about the link.
          Repeating it faster changes nothing, so it rejoins the ordinary cadence. */
@@ -553,9 +626,7 @@ export function useBridgeReportRelay(
         await acknowledgeCursor(plan.ackToken, session);
       } catch (error) {
         if (error instanceof BridgeAcknowledgementRefused && isAuthorityRefusal(error.status)) {
-          retireBridgeSession(session, error.status);
-          publish({ kind: "retired", sessionId: session, status: error.status });
-          return { kind: "retired" };
+          return suspend(session, error.status);
         }
         if (!isSpentAcknowledgement(error)) return { kind: "retryable" };
       }
@@ -608,7 +679,10 @@ export function useBridgeReportRelay(
         return;
       }
       failures = 0;
-      schedule(pollMs);
+      /* Capped at the ordinary cadence even when the suspension is much longer: the
+         wake costs one string comparison and no request, and it is how a genuinely new
+         credential is picked up without waiting out the refused one's backoff. */
+      schedule(outcome.kind === "retired" ? Math.min(outcome.retryInMs, pollMs) : pollMs);
     };
 
     /* Waking rather than fetching. The confirmation arrives on the host's schedule,
@@ -642,5 +716,5 @@ export function useBridgeReportRelay(
       timer = undefined;
       owner.abort(new Error("bridge relay stopped"));
     };
-  }, [client, fetchFn, injectedScheduler, live, pollMs, requestTimeoutMs]);
+  }, [client, fetchFn, injectedNow, injectedScheduler, live, pollMs, requestTimeoutMs]);
 }

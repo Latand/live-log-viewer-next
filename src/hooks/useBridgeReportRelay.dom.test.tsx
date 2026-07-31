@@ -22,6 +22,7 @@ import {
   type BridgeRelayState,
 } from "./useBridgeReportRelay";
 import type { DeadlineScheduler } from "@/lib/deadline";
+import { BRIDGE_ROOT_PROJECTION_REBUILD_MS } from "@/lib/bridge/gatewayAuthority";
 
 /**
  * The relay drives the loop, in the order that keeps reports exactly-once.
@@ -159,6 +160,7 @@ const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
 function virtualScheduler(): DeadlineScheduler & {
   advance(ms: number): void;
   pending(): number;
+  now(): number;
   delays: number[];
 } {
   let now = 0;
@@ -184,6 +186,7 @@ function virtualScheduler(): DeadlineScheduler & {
       }
     },
     pending: () => timers.size,
+    now: () => now,
   };
 }
 
@@ -603,6 +606,7 @@ function mountWithClock(options: { pollMs?: number; onState?: (state: BridgeRela
       pollMs,
       requestTimeoutMs: REQUEST_TIMEOUT_MS,
       scheduler,
+      now: () => scheduler.now(),
       /* Pinned so a backoff assertion is about the policy rather than the dice. */
       random: () => 0,
       ...(options.onState ? { onState: options.onState } : {}),
@@ -626,18 +630,70 @@ async function runFor(scheduler: ReturnType<typeof virtualScheduler>, totalMs: n
   }
 }
 
-test("thirty simulated minutes of 403 costs one request, not one hundred and eighty", async () => {
+test("thirty simulated minutes of persistent 403 costs a handful of requests, not one hundred and eighty", async () => {
   getStatuses = Array.from({ length: 500 }, () => 403);
   const { scheduler } = mountWithClock({ pollMs: 10_000 });
 
   await runFor(scheduler, 30 * 60_000, 10_000);
 
   const requests = calls.filter((call) => call.url.includes("/api/bridge"));
-  /* One refusal is the whole answer. The credential either is the live root's or is
-     not, and asking again cannot change that. */
-  expect(requests).toHaveLength(1);
-  expect(requests[0]!.method).toBe("GET");
-  expect(bridgeSessionRetirement("rt_sess_relay")).toEqual({ sessionId: "rt_sess_relay", status: 403 });
+  /* A refusal suspends rather than condemns — the authority can refuse a correct
+     successor for up to one projection window — so the loop probes again on a backing
+     -off schedule. Half an hour of a genuinely dead credential is a handful of
+     requests against the one hundred and eighty a fixed ten-second interval produced. */
+  expect(requests.length).toBeGreaterThan(1);
+  expect(requests.length).toBeLessThanOrEqual(8);
+  expect(requests.every((request) => request.method === "GET")).toBe(true);
+
+  const retirement = bridgeSessionRetirement("rt_sess_relay");
+  expect(retirement?.status).toBe(403);
+  /* Backing off: each probe pushes the next one further out, to a ceiling. */
+  expect(retirement!.attempts).toBe(requests.length);
+  expect(retirement!.nextAttemptAt - scheduler.now()).toBeLessThanOrEqual(900_000);
+});
+
+test("the first probe after a 403 lands well after the authority's rebuild window", async () => {
+  /* The authority re-derives its root projection at most once per 30s window, so a
+     correct successor can be refused for up to that long. A probe that came back
+     sooner would be asking a question the server has not had a chance to re-answer. */
+  getStatuses = [403];
+  const { scheduler } = mountWithClock({ pollMs: 10_000 });
+  await runFor(scheduler, 30_000, 10_000);
+  expect(calls).toHaveLength(1);
+
+  const retirement = bridgeSessionRetirement("rt_sess_relay")!;
+  expect(retirement.nextAttemptAt).toBeGreaterThan(BRIDGE_ROOT_PROJECTION_REBUILD_MS);
+});
+
+test("a same-session 403 recovers when the authority starts answering again", async () => {
+  /*
+   * The blocker this closes. A permanent retirement turned the authority's own
+   * transient, self-correcting refusal — the projection window after a handover — into
+   * a call that never spoke again until the tab was reloaded. The credential is
+   * unchanged throughout; only the server's answer changes.
+   */
+  getStatuses = [403];
+  plans = [{ kind: "idle" }, { kind: "idle" }];
+  const { scheduler } = mountWithClock({ pollMs: 10_000 });
+  await runFor(scheduler, 30_000, 10_000);
+
+  expect(calls).toHaveLength(1);
+  expect(bridgeSessionRetirement("rt_sess_relay")?.status).toBe(403);
+
+  /* Past the suspension. The same session id probes again and is served. */
+  await runFor(scheduler, 90_000, 10_000);
+
+  const probes = calls.filter((call) => call.method === "GET");
+  expect(probes.length).toBeGreaterThanOrEqual(2);
+  expect(probes.every((probe) => probe.url.includes("realtimeSessionId=rt_sess_relay"))).toBe(true);
+  /* Recovered: the suspension is gone, so the next poll is ordinary rather than
+     another backoff step. */
+  expect(bridgeSessionRetirement("rt_sess_relay")).toBeNull();
+
+  const beforeSteadyState = calls.length;
+  await runFor(scheduler, 60_000, 10_000);
+  /* Back to the ordinary cadence — roughly one poll per pollMs, not one per backoff. */
+  expect(calls.length - beforeSteadyState).toBeGreaterThanOrEqual(5);
 });
 
 test("a 401 retires the session exactly as a 403 does", async () => {
@@ -645,7 +701,7 @@ test("a 401 retires the session exactly as a 403 does", async () => {
   const { scheduler } = mountWithClock({ pollMs: 10_000 });
   await runFor(scheduler, 5 * 60_000, 10_000);
 
-  expect(calls).toHaveLength(1);
+  expect(calls.length).toBeLessThanOrEqual(4);
   expect(bridgeSessionRetirement("rt_sess_relay")?.status).toBe(401);
 });
 
@@ -676,7 +732,9 @@ test("a refused session stops polling, and a genuinely new session starts clean"
   getStatuses = [403];
   const states: BridgeRelayState[] = [];
   const { scheduler } = mountWithClock({ pollMs: 10_000, onState: (state) => { states.push(state); } });
-  await runFor(scheduler, 60_000, 10_000);
+  /* Inside the suspension window, so the subject is the silence rather than the probe
+     that ends it — recovery has its own test. */
+  await runFor(scheduler, 30_000, 10_000);
 
   expect(calls).toHaveLength(1);
   expect(states.some((state) => state.kind === "retired" && state.sessionId === "rt_sess_relay")).toBe(true);
@@ -852,7 +910,8 @@ test("a refusal met while sweeping retires the session before any drain goes out
   rememberBridgeAcknowledgement("voice:parked", "ack_parked", { sessionId: "rt_sess_relay" });
   postOutcomes = [{ status: 403 }];
   const { scheduler } = mountWithClock({ pollMs: 10_000 });
-  await runFor(scheduler, 10 * 60_000, 10_000);
+  /* Inside the suspension the refusal is the whole story: no drain follows it. */
+  await runFor(scheduler, 30_000, 10_000);
 
   expect(calls.filter((call) => call.method === "GET")).toEqual([]);
   expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
