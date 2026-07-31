@@ -74,10 +74,10 @@ test("canonical worktree cwd identity outranks a selected-project launch hint", 
 test("a launch-profile hint fills in when no cwd evidence exists", () => {
   const attribution = resolveProjectAttribution({
     cwd: "",
-    launchProfileProject: "stikon-dispatcher",
+    launchProfileProject: "example-dispatcher",
     fallbackProject: "other",
   });
-  expect(attribution).toEqual({ project: "stikon-dispatcher", source: "launch-profile" });
+  expect(attribution).toEqual({ project: "example-dispatcher", source: "launch-profile" });
 });
 
 test("a legacy session with no metadata keeps its scanner fallback", () => {
@@ -117,10 +117,10 @@ test("placeholder ownership never overrides a concrete cwd project", () => {
 
 test("a legacy display-name ownership collapses into the cwd repository identity", () => {
   const attribution = resolveProjectAttribution({
-    projectOwnership: operatorOwnership("Stikon-Business-Analytics"),
+    projectOwnership: operatorOwnership("Example-Analytics"),
     cwdInfo: {
       project: "repo-0123456789abcdef0123456789abcdef",
-      displayName: "Stikon-Business-Analytics",
+      displayName: "Example-Analytics",
     },
   });
   expect(attribution).toEqual({

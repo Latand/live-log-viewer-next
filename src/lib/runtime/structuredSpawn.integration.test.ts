@@ -173,15 +173,15 @@ test("attempt 93c42855 recovers a failed registry receipt from transcript eviden
     engine: "codex",
     cwd,
     transport: "structured",
-    accountId: "stikon",
-    clientAttemptId: "attempt_93c42855_stikon",
+    accountId: "account-a",
+    clientAttemptId: "attempt_93c42855_account_a",
   });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
   registry.stageStructuredSpawn(begun.receipt.launchId, {
     key: { engine: "codex", sessionId: id },
     artifactPath,
     cwd,
-    accountId: "stikon",
+    accountId: "account-a",
     status: "unhosted",
     host: null,
     structuredHost: null,

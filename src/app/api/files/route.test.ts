@@ -198,6 +198,35 @@ test("catalog aliases collapse a legacy dashed-path variant before grouping", ()
   expect(result.projectRemap.get("home-primary-Projects-example")).toBe(canonical);
 });
 
+test("a unique repository display name absorbs its matching legacy project key", () => {
+  const repositoryRoot = process.cwd();
+  const canonical = projectInfoFromCwd(repositoryRoot)!;
+  const result = consolidateProjectCatalogByRepository([
+    {
+      project: canonical.project,
+      displayName: canonical.displayName,
+      smt: 20,
+      conversations: 7,
+      projectRoot: repositoryRoot,
+    },
+    {
+      project: canonical.displayName,
+      displayName: canonical.displayName,
+      smt: 10,
+      conversations: 1,
+      projectRoot: os.homedir(),
+    },
+  ]);
+
+  expect(result.projectCatalog).toEqual([expect.objectContaining({
+    project: canonical.project,
+    displayName: canonical.displayName,
+    conversations: 8,
+    smt: 20,
+  })]);
+  expect(result.projectRemap.get(canonical.displayName)).toBe(canonical.project);
+});
+
 test("distinct readable legacy projects do not share the unresolved label", () => {
   const result = consolidateProjectCatalogByRepository([
     {
@@ -671,7 +700,7 @@ test("an ordinary resource snapshot reuses the completed scanner generation", as
   release();
   const files = await resourceFiles;
 
-  expect(scansBeforeRelease).toBe(2);
+  expect(scansBeforeRelease).toBe(1);
   expect(settledBeforeRelease).toBeTrue();
   expect(files.map((entry) => entry.path)).toEqual([before.path]);
 });
@@ -716,7 +745,7 @@ test("a fresh resource handoff replaces deferred ordinary work without a duplica
   let release!: () => void;
   scanGates.push(new Promise<void>((resolve) => { release = resolve; }));
   scannedFiles = [after];
-  await cachedFileScan(undefined, undefined, now + 10_100);
+  await cachedFileScan(undefined, undefined, now + 60_100);
   let settled = false;
   const handoff = readResourceFileSnapshot(true).then((files) => {
     settled = true;
@@ -746,7 +775,7 @@ test("a fresh resource handoff joins an ordinary generation that already started
   let release!: () => void;
   scanGates.push(new Promise<void>((resolve) => { release = resolve; }));
   scannedFiles = [after];
-  await cachedFileScan(undefined, undefined, now + 10_100);
+  await cachedFileScan(undefined, undefined, now + 60_100);
   await new Promise<void>((resolve) => setImmediate(resolve));
   expect(scans).toBe(2);
 
@@ -785,7 +814,7 @@ test("concurrent fresh callers share one pending generation through failure and 
     new Promise<void>((resolve) => { releaseOld = resolve; }),
     new Promise<void>((resolve) => { releaseFresh = resolve; }),
   );
-  await cachedFileScan(undefined, undefined, now + 10_100);
+  await cachedFileScan(undefined, undefined, now + 60_100);
   scannedFiles = [after];
 
   let firstSettled = false;
@@ -859,7 +888,7 @@ test("a fresh resource snapshot fences a pre-kill refresh before host election",
   expect(warm.snapshot.files.map((entry) => entry.path)).toEqual([before.path]);
   let releasePreKillRefresh!: () => void;
   scanGates.push(new Promise<void>((resolve) => { releasePreKillRefresh = resolve; }));
-  const revalidating = await cachedFileScan(undefined, undefined, now + 10_100);
+  const revalidating = await cachedFileScan(undefined, undefined, now + 60_100);
   expect(revalidating.snapshot.files.map((entry) => entry.path)).toEqual([before.path]);
   expect(scans).toBe(1);
 
@@ -1283,7 +1312,7 @@ test("ordinary reads defer one shared refresh to the bounded fallback cadence", 
   expect(frequentReads.every((scan) => scan.snapshot.files[0]?.path === before.path)).toBeTrue();
   expect(scans).toBe(1);
 
-  const stale = await cachedFileScan(undefined, undefined, now + 10_100);
+  const stale = await cachedFileScan(undefined, undefined, now + 60_100);
   expect(stale.snapshot.files.map((entry) => entry.path)).toEqual([before.path]);
   expect(stale.cacheStatus).toBe("stale");
   expect(scans).toBe(1);
@@ -1308,17 +1337,17 @@ test("a failed ordinary refresh keeps retry traffic on the bounded cadence", asy
   await cachedFileScan(undefined, undefined, now);
 
   scanCompleteResults = [false];
-  await cachedFileScan(undefined, undefined, now + 10_100);
+  await cachedFileScan(undefined, undefined, now + 60_100);
   await new Promise<void>((resolve) => setImmediate(resolve));
   expect(scans).toBe(2);
 
   const retryTraffic = await Promise.all(Array.from({ length: 24 }, (_, index) =>
-    cachedFileScan(undefined, undefined, now + 11_000 + index * 375)));
+    cachedFileScan(undefined, undefined, now + 61_000 + index * 375)));
   expect(retryTraffic.every((scan) => scan.snapshot.files[0]?.path === "/sessions/ordinary-retry.jsonl")).toBeTrue();
   expect(retryTraffic.every((scan) => scan.cacheStatus === "hit" && scan.targetGeneration === scan.generation)).toBeTrue();
   expect(scans).toBe(2);
 
-  await cachedFileScan(undefined, undefined, now + 20_200);
+  await cachedFileScan(undefined, undefined, now + 120_200);
   expect(scans).toBe(2);
   await new Promise<void>((resolve) => setImmediate(resolve));
   expect(scans).toBe(3);
@@ -1331,13 +1360,13 @@ test("an incomplete filesystem scan retains the last completed route snapshot un
   scanFileResults = [[file("/sessions/partial.jsonl")]];
   scanCompleteResults = [false];
 
-  const stale = await cachedFileScan(undefined, undefined, now + 10_100);
+  const stale = await cachedFileScan(undefined, undefined, now + 60_100);
   expect(stale.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/canonical.jsonl"]);
   await new Promise<void>((resolve) => setImmediate(resolve));
   expect((await cachedFileScan()).snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/canonical.jsonl"]);
 
   scanFileResults = [[file("/sessions/recovered.jsonl")]];
-  const recovered = await cachedFileScan(undefined, undefined, now + 20_200);
+  const recovered = await cachedFileScan(undefined, undefined, now + 120_200);
   expect(recovered.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/canonical.jsonl"]);
   await new Promise<void>((resolve) => setImmediate(resolve));
   expect((await cachedFileScan()).snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/recovered.jsonl"]);
@@ -1839,7 +1868,7 @@ test("a no-transcript structured reservation projects its card from canonical cw
     cwd,
     transport: "structured",
     accountId: "terra",
-    clientAttemptId: "attempt_93c42855_stikon",
+    clientAttemptId: "attempt_93c42855_account_a",
     requestDigest: "9".repeat(64),
     launchProfile: emptyLaunchProfile({ cwd, model: "gpt-5.6-sol", effort: "xhigh" }),
   });
@@ -1865,7 +1894,7 @@ test("a no-transcript structured reservation projects its card from canonical cw
     effort: "xhigh",
     spawn: {
       launchId: begun.receipt.launchId,
-      clientAttemptId: "attempt_93c42855_stikon",
+      clientAttemptId: "attempt_93c42855_account_a",
       state: "starting",
       initialMessage: "pending",
       retrySafe: false,
@@ -2045,15 +2074,15 @@ test("a staged structured card stays binding until its initial message is admitt
     engine: "codex",
     cwd,
     transport: "structured",
-    accountId: "stikon",
-    clientAttemptId: "attempt_e9e8a4b4_stikon",
+    accountId: "account-a",
+    clientAttemptId: "attempt_e9e8a4b4_account_a",
   });
   if (begun.kind !== "created") throw new Error("expected a structured reservation");
   registry.stageStructuredSpawn(begun.receipt.launchId, {
     key: { engine: "codex", sessionId: "e9e8a4b4" },
     artifactPath,
     cwd,
-    accountId: "stikon",
+    accountId: "account-a",
     status: "unhosted",
     host: null,
     structuredHost: null,

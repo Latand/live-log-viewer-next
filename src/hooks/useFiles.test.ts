@@ -14,7 +14,7 @@ import { createFilesClientCache, filesApiUrl, filesPollCadence, filesRequestHead
 test("filesApiUrl keeps project switches on the bounded scheme feed", () => {
   expect(filesApiUrl()).toBe("/api/files");
   expect(filesApiUrl(null)).toBe("/api/files");
-  expect(filesApiUrl("stikon-dispatcher")).toBe("/api/files");
+  expect(filesApiUrl("example-dispatcher")).toBe("/api/files");
   expect(filesApiUrl("space project")).toBe("/api/files");
   expect(filesApiUrl("space project", "/sessions/quiet.jsonl")).toBe("/api/files?path=%2Fsessions%2Fquiet.jsonl");
 });

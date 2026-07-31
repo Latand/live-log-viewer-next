@@ -101,24 +101,42 @@ export function consolidateProjectCatalogByRepository(
   projectRemap: Map<string, string>;
 } {
   const repositoryProjects = new Map<string, string>();
+  const repositoryProjectsByDisplayName = new Map<string, Set<string>>();
   for (const entry of entries) {
-    if (!entry.repository) continue;
-    const repository = entry.repository.toLowerCase();
     const identity = entry.projectRoot ? projectIdentityFromRepositoryRoot(entry.projectRoot) : null;
     const aliasedProject = resolveCatalogAlias(entry.project, aliases);
+    if (identity) {
+      const displayName = identity.displayName.trim().toLocaleLowerCase();
+      const projects = repositoryProjectsByDisplayName.get(displayName) ?? new Set<string>();
+      projects.add(identity.project);
+      repositoryProjectsByDisplayName.set(displayName, projects);
+    }
+    if (!entry.repository) continue;
+    const repository = entry.repository.toLowerCase();
     const candidate = identity?.project
       ?? (/^repo-[0-9a-f]{32}$/.test(aliasedProject) ? aliasedProject : null);
     if (candidate && (identity || !repositoryProjects.has(repository))) {
       repositoryProjects.set(repository, candidate);
     }
   }
+  const uniqueRepositoryProjectByDisplayName = new Map(
+    [...repositoryProjectsByDisplayName]
+      .filter(([, projects]) => projects.size === 1)
+      .map(([displayName, projects]) => [displayName, [...projects][0]!] as const),
+  );
   const groups = new Map<string, Array<{ entry: ProjectCatalogEntry; aliasedProject: string }>>();
   for (const entry of entries) {
     const aliasedProject = resolveCatalogAlias(entry.project, aliases);
     const repository = entry.repository?.toLowerCase();
     const repositoryProject = repository ? repositoryProjects.get(repository) : null;
-    const key = repositoryProject
-      ? `project:${repositoryProject}`
+    const displayName = (displayNames[aliasedProject] ?? entry.displayName ?? projectDisplayName(aliasedProject))
+      .trim()
+      .toLocaleLowerCase();
+    const displayNameProject = displayName === UNRESOLVED_PROJECT_NAME.toLocaleLowerCase()
+      ? null
+      : uniqueRepositoryProjectByDisplayName.get(displayName);
+    const key = repositoryProject || displayNameProject
+      ? `project:${repositoryProject ?? displayNameProject}`
       : repository
         ? `repository:${repository}`
         : `project:${aliasedProject}`;
