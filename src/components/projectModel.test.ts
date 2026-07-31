@@ -6,6 +6,7 @@ import {
   buildArchiveBranchGroups,
   buildBranchGroups,
   buildProjectSummaries,
+  collapsedTrees,
   draftWorkingDirectory,
   descendantCounts,
   isConversation,
@@ -348,6 +349,21 @@ describe("buildBranchGroups", () => {
     const group = groups.find((candidate) => candidate.key === "/parent")!;
     expect(group.columns.map((column) => column.file.path)).toContain("/parent/attn");
   });
+});
+
+test("collapsed tree cards keep unsettled work and leave idle history off the canvas", () => {
+  const idleRoot = entry({ path: "/idle-root" });
+  const idleChild = entry({ path: "/idle-child", parent: idleRoot.path, kind: "subagent" });
+  const stalledRoot = entry({ path: "/stalled-root" });
+  const stalledChild = entry({
+    path: "/stalled-child",
+    parent: stalledRoot.path,
+    kind: "subagent",
+    activity: "stalled",
+  });
+
+  expect(collapsedTrees([idleRoot, idleChild, stalledRoot, stalledChild], "demo", new Set())
+    .map((card) => card.root.path)).toEqual(["/stalled-root"]);
 });
 
 describe("buildArchiveBranchGroups", () => {

@@ -524,9 +524,9 @@ export interface TreeCard {
 }
 
 /**
- * Quiet trees of the project: root conversations without a dashboard group
- * but with descendants. Shown as compact collapsed cards on the same canvas,
- * expandable in place.
+ * Unsettled trees of the project that have not entered a full dashboard group.
+ * Fully idle history stays in the history surface instead of repopulating the
+ * canvas and minimap with one compact card per old worker tree.
  */
 export function collapsedTrees(files: FileEntry[], project: string, activeRoots: ReadonlySet<string>): TreeCard[] {
   const kids = kidsIndex(files);
@@ -541,7 +541,7 @@ export function collapsedTrees(files: FileEntry[], project: string, activeRoots:
       smt = Math.max(smt, node.mtime);
       band = Math.min(band, activityBand(node)) as ActivityBand;
     }
-    cards.push({ root: file, branchCount: descendants.length, smt, band });
+    if (band < 3) cards.push({ root: file, branchCount: descendants.length, smt, band });
   }
   return cards.sort((a, b) => a.band - b.band || b.smt - a.smt);
 }
