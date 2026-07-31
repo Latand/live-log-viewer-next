@@ -470,6 +470,17 @@ export interface SnapshotSpawnProjectionEntry {
 
 export type SnapshotSpawnProjection = Record<string, SnapshotSpawnProjectionEntry>;
 
+/** Compact read model for applying the bounded custom-title store to a
+    completed scanner projection. Only conversations named by title records
+    enter this seam; unrelated registry rows stay unopened. */
+export interface SnapshotTitleConversationProjectionEntry {
+  conversationId: ViewerConversationId;
+  aliases: ViewerConversationId[];
+  ownedPaths: string[];
+}
+
+export type SnapshotTitleConversationProjection = SnapshotTitleConversationProjectionEntry[];
+
 const SNAPSHOT_SPAWN_ALIAS_LIMIT = 64;
 
 export interface ConversationLookup {
@@ -3361,6 +3372,13 @@ export class AgentRegistry {
   snapshotSpawns(launchIds: readonly string[]): SnapshotSpawnProjection {
     if (this.sqliteStore) return this.sqliteStore.snapshotSpawns(launchIds);
     return snapshotSpawnsFromRegistry(this.readOnlySnapshot(), launchIds);
+  }
+
+  /** Resolves only conversation ids already present in the bounded custom-title
+      store. JSON compatibility mode deliberately stays registry-free on the
+      snapshot route; UUID/path title keys still apply there. */
+  snapshotTitleConversations(conversationIds: readonly string[]): SnapshotTitleConversationProjection {
+    return this.sqliteStore?.snapshotTitleConversations(conversationIds) ?? [];
   }
 
   spawnReceiptForClientAttempt(clientAttemptId: string): SpawnReceipt | null {
