@@ -13,6 +13,8 @@ import { useComposer } from "@/hooks/useComposer";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useCodexRealtime } from "@/hooks/useCodexRealtime";
 import { refreshRuntime, sendRuntimeMessage, useRuntimeReceiptsForArtifact, type RuntimeSessionView } from "@/hooks/useRuntime";
+import type { SelectedContextRef } from "@/lib/selection/selectedContext";
+import { useViewerSelectedContext, viewerSelectedContext } from "@/lib/selection/viewerSelectedContext";
 import { useTmuxTarget } from "@/hooks/useTmuxTarget";
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { cardMigrationState, migrationHoldsSends } from "@/lib/accounts/migration";
@@ -21,6 +23,7 @@ import type { FileEntry } from "@/lib/types";
 import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 
 import { ComposerBar } from "./ComposerBar";
+import { SelectedContextBadge } from "./SelectedContextBadge";
 import { OutboxDispatcher } from "./conversation/OutboxDispatcher";
 import {
   adoptOutbox,
@@ -517,6 +520,11 @@ export interface PendingDelivery {
   images: readonly PendingImage[];
   /** Runtime selection frozen with the first request under this key. */
   runtime?: RuntimeProfile;
+  /** The Viewer card selected when this attempt was dispatched (#844). Frozen
+      with the generation so a replay re-sends the SAME reference: an idempotent
+      retry must not silently re-point the operator's instruction at whatever
+      happens to be selected now. */
+  selectedContext?: SelectedContextRef;
   /** Records that runtime absence was captured deliberately. */
   runtimeCaptured?: true;
   /** False when a legacy/quota-limited record lacks bytes needed for an exact
@@ -1539,6 +1547,14 @@ export function TmuxComposerCore({
     return () => clearInterval(timer);
   }, [file.mtime, cardId]);
 
+  /* #844: the PREVIEW read — it follows the selection as the operator moves it.
+     Above the capability early-returns below, because a hook may not be called
+     conditionally; the badge it feeds is rendered only when there is a card to
+     name. The submission itself re-reads the bus synchronously inside `send`, so
+     what rides the wire is decided at the submission instant rather than by
+     whatever this render closed over. */
+  const liveSelectedContext = useViewerSelectedContext();
+
   // A surface whose Send capability is hidden exposes NO message surface — no
   // Send, quick-ack, mic, or image path, and fires zero requests. This gates the
   // gated scanner-shaped subagent (inert row) that `canMessageWithoutPane` would
@@ -1651,6 +1667,12 @@ export function TmuxComposerCore({
        submit replays the original bytes under the original key. */
     const clientMessageId = deliveryAttemptKey(idempotencyKey.current, retry?.clientMessageId);
     const replayGeneration = pendingDeliveries.current.find((entry) => entry.key === clientMessageId);
+    /* #844: READ HERE, before the first await. This is the submission instant as
+       far as the reference is concerned — everything it will ever say is decided
+       now, so the operator moving the board a moment later cannot rewrite the
+       admitted turn. A replay reuses the generation's original reference for
+       the same reason it replays the original bytes. */
+    const selectedContext = replayGeneration?.selectedContext ?? viewerSelectedContext();
     /* #691 §4, the no-call path: a turn is opening, so whatever the manager
        reported while nothing was live rides in with it. Never on a replay — a
        retained generation replays its original bytes under its original key, and
@@ -1756,6 +1778,7 @@ export function TmuxComposerCore({
           text: payloadText,
           images: sentImages,
           ...(runtimeOverride ? { runtime: runtimeOverride } : {}),
+          selectedContext,
           ...(capturesRuntime ? { runtimeCaptured: true as const } : {}),
         },
         ...pendingDeliveries.current,
@@ -1825,6 +1848,7 @@ export function TmuxComposerCore({
               idempotencyKey: clientMessageId,
               policy: "interrupt-active",
               ...(runtimeOverride ? { runtime: runtimeOverride } : {}),
+              selectedContext,
             }).then((result) => ({
               ok: result.ok,
               structured: true,
@@ -2189,6 +2213,17 @@ export function TmuxComposerCore({
         ready={!busy && !voiceSending && !reconcilingSend}
         onDispatch={dispatchQueued}
       />
+      {/* #844: what the NEXT turn will point at, shown before the operator
+          commits to it. Only when a card is actually selected — an explicit
+          empty selection is an answer worth persisting on the sent record, but a
+          permanent "nothing selected" chip over every composer in the app is
+          noise. The transcript row renders the same badge from the same
+          component afterwards, so the before and after can be compared. */}
+      {liveSelectedContext.state === "selected" ? (
+        <div className="flex justify-end">
+          <SelectedContextBadge reference={liveSelectedContext} />
+        </div>
+      ) : null}
       {/* Proactive hold hint: while the card is switching accounts, the next
           send is queued for the successor rather than delivered live. Shown
           identically under the desktop and mobile composers. */}

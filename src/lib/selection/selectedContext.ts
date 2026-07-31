@@ -94,6 +94,60 @@ export interface SelectedCardIdentity {
   label?: string;
 }
 
+/**
+ * What a reference SAYS, with no capture time and no binding.
+ *
+ * The badge renders exactly this, and a full `SelectedContextRef` satisfies it
+ * structurally — so the composer can preview the card the next turn would name
+ * without minting a capture time for a capture that has not happened. A
+ * timestamp on a preview would be a lie the moment the operator paused before
+ * hitting send.
+ */
+export interface SelectedContextPreview {
+  state: "selected" | "none";
+  conversationId?: string;
+  project?: string;
+  label?: string;
+}
+
+/**
+ * THE selection rule, in one place: the focused card first (the one the operator
+ * is looking at), then the first member of the selection in this view's
+ * published order. A card this view cannot name with a canonical conversation id
+ * is skipped rather than guessed at.
+ *
+ * Returns the CARD, not just its identity. Two entries can legitimately share a
+ * conversation id — a migrated predecessor and its successor both do — so
+ * recovering "which card" by searching for the id afterwards can name the wrong
+ * artifact. Whoever needs the card gets the one that was actually chosen.
+ */
+function selectedCard(input: Pick<SelectedContextCaptureInput, "slice" | "cards">): SelectedCardIdentity | null {
+  const byPath = new Map(input.cards.map((card) => [card.path, card]));
+  const candidates = input.slice.focusedPath
+    ? [input.slice.focusedPath, ...input.slice.selectedPaths]
+    : input.slice.selectedPaths;
+  for (const path of candidates) {
+    const card = byPath.get(path);
+    if (card && typeof card.conversationId === "string" && CONVERSATION_ID.test(card.conversationId)) return card;
+  }
+  return null;
+}
+
+/** The pure half of capture: which card, with no clock involved. */
+export function selectedContextPreview(
+  input: Pick<SelectedContextCaptureInput, "context" | "slice" | "cards">,
+): SelectedContextPreview {
+  const project = optional("project", boundedText(input.context.project, MAX_SELECTED_PROJECT_CHARS));
+  const card = selectedCard(input);
+  if (!card) return { state: "none", ...project };
+  return {
+    state: "selected",
+    conversationId: card.conversationId!,
+    ...project,
+    ...optional("label", boundedText(card.label, MAX_SELECTED_LABEL_CHARS)),
+  };
+}
+
 export interface SelectedContextCaptureInput {
   context: { project: string | null };
   slice: { focusedPath: string | null; selectedPaths: readonly string[] };
@@ -128,24 +182,18 @@ export function captureSelectedContext(input: SelectedContextCaptureInput): Sele
     ...optional("deviceId", input.identity ? opaqueId(input.identity.deviceId) : null),
     ...optional("revision", revisionOf(input.revision)),
   };
-  const byPath = new Map(input.cards.map((card) => [card.path, card]));
-  const candidates = input.slice.focusedPath ? [input.slice.focusedPath, ...input.slice.selectedPaths] : input.slice.selectedPaths;
-  for (const path of candidates) {
-    const card = byPath.get(path);
-    const conversationId = card && typeof card.conversationId === "string" && CONVERSATION_ID.test(card.conversationId)
-      ? card.conversationId
-      : null;
-    if (!card || !conversationId) continue;
-    return {
-      version: SELECTED_CONTEXT_VERSION,
-      state: "selected",
-      conversationId,
-      ...evidence,
-      ...optional("path", boundedPath(card.path)),
-      ...optional("label", boundedText(card.label, MAX_SELECTED_LABEL_CHARS)),
-    };
-  }
-  return { version: SELECTED_CONTEXT_VERSION, state: "none", ...evidence };
+  /* One selection rule, used by the badge and by the wire alike: whatever the
+     preview shows before the operator sends is the card this reference names. */
+  const card = selectedCard(input);
+  if (!card) return { version: SELECTED_CONTEXT_VERSION, state: "none", ...evidence };
+  return {
+    version: SELECTED_CONTEXT_VERSION,
+    state: "selected",
+    conversationId: card.conversationId!,
+    ...evidence,
+    ...optional("path", boundedPath(card.path)),
+    ...optional("label", boundedText(card.label, MAX_SELECTED_LABEL_CHARS)),
+  };
 }
 
 /* ------------------------------------------------------------------ *

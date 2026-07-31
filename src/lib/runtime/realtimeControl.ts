@@ -116,6 +116,36 @@ export async function executeRealtimeControl(
       }
       return { status: 200, body: { ok: true, ...answer } };
     }
+    /**
+     * The browser's utterance boundary (#844 §2).
+     *
+     * The operator's speech never passes through this server — it rides the
+     * WebRTC leg straight to the model — so the only place a spoken turn can be
+     * paired with a selected card is the moment the browser sees its own
+     * transcript go final. That is what this action reports, and it writes no
+     * words: it records what the NEXT delegated turn points at.
+     *
+     * Not listed in `REALTIME_INJECTION_ACTIONS`, and deliberately so. The
+     * authority check is not a separate allowlist but the ledger itself: the
+     * admission matches the presented session id against the one this call was
+     * bound to, so a caller presenting nothing (or another call's id) is
+     * refused `unbound` without a second rule to keep in sync.
+     */
+    if (request.action === "selectedContext") {
+      const admission = admitVoiceSelectedContext({
+        conversationId,
+        realtimeSessionId: caller.kind === "session" ? caller.realtimeSessionId : "",
+        reference: parseSelectedContextRef(request.selectedContext),
+        now: Date.now(),
+      });
+      if (!admission.ok) {
+        return { status: 409, body: { error: admission.failure.message, code: admission.failure.code } };
+      }
+      return {
+        status: 200,
+        body: { ok: true, selectedContext: admission.admission.reference, sequence: admission.admission.sequence },
+      };
+    }
     if (request.action === "appendSpeech") {
       const text = typeof request.text === "string" ? request.text.trim() : "";
       if (!text || byteLength(text) > MAX_SPEECH_BYTES) {
@@ -176,7 +206,7 @@ export async function executeRealtimeControl(
         },
       };
     }
-    return { status: 400, body: { error: "action must be start, appendSpeech, deliverWorkerResponse, stop, or status" } };
+    return { status: 400, body: { error: "action must be start, selectedContext, appendSpeech, deliverWorkerResponse, stop, or status" } };
   } catch (error) {
     return { status: 409, body: { error: redactCodexHostDiagnostic(error) } };
   }

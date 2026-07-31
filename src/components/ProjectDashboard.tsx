@@ -1426,6 +1426,23 @@ function ProjectDashboardView({
     viewBus.reportContext({ project, board: { renderedRevision: revision, durableRevision: revision, sync: board.sync } });
   }, [project, board.revision, board.sync]);
 
+  /* Card identities for the selected-card reference (#844). The presence
+     channels carry PATHS; a durable reference is keyed by `conversationId`, and
+     this is the surface that holds the `FileEntry` objects naming both. Reported
+     from here for the same reason the prune below lives here: the scan is here,
+     and every view's selection is projected out of this one set. A card the scan
+     has not named yet simply carries no conversation id, and capture then
+     records an explicit empty selection rather than guessing one. */
+  useEffect(() => {
+    if (!loaded) return;
+    viewBus.reportCards(files.map((file) => ({
+      path: file.path,
+      ...(file.conversationId ? { conversationId: file.conversationId } : {}),
+      ...(file.project ? { project: file.project } : {}),
+      ...(file.title ? { label: file.title } : {}),
+    })));
+  }, [files, loaded]);
+
   /* THE ONLY LEGITIMATE PRUNE of the canonical selection (#771): a selected
      conversation that no longer exists. Driven from here because this is where
      the scan lives, and because the selection outlives every view — pruning it

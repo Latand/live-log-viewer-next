@@ -6,6 +6,9 @@ import {
 } from "@/lib/runtime/voiceDelivery";
 
 
+import { viewBus } from "@/hooks/viewPresenceBus";
+import { viewerSelectedContext } from "@/lib/selection/viewerSelectedContext";
+
 import { reportCallPhase } from "./activeCall";
 
 export type CodexRealtimePhase = "idle" | "connecting" | "live" | "stopping" | "error";
@@ -299,7 +302,15 @@ class CodexRealtimeClient {
            thing that would break it is presenting a conversation capability, because
            that is precisely how an agent names itself. */
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action: "start", conversationId: this.conversationId, sdp: offer }),
+        /* #844 §4: the window this call belongs to. Sent once, at start, and
+           never re-asserted — a call that could re-bind itself mid-session would
+           be exactly the implicit device switch the typed refusals prevent. */
+        body: JSON.stringify({
+          action: "start",
+          conversationId: this.conversationId,
+          sdp: offer,
+          ...(viewBus.getIdentity() ? { view: viewBus.getIdentity() } : {}),
+        }),
       }));
       if (epoch !== this.epoch) return;
       if (typeof answer.sdp !== "string") throw new Error("Codex returned no WebRTC answer");
@@ -414,6 +425,34 @@ class CodexRealtimeClient {
     }
   }
 
+  /**
+   * Report what this call points at, for the delegated turn about to be minted.
+   *
+   * Fire-and-forget on purpose. A refused reference (another device, a reloaded
+   * window, one too old) leaves the PREVIOUS admission standing rather than
+   * blanking it, and the operator's speech is already on its way to the model
+   * regardless — blocking the audio path on this POST would trade a missing
+   * badge for a stutter in the conversation. The typed refusal is recorded by
+   * the server and read from the ledger; nothing here retries it.
+   */
+  private publishSelectedContext(): void {
+    if (!this.realtimeSessionId) return;
+    try {
+      void fetch("/api/runtime/realtime", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          action: "selectedContext",
+          conversationId: this.conversationId,
+          realtimeSessionId: this.realtimeSessionId,
+          selectedContext: viewerSelectedContext(),
+        }),
+      }).catch(() => undefined);
+    } catch {
+      /* the call keeps going without a selected-card reference */
+    }
+  }
+
   private acceptWireMessage(raw: unknown): void {
     if (typeof raw !== "string") return;
     let value: unknown;
@@ -425,6 +464,15 @@ class CodexRealtimeClient {
     const event = parseCodexRealtimeEvent(value);
     if (event.kind === "transcript") {
       this.writeTranscript(event.role, event.text, event.final);
+      /* THE UTTERANCE BOUNDARY (#844 §2). The operator's speech never passes
+         through our server — it rides the WebRTC leg straight to the model — so
+         this is the one moment in the whole system where a spoken turn can be
+         paired with the card the operator had selected. Read here, at the
+         instant the transcript goes final, for the same reason the composer
+         reads it inside its submit handler: everything the reference will say
+         is decided by the state that existed when the operator finished
+         speaking. */
+      if (event.role === "user" && event.final) this.publishSelectedContext();
     } else if (event.kind === "delegation") {
       return;
     } else if (event.kind === "error") {

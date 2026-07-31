@@ -771,6 +771,11 @@ export const en = {
   "feed.copyCode": "Copy code",
   "feed.copyMd": "Copy message (Markdown)",
   "feed.voiceTurn": "Voice",
+  /* #844 selected-card badge — the composer and the transcript row share it. */
+  "selectedContext.none": "Nothing selected",
+  "selectedContext.stale": "stale",
+  "selectedContext.ariaSelected": "Selected card: {name} (project {project})",
+  "selectedContext.ariaNone": "Submitted with nothing selected",
   "feed.voiceContext": "Call transcript",
   "feed.speak": "Read answer aloud (AI-generated voice)",
   "feed.stopSpeaking": "Stop reading aloud",
