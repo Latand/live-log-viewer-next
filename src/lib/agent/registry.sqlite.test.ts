@@ -107,6 +107,77 @@ test("a compact spawn lookup reads only requested receipts and their alias chain
   expect(snapshotLoads).toBe(0);
 });
 
+test("snapshot title lookup reads only named alias chains and conversations", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-title-lookup-"));
+  const filename = path.join(directory, "agent-registry.json");
+  const seed = new AgentRegistry(filename);
+  const begun = seed.beginSpawn("codex", "/title-lookup-seed");
+  const artifactPath = "/sessions/title-lookup.jsonl";
+  const settled = seed.settleSpawn(begun.launchId, {
+    key: { engine: "codex", sessionId: "title-lookup" },
+    artifactPath,
+    cwd: "/title-lookup-seed",
+    accountId: null,
+    launchProfile: emptyLaunchProfile({ cwd: "/title-lookup-seed" }),
+    status: "unhosted",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  if (settled.kind !== "settled") throw new Error("expected settled title seed");
+  const initial = seed.snapshot();
+  const canonicalId = settled.conversation.id;
+  const aliasA = "conversation_00000000-0000-4000-8000-000000000011" as typeof canonicalId;
+  const aliasB = "conversation_00000000-0000-4000-8000-000000000012" as typeof canonicalId;
+  const cycleA = "conversation_00000000-0000-4000-8000-000000000013" as typeof canonicalId;
+  const cycleB = "conversation_00000000-0000-4000-8000-000000000014" as typeof canonicalId;
+  const unknown = "conversation_00000000-0000-4000-8000-000000000015" as typeof canonicalId;
+  initial.conversationAliases[aliasA] = aliasB;
+  initial.conversationAliases[aliasB] = canonicalId;
+  initial.conversationAliases[cycleA] = cycleB;
+  initial.conversationAliases[cycleB] = cycleA;
+  initial.conversations[canonicalId]!.continuityPaths.push("/sessions/title-lookup-predecessor.jsonl");
+  for (let index = 0; index < 2_000; index += 1) {
+    const conversationId = `conversation_10000000-0000-4000-8000-${String(index).padStart(12, "0")}` as typeof canonicalId;
+    initial.conversations[conversationId] = {
+      ...structuredClone(settled.conversation),
+      id: conversationId,
+      generations: [{
+        ...structuredClone(settled.conversation.generations[0]!),
+        id: `10000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+        path: `/sessions/unrelated-title-${index}.jsonl`,
+      }],
+      continuityPaths: [],
+    };
+  }
+  const reads = new Map<string, number>();
+  let snapshotLoads = 0;
+  const store = new SqliteAgentRegistryStore(path.join(directory, "agent-registry.sqlite"), {
+    initialSnapshot: initial,
+    normalize: normalizeRegistry,
+    onSnapshotLoad: () => { snapshotLoads += 1; },
+    onRowPayloadRead: (collection, count) => {
+      reads.set(collection, (reads.get(collection) ?? 0) + count);
+    },
+  });
+  reads.clear();
+  snapshotLoads = 0;
+
+  const projection = store.snapshotTitleConversations([aliasA, cycleA, unknown]);
+
+  expect(projection).toEqual([{
+    conversationId: canonicalId,
+    aliases: [aliasA, aliasB],
+    ownedPaths: [artifactPath, "/sessions/title-lookup-predecessor.jsonl"],
+  }]);
+  expect(reads).toEqual(new Map([
+    ["conversationAliases", 4],
+    ["conversations", 1],
+  ]));
+  expect(snapshotLoads).toBe(0);
+});
+
 test("a committed SQLite mutation patches the read-only snapshot and parsed-row cache", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-row-cache-"));
   const filename = path.join(directory, "agent-registry.json");

@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import type { RegistryFile, SnapshotSpawnProjection } from "@/lib/agent/registry";
+import type { RegistryFile, SnapshotSpawnProjection, SnapshotTitleConversationProjection } from "@/lib/agent/registry";
 import { deadlineSignal, isAbortError, type DeadlineScheduler } from "@/lib/deadline";
 import type { completedFileScan } from "@/lib/scanner/scanCache";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
-import { collectSnapshot } from "@/lib/view/collect";
+import { collectSnapshot, type SnapshotPhaseObserver, type SnapshotPhaseTiming } from "@/lib/view/collect";
 import { SnapshotError } from "@/lib/view/snapshot";
 import type { resolveSiblings } from "@/lib/view/siblings";
 import { readBoundedJson, validateSnapshotRequest, ViewValidationError } from "@/lib/view/validation";
@@ -16,8 +16,26 @@ export interface SnapshotRouteDependencies {
   resolveSiblings: typeof resolveSiblings;
   registrySnapshot?: () => RegistryFile;
   snapshotSpawns?: (launchIds: readonly string[]) => SnapshotSpawnProjection;
+  snapshotTitleConversations?: (conversationIds: readonly string[]) => SnapshotTitleConversationProjection;
+  overlaySnapshotSessionTitles?: typeof import("@/lib/session/titleProjection")["overlaySnapshotSessionTitles"];
+  observePhase?: SnapshotPhaseObserver;
   snapshotDeadlineMs: number;
   scheduler: DeadlineScheduler;
+}
+
+type RoutePhaseTiming = SnapshotPhaseTiming | {
+  name: "encode";
+  durationMs: number;
+  cardinality: Readonly<Record<string, number>>;
+};
+
+function serverTiming(phases: readonly RoutePhaseTiming[]): string {
+  return phases.map((phase) => {
+    const description = Object.entries(phase.cardinality)
+      .map(([key, value]) => `${key}=${value}`)
+      .join(" ");
+    return `snapshot-${phase.name};dur=${phase.durationMs.toFixed(1)}${description ? `;desc="${description}"` : ""}`;
+  }).join(", ");
 }
 
 export async function postSnapshot(
@@ -44,10 +62,24 @@ export async function postSnapshot(
       reason: "snapshot deadline exceeded",
     });
     try {
-      return NextResponse.json(
-        await collectSnapshot(body, { ...dependencies, signal: deadline.signal }),
-        { headers },
-      );
+      const phases: RoutePhaseTiming[] = [];
+      const payload = await collectSnapshot(body, {
+        ...dependencies,
+        signal: deadline.signal,
+        observePhase: (timing) => {
+          phases.push(timing);
+          dependencies.observePhase?.(timing);
+        },
+      });
+      const encodeStartedAt = performance.now();
+      const response = NextResponse.json(payload, { headers });
+      phases.push({
+        name: "encode",
+        durationMs: performance.now() - encodeStartedAt,
+        cardinality: { conversations: payload.conversations.length, stubs: payload.stubs.length },
+      });
+      response.headers.set("Server-Timing", serverTiming(phases));
+      return response;
     } finally {
       deadline.release();
     }

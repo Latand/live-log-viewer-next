@@ -74,6 +74,36 @@ test("the agent snapshot shows the custom title on conversations and siblings", 
   expect(sibling?.title).toBe("Renamed by user");
 });
 
+test("conversation-keyed titles use only the compact title projection", async () => {
+  const conversationId = "conversation_00000000-0000-4000-8000-000000000001" as const;
+  const aliasId = "conversation_00000000-0000-4000-8000-000000000002" as const;
+  writeSessionTitle([`conversation:${aliasId}`], `conversation:${aliasId}`, "Alias-chain title", undefined, "t1");
+  upsertPresence(presence());
+  const requested: string[][] = [];
+
+  const snapshot = await collectSnapshot(
+    { schemaVersion: 1, text: { include: false } },
+    {
+      completedFileScan: async () => ({
+        snapshot: {
+          files: [file(SESSION_PATH, { title: "derived from first prompt" })],
+          projectCatalog: [],
+          complete: true,
+        },
+      }) as never,
+      resolveSiblings: echoingSiblings,
+      snapshotTitleConversations: (conversationIds) => {
+        requested.push([...conversationIds]);
+        return [{ conversationId, aliases: [aliasId], ownedPaths: [SESSION_PATH, "/archived.jsonl"] }];
+      },
+    },
+  );
+
+  expect(requested).toEqual([[aliasId]]);
+  expect(snapshot.conversations[0]).toMatchObject({ path: SESSION_PATH, title: "Alias-chain title" });
+  expect(snapshot.siblings.agents[0]).toMatchObject({ transcriptPath: SESSION_PATH, title: "Alias-chain title" });
+});
+
 test("spawn paths request one compact projection containing only their launch ids", async () => {
   const spawnPath = "spawn:known-launch";
   const failedSpawnPath = "spawn:failed-launch";

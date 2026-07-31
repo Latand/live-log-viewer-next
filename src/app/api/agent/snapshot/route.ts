@@ -14,6 +14,7 @@ const SNAPSHOT_DEADLINE_MS = 10_000;
 const productionDependencies = {
   completedFileScan,
   resolveSiblings,
+  snapshotTitleConversations: (conversationIds: readonly string[]) => agentRegistry().snapshotTitleConversations(conversationIds),
   snapshotSpawns: (launchIds: readonly string[]) => agentRegistry().snapshotSpawns(launchIds),
   snapshotDeadlineMs: SNAPSHOT_DEADLINE_MS,
   scheduler: systemScheduler,

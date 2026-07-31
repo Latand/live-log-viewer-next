@@ -1,10 +1,27 @@
-import { agentRegistry, type RegistryFile, type SnapshotSpawnProjection } from "@/lib/agent/registry";
+import { agentRegistry, type RegistryFile, type SnapshotSpawnProjection, type SnapshotTitleConversationProjection } from "@/lib/agent/registry";
 import { completedFileScan } from "@/lib/scanner/scanCache";
-import { overlaySessionTitles } from "@/lib/session/titleProjection";
+import { overlaySnapshotSessionTitles } from "@/lib/session/titleProjection";
 
 import { composeSnapshot } from "./snapshot";
 import { resolveSiblings } from "./siblings";
 import type { SnapshotRequestV1 } from "./types";
+
+export type SnapshotPhaseName = "completed-scan" | "session-titles" | "siblings" | "compose";
+export interface SnapshotPhaseTiming {
+  name: SnapshotPhaseName;
+  durationMs: number;
+  cardinality: Readonly<Record<string, number>>;
+}
+export type SnapshotPhaseObserver = (timing: SnapshotPhaseTiming) => void;
+
+function observePhase(
+  observer: SnapshotPhaseObserver | undefined,
+  name: SnapshotPhaseName,
+  startedAt: number,
+  cardinality: SnapshotPhaseTiming["cardinality"],
+): void {
+  observer?.({ name, durationMs: performance.now() - startedAt, cardinality });
+}
 
 /**
  * One completed scan and at most one bounded spawn projection per snapshot (#845).
@@ -24,18 +41,32 @@ export async function collectSnapshot(
         projection. Snapshot composition leaves it untouched. */
     registrySnapshot?: () => RegistryFile;
     snapshotSpawns?: (launchIds: readonly string[]) => SnapshotSpawnProjection;
+    snapshotTitleConversations?: (conversationIds: readonly string[]) => SnapshotTitleConversationProjection;
+    overlaySnapshotSessionTitles?: typeof overlaySnapshotSessionTitles;
+    observePhase?: SnapshotPhaseObserver;
     signal?: AbortSignal | null;
   } = { completedFileScan, resolveSiblings },
 ): Promise<Awaited<ReturnType<typeof composeSnapshot>>> {
   const started = Date.now();
+  let phaseStartedAt = performance.now();
   const scan = await dependencies.completedFileScan({ signal: dependencies.signal ?? null });
   const files = scan.snapshot.files;
+  observePhase(dependencies.observePhase, "completed-scan", phaseStartedAt, { files: files.length });
   // Custom session titles (issue #33) are the last word on `title` for the agent
   // snapshot surface too — applied before siblings resolve and the snapshot
   // composes, so renamed conversations and their siblings show the human title.
-  overlaySessionTitles(files);
+  phaseStartedAt = performance.now();
+  (dependencies.overlaySnapshotSessionTitles ?? overlaySnapshotSessionTitles)(
+    files,
+    dependencies.snapshotTitleConversations
+      ?? ((conversationIds) => agentRegistry().snapshotTitleConversations(conversationIds)),
+  );
+  observePhase(dependencies.observePhase, "session-titles", phaseStartedAt, { files: files.length });
+  phaseStartedAt = performance.now();
   const siblings = await dependencies.resolveSiblings(body.caller, files);
-  return composeSnapshot({
+  observePhase(dependencies.observePhase, "siblings", phaseStartedAt, { agents: siblings.agents.length });
+  phaseStartedAt = performance.now();
+  const snapshot = await composeSnapshot({
     request: body,
     files,
     siblings,
@@ -43,4 +74,10 @@ export async function collectSnapshot(
     scannerDurationMs: scan.lastScan?.durationMs ?? Date.now() - started,
     scannerScannedAt: scan.refreshedAt ?? Date.now(),
   });
+  observePhase(dependencies.observePhase, "compose", phaseStartedAt, {
+    scopePaths: snapshot.scope.totalPaths,
+    conversations: snapshot.conversations.length,
+    stubs: snapshot.stubs.length,
+  });
+  return snapshot;
 }

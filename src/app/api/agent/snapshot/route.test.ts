@@ -49,6 +49,34 @@ test("snapshot collection performs exactly one discovery and shares its entries"
   expect(result.conversations[0]?.path).toBe(entry.path);
 });
 
+test("snapshot reports bounded aggregate phase timings without path data", async () => {
+  upsertPresence(presence);
+  const response = await postSnapshot(
+    new NextRequest("http://127.0.0.1:8898/api/agent/snapshot", {
+      method: "POST",
+      headers: { host: "127.0.0.1:8898" },
+      body: JSON.stringify({ schemaVersion: 1, scope: { kind: "visible" }, text: { include: false } }),
+    }),
+    {
+      completedFileScan: async () => ({ snapshot: { files: [entry], projectCatalog: [], complete: true } }) as never,
+      resolveSiblings: async () => ({ selfResolution: "omitted" as const, agents: [] }),
+      overlaySnapshotSessionTitles: () => {},
+      snapshotDeadlineMs: 10_000,
+      scheduler: { setTimeout, clearTimeout },
+    },
+  );
+
+  expect(response.status).toBe(200);
+  const timing = response.headers.get("server-timing") ?? "";
+  expect(timing).toContain('snapshot-completed-scan;');
+  expect(timing).toContain('desc="files=1"');
+  expect(timing).toContain('snapshot-session-titles;');
+  expect(timing).toContain('snapshot-compose;');
+  expect(timing).toContain('scopePaths=1 conversations=1 stubs=0');
+  expect(timing).toContain('snapshot-encode;');
+  expect(timing).not.toContain(entry.path);
+});
+
 test("transcript-only snapshot serves one completed 373-file projection without reading the registry", async () => {
   upsertPresence(presence);
   const files = Array.from({ length: 373 }, (_value, index): FileEntry => ({
@@ -190,6 +218,43 @@ test("snapshot route owns a deadline when the framework request signal stays liv
   expect(request.signal.aborted).toBe(false);
   expect(activeTimers).toBe(1);
   deadline();
+  const response = await responsePromise;
+
+  expect(response.status).toBe(499);
+  expect((scanSignal as AbortSignal | null)?.aborted).toBe(true);
+  expect(activeTimers).toBe(0);
+});
+
+test("snapshot caller abort cancels the scan and releases its deadline", async () => {
+  upsertPresence(presence);
+  const caller = new AbortController();
+  let activeTimers = 0;
+  let scanSignal: AbortSignal | null = null;
+  const request = new NextRequest("http://127.0.0.1:8898/api/agent/snapshot", {
+    method: "POST",
+    headers: { host: "127.0.0.1:8898" },
+    body: JSON.stringify({ schemaVersion: 1, text: { include: false } }),
+    signal: caller.signal,
+  });
+
+  const responsePromise = postSnapshot(request, {
+    completedFileScan: ({ signal } = {}) => new Promise((_resolve, reject) => {
+      scanSignal = signal ?? null;
+      signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+    }),
+    resolveSiblings: async () => ({ selfResolution: "omitted" as const, agents: [] }),
+    snapshotDeadlineMs: 10_000,
+    scheduler: {
+      setTimeout: () => {
+        activeTimers += 1;
+        return 1;
+      },
+      clearTimeout: () => { activeTimers -= 1; },
+    },
+  });
+  for (let attempt = 0; attempt < 10 && scanSignal === null; attempt += 1) await Promise.resolve();
+
+  caller.abort(new DOMException("caller left", "AbortError"));
   const response = await responsePromise;
 
   expect(response.status).toBe(499);
