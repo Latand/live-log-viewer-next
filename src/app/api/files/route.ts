@@ -38,6 +38,7 @@ type PersistedProjection = {
 };
 
 const PROJECTION_CACHE_MAX = 32;
+const PROJECTION_STALE_WAIT_MS = 100;
 const PERSISTED_PROJECTION_META_FILE = "files-response-cache.json";
 const PERSISTED_PROJECTION_BODY_PREFIX = "files-response-cache-";
 const PERSISTED_PROJECTION_KEY_PREFIX = "persisted:";
@@ -111,6 +112,23 @@ function queueProjectionWorker(
   const current = previous.catch(() => undefined).then(build);
   projectionCacheStore.__llvFilesProjectionWorkerTail = current.then(() => undefined, () => undefined);
   return current;
+}
+
+async function projectionWithinBudget(
+  promise: Promise<ProjectionRepresentation>,
+  waitMs = PROJECTION_STALE_WAIT_MS,
+): Promise<ProjectionRepresentation | undefined> {
+  let timer: number | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(resolve, waitMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function rememberProjection(scopeKey: string, key: string, representation: ProjectionRepresentation): void {
@@ -259,6 +277,12 @@ async function projectionFor(
     || cached.key.startsWith(PERSISTED_PROJECTION_KEY_PREFIX)
   )) {
     return { representation: cached.representation, cacheStatus: "stale" };
+  }
+  if (cached) {
+    const completed = await projectionWithinBudget(promise);
+    return completed
+      ? { representation: completed, cacheStatus: "miss" }
+      : { representation: cached.representation, cacheStatus: "stale" };
   }
   try {
     return { representation: await promise, cacheStatus: "miss" };
