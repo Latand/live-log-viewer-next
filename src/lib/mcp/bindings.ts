@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-import { agentRegistry } from "@/lib/agent/registry";
+import { agentRegistry, readOnlyConversationLookupFromSnapshot } from "@/lib/agent/registry";
 import { procBackend } from "@/lib/proc";
 import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { VIEWER_SPAWN_CAPABILITY_ENV, VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
@@ -439,44 +439,6 @@ async function spawnAgent(args: McpToolArgs, control: ViewerControlDependencies)
   };
 }
 
-/**
- * Which conversation a send named, resolved from ONE registry projection (#845).
- *
- * Both halves mirror the registry's own resolution exactly, because this is a public
- * tool's answer and drifting from it would be a silent behaviour change:
- *
- * - the alias walk is MULTI-HOP and cycle-guarded, like `resolveConversationAlias`.
- *   An account migration chains redirects, so a single hop would stop halfway down a
- *   chain and report a conversation the operator has not been in for two moves.
- * - the path predicate mirrors `conversationOwnsPath`: a conversation owns every
- *   generation path it has had plus the continuity paths a migration left behind, so
- *   a send addressed by a superseded path still names its owner.
- */
-function canonicalConversationId(snapshot: RegistrySnapshot, id: string): string {
-  const seen = new Set<string>();
-  let current = id;
-  while (!seen.has(current)) {
-    seen.add(current);
-    const next: string | undefined = snapshot.conversationAliases[current as keyof typeof snapshot.conversationAliases];
-    if (!next) return current;
-    current = next;
-  }
-  return current;
-}
-
-function conversationFromProjection(
-  snapshot: RegistrySnapshot,
-  conversationId: string,
-  transcriptPath: string,
-): RegistrySnapshot["conversations"][string] | null {
-  if (conversationId) return snapshot.conversations[canonicalConversationId(snapshot, conversationId)] ?? null;
-  if (!transcriptPath) return null;
-  return Object.values(snapshot.conversations).find((candidate) => (
-    candidate.generations.some((generation) => generation.path === transcriptPath)
-    || (candidate.continuityPaths ?? []).includes(transcriptPath)
-  )) ?? null;
-}
-
 async function sendMessage(
   args: McpToolArgs,
   control: ViewerControlDependencies,
@@ -494,7 +456,15 @@ async function sendMessage(
     text: message,
     images: [],
   });
-  const conversation = conversationFromProjection(dependencies.registrySnapshot(), conversationId, transcriptPath);
+  /* The registry's OWN lookup over the projection this call already holds (#845),
+     rather than a local reimplementation of it. The alias walk is multi-hop and
+     cycle-guarded and the path index covers continuity paths, so a send addressed by
+     a chained alias or a superseded path still names its owner — and it stays that way
+     without this file having to be kept in step by hand. */
+  const lookup = readOnlyConversationLookupFromSnapshot(dependencies.registrySnapshot());
+  const conversation = conversationId
+    ? lookup.conversation(conversationId as `conversation_${string}`)
+    : lookup.conversationForPath(transcriptPath);
   return {
     conversationId: (conversation?.id ?? conversationId) || null,
     transcriptPath: (conversation?.generations.at(-1)?.path ?? transcriptPath) || null,
