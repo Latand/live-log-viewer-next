@@ -1,7 +1,15 @@
+import { parseSelectedContextRef } from "@/lib/selection/selectedContext";
+
 import { redactCodexHostDiagnostic } from "./codexAppServerHost";
 import { structuredDeliveryHostForConversation } from "./structuredDeliveryController";
 import { permitRealtimeAction, type RealtimeCaller } from "./realtimeInjection";
 import type { RuntimeVoiceDelivery } from "./voiceDelivery";
+import {
+  admitVoiceSelectedContext,
+  bindVoiceSession,
+  parseVoiceViewBinding,
+  releaseVoiceSession,
+} from "./voiceViewBinding";
 
 const MAX_SDP_BYTES = 512 * 1024;
 const MAX_SPEECH_BYTES = 8 * 1024;
@@ -69,9 +77,10 @@ export async function executeRealtimeControl(
      live session id is the credential a browser presents and only the host holds it.
      The refusal is identical whether or not a host exists, so an agent that may not
      speak cannot probe which conversations are hosted by reading the error. */
+  const caller: RealtimeCaller = authority.caller ?? { kind: "anonymous" };
   const permitted = permitRealtimeAction(
     request.action,
-    authority.caller ?? { kind: "anonymous" },
+    caller,
     authority.managerConversationId ?? null,
     host?.currentRealtimeSessionId?.() ?? null,
     /* Passed straight through, with no default on either side of it. A default of
@@ -98,6 +107,13 @@ export async function executeRealtimeControl(
         return { status: 400, body: { error: "a valid WebRTC SDP offer is required" } };
       }
       const answer = await host.startRealtimeWebRtc(sdp);
+      /* #844 §4: the call belongs to the window that opened it, from here on.
+         A browser that presents no usable view/device binds to nothing, which
+         refuses every later selected-card reference rather than accepting the
+         first one offered — the same fail-closed rule injection follows. */
+      if (answer.realtimeSessionId) {
+        bindVoiceSession(conversationId, answer.realtimeSessionId, parseVoiceViewBinding(request.view));
+      }
       return { status: 200, body: { ok: true, ...answer } };
     }
     if (request.action === "appendSpeech") {
@@ -105,8 +121,29 @@ export async function executeRealtimeControl(
       if (!text || byteLength(text) > MAX_SPEECH_BYTES) {
         return { status: 400, body: { error: "speech text is empty or too large" } };
       }
+      /* ATOMIC WITH THE UTTERANCE. The reference is admitted BEFORE the speech
+         is written, and a refusal writes nothing: an utterance that says "look
+         at that one" must not reach the agent with its "that one" dropped, and
+         the operator gets a typed reason instead of a confidently wrong answer.
+         An utterance carrying no reference at all is ordinary voice and passes
+         straight through — this feature adds a capability, it does not make
+         speaking conditional on having selected something. */
+      let admitted: Record<string, unknown> = {};
+      if (request.selectedContext !== undefined) {
+        const reference = parseSelectedContextRef(request.selectedContext);
+        const admission = admitVoiceSelectedContext({
+          conversationId,
+          realtimeSessionId: caller.kind === "session" ? caller.realtimeSessionId : "",
+          reference,
+          now: Date.now(),
+        });
+        if (!admission.ok) {
+          return { status: 409, body: { error: admission.failure.message, code: admission.failure.code } };
+        }
+        admitted = { selectedContext: admission.admission.reference };
+      }
       await host.appendRealtimeSpeech(text);
-      return { status: 200, body: { ok: true } };
+      return { status: 200, body: { ok: true, ...admitted } };
     }
     if (request.action === "deliverWorkerResponse") {
       if (typeof host.deliverRealtimeWorkerResponse !== "function") {
@@ -117,6 +154,10 @@ export async function executeRealtimeControl(
     }
     if (request.action === "stop") {
       await host.stopRealtime();
+      /* The binding describes a live transport, so it dies with it. A binding
+         that outlived its call would be exactly the stale authority the typed
+         refusals exist to prevent. */
+      releaseVoiceSession(conversationId);
       return { status: 200, body: { ok: true } };
     }
     /* Why the browser asks (#664): it owns the WebRTC leg and sees only that

@@ -850,6 +850,7 @@ export class CodexAppServerHost implements EngineHost {
       contentDigest: normalized.contentDigest,
       ...(normalized.expectedTurnId !== undefined ? { expectedTurnId: normalized.expectedTurnId } : {}),
       ...(normalized.runtime ? { runtime: normalized.runtime } : {}),
+      ...(normalized.selectedContext ? { selectedContext: normalized.selectedContext } : {}),
     };
     if (!entry.id) throw new Error("queue entry id is required");
     const confirmed = await this.confirmedDelivery(entry);
@@ -865,6 +866,10 @@ export class CodexAppServerHost implements EngineHost {
         text: encodeCodexStructuredUserText(
           normalized.content.text,
           normalized.content.images.length > 0 ? normalized.contentDigest : undefined,
+          /* #844: the selected-card reference becomes durable HERE, on the
+             canonical structured-user record, so it survives a restart and a
+             re-parse and the transcript row renders the composer badge. */
+          normalized.selectedContext,
         ),
       },
     ];

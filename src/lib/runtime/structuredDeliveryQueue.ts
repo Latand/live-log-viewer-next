@@ -1,3 +1,5 @@
+import { parseSelectedContextRef, type SelectedContextRef } from "@/lib/selection/selectedContext";
+
 import type { RuntimeSendSettings } from "./contracts";
 import type { DeliveryReceipt, EngineHost, QueueEntry } from "./engineHost";
 import type { RuntimeHostClient } from "./client";
@@ -49,6 +51,9 @@ interface SendEffect {
   policy?: "queue" | "steer-if-active" | "interrupt-active";
   kind: "send" | "steer";
   runtime?: RuntimeSendSettings;
+  /** #844: the selected-card reference the operator submitted with. Replayed
+      from the durable payload, never re-read from a live view. */
+  selectedContext?: SelectedContextRef;
   eventSeq: number;
 }
 
@@ -138,6 +143,9 @@ function sendEffect(effect: StructuredDeliveryEffect): SendEffect | null {
     ? effect.payload.policy
     : undefined;
   const runtime = runtimeSendSettings(effect.payload.runtime);
+  /* A malformed reference drops the same way malformed settings do: the
+     message must never be stranded by its own provenance. */
+  const selectedContext = parseSelectedContextRef(effect.payload.selectedContext);
   return {
     operationId,
     conversationId,
@@ -148,6 +156,7 @@ function sendEffect(effect: StructuredDeliveryEffect): SendEffect | null {
     ...(turnId !== undefined ? { turnId } : {}),
     ...(policy ? { policy } : {}),
     ...(runtime ? { runtime } : {}),
+    ...(selectedContext ? { selectedContext } : {}),
   };
 }
 
@@ -441,6 +450,7 @@ export class StructuredDeliveryQueue {
         images: effect.content.images,
         expectedTurnId: effect.policy === "interrupt-active" ? null : deliveryFence,
         ...(effect.runtime ? { runtime: effect.runtime } : {}),
+        ...(effect.selectedContext ? { selectedContext: effect.selectedContext } : {}),
       };
       await this.port.transition(
         effect.operationId,

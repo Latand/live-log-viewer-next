@@ -12,6 +12,8 @@ import { deliveryFence } from "@/lib/accounts/migration/coordinator";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import type { HeldDelivery, HeldDeliveryCommand, ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
+import type { SelectedContextRef } from "@/lib/selection/selectedContext";
+
 import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "./client";
 import type { RuntimeOperationReceipt, RuntimeSendSettings, RuntimeSession } from "./contracts";
 import { republishStructuredDeliveryHost } from "./structuredDeliveryController";
@@ -44,6 +46,10 @@ export interface StructuredMessageRequest {
       migration hold drops the override (absent = today's behavior) — the held
       command format predates it and stays untouched. */
   runtime?: RuntimeSendSettings;
+  /** The Viewer card selected at submission (#844): rides the durable send
+      effect so a replayed key re-delivers naming the SAME card, and the
+      transcript record keeps the reference the operator actually submitted. */
+  selectedContext?: SelectedContextRef;
 }
 
 export type StructuredMessageResult =
@@ -762,6 +768,7 @@ export async function enqueueStructuredMessage(
       policy: request.policy ?? "interrupt-active",
       ...(request.turnId !== undefined ? { turnId: request.turnId } : {}),
       ...(request.runtime ? { runtime: request.runtime } : {}),
+      ...(request.selectedContext ? { selectedContext: request.selectedContext } : {}),
     });
     const receipt = result.receipt;
     if (receipt.status === "rejected" || receipt.status === "failed" || receipt.status === "uncertain") {
