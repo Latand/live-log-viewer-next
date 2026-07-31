@@ -23,6 +23,13 @@ function createRepository(name: string, remote: string): string {
   return root;
 }
 
+function createLocalRepository(name: string): string {
+  const root = path.join(SANDBOX, name);
+  fs.mkdirSync(path.join(root, ".git"), { recursive: true });
+  fs.writeFileSync(path.join(root, ".git", "config"), "[core]\n\trepositoryformatversion = 0\n");
+  return root;
+}
+
 test("scp, ssh, and https clones of one remote resolve to one identity", () => {
   const identities = [
     createRepository("clone-scp", "git@example.invalid:team/shared-repository.git"),
@@ -43,4 +50,17 @@ test("an https remote never parses as an scp host", () => {
   const identity = projectIdentityFromRepositoryRoot(root)!;
   expect(identity.canonicalRemote.startsWith("example.invalid/")).toBe(true);
   expect(identity.canonicalRemote).not.toContain("https");
+});
+
+test("a local repository without origin still has one stable non-unresolved identity", () => {
+  const root = createLocalRepository("local-repository");
+  const first = projectIdentityFromRepositoryRoot(root);
+  const second = projectIdentityFromRepositoryRoot(path.join(root, "."));
+
+  expect(first).toEqual(second);
+  expect(first).toMatchObject({
+    displayName: "local-repository",
+    canonicalRemote: `local:${root}`,
+  });
+  expect(first?.project).toMatch(/^repo-[a-f0-9]{32}$/);
 });

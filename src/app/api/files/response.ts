@@ -14,7 +14,7 @@ import { loadFlows } from "@/lib/flows/store";
 import { reviewOutcomeFor } from "@/lib/flows/reviewOutcome";
 import { overlayPromptDisplayTitles, projectDisplayName } from "@/lib/displayNames";
 import { projectAliasSnapshot } from "@/lib/projects/aliases";
-import { projectIdentityFromRepositoryRoot } from "@/lib/projects/identity";
+import { projectIdentityFromRepositoryRoot, UNRESOLVED_PROJECT, UNRESOLVED_PROJECT_NAME } from "@/lib/projects/identity";
 import { projectRestoredFlows } from "@/lib/flows/visibility";
 import { reconcileEmbeddedReviewFlows } from "@/lib/pipelines/engine";
 import { loadPipelinesForProjection } from "@/lib/pipelines/store";
@@ -688,7 +688,10 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     if (entry.displayName?.trim()) projectDisplayNames[entry.project] = entry.displayName;
   }
   for (const file of projected.files) {
-    if (file.projectName?.trim()) projectDisplayNames[file.project] = file.projectName;
+    const projectName = file.projectName?.trim();
+    if (projectName && (projectName !== UNRESOLVED_PROJECT_NAME || file.project === UNRESOLVED_PROJECT)) {
+      projectDisplayNames[file.project] = projectName;
+    }
   }
   for (const [project, cwd] of Object.entries(projectCwds)) {
     const info = projectInfoFromCwd(cwd);

@@ -112,8 +112,14 @@ export function projectIdentityFromRepositoryRoot(root: string): RepositoryProje
     return null;
   }
   const remote = originRemote(config);
-  if (!remote) return null;
-  const canonical = canonicalRemote(remote, root);
+  const localRoot = (() => {
+    try {
+      return fs.realpathSync.native(root);
+    } catch {
+      return path.resolve(root);
+    }
+  })();
+  const canonical = remote ? canonicalRemote(remote, root) : `local:${localRoot}`;
   const displayName = canonical ? remoteDisplayName(canonical) : null;
   if (!canonical || !displayName) return null;
   const digest = crypto.createHash("sha256").update(canonical).digest("hex").slice(0, 32);

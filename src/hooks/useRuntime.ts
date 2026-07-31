@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 
 import {
   deriveSessionState,
@@ -28,6 +28,48 @@ const INERT: RuntimeBusState = {
   enabled: false,
   structuredHostsEnabled: false,
 };
+const EMPTY_RECEIPTS: RuntimeReceipt[] = [];
+
+/**
+ * Subscribe to one projection of the tab-wide runtime store. Every bus frame
+ * still reaches the selector, while React wakes only when that projection
+ * changes. This keeps high-rate text deltas scoped to their own conversation
+ * instead of re-rendering the whole board and every mounted card.
+ */
+export function useRuntimeSelector<T>(
+  selector: (state: RuntimeBusState) => T,
+  inert: T,
+  equal: (left: T, right: T) => boolean = Object.is,
+): T {
+  const enabled = isRuntimeUiEnabled();
+  const bus: RuntimeBus | null = enabled && typeof window !== "undefined" ? getRuntimeBus() : null;
+  const selectorRef = useRef(selector);
+  const equalRef = useRef(equal);
+  const inertRef = useRef(inert);
+  const cachedRef = useRef<{ bus: RuntimeBus; value: T } | null>(null);
+  selectorRef.current = selector;
+  equalRef.current = equal;
+  inertRef.current = inert;
+
+  useEffect(() => {
+    if (bus) bus.start();
+  }, [bus]);
+
+  const subscribe = useCallback(
+    (listener: () => void) => (bus ? bus.subscribe(listener) : () => {}),
+    [bus],
+  );
+  const getSnapshot = useCallback(() => {
+    if (!bus) return inertRef.current;
+    const next = selectorRef.current(bus.getState());
+    const cached = cachedRef.current;
+    if (cached?.bus === bus && equalRef.current(cached.value, next)) return cached.value;
+    cachedRef.current = { bus, value: next };
+    return next;
+  }, [bus]);
+  const getServerSnapshot = useCallback(() => inertRef.current, []);
+  return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+}
 
 /**
  * Subscribe React to the tab-wide runtime bus. Inert (and never connects) while
@@ -70,6 +112,10 @@ export function useRuntime(): RuntimeView {
   };
 }
 
+export function useRuntimeEnabled(): boolean {
+  return useRuntimeSelector((state) => state.enabled, false);
+}
+
 export interface RuntimeSessionView {
   session: RuntimeSession;
   uiState: SessionUiState;
@@ -95,14 +141,34 @@ function sessionViewFor(
   };
 }
 
+function sameRuntimeSessionView(
+  left: RuntimeSessionView | null,
+  right: RuntimeSessionView | null,
+): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  if (left.session !== right.session
+    || left.structuredControlsEnabled !== right.structuredControlsEnabled
+    || left.attentions.length !== right.attentions.length) return false;
+  return left.attentions.every((attention, index) => attention === right.attentions[index]);
+}
+
+function runtimeSessionView(
+  state: RuntimeBusState,
+  conversationId: string | null | undefined,
+  artifactPath: string | null,
+): RuntimeSessionView | null {
+  const session = sessionForConversation(state.store.sessions, conversationId, artifactPath);
+  return session ? sessionViewFor(state.store, session, state.structuredHostsEnabled) : null;
+}
+
 /** Derived view for one hosted session, or null when the bus doesn't carry it. */
 export function useRuntimeSession(conversationId: string | null): RuntimeSessionView | null {
-  const { store, structuredHostsEnabled } = useRuntime();
-  return useMemo(() => {
-    if (!conversationId) return null;
-    const session = store.sessions[conversationId];
-    return session ? sessionViewFor(store, session, structuredHostsEnabled) : null;
-  }, [store, structuredHostsEnabled, conversationId]);
+  return useRuntimeSelector(
+    (state) => runtimeSessionView(state, conversationId, null),
+    null,
+    sameRuntimeSessionView,
+  );
 }
 
 /**
@@ -113,12 +179,11 @@ export function useRuntimeSession(conversationId: string | null): RuntimeSession
  * finding 2). Keyed on the root transcript path — a subagent's `parent`.
  */
 export function useRuntimeSessionByArtifact(artifactPath: string | null): RuntimeSessionView | null {
-  const { store, structuredHostsEnabled } = useRuntime();
-  return useMemo(() => {
-    if (!artifactPath) return null;
-    const session = Object.values(store.sessions).find((s) => s.artifactPath === artifactPath);
-    return session ? sessionViewFor(store, session, structuredHostsEnabled) : null;
-  }, [store, structuredHostsEnabled, artifactPath]);
+  return useRuntimeSelector(
+    (state) => runtimeSessionView(state, null, artifactPath),
+    null,
+    sameRuntimeSessionView,
+  );
 }
 
 /**
@@ -135,11 +200,11 @@ export function useRuntimeSessionForConversation(
   conversationId: string | null | undefined,
   artifactPath: string | null,
 ): RuntimeSessionView | null {
-  const { store, structuredHostsEnabled } = useRuntime();
-  return useMemo(() => {
-    const session = sessionForConversation(store.sessions, conversationId, artifactPath);
-    return session ? sessionViewFor(store, session, structuredHostsEnabled) : null;
-  }, [store, structuredHostsEnabled, conversationId, artifactPath]);
+  return useRuntimeSelector(
+    (state) => runtimeSessionView(state, conversationId, artifactPath),
+    null,
+    sameRuntimeSessionView,
+  );
 }
 
 /** Pure resolution (round-1 P1#3): the hosted session for a conversation, by
@@ -162,13 +227,11 @@ export function sessionForConversation(
  * — so a legacy/unhosted composer shows nothing new.
  */
 export function useRuntimeReceiptsForArtifact(path: string | null, conversationId?: string | null): RuntimeReceipt[] {
-  const { store, enabled } = useRuntime();
-  return useMemo(() => {
-    if (!enabled || (!path && !conversationId)) return [];
-    const session = (conversationId ? store.sessions[conversationId] : undefined)
-      ?? Object.values(store.sessions).find((s) => s.artifactPath === path);
-    return session ? session.recentReceipts : [];
-  }, [store, enabled, path, conversationId]);
+  return useRuntimeSelector((state) => {
+    if (!state.enabled || (!path && !conversationId)) return EMPTY_RECEIPTS;
+    const session = sessionForConversation(state.store.sessions, conversationId, path);
+    return session?.recentReceipts ?? EMPTY_RECEIPTS;
+  }, EMPTY_RECEIPTS);
 }
 
 /**
@@ -178,8 +241,10 @@ export function useRuntimeReceiptsForArtifact(path: string | null, conversationI
  * without waiting out the poll interval (bus revision wins — Fable precedence).
  */
 export function useRuntimeFlow(flowId: string | null): Flow | null {
-  const { store, enabled } = useRuntime();
-  return useMemo(() => (enabled && flowId ? store.flows[flowId] ?? null : null), [store, enabled, flowId]);
+  return useRuntimeSelector(
+    (state) => (state.enabled && flowId ? state.store.flows[flowId] ?? null : null),
+    null,
+  );
 }
 
 /* ------------------------------------------------------------------ *

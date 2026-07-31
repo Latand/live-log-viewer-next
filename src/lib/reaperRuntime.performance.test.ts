@@ -2,13 +2,14 @@ import { afterEach, expect, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { AgentRegistry } from "@/lib/agent/registry";
 import type { TranscriptHost } from "@/lib/agent/transcriptHost";
 import type { FileEntry } from "@/lib/types";
 
-import { runReaperCycle } from "./reaperRuntime";
+import { runReaperCycle, terminalizeStaleUndeliverableHeldDeliveries } from "./reaperRuntime";
 
 const originalStateDir = process.env.LLV_STATE_DIR;
 const originalEnabled = process.env.LLV_REAPER_ENABLED;
@@ -112,3 +113,56 @@ test("a sticky owner-authored verdict prevents later full transcript rescans (is
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("stale migration convergence scales linearly with a production-shaped registry", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-migration-scale-"));
+  const filename = path.join(directory, "agent-registry.json");
+  const registry = new AgentRegistry(filename);
+  const conversation = registry.ensureConversation("codex", "/registry-scale-0.jsonl", "source");
+  const intent = registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "target",
+    origin: "manual",
+    requestId: "registry-scale",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+  const delivery = registry.holdDelivery(conversation.id, "fixture", "registry-scale-0");
+  registry.recordDeliveryOutcome(delivery.id, "delivered");
+
+  try {
+    const snapshot = registry.snapshot() as any;
+    const conversationTemplate = snapshot.conversations[conversation.id];
+    const deliveryTemplate = snapshot.heldDeliveries[delivery.id];
+    for (let index = 1; index < 2_500; index += 1) {
+      const conversationId = `conversation_10000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
+      const generationId = `native_10000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
+      snapshot.conversations[conversationId] = {
+        ...structuredClone(conversationTemplate),
+        id: conversationId,
+        generations: [{
+          ...structuredClone(conversationTemplate.generations[0]),
+          id: generationId,
+          path: `/registry-scale-${index}.jsonl`,
+        }],
+        migration: null,
+      };
+      const deliveryId = `held_registry_scale_${index}`;
+      snapshot.heldDeliveries[deliveryId] = {
+        ...structuredClone(deliveryTemplate),
+        id: deliveryId,
+        conversationId,
+        clientMessageId: `registry-scale-${index}`,
+      };
+    }
+    fs.writeFileSync(filename, JSON.stringify(snapshot));
+    const seeded = new AgentRegistry(filename);
+    const startedAt = performance.now();
+
+    terminalizeStaleUndeliverableHeldDeliveries(seeded, Date.now() + 6 * 60_000);
+
+    expect(performance.now() - startedAt).toBeLessThan(5_000);
+    expect(seeded.snapshot().migrationIntents[intent.id]?.state).toBe("stopped");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}, 15_000);
