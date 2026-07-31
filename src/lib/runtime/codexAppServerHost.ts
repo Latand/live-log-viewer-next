@@ -91,6 +91,23 @@ type RealtimeDeliveryState = {
   offset: number;
   acknowledged: boolean;
 };
+type RealtimeInitialItem = {
+  role: "user" | "assistant";
+  text: string;
+};
+type RealtimeContextCandidate = RealtimeInitialItem & {
+  turnId: string | null;
+  source: "durable-delta" | "durable-item";
+};
+type RealtimeContextSelection = {
+  items: RealtimeInitialItem[];
+  diagnosticItems: Array<{
+    role: RealtimeInitialItem["role"];
+    source: RealtimeContextCandidate["source"];
+    bytes: number;
+  }>;
+  truncated: boolean;
+};
 type UnsequencedEvent = RuntimeEvent extends infer Event
   ? Event extends RuntimeEvent ? Omit<Event, "seq"> : never
   : never;
@@ -214,6 +231,9 @@ const REALTIME_HANGUP_TIMEOUT_MS = 2_000;
 const REALTIME_LIVE_MODEL = "gpt-live-1-codex";
 const MAX_REALTIME_SDP_BYTES = 512 * 1024;
 const MAX_REALTIME_SPEECH_BYTES = 8 * 1024;
+const MAX_REALTIME_CONTEXT_ITEMS = 12;
+const MAX_REALTIME_CONTEXT_ITEM_BYTES = 8 * 1024;
+const MAX_REALTIME_CONTEXT_BYTES = 24 * 1024;
 const MAX_REPLAY_ENVELOPE_BYTES = 256 * 1024;
 const MAX_LINE_BYTES = MAX_STRUCTURED_IMAGE_ENCODED_BYTES + MAX_REPLAY_ENVELOPE_BYTES;
 /**
@@ -381,6 +401,107 @@ function userMessageText(value: JsonObject): string | null {
     if (text !== null) parts.push(text);
   }
   return parts.length > 0 ? parts.join("") : null;
+}
+
+function realtimeMessage(value: unknown): RealtimeInitialItem | null {
+  const item = record(value);
+  if (!item) return null;
+  const type = stringField(item, "type");
+  const message = record(item.message);
+  const role = stringField(item, "role") ?? stringField(message, "role");
+  const user = type === "userMessage"
+    || type === "user_message"
+    || type === "user"
+    || (type === "message" && role === "user");
+  const assistant = type === "agentMessage"
+    || type === "agent_message"
+    || type === "assistant"
+    || (type === "message" && role === "assistant");
+  if (!user && !assistant) return null;
+  const wireText = stringField(item, "text")
+    ?? userMessageText(item)
+    ?? (message ? stringField(message, "text") ?? userMessageText(message) : null);
+  if (!wireText) return null;
+  return user
+    ? { role: "user", text: decodeCodexStructuredUserText(wireText).text }
+    : { role: "assistant", text: wireText };
+}
+
+function utf8Tail(value: string, maxBytes: number): { text: string; truncated: boolean } {
+  const encoded = Buffer.from(value, "utf8");
+  if (encoded.byteLength <= maxBytes) return { text: value, truncated: false };
+  let start = encoded.byteLength - maxBytes;
+  while (start < encoded.byteLength && (encoded[start]! & 0xc0) === 0x80) start += 1;
+  return { text: encoded.subarray(start).toString("utf8"), truncated: true };
+}
+
+function selectRealtimeContext(events: readonly RuntimeEvent[]): RealtimeContextSelection {
+  let selected: RealtimeContextCandidate[] = [];
+  let truncated = false;
+  for (const event of events) {
+    if (event.kind === "delta") {
+      if (!event.text) continue;
+      const latest = selected.at(-1);
+      if (latest?.role === "assistant" && latest.turnId === event.turnId) {
+        const bounded = utf8Tail(latest.text + event.text, MAX_REALTIME_CONTEXT_ITEM_BYTES);
+        latest.text = bounded.text;
+        truncated ||= bounded.truncated;
+      } else {
+        const bounded = utf8Tail(event.text, MAX_REALTIME_CONTEXT_ITEM_BYTES);
+        selected = [{
+          role: "assistant",
+          text: bounded.text,
+          turnId: event.turnId,
+          source: "durable-delta",
+        }];
+        truncated = bounded.truncated;
+      }
+      continue;
+    }
+    if (event.kind !== "item" || event.phase !== "completed") continue;
+    const message = realtimeMessage(event.item);
+    if (!message) continue;
+    if (message.role === "user") {
+      if (selected.length === 0) continue;
+      const bounded = utf8Tail(message.text, MAX_REALTIME_CONTEXT_ITEM_BYTES);
+      selected.push({
+        ...message,
+        text: bounded.text,
+        turnId: event.turnId,
+        source: "durable-item",
+      });
+      truncated ||= bounded.truncated;
+      if (selected.length > MAX_REALTIME_CONTEXT_ITEMS) {
+        selected = [selected[0]!, ...selected.slice(-(MAX_REALTIME_CONTEXT_ITEMS - 1))];
+        truncated = true;
+      }
+      continue;
+    }
+    const draftIndex = selected.findLastIndex((candidate) =>
+      candidate.role === "assistant"
+      && (event.turnId === null || candidate.turnId === event.turnId));
+    if (draftIndex >= 0) {
+      selected = [];
+      truncated = false;
+    }
+  }
+  selected = selected.filter((candidate) => candidate.text.length > 0);
+  let selectedBytes = selected.reduce((total, candidate) =>
+    total + Buffer.byteLength(candidate.text, "utf8"), 0);
+  while (selectedBytes > MAX_REALTIME_CONTEXT_BYTES && selected.length > 1) {
+    const removed = selected.splice(1, 1)[0]!;
+    selectedBytes -= Buffer.byteLength(removed.text, "utf8");
+    truncated = true;
+  }
+  return {
+    items: selected.map(({ role, text }) => ({ role, text })),
+    diagnosticItems: selected.map(({ role, source, text }) => ({
+      role,
+      source,
+      bytes: Buffer.byteLength(text, "utf8"),
+    })),
+    truncated,
+  };
 }
 
 function threadStatus(value: unknown): ThreadStatus | null {
@@ -805,12 +926,10 @@ export class CodexAppServerHost implements EngineHost {
     });
     void answer.catch(() => undefined);
 
-    /* The persona reaches the call through the THREAD, never through the live
-       session: `includeStartupContext` pulls the thread in at start, while an
-       initial item on the session made codex open the sideband channel that
-       every 9-second kill arrived on. Best effort by construction — a rejected
-       injection must never cost the operator their call, so the failure is
-       swallowed and the start proceeds with whatever the thread already holds. */
+    /* The persona is a durable thread item, so `includeStartupContext` carries
+       it into every call and reconnect. Best effort by construction — a
+       rejected injection must never cost the operator their call, so the start
+       proceeds with whatever instructions the thread already holds. */
     try {
       await this.rpc("thread/inject_items", {
         threadId: this.identity.threadId,
@@ -821,6 +940,12 @@ export class CodexAppServerHost implements EngineHost {
          own log, which is where a wrong item shape gets diagnosed, and the
          operator gets their call either way. */
     }
+    const realtimeContext = selectRealtimeContext(this.events);
+    console.info("[realtime context] selected", {
+      providerStartupContext: true,
+      durableTail: realtimeContext.diagnosticItems,
+      truncated: realtimeContext.truncated,
+    });
     try {
       await this.rpc("thread/realtime/start", {
         threadId: this.identity.threadId,
@@ -831,12 +956,10 @@ export class CodexAppServerHost implements EngineHost {
         clientManagedHandoffs: true,
         codexResponsesAsItems: true,
         includeStartupContext: true,
-        /* NO initial items. Sending any made codex open the sideband channel
-           `wss://api.openai.com/v1/live/<call-id>`, and every call that opened
-           it was killed 9 seconds later with rate_limit_error, while calls
-           without it ran for tens of minutes on the same build, account, and
-           model. The persona has to reach the call through the thread instead,
-           which `includeStartupContext` already pulls in. */
+        /* Current V3 clients carry initial items in call creation. Add the
+           durable tail only when a streamed assistant response has no
+           committed item; provider startup context owns the persisted history. */
+        ...(realtimeContext.items.length > 0 ? { initialItems: realtimeContext.items } : {}),
       }, REALTIME_START_TIMEOUT_MS);
     } catch (error) {
       this.rejectRealtimeStart(error instanceof Error ? error : new Error(safeError(error)));
