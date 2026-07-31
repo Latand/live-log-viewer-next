@@ -74,6 +74,10 @@ function bindings(
   attentionAuthority: () => AttentionCallerAuthority = () => ROOT_CALLER,
 ) {
   return viewerMcpBindings(undefined, undefined, {
+    /* #845: a single-conversation read consumes the COMPLETED generation and only
+       falls back to a private pinned scan when that genuinely misses. Empty here, so
+       these tests keep exercising the pinned fallback they were written against. */
+    completedFileScan: async () => ({ snapshot: { files: [], projectCatalog: [], complete: true } }),
     listFiles: async () => [reviewerFile],
     loadTasks: () => [task],
     getPipelines: () => ({ pipelines: [{ id: "pipeline_1", project: "pipeline-project" }] }),
