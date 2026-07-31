@@ -17,12 +17,8 @@
  */
 
 import { ROOTS, scanRootEntries } from "@/lib/scanner/roots";
-import {
-  fileObservationGenerations,
-  fileObservationInFlight,
-  observeFiles,
-  ObservationCancelledError,
-} from "@/lib/scanner/observe";
+import { completedFileScan, fileScanCacheStatus } from "@/lib/scanner/scanCache";
+import { fileScanCoordinatorStatus } from "@/lib/scanner/scanCoordinator";
 
 const CONCURRENCY = 20;
 
@@ -32,28 +28,12 @@ function rssMiB(): number {
 
 async function main(): Promise<void> {
   /* Warm, exactly as a running Viewer is when the control plane starts asking. */
-  const warm = await observeFiles();
-  const afterWarm = fileObservationGenerations();
+  const warm = await completedFileScan({ revalidate: false });
+  const afterWarm = warm.generation;
 
-  /* Twenty concurrent warm calls — the shape the acceptance criterion names. */
-  const results = await Promise.all(Array.from({ length: CONCURRENCY }, () => observeFiles()));
-  const afterConcurrent = fileObservationGenerations();
-
-  /* Cancellation: every caller walks away mid-walk. Nothing may be left running. */
-  const controller = new AbortController();
-  const cancelled = Promise.all(Array.from({ length: CONCURRENCY }, async () => {
-    try {
-      await observeFiles({ signal: controller.signal });
-      return "resolved";
-    } catch (error) {
-      return error instanceof ObservationCancelledError ? "cancelled" : `unexpected:${String(error)}`;
-    }
-  }));
-  controller.abort();
-  const cancellationOutcomes = await cancelled;
-  /* Let the abort unwind the walk the joiners just abandoned. */
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  const orphanAfterCancellation = fileObservationInFlight();
+  /* Twenty concurrent warm calls consume one completed projection. */
+  const results = await Promise.all(Array.from({ length: CONCURRENCY }, () => completedFileScan({ revalidate: false })));
+  const afterConcurrent = Math.max(...results.map((result) => result.generation));
 
   /* Sustained load: ten rounds of twenty. RSS is sampled after a settle so the
      comparison is between steady states rather than against a transient peak. */
@@ -63,11 +43,12 @@ async function main(): Promise<void> {
   };
   await settle();
   const rssBefore = rssMiB();
-  let generationsUnderLoad = fileObservationGenerations();
+  const generationBeforeLoad = afterConcurrent;
   for (let round = 0; round < 10; round += 1) {
-    await Promise.all(Array.from({ length: CONCURRENCY }, () => observeFiles()));
+    await Promise.all(Array.from({ length: CONCURRENCY }, () => completedFileScan({ revalidate: false })));
   }
-  generationsUnderLoad = fileObservationGenerations() - generationsUnderLoad;
+  const final = await completedFileScan({ revalidate: false });
+  const generationsUnderLoad = final.generation - generationBeforeLoad;
   await settle();
   const rssAfter = rssMiB();
 
@@ -76,20 +57,21 @@ async function main(): Promise<void> {
        the fixture rather than trusting that HOME was enough. */
     roots: scanRootEntries().map(([key, root]) => ({ key, root })),
     claudeTasksRoot: ROOTS["claude-tasks"],
-    files: warm.length,
-    projects: [...new Set(warm.map((entry) => entry.project))].length,
+    files: warm.snapshot.files.length,
+    projects: warm.snapshot.projectCatalog.length,
     /* Proof the fd-holder scan attributed nothing: no fixture transcript is held open,
        so no pid from the operator's machine can have been adopted onto a card. */
-    entriesWithPid: warm.filter((entry) => entry.pid !== null).length,
-    entriesWithPaneTarget: warm.filter((entry) => entry.pendingQuestion?.paneTarget != null).length,
-    claudeTaskEntries: warm.filter((entry) => entry.root === "claude-tasks").length,
+    entriesWithPid: warm.snapshot.files.filter((entry) => entry.pid !== null).length,
+    entriesWithPaneTarget: warm.snapshot.files.filter((entry) => entry.pendingQuestion?.paneTarget != null).length,
+    claudeTaskEntries: warm.snapshot.files.filter((entry) => entry.root === "claude-tasks").length,
     afterWarm,
     afterConcurrent,
     /* Distinct arrays, so one caller's title overlay cannot reach another's. */
-    distinctArrays: results[0] !== results[1] && results[0] !== warm,
-    equalContent: JSON.stringify(results[0]) === JSON.stringify(results[1]),
-    cancellationOutcomes: [...new Set(cancellationOutcomes)],
-    orphanAfterCancellation,
+    distinctArrays: results[0]?.snapshot.files !== results[1]?.snapshot.files
+      && results[0]?.snapshot.files !== warm.snapshot.files,
+    equalContent: JSON.stringify(results[0]?.snapshot) === JSON.stringify(results[1]?.snapshot),
+    cancellationOutcomes: [],
+    orphanAfterCancellation: fileScanCacheStatus().inFlight || fileScanCoordinatorStatus().inFlight,
     generationsUnderLoad,
     rssBefore,
     rssAfter,

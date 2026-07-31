@@ -1,5 +1,5 @@
 import { agentRegistry, type RegistryFile } from "@/lib/agent/registry";
-import { observeFiles } from "@/lib/scanner/observe";
+import { completedFileScan } from "@/lib/scanner/scanCache";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
 
 import { composeSnapshot } from "./snapshot";
@@ -7,33 +7,40 @@ import { resolveSiblings } from "./siblings";
 import type { SnapshotRequestV1 } from "./types";
 
 /**
- * One completed observation and one registry projection per snapshot (#845).
+ * One completed scan and one registry projection per snapshot (#845).
  *
- * The observation is single-flight inside `observeFiles`, so twenty concurrent
- * callers join one corpus walk rather than starting twenty. What is left here is the
- * other half: the caller's `signal` reaches that walk, so a client that deadlines
- * out or disconnects stops being a reason to keep reading files, and the registry
- * projection is INJECTED rather than materialised inside — an MCP caller that
- * already holds a projection should not cause a second one.
+ * The file route, MCP reads, and snapshots all consume the scanner cache's latest
+ * completed generation. A warm snapshot therefore stays independent of an unhealthy
+ * refresh, while a cold caller joins the cache's one real refresh. The registry
+ * projection remains injected so an MCP caller that already holds it does not
+ * materialise a second projection.
  */
 export async function collectSnapshot(
   body: SnapshotRequestV1,
   dependencies: {
-    observeFiles: typeof observeFiles;
+    completedFileScan: typeof completedFileScan;
     resolveSiblings: typeof resolveSiblings;
     registrySnapshot?: () => RegistryFile;
     signal?: AbortSignal | null;
-  } = { observeFiles, resolveSiblings },
+  } = { completedFileScan, resolveSiblings },
 ): Promise<Awaited<ReturnType<typeof composeSnapshot>>> {
   const started = Date.now();
-  const files = await dependencies.observeFiles({ signal: dependencies.signal ?? null });
+  const scan = await dependencies.completedFileScan({ signal: dependencies.signal ?? null });
+  const files = scan.snapshot.files;
   // Custom session titles (issue #33) are the last word on `title` for the agent
   // snapshot surface too — applied before siblings resolve and the snapshot
   // composes, so renamed conversations and their siblings show the human title.
   overlaySessionTitles(files);
   const siblings = await dependencies.resolveSiblings(body.caller, files);
-  /* `observeFiles` never appends spawn placeholder cards (#342), so visible
-     `spawn:` paths must resolve against the durable registry here. */
+  /* The completed scanner projection never appends spawn placeholder cards
+     (#342), so visible `spawn:` paths resolve against the durable registry. */
   const registry = (dependencies.registrySnapshot ?? (() => agentRegistry().readOnlySnapshot()))();
-  return composeSnapshot({ request: body, files, siblings, registry, scannerDurationMs: Date.now() - started });
+  return composeSnapshot({
+    request: body,
+    files,
+    siblings,
+    registry,
+    scannerDurationMs: scan.lastScan?.durationMs ?? Date.now() - started,
+    scannerScannedAt: scan.refreshedAt ?? Date.now(),
+  });
 }

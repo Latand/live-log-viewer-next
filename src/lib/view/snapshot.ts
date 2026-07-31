@@ -63,8 +63,9 @@ function conversation(entry: FileEntry): SnapshotConversation {
   return { path: entry.path, project: entry.project, title: entry.title, engine: entry.engine as "claude" | "codex", model: entry.model, activity: entry.activity, proc: entry.proc, attention };
 }
 
-export async function composeSnapshot(input: { request: SnapshotRequestV1; files: FileEntry[]; scannerDurationMs: number; siblings: ViewerSnapshotV1["siblings"]; registry?: RegistryFile; now?: number }): Promise<ViewerSnapshotV1> {
+export async function composeSnapshot(input: { request: SnapshotRequestV1; files: FileEntry[]; scannerDurationMs: number; scannerScannedAt?: number; siblings: ViewerSnapshotV1["siblings"]; registry?: RegistryFile; now?: number }): Promise<ViewerSnapshotV1> {
   const now = input.now ?? Date.now();
+  const scannerScannedAt = Math.min(now, input.scannerScannedAt ?? now);
   const selection = choose(input.request, now);
   const session = selection.session;
   const byPath = new Map(input.files.map((file) => [file.path, file]));
@@ -134,7 +135,7 @@ export async function composeSnapshot(input: { request: SnapshotRequestV1; files
     view: { viewSessionId: session.viewSessionId, deviceId: session.deviceId, device: session.device, visibility: session.visibility, freshness: freshness(session, now), presenceAgeMs: Math.max(0, now - session.lastSeenAt), project: session.project, mode: session.mode, viewport: session.viewport, camera: session.camera, focusedPath: session.focusedPath, selectedPaths: session.selectedPaths, visiblePaths: session.visiblePaths, board: session.board },
     scope: { kind: scope.kind, totalPaths: scope.all.length, returnedPaths, truncated: omittedCount > 0, omittedCount },
     conversations, stubs, siblings: input.siblings,
-    scanner: { scannedAt: new Date(now).toISOString(), ageMs: 0, durationMs: input.scannerDurationMs, entryCount: input.files.length },
+    scanner: { scannedAt: new Date(scannerScannedAt).toISOString(), ageMs: Math.max(0, now - scannerScannedAt), durationMs: input.scannerDurationMs, entryCount: input.files.length },
   };
   if (Buffer.byteLength(JSON.stringify(snapshot), "utf8") > MAX_RESPONSE_BYTES) throw new SnapshotError("INTERNAL_ERROR", 500, "snapshot response limit exceeded");
   return snapshot;

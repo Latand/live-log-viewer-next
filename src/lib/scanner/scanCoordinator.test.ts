@@ -3,7 +3,7 @@ import { beforeEach, expect, test } from "bun:test";
 import type { FileEntry } from "@/lib/types";
 
 import type { FileCatalogScan } from "./index";
-import { coordinatedFileScan, resetFileScanCoordinatorForTests, type CoordinatedScanRunner } from "./scanCoordinator";
+import { coordinatedFileScan, fileScanCoordinatorStatus, resetFileScanCoordinatorForTests, type CoordinatedScanRunner } from "./scanCoordinator";
 
 beforeEach(() => {
   resetFileScanCoordinatorForTests();
@@ -223,4 +223,32 @@ test("a failed generation rejects its joiners and the next request scans again",
   await Promise.resolve();
   scans[0]!.release();
   expect((await recovery).complete).toBe(true);
+});
+
+test("aborting every subscriber stops the shared refresh and releases its generation", async () => {
+  const controllers = Array.from({ length: 20 }, () => new AbortController());
+  let refreshes = 0;
+  let underlyingAborts = 0;
+  const runner: CoordinatedScanRunner = (_intent, signal) => new Promise((_resolve, reject) => {
+    refreshes += 1;
+    const onAbort = () => {
+      underlyingAborts += 1;
+      signal.removeEventListener("abort", onAbort);
+      reject(new DOMException("scan cancelled", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+
+  const reads = controllers.map((controller) => coordinatedFileScan({ signal: controller.signal }, runner)
+    .then(() => "resolved", (error: unknown) => error instanceof Error ? error.name : String(error)));
+  await Promise.resolve();
+  expect(refreshes).toBe(1);
+  expect(fileScanCoordinatorStatus()).toEqual({ inFlight: true, queued: 0, subscribers: 20 });
+
+  for (const controller of controllers) controller.abort();
+  expect(await Promise.all(reads)).toEqual(Array.from({ length: 20 }, () => "AbortError"));
+  await Promise.resolve();
+
+  expect(underlyingAborts).toBe(1);
+  expect(fileScanCoordinatorStatus()).toEqual({ inFlight: false, queued: 0, subscribers: 0 });
 });
