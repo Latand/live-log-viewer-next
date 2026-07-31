@@ -211,10 +211,7 @@ async function projectionFor(
 
   const current = projectionInflight().get(scopeKey);
   if (current) {
-    if (cached && (
-      request.headers.has("if-none-match")
-      || cached.key.startsWith(PERSISTED_PROJECTION_KEY_PREFIX)
-    )) {
+    if (cached) {
       return { representation: cached.representation, cacheStatus: "stale" };
     }
     return { representation: await current, cacheStatus: "joined" };
@@ -257,10 +254,10 @@ async function projectionFor(
   void promise.catch(() => undefined).finally(() => {
     if (projectionInflight().get(scopeKey) === promise) projectionInflight().delete(scopeKey);
   });
-  if (cached && request.headers.has("if-none-match")) {
-    return { representation: cached.representation, cacheStatus: "stale" };
-  }
-  if (cached?.key.startsWith(PERSISTED_PROJECTION_KEY_PREFIX)) {
+  if (cached && (
+    request.headers.has("if-none-match")
+    || cached.key.startsWith(PERSISTED_PROJECTION_KEY_PREFIX)
+  )) {
     return { representation: cached.representation, cacheStatus: "stale" };
   }
   try {
