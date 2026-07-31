@@ -4,7 +4,11 @@ import path from "node:path";
 
 import { agentRegistry, conversationLookupFromSnapshot, type RegistryFile } from "@/lib/agent/registry";
 import { configFilePath, statePath } from "@/lib/configDir";
-import { currentFileScan } from "@/lib/scanner/scanCache";
+import {
+  currentFileScan,
+  persistedFileScanSnapshot,
+  type FileScanSnapshot,
+} from "@/lib/scanner/scanCache";
 import { recentTurnWindowsFor, type RecentTurnWindows } from "@/lib/scanner/turnDuration";
 import { resolveProjectAttribution } from "@/lib/session/projectResolution";
 import type { FileEntry, TurnBoundary } from "@/lib/types";
@@ -950,9 +954,26 @@ function writeProductionState(state: WakatimeStateV1): void {
 
 const singleton = globalThis as typeof globalThis & { __llvWakatimeSync?: WakatimeSync };
 
+const INCOMPLETE_WAKATIME_SCAN: FileScanSnapshot = {
+  files: [],
+  projectCatalog: [],
+  complete: false,
+};
+
+export async function wakatimeProductionScan(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  persisted: () => FileScanSnapshot | undefined = persistedFileScanSnapshot,
+  live: typeof currentFileScan = currentFileScan,
+): Promise<FileScanSnapshot> {
+  if (env.LLV_WAKATIME_SYNC_WORKER === "1") {
+    return persisted() ?? INCOMPLETE_WAKATIME_SCAN;
+  }
+  return (await live()).snapshot;
+}
+
 function productionDependencies(): WakatimeSyncDependencies {
   return {
-    scan: async () => (await currentFileScan()).snapshot,
+    scan: () => wakatimeProductionScan(),
     registrySnapshot: () => agentRegistry().readOnlySnapshot(),
     recentTurnWindows: recentTurnWindowsFor,
     readCredential: readProductionWakatimeCredential,

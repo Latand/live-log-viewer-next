@@ -1,5 +1,3 @@
-import "./fileScanner.workerMode";
-
 import { startAccountMigrationController } from "./accounts/migration/controller";
 
 await startAccountMigrationController();

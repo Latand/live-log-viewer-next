@@ -12,7 +12,7 @@ import { coordinatedFileScan, resetFileScanCoordinatorForTests, runFileCatalogSc
 import type { FileEntry, PendingQuestion } from "@/lib/types";
 import type { TurnState } from "@/lib/accounts/migration/contracts";
 
-type FileScanSnapshot = Awaited<ReturnType<typeof listFilesWithProjectCatalog>>;
+export type FileScanSnapshot = Awaited<ReturnType<typeof listFilesWithProjectCatalog>>;
 type FileScanRefresh = {
   generation: number;
   promise: Promise<FileScanSnapshot>;
@@ -237,6 +237,15 @@ function readPersistedFileScanSnapshot(): FileScanSnapshot | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Reads the last completed catalog published by the Viewer process without
+ * starting another filesystem scan. Background sidecars use this cross-process
+ * seam so one container owns one full-corpus scan generation.
+ */
+export function persistedFileScanSnapshot(): FileScanSnapshot | undefined {
+  return readPersistedFileScanSnapshot();
 }
 
 function writePersistedFileScanSnapshot(snapshot: FileScanSnapshot): void {

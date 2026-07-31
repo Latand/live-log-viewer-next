@@ -1,5 +1,3 @@
-import "./fileScanner.workerMode";
-
 import { startWakatimeSync } from "./wakatime/sync";
 
 startWakatimeSync();

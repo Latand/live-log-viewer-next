@@ -11,6 +11,7 @@ import path from "node:path";
 import { loadFlows, reconcileFlowConversationOwnershipCooperatively } from "@/lib/flows/store";
 import { reconcileHandoffConversationOwnershipCooperatively } from "@/lib/handoffLineage";
 import { listFilesWithProjectCatalog, reconcileFileControllers } from "@/lib/scanner";
+import { persistedFileScanSnapshot } from "@/lib/scanner/scanCache";
 import { coordinatedControllerScan } from "@/lib/scanner/scanCoordinator";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { runReaperCycle } from "@/lib/reaperRuntime";
@@ -87,6 +88,21 @@ type InventorySnapshot = Awaited<ReturnType<typeof reconcileMigrationInventory>>
 type ConversationLookup = ReturnType<typeof conversationLookupFromSnapshot>;
 type ControllerScan = Awaited<ReturnType<typeof listFilesWithProjectCatalog>>;
 
+const INCOMPLETE_CONTROLLER_SCAN: ControllerScan = {
+  files: [],
+  projectCatalog: [],
+  complete: false,
+};
+
+export function accountControllerScan(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  persisted: () => ControllerScan | undefined = persistedFileScanSnapshot,
+  live: () => Promise<ControllerScan> = coordinatedControllerScan,
+): Promise<ControllerScan> {
+  if (env.LLV_ACCOUNT_CONTROLLER_INVENTORY_WORKER !== "1") return live();
+  return Promise.resolve(persisted() ?? INCOMPLETE_CONTROLLER_SCAN);
+}
+
 export interface AccountMigrationControllerCyclePorts {
   scan: () => ReturnType<typeof listFilesWithProjectCatalog>;
   reconcileInventory: (registry: AgentRegistry, files: ControllerScan["files"]) => Promise<InventorySnapshot>;
@@ -135,9 +151,9 @@ function reconcileControllerTasks(registry: AgentRegistry, files: ControllerScan
 }
 
 const DEFAULT_CONTROLLER_CYCLE_PORTS: AccountMigrationControllerCyclePorts = {
-  // Reconciliation consumes the process-wide scan generation; it never fans
-  // out an extra scanner run alongside the HTTP cache or the pipeline watchdog.
-  scan: () => coordinatedControllerScan(),
+  // The inventory sidecar consumes the completed snapshot published by the
+  // Viewer. Process-wide coordination cannot cover a separate OS process.
+  scan: () => accountControllerScan(),
   reconcileInventory: reconcileMigrationInventory,
   reconcileFlowOwnership: reconcileFlowConversationOwnershipCooperatively,
   reconcileWorkflowOwnership: reconcileWorkflowConversationOwnershipCooperatively,
