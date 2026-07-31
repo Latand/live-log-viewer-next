@@ -67,7 +67,11 @@ export function buildFilesResponseInWorker(
   runtime: FilesResponseWorkerRuntime = {},
 ): Promise<FilesResponseRepresentation> {
   const launch = runtime.launch ?? workerLaunch(runtime.cwd);
-  const child = spawn(launch.executable, [launch.workerPath], {
+  const useNice = runtime.launch === undefined && fs.existsSync("/usr/bin/nice");
+  const child = spawn(useNice ? "/usr/bin/nice" : launch.executable, [
+    ...(useNice ? ["-n", "10", launch.executable] : []),
+    launch.workerPath,
+  ], {
     cwd: runtime.cwd ?? process.cwd(),
     stdio: ["pipe", "pipe", "pipe"],
     env: {
