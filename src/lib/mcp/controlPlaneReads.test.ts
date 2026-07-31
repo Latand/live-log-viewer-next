@@ -87,7 +87,13 @@ function projection() {
   for (let index = 0; index < REGISTRY_ROWS; index += 1) {
     entries[`codex:sess-${index}`] = { artifactPath: `/sessions/worker-${index}.jsonl`, host: null, structuredHost: null };
   }
-  return { conversations, entries, lineageEdges: {}, memberships: {}, conversationAliases: {} };
+  /* A migration chains redirects rather than rewriting them, so the walk that
+     resolves them has to follow more than one hop. */
+  const conversationAliases = {
+    conversation_retired: "conversation_middle",
+    conversation_middle: "conversation_0",
+  };
+  return { conversations, entries, lineageEdges: {}, memberships: {}, conversationAliases };
 }
 
 /**
@@ -254,4 +260,23 @@ test("a send addressed by conversation id follows the alias the projection recor
 
   expect(result.conversationId).toBe("conversation_0");
   expect(counts.projections).toBe(1);
+});
+
+test("a send addressed by a CHAINED alias follows the walk to its end", () => {
+  /* The registry's alias resolution is multi-hop and cycle-guarded. Resolving one
+     hop from an injected projection would answer with a conversation the operator
+     has not been in for two moves — a silent wrong answer on a public tool. */
+  const { counts, injected } = dependencies();
+  const bindings = viewerMcpBindings(undefined, {
+    post: async () => ({ operationId: "operation_3", outcome: "queued" }),
+  } as never, injected);
+
+  return bindings.send_message({
+    clientRequestId: "send-3",
+    conversationId: "conversation_retired",
+    text: "status check",
+  }).then((result) => {
+    expect((result as { conversationId: string | null }).conversationId).toBe("conversation_0");
+    expect(counts.projections).toBe(1);
+  });
 });

@@ -442,19 +442,34 @@ async function spawnAgent(args: McpToolArgs, control: ViewerControlDependencies)
 /**
  * Which conversation a send named, resolved from ONE registry projection (#845).
  *
- * The predicate mirrors the registry's own `conversationOwnsPath` — a conversation
- * owns every generation path it has had plus the continuity paths a migration left
- * behind — so a send addressed by a superseded path still names its owner.
+ * Both halves mirror the registry's own resolution exactly, because this is a public
+ * tool's answer and drifting from it would be a silent behaviour change:
+ *
+ * - the alias walk is MULTI-HOP and cycle-guarded, like `resolveConversationAlias`.
+ *   An account migration chains redirects, so a single hop would stop halfway down a
+ *   chain and report a conversation the operator has not been in for two moves.
+ * - the path predicate mirrors `conversationOwnsPath`: a conversation owns every
+ *   generation path it has had plus the continuity paths a migration left behind, so
+ *   a send addressed by a superseded path still names its owner.
  */
+function canonicalConversationId(snapshot: RegistrySnapshot, id: string): string {
+  const seen = new Set<string>();
+  let current = id;
+  while (!seen.has(current)) {
+    seen.add(current);
+    const next: string | undefined = snapshot.conversationAliases[current as keyof typeof snapshot.conversationAliases];
+    if (!next) return current;
+    current = next;
+  }
+  return current;
+}
+
 function conversationFromProjection(
   snapshot: RegistrySnapshot,
   conversationId: string,
   transcriptPath: string,
 ): RegistrySnapshot["conversations"][string] | null {
-  if (conversationId) {
-    const canonical = snapshot.conversationAliases[conversationId] ?? conversationId;
-    return snapshot.conversations[canonical] ?? snapshot.conversations[conversationId] ?? null;
-  }
+  if (conversationId) return snapshot.conversations[canonicalConversationId(snapshot, conversationId)] ?? null;
   if (!transcriptPath) return null;
   return Object.values(snapshot.conversations).find((candidate) => (
     candidate.generations.some((generation) => generation.path === transcriptPath)
