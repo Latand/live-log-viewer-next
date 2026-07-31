@@ -105,6 +105,36 @@ test("URL-specific 304 responses restore the matching cached representation", as
   expect(cache.read()).toBe(restored);
 });
 
+test("an unchanged generation-wait 304 keeps the mounted snapshot asleep", async () => {
+  let requests = 0;
+  const cache = createFilesClientCache(async () => {
+    requests += 1;
+    if (requests === 1) {
+      return new Response(JSON.stringify({ files: [file("/global", "Global")] }), {
+        headers: { ETag: '"global"', "x-llv-files-generation": "1" },
+      });
+    }
+    return new Response(null, {
+      status: 304,
+      headers: {
+        ETag: '"global"',
+        "x-llv-files-generation": "1",
+        "x-llv-files-target-generation": "2",
+      },
+    });
+  });
+  let updates = 0;
+  const unsubscribe = cache.subscribe(() => { updates += 1; });
+
+  const initial = await cache.revalidate();
+  updates = 0;
+  const waiting = await cache.revalidate();
+  unsubscribe();
+
+  expect(waiting).toBe(initial);
+  expect(updates).toBe(0);
+});
+
 test("client cache subscriptions receive updates only for their request scope", async () => {
   const pinnedPath = "/archive/scoped-pin.jsonl";
   const cache = createFilesClientCache(async (input) => {

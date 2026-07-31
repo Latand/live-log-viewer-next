@@ -355,11 +355,17 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     if (response.status === 304) {
       if (!representation) throw new Error("files request returned 304 without a cached representation");
       if (generation < appliedGeneration) return snapshot;
-      snapshot = restoreNotModified(snapshot, representation.data, url);
+      const previousSnapshot = snapshot;
+      if (snapshot !== representation.data || snapshot.requestScope !== url) {
+        snapshot = restoreNotModified(snapshot, representation.data, url);
+      }
       appliedGeneration = generation;
       rememberRepresentation(url, snapshot, representation.etag);
       settleServerPipelines(logicalGeneration ?? generation, !generationIncomplete);
-      publish(url);
+      // Generation-completion probes commonly return the same bodyless 304
+      // for minutes while a large catalog scan is active. Keep React asleep
+      // until the certified representation or a local pipeline overlay changes.
+      if (snapshot !== previousSnapshot) publish(url);
       if (generationIncomplete && completionTargetGeneration !== undefined) {
         scheduleCompletionRetry(
           url,
