@@ -96,6 +96,7 @@ export function consolidateProjectCatalogByRepository(
   entries: readonly ProjectCatalogEntry[],
   aliases: Readonly<Record<string, string>> = {},
   displayNames: Readonly<Record<string, string>> = {},
+  stabilize = true,
 ): {
   projectCatalog: ProjectCatalogEntry[];
   projectRemap: Map<string, string>;
@@ -176,6 +177,21 @@ export function consolidateProjectCatalogByRepository(
     });
   }
   projectCatalog.sort((left, right) => right.smt - left.smt || left.project.localeCompare(right.project));
+  if (stabilize) {
+    /* A persisted projection can recover a canonical repo key/root during the
+       first pass. Legacy rows sharing that newly recovered display identity
+       become provably mergeable only after that metadata exists. One bounded
+       second pass reaches the fixed point without turning catalog projection
+       into an unbounded alias walk. */
+    const stabilized = consolidateProjectCatalogByRepository(projectCatalog, aliases, displayNames, false);
+    for (const [source, target] of projectRemap) {
+      projectRemap.set(source, stabilized.projectRemap.get(target) ?? target);
+    }
+    for (const [source, target] of stabilized.projectRemap) {
+      if (!projectRemap.has(source)) projectRemap.set(source, target);
+    }
+    return { projectCatalog: stabilized.projectCatalog, projectRemap };
+  }
   return { projectCatalog, projectRemap };
 }
 
