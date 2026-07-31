@@ -452,7 +452,8 @@ describe("CodexAppServerHost", () => {
   test("publishes a semantic voice chunk before the assistant response completes", async () => {
     const threadId = "voice-semantic-stream-thread";
     const turnId = "turn-semantic-stream";
-    const eventStore = new MemoryEventStore();
+    const eventDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-semantic-stream-"));
+    const eventStore = new FileRuntimeEventStore(eventDirectory);
     const server = new FakeAppServer(threadId);
     const host = await CodexAppServerHost.start({
       cwd: "/repo",
@@ -487,6 +488,7 @@ describe("CodexAppServerHost", () => {
         streamChunk: { index: 0 },
       },
     });
+    expect(await host.health()).toMatchObject({ status: "active", activeTurnRef: turnId });
     expect(eventStore.load(threadId).some((event) => event.kind === "item")).toBeFalse();
 
     const terminalText = "The first substantial part is ready and can be spoken while the remaining investigation continues, while enough related detail stays together to preserve the meaning and keep the spoken reply natural. This second sentence starts the next semantic batch.";
@@ -507,6 +509,7 @@ describe("CodexAppServerHost", () => {
       .join("");
     expect(streamedText + (voiceResponse?.text ?? "")).toBe(terminalText);
     await host.release();
+    fs.rmSync(eventDirectory, { recursive: true, force: true });
   });
 
   test("bounds unacknowledged semantic chunks instead of forwarding every delta", async () => {
