@@ -410,6 +410,15 @@ function beginFileScanRefresh(
   generation: number,
   reason: FileScanReason,
 ): FileScanRefresh {
+  const promise = fileScanRefreshPromise(slot, generation, reason);
+  return installFileScanRefresh(slot, generation, promise);
+}
+
+function beginResourceFileScanRefresh(
+  slot: FileScanCacheSlot,
+  generation: number,
+  reason: FileScanReason,
+): FileScanRefresh {
   return installStagedFileScanRefresh(
     slot,
     generation,
@@ -420,31 +429,15 @@ function beginFileScanRefresh(
 function beginDeferredFileScanRefresh(slot: FileScanCacheSlot, generation: number): FileScanRefresh {
   let started = false;
   let canceled = false;
-  let publishResource!: (snapshot: FileScanSnapshot) => void;
-  let rejectResource!: (error: unknown) => void;
-  let published = false;
-  const resourcePromise = new Promise<FileScanSnapshot>((resolve, reject) => {
-    publishResource = resolve;
-    rejectResource = reject;
-  });
-  void resourcePromise.catch(() => {});
-  const publish = (snapshot: FileScanSnapshot) => {
-    if (published) return;
-    published = true;
-    publishResource(snapshot);
-  };
   const promise = new Promise<void>((resolve) => setImmediate(resolve)).then(() => {
     started = true;
     if (canceled) {
       if (!slot.snapshot) throw new Error("deferred file scan canceled without a completed snapshot");
       return slot.snapshot;
     }
-    return fileScanRefreshPromise(slot, generation, "ordinary", publish);
+    return fileScanRefreshPromise(slot, generation, "ordinary");
   });
-  void promise.then(publish, (error) => {
-    if (!published) rejectResource(error);
-  });
-  const refresh = installFileScanRefresh(slot, generation, promise, resourcePromise);
+  const refresh = installFileScanRefresh(slot, generation, promise);
   refresh.cancelBeforeStart = () => {
     if (started) return false;
     canceled = true;
@@ -461,7 +454,7 @@ function beginPinnedFileScanRefresh(
 ): FileScanRefresh {
   const fresh = slot.freshObservationGeneration !== undefined
     && generation >= slot.freshObservationGeneration;
-  return installStagedFileScanRefresh(slot, generation, (publish) => instrumentFileScan(slot, generation, reason, async () => {
+  const promise = instrumentFileScan(slot, generation, reason, async () => {
     /* A pin changes the scan scope, so this generation never serves joiners'
        fences, never adopts a running scan, and never merges with other pending
        callers (their runners cannot reproduce the pin overlay); it still holds
@@ -469,8 +462,6 @@ function beginPinnedFileScanRefresh(
     const pinnedSnapshot = await coordinatedFileScan({ fresh, join: false, exclusive: true }, (intent) => runFileCatalogScan(intent, {
       persistIndex: process.env.LLV_RESOURCE_OBSERVATION_WORKER !== "1",
       pin: pinnedPath,
-      onResourceSnapshot: publish,
-      resourceBaseline: slot.snapshot,
     }));
     if (!pinnedSnapshot.complete) throw new Error("filesystem scan incomplete");
     const pinOverlayPaths = pinnedSnapshot.pinOverlayPaths ?? [];
@@ -506,7 +497,8 @@ function beginPinnedFileScanRefresh(
       slot.freshObservationGeneration = undefined;
     }
     return globalSnapshot;
-  }));
+  });
+  return installFileScanRefresh(slot, generation, promise);
 }
 
 async function refreshThroughGeneration(
@@ -823,7 +815,7 @@ export async function currentResourceFileScan(): Promise<CachedFileScan> {
     if (pending?.cancelBeforeStart?.()) {
       targetGeneration = nextGeneration(slot);
       slot.freshObservationGeneration = targetGeneration;
-      requestedRefresh = beginFileScanRefresh(slot, targetGeneration, "fresh");
+      requestedRefresh = beginResourceFileScanRefresh(slot, targetGeneration, "fresh");
     } else if (pending) {
       targetGeneration = pending.generation;
     } else {
@@ -832,7 +824,7 @@ export async function currentResourceFileScan(): Promise<CachedFileScan> {
     }
   }
   while (true) {
-    const refresh = requestedRefresh ?? slot.refresh ?? beginFileScanRefresh(slot, targetGeneration, "fresh");
+    const refresh = requestedRefresh ?? slot.refresh ?? beginResourceFileScanRefresh(slot, targetGeneration, "fresh");
     requestedRefresh = undefined;
     const snapshot = await refresh.resourcePromise;
     if (refresh.generation >= targetGeneration) {

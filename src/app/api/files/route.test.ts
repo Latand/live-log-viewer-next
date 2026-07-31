@@ -188,8 +188,8 @@ test("repeated files reads reuse the pure read snapshot and retain ETag behavior
   expect(scanOptions).toEqual(expect.objectContaining({
     persist: false,
     persistIndex: true,
-    onResourceSnapshot: expect.any(Function),
   }));
+  expect(scanOptions).not.toHaveProperty("onResourceSnapshot");
   expect(first.headers.get("x-llv-files-cache")).toBe("miss");
   expect(second.headers.get("x-llv-files-cache")).toBe("hit");
   expect(first.headers.get("x-llv-files-projection-cache")).toBe("miss");
@@ -676,7 +676,7 @@ test("a fresh resource handoff joins an ordinary generation that already started
   release();
   const files = await handoff;
 
-  expect(settledBeforeFullScan).toBeTrue();
+  expect(settledBeforeFullScan).toBeFalse();
   expect(scansBeforeFullScan).toBe(2);
   expect(files.map((entry) => entry.path)).toEqual([after.path]);
   expect(scans).toBe(2);
