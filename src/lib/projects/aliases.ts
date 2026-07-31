@@ -198,7 +198,7 @@ export function durableProjectAliasCandidates(): DurableProjectAliasCandidates {
   for (const [source, candidatePath] of pairs) {
     const root = repositoryRootForPath(candidatePath) ?? rememberedRepositories.get(candidatePath);
     const identity = root ? projectIdentityFromRepositoryRoot(root) : null;
-    if (!identity || source === identity.project) continue;
+    if (!identity) continue;
     const sourceTargets = targets.get(source) ?? new Map<string, TargetEvidence>();
     const evidence = sourceTargets.get(identity.project) ?? {
       registration: { source, target: identity.project, displayName: identity.displayName },
@@ -211,6 +211,14 @@ export function durableProjectAliasCandidates(): DurableProjectAliasCandidates {
   const registrations: ProjectAliasRegistration[] = [];
   const conflicts: string[] = [];
   for (const [source, sourceTargets] of targets) {
+    /* A repository id that still points at its own repository is already a
+       valid canonical identity. Historical records stamped with that same id
+       while rooted in another repository are per-record corruption; turning
+       them into a global alias would merge two unrelated boards. */
+    if (sourceTargets.has(source)) {
+      if (sourceTargets.size > 1) conflicts.push(source);
+      continue;
+    }
     const ranked = [...sourceTargets.values()].sort((left, right) => right.records - left.records);
     const total = ranked.reduce((sum, evidence) => sum + evidence.records, 0);
     const leader = ranked[0]!;

@@ -142,6 +142,33 @@ test("one poisoned record cannot block a majority-backed legacy source", () => {
   });
 });
 
+test("a canonical repository id with foreign records never aliases to another repository", () => {
+  const repositories = ["current-repository", "foreign-repository"].map((name) => {
+    const repository = path.join(SANDBOX, name);
+    fs.mkdirSync(path.join(repository, ".git"), { recursive: true });
+    fs.writeFileSync(path.join(repository, ".git", "config"), [
+      '[remote "origin"]',
+      `\turl = ssh://git@example.invalid/team/${name}.git`,
+      "",
+    ].join("\n"));
+    return repository;
+  });
+  const current = projectIdentityFromRepositoryRoot(repositories[0]!)!;
+  fs.mkdirSync(process.env.LLV_STATE_DIR!, { recursive: true });
+  fs.writeFileSync(path.join(process.env.LLV_STATE_DIR!, "flows.json"), JSON.stringify({
+    flows: [
+      { project: current.project, cwd: repositories[0] },
+      { project: current.project, cwd: repositories[1] },
+      { project: current.project, cwd: repositories[1] },
+    ],
+  }));
+
+  expect(durableProjectAliasCandidates()).toEqual({
+    registrations: [],
+    conflicts: [current.project],
+  });
+});
+
 test("a durable alias from a deleted worktree checkout resolves through the worktree map", () => {
   const repository = path.join(SANDBOX, "deleted-worktree-main");
   fs.mkdirSync(path.join(repository, ".git"), { recursive: true });
