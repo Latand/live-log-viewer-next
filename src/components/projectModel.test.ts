@@ -368,11 +368,11 @@ test("collapsed tree cards keep unsettled work and leave idle history off the ca
 
 describe("buildArchiveBranchGroups", () => {
   test("a hydrated quiet project root renders as an archive group", () => {
-    const quietRoot = entry({ path: "/stikon-old", project: "stikon-dispatcher", mtime: 50 });
-    const groups = buildArchiveBranchGroups([quietRoot], "stikon-dispatcher", 100);
+    const quietRoot = entry({ path: "/example-old", project: "example-dispatcher", mtime: 50 });
+    const groups = buildArchiveBranchGroups([quietRoot], "example-dispatcher", 100);
 
     expect(groups).toHaveLength(1);
-    expect(groups[0]!.columns.map((column) => column.file.path)).toEqual(["/stikon-old"]);
+    expect(groups[0]!.columns.map((column) => column.file.path)).toEqual(["/example-old"]);
   });
 
   test("keeps ancestors for a fresh child so the scheme can draw the edge", () => {

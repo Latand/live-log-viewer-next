@@ -33,7 +33,10 @@ import type { FileEntry, ResourceSession, ResourcesPayload } from "./types";
  * servers) hanging off the CLI usually outweigh the CLI itself.
  */
 
-const CACHE_MS = 10_000;
+/** Per-session process attribution is expensive on large transcript inventories.
+ * System memory is still captured for every API read, and explicit post-kill
+ * refreshes still bypass this cache. */
+const CACHE_MS = 120_000;
 
 type ResourceBuildPhase = "systemMemory" | "readFiles" | "readHosts" | "ppidMap" | "processMemory" | "attach" | "serialization";
 type ResourceBuildPhases = Record<ResourceBuildPhase, number>;
@@ -277,7 +280,7 @@ export function resourceWorkerFileSnapshot(
 }
 
 export async function readResourceFileSnapshot(fresh: boolean): Promise<ResourceWorkerFileObservation[]> {
-  const scan = fresh ? await currentResourceFileScan() : await completedFileScan();
+  const scan = fresh ? await currentResourceFileScan() : await completedFileScan({ revalidate: false });
   return resourceWorkerFileSnapshot(scan.snapshot.files, () => null);
 }
 

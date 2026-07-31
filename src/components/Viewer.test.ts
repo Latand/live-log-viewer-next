@@ -7,7 +7,7 @@ import { OVERVIEW } from "./projectModel";
 import { filesRequestPin, initialProjectFromState, reduceCatalogPin } from "./Viewer";
 
 test("initialProjectFromState reads a direct project hash before polling", () => {
-  expect(initialProjectFromState("#p=stikon-dispatcher", null)).toBe("stikon-dispatcher");
+  expect(initialProjectFromState("#p=example-dispatcher", null)).toBe("example-dispatcher");
   expect(initialProjectFromState("#p=space%20project", null)).toBe("space project");
 });
 

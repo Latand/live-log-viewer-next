@@ -2747,7 +2747,7 @@ describe("resource recurring reads", () => {
     await reader.read();
     expect(persisted).toEqual([1]);
 
-    now = 10_000;
+    now = 120_000;
     await reader.read();
     await new Promise<void>((resolve) => setImmediate(resolve));
     await reader.read(true);
@@ -2976,7 +2976,7 @@ describe("resource recurring reads", () => {
     } }), { inProcess: true });
 
     expect((await reader.read()).payload).toEqual(cached);
-    now = 10_000;
+    now = 120_000;
     expect((await reader.read()).payload).toEqual(cached);
     await Promise.resolve();
     expect(builds).toBe(2);
@@ -3010,7 +3010,7 @@ describe("resource recurring reads", () => {
     } }), { inProcess: true });
 
     await reader.read();
-    now = 10_000;
+    now = 120_000;
     expect((await reader.read()).payload).toEqual(cached);
     await new Promise<void>((resolve) => setImmediate(resolve));
     await Promise.resolve();

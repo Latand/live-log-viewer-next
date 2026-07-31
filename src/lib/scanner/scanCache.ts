@@ -60,7 +60,7 @@ export type CachedFileScan = {
 
 const FILE_SCAN_FRESH_MS = 1_000;
 /** Poll-driven attempts share the client's fallback cadence, including failures. */
-const FILE_SCAN_ORDINARY_REFRESH_MS = 10_000;
+const FILE_SCAN_ORDINARY_REFRESH_MS = 60_000;
 const FILE_SCAN_PIN_CACHE_MAX = 8;
 // v8: lastTurn boundaries follow the shared meta/command classification
 // (issue #406) — persisted v7 snapshots carry windows opened by meta records
@@ -770,12 +770,16 @@ export async function cachedFileScan(
 
 /** Returns the latest completed global generation. A missing snapshot joins
     or starts the shared cold generation so every consumer receives a corpus. */
-export async function completedFileScan(): Promise<CachedFileScan> {
+export async function completedFileScan(
+  { revalidate = true }: { revalidate?: boolean } = {},
+): Promise<CachedFileScan> {
   const slot = globalFileScanSlot();
   slot.requestCount = (slot.requestCount ?? 0) + 1;
   if (slot.snapshot) {
     const now = Date.now();
-    if (!slot.refresh && now - Math.max(slot.refreshedAt, slot.ordinaryRefreshRequestedAt ?? 0) >= FILE_SCAN_ORDINARY_REFRESH_MS) {
+    if (revalidate
+      && !slot.refresh
+      && now - Math.max(slot.refreshedAt, slot.ordinaryRefreshRequestedAt ?? 0) >= FILE_SCAN_ORDINARY_REFRESH_MS) {
       const targetGeneration = nextGeneration(slot);
       slot.ordinaryRefreshRequestedAt = now;
       beginDeferredFileScanRefresh(slot, targetGeneration);
