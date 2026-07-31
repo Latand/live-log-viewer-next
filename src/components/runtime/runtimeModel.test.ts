@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import type { Flow } from "@/lib/flows/types";
 import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
+import { streamingVoiceDelivery } from "@/lib/runtime/voiceDelivery";
 
 import {
   applyEvent,
@@ -210,6 +211,28 @@ describe("live turn delta buffering", () => {
 });
 
 describe("canonical voice delivery reconciliation", () => {
+  test("publishes a ready semantic chunk before turn completion and removes it on interruption", () => {
+    const delivery = streamingVoiceDelivery({
+      sourceTurnId: "streaming-turn",
+      chunkIndex: 0,
+      startOffset: 0,
+      endOffset: 19,
+      text: "substantial phrase ",
+    });
+    let store = installSnapshot(snapshot());
+    store = apply(store, env("voice-chunk", { type: "session", id: "conv_a" }, 4, {
+      conversationId: "conv_a",
+      voiceDelivery: delivery,
+    }));
+    expect(store.sessions.conv_a?.voiceDeliveries).toEqual([delivery]);
+    store = apply(store, env("turn-ended", { type: "session", id: "conv_a" }, 5, {
+      conversationId: "conv_a",
+      turnId: "streaming-turn",
+      outcome: "interrupted",
+    }));
+    expect(store.sessions.conv_a?.voiceDeliveries).toEqual([]);
+  });
+
   test("hydrates an unseen completed multi-item turn and keeps rerenders idempotent", () => {
     const unicode = `${"🙂界".repeat(8_000)}\nfinished`;
     let store = installSnapshot(snapshot());

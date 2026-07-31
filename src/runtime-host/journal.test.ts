@@ -13,6 +13,7 @@ import { UnixRuntimeHostClient } from "@/lib/runtime/client";
 import { runtimePresentationReceipt, runtimeScope } from "@/lib/runtime/contracts";
 import { projectEngineHostEvent } from "@/lib/runtime/engineHostEvents";
 import { structuredContentDigest, type StructuredImageRef } from "@/lib/runtime/structuredContent";
+import { streamingVoiceDelivery } from "@/lib/runtime/voiceDelivery";
 
 import { RuntimeHost, RuntimeHostFence } from "./host";
 import { RuntimeJournal, RuntimeJournalFault } from "./journal";
@@ -185,6 +186,39 @@ test("canonical voice deliveries survive missed-running recovery and compaction 
   });
   expect(recovered.snapshot().sessions[0]?.voiceDeliveries).toEqual([]);
   recovered.close();
+});
+
+test("semantic voice chunks become ready immediately and interruption removes their queued suffix", () => {
+  const dir = sandbox("voice-semantic-chunks");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 100, now: () => 100 });
+  const delivery = streamingVoiceDelivery({
+    sourceTurnId: "turn-streaming",
+    chunkIndex: 0,
+    startOffset: 0,
+    endOffset: 19,
+    text: "substantial phrase ",
+  });
+  journal.append({
+    scope: runtimeScope("session", "conversation_streaming"),
+    kind: "voice-chunk",
+    payload: {
+      conversationId: "conversation_streaming",
+      turnId: "turn-streaming",
+      voiceDelivery: delivery,
+    },
+  });
+  expect(journal.snapshot().sessions[0]?.voiceDeliveries).toEqual([delivery]);
+  journal.append({
+    scope: runtimeScope("session", "conversation_streaming"),
+    kind: "turn-ended",
+    payload: {
+      conversationId: "conversation_streaming",
+      turnId: "turn-streaming",
+      outcome: "interrupted",
+    },
+  });
+  expect(journal.snapshot().sessions[0]?.voiceDeliveries).toEqual([]);
+  journal.close();
 });
 
 test("acknowledged voice delivery stays retired after reload and terminal replay while an undelivered response hydrates", () => {

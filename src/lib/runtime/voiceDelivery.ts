@@ -8,6 +8,13 @@ export interface RuntimeVoiceDelivery {
   turnId: string;
   responses: RuntimeVoiceResponse[];
   ready: boolean;
+  /** Original backend turn for an immutable pre-terminal speech chunk. */
+  sourceTurnId?: string;
+  streamChunk?: {
+    index: number;
+    startOffset: number;
+    endOffset: number;
+  };
 }
 
 export interface Utf8Chunk {
@@ -82,13 +89,73 @@ export function normalizeVoiceDeliveries(value: unknown): RuntimeVoiceDelivery[]
       })
       : [];
     if (!turnId || responses.length === 0) return [];
+    const sourceTurnId = string(delivery?.sourceTurnId);
+    const streamChunk = record(delivery?.streamChunk);
+    const index = streamChunk?.index;
+    const startOffset = streamChunk?.startOffset;
+    const endOffset = streamChunk?.endOffset;
+    const validStreamChunk = sourceTurnId
+      && Number.isInteger(index)
+      && Number.isInteger(startOffset)
+      && Number.isInteger(endOffset)
+      && (index as number) >= 0
+      && (startOffset as number) >= 0
+      && (endOffset as number) > (startOffset as number);
     return [{
       deliveryId: deliveryId(turnId, responses),
       turnId,
       responses,
       ready: delivery?.ready === true,
+      ...(validStreamChunk ? {
+        sourceTurnId,
+        streamChunk: {
+          index: index as number,
+          startOffset: startOffset as number,
+          endOffset: endOffset as number,
+        },
+      } : {}),
     }];
   });
+}
+
+export function streamingVoiceDelivery(options: {
+  sourceTurnId: string;
+  chunkIndex: number;
+  startOffset: number;
+  endOffset: number;
+  text: string;
+}): RuntimeVoiceDelivery {
+  const turnId = `voice-stream:${options.sourceTurnId}:${options.chunkIndex}:${options.startOffset}:${options.endOffset}`;
+  const responseId = `${turnId}:response`;
+  return normalizeVoiceDeliveries([{
+    deliveryId: "derived",
+    turnId,
+    sourceTurnId: options.sourceTurnId,
+    streamChunk: {
+      index: options.chunkIndex,
+      startOffset: options.startOffset,
+      endOffset: options.endOffset,
+    },
+    responses: [{ responseId, text: options.text }],
+    ready: true,
+  }])[0]!;
+}
+
+export function appendReadyVoiceDelivery(
+  value: readonly RuntimeVoiceDelivery[] | null | undefined,
+  delivery: RuntimeVoiceDelivery,
+): RuntimeVoiceDelivery[] {
+  const deliveries = normalizeVoiceDeliveries(value);
+  const normalized = normalizeVoiceDeliveries([delivery])[0];
+  if (!normalized?.ready) return deliveries;
+  const existing = deliveries.find((candidate) => candidate.deliveryId === normalized.deliveryId);
+  if (existing) {
+    if (JSON.stringify(existing) !== JSON.stringify(normalized)) {
+      throw new Error("voice delivery id belongs to different content");
+    }
+    return deliveries;
+  }
+  return [...deliveries, normalized];
 }
 
 export function normalizeAcknowledgedVoiceDeliveryIds(value: unknown): string[] {
@@ -151,10 +218,11 @@ export function completeVoiceTurn(
 ): RuntimeVoiceDelivery[] {
   const deliveries = normalizeVoiceDeliveries(value);
   const index = deliveries.findIndex((delivery) => delivery.turnId === turnId);
-  if (index < 0) return deliveries;
   if (outcome !== "completed") {
-    return deliveries.filter((_, deliveryIndex) => deliveryIndex !== index);
+    return deliveries.filter((delivery) =>
+      delivery.turnId !== turnId && delivery.sourceTurnId !== turnId);
   }
+  if (index < 0) return deliveries;
   if (deliveries[index]!.ready) return deliveries;
   if (normalizeAcknowledgedVoiceDeliveryIds(acknowledgedDeliveryIds)
     .includes(deliveries[index]!.deliveryId)) {

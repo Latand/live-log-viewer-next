@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, type Hash } from "node:crypto";
 
 import { isKnownEffortTier } from "@/lib/agent/efforts";
 import { procBackend } from "@/lib/proc";
@@ -14,9 +14,19 @@ import { MAX_STRUCTURED_IMAGE_ENCODED_BYTES, runtimeImageStore } from "./runtime
 import { STRUCTURED_IMAGE_CAPABILITY, type StructuredImageRef } from "./structuredContent";
 import {
   normalizeVoiceDeliveries,
+  streamingVoiceDelivery,
+  terminalVoiceResponse,
   utf8ChunkAt,
   type RuntimeVoiceDelivery,
+  type RuntimeVoiceResponse,
 } from "./voiceDelivery";
+import {
+  takeVoiceStreamChunk,
+  VOICE_STREAM_BUFFER_LIMIT_BYTES,
+  VOICE_STREAM_FLUSH_DELAY_MS,
+  VOICE_STREAM_MAX_PENDING,
+  type VoiceStreamFlushMode,
+} from "./voiceStreamChunks";
 
 import type {
   DeliveryReceipt,
@@ -90,6 +100,18 @@ type RealtimeDeliveryState = {
   responseIndex: number;
   offset: number;
   acknowledged: boolean;
+};
+type VoiceStreamState = {
+  turnId: string;
+  segmentIndex: number;
+  nextChunkIndex: number;
+  buffer: string;
+  observedChars: number;
+  emittedChars: number;
+  observedHash: Hash;
+  emittedHash: Hash;
+  fallbackToTerminal: boolean;
+  timer: ReturnType<typeof setTimeout> | null;
 };
 type RealtimeInitialItem = {
   role: "user" | "assistant";
@@ -554,6 +576,9 @@ export class CodexAppServerHost implements EngineHost {
   }>();
   private readonly pendingDeliveries = new Map<string, PendingDelivery>();
   private readonly realtimeDeliveries = new Map<string, RealtimeDeliveryState>();
+  private readonly voiceStreams = new Map<string, VoiceStreamState>();
+  private readonly pendingVoiceChunks = new Map<string, string>();
+  private readonly cancelledVoiceTurns = new Set<string>();
   private readonly activeRealtimeDeliveries = new Map<string, {
     digest: string;
     promise: Promise<{ deliveryId: string; acknowledged: true }>;
@@ -977,12 +1002,171 @@ export class CodexAppServerHost implements EngineHost {
     });
   }
 
+  private voiceStream(turnId: string): VoiceStreamState {
+    const existing = this.voiceStreams.get(turnId);
+    if (existing) return existing;
+    const created: VoiceStreamState = {
+      turnId,
+      segmentIndex: 0,
+      nextChunkIndex: 0,
+      buffer: "",
+      observedChars: 0,
+      emittedChars: 0,
+      observedHash: createHash("sha256"),
+      emittedHash: createHash("sha256"),
+      fallbackToTerminal: false,
+      timer: null,
+    };
+    this.voiceStreams.set(turnId, created);
+    return created;
+  }
+
+  private observeVoiceDelta(turnId: string, text: string): void {
+    if (!text || this.cancelledVoiceTurns.has(turnId)) return;
+    const stream = this.voiceStream(turnId);
+    stream.buffer += text;
+    stream.observedChars += text.length;
+    stream.observedHash.update(text);
+    if (Buffer.byteLength(stream.buffer, "utf8") > VOICE_STREAM_BUFFER_LIMIT_BYTES) {
+      stream.fallbackToTerminal = true;
+      stream.buffer = "";
+      this.clearVoiceStreamTimer(stream);
+      return;
+    }
+    if (!this.realtimeSessionId || stream.fallbackToTerminal) return;
+    this.flushVoiceStream(stream, "eager");
+    this.scheduleVoiceStreamFlush(stream);
+  }
+
+  private flushVoiceStream(stream: VoiceStreamState, mode: VoiceStreamFlushMode): boolean {
+    if (!this.realtimeSessionId
+      || stream.fallbackToTerminal
+      || this.cancelledVoiceTurns.has(stream.turnId)
+      || this.pendingVoiceChunks.size >= VOICE_STREAM_MAX_PENDING) return false;
+    const chunk = takeVoiceStreamChunk(stream.buffer, mode);
+    if (!chunk) return false;
+    const startOffset = stream.emittedChars;
+    const endOffset = startOffset + chunk.text.length;
+    const delivery = streamingVoiceDelivery({
+      sourceTurnId: stream.turnId,
+      chunkIndex: stream.nextChunkIndex,
+      startOffset,
+      endOffset,
+      text: chunk.text,
+    });
+    this.emit({ kind: "voice-chunk", turnId: stream.turnId, delivery });
+    if (this.ledgerFailed) return false;
+    this.pendingVoiceChunks.set(delivery.deliveryId, stream.turnId);
+    stream.nextChunkIndex += 1;
+    stream.emittedChars = endOffset;
+    stream.emittedHash.update(chunk.text);
+    stream.buffer = chunk.remainder;
+    return true;
+  }
+
+  private scheduleVoiceStreamFlush(stream: VoiceStreamState): void {
+    this.clearVoiceStreamTimer(stream);
+    if (!stream.buffer
+      || !this.realtimeSessionId
+      || stream.fallbackToTerminal
+      || this.cancelledVoiceTurns.has(stream.turnId)) return;
+    stream.timer = setTimeout(() => {
+      stream.timer = null;
+      const flushed = this.flushVoiceStream(stream, "deadline");
+      if (flushed && stream.buffer.length > 0 && this.pendingVoiceChunks.size < VOICE_STREAM_MAX_PENDING) {
+        this.scheduleVoiceStreamFlush(stream);
+      }
+    }, VOICE_STREAM_FLUSH_DELAY_MS);
+  }
+
+  private clearVoiceStreamTimer(stream: VoiceStreamState): void {
+    if (!stream.timer) return;
+    clearTimeout(stream.timer);
+    stream.timer = null;
+  }
+
+  private clearVoiceStreamTimers(): void {
+    for (const stream of this.voiceStreams.values()) this.clearVoiceStreamTimer(stream);
+  }
+
+  private resetVoiceStreamSegment(stream: VoiceStreamState): void {
+    this.clearVoiceStreamTimer(stream);
+    stream.segmentIndex += 1;
+    stream.buffer = "";
+    stream.observedChars = 0;
+    stream.emittedChars = 0;
+    stream.observedHash = createHash("sha256");
+    stream.emittedHash = createHash("sha256");
+    stream.fallbackToTerminal = false;
+  }
+
+  private finalizeVoiceStreamItem(turnId: string, item: unknown): RuntimeVoiceResponse | null | undefined {
+    const stream = this.voiceStreams.get(turnId);
+    const terminal = terminalVoiceResponse(item, `voice-final:${turnId}:${stream?.segmentIndex ?? 0}`);
+    if (!terminal) return undefined;
+    /* Legacy terminal-only turns keep the historical event shape. The
+       projection layer derives their complete voice response. An explicit
+       override is needed only after streaming has emitted or buffered text. */
+    if (!stream || stream.observedChars === 0) return undefined;
+    this.clearVoiceStreamTimer(stream);
+    const emittedPrefix = terminal.text.slice(0, stream.emittedChars);
+    const emittedMatches = createHash("sha256").update(emittedPrefix).digest("hex")
+      === stream.emittedHash.copy().digest("hex");
+    const observedPrefix = terminal.text.slice(0, stream.observedChars);
+    const observedMatches = stream.observedChars <= terminal.text.length
+      && createHash("sha256").update(observedPrefix).digest("hex")
+        === stream.observedHash.copy().digest("hex");
+    if (emittedMatches && observedMatches && !stream.fallbackToTerminal) {
+      this.flushVoiceStream(stream, "final");
+    }
+    const offset = emittedMatches ? stream.emittedChars : 0;
+    const suffix = terminal.text.slice(offset);
+    if (!emittedMatches || !observedMatches) {
+      console.warn("[realtime voice stream] terminal reconciliation used bounded fallback", {
+        turnId,
+        emittedChars: stream.emittedChars,
+        observedChars: stream.observedChars,
+        emittedMatches,
+        observedMatches,
+      });
+    }
+    this.resetVoiceStreamSegment(stream);
+    if (!suffix) return null;
+    return {
+      responseId: offset > 0 ? `${terminal.responseId}:suffix:${offset}` : terminal.responseId,
+      text: suffix,
+    };
+  }
+
+  private cancelVoiceStream(turnId: string): void {
+    const stream = this.voiceStreams.get(turnId);
+    if (stream) this.clearVoiceStreamTimer(stream);
+    this.voiceStreams.delete(turnId);
+    this.cancelledVoiceTurns.add(turnId);
+    for (const [deliveryId, sourceTurnId] of this.pendingVoiceChunks) {
+      if (sourceTurnId === turnId) this.pendingVoiceChunks.delete(deliveryId);
+    }
+  }
+
+  private resumeVoiceStreams(): void {
+    if (!this.realtimeSessionId) return;
+    for (const stream of this.voiceStreams.values()) {
+      if (this.cancelledVoiceTurns.has(stream.turnId)) continue;
+      stream.fallbackToTerminal = false;
+      this.flushVoiceStream(stream, "eager");
+      this.scheduleVoiceStreamFlush(stream);
+    }
+  }
+
   async deliverRealtimeWorkerResponse(
     value: RuntimeVoiceDelivery,
   ): Promise<{ deliveryId: string; acknowledged: true }> {
     const delivery = normalizeVoiceDeliveries([value])[0];
     if (!delivery || !delivery.ready || delivery.deliveryId !== value.deliveryId) {
       throw new Error("Realtime worker delivery is invalid");
+    }
+    if (delivery.sourceTurnId && this.cancelledVoiceTurns.has(delivery.sourceTurnId)) {
+      throw new Error("Realtime worker delivery belongs to an interrupted turn");
     }
     const digest = createHash("sha256")
       .update(JSON.stringify(delivery.responses))
@@ -1066,6 +1250,15 @@ export class CodexAppServerHost implements EngineHost {
       offset,
       acknowledged: true,
     });
+    const sourceTurnId = this.pendingVoiceChunks.get(delivery.deliveryId);
+    if (sourceTurnId) {
+      this.pendingVoiceChunks.delete(delivery.deliveryId);
+      const stream = this.voiceStreams.get(sourceTurnId);
+      if (stream && !this.cancelledVoiceTurns.has(sourceTurnId)) {
+        this.flushVoiceStream(stream, "eager");
+        this.scheduleVoiceStreamFlush(stream);
+      }
+    }
     return { deliveryId: delivery.deliveryId, acknowledged: true };
   }
 
@@ -1079,6 +1272,10 @@ export class CodexAppServerHost implements EngineHost {
     /* An operator hanging up is not a failure to report back to them. */
     this.realtimeFailure = null;
     this.realtimeSessionId = null;
+    for (const stream of this.voiceStreams.values()) {
+      this.clearVoiceStreamTimer(stream);
+      stream.fallbackToTerminal = true;
+    }
   }
 
   async answer(attentionRef: string, value: unknown): Promise<void> {
@@ -1223,6 +1420,7 @@ export class CodexAppServerHost implements EngineHost {
 
   private finishRelease(): void {
     if (this.released) return;
+    this.clearVoiceStreamTimers();
     if (this.failureCleanupTimer) {
       clearTimeout(this.failureCleanupTimer);
       this.failureCleanupTimer = null;
@@ -1352,6 +1550,10 @@ export class CodexAppServerHost implements EngineHost {
     const stored = this.eventStore.load(this.identity.threadId);
     const currentAttentions = new Map([...this.attentions].filter(([, attention]) => attention.origin === "current"));
     this.attentions.clear();
+    this.clearVoiceStreamTimers();
+    this.voiceStreams.clear();
+    this.pendingVoiceChunks.clear();
+    this.cancelledVoiceTurns.clear();
     this.events.splice(0, this.events.length, ...stored);
     this.cursor = reconcileRuntimeEventCursor(
       this.identity.threadId,
@@ -1360,8 +1562,40 @@ export class CodexAppServerHost implements EngineHost {
       this.onEventCursorRecovery,
     );
     for (const event of stored) {
-      if (event.kind === "turn-started") this.activeTurnId = event.turnId;
-      if (event.kind === "turn-ended" && event.turnId === this.activeTurnId) this.activeTurnId = null;
+      if (event.kind === "turn-started") {
+        this.cancelledVoiceTurns.delete(event.turnId);
+        this.activeTurnId = event.turnId;
+      }
+      if (event.kind === "delta") this.observeVoiceDelta(event.turnId, event.text);
+      if (event.kind === "voice-chunk") {
+        const delivery = normalizeVoiceDeliveries([event.delivery])[0];
+        const response = delivery?.responses[0];
+        const stream = delivery?.sourceTurnId ? this.voiceStream(delivery.sourceTurnId) : null;
+        if (delivery?.streamChunk && response && stream
+          && delivery.streamChunk.startOffset === stream.emittedChars
+          && stream.buffer.startsWith(response.text)) {
+          stream.buffer = stream.buffer.slice(response.text.length);
+          stream.emittedChars = delivery.streamChunk.endOffset;
+          stream.emittedHash.update(response.text);
+          stream.nextChunkIndex = Math.max(stream.nextChunkIndex, delivery.streamChunk.index + 1);
+          this.pendingVoiceChunks.set(delivery.deliveryId, delivery.sourceTurnId!);
+        } else if (stream) {
+          stream.fallbackToTerminal = true;
+          stream.buffer = "";
+        }
+      }
+      if (event.kind === "item" && event.phase === "completed" && event.turnId
+        && terminalVoiceResponse(event.item, "restored")) {
+        const stream = this.voiceStreams.get(event.turnId);
+        if (stream) this.resetVoiceStreamSegment(stream);
+      }
+      if (event.kind === "turn-ended") {
+        if (event.turnId === this.activeTurnId) this.activeTurnId = null;
+        const stream = this.voiceStreams.get(event.turnId);
+        if (stream) this.clearVoiceStreamTimer(stream);
+        this.voiceStreams.delete(event.turnId);
+        if (event.status !== "completed") this.cancelledVoiceTurns.add(event.turnId);
+      }
       if (event.kind === "attention") {
         this.attentions.set(event.id, { rpcId: "restored", method: event.method, origin: "restored" });
       }
@@ -1382,6 +1616,7 @@ export class CodexAppServerHost implements EngineHost {
           offset: previous?.offset ?? 0,
           acknowledged: true,
         });
+        this.pendingVoiceChunks.delete(event.deliveryId);
       }
       if (event.kind === "session-status") {
         this.engineStatus = event.status;
@@ -1936,6 +2171,7 @@ export class CodexAppServerHost implements EngineHost {
       pending.started = true;
       pending.realtimeSessionId = stringField(params, "realtimeSessionId");
       this.realtimeSessionId = pending.realtimeSessionId;
+      this.resumeVoiceStreams();
       this.resolveRealtimeStart();
       return;
     }
@@ -1988,6 +2224,7 @@ export class CodexAppServerHost implements EngineHost {
         const historicalTerminal = this.events.some((event) => event.kind === "turn-ended" && event.turnId === turnId);
         if (historicalStart && (historicalTerminal || this.activeTurnId !== null)) return;
       }
+      this.cancelledVoiceTurns.delete(turnId);
       this.activeTurnId = turnId;
       this.emit({ kind: "turn-started", turnId });
       return;
@@ -1998,7 +2235,10 @@ export class CodexAppServerHost implements EngineHost {
         turnId: turnId ?? this.activeTurnId ?? "unknown",
         text: stringField(params, "delta") ?? "",
       };
-      if (!reconcileBufferedLifecycle || !this.consumeBufferedNotification(event)) this.emit(event);
+      if (!reconcileBufferedLifecycle || !this.consumeBufferedNotification(event)) {
+        this.emit(event);
+        this.observeVoiceDelta(event.turnId, event.text);
+      }
       return;
     }
     if ((method === "item/started" || method === "item/completed") && "item" in params) {
@@ -2020,7 +2260,16 @@ export class CodexAppServerHost implements EngineHost {
           this.emit({ kind: "turn-started", turnId: eventTurnId });
         }
       }
-      this.emit({ kind: "item", turnId: eventTurnId, item: this.boundImageBodies(params.item), phase });
+      const voiceResponse = phase === "completed" && eventTurnId
+        ? this.finalizeVoiceStreamItem(eventTurnId, params.item)
+        : undefined;
+      this.emit({
+        kind: "item",
+        turnId: eventTurnId,
+        item: this.boundImageBodies(params.item),
+        phase,
+        ...(voiceResponse !== undefined ? { voiceResponse } : {}),
+      });
       return;
     }
     if (method === "turn/completed" && turnId) {
@@ -2033,6 +2282,13 @@ export class CodexAppServerHost implements EngineHost {
       if (reconcileBufferedLifecycle
         && !this.events.some((event) => event.kind === "turn-started" && event.turnId === turnId)) {
         this.emit({ kind: "turn-started", turnId });
+      }
+      if (status !== "completed") {
+        this.cancelVoiceStream(turnId);
+      } else {
+        const stream = this.voiceStreams.get(turnId);
+        if (stream) this.clearVoiceStreamTimer(stream);
+        this.voiceStreams.delete(turnId);
       }
       this.emit({ kind: "turn-ended", turnId, status });
       return;
@@ -2049,6 +2305,7 @@ export class CodexAppServerHost implements EngineHost {
 
   private fail(error: Error, activeFlags: string[] = []): void {
     if (this.dead || this.released) return;
+    this.clearVoiceStreamTimers();
     this.dead = true;
     this.failure = error;
     this.activeTurnId = null;

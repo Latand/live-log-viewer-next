@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import { streamingVoiceDelivery } from "./voiceDelivery";
 import { projectEngineHostEvent } from "./engineHostEvents";
 
 describe("projectEngineHostEvent", () => {
@@ -85,6 +86,33 @@ describe("projectEngineHostEvent", () => {
     });
     expect(new TextEncoder().encode((projected?.payload.voiceResponse as { text: string }).text).length)
       .toBeGreaterThan(64 * 1024);
+  });
+
+  test("projects an early semantic chunk and lets an explicit terminal override suppress replay", () => {
+    const delivery = streamingVoiceDelivery({
+      sourceTurnId: "turn-stream",
+      chunkIndex: 0,
+      startOffset: 0,
+      endOffset: 19,
+      text: "substantial phrase ",
+    });
+    expect(projectEngineHostEvent("conversation_voice", "codex:thread-voice", {
+      kind: "voice-chunk",
+      turnId: "turn-stream",
+      delivery,
+      seq: 13,
+    })).toMatchObject({
+      kind: "voice-chunk",
+      payload: { conversationId: "conversation_voice", turnId: "turn-stream", voiceDelivery: delivery },
+    });
+    expect(projectEngineHostEvent("conversation_voice", "codex:thread-voice", {
+      kind: "item",
+      turnId: "turn-stream",
+      item: { type: "agentMessage", id: "response-stream", text: "substantial phrase " },
+      phase: "completed",
+      voiceResponse: null,
+      seq: 14,
+    })?.payload.voiceResponse).toBeUndefined();
   });
 
   test("projects durable receiver acknowledgement onto the pending session delivery", () => {

@@ -26,7 +26,10 @@ export interface RealtimeSurface {
   start(): Promise<void>;
   stop(): Promise<void>;
   updateWorkerProgress(turnId: string, progress: string, running: boolean): void;
-  reconcileWorkerDeliveries(deliveries: readonly RuntimeVoiceDelivery[]): void;
+  reconcileWorkerDeliveries(
+    deliveries: readonly RuntimeVoiceDelivery[],
+    options?: { authoritative?: boolean },
+  ): void;
   /** #691 §6: this call's credential, presented on every write into it and on every
       read of the inbox that carries its deploy nonces. */
   realtimeSession(): string | null;
@@ -147,7 +150,7 @@ export function useCodexRealtime(
     client.updateWorkerProgress(workerTurnId, workerProgress, workerRunning);
   }, [client, snapshot.phase, workerProgress, workerRunning, workerTurnId]);
   useEffect(() => {
-    client?.reconcileWorkerDeliveries(workerDeliveries);
+    client?.reconcileWorkerDeliveries(workerDeliveries, { authoritative: true });
   }, [client, snapshot.phase, workerDeliveries]);
 
   /* The ambient lease deliberately does NOT live here any more: this hook is
