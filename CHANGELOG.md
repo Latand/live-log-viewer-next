@@ -2,9 +2,12 @@
 
 All notable changes to `agent-log-viewer` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
-versions follow [SemVer](https://semver.org/) (0.x — the API may still move).
+versions follow [SemVer](https://semver.org/), including its compatibility
+guarantees for the 1.x series.
 
 ## [Unreleased]
+
+## [1.0.0] — 2026-07-31
 
 ### Fixed
 - An agent asking for the operator's attention reaches the desktop that is
@@ -460,7 +463,8 @@ Initial public release, packaged as `agent-log-viewer` with a `bunx` CLI.
 - Implement→review flows with fresh headless reviewer rounds.
 - Remote access over Tailscale behind a token gate.
 
-[Unreleased]: https://github.com/Latand/live-log-viewer-next/compare/v0.11.2...HEAD
+[Unreleased]: https://github.com/Latand/live-log-viewer-next/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/Latand/live-log-viewer-next/compare/v0.11.7...v1.0.0
 [0.11.2]: https://github.com/Latand/live-log-viewer-next/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/Latand/live-log-viewer-next/compare/v0.10.0...v0.11.1
 [0.10.0]: https://github.com/Latand/live-log-viewer-next/compare/v0.9.3...v0.10.0
