@@ -5,6 +5,7 @@ import { agentRegistry } from "@/lib/agent/registry";
 import { statePath } from "@/lib/configDir";
 import { buildFilesResponse } from "./response";
 import { cachedFileScan } from "@/lib/scanner/scanCache";
+import { buildFilesResponseInWorker, filesResponseWorkerEnabled } from "@/lib/scanner/filesResponseWorker";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -110,18 +111,26 @@ async function projectionFor(
   const promise = (async () => {
     const headers = new Headers(request.headers);
     headers.delete("if-none-match");
-    const projectionRequest = new Request(request.url, { headers });
-    const response = await buildFilesResponse(projectionRequest, {
-      listFilesWithProjectCatalog: async () => {
-        return { ...scan.snapshot, pinOverlayPaths: scan.pinOverlayPaths };
-      },
-    });
-    const representation = {
-      body: await response.text(),
-      contentType: response.headers.get("content-type") ?? "application/json",
-      etag: response.headers.get("etag") ?? "",
-      timing: response.headers.get("server-timing") ?? "",
-    };
+    const snapshot = { ...scan.snapshot, pinOverlayPaths: scan.pinOverlayPaths };
+    let representation: ProjectionRepresentation;
+    if (filesResponseWorkerEnabled()) {
+      representation = await buildFilesResponseInWorker({
+        type: "project",
+        url: request.url,
+        headers: [...headers.entries()],
+        snapshot,
+      });
+    } else {
+      const response = await buildFilesResponse(new Request(request.url, { headers }), {
+        listFilesWithProjectCatalog: async () => snapshot,
+      });
+      representation = {
+        body: await response.text(),
+        contentType: response.headers.get("content-type") ?? "application/json",
+        etag: response.headers.get("etag") ?? "",
+        timing: response.headers.get("server-timing") ?? "",
+      };
+    }
     rememberProjection(key, representation);
     return representation;
   })();
