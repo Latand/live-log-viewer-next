@@ -3,7 +3,10 @@ import net from "node:net";
 import type { RuntimeEventInput, RuntimeOperationCommand, RuntimeOperationResult, RuntimePendingEffect, RuntimeReceiptStatus, RuntimeReplay, RuntimeRetryOptions, RuntimeSnapshot, RuntimeSocketRequest, RuntimeSocketResponse, ViewerDeploymentReceipt, ViewerDeploymentRequest, ViewerDeploymentStatus } from "./contracts";
 import { runtimeHostSocket } from "./flags";
 
-const MAX_RESPONSE_FRAME_BYTES = 8 * 1024 * 1024;
+// Exact-SHA handoff briefly pairs the new Viewer with the previous runtime
+// host. Its pre-compaction snapshot can exceed 8 MiB; the successor host
+// projects dead-session live text away and returns to the smaller steady state.
+const MAX_RESPONSE_FRAME_BYTES = 16 * 1024 * 1024;
 export const RUNTIME_SNAPSHOT_REQUEST_TIMEOUT_MS = 10_000;
 export const VIEWER_DEPLOYMENT_REQUEST_TIMEOUT_MS = 120_000;
 
