@@ -29,8 +29,18 @@ type ProjectionResult = {
   cacheStatus: "hit" | "joined" | "miss" | "stale";
 };
 type CachedProjection = { key: string; representation: ProjectionRepresentation };
+type PersistedProjection = {
+  version: 1;
+  bodyFile: string;
+  contentType: string;
+  etag: string;
+  timing: string;
+};
 
 const PROJECTION_CACHE_MAX = 32;
+const PERSISTED_PROJECTION_META_FILE = "files-response-cache.json";
+const PERSISTED_PROJECTION_BODY_PREFIX = "files-response-cache-";
+const PERSISTED_PROJECTION_KEY_PREFIX = "persisted:";
 const PROJECTION_STATE_FILES = [
   "flows.json",
   "pipelines.json",
@@ -44,6 +54,8 @@ const projectionCacheStore = globalThis as typeof globalThis & {
   __llvFilesProjectionCache?: Map<string, CachedProjection>;
   __llvFilesProjectionInflight?: Map<string, Promise<ProjectionRepresentation>>;
   __llvFilesProjectionWorkerTail?: Promise<void>;
+  __llvFilesProjectionPersistenceTail?: Promise<void>;
+  __llvFilesPersistedProjectionChecked?: boolean;
 };
 
 function projectionCache(): Map<string, CachedProjection> {
@@ -68,11 +80,9 @@ function stateFileSignature(filename: string): string {
 
 function projectionBaseKey(
   scan: CachedScan,
-  selectedProject: string | undefined,
   pinnedPath: string | undefined,
 ): string {
   return createHash("sha1").update(JSON.stringify({
-    selectedProject: selectedProject ?? null,
     pinnedPath: pinnedPath ?? null,
     /* `generation` is the immutable identity of the published snapshot.
        Re-stringifying every file row on every poll burns the request thread
@@ -84,10 +94,9 @@ function projectionBaseKey(
 }
 
 function projectionScopeKey(
-  selectedProject: string | undefined,
   pinnedPath: string | undefined,
 ): string {
-  return JSON.stringify([selectedProject ?? null, pinnedPath ?? null]);
+  return JSON.stringify([pinnedPath ?? null]);
 }
 
 function projectionKey(baseKey: string): string {
@@ -115,6 +124,82 @@ function rememberProjection(scopeKey: string, key: string, representation: Proje
   }
 }
 
+function validPersistedProjection(value: unknown): value is PersistedProjection {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  return candidate.version === 1
+    && typeof candidate.bodyFile === "string"
+    && new RegExp(`^${PERSISTED_PROJECTION_BODY_PREFIX}[0-9a-f]{40}\\.json$`).test(candidate.bodyFile)
+    && typeof candidate.contentType === "string"
+    && typeof candidate.etag === "string"
+    && /^"[0-9a-f]{40}"$/.test(candidate.etag)
+    && typeof candidate.timing === "string";
+}
+
+function warmPersistedProjection(scopeKey: string, pinnedPath: string | undefined): void {
+  if (pinnedPath || projectionCacheStore.__llvFilesPersistedProjectionChecked) return;
+  projectionCacheStore.__llvFilesPersistedProjectionChecked = true;
+  try {
+    const metadata = JSON.parse(fs.readFileSync(statePath(PERSISTED_PROJECTION_META_FILE), "utf8")) as unknown;
+    if (!validPersistedProjection(metadata)) return;
+    const body = fs.readFileSync(statePath(metadata.bodyFile), "utf8");
+    const etag = `"${createHash("sha1").update(body).digest("hex")}"`;
+    if (etag !== metadata.etag) return;
+    rememberProjection(scopeKey, `${PERSISTED_PROJECTION_KEY_PREFIX}${etag}`, {
+      body,
+      contentType: metadata.contentType,
+      etag,
+      timing: metadata.timing,
+    });
+  } catch {
+    // A first run or interrupted cache write performs one live projection.
+  }
+}
+
+async function persistProjection(representation: ProjectionRepresentation): Promise<void> {
+  const digest = representation.etag.slice(1, -1);
+  if (!/^[0-9a-f]{40}$/.test(digest)) return;
+  const directory = statePath(".");
+  const bodyFile = `${PERSISTED_PROJECTION_BODY_PREFIX}${digest}.json`;
+  const bodyPath = statePath(bodyFile);
+  const metaPath = statePath(PERSISTED_PROJECTION_META_FILE);
+  const nonce = `${process.pid}-${Date.now()}`;
+  const bodyTemporary = `${bodyPath}.${nonce}.tmp`;
+  const metaTemporary = `${metaPath}.${nonce}.tmp`;
+  let previousBodyFile: string | undefined;
+  try {
+    const previous = JSON.parse(await fs.promises.readFile(metaPath, "utf8")) as unknown;
+    if (validPersistedProjection(previous)) previousBodyFile = previous.bodyFile;
+  } catch {
+    // The first completed projection has no predecessor.
+  }
+  await fs.promises.mkdir(directory, { recursive: true, mode: 0o700 });
+  await fs.promises.writeFile(bodyTemporary, representation.body, { encoding: "utf8", mode: 0o600 });
+  await fs.promises.rename(bodyTemporary, bodyPath);
+  const metadata: PersistedProjection = {
+    version: 1,
+    bodyFile,
+    contentType: representation.contentType,
+    etag: representation.etag,
+    timing: representation.timing,
+  };
+  await fs.promises.writeFile(metaTemporary, `${JSON.stringify(metadata)}\n`, { encoding: "utf8", mode: 0o600 });
+  await fs.promises.rename(metaTemporary, metaPath);
+  if (previousBodyFile && previousBodyFile !== bodyFile) {
+    await fs.promises.rm(statePath(previousBodyFile), { force: true });
+  }
+}
+
+function schedulePersistProjection(representation: ProjectionRepresentation): void {
+  if (process.env.NODE_ENV === "test" && process.env.LLV_FILES_PROJECTION_PERSIST_FOR_TEST !== "1") return;
+  const previous = projectionCacheStore.__llvFilesProjectionPersistenceTail ?? Promise.resolve();
+  const current = previous.catch(() => undefined).then(() => persistProjection(representation));
+  projectionCacheStore.__llvFilesProjectionPersistenceTail = current;
+  void current.catch((error) => {
+    console.error("[files projection cache] persistence failed", error);
+  });
+}
+
 async function projectionFor(
   scopeKey: string,
   key: string,
@@ -126,7 +211,10 @@ async function projectionFor(
 
   const current = projectionInflight().get(scopeKey);
   if (current) {
-    if (cached && request.headers.has("if-none-match")) {
+    if (cached && (
+      request.headers.has("if-none-match")
+      || cached.key.startsWith(PERSISTED_PROJECTION_KEY_PREFIX)
+    )) {
       return { representation: cached.representation, cacheStatus: "stale" };
     }
     return { representation: await current, cacheStatus: "joined" };
@@ -160,6 +248,9 @@ async function projectionFor(
       };
     }
     rememberProjection(scopeKey, key, representation);
+    if (scopeKey === projectionScopeKey(undefined)) {
+      schedulePersistProjection(representation);
+    }
     return representation;
   })();
   projectionInflight().set(scopeKey, promise);
@@ -167,6 +258,9 @@ async function projectionFor(
     if (projectionInflight().get(scopeKey) === promise) projectionInflight().delete(scopeKey);
   });
   if (cached && request.headers.has("if-none-match")) {
+    return { representation: cached.representation, cacheStatus: "stale" };
+  }
+  if (cached?.key.startsWith(PERSISTED_PROJECTION_KEY_PREFIX)) {
     return { representation: cached.representation, cacheStatus: "stale" };
   }
   try {
@@ -220,9 +314,10 @@ export async function GET(request: Request): Promise<Response> {
     return response;
   }
 
-  const baseKey = projectionBaseKey(scan, selectedProject, pinnedPath);
+  const baseKey = projectionBaseKey(scan, pinnedPath);
   const key = projectionKey(baseKey);
-  const scopeKey = projectionScopeKey(selectedProject, pinnedPath);
+  const scopeKey = projectionScopeKey(pinnedPath);
+  warmPersistedProjection(scopeKey, pinnedPath);
   const projected = await projectionFor(scopeKey, key, request, scan);
   const notModified = request.headers.get("if-none-match") === projected.representation.etag;
   const projectionTiming = [
