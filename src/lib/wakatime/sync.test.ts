@@ -11,6 +11,7 @@ import {
   readProductionWakatimeCredential,
   readWakatimeCredentialFile,
   startWakatimeSync,
+  wakatimeProductionScan,
   type WakatimeStateV1,
   type WakatimeSyncDependencies,
 } from "./sync";
@@ -21,6 +22,46 @@ const TURN_START = NOW + 1_000;
 const TURN_END = NOW + 31_000;
 const PATH = "/sessions/current.jsonl";
 const TEST_CREDENTIAL = ["fixture", "wakatime", "value"].join("-");
+
+test("WakaTime sidecar reuses the Viewer snapshot without launching a corpus scan", async () => {
+  const persisted = { files: [], projectCatalog: [], complete: true };
+  let liveScans = 0;
+
+  const snapshot = await wakatimeProductionScan(
+    { LLV_WAKATIME_SYNC_WORKER: "1" },
+    () => persisted,
+    async () => {
+      liveScans += 1;
+      return {
+        snapshot: { files: [], projectCatalog: [], complete: true },
+        generation: 1,
+        targetGeneration: 1,
+        cacheStatus: "hit",
+        requestCount: 1,
+        cloneDurationMs: 0,
+      };
+    },
+  );
+
+  expect(snapshot).toBe(persisted);
+  expect(liveScans).toBe(0);
+});
+
+test("WakaTime sidecar waits for the Viewer to publish its first snapshot", async () => {
+  let liveScans = 0;
+
+  const snapshot = await wakatimeProductionScan(
+    { LLV_WAKATIME_SYNC_WORKER: "1" },
+    () => undefined,
+    async () => {
+      liveScans += 1;
+      throw new Error("live scan should stay in the Viewer process");
+    },
+  );
+
+  expect(snapshot).toEqual({ files: [], projectCatalog: [], complete: false });
+  expect(liveScans).toBe(0);
+});
 
 function entry(overrides: Partial<FileEntry> = {}): FileEntry {
   return {
