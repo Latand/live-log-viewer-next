@@ -14,6 +14,7 @@ import { loadFlows } from "@/lib/flows/store";
 import { reviewOutcomeFor } from "@/lib/flows/reviewOutcome";
 import { overlayPromptDisplayTitles } from "@/lib/displayNames";
 import { projectAliasSnapshot } from "@/lib/projects/aliases";
+import { projectIdentityFromRepositoryRoot } from "@/lib/projects/identity";
 import { projectRestoredFlows } from "@/lib/flows/visibility";
 import { reconcileEmbeddedReviewFlows } from "@/lib/pipelines/engine";
 import { loadPipelinesForProjection } from "@/lib/pipelines/store";
@@ -73,6 +74,44 @@ function projectedProjectCatalog(
     groups.set(project, group);
   }
   return [...groups.values()].sort((left, right) => right.smt - left.smt || left.project.localeCompare(right.project));
+}
+
+export function consolidateProjectCatalogByRepository(entries: readonly ProjectCatalogEntry[]): {
+  projectCatalog: ProjectCatalogEntry[];
+  projectRemap: Map<string, string>;
+} {
+  const groups = new Map<string, ProjectCatalogEntry[]>();
+  for (const entry of entries) {
+    const key = entry.repository
+      ? `repository:${entry.repository.toLowerCase()}`
+      : `project:${entry.project}`;
+    const group = groups.get(key) ?? [];
+    group.push(entry);
+    groups.set(key, group);
+  }
+  const projectRemap = new Map<string, string>();
+  const projectCatalog: ProjectCatalogEntry[] = [];
+  for (const group of groups.values()) {
+    const repositoryIdentity = group
+      .map((entry) => entry.projectRoot ? projectIdentityFromRepositoryRoot(entry.projectRoot) : null)
+      .find((identity) => identity !== null);
+    const canonical = repositoryIdentity?.project
+      ?? group.find((entry) => /^repo-[0-9a-f]{32}$/.test(entry.project))?.project
+      ?? group[0]!.project;
+    for (const entry of group) projectRemap.set(entry.project, canonical);
+    const preferred = group.find((entry) => entry.project === canonical) ?? group[0]!;
+    projectCatalog.push({
+      ...preferred,
+      project: canonical,
+      displayName: repositoryIdentity?.displayName ?? preferred.displayName,
+      smt: Math.max(...group.map((entry) => entry.smt)),
+      conversations: group.reduce((total, entry) => total + entry.conversations, 0),
+      projectRoot: preferred.projectRoot ?? group.find((entry) => entry.projectRoot)?.projectRoot,
+      repository: preferred.repository ?? group.find((entry) => entry.repository)?.repository ?? null,
+    });
+  }
+  projectCatalog.sort((left, right) => right.smt - left.smt || left.project.localeCompare(right.project));
+  return { projectCatalog, projectRemap };
 }
 
 export async function buildFilesResponse(request: Request, dependencies: FilesRouteDependencies): Promise<NextResponse> {
@@ -507,7 +546,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
       ? conversationLookup.canonicalConversationId(conversationId as `conversation_${string}`)
       : conversationId,
   );
-  const workflows = filterWorkflowsForFileScan(loadWorkflows(), files);
+  let workflows = filterWorkflowsForFileScan(loadWorkflows(), files);
   /* The pipelines store fails closed on malformed or future-schema state
      (both viewer instances share one config dir, so skew is a normal
      condition) — that must degrade to "pipelines unavailable", never take
@@ -543,12 +582,20 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   const projectsStartedAt = performance.now();
   const projected = projectRateLimitReadModel(files, flows, registrySnapshot);
   markTiming("files-project-rate-limits");
-  const effectiveProjectCatalog = projectedProjectCatalog(projectCatalog, registrySnapshot);
+  let effectiveProjectCatalog = projectedProjectCatalog(projectCatalog, registrySnapshot);
   /* GitHub repository identity for readiness issue links (issue #290): cached
      per project root from local .git/config, nullable on any failure. */
   for (const entry of effectiveProjectCatalog) {
     entry.repository = entry.projectRoot ? repositoryForProjectRoot(entry.projectRoot) : null;
   }
+  const consolidated = consolidateProjectCatalogByRepository(effectiveProjectCatalog);
+  effectiveProjectCatalog = consolidated.projectCatalog;
+  const remapProject = (project: string): string => consolidated.projectRemap.get(project) ?? project;
+  projected.files = projected.files.map((file) => ({ ...file, project: remapProject(file.project) }));
+  projected.flows = projected.flows.map((flow) => ({ ...flow, project: remapProject(flow.project) }));
+  pipelines = pipelines.map((pipeline) => ({ ...pipeline, project: remapProject(pipeline.project) }));
+  workflows = workflows.map((workflow) => ({ ...workflow, project: remapProject(workflow.project) }));
+  tasks.tasks = tasks.tasks.map((task) => ({ ...task, project: remapProject(task.project) }));
   const projectNames = new Map(effectiveProjectCatalog.map((entry) => [entry.project, entry.displayName] as const));
   for (const file of projected.files) {
     file.projectName = projectNames.get(file.project) ?? file.projectName;
@@ -578,6 +625,11 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     mirrorDirty: registryDiagnostics.mirrorDirty,
   };
   const projectAliases = projectAliasSnapshot();
+  const effectiveProjectAliases = { ...projectAliases.aliases };
+  for (const [source, target] of consolidated.projectRemap) {
+    delete effectiveProjectAliases[target];
+    if (source !== target) effectiveProjectAliases[source] = target;
+  }
   const projectDisplayNames = { ...projectAliases.displayNames };
   for (const entry of effectiveProjectCatalog) {
     if (entry.displayName?.trim()) projectDisplayNames[entry.project] = entry.displayName;
@@ -593,7 +645,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     files: projected.files,
     ...(responsePinOverlayPaths.size ? { pinOverlayPaths: [...responsePinOverlayPaths] } : {}),
     projectCatalog: effectiveProjectCatalog,
-    projectAliases: projectAliases.aliases,
+    projectAliases: effectiveProjectAliases,
     projectDisplayNames,
     ...(Object.keys(projectCwds).length ? { projectCwds } : {}),
     flows: projected.flows,
