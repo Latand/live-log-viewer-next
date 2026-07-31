@@ -352,6 +352,21 @@ async function verifyViewer(candidate: ViewerReleaseIdentity, endpoint: string, 
   });
 }
 
+export function mcpProbeEnvironment(
+  endpoint: string,
+  deployTarget: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  return {
+    ...Object.fromEntries(Object.entries(withoutWakatimeCredential(env))
+      .filter((entry): entry is [string, string] => typeof entry[1] === "string")),
+    LLV_VIEWER_DEPLOY_TARGET: deployTarget,
+    // Candidate health must exercise the candidate's web/runtime client. The
+    // stable listener still serves the previous generation before promotion.
+    LLV_VIEWER_CONTROL_URL: endpoint,
+  };
+}
+
 async function verify(
   candidate: ViewerReleaseIdentity,
   endpoint: string,
@@ -371,9 +386,7 @@ async function verify(
     ? targetFile
     : path.join(stateDir, `mcp-candidate-probe-${candidate.mcpRuntime.releaseId}.json`);
   if (!promoted) writeReleaseTarget(probeTarget, candidate);
-  const probeEnvironment = Object.fromEntries(Object.entries(withoutWakatimeCredential(process.env))
-    .filter((entry): entry is [string, string] => typeof entry[1] === "string"));
-  probeEnvironment.LLV_VIEWER_DEPLOY_TARGET = probeTarget;
+  const probeEnvironment = mcpProbeEnvironment(endpoint, probeTarget);
   const mcpRuntime = await probeMcpRuntime({
     command: process.execPath,
     args: [path.join(mcpRuntimeRoot, "bin", "mcp-server.mjs")],
@@ -475,9 +488,7 @@ async function reconcileMcpRuntime(
   try {
     mcpRuntimeStore.installStableLauncher(deploymentPackageRoot);
     const publication = switchTarget({ ...previous, mcpRuntime: runtime }, "activate");
-    const probeEnvironment = Object.fromEntries(Object.entries(withoutWakatimeCredential(process.env))
-      .filter((entry): entry is [string, string] => typeof entry[1] === "string"));
-    probeEnvironment.LLV_VIEWER_DEPLOY_TARGET = targetFile;
+    const probeEnvironment = mcpProbeEnvironment(stableEndpoint, targetFile);
     const health = await probeMcpRuntime({
       command: process.execPath,
       args: [path.join(mcpRuntimeRoot, "bin", "mcp-server.mjs")],

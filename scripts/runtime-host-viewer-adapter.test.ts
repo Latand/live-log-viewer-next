@@ -19,10 +19,25 @@ import {
 import { probeMcpRuntime } from "../src/runtime-host/mcpRuntimeProbe";
 import { RuntimeHostFence } from "../src/runtime-host/runtimeHostFence";
 import { serveRuntimeHost } from "../src/runtime-host/socket";
-import { runBootstrapRelease } from "./runtime-host-viewer-adapter";
+import { mcpProbeEnvironment, runBootstrapRelease } from "./runtime-host-viewer-adapter";
 
 const root = path.resolve(import.meta.dir, "..");
 const adapter = path.join(root, "scripts", "runtime-host-viewer-adapter.ts");
+
+test("candidate MCP probes read through the candidate Viewer endpoint", () => {
+  const environment = mcpProbeEnvironment(
+    "http://candidate.invalid",
+    "/state/candidate-target.json",
+    {
+      NODE_ENV: "test",
+      LLV_VIEWER_CONTROL_URL: "http://stable.invalid",
+      LLV_VIEWER_DEPLOY_TARGET: "/state/stable-target.json",
+    },
+  );
+
+  expect(environment.LLV_VIEWER_CONTROL_URL).toBe("http://candidate.invalid");
+  expect(environment.LLV_VIEWER_DEPLOY_TARGET).toBe("/state/candidate-target.json");
+});
 const release = {
   container: "viewer-current",
   endpoint: "http://127.0.0.1:19892",
@@ -97,6 +112,17 @@ test("documented bootstrap input obtains host-owned admission through the final 
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-bootstrap-admission-"));
   const state = path.join(sandbox, "state");
   const socketPath = path.join(state, "runtime-host.sock");
+  const control = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      const url = new URL(request.url);
+      if (url.pathname === "/api/runtime/deployments") {
+        return Response.json({ count: 0, deployments: [] });
+      }
+      return Response.json({ error: "not found" }, { status: 404 });
+    },
+  });
   const revision = "7".repeat(40);
   const candidate = {
     ...release,
@@ -120,6 +146,7 @@ test("documented bootstrap input obtains host-owned admission through the final 
     LLV_STATE_DIR: state,
     LLV_RUNTIME_EVENTS: "1",
     LLV_RUNTIME_HOST_SOCKET: socketPath,
+    LLV_VIEWER_CONTROL_URL: control.url.origin,
     LLV_AGENT_REGISTRY_SQLITE: "off",
     LLV_CODEX_HOME: path.join(sandbox, "codex"),
     LLV_CLAUDE_HOME: path.join(sandbox, "claude"),
@@ -186,6 +213,7 @@ test("documented bootstrap input obtains host-owned admission through the final 
     successor.acquire();
     successor.release();
   } finally {
+    control.stop(true);
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
 }, 20_000);
