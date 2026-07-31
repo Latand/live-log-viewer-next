@@ -717,6 +717,12 @@ export class RuntimeJournal {
         filesRevision: Number(this.meta("files_revision")),
         sessions: this.snapshotSessionValues().map((session) => ({
           ...session,
+          // A terminal host has no live stream to resume. The durable entity
+          // retains its audit state while the browser snapshot drops transient
+          // text that can otherwise dominate every reconnect frame.
+          ...((session.host === "dead" || session.host === "unhosted")
+            ? { liveTurn: null }
+            : {}),
           recentReceipts: visibleReceipts(session.recentReceipts).map(runtimePresentationReceipt),
         })),
         attentions: this.entityValues<RuntimeAttention>("attention"),
