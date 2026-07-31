@@ -5,6 +5,9 @@ import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
 import { agentRegistry, conversationLookupFromSnapshot, type AgentRegistry } from "@/lib/agent/registry";
 import { readTranscriptHosts } from "@/lib/agent/transcriptHost";
 import { yieldToRuntime } from "@/lib/cooperative";
+import { spawn, type ChildProcess } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 import { loadFlows, reconcileFlowConversationOwnershipCooperatively } from "@/lib/flows/store";
 import { reconcileHandoffConversationOwnershipCooperatively } from "@/lib/handoffLineage";
 import { listFilesWithProjectCatalog, reconcileFileControllers } from "@/lib/scanner";
@@ -16,6 +19,7 @@ import { pathForPanePid, reconcileTasks } from "@/lib/tasks/reconcile";
 import { mutateTasks } from "@/lib/tasks/store";
 import { reconcileWorkflowConversationOwnershipCooperatively } from "@/lib/workflows/store";
 import { paneInfo } from "@/lib/tmux";
+import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 
 import { reconcileMigrationInventory, reconcileMigrations, type HeldDeliveryPort } from "./coordinator";
 import { createMigrationDeliveryPort } from "./deliveryPort";
@@ -27,6 +31,7 @@ import { QuotaController } from "./quotaController";
 
 const CONTROLLER_INTERVAL_MS = 60_000;
 const INITIAL_INVENTORY_DELAY_MS = 1_000;
+const INVENTORY_WORKER_RESTART_MS = 1_000;
 
 const deliveryPort = createMigrationDeliveryPort();
 
@@ -210,19 +215,12 @@ const globalController = globalThis as unknown as {
   __llvAccountMigrationTimer?: ReturnType<typeof setInterval>;
   __llvAccountMigrationInitialTimer?: ReturnType<typeof setTimeout>;
   __llvAccountMigrationBootstrapStarted?: boolean;
+  __llvAccountMigrationInventoryWorker?: ChildProcess;
+  __llvAccountMigrationInventoryWorkerRestart?: ReturnType<typeof setTimeout>;
 };
 
-export async function startAccountMigrationController(): Promise<void> {
-  await yieldToRuntime();
-  const registry = agentRegistry();
-  const quota = new QuotaController(registry);
+function startInventoryController(registry: AgentRegistry, quota: QuotaController): void {
   const controller = globalController.__llvAccountMigrationController ??= new AccountMigrationController(registry, quota);
-  const fastController = globalController.__llvAccountMigrationFastController ??= new AccountMigrationController(
-    registry,
-    quota,
-    () => reconcileAccountMigrationCycle(registry, quota),
-  );
-  registerAccountMigrationTick(() => fastController.tick());
   if (!globalController.__llvAccountMigrationTimer) {
     const timer = setInterval(() => void controller.poll().catch(() => {
       console.error("[account migration controller] durable reconciliation tick failed");
@@ -232,17 +230,77 @@ export async function startAccountMigrationController(): Promise<void> {
   }
   if (!globalController.__llvAccountMigrationBootstrapStarted) {
     globalController.__llvAccountMigrationBootstrapStarted = true;
-    void fastController.tick().catch(() => {
-      console.error("[account migration controller] initial durable reconciliation failed");
-    }).finally(() => {
-      const timer = setTimeout(() => {
-        globalController.__llvAccountMigrationInitialTimer = undefined;
-        void controller.poll().catch(() => {
-          console.error("[account migration controller] initial inventory reconciliation failed");
-        });
-      }, INITIAL_INVENTORY_DELAY_MS);
-      timer.unref?.();
-      globalController.__llvAccountMigrationInitialTimer = timer;
-    });
+    const timer = setTimeout(() => {
+      globalController.__llvAccountMigrationInitialTimer = undefined;
+      void controller.poll().catch(() => {
+        console.error("[account migration controller] initial inventory reconciliation failed");
+      });
+    }, INITIAL_INVENTORY_DELAY_MS);
+    timer.unref?.();
+    globalController.__llvAccountMigrationInitialTimer = timer;
   }
+}
+
+function inventoryWorkerLaunch(cwd = process.cwd()): { executable: string; workerPath: string } {
+  const source = path.join(cwd, "src/lib/accountMigrationController.worker.ts");
+  const bundled = path.join(cwd, ".next/server/account-migration-controller-worker.js");
+  if (fs.existsSync(source) && fs.existsSync("/usr/local/bin/bun-container")) {
+    return { executable: "/usr/local/bin/bun-container", workerPath: source };
+  }
+  if (fs.existsSync(bundled)) return { executable: process.execPath, workerPath: bundled };
+  return { executable: process.execPath, workerPath: source };
+}
+
+function startInventoryControllerWorker(): void {
+  if (globalController.__llvAccountMigrationInventoryWorker) return;
+  const launch = inventoryWorkerLaunch();
+  const useNice = fs.existsSync("/usr/bin/nice");
+  const child = spawn(useNice ? "/usr/bin/nice" : launch.executable, [
+    ...(useNice ? ["-n", "10", launch.executable] : []),
+    launch.workerPath,
+  ], {
+    cwd: process.cwd(),
+    stdio: ["ignore", "inherit", "inherit"],
+    env: {
+      ...withoutWakatimeCredential(process.env),
+      LLV_ACCOUNT_CONTROLLER_INVENTORY_WORKER: "1",
+    },
+  });
+  globalController.__llvAccountMigrationInventoryWorker = child;
+  child.once("error", (error) => {
+    console.error("[account migration controller] inventory worker failed to start", error);
+  });
+  child.once("exit", (code, signal) => {
+    if (globalController.__llvAccountMigrationInventoryWorker === child) {
+      globalController.__llvAccountMigrationInventoryWorker = undefined;
+    }
+    if (globalController.__llvAccountMigrationInventoryWorkerRestart) return;
+    console.error("[account migration controller] inventory worker exited", { code, signal });
+    const timer = setTimeout(() => {
+      globalController.__llvAccountMigrationInventoryWorkerRestart = undefined;
+      startInventoryControllerWorker();
+    }, INVENTORY_WORKER_RESTART_MS);
+    timer.unref?.();
+    globalController.__llvAccountMigrationInventoryWorkerRestart = timer;
+  });
+}
+
+export async function startAccountMigrationController(): Promise<void> {
+  await yieldToRuntime();
+  const registry = agentRegistry();
+  const quota = new QuotaController(registry);
+  if (process.env.LLV_ACCOUNT_CONTROLLER_INVENTORY_WORKER === "1") {
+    startInventoryController(registry, quota);
+    return;
+  }
+  const fastController = globalController.__llvAccountMigrationFastController ??= new AccountMigrationController(
+    registry,
+    quota,
+    () => reconcileAccountMigrationCycle(registry, quota),
+  );
+  registerAccountMigrationTick(() => fastController.tick());
+  void fastController.tick().catch(() => {
+    console.error("[account migration controller] initial durable reconciliation failed");
+  });
+  startInventoryControllerWorker();
 }
