@@ -86,7 +86,10 @@ export interface FilesClientCache {
   /** Return only the representation previously certified for this request URL. */
   readScope(pinnedPath?: string | null): FilesData;
   revalidate(pinnedPath?: string | null, revision?: number): Promise<FilesData>;
-  subscribe(listener: (data: FilesData) => void, pinnedPath?: string | null): () => void;
+  subscribe(
+    listener: (data: FilesData, priority?: "background" | "urgent") => void,
+    pinnedPath?: string | null,
+  ): () => void;
   /** Layer one pipeline record over the server snapshot without a refetch — an
       optimistic local mutation (`confirmed: false`, held until reverted or
       confirmed) or a PATCH/POST echo (`confirmed: true`, held only until a scan
@@ -109,10 +112,13 @@ function equalValue(left: unknown, right: unknown): boolean {
 
 function patchRows<T>(previous: readonly T[], incoming: readonly T[], keyOf: (value: T) => string): T[] {
   const previousByKey = new Map(previous.map((value) => [keyOf(value), value] as const));
-  return incoming.map((value) => {
+  const patched = incoming.map((value) => {
     const cached = previousByKey.get(keyOf(value));
     return cached !== undefined && equalValue(cached, value) ? cached : value;
   });
+  return patched.length === previous.length && patched.every((value, index) => value === previous[index])
+    ? previous as T[]
+    : patched;
 }
 
 function parsedFilesData(parsed: FilesResponse | FileEntry[], requestScope: string): FilesData {
@@ -178,7 +184,10 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
   let snapshot = EMPTY;
   let disposed = false;
   const representations = new Map<string, { data: FilesData; etag?: string }>();
-  const listeners = new Map<(data: FilesData) => void, string>();
+  const listeners = new Map<
+    (data: FilesData, priority?: "background" | "urgent") => void,
+    string
+  >();
   const completionRetries = new Map<string, CompletionRetry>();
   let requestedGeneration = 0;
   let appliedGeneration = 0;
@@ -226,14 +235,17 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
   const exactScopeSnapshot = (pinnedPath?: string | null): FilesData =>
     exactScopeRepresentation(filesApiUrl(undefined, pinnedPath));
 
-  const publish = (requestScope?: string) => {
+  const publish = (
+    requestScope?: string,
+    priority: "background" | "urgent" = "background",
+  ) => {
     if (disposed) return;
     for (const [listener, scope] of listeners) {
       if (requestScope !== undefined) {
-        if (requestScope === scope) listener(withCatalogFailures(snapshot));
+        if (requestScope === scope) listener(withCatalogFailures(snapshot), priority);
         continue;
       }
-      listener(exactScopeRepresentation(scope));
+      listener(exactScopeRepresentation(scope), priority);
     }
   };
 
@@ -244,7 +256,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     const next = ok ? 0 : catalogFailures + 1;
     if (next === catalogFailures) return;
     catalogFailures = next;
-    publish();
+    publish(undefined, "urgent");
   };
 
   const hasSubscriber = (requestScope: string): boolean =>
@@ -526,17 +538,20 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
       minGeneration: confirmed ? requestedGeneration + 1 : Number.POSITIVE_INFINITY,
     });
     composePipelines();
-    publish();
+    publish(undefined, "urgent");
   };
 
   const revertPipeline = (id: string) => {
     if (disposed) return;
     if (!pipelineOverlays.delete(id)) return;
     composePipelines();
-    publish();
+    publish(undefined, "urgent");
   };
 
-  const subscribe = (listener: (data: FilesData) => void, pinnedPath?: string | null) => {
+  const subscribe = (
+    listener: (data: FilesData, priority?: "background" | "urgent") => void,
+    pinnedPath?: string | null,
+  ) => {
     if (disposed) return () => {};
     const requestScope = filesApiUrl(undefined, pinnedPath);
     listeners.set(listener, requestScope);
@@ -628,7 +643,11 @@ export function useFiles(_project?: string | null, pinnedPath?: string | null): 
         if (alive) setData(next);
       });
     };
-    const unsubscribeCache = cache.subscribe((next) => {
+    const unsubscribeCache = cache.subscribe((next, priority) => {
+      if (priority === "urgent") {
+        if (alive) setData(next);
+        return;
+      }
       publishBackgroundData(next);
     }, pinnedPath);
     const performLoad = async (revision?: number): Promise<boolean> => {

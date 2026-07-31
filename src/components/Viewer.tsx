@@ -124,6 +124,19 @@ export function Viewer() {
      card — every surface below sees only current generations. A no-op (same
      array identity) until something actually migrates. */
   const files = useMemo(() => withoutArchivedPredecessors(allFiles), [allFiles]);
+  const dashboardFilesRef = useRef<{ project: string; files: FileEntry[] } | null>(null);
+  const dashboardFiles = useMemo(() => {
+    if (project === OVERVIEW) return [];
+    const selected = files.filter((file) => projectKey(file) === project);
+    const previous = dashboardFilesRef.current;
+    const stable = previous?.project === project
+      && previous.files.length === selected.length
+      && selected.every((file, index) => file === previous.files[index])
+      ? previous.files
+      : selected;
+    dashboardFilesRef.current = { project, files: stable };
+    return stable;
+  }, [files, project]);
   useEffect(() => {
     publishConversationAvailability(new Set(allFiles.flatMap((file) => file.conversationId ? [file.conversationId] : [])));
   }, [allFiles]);
@@ -696,7 +709,7 @@ export function Viewer() {
           />
         ) : (
           <ProjectDashboard
-            files={files}
+            files={dashboardFiles}
             flows={flows}
             pipelines={pipelines}
             pipelinesError={pipelinesError}
