@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-import { agentRegistry } from "@/lib/agent/registry";
+import { agentRegistry, readOnlyConversationLookupFromSnapshot } from "@/lib/agent/registry";
 import { procBackend } from "@/lib/proc";
 import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { VIEWER_SPAWN_CAPABILITY_ENV, VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
@@ -48,6 +48,8 @@ import { loadTasks, mutateTasks, mutateTasksFile } from "@/lib/tasks/store";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 import { collectSnapshot } from "@/lib/view/collect";
+import { observeFiles } from "@/lib/scanner/observe";
+import { resolveSiblings } from "@/lib/view/siblings";
 import { hardenedRedact } from "@/lib/view/compactText";
 import { validateSnapshotRequest } from "@/lib/view/validation";
 
@@ -437,7 +439,11 @@ async function spawnAgent(args: McpToolArgs, control: ViewerControlDependencies)
   };
 }
 
-async function sendMessage(args: McpToolArgs, control: ViewerControlDependencies): Promise<McpToolPayload> {
+async function sendMessage(
+  args: McpToolArgs,
+  control: ViewerControlDependencies,
+  dependencies: Pick<ViewerMcpDomainDependencies, "registrySnapshot">,
+): Promise<McpToolPayload> {
   const conversationId = text(args.conversationId);
   const transcriptPath = text(args.transcriptPath) || text(args.path);
   if (!conversationId && !transcriptPath) throw new Error("conversationId or transcriptPath is required");
@@ -450,9 +456,15 @@ async function sendMessage(args: McpToolArgs, control: ViewerControlDependencies
     text: message,
     images: [],
   });
+  /* The registry's OWN lookup over the projection this call already holds (#845),
+     rather than a local reimplementation of it. The alias walk is multi-hop and
+     cycle-guarded and the path index covers continuity paths, so a send addressed by
+     a chained alias or a superseded path still names its owner — and it stays that way
+     without this file having to be kept in step by hand. */
+  const lookup = readOnlyConversationLookupFromSnapshot(dependencies.registrySnapshot());
   const conversation = conversationId
-    ? agentRegistry().conversation(conversationId as `conversation_${string}`)
-    : agentRegistry().conversationForPath(transcriptPath);
+    ? lookup.conversation(conversationId as `conversation_${string}`)
+    : lookup.conversationForPath(transcriptPath);
   return {
     conversationId: (conversation?.id ?? conversationId) || null,
     transcriptPath: (conversation?.generations.at(-1)?.path ?? transcriptPath) || null,
@@ -539,11 +551,38 @@ async function linkTaskToPipeline(args: McpToolArgs, dependencies: LinkTaskToPip
   return { taskId, pipelineId, task: result.task, conversationId, transcriptPath };
 }
 
-async function listConversations(args: McpToolArgs): Promise<McpToolPayload> {
+/**
+ * One completed generation, and a private pinned scan ONLY when it misses (#845).
+ *
+ * Every read of a single conversation used to force `fresh: true` with a pin, which
+ * is a full-corpus walk in an exclusive scan generation — per call, for a question
+ * the completed generation almost always already answers. The pin exists for the
+ * case it was built for: a transcript outside the recency cap, which the completed
+ * snapshot genuinely does not carry.
+ */
+async function entryForPath(
+  transcriptPath: string,
+  dependencies: Pick<ViewerMcpDomainDependencies, "listFiles" | "completedFileScan">,
+): Promise<FileEntry | undefined> {
+  const completed = (await dependencies.completedFileScan()).snapshot.files;
+  const known = completed.find((candidate) => candidate.path === transcriptPath);
+  if (known) return known;
+  const pinned = await dependencies.listFiles({ fresh: true, persist: false, pin: transcriptPath });
+  return pinned.find((candidate) => candidate.path === transcriptPath);
+}
+
+async function listConversations(
+  args: McpToolArgs,
+  dependencies: Pick<ViewerMcpDomainDependencies, "completedFileScan">,
+): Promise<McpToolPayload> {
   const project = text(args.project);
   const query = text(args.query).toLocaleLowerCase();
   const limit = Math.max(1, Math.min(100, integer(args.limit, 50)));
-  const files = await listFiles({ fresh: true, persist: false });
+  /* The COMPLETED generation, not a private fresh scan (#845). This is a listing:
+     it reads what the process already knows, the same corpus `board_snapshot`
+     reads. Forcing a full fresh scan per call meant every agent asking "what is
+     running" started another full-corpus walk beside the coordinator's own. */
+  const files = (await dependencies.completedFileScan()).snapshot.files;
   const conversations = files
     .filter((entry) => entry.engine === "claude" || entry.engine === "codex")
     .filter((entry) => !project || entry.project === project)
@@ -562,7 +601,7 @@ async function listConversations(args: McpToolArgs): Promise<McpToolPayload> {
 
 async function getConversation(
   args: McpToolArgs,
-  dependencies: Pick<ViewerMcpDomainDependencies, "listFiles">,
+  dependencies: Pick<ViewerMcpDomainDependencies, "listFiles" | "completedFileScan">,
 ): Promise<McpToolPayload> {
   const requestedId = text(args.conversationId);
   const requestedPath = text(args.transcriptPath) || text(args.path);
@@ -571,8 +610,7 @@ async function getConversation(
     ? agentRegistry().conversation(requestedId as `conversation_${string}`)
     : agentRegistry().conversationForPath(requestedPath);
   const transcriptPath = conversation?.generations.at(-1)?.path ?? requestedPath;
-  const files = await dependencies.listFiles({ fresh: true, persist: false, pin: transcriptPath });
-  const entry = files.find((candidate) => candidate.path === transcriptPath);
+  const entry = await entryForPath(transcriptPath, dependencies);
   if (!entry || (entry.engine !== "claude" && entry.engine !== "codex")) throw new Error("conversation not found");
   const session = readSession(entry.path, entry.engine);
   const maxRecords = Math.max(1, Math.min(500, integer(args.maxRecords, 100)));
@@ -1144,7 +1182,17 @@ async function operatorSnapshot(args: McpToolArgs, dependencies: ViewerMcpDomain
     schemaVersion: 1,
     ...withoutKeys(args, ["clientRequestId"]),
   });
-  return redactPayload({ ...await dependencies.collectSnapshot(request) });
+  /* Explicit dependencies rather than the module defaults (#845): the registry
+     projection is the one this call already holds, so a snapshot costs one
+     projection instead of materialising a second inside the collector. The corpus
+     walk is single-flight in `observeFiles`, so concurrent callers join one. */
+  return redactPayload({
+    ...await dependencies.collectSnapshot(request, {
+      observeFiles,
+      resolveSiblings,
+      registrySnapshot: dependencies.registrySnapshot,
+    }),
+  });
 }
 
 /**
@@ -1432,8 +1480,7 @@ async function focusTargetProject(
   if (isGeometricTarget(target)) return target.project;
   switch (target.kind) {
     case "conversation": {
-      const files = await dependencies.listFiles({ fresh: true, persist: false, pin: target.path });
-      const entry = files.find((candidate) => candidate.path === target.path);
+      const entry = await entryForPath(target.path, dependencies);
       if (!entry) throw new Error("no conversation on the board has that transcript path");
       return entry.project;
     }
@@ -1579,13 +1626,13 @@ export function viewerMcpBindings(
 ): McpToolBindings {
   return {
     spawn_agent: (args) => spawnAgent(args, controlDependencies),
-    send_message: (args) => sendMessage(args, controlDependencies),
+    send_message: (args) => sendMessage(args, controlDependencies, domainDependencies),
     create_task: createBoardTask,
     update_task: updateBoardTask,
     create_pipeline: createPipeline,
     pipeline_action: (args) => pipelineAction(args, domainDependencies),
     link_task_to_pipeline: (args) => linkTaskToPipeline(args, linkTaskDependencies),
-    list_conversations: listConversations,
+    list_conversations: (args) => listConversations(args, domainDependencies),
     get_conversation: (args) => getConversation(args, domainDependencies),
     deploy_exact_sha: (args) => deployExactSha(args, controlDependencies, domainDependencies),
     get_pipeline: getPipeline,
