@@ -35,6 +35,9 @@ export interface FileScanIntent {
       callers never merge into it — it still holds the process-wide
       single-generation lease and queues behind the running scan. */
   exclusive?: boolean;
+  /** This caller's lifetime. The shared generation stops after its final
+      subscriber leaves; one cancelled joiner never interrupts the others. */
+  signal?: AbortSignal | null;
 }
 
 interface ResolvedScanIntent {
@@ -42,21 +45,19 @@ interface ResolvedScanIntent {
   fresh: boolean;
 }
 
-export type CoordinatedScanRunner = (intent: ResolvedScanIntent) => Promise<FileCatalogScan>;
+export type CoordinatedScanRunner = (intent: ResolvedScanIntent, signal: AbortSignal) => Promise<FileCatalogScan>;
 
-interface InflightGeneration {
+interface ScanGeneration {
   generation: number;
   intent: ResolvedScanIntent;
   /** An exclusive generation's snapshot carries private scope (a pin overlay);
       joiners must never adopt it as the shared catalog. */
   exclusive: boolean;
-  promise: Promise<FileCatalogScan>;
-}
-
-interface PendingGeneration {
-  intent: ResolvedScanIntent;
   runner: CoordinatedScanRunner;
-  exclusive: boolean;
+  controller: AbortController;
+  subscribers: number;
+  started: boolean;
+  settled: boolean;
   promise: Promise<FileCatalogScan>;
   resolve: (snapshot: FileCatalogScan) => void;
   reject: (error: unknown) => void;
@@ -64,10 +65,10 @@ interface PendingGeneration {
 
 interface CoordinatorState {
   generation: number;
-  inflight?: InflightGeneration;
+  inflight?: ScanGeneration;
   /** FIFO of generations waiting for the single-generation lease. At most one
       entry is shared (non-exclusive); every other entry owns a private scope. */
-  queue: PendingGeneration[];
+  queue: ScanGeneration[];
   startScheduled: boolean;
 }
 
@@ -89,43 +90,88 @@ function covers(running: ResolvedScanIntent, wanted: ResolvedScanIntent): boolea
 export function runFileCatalogScan(
   intent: ResolvedScanIntent,
   options: Omit<FileScanOptions, "persist" | "fresh"> = {},
+  signal: AbortSignal = new AbortController().signal,
 ): Promise<FileCatalogScan> {
   const scanOptions: FileScanOptions = {
     ...options,
     persist: intent.persist,
     ...(intent.fresh ? { fresh: true } : {}),
   };
-  if (!fileScanWorkerEnabled()) return listFilesWithProjectCatalog(undefined, scanOptions);
+  if (signal.aborted) return Promise.reject(abortError(signal.reason));
+  if (!fileScanWorkerEnabled()) {
+    return listFilesWithProjectCatalog(undefined, { ...scanOptions, signal }).then((snapshot) => {
+      if (signal.aborted) throw abortError(signal.reason);
+      return snapshot;
+    });
+  }
   const { onResourceSnapshot, ...serializable } = scanOptions;
-  return collectFileScanInWorker(serializable, onResourceSnapshot);
+  return collectFileScanInWorker(serializable, onResourceSnapshot, { signal });
 }
 
-const defaultRunner: CoordinatedScanRunner = (intent) => runFileCatalogScan(intent);
+const defaultRunner: CoordinatedScanRunner = (intent, signal) => runFileCatalogScan(intent, {}, signal);
 
-function startGeneration(
-  state: CoordinatorState,
+function abortError(reason?: unknown): Error {
+  if (reason instanceof Error && reason.name === "AbortError") return reason;
+  return new DOMException("file scan cancelled", "AbortError");
+}
+
+function generationFor(
   intent: ResolvedScanIntent,
   runner: CoordinatedScanRunner,
   exclusive: boolean,
-): InflightGeneration {
+): ScanGeneration {
+  let resolve!: (snapshot: FileCatalogScan) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<FileCatalogScan>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  /* Every subscriber may leave before the runner observes its abort. Keep the
+     shared rejection handled while each subscriber receives its private one. */
+  void promise.catch(() => undefined);
+  return {
+    generation: 0,
+    intent,
+    runner,
+    exclusive,
+    controller: new AbortController(),
+    subscribers: 0,
+    started: false,
+    settled: false,
+    promise,
+    resolve,
+    reject,
+  };
+}
+
+function startGeneration(
+  state: CoordinatorState,
+  pending: ScanGeneration,
+): ScanGeneration {
   state.generation += 1;
+  pending.generation = state.generation;
+  pending.started = true;
+  state.inflight = pending;
   let scan: Promise<FileCatalogScan>;
   try {
-    scan = Promise.resolve(runner(intent));
+    scan = Promise.resolve(pending.runner(pending.intent, pending.controller.signal));
   } catch (error) {
     scan = Promise.reject(error);
   }
-  const inflight: InflightGeneration = {
-    generation: state.generation,
-    intent,
-    exclusive,
-    promise: scan.finally(() => {
-      if (state.inflight === inflight) state.inflight = undefined;
+  void scan.then(
+    (snapshot) => {
+      pending.settled = true;
+      pending.resolve(snapshot);
+    },
+    (error) => {
+      pending.settled = true;
+      pending.reject(error);
+    },
+  ).finally(() => {
+      if (state.inflight === pending) state.inflight = undefined;
       scheduleStart(state);
-    }),
-  };
-  state.inflight = inflight;
-  return inflight;
+    });
+  return pending;
 }
 
 /* Truly simultaneous requests merge inside one microtask turn, so a burst of
@@ -139,7 +185,7 @@ function scheduleStart(state: CoordinatorState): void {
     if (state.inflight) return;
     const pending = state.queue.shift();
     if (!pending) return;
-    startGeneration(state, pending.intent, pending.runner, pending.exclusive).promise.then(pending.resolve, pending.reject);
+    startGeneration(state, pending);
   });
 }
 
@@ -148,7 +194,7 @@ function enqueue(
   intent: ResolvedScanIntent,
   runner: CoordinatedScanRunner,
   exclusive: boolean,
-): Promise<FileCatalogScan> {
+): ScanGeneration {
   if (!exclusive) {
     /* Only the shared pending generation accepts extra callers: an exclusive
        pending runs a runner whose scope (pin, staged publisher) would not
@@ -160,18 +206,62 @@ function enqueue(
         persist: shared.intent.persist || intent.persist,
         fresh: shared.intent.fresh || intent.fresh,
       };
-      return shared.promise;
+      return shared;
     }
   }
-  let resolve!: (snapshot: FileCatalogScan) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<FileCatalogScan>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  state.queue.push({ intent, runner, exclusive, promise, resolve, reject });
+  const pending = generationFor(intent, runner, exclusive);
+  state.queue.push(pending);
   scheduleStart(state);
-  return promise;
+  return pending;
+}
+
+function abandonGeneration(state: CoordinatorState, generation: ScanGeneration): void {
+  if (generation.settled || generation.subscribers > 0) return;
+  generation.controller.abort(abortError());
+  if (generation.started) return;
+  const queued = state.queue.indexOf(generation);
+  if (queued >= 0) state.queue.splice(queued, 1);
+  generation.settled = true;
+  generation.reject(abortError());
+}
+
+function subscribe(
+  state: CoordinatorState,
+  generation: ScanGeneration,
+  signal?: AbortSignal | null,
+): Promise<FileCatalogScan> {
+  if (signal?.aborted) {
+    abandonGeneration(state, generation);
+    return Promise.reject(abortError(signal.reason));
+  }
+  generation.subscribers += 1;
+  return new Promise<FileCatalogScan>((resolve, reject) => {
+    let active = true;
+    const release = () => {
+      if (!active) return;
+      active = false;
+      signal?.removeEventListener("abort", onAbort);
+      generation.subscribers -= 1;
+      abandonGeneration(state, generation);
+    };
+    const onAbort = () => {
+      release();
+      reject(abortError(signal?.reason));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    generation.promise.then(
+      (snapshot) => {
+        if (!active) return;
+        release();
+        resolve(structuredClone(snapshot));
+      },
+      (error) => {
+        if (!active) return;
+        release();
+        reject(error);
+      },
+    );
+  });
 }
 
 /**
@@ -183,13 +273,19 @@ export async function coordinatedFileScan(
   runner: CoordinatedScanRunner = defaultRunner,
 ): Promise<FileCatalogScan> {
   const state = coordinatorState();
+  if (intent.signal?.aborted) throw abortError(intent.signal.reason);
   const wanted: ResolvedScanIntent = { persist: intent.persist === true, fresh: intent.fresh === true };
   const exclusive = intent.exclusive === true;
   const inflight = state.inflight;
-  const snapshot = !exclusive && inflight && !inflight.exclusive && intent.join !== false && covers(inflight.intent, wanted)
-    ? await inflight.promise
-    : await enqueue(state, wanted, runner, exclusive);
-  return structuredClone(snapshot);
+  const generation = !exclusive
+    && inflight
+    && !inflight.controller.signal.aborted
+    && !inflight.exclusive
+    && intent.join !== false
+    && covers(inflight.intent, wanted)
+    ? inflight
+    : enqueue(state, wanted, runner, exclusive);
+  return subscribe(state, generation, intent.signal);
 }
 
 /** Controller-facing seam: pipeline and account reconciliation consume the
@@ -199,6 +295,27 @@ export function coordinatedControllerScan(): Promise<FileCatalogScan> {
   return coordinatedFileScan({ persist: true });
 }
 
+export function fileScanCoordinatorStatus(): { inFlight: boolean; queued: number; subscribers: number } {
+  const state = coordinatorState();
+  return {
+    inFlight: state.inflight !== undefined,
+    queued: state.queue.length,
+    subscribers: (state.inflight?.subscribers ?? 0)
+      + state.queue.reduce((total, generation) => total + generation.subscribers, 0),
+  };
+}
+
 export function resetFileScanCoordinatorForTests(): void {
+  const state = coordinatorHost.__llvFileScanCoordinator;
+  if (state) {
+    state.inflight?.controller.abort(abortError());
+    for (const pending of state.queue) {
+      pending.controller.abort(abortError());
+      if (!pending.settled) {
+        pending.settled = true;
+        pending.reject(abortError());
+      }
+    }
+  }
   coordinatorHost.__llvFileScanCoordinator = undefined;
 }

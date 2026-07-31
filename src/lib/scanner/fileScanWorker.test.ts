@@ -64,3 +64,63 @@ test("worker scan streams the resource scope, keeps the caller event loop live, 
     clearInterval(timer);
   }
 });
+
+test("aborting a worker scan kills the child and releases its timer and listener", async () => {
+  const { directory, workerPath } = fixtureWorker(`
+    import fs from "node:fs";
+    fs.writeFileSync(new URL("worker.pid", import.meta.url), String(process.pid));
+    process.stdin.resume();
+    process.stdin.on("end", () => setInterval(() => {}, 1_000));
+  `);
+  const pidFile = path.join(directory, "worker.pid");
+  const controller = new AbortController();
+  const signal = controller.signal as AbortSignal & {
+    addEventListener: AbortSignal["addEventListener"];
+    removeEventListener: AbortSignal["removeEventListener"];
+  };
+  const addEventListener = signal.addEventListener.bind(signal);
+  const removeEventListener = signal.removeEventListener.bind(signal);
+  let listeners = 0;
+  signal.addEventListener = ((...args: Parameters<AbortSignal["addEventListener"]>) => {
+    listeners += 1;
+    return addEventListener(...args);
+  }) as AbortSignal["addEventListener"];
+  signal.removeEventListener = ((...args: Parameters<AbortSignal["removeEventListener"]>) => {
+    listeners -= 1;
+    return removeEventListener(...args);
+  }) as AbortSignal["removeEventListener"];
+  let timers = 0;
+
+  const scan = collectFileScanInWorker(
+    { persist: false, persistIndex: false },
+    undefined,
+    {
+      launch: { executable: process.execPath, workerPath },
+      cwd: directory,
+      timeoutMs: 30_000,
+      signal,
+      scheduler: {
+        setTimeout: (handler, ms) => {
+          timers += 1;
+          return setTimeout(handler, ms);
+        },
+        clearTimeout: (handle) => {
+          timers -= 1;
+          clearTimeout(handle as ReturnType<typeof setTimeout>);
+        },
+      },
+    },
+  );
+
+  for (let attempt = 0; attempt < 100 && !fs.existsSync(pidFile); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  expect(fs.existsSync(pidFile)).toBe(true);
+  const pid = Number(fs.readFileSync(pidFile, "utf8"));
+  controller.abort();
+
+  await expect(scan).rejects.toMatchObject({ name: "AbortError" });
+  expect(() => process.kill(pid, 0)).toThrow();
+  expect(timers).toBe(0);
+  expect(listeners).toBe(0);
+});

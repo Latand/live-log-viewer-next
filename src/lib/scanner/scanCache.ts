@@ -17,6 +17,9 @@ type FileScanRefresh = {
   generation: number;
   promise: Promise<FileScanSnapshot>;
   resourcePromise: Promise<FileScanSnapshot>;
+  controller: AbortController;
+  subscribers: number;
+  settled: boolean;
   cancelBeforeStart?: () => boolean;
 };
 type FileScanReason = "cold" | "ordinary" | "pinned" | "revision" | "generation" | "fresh" | "current";
@@ -39,6 +42,7 @@ type FileScanCacheSlot = {
   forcedGeneration?: number;
   freshObservationGeneration?: number;
   refreshedAt: number;
+  completedAt?: number;
   refresh?: FileScanRefresh;
   pinnedSnapshots?: Map<string, PinnedFileScanSnapshot>;
   pinnedGenerations?: Map<string, number>;
@@ -55,6 +59,7 @@ export type CachedFileScan = {
   cacheStatus: "hit" | "stale" | "miss";
   requestCount: number;
   cloneDurationMs: number;
+  refreshedAt?: number;
   lastScan?: FileScanDiagnostic;
 };
 
@@ -239,6 +244,14 @@ function readPersistedFileScanSnapshot(): FileScanSnapshot | undefined {
   }
 }
 
+function persistedFileScanRefreshedAt(): number {
+  try {
+    return fs.statSync(statePath(FILE_SCAN_SNAPSHOT_FILE)).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
 /**
  * Reads the last completed catalog published by the Viewer process without
  * starting another filesystem scan. Background sidecars use this cross-process
@@ -300,10 +313,12 @@ function installFileScanRefresh(
   generation: number,
   promise: Promise<FileScanSnapshot>,
   resourcePromise: Promise<FileScanSnapshot> = promise,
+  controller: AbortController = new AbortController(),
 ): FileScanRefresh {
-  const refresh = { generation, promise, resourcePromise };
+  const refresh: FileScanRefresh = { generation, promise, resourcePromise, controller, subscribers: 0, settled: false };
   slot.refresh = refresh;
   const clear = () => {
+    refresh.settled = true;
     if (slot.refresh === refresh) slot.refresh = undefined;
   };
   void promise.then(clear, clear);
@@ -313,8 +328,9 @@ function installFileScanRefresh(
 function installStagedFileScanRefresh(
   slot: FileScanCacheSlot,
   generation: number,
-  start: (publish: (snapshot: FileScanSnapshot) => void) => Promise<FileScanSnapshot>,
+  start: (publish: (snapshot: FileScanSnapshot) => void, signal: AbortSignal) => Promise<FileScanSnapshot>,
 ): FileScanRefresh {
+  const controller = new AbortController();
   let publishResource!: (snapshot: FileScanSnapshot) => void;
   let rejectResource!: (error: unknown) => void;
   let published = false;
@@ -328,11 +344,53 @@ function installStagedFileScanRefresh(
     published = true;
     publishResource(snapshot);
   };
-  const promise = start(publish);
+  const promise = start(publish, controller.signal);
   void promise.then(publish, (error) => {
     if (!published) rejectResource(error);
   });
-  return installFileScanRefresh(slot, generation, promise, resourcePromise);
+  return installFileScanRefresh(slot, generation, promise, resourcePromise, controller);
+}
+
+function scanAbortError(reason?: unknown): Error {
+  if (reason instanceof Error && reason.name === "AbortError") return reason;
+  return new DOMException("file scan cancelled", "AbortError");
+}
+
+function waitForFileScanRefresh(
+  refresh: FileScanRefresh,
+  signal?: AbortSignal | null,
+): Promise<FileScanSnapshot> {
+  if (signal?.aborted) return Promise.reject(scanAbortError(signal.reason));
+  refresh.subscribers += 1;
+  return new Promise<FileScanSnapshot>((resolve, reject) => {
+    let active = true;
+    const release = () => {
+      if (!active) return;
+      active = false;
+      signal?.removeEventListener("abort", onAbort);
+      refresh.subscribers -= 1;
+      if (refresh.subscribers === 0 && !refresh.settled) {
+        refresh.controller.abort(scanAbortError());
+      }
+    };
+    const onAbort = () => {
+      release();
+      reject(scanAbortError(signal?.reason));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    refresh.promise.then(
+      (snapshot) => {
+        if (!active) return;
+        release();
+        resolve(snapshot);
+      },
+      (error) => {
+        if (!active) return;
+        release();
+        reject(error);
+      },
+    );
+  });
 }
 
 function normalizeFileScanCacheSlot(value: unknown): FileScanCacheSlot {
@@ -342,7 +400,12 @@ function normalizeFileScanCacheSlot(value: unknown): FileScanCacheSlot {
     && Number.isSafeInteger(value.snapshotGeneration)
     && Number.isSafeInteger(value.requestedGeneration)
   ) {
-    return value as FileScanCacheSlot;
+    const slot = value as FileScanCacheSlot;
+    const pending = refreshPromise(slot.refresh);
+    if (pending && (!slot.refresh?.controller || !Number.isSafeInteger(slot.refresh.subscribers))) {
+      installFileScanRefresh(slot, slot.refresh?.generation ?? 0, pending);
+    }
+    return slot;
   }
 
   const legacy = isRecord(value) ? value : {};
@@ -352,6 +415,9 @@ function normalizeFileScanCacheSlot(value: unknown): FileScanCacheSlot {
     snapshotGeneration: 0,
     requestedGeneration: 0,
     refreshedAt: typeof legacy.refreshedAt === "number" && Number.isFinite(legacy.refreshedAt) ? legacy.refreshedAt : 0,
+    completedAt: typeof legacy.completedAt === "number" && Number.isFinite(legacy.completedAt)
+      ? legacy.completedAt
+      : typeof legacy.refreshedAt === "number" && Number.isFinite(legacy.refreshedAt) ? legacy.refreshedAt : 0,
   };
   const pending = refreshPromise(legacy.refresh);
   if (pending) {
@@ -359,6 +425,7 @@ function normalizeFileScanCacheSlot(value: unknown): FileScanCacheSlot {
       if (!snapshot.complete) throw new Error("filesystem scan incomplete");
       slot.snapshot = snapshot;
       slot.refreshedAt = Date.now();
+      slot.completedAt = slot.refreshedAt;
       return snapshot;
     });
     installFileScanRefresh(slot, 0, promise);
@@ -388,6 +455,7 @@ function fileScanRefreshPromise(
   generation: number,
   reason: FileScanReason,
   onResourceSnapshot?: (snapshot: FileScanSnapshot) => void,
+  signal?: AbortSignal,
 ): Promise<FileScanSnapshot> {
   const fresh = slot.freshObservationGeneration !== undefined
     && generation >= slot.freshObservationGeneration;
@@ -397,15 +465,16 @@ function fileScanRefreshPromise(
      merge into the single trailing generation instead (#287). */
   const join = reason === "ordinary" || reason === "cold";
   return instrumentFileScan(slot, generation, reason, async () => {
-    const snapshot = await coordinatedFileScan({ fresh, join }, (intent) => runFileCatalogScan(intent, {
+    const snapshot = await coordinatedFileScan({ fresh, join, signal }, (intent, generationSignal) => runFileCatalogScan(intent, {
       persistIndex: process.env.LLV_RESOURCE_OBSERVATION_WORKER !== "1",
       ...(onResourceSnapshot ? { onResourceSnapshot, resourceBaseline: slot.snapshot } : {}),
-    }));
+    }, generationSignal));
     if (!snapshot.complete) throw new Error("filesystem scan incomplete");
     if (process.env.LLV_RESOURCE_OBSERVATION_WORKER !== "1") writePersistedFileScanSnapshot(snapshot);
     slot.snapshot = snapshot;
     slot.snapshotGeneration = Math.max(slot.snapshotGeneration, generation);
     slot.refreshedAt = Date.now();
+    slot.completedAt = slot.refreshedAt;
     if (fresh && slot.freshObservationGeneration !== undefined
       && generation >= slot.freshObservationGeneration) {
       slot.freshObservationGeneration = undefined;
@@ -419,8 +488,9 @@ function beginFileScanRefresh(
   generation: number,
   reason: FileScanReason,
 ): FileScanRefresh {
-  const promise = fileScanRefreshPromise(slot, generation, reason);
-  return installFileScanRefresh(slot, generation, promise);
+  const controller = new AbortController();
+  const promise = fileScanRefreshPromise(slot, generation, reason, undefined, controller.signal);
+  return installFileScanRefresh(slot, generation, promise, promise, controller);
 }
 
 function beginResourceFileScanRefresh(
@@ -431,22 +501,24 @@ function beginResourceFileScanRefresh(
   return installStagedFileScanRefresh(
     slot,
     generation,
-    (publish) => fileScanRefreshPromise(slot, generation, reason, publish),
+    (publish, signal) => fileScanRefreshPromise(slot, generation, reason, publish, signal),
   );
 }
 
 function beginDeferredFileScanRefresh(slot: FileScanCacheSlot, generation: number): FileScanRefresh {
   let started = false;
   let canceled = false;
+  const controller = new AbortController();
   const promise = new Promise<void>((resolve) => setImmediate(resolve)).then(() => {
     started = true;
+    if (controller.signal.aborted) throw scanAbortError(controller.signal.reason);
     if (canceled) {
       if (!slot.snapshot) throw new Error("deferred file scan canceled without a completed snapshot");
       return slot.snapshot;
     }
-    return fileScanRefreshPromise(slot, generation, "ordinary");
+    return fileScanRefreshPromise(slot, generation, "ordinary", undefined, controller.signal);
   });
-  const refresh = installFileScanRefresh(slot, generation, promise);
+  const refresh = installFileScanRefresh(slot, generation, promise, promise, controller);
   refresh.cancelBeforeStart = () => {
     if (started) return false;
     canceled = true;
@@ -461,6 +533,7 @@ function beginPinnedFileScanRefresh(
   pinnedPath: string,
   reason: FileScanReason,
 ): FileScanRefresh {
+  const controller = new AbortController();
   const fresh = slot.freshObservationGeneration !== undefined
     && generation >= slot.freshObservationGeneration;
   const promise = instrumentFileScan(slot, generation, reason, async () => {
@@ -468,10 +541,10 @@ function beginPinnedFileScanRefresh(
        fences, never adopts a running scan, and never merges with other pending
        callers (their runners cannot reproduce the pin overlay); it still holds
        the process-wide single-generation lease through the coordinator (#287). */
-    const pinnedSnapshot = await coordinatedFileScan({ fresh, join: false, exclusive: true }, (intent) => runFileCatalogScan(intent, {
+    const pinnedSnapshot = await coordinatedFileScan({ fresh, join: false, exclusive: true, signal: controller.signal }, (intent, signal) => runFileCatalogScan(intent, {
       persistIndex: process.env.LLV_RESOURCE_OBSERVATION_WORKER !== "1",
       pin: pinnedPath,
-    }));
+    }, signal));
     if (!pinnedSnapshot.complete) throw new Error("filesystem scan incomplete");
     const pinOverlayPaths = pinnedSnapshot.pinOverlayPaths ?? [];
     const overlayPathSet = new Set(pinOverlayPaths);
@@ -501,13 +574,14 @@ function beginPinnedFileScanRefresh(
     slot.snapshot = globalSnapshot;
     slot.snapshotGeneration = Math.max(slot.snapshotGeneration, generation);
     slot.refreshedAt = Date.now();
+    slot.completedAt = slot.refreshedAt;
     if (fresh && slot.freshObservationGeneration !== undefined
       && generation >= slot.freshObservationGeneration) {
       slot.freshObservationGeneration = undefined;
     }
     return globalSnapshot;
   });
-  return installFileScanRefresh(slot, generation, promise);
+  return installFileScanRefresh(slot, generation, promise, promise, controller);
 }
 
 async function refreshThroughGeneration(
@@ -515,6 +589,7 @@ async function refreshThroughGeneration(
   requestedGeneration: number,
   pinnedPath?: string,
   reason: FileScanReason = "generation",
+  signal?: AbortSignal | null,
 ): Promise<FileScanSnapshot> {
   while (
     !slot.snapshot
@@ -524,7 +599,7 @@ async function refreshThroughGeneration(
     const refresh = slot.refresh ?? (pinnedPath
       ? beginPinnedFileScanRefresh(slot, requestedGeneration, pinnedPath, reason)
       : beginFileScanRefresh(slot, requestedGeneration, reason));
-    await refresh.promise;
+    await waitForFileScanRefresh(refresh, signal);
   }
   return slot.snapshot;
 }
@@ -557,6 +632,7 @@ function completedScan(
       cacheStatus: cacheStatus ?? (completed.generation < targetGeneration ? "stale" : "hit"),
       requestCount: slot.requestCount ?? 0,
       cloneDurationMs: performance.now() - cloneStartedAt,
+      refreshedAt: pinned.refreshedAt,
       ...(slot.lastScan ? { lastScan: { ...slot.lastScan } } : {}),
     };
   }
@@ -568,6 +644,7 @@ function completedScan(
     cacheStatus: cacheStatus ?? (slot.snapshotGeneration < targetGeneration ? "stale" : "hit"),
     requestCount: slot.requestCount ?? 0,
     cloneDurationMs: performance.now() - cloneStartedAt,
+    refreshedAt: slot.completedAt ?? slot.refreshedAt,
     ...(slot.lastScan ? { lastScan: { ...slot.lastScan } } : {}),
   };
 }
@@ -585,6 +662,7 @@ function resourceScan(
     cacheStatus: "miss",
     requestCount: slot.requestCount ?? 0,
     cloneDurationMs: 0,
+    refreshedAt: Date.now(),
     ...(slot.lastScan ? { lastScan: { ...slot.lastScan } } : {}),
   };
 }
@@ -633,6 +711,7 @@ function globalFileScanSlot(): FileScanCacheSlot {
       snapshotGeneration: 0,
       requestedGeneration: 0,
       refreshedAt: 0,
+      completedAt: snapshot ? persistedFileScanRefreshedAt() : 0,
     };
     cache.set(key, slot);
     return slot;
@@ -752,7 +831,7 @@ export async function cachedFileScan(
   if (!slot.snapshot) {
     targetGeneration = slot.refresh?.generation ?? nextGeneration(slot);
     const refresh = slot.refresh ?? beginFileScanRefresh(slot, targetGeneration, "cold");
-    await refresh.promise;
+    await waitForFileScanRefresh(refresh);
     return completedScan(slot, undefined, targetGeneration, "miss");
   }
 
@@ -771,7 +850,7 @@ export async function cachedFileScan(
 /** Returns the latest completed global generation. A missing snapshot joins
     or starts the shared cold generation so every consumer receives a corpus. */
 export async function completedFileScan(
-  { revalidate = true }: { revalidate?: boolean } = {},
+  { revalidate = true, signal }: { revalidate?: boolean; signal?: AbortSignal | null } = {},
 ): Promise<CachedFileScan> {
   const slot = globalFileScanSlot();
   slot.requestCount = (slot.requestCount ?? 0) + 1;
@@ -789,8 +868,13 @@ export async function completedFileScan(
 
   const targetGeneration = slot.refresh?.generation ?? nextGeneration(slot);
   const refresh = slot.refresh ?? beginFileScanRefresh(slot, targetGeneration, "cold");
-  await refresh.promise;
+  await waitForFileScanRefresh(refresh, signal);
   return completedScan(slot, undefined, targetGeneration, "miss");
+}
+
+export function fileScanCacheStatus(): { inFlight: boolean; subscribers: number } {
+  const refresh = globalFileScanSlot().refresh;
+  return { inFlight: refresh !== undefined, subscribers: refresh?.subscribers ?? 0 };
 }
 
 /** Returns metadata from a completed current generation. The first fresh
@@ -843,12 +927,19 @@ export async function currentResourceFileScan(): Promise<CachedFileScan> {
     if (refresh.generation >= targetGeneration) {
       return resourceScan(slot, snapshot, refresh.generation, targetGeneration);
     }
-    await refresh.promise;
+    await waitForFileScanRefresh(refresh);
   }
 }
 
 export function resetFilesRouteCacheForTests(): void {
-  fileScanCache().clear();
+  const cache = fileScanCache();
+  for (const value of cache.values()) {
+    const refresh = isRecord(value) && isRecord(value.refresh)
+      ? value.refresh as unknown as Partial<FileScanRefresh>
+      : undefined;
+    refresh?.controller?.abort(scanAbortError());
+  }
+  cache.clear();
   /* The coordinator's single-generation lease lives on globalThis alongside
      this cache. A test that leaves a gated scan unfinished would otherwise
      wedge every later test's generations behind it. */

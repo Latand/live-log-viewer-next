@@ -139,12 +139,15 @@ function dependencies(options: { scans?: number; projections?: number } = {}) {
         counts.rawScans += 1;
         throw new Error("a control-plane read must not start a raw corpus scan");
       },
-      /* Stands in for the collector so the snapshot path can be asserted without the
-         suite ever touching a real corpus. */
-      collectSnapshot: async (_body: unknown, deps: { registrySnapshot?: () => unknown } = {}) => {
+      /* Stands in for composition while exercising the same injected completed
+         generation and registry projection as the production collector. */
+      collectSnapshot: async (_body: unknown, deps: {
+        completedFileScan?: () => Promise<{ snapshot: typeof snapshot }>;
+        registrySnapshot?: () => unknown;
+      } = {}) => {
         counts.observations += 1;
-        /* The contract under test: the collector is handed the projection this call
-           already holds, so it never materialises a second one. */
+        if (!deps.completedFileScan) throw new Error("snapshot received no completed scan seam");
+        await deps.completedFileScan();
         deps.registrySnapshot?.();
         return { schemaVersion: 1, sessions: [], caller: null };
       },
@@ -195,6 +198,7 @@ test("operator_snapshot hands the collector the projection it already holds", as
   await bindings.operator_snapshot({ clientRequestId: "snapshot-1", caller: { transcriptPath } });
 
   expect(counts.observations).toBe(1);
+  expect(counts.scans).toBe(1);
   /* Exactly one, materialised by the caller and consumed by the collector. The
      default path built a second one inside `collectSnapshot`. */
   expect(counts.projections).toBe(1);
@@ -206,11 +210,14 @@ test("twenty concurrent control reads join one scan and one projection", async (
   const { counts, injected } = dependencies({ scans: 1, projections: 1 });
   const bindings = viewerMcpBindings(undefined, undefined, injected);
 
-  const results = await Promise.all(Array.from({ length: CONCURRENCY }, (_value, index) => (
-    index % 2 === 0
-      ? bindings.list_conversations({ clientRequestId: `list-${index}`, limit: 10 })
-      : bindings.board_snapshot({ clientRequestId: `board-${index}`, limit: 10 })
-  ).catch((error: unknown) => ({ error: String(error) }))));
+  const results = await Promise.all(Array.from({ length: CONCURRENCY }, (_value, index) => {
+    const read = index % 3 === 0
+      ? bindings.operator_snapshot({ clientRequestId: `snapshot-${index}`, text: { include: false } })
+      : index % 3 === 1
+        ? bindings.list_conversations({ clientRequestId: `list-${index}`, limit: 10 })
+        : bindings.board_snapshot({ clientRequestId: `board-${index}`, limit: 10 });
+    return read.catch((error: unknown) => ({ error: String(error) }));
+  }));
 
   const refused = results.filter((entry) => typeof entry === "object" && entry !== null && "error" in entry);
   /* Poisoned after one of each, so any read that did NOT join shows up here. */

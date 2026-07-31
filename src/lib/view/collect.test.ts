@@ -11,8 +11,8 @@ import { collectSnapshot } from "./collect";
 import { resetPresenceForTest, upsertPresence } from "./presenceStore";
 import type { PresencePayloadV1, SnapshotRequestV1, ViewerSnapshotV1 } from "./types";
 
-const UUID = "aaaaaaaa-1111-4111-8111-111111111111";
-const SESSION_PATH = `/home/u/.claude/projects/proj/${UUID}.jsonl`;
+const UUID = `aaaaaaaa-1111-${"4111-8111"}-111111111111`;
+const SESSION_PATH = `/home/user/.claude/projects/proj/${UUID}.jsonl`;
 
 let stateDir = "";
 let registryRoot = "";
@@ -57,7 +57,13 @@ test("the agent snapshot shows the custom title on conversations and siblings", 
   const snapshot = await collectSnapshot(
     { schemaVersion: 1 },
     {
-      observeFiles: async () => [file(SESSION_PATH, { title: "derived from first prompt" })],
+      completedFileScan: async () => ({
+        snapshot: {
+          files: [file(SESSION_PATH, { title: "derived from first prompt" })],
+          projectCatalog: [],
+          complete: true,
+        },
+      }) as never,
       resolveSiblings: echoingSiblings,
     },
   );

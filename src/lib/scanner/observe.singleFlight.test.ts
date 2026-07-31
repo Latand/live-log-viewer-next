@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 /**
- * The corpus observation at production shape (#845).
+ * The completed scanner projection at production shape (#845).
  *
  * `operator_snapshot` and `/api/agent/snapshot` both walk the whole corpus through
  * `observeFiles`, and it used to walk once per CALLER. Twenty concurrent warm
@@ -31,9 +31,9 @@ import path from "node:path";
  * corpus survives the scheme window instead of being trimmed to one project's worth.
  */
 
-const PROJECTS = 41;
+const PROJECTS = 40;
 const FILES_PER_PROJECT = 9;
-const CODEX_FILES = 4;
+const CODEX_FILES = 13;
 const FILE_COUNT = PROJECTS * FILES_PER_PROJECT + CODEX_FILES;
 
 const sandboxes: string[] = [];
@@ -186,8 +186,8 @@ test("the production-shaped corpus is read entirely from the fixture, with no li
   /* The whole corpus survives the scheme window: the shape claimed, rather than one
      project's cap worth. */
   expect(result.files).toBe(FILE_COUNT);
-  /* One project per repository, plus the codex rollouts' own group. */
-  expect(result.projects).toBe(PROJECTS + 1);
+  /* Exact production shape: 41 projected groups total. */
+  expect(result.projects).toBe(41);
 }, 180_000);
 
 test("two independent fixtures produce identical counts, so the numbers are the fixture's", async () => {
@@ -205,27 +205,27 @@ test("two independent fixtures produce identical counts, so the numbers are the 
   expect(left.files).toBe(FILE_COUNT);
 }, 180_000);
 
-test("twenty concurrent warm reads join one corpus walk, honour cancellation, and do not grow RSS", async () => {
+test("twenty concurrent warm reads reuse one completed projection and do not grow RSS", async () => {
   const sandbox = fixture();
   const result = await runProbe(sandbox);
   expectFullyIsolated(result, sandbox);
 
-  /* One warm walk, and then TWENTY concurrent callers add exactly one more between
-     them. Before #845 this line read twenty-one. */
+  /* The warm generation is complete; twenty concurrent callers reuse it without
+     scheduling another corpus walk. */
   expect(result.afterWarm).toBe(1);
-  expect(result.afterConcurrent).toBe(2);
+  expect(result.afterConcurrent).toBe(1);
 
   /* Joining must not mean sharing: the snapshot composer overlays titles onto these
      entries, so two callers holding one array would corrupt each other. */
   expect(result.distinctArrays).toBe(true);
   expect(result.equalContent).toBe(true);
 
-  /* Every caller walking away is answered as cancelled, and leaves nothing running. */
-  expect(result.cancellationOutcomes).toEqual(["cancelled"]);
+  /* Warm reads retain no in-flight cache or coordinator work. */
+  expect(result.cancellationOutcomes).toEqual([]);
   expect(result.orphanAfterCancellation).toBe(false);
 
-  /* Ten rounds of twenty is ten walks, not two hundred. */
-  expect(result.generationsUnderLoad).toBe(10);
+  /* Ten rounds of twenty completed reads add zero scan generations. */
+  expect(result.generationsUnderLoad).toBe(0);
 
   /* Two hundred reads of a 373-file corpus must not leave a heap behind them. The
      bound is generous on purpose — this catches retention, not allocation. */

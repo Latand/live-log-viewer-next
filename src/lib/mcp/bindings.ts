@@ -48,7 +48,6 @@ import { loadTasks, mutateTasks, mutateTasksFile } from "@/lib/tasks/store";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 import { collectSnapshot } from "@/lib/view/collect";
-import { observeFiles } from "@/lib/scanner/observe";
 import { resolveSiblings } from "@/lib/view/siblings";
 import { hardenedRedact } from "@/lib/view/compactText";
 import { validateSnapshotRequest } from "@/lib/view/validation";
@@ -185,7 +184,7 @@ type RegistrySnapshot = ReturnType<ReturnType<typeof agentRegistry>["readOnlySna
 
 export interface ViewerMcpDomainDependencies {
   listFiles(options?: Parameters<typeof listFiles>[0]): Promise<FileEntry[]>;
-  completedFileScan(): ReturnType<typeof completedFileScan>;
+  completedFileScan(options?: Parameters<typeof completedFileScan>[0]): ReturnType<typeof completedFileScan>;
   registrySnapshot(): RegistrySnapshot;
   boardFor(project: string): ReturnType<typeof boardFor>;
   getFlowsWithPresets(): ReturnType<typeof getFlowsWithPresets>;
@@ -1182,13 +1181,12 @@ async function operatorSnapshot(args: McpToolArgs, dependencies: ViewerMcpDomain
     schemaVersion: 1,
     ...withoutKeys(args, ["clientRequestId"]),
   });
-  /* Explicit dependencies rather than the module defaults (#845): the registry
-     projection is the one this call already holds, so a snapshot costs one
-     projection instead of materialising a second inside the collector. The corpus
-     walk is single-flight in `observeFiles`, so concurrent callers join one. */
+  /* Explicit dependencies rather than the module defaults (#845): the completed
+     scanner generation and registry projection are the same shared reads used by
+     board/list/get/send, so this call starts no private observation. */
   return redactPayload({
     ...await dependencies.collectSnapshot(request, {
-      observeFiles,
+      completedFileScan: dependencies.completedFileScan,
       resolveSiblings,
       registrySnapshot: dependencies.registrySnapshot,
     }),
