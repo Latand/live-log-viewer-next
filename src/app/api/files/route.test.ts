@@ -207,7 +207,6 @@ test("a unique repository display name absorbs its matching legacy project key",
       displayName: canonical.displayName,
       smt: 20,
       conversations: 7,
-      projectRoot: repositoryRoot,
     },
     {
       project: canonical.displayName,
@@ -745,7 +744,7 @@ test("a fresh resource handoff replaces deferred ordinary work without a duplica
   let release!: () => void;
   scanGates.push(new Promise<void>((resolve) => { release = resolve; }));
   scannedFiles = [after];
-  await cachedFileScan(undefined, undefined, now + 60_100);
+  await cachedFileScan(undefined, undefined, now + 300_100);
   let settled = false;
   const handoff = readResourceFileSnapshot(true).then((files) => {
     settled = true;
@@ -775,7 +774,7 @@ test("a fresh resource handoff joins an ordinary generation that already started
   let release!: () => void;
   scanGates.push(new Promise<void>((resolve) => { release = resolve; }));
   scannedFiles = [after];
-  await cachedFileScan(undefined, undefined, now + 60_100);
+  await cachedFileScan(undefined, undefined, now + 300_100);
   await new Promise<void>((resolve) => setImmediate(resolve));
   expect(scans).toBe(2);
 
@@ -814,7 +813,7 @@ test("concurrent fresh callers share one pending generation through failure and 
     new Promise<void>((resolve) => { releaseOld = resolve; }),
     new Promise<void>((resolve) => { releaseFresh = resolve; }),
   );
-  await cachedFileScan(undefined, undefined, now + 60_100);
+  await cachedFileScan(undefined, undefined, now + 300_100);
   scannedFiles = [after];
 
   let firstSettled = false;
@@ -888,7 +887,7 @@ test("a fresh resource snapshot fences a pre-kill refresh before host election",
   expect(warm.snapshot.files.map((entry) => entry.path)).toEqual([before.path]);
   let releasePreKillRefresh!: () => void;
   scanGates.push(new Promise<void>((resolve) => { releasePreKillRefresh = resolve; }));
-  const revalidating = await cachedFileScan(undefined, undefined, now + 60_100);
+  const revalidating = await cachedFileScan(undefined, undefined, now + 300_100);
   expect(revalidating.snapshot.files.map((entry) => entry.path)).toEqual([before.path]);
   expect(scans).toBe(1);
 
@@ -1312,7 +1311,7 @@ test("ordinary reads defer one shared refresh to the bounded fallback cadence", 
   expect(frequentReads.every((scan) => scan.snapshot.files[0]?.path === before.path)).toBeTrue();
   expect(scans).toBe(1);
 
-  const stale = await cachedFileScan(undefined, undefined, now + 60_100);
+  const stale = await cachedFileScan(undefined, undefined, now + 300_100);
   expect(stale.snapshot.files.map((entry) => entry.path)).toEqual([before.path]);
   expect(stale.cacheStatus).toBe("stale");
   expect(scans).toBe(1);
@@ -1337,17 +1336,17 @@ test("a failed ordinary refresh keeps retry traffic on the bounded cadence", asy
   await cachedFileScan(undefined, undefined, now);
 
   scanCompleteResults = [false];
-  await cachedFileScan(undefined, undefined, now + 60_100);
+  await cachedFileScan(undefined, undefined, now + 300_100);
   await new Promise<void>((resolve) => setImmediate(resolve));
   expect(scans).toBe(2);
 
   const retryTraffic = await Promise.all(Array.from({ length: 24 }, (_, index) =>
-    cachedFileScan(undefined, undefined, now + 61_000 + index * 375)));
+    cachedFileScan(undefined, undefined, now + 301_000 + index * 375)));
   expect(retryTraffic.every((scan) => scan.snapshot.files[0]?.path === "/sessions/ordinary-retry.jsonl")).toBeTrue();
   expect(retryTraffic.every((scan) => scan.cacheStatus === "hit" && scan.targetGeneration === scan.generation)).toBeTrue();
   expect(scans).toBe(2);
 
-  await cachedFileScan(undefined, undefined, now + 120_200);
+  await cachedFileScan(undefined, undefined, now + 600_200);
   expect(scans).toBe(2);
   await new Promise<void>((resolve) => setImmediate(resolve));
   expect(scans).toBe(3);
@@ -1360,13 +1359,13 @@ test("an incomplete filesystem scan retains the last completed route snapshot un
   scanFileResults = [[file("/sessions/partial.jsonl")]];
   scanCompleteResults = [false];
 
-  const stale = await cachedFileScan(undefined, undefined, now + 60_100);
+  const stale = await cachedFileScan(undefined, undefined, now + 300_100);
   expect(stale.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/canonical.jsonl"]);
   await new Promise<void>((resolve) => setImmediate(resolve));
   expect((await cachedFileScan()).snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/canonical.jsonl"]);
 
   scanFileResults = [[file("/sessions/recovered.jsonl")]];
-  const recovered = await cachedFileScan(undefined, undefined, now + 120_200);
+  const recovered = await cachedFileScan(undefined, undefined, now + 600_200);
   expect(recovered.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/canonical.jsonl"]);
   await new Promise<void>((resolve) => setImmediate(resolve));
   expect((await cachedFileScan()).snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/recovered.jsonl"]);

@@ -105,10 +105,17 @@ export function consolidateProjectCatalogByRepository(
   for (const entry of entries) {
     const identity = entry.projectRoot ? projectIdentityFromRepositoryRoot(entry.projectRoot) : null;
     const aliasedProject = resolveCatalogAlias(entry.project, aliases);
-    if (identity) {
-      const displayName = identity.displayName.trim().toLocaleLowerCase();
+    const displayCandidate = identity?.project
+      ?? (/^repo-[0-9a-f]{32}$/.test(aliasedProject) ? aliasedProject : null);
+    if (displayCandidate) {
+      const displayName = (identity?.displayName
+        ?? displayNames[displayCandidate]
+        ?? entry.displayName
+        ?? projectDisplayName(displayCandidate))
+        .trim()
+        .toLocaleLowerCase();
       const projects = repositoryProjectsByDisplayName.get(displayName) ?? new Set<string>();
-      projects.add(identity.project);
+      projects.add(displayCandidate);
       repositoryProjectsByDisplayName.set(displayName, projects);
     }
     if (!entry.repository) continue;
