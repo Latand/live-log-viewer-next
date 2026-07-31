@@ -29,8 +29,7 @@ type ProjectionResult = {
   cacheStatus: "hit" | "joined" | "miss";
 };
 
-const PROJECTION_CACHE_MAX = 8;
-const PROJECTION_HEALTH_BUCKET_MS = 60_000;
+const PROJECTION_CACHE_MAX = 32;
 const PROJECTION_STATE_FILES = [
   "flows.json",
   "pipelines.json",
@@ -43,6 +42,7 @@ const PROJECTION_STATE_FILES = [
 const projectionCacheStore = globalThis as typeof globalThis & {
   __llvFilesProjectionCache?: Map<string, ProjectionRepresentation>;
   __llvFilesProjectionInflight?: Map<string, Promise<ProjectionRepresentation>>;
+  __llvFilesProjectionWorkerTail?: Promise<void>;
 };
 
 function projectionCache(): Map<string, ProjectionRepresentation> {
@@ -69,7 +69,6 @@ function projectionKey(
   scan: CachedScan,
   selectedProject: string | undefined,
   pinnedPath: string | undefined,
-  now: number,
 ): string {
   const registryDiagnostics = agentRegistry().storageDiagnostics();
   const hash = createHash("sha1");
@@ -81,9 +80,17 @@ function projectionKey(
     registryRevision: registryDiagnostics.revision,
     registryTransactions: registryDiagnostics.transactionCount,
     stores: PROJECTION_STATE_FILES.map(stateFileSignature),
-    healthBucket: Math.floor(now / PROJECTION_HEALTH_BUCKET_MS),
   }));
   return hash.digest("hex");
+}
+
+function queueProjectionWorker(
+  build: () => Promise<ProjectionRepresentation>,
+): Promise<ProjectionRepresentation> {
+  const previous = projectionCacheStore.__llvFilesProjectionWorkerTail ?? Promise.resolve();
+  const current = previous.catch(() => undefined).then(build);
+  projectionCacheStore.__llvFilesProjectionWorkerTail = current.then(() => undefined, () => undefined);
+  return current;
 }
 
 function rememberProjection(key: string, representation: ProjectionRepresentation): void {
@@ -114,12 +121,13 @@ async function projectionFor(
     const snapshot = { ...scan.snapshot, pinOverlayPaths: scan.pinOverlayPaths };
     let representation: ProjectionRepresentation;
     if (filesResponseWorkerEnabled()) {
-      representation = await buildFilesResponseInWorker({
-        type: "project",
-        url: request.url,
-        headers: [...headers.entries()],
-        snapshot,
-      });
+      representation = await queueProjectionWorker(() =>
+        buildFilesResponseInWorker({
+          type: "project",
+          url: request.url,
+          headers: [...headers.entries()],
+          snapshot,
+        }));
     } else {
       const response = await buildFilesResponse(new Request(request.url, { headers }), {
         listFilesWithProjectCatalog: async () => snapshot,
@@ -186,7 +194,7 @@ export async function GET(request: Request): Promise<Response> {
     return response;
   }
 
-  const key = projectionKey(scan, selectedProject, pinnedPath, Date.now());
+  const key = projectionKey(scan, selectedProject, pinnedPath);
   const projected = await projectionFor(key, request, scan);
   const notModified = request.headers.get("if-none-match") === projected.representation.etag;
   const projectionTiming = [

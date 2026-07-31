@@ -21,7 +21,9 @@ interface RegistryProjection {
   aliasesByCanonical: Map<string, string[]>;
   ownedPathsByConversation: Map<string, string[]>;
   projectByPath: Map<string, string>;
-  projectMetadataByPath: Map<string, { displayName: string; projectRoot?: string; unresolved?: true }>;
+  projectMetadataByPath: {
+    get(pathname: string): { displayName: string; projectRoot?: string; unresolved?: true } | undefined;
+  };
   archivedPaths: Set<string>;
 }
 
@@ -31,6 +33,7 @@ interface RegistryProjection {
    JSON file without changing the revision and therefore no longer invalidates
    this cache (issue #798). */
 const snapshotProjectionCache = new WeakMap<RegistrySnapshot, RegistryProjection>();
+const snapshotIdentityProjectionCache = new WeakMap<RegistrySnapshot, RegistryProjection>();
 let readOnlyRegistryProjectionCache: RegistryProjection | null = null;
 
 function canonicalConversationId(snapshot: RegistrySnapshot, alias: string): string {
@@ -45,12 +48,16 @@ function canonicalConversationId(snapshot: RegistrySnapshot, alias: string): str
   return current;
 }
 
-function projectRegistrySnapshot(snapshot: RegistrySnapshot, signature: string): RegistryProjection {
+function projectRegistrySnapshot(
+  snapshot: RegistrySnapshot,
+  signature: string,
+  includeProjects = true,
+): RegistryProjection {
   const conversationByPath = new Map<string, ViewerConversationId>();
   const aliasesByCanonical = new Map<string, string[]>();
   const ownedPathsByConversation = new Map<string, string[]>();
   const projectByPath = new Map<string, string>();
-  const projectMetadataByPath = new Map<string, { displayName: string; projectRoot?: string; unresolved?: true }>();
+  const projectCwdByPath = new Map<string, string>();
   const archivedPaths = new Set<string>();
   for (const conversation of Object.values(snapshot.conversations)) {
     const owned = [...conversation.generations.map((generation) => generation.path), ...conversation.continuityPaths];
@@ -58,20 +65,15 @@ function projectRegistrySnapshot(snapshot: RegistrySnapshot, signature: string):
     for (const pathname of owned) if (!conversationByPath.has(pathname)) conversationByPath.set(pathname, conversation.id);
     const latest = conversation.generations.at(-1);
     if (!latest) continue;
-    const { project } = resolveProjectAttribution({
-      projectOwnership: conversation.projectOwnership,
-      cwd: latest.launchProfile.cwd,
-      launchProfileProject: latest.launchProfile.project,
-    });
-    if (project) {
-      projectByPath.set(latest.path, project);
-      const cwdInfo = latest.launchProfile.cwd ? projectInfoFromCwd(latest.launchProfile.cwd) : null;
-      if (cwdInfo?.project === project) {
-        projectMetadataByPath.set(latest.path, {
-          displayName: cwdInfo.displayName,
-          ...(cwdInfo.repo ? { projectRoot: cwdInfo.repo } : {}),
-          ...(cwdInfo.unresolved ? { unresolved: true as const } : {}),
-        });
+    if (includeProjects) {
+      const { project } = resolveProjectAttribution({
+        projectOwnership: conversation.projectOwnership,
+        cwd: latest.launchProfile.cwd,
+        launchProfileProject: latest.launchProfile.project,
+      });
+      if (project) {
+        projectByPath.set(latest.path, project);
+        if (latest.launchProfile.cwd) projectCwdByPath.set(latest.path, latest.launchProfile.cwd);
       }
     }
     for (const generation of conversation.generations) {
@@ -87,6 +89,35 @@ function projectRegistrySnapshot(snapshot: RegistrySnapshot, signature: string):
     const list = aliasesByCanonical.get(canonical);
     if (list) list.push(alias); else aliasesByCanonical.set(canonical, [alias]);
   }
+  /* Resolve disk-backed cwd metadata only for paths a caller actually renders.
+     A historical registry can own thousands of one-off worktree cwd values,
+     while one board response asks for only a few hundred current paths. */
+  const projectMetadataCache = new Map<string, { displayName: string; projectRoot?: string; unresolved?: true } | null>();
+  const projectInfoByCwd = new Map<string, ReturnType<typeof projectInfoFromCwd>>();
+  const projectMetadataByPath = {
+    get(pathname: string) {
+      const cached = projectMetadataCache.get(pathname);
+      if (cached !== undefined) return cached ?? undefined;
+      const cwd = projectCwdByPath.get(pathname);
+      const project = projectByPath.get(pathname);
+      if (!cwd || !project) {
+        projectMetadataCache.set(pathname, null);
+        return undefined;
+      }
+      let cwdInfo = projectInfoByCwd.get(cwd);
+      if (!projectInfoByCwd.has(cwd)) {
+        cwdInfo = projectInfoFromCwd(cwd);
+        projectInfoByCwd.set(cwd, cwdInfo);
+      }
+      const metadata = cwdInfo?.project === project ? {
+        displayName: cwdInfo.displayName,
+        ...(cwdInfo.repo ? { projectRoot: cwdInfo.repo } : {}),
+        ...(cwdInfo.unresolved ? { unresolved: true as const } : {}),
+      } : null;
+      projectMetadataCache.set(pathname, metadata);
+      return metadata ?? undefined;
+    },
+  };
   const projection = {
     signature,
     snapshot,
@@ -108,6 +139,14 @@ export function registryProjectionForSnapshot(snapshot: RegistrySnapshot): Regis
   if (cached) return cached;
   const projection = projectRegistrySnapshot(snapshot, "snapshot");
   snapshotProjectionCache.set(snapshot, projection);
+  return projection;
+}
+
+function registryIdentityProjectionForSnapshot(snapshot: RegistrySnapshot): RegistryProjection {
+  const cached = snapshotIdentityProjectionCache.get(snapshot);
+  if (cached) return cached;
+  const projection = projectRegistrySnapshot(snapshot, "snapshot-identity", false);
+  snapshotIdentityProjectionCache.set(snapshot, projection);
   return projection;
 }
 
@@ -153,10 +192,19 @@ function readOnlyRegistryProjection(): RegistryProjection | null {
  * safe to run after the files response has already stamped identity/launch
  * profile — it never re-derives `autoTitle` once set.
  */
-export function overlaySessionTitles(entries: FileEntry[], registrySnapshot?: RegistrySnapshot): void {
+export function overlaySessionTitles(
+  entries: FileEntry[],
+  registrySnapshot?: RegistrySnapshot,
+  includeProjectMetadata = true,
+): void {
   const project = sessionTitleProjector(
     true,
-    registrySnapshot === undefined ? undefined : registryProjectionForSnapshot(registrySnapshot),
+    registrySnapshot === undefined
+      ? undefined
+      : includeProjectMetadata
+        ? registryProjectionForSnapshot(registrySnapshot)
+        : registryIdentityProjectionForSnapshot(registrySnapshot),
+    includeProjectMetadata,
   );
   for (const entry of entries) project(entry);
 }
@@ -171,6 +219,7 @@ export function overlayResourceSessionTitles(entries: FileEntry[]): void {
 function sessionTitleProjector(
   includeRenameEligibility = true,
   suppliedProjection?: RegistryProjection | null,
+  includeProjectMetadata = true,
 ): (entry: FileEntry) => void {
   const index = indexSessionTitles(loadSessionTitles());
   const projection = suppliedProjection === undefined ? registryProjection(agentRegistry()) : suppliedProjection;
@@ -193,19 +242,21 @@ function sessionTitleProjector(
     const latest = conversation?.generations.at(-1);
     if (latest?.path === entry.path) {
       entry.title = latest.launchProfile.title ?? entry.title;
-      entry.project = resolveProjectAttribution({
-        projectOwnership: conversation?.projectOwnership,
-        cwd: latest.launchProfile.cwd,
-        launchProfileProject: latest.launchProfile.project,
-        fallbackProject: entry.project,
-      }).project ?? entry.project;
-      const projectMetadata = projection?.projectMetadataByPath.get(entry.path);
-      if (projectMetadata) {
-        entry.projectName = projectMetadata.displayName;
-        entry.projectRoot = projectMetadata.projectRoot ?? entry.projectRoot;
-        entry.projectUnresolved = projectMetadata.unresolved;
+      if (includeProjectMetadata) {
+        entry.project = resolveProjectAttribution({
+          projectOwnership: conversation?.projectOwnership,
+          cwd: latest.launchProfile.cwd,
+          launchProfileProject: latest.launchProfile.project,
+          fallbackProject: entry.project,
+        }).project ?? entry.project;
+        const projectMetadata = projection?.projectMetadataByPath.get(entry.path);
+        if (projectMetadata) {
+          entry.projectName = projectMetadata.displayName;
+          entry.projectRoot = projectMetadata.projectRoot ?? entry.projectRoot;
+          entry.projectUnresolved = projectMetadata.unresolved;
+        }
+        if (conversation?.projectOwnership) entry.projectOwnership = { ...conversation.projectOwnership };
       }
-      if (conversation?.projectOwnership) entry.projectOwnership = { ...conversation.projectOwnership };
     }
     if (includeRenameEligibility) entry.renamable = isRenameableSessionEntry(entry);
     if (index.size > 0) {
@@ -246,7 +297,9 @@ export function overlaySessionProjects(entries: FileEntry[]): void {
  * free of another registry parse. */
 export function sessionProjectProjection(surfaceUnexpectedError = false): {
   projectByPath: ReadonlyMap<string, string>;
-  projectMetadataByPath: ReadonlyMap<string, { displayName: string; projectRoot?: string; unresolved?: true }>;
+  projectMetadataByPath: {
+    get(pathname: string): { displayName: string; projectRoot?: string; unresolved?: true } | undefined;
+  };
   archivedPaths: ReadonlySet<string>;
 } {
   const projection = registryProjection(agentRegistry(), surfaceUnexpectedError);

@@ -78,9 +78,20 @@ function projectedProjectCatalog(
 export async function buildFilesResponse(request: Request, dependencies: FilesRouteDependencies): Promise<NextResponse> {
   const timings: string[] = [];
   let timingMark = performance.now();
+  let traceMark = timingMark;
+  const traceStep = (name: string) => {
+    if (process.env.LLV_FILES_RESPONSE_TRACE !== "1") return;
+    const now = performance.now();
+    console.error(`[files projection trace] ${name} ${(now - traceMark).toFixed(1)}ms`);
+    traceMark = now;
+  };
   const markTiming = (name: string) => {
     const now = performance.now();
-    timings.push(`${name};dur=${(now - timingMark).toFixed(1)}`);
+    const duration = now - timingMark;
+    timings.push(`${name};dur=${duration.toFixed(1)}`);
+    if (process.env.LLV_FILES_RESPONSE_TRACE === "1") {
+      console.error(`[files projection] ${name} ${duration.toFixed(1)}ms`);
+    }
     timingMark = now;
   };
   const url = new URL(request.url);
@@ -94,16 +105,19 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   // the external scheduler, keeping repeated GETs byte-stable for state files.
   const registry = agentRegistry();
   const registrySnapshot = registry.readOnlySnapshot();
+  traceStep("registry-snapshot");
   /* One launch read-model (issue #569): a launch either projects the
      conversation window itself (nothing materialized yet) or folds into the
      live conversation as transient chips — never both. */
   const launchProjection = projectLaunchConversations(files, registrySnapshot);
+  traceStep("launch-projection");
   files.push(...launchProjection.cards);
   for (const file of files) {
     const launch = launchProjection.facts.get(file.path);
     if (launch) file.launch = launch;
   }
   const conversationLookup = readOnlyConversationLookupFromSnapshot(registrySnapshot);
+  traceStep("conversation-lookup");
   const conversationForPath = (pathname: string) => conversationLookup.conversationForPath(pathname);
   const filesByPath = new Map(files.map((file) => [file.path, file]));
   for (let index = 0; index < files.length; index += 1) {
@@ -168,6 +182,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     filesByPath.set(parentPath, placeholder);
     if (responsePinOverlayPaths.has(child.path)) responsePinOverlayPaths.add(parentPath);
   }
+  traceStep("parent-closure");
   const scannedPaths = new Set(files.map((file) => file.path));
   /* Receipt-owned conversations (issue #339): a Viewer launch persists a spawn
      receipt against the conversation it created. Those carry `viewer`
@@ -177,6 +192,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   for (const receipt of Object.values(registrySnapshot.receipts)) {
     receiptOwnedConversationIds.add(conversationLookup.canonicalConversationId(receipt.conversationId));
   }
+  traceStep("receipt-owners");
   /* Supersedence lineage (issue #383): the reverse edge map gives each chain
      tail its immediate predecessor and its round number (chain depth + 1),
      bounded so a malformed chain can never hang the scan. */
@@ -188,6 +204,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
       supersedencePredecessors.set(successorId, candidate.id);
     }
   }
+  traceStep("supersedence-index");
   const supersedenceRound = (conversationId: string): number => {
     let round = 1;
     const seen = new Set<string>([conversationId]);
@@ -363,6 +380,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
       };
     }
   }
+  traceStep("file-registry-overlay");
   markTiming("files-registry");
   /* Custom session titles (issue #33) are the last word on `title`. The shared
      projection runs after the registry has stamped `conversationId` and the
@@ -372,7 +390,10 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      on `autoTitle`; the `renamable` flag is projected too so the client never
      imports the Node-only store. */
   const flowsStartedAt = performance.now();
-  overlaySessionTitles(files, registrySnapshot);
+  /* The scanner rows already carry canonical project roots/display names.
+     Re-resolving every historical worktree cwd here costs tens of seconds on a
+     cold worker and cannot improve this request-level metadata. */
+  overlaySessionTitles(files, registrySnapshot, false);
   markTiming("files-session-titles");
   /* Durable project affinity: a Viewer-launched family whose root transcript
      recorded a bare directory above the repository its lineage works in (an
