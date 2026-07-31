@@ -602,14 +602,23 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     if (file.project === "project_unresolved") file.projectUnresolved = true;
   }
   markTiming("files-project-catalog");
-  const projectCwds = projectDirectoryFallbacks([
+  const visibleProjects = [
     ...projected.files.map((file) => file.project),
     ...effectiveProjectCatalog.map((entry) => entry.project),
     ...projected.flows.map((flow) => flow.project),
     ...pipelines.map((pipeline) => pipeline.project),
     ...workflows.map((workflow) => workflow.project),
     ...tasks.tasks.map((task) => task.project),
-  ]);
+  ];
+  const projectCwds = Object.fromEntries(
+    effectiveProjectCatalog
+      .filter((entry): entry is ProjectCatalogEntry & { projectRoot: string } => Boolean(entry.projectRoot))
+      .map((entry) => [entry.project, entry.projectRoot]),
+  );
+  const missingProjectCwds = [...new Set(visibleProjects)].filter((project) => !projectCwds[project]);
+  if (missingProjectCwds.length) {
+    Object.assign(projectCwds, projectDirectoryFallbacks(missingProjectCwds));
+  }
   markTiming("files-project-cwds");
   const projectsFinishedAt = performance.now();
   timings.push(`files-projects;dur=${(projectsFinishedAt - projectsStartedAt).toFixed(1)}`);

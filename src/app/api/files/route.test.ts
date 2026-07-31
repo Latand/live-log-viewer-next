@@ -30,9 +30,13 @@ function resetFilesProjectionCacheForTests(): void {
   const store = globalThis as typeof globalThis & {
     __llvFilesProjectionCache?: Map<string, unknown>;
     __llvFilesProjectionInflight?: Map<string, Promise<unknown>>;
+    __llvFilesProjectionWorkerTail?: Promise<void>;
+    __llvFilesPersistedProjectionChecked?: boolean;
   };
   store.__llvFilesProjectionCache = new Map();
   store.__llvFilesProjectionInflight = new Map();
+  store.__llvFilesProjectionWorkerTail = undefined;
+  store.__llvFilesPersistedProjectionChecked = undefined;
 }
 
 beforeEach(() => {
@@ -209,6 +213,35 @@ test("repeated files reads reuse the pure read snapshot and retain ETag behavior
   expect(first.headers.get("server-timing")).toMatch(/files-flow-restore;dur=\d+(?:\.\d+)?/);
   expect(first.headers.get("server-timing")).toMatch(/files-task-store;dur=\d+(?:\.\d+)?/);
   expect(first.headers.get("server-timing")).toMatch(/files-role-titles;dur=\d+(?:\.\d+)?/);
+});
+
+test("a process restart serves the persisted global projection while refreshing it", async () => {
+  const store = globalThis as typeof globalThis & {
+    __llvFilesProjectionInflight?: Map<string, Promise<unknown>>;
+    __llvFilesProjectionPersistenceTail?: Promise<void>;
+  };
+  process.env.LLV_FILES_PROJECTION_PERSIST_FOR_TEST = "1";
+  try {
+    scannedFiles = [file("/sessions/persisted-projection.jsonl")];
+    const first = await GET(new Request("http://127.0.0.1/api/files?project=project-a"));
+    const firstBody = await first.text();
+    await store.__llvFilesProjectionPersistenceTail;
+
+    resetFilesProjectionCacheForTests();
+    const restarted = await GET(new Request("http://127.0.0.1/api/files?project=project-b"));
+
+    expect(restarted.status).toBe(200);
+    expect(restarted.headers.get("x-llv-files-projection-cache")).toBe("stale");
+    expect(await restarted.text()).toBe(firstBody);
+
+    for (let attempt = 0; attempt < 100 && store.__llvFilesProjectionInflight?.size; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(store.__llvFilesProjectionInflight?.size ?? 0).toBe(0);
+    await store.__llvFilesProjectionPersistenceTail;
+  } finally {
+    delete process.env.LLV_FILES_PROJECTION_PERSIST_FOR_TEST;
+  }
 });
 
 test("registry heartbeat writes do not invalidate the completed files projection", async () => {
@@ -1715,11 +1748,13 @@ test("a client generation above the issued watermark cannot advance the server c
 });
 
 test("project query changes reuse one global scan snapshot", async () => {
-  await GET(new Request("http://127.0.0.1/api/files?project=project-a"));
-  await GET(new Request("http://127.0.0.1/api/files?project=project-b"));
+  const first = await GET(new Request("http://127.0.0.1/api/files?project=project-a"));
+  const second = await GET(new Request("http://127.0.0.1/api/files?project=project-b"));
 
   expect(scans).toBe(1);
   expect(scanProjects).toEqual([undefined]);
+  expect(first.headers.get("x-llv-files-projection-cache")).toBe("miss");
+  expect(second.headers.get("x-llv-files-projection-cache")).toBe("hit");
 });
 
 function file(path: string): FileEntry {
