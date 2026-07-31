@@ -115,6 +115,14 @@ for (const mode of ["off", "sqlite"] as const) {
       deliveredAt: null,
       error: expect.stringContaining("migration was stopped"),
     });
+    /* A late journal report from the abandoned generation is evidence only.
+       It cannot release the cancelled message after either persistence mode
+       restarts; a fresh operator action owns any later delivery. */
+    expect(reopened.recordDeliveryOutcomeForOperation(id, held.command.operationId, "delivered")).toBeNull();
+    expect(reopened.snapshot().heldDeliveries[held.id]).toMatchObject({
+      state: "failed",
+      error: expect.stringContaining("migration was stopped"),
+    });
   });
 }
 
@@ -243,6 +251,74 @@ test("stopped and non-active-target intents cannot adopt unrelated spawns", () =
   }
 });
 
+test("an explicit account pin stays outside an active engine drain while an unpinned launch follows the selected account", () => {
+  const { store } = seededRegistry("off", registryFile());
+  store.setEngineRouting("codex", "selected");
+  store.commitMigrationIntent({
+    engine: "codex",
+    targetId: "selected",
+    origin: "manual",
+    requestId: "selected-engine-drain",
+    expectedRevision: store.engineRouting("codex").revision,
+  });
+
+  const pinned = store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo/checkout",
+    transport: "structured",
+    accountId: "pinned",
+    accountPin: true,
+  });
+  if (pinned.kind !== "created") throw new Error("expected pinned launch receipt");
+  const staged = store.stageStructuredSpawn(pinned.receipt.launchId, {
+    key: { engine: "codex", sessionId: "pinned-session" },
+    artifactPath: "/sessions/pinned-session.jsonl",
+    cwd: "/repo/checkout",
+    accountId: "pinned",
+    status: "idle",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
+  if (staged.kind !== "settled") throw new Error("expected pinned launch staging");
+
+  expect(staged.receipt).toMatchObject({ accountId: "pinned", accountPin: true, state: "path-pending" });
+  expect(staged.conversation).toMatchObject({ pinnedAccountId: "pinned", migration: null });
+
+  store.setEngineRouting("codex", "reselected");
+  expect(store.requestConversationMigrationToActiveAccount(staged.conversation.id)).toMatchObject({
+    pinnedAccountId: "pinned",
+    migration: null,
+  });
+
+  const unpinned = store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo/checkout",
+    transport: "structured",
+    accountId: "reselected",
+    accountPin: false,
+  });
+  if (unpinned.kind !== "created") throw new Error("expected fallback launch receipt");
+  const settled = store.settleSpawn(unpinned.receipt.launchId, {
+    key: { engine: "codex", sessionId: "fallback-session" },
+    artifactPath: "/sessions/fallback-session.jsonl",
+    cwd: "/repo/checkout",
+    accountId: "reselected",
+    status: "idle",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
+  if (settled.kind !== "settled") throw new Error("expected fallback launch settlement");
+
+  store.setEngineRouting("codex", "next-selected");
+  expect(store.requestConversationMigrationToActiveAccount(settled.conversation.id).migration).toMatchObject({
+    targetId: "next-selected",
+  });
+});
+
 test("resume generation rollover cannot revive delivery cancelled by Stop", () => {
   const { store, id } = seededRegistry("off", registryFile());
   const intent = store.commitMigrationIntent({
@@ -355,6 +431,44 @@ test("stopping a migration records that an uncertain delivery may already have l
     generationId: null,
     error: expect.stringContaining("may have been delivered"),
   });
+});
+
+test("a successful migration preserves both prior and fenced prompts as cancelled evidence", () => {
+  const { store, id } = seededRegistry("off", registryFile());
+  const source = store.conversation(id)!.generations.at(-1)!;
+  const predecessorOwned = store.holdDelivery(id, "old owner payload", "old-owner-prompt");
+  const requested = store.requestConversationReseat(id, "healthy");
+  const fenced = store.holdDelivery(id, "fenced payload", "fenced-prompt");
+  const revision = requested.migration!.revision;
+  store.transitionConversationMigration(id, revision, ["requested"], { phase: "preparing" });
+  const starting = store.transitionConversationMigration(id, revision, ["preparing"], { phase: "successor-starting" });
+  const receipt = providerReceipt(starting.migration!.operationId, "verified-successor", "/sessions/verified-successor.jsonl");
+  store.persistMigrationProviderReceipt(id, revision, starting.migration!.operationId, receipt);
+  const committed = store.commitSuccessor(id, {
+    id: receipt.nativeId,
+    path: receipt.path,
+    accountId: "healthy",
+    historyHash: receipt.historyHash,
+    host: receipt.host,
+  }, revision, starting.migration!.operationId, receipt);
+
+  expect(committed.migration).toMatchObject({ phase: "committed" });
+  expect(store.snapshot().heldDeliveries[predecessorOwned.id]).toMatchObject({
+    state: "failed",
+    generationId: null,
+    text: "",
+    error: expect.stringContaining("migration committed"),
+  });
+  expect(store.snapshot().heldDeliveries[fenced.id]).toMatchObject({
+    state: "failed",
+    generationId: null,
+    text: "",
+    error: expect.stringContaining("migration committed"),
+  });
+  expect(store.conversation(id)?.generations).toMatchObject([
+    { id: source.id, archivedAt: expect.any(String) },
+    { id: receipt.nativeId, accountId: "healthy", archivedAt: null },
+  ]);
 });
 
 test("repeat reseat clicks never mint a second successor operation", () => {

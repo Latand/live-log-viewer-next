@@ -93,6 +93,7 @@ function cardState(snapshot: RegistryFile, receipt: SpawnReceipt): StructuredSpa
     launchId: receipt.launchId,
     clientAttemptId: receipt.clientAttemptId,
     accountId: receipt.accountId,
+    accountPin: receipt.accountPin,
     conversationId: receipt.conversationId,
     state,
     initialMessage,

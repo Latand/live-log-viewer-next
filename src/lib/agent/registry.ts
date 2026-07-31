@@ -167,6 +167,10 @@ export interface SpawnReceipt {
   engine: AgentEngine;
   cwd: string;
   accountId: string | null;
+  /** An explicit launch account is a durable routing authority for this
+      conversation. The selected engine account remains a fallback for
+      receipts without this marker. */
+  accountPin: boolean;
   parentConversationId: ViewerConversationId | null;
   /** How the durable parent was attributed (#341): an explicit selector in the
       request body, or inference from the authenticated caller conversation.
@@ -267,6 +271,8 @@ export interface SpawnRequest {
   requestDigest?: string | null;
   spawnCapabilityDigest?: string | null;
   accountId?: string | null;
+  /** True only when the caller explicitly selected accountId. */
+  accountPin?: boolean;
   parentConversationId?: ViewerConversationId | null;
   /** Attribution of the resolved parent (#341): explicit request selector or
       inference from the authenticated caller conversation. */
@@ -396,6 +402,9 @@ export interface RegistryConversation {
       cwd-attributed conversations; projections then fall back to canonical
       cwd, the launch-profile hint, and the scanner slug in that order. */
   projectOwnership: ConversationProjectOwnership | null;
+  /** Explicit launch pin carried from a receipt into the conversation. A
+      selected-account change cannot reseat this conversation. */
+  pinnedAccountId?: string | null;
   /** Durable compare-and-set owner for live structured profile changes. */
   reconfigure?: ConversationReconfigureState | null;
   migration: ConversationMigration | null;
@@ -806,6 +815,7 @@ function migrationScopeCounts(
   const index = migrationReadinessIndex(file);
   for (const conversation of Object.values(file.conversations)) {
     if (conversation.engine !== engine) continue;
+    if (conversation.pinnedAccountId) continue;
     const source = conversation.generations.at(-1);
     if (!source || source.accountId === null) continue;
     if (source.accountId === targetId) {
@@ -894,6 +904,7 @@ function terminalizeHeldDelivery(
   delivery.assignedAt = null;
   delivery.deliveredAt = null;
   delivery.error = terminalReason.slice(0, 240);
+  failInitialSpawnReceiptForDelivery(file, delivery);
   syncDeliveryOperationOwnerState(file, delivery);
 }
 
@@ -1304,6 +1315,9 @@ function normalizeConversation(value: RegistryConversation, policy?: McpGrantPol
     abandonedContinuityPaths,
     providerForkPaths,
     projectOwnership: normalizeProjectOwnership((value as Partial<RegistryConversation>).projectOwnership),
+    pinnedAccountId: typeof (value as Partial<RegistryConversation>).pinnedAccountId === "string"
+      ? (value as Partial<RegistryConversation>).pinnedAccountId
+      : null,
     reconfigure: normalizeConversationReconfigure((value as Partial<RegistryConversation>).reconfigure),
     migration,
     migrationOptOut,
@@ -1460,6 +1474,25 @@ function failedSpawnLaunchIdOf(file: RegistryFile, delivery: HeldDelivery): stri
   const receipt = file.receipts[launchId];
   if (!receipt || receipt.purpose !== "launch" || receipt.state !== "failed") return null;
   return launchId;
+}
+
+/** A terminal first-message delivery failure makes its launch receipt terminal
+    too. Leaving the receipt path-pending would keep the operator card live
+    without a retry action even though its only prompt can no longer arrive. */
+function failInitialSpawnReceiptForDelivery(file: RegistryFile, delivery: HeldDelivery): void {
+  if (delivery.state !== "failed") return;
+  const clientMessageId = delivery.clientMessageId;
+  if (!clientMessageId?.startsWith("spawn_")) return;
+  const launchId = clientMessageId.slice("spawn_".length);
+  if (delivery.command.operationId !== `spawn_message_${launchId}`) return;
+  const receipt = file.receipts[launchId];
+  if (!receipt
+    || receipt.purpose !== "launch"
+    || resolveConversationAlias(file, receipt.conversationId) !== resolveConversationAlias(file, delivery.conversationId)
+    || ["completed", "failed", "conflicted"].includes(receipt.state)) return;
+  receipt.state = "failed";
+  receipt.error = delivery.error ?? "initial prompt delivery failed";
+  receipt.admissionOwner = null;
 }
 
 /** Durably terminalize the `spawn_<launchId>` initial delivery of a FAILED
@@ -2328,6 +2361,7 @@ function normalizeReceipt(value: SpawnReceipt, policy?: McpGrantPolicy): SpawnRe
       ? value.pathCorrelation
       : null,
     accountId: typeof value.accountId === "string" ? value.accountId : null,
+    accountPin: value.accountPin === true,
     parentConversationId: typeof value.parentConversationId === "string" && value.parentConversationId.startsWith("conversation_")
       ? value.parentConversationId as ViewerConversationId
       : null,
@@ -3498,6 +3532,7 @@ export class AgentRegistry {
             && existing.engine === input.engine
             && existing.cwd === input.cwd
             && existing.transport === (input.transport ?? null)
+            && existing.accountPin === (input.accountPin === true)
             && existing.explicitProject === explicitProject
             && (existing.supersedes?.conversationId ?? null) === supersedes
             && existing.launchProfile.permissionMode === profile.permissionMode;
@@ -3596,6 +3631,7 @@ export class AgentRegistry {
         engine: input.engine,
         cwd: input.cwd,
         accountId: input.accountId ?? null,
+        accountPin: input.accountPin === true,
         parentConversationId,
         parentSource: parentConversationId
           && (input.parentSource === "explicit" || input.parentSource === "inferred-caller")
@@ -3950,6 +3986,7 @@ export class AgentRegistry {
       abandonedContinuityPaths: [],
       providerForkPaths: [],
       projectOwnership: null,
+      pinnedAccountId: receipt.accountPin ? receipt.accountId : null,
       migration: null,
       migrationOptOut: null,
       supersededBy: null,
@@ -3964,6 +4001,9 @@ export class AgentRegistry {
        re-derive or demote it. */
     conversation.agentRole ??= receipt.agentRole;
     conversation.delegationDepth ??= receipt.delegationDepth;
+    if (receipt.purpose === "launch" && receipt.accountPin && receipt.accountId) {
+      conversation.pinnedAccountId = receipt.accountId;
+    }
     if (conversation.engine !== receipt.engine) return conflict("spawn_identity_conflict");
     if (receipt.purpose === "resume-successor" && !resumeCanRebaseMigration(conversation.migration)) {
       return conflict("spawn_identity_conflict");
@@ -4059,7 +4099,7 @@ export class AgentRegistry {
       && engineScopedIntent(intent)
       && migrationIntentCanEnroll(file, intent, Date.parse(createdAt)));
     const source = conversation.generations.at(-1);
-    if (activeIntent && source && source.accountId !== activeIntent.targetId && !conversation.migration) {
+    if (activeIntent && !conversation.pinnedAccountId && source && source.accountId !== activeIntent.targetId && !conversation.migration) {
       conversation.migration = {
         intentId: activeIntent.id,
         phase: migrationTurnIsBusy(file, conversation) ? "waiting-turn" : "requested",
@@ -4650,6 +4690,7 @@ export class AgentRegistry {
         abandonedContinuityPaths: [],
         providerForkPaths: [],
         projectOwnership: null,
+        pinnedAccountId: null,
         migration: null,
         migrationOptOut: null,
         supersededBy: null,
@@ -4826,6 +4867,7 @@ export class AgentRegistry {
             abandonedContinuityPaths: [],
             providerForkPaths: [],
             projectOwnership: null,
+            pinnedAccountId: null,
             migration: null,
             migrationOptOut: null,
             supersededBy: null,
@@ -5237,6 +5279,7 @@ export class AgentRegistry {
       let scoped = 0;
       for (const conversation of Object.values(file.conversations)) {
         if (conversation.engine !== input.engine) continue;
+        if (conversation.pinnedAccountId) continue;
         if (input.origin === "manual" && conversation.migrationOptOut?.targetId === input.targetId) {
           conversation.migrationOptOut = null;
         }
@@ -5275,6 +5318,7 @@ export class AgentRegistry {
       const canonicalId = resolveConversationAlias(file, id);
       const conversation = file.conversations[canonicalId];
       if (!conversation) throw new Error("viewer conversation is unknown");
+      if (conversation.pinnedAccountId) return clone(conversation);
       const targetId = file.engineRouting[conversation.engine].activeAccountId;
       const source = conversation.generations.at(-1);
       if (!targetId || !source || source.accountId === null || source.accountId === targetId) return clone(conversation);
@@ -6034,6 +6078,7 @@ export class AgentRegistry {
       delivery.deliveredAt = state === "delivered" ? now() : null;
       delivery.error = error?.slice(0, 240) ?? null;
       if (state === "delivered") delivery.text = "";
+      if (state === "failed") failInitialSpawnReceiptForDelivery(file, delivery);
       if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
       const settled = clone(delivery);
       if (state === "delivered" || state === "failed") compactDeliveryReservations(file, delivery.conversationId);
@@ -6079,7 +6124,9 @@ export class AgentRegistry {
         const canonicalId = resolveConversationAlias(file, outcome.conversationId);
         const delivery = deliveries.get(keyFor(canonicalId, outcome.operationId));
         if (!delivery || delivery.state === "delivered") return delivery ? clone(delivery) : null;
-        const retryRecovered = delivery.state === "failed" && outcome.state === "delivered";
+        const retryRecovered = delivery.state === "failed"
+          && outcome.state === "delivered"
+          && !delivery.error?.startsWith(MIGRATION_DELIVERY_CANCELLATION_PREFIX);
         if (delivery.state !== "delivery-uncertain" && !retryRecovered) return null;
         const conversation = file.conversations[canonicalId];
         const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
@@ -6088,6 +6135,7 @@ export class AgentRegistry {
         delivery.deliveredAt = outcome.state === "delivered" ? now() : null;
         delivery.error = outcome.error?.slice(0, 240) ?? null;
         if (outcome.state === "delivered") delivery.text = "";
+        if (outcome.state === "failed") failInitialSpawnReceiptForDelivery(file, delivery);
         if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
         compactConversations.add(delivery.conversationId);
         return clone(delivery);

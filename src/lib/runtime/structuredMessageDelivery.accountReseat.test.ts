@@ -6,14 +6,15 @@ import { afterAll, expect, test } from "bun:test";
 
 import { AgentRegistry } from "@/lib/agent/registry";
 import { advanceConversationMigration, drainHeldDeliveries } from "@/lib/accounts/migration/coordinator";
-import { emptyLaunchProfile, type HeldDelivery, type SuccessorProviderPort, type TurnState } from "@/lib/accounts/migration/contracts";
+import { emptyLaunchProfile, type SuccessorProviderPort, type TurnState } from "@/lib/accounts/migration/contracts";
+import { projectLaunchConversations } from "@/lib/agent/spawnProjection";
 import type { RuntimeHostClient } from "./client";
 import type { RuntimeSnapshot, RuntimeTurnAxis } from "./contracts";
 import { runtimeImageCapability } from "./runtimeImageStore";
 import type { StructuredImageRef } from "./structuredContent";
 import { StructuredDeliveryControllerUnavailableError } from "./structuredDeliveryController";
 
-import { deliverHeldStructuredMessage, enqueueStructuredMessage } from "./structuredMessageDelivery";
+import { enqueueStructuredMessage } from "./structuredMessageDelivery";
 
 const artifactPath = "/sessions/native-source.jsonl";
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-account-reseat-"));
@@ -141,6 +142,196 @@ function recordStructuredOwner(
     pendingAction: null,
   });
 }
+
+test("a pinned first prompt bypasses selected-account migration and terminal delivery failure settles its receipt", async () => {
+  const registry = new AgentRegistry(path.join(sandbox, `registry-${registryNumber += 1}.json`));
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    transport: "structured",
+    accountId: "pinned",
+    accountPin: true,
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+  });
+  if (begun.kind !== "created") throw new Error("expected pinned launch receipt");
+  const staged = registry.stageStructuredSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: "native-source" },
+    artifactPath,
+    cwd: "/repo",
+    accountId: "pinned",
+    launchProfile: begun.receipt.launchProfile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:pinned-account",
+      process: { pid: 101, startIdentity: "pinned-account" },
+      eventCursor: 0,
+      protocolVersion: "v2",
+      writerClaimEpoch: 1,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 1,
+    claimOwner: "structured-host:pinned-account",
+    pendingAction: "spawn",
+  });
+  if (staged.kind !== "settled") throw new Error("expected staged pinned launch");
+  registry.setEngineRouting("codex", "selected");
+
+  const client: RuntimeHostClient = {
+    snapshot: async () => snapshot(staged.conversation.id),
+    command: async (command: { operationId: string; idempotencyKey: string; conversationId: string }) => ({
+      operationId: command.operationId,
+      replayed: false,
+      receipt: {
+        operationId: command.operationId,
+        idempotencyKey: command.idempotencyKey,
+        conversationId: command.conversationId,
+        kind: "send",
+        status: "failed",
+        reason: "pinned account cannot accept the first prompt",
+        at: "2026-07-31T12:00:00.000Z",
+        revision: 1,
+      },
+    }),
+  } as unknown as RuntimeHostClient;
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: staged.conversation.id,
+    clientMessageId: `spawn_${begun.receipt.launchId}`,
+    operationId: `spawn_message_${begun.receipt.launchId}`,
+    text: "first prompt",
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    requestMigrationTick: () => {},
+    kick: () => {},
+  });
+
+  expect(result).toMatchObject({ ok: false, outcome: "failed", error: "pinned account cannot accept the first prompt" });
+  expect(registry.conversation(staged.conversation.id)).toMatchObject({ pinnedAccountId: "pinned", migration: null });
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    accountId: "pinned",
+    accountPin: true,
+    state: "failed",
+    error: "pinned account cannot accept the first prompt",
+  });
+  expect(registry.pendingDeliveries(staged.conversation.id)).toMatchObject([{
+    state: "failed",
+    attempts: 1,
+    error: "pinned account cannot accept the first prompt",
+  }]);
+  const card = projectLaunchConversations([], registry.snapshot()).cards.find((item) => item.conversationId === staged.conversation.id);
+  expect(card?.spawn).toMatchObject({ accountId: "pinned", accountPin: true, state: "failed", retrySafe: true, error: "pinned account cannot accept the first prompt" });
+});
+
+test("simultaneous pinned first prompts deliver independently after the selected account changes", async () => {
+  const registry = new AgentRegistry(path.join(sandbox, `registry-${registryNumber += 1}.json`));
+  const stagePinned = (accountId: string, sessionId: string) => {
+    const receipt = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd: "/repo",
+      transport: "structured",
+      accountId,
+      accountPin: true,
+      launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    });
+    if (receipt.kind !== "created") throw new Error("expected a pinned launch receipt");
+    const path = `/sessions/${sessionId}.jsonl`;
+    const staged = registry.stageStructuredSpawn(receipt.receipt.launchId, {
+      key: { engine: "codex", sessionId },
+      artifactPath: path,
+      cwd: "/repo",
+      accountId,
+      launchProfile: receipt.receipt.launchProfile,
+      status: "idle",
+      host: null,
+      structuredHost: {
+        kind: "codex-app-server",
+        endpoint: `stdio:${sessionId}`,
+        process: { pid: 100 + sessionId.length, startIdentity: sessionId },
+        eventCursor: 0,
+        protocolVersion: "v2",
+        writerClaimEpoch: 1,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      },
+      claimEpoch: 1,
+      claimOwner: `structured-host:${sessionId}`,
+      pendingAction: "spawn",
+    });
+    if (staged.kind !== "settled") throw new Error("expected a staged pinned launch");
+    return { receipt: receipt.receipt, conversation: staged.conversation, path, sessionId };
+  };
+
+  const first = stagePinned("account-one", "pinned-one");
+  const second = stagePinned("account-two", "pinned-two");
+  registry.setEngineRouting("codex", "selected-before");
+  registry.setEngineRouting("codex", "selected-after");
+  const staged = [first, second];
+  const commands: string[] = [];
+  const client: RuntimeHostClient = {
+    snapshot: async () => {
+      const result = snapshot(first.conversation.id);
+      result.sessions = staged.map((item) => ({
+        ...result.sessions[0]!,
+        conversationId: item.conversation.id,
+        sessionKey: { engine: "codex", sessionId: item.sessionId },
+        artifactPath: item.path,
+      }));
+      return result;
+    },
+    command: async (command: { operationId: string; idempotencyKey: string; conversationId: string }) => {
+      commands.push(command.conversationId);
+      return {
+        operationId: command.operationId,
+        replayed: false,
+        receipt: {
+          operationId: command.operationId,
+          idempotencyKey: command.idempotencyKey,
+          conversationId: command.conversationId,
+          kind: "send" as const,
+          status: "delivered" as const,
+          at: "2026-07-31T12:00:00.000Z",
+          revision: 1,
+        },
+      };
+    },
+  } as unknown as RuntimeHostClient;
+
+  const results = await Promise.all(staged.map(async (item) => await enqueueStructuredMessage({
+    path: item.path,
+    conversationId: item.conversation.id,
+    clientMessageId: `spawn_${item.receipt.launchId}`,
+    operationId: `spawn_message_${item.receipt.launchId}`,
+    text: `first prompt for ${item.sessionId}`,
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    requestMigrationTick: () => {},
+    kick: () => {},
+  })));
+
+  expect(results).toEqual(staged.map((item) => expect.objectContaining({
+    ok: true,
+    outcome: "delivered",
+    target: item.conversation.id,
+  })));
+  expect(commands.sort()).toEqual(staged.map((item) => item.conversation.id).sort());
+  for (const item of staged) {
+    expect(registry.conversation(item.conversation.id)).toMatchObject({
+      pinnedAccountId: item.receipt.accountId,
+      migration: null,
+      generations: [{ accountId: item.receipt.accountId }],
+    });
+  }
+});
 
 type RuntimeSynchronization = "live" | "absent-client" | "snapshot-failure" | "missing-session";
 
@@ -272,7 +463,7 @@ async function expectWaitingTurnReseatRestart(
   expect({ predecessorCommands, successorCreates, successorDeliveries }).toEqual({
     predecessorCommands: 0,
     successorCreates: 1,
-    successorDeliveries: [clientMessageId],
+    successorDeliveries: [],
   });
   expect(restarted.conversation(conversation.id)).toMatchObject({
     id: conversation.id,
@@ -282,37 +473,44 @@ async function expectWaitingTurnReseatRestart(
       { id: successorId, path: successorPath, accountId: "seat-active", archivedAt: null },
     ],
   });
+  expect(restarted.pendingDeliveries(conversation.id)).toMatchObject([{
+    clientMessageId,
+    state: "failed",
+    text: "",
+    generationId: null,
+    error: expect.stringContaining("migration committed"),
+  }]);
 }
 
-test("a newly admitted busy-turn reseat stays held through restart and drains once to the successor", async () => {
+test("a newly admitted busy-turn reseat stays held through restart and becomes cancelled evidence", async () => {
   await expectWaitingTurnReseatRestart("busy");
 });
 
-test("a newly admitted unknown-turn reseat stays held through restart and drains once to the successor", async () => {
+test("a newly admitted unknown-turn reseat stays held through restart and becomes cancelled evidence", async () => {
   await expectWaitingTurnReseatRestart("unknown");
 });
 
-test("an absent runtime client keeps a busy-turn reseat held through restart and drains once to the successor", async () => {
+test("an absent runtime client keeps a busy-turn reseat held through restart and becomes cancelled evidence", async () => {
   await expectWaitingTurnReseatRestart("busy", "absent-client");
 });
 
-test("an absent runtime client keeps an unknown-turn reseat held through restart and drains once to the successor", async () => {
+test("an absent runtime client keeps an unknown-turn reseat held through restart and becomes cancelled evidence", async () => {
   await expectWaitingTurnReseatRestart("unknown", "absent-client");
 });
 
-test("a failed runtime snapshot keeps a busy-turn reseat held through restart and drains once to the successor", async () => {
+test("a failed runtime snapshot keeps a busy-turn reseat held through restart and becomes cancelled evidence", async () => {
   await expectWaitingTurnReseatRestart("busy", "snapshot-failure");
 });
 
-test("a failed runtime snapshot keeps an unknown-turn reseat held through restart and drains once to the successor", async () => {
+test("a failed runtime snapshot keeps an unknown-turn reseat held through restart and becomes cancelled evidence", async () => {
   await expectWaitingTurnReseatRestart("unknown", "snapshot-failure");
 });
 
-test("a missing runtime session keeps a busy-turn reseat held through restart and drains once to the successor", async () => {
+test("a missing runtime session keeps a busy-turn reseat held through restart and becomes cancelled evidence", async () => {
   await expectWaitingTurnReseatRestart("busy", "missing-session");
 });
 
-test("a missing runtime session keeps an unknown-turn reseat held through restart and drains once to the successor", async () => {
+test("a missing runtime session keeps an unknown-turn reseat held through restart and becomes cancelled evidence", async () => {
   await expectWaitingTurnReseatRestart("unknown", "missing-session");
 });
 
@@ -697,7 +895,7 @@ test("an explicit migration opt-out keeps a synchronization hold assigned to the
   expect(sourceDeliveries).toEqual(["synchronization-opted-out-send"]);
 });
 
-test("a fresh empty-turn spawn on a draining source account reaches one successor", async () => {
+test("a fresh empty-turn prompt on a draining source account becomes cancelled evidence", async () => {
   const { registry, conversation } = registryWithConversation("seat-source", "codex", "unknown", "empty");
   registry.setEngineRouting("codex", "seat-active");
   let predecessorCommands = 0;
@@ -747,12 +945,18 @@ test("a fresh empty-turn spawn on a draining source account reaches one successo
 
   expect({ successorCreates, delivered }).toEqual({
     successorCreates: 1,
-    delivered: ["fresh-empty-turn-send"],
+    delivered: [],
   });
   expect(registry.conversation(conversation.id)?.migration?.phase).toBe("committed");
+  expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{
+    clientMessageId: "fresh-empty-turn-send",
+    state: "failed",
+    text: "",
+    error: expect.stringContaining("migration committed"),
+  }]);
 });
 
-test("a post-rollback stale busy owner recovers its missing host and drains once", async () => {
+test("a post-rollback stale busy owner remains cancelled after its host returns", async () => {
   const { registry, conversation } = registryWithConversation("seat-source", "codex", "busy");
   recordStructuredOwner(registry, conversation);
   registry.setEngineRouting("codex", "seat-active");
@@ -770,63 +974,23 @@ test("a post-rollback stale busy owner recovers its missing host and drains once
   expect(admitted).toMatchObject({ ok: true, outcome: "held" });
   registry.rollbackConversationMigration(conversation.id, registry.conversation(conversation.id)!.migration!.revision);
 
-  let hostAvailable = false;
-  let recoveries = 0;
-  let commands = 0;
-  const client = {
-    snapshot: async () => hostAvailable ? snapshot(conversation.id, "codex", "hosted", "idle") : {
-      ...snapshot(conversation.id, "codex", "dead", "unknown"),
-      sessions: [],
-    },
-    command: async (command: { operationId: string; idempotencyKey: string; conversationId: string }) => {
-      commands += 1;
-      return {
-        operationId: command.operationId,
-        replayed: false,
-        receipt: {
-          operationId: command.operationId,
-          idempotencyKey: command.idempotencyKey,
-          conversationId: command.conversationId,
-          kind: "send" as const,
-          status: "delivered" as const,
-          at: "2026-07-22T00:00:00.000Z",
-          revision: 1,
-        },
-      };
-    },
-    operationStatus: async () => null,
-  } as unknown as RuntimeHostClient;
+  let oldPromptDeliveries = 0;
   const port = {
-    async deliver(input: { delivery: { id: string; conversationId: string; text: string; command: HeldDelivery["command"] }; path: string; clientMessageId: string }) {
-      return await deliverHeldStructuredMessage({
-        conversationId: input.delivery.conversationId,
-        path: input.path,
-        deliveryId: input.delivery.id,
-        clientMessageId: input.clientMessageId,
-        text: input.delivery.text,
-        command: input.delivery.command,
-      }, {
-        enabled: () => true,
-        client: () => client,
-        registry: () => registry,
-        kick: () => {},
-        recover: async () => {
-          recoveries += 1;
-          hostAvailable = true;
-          return { target: null, path: artifactPath, conversationId: conversation.id, spawned: true };
-        },
-      }) ?? "delivery-uncertain";
+    async deliver() {
+      oldPromptDeliveries += 1;
+      return "delivered" as const;
     },
   };
   await drainHeldDeliveries(conversation.id, port, registry);
   await drainHeldDeliveries(conversation.id, port, registry);
-  await drainHeldDeliveries(conversation.id, port, registry);
 
-  expect({ recoveries, commands }).toEqual({ recoveries: 1, commands: 1 });
+  expect(oldPromptDeliveries).toBe(0);
   expect(Object.values(registry.snapshot().heldDeliveries)).toMatchObject([{
     clientMessageId: "stale-busy-post-rollback",
-    state: "delivered",
-    attempts: 2,
+    state: "failed",
+    text: "",
+    attempts: 0,
+    error: expect.stringContaining("migration was rolled back"),
   }]);
 });
 
@@ -925,7 +1089,7 @@ test("an exact retry reuses one account migration and one held delivery", async 
   }]);
 });
 
-test("restart preserves one Viewer conversation and drains once after account adoption", async () => {
+test("restart preserves one Viewer conversation and retains old held input as cancelled evidence", async () => {
   const { registry, conversation } = registryWithConversation();
   registry.setEngineRouting("codex", "seat-active");
   const sourceGeneration = conversation.generations.at(-1)!;
@@ -999,16 +1163,17 @@ test("restart preserves one Viewer conversation and drains once after account ad
   await drainHeldDeliveries(conversation.id, delivery, restarted);
   await drainHeldDeliveries(conversation.id, delivery, restarted);
 
-  expect(delivered).toEqual(["restart-safe-account-reseat"]);
+  expect(delivered).toEqual([]);
   expect(Object.values(restarted.snapshot().heldDeliveries)).toMatchObject([{
     clientMessageId: "restart-safe-account-reseat",
-    state: "delivered",
+    state: "failed",
     text: "",
-    generationId: successorId,
+    generationId: null,
+    error: expect.stringContaining("migration committed"),
   }]);
 });
 
-test("controller startup retry publishes one selected-account successor and drains once for both engines", async () => {
+test("controller startup retry publishes one selected-account successor and cancels held input for both engines", async () => {
   for (const engine of ["claude", "codex"] as const) {
     const { registry, conversation } = registryWithConversation("seat-source", engine);
     registry.setEngineRouting(engine, "seat-active");
@@ -1082,8 +1247,14 @@ test("controller startup retry publishes one selected-account successor and drai
     expect({ creates, publications, delivered }).toEqual({
       creates: 1,
       publications: 2,
-      delivered: [clientMessageId],
+      delivered: [],
     });
     expect(controllerReady.conversation(conversation.id)?.migration?.phase).toBe("committed");
+    expect(controllerReady.pendingDeliveries(conversation.id)).toMatchObject([{
+      clientMessageId,
+      state: "failed",
+      text: "",
+      error: expect.stringContaining("migration committed"),
+    }]);
   }
 });
