@@ -71,17 +71,6 @@ export function reduceCatalogPin(state: CatalogPinState, event: CatalogPinEvent)
   return current;
 }
 
-function initialProject(): string {
-  if (typeof window === "undefined") return OVERVIEW;
-  let stored: string | null = null;
-  try {
-    stored = window.localStorage.getItem(PROJECT_KEY);
-  } catch {
-    stored = null;
-  }
-  return initialProjectFromState(window.location.hash, stored);
-}
-
 function writeHash(project: string) {
   if (project !== OVERVIEW) {
     history.replaceState(null, "", "#p=" + encodeURIComponent(project));
@@ -115,7 +104,10 @@ export function Viewer() {
      that the board/scheme/mobile components report into and ships an ephemeral
      per-tab snapshot to the server. Renders nothing. */
   useViewPresence();
-  const [project, setProject] = useState<string>(() => initialProject());
+  /* URL fragments and localStorage do not exist in the server render. Start
+     from the same Overview shell on both sides, then apply the saved/hash
+     project in the mount effect below so hydration never discards the tree. */
+  const [project, setProject] = useState<string>(OVERVIEW);
   const [pendingHash, setPendingHash] = useState<ConversationHash | null>(null);
   const [catalogPin, dispatchCatalogPin] = useReducer(reduceCatalogPin, null);
   const { files: allFiles, requestScope, projectCatalog, projectAliases, projectDisplayNames, projectCwds, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, conversationAliases, launchRoutes, loaded, catalogFailures } = useFiles(null, filesRequestPin(pendingHash, catalogPin?.path ?? null));
