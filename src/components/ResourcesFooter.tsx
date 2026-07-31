@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { startTransition, useEffect, useRef, useState } from "react";
 
 import { createFreshAwareCoalescer } from "@/lib/asyncCoalescer";
 import { useLocale } from "@/lib/i18n";
@@ -11,6 +11,7 @@ import { AttachControls } from "./resources/AttachControls";
 import { activityDot, engineTintOf, fmtAge } from "./utils";
 
 const POLL_MS = 30_000;
+const INITIAL_POLL_DELAY_MS = 1_500;
 const GIB = 1024 ** 3;
 const MIB = 1024 ** 2;
 const BULK_HOURS = [2, 6, 12] as const;
@@ -123,23 +124,37 @@ export function ResourcesFooter() {
      hands the panel a way to force a fresh snapshot right after a kill. */
   const loadRef = useRef<(fresh?: boolean) => Promise<void>>(async () => {});
   useEffect(() => {
+    let disposed = false;
     const loader = createResourcesLoader(
       fetch,
       (json, at) => {
-        setSnap((prev) => stickySnap(prev, json, at));
+        startTransition(() => {
+          if (!disposed) setSnap((prev) => stickySnap(prev, json, at));
+        });
       },
       (at) => {
-        setSnap((prev) => (prev ? { ...prev, staleSince: prev.staleSince ?? at } : prev));
+        startTransition(() => {
+          if (!disposed) setSnap((prev) => (prev ? { ...prev, staleSince: prev.staleSince ?? at } : prev));
+        });
       },
     );
     const load = async (fresh = false) => {
       await loader.load(fresh);
     };
     loadRef.current = load;
-    void load();
-    const timer = setInterval(() => void load(), POLL_MS);
+    /* Board, limits and presence mount in the same frame. Starting this probe
+       slightly later keeps their first responses and recurring work out of one
+       main-thread burst. Reschedule after completion so later polls retain the
+       separation instead of snapping back to the page-load clock. */
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const poll = async () => {
+      await load();
+      if (!disposed) timer = setTimeout(() => void poll(), POLL_MS);
+    };
+    timer = setTimeout(() => void poll(), INITIAL_POLL_DELAY_MS);
     return () => {
-      clearInterval(timer);
+      disposed = true;
+      if (timer) clearTimeout(timer);
       loader.dispose();
       loadRef.current = async () => {};
     };
