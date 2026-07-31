@@ -1,7 +1,7 @@
 "use client";
 
 import { Layers, List, ListTodo, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus, Redo2 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 
 import { useBoardActionHistory } from "@/hooks/useBoardActionHistory";
 import { queueColumnOpen, useBoardState } from "@/hooks/useBoardState";
@@ -310,7 +310,7 @@ function HeaderMenuItem({ icon, label, onSelect, disabled = false, checked }: { 
   );
 }
 
-export function ProjectDashboard({
+function ProjectDashboardView({
   files,
   flows: rawFlows,
   pipelines: rawPipelines,
@@ -1928,3 +1928,5 @@ export function ProjectDashboard({
     </FavoritesProvider>
   );
 }
+
+export const ProjectDashboard = memo(ProjectDashboardView);

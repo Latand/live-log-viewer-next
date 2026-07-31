@@ -43,6 +43,9 @@ test("global client cache serves stale rows while revalidation patches changed f
   expect(second.files.map((entry) => entry.title)).toEqual(["A", "B2", "C"]);
   expect(second.files[0]).toBe(first.files[0]);
   expect(second.files[1]).not.toBe(first.files[1]);
+  expect(second.pipelines).toBe(first.pipelines);
+  expect(second.workflows).toBe(first.workflows);
+  expect(second.tasks).toBe(first.tasks);
 });
 
 test("an ordinary hydration waits for an in-flight forced revision refresh", async () => {
