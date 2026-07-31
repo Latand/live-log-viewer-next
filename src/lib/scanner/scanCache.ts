@@ -60,7 +60,7 @@ export type CachedFileScan = {
 
 const FILE_SCAN_FRESH_MS = 1_000;
 /** Poll-driven attempts share the client's fallback cadence, including failures. */
-const FILE_SCAN_ORDINARY_REFRESH_MS = 60_000;
+const FILE_SCAN_ORDINARY_REFRESH_MS = 300_000;
 const FILE_SCAN_PIN_CACHE_MAX = 8;
 // v8: lastTurn boundaries follow the shared meta/command classification
 // (issue #406) — persisted v7 snapshots carry windows opened by meta records
