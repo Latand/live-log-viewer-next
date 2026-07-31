@@ -513,25 +513,38 @@ function engineScopedIntent(intent: MigrationIntent): boolean {
 function migrationReadiness(
   file: RegistryFile,
   conversation: RegistryConversation,
+  index?: MigrationReadinessIndex,
 ): "idle" | "busy" | "deferred" {
-  if (migrationTurnIsBusy(file, conversation)) return "busy";
-  const deliveryInFlight = Object.values(file.heldDeliveries).some((delivery) =>
-    delivery.conversationId === conversation.id && delivery.state === "delivery-uncertain");
+  if (migrationTurnIsBusy(file, conversation, index?.pendingDeliveryConversationIds)) return "busy";
+  const deliveryInFlight = index
+    ? index.uncertainDeliveryConversationIds.has(conversation.id)
+    : Object.values(file.heldDeliveries).some((delivery) =>
+        delivery.conversationId === conversation.id && delivery.state === "delivery-uncertain");
   if (deliveryInFlight) return "busy";
   if (conversation.migration && !["committed", "rolled-back"].includes(conversation.migration.phase)) return "idle";
   const sourcePath = conversation.generations.at(-1)?.path;
-  const hasActiveHost = sourcePath !== undefined && Object.values(file.entries).some((entry) =>
-    entry.artifactPath === sourcePath && ["starting", "live", "idle", "handoff"].includes(entry.status));
+  const hasActiveHost = sourcePath !== undefined && (index
+    ? index.activeHostPaths.has(sourcePath)
+    : Object.values(file.entries).some((entry) =>
+        entry.artifactPath === sourcePath && ["starting", "live", "idle", "handoff"].includes(entry.status)));
   if (hasActiveHost) return "idle";
-  const hasPendingDelivery = Object.values(file.heldDeliveries).some((delivery) =>
-    delivery.conversationId === conversation.id && delivery.state !== "delivered");
+  const hasPendingDelivery = index
+    ? index.pendingDeliveryConversationIds.has(conversation.id)
+    : Object.values(file.heldDeliveries).some((delivery) =>
+        delivery.conversationId === conversation.id && delivery.state !== "delivered");
   return hasPendingDelivery ? "idle" : "deferred";
 }
 
-function migrationTurnIsBusy(file: RegistryFile, conversation: RegistryConversation): boolean {
+function migrationTurnIsBusy(
+  file: RegistryFile,
+  conversation: RegistryConversation,
+  pendingDeliveryConversationIds?: ReadonlySet<ViewerConversationId>,
+): boolean {
   const currentPath = conversation.generations.at(-1)?.path;
-  const hasPendingDelivery = Object.values(file.heldDeliveries).some((delivery) =>
-    delivery.conversationId === conversation.id && delivery.state !== "delivered");
+  const hasPendingDelivery = pendingDeliveryConversationIds
+    ? pendingDeliveryConversationIds.has(conversation.id)
+    : Object.values(file.heldDeliveries).some((delivery) =>
+        delivery.conversationId === conversation.id && delivery.state !== "delivered");
   const unmaterializedEmptyTurn = conversation.turn.state === "unknown"
     && conversation.turn.source === "empty"
     && Boolean(currentPath)
@@ -539,6 +552,26 @@ function migrationTurnIsBusy(file: RegistryFile, conversation: RegistryConversat
     && !hasPendingDelivery;
   return conversation.turn.state === "busy"
     || (conversation.turn.state === "unknown" && !unmaterializedEmptyTurn);
+}
+
+interface MigrationReadinessIndex {
+  uncertainDeliveryConversationIds: ReadonlySet<ViewerConversationId>;
+  pendingDeliveryConversationIds: ReadonlySet<ViewerConversationId>;
+  activeHostPaths: ReadonlySet<string>;
+}
+
+function migrationReadinessIndex(file: RegistryFile): MigrationReadinessIndex {
+  const uncertainDeliveryConversationIds = new Set<ViewerConversationId>();
+  const pendingDeliveryConversationIds = new Set<ViewerConversationId>();
+  for (const delivery of Object.values(file.heldDeliveries)) {
+    if (delivery.state === "delivery-uncertain") uncertainDeliveryConversationIds.add(delivery.conversationId);
+    if (delivery.state !== "delivered") pendingDeliveryConversationIds.add(delivery.conversationId);
+  }
+  const activeHostPaths = new Set(Object.values(file.entries)
+    .filter((entry) => ["starting", "live", "idle", "handoff"].includes(entry.status))
+    .map((entry) => entry.artifactPath)
+    .filter((pathname): pathname is string => Boolean(pathname)));
+  return { uncertainDeliveryConversationIds, pendingDeliveryConversationIds, activeHostPaths };
 }
 
 function resumeCanRebaseMigration(migration: ConversationMigration | null): boolean {
@@ -697,10 +730,11 @@ function migrationReadinessSignature(
   engine: Extract<AgentEngine, "claude" | "codex">,
   paths: ReadonlySet<string>,
 ): string {
+  const index = migrationReadinessIndex(file);
   return JSON.stringify(Object.values(file.conversations)
     .filter((conversation) => conversation.engine === engine
       && paths.has(conversation.generations.at(-1)?.path ?? ""))
-    .map((conversation) => [conversation.id, migrationReadiness(file, conversation)])
+    .map((conversation) => [conversation.id, migrationReadiness(file, conversation, index)])
     .sort(([left], [right]) => left.localeCompare(right)));
 }
 
@@ -741,6 +775,7 @@ function migrationScopeCounts(
   targetId: string,
 ): MigrationScopeCounts {
   const counts: MigrationScopeCounts = { total: 0, idle: 0, busy: 0, deferred: 0, alreadyTarget: 0 };
+  const index = migrationReadinessIndex(file);
   for (const conversation of Object.values(file.conversations)) {
     if (conversation.engine !== engine) continue;
     const source = conversation.generations.at(-1);
@@ -750,7 +785,7 @@ function migrationScopeCounts(
       continue;
     }
     counts.total += 1;
-    counts[migrationReadiness(file, conversation)] += 1;
+    counts[migrationReadiness(file, conversation, index)] += 1;
   }
   return counts;
 }

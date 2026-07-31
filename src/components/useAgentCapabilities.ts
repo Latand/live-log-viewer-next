@@ -1,7 +1,7 @@
 "use client";
 
 import { conversationIdentity } from "@/lib/accounts/identity";
-import { useRuntime, useRuntimeSession, useRuntimeSessionByArtifact, type RuntimeSessionView } from "@/hooks/useRuntime";
+import { useRuntimeEnabled, useRuntimeSession, useRuntimeSessionByArtifact, type RuntimeSessionView } from "@/hooks/useRuntime";
 import type { FileEntry } from "@/lib/types";
 
 import {
@@ -48,7 +48,7 @@ export interface AgentCapabilities {
  * identically wherever a pane is mounted.
  */
 export function useAgentCapabilities(file: FileEntry): AgentCapabilities {
-  const { enabled } = useRuntime();
+  const enabled = useRuntimeEnabled();
   const cardId = conversationIdentity(file);
   const runtime = useRuntimeSession(cardId);
   // A Claude subagent relays through its root; resolve the root host from the

@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterAll, expect, test } from "bun:test";
 
 import { normalizeProjectOwnership, validExplicitProject } from "@/lib/accounts/migration/contracts";
+import { projectInfoFromCwd } from "@/lib/scanner/describe";
 import { resolveProjectAttribution } from "./projectResolution";
 
 /* Keep persisted-project and worktree-map reads sandboxed away from the
@@ -20,6 +21,7 @@ afterAll(() => {
 });
 
 const LLV_PROJECT = "-agents-tools-live-log-viewer-next";
+const LLV_CANONICAL_PROJECT = projectInfoFromCwd(process.cwd())!.project;
 const LLV_WORKTREE_CWD = path.join(
   os.homedir(),
   ".agents",
@@ -63,7 +65,7 @@ test("canonical worktree cwd identity outranks a selected-project launch hint", 
     fallbackProject: "other",
   });
   expect(attribution).toEqual({
-    project: LLV_PROJECT,
+    project: LLV_CANONICAL_PROJECT,
     worktree: "pipeline-315-explicit-ownership",
     source: "cwd",
   });
@@ -99,6 +101,32 @@ test("blank ownership records never blank the attribution", () => {
     launchProfileProject: "latand",
   });
   expect(attribution).toEqual({ project: "latand", source: "launch-profile" });
+});
+
+test("placeholder ownership never overrides a concrete cwd project", () => {
+  const attribution = resolveProjectAttribution({
+    projectOwnership: operatorOwnership("project_unresolved"),
+    cwdInfo: {
+      project: LLV_PROJECT,
+      displayName: "live-log-viewer-next",
+    },
+    launchProfileProject: "other",
+  });
+  expect(attribution).toEqual({ project: LLV_PROJECT, source: "cwd" });
+});
+
+test("a legacy display-name ownership collapses into the cwd repository identity", () => {
+  const attribution = resolveProjectAttribution({
+    projectOwnership: operatorOwnership("Stikon-Business-Analytics"),
+    cwdInfo: {
+      project: "repo-0123456789abcdef0123456789abcdef",
+      displayName: "Stikon-Business-Analytics",
+    },
+  });
+  expect(attribution).toEqual({
+    project: "repo-0123456789abcdef0123456789abcdef",
+    source: "cwd",
+  });
 });
 
 test("explicit project validation rejects ambiguous aliases", () => {

@@ -92,6 +92,26 @@ test("spawn mode designates and injects together: mandate rides the spawn prompt
   expect(recorded.legacySyncs).toEqual([{ conversationId: NEW_ID }]);
 });
 
+test("an admitted asynchronous spawn activates the seat from its durable conversation id", async () => {
+  const { deps } = dependencies({
+    spawn: async () => ({
+      status: 202,
+      body: {
+        state: "accepted",
+        launched: true,
+        conversationId: NEW_ID,
+        launchId: "launch_async",
+      },
+    }),
+  });
+
+  const result = await executeOrchestratorSeatRequest(spawnRequest(), deps);
+
+  expect(result.status).toBe(202);
+  expect(orchestratorSeatFor("proj-a").active?.conversationId).toBe(NEW_ID);
+  expect(orchestratorSeatFor("proj-a").pending).toBeNull();
+});
+
 test("a failed spawn leaves NEITHER half: no active seat, no legacy record, a recoverable pending intent", async () => {
   const { deps, recorded } = dependencies({
     spawn: async () => ({ status: 400, body: { error: "directory does not exist" } }),

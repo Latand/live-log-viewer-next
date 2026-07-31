@@ -10,7 +10,7 @@ import { useLocale } from "@/lib/i18n";
 import type { Activity, FileEntry } from "@/lib/types";
 import type { BoardTask } from "@/lib/tasks/types";
 
-import { useRuntime } from "@/hooks/useRuntime";
+import { useRuntimeSelector } from "@/hooks/useRuntime";
 import { deriveSessionState, hasBlockingAttention, runtimeActivity } from "@/components/runtime/runtimeModel";
 
 import { BranchPane, kindLabel } from "@/components/BranchPane";
@@ -68,6 +68,16 @@ import {
 } from "./layout";
 
 const EMPTY_RELATIONS: readonly TaskRelation[] = [];
+const EMPTY_RUNTIME_ACTIVITY_BY_PATH = new Map<string, Activity>();
+
+function sameRuntimeActivityByPath(left: Map<string, Activity>, right: Map<string, Activity>): boolean {
+  if (left === right) return true;
+  if (left.size !== right.size) return false;
+  for (const [pathname, activity] of left) {
+    if (right.get(pathname) !== activity) return false;
+  }
+  return true;
+}
 
 /* Layout reshuffles glide instead of jumping. */
 export const MOVE_MS = 380;
@@ -1448,16 +1458,15 @@ export const NodesLayer = memo(function NodesLayer({
      session-status events instead of the poll-derived activity (Fable §7).
      Empty while the bus is off, and legacy tmux nodes are skipped, so today's
      derivation is unchanged everywhere the bus does not own the session. */
-  const { store, enabled: runtimeEnabled } = useRuntime();
-  const runtimeActivityByPath = useMemo(() => {
+  const runtimeActivityByPath = useRuntimeSelector((state) => {
     const map = new Map<string, Activity>();
-    if (!runtimeEnabled) return map;
-    for (const s of Object.values(store.sessions)) {
+    if (!state.enabled) return map;
+    for (const s of Object.values(state.store.sessions)) {
       if (s.hostKind === "tmux-legacy" || !s.artifactPath) continue;
-      map.set(s.artifactPath, runtimeActivity(deriveSessionState(s, hasBlockingAttention(store, s))));
+      map.set(s.artifactPath, runtimeActivity(deriveSessionState(s, hasBlockingAttention(state.store, s))));
     }
     return map;
-  }, [store, runtimeEnabled]);
+  }, EMPTY_RUNTIME_ACTIVITY_BY_PATH, sameRuntimeActivityByPath);
   const withRuntimeActivity = (node: SchemeNode): SchemeNode => {
     const activity = runtimeActivityByPath.get(node.file.path);
     return activity ? { ...node, file: { ...node.file, activity } } : node;

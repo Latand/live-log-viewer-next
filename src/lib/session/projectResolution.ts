@@ -1,5 +1,6 @@
 import type { ConversationProjectOwnership } from "@/lib/accounts/migration/contracts";
 import { canonicalProject } from "@/lib/projects/aliases";
+import { UNRESOLVED_PROJECT } from "@/lib/projects/identity";
 import { projectInfoFromCwd } from "@/lib/scanner/describe";
 
 /*
@@ -43,7 +44,12 @@ export function resolveProjectAttribution(input: ProjectAttributionInput): Proje
   const cwdInfo = Object.hasOwn(input, "cwdInfo") ? input.cwdInfo ?? null : cwd ? projectInfoFromCwd(cwd) : null;
   const ownership = input.projectOwnership?.project.trim();
   if (ownership) {
-    return { project: canonicalProject(ownership), ...(cwdInfo?.worktree ? { worktree: cwdInfo.worktree } : {}), source: "ownership" };
+    const project = canonicalProject(ownership);
+    const concreteCwd = cwdInfo?.project && cwdInfo.project !== UNRESOLVED_PROJECT;
+    const legacyCwdIdentity = concreteCwd && project === cwdInfo?.displayName;
+    if (!legacyCwdIdentity && (project !== UNRESOLVED_PROJECT || !concreteCwd)) {
+      return { project, ...(cwdInfo?.worktree ? { worktree: cwdInfo.worktree } : {}), source: "ownership" };
+    }
   }
   if (cwdInfo?.project) {
     return { project: cwdInfo.project, ...(cwdInfo.worktree ? { worktree: cwdInfo.worktree } : {}), source: "cwd" };

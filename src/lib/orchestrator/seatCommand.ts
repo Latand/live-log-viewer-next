@@ -310,7 +310,8 @@ export async function executeOrchestratorSeatRequest(
   };
   const spawned = await dependencies.spawn(spawnBody);
   const spawnedConversationId = text(spawned.body.conversationId);
-  const launched = spawned.body.ok === true && spawned.body.launched !== false && Boolean(spawnedConversationId);
+  const admitted = spawned.status >= 200 && spawned.status < 300 && spawned.body.ok !== false;
+  const launched = admitted && spawned.body.launched !== false && Boolean(spawnedConversationId);
   if (!launched) {
     const error = text(spawned.body.error) || `spawn failed with status ${spawned.status}`;
     failOrchestratorSeatIntent(project, clientRequestId, error);
