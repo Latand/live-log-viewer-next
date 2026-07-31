@@ -139,8 +139,8 @@ function dependencies(options: { scans?: number; projections?: number } = {}) {
         counts.rawScans += 1;
         throw new Error("a control-plane read must not start a raw corpus scan");
       },
-      /* Stands in for composition while exercising the same injected completed
-         generation and registry projection as the production collector. */
+      /* Stands in for transcript-only composition: the completed generation is
+         consumed while the injected registry projection remains lazy. */
       collectSnapshot: async (_body: unknown, deps: {
         completedFileScan?: () => Promise<{ snapshot: typeof snapshot }>;
         registrySnapshot?: () => unknown;
@@ -148,7 +148,6 @@ function dependencies(options: { scans?: number; projections?: number } = {}) {
         counts.observations += 1;
         if (!deps.completedFileScan) throw new Error("snapshot received no completed scan seam");
         await deps.completedFileScan();
-        deps.registrySnapshot?.();
         return { schemaVersion: 1, sessions: [], caller: null };
       },
       boardFor: () => null,
@@ -191,7 +190,7 @@ test("board_snapshot still consumes one scan and one projection", async () => {
   expect(counts.rawScans).toBe(0);
 });
 
-test("operator_snapshot hands the collector the projection it already holds", async () => {
+test("operator_snapshot keeps the transcript-only registry projection lazy", async () => {
   const { counts, injected } = dependencies();
   const bindings = viewerMcpBindings(undefined, undefined, injected);
 
@@ -199,9 +198,8 @@ test("operator_snapshot hands the collector the projection it already holds", as
 
   expect(counts.observations).toBe(1);
   expect(counts.scans).toBe(1);
-  /* Exactly one, materialised by the caller and consumed by the collector. The
-     default path built a second one inside `collectSnapshot`. */
-  expect(counts.projections).toBe(1);
+  expect(counts.projections).toBe(0);
+  expect(counts.projectionCalls).toBe(0);
 });
 
 test("twenty concurrent control reads join one scan and one projection", async () => {

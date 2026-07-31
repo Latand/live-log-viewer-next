@@ -49,7 +49,7 @@ test("snapshot collection performs exactly one discovery and shares its entries"
   expect(result.conversations[0]?.path).toBe(entry.path);
 });
 
-test("snapshot route serves one completed 373-file projection without a second corpus walk", async () => {
+test("transcript-only snapshot serves one completed 373-file projection without reading the registry", async () => {
   upsertPresence(presence);
   const files = Array.from({ length: 373 }, (_value, index): FileEntry => ({
     ...entry,
@@ -58,13 +58,19 @@ test("snapshot route serves one completed 373-file projection without a second c
     project: `project-${index % 41}`,
     title: `Session ${index}`,
   }));
+  const projectCatalog = Array.from({ length: 41 }, (_value, index) => ({
+    project: `project-${index}`,
+    smt: 1,
+    conversations: files.filter((file) => file.project === `project-${index}`).length,
+  }));
   let completedReads = 0;
+  let registryReads = 0;
   const refreshedAt = Date.now() - 10_000;
   const corpusWalksBefore = fileObservationGenerations();
   const request = new NextRequest("http://127.0.0.1:8898/api/agent/snapshot", {
     method: "POST",
     headers: { host: "127.0.0.1:8898" },
-    body: JSON.stringify({ schemaVersion: 1, text: { include: false } }),
+    body: JSON.stringify({ schemaVersion: 1, scope: { kind: "visible" }, text: { include: false } }),
   });
 
   const response = await Promise.race([
@@ -72,7 +78,7 @@ test("snapshot route serves one completed 373-file projection without a second c
       completedFileScan: async () => {
         completedReads += 1;
         return {
-          snapshot: { files, projectCatalog: [], complete: true as const },
+          snapshot: { files, projectCatalog, complete: true as const },
           generation: 7,
           targetGeneration: 7,
           cacheStatus: "hit" as const,
@@ -82,7 +88,10 @@ test("snapshot route serves one completed 373-file projection without a second c
         };
       },
       resolveSiblings: async () => ({ selfResolution: "omitted" as const, agents: [] }),
-      registrySnapshot: () => ({ conversations: {}, entries: {}, lineageEdges: {}, memberships: {}, conversationAliases: {}, receipts: {} }) as never,
+      registrySnapshot: () => {
+        registryReads += 1;
+        throw new Error("transcript-only snapshot touched the poisoned registry");
+      },
       snapshotDeadlineMs: 10_000,
       scheduler: { setTimeout, clearTimeout },
     }),
@@ -95,7 +104,54 @@ test("snapshot route serves one completed 373-file projection without a second c
   expect(payload.scanner.ageMs).toBeGreaterThanOrEqual(9_000);
   expect(payload.scanner.ageMs).toBeLessThan(11_000);
   expect(completedReads).toBe(1);
+  expect(registryReads).toBe(0);
   expect(fileObservationGenerations()).toBe(corpusWalksBefore);
+});
+
+test("twenty concurrent transcript-only snapshots retain no registry or response corpus", async () => {
+  upsertPresence(presence);
+  const files = Array.from({ length: 373 }, (_value, index): FileEntry => ({
+    ...entry,
+    path: index === 0 ? entry.path : `/fixture/project-${index % 41}/session-${index}.jsonl`,
+    name: `session-${index}.jsonl`,
+    project: `project-${index % 41}`,
+    title: `Session ${index}`,
+  }));
+  let wholeRegistrySnapshots = 0;
+  let compactSpawnLookups = 0;
+  Bun.gc(true);
+  const rssBefore = process.memoryUsage.rss();
+  let responses: Response[] | null = await Promise.all(Array.from({ length: 20 }, () => postSnapshot(
+    new NextRequest("http://127.0.0.1:8898/api/agent/snapshot", {
+      method: "POST",
+      headers: { host: "127.0.0.1:8898" },
+      body: JSON.stringify({ schemaVersion: 1, scope: { kind: "visible" }, text: { include: false } }),
+    }),
+    {
+      completedFileScan: async () => ({ snapshot: { files, projectCatalog: [], complete: true } }) as never,
+      resolveSiblings: async () => ({ selfResolution: "omitted" as const, agents: [] }),
+      registrySnapshot: () => {
+        wholeRegistrySnapshots += 1;
+        throw new Error("transcript-only snapshot materialized the whole registry");
+      },
+      snapshotSpawns: () => {
+        compactSpawnLookups += 1;
+        return {};
+      },
+      snapshotDeadlineMs: 10_000,
+      scheduler: { setTimeout, clearTimeout },
+    },
+  )));
+
+  expect(responses.every((response) => response.status === 200)).toBe(true);
+  await Promise.all(responses.map((response) => response.text()));
+  expect(wholeRegistrySnapshots).toBe(0);
+  expect(compactSpawnLookups).toBe(0);
+  responses = null;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  Bun.gc(true);
+  const retainedRss = process.memoryUsage.rss() - rssBefore;
+  expect(retainedRss).toBeLessThan(16 * 1024 * 1024);
 });
 
 test("snapshot route owns a deadline when the framework request signal stays live", async () => {

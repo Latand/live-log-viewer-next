@@ -5,13 +5,14 @@ import { isDeepStrictEqual } from "node:util";
 import type { Database as BunDatabase } from "bun:sqlite";
 
 import { reboundAssembledMcpGrants, rowClaimsBeyondBaselineGrant, type McpGrantPolicy } from "./mcpAllowlist";
-import type { RegistryFile } from "./registry";
+import type { RegistryFile, SnapshotSpawnProjection } from "./registry";
 
 /** The collections the MCP grant decision reads and writes. Touching any one of
     them requires the decision to have run over ALL of them, because an entry or
     a receipt is only decidable against the conversations and lineage edges that
     attest to it (#739). */
 const GRANT_COLLECTIONS = new Set(["entries", "receipts", "conversations", "lineageEdges"]);
+const SNAPSHOT_SPAWN_ALIAS_LIMIT = 64;
 
 const ROW_COLLECTIONS = [
   "entries",
@@ -260,6 +261,66 @@ export class SqliteAgentRegistryStore {
     if (this.readOnlyCache?.revision === revision) return this.readOnlyCache;
     this.readOnlyCache = this.loadSnapshot(true);
     return this.readOnlyCache;
+  }
+
+  /** One transaction and keyed row reads for the at-most-bounded spawn paths in
+      a Viewer snapshot. No collection enumeration or whole snapshot occurs. */
+  snapshotSpawns(launchIds: readonly string[]): SnapshotSpawnProjection {
+    this.db.exec("BEGIN");
+    try {
+      const readRow = (collection: RowCollection, key: string): unknown => {
+        const stored = this.db.query<Pick<StoredRow, "value_json">, [string, string]>(
+          "SELECT value_json FROM registry_rows WHERE collection = ? AND row_key = ?",
+        ).get(collection, key);
+        this.onRowPayloadRead?.(collection, stored ? 1 : 0);
+        return stored ? this.parseRow(collection, key, stored.value_json, true) : undefined;
+      };
+      const normalizeRow = <Collection extends "receipts" | "conversations">(
+        collection: Collection,
+        key: string,
+        value: unknown,
+      ): RegistryFile[Collection][string] | undefined => {
+        const input: Record<string, unknown> = { version: 2, entries: {}, receipts: {} };
+        input[collection] = { [key]: value };
+        return this.normalize(input)[collection][key] as RegistryFile[Collection][string] | undefined;
+      };
+      const projection: SnapshotSpawnProjection = {};
+      for (const launchId of new Set(launchIds)) {
+        const rawReceipt = readRow("receipts", launchId);
+        if (rawReceipt === undefined) continue;
+        const receipt = normalizeRow("receipts", launchId, rawReceipt);
+        if (!receipt) continue;
+
+        const seen = new Set<string>();
+        let conversationId: string = receipt.conversationId;
+        let aliasLimitReached = false;
+        while (!seen.has(conversationId) && seen.size < SNAPSHOT_SPAWN_ALIAS_LIMIT) {
+          seen.add(conversationId);
+          const alias = readRow("conversationAliases", conversationId);
+          if (typeof alias !== "string" || !alias.startsWith("conversation_")) break;
+          conversationId = alias;
+          aliasLimitReached = seen.size === SNAPSHOT_SPAWN_ALIAS_LIMIT;
+        }
+        const rawConversation = aliasLimitReached ? undefined : readRow("conversations", conversationId);
+        const conversation = rawConversation === undefined
+          ? undefined
+          : normalizeRow("conversations", conversationId, rawConversation);
+        projection[launchId] = {
+          launchId: receipt.launchId,
+          state: receipt.state,
+          error: receipt.error,
+          engine: receipt.engine,
+          cwd: receipt.cwd,
+          createdAt: receipt.createdAt,
+          materializedPath: conversation?.generations.at(-1)?.path ?? receipt.artifactPath,
+        };
+      }
+      this.db.exec("COMMIT");
+      return projection;
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+      throw error;
+    }
   }
 
   mutate<T>(operation: (file: RegistryFile) => T, includeSnapshot = true): SqliteRegistryMutation<T> {
