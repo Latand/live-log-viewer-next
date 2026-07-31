@@ -78,7 +78,12 @@ function registrySnapshot(pathname = PATH): RegistryFile {
         }],
         continuityPaths: [],
         abandonedContinuityPaths: [],
-        projectOwnership: null,
+        projectOwnership: {
+          project: "-repo",
+          source: "operator",
+          setAt: new Date(NOW).toISOString(),
+          operationId: "fixture",
+        },
         migration: null,
         migrationOptOut: null,
         supersededBy: null,
@@ -660,6 +665,26 @@ describe("WakaTime activity sync", () => {
     expect(heartbeats.filter((heartbeat) => heartbeat.project === "agent-log-viewer-boundary")).toHaveLength(1);
     sync.stop();
   });
+
+  test("production-sized overlap coverage stays subquadratic", async () => {
+    const windows = Array.from({ length: 4_000 }, (_, index) => ({
+      startedAt: NOW + index * 1_000,
+      endedAt: NOW + (index + 60) * 1_000,
+    }));
+    const { sync } = harness({
+      recentTurnWindows: () => ({
+        windows,
+        prefixTruncated: false,
+        complete: true,
+      }),
+    });
+
+    const startedAt = performance.now();
+    await sync.tick();
+
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
+    sync.stop();
+  }, 5_000);
 
   test("an overlap-finalized stream never mints a stale boundary when the covering tail disappears", async () => {
     let windows = [

@@ -1,10 +1,15 @@
 import fs from "node:fs";
+import path from "node:path";
+import type { ChildProcess } from "node:child_process";
 
 import { statePath } from "@/lib/configDir";
 import { structuredHostsEnabled } from "@/lib/runtime/flags";
 import { markStructuredHostStartupFailed, markStructuredHostStartupReady } from "@/lib/runtime/startupStatus";
 import { StructuredRuntimeRequirementError } from "@/lib/proc/darwinIdentity";
-import { discardWakatimeEnvironmentCredential } from "@/lib/wakatime/credential";
+import {
+  discardWakatimeEnvironmentCredential,
+  withoutWakatimeCredential,
+} from "@/lib/wakatime/credential";
 
 /*
  * The Viewer's node-side startup runtime. This module (and everything it pulls
@@ -17,6 +22,11 @@ import { discardWakatimeEnvironmentCredential } from "@/lib/wakatime/credential"
  */
 
 const RELEASE_ACTIVATION_POLL_MS = 250;
+const WAKATIME_WORKER_RESTART_MS = 1_000;
+const wakatimeWorkerStore = globalThis as typeof globalThis & {
+  __llvWakatimeWorker?: ChildProcess;
+  __llvWakatimeWorkerRestart?: ReturnType<typeof setTimeout>;
+};
 
 interface ActivationTimer {
   unref?(): unknown;
@@ -178,10 +188,7 @@ export async function initializeOperatorSpawnCapabilityAtStartup(
 
 export async function startWakatimeIntegrationIfEnabled(
   env: Readonly<Record<string, string | undefined>> = process.env,
-  start: () => Promise<void> = async () => {
-    const { startWakatimeSync } = await import("@/lib/wakatime/sync");
-    startWakatimeSync();
-  },
+  start: () => Promise<void> = startWakatimeWorker,
   log: (event: string, fields: Readonly<Record<string, never>>) => void = (event, fields) => console.error(event, fields),
 ): Promise<void> {
   if (env.LLV_WAKATIME_ENABLED !== "1") return;
@@ -190,6 +197,49 @@ export async function startWakatimeIntegrationIfEnabled(
   } catch {
     log("[wakatime] startup_failed", {});
   }
+}
+
+async function startWakatimeWorker(): Promise<void> {
+  if (wakatimeWorkerStore.__llvWakatimeWorker) return;
+  const cwd = process.cwd();
+  const source = path.join(cwd, "src/lib/wakatimeSync.worker.ts");
+  const bundled = path.join(cwd, ".next/server/wakatime-sync-worker.js");
+  const bunContainer = "/usr/local/bin/bun-container";
+  const launch = fs.existsSync(source) && fs.existsSync(bunContainer)
+    ? { executable: bunContainer, workerPath: source }
+    : fs.existsSync(bundled)
+      ? { executable: process.execPath, workerPath: bundled }
+      : { executable: process.execPath, workerPath: source };
+  const { spawn } = await import("node:child_process");
+  const useNice = fs.existsSync("/usr/bin/nice");
+  const child = spawn(useNice ? "/usr/bin/nice" : launch.executable, [
+    ...(useNice ? ["-n", "10", launch.executable] : []),
+    launch.workerPath,
+  ], {
+    cwd,
+    stdio: ["ignore", "inherit", "inherit"],
+    env: {
+      ...withoutWakatimeCredential(process.env),
+      LLV_WAKATIME_SYNC_WORKER: "1",
+    },
+  });
+  wakatimeWorkerStore.__llvWakatimeWorker = child;
+  child.once("error", (error) => {
+    console.error("[wakatime] worker_start_failed", { message: error.message });
+  });
+  child.once("exit", (code, signal) => {
+    if (wakatimeWorkerStore.__llvWakatimeWorker === child) {
+      wakatimeWorkerStore.__llvWakatimeWorker = undefined;
+    }
+    if (wakatimeWorkerStore.__llvWakatimeWorkerRestart) return;
+    console.error("[wakatime] worker_exited", { code, signal });
+    const timer = setTimeout(() => {
+      wakatimeWorkerStore.__llvWakatimeWorkerRestart = undefined;
+      void startWakatimeWorker();
+    }, WAKATIME_WORKER_RESTART_MS);
+    timer.unref?.();
+    wakatimeWorkerStore.__llvWakatimeWorkerRestart = timer;
+  });
 }
 
 export async function runStructuredHostStartup(

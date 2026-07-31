@@ -621,18 +621,47 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
         current.streams[observation.streamKey]?.lastObservedAtMs ?? observation.window.startedAt,
       ));
     };
+    const effectiveEnds = observations.map(effectiveEnd);
+    const coveredBySameProject = new Array<boolean>(observations.length).fill(false);
+    const observationsByProject = new Map<string, number[]>();
+    for (let index = 0; index < observations.length; index += 1) {
+      const indexes = observationsByProject.get(observations[index]!.project) ?? [];
+      indexes.push(index);
+      observationsByProject.set(observations[index]!.project, indexes);
+    }
+    for (const indexes of observationsByProject.values()) {
+      const candidates = [...indexes].sort((left, right) =>
+        observations[left]!.window.startedAt - observations[right]!.window.startedAt);
+      const queries = indexes
+        .filter((index) => observations[index]!.window.endedAt !== null || !observations[index]!.openWindowActive)
+        .sort((left, right) => effectiveEnds[left]! - effectiveEnds[right]!);
+      let candidateIndex = 0;
+      let maximumEnd = Number.NEGATIVE_INFINITY;
+      let activeAtMaximumEnd = false;
+      for (const query of queries) {
+        const queryEnd = effectiveEnds[query]!;
+        while (
+          candidateIndex < candidates.length
+          && observations[candidates[candidateIndex]!]!.window.startedAt <= queryEnd
+        ) {
+          const candidate = candidates[candidateIndex]!;
+          const candidateEnd = effectiveEnds[candidate]!;
+          const activeOpen = observations[candidate]!.window.endedAt === null
+            && observations[candidate]!.openWindowActive;
+          if (candidateEnd > maximumEnd) {
+            maximumEnd = candidateEnd;
+            activeAtMaximumEnd = activeOpen;
+          } else if (candidateEnd === maximumEnd && activeOpen) {
+            activeAtMaximumEnd = true;
+          }
+          candidateIndex += 1;
+        }
+        coveredBySameProject[query] = maximumEnd > queryEnd
+          || (maximumEnd === queryEnd && activeAtMaximumEnd);
+      }
+    }
     for (let index = 0; index < observations.length; index += 1) {
       const observation = observations[index]!;
-      const end = effectiveEnd(observation);
-      const closesObservedInterval = observation.window.endedAt !== null || !observation.openWindowActive;
-      const coveredBySameProject = closesObservedInterval && observations.some((candidate, candidateIndex) => {
-        const candidateEnd = effectiveEnd(candidate);
-        return candidateIndex !== index
-          && candidate.project === observation.project
-          && candidate.window.startedAt <= end
-          && (candidateEnd > end
-            || (candidateEnd === end && candidate.window.endedAt === null && candidate.openWindowActive));
-      });
       addWindow(
         current,
         observation.entry,
@@ -642,7 +671,7 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
         now,
         existingKeys,
         observation.openWindowActive,
-        !coveredBySameProject,
+        !coveredBySameProject[index],
       );
     }
   };
