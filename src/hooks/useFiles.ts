@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { startTransition, useEffect, useState } from "react";
 import { flushSync } from "react-dom";
 
 import { FLOWS_CHANGED_EVENT } from "@/components/flows/flowModel";
@@ -619,14 +619,22 @@ export function useFiles(_project?: string | null, pinnedPath?: string | null): 
   useEffect(() => {
     let alive = true;
     const cache = filesClientCache;
+    const publishBackgroundData = (next: FilesData) => {
+      if (!alive) return;
+      /* Scanner generations can change one live row inside a large catalog.
+         Keep that reconciliation interruptible so reload, typing and board
+         gestures do not wait behind a synchronous whole-Viewer render. */
+      startTransition(() => {
+        if (alive) setData(next);
+      });
+    };
     const unsubscribeCache = cache.subscribe((next) => {
-      if (alive) setData(next);
+      publishBackgroundData(next);
     }, pinnedPath);
     const performLoad = async (revision?: number): Promise<boolean> => {
       if (!alive) return true;
       try {
-        const next = await cache.revalidate(pinnedPath, revision);
-        if (alive) setData(next);
+        await cache.revalidate(pinnedPath, revision);
         return true;
       } catch {
         /* keep previous list */
