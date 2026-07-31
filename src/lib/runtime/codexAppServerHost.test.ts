@@ -10,6 +10,7 @@ import { AgentRegistry } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 
 import { CodexAppServerHost, redactCodexHostDiagnostic } from "./codexAppServerHost";
+import { encodeCodexStructuredUserText } from "./codexStructuredUserText";
 import { FileRuntimeEventStore, type RuntimeEventStore } from "./eventStore";
 import type { HostState, RuntimeEvent } from "./engineHost";
 import { adoptCodexRegistryHosts, bindCodexHostPersistence, persistCodexHost, startCodexStructuredHost, structuredHostsEnabled } from "./registry";
@@ -320,14 +321,10 @@ describe("CodexAppServerHost", () => {
       clientManagedHandoffs: true,
       codexResponsesAsItems: true,
       includeStartupContext: true,
-      /* The voice persona rides in as the call's first item: the thread's own
-         instructions assume a text agent, which does not survive being read
-         aloud. */
     });
 
-    /* The persona rides into the THREAD before the call, never into the live
-       session: an initial item on the session opened the sideband channel that
-       every 9-second kill arrived on. */
+    /* The thread owns the persona while a current V3 call may also receive a
+       bounded unresolved conversation tail through its creation payload. */
     const injected = server.requests.find((request) => request.method === "thread/inject_items");
     expect((injected?.params as { threadId?: string })?.threadId).toBe("voice-thread");
     /* Shape and ordering only. Which text arrives is pinned by the override
@@ -346,6 +343,164 @@ describe("CodexAppServerHost", () => {
     expect(server.requests.find((request) => request.method === "thread/realtime/stop")?.params).toEqual({
       threadId: "voice-thread",
     });
+    await host.release();
+  });
+
+  test("seeds a resumed realtime call with the interrupted duplex tail in canonical order", async () => {
+    const threadId = "voice-context-thread";
+    const turnId = "turn-overlap";
+    const firstUser = {
+      type: "userMessage",
+      id: "user-first",
+      content: [{ type: "text", text: encodeCodexStructuredUserText("Give the first status.") }],
+    };
+    const followUpText = `<realtime_delegation>
+  <input>Repeat the previous status.</input>
+  <transcript_delta>[redacted incomplete duplex delta]</transcript_delta>
+</realtime_delegation>`;
+    const followUp = {
+      type: "userMessage",
+      id: "user-follow-up",
+      content: [{ type: "text", text: encodeCodexStructuredUserText(followUpText) }],
+    };
+    const eventStore = new MemoryEventStore();
+    eventStore.append(threadId, { kind: "turn-started", turnId, seq: 1 });
+    eventStore.append(threadId, { kind: "item", turnId, item: firstUser, phase: "completed", seq: 2 });
+    eventStore.append(threadId, { kind: "delta", turnId, text: "The first status is", seq: 3 });
+    eventStore.append(threadId, { kind: "delta", turnId, text: " ready.", seq: 4 });
+    eventStore.append(threadId, {
+      kind: "item",
+      turnId,
+      item: { type: "contextCompaction", id: "compaction-one" },
+      phase: "completed",
+      seq: 5,
+    });
+    eventStore.append(threadId, { kind: "item", turnId, item: followUp, phase: "completed", seq: 6 });
+    eventStore.append(threadId, { kind: "turn-ended", turnId, status: "interrupted", seq: 7 });
+    eventStore.append(threadId, { kind: "session-status", status: "idle", seq: 8 });
+    const server = new FakeAppServer(threadId, threadId, false, [{
+      id: turnId,
+      status: "interrupted",
+      items: [firstUser, { type: "contextCompaction", id: "compaction-one" }, followUp],
+    }], { type: "idle" });
+    const host = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore,
+      initialEventCursor: 8,
+      spawnProcess: fakeSpawn(server),
+    });
+    const diagnostics: unknown[][] = [];
+    const originalInfo = console.info;
+    console.info = (...values: unknown[]) => { diagnostics.push(values); };
+    try {
+      await host.startRealtimeWebRtc("v=0\r\noffer");
+    } finally {
+      console.info = originalInfo;
+    }
+
+    expect(server.requests.find((request) => request.method === "thread/realtime/start")?.params)
+      .toMatchObject({
+        initialItems: [
+          { role: "assistant", text: "The first status is ready." },
+          { role: "user", text: followUpText },
+        ],
+      });
+    expect(diagnostics).toEqual([["[realtime context] selected", {
+      providerStartupContext: true,
+      durableTail: [
+        { role: "assistant", source: "durable-delta", bytes: 26 },
+        { role: "user", source: "durable-item", bytes: Buffer.byteLength(followUpText, "utf8") },
+      ],
+      truncated: false,
+    }]]);
+    expect(JSON.stringify(diagnostics)).not.toContain("The first status");
+    expect(JSON.stringify(diagnostics)).not.toContain("realtime_delegation");
+    await host.release();
+  });
+
+  test("leaves committed assistant context with the provider startup selector", async () => {
+    const server = new FakeAppServer("voice-committed-thread");
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+    server.notify("turn/started", {
+      threadId: "voice-committed-thread",
+      turn: { id: "turn-committed" },
+    });
+    server.notify("item/agentMessage/delta", {
+      threadId: "voice-committed-thread",
+      turnId: "turn-committed",
+      delta: "Committed status.",
+    });
+    server.notify("item/completed", {
+      threadId: "voice-committed-thread",
+      turnId: "turn-committed",
+      item: { type: "agentMessage", id: "assistant-committed", text: "Committed status." },
+    });
+    await Bun.sleep(0);
+
+    await host.startRealtimeWebRtc("v=0\r\noffer");
+
+    const params = server.requests.find((request) => request.method === "thread/realtime/start")?.params;
+    expect(params).toMatchObject({ includeStartupContext: true });
+    expect((params as { initialItems?: unknown[] }).initialItems).toBeUndefined();
+    await host.release();
+  });
+
+  test("bounds the unresolved realtime tail by UTF-8 bytes and item count", async () => {
+    const server = new FakeAppServer("voice-bounded-thread");
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+    server.notify("turn/started", {
+      threadId: "voice-bounded-thread",
+      turn: { id: "turn-bounded" },
+    });
+    server.notify("item/agentMessage/delta", {
+      threadId: "voice-bounded-thread",
+      turnId: "turn-bounded",
+      delta: "🙂".repeat(3_000),
+    });
+    for (let index = 0; index < 20; index += 1) {
+      server.notify("item/completed", {
+        threadId: "voice-bounded-thread",
+        turnId: "turn-bounded",
+        item: {
+          type: "userMessage",
+          id: `user-${index}`,
+          content: [{
+            type: "text",
+            text: encodeCodexStructuredUserText(`${"界".repeat(3_000)} follow-up-${index}`),
+          }],
+        },
+      });
+    }
+    await Bun.sleep(0);
+    const diagnostics: unknown[][] = [];
+    const originalInfo = console.info;
+    console.info = (...values: unknown[]) => { diagnostics.push(values); };
+    try {
+      await host.startRealtimeWebRtc("v=0\r\noffer");
+    } finally {
+      console.info = originalInfo;
+    }
+
+    const params = server.requests.find((request) => request.method === "thread/realtime/start")?.params;
+    const items = (params as { initialItems: Array<{ role: string; text: string }> }).initialItems;
+    expect(items).toHaveLength(3);
+    expect(items.map((item) => item.role)).toEqual(["assistant", "user", "user"]);
+    expect(items[1]?.text.endsWith("follow-up-18")).toBeTrue();
+    expect(items[2]?.text.endsWith("follow-up-19")).toBeTrue();
+    expect(items.every((item) => Buffer.byteLength(item.text, "utf8") <= 8 * 1024)).toBeTrue();
+    expect(items.reduce((total, item) => total + Buffer.byteLength(item.text, "utf8"), 0))
+      .toBeLessThanOrEqual(24 * 1024);
+    expect(items.every((item) => !item.text.includes("�"))).toBeTrue();
+    expect(diagnostics).toMatchObject([["[realtime context] selected", { truncated: true }]]);
+    expect(JSON.stringify(diagnostics)).not.toContain("follow-up-19");
     await host.release();
   });
 
