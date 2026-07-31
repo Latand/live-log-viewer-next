@@ -168,6 +168,58 @@ test("repository-backed catalog rows collapse to the current repository identity
   expect(result.projectRemap.get("repo-00000000000000000000000000000000")).toBe(canonical.project);
 });
 
+test("catalog aliases collapse a legacy dashed-path variant before grouping", () => {
+  const canonical = "repo-0123456789abcdef0123456789abcdef";
+  const result = consolidateProjectCatalogByRepository(
+    [
+      {
+        project: "home-primary-Projects-example",
+        displayName: "Unresolved project",
+        smt: 20,
+        conversations: 1,
+      },
+      {
+        project: canonical,
+        displayName: "example",
+        smt: 10,
+        conversations: 3,
+        repository: "owner/example",
+      },
+    ],
+    { "-home-primary-Projects-example": canonical },
+    { [canonical]: "example" },
+  );
+
+  expect(result.projectCatalog).toEqual([expect.objectContaining({
+    project: canonical,
+    displayName: "example",
+    conversations: 4,
+  })]);
+  expect(result.projectRemap.get("home-primary-Projects-example")).toBe(canonical);
+});
+
+test("distinct readable legacy projects do not share the unresolved label", () => {
+  const result = consolidateProjectCatalogByRepository([
+    {
+      project: "readable-project",
+      displayName: "Unresolved project",
+      smt: 20,
+      conversations: 1,
+    },
+    {
+      project: "project_unresolved",
+      displayName: "Unresolved project",
+      smt: 10,
+      conversations: 3,
+    },
+  ]);
+
+  expect(result.projectCatalog.find((entry) => entry.project === "readable-project")?.displayName)
+    .toBe("readable-project");
+  expect(result.projectCatalog.find((entry) => entry.project === "project_unresolved")?.displayName)
+    .toBe("Unresolved project");
+});
+
 test("repeated files reads reuse the pure read snapshot and retain ETag behavior", async () => {
   scannedFiles = [];
   const registry = agentRegistry();
