@@ -132,6 +132,37 @@ const { cachedFileScan, currentFileScan, resetFilesRouteCacheForTests } = await 
 const { controllerFileScan } = await import("@/lib/pipelines/controller");
 const { allowedKillTarget, buildResourceSnapshot, lastResourceTargetRefs, noteSessionTargets, readResourceFileSnapshot } = await import("@/lib/resources");
 const { GET } = await import("./route");
+const { consolidateProjectCatalogByRepository } = await import("./response");
+
+test("repository-backed catalog rows collapse to the current repository identity", () => {
+  const repositoryRoot = process.cwd();
+  const canonical = projectInfoFromCwd(repositoryRoot)!;
+  const result = consolidateProjectCatalogByRepository([
+    {
+      project: canonical.project,
+      displayName: canonical.displayName,
+      smt: 20,
+      conversations: 7,
+      projectRoot: repositoryRoot,
+      repository: "owner/repository",
+    },
+    {
+      project: "repo-00000000000000000000000000000000",
+      displayName: canonical.displayName,
+      smt: 10,
+      conversations: 3,
+      projectRoot: repositoryRoot,
+      repository: "owner/repository",
+    },
+  ]);
+
+  expect(result.projectCatalog).toEqual([expect.objectContaining({
+    project: canonical.project,
+    conversations: 10,
+    smt: 20,
+  })]);
+  expect(result.projectRemap.get("repo-00000000000000000000000000000000")).toBe(canonical.project);
+});
 
 test("repeated files reads reuse the pure read snapshot and retain ETag behavior", async () => {
   scannedFiles = [];
