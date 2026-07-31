@@ -118,10 +118,23 @@ export function projectEngineHostEvent(
   if (event.kind === "delta") {
     return { ...base, kind: "delta", payload: { conversationId, turnId: event.turnId, text: clipped(event.text, 8 * 1024) } };
   }
+  if (event.kind === "voice-chunk") {
+    return {
+      ...base,
+      kind: "voice-chunk",
+      payload: {
+        conversationId,
+        turnId: event.turnId,
+        voiceDelivery: event.delivery,
+      },
+    };
+  }
   if (event.kind === "item") {
-    const voiceResponse = engine === "codex" && event.phase === "completed"
-      ? terminalVoiceResponse(event.item, `engine-host:${hostKey}:${event.seq}`)
-      : null;
+    const voiceResponse = "voiceResponse" in event
+      ? event.voiceResponse
+      : engine === "codex" && event.phase === "completed"
+        ? terminalVoiceResponse(event.item, `engine-host:${hostKey}:${event.seq}`)
+        : null;
     return {
       ...base,
       kind: "item",

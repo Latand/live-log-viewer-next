@@ -2,10 +2,12 @@ import { describe, expect, test } from "bun:test";
 
 import {
   acknowledgeVoiceDelivery,
+  appendReadyVoiceDelivery,
   appendVoiceResponse,
   completeVoiceTurn,
   rememberAcknowledgedVoiceDelivery,
   terminalVoiceResponse,
+  streamingVoiceDelivery,
   utf8ChunkAt,
   type RuntimeVoiceDelivery,
 } from "./voiceDelivery";
@@ -68,6 +70,31 @@ describe("canonical voice delivery state", () => {
     expect(completeVoiceTurn(withDraft, "turn-interrupted", "interrupted")).toEqual(pending);
     expect(acknowledgeVoiceDelivery(pending, pending[0]!.deliveryId)).toEqual([]);
     expect(acknowledgeVoiceDelivery(pending, "unknown")).toEqual(pending);
+  });
+
+  test("keeps immutable streamed chunks distinct and removes their interrupted source turn", () => {
+    const first = streamingVoiceDelivery({
+      sourceTurnId: "turn-streamed",
+      chunkIndex: 0,
+      startOffset: 0,
+      endOffset: 11,
+      text: "first part ",
+    });
+    const second = streamingVoiceDelivery({
+      sourceTurnId: "turn-streamed",
+      chunkIndex: 1,
+      startOffset: 11,
+      endOffset: 22,
+      text: "second part",
+    });
+    const once = appendReadyVoiceDelivery([], first);
+    expect(appendReadyVoiceDelivery(once, first)).toEqual(once);
+    const queued = appendReadyVoiceDelivery(once, second);
+    expect(queued.map((delivery) => delivery.responses[0]!.text)).toEqual([
+      "first part ",
+      "second part",
+    ]);
+    expect(completeVoiceTurn(queued, "turn-streamed", "interrupted")).toEqual([]);
   });
 
   test("bounds durable acknowledgement identities and retires a replayed delivery", () => {

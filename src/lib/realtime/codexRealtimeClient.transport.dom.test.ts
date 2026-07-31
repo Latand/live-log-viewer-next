@@ -2,6 +2,7 @@ import { afterAll, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 
 import { codexRealtimeClient } from "./codexRealtimeClient";
+import { streamingVoiceDelivery } from "@/lib/runtime/voiceDelivery";
 
 const dom = new Window();
 Object.assign(globalThis, {
@@ -442,6 +443,31 @@ test("hydrated completed responses queue in order before Live Mode opens", async
   StubPeerConnection.latest?.channel.onopen?.();
   await flushAsync();
   expect(delivered).toEqual([first, second]);
+  await client.stop();
+});
+
+test("authoritative interruption removes a queued semantic chunk before Live Mode opens", async () => {
+  const delivered: unknown[] = [];
+  globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    if (body.action === "deliverWorkerResponse") delivered.push(body.delivery);
+    return jsonResponse(200, { ok: true, sdp: "v=0\r\nanswer" });
+  }) as unknown as typeof fetch;
+  const client = codexRealtimeClient("conversation_interrupted_chunk");
+  const chunk = streamingVoiceDelivery({
+    sourceTurnId: "turn-interrupted",
+    chunkIndex: 0,
+    startOffset: 0,
+    endOffset: 19,
+    text: "substantial phrase ",
+  });
+  client.reconcileWorkerDeliveries([chunk], { authoritative: true });
+  client.reconcileWorkerDeliveries([], { authoritative: true });
+
+  await client.start();
+  StubPeerConnection.latest?.channel.onopen?.();
+  await flushAsync();
+  expect(delivered).toEqual([]);
   await client.stop();
 });
 

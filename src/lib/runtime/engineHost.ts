@@ -1,4 +1,5 @@
 import type { RuntimeSendSettings } from "./contracts";
+import type { RuntimeVoiceDelivery, RuntimeVoiceResponse } from "./voiceDelivery";
 import {
   structuredContent,
   type StructuredImageRef,
@@ -49,7 +50,8 @@ export type DeliveryReceipt =
 export type RuntimeEvent =
   | { kind: "turn-started"; turnId: string; seq: number }
   | { kind: "delta"; turnId: string; text: string; seq: number }
-  | { kind: "item"; turnId: string | null; item: unknown; phase: "started" | "completed"; seq: number }
+  | { kind: "item"; turnId: string | null; item: unknown; phase: "started" | "completed"; voiceResponse?: RuntimeVoiceResponse | null; seq: number }
+  | { kind: "voice-chunk"; turnId: string; delivery: RuntimeVoiceDelivery; seq: number }
   | { kind: "turn-ended"; turnId: string; status: "completed" | "interrupted" | "error"; seq: number }
   | { kind: "attention"; id: string; method: string; attention: unknown; seq: number }
   | { kind: "attention-resolved"; id: string; resolution: "answered" | "host-restarted" | "server-resolved"; seq: number }

@@ -33,6 +33,7 @@ import {
 } from "@/lib/runtime/contracts";
 import {
   acknowledgeVoiceDelivery,
+  appendReadyVoiceDelivery,
   appendVoiceResponse,
   completeVoiceTurn,
   normalizeAcknowledgedVoiceDeliveryIds,
@@ -1640,6 +1641,18 @@ export class RuntimeJournal {
         revision: event.revision,
         liveTurn,
         ...(voiceDeliveries ? { voiceDeliveries } : {}),
+      }, event.seq);
+      return;
+    }
+    if (event.kind === "voice-chunk") {
+      const previous = this.entity<RuntimeSession>("session", scope.id) ?? baseSession(scope.id, {}, 0);
+      const delivery = normalizeVoiceDeliveries([payload.voiceDelivery])[0];
+      this.upsertEntity("session", scope.id, event.revision, {
+        ...previous,
+        revision: event.revision,
+        voiceDeliveries: delivery
+          ? appendReadyVoiceDelivery(previous.voiceDeliveries, delivery)
+          : previous.voiceDeliveries,
       }, event.seq);
       return;
     }

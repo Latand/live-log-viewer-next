@@ -31,6 +31,7 @@ import {
 } from "@/lib/runtime/liveTurn";
 import {
   acknowledgeVoiceDelivery,
+  appendReadyVoiceDelivery,
   appendVoiceResponse,
   completeVoiceTurn,
   normalizeAcknowledgedVoiceDeliveryIds,
@@ -561,6 +562,20 @@ function reduceKnown(store: RuntimeStore, env: RuntimeEnvelope, revision: number
             : s.voiceDeliveries,
         };
       });
+      break;
+    }
+    case "voice-chunk": {
+      const p = env.payload as {
+        conversationId?: string;
+        voiceDelivery?: unknown;
+      };
+      const delivery = normalizeVoiceDeliveries([p.voiceDelivery])[0];
+      updateSession(store, p.conversationId ?? env.scope.id, revision, (s) => ({
+        ...s,
+        voiceDeliveries: delivery
+          ? appendReadyVoiceDelivery(s.voiceDeliveries, delivery)
+          : s.voiceDeliveries,
+      }));
       break;
     }
     case "turn-ended": {

@@ -351,8 +351,20 @@ class CodexRealtimeClient {
     this.writeLine(`progress:${turnId}`, "progress", text, !running, "replace");
   }
 
-  reconcileWorkerDeliveries(value: readonly RuntimeVoiceDelivery[] | null | undefined): void {
-    for (const delivery of normalizeVoiceDeliveries(value)) {
+  reconcileWorkerDeliveries(
+    value: readonly RuntimeVoiceDelivery[] | null | undefined,
+    options: { authoritative?: boolean } = {},
+  ): void {
+    const deliveries = normalizeVoiceDeliveries(value);
+    if (options.authoritative) {
+      const current = new Set(deliveries.map((delivery) => delivery.deliveryId));
+      for (const [deliveryId, delivery] of this.pendingWorkerDeliveries) {
+        if (delivery.sourceTurnId && !current.has(deliveryId)) {
+          this.pendingWorkerDeliveries.delete(deliveryId);
+        }
+      }
+    }
+    for (const delivery of deliveries) {
       if (!delivery.ready || this.acknowledgedWorkerDeliveries.has(delivery.deliveryId)) continue;
       this.pendingWorkerDeliveries.set(delivery.deliveryId, delivery);
     }

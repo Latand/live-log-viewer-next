@@ -449,6 +449,91 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
+  test("publishes a semantic voice chunk before the assistant response completes", async () => {
+    const threadId = "voice-semantic-stream-thread";
+    const turnId = "turn-semantic-stream";
+    const eventStore = new MemoryEventStore();
+    const server = new FakeAppServer(threadId);
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore,
+      spawnProcess: fakeSpawn(server),
+    });
+    await host.startRealtimeWebRtc("v=0\r\noffer");
+    server.notify("turn/started", {
+      threadId,
+      turn: { id: turnId },
+    });
+    server.notify("item/agentMessage/delta", {
+      threadId,
+      turnId,
+      delta: "The first substantial part is ready and can be spoken while the remaining investigation continues, while enough related detail stays together to preserve the meaning and keep the spoken reply natural. ",
+    });
+    server.notify("item/agentMessage/delta", {
+      threadId,
+      turnId,
+      delta: "This second sentence starts the next semantic batch.",
+    });
+    await Bun.sleep(0);
+
+    const streamed = eventStore.load(threadId).filter((event) =>
+      (event as { kind: string }).kind === "voice-chunk");
+    expect(streamed).toHaveLength(1);
+    expect(streamed[0]).toMatchObject({
+      kind: "voice-chunk",
+      turnId,
+      delivery: {
+        sourceTurnId: turnId,
+        streamChunk: { index: 0 },
+      },
+    });
+    expect(eventStore.load(threadId).some((event) => event.kind === "item")).toBeFalse();
+
+    const terminalText = "The first substantial part is ready and can be spoken while the remaining investigation continues, while enough related detail stays together to preserve the meaning and keep the spoken reply natural. This second sentence starts the next semantic batch.";
+    server.notify("item/completed", {
+      threadId,
+      turnId,
+      item: { type: "agentMessage", id: "assistant-semantic-stream", text: terminalText },
+    });
+    await Bun.sleep(0);
+    const completedEvents = eventStore.load(threadId);
+    const finalItem = completedEvents.findLast((event) => event.kind === "item");
+    const voiceResponse = finalItem && "voiceResponse" in finalItem
+      ? finalItem.voiceResponse
+      : undefined;
+    const streamedText = completedEvents
+      .filter((event) => event.kind === "voice-chunk")
+      .map((event) => event.delivery.responses[0]!.text)
+      .join("");
+    expect(streamedText + (voiceResponse?.text ?? "")).toBe(terminalText);
+    await host.release();
+  });
+
+  test("bounds unacknowledged semantic chunks instead of forwarding every delta", async () => {
+    const threadId = "voice-semantic-backpressure-thread";
+    const turnId = "turn-semantic-backpressure";
+    const eventStore = new MemoryEventStore();
+    const server = new FakeAppServer(threadId);
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore,
+      spawnProcess: fakeSpawn(server),
+    });
+    await host.startRealtimeWebRtc("v=0\r\noffer");
+    server.notify("turn/started", { threadId, turn: { id: turnId } });
+    for (let index = 0; index < 10; index += 1) {
+      server.notify("item/agentMessage/delta", {
+        threadId,
+        turnId,
+        delta: `${index}: ${"One cohesive explanation remains in a single speech request to keep quota use bounded and delivery natural. ".repeat(2)}`,
+      });
+    }
+    await Bun.sleep(0);
+
+    expect(eventStore.load(threadId).filter((event) => event.kind === "voice-chunk")).toHaveLength(6);
+    await host.release();
+  });
+
   test("bounds the unresolved realtime tail by UTF-8 bytes and item count", async () => {
     const server = new FakeAppServer("voice-bounded-thread");
     const host = await CodexAppServerHost.start({
