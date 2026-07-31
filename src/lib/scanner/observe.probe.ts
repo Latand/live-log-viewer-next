@@ -1,15 +1,22 @@
 /**
  * Out-of-process probe for the shared corpus observation (#845).
  *
- * `ROOTS` is baked from `os.homedir()` at import time, so a test that points HOME at
- * a fixture only wins if it is the first thing in the process to load the scanner —
- * which `bun test` cannot promise, and getting it wrong means sweeping the
- * OPERATOR'S real corpus. Running the scenario in a child process whose HOME is set
- * before it starts removes the ordering question entirely.
+ * `ROOTS` is baked from `os.homedir()` and `os.tmpdir()` at import time, so a test
+ * that points HOME at a fixture only wins if it is the first thing in the process to
+ * load the scanner — which `bun test` cannot promise, and getting it wrong means
+ * sweeping the OPERATOR'S real corpus. Running the scenario in a child process whose
+ * environment is set before it starts removes the ordering question entirely.
+ *
+ * It also REPORTS the roots it resolved, so the isolation is asserted rather than
+ * assumed: the `claude-tasks` root in particular falls back to a live
+ * `/tmp/claude-<uid>` when the tmpdir-based candidate does not exist, which would have
+ * put the operator's background-task outputs inside a "sandboxed" scan and made the
+ * fd-holder scan enumerate processes that own them.
  *
  * Prints one JSON line. Not a test file, so the runner never collects it.
  */
 
+import { ROOTS, scanRootEntries } from "@/lib/scanner/roots";
 import {
   fileObservationGenerations,
   fileObservationInFlight,
@@ -65,7 +72,17 @@ async function main(): Promise<void> {
   const rssAfter = rssMiB();
 
   process.stdout.write(JSON.stringify({
+    /* Every root the scanner would walk, so the test can prove all of them are inside
+       the fixture rather than trusting that HOME was enough. */
+    roots: scanRootEntries().map(([key, root]) => ({ key, root })),
+    claudeTasksRoot: ROOTS["claude-tasks"],
     files: warm.length,
+    projects: [...new Set(warm.map((entry) => entry.project))].length,
+    /* Proof the fd-holder scan attributed nothing: no fixture transcript is held open,
+       so no pid from the operator's machine can have been adopted onto a card. */
+    entriesWithPid: warm.filter((entry) => entry.pid !== null).length,
+    entriesWithPaneTarget: warm.filter((entry) => entry.pendingQuestion?.paneTarget != null).length,
+    claudeTaskEntries: warm.filter((entry) => entry.root === "claude-tasks").length,
     afterWarm,
     afterConcurrent,
     /* Distinct arrays, so one caller's title overlay cannot reach another's. */
