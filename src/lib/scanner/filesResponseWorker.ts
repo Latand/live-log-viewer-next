@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+import { statePath } from "@/lib/configDir";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 
 import type { FileCatalogScan } from "./index";
@@ -21,7 +22,8 @@ export type FilesResponseWorkerRequest = {
   type: "project";
   url: string;
   headers: Array<[string, string]>;
-  snapshot: FileCatalogScan;
+  snapshot?: FileCatalogScan;
+  snapshotFile?: string;
 };
 
 export interface FilesResponseWorkerRuntime {
@@ -35,13 +37,17 @@ function record(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function representation(value: unknown): FilesResponseRepresentation | null {
+type FilesResponseWorkerWireRepresentation = Omit<FilesResponseRepresentation, "body"> & {
+  bodyFile: string;
+};
+
+function representation(value: unknown): FilesResponseWorkerWireRepresentation | null {
   if (!record(value)
-    || typeof value.body !== "string"
+    || typeof value.bodyFile !== "string"
     || typeof value.contentType !== "string"
     || typeof value.etag !== "string"
     || typeof value.timing !== "string") return null;
-  return value as unknown as FilesResponseRepresentation;
+  return value as unknown as FilesResponseWorkerWireRepresentation;
 }
 
 function workerLaunch(cwd = process.cwd()): { executable: string; workerPath: string } {
@@ -132,7 +138,21 @@ export function buildFilesResponseInWorker(
         finish(new Error(`files response worker exited before completion (${signal ?? code ?? "unknown"})${detail ? `: ${detail}` : ""}`));
         return;
       }
-      finish(undefined, result);
+      const resultDirectory = runtime.env?.LLV_STATE_DIR
+        ? path.resolve(runtime.env.LLV_STATE_DIR, "files-response-results")
+        : path.resolve(statePath("files-response-results"));
+      const bodyFile = path.resolve(result.bodyFile);
+      if (path.dirname(bodyFile) !== resultDirectory) {
+        finish(new Error("files response worker returned an invalid body path"));
+        return;
+      }
+      try {
+        const body = fs.readFileSync(bodyFile, "utf8");
+        fs.rmSync(bodyFile, { force: true });
+        finish(undefined, { ...result, body });
+      } catch (error) {
+        finish(error instanceof Error ? error : new Error("files response worker body is unavailable"));
+      }
     });
     child.stdin.once("error", (error) => finish(error));
     child.stdin.end(JSON.stringify(request));
