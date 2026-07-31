@@ -180,6 +180,38 @@ test("repeated files reads reuse the pure read snapshot and retain ETag behavior
   expect(first.headers.get("server-timing")).toMatch(/files-role-titles;dur=\d+(?:\.\d+)?/);
 });
 
+test("registry heartbeat writes do not invalidate the completed files projection", async () => {
+  scannedFiles = [];
+  const registry = agentRegistry();
+  const key = { engine: "codex" as const, sessionId: "heartbeat-cache-test" };
+  const entry = {
+    key,
+    artifactPath: path.join(registryRoot, "heartbeat-cache-test.jsonl"),
+    cwd: registryRoot,
+    accountId: null,
+    launchProfile: emptyLaunchProfile({ cwd: registryRoot }),
+    status: "live" as const,
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  };
+  registry.upsert(entry);
+  const first = await GET(new Request("http://127.0.0.1/api/files"));
+  const before = registry.storageDiagnostics();
+  registry.upsert(entry);
+  const after = registry.storageDiagnostics();
+  const etag = first.headers.get("etag");
+  const second = await GET(new Request("http://127.0.0.1/api/files", {
+    headers: { "if-none-match": etag! },
+  }));
+
+  expect(after.transactionCount).toBeGreaterThan(before.transactionCount);
+  expect(first.headers.get("x-llv-files-projection-cache")).toBe("miss");
+  expect(second.status).toBe(304);
+  expect(second.headers.get("x-llv-files-projection-cache")).toBe("stale");
+});
+
 test("generation completion retries skip the stale projection while its refresh is running", async () => {
   scannedFiles = [file("/sessions/generation-1.jsonl")];
   const initial = await GET(new Request("http://127.0.0.1/api/files"));
