@@ -25,6 +25,9 @@ export type ProjectAttributionSource = "ownership" | "cwd" | "launch-profile" | 
 export interface ProjectAttributionInput {
   projectOwnership?: ConversationProjectOwnership | null;
   cwd?: string | null;
+  /** Optional caller-owned cwd projection cache. Presence, including null,
+      suppresses another disk-backed worktree resolution. */
+  cwdInfo?: ReturnType<typeof projectInfoFromCwd>;
   launchProfileProject?: string | null;
   fallbackProject?: string | null;
 }
@@ -37,7 +40,7 @@ export interface ProjectAttribution {
 
 export function resolveProjectAttribution(input: ProjectAttributionInput): ProjectAttribution {
   const cwd = input.cwd?.trim();
-  const cwdInfo = cwd ? projectInfoFromCwd(cwd) : null;
+  const cwdInfo = Object.hasOwn(input, "cwdInfo") ? input.cwdInfo ?? null : cwd ? projectInfoFromCwd(cwd) : null;
   const ownership = input.projectOwnership?.project.trim();
   if (ownership) {
     return { project: canonicalProject(ownership), ...(cwdInfo?.worktree ? { worktree: cwdInfo.worktree } : {}), source: "ownership" };

@@ -91,7 +91,10 @@ export function buildFilesResponseInWorker(
       try { child.kill("SIGKILL"); } catch { /* child already exited */ }
       finish(new Error(message));
     };
-    const timer = setTimeout(() => fail("files response worker timed out"), runtime.timeoutMs ?? FILES_RESPONSE_WORKER_TIMEOUT_MS);
+    const timer = setTimeout(() => {
+      const detail = stderr.trim();
+      fail(`files response worker timed out${detail ? `: ${detail}` : ""}`);
+    }, runtime.timeoutMs ?? FILES_RESPONSE_WORKER_TIMEOUT_MS);
     child.once("error", (error) => finish(error));
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
