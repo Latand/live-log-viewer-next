@@ -224,6 +224,9 @@ test("a unique repository display name absorbs its matching legacy project key",
     smt: 20,
   })]);
   expect(result.projectRemap.get(canonical.displayName)).toBe(canonical.project);
+  const repeated = consolidateProjectCatalogByRepository(result.projectCatalog);
+  expect(repeated.projectCatalog).toEqual(result.projectCatalog);
+  expect(repeated.projectRemap.get(canonical.project)).toBe(canonical.project);
 });
 
 test("distinct readable legacy projects do not share the unresolved label", () => {
