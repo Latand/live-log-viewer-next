@@ -12,6 +12,7 @@ const nextConfig: NextConfig = {
   outputFileTracingIncludes: {
     "/*": [
       ".next/server/file-scanner-worker.js",
+      ".next/server/files-response-worker.js",
       ".next/server/resource-collector-worker.js",
     ],
   },
@@ -21,6 +22,7 @@ const nextConfig: NextConfig = {
       config.entry = async () => ({
         ...(typeof originalEntry === "function" ? await originalEntry() : originalEntry),
         "file-scanner-worker": "./src/lib/fileScanner.worker.ts",
+        "files-response-worker": "./src/lib/filesResponse.worker.ts",
         "resource-collector-worker": "./src/lib/resourceCollector.worker.ts",
       });
     }
