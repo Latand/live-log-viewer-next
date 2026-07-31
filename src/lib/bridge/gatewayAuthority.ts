@@ -26,22 +26,23 @@ import { structuredDeliveryHostForConversation } from "@/lib/runtime/structuredD
  * poll to answer a question whose answer changes when a root session rolls over,
  * which is to say almost never.
  *
- * So the poll path no longer rebuilds anything. The root identity is a
- * process-scoped projection, and the steady-state check is two O(1) lookups: which
- * conversation is root, and what realtime session its structured host currently
- * holds. A rebuild happens only when that check does NOT match — the rollover
- * signal — and even then no more than once per window, so a client hammering a
- * refused credential cannot turn its own refusals into registry reads.
+ * So the SUCCESSFUL poll path rebuilds nothing. The root identity is a
+ * process-scoped projection, and a matching credential costs one O(1) lookup: what
+ * realtime session the projected root's structured host currently holds.
  *
- * The trade-off, stated plainly: between a rollover and the next rebuild, the
- * projection can still name the previous root. That cannot grant authority to an
- * arbitrary caller — the presented id must still equal the realtime session id that
- * conversation's own live host holds right now, which nobody but that call's peer
- * has. And a rollover ends the previous root's call, so the projected root stops
- * having a live session at all, which is the one condition that spends the rebuild
- * budget. A wrong credential presented against a HEALTHY root spends nothing, at any
- * request rate, because there is nothing about it a rebuild would change. Every step
- * still fails closed.
+ * A MISMATCH re-derives, bounded to at most one whole-registry read per window. That
+ * bound has to hold against request RATE rather than against a well-behaved client,
+ * which is what makes a refused caller looping forever cost one read per window
+ * instead of one per request.
+ *
+ * The trade-off, stated plainly: for up to one window after a handover the projection
+ * can still name the predecessor, so a predecessor whose call is still up keeps
+ * access for at most that long, and a successor is adopted within at most that long —
+ * in practice on its first request, because a healthy root never spends the budget
+ * and the window is long expired when a handover happens. The projection can never
+ * grant authority to an arbitrary caller: the presented id must equal the realtime
+ * session id the projected root's own live host holds right now, which nobody but
+ * that call's peer has. Every step still fails closed.
  */
 
 export type BridgeGatewayAuthority =
@@ -152,22 +153,31 @@ export function authenticateBridgeGateway(
   /* The steady state, and the only path a healthy poll takes: one O(1) lookup and no
      registry work at all. */
   const projected = projectionHost.__llvBridgeRootProjection?.conversationId ?? null;
-  if (projected) {
-    const live = sources.liveRealtimeSessionId(projected);
-    if (live === claimed) return { ok: true, conversationId: projected };
-    /* The projected root is UP and holding a different session, so the projection is
-       not what is wrong here — the credential is. Rebuilding would cost a whole
-       registry read to re-derive the same answer, which is precisely how a client
-       looping on a refusal turned its own retries into registry load. Refuse, free. */
-    if (live) return REFUSED;
+  if (projected && sources.liveRealtimeSessionId(projected) === claimed) {
+    return { ok: true, conversationId: projected };
   }
 
-  /* Either nothing is projected, or the projected root no longer has a live call —
-     which is exactly what a rollover looks like. That is worth a rebuild, and the
-     window keeps even this bounded when the root is simply down and something keeps
-     asking. */
+  /*
+   * A MISMATCH IS A REASON TO RE-DERIVE, not a reason to refuse from the memo.
+   *
+   * The first version of this refused for free whenever the projected root still had
+   * a live call, reasoning that a rollover ends the predecessor's call. It does not
+   * have to. A handover can promote B while A's call is still up, and then the memo
+   * pinned A forever: A kept reading the deploy nonces it was no longer entitled to,
+   * and B — the actual root — was refused for as long as A stayed on the line. That
+   * is the wrong half of a fail-closed design failing open.
+   *
+   * So every mismatch consults the projection, and the WINDOW is what keeps it
+   * bounded: `projectedRoot` re-derives at most once per window and serves the memo
+   * otherwise. A caller looping on a refusal therefore costs at most one registry
+   * read per window no matter its rate, and a genuine successor is adopted within one
+   * window — usually on its first request, since a healthy root never spends the
+   * budget and the window is long expired by the time a handover happens.
+   */
   const conversationId = projectedRoot(sources, now);
   if (!conversationId) return REFUSED;
+  /* Already checked above against this exact id, and the memo did not move. */
+  if (conversationId === projected) return REFUSED;
   const live = sources.liveRealtimeSessionId(conversationId);
   if (!live || live !== claimed) return REFUSED;
   return { ok: true, conversationId };
