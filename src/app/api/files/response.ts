@@ -12,7 +12,7 @@ import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { repositoryForProjectRoot } from "@/lib/flows/git";
 import { loadFlows } from "@/lib/flows/store";
 import { reviewOutcomeFor } from "@/lib/flows/reviewOutcome";
-import { overlayPromptDisplayTitles } from "@/lib/displayNames";
+import { overlayPromptDisplayTitles, projectDisplayName } from "@/lib/displayNames";
 import { projectAliasSnapshot } from "@/lib/projects/aliases";
 import { projectIdentityFromRepositoryRoot } from "@/lib/projects/identity";
 import { projectRestoredFlows } from "@/lib/flows/visibility";
@@ -76,38 +76,78 @@ function projectedProjectCatalog(
   return [...groups.values()].sort((left, right) => right.smt - left.smt || left.project.localeCompare(right.project));
 }
 
-export function consolidateProjectCatalogByRepository(entries: readonly ProjectCatalogEntry[]): {
+function resolveCatalogAlias(
+  project: string,
+  aliases: Readonly<Record<string, string>>,
+): string {
+  let current = project;
+  if (!aliases[current] && !current.startsWith("-") && aliases[`-${current}`]) {
+    current = `-${current}`;
+  }
+  const seen = new Set<string>();
+  while (aliases[current] && !seen.has(current)) {
+    seen.add(current);
+    current = aliases[current]!;
+  }
+  return seen.has(current) ? project : current;
+}
+
+export function consolidateProjectCatalogByRepository(
+  entries: readonly ProjectCatalogEntry[],
+  aliases: Readonly<Record<string, string>> = {},
+  displayNames: Readonly<Record<string, string>> = {},
+): {
   projectCatalog: ProjectCatalogEntry[];
   projectRemap: Map<string, string>;
 } {
-  const groups = new Map<string, ProjectCatalogEntry[]>();
+  const repositoryProjects = new Map<string, string>();
   for (const entry of entries) {
-    const key = entry.repository
-      ? `repository:${entry.repository.toLowerCase()}`
-      : `project:${entry.project}`;
+    if (!entry.repository) continue;
+    const repository = entry.repository.toLowerCase();
+    const identity = entry.projectRoot ? projectIdentityFromRepositoryRoot(entry.projectRoot) : null;
+    const aliasedProject = resolveCatalogAlias(entry.project, aliases);
+    const candidate = identity?.project
+      ?? (/^repo-[0-9a-f]{32}$/.test(aliasedProject) ? aliasedProject : null);
+    if (candidate && (identity || !repositoryProjects.has(repository))) {
+      repositoryProjects.set(repository, candidate);
+    }
+  }
+  const groups = new Map<string, Array<{ entry: ProjectCatalogEntry; aliasedProject: string }>>();
+  for (const entry of entries) {
+    const aliasedProject = resolveCatalogAlias(entry.project, aliases);
+    const repository = entry.repository?.toLowerCase();
+    const repositoryProject = repository ? repositoryProjects.get(repository) : null;
+    const key = repositoryProject
+      ? `project:${repositoryProject}`
+      : repository
+        ? `repository:${repository}`
+        : `project:${aliasedProject}`;
     const group = groups.get(key) ?? [];
-    group.push(entry);
+    group.push({ entry, aliasedProject });
     groups.set(key, group);
   }
   const projectRemap = new Map<string, string>();
   const projectCatalog: ProjectCatalogEntry[] = [];
   for (const group of groups.values()) {
     const repositoryIdentity = group
-      .map((entry) => entry.projectRoot ? projectIdentityFromRepositoryRoot(entry.projectRoot) : null)
+      .map(({ entry }) => entry.projectRoot ? projectIdentityFromRepositoryRoot(entry.projectRoot) : null)
       .find((identity) => identity !== null);
     const canonical = repositoryIdentity?.project
-      ?? group.find((entry) => /^repo-[0-9a-f]{32}$/.test(entry.project))?.project
-      ?? group[0]!.project;
-    for (const entry of group) projectRemap.set(entry.project, canonical);
-    const preferred = group.find((entry) => entry.project === canonical) ?? group[0]!;
+      ?? group.find(({ aliasedProject }) => /^repo-[0-9a-f]{32}$/.test(aliasedProject))?.aliasedProject
+      ?? group[0]!.aliasedProject;
+    for (const { entry } of group) projectRemap.set(entry.project, canonical);
+    const preferred = group.find(({ aliasedProject }) => aliasedProject === canonical)?.entry ?? group[0]!.entry;
+    const fallbackDisplayName = preferred.displayName === "Unresolved project" && canonical !== "project_unresolved"
+      ? projectDisplayName(canonical)
+      : preferred.displayName;
     projectCatalog.push({
       ...preferred,
       project: canonical,
-      displayName: repositoryIdentity?.displayName ?? preferred.displayName,
-      smt: Math.max(...group.map((entry) => entry.smt)),
-      conversations: group.reduce((total, entry) => total + entry.conversations, 0),
-      projectRoot: preferred.projectRoot ?? group.find((entry) => entry.projectRoot)?.projectRoot,
-      repository: preferred.repository ?? group.find((entry) => entry.repository)?.repository ?? null,
+      displayName: repositoryIdentity?.displayName ?? displayNames[canonical] ?? fallbackDisplayName,
+      smt: Math.max(...group.map(({ entry }) => entry.smt)),
+      conversations: group.reduce((total, { entry }) => total + entry.conversations, 0),
+      projectRoot: preferred.projectRoot ?? group.find(({ entry }) => entry.projectRoot)?.entry.projectRoot,
+      repository: preferred.repository ?? group.find(({ entry }) => entry.repository)?.entry.repository ?? null,
     });
   }
   projectCatalog.sort((left, right) => right.smt - left.smt || left.project.localeCompare(right.project));
@@ -583,12 +623,17 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   const projected = projectRateLimitReadModel(files, flows, registrySnapshot);
   markTiming("files-project-rate-limits");
   let effectiveProjectCatalog = projectedProjectCatalog(projectCatalog, registrySnapshot);
+  const projectAliases = projectAliasSnapshot();
   /* GitHub repository identity for readiness issue links (issue #290): cached
      per project root from local .git/config, nullable on any failure. */
   for (const entry of effectiveProjectCatalog) {
     entry.repository = entry.projectRoot ? repositoryForProjectRoot(entry.projectRoot) : null;
   }
-  const consolidated = consolidateProjectCatalogByRepository(effectiveProjectCatalog);
+  const consolidated = consolidateProjectCatalogByRepository(
+    effectiveProjectCatalog,
+    projectAliases.aliases,
+    projectAliases.displayNames,
+  );
   effectiveProjectCatalog = consolidated.projectCatalog;
   const remapProject = (project: string): string => consolidated.projectRemap.get(project) ?? project;
   projected.files = projected.files.map((file) => ({ ...file, project: remapProject(file.project) }));
@@ -633,7 +678,6 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     mirrorCheckpointAtMs: registryDiagnostics.mirrorCheckpointAtMs,
     mirrorDirty: registryDiagnostics.mirrorDirty,
   };
-  const projectAliases = projectAliasSnapshot();
   const effectiveProjectAliases = { ...projectAliases.aliases };
   for (const [source, target] of consolidated.projectRemap) {
     delete effectiveProjectAliases[target];
