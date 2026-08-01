@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { viewerMcpBindings } from "./bindings";
+import { targetedConversationAtPath, viewerMcpBindings, type TargetedConversationDependencies } from "./bindings";
 
 /**
  * The control-plane reads consume ONE completed scan and ONE projection (#845).
@@ -264,6 +264,91 @@ test("get_conversation deadlines a targeted miss without orphan work", async () 
   await expect(call).rejects.toMatchObject({ name: "DeadlineExceededError" });
   expect(targetedSignal?.aborted).toBeTrue();
   expect(counts.rawScans).toBe(0);
+});
+
+test("targeted conversation opens one canonical regular transcript and retains its title", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-targeted-open-"));
+  sandboxes.push(directory);
+  const root = path.join(directory, "sessions");
+  fs.mkdirSync(root);
+  const pathname = path.join(root, "rollout.jsonl");
+  fs.writeFileSync(pathname, [
+    JSON.stringify({ type: "session_meta", payload: { id: "fixture", timestamp: "2026-07-01T09:00:00.000Z", cwd: "/repo/fixture" } }),
+    JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "canonical title" }] } }),
+    JSON.stringify({ type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "bounded answer" }] } }),
+  ].join("\n") + "\n");
+
+  const targeted = await targetedConversationAtPath(pathname, {}, {
+    roots: [["codex-sessions", root]],
+    pathAllowed: (candidate) => fs.realpathSync(candidate).startsWith(fs.realpathSync(root) + path.sep),
+  });
+
+  expect(targeted?.entry).toMatchObject({ path: pathname, title: "canonical title", engine: "codex" });
+  expect(targeted?.session.messages.at(-1)?.text).toBe("bounded answer");
+});
+
+test("targeted conversation retains a safely opened Claude subagent sidecar title", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-targeted-sidecar-"));
+  sandboxes.push(directory);
+  const root = path.join(directory, "projects");
+  const project = path.join(root, "-repo-fixture");
+  fs.mkdirSync(project, { recursive: true });
+  const pathname = path.join(project, "agent-fixture.jsonl");
+  fs.writeFileSync(pathname, `${JSON.stringify({ type: "user", cwd: "/repo/fixture", message: { content: "fallback title" } })}\n`);
+  fs.writeFileSync(pathname.replace(/\.jsonl$/, ".meta.json"), JSON.stringify({ description: "sidecar title" }));
+  const pathAllowed = (candidate: string) => {
+    try { return fs.realpathSync(candidate).startsWith(fs.realpathSync(root) + path.sep); } catch { return false; }
+  };
+
+  const targeted = await targetedConversationAtPath(pathname, {}, {
+    roots: [["claude-projects", root]],
+    pathAllowed,
+  });
+
+  expect(targeted?.entry).toMatchObject({ title: "sidecar title", engine: "claude", kind: "subagent" });
+});
+
+test("targeted conversation rejects external symlinks and a path swapped after safe open", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-targeted-race-"));
+  sandboxes.push(directory);
+  const root = path.join(directory, "sessions");
+  const external = path.join(directory, "external");
+  fs.mkdirSync(root);
+  fs.mkdirSync(external);
+  const externalPath = path.join(external, "outside.jsonl");
+  const externalBody = `${JSON.stringify({ type: "session_meta", payload: { cwd: "/outside" } })}\n`;
+  fs.writeFileSync(externalPath, externalBody);
+  const symlinkPath = path.join(root, "external-link.jsonl");
+  fs.symlinkSync(externalPath, symlinkPath);
+  const pathAllowed = (candidate: string) => {
+    try { return fs.realpathSync(candidate).startsWith(fs.realpathSync(root) + path.sep); } catch { return false; }
+  };
+
+  const targetedDependencies: TargetedConversationDependencies = {
+    roots: [["codex-sessions", root]],
+    pathAllowed,
+  };
+  expect(await targetedConversationAtPath(symlinkPath, {}, targetedDependencies)).toBeUndefined();
+  const { injected } = dependencies({ completedTranscript: false });
+  const domain = injected as unknown as {
+    targetedFileEntry(pathname: string, options?: { signal?: AbortSignal; deadlineAt?: number }): ReturnType<typeof targetedConversationAtPath>;
+  };
+  domain.targetedFileEntry = (candidate, options = {}) => targetedConversationAtPath(candidate, options, targetedDependencies);
+  await expect(viewerMcpBindings(undefined, undefined, injected).get_conversation({
+    clientRequestId: "external-symlink",
+    transcriptPath: symlinkPath,
+  })).rejects.toThrow("conversation not found");
+
+  const swappedPath = path.join(root, "swapped.jsonl");
+  fs.writeFileSync(swappedPath, `${JSON.stringify({ type: "session_meta", payload: { cwd: "/inside" } })}\n`);
+  expect(await targetedConversationAtPath(swappedPath, {}, {
+    roots: [["codex-sessions", root]],
+    pathAllowed,
+    afterOpen: () => {
+      fs.unlinkSync(swappedPath);
+      fs.symlinkSync(externalPath, swappedPath);
+    },
+  })).toBeUndefined();
 });
 
 test("board_snapshot still consumes one scan and one projection", async () => {

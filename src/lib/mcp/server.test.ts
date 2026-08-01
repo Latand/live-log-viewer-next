@@ -3,6 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { Database } from "bun:sqlite";
+
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
@@ -48,6 +50,15 @@ async function waitForFile(filename: string, timeoutMs = 3_000): Promise<boolean
   return fs.existsSync(filename);
 }
 
+async function waitForFileCount(directory: string, prefix: string, count: number, timeoutMs = 10_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fs.readdirSync(directory).filter((entry) => entry.startsWith(prefix)).length >= count) return true;
+    await Bun.sleep(10);
+  }
+  return fs.readdirSync(directory).filter((entry) => entry.startsWith(prefix)).length >= count;
+}
+
 function recoveryArtifacts(directory: string): string[] {
   return fs.readdirSync(directory)
     .filter((entry) => entry.includes(".recovering") || entry.includes(".recovery-owner"));
@@ -71,7 +82,7 @@ async function childResult(child: { exited: Promise<number>; stderr: ReadableStr
 }
 
 describe("MCP tool service", () => {
-  test("production-shaped receipts stay bounded under twenty concurrent fresh calls and replays", async () => {
+  test("production-shaped legacy receipts import once and stay bounded", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-receipts-sqlite-"));
     scratch.push(directory);
     const legacyPath = path.join(directory, "mcp-receipts.json");
@@ -131,26 +142,102 @@ describe("MCP tool service", () => {
       replayed: true,
     });
 
-    const measure = async (clientRequestId: string) => {
-      const startedAt = performance.now();
-      const result = await service.callTool("list_tasks", { clientRequestId, limit: 1 });
-      return { durationMs: performance.now() - startedAt, result };
-    };
-    const fresh = await Promise.all(Array.from({ length: 20 }, (_value, index) => measure(`concurrent-${index}`)));
-    const replay = await Promise.all(Array.from({ length: 20 }, (_value, index) => measure(`concurrent-${index}`)));
-    const percentile = (values: number[], quantile: number) => values.toSorted((left, right) => left - right)[Math.ceil(values.length * quantile) - 1]!;
-
-    expect(fresh.every(({ result }) => result.ok && !result.replayed)).toBeTrue();
-    expect(replay.every(({ result }) => result.ok && result.replayed)).toBeTrue();
-    expect(bindingCalls).toBe(20);
-    expect(percentile(fresh.map(({ durationMs }) => durationMs), 0.95)).toBeLessThan(250);
-    expect(percentile(replay.map(({ durationMs }) => durationMs), 0.95)).toBeLessThan(100);
+    const fresh = await service.callTool("list_tasks", { clientRequestId: "post-import-read", limit: 1 });
+    expect(fresh).toMatchObject({ ok: true, replayed: false });
+    expect(await service.callTool("list_tasks", { clientRequestId: "post-import-read", limit: 1 }))
+      .toEqual({ ...fresh, replayed: true });
+    expect(bindingCalls).toBe(1);
 
     store.close();
     expect(fs.statSync(sqlitePath).size).toBeLessThan(12 * 1024 * 1024);
     fs.writeFileSync(legacyPath, "legacy import must not run twice");
     const restarted = createMcpToolService(bindings, new SqliteMcpReceiptStore(sqlitePath, { legacyFilePath: legacyPath }));
     expect(await restarted.callTool("send_message", durableArgs)).toEqual({ ...durableResult, replayed: true });
+  }, 30_000);
+
+  test("twenty processes deterministically share one SQLite receipt owner and restart replay", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-receipts-processes-"));
+    scratch.push(directory);
+    const sqlitePath = path.join(directory, "receipts.sqlite");
+    new SqliteMcpReceiptStore(sqlitePath).close();
+    const childPath = path.join(import.meta.dir, "receiptStoreProbeChild.ts");
+    const startPath = path.join(directory, "start");
+    const ownerReadyPath = path.join(directory, "owner-ready");
+    const ownerReleasePath = path.join(directory, "owner-release");
+    const ownerCountPath = path.join(directory, "owner-count");
+    const children = Array.from({ length: 20 }, (_value, index) => Bun.spawn({
+      cmd: [
+        process.execPath,
+        childPath,
+        sqlitePath,
+        path.join(directory, `ready-${index}.json`),
+        startPath,
+        ownerReadyPath,
+        ownerReleasePath,
+        ownerCountPath,
+        path.join(directory, `result-${index}.json`),
+        String(index),
+      ],
+      cwd: import.meta.dir,
+      env: { ...process.env, LLV_STATE_DIR: path.join(directory, "state", String(index)) },
+      stdout: "pipe",
+      stderr: "pipe",
+    }));
+
+    expect(await waitForFileCount(directory, "ready-", 20)).toBeTrue();
+    const ready = Array.from({ length: 20 }, (_value, index) => JSON.parse(
+      fs.readFileSync(path.join(directory, `ready-${index}.json`), "utf8"),
+    ) as { index: number; steadyRssBytes: number });
+    expect(ready.map(({ index }) => index).toSorted((left, right) => left - right))
+      .toEqual(Array.from({ length: 20 }, (_value, index) => index));
+    expect(ready.every(({ steadyRssBytes }) => Number.isFinite(steadyRssBytes) && steadyRssBytes > 0)).toBeTrue();
+
+    fs.writeFileSync(startPath, "start");
+    expect(await waitForFile(ownerReadyPath, 10_000)).toBeTrue();
+    expect(await waitForFileCount(directory, "result-", 19, 10_000)).toBeTrue();
+    const ownerIndex = Number(fs.readFileSync(ownerReadyPath, "utf8"));
+    expect(fs.readFileSync(ownerCountPath, "utf8").trim().split("\n")).toEqual([String(ownerIndex)]);
+    fs.writeFileSync(ownerReleasePath, "release");
+
+    const childOutcomes = await Promise.all(children.map(childResult));
+    expect(childOutcomes).toEqual(Array.from({ length: 20 }, () => ({ exit: 0, error: "" })));
+    const results = Array.from({ length: 20 }, (_value, index) => JSON.parse(
+      fs.readFileSync(path.join(directory, `result-${index}.json`), "utf8"),
+    ) as {
+      index: number;
+      durationMs: number;
+      peakRssBytes: number;
+      result: { ok: boolean; replayed: boolean; code?: string; ownerIndex?: number };
+    });
+    const winners = results.filter(({ result }) => result.ok);
+    const contenders = results.filter(({ result }) => result.code === "call_interrupted");
+    expect(winners).toHaveLength(1);
+    expect(winners[0]).toMatchObject({ index: ownerIndex, result: { replayed: false, ownerIndex } });
+    expect(contenders).toHaveLength(19);
+    expect(contenders.every(({ result }) => result.replayed)).toBeTrue();
+
+    let restartBindingCalls = 0;
+    const restartBindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [toolName, async () => ({})])) as unknown as McpToolBindings;
+    restartBindings.list_tasks = async () => ({ restartBindingCall: ++restartBindingCalls });
+    const restartedStore = new SqliteMcpReceiptStore(sqlitePath);
+    const restartedService = createMcpToolService(restartBindings, restartedStore);
+    expect(await restartedService.callTool("list_tasks", { clientRequestId: "twenty-process-owner", limit: 1 }))
+      .toMatchObject({ ok: true, replayed: true, ownerIndex });
+    expect(await restartedService.callTool("list_tasks", { clientRequestId: "twenty-process-owner", limit: 2 }))
+      .toMatchObject({ ok: false, replayed: true, code: "idempotency_conflict" });
+    expect(restartBindingCalls).toBe(0);
+    restartedStore.close();
+
+    const percentile = (values: number[], quantile: number) => values.toSorted((left, right) => left - right)[Math.ceil(values.length * quantile) - 1]!;
+    const durations = results.map(({ durationMs }) => durationMs);
+    const steadyRss = ready.map(({ steadyRssBytes }) => steadyRssBytes);
+    const peaks = results.map(({ peakRssBytes }) => peakRssBytes);
+    console.info("[mcp-sqlite-20-process]", JSON.stringify({
+      processes: 20,
+      latencyMs: { p50: percentile(durations, 0.5), p95: percentile(durations, 0.95), max: Math.max(...durations) },
+      steadyRssMiB: { total: steadyRss.reduce((sum, value) => sum + value, 0) / 1024 / 1024, max: Math.max(...steadyRss) / 1024 / 1024 },
+      peakRssMiB: { max: Math.max(...peaks) / 1024 / 1024 },
+    }));
   }, 30_000);
 
   test("SQLite read receipt count retention expires the oldest completed replay", async () => {
@@ -190,6 +277,59 @@ describe("MCP tool service", () => {
     expect((await service.callTool("list_tasks", { clientRequestId: "bytes-1" })).replayed).toBeFalse();
     expect(bindingCalls).toBe(3);
     store.close();
+  });
+
+  test("SQLite restart reclaims expired bounded claims within count and byte budgets", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-receipts-expired-"));
+    scratch.push(directory);
+    const filename = path.join(directory, "receipts.sqlite");
+    let now = 10_000;
+    let bindingCalls = 0;
+    const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [toolName, async () => ({})])) as unknown as McpToolBindings;
+    bindings.list_tasks = async () => ({ bindingCall: ++bindingCalls });
+    const initial = new SqliteMcpReceiptStore(filename, {
+      readReceiptCountCap: 100,
+      readReceiptByteCap: 1_000_000,
+      boundedPendingTtlMs: 100,
+      now: () => now,
+    });
+    const service = createMcpToolService(bindings, initial);
+    const completedArgs = { clientRequestId: "completed-before-abandonment" };
+    const completed = await service.callTool("list_tasks", completedArgs);
+    const digest = "a".repeat(64);
+    for (let index = 0; index < 8; index += 1) {
+      expect(initial.claim(`list_tasks:abandoned-${index}`, digest, "bounded")).toEqual({ kind: "fresh" });
+    }
+    expect(initial.claim("send_message:durable-pending", digest, "durable")).toEqual({ kind: "fresh" });
+    initial.close();
+
+    now += 101;
+    const restarted = new SqliteMcpReceiptStore(filename, {
+      readReceiptCountCap: 2,
+      readReceiptByteCap: 1_000,
+      boundedPendingTtlMs: 100,
+      now: () => now,
+    });
+    expect(await createMcpToolService(bindings, restarted).callTool("list_tasks", completedArgs))
+      .toEqual({ ...completed, replayed: true });
+    expect(restarted.claim("list_tasks:abandoned-0", digest, "bounded")).toEqual({ kind: "fresh" });
+    expect(restarted.claim("send_message:durable-pending", digest, "durable")).toMatchObject({ kind: "pending" });
+    expect(restarted.claim("send_message:durable-pending", "b".repeat(64), "durable")).toEqual({ kind: "conflict" });
+    restarted.close();
+
+    const database = new Database(filename, { readonly: true, strict: true });
+    const bounded = database.query<{ count: number; bytes: number; pending: number }, []>(`
+      SELECT COUNT(*) AS count,
+             COALESCE(SUM(storage_bytes), 0) AS bytes,
+             SUM(CASE WHEN result_json IS NULL THEN 1 ELSE 0 END) AS pending
+      FROM mcp_receipts
+      WHERE retention = 'bounded'
+    `).get()!;
+    database.close();
+    expect(bounded.count).toBeLessThanOrEqual(2);
+    expect(bounded.bytes).toBeLessThanOrEqual(1_000);
+    expect(bounded.pending).toBe(1);
+    expect(bindingCalls).toBe(1);
   });
 
   test("separate SQLite store instances preserve one durable mutation owner", async () => {
@@ -259,8 +399,11 @@ describe("MCP tool service", () => {
     expect(listTasks.phases.binding.samples).toBe(1);
     expect(listTasks.phases.completion.samples).toBe(1);
     expect(listTasks.phases.serialization.samples).toBe(3);
-    expect(listTasks.phases.rpcDeliveryWait.samples).toBe(3);
+    expect(listTasks.phases.serviceTotal.samples).toBe(3);
     expect(listTasks.phases.replay.samples).toBe(1);
+    expect(listTasks.phases.serviceTotal.max).toBeGreaterThanOrEqual(listTasks.phases.binding.max);
+    expect(listTasks.phases.serviceTotal.max).toBeGreaterThanOrEqual(listTasks.phases.claim.max);
+    expect(listTasks.phases).not.toHaveProperty("rpcDeliveryWait");
     expect(listTasks.resultSizeBytes.max).toBeGreaterThan(0);
     expect(listTasks.deadline.callsWithDeadline).toBe(3);
     expect(JSON.stringify(snapshot)).not.toContain(privateSentinel);

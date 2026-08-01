@@ -178,6 +178,7 @@ type ReceiptFile = {
 
 const FILE_RECEIPT_CAP = 500;
 const SQLITE_READ_RECEIPT_BYTE_CAP = 8 * 1024 * 1024;
+const SQLITE_BOUNDED_PENDING_TTL_MS = 60_000;
 const LOCK_WAIT_MS = 5_000;
 const LOCK_STALE_MS = 30_000;
 type ReceiptLockOwner = { pid: number; startIdentity: string | null; token: string };
@@ -874,6 +875,8 @@ export interface SqliteMcpReceiptStoreOptions {
   legacyFilePath?: string;
   readReceiptCountCap?: number;
   readReceiptByteCap?: number;
+  boundedPendingTtlMs?: number;
+  now?: () => number;
 }
 
 /**
@@ -888,6 +891,8 @@ export class SqliteMcpReceiptStore implements McpReceiptStore {
   private readonly db: BunDatabase;
   private readonly readReceiptCountCap: number;
   private readonly readReceiptByteCap: number;
+  private readonly boundedPendingTtlMs: number;
+  private readonly now: () => number;
 
   constructor(readonly filename: string, options: SqliteMcpReceiptStoreOptions = {}) {
     fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
@@ -896,6 +901,8 @@ export class SqliteMcpReceiptStore implements McpReceiptStore {
     this.db = new sqlite.Database(filename, { create: true, strict: true });
     this.readReceiptCountCap = Math.max(1, Math.floor(options.readReceiptCountCap ?? FILE_RECEIPT_CAP));
     this.readReceiptByteCap = Math.max(1, Math.floor(options.readReceiptByteCap ?? SQLITE_READ_RECEIPT_BYTE_CAP));
+    this.boundedPendingTtlMs = Math.max(1, Math.floor(options.boundedPendingTtlMs ?? SQLITE_BOUNDED_PENDING_TTL_MS));
+    this.now = options.now ?? Date.now;
     this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA auto_vacuum = INCREMENTAL;");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS mcp_receipt_meta (
@@ -915,12 +922,22 @@ export class SqliteMcpReceiptStore implements McpReceiptStore {
       ON mcp_receipts(retention, sequence);
     `);
     this.importLegacyFile(options.legacyFilePath);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.pruneBoundedReceipts(this.now());
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+      throw error;
+    }
     this.secureFiles();
   }
 
   claim(key: string, digest: string, retention: ReceiptRetention): ReceiptClaim {
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const now = this.now();
+      this.pruneBoundedReceipts(now);
       const receipt = this.db.query<StoredSqliteReceipt, [string]>(`
         SELECT digest, result_json, claimed_at
         FROM mcp_receipts
@@ -930,17 +947,16 @@ export class SqliteMcpReceiptStore implements McpReceiptStore {
         this.db.exec("COMMIT");
         if (receipt.digest !== digest) return { kind: "conflict" };
         if (receipt.result_json === null) {
-          return { kind: "pending", unfinishedAgeMs: Math.max(0, Date.now() - receipt.claimed_at) };
+          return { kind: "pending", unfinishedAgeMs: Math.max(0, now - receipt.claimed_at) };
         }
         return { kind: "replay", result: this.parseResult(key, receipt.result_json) };
       }
-      const now = Date.now();
       const storageBytes = this.storageBytes(key, digest, null);
       this.db.query<unknown, [string, string, ReceiptRetention, number, number]>(`
         INSERT INTO mcp_receipts(receipt_key, digest, retention, result_json, storage_bytes, claimed_at)
         VALUES (?, ?, ?, NULL, ?, ?)
       `).run(key, digest, retention, storageBytes, now);
-      this.pruneBoundedReceipts();
+      this.pruneBoundedReceipts(now);
       this.db.exec("COMMIT");
       return { kind: "fresh" };
     } catch (error) {
@@ -966,7 +982,7 @@ export class SqliteMcpReceiptStore implements McpReceiptStore {
         SET retention = ?, result_json = ?, storage_bytes = ?
         WHERE receipt_key = ?
       `).run(effectiveRetention, resultJson, storageBytes, key);
-      this.pruneBoundedReceipts();
+      this.pruneBoundedReceipts(this.now());
       this.db.exec("COMMIT");
     } catch (error) {
       try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
@@ -995,7 +1011,7 @@ export class SqliteMcpReceiptStore implements McpReceiptStore {
           receipt_key, digest, retention, result_json, storage_bytes, claimed_at
         ) VALUES (?, ?, ?, ?, ?, ?)
       `);
-      let claimedAt = Date.now() - Object.keys(state.readReceipts).length - Object.keys(state.mutationReceipts).length;
+      let claimedAt = this.now() - Object.keys(state.readReceipts).length - Object.keys(state.mutationReceipts).length;
       const importCollection = (receipts: Record<string, Receipt>, retention: ReceiptRetention) => {
         for (const [key, receipt] of Object.entries(receipts)) {
           const resultJson = receipt.result === undefined ? null : JSON.stringify(receipt.result);
@@ -1005,7 +1021,7 @@ export class SqliteMcpReceiptStore implements McpReceiptStore {
       };
       importCollection(state.mutationReceipts, "durable");
       importCollection(state.readReceipts, "bounded");
-      this.pruneBoundedReceipts();
+      this.pruneBoundedReceipts(this.now());
       this.db.query<unknown, [string, string]>(`
         INSERT INTO mcp_receipt_meta(key, value) VALUES (?, ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
@@ -1021,7 +1037,18 @@ export class SqliteMcpReceiptStore implements McpReceiptStore {
     }
   }
 
-  private pruneBoundedReceipts(): void {
+  private pruneBoundedReceipts(now: number): void {
+    /* Bounded reads have a lease longer than the SDK's 30-second call budget.
+       A crash cannot strand their claims forever; after the lease, a restart or
+       any later receipt transaction removes them before completed replay rows
+       are considered for count/byte retention. Durable mutation claims never
+       enter this expiry path. */
+    this.db.query<unknown, [number]>(`
+      DELETE FROM mcp_receipts
+      WHERE retention = 'bounded'
+        AND result_json IS NULL
+        AND claimed_at <= ?
+    `).run(now - this.boundedPendingTtlMs);
     this.db.query<unknown, [number]>(`
       DELETE FROM mcp_receipts
       WHERE sequence IN (
@@ -1123,7 +1150,7 @@ export interface McpToolService {
 }
 
 type McpTimingOutcome = "success" | "failure" | "replay" | "conflict" | "pending" | "deadline" | "cancelled";
-type McpTimingPhase = "claim" | "binding" | "completion" | "serialization" | "rpcDeliveryWait" | "replay";
+type McpTimingPhase = "claim" | "binding" | "completion" | "serialization" | "serviceTotal" | "replay";
 
 interface McpToolTimingSample {
   toolName: McpToolName;
@@ -1204,7 +1231,7 @@ const MCP_TIMING_OUTCOMES: McpTimingOutcome[] = [
   "success", "failure", "replay", "conflict", "pending", "deadline", "cancelled",
 ];
 const MCP_TIMING_PHASES: McpTimingPhase[] = [
-  "claim", "binding", "completion", "serialization", "rpcDeliveryWait", "replay",
+  "claim", "binding", "completion", "serialization", "serviceTotal", "replay",
 ];
 
 function mutableToolTiming(): MutableToolTiming {
@@ -1292,7 +1319,7 @@ export function createMcpToolService(
           resultSizeBytes = Buffer.byteLength(JSON.stringify(result));
         } catch { /* timing must never change a tool outcome */ }
         phaseDurations.serialization = performance.now() - serializationStartedAt;
-        phaseDurations.rpcDeliveryWait = serializationStartedAt - callStartedAt;
+        phaseDurations.serviceTotal = serializationStartedAt - callStartedAt;
         options.timings?.observe({
           toolName: typedTool,
           outcome,
