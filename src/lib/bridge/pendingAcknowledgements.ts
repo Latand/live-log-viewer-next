@@ -26,8 +26,16 @@ const STORAGE_KEY = "llv.bridge.pendingAcks";
 const CAPACITY = 32;
 
 /** `waitingOn` is a delivery id for the live path, or a composer delivery key for the
-    turn-start path. The two never collide, and neither needs to know about the other. */
-type Pending = { waitingOn: string; ackToken: string; at: number };
+    turn-start path. The two never collide, and neither needs to know about the other.
+
+    `sessionId` records WHICH call drained the batch (#845). Without it the relay's
+    retry sweep replayed every parked token under whatever credential happened to be
+    live, so a token from a previous call was spent against a session that never
+    received its batch — and, on a refused credential, thirty-two of them were
+    attempted per poll. `null` means the token predates the stamp or survived a
+    reload; those are still swept, because a token nobody claims is still the only
+    thing that can settle its batch. */
+type Pending = { waitingOn: string; ackToken: string; at: number; sessionId: string | null };
 
 let pending: Pending[] = [];
 let hydrated = false;
@@ -42,7 +50,12 @@ function hydrate(): void {
     pending = parsed.flatMap((entry) => {
       const candidate = entry as Partial<Pending>;
       return typeof candidate?.waitingOn === "string" && typeof candidate.ackToken === "string"
-        ? [{ waitingOn: candidate.waitingOn, ackToken: candidate.ackToken, at: Number(candidate.at) || 0 }]
+        ? [{
+          waitingOn: candidate.waitingOn,
+          ackToken: candidate.ackToken,
+          at: Number(candidate.at) || 0,
+          sessionId: typeof candidate.sessionId === "string" ? candidate.sessionId : null,
+        }]
         : [];
     });
   } catch {
@@ -59,11 +72,20 @@ function persist(): void {
 }
 
 /** Park a token until whatever it is waiting on is confirmed. */
-export function rememberBridgeAcknowledgement(waitingOn: string, ackToken: string, now = Date.now()): void {
+export function rememberBridgeAcknowledgement(
+  waitingOn: string,
+  ackToken: string,
+  options: { now?: number; sessionId?: string | null } = {},
+): void {
   if (!waitingOn || !ackToken) return;
   hydrate();
-  pending = [...pending.filter((entry) => entry.waitingOn !== waitingOn), { waitingOn, ackToken, at: now }]
-    .slice(-CAPACITY);
+  const entry: Pending = {
+    waitingOn,
+    ackToken,
+    at: options.now ?? Date.now(),
+    sessionId: options.sessionId ?? null,
+  };
+  pending = [...pending.filter((candidate) => candidate.waitingOn !== waitingOn), entry].slice(-CAPACITY);
   persist();
 }
 
@@ -73,10 +95,11 @@ export function bridgeAcknowledgementFor(waitingOn: string): string | null {
   return pending.find((entry) => entry.waitingOn === waitingOn)?.ackToken ?? null;
 }
 
-/** Everything still unspent — the replay set after a remount or a reload. */
-export function pendingBridgeAcknowledgements(): { waitingOn: string; ackToken: string }[] {
+/** Everything still unspent — the replay set after a remount or a reload, oldest
+    first so a bounded sweep drains the longest-waiting batch rather than the newest. */
+export function pendingBridgeAcknowledgements(): { waitingOn: string; ackToken: string; sessionId: string | null }[] {
   hydrate();
-  return pending.map(({ waitingOn, ackToken }) => ({ waitingOn, ackToken }));
+  return pending.map(({ waitingOn, ackToken, sessionId }) => ({ waitingOn, ackToken, sessionId }));
 }
 
 /**

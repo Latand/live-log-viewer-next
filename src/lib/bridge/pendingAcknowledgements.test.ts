@@ -73,18 +73,18 @@ test("the replay set carries everything still unspent", () => {
   rememberBridgeAcknowledgement("voice:batch-1", "ack_1");
   rememberBridgeAcknowledgement("composer-key-2", "ack_2");
   expect(pendingBridgeAcknowledgements()).toEqual([
-    { waitingOn: "voice:batch-1", ackToken: "ack_1" },
-    { waitingOn: "composer-key-2", ackToken: "ack_2" },
+    { waitingOn: "voice:batch-1", ackToken: "ack_1", sessionId: null },
+    { waitingOn: "composer-key-2", ackToken: "ack_2", sessionId: null },
   ]);
 
   forgetBridgeAcknowledgement("voice:batch-1");
-  expect(pendingBridgeAcknowledgements()).toEqual([{ waitingOn: "composer-key-2", ackToken: "ack_2" }]);
+  expect(pendingBridgeAcknowledgements()).toEqual([{ waitingOn: "composer-key-2", ackToken: "ack_2", sessionId: null }]);
 });
 
 test("re-parking the same subject replaces its token rather than duplicating it", () => {
   rememberBridgeAcknowledgement("voice:batch-1", "ack_old");
   rememberBridgeAcknowledgement("voice:batch-1", "ack_new");
-  expect(pendingBridgeAcknowledgements()).toEqual([{ waitingOn: "voice:batch-1", ackToken: "ack_new" }]);
+  expect(pendingBridgeAcknowledgements()).toEqual([{ waitingOn: "voice:batch-1", ackToken: "ack_new", sessionId: null }]);
 });
 
 test("the parked set is bounded, so an unspendable token cannot accumulate forever", () => {
@@ -94,7 +94,7 @@ test("the parked set is bounded, so an unspendable token cannot accumulate forev
   const parked = pendingBridgeAcknowledgements();
   expect(parked.length).toBeLessThanOrEqual(32);
   /* The oldest fall off: a dropped token costs a repeated report, never a lost one. */
-  expect(parked.at(-1)).toEqual({ waitingOn: "voice:batch-39", ackToken: "ack_39" });
+  expect(parked.at(-1)).toEqual({ waitingOn: "voice:batch-39", ackToken: "ack_39", sessionId: null });
   expect(bridgeAcknowledgementFor("voice:batch-0")).toBeNull();
 });
 
@@ -102,4 +102,40 @@ test("empty subjects and tokens are ignored rather than parked", () => {
   rememberBridgeAcknowledgement("", "ack_1");
   rememberBridgeAcknowledgement("voice:batch-1", "");
   expect(pendingBridgeAcknowledgements()).toEqual([]);
+});
+
+/**
+ * #845: a parked token remembers WHICH call drained its batch.
+ *
+ * The relay's retry sweep replayed every parked token under whatever credential was
+ * live at the time, so a token from a previous call was spent against a session that
+ * never received its batch. The stamp is what lets the sweep stay session-aware, and
+ * it has to survive the reload that the store exists to survive.
+ */
+test("a parked token records the session that drained it, and the stamp survives a reload", () => {
+  rememberBridgeAcknowledgement("voice:batch-1", "ack_1", { sessionId: "sess_alpha" });
+  rememberBridgeAcknowledgement("voice:batch-2", "ack_2", { sessionId: "sess_beta" });
+  expect(pendingBridgeAcknowledgements()).toEqual([
+    { waitingOn: "voice:batch-1", ackToken: "ack_1", sessionId: "sess_alpha" },
+    { waitingOn: "voice:batch-2", ackToken: "ack_2", sessionId: "sess_beta" },
+  ]);
+
+  resetInMemoryOnly();
+  expect(pendingBridgeAcknowledgements()).toEqual([
+    { waitingOn: "voice:batch-1", ackToken: "ack_1", sessionId: "sess_alpha" },
+    { waitingOn: "voice:batch-2", ackToken: "ack_2", sessionId: "sess_beta" },
+  ]);
+});
+
+test("a token stored before the stamp existed reads back unclaimed rather than corrupt", () => {
+  dom.sessionStorage.setItem(
+    "llv.bridge.pendingAcks",
+    JSON.stringify([{ waitingOn: "voice:batch-legacy", ackToken: "ack_legacy", at: 1 }]),
+  );
+  resetInMemoryOnly();
+  /* `null`, not a dropped entry: an unclaimed token is still the only thing that can
+     settle its batch, so the sweep must be able to see it. */
+  expect(pendingBridgeAcknowledgements()).toEqual([
+    { waitingOn: "voice:batch-legacy", ackToken: "ack_legacy", sessionId: null },
+  ]);
 });

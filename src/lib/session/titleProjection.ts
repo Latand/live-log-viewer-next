@@ -1,6 +1,6 @@
 import fs from "node:fs";
 
-import { agentRegistry, normalizeRegistry, RegistryReadError } from "@/lib/agent/registry";
+import { agentRegistry, normalizeRegistry, RegistryReadError, type SnapshotTitleConversationProjection } from "@/lib/agent/registry";
 import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { statePath } from "@/lib/configDir";
 import { projectInfoFromCwd } from "@/lib/scanner/describe";
@@ -207,6 +207,35 @@ export function overlaySessionTitles(
     includeProjectMetadata,
   );
   for (const entry of entries) project(entry);
+}
+
+/** Snapshot-specific title overlay over a completed scanner projection.
+ *
+ * The durable title store is capped at 2,000 records. UUID/path records apply
+ * directly. Conversation records use the registry's keyed SQLite seam, which
+ * returns only their alias chains and owned paths; scanner metadata remains the
+ * source for every other card field. */
+export function overlaySnapshotSessionTitles(
+  entries: FileEntry[],
+  snapshotTitleConversations: (conversationIds: readonly string[]) => SnapshotTitleConversationProjection,
+): void {
+  const index = indexSessionTitles(loadSessionTitles());
+  if (index.size === 0) return;
+  const conversationIds = [...index.keys()].flatMap((key) =>
+    key.startsWith("conversation:") ? [key.slice("conversation:".length)] : []);
+  const conversations = conversationIds.length > 0 ? snapshotTitleConversations(conversationIds) : [];
+  const byPath = new Map<string, SnapshotTitleConversationProjection[number]>();
+  const entryPaths = new Set(entries.map((entry) => entry.path));
+  for (const conversation of conversations) {
+    for (const pathname of conversation.ownedPaths) {
+      if (entryPaths.has(pathname) && !byPath.has(pathname)) byPath.set(pathname, conversation);
+    }
+  }
+  for (const entry of entries) {
+    const conversation = byPath.get(entry.path);
+    if (conversation) entry.conversationId = conversation.conversationId;
+    applyTitleOverride(entry, index, conversation?.aliases ?? [], conversation?.ownedPaths ?? []);
+  }
 }
 
 /** Applies resource-facing identity and titles while leaving the files-route

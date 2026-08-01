@@ -2,11 +2,14 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import type { Database as BunDatabase } from "bun:sqlite";
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
 import { statePath } from "@/lib/configDir";
+import { DeadlineExceededError, deadlineSignal } from "@/lib/deadline";
 import { PIPELINE_ACTIONS } from "@/lib/pipelines/types";
 import { procBackend } from "@/lib/proc";
 import { ROLE_IDS } from "@/lib/roles/types";
@@ -94,7 +97,11 @@ const MUTATING_MCP_TOOL_NAMES = new Set<McpToolName>([
 
 export type McpToolArgs = Record<string, unknown> & { clientRequestId?: unknown };
 export type McpToolPayload = Record<string, unknown>;
-export type McpToolBinding = (args: McpToolArgs) => Promise<McpToolPayload>;
+export interface McpToolCallContext {
+  signal?: AbortSignal;
+  deadlineAt?: number;
+}
+export type McpToolBinding = (args: McpToolArgs, context?: McpToolCallContext) => Promise<McpToolPayload>;
 export type McpToolBindings = Record<McpToolName, McpToolBinding>;
 
 export type McpToolSuccess = McpToolPayload & {
@@ -134,7 +141,7 @@ type Receipt = {
 
 export type ReceiptClaim =
   | { kind: "fresh" }
-  | { kind: "pending" }
+  | { kind: "pending"; unfinishedAgeMs?: number }
   | { kind: "replay"; result: McpToolResult }
   | { kind: "conflict" };
 
@@ -170,6 +177,8 @@ type ReceiptFile = {
 };
 
 const FILE_RECEIPT_CAP = 500;
+const SQLITE_READ_RECEIPT_BYTE_CAP = 8 * 1024 * 1024;
+const SQLITE_BOUNDED_PENDING_TTL_MS = 60_000;
 const LOCK_WAIT_MS = 5_000;
 const LOCK_STALE_MS = 30_000;
 type ReceiptLockOwner = { pid: number; startIdentity: string | null; token: string };
@@ -856,6 +865,258 @@ export class FileMcpReceiptStore implements McpReceiptStore {
   }
 }
 
+type StoredSqliteReceipt = {
+  digest: string;
+  result_json: string | null;
+  claimed_at: number;
+};
+
+export interface SqliteMcpReceiptStoreOptions {
+  legacyFilePath?: string;
+  readReceiptCountCap?: number;
+  readReceiptByteCap?: number;
+  boundedPendingTtlMs?: number;
+  now?: () => number;
+}
+
+/**
+ * Keyed durable receipts for the production MCP server.
+ *
+ * One row carries one idempotency claim. Reads therefore touch one indexed row;
+ * durable mutations survive restarts without sharing a retention budget with
+ * large read responses. The legacy JSON import is validated by the same parser
+ * as the legacy adapter and committed atomically with its import marker.
+ */
+export class SqliteMcpReceiptStore implements McpReceiptStore {
+  private readonly db: BunDatabase;
+  private readonly readReceiptCountCap: number;
+  private readonly readReceiptByteCap: number;
+  private readonly boundedPendingTtlMs: number;
+  private readonly now: () => number;
+
+  constructor(readonly filename: string, options: SqliteMcpReceiptStoreOptions = {}) {
+    fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
+    const sqlite = process.getBuiltinModule?.("bun:sqlite") as typeof import("bun:sqlite") | undefined;
+    if (!sqlite) throw new Error("SQLite MCP receipts require the Bun runtime");
+    this.db = new sqlite.Database(filename, { create: true, strict: true });
+    this.readReceiptCountCap = Math.max(1, Math.floor(options.readReceiptCountCap ?? FILE_RECEIPT_CAP));
+    this.readReceiptByteCap = Math.max(1, Math.floor(options.readReceiptByteCap ?? SQLITE_READ_RECEIPT_BYTE_CAP));
+    this.boundedPendingTtlMs = Math.max(1, Math.floor(options.boundedPendingTtlMs ?? SQLITE_BOUNDED_PENDING_TTL_MS));
+    this.now = options.now ?? Date.now;
+    this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA auto_vacuum = INCREMENTAL;");
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS mcp_receipt_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS mcp_receipts (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        receipt_key TEXT NOT NULL UNIQUE,
+        digest TEXT NOT NULL,
+        retention TEXT NOT NULL CHECK(retention IN ('bounded', 'durable')),
+        result_json TEXT,
+        storage_bytes INTEGER NOT NULL,
+        claimed_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS mcp_receipts_retention_sequence
+      ON mcp_receipts(retention, sequence);
+    `);
+    this.importLegacyFile(options.legacyFilePath);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.pruneBoundedReceipts(this.now());
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+      throw error;
+    }
+    this.secureFiles();
+  }
+
+  claim(key: string, digest: string, retention: ReceiptRetention): ReceiptClaim {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const now = this.now();
+      this.pruneBoundedReceipts(now);
+      const receipt = this.db.query<StoredSqliteReceipt, [string]>(`
+        SELECT digest, result_json, claimed_at
+        FROM mcp_receipts
+        WHERE receipt_key = ?
+      `).get(key);
+      if (receipt) {
+        this.db.exec("COMMIT");
+        if (receipt.digest !== digest) return { kind: "conflict" };
+        if (receipt.result_json === null) {
+          return { kind: "pending", unfinishedAgeMs: Math.max(0, now - receipt.claimed_at) };
+        }
+        return { kind: "replay", result: this.parseResult(key, receipt.result_json) };
+      }
+      const storageBytes = this.storageBytes(key, digest, null);
+      this.db.query<unknown, [string, string, ReceiptRetention, number, number]>(`
+        INSERT INTO mcp_receipts(receipt_key, digest, retention, result_json, storage_bytes, claimed_at)
+        VALUES (?, ?, ?, NULL, ?, ?)
+      `).run(key, digest, retention, storageBytes, now);
+      this.pruneBoundedReceipts(now);
+      this.db.exec("COMMIT");
+      return { kind: "fresh" };
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+      throw error;
+    }
+  }
+
+  complete(key: string, digest: string, result: McpToolResult, retention: ReceiptRetention): void {
+    const resultJson = JSON.stringify(result);
+    const storageBytes = this.storageBytes(key, digest, resultJson);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const receipt = this.db.query<Pick<StoredSqliteReceipt, "digest"> & { retention: ReceiptRetention }, [string]>(`
+        SELECT digest, retention
+        FROM mcp_receipts
+        WHERE receipt_key = ?
+      `).get(key);
+      if (!receipt || receipt.digest !== digest) throw new Error("MCP receipt ownership changed");
+      const effectiveRetention = receipt.retention === "durable" ? "durable" : retention;
+      this.db.query<unknown, [ReceiptRetention, string, number, string]>(`
+        UPDATE mcp_receipts
+        SET retention = ?, result_json = ?, storage_bytes = ?
+        WHERE receipt_key = ?
+      `).run(effectiveRetention, resultJson, storageBytes, key);
+      this.pruneBoundedReceipts(this.now());
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+      throw error;
+    }
+  }
+
+  close(): void {
+    this.db.close();
+  }
+
+  private importLegacyFile(legacyFilePath: string | undefined): void {
+    if (!legacyFilePath || this.meta("legacy_import_v2") === "complete") return;
+    let state: ReceiptFile;
+    try {
+      state = readReceiptFile(legacyFilePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    if (!fs.existsSync(legacyFilePath)) return;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const insert = this.db.query<unknown, [string, string, ReceiptRetention, string | null, number, number]>(`
+        INSERT OR IGNORE INTO mcp_receipts(
+          receipt_key, digest, retention, result_json, storage_bytes, claimed_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+      `);
+      let claimedAt = this.now() - Object.keys(state.readReceipts).length - Object.keys(state.mutationReceipts).length;
+      const importCollection = (receipts: Record<string, Receipt>, retention: ReceiptRetention) => {
+        for (const [key, receipt] of Object.entries(receipts)) {
+          const resultJson = receipt.result === undefined ? null : JSON.stringify(receipt.result);
+          insert.run(key, receipt.digest, retention, resultJson, this.storageBytes(key, receipt.digest, resultJson), claimedAt);
+          claimedAt += 1;
+        }
+      };
+      importCollection(state.mutationReceipts, "durable");
+      importCollection(state.readReceipts, "bounded");
+      this.pruneBoundedReceipts(this.now());
+      this.db.query<unknown, [string, string]>(`
+        INSERT INTO mcp_receipt_meta(key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+      `).run("legacy_import_v2", "complete");
+      this.db.exec("COMMIT");
+      /* The legacy payload can be much larger than the retained read budget.
+         Compact once after its one-time import so deleted response pages never
+         become the new long-lived database baseline. */
+      this.db.exec("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;");
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+      throw error;
+    }
+  }
+
+  private pruneBoundedReceipts(now: number): void {
+    /* Bounded reads have a lease longer than the SDK's 30-second call budget.
+       A crash cannot strand their claims forever; after the lease, a restart or
+       any later receipt transaction removes them before completed replay rows
+       are considered for count/byte retention. Durable mutation claims never
+       enter this expiry path. */
+    this.db.query<unknown, [number]>(`
+      DELETE FROM mcp_receipts
+      WHERE retention = 'bounded'
+        AND result_json IS NULL
+        AND claimed_at <= ?
+    `).run(now - this.boundedPendingTtlMs);
+    this.db.query<unknown, [number]>(`
+      DELETE FROM mcp_receipts
+      WHERE sequence IN (
+        SELECT sequence
+        FROM mcp_receipts
+        WHERE retention = 'bounded' AND result_json IS NOT NULL
+        ORDER BY sequence ASC
+        LIMIT MAX(0, (
+          SELECT COUNT(*) - ? FROM mcp_receipts WHERE retention = 'bounded'
+        ))
+      )
+    `).run(this.readReceiptCountCap);
+    const aggregate = this.db.query<{ storage_bytes: number }, []>(`
+      SELECT COALESCE(SUM(storage_bytes), 0) AS storage_bytes
+      FROM mcp_receipts
+      WHERE retention = 'bounded'
+    `).get()?.storage_bytes ?? 0;
+    let excessBytes = aggregate - this.readReceiptByteCap;
+    if (excessBytes <= 0) return;
+    const completed = this.db.query<{ sequence: number; storage_bytes: number }, []>(`
+      SELECT sequence, storage_bytes
+      FROM mcp_receipts
+      WHERE retention = 'bounded' AND result_json IS NOT NULL
+      ORDER BY sequence ASC
+    `).all();
+    const expired: number[] = [];
+    for (const receipt of completed) {
+      if (excessBytes <= 0) break;
+      expired.push(receipt.sequence);
+      excessBytes -= receipt.storage_bytes;
+    }
+    const remove = this.db.query<unknown, [number]>("DELETE FROM mcp_receipts WHERE sequence = ?");
+    for (const sequence of expired) remove.run(sequence);
+  }
+
+  private parseResult(key: string, serialized: string): McpToolResult {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(serialized);
+    } catch (error) {
+      throw new Error("invalid MCP receipt database result JSON", { cause: error });
+    }
+    const parts = receiptKeyParts(key);
+    if (!parts || !validReceiptResult(parsed, parts.toolName, parts.requestId)) {
+      throw new Error("invalid MCP receipt database result");
+    }
+    return parsed;
+  }
+
+  private storageBytes(key: string, digest: string, resultJson: string | null): number {
+    return Buffer.byteLength(key) + Buffer.byteLength(digest) + (resultJson === null ? 0 : Buffer.byteLength(resultJson));
+  }
+
+  private meta(key: string): string | null {
+    return this.db.query<{ value: string }, [string]>("SELECT value FROM mcp_receipt_meta WHERE key = ?").get(key)?.value ?? null;
+  }
+
+  private secureFiles(): void {
+    for (const target of [this.filename, `${this.filename}-wal`, `${this.filename}-shm`]) {
+      try {
+        fs.chmodSync(target, 0o600);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+  }
+}
+
 function stable(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stable);
   if (!value || typeof value !== "object") return value;
@@ -885,7 +1146,150 @@ function failure(
 }
 
 export interface McpToolService {
-  callTool(toolName: string, args: McpToolArgs): Promise<McpToolResult>;
+  callTool(toolName: string, args: McpToolArgs, context?: McpToolCallContext): Promise<McpToolResult>;
+}
+
+type McpTimingOutcome = "success" | "failure" | "replay" | "conflict" | "pending" | "deadline" | "cancelled";
+type McpTimingPhase = "claim" | "binding" | "completion" | "serialization" | "serviceTotal" | "replay";
+
+interface McpToolTimingSample {
+  toolName: McpToolName;
+  outcome: McpTimingOutcome;
+  phases: Partial<Record<McpTimingPhase, number>>;
+  resultSizeBytes?: number;
+  deadlineBudgetMs?: number;
+  unfinishedAgeMs?: number;
+}
+
+export interface McpAggregateMeasure {
+  samples: number;
+  total: number;
+  p50: number;
+  p95: number;
+  p99: number;
+  max: number;
+}
+
+export interface McpToolTimingSummary {
+  toolName: McpToolName;
+  calls: number;
+  outcomes: Record<McpTimingOutcome, number>;
+  phases: Record<McpTimingPhase, McpAggregateMeasure>;
+  resultSizeBytes: McpAggregateMeasure;
+  deadline: {
+    callsWithDeadline: number;
+    exceeded: number;
+    budgetMs: McpAggregateMeasure;
+  };
+  cancellation: { cancelled: number };
+  unfinishedAgeMs: McpAggregateMeasure;
+}
+
+const TIMING_SAMPLE_CAP = 2_048;
+
+class AggregateMeasure {
+  private readonly recent: number[] = [];
+  private count = 0;
+  private total = 0;
+  private maximum = 0;
+
+  add(value: number | undefined): void {
+    if (value === undefined || !Number.isFinite(value) || value < 0) return;
+    this.count += 1;
+    this.total += value;
+    this.maximum = Math.max(this.maximum, value);
+    if (this.recent.length < TIMING_SAMPLE_CAP) this.recent.push(value);
+    else this.recent[(this.count - 1) % TIMING_SAMPLE_CAP] = value;
+  }
+
+  snapshot(): McpAggregateMeasure {
+    const values = this.recent.toSorted((left, right) => left - right);
+    const percentile = (quantile: number) => values.length
+      ? values[Math.max(0, Math.ceil(values.length * quantile) - 1)]!
+      : 0;
+    return {
+      samples: this.count,
+      total: this.total,
+      p50: percentile(0.5),
+      p95: percentile(0.95),
+      p99: percentile(0.99),
+      max: this.maximum,
+    };
+  }
+}
+
+type MutableToolTiming = {
+  calls: number;
+  outcomes: Record<McpTimingOutcome, number>;
+  phases: Record<McpTimingPhase, AggregateMeasure>;
+  resultSizeBytes: AggregateMeasure;
+  deadlineBudgetMs: AggregateMeasure;
+  unfinishedAgeMs: AggregateMeasure;
+};
+
+const MCP_TIMING_OUTCOMES: McpTimingOutcome[] = [
+  "success", "failure", "replay", "conflict", "pending", "deadline", "cancelled",
+];
+const MCP_TIMING_PHASES: McpTimingPhase[] = [
+  "claim", "binding", "completion", "serialization", "serviceTotal", "replay",
+];
+
+function mutableToolTiming(): MutableToolTiming {
+  return {
+    calls: 0,
+    outcomes: Object.fromEntries(MCP_TIMING_OUTCOMES.map((outcome) => [outcome, 0])) as Record<McpTimingOutcome, number>,
+    phases: Object.fromEntries(MCP_TIMING_PHASES.map((phase) => [phase, new AggregateMeasure()])) as Record<McpTimingPhase, AggregateMeasure>,
+    resultSizeBytes: new AggregateMeasure(),
+    deadlineBudgetMs: new AggregateMeasure(),
+    unfinishedAgeMs: new AggregateMeasure(),
+  };
+}
+
+/** Numeric-only per-tool aggregates. No request or response values enter this module. */
+export class McpToolTimingAggregate {
+  private readonly tools = new Map<McpToolName, MutableToolTiming>(
+    MCP_TOOL_NAMES.map((toolName) => [toolName, mutableToolTiming()]),
+  );
+
+  observe(sample: McpToolTimingSample): void {
+    const timing = this.tools.get(sample.toolName)!;
+    timing.calls += 1;
+    timing.outcomes[sample.outcome] += 1;
+    for (const phase of MCP_TIMING_PHASES) timing.phases[phase].add(sample.phases[phase]);
+    timing.resultSizeBytes.add(sample.resultSizeBytes);
+    timing.deadlineBudgetMs.add(sample.deadlineBudgetMs);
+    timing.unfinishedAgeMs.add(sample.unfinishedAgeMs);
+  }
+
+  snapshot(): McpToolTimingSummary[] {
+    return MCP_TOOL_NAMES.map((toolName) => {
+      const timing = this.tools.get(toolName)!;
+      return {
+        toolName,
+        calls: timing.calls,
+        outcomes: { ...timing.outcomes },
+        phases: Object.fromEntries(MCP_TIMING_PHASES.map((phase) => [phase, timing.phases[phase].snapshot()])) as Record<McpTimingPhase, McpAggregateMeasure>,
+        resultSizeBytes: timing.resultSizeBytes.snapshot(),
+        deadline: {
+          callsWithDeadline: timing.deadlineBudgetMs.snapshot().samples,
+          exceeded: timing.outcomes.deadline,
+          budgetMs: timing.deadlineBudgetMs.snapshot(),
+        },
+        cancellation: { cancelled: timing.outcomes.cancelled },
+        unfinishedAgeMs: timing.unfinishedAgeMs.snapshot(),
+      };
+    });
+  }
+}
+
+const productionMcpToolTimings = new McpToolTimingAggregate();
+
+export function mcpToolTimingSnapshot(): McpToolTimingSummary[] {
+  return productionMcpToolTimings.snapshot();
+}
+
+export interface McpToolServiceOptions {
+  timings?: McpToolTimingAggregate;
 }
 
 export function createMcpToolService(
@@ -894,17 +1298,41 @@ export function createMcpToolService(
   /** #691 §6: the per-identity fence. Absent means "no fence", which is what every
       existing caller of this factory means and gets. */
   policy?: McpToolPolicy,
+  options: McpToolServiceOptions = {},
 ): McpToolService {
   const inFlight = new Map<string, { digest: string; result: Promise<McpToolResult> }>();
   return {
-    async callTool(toolName, args) {
+    async callTool(toolName, args, context = {}) {
       if (!(MCP_TOOL_NAMES as readonly string[]).includes(toolName)) {
         return failure(toolName, clientRequestId(args), "unknown_tool", `Unknown viewer tool: ${toolName}`, false);
       }
       const typedTool = toolName as McpToolName;
+      const callStartedAt = performance.now();
+      const phaseDurations: Partial<Record<McpTimingPhase, number>> = {};
+      const deadlineBudgetMs = context.deadlineAt === undefined
+        ? undefined
+        : Math.max(0, context.deadlineAt - Date.now());
+      const finish = (result: McpToolResult, outcome: McpTimingOutcome, unfinishedAgeMs?: number): McpToolResult => {
+        const serializationStartedAt = performance.now();
+        let resultSizeBytes: number | undefined;
+        try {
+          resultSizeBytes = Buffer.byteLength(JSON.stringify(result));
+        } catch { /* timing must never change a tool outcome */ }
+        phaseDurations.serialization = performance.now() - serializationStartedAt;
+        phaseDurations.serviceTotal = serializationStartedAt - callStartedAt;
+        options.timings?.observe({
+          toolName: typedTool,
+          outcome,
+          phases: phaseDurations,
+          resultSizeBytes,
+          deadlineBudgetMs,
+          unfinishedAgeMs,
+        });
+        return result;
+      };
       const retention: ReceiptRetention = MUTATING_MCP_TOOL_NAMES.has(typedTool) ? "durable" : "bounded";
       const requestId = clientRequestId(args);
-      if (!requestId) return failure(toolName, null, "invalid_request", "clientRequestId is required", false);
+      if (!requestId) return finish(failure(toolName, null, "invalid_request", "clientRequestId is required", false), "failure");
 
       /* Refused before the receipt is claimed, on purpose. A refusal is a
          property of who is calling, not of the operation, so it must not burn the
@@ -912,7 +1340,7 @@ export function createMcpToolService(
          grants the tool, and a spent receipt would answer it with a stale no. */
       const verdict = policy?.permit(typedTool, args);
       if (verdict && !verdict.allowed) {
-        return failure(typedTool, requestId, verdict.code, verdict.error, false);
+        return finish(failure(typedTool, requestId, verdict.code, verdict.error, false), "failure");
       }
 
       const digest = requestDigest(typedTool, args);
@@ -920,24 +1348,48 @@ export function createMcpToolService(
       const active = inFlight.get(key);
       if (active) {
         if (active.digest !== digest) {
-          return failure(toolName, requestId, "idempotency_conflict", "clientRequestId was already used with different arguments", false, true);
+          return finish(failure(toolName, requestId, "idempotency_conflict", "clientRequestId was already used with different arguments", false, true), "conflict");
         }
-        return { ...await active.result, replayed: true };
+        const replayStartedAt = performance.now();
+        const replayed = { ...await active.result, replayed: true };
+        phaseDurations.replay = performance.now() - replayStartedAt;
+        return finish(replayed, "replay");
       }
+      let outcome: McpTimingOutcome = "failure";
+      let unfinishedAgeMs: number | undefined;
       const result = (async (): Promise<McpToolResult> => {
+        const claimStartedAt = performance.now();
         const claim = await receipts.claim(key, digest, retention);
+        phaseDurations.claim = performance.now() - claimStartedAt;
         if (claim.kind === "conflict") {
+          outcome = "conflict";
           return failure(toolName, requestId, "idempotency_conflict", "clientRequestId was already used with different arguments", false, true);
         }
         if (claim.kind === "pending") {
+          outcome = "pending";
+          unfinishedAgeMs = claim.unfinishedAgeMs;
           return failure(toolName, requestId, "call_interrupted", "The previous MCP process ended before this call completed", true, true);
         }
-        if (claim.kind === "replay") return { ...claim.result, replayed: true };
+        if (claim.kind === "replay") {
+          const replayStartedAt = performance.now();
+          const replayed = { ...claim.result, replayed: true };
+          phaseDurations.replay = performance.now() - replayStartedAt;
+          outcome = "replay";
+          return replayed;
+        }
         let settled: McpToolResult;
+        const bindingStartedAt = performance.now();
         try {
-          const payload = await bindings[typedTool](args);
+          const payload = await bindings[typedTool](args, context);
           settled = { ...payload, ok: true, toolName: typedTool, clientRequestId: requestId, replayed: false };
+          outcome = "success";
         } catch (error) {
+          const reason = context.signal?.aborted ? context.signal.reason : error;
+          outcome = reason instanceof DeadlineExceededError
+            ? "deadline"
+            : context.signal?.aborted
+              ? "cancelled"
+              : "failure";
           settled = failure(
             typedTool,
             requestId,
@@ -947,13 +1399,17 @@ export function createMcpToolService(
             false,
             error instanceof McpToolRefusal ? error.details : undefined,
           );
+        } finally {
+          phaseDurations.binding = performance.now() - bindingStartedAt;
         }
+        const completionStartedAt = performance.now();
         await receipts.complete(key, digest, settled, retention);
+        phaseDurations.completion = performance.now() - completionStartedAt;
         return settled;
       })();
       inFlight.set(key, { digest, result });
       try {
-        return await result;
+        return finish(await result, outcome, unfinishedAgeMs);
       } finally {
         if (inFlight.get(key)?.result === result) inFlight.delete(key);
       }
@@ -1287,13 +1743,25 @@ export function createViewerMcpServer(service: McpToolService): McpServer {
     server.registerTool(toolName, {
       description: TOOL_DESCRIPTIONS[toolName],
       inputSchema: TOOL_INPUT_SCHEMAS[toolName],
-    }, async (args) => {
-      const result = await service.callTool(toolName, args as McpToolArgs);
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify(result) }],
-        structuredContent: result,
-        ...(result.ok ? {} : { isError: true }),
-      };
+    }, async (args, extra) => {
+      const timeoutMs = 30_000;
+      const deadline = deadlineSignal(timeoutMs, {
+        signal: extra.signal,
+        reason: "MCP tool deadline exceeded",
+      });
+      try {
+        const result = await service.callTool(toolName, args as McpToolArgs, {
+          signal: deadline.signal,
+          deadlineAt: Date.now() + timeoutMs,
+        });
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(result) }],
+          structuredContent: result,
+          ...(result.ok ? {} : { isError: true }),
+        };
+      } finally {
+        deadline.release();
+      }
     });
   }
   return server;
@@ -1307,8 +1775,11 @@ export async function startViewerMcpServer(): Promise<void> {
   const hostHealthProbe = await admittedMcpHealthProbe(healthProbeCapability);
   const service = createMcpToolService(
     viewerMcpBindings(),
-    new FileMcpReceiptStore(statePath("mcp-receipts.json")),
+    new SqliteMcpReceiptStore(statePath("mcp-receipts.sqlite"), {
+      legacyFilePath: statePath("mcp-receipts.json"),
+    }),
     viewerMcpToolPolicy(undefined, hostHealthProbe),
+    { timings: productionMcpToolTimings },
   );
   const server = createViewerMcpServer(service);
   const transport = new StdioServerTransport();

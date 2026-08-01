@@ -455,6 +455,34 @@ export interface RegistryFile {
   pendingSupersedence: Record<string, PendingSupersedence>;
 }
 
+/** Compact read model for resolving the bounded `spawn:<launchId>` paths that
+    can appear in one Viewer snapshot. It intentionally excludes launch profile,
+    account, host, lineage, and membership data from the snapshot seam. */
+export interface SnapshotSpawnProjectionEntry {
+  launchId: string;
+  state: SpawnReceipt["state"];
+  error: string | null;
+  engine: SpawnReceipt["engine"];
+  cwd: string;
+  createdAt: string;
+  materializedPath: string | null;
+}
+
+export type SnapshotSpawnProjection = Record<string, SnapshotSpawnProjectionEntry>;
+
+/** Compact read model for applying the bounded custom-title store to a
+    completed scanner projection. Only conversations named by title records
+    enter this seam; unrelated registry rows stay unopened. */
+export interface SnapshotTitleConversationProjectionEntry {
+  conversationId: ViewerConversationId;
+  aliases: ViewerConversationId[];
+  ownedPaths: string[];
+}
+
+export type SnapshotTitleConversationProjection = SnapshotTitleConversationProjectionEntry[];
+
+const SNAPSHOT_SPAWN_ALIAS_LIMIT = 64;
+
 export interface ConversationLookup {
   conversationForPath(artifactPath: string): RegistryConversation | null;
   canonicalConversationId(id: ViewerConversationId): ViewerConversationId;
@@ -1813,6 +1841,37 @@ function resolveConversationAlias(file: Pick<RegistryFile, "conversationAliases"
     current = next;
   }
   return current;
+}
+
+export function snapshotSpawnsFromRegistry(
+  file: Pick<RegistryFile, "receipts" | "conversations" | "conversationAliases">,
+  launchIds: readonly string[],
+): SnapshotSpawnProjection {
+  const projection: SnapshotSpawnProjection = {};
+  for (const launchId of new Set(launchIds)) {
+    const receipt = file.receipts[launchId];
+    if (!receipt) continue;
+    const seen = new Set<ViewerConversationId>();
+    let conversationId: ViewerConversationId | null = receipt.conversationId;
+    for (let hop = 0; hop < SNAPSHOT_SPAWN_ALIAS_LIMIT && conversationId; hop += 1) {
+      if (seen.has(conversationId)) break;
+      seen.add(conversationId);
+      const alias: ViewerConversationId | undefined = file.conversationAliases[conversationId];
+      if (!alias) break;
+      conversationId = hop + 1 === SNAPSHOT_SPAWN_ALIAS_LIMIT ? null : alias;
+    }
+    projection[launchId] = {
+      launchId: receipt.launchId,
+      state: receipt.state,
+      error: receipt.error,
+      engine: receipt.engine,
+      cwd: receipt.cwd,
+      createdAt: receipt.createdAt,
+      materializedPath: (conversationId ? file.conversations[conversationId] : undefined)?.generations.at(-1)?.path
+        ?? receipt.artifactPath,
+    };
+  }
+  return projection;
 }
 
 const SUPERSEDENCE_CHAIN_LIMIT = 64;
@@ -3306,6 +3365,20 @@ export class AgentRegistry {
       return snapshot;
     }
     return readFile(this.filename, this.mcpGrantPolicy);
+  }
+
+  /** Resolves only the requested snapshot placeholders. SQLite-backed modes use
+      one consistent keyed read; JSON mode retains its compatibility fallback. */
+  snapshotSpawns(launchIds: readonly string[]): SnapshotSpawnProjection {
+    if (this.sqliteStore) return this.sqliteStore.snapshotSpawns(launchIds);
+    return snapshotSpawnsFromRegistry(this.readOnlySnapshot(), launchIds);
+  }
+
+  /** Resolves only conversation ids already present in the bounded custom-title
+      store. JSON compatibility mode deliberately stays registry-free on the
+      snapshot route; UUID/path title keys still apply there. */
+  snapshotTitleConversations(conversationIds: readonly string[]): SnapshotTitleConversationProjection {
+    return this.sqliteStore?.snapshotTitleConversations(conversationIds) ?? [];
   }
 
   spawnReceiptForClientAttempt(clientAttemptId: string): SpawnReceipt | null {
