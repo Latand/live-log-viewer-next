@@ -60,7 +60,7 @@ function activeSeat(conversationId: string, seatEpoch = 1): OrchestratorSeat {
     promptVersion: null,
     predecessorConversationId: null,
     state: "active",
-    intent: { clientRequestId: "req_0000001", mode: "spawn", error: null },
+    intent: { clientRequestId: "req_0000001", mode: "spawn", launchId: null, error: null },
     designatedAt: "2026-07-29T00:00:00.000Z",
     activatedAt: "2026-07-29T00:00:00.000Z",
   };

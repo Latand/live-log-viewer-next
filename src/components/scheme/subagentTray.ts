@@ -2,6 +2,8 @@ import { attentionId } from "@/components/attention";
 import { conversationIdentity, isArchivedPredecessor } from "@/lib/accounts/identity";
 import type { EpochSeconds, Engine, FileEntry } from "@/lib/types";
 
+import { durableParentConversationId } from "./lineageModel";
+
 /*
  * Engine-native subagent tray — the single presence projection for issue #142
  * slice S2 (docs/design/board-presence-cards.md §1.2/§1.4).
@@ -205,8 +207,14 @@ export function currentGenerationChildrenOf(
     if (entry.engine === "shell") continue;
     const id = conversationIdentity(entry);
     if (id === conversationId) continue;
-    const durableParent = entry.durableLineage?.parentConversationId;
-    if (durableParent !== conversationId && (!entry.parent || !parentPaths.has(entry.parent))) continue;
+    /* Same precedence the board's lineage model applies (issue #828): a record
+       that NAMES its parent is a child of that conversation and of no other, so
+       a stale transcript pointer can never hand it to a second host — which is
+       how a tray/badge could show a conversation under its own descendant. */
+    const durableParent = durableParentConversationId(entry);
+    if (durableParent !== null) {
+      if (durableParent !== conversationId) continue;
+    } else if (!entry.parent || !parentPaths.has(entry.parent)) continue;
     if (!filter(entry)) continue;
     const current = currentById.get(id);
     const generation = entry.generation ?? 0;

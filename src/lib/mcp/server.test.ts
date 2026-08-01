@@ -1511,6 +1511,8 @@ describe("MCP tool service", () => {
       expect(spawnSchema?.properties).toHaveProperty("cwd");
       expect(spawnSchema?.properties).toHaveProperty("prompt");
       expect(spawnSchema?.properties).toHaveProperty("mcpServers");
+      const createOrchestratorSchema = listed.tools.find((tool) => tool.name === "create_orchestrator")?.inputSchema;
+      expect(createOrchestratorSchema?.properties).toHaveProperty("conversationId");
       const deploySchema = listed.tools.find((tool) => tool.name === "deploy_exact_sha")?.inputSchema;
       /* #795: the deploy carries WHAT ships and nothing that claims authority —
          no confirmation flag, no bridge reference, no nonce. */

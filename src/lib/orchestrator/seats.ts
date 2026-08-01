@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
+import { canonicalProject } from "@/lib/projects/aliases";
 
 /* Operator-selected PER-PROJECT orchestrator seats.
  *
@@ -40,6 +41,8 @@ export interface OrchestratorSeatIntent {
       duplicating. */
   clientRequestId: string;
   mode: "spawn" | "existing";
+  /** Durable launch receipt for an accepted asynchronous spawn. */
+  launchId: string | null;
   /** Terminal error of the last completion attempt; null while none failed. */
   error: string | null;
 }
@@ -89,6 +92,11 @@ interface OrchestratorSeatFile {
 
 const seatsFile = () => statePath("orchestrator-seats.json");
 
+/** One durable namespace for named projects and their repository identities. */
+export function canonicalOrchestratorProject(project: string): string {
+  return canonicalProject(project.trim());
+}
+
 function emptyFile(): OrchestratorSeatFile {
   return { schemaVersion: ORCHESTRATOR_SEATS_SCHEMA_VERSION, nextSeatEpoch: 1, seats: {}, pending: {}, revocations: [] };
 }
@@ -123,10 +131,20 @@ function normalizeSeat(value: unknown): OrchestratorSeat | null {
     promptVersion: typeof seat.promptVersion === "number" && Number.isInteger(seat.promptVersion) ? seat.promptVersion : null,
     predecessorConversationId: typeof seat.predecessorConversationId === "string" ? seat.predecessorConversationId : null,
     state: seat.state,
-    intent: { clientRequestId: intent.clientRequestId, mode: intent.mode, error: typeof intent.error === "string" ? intent.error : null },
+    intent: {
+      clientRequestId: intent.clientRequestId,
+      mode: intent.mode,
+      launchId: typeof intent.launchId === "string" ? intent.launchId : null,
+      error: typeof intent.error === "string" ? intent.error : null,
+    },
     designatedAt: seat.designatedAt,
     activatedAt: seat.activatedAt ?? null,
   };
+}
+
+function retainNewestSeat(collection: Record<string, OrchestratorSeat>, seat: OrchestratorSeat): void {
+  const current = collection[seat.project];
+  if (!current || seat.seatEpoch > current.seatEpoch) collection[seat.project] = seat;
 }
 
 /**
@@ -151,11 +169,15 @@ export function readOrchestratorSeatFile(): OrchestratorSeatFile {
       : 1;
     for (const [project, candidate] of Object.entries(parsed.seats ?? {})) {
       const seat = normalizeSeat(candidate);
-      if (seat && seat.project === project && seat.state === "active" && seat.conversationId) file.seats[project] = seat;
+      if (seat && seat.project === project && seat.state === "active" && seat.conversationId) {
+        retainNewestSeat(file.seats, { ...seat, project: canonicalOrchestratorProject(project) });
+      }
     }
     for (const [project, candidate] of Object.entries(parsed.pending ?? {})) {
       const seat = normalizeSeat(candidate);
-      if (seat && seat.project === project && seat.state === "pending") file.pending[project] = seat;
+      if (seat && seat.project === project && seat.state === "pending") {
+        retainNewestSeat(file.pending, { ...seat, project: canonicalOrchestratorProject(project) });
+      }
     }
     for (const candidate of Array.isArray(parsed.revocations) ? parsed.revocations : []) {
       const revocation = candidate as Partial<OrchestratorRevocation>;
@@ -163,7 +185,7 @@ export function readOrchestratorSeatFile(): OrchestratorSeatFile {
         && typeof revocation.seatEpoch === "number" && Number.isInteger(revocation.seatEpoch)
         && typeof revocation.revokedAt === "string") {
         file.revocations.push({
-          project: revocation.project,
+          project: canonicalOrchestratorProject(revocation.project),
           conversationId: revocation.conversationId,
           seatEpoch: revocation.seatEpoch,
           revokedAt: revocation.revokedAt,
@@ -192,12 +214,15 @@ function writeSeatFile(file: OrchestratorSeatFile): void {
 /** The active seat and any pending intent for one project. */
 export function orchestratorSeatFor(project: string): { active: OrchestratorSeat | null; pending: OrchestratorSeat | null } {
   const file = readOrchestratorSeatFile();
-  return { active: file.seats[project] ?? null, pending: file.pending[project] ?? null };
+  const canonical = canonicalOrchestratorProject(project);
+  return { active: file.seats[canonical] ?? null, pending: file.pending[canonical] ?? null };
 }
 
 export type BeginSeatIntentResult =
   /** A fresh pending intent, or the same intent replayed by its own key. */
   | { kind: "begun" | "replay"; seat: OrchestratorSeat }
+  /** Another request owns the in-flight transition for this project. */
+  | { kind: "in_progress"; seat: OrchestratorSeat }
   /** The same key already completed: designation and injection both happened. */
   | { kind: "completed"; seat: OrchestratorSeat };
 
@@ -218,16 +243,18 @@ export function beginOrchestratorSeatIntent(input: {
   now?: string;
 }): BeginSeatIntentResult {
   const file = readOrchestratorSeatFile();
-  const active = file.seats[input.project];
+  const project = canonicalOrchestratorProject(input.project);
+  const active = file.seats[project];
   if (active && active.intent.clientRequestId === input.clientRequestId) {
     return { kind: "completed", seat: active };
   }
-  const pending = file.pending[input.project];
+  const pending = file.pending[project];
   if (pending && pending.intent.clientRequestId === input.clientRequestId) {
     return { kind: "replay", seat: pending };
   }
+  if (pending) return { kind: "in_progress", seat: pending };
   const seat: OrchestratorSeat = {
-    project: input.project,
+    project,
     seatEpoch: file.nextSeatEpoch,
     conversationId: input.conversationId ?? null,
     path: null,
@@ -235,12 +262,12 @@ export function beginOrchestratorSeatIntent(input: {
     promptVersion: input.promptVersion ?? null,
     predecessorConversationId: null,
     state: "pending",
-    intent: { clientRequestId: input.clientRequestId, mode: input.mode, error: null },
+    intent: { clientRequestId: input.clientRequestId, mode: input.mode, launchId: null, error: null },
     designatedAt: input.now ?? new Date().toISOString(),
     activatedAt: null,
   };
   file.nextSeatEpoch += 1;
-  file.pending[input.project] = seat;
+  file.pending[project] = seat;
   writeSeatFile(file);
   return { kind: "begun", seat };
 }
@@ -262,20 +289,22 @@ export function completeOrchestratorSeatIntent(input: {
   clientRequestId: string;
   conversationId: string;
   path: string | null;
+  launchId?: string | null;
   now?: string;
 }): CompleteSeatIntentResult {
   const file = readOrchestratorSeatFile();
-  const active = file.seats[input.project];
+  const project = canonicalOrchestratorProject(input.project);
+  const active = file.seats[project];
   if (active && active.intent.clientRequestId === input.clientRequestId) {
     return { kind: "replay", seat: active };
   }
-  const pending = file.pending[input.project];
+  const pending = file.pending[project];
   if (!pending || pending.intent.clientRequestId !== input.clientRequestId) return { kind: "missing" };
   const now = input.now ?? new Date().toISOString();
   let revoked: OrchestratorRevocation | null = null;
   if (active && active.conversationId && active.conversationId !== input.conversationId) {
     revoked = {
-      project: input.project,
+      project,
       conversationId: active.conversationId,
       seatEpoch: active.seatEpoch,
       revokedAt: now,
@@ -291,11 +320,11 @@ export function completeOrchestratorSeatIntent(input: {
     path: input.path,
     predecessorConversationId: revoked?.conversationId ?? pending.predecessorConversationId,
     state: "active",
-    intent: { ...pending.intent, error: null },
+    intent: { ...pending.intent, launchId: input.launchId ?? pending.intent.launchId, error: null },
     activatedAt: now,
   };
-  delete file.pending[input.project];
-  file.seats[input.project] = seat;
+  delete file.pending[project];
+  file.seats[project] = seat;
   writeSeatFile(file);
   return { kind: "activated", seat, revoked };
 }
@@ -304,7 +333,8 @@ export function completeOrchestratorSeatIntent(input: {
     recoverable, and the previous active seat (if any) stays authoritative. */
 export function failOrchestratorSeatIntent(project: string, clientRequestId: string, error: string): void {
   const file = readOrchestratorSeatFile();
-  const pending = file.pending[project];
+  const canonical = canonicalOrchestratorProject(project);
+  const pending = file.pending[canonical];
   if (!pending || pending.intent.clientRequestId !== clientRequestId) return;
   pending.intent.error = error.slice(0, 500);
   writeSeatFile(file);

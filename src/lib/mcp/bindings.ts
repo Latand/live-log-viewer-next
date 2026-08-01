@@ -29,7 +29,7 @@ import { bridgeDirectiveBody, bridgeDirectiveId, type BridgeTrailer } from "@/li
 import { isBridgeReportClass } from "@/lib/bridge/types";
 import { readOrchestratorRecord } from "@/lib/orchestrator/store";
 import { authorizedManagerSeats, type ManagerAuthoritySources } from "@/lib/orchestrator/authority";
-import { activeOrchestratorSeats, orchestratorRevocations, orchestratorSeatFor, type OrchestratorSeat } from "@/lib/orchestrator/seats";
+import { activeOrchestratorSeats, canonicalOrchestratorProject, orchestratorRevocations, orchestratorSeatFor, type OrchestratorSeat } from "@/lib/orchestrator/seats";
 import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
 import { contextReading, readOrchestratorTranscriptFacts, rotationRecommendation } from "@/lib/orchestrator/health";
 import { contextWindowPolicyFor } from "@/lib/orchestrator/contextPolicy";
@@ -1090,9 +1090,9 @@ function callerCapabilityHeaders(): Record<string, string> {
   return /^[A-Za-z0-9_-]{43}$/.test(capability) ? { [VIEWER_SPAWN_CAPABILITY_HEADER]: capability } : {};
 }
 
-/** Explicitly allowlisted launch fields for the designation routes. NEVER a
-    denylist: `conversationId` (seat an existing session — the self-designation
-    vector) and `promptVersion` (mandate provenance) are server-owned. */
+/** Explicitly allowlisted fields for the designation routes. The seat route
+    authorizes existing-conversation adoption before it writes an intent;
+    mandate provenance stays server-owned. */
 function allowedSeatFields(args: McpToolArgs, keys: readonly string[]): Record<string, unknown> {
   return Object.fromEntries(keys.flatMap((key) => (args[key] === undefined ? [] : [[key, args[key]]])));
 }
@@ -1104,7 +1104,7 @@ function allowedSeatFields(args: McpToolArgs, keys: readonly string[]): Record<s
  * act on the recommendation automatically.
  */
 async function getOrchestrator(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): Promise<McpToolPayload> {
-  const project = required(args, "project");
+  const project = canonicalOrchestratorProject(required(args, "project"));
   const { active, pending } = orchestratorSeatFor(project);
   const revocations = orchestratorRevocations().filter((revocation) => revocation.project === project);
   const base = {
@@ -1205,13 +1205,13 @@ async function getOrchestrator(args: McpToolArgs, dependencies: ViewerMcpDomainD
     approved versioned default mandate (or the caller's edited text based on
     it). The seat route owns the durable intent, so a retry replays. */
 async function createOrchestrator(args: McpToolArgs, control: ViewerControlDependencies): Promise<McpToolPayload> {
-  const project = required(args, "project");
+  const project = canonicalOrchestratorProject(required(args, "project"));
   const result = await control.post("/api/orchestrator/seat", {
     project,
     mandate: text(args.mandate) || ORCHESTRATOR_SYSTEM_PROMPT,
     promptVersion: ORCHESTRATOR_PROMPT_VERSION,
     clientRequestId: spawnAttemptId(requestId(args)),
-    ...allowedSeatFields(args, ["cwd", "engine", "model", "effort", "accountId"]),
+    ...allowedSeatFields(args, ["conversationId", "cwd", "engine", "model", "effort", "accountId"]),
   }, callerCapabilityHeaders());
   return redactPayload({
     project,
@@ -1219,7 +1219,9 @@ async function createOrchestrator(args: McpToolArgs, control: ViewerControlDepen
     transcriptPath: result.path ?? null,
     seat: result.seat ?? null,
     replayed: result.replayed === true,
+    accepted: result.accepted === true,
     state: result.state ?? null,
+    launchId: result.launchId ?? null,
   });
 }
 
@@ -1232,7 +1234,7 @@ async function createOrchestrator(args: McpToolArgs, control: ViewerControlDepen
  * duplicating, and the response says which path ran.
  */
 async function sendMessageToOrchestrator(args: McpToolArgs, control: ViewerControlDependencies): Promise<McpToolPayload> {
-  const project = required(args, "project");
+  const project = canonicalOrchestratorProject(required(args, "project"));
   const message = requiredMessageText(args);
   const key = requestId(args);
 
@@ -1273,7 +1275,7 @@ async function sendMessageToOrchestrator(args: McpToolArgs, control: ViewerContr
 /** rotate_orchestrator: explicit handoff to a successor. Never called by any
     heuristic — see the rotation command's contract. */
 async function rotateOrchestrator(args: McpToolArgs, control: ViewerControlDependencies): Promise<McpToolPayload> {
-  const project = required(args, "project");
+  const project = canonicalOrchestratorProject(required(args, "project"));
   const result = await control.post("/api/orchestrator/rotate", {
     project,
     clientRequestId: spawnAttemptId(requestId(args)),

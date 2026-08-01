@@ -55,7 +55,13 @@ function dependencies(overrides: Partial<SeatCommandDependencies> = {}): { deps:
       recorded.deliveries.push({ conversationId: input.conversationId, clientMessageId: input.clientMessageId, text: input.text });
       return { ok: true, outcome: "delivered" };
     },
-    conversationTarget: (conversationId) => ({ conversationId, path: `/tmp/${conversationId.slice(-4)}.jsonl` }),
+    conversationTarget: (conversationId) => ({
+      kind: "eligible",
+      conversationId,
+      path: `/tmp/${conversationId.slice(-4)}.jsonl`,
+      cwd: "/workspace",
+      project: "proj-a",
+    }),
     syncLegacyRecord: (input) => { recorded.legacySyncs.push({ conversationId: input.conversationId }); },
     projectTasks: () => [],
     now: () => AT,
@@ -97,8 +103,9 @@ test("an admitted asynchronous spawn activates the seat from its durable convers
     spawn: async () => ({
       status: 202,
       body: {
-        state: "accepted",
-        launched: true,
+        ok: true,
+        state: "starting",
+        launched: false,
         conversationId: NEW_ID,
         launchId: "launch_async",
       },
@@ -108,8 +115,38 @@ test("an admitted asynchronous spawn activates the seat from its durable convers
   const result = await executeOrchestratorSeatRequest(spawnRequest(), deps);
 
   expect(result.status).toBe(202);
+  expect(result.body).toMatchObject({
+    accepted: true,
+    state: "accepted",
+    conversationId: NEW_ID,
+    launchId: "launch_async",
+  });
   expect(orchestratorSeatFor("proj-a").active?.conversationId).toBe(NEW_ID);
+  expect(orchestratorSeatFor("proj-a").active?.intent.launchId).toBe("launch_async");
   expect(orchestratorSeatFor("proj-a").pending).toBeNull();
+});
+
+test("a restarted caller replays the accepted launch from the durable seat receipt", async () => {
+  const { deps } = dependencies({
+    spawn: async () => ({
+      status: 202,
+      body: { ok: true, state: "starting", launched: false, conversationId: NEW_ID, launchId: "launch_resume" },
+    }),
+  });
+  await executeOrchestratorSeatRequest(spawnRequest("req_00000015"), deps);
+  const { deps: resumed, recorded } = dependencies({
+    spawn: async () => {
+      throw new Error("a completed accepted launch must replay from durable state");
+    },
+  });
+
+  const replay = await executeOrchestratorSeatRequest(spawnRequest("req_00000015"), resumed);
+
+  expect(replay).toMatchObject({
+    status: 200,
+    body: { replayed: true, accepted: true, state: "accepted", conversationId: NEW_ID, launchId: "launch_resume" },
+  });
+  expect(recorded.spawns).toEqual([]);
 });
 
 test("a failed spawn leaves NEITHER half: no active seat, no legacy record, a recoverable pending intent", async () => {
@@ -171,6 +208,42 @@ test("selecting an EXISTING conversation delivers the mandate without spawning a
   expect(orchestratorSeatFor("proj-a").active?.conversationId).toBe(OLD_ID);
 });
 
+test("a replayed adoption keeps its original target during an ABA-shaped retry", async () => {
+  let releaseDelivery: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseDelivery = resolve; });
+  const { deps, recorded } = dependencies({
+    conversationTarget: (conversationId) => ({
+      kind: "eligible",
+      conversationId,
+      path: `/tmp/${conversationId.slice(-4)}.jsonl`,
+      cwd: "/workspace",
+      project: "proj-a",
+    }),
+    deliver: async (input) => {
+      recorded.deliveries.push({ conversationId: input.conversationId, clientMessageId: input.clientMessageId, text: input.text });
+      await gate;
+      return { ok: true, outcome: "delivered" };
+    },
+  });
+  const first = executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "m",
+    clientRequestId: "req_00000014",
+    conversationId: OLD_ID,
+  }, deps);
+  const replay = executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "recomposed",
+    clientRequestId: "req_00000014",
+    conversationId: NEW_ID,
+  }, deps);
+
+  expect(recorded.deliveries.map((delivery) => delivery.conversationId)).toEqual([OLD_ID, OLD_ID]);
+  releaseDelivery();
+  await Promise.all([first, replay]);
+  expect(orchestratorSeatFor("proj-a").active?.conversationId).toBe(OLD_ID);
+});
+
 test("a failed delivery keeps the incumbent seated and reports a recoverable state", async () => {
   const { deps } = dependencies();
   await executeOrchestratorSeatRequest(spawnRequest(), deps);
@@ -221,6 +294,32 @@ test("an unknown existing conversation is refused before any intent exists", asy
   expect(orchestratorSeatFor("proj-a").pending).toBeNull();
 });
 
+test("adoption refuses a conversation whose project, cwd, transcript, or lifecycle is ineligible before creating an intent", async () => {
+  const candidates = [
+    { kind: "eligible", conversationId: OLD_ID, path: "/tmp/old.jsonl", cwd: "/workspace", project: "proj-b" },
+    { kind: "ineligible", code: "invalid_cwd", error: "conversation cwd is unavailable" },
+    { kind: "ineligible", code: "missing_transcript", error: "conversation transcript is unavailable" },
+    { kind: "ineligible", code: "conversation_ineligible", error: "conversation is superseded" },
+  ];
+
+  for (const [index, candidate] of candidates.entries()) {
+    const { deps, recorded } = dependencies({
+      conversationTarget: () => candidate as never,
+    });
+    const result = await executeOrchestratorSeatRequest({
+      project: "proj-a",
+      mandate: "m",
+      clientRequestId: `req_00000${index}2`,
+      conversationId: OLD_ID,
+    }, deps);
+
+    expect(result.status).toBe(409);
+    expect(recorded.spawns).toEqual([]);
+    expect(recorded.deliveries).toEqual([]);
+    expect(orchestratorSeatFor("proj-a").pending).toBeNull();
+  }
+});
+
 test("rotation composes a bounded handoff, switches designation atomically, and links both cards", async () => {
   const { deps } = dependencies();
   await executeOrchestratorSeatRequest(spawnRequest(), deps);
@@ -264,6 +363,38 @@ test("rotation composes a bounded handoff, switches designation atomically, and 
     successorConversationId: SUCCESSOR,
   })]);
   expect(retiredHosts).toEqual([]);
+});
+
+test("an adoption racing an in-flight rotation is refused while the rotation keeps one durable successor", async () => {
+  const seeded = dependencies();
+  await executeOrchestratorSeatRequest(spawnRequest("req_00000020"), seeded.deps);
+
+  let releaseSpawn: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseSpawn = resolve; });
+  const successor = "conversation_77777777-7777-4777-8777-777777777777";
+  const { deps, recorded } = dependencies({
+    spawn: async (body) => {
+      recorded.spawns.push(body);
+      await gate;
+      return { status: 200, body: { ok: true, conversationId: successor, path: "/tmp/successor.jsonl" } };
+    },
+  });
+  const rotating = executeOrchestratorRotation({ project: "proj-a", clientRequestId: "req_00000021" }, deps);
+  const adoption = await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "adopt me",
+    clientRequestId: "req_00000022",
+    conversationId: OLD_ID,
+  }, deps);
+
+  expect(adoption).toMatchObject({ status: 409, body: { code: "seat_intent_in_progress" } });
+  expect(recorded.deliveries).toEqual([]);
+  releaseSpawn();
+  const rotated = await rotating;
+
+  expect(rotated.status).toBe(200);
+  expect(orchestratorSeatFor("proj-a").active?.conversationId).toBe(successor);
+  expect(orchestratorRevocations()).toEqual([expect.objectContaining({ conversationId: NEW_ID, successorConversationId: successor })]);
 });
 
 test("HIGH 5: a spawn-mode designation for an ALREADY-SEATED project refuses instead of silently unseating the incumbent", async () => {

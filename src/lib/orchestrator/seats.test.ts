@@ -3,6 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { persistProjectAliases } from "@/lib/projects/aliases";
+
 import {
   activeOrchestratorSeats,
   beginOrchestratorSeatIntent,
@@ -103,12 +105,13 @@ test("a failed intent stays pending with its error and never unseats the incumbe
   expect(pending?.intent.error).toBe("spawn failed");
 });
 
-test("completing an unknown or superseded key reports missing instead of guessing", () => {
+test("a concurrent key cannot displace a pending intent, and a stale completion reports missing", () => {
   expect(completeOrchestratorSeatIntent({ project: "proj-a", clientRequestId: "req_0000009", conversationId: "conversation_x", path: null, now: AT }).kind).toBe("missing");
   beginOrchestratorSeatIntent({ project: "proj-a", mandate: "a", clientRequestId: "req_0000001", mode: "spawn", now: AT });
-  beginOrchestratorSeatIntent({ project: "proj-a", mandate: "b", clientRequestId: "req_0000002", mode: "spawn", now: AT });
-  /* The newer intent replaced the abandoned one; the stale key cannot complete. */
-  expect(completeOrchestratorSeatIntent({ project: "proj-a", clientRequestId: "req_0000001", conversationId: "conversation_x", path: null, now: AT }).kind).toBe("missing");
+  const competing = beginOrchestratorSeatIntent({ project: "proj-a", mandate: "b", clientRequestId: "req_0000002", mode: "spawn", now: AT });
+  expect(competing.kind).toBe("in_progress");
+  expect(completeOrchestratorSeatIntent({ project: "proj-a", clientRequestId: "req_0000001", conversationId: "conversation_x", path: null, now: AT }).kind).toBe("activated");
+  expect(completeOrchestratorSeatIntent({ project: "proj-a", clientRequestId: "req_0000002", conversationId: "conversation_y", path: null, now: AT }).kind).toBe("missing");
 });
 
 test("a malformed file reads as empty and the epoch counter postdates everything on file", () => {
@@ -130,4 +133,50 @@ test("seats are independent per project", () => {
   completeOrchestratorSeatIntent({ project: "proj-b", clientRequestId: "req_0000002", conversationId: "conversation_b", path: null, now: AT });
   expect(activeOrchestratorSeats().map((seat) => seat.conversationId).sort()).toEqual(["conversation_a", "conversation_b"]);
   expect(orchestratorRevocations()).toEqual([]);
+});
+
+test("a named project alias and its canonical identity resolve to one seat", () => {
+  const canonical = "repo-0123456789abcdef0123456789abcdef";
+  expect(persistProjectAliases([
+    { source: "named-project", target: canonical, displayName: "named-project" },
+  ])).toBe(true);
+
+  beginOrchestratorSeatIntent({ project: "named-project", mandate: "m", clientRequestId: "req_0000001", mode: "spawn", now: AT });
+  completeOrchestratorSeatIntent({ project: canonical, clientRequestId: "req_0000001", conversationId: "conversation_a", path: null, now: AT });
+
+  expect(orchestratorSeatFor("named-project").active?.conversationId).toBe("conversation_a");
+  expect(orchestratorSeatFor(canonical).active).toMatchObject({ project: canonical, conversationId: "conversation_a" });
+  expect(activeOrchestratorSeats()).toHaveLength(1);
+});
+
+test("a persisted pre-canonical alias seat is recovered under its canonical project", () => {
+  const canonical = "repo-0123456789abcdef0123456789abcdef";
+  expect(persistProjectAliases([
+    { source: "legacy-project", target: canonical, displayName: "legacy-project" },
+  ])).toBe(true);
+  fs.writeFileSync(path.join(sandbox, "orchestrator-seats.json"), JSON.stringify({
+    schemaVersion: 1,
+    nextSeatEpoch: 2,
+    seats: {
+      "legacy-project": {
+        project: "legacy-project",
+        seatEpoch: 1,
+        conversationId: "conversation_a",
+        path: null,
+        mandate: "m",
+        promptVersion: null,
+        predecessorConversationId: null,
+        state: "active",
+        intent: { clientRequestId: "req_0000001", mode: "spawn", launchId: null, error: null },
+        designatedAt: AT,
+        activatedAt: AT,
+      },
+    },
+    pending: {},
+    revocations: [],
+  }), "utf8");
+
+  expect(orchestratorSeatFor(canonical).active).toMatchObject({ project: canonical, conversationId: "conversation_a" });
+  expect(orchestratorSeatFor("legacy-project").active?.conversationId).toBe("conversation_a");
+  expect(activeOrchestratorSeats()).toHaveLength(1);
 });
