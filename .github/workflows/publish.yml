@@ -4,6 +4,19 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing immutable release tag to publish
+        required: true
+        type: string
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+concurrency:
+  group: npm-publish-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -13,6 +26,9 @@ jobs:
       id-token: write # OIDC for npm trusted publishing
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          fetch-depth: 0
 
       - uses: oven-sh/setup-bun@v2
 
@@ -27,26 +43,181 @@ jobs:
       # publishing (MODULE_NOT_FOUND: sigstore). Use the bundled npm instead.
       - run: npm --version
 
-      - name: Check tag matches package.json version
+      - name: Verify immutable release tag
+        shell: bash
         run: |
-          pkg="$(node -p "require('./package.json').version")"
-          tag="${GITHUB_REF_NAME#v}"
-          if [ "$pkg" != "$tag" ]; then
-            echo "Tag v$tag does not match package.json version $pkg" >&2
+          set -euo pipefail
+
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo "Release tag must use v-prefixed SemVer syntax: $RELEASE_TAG" >&2
             exit 1
           fi
 
-      - run: bun install --frozen-lockfile
+          package_version="$(node -p "require('./package.json').version")"
+          if [ "$RELEASE_TAG" != "v${package_version}" ]; then
+            echo "Release tag $RELEASE_TAG does not match package.json version $package_version" >&2
+            exit 1
+          fi
 
-      # actions/checkout above uses fetch-depth: 1 (depth-one). The issue-499
-      # capture-evidence suite (docs/screenshots/issue-499/evidence.test.ts, run
-      # by `bun test` below) validates the committed evidence against the capture
-      # manifest's ancestor sourceRevision — its git tree and committed harness
-      # bytes — which are absent from a depth-one checkout. Deepen history to it
-      # first; depth-one-evidence.test.ts runs this same script as its regression.
-      - name: Deepen history to the issue-499 capture-evidence source revision
-        run: bash docs/screenshots/issue-499/deepen-to-evidence-revision.sh
+          tag_object="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}")"
+          tag_type="$(git cat-file -t "$tag_object")"
+          if [ "$tag_type" != "tag" ]; then
+            echo "Release ref refs/tags/${RELEASE_TAG} must be an annotated tag" >&2
+            exit 1
+          fi
 
-      - run: bun test
+          tag_commit="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
+          checkout_commit="$(git rev-parse --verify HEAD)"
+          remote_refs="$(git ls-remote origin "refs/tags/${RELEASE_TAG}" "refs/tags/${RELEASE_TAG}^{}")"
+          remote_tag_object="$(awk -v ref="refs/tags/${RELEASE_TAG}" '$2 == ref { print $1 }' <<<"$remote_refs")"
+          remote_tag_commit="$(awk -v ref="refs/tags/${RELEASE_TAG}^{}" '$2 == ref { print $1 }' <<<"$remote_refs")"
 
-      - run: npm publish
+          if [ -z "$remote_tag_object" ] || [ -z "$remote_tag_commit" ]; then
+            echo "Remote annotated tag refs/tags/${RELEASE_TAG} could not be resolved exactly" >&2
+            exit 1
+          fi
+          if [ "$tag_object" != "$remote_tag_object" ] || [ "$tag_commit" != "$remote_tag_commit" ]; then
+            echo "Local tag identity does not match origin for refs/tags/${RELEASE_TAG}" >&2
+            exit 1
+          fi
+          if [ "$checkout_commit" != "$tag_commit" ]; then
+            echo "Checkout $checkout_commit does not match peeled tag commit $tag_commit" >&2
+            exit 1
+          fi
+
+          echo "Verified refs/tags/${RELEASE_TAG} at tag object $tag_object and commit $tag_commit"
+
+      - name: Check npm registry
+        id: registry
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          package_name="$(node -p "require('./package.json').name")"
+          package_version="$(node -p "require('./package.json').version")"
+          error_file="$(mktemp "${RUNNER_TEMP}/npm-view.XXXXXX")"
+
+          set +e
+          published_json="$(npm view "${package_name}@${package_version}" version --json 2>"$error_file")"
+          view_status=$?
+          set -e
+
+          if [ "$view_status" -eq 0 ]; then
+            published_version="$(node -e '
+              const value = JSON.parse(process.argv[1]);
+              if (typeof value !== "string") throw new Error("npm returned a non-string version");
+              process.stdout.write(value);
+            ' "$published_json")"
+            if [ "$published_version" != "$package_version" ]; then
+              echo "Registry returned $published_version for ${package_name}@${package_version}" >&2
+              exit 1
+            fi
+            exists=true
+            echo "${package_name}@${package_version} already exists; publication will be skipped"
+          elif grep -q 'E404' "$error_file"; then
+            exists=false
+            echo "${package_name}@${package_version} is absent and eligible for publication"
+          else
+            cat "$error_file" >&2
+            exit "$view_status"
+          fi
+
+          printf 'package_name=%s\n' "$package_name" >> "$GITHUB_OUTPUT"
+          printf 'package_version=%s\n' "$package_version" >> "$GITHUB_OUTPUT"
+          printf 'exists=%s\n' "$exists" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        if: steps.registry.outputs.exists == 'false'
+        run: bun install --frozen-lockfile
+
+      - name: Build and inspect npm package
+        id: package
+        if: steps.registry.outputs.exists == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          package_dir="$(mktemp -d "${RUNNER_TEMP}/npm-package.XXXXXX")"
+          npm pack --pack-destination "$package_dir"
+
+          mapfile -t tarballs < <(find "$package_dir" -maxdepth 1 -type f -name '*.tgz' -print)
+          if [ "${#tarballs[@]}" -ne 1 ]; then
+            echo "Expected npm pack to produce exactly one tarball" >&2
+            exit 1
+          fi
+          tarball="${tarballs[0]}"
+          inventory="$package_dir/inventory.txt"
+          tar -tzf "$tarball" > "$inventory"
+          for required_entry in \
+            package/package.json \
+            package/bin/cli.mjs \
+            package/bin/mcp-server.mjs \
+            package/bin/server-runtime.mjs \
+            package/dist/mcp-server.mjs \
+            package/dist/standalone/server.js; do
+            if ! grep -Fxq "$required_entry" "$inventory"; then
+              echo "Package is missing required entry: $required_entry" >&2
+              exit 1
+            fi
+          done
+
+          extract_dir="$(mktemp -d "${RUNNER_TEMP}/npm-package-extract.XXXXXX")"
+          tar -xzf "$tarball" -C "$extract_dir"
+          package_version="$(node -p "require('./package.json').version")"
+          cli_version="$(node "$extract_dir/package/bin/cli.mjs" --version)"
+          if [ "$cli_version" != "$package_version" ]; then
+            echo "Packaged CLI version $cli_version does not match $package_version" >&2
+            exit 1
+          fi
+          cli_help="$(node "$extract_dir/package/bin/cli.mjs" --help)"
+          if [[ "$cli_help" != *"Usage: agent-log-viewer"* ]]; then
+            echo "Packaged CLI help is unavailable" >&2
+            exit 1
+          fi
+          printf 'tarball=%s\n' "$tarball" >> "$GITHUB_OUTPUT"
+
+      - name: Run hermetic release gate
+        if: steps.registry.outputs.exists == 'false'
+        run: bun test bin/server-runtime.test.ts bin/mcp-server.test.ts docs/media/issue-626/evidence.test.ts
+
+      - name: Publish package with OIDC
+        if: steps.registry.outputs.exists == 'false'
+        run: npm publish "${{ steps.package.outputs.tarball }}"
+
+      - name: Verify published package version
+        shell: bash
+        env:
+          PACKAGE_NAME: ${{ steps.registry.outputs.package_name }}
+          PACKAGE_VERSION: ${{ steps.registry.outputs.package_version }}
+        run: |
+          set -euo pipefail
+
+          error_file="$(mktemp "${RUNNER_TEMP}/npm-verify.XXXXXX")"
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            set +e
+            published_json="$(npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version --json 2>"$error_file")"
+            view_status=$?
+            set -e
+
+            if [ "$view_status" -eq 0 ]; then
+              published_version="$(node -e '
+                const value = JSON.parse(process.argv[1]);
+                if (typeof value !== "string") throw new Error("npm returned a non-string version");
+                process.stdout.write(value);
+              ' "$published_json")"
+              if [ "$published_version" != "$PACKAGE_VERSION" ]; then
+                echo "Registry returned $published_version for ${PACKAGE_NAME}@${PACKAGE_VERSION}" >&2
+                exit 1
+              fi
+              echo "Verified ${PACKAGE_NAME}@${PACKAGE_VERSION} in the npm registry"
+              exit 0
+            fi
+
+            if [ "$attempt" -lt 12 ]; then
+              sleep 5
+            fi
+          done
+
+          cat "$error_file" >&2
+          echo "Could not verify ${PACKAGE_NAME}@${PACKAGE_VERSION} in the npm registry" >&2
+          exit 1
