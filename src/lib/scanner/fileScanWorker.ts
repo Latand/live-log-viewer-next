@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+import { systemScheduler, type DeadlineScheduler } from "@/lib/deadline";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 
 import type { FileCatalogScan, FileScanOptions } from "./index";
@@ -10,7 +11,7 @@ const FILE_SCAN_WORKER_TIMEOUT_MS = 5 * 60_000;
 const FILE_SCAN_WORKER_OUTPUT_MAX_BYTES = 32 * 1024 * 1024;
 const FILE_SCAN_WORKER_STDERR_MAX_BYTES = 4 * 1024;
 
-type SerializableFileScanOptions = Omit<FileScanOptions, "onResourceSnapshot">;
+type SerializableFileScanOptions = Omit<FileScanOptions, "onResourceSnapshot" | "signal">;
 
 type FileScanWorkerMessage =
   | { type: "resource"; snapshot: FileCatalogScan }
@@ -21,6 +22,12 @@ export interface FileScanWorkerRuntime {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
+  signal?: AbortSignal | null;
+  scheduler?: DeadlineScheduler;
+}
+
+function abortError(): Error {
+  return new DOMException("file scan cancelled", "AbortError");
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -65,6 +72,7 @@ export function collectFileScanInWorker(
   onResourceSnapshot?: (snapshot: FileCatalogScan) => void,
   runtime: FileScanWorkerRuntime = {},
 ): Promise<FileCatalogScan> {
+  if (runtime.signal?.aborted) return Promise.reject(abortError());
   const launch = runtime.launch ?? workerLaunch(runtime.cwd);
   /* Full-corpus scans are background freshness work. Keep the interactive
      Next process ahead of their CPU demand on a busy operator host. Explicit
@@ -82,22 +90,39 @@ export function collectFileScanInWorker(
     },
   });
   return new Promise<FileCatalogScan>((resolve, reject) => {
+    const scheduler = runtime.scheduler ?? systemScheduler;
     let settled = false;
+    let listening = false;
     let stdout = "";
     let stderr = "";
     let outputBytes = 0;
     let completed: FileCatalogScan | null = null;
+    let terminationError: Error | null = null;
+    let timer: unknown;
     const finish = (error?: Error, snapshot?: FileCatalogScan) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer !== undefined) {
+        scheduler.clearTimeout(timer);
+        timer = undefined;
+      }
+      if (listening) {
+        runtime.signal?.removeEventListener("abort", onAbort);
+        listening = false;
+      }
       if (error) reject(error);
       else resolve(snapshot!);
     };
-    const fail = (message: string) => {
+    const terminate = (error: Error) => {
+      if (settled || terminationError) return;
+      terminationError = error;
       try { child.kill("SIGKILL"); } catch { /* child already exited */ }
-      finish(new Error(message));
+      if (child.exitCode !== null || child.signalCode !== null) finish(error);
     };
+    const fail = (message: string) => {
+      terminate(new Error(message));
+    };
+    const onAbort = () => terminate(abortError());
     const consume = () => {
       while (true) {
         const newline = stdout.indexOf("\n");
@@ -121,7 +146,8 @@ export function collectFileScanInWorker(
         else completed = message.snapshot;
       }
     };
-    const timer = setTimeout(() => {
+    timer = scheduler.setTimeout(() => {
+      timer = undefined;
       fail("file scanner worker timed out");
     }, runtime.timeoutMs ?? FILE_SCAN_WORKER_TIMEOUT_MS);
     child.once("error", (error) => finish(error));
@@ -144,6 +170,10 @@ export function collectFileScanInWorker(
     });
     child.once("close", (code, signal) => {
       if (settled) return;
+      if (terminationError) {
+        finish(terminationError);
+        return;
+      }
       consume();
       if (code !== 0 || !completed) {
         const detail = stderr.trim();
@@ -152,7 +182,14 @@ export function collectFileScanInWorker(
       }
       finish(undefined, completed);
     });
-    child.stdin.once("error", (error) => finish(error));
+    child.stdin.once("error", (error) => {
+      if (!terminationError) finish(error);
+    });
+    if (runtime.signal) {
+      runtime.signal.addEventListener("abort", onAbort, { once: true });
+      listening = true;
+      if (runtime.signal.aborted) onAbort();
+    }
     child.stdin.end(JSON.stringify({ type: "scan", options }));
   });
 }

@@ -20,6 +20,7 @@ let scanFileResults: FileEntry[][] = [];
 let scanPinOverlayResults: Array<string[] | undefined> = [];
 let scanCompleteResults: Array<boolean | undefined> = [];
 let scanGates: Promise<void>[] = [];
+let scanAborts = 0;
 let hydrateScannedFiles: (files: FileEntry[], options: unknown) => FileEntry[] = (files) => files;
 let registryRoot = "";
 let tmuxHealth: unknown = { status: "healthy" };
@@ -55,15 +56,18 @@ beforeEach(() => {
   scanPinOverlayResults = [];
   scanCompleteResults = [];
   scanGates = [];
+  scanAborts = 0;
   hydrateScannedFiles = (files) => files;
   tmuxHealth = { status: "healthy" };
   flowsStore = () => [];
   pipelineMutationCalls = 0;
   replaceConversationCatalog([]);
+  resetPresenceForTest();
 });
 
 afterEach(() => {
   setAgentRegistryForTests(null);
+  resetPresenceForTest();
   replaceConversationCatalog([]);
   noteSessionTargets([]);
   if (previousState === undefined) delete process.env.LLV_STATE_DIR;
@@ -97,7 +101,21 @@ mock.module("@/lib/scanner", () => ({
     const files = hydrateScannedFiles(scanFileResults.shift() ?? scannedFiles, options);
     const resourceSnapshot = { files, projectCatalog: [], complete: true };
     (options as { onResourceSnapshot?: (snapshot: typeof resourceSnapshot) => void }).onResourceSnapshot?.(resourceSnapshot);
-    await scanGates.shift();
+    const gate = scanGates.shift();
+    const signal = (options as { signal?: AbortSignal }).signal;
+    if (gate && signal) {
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = () => {
+          scanAborts += 1;
+          signal.removeEventListener("abort", onAbort);
+          reject(new DOMException("scan cancelled", "AbortError"));
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        gate.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+      });
+    } else {
+      await gate;
+    }
     const pinOverlayPaths = scanPinOverlayResults.shift();
     const complete = scanCompleteResults.shift();
     return { files, projectCatalog: [], ...(pinOverlayPaths ? { pinOverlayPaths } : {}), complete: complete ?? true };
@@ -132,7 +150,10 @@ afterAll(() => {
   for (const [name, real] of realModules) mock.module(name, () => real as Record<string, unknown>);
 });
 
-const { cachedFileScan, currentFileScan, resetFilesRouteCacheForTests } = await import("@/lib/scanner/scanCache");
+const { cachedFileScan, completedFileScan, currentFileScan, fileScanCacheStatus, resetFilesRouteCacheForTests } = await import("@/lib/scanner/scanCache");
+const { fileScanCoordinatorStatus } = await import("@/lib/scanner/scanCoordinator");
+const { postSnapshot } = await import("@/app/api/agent/snapshot/handler");
+const { resetPresenceForTest, upsertPresence } = await import("@/lib/view/presenceStore");
 const { controllerFileScan } = await import("@/lib/pipelines/controller");
 const { allowedKillTarget, buildResourceSnapshot, lastResourceTargetRefs, noteSessionTargets, readResourceFileSnapshot } = await import("@/lib/resources");
 const { GET } = await import("./route");
@@ -1396,6 +1417,84 @@ test("concurrent reads during a blocked refresh share one scan and return within
   expect(scans).toBe(2);
   release();
   await new Promise<void>((resolve) => setImmediate(resolve));
+});
+
+test("a cold completed scan aborts its refresh after every subscriber leaves", async () => {
+  let release!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { release = resolve; }));
+  const controllers = Array.from({ length: 20 }, () => new AbortController());
+  const reads = controllers.map((controller) => completedFileScan({ signal: controller.signal })
+    .then(() => "resolved", (error: unknown) => error instanceof Error ? error.name : String(error)));
+
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(scans).toBe(1);
+  expect(fileScanCacheStatus()).toEqual({ inFlight: true, subscribers: 20 });
+
+  for (const controller of controllers) controller.abort();
+  const outcomes = await Promise.race([
+    Promise.all(reads),
+    new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("cancelled scan retained its subscribers")), 1_000)),
+  ]);
+  release();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  expect(outcomes).toEqual(Array.from({ length: 20 }, () => "AbortError"));
+  expect(scanAborts).toBe(1);
+  expect(fileScanCacheStatus()).toEqual({ inFlight: false, subscribers: 0 });
+  expect(fileScanCoordinatorStatus()).toEqual({ inFlight: false, queued: 0, subscribers: 0 });
+});
+
+test("a warm snapshot returns the completed projection while an independent refresh is blocked", async () => {
+  const completed = file("/sessions/completed-snapshot.jsonl");
+  scannedFiles = [completed];
+  await completedFileScan({ revalidate: false });
+  let release!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { release = resolve; }));
+  scannedFiles = [file("/sessions/unhealthy-refresh.jsonl")];
+  const refresh = currentFileScan({ fresh: true });
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(scans).toBe(2);
+
+  upsertPresence({
+    schemaVersion: 1,
+    viewSessionId: "warm-snapshot",
+    deviceId: "fixture-device",
+    device: { kind: "desktop", browser: "chrome" },
+    visibility: "visible",
+    sequence: 1,
+    inputSequence: 1,
+    project: "repo",
+    mode: "scheme",
+    viewport: { width: 1280, height: 720, dpr: 1 },
+    camera: null,
+    focusedPath: completed.path,
+    selectedPaths: [],
+    visiblePaths: [completed.path],
+    board: { renderedRevision: 1, durableRevision: 1, sync: "current" },
+  });
+  const startedAt = performance.now();
+  const response = await postSnapshot(new Request("http://127.0.0.1:8898/api/agent/snapshot", {
+    method: "POST",
+    headers: { host: "127.0.0.1:8898" },
+    body: JSON.stringify({ schemaVersion: 1, text: { include: false } }),
+  }) as never, {
+    completedFileScan,
+    resolveSiblings: async () => ({ selfResolution: "omitted", agents: [] }),
+    registrySnapshot: () => ({ conversations: {}, entries: {}, lineageEdges: {}, memberships: {}, conversationAliases: {}, receipts: {} }) as never,
+    snapshotDeadlineMs: 1_000,
+    scheduler: { setTimeout, clearTimeout },
+  });
+
+  expect(performance.now() - startedAt).toBeLessThan(300);
+  expect(response.status).toBe(200);
+  expect((await response.json()).conversations.map((entry: { path: string }) => entry.path)).toEqual([completed.path]);
+  expect(fileScanCacheStatus()).toEqual({ inFlight: true, subscribers: 1 });
+
+  release();
+  await refresh;
 });
 
 test("a pinned refresh serves stale data then advances the shared global slot with its overlay", async () => {

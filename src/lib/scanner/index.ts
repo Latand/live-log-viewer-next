@@ -92,6 +92,9 @@ export interface FileScanOptions {
   /** Last validated completed generation used only to label current resource
       paths while the catalog projection for this generation continues. */
   resourceBaseline?: FileCatalogScan;
+  /** Cancellation for direct/test scans. Production scans cross the worker
+      boundary, where abort terminates the child process. */
+  signal?: AbortSignal | null;
 }
 
 export interface FileCatalogScan {
@@ -205,6 +208,7 @@ async function listFilesInternal(
   selectedProject?: string,
   options: FileScanOptions = {},
 ): Promise<FileCatalogScan> {
+  if (options.signal?.aborted) throw new DOMException("file scan cancelled", "AbortError");
   const persist = options.persist === true;
   const stagedResourceScope = options.onResourceSnapshot !== undefined;
   const demote = stagedResourceScope
@@ -223,6 +227,7 @@ async function listFilesInternal(
         onResourceSnapshot: options.onResourceSnapshot,
       })
     : { files: await discoverFiles(undefined, demote ?? archivedTranscriptPaths(), pin), projectCatalog: [], complete: true };
+  if (options.signal?.aborted) throw new DOMException("file scan cancelled", "AbortError");
   const entries = scan.files;
   if (options.fresh) {
     const panes = panePidMap(true);
@@ -282,6 +287,7 @@ async function listFilesInternal(
     }
   });
   await linkEntries(entries, { persist });
+  if (options.signal?.aborted) throw new DOMException("file scan cancelled", "AbortError");
   const pinOverlayPaths = "pinOverlayPaths" in scan ? scan.pinOverlayPaths : undefined;
   return {
     files: entries,

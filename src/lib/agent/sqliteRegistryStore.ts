@@ -5,13 +5,16 @@ import { isDeepStrictEqual } from "node:util";
 import type { Database as BunDatabase } from "bun:sqlite";
 
 import { reboundAssembledMcpGrants, rowClaimsBeyondBaselineGrant, type McpGrantPolicy } from "./mcpAllowlist";
-import type { RegistryFile } from "./registry";
+import type { RegistryFile, SnapshotSpawnProjection, SnapshotTitleConversationProjection } from "./registry";
 
 /** The collections the MCP grant decision reads and writes. Touching any one of
     them requires the decision to have run over ALL of them, because an entry or
     a receipt is only decidable against the conversations and lineage edges that
     attest to it (#739). */
 const GRANT_COLLECTIONS = new Set(["entries", "receipts", "conversations", "lineageEdges"]);
+const SNAPSHOT_SPAWN_ALIAS_LIMIT = 64;
+const SNAPSHOT_TITLE_CONVERSATION_LIMIT = 2_000;
+const SNAPSHOT_TITLE_OWNED_PATH_LIMIT = 128;
 
 const ROW_COLLECTIONS = [
   "entries",
@@ -260,6 +263,129 @@ export class SqliteAgentRegistryStore {
     if (this.readOnlyCache?.revision === revision) return this.readOnlyCache;
     this.readOnlyCache = this.loadSnapshot(true);
     return this.readOnlyCache;
+  }
+
+  /** One transaction and keyed row reads for the at-most-bounded spawn paths in
+      a Viewer snapshot. No collection enumeration or whole snapshot occurs. */
+  snapshotSpawns(launchIds: readonly string[]): SnapshotSpawnProjection {
+    this.db.exec("BEGIN");
+    try {
+      const readRow = (collection: RowCollection, key: string): unknown => {
+        const stored = this.db.query<Pick<StoredRow, "value_json">, [string, string]>(
+          "SELECT value_json FROM registry_rows WHERE collection = ? AND row_key = ?",
+        ).get(collection, key);
+        this.onRowPayloadRead?.(collection, stored ? 1 : 0);
+        return stored ? this.parseRow(collection, key, stored.value_json, true) : undefined;
+      };
+      const normalizeRow = <Collection extends "receipts" | "conversations">(
+        collection: Collection,
+        key: string,
+        value: unknown,
+      ): RegistryFile[Collection][string] | undefined => {
+        const input: Record<string, unknown> = { version: 2, entries: {}, receipts: {} };
+        input[collection] = { [key]: value };
+        return this.normalize(input)[collection][key] as RegistryFile[Collection][string] | undefined;
+      };
+      const projection: SnapshotSpawnProjection = {};
+      for (const launchId of new Set(launchIds)) {
+        const rawReceipt = readRow("receipts", launchId);
+        if (rawReceipt === undefined) continue;
+        const receipt = normalizeRow("receipts", launchId, rawReceipt);
+        if (!receipt) continue;
+
+        const seen = new Set<string>();
+        let conversationId: string = receipt.conversationId;
+        let aliasLimitReached = false;
+        while (!seen.has(conversationId) && seen.size < SNAPSHOT_SPAWN_ALIAS_LIMIT) {
+          seen.add(conversationId);
+          const alias = readRow("conversationAliases", conversationId);
+          if (typeof alias !== "string" || !alias.startsWith("conversation_")) break;
+          conversationId = alias;
+          aliasLimitReached = seen.size === SNAPSHOT_SPAWN_ALIAS_LIMIT;
+        }
+        const rawConversation = aliasLimitReached ? undefined : readRow("conversations", conversationId);
+        const conversation = rawConversation === undefined
+          ? undefined
+          : normalizeRow("conversations", conversationId, rawConversation);
+        projection[launchId] = {
+          launchId: receipt.launchId,
+          state: receipt.state,
+          error: receipt.error,
+          engine: receipt.engine,
+          cwd: receipt.cwd,
+          createdAt: receipt.createdAt,
+          materializedPath: conversation?.generations.at(-1)?.path ?? receipt.artifactPath,
+        };
+      }
+      this.db.exec("COMMIT");
+      return projection;
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+      throw error;
+    }
+  }
+
+  /** Keyed title lookup for the bounded custom-title store. A request reads at
+      most one alias chain and one conversation row per title record; it never
+      enumerates a registry collection. */
+  snapshotTitleConversations(conversationIds: readonly string[]): SnapshotTitleConversationProjection {
+    this.db.exec("BEGIN");
+    try {
+      const readRow = (collection: "conversationAliases" | "conversations", key: string): unknown => {
+        const stored = this.db.query<Pick<StoredRow, "value_json">, [string, string]>(
+          "SELECT value_json FROM registry_rows WHERE collection = ? AND row_key = ?",
+        ).get(collection, key);
+        this.onRowPayloadRead?.(collection, stored ? 1 : 0);
+        return stored ? this.parseRow(collection, key, stored.value_json, true) : undefined;
+      };
+      const normalizedConversation = (key: string, value: unknown): RegistryFile["conversations"][string] | undefined => {
+        const input: Record<string, unknown> = { version: 2, entries: {}, receipts: {}, conversations: { [key]: value } };
+        return this.normalize(input).conversations[key];
+      };
+      const grouped = new Map<string, { aliases: Set<string>; conversation: RegistryFile["conversations"][string] }>();
+      for (const requestedId of [...new Set(conversationIds)].slice(0, SNAPSHOT_TITLE_CONVERSATION_LIMIT)) {
+        if (!requestedId.startsWith("conversation_")) continue;
+        const seen = new Set<string>();
+        let conversationId: string | null = requestedId;
+        let aliasLimitReached = false;
+        while (conversationId) {
+          if (seen.has(conversationId)) {
+            conversationId = null;
+            break;
+          }
+          if (seen.size >= SNAPSHOT_SPAWN_ALIAS_LIMIT) {
+            aliasLimitReached = true;
+            break;
+          }
+          seen.add(conversationId);
+          const alias = readRow("conversationAliases", conversationId);
+          if (typeof alias !== "string" || !alias.startsWith("conversation_")) break;
+          conversationId = alias;
+        }
+        if (!conversationId || aliasLimitReached) continue;
+        const held = grouped.get(conversationId);
+        const rawConversation = held ? undefined : readRow("conversations", conversationId);
+        const conversation = held?.conversation
+          ?? (rawConversation === undefined ? undefined : normalizedConversation(conversationId, rawConversation));
+        if (!conversation) continue;
+        const group = held ?? { aliases: new Set<string>(), conversation };
+        for (const alias of seen) if (alias !== conversationId) group.aliases.add(alias);
+        grouped.set(conversationId, group);
+      }
+      const projection = [...grouped.values()].map(({ aliases, conversation }) => ({
+        conversationId: conversation.id,
+        aliases: [...aliases] as RegistryFile["conversationAliases"][string][],
+        ownedPaths: [...new Set([
+          ...[...conversation.generations].reverse().map((generation) => generation.path),
+          ...[...conversation.continuityPaths].reverse(),
+        ])].slice(0, SNAPSHOT_TITLE_OWNED_PATH_LIMIT),
+      }));
+      this.db.exec("COMMIT");
+      return projection;
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+      throw error;
+    }
   }
 
   mutate<T>(operation: (file: RegistryFile) => T, includeSnapshot = true): SqliteRegistryMutation<T> {

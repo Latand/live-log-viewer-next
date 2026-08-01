@@ -57,6 +57,18 @@ test("runtime-bound MCP tools use the live Viewer control surface", async () => 
     callerAttribution: () => ({ kind: "manager" as const, conversationId: "conversation_seat", role: null }),
     callerProject: () => "proj-a",
     authorizedSeats: () => [{ conversationId: "conversation_seat", path: null, project: "proj-a" }],
+    /* #845: the send resolves the conversation it names from ONE injected registry
+       projection rather than reaching for the registry itself. */
+    registrySnapshot: () => ({
+      conversations: {
+        conversation_http_control: {
+          id: "conversation_http_control",
+          generations: [{ path: "/repo/session.jsonl" }],
+          continuityPaths: [],
+        },
+      },
+      conversationAliases: {},
+    }),
   } as never;
   const bindings = viewerMcpBindings(undefined, {
     post: async (pathname, body) => {
@@ -152,6 +164,9 @@ test("get_conversation presents current direct Codex tools and redacts recovered
     conversationId: "conversation_issue_626",
   } satisfies FileEntry;
   const bindings = viewerMcpBindings(undefined, undefined, {
+    /* The completed generation does not carry this transcript, so the pinned scan is
+       the fallback it exists for (#845). */
+    completedFileScan: async () => ({ snapshot: { files: [], projectCatalog: [], complete: true } }),
     listFiles: async () => [file],
   } as never);
 

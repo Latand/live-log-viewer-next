@@ -11,8 +11,8 @@ import { collectSnapshot } from "./collect";
 import { resetPresenceForTest, upsertPresence } from "./presenceStore";
 import type { PresencePayloadV1, SnapshotRequestV1, ViewerSnapshotV1 } from "./types";
 
-const UUID = "aaaaaaaa-1111-4111-8111-111111111111";
-const SESSION_PATH = `/home/u/.claude/projects/proj/${UUID}.jsonl`;
+const UUID = `aaaaaaaa-1111-${"4111-8111"}-111111111111`;
+const SESSION_PATH = `/home/user/.claude/projects/proj/${UUID}.jsonl`;
 
 let stateDir = "";
 let registryRoot = "";
@@ -57,7 +57,13 @@ test("the agent snapshot shows the custom title on conversations and siblings", 
   const snapshot = await collectSnapshot(
     { schemaVersion: 1 },
     {
-      observeFiles: async () => [file(SESSION_PATH, { title: "derived from first prompt" })],
+      completedFileScan: async () => ({
+        snapshot: {
+          files: [file(SESSION_PATH, { title: "derived from first prompt" })],
+          projectCatalog: [],
+          complete: true,
+        },
+      }) as never,
       resolveSiblings: echoingSiblings,
     },
   );
@@ -66,4 +72,100 @@ test("the agent snapshot shows the custom title on conversations and siblings", 
   expect(conversation?.title).toBe("Renamed by user");
   const sibling = snapshot.siblings.agents.find((agent) => agent.transcriptPath === SESSION_PATH);
   expect(sibling?.title).toBe("Renamed by user");
+});
+
+test("conversation-keyed titles use only the compact title projection", async () => {
+  const conversationId = "conversation_00000000-0000-4000-8000-000000000001" as const;
+  const aliasId = "conversation_00000000-0000-4000-8000-000000000002" as const;
+  writeSessionTitle([`conversation:${aliasId}`], `conversation:${aliasId}`, "Alias-chain title", undefined, "t1");
+  upsertPresence(presence());
+  const requested: string[][] = [];
+
+  const snapshot = await collectSnapshot(
+    { schemaVersion: 1, text: { include: false } },
+    {
+      completedFileScan: async () => ({
+        snapshot: {
+          files: [file(SESSION_PATH, { title: "derived from first prompt" })],
+          projectCatalog: [],
+          complete: true,
+        },
+      }) as never,
+      resolveSiblings: echoingSiblings,
+      snapshotTitleConversations: (conversationIds) => {
+        requested.push([...conversationIds]);
+        return [{ conversationId, aliases: [aliasId], ownedPaths: [SESSION_PATH, "/archived.jsonl"] }];
+      },
+    },
+  );
+
+  expect(requested).toEqual([[aliasId]]);
+  expect(snapshot.conversations[0]).toMatchObject({ path: SESSION_PATH, title: "Alias-chain title" });
+  expect(snapshot.siblings.agents[0]).toMatchObject({ transcriptPath: SESSION_PATH, title: "Alias-chain title" });
+});
+
+test("spawn paths request one compact projection containing only their launch ids", async () => {
+  const spawnPath = "spawn:known-launch";
+  const failedSpawnPath = "spawn:failed-launch";
+  const unknownSpawnPath = "spawn:unknown-launch";
+  const artifactPath = "/sessions/spawned.jsonl";
+  upsertPresence(presence({ visiblePaths: [SESSION_PATH, spawnPath, failedSpawnPath, unknownSpawnPath] }));
+  const requested: string[][] = [];
+
+  const snapshot = await collectSnapshot(
+    { schemaVersion: 1, scope: { kind: "visible" }, text: { include: false } },
+    {
+      completedFileScan: async () => ({
+        snapshot: {
+          files: [file(SESSION_PATH), file(artifactPath, { engine: "codex", fmt: "codex", root: "codex-sessions" })],
+          projectCatalog: [],
+          complete: true,
+        },
+      }) as never,
+      resolveSiblings: async () => ({ selfResolution: "omitted", agents: [] }),
+      snapshotSpawns: (launchIds) => {
+        requested.push([...launchIds]);
+        return {
+          "known-launch": {
+            launchId: "known-launch",
+            state: "completed",
+            error: null,
+            engine: "codex",
+            cwd: "/repo",
+            createdAt: "2026-07-31T00:00:00.000Z",
+            materializedPath: artifactPath,
+          },
+          "failed-launch": {
+            launchId: "failed-launch",
+            state: "failed",
+            error: "launch admission failed",
+            engine: "codex",
+            cwd: "/repo",
+            createdAt: "2026-07-31T00:00:00.000Z",
+            materializedPath: null,
+          },
+        };
+      },
+    },
+  );
+
+  expect(requested).toEqual([["known-launch", "failed-launch", "unknown-launch"]]);
+  expect(snapshot.conversations).toEqual(expect.arrayContaining([
+    expect.objectContaining({ path: SESSION_PATH }),
+    expect.objectContaining({ path: artifactPath, resolvedFrom: spawnPath }),
+  ]));
+  expect(snapshot.stubs).toEqual([{
+    path: failedSpawnPath,
+    kind: "spawn-stub",
+    launch: {
+      launchId: "failed-launch",
+      state: "failed",
+      error: "launch admission failed",
+      retrySafe: true,
+      engine: "codex",
+      cwd: "/repo",
+      createdAt: "2026-07-31T00:00:00.000Z",
+    },
+  }]);
+  expect(snapshot.scope).toMatchObject({ truncated: true, omittedCount: 1 });
 });

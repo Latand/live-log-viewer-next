@@ -1,30 +1,25 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { observeFiles } from "@/lib/scanner/observe";
-import { rejectCrossOrigin } from "@/lib/sameOrigin";
-import { collectSnapshot } from "@/lib/view/collect";
-import { SnapshotError } from "@/lib/view/snapshot";
+import { agentRegistry } from "@/lib/agent/registry";
+import { systemScheduler } from "@/lib/deadline";
+import { completedFileScan } from "@/lib/scanner/scanCache";
 import { resolveSiblings } from "@/lib/view/siblings";
-import { readBoundedJson, validateSnapshotRequest, ViewValidationError } from "@/lib/view/validation";
+
+import { postSnapshot } from "./handler";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-const headers = { "Cache-Control": "no-store" };
+const SNAPSHOT_DEADLINE_MS = 10_000;
+
+const productionDependencies = {
+  completedFileScan,
+  resolveSiblings,
+  snapshotTitleConversations: (conversationIds: readonly string[]) => agentRegistry().snapshotTitleConversations(conversationIds),
+  snapshotSpawns: (launchIds: readonly string[]) => agentRegistry().snapshotSpawns(launchIds),
+  snapshotDeadlineMs: SNAPSHOT_DEADLINE_MS,
+  scheduler: systemScheduler,
+} satisfies Parameters<typeof postSnapshot>[1];
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
-  const rejection = rejectCrossOrigin(request);
-  if (rejection) { rejection.headers.set("Cache-Control", "no-store"); return rejection; }
-  let body: ReturnType<typeof validateSnapshotRequest>;
-  try {
-    body = validateSnapshotRequest(await readBoundedJson(request));
-  } catch (error) {
-    if (error instanceof ViewValidationError) return NextResponse.json({ error: error.code, message: error.message }, { status: error.status, headers });
-    return NextResponse.json({ error: "INVALID_REQUEST", message: "invalid request" }, { status: 400, headers });
-  }
-  try {
-    return NextResponse.json(await collectSnapshot(body, { observeFiles, resolveSiblings }), { headers });
-  } catch (error) {
-    if (error instanceof SnapshotError) return NextResponse.json({ error: error.code, message: error.message, ...(error.sessions ? { sessions: error.sessions } : {}) }, { status: error.status, headers });
-    return NextResponse.json({ error: "SCANNER_UNAVAILABLE", message: "scanner unavailable" }, { status: 503, headers });
-  }
+  return postSnapshot(request, productionDependencies);
 }
