@@ -1341,6 +1341,9 @@ export const en = {
   "scheme.flowTitle": "Run the implement → review cycle for this conversation",
   "scheme.flow": "Flow",
   "scheme.collapsedTitle": "Collapsed branches and tasks of this conversation",
+  /* Lineage the board cannot draw in full (issue #828). */
+  "scheme.ancestorElided": { one: "Parent not drawn on this board: {title}", other: "{count} ancestors not drawn on this board, nearest: {title}" },
+  "scheme.ancestorOffBoard": "Parent conversation is not on this board",
   "scheme.underneath": "underneath",
   "scheme.handTool": "Hand — drag the canvas (H, or hold Space)",
   "scheme.selectTool": "Select — click and work with conversations (V)",

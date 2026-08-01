@@ -59,6 +59,7 @@ import {
   type DraftNode,
   type FlowLoop,
   type MiniStack,
+  type NodeAncestry,
   type SchemeEdge,
   type SchemeGroup,
   type SchemeLayout,
@@ -151,8 +152,18 @@ export const EdgesLayer = memo(function EdgesLayer({
         const lift = Math.max(36, (edge.y2 - y1) * 0.5);
         const curve = `M ${x1} ${y1} C ${x1} ${y1 + lift}, ${edge.x2} ${edge.y2 - lift}, ${edge.x2} ${edge.y2 - 7}`;
         const head = `M ${edge.x2 - 5} ${edge.y2 - 9} L ${edge.x2 + 5} ${edge.y2 - 9} L ${edge.x2} ${edge.y2 - 1} Z`;
+        /* Ancestors the edge spans without drawing them (issue #828): the arrow
+           still runs parent → child, and the marker says how many generations
+           it skipped, so an elided chain can never read as a direct spawn. */
+        const elided = edge.via?.length ?? 0;
         return (
-          <g key={edge.to} opacity={edge.live ? 0.9 : 0.5}>
+          <g
+            key={edge.to}
+            opacity={edge.live ? 0.9 : 0.5}
+            data-scheme-edge={edge.to}
+            data-scheme-edge-from={edge.from}
+            data-scheme-edge-elided={elided ? String(elided) : undefined}
+          >
             <path
               d={curve}
               style={{ d: `path("${curve}")`, transition: `d ${MOVE_MS}ms ${MOVE_EASE}` } as React.CSSProperties}
@@ -180,6 +191,21 @@ export const EdgesLayer = memo(function EdgesLayer({
               style={{ d: `path("${head}")`, transition: `d ${MOVE_MS}ms ${MOVE_EASE}` } as React.CSSProperties}
               fill={edge.color}
             />
+            {elided ? (
+              <>
+                <circle cx={(x1 + edge.x2) / 2} cy={(y1 + edge.y2) / 2} r={12} fill="var(--color-canvas)" stroke={edge.color} strokeWidth={1.5} />
+                <text
+                  x={(x1 + edge.x2) / 2}
+                  y={(y1 + edge.y2) / 2 + 4}
+                  textAnchor="middle"
+                  fontSize={12}
+                  fontWeight={700}
+                  fill={edge.color}
+                >
+                  ⋯{elided}
+                </text>
+              </>
+            ) : null}
           </g>
         );
       })}
@@ -528,6 +554,39 @@ function RecencyChip({ file, className }: { file: FileEntry; className?: string 
   return (
     <span className={`${className ?? ""} shrink-0 tabular-nums text-muted`} title={info.idleTitle ?? undefined}>
       {fmtAge(file.mtime)}
+    </span>
+  );
+}
+
+/**
+ * What the board could NOT draw about this node's lineage (issue #828).
+ *
+ * A card whose parent generation is off the board must say so on the card
+ * itself: either the ancestors the incoming arrow skips, or — when the durable
+ * record names a parent that is not in the scan at all (an old window, a deleted
+ * worktree) — that the conversation continues a lineage the board cannot show.
+ * Without this the same card reads as a root, which is how delegation came to
+ * look inverted; the chip is the explicit alternative to guessing an owner.
+ */
+function AncestryChip({ ancestry }: { ancestry?: NodeAncestry }) {
+  const { t } = useLocale();
+  if (!ancestry) return null;
+  const nearest = ancestry.elided[0];
+  const label = nearest
+    ? t("scheme.ancestorElided", { count: ancestry.elided.length, title: cleanTitle(nearest.title, 60) })
+    : ancestry.unresolvedParentId
+      ? t("scheme.ancestorOffBoard")
+      : null;
+  if (!label) return null;
+  return (
+    <span
+      data-scheme-ancestry-chip
+      className="pointer-events-none absolute -top-3 left-3 z-[7] inline-flex h-6 max-w-[62%] items-center gap-1 rounded-full border border-border bg-card px-2 text-[10.5px] font-bold text-muted shadow-1"
+      title={label}
+      aria-label={label}
+    >
+      <span aria-hidden className="text-[12px] leading-none">↑</span>
+      <span className="truncate">{nearest ? cleanTitle(nearest.title, 40) : label}</span>
     </span>
   );
 }
@@ -936,6 +995,9 @@ function NodeShell({
   return (
     <div
       data-scheme-node={node.file.path}
+      data-scheme-node-host={node.ancestry?.hostPath ?? undefined}
+      data-scheme-node-elided={node.ancestry?.elided.length ? String(node.ancestry.elided.length) : undefined}
+      data-scheme-node-unresolved-parent={node.ancestry?.unresolvedParentId ?? undefined}
       data-pipeline-stage-card={pipelineStage ? `${pipelineStage.pipeline.id}::${pipelineStage.stage.id}` : undefined}
       data-pipeline-stage-state={pipelineStage ? stageChipState(pipelineStage.pipeline, pipelineStage.stage) : undefined}
       data-lasso-selected={marked ? "true" : undefined}
@@ -956,6 +1018,7 @@ function NodeShell({
         /* The promised member tint: readable at far zoom, panes stay legible. */
         <div aria-hidden className="pointer-events-none absolute inset-0 z-[4] rounded-[10px] bg-accent/[0.06]" />
       ) : null}
+      <AncestryChip ancestry={node.ancestry} />
       {pipelineStage ? (
         <span
           className="pointer-events-none absolute -top-3 right-3 z-[7] inline-flex h-6 max-w-[78%] items-center gap-1.5 rounded-full border border-accent/35 bg-card px-2 text-[10.5px] font-bold text-accent shadow-1"

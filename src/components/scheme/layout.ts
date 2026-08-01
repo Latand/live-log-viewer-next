@@ -21,6 +21,7 @@ import {
   type SchemeGroupSpec,
 } from "./agentLinks";
 import { PIPELINE_PLACEHOLDER_STATES, latestAttempt, pipelinePlaceholderStages, stageAttempts, stageRowCollapsible } from "@/components/pipelines/pipelineModel";
+import { buildSchemeLineage } from "./lineageModel";
 import { linkedPipelineTasks } from "./pipelineAnchor";
 import { TASK_W, isPlacedTask, taskBoxHeight } from "./taskGeometry";
 import { type BranchGroup, descendantsOf, isChildConversation, kidsIndex, projectDescendantsOf } from "@/components/projectModel";
@@ -115,6 +116,23 @@ export interface SchemeRect {
   h: number;
 }
 
+/** How a placed node stands in the canonical lineage (issue #828): what the
+    board drew it under, and what it could not draw. Every board surface reads
+    this instead of re-deriving parentage from the raw signals. */
+export interface NodeAncestry {
+  /** The rendered ancestor this node hangs under, or null when it has none. */
+  hostPath: string | null;
+  /** Ancestors between this node and `hostPath` that the board does not draw —
+      the generation an edge would otherwise silently skip. */
+  elided: readonly FileEntry[];
+  /** The parent conversation named by the durable record but absent from the
+      scan (an off-window ancestor, a deleted worktree). The node renders as an
+      explicit continuation instead of borrowing another node's parent. */
+  unresolvedParentId: string | null;
+  /** Generations above this node in the canonical chain. */
+  depth: number;
+}
+
 export interface SchemeNode extends SchemeRect {
   file: FileEntry;
   /** Live background tasks docked inside the pane as collapsed strips. */
@@ -122,6 +140,13 @@ export interface SchemeNode extends SchemeRect {
   /** Quiet history lying "under" the node: previous chats, finished tasks. */
   under: FileEntry[];
   isRoot: boolean;
+  /** Canonical lineage standing of this node (issue #828). Always set by
+      {@link buildSchemeLayout}; optional for the fixtures and mobile
+      projections that assemble a bare rect. */
+  ancestry?: NodeAncestry;
+  /** Lineage sort key: ancestors sort before descendants, independent of
+      activity, so the DOM order follows the hierarchy and never reshuffles. */
+  lineageOrderKey?: string;
 }
 
 /** Not-yet-spawned conversation drafted straight on the scheme. */
@@ -134,9 +159,16 @@ export interface DraftNode extends SchemeRect {
 
 export interface SchemeEdge {
   to: string;
+  /** Board key the edge leaves — the PARENT side. Present on every lineage
+      edge (issue #828) so direction is carried by the model, not inferred from
+      the geometry the layout happened to produce. */
+  from?: string;
   /** Stable lineage identities used by the optional subagent badge anchor. */
   sourceConversationId?: string;
   targetConversationId?: string;
+  /** Canonical ancestors this edge spans without drawing (issue #828): the
+      edge is a "descends from", not a "spawned by", and says so. */
+  via?: readonly FileEntry[];
   x1: number;
   y1: number;
   x2: number;
@@ -309,6 +341,11 @@ export function buildSchemeLayout(
   taskTextExpanded: ReadonlySet<string> = new Set(),
 ): SchemeLayout {
   const byAll = new Map(files.map((file) => [file.path, file]));
+  /* The board's single parentage authority (issue #828). Resolved once per
+     scan, before anything is placed, so hosting, edges, node ancestry and DOM
+     order all read the same forest — and a transient activity/process change
+     can no longer reverse or flatten a relationship at render time. */
+  const lineage = buildSchemeLineage(files);
   const kids = kidsIndex(files);
   const nodes: SchemeNode[] = [];
   const edges: SchemeEdge[] = [];
@@ -719,6 +756,7 @@ export function buildSchemeLayout(
       const placeChild = (child: { file: FileEntry; tasks: FileEntry[] }, atX: number): number => {
         edges.push({
           to: child.file.path,
+          from: col.file.path,
           sourceConversationId: conversationIdentity(col.file),
           targetConversationId: conversationIdentity(child.file),
           x1: x + 40,
@@ -854,29 +892,32 @@ export function buildSchemeLayout(
   const placeGroup = (group: BranchGroup, bandTop: number) => {
     const cols = group.columns;
     if (!cols.length) return;
-    const topPath = cols[0]!.file.path;
     const inGroup = new Set(cols.map((col) => col.file.path));
 
-    /* Nearest displayed ancestor: intermediate quiet nodes are skipped, an
-       unresolvable chain attaches to the group top. */
-    const hostOf = (file: FileEntry): string => {
-      let up: string | null = file.parent;
-      const seen = new Set<string>([file.path]);
-      while (up && !seen.has(up) && !inGroup.has(up)) {
-        seen.add(up);
-        up = byAll.get(up)?.parent ?? null;
-      }
-      return up && inGroup.has(up) && up !== file.path ? up : topPath;
-    };
+    /* Nearest CANONICAL ancestor the group also draws (issue #828): quiet
+       intermediate generations are skipped (the edge reports them as elided),
+       and a column whose chain leaves the group opens a tree of its own. It is
+       never re-hosted on the group's first column — that column may itself be a
+       descendant, which is exactly how a builder came to look like the spawner
+       of its own coordinator. */
+    const hostOf = (file: FileEntry): string | null => lineage.resolveHost(file.path, inGroup).host;
 
     const childrenOf = new Map<string, typeof cols>();
+    const roots: typeof cols = [];
     for (const col of cols) {
-      if (col.file.path === topPath) continue;
-      const parent = hostOf(col.file);
-      const list = childrenOf.get(parent);
+      const host = hostOf(col.file);
+      if (!host) {
+        roots.push(col);
+        continue;
+      }
+      const list = childrenOf.get(host);
       if (list) list.push(col);
-      else childrenOf.set(parent, [col]);
+      else childrenOf.set(host, [col]);
     }
+    /* Hosting follows an acyclic chain, so a non-empty group always has a root;
+       the guard keeps a column from being dropped if that ever stops holding. */
+    if (!roots.length) roots.push(cols[0]!);
+    const topPath = roots[0]!.file.path;
 
     /* Quiet child conversations stay visible on the diagram as mini cards
        wired to their parent; everything else (bash tasks, codex job logs,
@@ -886,7 +927,7 @@ export function buildSchemeLayout(
     for (const file of [...group.returnable, ...group.finished]) {
       if (claimed.has(file.path)) continue;
       if (isChildConversation(file)) {
-        const host = hostOf(file);
+        const host = hostOf(file) ?? topPath;
         const list = stackFor.get(host);
         if (list) list.push(file);
         else stackFor.set(host, [file]);
@@ -895,7 +936,10 @@ export function buildSchemeLayout(
       }
     }
     const deck = new Map<string, FileEntry[]>([[topPath, deckItems]]);
-    cursor += placeTree(cols[0]!, childrenOf, stackFor, deck, group.key, bandTop) + GROUP_GAP;
+    /* Each canonical root is the top of its own tree, so a group whose first
+       column turned out to be a descendant does not leave a child card marked
+       as the root of the branch. */
+    for (const root of roots) cursor += placeTree(root, childrenOf, stackFor, deck, root.file.path, bandTop) + GROUP_GAP;
   };
 
   const placeManual = (file: FileEntry, bandTop: number) => {
@@ -1209,6 +1253,69 @@ export function buildSchemeLayout(
      edge can route into (or out of) a future stage that has no materialized node
      yet — the rail stays continuous inside the halo (#353). */
   for (const slot of slots) anchors.set(slot.key, slot.key);
+  /* ── Canonical lineage reconciliation (issue #828) ────────────────────────
+     Placement has drawn what the board CAN show; this pass makes what it draws
+     agree with the one lineage model. Every placed node records the ancestor it
+     hangs under, the generations that ancestor edge skips, and a parent the scan
+     does not carry at all. Structural edges are then reconciled against that
+     record: an edge the model does not endorse is dropped instead of asserting a
+     spawn that never happened, a node whose canonical ancestor is drawn
+     elsewhere on the board gains exactly one incoming edge, and no pair is ever
+     joined twice or in both directions. */
+  const placedNodePaths = new Set(nodes.map((node) => node.file.path));
+  const nodeByPath = new Map(nodes.map((node) => [node.file.path, node] as const));
+  for (const node of nodes) {
+    const resolution = lineage.resolveHost(node.file.path, placedNodePaths);
+    node.ancestry = {
+      hostPath: resolution.host,
+      elided: resolution.elided.map((path) => byAll.get(path)).filter((file): file is FileEntry => Boolean(file)),
+      unresolvedParentId: resolution.unresolvedParentId,
+      depth: lineage.depthOf(node.file.path),
+    };
+    node.lineageOrderKey = lineage.orderKey(node.file.path);
+  }
+  const lineageEdgeTargets = new Set<string>();
+  const reconciled: SchemeEdge[] = [];
+  for (const edge of edges) {
+    const target = nodeByPath.get(edge.to);
+    /* Stack, deck and draft connectors are attachments, not lineage. */
+    if (!target) {
+      reconciled.push(edge);
+      continue;
+    }
+    const host = target.ancestry?.hostPath ?? null;
+    if (!host || edge.from !== host || lineageEdgeTargets.has(edge.to)) continue;
+    const via = target.ancestry?.elided ?? [];
+    reconciled.push(via.length ? { ...edge, via, dashed: true } : edge);
+    lineageEdgeTargets.add(edge.to);
+  }
+  /* A canonical ancestor the board draws in ANOTHER tree (its own group, a
+     manual placement, a pipeline region) still owns the descendant: the edge
+     spans the boards' trees instead of leaving the node reading as a root. */
+  for (const node of nodes) {
+    const host = node.ancestry?.hostPath;
+    if (!host || lineageEdgeTargets.has(node.file.path)) continue;
+    const source = nodeByPath.get(host);
+    if (!source) continue;
+    reconciled.push({
+      to: node.file.path,
+      from: source.file.path,
+      sourceConversationId: conversationIdentity(source.file),
+      targetConversationId: conversationIdentity(node.file),
+      x1: source.x + 40,
+      y1: source.y + source.h,
+      x2: node.x + node.w / 2,
+      y2: node.y,
+      color: engineColor(node.file),
+      live: node.file.activity === "live",
+      dashed: true,
+      via: node.ancestry?.elided ?? [],
+    });
+    lineageEdgeTargets.add(node.file.path);
+  }
+  edges.length = 0;
+  for (const edge of reconciled) edges.push(edge);
+
   const byPath = new Map<string, SchemeRect>([
     ...nodes.map((node) => [node.file.path, node] as const),
     ...drafts.map((draft) => [draft.key, draft] as const),
@@ -1231,7 +1338,6 @@ export function buildSchemeLayout(
      — a descendant OWNED by a different flow/pipeline is never absorbed (nor is
        its subtree), so one colored region can never swallow another's cards and
        force the two dashed outlines to intersect. */
-  const placedNodePaths = new Set(nodes.map((node) => node.file.path));
   const deckKeyByImplementer = new Map(decks.map((deck) => [deck.flow.implementerPath, deck.key] as const));
   const attachmentKeysOf = (path: string): string[] => {
     const keys: string[] = [];

@@ -1296,6 +1296,9 @@ export const uk: Record<keyof typeof en, Message> = {
   "scheme.flowTitle": "Запустити цикл implement → review для цієї розмови",
   "scheme.flow": "Флоу",
   "scheme.collapsedTitle": "Згорнуті гілки й задачі цієї розмови",
+  /* Лінія походження, яку дошка не може показати повністю (issue #828). */
+  "scheme.ancestorElided": { one: "Батьківську розмову не показано: {title}", few: "{count} предків не показано, найближчий: {title}", many: "{count} предків не показано, найближчий: {title}", other: "{count} предків не показано, найближчий: {title}" },
+  "scheme.ancestorOffBoard": "Батьківської розмови немає на цій дошці",
   "scheme.underneath": "під сподом",
   "scheme.handTool": "Рука — тягнути полотно (H, або тримай Space)",
   "scheme.selectTool": "Виділення — клік і робота з розмовами (V)",
