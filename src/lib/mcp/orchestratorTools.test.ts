@@ -9,6 +9,7 @@ import { requireOperatorAuthority, setCallerConversationResolverForTests } from 
 import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
 import { beginOrchestratorSeatIntent, completeOrchestratorSeatIntent, orchestratorSeatFor } from "@/lib/orchestrator/seats";
 import { replaceOrchestratorIncumbent } from "@/lib/orchestrator/store";
+import { persistProjectAliases } from "@/lib/projects/aliases";
 
 import { viewerMcpBindings, type ViewerControlDependencies } from "./bindings";
 
@@ -154,6 +155,25 @@ test("get_orchestrator surfaces bidirectional predecessor lineage after a replac
   }]);
 });
 
+test("get and send resolve a named project alias to its canonical orchestrator seat", async () => {
+  const canonical = "repo-0123456789abcdef0123456789abcdef";
+  expect(persistProjectAliases([
+    { source: "named-project", target: canonical, displayName: "named-project" },
+  ])).toBe(true);
+  seatActive(canonical, SEATED_ID, "/tmp/o.jsonl");
+
+  const { control } = controlStub();
+  const status = await bindingsWith(control).get_orchestrator({ clientRequestId: "get-alias", project: "named-project" });
+  const delivery = await bindingsWith(control).send_message_to_orchestrator({
+    clientRequestId: "send-alias",
+    project: "named-project",
+    text: "status?",
+  });
+
+  expect(status).toMatchObject({ project: canonical, designated: true, conversationId: SEATED_ID });
+  expect(delivery).toMatchObject({ project: canonical, conversationId: SEATED_ID, created: false });
+});
+
 test("create_orchestrator posts the versioned approved default mandate through the seat route", async () => {
   const { posts, control } = controlStub({
     "/api/orchestrator/seat": { ok: true, conversationId: SEATED_ID, path: "/tmp/o.jsonl", seat: { conversationId: SEATED_ID }, state: "settled" },
@@ -169,6 +189,52 @@ test("create_orchestrator posts the versioned approved default mandate through t
     clientRequestId: "create-1",
   });
   expect(result).toMatchObject({ conversationId: SEATED_ID, transcriptPath: "/tmp/o.jsonl" });
+});
+
+test("create_orchestrator adopts an eligible existing conversation through the seat route", async () => {
+  const { posts, control } = controlStub({
+    "/api/orchestrator/seat": { ok: true, conversationId: SEATED_ID, path: "/tmp/o.jsonl", seat: { conversationId: SEATED_ID }, state: "settled" },
+  });
+
+  const result = await bindingsWith(control).create_orchestrator({
+    clientRequestId: "adopt-01",
+    project: "proj-a",
+    conversationId: SEATED_ID,
+  });
+
+  expect(posts).toHaveLength(1);
+  expect(posts[0]!.pathname).toBe("/api/orchestrator/seat");
+  expect(posts[0]!.body).toMatchObject({
+    project: "proj-a",
+    conversationId: SEATED_ID,
+    clientRequestId: "adopt-01",
+  });
+  expect(result).toMatchObject({ conversationId: SEATED_ID, transcriptPath: "/tmp/o.jsonl" });
+});
+
+test("create_orchestrator reports an accepted asynchronous launch with durable identifiers", async () => {
+  const { control } = controlStub({
+    "/api/orchestrator/seat": {
+      ok: true,
+      accepted: true,
+      state: "accepted",
+      conversationId: SEATED_ID,
+      launchId: "launch_async",
+      seat: { conversationId: SEATED_ID },
+    },
+  });
+
+  const result = await bindingsWith(control).create_orchestrator({
+    clientRequestId: "accepted-01",
+    project: "proj-a",
+  });
+
+  expect(result).toMatchObject({
+    accepted: true,
+    state: "accepted",
+    conversationId: SEATED_ID,
+    launchId: "launch_async",
+  });
 });
 
 test("send_message_to_orchestrator resolves the seat server-side and delivers with the caller's idempotency key", async () => {
@@ -237,7 +303,11 @@ test("a NON-OPERATOR caller cannot designate itself or anyone: create, rotate an
     /* All three designation paths run — the tools are ON the surface for this
        session (axis 1) — and every one is refused by the gate that reads the
        forwarded conversation capability, before anything durable changes. */
-    await expect(tools.create_orchestrator({ clientRequestId: "create-x", project: "proj-a" })).rejects.toThrow();
+    await expect(tools.create_orchestrator({
+      clientRequestId: "create-x",
+      project: "proj-a",
+      conversationId: "conversation_worker",
+    })).rejects.toThrow();
     await expect(tools.rotate_orchestrator({ clientRequestId: "rotate-x", project: "proj-a" })).rejects.toThrow();
     await expect(tools.send_message_to_orchestrator({ clientRequestId: "send-x", project: "proj-a", text: "hi" })).rejects.toThrow();
 
@@ -257,20 +327,19 @@ test("an operator-lane caller (no conversation capability) still designates thro
   expect(result).toMatchObject({ conversationId: SEATED_ID });
 });
 
-test("caller-supplied conversationId and promptVersion NEVER reach the seat route", async () => {
+test("the adoption target reaches the authorized seat route while prompt provenance stays server-owned", async () => {
   const { posts, control } = controlStub({
     "/api/orchestrator/seat": { ok: true, conversationId: SEATED_ID, seat: { conversationId: SEATED_ID } },
   });
   await bindingsWith(control).create_orchestrator({
     clientRequestId: "create-z",
     project: "proj-a",
-    /* A caller that could name a conversation here would seat an EXISTING
-       session — itself — instead of spawning a fresh one; a caller that could
-       set promptVersion would forge mandate provenance. Both are dropped. */
+    /* Route-level operator authorization decides whether this existing
+       conversation can be adopted. Prompt provenance remains server-owned. */
     conversationId: "conversation_worker",
     promptVersion: 99,
   });
-  expect(posts[0]!.body).not.toHaveProperty("conversationId");
+  expect(posts[0]!.body.conversationId).toBe("conversation_worker");
   expect(posts[0]!.body.promptVersion).toBe(ORCHESTRATOR_PROMPT_VERSION);
 
   await bindingsWith(control).rotate_orchestrator({
