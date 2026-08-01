@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { viewerMcpBindings } from "./bindings";
+import { targetedConversationAtPath, viewerMcpBindings, type TargetedConversationDependencies } from "./bindings";
 
 /**
  * The control-plane reads consume ONE completed scan and ONE projection (#845).
@@ -106,11 +106,19 @@ function projection() {
  * therefore the number of GENERATIONS and MATERIALISATIONS — the expensive events —
  * rather than the number of times a read asked.
  */
-function dependencies(options: { scans?: number; projections?: number } = {}) {
+function dependencies(options: { scans?: number; projections?: number; completedTranscript?: boolean } = {}) {
   const allowedScans = options.scans ?? 1;
   const allowedProjections = options.projections ?? 1;
-  const counts = { scans: 0, projections: 0, rawScans: 0, observations: 0, scanCalls: 0, projectionCalls: 0 };
-  const snapshot = { files: Array.from({ length: SCAN_ROWS }, (_value, index) => scanRow(index)), projectCatalog: [], complete: true };
+  const counts = { scans: 0, projections: 0, rawScans: 0, targetedReads: 0, observations: 0, scanCalls: 0, projectionCalls: 0 };
+  const completedTranscript = options.completedTranscript ?? true;
+  const snapshot = {
+    files: Array.from({ length: SCAN_ROWS }, (_value, index) => completedTranscript || index > 0
+      ? scanRow(index)
+      : { ...scanRow(index), path: "/sessions/completed-generation-other.jsonl" }),
+    projectCatalog: [],
+    complete: true,
+  };
+  const targetedCalls: Array<{ pathname: string; signal: AbortSignal | undefined; deadlineAt: number | undefined }> = [];
   let inflight: Promise<{ snapshot: typeof snapshot }> | null = null;
   let materialised: ReturnType<typeof projection> | null = null;
   return {
@@ -139,6 +147,11 @@ function dependencies(options: { scans?: number; projections?: number } = {}) {
         counts.rawScans += 1;
         throw new Error("a control-plane read must not start a raw corpus scan");
       },
+      targetedFileEntry: async (pathname: string, options: { signal?: AbortSignal; deadlineAt?: number } = {}) => {
+        counts.targetedReads += 1;
+        targetedCalls.push({ pathname, signal: options.signal, deadlineAt: options.deadlineAt });
+        return pathname === transcriptPath ? scanRow(0) : undefined;
+      },
       /* Stands in for transcript-only composition: the completed generation is
          consumed while the injected registry projection remains lazy. */
       collectSnapshot: async (_body: unknown, deps: {
@@ -152,6 +165,7 @@ function dependencies(options: { scans?: number; projections?: number } = {}) {
       },
       boardFor: () => null,
     } as never,
+    targetedCalls,
   };
 }
 
@@ -177,6 +191,164 @@ test("get_conversation reads the completed generation when it already carries th
      it does, so the private exclusive scan never runs. */
   expect(counts.rawScans).toBe(0);
   expect(counts.scans).toBe(1);
+});
+
+test("get_conversation hydrates one known transcript after a completed miss and propagates its bound", async () => {
+  const { counts, injected, targetedCalls } = dependencies({ completedTranscript: false });
+  const bindings = viewerMcpBindings(undefined, undefined, injected);
+  const controller = new AbortController();
+  const deadlineAt = Date.now() + 1_000;
+
+  const result = await bindings.get_conversation(
+    { clientRequestId: "get-targeted", transcriptPath },
+    { signal: controller.signal, deadlineAt },
+  ) as { transcriptPath: string };
+
+  expect(result.transcriptPath).toBe(transcriptPath);
+  expect(counts.scans).toBe(1);
+  expect(counts.targetedReads).toBe(1);
+  expect(counts.rawScans).toBe(0);
+  expect(targetedCalls).toEqual([{ pathname: transcriptPath, signal: controller.signal, deadlineAt }]);
+});
+
+test("get_conversation cancels a targeted miss when its caller leaves", async () => {
+  const { counts, injected } = dependencies({ completedTranscript: false });
+  let started!: () => void;
+  const targetedStarted = new Promise<void>((resolve) => { started = resolve; });
+  let targetedSignal: AbortSignal | undefined;
+  const domain = injected as unknown as {
+    targetedFileEntry(pathname: string, options?: { signal?: AbortSignal; deadlineAt?: number }): Promise<ReturnType<typeof scanRow> | undefined>;
+  };
+  domain.targetedFileEntry = async (_pathname, options = {}) => new Promise((_resolve, reject) => {
+    targetedSignal = options.signal;
+    started();
+    options.signal?.addEventListener("abort", () => reject(options.signal?.reason), { once: true });
+  });
+  const bindings = viewerMcpBindings(undefined, undefined, injected);
+  const controller = new AbortController();
+  const call = bindings.get_conversation(
+    { clientRequestId: "get-cancelled", transcriptPath },
+    { signal: controller.signal, deadlineAt: Date.now() + 1_000 },
+  );
+  const startState = await Promise.race([
+    targetedStarted.then(() => "targeted" as const),
+    call.then(() => "resolved" as const, () => "rejected" as const),
+    Bun.sleep(250).then(() => "timed-out" as const),
+  ]);
+  expect(startState).toBe("targeted");
+  controller.abort(new DOMException("caller left", "AbortError"));
+
+  await expect(call).rejects.toMatchObject({ name: "AbortError" });
+  expect(targetedSignal?.aborted).toBeTrue();
+  expect(counts.targetedReads).toBe(0);
+  expect(counts.rawScans).toBe(0);
+});
+
+test("get_conversation deadlines a targeted miss without orphan work", async () => {
+  const { counts, injected } = dependencies({ completedTranscript: false });
+  let targetedSignal: AbortSignal | undefined;
+  const domain = injected as unknown as {
+    targetedFileEntry(pathname: string, options?: { signal?: AbortSignal; deadlineAt?: number }): Promise<ReturnType<typeof scanRow> | undefined>;
+  };
+  domain.targetedFileEntry = async (_pathname, options = {}) => new Promise((_resolve, reject) => {
+    targetedSignal = options.signal;
+    options.signal?.addEventListener("abort", () => reject(options.signal?.reason), { once: true });
+  });
+  const bindings = viewerMcpBindings(undefined, undefined, injected);
+
+  const call = bindings.get_conversation(
+    { clientRequestId: "get-deadline", transcriptPath },
+    { deadlineAt: Date.now() + 20 },
+  );
+
+  await expect(call).rejects.toMatchObject({ name: "DeadlineExceededError" });
+  expect(targetedSignal?.aborted).toBeTrue();
+  expect(counts.rawScans).toBe(0);
+});
+
+test("targeted conversation opens one canonical regular transcript and retains its title", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-targeted-open-"));
+  sandboxes.push(directory);
+  const root = path.join(directory, "sessions");
+  fs.mkdirSync(root);
+  const pathname = path.join(root, "rollout.jsonl");
+  fs.writeFileSync(pathname, [
+    JSON.stringify({ type: "session_meta", payload: { id: "fixture", timestamp: "2026-07-01T09:00:00.000Z", cwd: "/repo/fixture" } }),
+    JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "canonical title" }] } }),
+    JSON.stringify({ type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "bounded answer" }] } }),
+  ].join("\n") + "\n");
+
+  const targeted = await targetedConversationAtPath(pathname, {}, {
+    roots: [["codex-sessions", root]],
+    pathAllowed: (candidate) => fs.realpathSync(candidate).startsWith(fs.realpathSync(root) + path.sep),
+  });
+
+  expect(targeted?.entry).toMatchObject({ path: pathname, title: "canonical title", engine: "codex" });
+  expect(targeted?.session.messages.at(-1)?.text).toBe("bounded answer");
+});
+
+test("targeted conversation retains a safely opened Claude subagent sidecar title", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-targeted-sidecar-"));
+  sandboxes.push(directory);
+  const root = path.join(directory, "projects");
+  const project = path.join(root, "-repo-fixture");
+  fs.mkdirSync(project, { recursive: true });
+  const pathname = path.join(project, "agent-fixture.jsonl");
+  fs.writeFileSync(pathname, `${JSON.stringify({ type: "user", cwd: "/repo/fixture", message: { content: "fallback title" } })}\n`);
+  fs.writeFileSync(pathname.replace(/\.jsonl$/, ".meta.json"), JSON.stringify({ description: "sidecar title" }));
+  const pathAllowed = (candidate: string) => {
+    try { return fs.realpathSync(candidate).startsWith(fs.realpathSync(root) + path.sep); } catch { return false; }
+  };
+
+  const targeted = await targetedConversationAtPath(pathname, {}, {
+    roots: [["claude-projects", root]],
+    pathAllowed,
+  });
+
+  expect(targeted?.entry).toMatchObject({ title: "sidecar title", engine: "claude", kind: "subagent" });
+});
+
+test("targeted conversation rejects external symlinks and a path swapped after safe open", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-targeted-race-"));
+  sandboxes.push(directory);
+  const root = path.join(directory, "sessions");
+  const external = path.join(directory, "external");
+  fs.mkdirSync(root);
+  fs.mkdirSync(external);
+  const externalPath = path.join(external, "outside.jsonl");
+  const externalBody = `${JSON.stringify({ type: "session_meta", payload: { cwd: "/outside" } })}\n`;
+  fs.writeFileSync(externalPath, externalBody);
+  const symlinkPath = path.join(root, "external-link.jsonl");
+  fs.symlinkSync(externalPath, symlinkPath);
+  const pathAllowed = (candidate: string) => {
+    try { return fs.realpathSync(candidate).startsWith(fs.realpathSync(root) + path.sep); } catch { return false; }
+  };
+
+  const targetedDependencies: TargetedConversationDependencies = {
+    roots: [["codex-sessions", root]],
+    pathAllowed,
+  };
+  expect(await targetedConversationAtPath(symlinkPath, {}, targetedDependencies)).toBeUndefined();
+  const { injected } = dependencies({ completedTranscript: false });
+  const domain = injected as unknown as {
+    targetedFileEntry(pathname: string, options?: { signal?: AbortSignal; deadlineAt?: number }): ReturnType<typeof targetedConversationAtPath>;
+  };
+  domain.targetedFileEntry = (candidate, options = {}) => targetedConversationAtPath(candidate, options, targetedDependencies);
+  await expect(viewerMcpBindings(undefined, undefined, injected).get_conversation({
+    clientRequestId: "external-symlink",
+    transcriptPath: symlinkPath,
+  })).rejects.toThrow("conversation not found");
+
+  const swappedPath = path.join(root, "swapped.jsonl");
+  fs.writeFileSync(swappedPath, `${JSON.stringify({ type: "session_meta", payload: { cwd: "/inside" } })}\n`);
+  expect(await targetedConversationAtPath(swappedPath, {}, {
+    roots: [["codex-sessions", root]],
+    pathAllowed,
+    afterOpen: () => {
+      fs.unlinkSync(swappedPath);
+      fs.symlinkSync(externalPath, swappedPath);
+    },
+  })).toBeUndefined();
 });
 
 test("board_snapshot still consumes one scan and one projection", async () => {

@@ -1,4 +1,7 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import { agentRegistry, readOnlyConversationLookupFromSnapshot } from "@/lib/agent/registry";
 import { procBackend } from "@/lib/proc";
@@ -12,6 +15,7 @@ import { geometricFrameRect, isFocusTarget, isGeometricTarget } from "@/lib/atte
 import type { FocusIntent, FocusTarget, ZoomIntent } from "@/lib/attention/types";
 import { boardFor } from "@/lib/board/store";
 import { applyConversationAction } from "@/lib/conversation/actions";
+import { DeadlineExceededError, deadlineSignal } from "@/lib/deadline";
 import { cancelRound, closeFlow, patchFlow } from "@/lib/flows/commands";
 import { getFlowsWithPresets } from "@/lib/flows/engine";
 import type { PatchFlowRequest } from "@/lib/flows/types";
@@ -35,13 +39,15 @@ import { requestPipelineTick } from "@/lib/pipelines/controllerSignal";
 import { projectTaskPipelineIds } from "@/lib/pipelines/taskBinding";
 import type { CreatePipelineRequest, PatchPipelineRequest, PipelineAction } from "@/lib/pipelines/types";
 import { listFiles } from "@/lib/scanner";
-import { projectForCwd } from "@/lib/scanner/describe";
+import { describe, projectForCwd, reprojectFileDescription } from "@/lib/scanner/describe";
+import { pathAllowed, scanRootEntries } from "@/lib/scanner/roots";
 import { completedFileScan } from "@/lib/scanner/scanCache";
 import { readResources } from "@/lib/resources";
 import { adoptLiveRootSession, conversationRole, liveRootSession, type RootSessionSource } from "@/lib/root/adopt";
 import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
 import { ledgerDeployment, ledgerDeployments } from "@/lib/runtime/deploymentLedger";
-import { readSession } from "@/lib/session/reader";
+import { readSession, type SessionReadResult } from "@/lib/session/reader";
+import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { applyAssignmentPatches, createTask, patchTask, type CreateTaskInput, type PatchTaskInput } from "@/lib/tasks/commands";
 import { isoNow } from "@/lib/tasks/helpers";
 import { loadTasks, mutateTasks, mutateTasksFile } from "@/lib/tasks/store";
@@ -52,7 +58,7 @@ import { resolveSiblings } from "@/lib/view/siblings";
 import { hardenedRedact } from "@/lib/view/compactText";
 import { validateSnapshotRequest } from "@/lib/view/validation";
 
-import { McpToolRefusal, type McpToolArgs, type McpToolBindings, type McpToolPayload } from "./server";
+import { McpToolRefusal, type McpToolArgs, type McpToolBindings, type McpToolCallContext, type McpToolPayload } from "./server";
 import { mcpCallerIdentity, mcpToolPolicy, type ManagerTarget, type McpToolPolicy } from "./toolAllowlist";
 
 const PIPELINE_CONTROLLER_ACTIONS = new Set<PipelineAction>(["start", "resume", "retry-stage", "skip-stage"]);
@@ -184,6 +190,7 @@ type RegistrySnapshot = ReturnType<ReturnType<typeof agentRegistry>["readOnlySna
 
 export interface ViewerMcpDomainDependencies {
   listFiles(options?: Parameters<typeof listFiles>[0]): Promise<FileEntry[]>;
+  targetedFileEntry?(pathname: string, options?: McpToolCallContext): Promise<TargetedConversationRead | FileEntry | undefined>;
   completedFileScan(options?: Parameters<typeof completedFileScan>[0]): ReturnType<typeof completedFileScan>;
   registrySnapshot(): RegistrySnapshot;
   boardFor(project: string): ReturnType<typeof boardFor>;
@@ -355,6 +362,7 @@ function attentionCallerSources(): AttentionCallerSources {
 
 const productionDomainDependencies: ViewerMcpDomainDependencies = {
   listFiles,
+  targetedFileEntry: targetedFileEntry,
   completedFileScan,
   registrySnapshot: () => agentRegistry().readOnlySnapshot(),
   boardFor,
@@ -550,24 +558,222 @@ async function linkTaskToPipeline(args: McpToolArgs, dependencies: LinkTaskToPip
   return { taskId, pipelineId, task: result.task, conversationId, transcriptPath };
 }
 
+function throwIfCallEnded(context: McpToolCallContext): void {
+  if (context.signal?.aborted) {
+    const reason = context.signal.reason;
+    throw reason instanceof Error ? reason : new DOMException("MCP tool cancelled", "AbortError");
+  }
+  if (context.deadlineAt !== undefined && Date.now() >= context.deadlineAt) {
+    throw new DeadlineExceededError("MCP tool deadline exceeded", 0);
+  }
+}
+
+function contained(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative !== "" && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+function rootForTranscript(
+  pathname: string,
+  roots: ReturnType<typeof scanRootEntries>,
+): ReturnType<typeof scanRootEntries>[number] | undefined {
+  let canonical: string;
+  try { canonical = fs.realpathSync(pathname); } catch { return undefined; }
+  return roots.find(([, root]) => {
+    try { return contained(fs.realpathSync(root), canonical); } catch { return false; }
+  });
+}
+
+export interface TargetedConversationRead {
+  entry: FileEntry;
+  session: SessionReadResult;
+}
+
+export interface TargetedConversationDependencies {
+  roots: ReturnType<typeof scanRootEntries>;
+  pathAllowed(candidate: string): boolean;
+  /** Deterministic race seam used by the focused security test. */
+  afterOpen?(): void;
+}
+
+function sameOpenedTranscript(
+  pathname: string,
+  root: string,
+  opened: fs.Stats,
+  allowed: (candidate: string) => boolean,
+): boolean {
+  if (!allowed(pathname)) return false;
+  try {
+    const listed = fs.lstatSync(pathname);
+    const canonicalRoot = fs.realpathSync(root);
+    const canonicalPath = fs.realpathSync(pathname);
+    return listed.isFile()
+      && !listed.isSymbolicLink()
+      && listed.dev === opened.dev
+      && listed.ino === opened.ino
+      && contained(canonicalRoot, canonicalPath);
+  } catch {
+    return false;
+  }
+}
+
+function descriptorPath(descriptor: number): string {
+  return process.platform === "linux" ? `/proc/self/fd/${descriptor}` : `/dev/fd/${descriptor}`;
+}
+
 /**
- * One completed generation, and a private pinned scan ONLY when it misses (#845).
+ * Hydrate and parse one known transcript through a pinned descriptor.
  *
- * Every read of a single conversation used to force `fresh: true` with a pin, which
- * is a full-corpus walk in an exclusive scan generation — per call, for a question
- * the completed generation almost always already answers. The pin exists for the
- * case it was built for: a transcript outside the recency cap, which the completed
- * snapshot genuinely does not carry.
+ * The public path is canonicalized against the registered scanner roots, then
+ * opened with O_NOFOLLOW. Metadata and tail parsing use a private alias to that
+ * descriptor, so a parent or leaf swap can only make the final identity check
+ * reject the result; it cannot redirect either bounded read.
+ */
+export async function targetedConversationAtPath(
+  pathname: string,
+  context: McpToolCallContext = {},
+  injectedDependencies?: TargetedConversationDependencies,
+): Promise<TargetedConversationRead | undefined> {
+  const dependencies = injectedDependencies ?? { roots: scanRootEntries(), pathAllowed };
+  throwIfCallEnded(context);
+  if (!dependencies.pathAllowed(pathname)) return undefined;
+  const rooted = rootForTranscript(pathname, dependencies.roots);
+  if (!rooted) return undefined;
+  const [rootName, root] = rooted;
+  let descriptor: number | null = null;
+  let sidecarDescriptor: number | null = null;
+  let sidecarPath: string | null = null;
+  let sidecarStat: fs.Stats | null = null;
+  let stableDirectory: string | null = null;
+  try {
+    descriptor = fs.openSync(pathname, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR" || code === "ELOOP" || code === "EACCES") return undefined;
+    throw error;
+  }
+  try {
+    const stat = fs.fstatSync(descriptor);
+    if (!stat.isFile() || stat.size === 0) return undefined;
+    dependencies.afterOpen?.();
+    if (!sameOpenedTranscript(pathname, root, stat, dependencies.pathAllowed)) return undefined;
+    throwIfCallEnded(context);
+
+    if (rootName === "claude-projects" && path.basename(pathname).startsWith("agent-") && pathname.endsWith(".jsonl")) {
+      const candidate = pathname.slice(0, -".jsonl".length) + ".meta.json";
+      if (dependencies.pathAllowed(candidate)) {
+        try {
+          sidecarDescriptor = fs.openSync(candidate, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+          const openedSidecar = fs.fstatSync(sidecarDescriptor);
+          if (openedSidecar.isFile() && sameOpenedTranscript(candidate, root, openedSidecar, dependencies.pathAllowed)) {
+            sidecarPath = candidate;
+            sidecarStat = openedSidecar;
+          } else {
+            fs.closeSync(sidecarDescriptor);
+            sidecarDescriptor = null;
+          }
+        } catch {
+          if (sidecarDescriptor !== null) fs.closeSync(sidecarDescriptor);
+          sidecarDescriptor = null;
+        }
+      }
+    }
+
+    stableDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-targeted-"));
+    fs.chmodSync(stableDirectory, 0o700);
+    const stablePath = path.join(stableDirectory, path.basename(pathname));
+    fs.symlinkSync(descriptorPath(descriptor), stablePath);
+    if (sidecarDescriptor !== null && sidecarPath !== null) {
+      fs.symlinkSync(descriptorPath(sidecarDescriptor), stablePath.slice(0, -".jsonl".length) + ".meta.json");
+    }
+    const pinnedMetadata = describe(rootName, root, stablePath, stat);
+    const metadata = reprojectFileDescription(rootName, root, pathname, pinnedMetadata);
+    const entry: FileEntry = {
+      path: pathname,
+      root: rootName,
+      name: path.relative(root, pathname),
+      project: metadata.project,
+      projectName: metadata.projectName,
+      projectUnresolved: metadata.projectUnresolved,
+      worktree: metadata.worktree,
+      cwd: metadata.cwd,
+      sessionStartedAt: metadata.sessionStartedAt,
+      nativeParentThreadId: metadata.nativeParentThreadId,
+      nativeForkSourceThreadId: metadata.nativeForkSourceThreadId,
+      projectRoot: metadata.projectRoot,
+      title: metadata.title,
+      engine: metadata.engine,
+      kind: metadata.kind,
+      fmt: metadata.fmt,
+      parent: null,
+      mtime: stat.mtimeMs / 1_000,
+      size: stat.size,
+      activity: "idle",
+      proc: null,
+      pid: null,
+      model: null,
+      pendingQuestion: null,
+      waitingInput: null,
+    };
+    overlaySessionTitles([entry]);
+    if (entry.engine !== "claude" && entry.engine !== "codex") return undefined;
+    const session = { ...readSession(stablePath, entry.engine), path: pathname };
+    throwIfCallEnded(context);
+    if (!sameOpenedTranscript(pathname, root, stat, dependencies.pathAllowed)) return undefined;
+    if (sidecarDescriptor !== null && sidecarPath !== null && sidecarStat !== null
+      && !sameOpenedTranscript(sidecarPath, root, sidecarStat, dependencies.pathAllowed)) return undefined;
+    return { entry, session };
+  } finally {
+    if (stableDirectory !== null) fs.rmSync(stableDirectory, { recursive: true, force: true });
+    if (sidecarDescriptor !== null) fs.closeSync(sidecarDescriptor);
+    if (descriptor !== null) fs.closeSync(descriptor);
+  }
+}
+
+async function targetedFileEntry(
+  pathname: string,
+  context: McpToolCallContext = {},
+): Promise<TargetedConversationRead | undefined> {
+  return targetedConversationAtPath(pathname, context);
+}
+
+/**
+ * Read one completed generation, then hydrate only the requested transcript on
+ * a miss. Production never reserves a private full-corpus scan for this lookup.
  */
 async function entryForPath(
   transcriptPath: string,
-  dependencies: Pick<ViewerMcpDomainDependencies, "listFiles" | "completedFileScan">,
-): Promise<FileEntry | undefined> {
-  const completed = (await dependencies.completedFileScan()).snapshot.files;
-  const known = completed.find((candidate) => candidate.path === transcriptPath);
-  if (known) return known;
-  const pinned = await dependencies.listFiles({ fresh: true, persist: false, pin: transcriptPath });
-  return pinned.find((candidate) => candidate.path === transcriptPath);
+  dependencies: Pick<ViewerMcpDomainDependencies, "listFiles" | "completedFileScan" | "targetedFileEntry">,
+  context: McpToolCallContext = {},
+): Promise<{ entry: FileEntry; session?: SessionReadResult } | undefined> {
+  throwIfCallEnded(context);
+  const timeoutMs = context.deadlineAt === undefined
+    ? Number.POSITIVE_INFINITY
+    : Math.max(0, context.deadlineAt - Date.now());
+  const deadline = deadlineSignal(timeoutMs, {
+    signal: context.signal,
+    reason: "MCP tool deadline exceeded",
+  });
+  try {
+    const completed = (await dependencies.completedFileScan({ signal: deadline.signal })).snapshot.files;
+    const known = completed.find((candidate) => candidate.path === transcriptPath);
+    if (known) return { entry: known };
+    if (dependencies.targetedFileEntry) {
+      const targeted = await dependencies.targetedFileEntry(transcriptPath, {
+        signal: deadline.signal,
+        deadlineAt: context.deadlineAt,
+      });
+      if (!targeted) return undefined;
+      return "entry" in targeted ? targeted : { entry: targeted };
+    }
+    /* Compatibility for older injected test adapters. Production always owns
+       the targeted seam above. */
+    const pinned = await dependencies.listFiles({ fresh: true, persist: false, pin: transcriptPath, signal: deadline.signal });
+    const entry = pinned.find((candidate) => candidate.path === transcriptPath);
+    return entry ? { entry } : undefined;
+  } finally {
+    deadline.release();
+  }
 }
 
 async function listConversations(
@@ -600,8 +806,10 @@ async function listConversations(
 
 async function getConversation(
   args: McpToolArgs,
-  dependencies: Pick<ViewerMcpDomainDependencies, "listFiles" | "completedFileScan">,
+  dependencies: Pick<ViewerMcpDomainDependencies, "listFiles" | "completedFileScan" | "targetedFileEntry">,
+  context: McpToolCallContext = {},
 ): Promise<McpToolPayload> {
+  throwIfCallEnded(context);
   const requestedId = text(args.conversationId);
   const requestedPath = text(args.transcriptPath) || text(args.path);
   if (!requestedId && !requestedPath) throw new Error("conversationId or transcriptPath is required");
@@ -609,9 +817,12 @@ async function getConversation(
     ? agentRegistry().conversation(requestedId as `conversation_${string}`)
     : agentRegistry().conversationForPath(requestedPath);
   const transcriptPath = conversation?.generations.at(-1)?.path ?? requestedPath;
-  const entry = await entryForPath(transcriptPath, dependencies);
+  const targeted = await entryForPath(transcriptPath, dependencies, context);
+  const entry = targeted?.entry;
   if (!entry || (entry.engine !== "claude" && entry.engine !== "codex")) throw new Error("conversation not found");
-  const session = readSession(entry.path, entry.engine);
+  throwIfCallEnded(context);
+  const session = targeted.session ?? readSession(entry.path, entry.engine);
+  throwIfCallEnded(context);
   const maxRecords = Math.max(1, Math.min(500, integer(args.maxRecords, 100)));
   return redactPayload({
     conversationId: (conversation?.id ?? entry.conversationId ?? requestedId) || null,
@@ -1478,9 +1689,9 @@ async function focusTargetProject(
   if (isGeometricTarget(target)) return target.project;
   switch (target.kind) {
     case "conversation": {
-      const entry = await entryForPath(target.path, dependencies);
-      if (!entry) throw new Error("no conversation on the board has that transcript path");
-      return entry.project;
+      const targeted = await entryForPath(target.path, dependencies);
+      if (!targeted) throw new Error("no conversation on the board has that transcript path");
+      return targeted.entry.project;
     }
     case "pipeline":
     case "stage": {
@@ -1631,7 +1842,7 @@ export function viewerMcpBindings(
     pipeline_action: (args) => pipelineAction(args, domainDependencies),
     link_task_to_pipeline: (args) => linkTaskToPipeline(args, linkTaskDependencies),
     list_conversations: (args) => listConversations(args, domainDependencies),
-    get_conversation: (args) => getConversation(args, domainDependencies),
+    get_conversation: (args, context) => getConversation(args, domainDependencies, context),
     deploy_exact_sha: (args) => deployExactSha(args, controlDependencies, domainDependencies),
     get_pipeline: getPipeline,
     board_snapshot: (args) => boardSnapshot(args, domainDependencies),
