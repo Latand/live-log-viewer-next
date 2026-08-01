@@ -8,15 +8,19 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { PIPELINE_ACTIONS } from "@/lib/pipelines/types";
 import { SNAPSHOT_CALLER_KEYS, SNAPSHOT_SCOPE_KEYS, SNAPSHOT_TEXT_KEYS, SNAPSHOT_VIEW_KEYS } from "@/lib/view/types";
+import { DeadlineExceededError } from "@/lib/deadline";
 
 import {
   MCP_TOOL_NAMES,
   TOOL_INPUT_SCHEMAS,
   FileMcpReceiptStore,
   MemoryMcpReceiptStore,
+  McpToolTimingAggregate,
+  SqliteMcpReceiptStore,
   createViewerMcpServer,
   createMcpToolService,
   type McpToolBindings,
+  type McpReceiptStore,
 } from "./server";
 
 const scratch: string[] = [];
@@ -67,6 +71,237 @@ async function childResult(child: { exited: Promise<number>; stderr: ReadableStr
 }
 
 describe("MCP tool service", () => {
+  test("production-shaped receipts stay bounded under twenty concurrent fresh calls and replays", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-receipts-sqlite-"));
+    scratch.push(directory);
+    const legacyPath = path.join(directory, "mcp-receipts.json");
+    const sqlitePath = path.join(directory, "mcp-receipts.sqlite");
+    const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [toolName, async () => ({})])) as unknown as McpToolBindings;
+    const durableArgs = { clientRequestId: "durable-before-sqlite", conversationId: "conversation_fixture", text: "hello" };
+
+    /* Produce one real legacy receipt through the public seam so migration is
+       checked against the same digest/idempotency contract as production. */
+    const legacyService = createMcpToolService(bindings, new FileMcpReceiptStore(legacyPath));
+    const durableResult = await legacyService.callTool("send_message", durableArgs);
+    const legacy = JSON.parse(fs.readFileSync(legacyPath, "utf8")) as {
+      version: 2;
+      readReceipts: Record<string, unknown>;
+      mutationReceipts: Record<string, unknown>;
+    };
+    const digest = "a".repeat(64);
+    for (let index = 0; index < 2_100; index += 1) {
+      const clientRequestId = `durable-fixture-${index}`;
+      legacy.mutationReceipts[`send_message:${clientRequestId}`] = {
+        digest,
+        result: {
+          ok: true,
+          toolName: "send_message",
+          clientRequestId,
+          replayed: false,
+          operationId: `operation_fixture_${index}`,
+        },
+      };
+    }
+    const bulkyResults = [
+      ...Array.from({ length: 22 }, () => ["list_pipelines", "x".repeat(400_000)] as const),
+      ...Array.from({ length: 79 }, () => ["get_conversation", "x".repeat(55_000)] as const),
+      ...Array.from({ length: 6 }, () => ["list_flows", "x".repeat(385_000)] as const),
+      ...Array.from({ length: 393 }, () => ["list_tasks", "x".repeat(8_000)] as const),
+    ];
+    for (const [index, [toolName, payload]] of bulkyResults.entries()) {
+      const clientRequestId = `read-fixture-${index}`;
+      legacy.readReceipts[`${toolName}:${clientRequestId}`] = {
+        digest,
+        result: { ok: true, toolName, clientRequestId, replayed: false, payload },
+      };
+    }
+    fs.writeFileSync(legacyPath, JSON.stringify(legacy));
+
+    let bindingCalls = 0;
+    bindings.list_tasks = async () => {
+      bindingCalls += 1;
+      return { count: 1, tasks: [{ state: "ready" }] };
+    };
+    const store = new SqliteMcpReceiptStore(sqlitePath, { legacyFilePath: legacyPath });
+    const service = createMcpToolService(bindings, store);
+    expect(await service.callTool("send_message", durableArgs)).toEqual({ ...durableResult, replayed: true });
+    expect(await service.callTool("send_message", { ...durableArgs, text: "changed" })).toMatchObject({
+      ok: false,
+      code: "idempotency_conflict",
+      replayed: true,
+    });
+
+    const measure = async (clientRequestId: string) => {
+      const startedAt = performance.now();
+      const result = await service.callTool("list_tasks", { clientRequestId, limit: 1 });
+      return { durationMs: performance.now() - startedAt, result };
+    };
+    const fresh = await Promise.all(Array.from({ length: 20 }, (_value, index) => measure(`concurrent-${index}`)));
+    const replay = await Promise.all(Array.from({ length: 20 }, (_value, index) => measure(`concurrent-${index}`)));
+    const percentile = (values: number[], quantile: number) => values.toSorted((left, right) => left - right)[Math.ceil(values.length * quantile) - 1]!;
+
+    expect(fresh.every(({ result }) => result.ok && !result.replayed)).toBeTrue();
+    expect(replay.every(({ result }) => result.ok && result.replayed)).toBeTrue();
+    expect(bindingCalls).toBe(20);
+    expect(percentile(fresh.map(({ durationMs }) => durationMs), 0.95)).toBeLessThan(250);
+    expect(percentile(replay.map(({ durationMs }) => durationMs), 0.95)).toBeLessThan(100);
+
+    store.close();
+    expect(fs.statSync(sqlitePath).size).toBeLessThan(12 * 1024 * 1024);
+    fs.writeFileSync(legacyPath, "legacy import must not run twice");
+    const restarted = createMcpToolService(bindings, new SqliteMcpReceiptStore(sqlitePath, { legacyFilePath: legacyPath }));
+    expect(await restarted.callTool("send_message", durableArgs)).toEqual({ ...durableResult, replayed: true });
+  }, 30_000);
+
+  test("SQLite read receipt count retention expires the oldest completed replay", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-receipts-count-"));
+    scratch.push(directory);
+    let bindingCalls = 0;
+    const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [toolName, async () => ({})])) as unknown as McpToolBindings;
+    bindings.list_tasks = async () => ({ bindingCall: ++bindingCalls });
+    const store = new SqliteMcpReceiptStore(path.join(directory, "receipts.sqlite"), {
+      readReceiptCountCap: 2,
+      readReceiptByteCap: 1_000_000,
+    });
+    const service = createMcpToolService(bindings, store);
+
+    for (const clientRequestId of ["count-1", "count-2", "count-3"]) {
+      expect((await service.callTool("list_tasks", { clientRequestId })).replayed).toBeFalse();
+    }
+    expect((await service.callTool("list_tasks", { clientRequestId: "count-1" })).replayed).toBeFalse();
+    expect(bindingCalls).toBe(4);
+    store.close();
+  });
+
+  test("SQLite read receipt byte retention expires oversized completed replays", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-receipts-bytes-"));
+    scratch.push(directory);
+    let bindingCalls = 0;
+    const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [toolName, async () => ({})])) as unknown as McpToolBindings;
+    bindings.list_tasks = async () => ({ bindingCall: ++bindingCalls, payload: "x".repeat(512) });
+    const store = new SqliteMcpReceiptStore(path.join(directory, "receipts.sqlite"), {
+      readReceiptCountCap: 100,
+      readReceiptByteCap: 1_000,
+    });
+    const service = createMcpToolService(bindings, store);
+
+    await service.callTool("list_tasks", { clientRequestId: "bytes-1" });
+    await service.callTool("list_tasks", { clientRequestId: "bytes-2" });
+    expect((await service.callTool("list_tasks", { clientRequestId: "bytes-1" })).replayed).toBeFalse();
+    expect(bindingCalls).toBe(3);
+    store.close();
+  });
+
+  test("separate SQLite store instances preserve one durable mutation owner", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-receipts-instances-"));
+    scratch.push(directory);
+    const filename = path.join(directory, "receipts.sqlite");
+    let release!: () => void;
+    let started!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const bindingStarted = new Promise<void>((resolve) => { started = resolve; });
+    let bindingCalls = 0;
+    const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [toolName, async () => ({})])) as unknown as McpToolBindings;
+    bindings.send_message = async () => {
+      bindingCalls += 1;
+      started();
+      await held;
+      return { operationId: "operation-sqlite-owner" };
+    };
+    const firstStore = new SqliteMcpReceiptStore(filename);
+    const secondStore = new SqliteMcpReceiptStore(filename);
+    const args = { clientRequestId: "sqlite-owner", conversationId: "conversation_fixture", text: "hello" };
+    const first = createMcpToolService(bindings, firstStore).callTool("send_message", args);
+    await bindingStarted;
+
+    expect(await createMcpToolService(bindings, secondStore).callTool("send_message", args)).toMatchObject({
+      ok: false,
+      code: "call_interrupted",
+      retryable: true,
+      replayed: true,
+    });
+    expect(bindingCalls).toBe(1);
+    release();
+    const completed = await first;
+    firstStore.close();
+    secondStore.close();
+
+    const restartedStore = new SqliteMcpReceiptStore(filename);
+    expect(await createMcpToolService(bindings, restartedStore).callTool("send_message", args))
+      .toEqual({ ...completed, replayed: true });
+    expect(bindingCalls).toBe(1);
+    restartedStore.close();
+  });
+
+  test("tool timing aggregates expose numeric phases and retain no call data", async () => {
+    const timings = new McpToolTimingAggregate();
+    const privateSentinel = "PRIVATE_TIMING_SENTINEL";
+    const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [toolName, async () => ({})])) as unknown as McpToolBindings;
+    bindings.list_tasks = async () => ({ resultBody: privateSentinel, count: 1 });
+    const service = createMcpToolService(bindings, new MemoryMcpReceiptStore(), undefined, { timings });
+
+    const args = {
+      clientRequestId: `request-${privateSentinel}`,
+      "prompt": privateSentinel,
+      transcriptPath: `/private/${privateSentinel}.jsonl`,
+      accountId: `account-${privateSentinel}`,
+    };
+    await service.callTool("list_tasks", args, { deadlineAt: Date.now() + 5_000 });
+    await service.callTool("list_tasks", args, { deadlineAt: Date.now() + 5_000 });
+    await service.callTool("list_tasks", { ...args, "prompt": "changed" }, { deadlineAt: Date.now() + 5_000 });
+
+    const snapshot = timings.snapshot();
+    const listTasks = snapshot.find((entry) => entry.toolName === "list_tasks")!;
+    expect(snapshot).toHaveLength(MCP_TOOL_NAMES.length);
+    expect(listTasks.calls).toBe(3);
+    expect(listTasks.outcomes).toMatchObject({ success: 1, replay: 1, conflict: 1 });
+    expect(listTasks.phases.claim.samples).toBe(3);
+    expect(listTasks.phases.binding.samples).toBe(1);
+    expect(listTasks.phases.completion.samples).toBe(1);
+    expect(listTasks.phases.serialization.samples).toBe(3);
+    expect(listTasks.phases.rpcDeliveryWait.samples).toBe(3);
+    expect(listTasks.phases.replay.samples).toBe(1);
+    expect(listTasks.resultSizeBytes.max).toBeGreaterThan(0);
+    expect(listTasks.deadline.callsWithDeadline).toBe(3);
+    expect(JSON.stringify(snapshot)).not.toContain(privateSentinel);
+  });
+
+  test("tool timing aggregates classify deadline, cancellation, and unfinished age", async () => {
+    const pendingTimings = new McpToolTimingAggregate();
+    const pendingStore: McpReceiptStore = {
+      claim: () => ({ kind: "pending", unfinishedAgeMs: 4_321 }),
+      complete: () => { throw new Error("pending receipt must not complete"); },
+    };
+    const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [toolName, async () => ({})])) as unknown as McpToolBindings;
+    await createMcpToolService(bindings, pendingStore, undefined, { timings: pendingTimings })
+      .callTool("list_tasks", { clientRequestId: "pending-age" });
+
+    const deadlineTimings = new McpToolTimingAggregate();
+    bindings.list_tasks = async (_args, context) => {
+      if (context?.signal?.aborted) throw context.signal.reason;
+      return {};
+    };
+    const deadlineController = new AbortController();
+    deadlineController.abort(new DeadlineExceededError("fixture deadline", 5_000));
+    const cancelledController = new AbortController();
+    cancelledController.abort(new DOMException("fixture cancelled", "AbortError"));
+    const service = createMcpToolService(bindings, new MemoryMcpReceiptStore(), undefined, { timings: deadlineTimings });
+    await service.callTool("list_tasks", { clientRequestId: "deadline" }, {
+      signal: deadlineController.signal,
+      deadlineAt: Date.now(),
+    });
+    await service.callTool("list_tasks", { clientRequestId: "cancelled" }, {
+      signal: cancelledController.signal,
+    });
+
+    const pending = pendingTimings.snapshot().find((entry) => entry.toolName === "list_tasks")!;
+    expect(pending.outcomes.pending).toBe(1);
+    expect(pending.unfinishedAgeMs).toMatchObject({ samples: 1, max: 4_321 });
+    const ended = deadlineTimings.snapshot().find((entry) => entry.toolName === "list_tasks")!;
+    expect(ended.deadline).toMatchObject({ callsWithDeadline: 1, exceeded: 1 });
+    expect(ended.cancellation.cancelled).toBe(1);
+  });
+
   test("each v1 tool returns structured ids and replays a duplicate clientRequestId", async () => {
     const calls = new Map<string, number>();
     const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [

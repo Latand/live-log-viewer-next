@@ -106,11 +106,19 @@ function projection() {
  * therefore the number of GENERATIONS and MATERIALISATIONS — the expensive events —
  * rather than the number of times a read asked.
  */
-function dependencies(options: { scans?: number; projections?: number } = {}) {
+function dependencies(options: { scans?: number; projections?: number; completedTranscript?: boolean } = {}) {
   const allowedScans = options.scans ?? 1;
   const allowedProjections = options.projections ?? 1;
-  const counts = { scans: 0, projections: 0, rawScans: 0, observations: 0, scanCalls: 0, projectionCalls: 0 };
-  const snapshot = { files: Array.from({ length: SCAN_ROWS }, (_value, index) => scanRow(index)), projectCatalog: [], complete: true };
+  const counts = { scans: 0, projections: 0, rawScans: 0, targetedReads: 0, observations: 0, scanCalls: 0, projectionCalls: 0 };
+  const completedTranscript = options.completedTranscript ?? true;
+  const snapshot = {
+    files: Array.from({ length: SCAN_ROWS }, (_value, index) => completedTranscript || index > 0
+      ? scanRow(index)
+      : { ...scanRow(index), path: "/sessions/completed-generation-other.jsonl" }),
+    projectCatalog: [],
+    complete: true,
+  };
+  const targetedCalls: Array<{ pathname: string; signal: AbortSignal | undefined; deadlineAt: number | undefined }> = [];
   let inflight: Promise<{ snapshot: typeof snapshot }> | null = null;
   let materialised: ReturnType<typeof projection> | null = null;
   return {
@@ -139,6 +147,11 @@ function dependencies(options: { scans?: number; projections?: number } = {}) {
         counts.rawScans += 1;
         throw new Error("a control-plane read must not start a raw corpus scan");
       },
+      targetedFileEntry: async (pathname: string, options: { signal?: AbortSignal; deadlineAt?: number } = {}) => {
+        counts.targetedReads += 1;
+        targetedCalls.push({ pathname, signal: options.signal, deadlineAt: options.deadlineAt });
+        return pathname === transcriptPath ? scanRow(0) : undefined;
+      },
       /* Stands in for transcript-only composition: the completed generation is
          consumed while the injected registry projection remains lazy. */
       collectSnapshot: async (_body: unknown, deps: {
@@ -152,6 +165,7 @@ function dependencies(options: { scans?: number; projections?: number } = {}) {
       },
       boardFor: () => null,
     } as never,
+    targetedCalls,
   };
 }
 
@@ -177,6 +191,79 @@ test("get_conversation reads the completed generation when it already carries th
      it does, so the private exclusive scan never runs. */
   expect(counts.rawScans).toBe(0);
   expect(counts.scans).toBe(1);
+});
+
+test("get_conversation hydrates one known transcript after a completed miss and propagates its bound", async () => {
+  const { counts, injected, targetedCalls } = dependencies({ completedTranscript: false });
+  const bindings = viewerMcpBindings(undefined, undefined, injected);
+  const controller = new AbortController();
+  const deadlineAt = Date.now() + 1_000;
+
+  const result = await bindings.get_conversation(
+    { clientRequestId: "get-targeted", transcriptPath },
+    { signal: controller.signal, deadlineAt },
+  ) as { transcriptPath: string };
+
+  expect(result.transcriptPath).toBe(transcriptPath);
+  expect(counts.scans).toBe(1);
+  expect(counts.targetedReads).toBe(1);
+  expect(counts.rawScans).toBe(0);
+  expect(targetedCalls).toEqual([{ pathname: transcriptPath, signal: controller.signal, deadlineAt }]);
+});
+
+test("get_conversation cancels a targeted miss when its caller leaves", async () => {
+  const { counts, injected } = dependencies({ completedTranscript: false });
+  let started!: () => void;
+  const targetedStarted = new Promise<void>((resolve) => { started = resolve; });
+  let targetedSignal: AbortSignal | undefined;
+  const domain = injected as unknown as {
+    targetedFileEntry(pathname: string, options?: { signal?: AbortSignal; deadlineAt?: number }): Promise<ReturnType<typeof scanRow> | undefined>;
+  };
+  domain.targetedFileEntry = async (_pathname, options = {}) => new Promise((_resolve, reject) => {
+    targetedSignal = options.signal;
+    started();
+    options.signal?.addEventListener("abort", () => reject(options.signal?.reason), { once: true });
+  });
+  const bindings = viewerMcpBindings(undefined, undefined, injected);
+  const controller = new AbortController();
+  const call = bindings.get_conversation(
+    { clientRequestId: "get-cancelled", transcriptPath },
+    { signal: controller.signal, deadlineAt: Date.now() + 1_000 },
+  );
+  const startState = await Promise.race([
+    targetedStarted.then(() => "targeted" as const),
+    call.then(() => "resolved" as const, () => "rejected" as const),
+    Bun.sleep(250).then(() => "timed-out" as const),
+  ]);
+  expect(startState).toBe("targeted");
+  controller.abort(new DOMException("caller left", "AbortError"));
+
+  await expect(call).rejects.toMatchObject({ name: "AbortError" });
+  expect(targetedSignal?.aborted).toBeTrue();
+  expect(counts.targetedReads).toBe(0);
+  expect(counts.rawScans).toBe(0);
+});
+
+test("get_conversation deadlines a targeted miss without orphan work", async () => {
+  const { counts, injected } = dependencies({ completedTranscript: false });
+  let targetedSignal: AbortSignal | undefined;
+  const domain = injected as unknown as {
+    targetedFileEntry(pathname: string, options?: { signal?: AbortSignal; deadlineAt?: number }): Promise<ReturnType<typeof scanRow> | undefined>;
+  };
+  domain.targetedFileEntry = async (_pathname, options = {}) => new Promise((_resolve, reject) => {
+    targetedSignal = options.signal;
+    options.signal?.addEventListener("abort", () => reject(options.signal?.reason), { once: true });
+  });
+  const bindings = viewerMcpBindings(undefined, undefined, injected);
+
+  const call = bindings.get_conversation(
+    { clientRequestId: "get-deadline", transcriptPath },
+    { deadlineAt: Date.now() + 20 },
+  );
+
+  await expect(call).rejects.toMatchObject({ name: "DeadlineExceededError" });
+  expect(targetedSignal?.aborted).toBeTrue();
+  expect(counts.rawScans).toBe(0);
 });
 
 test("board_snapshot still consumes one scan and one projection", async () => {
