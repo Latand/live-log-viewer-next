@@ -5,6 +5,7 @@ import type { BoardTask } from "@/lib/tasks/types";
 import type { Workflow } from "@/lib/workflows/types";
 import type { RuntimeLiveTurn } from "@/lib/runtime/liveTurn";
 import type { RuntimeVoiceDelivery } from "@/lib/runtime/voiceDelivery";
+import type { SelectedContextRef } from "@/lib/selection/selectedContext";
 import type { RuntimeImageCapability, StructuredImageRef } from "./structuredContent";
 
 export const RUNTIME_SCHEMA_VERSION = 1;
@@ -232,6 +233,12 @@ export interface RuntimeSendCommand extends RuntimeCommandBase {
   policy?: "queue" | "steer-if-active" | "interrupt-active";
   turnId?: string | null;
   runtime?: RuntimeSendSettings;
+  /** The Viewer card selected when this turn was submitted (#844). Admitted
+      atomically with the text and never re-read afterwards, so board movement
+      cannot rewrite what the operator was pointing at. Absent when the client
+      offered none — an EXPLICIT empty selection is the `none` variant, which is
+      present. */
+  selectedContext?: SelectedContextRef;
 }
 
 /**

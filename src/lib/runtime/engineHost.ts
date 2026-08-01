@@ -1,3 +1,5 @@
+import type { SelectedContextRef } from "@/lib/selection/selectedContext";
+
 import type { RuntimeSendSettings } from "./contracts";
 import type { RuntimeVoiceDelivery, RuntimeVoiceResponse } from "./voiceDelivery";
 import {
@@ -19,6 +21,10 @@ export interface QueueEntry {
       #390 §10). A host applies what its protocol can honor and ignores the
       rest; absent = the host's own configuration, exactly as before. */
   runtime?: RuntimeSendSettings;
+  /** #844: the Viewer card the operator had selected when this turn was
+      submitted. Hosts that can persist it write it onto the canonical
+      structured-user record; the rest ignore it, exactly as with `runtime`. */
+  selectedContext?: SelectedContextRef;
 }
 
 export interface NormalizedQueueEntry {
@@ -27,6 +33,7 @@ export interface NormalizedQueueEntry {
   contentDigest: string;
   expectedTurnId?: string | null;
   runtime?: RuntimeSendSettings;
+  selectedContext?: SelectedContextRef;
 }
 
 export function normalizeQueueEntry(entry: QueueEntry): NormalizedQueueEntry {
@@ -38,6 +45,7 @@ export function normalizeQueueEntry(entry: QueueEntry): NormalizedQueueEntry {
     contentDigest: envelope.contentDigest,
     ...(entry.expectedTurnId !== undefined ? { expectedTurnId: entry.expectedTurnId } : {}),
     ...(entry.runtime ? { runtime: entry.runtime } : {}),
+    ...(entry.selectedContext ? { selectedContext: entry.selectedContext } : {}),
   };
 }
 

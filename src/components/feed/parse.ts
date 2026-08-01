@@ -10,6 +10,7 @@ import { isClaudeProtocolUser } from "@/lib/claudeProtocolUser";
 import { getLocale, translate } from "@/lib/i18n";
 import { inboxImageExt, MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
 import { decodeCodexStructuredUserText } from "@/lib/runtime/codexStructuredUserText";
+import type { SelectedContextRef } from "@/lib/selection/selectedContext";
 import { isViewerMcpServer } from "@/lib/mcp/presentation";
 import type { FileEntry } from "@/lib/types";
 import { parseScheduleWakeup, refineWakeupFromResult, type WakeupInfo } from "@/lib/wakeup";
@@ -211,7 +212,7 @@ export type CmdGroupItem = {
 };
 export type Item =
   | { kind: "prose"; ts: unknown; text: string; engine: "codex" | "claude"; sourceId?: string }
-  | { kind: "user"; ts: unknown; text: string }
+  | { kind: "user"; ts: unknown; text: string; selectedContext?: SelectedContextRef }
   | VoiceTurnItem
   | { kind: "svc"; text: string }
   | { kind: "note"; text: string }
@@ -421,6 +422,10 @@ interface CodexUserContent {
   text: string;
   attachments: Item[];
   structured: boolean;
+  /** The Viewer card this turn was submitted against (#844), read off the
+      canonical structured-user marker. Absent on every record written before
+      the field existed, and on every turn that carried none. */
+  selectedContext?: SelectedContextRef | null;
 }
 
 /* Codex has added content-part variants over time. Keep the text path broad,
@@ -1687,7 +1692,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     const { cleaned, images } = extractInboxImages(content.text);
     const voice = cleaned ? parseRealtimeDelegation(cleaned) : null;
     if (voice) emit({ kind: "voice", ts, ...voice });
-    else if (cleaned) emit({ kind: "user", ts, text: cleaned });
+    else if (cleaned) emit({ kind: "user", ts, text: cleaned, ...(content.selectedContext ? { selectedContext: content.selectedContext } : {}) });
     for (const image of images) emit({ kind: "inbox-image", name: image.name, path: image.path });
     for (const attachment of content.attachments) emit(attachment);
     return { src: curSrc, ts, text: content.text, entrySeqs, structured: content.structured };

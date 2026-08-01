@@ -1,4 +1,5 @@
 import { modelFromBody } from "@/lib/agent/models";
+import { parseSelectedContextRef } from "@/lib/selection/selectedContext";
 
 import type { RuntimeOperationCommand, RuntimeOperationKind, RuntimeReconfigureCommand, RuntimeSendSettings } from "./contracts";
 import { parseStructuredImageRefs, structuredContent } from "./structuredContent";
@@ -80,6 +81,11 @@ export function parseRuntimeCommand(kind: RuntimeOperationKind, value: unknown):
       throw new Error("policy is invalid");
     }
     const runtime = parseRuntimeSendSettings(body.runtime);
+    /* #844: validated here, with the text, so the turn and the card it points at
+       are admitted as one fact. A body the validator refuses drops the reference
+       and admits the turn anyway — an instruction that arrives without its badge
+       is a small loss; one attributed to the wrong conversation is not. */
+    const selectedContext = parseSelectedContextRef(body.selectedContext);
     return {
       kind,
       conversationId,
@@ -91,6 +97,7 @@ export function parseRuntimeCommand(kind: RuntimeOperationKind, value: unknown):
       ...(policy ? { policy } : {}),
       ...(turnId !== undefined ? { turnId } : {}),
       ...(runtime ? { runtime } : {}),
+      ...(selectedContext ? { selectedContext } : {}),
     };
   }
 

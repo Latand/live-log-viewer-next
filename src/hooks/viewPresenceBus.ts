@@ -1,6 +1,7 @@
 "use client";
 
 import type { SchemeLayout, SchemeRect } from "@/components/scheme/layout";
+import type { SelectedCardIdentity } from "@/lib/selection/selectedContext";
 import { MAX_SELECTED_PATHS, type PresencePayloadV1 } from "@/lib/view/types";
 
 /* The client-assembled view the presence publisher ships to the server: every
@@ -184,11 +185,38 @@ export function mergeView(context: ViewContext, slice: ViewSlice, windowViewport
   };
 }
 
+/** This document's presence identity (#844). Minted inside the publisher's
+    effect and reported here because a selected-card reference must name the
+    window and device it was captured in — that is what lets a voice call refuse
+    another device's selection instead of silently obeying it. */
+export interface ViewIdentity {
+  viewSessionId: string;
+  deviceId: string;
+}
+
 export interface ViewBus {
   reportContext(next: ViewContext): void;
   reportSlice(next: ViewSlice): void;
+  /** Reported once by the presence publisher when it resolves this document. */
+  reportIdentity(next: ViewIdentity | null): void;
+  /**
+   * Path → conversation identity for the cards this view can name.
+   *
+   * The presence channels carry PATHS, because that is what an observer needs
+   * to look at. A reference is keyed by `conversationId`, and only the surface
+   * holding `FileEntry` objects knows the mapping. Reporting it here keeps
+   * capture from guessing an identity out of a path — the one thing a reference
+   * must never do.
+   */
+  reportCards(next: readonly SelectedCardIdentity[]): void;
   getContext(): ViewContext;
   getSlice(): ViewSlice;
+  getIdentity(): ViewIdentity | null;
+  getCards(): readonly SelectedCardIdentity[];
+  /** Monotonic count of slice reports that MOVED focus or selection. A camera
+      settle, a scroll, or a repeat of the current value is not a selection
+      change and does not advance it. */
+  getSelectionRevision(): number;
   subscribe(listener: () => void): () => void;
 }
 
@@ -202,6 +230,9 @@ export interface ViewBus {
 export function createViewBus(): ViewBus {
   let context: ViewContext = OVERVIEW_CONTEXT;
   let slice: ViewSlice = OVERVIEW_SLICE;
+  let identity: ViewIdentity | null = null;
+  let cards: readonly SelectedCardIdentity[] = [];
+  let selectionRevision = 0;
   const listeners = new Set<() => void>();
   const notify = () => {
     for (const listener of listeners) listener();
@@ -214,11 +245,29 @@ export function createViewBus(): ViewBus {
     },
     reportSlice(next) {
       if (sameShape(slice, next)) return;
+      /* Compared BEFORE the assignment and over the selection fields only: what
+         the operator has selected is a different fact from where the camera is
+         or what scrolled into frame, and only the former ages a reference. */
+      const moved = slice.focusedPath !== next.focusedPath || !sameShape(slice.selectedPaths, next.selectedPaths);
       slice = next;
+      if (moved) selectionRevision += 1;
+      notify();
+    },
+    reportIdentity(next) {
+      if (sameShape(identity, next)) return;
+      identity = next;
+      notify();
+    },
+    reportCards(next) {
+      if (sameShape(cards, next)) return;
+      cards = next;
       notify();
     },
     getContext: () => context,
     getSlice: () => slice,
+    getIdentity: () => identity,
+    getCards: () => cards,
+    getSelectionRevision: () => selectionRevision,
     subscribe(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);

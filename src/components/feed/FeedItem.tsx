@@ -5,6 +5,7 @@ import { memo } from "react";
 import { Brain, ChevronUp, Command, Check, Mail, Mic, Sparkle, X } from "../icons";
 import { hhmm } from "../utils";
 import { MESSAGE_ACTION } from "./actionStyles";
+import { SelectedContextBadge } from "../SelectedContextBadge";
 import { CopyButton } from "./CopyButton";
 import { InboxImageCard } from "./InboxImage";
 import { md, mdBlocks } from "./markdown";
@@ -104,6 +105,12 @@ export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item
           className={`mt-2 ${MESSAGE_ACTION}`}
         />
         <div className="max-w-[75%] whitespace-pre-wrap break-words rounded-surface bg-user px-4 py-2.5">
+          {/* #844: what this turn pointed at, from the reference persisted on
+              the record itself — the same badge the composer showed before the
+              operator sent it, so the two can be compared at a glance. */}
+          {item.selectedContext ? (
+            <SelectedContextBadge reference={item.selectedContext} className="mb-1.5" />
+          ) : null}
           {long ? (
             <details className="group/usr">
               <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden">

@@ -355,6 +355,11 @@ export function useViewPresence(): void {
       },
     });
 
+    /* #844: this document's identity leaves the effect. A selected-card
+       reference names the window and device it was captured in, which is what
+       lets a voice call refuse the OTHER device's selection instead of obeying
+       it. Reported here because this is the one place that mints it. */
+    viewBus.reportIdentity({ viewSessionId: identity.viewSessionId, deviceId: identity.deviceId });
     const push = () => publisher.setView(mergeView(viewBus.getContext(), viewBus.getSlice(), windowViewport()));
     const unsubscribe = viewBus.subscribe(push);
     const onInteract = () => publisher.markInteraction();
@@ -373,6 +378,9 @@ export function useViewPresence(): void {
     publisher.start();
 
     return () => {
+      /* The identity dies with the document that minted it: a stale one would
+         let a reference claim a window that is gone. */
+      viewBus.reportIdentity(null);
       unsubscribe();
       for (const event of INTERACTION_EVENTS) window.removeEventListener(event, onInteract);
       document.removeEventListener("visibilitychange", onVisibility);

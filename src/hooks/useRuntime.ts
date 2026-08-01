@@ -17,6 +17,7 @@ import {
 } from "@/components/runtime/runtimeModel";
 
 import type { Flow } from "@/lib/flows/types";
+import type { SelectedContextRef } from "@/lib/selection/selectedContext";
 
 import { getRuntimeBus, isRuntimeUiEnabled, type RuntimeBus, type RuntimeBusState } from "./runtimeBus";
 
@@ -285,6 +286,10 @@ export interface SendOptions {
       rides the send so a replay re-delivers with identical settings. Only
       explicitly selected fields are present; omitted entirely = today. */
   runtime?: { model?: string; effort?: string; fast?: boolean };
+  /** The Viewer card selected when the operator submitted (#844). Captured
+      atomically with the text, so it travels in the SAME request rather than
+      being re-read server-side from a view that has since moved. */
+  selectedContext?: SelectedContextRef;
 }
 
 /** Send/steer a message. Replaying the same key returns the original receipt
@@ -297,6 +302,7 @@ export function sendRuntimeMessage(options: SendOptions): Promise<CommandResult>
     idempotencyKey: options.idempotencyKey,
     policy: options.policy ?? "interrupt-active",
     ...(options.runtime ? { runtime: options.runtime } : {}),
+    ...(options.selectedContext ? { selectedContext: options.selectedContext } : {}),
   });
 }
 

@@ -117,6 +117,7 @@ export async function handleRuntimeCommand(
         text: command.text,
         ...(rawImages ? { images: rawImages } : command.images?.length ? { imageRefs: command.images } : {}),
         ...(command.runtime ? { runtime: command.runtime } : {}),
+        ...(command.selectedContext ? { selectedContext: command.selectedContext } : {}),
       }, {
         enabled: dependencies.structuredEnabled ?? (() => structuredHostsEnabled()),
         client: () => client,
