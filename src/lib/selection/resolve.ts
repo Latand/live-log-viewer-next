@@ -68,12 +68,19 @@ export interface SelectedConversationResolver {
 }
 
 /** The bytes at the end of a file, at most `maxBytes`, plus whether more precede
-    them. Opens once and reads one window — the cost does not grow with the file. */
+    them. Opens once and reads one window — the cost does not grow with the file.
+
+    `O_NOFOLLOW` and the regular-file check are what keep this read on the
+    artifact the registry named: the path is registry-minted, but the leaf is
+    still something outside this process can replace between the scan that
+    recorded it and the tail an agent asks for. */
 function readTailBytes(pathname: string, maxBytes: number): { buffer: Buffer; precededByMore: boolean } | null {
   let handle: number | null = null;
   try {
-    handle = fs.openSync(pathname, "r");
-    const size = fs.fstatSync(handle).size;
+    handle = fs.openSync(pathname, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const opened = fs.fstatSync(handle);
+    if (!opened.isFile()) return null;
+    const size = opened.size;
     const window = Math.min(size, maxBytes);
     const buffer = Buffer.allocUnsafe(window);
     const read = fs.readSync(handle, buffer, 0, window, size - window);

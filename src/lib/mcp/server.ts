@@ -13,6 +13,7 @@ import { DeadlineExceededError, deadlineSignal } from "@/lib/deadline";
 import { PIPELINE_ACTIONS } from "@/lib/pipelines/types";
 import { procBackend } from "@/lib/proc";
 import { ROLE_IDS } from "@/lib/roles/types";
+import { SELECTED_TAIL_MAX_LINES } from "@/lib/selection/resolve";
 import {
   MAX_SCOPE_PATHS, MAX_SNAPSHOT_CHARS_PER_CONVERSATION, MAX_SNAPSHOT_LAST_MESSAGES, MAX_SNAPSHOT_STRING_LENGTH,
   MIN_SNAPSHOT_STRING_LENGTH, VIEW_RESOLUTIONS, VIEW_SCOPE_KINDS,
@@ -1426,7 +1427,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   pipeline_action: "Apply a supported action to an existing pipeline.",
   link_task_to_pipeline: "Attach a board task to a conversation owned by a pipeline.",
   list_conversations: "List scanned Viewer conversations with durable ids and transcript paths.",
-  get_conversation: "Read a conversation summary and its recent messages and tools.",
+  get_conversation: "Read a conversation summary and its recent messages and tools. Accepts the selected-card reference from an operator turn, and with tailLines answers from the bounded identity path alone — no snapshot, no corpus scan.",
   deploy_exact_sha: "Deploy one full commit SHA. The designated orchestrator decides when to deploy and calls this directly; authority is the server-attributed designated seat, and nobody asks the operator for a confirmation, a phrase, or a SHA. Idempotent by clientRequestId; deployments serialize at the runtime host.",
   get_pipeline: "Read one pipeline by durable id.",
   board_snapshot: "Read a bounded, redacted snapshot of the Viewer board and durable placement.",
@@ -1434,7 +1435,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   get_flow: "Read one implement-review flow by durable id.",
   flow_action: "Apply a supported action to an implement-review flow.",
   list_pipelines: "List durable pipelines.",
-  conversation_action: "Interrupt, kill, resume, compact, or answer a dialog for a Viewer conversation.",
+  conversation_action: "Interrupt, kill, resume, compact, or answer a dialog for a Viewer conversation. Names the conversation by id, transcript path, or the selected-card reference the operator's turn carried — the last resolves directly, with no operator_snapshot call.",
   operator_snapshot: "Read the bounded, secret-redacted Viewer state currently visible to the operator.",
   list_tasks: "List durable board tasks.",
   get_task: "Read one durable board task.",
@@ -1453,6 +1454,13 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
 };
 
 const clientRequestIdSchema = z.string().min(1).describe("Stable idempotency key for this logical call.");
+/* #844 §7: the selected-card reference an operator turn carried, in either of
+   the two forms a caller actually holds — the `ctx=` token copied off the
+   structured-user marker, or that token already decoded. The object stays open
+   because the reference is versioned and validated by its own parser; a schema
+   that pinned today's fields would reject tomorrow's evidence at the door. */
+const selectedContextSchema = z.union([z.string().min(1), z.record(z.string(), z.unknown())]).optional()
+  .describe("Selected-card reference from the operator's turn (the `ctx=` marker token, or the decoded object). Resolves the conversation through a bounded identity lookup — no operator_snapshot needed.");
 const entityIdSchema = z.string().min(1);
 const snapshotStringSchema = z.string()
   .min(MIN_SNAPSHOT_STRING_LENGTH)
@@ -1548,6 +1556,9 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     conversationId: z.string().optional(),
     transcriptPath: z.string().optional(),
     maxRecords: z.number().int().min(1).max(500).optional(),
+    selectedContext: selectedContextSchema,
+    tailLines: z.number().int().min(1).max(SELECTED_TAIL_MAX_LINES).optional()
+      .describe("Read this many trailing transcript lines through the bounded identity path instead of the scanned summary. Needs conversationId or selectedContext; keeps answering while corpus scans are degraded."),
   }).passthrough(),
   deploy_exact_sha: z.object({
     clientRequestId: clientRequestIdSchema,
@@ -1597,6 +1608,7 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     clientRequestId: clientRequestIdSchema,
     conversationId: z.string().optional(),
     transcriptPath: z.string().optional(),
+    selectedContext: selectedContextSchema,
     action: z.enum(["interrupt", "kill", "resume", "compact", "dialog-key"]),
     key: z.enum(["1", "2", "3", "4", "5", "6", "7", "8", "9", "Tab", "Enter", "Escape"]).optional(),
     label: z.string().optional(),

@@ -46,6 +46,7 @@ import { readResources } from "@/lib/resources";
 import { adoptLiveRootSession, conversationRole, liveRootSession, type RootSessionSource } from "@/lib/root/adopt";
 import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
 import { ledgerDeployment, ledgerDeployments } from "@/lib/runtime/deploymentLedger";
+import { SELECTED_TAIL_MAX_LINES } from "@/lib/selection/resolve";
 import { readSession, type SessionReadResult } from "@/lib/session/reader";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { applyAssignmentPatches, createTask, patchTask, type CreateTaskInput, type PatchTaskInput } from "@/lib/tasks/commands";
@@ -59,6 +60,13 @@ import { hardenedRedact } from "@/lib/view/compactText";
 import { validateSnapshotRequest } from "@/lib/view/validation";
 
 import { McpToolRefusal, type McpToolArgs, type McpToolBindings, type McpToolCallContext, type McpToolPayload } from "./server";
+import {
+  productionSelectedContextDependencies,
+  resolveSelectedContext,
+  selectedContextEcho,
+  selectedConversationTail,
+  type SelectedContextTargetDependencies,
+} from "./selectedContextTarget";
 import { mcpCallerIdentity, mcpToolPolicy, type ManagerTarget, type McpToolPolicy } from "./toolAllowlist";
 
 const PIPELINE_CONTROLLER_ACTIONS = new Set<PipelineAction>(["start", "resume", "retry-stage", "skip-stage"]);
@@ -191,6 +199,10 @@ type RegistrySnapshot = ReturnType<ReturnType<typeof agentRegistry>["readOnlySna
 export interface ViewerMcpDomainDependencies {
   listFiles(options?: Parameters<typeof listFiles>[0]): Promise<FileEntry[]>;
   targetedFileEntry?(pathname: string, options?: McpToolCallContext): Promise<TargetedConversationRead | FileEntry | undefined>;
+  /** #844 §6/§7: the bounded selected-card path — one keyed identity lookup and
+      an explicit tail read, reaching no scan. Optional so partial test
+      harnesses fall back to the production resolver. */
+  selectedContext?: SelectedContextTargetDependencies;
   completedFileScan(options?: Parameters<typeof completedFileScan>[0]): ReturnType<typeof completedFileScan>;
   registrySnapshot(): RegistrySnapshot;
   boardFor(project: string): ReturnType<typeof boardFor>;
@@ -363,6 +375,7 @@ function attentionCallerSources(): AttentionCallerSources {
 const productionDomainDependencies: ViewerMcpDomainDependencies = {
   listFiles,
   targetedFileEntry: targetedFileEntry,
+  selectedContext: productionSelectedContextDependencies,
   completedFileScan,
   registrySnapshot: () => agentRegistry().readOnlySnapshot(),
   boardFor,
@@ -806,13 +819,44 @@ async function listConversations(
 
 async function getConversation(
   args: McpToolArgs,
-  dependencies: Pick<ViewerMcpDomainDependencies, "listFiles" | "completedFileScan" | "targetedFileEntry">,
+  dependencies: Pick<ViewerMcpDomainDependencies, "listFiles" | "completedFileScan" | "targetedFileEntry" | "selectedContext">,
   context: McpToolCallContext = {},
 ): Promise<McpToolPayload> {
   throwIfCallEnded(context);
-  const requestedId = text(args.conversationId);
+  const selectedDependencies = dependencies.selectedContext ?? productionSelectedContextDependencies;
+  const selected = resolveSelectedContext(args, text(args.conversationId), selectedDependencies);
+  const requestedId = selected.conversationId;
   const requestedPath = text(args.transcriptPath) || text(args.path);
-  if (!requestedId && !requestedPath) throw new Error("conversationId or transcriptPath is required");
+  const tailLines = integer(args.tailLines, 0);
+  if (!requestedId && !requestedPath && tailLines <= 0) {
+    throw new Error("conversationId, transcriptPath or selectedContext is required");
+  }
+  /* #844 §6: the bounded route. An explicit `tailLines` says "answer from the
+     identity alone" — one keyed registry lookup and one clamped tail read, with
+     no completed generation consulted and no pinned walk reserved, so the
+     selected card stays answerable while the corpus scan is degraded. */
+  if (tailLines > 0) {
+    if (!requestedId) {
+      throw new McpToolRefusal(
+        "tailLines reads a conversation by identity: pass conversationId or selectedContext.",
+        { code: "selected_tail_requires_identity" },
+      );
+    }
+    const answer = selectedConversationTail(
+      { conversationId: requestedId, maxLines: Math.max(1, Math.min(tailLines, SELECTED_TAIL_MAX_LINES)) },
+      selectedDependencies,
+    );
+    throwIfCallEnded(context);
+    return redactPayload({
+      conversationId: answer.record.conversationId,
+      transcriptPath: answer.tail.path,
+      project: answer.record.project,
+      engine: answer.record.engine,
+      scanned: false,
+      tail: { lines: answer.tail.lines, bytes: answer.tail.bytes, truncated: answer.tail.truncated },
+      ...selectedContextEcho(selected.target),
+    });
+  }
   const conversation = requestedId
     ? agentRegistry().conversation(requestedId as `conversation_${string}`)
     : agentRegistry().conversationForPath(requestedPath);
@@ -832,6 +876,7 @@ async function getConversation(
     engine: entry.engine,
     messages: session.messages.slice(-maxRecords),
     tools: session.tools.slice(-maxRecords),
+    ...selectedContextEcho(selected.target),
   });
 }
 
@@ -1511,10 +1556,28 @@ async function resources(args: McpToolArgs, dependencies: ViewerMcpDomainDepende
   return redactPayload({ ...await dependencies.readResources(args.fresh === true) });
 }
 
-async function conversationAction(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): Promise<McpToolPayload> {
-  const conversationId = text(args.conversationId);
+async function conversationAction(
+  args: McpToolArgs,
+  dependencies: ViewerMcpDomainDependencies,
+  context: McpToolCallContext = {},
+): Promise<McpToolPayload> {
+  throwIfCallEnded(context);
+  /* #844 §7: the selected card is actionable from its reference alone. The
+     identity comes back from one keyed registry lookup, so no `operator_snapshot`
+     and no scan stands between "the operator pointed at that card" and acting on
+     it. Only the IDENTITY is taken from the reference — the path it recorded is
+     capture-time provenance, and a later generation would make it wrong. */
+  const selected = resolveSelectedContext(
+    args,
+    text(args.conversationId),
+    dependencies.selectedContext ?? productionSelectedContextDependencies,
+  );
+  const conversationId = selected.conversationId;
   const transcriptPath = text(args.transcriptPath) || text(args.path);
-  if (!conversationId && !transcriptPath) throw new Error("conversationId or transcriptPath is required");
+  if (!conversationId && !transcriptPath) {
+    throw new Error("conversationId, transcriptPath or selectedContext is required");
+  }
+  throwIfCallEnded(context);
   const operationId = mcpOperationId("conversation_action", requestId(args));
   const result = await dependencies.applyConversationAction({
     operationId,
@@ -1536,6 +1599,7 @@ async function conversationAction(args: McpToolArgs, dependencies: ViewerMcpDoma
     transcriptPath: transcriptPath || null,
     ...result.body,
     ...receipt,
+    ...selectedContextEcho(selected.target),
   });
 }
 
@@ -1855,7 +1919,7 @@ export function viewerMcpBindings(
     operator_snapshot: (args) => operatorSnapshot(args, domainDependencies),
     deployment_status: (args) => deploymentStatus(args, controlDependencies),
     resources: (args) => resources(args, domainDependencies),
-    conversation_action: (args) => conversationAction(args, domainDependencies),
+    conversation_action: (args, context) => conversationAction(args, domainDependencies, context),
     conversation_migration: (args) => conversationMigration(args, domainDependencies),
     agent_activity: (args) => agentActivity(args, domainDependencies),
     lifecycle_events: (args) => lifecycleEvents(args, controlDependencies, domainDependencies),

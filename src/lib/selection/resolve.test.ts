@@ -133,3 +133,15 @@ test("a conversation whose transcript is gone resolves but reads no tail", () =>
   expect(resolver.resolve("conversation_atlas_a")?.path).toBe(file);
   expect(resolver.readTail("conversation_atlas_a", { maxLines: 5 })).toBeNull();
 });
+
+test("a transcript path replaced by a symlink reads no tail", () => {
+  const file = transcript(['{"n":0}']);
+  const elsewhere = path.join(path.dirname(file), "elsewhere.jsonl");
+  fs.writeFileSync(elsewhere, '{"secret":"other artifact"}\n');
+  /* The registry recorded a regular file; something swapped the leaf for a link
+     afterwards. The tail follows the identity the scan named, or nothing. */
+  fs.rmSync(file);
+  fs.symlinkSync(elsewhere, file);
+  const resolver = selectedConversationResolver(lookupFor({ conversation_atlas_a: conversation("conversation_atlas_a", file, "atlas") }));
+  expect(resolver.readTail("conversation_atlas_a", { maxLines: 5 })).toBeNull();
+});
