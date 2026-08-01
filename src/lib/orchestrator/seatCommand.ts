@@ -1,4 +1,5 @@
 import type { NextRequest } from "next/server";
+import fs from "node:fs";
 
 import { validExplicitProject } from "@/lib/accounts/migration/contracts";
 import { agentRegistry } from "@/lib/agent/registry";
@@ -6,12 +7,14 @@ import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { deliverConversationMessage } from "@/lib/delivery";
 import { structuredHostsEnabled } from "@/lib/runtime/flags";
+import { projectForCwd } from "@/lib/scanner/describe";
 
 import { loadTasks } from "@/lib/tasks/store";
 import {
   beginOrchestratorSeatIntent,
   completeOrchestratorSeatIntent,
   failOrchestratorSeatIntent,
+  canonicalOrchestratorProject,
   orchestratorSeatFor,
   type OrchestratorSeat,
 } from "./seats";
@@ -50,8 +53,8 @@ export interface SeatCommandDependencies {
   /** Deliver the mandate to an existing conversation, idempotent on
       `clientMessageId`. */
   deliver(input: { conversationId: string; path: string | null; clientMessageId: string; text: string }): Promise<{ ok: boolean; error?: string; outcome?: string }>;
-  /** Canonical id + latest transcript path, or null when unknown. */
-  conversationTarget(conversationId: string): { conversationId: string; path: string | null } | null;
+  /** Registry-backed eligibility of a conversation offered for adoption. */
+  conversationTarget(conversationId: string): ExistingConversationTarget | null;
   /** Keep the legacy single-instance manager record pointing at the newest
       operator-selected seat, so the bridge follows the selection. */
   syncLegacyRecord(input: { conversationId: string; path: string | null; engine?: string; model?: string }): void;
@@ -59,6 +62,10 @@ export interface SeatCommandDependencies {
   projectTasks(project: string): { id: string; status: string; text: string }[];
   now(): string;
 }
+
+export type ExistingConversationTarget =
+  | { kind: "eligible"; conversationId: string; path: string; cwd: string; project: string }
+  | { kind: "ineligible"; code: "conversation_ineligible" | "invalid_cwd" | "missing_transcript" | "missing_project"; error: string };
 
 async function postSpawnInProcess(body: Record<string, unknown>): Promise<{ status: number; body: Record<string, unknown> }> {
   const { executeSpawnRequest } = await import("@/lib/agent/spawnCommand");
@@ -111,9 +118,30 @@ export const productionSeatCommandDependencies: SeatCommandDependencies = {
   deliver: deliverMandateInProcess,
   conversationTarget: (conversationId) => {
     const conversation = agentRegistry().conversation(conversationId as `conversation_${string}`);
-    return conversation
-      ? { conversationId: conversation.id, path: conversation.generations.at(-1)?.path ?? null }
-      : null;
+    if (!conversation) return null;
+    if (conversation.supersededBy) {
+      return { kind: "ineligible", code: "conversation_ineligible", error: "conversation is superseded" };
+    }
+    const generation = conversation.generations.at(-1);
+    const transcriptPath = generation?.path?.trim();
+    if (!transcriptPath || !fs.existsSync(transcriptPath)) {
+      return { kind: "ineligible", code: "missing_transcript", error: "conversation transcript is unavailable" };
+    }
+    const cwd = generation?.launchProfile?.cwd?.trim();
+    if (!cwd || !fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
+      return { kind: "ineligible", code: "invalid_cwd", error: "conversation cwd is unavailable" };
+    }
+    const ownedProject = conversation.projectOwnership?.project ?? projectForCwd(cwd);
+    if (!ownedProject) {
+      return { kind: "ineligible", code: "missing_project", error: "conversation project is unavailable" };
+    }
+    return {
+      kind: "eligible",
+      conversationId: conversation.id,
+      path: transcriptPath,
+      cwd,
+      project: canonicalOrchestratorProject(ownedProject),
+    };
   },
   syncLegacyRecord: (input) => {
     replaceOrchestratorIncumbent({
@@ -143,14 +171,28 @@ function text(value: unknown): string {
 }
 
 function replayedSeatResponse(seat: OrchestratorSeat): SeatCommandResult {
+  const accepted = seat.path === null && seat.intent.launchId !== null;
   return {
     status: 200,
     body: {
       ok: true,
       replayed: true,
-      state: seat.path ? "settled" : "starting",
+      state: seat.path ? "settled" : accepted ? "accepted" : "starting",
+      accepted,
       conversationId: seat.conversationId,
       path: seat.path,
+      launchId: seat.intent.launchId,
+      seat,
+    },
+  };
+}
+
+function inProgressSeatResponse(seat: OrchestratorSeat): SeatCommandResult {
+  return {
+    status: 409,
+    body: {
+      error: "an orchestrator seat transition is already in progress for this project",
+      code: "seat_intent_in_progress",
       seat,
     },
   };
@@ -168,7 +210,7 @@ function replayedSeatResponse(seat: OrchestratorSeat): SeatCommandResult {
  * may reach them.
  */
 async function activate(
-  input: { project: string; clientRequestId: string; conversationId: string; path: string | null; engine?: string; model?: string },
+  input: { project: string; clientRequestId: string; conversationId: string; path: string | null; launchId?: string | null; engine?: string; model?: string },
   dependencies: SeatCommandDependencies,
 ): Promise<{ seat: OrchestratorSeat } | null> {
   const completed = completeOrchestratorSeatIntent({
@@ -176,6 +218,7 @@ async function activate(
     clientRequestId: input.clientRequestId,
     conversationId: input.conversationId,
     path: input.path,
+    launchId: input.launchId,
     now: dependencies.now(),
   });
   if (completed.kind === "missing") return null;
@@ -194,8 +237,9 @@ export async function executeOrchestratorSeatRequest(
   rawBody: Record<string, unknown>,
   dependencies: SeatCommandDependencies = productionSeatCommandDependencies,
 ): Promise<SeatCommandResult> {
-  const project = typeof rawBody.project === "string" ? validExplicitProject(rawBody.project) : null;
-  if (!project) return { status: 400, body: { error: "project must be a valid project key" } };
+  const namedProject = typeof rawBody.project === "string" ? validExplicitProject(rawBody.project) : null;
+  if (!namedProject) return { status: 400, body: { error: "project must be a valid project key" } };
+  const project = canonicalOrchestratorProject(namedProject);
   const mandate = typeof rawBody.mandate === "string" ? rawBody.mandate : "";
   if (!mandate.trim()) return { status: 400, body: { error: "mandate is required" } };
   if (Buffer.byteLength(mandate, "utf8") > MANDATE_MAX_BYTES) {
@@ -216,6 +260,15 @@ export async function executeOrchestratorSeatRequest(
   if (existingConversationId) {
     const target = dependencies.conversationTarget(existingConversationId);
     if (!target) return { status: 404, body: { error: "conversation is unknown to the registry" } };
+    if (target.kind === "ineligible") {
+      return { status: 409, body: { error: target.error, code: target.code } };
+    }
+    if (target.project !== project) {
+      return {
+        status: 409,
+        body: { error: "conversation belongs to a different project", code: "project_mismatch" },
+      };
+    }
 
     const begun = beginOrchestratorSeatIntent({
       project,
@@ -227,10 +280,23 @@ export async function executeOrchestratorSeatRequest(
       now: dependencies.now(),
     });
     if (begun.kind === "completed") return replayedSeatResponse(begun.seat);
+    if (begun.kind === "in_progress") return inProgressSeatResponse(begun.seat);
+
+    /* The durable intent owns the target on replay. A retried request may carry
+       a different conversation id after a caller restart; following it would
+       let one idempotency key designate a different conversation. */
+    const deliveryTarget = begun.kind === "replay"
+      ? dependencies.conversationTarget(begun.seat.conversationId ?? "")
+      : target;
+    if (!deliveryTarget || deliveryTarget.kind === "ineligible" || deliveryTarget.project !== project) {
+      const error = "the pending adoption target is no longer eligible";
+      failOrchestratorSeatIntent(project, clientRequestId, error);
+      return { status: 409, body: { error, code: "adoption_target_unavailable", seat: orchestratorSeatFor(project).pending } };
+    }
 
     const delivery = await dependencies.deliver({
-      conversationId: target.conversationId,
-      path: target.path,
+      conversationId: deliveryTarget.conversationId,
+      path: deliveryTarget.path,
       /* Derived, never minted: a retry after a lost response reuses the same
          id and the delivery receipts answer it instead of delivering twice. */
       clientMessageId: `orchmandate_${clientRequestId}`,
@@ -253,15 +319,15 @@ export async function executeOrchestratorSeatRequest(
         },
       };
     }
-    const activated = await activate({ project, clientRequestId, conversationId: target.conversationId, path: target.path }, dependencies);
+    const activated = await activate({ project, clientRequestId, conversationId: deliveryTarget.conversationId, path: deliveryTarget.path }, dependencies);
     if (!activated) return { status: 409, body: { error: "seat intent was superseded by a newer designation" } };
     return {
       status: 200,
       body: {
         ok: true,
         state: "settled",
-        conversationId: target.conversationId,
-        path: target.path,
+        conversationId: deliveryTarget.conversationId,
+        path: deliveryTarget.path,
         delivery: delivery.outcome ?? "delivered",
         seat: activated.seat,
       },
@@ -289,6 +355,7 @@ export async function executeOrchestratorSeatRequest(
   }
   const begun = beginOrchestratorSeatIntent({ project, mandate, clientRequestId, mode: "spawn", promptVersion, now: dependencies.now() });
   if (begun.kind === "completed") return replayedSeatResponse(begun.seat);
+  if (begun.kind === "in_progress") return inProgressSeatResponse(begun.seat);
   /* A pending replay spawns the ORIGINAL intent's mandate: the spawn receipt is
      matched by clientAttemptId AND request digest, so a recomposed retry would
      otherwise conflict with its own first attempt. */
@@ -311,9 +378,19 @@ export async function executeOrchestratorSeatRequest(
   const spawned = await dependencies.spawn(spawnBody);
   const spawnedConversationId = text(spawned.body.conversationId);
   const admitted = spawned.status >= 200 && spawned.status < 300 && spawned.body.ok !== false;
+  const launchId = text(spawned.body.launchId);
+  const acceptedPending = admitted
+    && spawned.status === 202
+    && Boolean(spawnedConversationId)
+    && Boolean(launchId);
   const launched = admitted && spawned.body.launched !== false && Boolean(spawnedConversationId);
-  if (!launched) {
-    const error = text(spawned.body.error) || `spawn failed with status ${spawned.status}`;
+  if (!launched && !acceptedPending) {
+    const error = text(spawned.body.error)
+      || (!admitted
+        ? `spawn was rejected with HTTP status ${spawned.status}`
+        : !spawnedConversationId
+          ? "spawn response omitted conversationId"
+          : "spawn did not report an accepted launch");
     failOrchestratorSeatIntent(project, clientRequestId, error);
     return { status: spawned.status, body: { ...spawned.body, seat: orchestratorSeatFor(project).pending } };
   }
@@ -322,6 +399,7 @@ export async function executeOrchestratorSeatRequest(
     clientRequestId,
     conversationId: spawnedConversationId,
     path: typeof spawned.body.path === "string" ? spawned.body.path : null,
+    launchId: launchId || null,
     ...(typeof rawBody.engine === "string" ? { engine: rawBody.engine } : {}),
     ...(typeof rawBody.model === "string" ? { model: rawBody.model } : {}),
   }, dependencies);
@@ -330,6 +408,7 @@ export async function executeOrchestratorSeatRequest(
     status: spawned.status,
     body: {
       ...spawned.body,
+      ...(acceptedPending ? { accepted: true, state: "accepted" } : {}),
       seat: activated.seat,
     },
   };
@@ -359,8 +438,9 @@ export async function executeOrchestratorRotation(
   rawBody: Record<string, unknown>,
   dependencies: SeatCommandDependencies = productionSeatCommandDependencies,
 ): Promise<SeatCommandResult> {
-  const project = typeof rawBody.project === "string" ? validExplicitProject(rawBody.project) : null;
-  if (!project) return { status: 400, body: { error: "project must be a valid project key" } };
+  const namedProject = typeof rawBody.project === "string" ? validExplicitProject(rawBody.project) : null;
+  if (!namedProject) return { status: 400, body: { error: "project must be a valid project key" } };
+  const project = canonicalOrchestratorProject(namedProject);
   const clientRequestId = text(rawBody.clientRequestId);
   if (!CLIENT_REQUEST_ID.test(clientRequestId)) {
     return { status: 400, body: { error: "clientRequestId must be 8-128 URL-safe characters" } };
@@ -373,7 +453,8 @@ export async function executeOrchestratorRotation(
     };
   }
 
-  const predecessor = dependencies.conversationTarget(incumbent.conversationId);
+  const predecessorTarget = dependencies.conversationTarget(incumbent.conversationId);
+  const predecessor = predecessorTarget?.kind === "eligible" ? predecessorTarget : null;
   const tasks = dependencies.projectTasks(project).slice(0, HANDOFF_TASK_CAP);
   const notes = text(rawBody.handoffNotes).slice(0, HANDOFF_NOTES_CAP);
   const handoff = [
