@@ -280,6 +280,32 @@ test("a rejected compaction is reported as the refusal, not as a started compact
   await act(async () => root.unmount());
 });
 
+test("a typed capability refusal is localized from its code, not echoed in English", async () => {
+  sessionView = structuredCodexView();
+  const calls: string[] = [];
+  globalThis.fetch = ((url: string) => {
+    calls.push(String(url));
+    return Promise.resolve({
+    ok: false,
+    json: () => Promise.resolve({
+      /* `dispatchStructuredControl`'s capability body: the sentence is a
+         server-side English string, so the code is what the operator reads. */
+      error: "The Claude stream-json protocol has no client-originated compact control; only interrupt is exposed.",
+      code: "unsupported-capability",
+      capability: { control: "compact", engine: "claude", supported: false },
+    }),
+    } as unknown as Response);
+  }) as typeof fetch;
+
+  const { host, root } = await mount(structuredRoot);
+  await confirmCompact(host);
+
+  expect(calls).toEqual(["/api/tmux"]);
+  expect(statusText(host)).toBe(translate("en", "receipt.human.unsupportedCapability"));
+  expect(statusText(host)).not.toContain("stream-json");
+  await act(async () => root.unmount());
+});
+
 test("an ambiguous transport failure keeps the gesture on one operation", async () => {
   sessionView = structuredCodexView();
   const bodies: Array<Record<string, unknown>> = [];

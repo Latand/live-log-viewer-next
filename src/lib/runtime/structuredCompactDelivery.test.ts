@@ -296,6 +296,76 @@ test("a second compaction for a thread already compacting waits instead of compa
     .toEqual(["delivering", "delivered"]);
 });
 
+test("a compaction on an unavailable host still lets a kill behind it run in the same pass", async () => {
+  const sent: QueueEntry[] = [];
+  const terminations: string[] = [];
+  const recoveries: string[] = [];
+  const kill = {
+    id: "effect:op-kill",
+    kind: "runtime.kill",
+    eventSeq: 8,
+    payload: {
+      kind: "kill",
+      operationId: "op-kill",
+      conversationId: "conversation-one",
+      idempotencyKey: "op-kill",
+      sessionKey: { engine: "codex", sessionId: "thread-one" },
+    },
+  } satisfies StructuredDeliveryEffect;
+  const { port, transitions } = recorder([compactEffect(), kill], ["delivered", "failed"]);
+  const queue = new StructuredDeliveryQueue(
+    port,
+    () => null,
+    async (conversationId) => { terminations.push(conversationId); return true; },
+    undefined,
+    async (conversationId) => { recoveries.push(conversationId); return false; },
+  );
+
+  await queue.drain();
+
+  /* Compact sorts ahead of the kill because it is a control too, so a barrier
+     here would be the first time one control could stop another. */
+  expect(recoveries).toEqual(["conversation-one"]);
+  expect(terminations).toEqual(["conversation-one"]);
+  expect(transitions.filter(([operationId]) => operationId === "op-kill").map(([, status]) => status))
+    .toEqual(["delivering", "delivered"]);
+  expect(sent).toEqual([]);
+});
+
+test("a compaction admitted before a successful kill is not allowed to respawn the conversation", async () => {
+  const sent: QueueEntry[] = [];
+  let compactions = 0;
+  const recoveries: string[] = [];
+  const host: CompactCapableHost = Object.assign(baseHost(sent), {
+    compact: async () => { compactions += 1; return { compactionId: "compaction-one" }; },
+  });
+  /* The durable kill boundary the journal retains for a conversation whose
+     host the operator deliberately terminated. */
+  const boundary = {
+    id: "kill-boundary:conversation-one",
+    kind: "runtime.kill-boundary",
+    eventSeq: 9,
+    payload: { operationId: "op-kill", conversationId: "conversation-one", admissionEventSeq: 9 },
+  } satisfies StructuredDeliveryEffect;
+  const { port, transitions, settled } = recorder([boundary, compactEffect()]);
+  const queue = new StructuredDeliveryQueue(
+    port,
+    () => host,
+    undefined,
+    undefined,
+    async (conversationId) => { recoveries.push(conversationId); return true; },
+  );
+
+  await queue.drain();
+  await settled;
+
+  expect(compactions).toBe(0);
+  expect(recoveries).toEqual([]);
+  expect(transitions).toHaveLength(1);
+  expect(transitions[0]!.slice(0, 2)).toEqual(["op-one", "failed"]);
+  expect(transitions[0]![2]).toContain("intentionally terminated");
+});
+
 test("a compact effect whose durable receipt cannot be read falls through to the host checks", async () => {
   const sent: QueueEntry[] = [];
   let compactions = 0;

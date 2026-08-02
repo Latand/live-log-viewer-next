@@ -156,13 +156,15 @@ const structuredImages = (imageInput: RuntimeImageCapability | null | undefined)
  *   require to be codex-app-server (a session view missing `sessionKey`
  *   defaults its engine to codex, so the engine alone is not enough);
  * - the turn, because admission rejects a compaction that would race a live one
- *   — an enabled button there promises something the journal refuses.
+ *   — an enabled button there promises something the journal refuses. Both
+ *   halves of that rejection are read: the turn axis AND a non-null
+ *   `activeTurnId`, which a session can project while its axis still says idle.
  */
 const structuredCompact = (session: RuntimeSessionView["session"] | undefined): Capability => {
   if (session?.hostKind !== "codex-app-server" || session.sessionKey?.engine !== "codex") {
     return disabled("strip.compactEngineUnsupported");
   }
-  if (session.turn === "running" || session.turn === "interrupt_requested") {
+  if (session.turn === "running" || session.turn === "interrupt_requested" || session.activeTurnId) {
     return disabled("strip.compactBusyTurn");
   }
   return ENABLED;

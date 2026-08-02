@@ -1083,6 +1083,15 @@ export class CodexAppServerHost implements EngineHost {
    * never completes is caught by `compactEvidenceTimeoutMs` (or sooner by host
    * death), and terminalizes unverified — which is the honest verdict, since
    * nothing on the wire says what became of it.
+   *
+   * Nor is there anything to correlate on. The item's `id` is minted by the
+   * engine and appears for the first time in this notification, so ANY completed
+   * compaction on the owned thread settles the waiter — including an
+   * auto-compaction that happened to land in the same window, whose id the
+   * receipt would then record. Two guards make that window small rather than
+   * closed: `compact()` refuses while a turn is active, and the delivery queue
+   * holds messages behind an unfinished compaction, so the thread should have no
+   * turn running to auto-compact. Recorded as a known limit of `{ id, type }`.
    */
   private acceptCompactionItem(item: unknown, phase: "started" | "completed"): void {
     if (phase !== "completed" || this.pendingCompactions.size === 0) return;

@@ -70,6 +70,12 @@ function rvTurn(turn: "unknown" | "idle" | "running" | "interrupt_requested"): R
   return { ...view, session: { ...view.session, turn } };
 }
 
+/** A hosted codex structured view whose axis says idle while a turn is live. */
+function rvActiveTurn(): RuntimeSessionView {
+  const view = rvTurn("idle");
+  return { ...view, session: { ...view.session, activeTurnId: "turn-live" } };
+}
+
 /** Same view with the structured-hosts rollback flag OFF. */
 function rvGateOff(hostKind: HostKind, host: HostAxis): RuntimeSessionView {
   return { ...rv(hostKind, host), structuredControlsEnabled: false };
@@ -280,6 +286,10 @@ test("structured: stop+terminal+kill+runtime enabled, compact follows the engine
   expect(reason("compact", f, rvTurn("interrupt_requested"))).toBe("strip.compactBusyTurn");
   expect(state("compact", f, rvTurn("idle"))).toBe("enabled");
   expect(state("compact", f, rvTurn("unknown"))).toBe("enabled");
+  /* Admission rejects on the turn axis OR a live activeTurnId, so both halves
+     are read here — an idle-looking session still carrying a turn must not
+     offer a button the journal will refuse. */
+  expect(reason("compact", f, rvActiveTurn())).toBe("strip.compactBusyTurn");
   // The composer RuntimePill owns runtime selection here (issue #390); per-row
   // honesty comes from the session's negotiated runtimeSettings capability.
   expect(state("runtime", f, view)).toBe("enabled");

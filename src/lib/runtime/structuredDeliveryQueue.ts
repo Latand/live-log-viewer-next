@@ -582,8 +582,10 @@ export class StructuredDeliveryQueue {
    * impossible because the operation is registered in flight before the control
    * is issued and the outbox row is only cleared by the terminal transition.
    *
-   * It never reports the group blocked for an in-flight compaction: the
-   * remaining control effects — kill above all — must still run.
+   * It never reports the group blocked, in any branch: compact is the first
+   * control that can occupy this slot for minutes, and a kill sorted behind it
+   * must still run in the same pass. Messages are held by the per-conversation
+   * barrier instead, which is read only for non-control effects.
    */
   private async drainCompact(effect: CompactEffect): Promise<ControlDrainResult> {
     if (this.activeCompactions.has(effect.operationId)) return { blocked: false, terminated: false };
@@ -610,15 +612,29 @@ export class StructuredDeliveryQueue {
       );
       return { blocked: false, terminated: false };
     }
+    /* A conversation the operator deliberately terminated must not be brought
+       back to compact it. A compact admitted between a kill's admission and its
+       execution is still pending afterwards — kill admission does not move the
+       session's host axis — and the recovery below would otherwise respawn the
+       host purely to run this control. Sends are fenced the same way. */
+    const killBoundary = this.successfulKillBoundaries.get(effect.conversationId);
+    if (killBoundary && effect.eventSeq <= killBoundary.eventSeq) {
+      await this.port.transition(effect.operationId, "failed", {
+        reason: "structured host was intentionally terminated; retry the operation",
+      });
+      return { blocked: false, terminated: false };
+    }
     const host = this.resolveHost(effect.conversationId);
     /* Controls sort ahead of sends, and a compaction can hold that slot for
        minutes, so an unavailable host must start the same recovery a send would
        — otherwise every message queued behind this control waits on a host
-       nobody asked to come back. */
+       nobody asked to come back. The group is not reported blocked: recovery is
+       asynchronous, and a kill behind this effect must not wait a whole pass
+       for it. */
     if (!host) {
       await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
       await this.recoverUnavailableHost(effect);
-      return { blocked: true, terminated: false };
+      return { blocked: false, terminated: false };
     }
     if (!hostSupportsCompact(host)) {
       await this.port.transition(effect.operationId, "failed", { reason: "unsupported-capability" });
@@ -628,7 +644,7 @@ export class StructuredDeliveryQueue {
     if (health.status === "dead" || health.status === "unhosted") {
       await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
       await this.recoverUnavailableHost(effect);
-      return { blocked: true, terminated: false };
+      return { blocked: false, terminated: false };
     }
     /* Admission fenced the durable turn axis; this re-reads the live host, so a
        turn that started in between fails the control instead of racing it. */
