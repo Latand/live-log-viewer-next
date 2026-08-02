@@ -107,7 +107,7 @@ export type ReceiptStatus =
   | "failed"
   | "uncertain";
 
-export type OperationKind = "send" | "steer" | "interrupt" | "answer" | "kill" | "spawn" | "reconfigure";
+export type OperationKind = "send" | "steer" | "interrupt" | "answer" | "kill" | "spawn" | "reconfigure" | "compact";
 
 /** Client connection state (Fable §2). `resynced` is a transient note, not a state. */
 export type ConnectionState = "live" | "reconnecting" | "degraded" | "offline";
@@ -775,7 +775,14 @@ export const RECEIPT_REASON_KEYS: Record<string, MessageKey> = {
   "stale-delivery-key": "receipt.human.staleKey",
   "duplicate": "receipt.human.duplicate",
   "turn-active": "receipt.human.turnActive",
+  "busy-turn": "receipt.human.turnActive",
   "no-active-turn": "receipt.human.noTurn",
+  /* #862 compact refusals. `stale-generation` is the same class of fact as a
+     stale delivery key: the operator was pointing at a generation that is no
+     longer the live one. */
+  "stale-generation": "receipt.human.staleKey",
+  "stale-turn": "receipt.human.staleKey",
+  "unsupported-capability": "receipt.human.unsupportedCapability",
 };
 
 /** The human sentence key for a receipt's reason, or null for an unknown one. */

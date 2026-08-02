@@ -40,13 +40,40 @@ function imageCap(supported: boolean): RuntimeImageCapability {
     negotiated image capability. */
 function rv(hostKind: HostKind, host: HostAxis, legacy = false, imageInput?: RuntimeImageCapability): RuntimeSessionView {
   return {
-    session: { hostKind, host, capabilities: { steer: true, structuredAttention: true, ...(imageInput ? { imageInput } : {}) } } as RuntimeSessionView["session"],
+    session: {
+      hostKind,
+      host,
+      /* The engine the host speaks — structured Compact reads it, because the
+         compact control exists on codex-app-server and not on claude-broker. */
+      sessionKey: { engine: hostKind === "claude-broker" ? "claude" : "codex", sessionId: "session-one" },
+      capabilities: { steer: true, structuredAttention: true, ...(imageInput ? { imageInput } : {}) },
+    } as RuntimeSessionView["session"],
     uiState: {} as RuntimeSessionView["uiState"],
     attentions: [],
     receipts: [],
     legacy,
     structuredControlsEnabled: true,
   };
+}
+
+/** A hosted structured view whose `sessionKey` payload never arrived. */
+function rvWithoutSessionKey(hostKind: HostKind): RuntimeSessionView {
+  const view = rv(hostKind, "hosted");
+  const { sessionKey, ...session } = view.session as RuntimeSessionView["session"] & { sessionKey?: unknown };
+  void sessionKey;
+  return { ...view, session: session as RuntimeSessionView["session"] };
+}
+
+/** A hosted codex structured view on a named turn axis. */
+function rvTurn(turn: "unknown" | "idle" | "running" | "interrupt_requested"): RuntimeSessionView {
+  const view = rv("codex-app-server", "hosted");
+  return { ...view, session: { ...view.session, turn } };
+}
+
+/** A hosted codex structured view whose axis says idle while a turn is live. */
+function rvActiveTurn(): RuntimeSessionView {
+  const view = rvTurn("idle");
+  return { ...view, session: { ...view.session, activeTurnId: "turn-live" } };
 }
 
 /** Same view with the structured-hosts rollback flag OFF. */
@@ -239,15 +266,30 @@ test("live-subagent: stop enabled (root-interrupt note), compact disabled, runti
   expect(state("images", f, null)).toBe("enabled");
 });
 
-test("structured: stop+terminal+kill+runtime enabled, compact still fenced, images follow the negotiated capability", () => {
+test("structured: stop+terminal+kill+runtime enabled, compact follows the engine, images follow the negotiated capability", () => {
   const f = file({ proc: "running" });
   const view = rv("codex-app-server", "hosted");
   expect(state("stop", f, view)).toBe("enabled");
   expect(state("terminal", f, view)).toBe("enabled");
   // Kill is enabled and routed through the durable structured control channel.
   expect(state("kill", f, view)).toBe("enabled");
-  // Compact stays disabled: dispatchStructuredControl still 409s it.
-  expect(reason("compact", f, view)).toBe("strip.structuredUnsupported");
+  // Compact is a real durable control on codex-app-server (#862)...
+  expect(state("compact", f, view)).toBe("enabled");
+  // ...and a genuine protocol gap on claude-broker, which names the engine.
+  expect(reason("compact", f, rv("claude-broker", "hosted"))).toBe("strip.compactEngineUnsupported");
+  // The cell gates on exactly what the server gates on: host kind as well as
+  // engine. A session view whose sessionKey never arrived defaults its engine to
+  // codex, so the host kind is what keeps a claude-broker cell honest...
+  expect(reason("compact", f, rvWithoutSessionKey("claude-broker"))).toBe("strip.compactEngineUnsupported");
+  // ...and the turn, because admission rejects a compaction that races one.
+  expect(reason("compact", f, rvTurn("running"))).toBe("strip.compactBusyTurn");
+  expect(reason("compact", f, rvTurn("interrupt_requested"))).toBe("strip.compactBusyTurn");
+  expect(state("compact", f, rvTurn("idle"))).toBe("enabled");
+  expect(state("compact", f, rvTurn("unknown"))).toBe("enabled");
+  /* Admission rejects on the turn axis OR a live activeTurnId, so both halves
+     are read here — an idle-looking session still carrying a turn must not
+     offer a button the journal will refuse. */
+  expect(reason("compact", f, rvActiveTurn())).toBe("strip.compactBusyTurn");
   // The composer RuntimePill owns runtime selection here (issue #390); per-row
   // honesty comes from the session's negotiated runtimeSettings capability.
   expect(state("runtime", f, view)).toBe("enabled");

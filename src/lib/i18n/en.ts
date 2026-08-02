@@ -350,6 +350,8 @@ export const en = {
   "strip.stopSubagent": "interrupts the root agent",
   "strip.compactSubagent": "not available for subagents",
   "strip.structuredUnsupported": "the structured host does not support this action yet",
+  "strip.compactEngineUnsupported": "this engine has no compact control",
+  "strip.compactBusyTurn": "not while a turn is running",
   "strip.resolving": "resolving the agent host…",
 
   // Dead-host banner (issue #247)
@@ -393,6 +395,7 @@ export const en = {
   "receipt.human.duplicate": "already delivered",
   "receipt.human.turnActive": "the agent is mid-turn",
   "receipt.human.noTurn": "there is no active turn",
+  "receipt.human.unsupportedCapability": "this engine has no such control",
   "receipt.human.verbatim": "not delivered: {reason}",
 
   // DraftAgentPane

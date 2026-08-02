@@ -6,7 +6,7 @@ import { listCodexAccounts } from "@/lib/accounts/codex";
 import { sessionKeyId } from "@/lib/agent/sessionKey";
 
 import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "./client";
-import { newOperationId } from "./contracts";
+import { newOperationId, runtimeCompactCapability, type RuntimeControlCapability, type RuntimeOperationCommand } from "./contracts";
 import { republishStructuredDeliveryHost } from "./structuredDeliveryController";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { recoverDeadStructuredConversation, structuredHostProcessAlive } from "./structuredRecovery";
@@ -15,7 +15,13 @@ export type StructuredControlResult =
   | { status: 200; body: { ok: true; structured: true; target: string; outcome: "delivered" } }
   | { status: 200; body: { ok: true; structured: true; target: string; outcome: "resumed"; spawned: boolean } }
   | { status: 200 | 202; body: { ok: true; structured: true; target: string; operationId: string; receipt: { operationId: string; status: string } } }
+  /** A control this engine genuinely does not expose (#862). It is typed, so a
+      caller can tell "this engine cannot" from "this attempt failed", and no
+      prompt-based fallback is ever offered in its place. */
+  | { status: 409; body: { error: string; code: "unsupported-capability"; capability: RuntimeControlCapability } }
   | { status: 400 | 409 | 503; body: { error: string } };
+
+const STRUCTURED_CONTROL_ACTIONS = new Set(["interrupt", "kill", "reconfigure", "compact"]);
 
 export interface StructuredControlRequest {
   path: string;
@@ -67,7 +73,7 @@ export async function dispatchStructuredControl(
     && (conversation.reconfigure?.status === "applying" || completedStructuredOwnership);
   if (!entry.structuredHost && !structuredKill && !structuredReconfigureRestart) return null;
 
-  if (request.action !== "interrupt" && request.action !== "kill" && request.action !== "reconfigure") {
+  if (!STRUCTURED_CONTROL_ACTIONS.has(request.action)) {
     if (request.action === "resume") {
       if (entry.status === "dead" || entry.status === "unhosted") return null;
       try {
@@ -111,10 +117,25 @@ export async function dispatchStructuredControl(
         return { status: 503, body: { error: error instanceof Error ? error.message : String(error) } };
       }
     }
-    const label = ["compact", "dialog-key", "kill", "reconfigure"].includes(request.action)
+    const label = ["dialog-key", "kill", "reconfigure"].includes(request.action)
       ? request.action
       : "requested";
     return { status: 409, body: { error: `structured host does not support the ${label} control` } };
+  }
+
+  if (request.action === "compact") {
+    const capability = runtimeCompactCapability(conversation.engine);
+    if (!capability.supported || entry.structuredHost?.kind !== "codex-app-server") {
+      return {
+        status: 409,
+        body: {
+          error: capability.reason
+            ?? `the ${conversation.engine} structured host does not expose a compact control`,
+          code: "unsupported-capability",
+          capability,
+        },
+      };
+    }
   }
 
   if (structuredKill
@@ -143,35 +164,36 @@ export async function dispatchStructuredControl(
         return { status: 400, body: { error: `account is not available for ${conversation.engine}` } };
       }
     }
-    const result = await client.command(request.action === "kill"
-      ? {
-          kind: "kill",
-          operationId,
-          idempotencyKey: operationId,
-          conversationId: conversation.id,
-          sessionKey: { engine: conversation.engine, sessionId: generation.id },
-        }
-      : request.action === "reconfigure"
-        ? {
-            kind: "reconfigure",
-            operationId,
-            idempotencyKey: operationId,
-            conversationId: conversation.id,
-            sessionKey: { engine: conversation.engine, sessionId: generation.id },
-            ...reconfiguration!.value!,
-            previousProfile: {
-              model: generation.launchProfile.model,
-              effort: generation.launchProfile.effort,
-              fast: generation.launchProfile.fast,
-            },
-          }
-        : {
-          kind: "interrupt",
-          operationId,
-          idempotencyKey: operationId,
-          conversationId: conversation.id,
-          turnId: entry.structuredHost?.activeTurnRef ?? null,
-        });
+    const sessionKey = { engine: conversation.engine, sessionId: generation.id };
+    const command: RuntimeOperationCommand = request.action === "kill"
+      ? { kind: "kill", operationId, idempotencyKey: operationId, conversationId: conversation.id, sessionKey }
+      /* #862: a compact command carries a generation fence and nothing else.
+         There is no text field to fill, so this control cannot degrade into a
+         `/compact` user turn on any path. */
+      : request.action === "compact"
+        ? { kind: "compact", operationId, idempotencyKey: operationId, conversationId: conversation.id, sessionKey }
+        : request.action === "reconfigure"
+          ? {
+              kind: "reconfigure",
+              operationId,
+              idempotencyKey: operationId,
+              conversationId: conversation.id,
+              sessionKey,
+              ...reconfiguration!.value!,
+              previousProfile: {
+                model: generation.launchProfile.model,
+                effort: generation.launchProfile.effort,
+                fast: generation.launchProfile.fast,
+              },
+            }
+          : {
+              kind: "interrupt",
+              operationId,
+              idempotencyKey: operationId,
+              conversationId: conversation.id,
+              turnId: entry.structuredHost?.activeTurnRef ?? null,
+            };
+    const result = await client.command(command);
     (dependencies.kick ?? kickStructuredDeliveryQueue)();
     return {
       status: result.receipt.status === "delivered" ? 200 : 202,
@@ -184,7 +206,8 @@ export async function dispatchStructuredControl(
       },
     };
   } catch (error) {
-    if ((request.action === "kill" || request.action === "reconfigure") && isRuntimeHostTransportFailure(error)) {
+    if ((request.action === "kill" || request.action === "reconfigure" || request.action === "compact")
+      && isRuntimeHostTransportFailure(error)) {
       /* The socket failed after the command may have reached the journal. The
          durable receipt decides whether structured control owns the response. */
       const durable = await client.operationStatus(operationId).catch(() => null);

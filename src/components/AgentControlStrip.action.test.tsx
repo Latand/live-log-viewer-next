@@ -64,11 +64,13 @@ let rootAxis: HostAxis = "hosted";
 // default shape without a live runtime — a re-mock to the real module does not
 // reliably un-bind already-loaded consumers, but flipping the flag does.
 let planeEnabled = true;
+/* A pane-less structured session for the root-conversation compact tests. */
+let sessionView: RuntimeSessionView | null = null;
 const actual = await import("@/hooks/useRuntime");
 mock.module("@/hooks/useRuntime", () => ({
   ...actual,
   useRuntime: () => ({ enabled: planeEnabled, connection: planeEnabled ? "live" : "offline", resyncedAt: null, store: {} }),
-  useRuntimeSession: () => null,
+  useRuntimeSession: () => sessionView,
   useRuntimeSessionByArtifact: (path: string | null) => (planeEnabled && path === "/root.jsonl" ? rootView(rootKind, rootAxis) : null),
 }));
 
@@ -101,6 +103,7 @@ afterEach(() => {
   globalThis.fetch = realFetch;
   rootKind = "claude-broker";
   rootAxis = "hosted";
+  sessionView = null;
   FakeResizeObserver.instances = [];
   document.body.replaceChildren();
   localStorage.clear();
@@ -197,4 +200,161 @@ test("Stop on a live TMUX-root subagent keeps the canonical /api/tmux child path
   expect(interrupts[0]!.body).toEqual({ action: "interrupt", path: "/child.jsonl" });
   expect(calls.some((c) => c.url.includes("/api/runtime/interrupt"))).toBe(false);
   await act(async () => root.unmount());
+});
+
+/* ------------------------- #862 structured compact ------------------------- */
+
+const structuredRoot: FileEntry = {
+  path: "/root.jsonl", root: "codex-sessions", name: "root.jsonl", project: "viewer", title: "root",
+  engine: "codex", kind: "session", fmt: "codex", parent: null, mtime: 1, size: 1,
+  activity: "live", proc: "running", pid: null, model: "gpt-5.3-codex-spark", effort: "high", fast: false,
+  pendingQuestion: null, waitingInput: null,
+} as FileEntry;
+
+function structuredCodexView(): RuntimeSessionView {
+  return {
+    session: {
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      sessionKey: { engine: "codex", sessionId: "thread-one" },
+      conversationId: "conv-root",
+      capabilities: { steer: true, structuredAttention: true },
+    } as unknown as RuntimeSessionView["session"],
+    uiState: {} as RuntimeSessionView["uiState"],
+    attentions: [],
+    receipts: [],
+    legacy: false,
+    structuredControlsEnabled: true,
+  };
+}
+
+const compactButton = (host: HTMLElement) =>
+  host.querySelector(`button[aria-label^="${translate("en", "composer.compactAria")}"]`) as HTMLButtonElement | null;
+
+async function confirmCompact(host: HTMLElement): Promise<void> {
+  const button = compactButton(host)!;
+  await act(async () => button.click());
+  await act(async () => button.click());
+}
+
+const statusText = (host: HTMLElement) =>
+  (host.querySelector("[aria-live]") as HTMLElement | null)?.textContent ?? "";
+
+test("a rejected compaction is reported as the refusal, not as a started compaction", async () => {
+  sessionView = structuredCodexView();
+  const bodies: Array<Record<string, unknown>> = [];
+  globalThis.fetch = ((url: string, init?: RequestInit) => {
+    bodies.push(init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {});
+    /* Structured controls answer 202 `ok` for a receipt the journal REFUSED,
+       so the receipt decides what the operator is told. */
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({
+        ok: true,
+        structured: true,
+        target: "conv-root",
+        operationId: String(bodies.at(-1)!.operationId),
+        receipt: { operationId: String(bodies.at(-1)!.operationId), status: "rejected", reason: "busy-turn" },
+      }),
+    } as unknown as Response);
+  }) as typeof fetch;
+
+  const { host, root } = await mount(structuredRoot);
+  expect(host.querySelector('[data-strip-surface="structured"]')).not.toBeNull();
+  await confirmCompact(host);
+
+  expect(bodies).toHaveLength(1);
+  expect(bodies[0]!.action).toBe("compact");
+  /* The operator reads a sentence, not the durable record's machine token. */
+  expect(statusText(host)).toBe(translate("en", "receipt.human.turnActive"));
+  expect(statusText(host)).not.toBe(translate("en", "composer.compactSent"));
+
+  /* The refusal is terminal and stored, and idempotency replays a stored
+     receipt for the same key forever — so the gesture's operation is released
+     and the next attempt is a genuinely new one. Holding the id would answer
+     every later click with this same stale refusal. */
+  await confirmCompact(host);
+  expect(bodies).toHaveLength(2);
+  expect(bodies[1]!.operationId).not.toBe(bodies[0]!.operationId);
+  await act(async () => root.unmount());
+});
+
+test("a typed capability refusal is localized from its code, not echoed in English", async () => {
+  sessionView = structuredCodexView();
+  const calls: string[] = [];
+  globalThis.fetch = ((url: string) => {
+    calls.push(String(url));
+    return Promise.resolve({
+    ok: false,
+    json: () => Promise.resolve({
+      /* `dispatchStructuredControl`'s capability body: the sentence is a
+         server-side English string, so the code is what the operator reads. */
+      error: "The Claude stream-json protocol has no client-originated compact control; only interrupt is exposed.",
+      code: "unsupported-capability",
+      capability: { control: "compact", engine: "claude", supported: false },
+    }),
+    } as unknown as Response);
+  }) as typeof fetch;
+
+  const { host, root } = await mount(structuredRoot);
+  await confirmCompact(host);
+
+  expect(calls).toEqual(["/api/tmux"]);
+  expect(statusText(host)).toBe(translate("en", "receipt.human.unsupportedCapability"));
+  expect(statusText(host)).not.toContain("stream-json");
+  await act(async () => root.unmount());
+});
+
+test("an ambiguous transport failure keeps the gesture on one operation", async () => {
+  sessionView = structuredCodexView();
+  const bodies: Array<Record<string, unknown>> = [];
+  globalThis.fetch = ((url: string, init?: RequestInit) => {
+    bodies.push(init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {});
+    /* The runtime-host socket failed and no receipt came back: the compaction
+       may or may not have been admitted, so the retry must name the same
+       operation rather than risk a second one. */
+    return Promise.resolve({
+      ok: false,
+      json: () => Promise.resolve({ error: "runtime host request timed out" }),
+    } as unknown as Response);
+  }) as typeof fetch;
+
+  const { host, root } = await mount(structuredRoot);
+  await confirmCompact(host);
+  expect(statusText(host)).toBe("runtime host request timed out");
+
+  await confirmCompact(host);
+  expect(bodies).toHaveLength(2);
+  expect(bodies[1]!.operationId).toBe(bodies[0]!.operationId);
+  await act(async () => root.unmount());
+});
+
+test("compact still mints an operation id without a secure context", async () => {
+  sessionView = structuredCodexView();
+  const bodies: Array<Record<string, unknown>> = [];
+  globalThis.fetch = ((url: string, init?: RequestInit) => {
+    bodies.push(init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {});
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({ ok: true, structured: true, target: "conv-root", receipt: { status: "pending" } }),
+    } as unknown as Response);
+  }) as typeof fetch;
+  /* Plain-http LAN access has no `crypto.randomUUID`. Reaching for it directly
+     would throw outside the try, leaving the button permanently busy. */
+  const cryptoObject = globalThis.crypto as { randomUUID?: unknown };
+  const realRandomUUID = cryptoObject.randomUUID;
+  delete cryptoObject.randomUUID;
+  try {
+    const { host, root } = await mount(structuredRoot);
+    await confirmCompact(host);
+
+    expect(bodies).toHaveLength(1);
+    expect(typeof bodies[0]!.operationId).toBe("string");
+    expect(String(bodies[0]!.operationId).length).toBeGreaterThan(8);
+    expect(statusText(host)).toBe(translate("en", "composer.compactSent"));
+    await act(async () => root.unmount());
+  } finally {
+    if (realRandomUUID !== undefined) cryptoObject.randomUUID = realRandomUUID;
+  }
 });

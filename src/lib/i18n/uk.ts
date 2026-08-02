@@ -367,6 +367,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "strip.stopSubagent": "перериває кореневого агента",
   "strip.compactSubagent": "недоступно для субагентів",
   "strip.structuredUnsupported": "структурований хост поки не підтримує цю дію",
+  "strip.compactEngineUnsupported": "цей двигун не має команди стиснення",
+  "strip.compactBusyTurn": "недоступно, поки триває хід",
   "strip.resolving": "визначаємо середовище агента…",
 
   // Dead-host banner (issue #247)
@@ -410,6 +412,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "receipt.human.duplicate": "вже доставлено",
   "receipt.human.turnActive": "агент посеред ходу",
   "receipt.human.noTurn": "немає активного ходу",
+  "receipt.human.unsupportedCapability": "цей двигун не має такої команди",
   "receipt.human.verbatim": "не доставлено: {reason}",
 
   "draft.readPrompt": "Прочитай розмову агента у файлі {src} і продовж роботу звідти: ",
