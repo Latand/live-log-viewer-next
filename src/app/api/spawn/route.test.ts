@@ -162,18 +162,7 @@ test("an unusable explicit account creates a terminal retryable pinned receipt a
   process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
   process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
   try {
-    const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
-      method: "POST",
-      headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
-      body: JSON.stringify({
-        engine: "claude",
-        model: "claude-sonnet-4-6",
-        cwd,
-        ["prompt"]: "inspect",
-        accountId: "unusable-pin",
-        clientAttemptId: "unusable_pin_20260731",
-      }),
-    }), {
+    const dependencies = {
       ...structuredRouteDependencies(cwd),
       registry: () => store,
       resolveHealthySpawnAccount: async () => ({
@@ -182,21 +171,65 @@ test("an unusable explicit account creates a terminal retryable pinned receipt a
         kind: "managed" as const,
         home: path.join(cwd, "selected-account"),
         transcriptRoot: path.join(cwd, "selected-account", "projects"),
-        env: { NODE_ENV: "test" },
+        env: { NODE_ENV: "test" as const },
       }),
-    });
+    };
+    const capability = rotateOperatorSpawnCapability();
+    const baseRequest = {
+      engine: "claude",
+      model: "claude-sonnet-4-6",
+      cwd,
+      ["prompt"]: "inspect",
+      accountId: "unusable-pin",
+      clientAttemptId: "unusable_pin_20260731",
+    };
+    const post = async (overrides: Record<string, unknown> = {}) => await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+      method: "POST",
+      headers: {
+        origin: "http://127.0.0.1",
+        host: "127.0.0.1",
+        "content-type": "application/json",
+        "sec-fetch-site": "same-origin",
+        "x-llv-spawn-capability": capability,
+      },
+      body: JSON.stringify({
+        ...baseRequest,
+        ...overrides,
+      }),
+    }), dependencies);
 
+    const response = await post();
+    const responseBody = await response.json();
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
+    expect(responseBody).toMatchObject({
       state: "failed",
       initialMessage: "failed",
       retrySafe: true,
       error: "the requested account is not available for this launch",
     });
+    const replay = await post();
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ launchId: responseBody.launchId, state: "failed" });
+
+    const parent = store.ensureConversation("claude", path.join(cwd, "parent.jsonl"), "parent-account");
+    const conflicts = [
+      { accountId: "other-unusable-pin" },
+      { ["prompt"]: "inspect a different target" },
+      { parentConversationId: parent.id },
+      { role: "builder" },
+      { allowSubagents: true },
+    ];
+    for (const changed of conflicts) {
+      const conflict = await post(changed);
+      expect(conflict.status).toBe(409);
+      expect(await conflict.json()).toEqual({ error: "spawn attempt conflicts with its original request" });
+    }
+
     const receipt = store.spawnReceiptForClientAttempt("unusable_pin_20260731");
     expect(receipt).toMatchObject({
       accountId: "unusable-pin",
       accountPin: true,
+      requestDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
       state: "failed",
       error: "the requested account is not available for this launch",
     });

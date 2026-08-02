@@ -1458,6 +1458,11 @@ function terminalDeliveryState(
   return delivery?.state === "delivered" || delivery?.state === "failed" ? delivery.state : null;
 }
 
+function migrationDeliveryCancellationIsAbsorbing(delivery: HeldDelivery): boolean {
+  return delivery.state === "failed"
+    && delivery.error?.startsWith(MIGRATION_DELIVERY_CANCELLATION_PREFIX) === true;
+}
+
 function syncDeliveryOperationOwnerState(file: RegistryFile, delivery: HeldDelivery): void {
   const owner = file.deliveryOperationOwners[delivery.command.operationId];
   if (owner?.deliveryId === delivery.id) owner.terminalState = terminalDeliveryState(delivery);
@@ -6070,7 +6075,9 @@ export class AgentRegistry {
     return this.mutate((file) => {
       const delivery = file.heldDeliveries[id];
       if (!delivery) throw new Error("held delivery is unknown");
-      if (delivery.state === "delivered") return clone(delivery);
+      if (delivery.state === "delivered" || migrationDeliveryCancellationIsAbsorbing(delivery)) {
+        return clone(delivery);
+      }
       const conversation = file.conversations[resolveConversationAlias(file, delivery.conversationId)];
       const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
       const signature = conversation ? migrationReadinessSignature(file, conversation.engine, paths) : "";
@@ -6126,7 +6133,7 @@ export class AgentRegistry {
         if (!delivery || delivery.state === "delivered") return delivery ? clone(delivery) : null;
         const retryRecovered = delivery.state === "failed"
           && outcome.state === "delivered"
-          && !delivery.error?.startsWith(MIGRATION_DELIVERY_CANCELLATION_PREFIX);
+          && !migrationDeliveryCancellationIsAbsorbing(delivery);
         if (delivery.state !== "delivery-uncertain" && !retryRecovered) return null;
         const conversation = file.conversations[canonicalId];
         const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));

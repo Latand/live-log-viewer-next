@@ -96,6 +96,12 @@ for (const mode of ["off", "sqlite"] as const) {
   test(`stopped migration delivery settlement survives a ${mode === "off" ? "JSON" : "SQLite"} registry restart`, () => {
     const filename = registryFile();
     const { store, id } = seededRegistry(mode, filename);
+    const held = store.holdDelivery(id, "fixture", `stop-parity-${mode}`);
+    const generation = store.conversation(id)!.generations.at(-1)!;
+    expect(store.beginDeliveryAttempt(held.id, generation.id)).toMatchObject({
+      state: "delivery-uncertain",
+      attempts: 1,
+    });
     const intent = store.commitMigrationIntent({
       engine: "codex",
       targetId: "healthy",
@@ -103,14 +109,13 @@ for (const mode of ["off", "sqlite"] as const) {
       requestId: `stop-parity-${mode}`,
       expectedRevision: store.engineRouting("codex").revision,
     });
-    const held = store.holdDelivery(id, "fixture", `stop-parity-${mode}`);
     store.setMigrationIntentState(intent.id, "stopped", intent.revision);
 
     const reopened = new AgentRegistry(filename, undefined, undefined, { sqliteMode: mode });
     expect(reopened.snapshot().migrationIntents[intent.id]).toMatchObject({ state: "stopped" });
     expect(reopened.snapshot().heldDeliveries[held.id]).toMatchObject({
       state: "failed",
-      attempts: 0,
+      attempts: 1,
       generationId: null,
       deliveredAt: null,
       error: expect.stringContaining("migration was stopped"),
@@ -123,8 +128,95 @@ for (const mode of ["off", "sqlite"] as const) {
       state: "failed",
       error: expect.stringContaining("migration was stopped"),
     });
+    expect(reopened.recordDeliveryOutcome(held.id, "delivered")).toMatchObject({
+      state: "failed",
+      error: expect.stringContaining("migration was stopped"),
+    });
+    expect(reopened.snapshot().heldDeliveries[held.id]).toMatchObject({
+      state: "failed",
+      error: expect.stringContaining("migration was stopped"),
+    });
+  });
+
+  test(`rolled-back migration delivery settlement survives a ${mode === "off" ? "JSON" : "SQLite"} registry restart`, () => {
+    const filename = registryFile();
+    const { store, id } = seededRegistry(mode, filename);
+    const held = store.holdDelivery(id, "fixture", `rollback-parity-${mode}`);
+    const generation = store.conversation(id)!.generations.at(-1)!;
+    expect(store.beginDeliveryAttempt(held.id, generation.id)).toMatchObject({
+      state: "delivery-uncertain",
+      attempts: 1,
+    });
+    const requested = store.requestConversationReseat(id, "healthy");
+    store.rollbackConversationMigration(id, requested.migration!.revision);
+
+    const reopened = new AgentRegistry(filename, undefined, undefined, { sqliteMode: mode });
+    expect(reopened.snapshot().heldDeliveries[held.id]).toMatchObject({
+      state: "failed",
+      attempts: 1,
+      generationId: null,
+      deliveredAt: null,
+      error: expect.stringContaining("migration was rolled back"),
+    });
+    expect(reopened.recordDeliveryOutcomeForOperation(id, held.command.operationId, "delivered")).toBeNull();
+    expect(reopened.recordDeliveryOutcome(held.id, "delivered")).toMatchObject({
+      state: "failed",
+      error: expect.stringContaining("migration was rolled back"),
+    });
+  });
+
+  test(`committed migration delivery settlement survives a ${mode === "off" ? "JSON" : "SQLite"} registry restart`, () => {
+    const filename = registryFile();
+    const { store, id } = seededRegistry(mode, filename);
+    const held = store.holdDelivery(id, "fixture", `commit-parity-${mode}`);
+    const generation = store.conversation(id)!.generations.at(-1)!;
+    expect(store.beginDeliveryAttempt(held.id, generation.id)).toMatchObject({
+      state: "delivery-uncertain",
+      attempts: 1,
+    });
+    const requested = store.requestConversationReseat(id, "healthy");
+    const revision = requested.migration!.revision;
+    store.transitionConversationMigration(id, revision, ["waiting-turn", "requested"], { phase: "preparing" });
+    const starting = store.transitionConversationMigration(id, revision, ["preparing"], { phase: "successor-starting" });
+    const receipt = providerReceipt(starting.migration!.operationId, `committed-successor-${mode}`, `/sessions/committed-${mode}.jsonl`);
+    store.persistMigrationProviderReceipt(id, revision, starting.migration!.operationId, receipt);
+    store.commitSuccessor(id, {
+      id: receipt.nativeId,
+      path: receipt.path,
+      accountId: "healthy",
+      historyHash: receipt.historyHash,
+      host: receipt.host,
+    }, revision, starting.migration!.operationId, receipt);
+
+    const reopened = new AgentRegistry(filename, undefined, undefined, { sqliteMode: mode });
+    expect(reopened.snapshot().heldDeliveries[held.id]).toMatchObject({
+      state: "failed",
+      attempts: 1,
+      generationId: null,
+      deliveredAt: null,
+      error: expect.stringContaining("migration committed"),
+    });
+    expect(reopened.recordDeliveryOutcomeForOperation(id, held.command.operationId, "delivered")).toBeNull();
+    expect(reopened.recordDeliveryOutcome(held.id, "delivered")).toMatchObject({
+      state: "failed",
+      error: expect.stringContaining("migration committed"),
+    });
   });
 }
+
+test("direct settlement can still recover a failure unrelated to migration cancellation", () => {
+  const { store, id } = seededRegistry("off", registryFile());
+  const held = store.holdDelivery(id, "fixture", "ordinary-direct-recovery");
+  expect(store.recordDeliveryOutcome(held.id, "failed", "temporary provider failure")).toMatchObject({
+    state: "failed",
+    error: "temporary provider failure",
+  });
+  expect(store.recordDeliveryOutcome(held.id, "delivered")).toMatchObject({
+    state: "delivered",
+    deliveredAt: expect.any(String),
+    error: null,
+  });
+});
 
 test("a conversation reseat never reuses or retargets the single engine drain intent", () => {
   const { store, id } = seededRegistry("off", registryFile());

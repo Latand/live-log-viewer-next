@@ -345,6 +345,45 @@ test("a flow reviewer reserves the canonical review edge before process launch",
   });
 });
 
+test("a flow reviewer keeps its frozen account through a routing change before settlement", () => {
+  const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "review-account-pin-registry.json"));
+  const implementer = registry.ensureConversation("codex", "/sessions/pinned-implementer.jsonl", "limited");
+  const flow = {
+    id: "flow-account-pin",
+    cwd: "/repo",
+    implementerPath: "/sessions/pinned-implementer.jsonl",
+    implementerConversationId: implementer.id,
+    roles: { reviewer: { engine: "codex", model: null, effort: "xhigh" } },
+    rounds: [],
+  } as unknown as Flow;
+  const round = newRound(flow, "button", null);
+  const begun = reserveReviewerSpawn(flow, round, flow.roles.reviewer, "limited", registry);
+
+  registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "healthy",
+    origin: "manual",
+    requestId: "flow-routing-change",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+  const settled = registry.settleSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: crypto.randomUUID() },
+    artifactPath: "/sessions/pinned-reviewer.jsonl",
+    cwd: flow.cwd,
+    accountId: "limited",
+    launchProfile: begun.receipt.launchProfile,
+    status: "starting",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
+  if (settled.kind === "conflict") throw new Error(settled.code);
+
+  expect(settled.receipt).toMatchObject({ accountId: "limited", accountPin: true });
+  expect(settled.conversation).toMatchObject({ pinnedAccountId: "limited", migration: null });
+});
+
 test("reviewer retries reserve distinct immutable membership slots", () => {
   const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "review-retry-lineage-registry.json"));
   const implementer = registry.ensureConversation("codex", "/sessions/retry-implementer.jsonl", "terra");

@@ -301,55 +301,6 @@ export async function executeSpawnRequest(
   try {
     const clientAttemptId = typeof body.clientAttemptId === "string" ? body.clientAttemptId : null;
     const existingAttempt = clientAttemptId ? registry.spawnReceiptForClientAttempt(clientAttemptId) : null;
-    const terminalizePinnedAccountFailure = (failure: unknown): NextResponse<SpawnResponse | ApiError> => {
-      const accountId = body.accountId as string;
-      const reason = (failure instanceof Error ? failure.message : String(failure)).slice(0, 240);
-      const begun = registry.beginSpawnRequest({
-        engine,
-        cwd,
-        transport,
-        accountId,
-        accountPin: true,
-        launchProfile: emptyLaunchProfile({
-          cwd,
-          model: selectedModel.model,
-          effort: reasoning.effort,
-          fast: reasoning.fast,
-        }),
-        clientAttemptId,
-        /* Account preflight has no session to start. Its failed receipt is an
-           idempotent terminal account of this request, while the Retry action
-           intentionally starts a fresh client attempt after the operator fixes
-           credentials or chooses another pin. */
-        requestDigest: null,
-        launchDisplay: (userPrompt.trim() || images.length)
-          ? { prompt: userPrompt, images: images.length, echo: prompt }
-          : null,
-      });
-      if (begun.kind === "conflict") {
-        return NextResponse.json({ error: "spawn attempt conflicts with its original request" }, { status: 409 });
-      }
-      if (begun.kind === "created") {
-        if (transport === "structured") registry.failStructuredSpawn(begun.receipt.launchId, reason);
-        else registry.failSpawn(begun.receipt.launchId, reason);
-      }
-      const receipt = registry.readOnlySnapshot().receipts[begun.receipt.launchId] ?? begun.receipt;
-      return NextResponse.json(spawnResponseForReceipt(receipt, receipt.artifactPath, {
-        structured: transport === "structured",
-      }));
-    };
-    let account;
-    try {
-      account = existingAttempt && body.accountId === undefined && existingAttempt.accountId !== null
-        ? dependencies.resolveSpawnAccount(existingAttempt.engine, existingAttempt.accountId)
-        : await dependencies.resolveHealthySpawnAccount(engine, body.accountId);
-    } catch (error) {
-      if (body.accountId === undefined) throw error;
-      return terminalizePinnedAccountFailure(error);
-    }
-    if (body.accountId !== undefined && account.accountId !== body.accountId) {
-      return terminalizePinnedAccountFailure(new Error("the requested account is not available for this launch"));
-    }
     const lineage = resolveSpawnLineage(spawnLineageSelectorForCaller(authenticatedCaller, {
       ...body,
       role: role.value?.role,
@@ -403,13 +354,13 @@ export async function executeSpawnRequest(
     /* Same shape for MCP: a delegated launch holds the Viewer baseline whatever
        it asked for, so a granted connector cannot travel down a spawn chain. */
     const grantedServers = mcpServersForSession({ origin: sessionOrigin, requested: requestedMcpServers });
-    const digest = spawnRequestDigest({
+    const requestDigestForAccount = (accountId: string) => spawnRequestDigest({
       engine,
       cwd,
       model: selectedModel.model,
       effort: reasoning.effort,
       fast: reasoning.fast,
-      accountId: account.accountId,
+      accountId,
       role: role.value?.role ?? null,
       mcpServers: grantedServers,
       ...(plugins.length ? { plugins } : {}),
@@ -421,6 +372,55 @@ export async function executeSpawnRequest(
       prompt,
       images: images.map((image) => ({ mime: image.mime, digest: spawnContentDigest({ image: image.base64 }) })),
     });
+    const terminalizePinnedAccountFailure = (failure: unknown): NextResponse<SpawnResponse | ApiError> => {
+      const accountId = body.accountId as string;
+      const reason = (failure instanceof Error ? failure.message : String(failure)).slice(0, 240);
+      const begun = registry.beginSpawnRequest({
+        engine,
+        cwd,
+        transport,
+        accountId,
+        accountPin: true,
+        launchProfile: emptyLaunchProfile({
+          cwd,
+          model: selectedModel.model,
+          effort: reasoning.effort,
+          fast: reasoning.fast,
+        }),
+        clientAttemptId,
+        /* The digest binds this terminal preflight to the same canonical public
+           launch identity as a runnable request. Prompt and image bytes enter
+           durable identity only through one-way hashes. */
+        requestDigest: requestDigestForAccount(accountId),
+        launchDisplay: (userPrompt.trim() || images.length)
+          ? { ["prompt"]: userPrompt, images: images.length, echo: prompt }
+          : null,
+      });
+      if (begun.kind === "conflict") {
+        return NextResponse.json({ error: "spawn attempt conflicts with its original request" }, { status: 409 });
+      }
+      if (begun.kind === "created") {
+        if (transport === "structured") registry.failStructuredSpawn(begun.receipt.launchId, reason);
+        else registry.failSpawn(begun.receipt.launchId, reason);
+      }
+      const receipt = registry.readOnlySnapshot().receipts[begun.receipt.launchId] ?? begun.receipt;
+      return NextResponse.json(spawnResponseForReceipt(receipt, receipt.artifactPath, {
+        structured: transport === "structured",
+      }));
+    };
+    let account;
+    try {
+      account = existingAttempt && body.accountId === undefined && existingAttempt.accountId !== null
+        ? dependencies.resolveSpawnAccount(existingAttempt.engine, existingAttempt.accountId)
+        : await dependencies.resolveHealthySpawnAccount(engine, body.accountId);
+    } catch (error) {
+      if (body.accountId === undefined) throw error;
+      return terminalizePinnedAccountFailure(error);
+    }
+    if (body.accountId !== undefined && account.accountId !== body.accountId) {
+      return terminalizePinnedAccountFailure(new Error("the requested account is not available for this launch"));
+    }
+    const digest = requestDigestForAccount(account.accountId);
     const pipelineAttemptTarget = pipelineSourceConversationId && dependencies.pipelineAttemptTargetForSource
       ? dependencies.pipelineAttemptTargetForSource(pipelineSourceConversationId)
       : null;
