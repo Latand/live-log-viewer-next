@@ -3,7 +3,7 @@ import { expect, test } from "bun:test";
 import type { AgentRegistry } from "@/lib/agent/registry";
 import type { RuntimeHostClient } from "@/lib/runtime/client";
 
-import { pipelineDecisionDeliveryStatus, terminalizePipelineDecisionDelivery } from "./decisionDelivery";
+import { deliverPipelineDecision, pipelineDecisionDeliveryStatus, terminalizePipelineDecisionDelivery } from "./decisionDelivery";
 
 test("held decision admission returns the caller's stable operation and durable delivery identities (#852)", async () => {
   const admitted: unknown[] = [];
@@ -18,7 +18,6 @@ test("held decision admission returns the caller's stable operation and durable 
     clientMessageId: "pipeline-decision-message-held",
     operationId: "pipeline-decision-operation-held",
   };
-  const { deliverPipelineDecision } = await import("./decisionDelivery");
   const result = await deliverPipelineDecision(request, {
     enqueue: async (input) => {
       admitted.push(input);
@@ -51,6 +50,61 @@ test("held decision admission returns the caller's stable operation and durable 
       policy: "queue",
       text: request.input,
     }],
+  });
+});
+
+test("an uncertain admission keeps the original operation in flight (#852)", async () => {
+  const request = {
+    pipelineId: "pipeline-uncertain-admission",
+    stageId: "build",
+    sourceAttempt: 1,
+    targetAttempt: 2,
+    conversationId: "conversation-uncertain-admission",
+    path: "/sessions/pipeline-uncertain-admission.jsonl",
+    input: "Continue once delivery is confirmed.",
+    clientMessageId: "pipeline-decision-message-uncertain-admission",
+    operationId: "pipeline-decision-operation-uncertain-admission",
+  };
+  const deliveryId = "pipeline-decision-delivery-uncertain-admission";
+  const result = await deliverPipelineDecision(request, {
+    enqueue: async () => ({
+      ok: false,
+      structured: true,
+      outcome: "failed",
+      error: "delivery outcome is unknown",
+      status: 409,
+      operationId: request.operationId,
+      receipt: {
+        operationId: request.operationId,
+        idempotencyKey: request.clientMessageId,
+        conversationId: request.conversationId,
+        kind: "send",
+        status: "uncertain",
+        reason: "delivery outcome is unknown",
+        at: "2026-07-31T18:00:02.000Z",
+        revision: 1,
+      },
+    }),
+    registry: () => ({
+      readOnlySnapshot: () => ({
+        deliveryOperationOwners: {
+          [request.operationId]: {
+            deliveryId,
+            terminalState: null,
+            createdAt: "2026-07-31T18:00:00.000Z",
+          },
+        },
+        heldDeliveries: {},
+      }),
+    }) as unknown as AgentRegistry,
+  });
+
+  expect(result).toEqual({
+    state: "delivering",
+    operationId: request.operationId,
+    deliveryId,
+    at: "2026-07-31T18:00:02.000Z",
+    error: "delivery outcome is unknown",
   });
 });
 

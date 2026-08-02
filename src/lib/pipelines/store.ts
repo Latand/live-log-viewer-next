@@ -471,8 +471,7 @@ function migrateDecisionState(raw: unknown): unknown {
     ...pipeline,
   };
   if (Array.isArray(pipeline.decisions) && Number.isInteger(pipeline.decisionRevision)) return migrated;
-  const pausedState = pipeline.state === "paused" ? pipeline.pausedState : null;
-  if (pipeline.state !== "needs_decision" && pausedState !== "needs_decision") return migrated;
+  if (pipeline.state !== "needs_decision" && pipeline.state !== "paused") return migrated;
   const cursor = pipeline.cursor && typeof pipeline.cursor === "object" && !Array.isArray(pipeline.cursor)
     ? pipeline.cursor as Record<string, unknown>
     : null;
@@ -488,10 +487,11 @@ function migrateDecisionState(raw: unknown): unknown {
     : undefined;
   const attempts = Array.isArray(run?.attempts) ? run.attempts : [];
   const source = attempts.findLast((candidate) => candidate && typeof candidate === "object" && !(candidate as { historical?: unknown }).historical) as Record<string, unknown> | undefined;
-  if (!stageId || !source || !Number.isInteger(source.n)
+  if (!stageId || !source || source.state !== "needs_decision" || !Number.isInteger(source.n)
     || source.paneId !== null
     || typeof source.conversationId !== "string" || !source.conversationId
     || typeof source.agentPath !== "string" || !source.agentPath) return migrated;
+  if (pipeline.state === "paused") migrated.pausedState = "needs_decision";
   const createdAt = [source.completedAt, pipeline.resumedAt, pipeline.pausedAt, pipeline.createdAt]
     .find((value): value is string => typeof value === "string") ?? "";
   migrated.decisionRevision = 1;

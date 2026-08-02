@@ -2371,6 +2371,63 @@ test("a restarted controller reopens the fresh attempt only after the queued dec
   });
 });
 
+test("an uncertain decision admission reopens one fresh attempt after turn start (#852)", async () => {
+  const h = harness();
+  const pipeline = await runningStructuredStage(h);
+  h.setConversationActive(false);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: "Need input.\n\n```json\n{\"status\":\"needs_decision\"}\n```", ts: 5_000_000 },
+  });
+  await tickPipelines([], h.ports);
+
+  const admissionOperations: string[] = [];
+  h.ports.deliverDecision = async (request) => {
+    admissionOperations.push(request.operationId);
+    return {
+      state: "delivering",
+      operationId: request.operationId,
+      deliveryId: "delivery-uncertain-admission",
+      error: "delivery outcome is unknown",
+    };
+  };
+  await patchPipeline(pipeline.id, {
+    action: "answer-decision",
+    stageId: "plan",
+    attempt: 1,
+    expectedDecisionRevision: 1,
+    input: "Continue once delivery is confirmed.",
+  } as never, h.ports);
+
+  const operationId = admissionOperations[0]!;
+  const statusOperations: string[] = [];
+  h.ports.decisionDeliveryStatus = async (requestedOperationId) => {
+    statusOperations.push(requestedOperationId);
+    return {
+      state: "delivered",
+      operationId: requestedOperationId,
+      deliveryId: "delivery-uncertain-admission",
+      at: "1970-01-01T01:31:00.000Z",
+    };
+  };
+  await tickPipelines([], h.ports);
+
+  const reopened = loadPipelines()[0]!;
+  expect({
+    state: reopened.state,
+    revisions: reopened.decisions.map(({ revision, state, operationId: id }) => ({ revision, state, operationId: id })),
+    attempts: reopened.runs[0]!.attempts.map(({ n, state }) => ({ n, state })),
+    admissionOperations,
+    statusOperations,
+  }).toEqual({
+    state: "running",
+    revisions: [{ revision: 1, state: "delivered", operationId }],
+    attempts: [{ n: 1, state: "needs_decision" }, { n: 2, state: "running" }],
+    admissionOperations: [operationId],
+    statusOperations: [operationId],
+  });
+});
+
 test("a restarted controller replays an admitting decision with the same identities when no reservation exists (#852)", async () => {
   const h = harness();
   const pipeline = await runningStructuredStage(h);

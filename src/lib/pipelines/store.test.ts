@@ -192,7 +192,7 @@ test("current production records without verdict recovery metadata load and roun
   });
 });
 
-test("a v4 paused needs_decision record reconstructs one awaiting decision revision after restart (#852)", () => {
+test("a v4 corrupted paused-running record reconstructs its structured needs_decision attempt (#852)", () => {
   sandboxed((sandbox) => {
     const pipeline = buildPipeline({
       id: "decide01",
@@ -205,7 +205,7 @@ test("a v4 paused needs_decision record reconstructs one awaiting decision revis
       now: "2026-07-31T18:00:00.000Z",
     });
     pipeline.state = "paused";
-    pipeline.pausedState = "needs_decision";
+    pipeline.pausedState = "running";
     pipeline.pausedAt = "2026-07-31T18:02:00.000Z";
     pipeline.stateDetail = "Which rollout window should I use?";
     pipeline.cursor = { stageId: "build", state: "running", input: null, activatedBy: null };
