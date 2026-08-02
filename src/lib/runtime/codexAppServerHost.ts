@@ -254,9 +254,8 @@ const MIN_LATE_THREAD_READ_RESPONSE_TTL_MS = 1_000;
 const MAX_LATE_THREAD_READ_RESPONSES = 32;
 const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
 const REALTIME_START_TIMEOUT_MS = 90_000;
-/* The persona is optional; never let it hold the microphone waiting. An
-   app-server that rejects the method answers immediately, so this bound only
-   covers one that accepts it and then stalls. */
+/* First speech waits for the persona's durable insertion outcome. Keep that
+   gate bounded when an app-server accepts the method and then stalls. */
 const REALTIME_PERSONA_TIMEOUT_MS = 3_000;
 /* Releasing the host must not block on a wedged app-server, but the hangup is
    worth a moment: skipping it strands the account's realtime slot. */
@@ -275,7 +274,6 @@ const MAX_REALTIME_SPEECH_BYTES = 8 * 1024;
 const MAX_REALTIME_CONTEXT_ITEMS = 12;
 const MAX_REALTIME_CONTEXT_ITEM_BYTES = 8 * 1024;
 const MAX_REALTIME_CONTEXT_BYTES = 24 * 1024;
-const MAX_UNRESOLVED_VOICE_BOOTSTRAPS = 8;
 const MAX_REPLAY_ENVELOPE_BYTES = 256 * 1024;
 const MAX_LINE_BYTES = MAX_STRUCTURED_IMAGE_ENCODED_BYTES + MAX_REPLAY_ENVELOPE_BYTES;
 /**
@@ -597,7 +595,7 @@ export class CodexAppServerHost implements EngineHost {
   private readonly pendingDeliveries = new Map<string, PendingDelivery>();
   private readonly realtimeDeliveries = new Map<string, RealtimeDeliveryState>();
   private readonly voiceStreams = new Map<string, VoiceStreamState>();
-  private readonly unresolvedVoicePersonaBootstraps = new Map<string, VoicePersonaBootstrap>();
+  private unresolvedVoicePersonaBootstrap: VoicePersonaBootstrap | null = null;
   private readonly pendingVoiceChunks = new Map<string, string>();
   private readonly cancelledVoiceTurns = new Set<string>();
   private readonly activeRealtimeDeliveries = new Map<string, {
@@ -989,31 +987,28 @@ export class CodexAppServerHost implements EngineHost {
         this.identity.path,
         personaBootstrapIdentity.itemId,
       );
-    } catch {
+    } catch (error) {
       /* The insertion RPC is authoritative. A rollout that cannot be scanned
          still gets one attempt to persist the canonical item. */
-      console.warn("[voice persona bootstrap] canonical scan unavailable; attempting insertion");
+      console.warn("[voice persona bootstrap] canonical scan unavailable; attempting insertion", {
+        code: (error as NodeJS.ErrnoException).code ?? "unknown",
+        diagnostic: safeError(error),
+      });
     }
     if (!exists) {
       try {
-        const personaBootstrap = this.unresolvedVoicePersonaBootstraps.get(personaBootstrapIdentity.receiptId)
+        const personaBootstrap = this.unresolvedVoicePersonaBootstrap
           ?? voicePersonaBootstrap(personaBootstrapIdentity);
-        this.unresolvedVoicePersonaBootstraps.delete(personaBootstrapIdentity.receiptId);
-        this.unresolvedVoicePersonaBootstraps.set(personaBootstrapIdentity.receiptId, personaBootstrap);
-        while (this.unresolvedVoicePersonaBootstraps.size > MAX_UNRESOLVED_VOICE_BOOTSTRAPS) {
-          const oldest = this.unresolvedVoicePersonaBootstraps.keys().next().value;
-          if (typeof oldest !== "string") break;
-          this.unresolvedVoicePersonaBootstraps.delete(oldest);
-        }
+        this.unresolvedVoicePersonaBootstrap = personaBootstrap;
         await this.rpc("thread/inject_items", {
           threadId: this.identity.threadId,
           items: [personaBootstrap.item],
         }, REALTIME_PERSONA_TIMEOUT_MS);
-        this.unresolvedVoicePersonaBootstraps.delete(personaBootstrapIdentity.receiptId);
+        this.unresolvedVoicePersonaBootstrap = null;
       } catch (error) {
-        const pending = this.pendingRealtimeStart;
+        if (this.pendingRealtimeStart !== pendingStart) return answer;
+        const pending = pendingStart;
         this.pendingRealtimeStart = null;
-        if (!pending) return answer;
         clearTimeout(pending.timer);
         const rejected: CodexRealtimeWebRtcRejection = {
           sdp: null,
@@ -1028,7 +1023,7 @@ export class CodexAppServerHost implements EngineHost {
         return answer;
       }
     } else {
-      this.unresolvedVoicePersonaBootstraps.delete(personaBootstrapIdentity.receiptId);
+      this.unresolvedVoicePersonaBootstrap = null;
     }
     if (this.pendingRealtimeStart !== pendingStart) return answer;
     const realtimeContext = selectRealtimeContext(this.events);
@@ -1434,6 +1429,7 @@ export class CodexAppServerHost implements EngineHost {
       this.realtimeSessionId = null;
     }
     this.releasing = true;
+    this.unresolvedVoicePersonaBootstrap = null;
     this.rejectRealtimeStart(new Error("Codex app-server host released"));
     this.rejectPendingAnswers(new Error("Codex app-server host released"));
     this.rejectPendingDeliveries(new Error("Codex app-server host released"));

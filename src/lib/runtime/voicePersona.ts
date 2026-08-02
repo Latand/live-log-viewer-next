@@ -110,7 +110,7 @@ Do not ask permission for what you can check yourself.
 
 Stay silent until you are spoken to: this text is context, and there is nothing here to greet.`;
 
-/** Operator override, read at call time so wording changes need no deploy. */
+/** Operator override, resolved once per thread; edits apply when a new thread starts. */
 export const VOICE_PERSONA_FILE = "prompts/voice-persona.md";
 
 export type VoicePersonaBootstrapReceipt = {
@@ -121,7 +121,6 @@ export type VoicePersonaBootstrapReceipt = {
 };
 
 export type VoicePersonaBootstrap = {
-  receipt: VoicePersonaBootstrapReceipt;
   item: {
     type: "message";
     id: string;
@@ -134,9 +133,9 @@ export type VoicePersonaBootstrapIdentity = Pick<VoicePersonaBootstrapReceipt, "
 
 /**
  * The persona text for a starting call: the operator's override when the file
- * exists and holds anything, otherwise {@link DEFAULT_VOICE_PERSONA}. Read per
- * call rather than cached — the point of the override is editing it between
- * two calls and hearing the difference on the second.
+ * exists and holds anything, otherwise {@link DEFAULT_VOICE_PERSONA}. The host
+ * invokes this resolver only while the thread has no canonical persona item,
+ * so that thread keeps its resolved wording and a new thread picks up edits.
  */
 export function voicePersona(readFile: (path: string) => string = (target) => fs.readFileSync(target, "utf8")): string {
   try {
@@ -168,7 +167,6 @@ export function voicePersonaBootstrap(
 ): VoicePersonaBootstrap {
   const text = voicePersona(readFile);
   return {
-    receipt: { ...identity, insertion: "accepted" },
     item: {
       type: "message",
       id: identity.itemId,
@@ -188,7 +186,10 @@ export async function canonicalVoicePersonaBootstrapExists(
   itemId: string,
 ): Promise<boolean> {
   if (!transcriptPath) return false;
-  const marker = `\"type\":\"message\",\"id\":\"${itemId}\",\"role\":\"developer\"`;
+  /* Codex app-server 0.146.0 serializes injected response items in this field
+     order. A serializer reorder makes this scan return false and can cause a
+     reinsertion, so upgrades must keep the live protocol probe current. */
+  const marker = `"type":"message","id":"${itemId}","role":"developer"`;
   let handle: fs.promises.FileHandle;
   try {
     handle = await fs.promises.open(

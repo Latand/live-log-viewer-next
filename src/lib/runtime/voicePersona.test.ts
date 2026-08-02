@@ -71,7 +71,6 @@ test("one durable thread identity produces one stable canonical developer item",
   expect(voicePersonaBootstrapIdentity("thread-voice")).toEqual(identity);
   expect(voicePersonaBootstrapIdentity("thread-other")).not.toEqual(identity);
   expect(voicePersonaBootstrap(identity, () => "  Resolved call persona. \n")).toEqual({
-    receipt: { ...identity, insertion: "accepted" },
     item: {
       type: "message",
       id: identity.itemId,
