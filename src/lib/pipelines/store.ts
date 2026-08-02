@@ -501,21 +501,42 @@ function pipelinesFileSignature(): string | null {
   }
 }
 
+/** The parse+validation of a large registry, cached against the file signature.
+    Mutating paths keep `withPipelineMutation`, whose persisted rename changes the
+    signature and invalidates this cache. The records are the cache itself — only
+    the exported readers below decide what a caller may do with them. */
+function cachedPipelines(): Pipeline[] {
+  const before = pipelinesFileSignature();
+  if (before !== null && projectionCache?.signature === before) return projectionCache.pipelines;
+  const pipelines = loadPipelines();
+  const after = pipelinesFileSignature();
+  if (after !== null && before === after) projectionCache = { signature: after, pipelines };
+  return pipelines;
+}
+
 /** Read-only load for request-path projections (issue #798): no lock, and the
     parse+validation of a large registry is cached against the file signature.
     Every call still returns independently mutable records via the same revive
     pass `loadPipelines` uses, so a projection overlay can never write into the
-    cache. Mutating paths keep `withPipelineMutation`, whose persisted rename
-    changes the signature and invalidates this cache. */
+    cache. */
 export function loadPipelinesForProjection(): Pipeline[] {
-  const before = pipelinesFileSignature();
-  if (before !== null && projectionCache?.signature === before) {
-    return projectionCache.pipelines.map(reviveLoadedPipeline);
-  }
-  const pipelines = loadPipelines();
-  const after = pipelinesFileSignature();
-  if (after !== null && before === after) projectionCache = { signature: after, pipelines };
-  return pipelines.map(reviveLoadedPipeline);
+  return cachedPipelines().map(reviveLoadedPipeline);
+}
+
+/** The registry read behind bounded list projections (issue #863).
+ *
+ * Deliberately skips the per-caller `reviveLoadedPipeline` pass that every other
+ * reader pays: a list page filters and slices these records and then copies only
+ * the handful of scalars a row needs, so materializing mutable copies of 500
+ * pipelines' nested stage/attempt history — for rows that are about to be
+ * dropped, out of fields a list never returns — is pure waste.
+ *
+ * The price is that these ARE the cached records. Read them; never write them.
+ * Anything that mutates a pipeline goes through `withPipelineMutation`, and
+ * anything that overlays one takes `loadPipelinesForProjection`.
+ */
+export function loadPipelinesForList(): readonly Pipeline[] {
+  return cachedPipelines();
 }
 
 function savePipelinesUnlocked(pipelines: Pipeline[]): void {

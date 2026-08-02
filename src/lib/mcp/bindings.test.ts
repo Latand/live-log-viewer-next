@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 
 import { AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
+import { DeadlineExceededError } from "@/lib/deadline";
+import { CORPUS_BODY_MARKERS, pipelineCorpus } from "@/lib/pipelines/fixtures/corpus";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
@@ -475,14 +477,54 @@ test("list_pipelines applies project, state, and closed filters to the durable r
     ] }),
   } as never);
 
-  expect(await bindings.list_pipelines({
+  const listed = await bindings.list_pipelines({
     clientRequestId: "list-pipelines",
     project: "viewer",
     state: "running",
-  })).toEqual({
-    count: 1,
-    pipelines: [{ id: "pipeline_live", project: "viewer", state: "running" }],
-  });
+  }) as { count: number; pipelines: { id: string; project: string; state: string }[] };
+  expect(listed.count).toBe(1);
+  expect(listed.pipelines.map((row) => ({ id: row.id, project: row.project, state: row.state })))
+    .toEqual([{ id: "pipeline_live", project: "viewer", state: "running" }]);
+});
+
+/* #863: the list is a board-card projection, not the registry records. Detail —
+   the spec body, stage prompts, and every attempt's relay input and transcript
+   tail — belongs to get_pipeline, which still returns the whole record. */
+test("list_pipelines returns bounded rows and leaves prompts, specs and transcripts to get_pipeline", async () => {
+  const pipeline = {
+    ...pipelineCorpus(1)[0],
+    id: "pipeline_detail",
+    project: "viewer",
+    state: "running",
+    stateDetail: "waiting on review",
+  };
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    getPipelines: () => ({ pipelines: [pipeline] }),
+  } as never);
+
+  const listed = await bindings.list_pipelines({ clientRequestId: "list-bounded", project: "viewer" });
+  const serialized = JSON.stringify(listed.pipelines);
+  for (const marker of Object.values(CORPUS_BODY_MARKERS)) expect(serialized).not.toContain(marker);
+  expect(listed.pipelines).toMatchObject([{
+    id: "pipeline_detail",
+    project: "viewer",
+    state: "running",
+    stateDetail: "waiting on review",
+    hasSpec: true,
+    attemptCount: 12,
+  }]);
+  expect(Buffer.byteLength(serialized)).toBeLessThan(4 * 1024);
+});
+
+test("list_pipelines abandons the read when the caller's deadline has already passed", async () => {
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    getPipelines: () => ({ pipelines: pipelineCorpus(1) }),
+  } as never);
+
+  await expect(bindings.list_pipelines(
+    { clientRequestId: "list-expired" },
+    { deadlineAt: Date.now() - 1 },
+  )).rejects.toThrow(DeadlineExceededError);
 });
 
 test("task read tools expose the pipeline-linked durable read model", async () => {

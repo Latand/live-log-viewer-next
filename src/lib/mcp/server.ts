@@ -1403,6 +1403,16 @@ export function createMcpToolService(
         } finally {
           phaseDurations.binding = performance.now() - bindingStartedAt;
         }
+        /* #863: a caller that has already given up gets no receipt row. The
+           completion write serializes the whole result and persists it, which on
+           a large read is exactly the cost the deadline existed to stop — and it
+           would burn the clientRequestId on an answer nobody received, so the
+           obvious retry would replay a stale timeout forever. The claim is left
+           unsettled instead, which is what "the previous call did not finish"
+           already means: a retry gets `call_interrupted`, retryable. Every
+           outcome that produced a real answer still writes, so idempotent replay
+           of a completed call is untouched. */
+        if (outcome === "deadline" || outcome === "cancelled") return settled;
         const completionStartedAt = performance.now();
         await receipts.complete(key, digest, settled, retention);
         phaseDurations.completion = performance.now() - completionStartedAt;

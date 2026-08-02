@@ -1,7 +1,8 @@
-# Issue #863 — slow structured `list_pipelines`: phase profile, RED proof, integration plan
+# Issue #863 — slow structured `list_pipelines`: phase profile, RED proof, repair
 
-Status: **diagnosis complete, repair fenced.** Every file the repair must edit is
-also modified by open PR #859, so no product source was changed here.
+Status: **repaired.** `red.ts` is GREEN on the same fixture that produced every
+number below; see "The repair" at the end for what shipped and what it cost.
+The diagnosis sections are kept verbatim as the record of the measured baseline.
 
 ## Reproducing
 
@@ -9,7 +10,7 @@ All three scripts seed their own `LLV_STATE_DIR` sandbox under `$TMPDIR` and
 delete it on exit. None of them read or write live viewer state.
 
 ```
-bun spikes/issue-863/red.ts        # acceptance assertions — currently 6 RED
+bun spikes/issue-863/red.ts        # acceptance assertions — 6 RED before the repair, all GREEN after
 bun spikes/issue-863/endToEnd.ts   # per-phase aggregate timings
 COUNT=1000 CONCURRENCY=16 bun spikes/issue-863/red.ts
 ```
@@ -98,7 +99,81 @@ PASS all concurrent calls succeeded — 8/8 ok
 Filter and ordering semantics already agree with HTTP, so the repair must
 preserve them rather than establish them.
 
-## Why the repair is fenced
+## The repair (shipped)
+
+The lane was un-fenced when PR #859 was parked, so the whole repair landed at
+once rather than in the two disjoint halves drafted in the appendix.
+
+1. **`src/lib/pipelines/listProjection.ts`** (new) — `PipelineListRow` and
+   `projectPipelineListRows`. Board-card fields only: identity, placement, state,
+   cursor stage + state, attempt counts, and per-stage
+   `{ id, kind, roleId, engine, model, effort, access, next, onFail, attempts,
+   latestAttempt }`. Filters and stops at `limit` in ONE pass before any row is
+   materialized, so nested history is never touched for a record that was going
+   to be dropped. Operator free text (`task`, `stateDetail`, an attempt `error`)
+   is clamped, which is what gives a row a length bound the registry does not
+   have. `latestAttempt` uses the shared `latestOperationalStageAttempt`, so a
+   lineage-adopted historical attempt is never reported as current work.
+2. **`src/lib/pipelines/store.ts`** — `loadPipelinesForList()`, which shares the
+   signature-keyed parse cache `loadPipelinesForProjection` already kept (no
+   second copy of the registry in memory) and skips the per-caller
+   `reviveLoadedPipeline` deep copy, because a row copies scalars and retains
+   nothing. This is where the 265 ms read and the 8x re-parse under concurrency
+   went. The registry is a single JSON file, so it admits no indexed read; the
+   materialization the filter now precedes is the revive, not the parse.
+3. **`src/lib/mcp/bindings.ts`** — `listPipelines` is async, projects, and
+   redacts the projected rows; the tool table entry forwards `context`. The
+   filter, ordering and `limit` bound are byte-for-byte the previous semantics.
+   `get_pipeline` is untouched and remains the full-detail read.
+4. **Cancellation** — the binding passes `throwIfCallEnded(context)` as the
+   projection's checkpoint, and the projection yields to the event loop between
+   row batches so the 30 s deadline timer can actually fire instead of waiting
+   for a synchronous walk to release the loop. `createMcpToolService` skips
+   `receipts.complete` for a `deadline`/`cancelled` outcome, so an abandoned call
+   leaves no receipt row and does not burn its `clientRequestId`; every outcome
+   that produced a real answer still writes, so replay is unchanged.
+5. **`src/lib/pipelines/engine.ts` and `types.ts` were not touched.** The list
+   row type lives with the projection, and `getPipelines` stays the HTTP/detail
+   seam — the binding reaches the bounded read through an optional
+   `listPipelineRecords` dependency instead.
+
+### Same fixture, after
+
+```
+PASS bounded list rows — 1 KB per row (budget 64 KB)
+PASS no attempt history in list rows — rows carry no attempts
+PASS no stage prompts in list rows — rows carry no prompts
+PASS no spec body in list rows — rows carry no spec
+PASS HTTP/MCP count parity — http 100 vs mcp 100
+PASS HTTP/MCP ordering parity — id sequences compared
+PASS concurrent x8 within 5000 ms — 37 ms wall
+PASS bounded RSS growth under concurrency — +6 MB (583 -> 589 MB)
+PASS all concurrent calls succeeded — 8/8 ok
+```
+
+| measure | before | after |
+| --- | --- | --- |
+| response, 100 rows | 37.33 MB | 0.12 MB |
+| per row | 365 KB | 1 KB |
+| `binding` p95 (x8) | 10 345 ms | 221 ms |
+| `claim` p95 (x8) | 9 025 ms | 1 ms |
+| `completion` p95 (x8) | 1 276 ms | 1 ms |
+| `serviceTotal` p95 (x8) | 11 844 ms | 223 ms |
+| wall, 8 concurrent | 11 878 ms | 37 ms |
+| RSS growth, 8 concurrent | +2 115 MB | +6 MB |
+
+The remaining 221 ms binding max is the one cold-cache registry parse; every
+later call inside the signature window is about 1 ms.
+
+The 500-pipeline builder now lives at `src/lib/pipelines/fixtures/corpus.ts` and
+is imported by both `corpus.ts` here and
+`src/lib/pipelines/listProjection.test.ts`, so the measured shape and the tested
+shape cannot drift apart. The suite asserts the structural bars (response bytes,
+which fields exist, filter/ordering parity, cancellation); wall clock and RSS
+stay in `red.ts`, where they are not flaky host-speed assertions in CI.
+
+## Appendix: why the repair was originally fenced
+
 
 | file the repair needs | why | also modified by |
 | --- | --- | --- |
@@ -113,7 +188,7 @@ editing `bindings.ts`: the tool table is a literal in that file. PR #859's edits
 are textually distant from `listPipelines`, so the conflict is ownership, not
 merge mechanics.
 
-## Disjoint integration plan (after #859 lands)
+### Disjoint integration plan as drafted (superseded by "The repair" above)
 
 1. **New file `src/lib/pipelines/listProjection.ts`** — owned by nobody today.
    Export `PipelineListRow` (id, task, project, state, stateDetail, branch,

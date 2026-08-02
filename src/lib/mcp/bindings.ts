@@ -37,7 +37,9 @@ import { createPipelineFromRequest, getPipelines, patchPipeline } from "@/lib/pi
 import { latestOperationalPipelineAttempt } from "@/lib/pipelines/attemptSelection";
 import { requestPipelineTick } from "@/lib/pipelines/controllerSignal";
 import { projectTaskPipelineIds } from "@/lib/pipelines/taskBinding";
-import type { CreatePipelineRequest, PatchPipelineRequest, PipelineAction } from "@/lib/pipelines/types";
+import { PIPELINE_LIST_DEFAULT_LIMIT, projectPipelineListRows } from "@/lib/pipelines/listProjection";
+import { loadPipelinesForList } from "@/lib/pipelines/store";
+import type { CreatePipelineRequest, PatchPipelineRequest, Pipeline, PipelineAction } from "@/lib/pipelines/types";
 import { listFiles } from "@/lib/scanner";
 import { describe, projectForCwd, reprojectFileDescription } from "@/lib/scanner/describe";
 import { pathAllowed, scanRootEntries } from "@/lib/scanner/roots";
@@ -211,6 +213,11 @@ export interface ViewerMcpDomainDependencies {
   cancelRound: typeof cancelRound;
   closeFlow: typeof closeFlow;
   getPipelines: typeof getPipelines;
+  /** #863: the bounded list read — the shared cached registry parse, with none
+      of the per-caller revive `getPipelines` pays, because a list row copies
+      scalars and keeps nothing. Optional so partial test harnesses that stub
+      only `getPipelines` still project from it. */
+  listPipelineRecords?(): readonly Pipeline[];
   patchPipeline: typeof patchPipeline;
   loadTasks: typeof loadTasks;
   collectSnapshot: typeof collectSnapshot;
@@ -384,6 +391,7 @@ const productionDomainDependencies: ViewerMcpDomainDependencies = {
   cancelRound,
   closeFlow,
   getPipelines,
+  listPipelineRecords: loadPipelinesForList,
   patchPipeline,
   loadTasks,
   collectSnapshot,
@@ -1397,16 +1405,24 @@ async function flowAction(args: McpToolArgs, dependencies: ViewerMcpDomainDepend
   return redactPayload({ flowId, flow: result.flow, ...mutationReceipt(operationId) });
 }
 
-function listPipelines(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): McpToolPayload {
-  const project = text(args.project);
-  const state = text(args.state);
-  const includeClosed = args.includeClosed === true;
-  const limit = Math.max(1, Math.min(200, integer(args.limit, 100)));
-  const pipelines = dependencies.getPipelines().pipelines
-    .filter((pipeline) => !project || pipeline.project === project)
-    .filter((pipeline) => !state || pipeline.state === state)
-    .filter((pipeline) => includeClosed || pipeline.state !== "closed")
-    .slice(0, limit);
+/** #863: bounded board-card rows, never whole `Pipeline` records. The filters,
+    ordering and `limit` bound are unchanged — only what a surviving row carries
+    is, and `get_pipeline` remains the full-detail read. `context` reaches the
+    projection so a caller's deadline can abandon the call. */
+async function listPipelines(
+  args: McpToolArgs,
+  dependencies: ViewerMcpDomainDependencies,
+  context: McpToolCallContext = {},
+): Promise<McpToolPayload> {
+  const pipelines = await projectPipelineListRows({
+    project: text(args.project),
+    state: text(args.state),
+    includeClosed: args.includeClosed === true,
+    limit: integer(args.limit, PIPELINE_LIST_DEFAULT_LIMIT),
+  }, {
+    checkpoint: () => throwIfCallEnded(context),
+    source: dependencies.listPipelineRecords ?? (() => dependencies.getPipelines().pipelines),
+  });
   return redactPayload({ count: pipelines.length, pipelines });
 }
 
@@ -1915,7 +1931,7 @@ export function viewerMcpBindings(
     list_flows: (args) => Promise.resolve(listFlows(args, domainDependencies)),
     get_flow: (args) => Promise.resolve(getFlow(args, domainDependencies)),
     flow_action: (args) => flowAction(args, domainDependencies),
-    list_pipelines: (args) => Promise.resolve(listPipelines(args, domainDependencies)),
+    list_pipelines: (args, context) => listPipelines(args, domainDependencies, context),
     list_tasks: (args) => Promise.resolve(listTasks(args, domainDependencies)),
     get_task: (args) => Promise.resolve(getTask(args, domainDependencies)),
     operator_snapshot: (args) => operatorSnapshot(args, domainDependencies),

@@ -445,6 +445,48 @@ describe("MCP tool service", () => {
     expect(ended.cancellation.cancelled).toBe(1);
   });
 
+  /* #863: the completion write serializes and persists the whole result, which on
+     a large read is the exact cost the deadline was meant to stop. A caller that
+     already gave up must not pay it, and must not have its clientRequestId burned
+     on an answer it never received. */
+  test("an abandoned call writes no receipt, while a completed one still replays", async () => {
+    const completed: string[] = [];
+    const store: McpReceiptStore = {
+      claim: () => ({ kind: "fresh" }),
+      complete: (key) => { completed.push(key); },
+    };
+    const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [toolName, async () => ({})])) as unknown as McpToolBindings;
+    bindings.list_pipelines = async (_args, context) => {
+      if (context?.signal?.aborted) throw context.signal.reason;
+      return { count: 0, pipelines: [] };
+    };
+    const service = createMcpToolService(bindings, store);
+
+    const deadline = new AbortController();
+    deadline.abort(new DeadlineExceededError("fixture deadline", 5_000));
+    const cancelled = new AbortController();
+    cancelled.abort(new DOMException("fixture cancelled", "AbortError"));
+    const timedOut = await service.callTool("list_pipelines", { clientRequestId: "abandoned-deadline" }, { signal: deadline.signal });
+    await service.callTool("list_pipelines", { clientRequestId: "abandoned-cancel" }, { signal: cancelled.signal });
+    expect(timedOut.ok).toBe(false);
+    expect(completed).toEqual([]);
+
+    await service.callTool("list_pipelines", { clientRequestId: "answered" });
+    expect(completed).toEqual(["list_pipelines:answered"]);
+  });
+
+  test("an ordinary tool failure still writes its receipt", async () => {
+    const completed: string[] = [];
+    const store: McpReceiptStore = {
+      claim: () => ({ kind: "fresh" }),
+      complete: (key) => { completed.push(key); },
+    };
+    const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [toolName, async () => ({})])) as unknown as McpToolBindings;
+    bindings.list_pipelines = async () => { throw new Error("registry unreadable"); };
+    await createMcpToolService(bindings, store).callTool("list_pipelines", { clientRequestId: "failed" });
+    expect(completed).toEqual(["list_pipelines:failed"]);
+  });
+
   test("each v1 tool returns structured ids and replays a duplicate clientRequestId", async () => {
     const calls = new Map<string, number>();
     const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [
