@@ -195,6 +195,71 @@ test("a revisioned pipeline decision projects queued and delivered transport tru
   expect(JSON.stringify({ queued, delivered })).not.toContain("private operator answer");
 });
 
+test("superseded and closed decisions terminalize their queued lifecycle events (#852)", () => {
+  const queuedDecision = {
+    revision: 1,
+    stageId: "build",
+    sourceAttempt: 1,
+    targetAttempt: 2,
+    state: "queued" as const,
+    input: "operator answer",
+    inputDigest: "digest",
+    clientMessageId: "pipeline-message-terminal",
+    operationId: "pipeline-operation-terminal",
+    deliveryId: "pipeline-delivery-terminal",
+    resumeIntent: true,
+    createdAt: "2026-07-26T09:10:00.000Z",
+    updatedAt: "2026-07-26T09:11:00.000Z",
+    terminalAt: null,
+    error: null,
+  };
+  const pipelineFor = (id: string) => pipelineFixture(id, {
+    state: "needs_decision",
+    decisionRevision: 1,
+    decisions: [{ ...queuedDecision }],
+    runs: [{
+      stageId: "build",
+      attempts: [
+        { n: 1, state: "needs_decision", conversationId: `conversation_${id}` },
+        { n: 2, state: "pending", conversationId: `conversation_${id}` },
+      ],
+    }, { stageId: "review", attempts: [] }],
+  } as unknown as Partial<Pipeline>);
+  const superseded = pipelineFor("pipeline_decision_superseded");
+  const closed = pipelineFor("pipeline_decision_closed");
+
+  refreshLifecycleJournal({ pipelines: [superseded, closed] }, { force: true });
+  superseded.decisions[0]!.state = "superseded";
+  superseded.decisions[0]!.updatedAt = "2026-07-26T09:12:00.000Z";
+  superseded.decisions[0]!.terminalAt = "2026-07-26T09:12:00.000Z";
+  closed.decisions[0]!.state = "closed";
+  closed.decisions[0]!.updatedAt = "2026-07-26T09:13:00.000Z";
+  closed.decisions[0]!.terminalAt = "2026-07-26T09:13:00.000Z";
+  refreshLifecycleJournal({ pipelines: [superseded, closed] }, { force: true });
+
+  const supersededEvents = queryLifecycleEvents({ pipelineId: superseded.id, limit: 20 }).events;
+  const closedEvents = queryLifecycleEvents({ pipelineId: closed.id, limit: 20 }).events;
+  expect({
+    superseded: supersededEvents.find((event) => event.type === "delivery_expired"),
+    closed: closedEvents.find((event) => event.type === "delivery_expired"),
+  }).toMatchObject({
+    superseded: {
+      at: "2026-07-26T09:12:00.000Z",
+      summary: "build decision 1 superseded before attempt 2",
+    },
+    closed: {
+      at: "2026-07-26T09:13:00.000Z",
+      summary: "build decision 1 closed before attempt 2",
+    },
+  });
+
+  const supersededCount = queryLifecycleEvents({ pipelineId: superseded.id, limit: 20 }).count;
+  const closedCount = queryLifecycleEvents({ pipelineId: closed.id, limit: 20 }).count;
+  refreshLifecycleJournal({ pipelines: [superseded, closed] }, { force: true });
+  expect(queryLifecycleEvents({ pipelineId: superseded.id, limit: 20 }).count).toBe(supersededCount);
+  expect(queryLifecycleEvents({ pipelineId: closed.id, limit: 20 }).count).toBe(closedCount);
+});
+
 function livenessRecord(overrides: Partial<AgentLivenessRecord>): AgentLivenessRecord {
   return {
     conversationId: "conversation_agent_gone",

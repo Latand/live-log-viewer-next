@@ -53,6 +53,60 @@ test("held decision admission returns the caller's stable operation and durable 
   });
 });
 
+test("a successful turn-started admission is delivered immediately (#852)", async () => {
+  const request = {
+    pipelineId: "pipeline-turn-started",
+    stageId: "build",
+    sourceAttempt: 1,
+    targetAttempt: 2,
+    conversationId: "conversation-turn-started",
+    path: "/sessions/pipeline-turn-started.jsonl",
+    input: "Continue immediately.",
+    clientMessageId: "pipeline-decision-message-turn-started",
+    operationId: "pipeline-decision-operation-turn-started",
+  };
+  const deliveryId = "pipeline-decision-delivery-turn-started";
+  const result = await deliverPipelineDecision(request, {
+    enqueue: async () => ({
+      ok: true,
+      structured: true,
+      target: request.conversationId,
+      outcome: "queued",
+      operationId: request.operationId,
+      receipt: {
+        operationId: request.operationId,
+        idempotencyKey: request.clientMessageId,
+        conversationId: request.conversationId,
+        kind: "send",
+        status: "turn-started",
+        turnId: "turn-pipeline-decision",
+        at: "2026-07-31T18:00:02.000Z",
+        revision: 1,
+      },
+    }),
+    registry: () => ({
+      readOnlySnapshot: () => ({
+        deliveryOperationOwners: {
+          [request.operationId]: {
+            deliveryId,
+            terminalState: "delivered",
+            createdAt: "2026-07-31T18:00:00.000Z",
+          },
+        },
+        heldDeliveries: {},
+      }),
+    }) as unknown as AgentRegistry,
+  });
+
+  expect(result).toEqual({
+    state: "delivered",
+    operationId: request.operationId,
+    deliveryId,
+    at: "2026-07-31T18:00:02.000Z",
+    error: null,
+  });
+});
+
 test("an uncertain admission keeps the original operation in flight (#852)", async () => {
   const request = {
     pipelineId: "pipeline-uncertain-admission",

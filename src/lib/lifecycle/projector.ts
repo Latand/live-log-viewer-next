@@ -127,6 +127,13 @@ function pipelineDecisionEvent(pipeline: Pipeline, decision: Pipeline["decisions
   if (decision.state === "failed") {
     return { ...base, type: "delivery_expired", summary: `${decision.stageId} decision ${decision.revision} failed for attempt ${attemptN}` };
   }
+  if (decision.state === "superseded" || decision.state === "closed") {
+    return {
+      ...base,
+      type: "delivery_expired",
+      summary: `${decision.stageId} decision ${decision.revision} ${decision.state} before attempt ${attemptN}`,
+    };
+  }
   return null;
 }
 

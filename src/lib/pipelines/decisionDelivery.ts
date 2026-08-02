@@ -98,11 +98,12 @@ export async function deliverPipelineDecision(
       error: result.error,
     };
   }
+  if ("receipt" in result) return resultFromReceipt(result.receipt, deliveryId);
   return {
     state: result.outcome,
     operationId: result.operationId,
     deliveryId,
-    at: "receipt" in result ? result.receipt.at : null,
+    at: null,
     error: null,
   };
 }
