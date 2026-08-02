@@ -235,6 +235,46 @@ test("a compacted notification for another thread is not evidence", async () => 
   await host.release();
 });
 
+test("a graceful release settles an in-flight compaction instead of leaving it to time out", async () => {
+  const server = new CompactAppServer();
+  /* The evidence budget is minutes in production; the point is that release
+     must not wait for it. */
+  const host = await startHost(server, { compactEvidenceTimeoutMs: 60_000 });
+
+  const compaction = host.compact({ operationId: "op-compact", threadId: server.threadId });
+  await Bun.sleep(10);
+  /* `close` skips `fail()` while the host is releasing, so this is the one
+     teardown no other rejection path covers. Kill routes through here. */
+  await host.release();
+
+  const error = await compaction.then(() => null, (reason: unknown) => reason);
+  expect(error).toBeInstanceOf(StructuredCompactError);
+  expect((error as StructuredCompactError).phase).toBe("unverified");
+});
+
+test("a concurrent compaction on the same thread is refused rather than issued twice", async () => {
+  const server = new CompactAppServer();
+  const host = await startHost(server);
+
+  const first = host.compact({ operationId: "op-one", threadId: server.threadId });
+  await Bun.sleep(10);
+  const second = await host.compact({ operationId: "op-two", threadId: server.threadId })
+    .then(() => null, (reason: unknown) => reason);
+
+  expect(second).toBeInstanceOf(StructuredCompactError);
+  expect((second as StructuredCompactError).phase).toBe("refused");
+  /* One thread compacts once at a time: a second request must not reach the
+     engine, or both waiters would settle on whichever item arrived first. */
+  expect(server.requests.filter((candidate) => candidate.method === "thread/compact/start")).toHaveLength(1);
+
+  server.notify("item/completed", {
+    threadId: server.threadId,
+    item: { id: "compaction-one", type: "contextCompaction" },
+  });
+  expect(await first).toEqual({ compactionId: "compaction-one" });
+  await host.release();
+});
+
 test("a compaction that starts and never finishes terminalizes unverified", async () => {
   const server = new CompactAppServer();
   const host = await startHost(server, { compactEvidenceTimeoutMs: 40 });

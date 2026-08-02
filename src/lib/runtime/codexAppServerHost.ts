@@ -1008,6 +1008,13 @@ export class CodexAppServerHost implements EngineHost {
     }
     const existing = this.pendingCompactions.get(request.operationId);
     if (existing) return existing.promise;
+    /* One compaction per thread at a time. The delivery queue already holds a
+       second request back, so reaching here means something bypassed it — and
+       a concurrent `thread/compact/start` would compact the thread twice and
+       leave both waiters settling on whichever item arrived first. */
+    if (this.pendingCompactions.size > 0) {
+      throw new StructuredCompactError("a compaction is already running on this thread", "refused");
+    }
 
     let settle!: PendingCompaction;
     const promise = new Promise<RuntimeCompactOutcome>((resolve, reject) => {
@@ -1023,7 +1030,14 @@ export class CodexAppServerHost implements EngineHost {
          `thread/compact/start` is a mutating method, so the default 30 s
          request budget would fail the whole host — and take the operator's live
          conversation with it — the moment a large thread takes longer than that
-         to begin compacting. */
+         to begin compacting.
+
+         The fence at the far end of this budget is deliberate, not inherited: a
+         mutating call whose ack never arrives has left the thread in a state
+         this host cannot describe, and every other mutating method here fails
+         closed for that reason. Five minutes of silence on an ack that normally
+         returns at once is that case. The compaction itself terminalizes
+         `unverified` either way. */
       await this.rpc(
         "thread/compact/start",
         { threadId: this.identity.threadId },
@@ -1668,6 +1682,11 @@ export class CodexAppServerHost implements EngineHost {
     this.rejectRealtimeStart(new Error("Codex app-server host released"));
     this.rejectPendingAnswers(new Error("Codex app-server host released"));
     this.rejectPendingDeliveries(new Error("Codex app-server host released"));
+    /* A graceful release is the one teardown `fail()` never sees — `close`
+       skips it while `releasing` is set — so a compaction waiting on evidence
+       would otherwise hang until its own timeout, holding this conversation's
+       queue behind it for minutes after the host is gone (#862). */
+    this.rejectPendingCompactions(new Error("Codex app-server host released"));
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);
       request.reject(new Error("Codex app-server host released"));

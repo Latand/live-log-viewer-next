@@ -1004,11 +1004,19 @@ export class RuntimeJournal {
        ORDER BY event_seq`,
     ).all();
     for (const row of rows) {
-      const receipt = JSON.parse(row.receipt_json) as RuntimeOperationReceipt;
-      if (receipt.kind !== "compact" || receipt.status !== "delivering") continue;
-      this.transitionOperation(row.operation_id, "uncertain", {
-        reason: "compaction was in flight during a runtime-host restart; its outcome is unverified",
-      });
+      /* Per row: the epoch is already claimed, so one unreadable receipt or one
+         refused transition must not fail runtime-host startup and leave the
+         claim behind. A row that cannot be settled here stays `delivering` and
+         is swept again at the next epoch. */
+      try {
+        const receipt = JSON.parse(row.receipt_json) as RuntimeOperationReceipt;
+        if (receipt.kind !== "compact" || receipt.status !== "delivering") continue;
+        this.transitionOperation(row.operation_id, "uncertain", {
+          reason: "compaction was in flight during a runtime-host restart; its outcome is unverified",
+        });
+      } catch {
+        console.error(`[runtime journal] compaction ${row.operation_id} could not be settled at this epoch`);
+      }
     }
   }
 

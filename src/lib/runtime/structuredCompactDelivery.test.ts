@@ -48,14 +48,14 @@ function baseHost(sent: QueueEntry[]): EngineHost {
 
 function compactEffect(overrides: Partial<Record<string, unknown>> = {}): StructuredDeliveryEffect {
   return {
-    id: "effect:op-compact",
+    id: "effect:op-one",
     kind: "runtime.compact",
     eventSeq: 7,
     payload: {
       kind: "compact",
-      operationId: "op-compact",
+      operationId: "op-one",
       conversationId: "conversation-one",
-      idempotencyKey: "op-compact",
+      idempotencyKey: "op-one",
       sessionKey: { engine: "codex", sessionId: "thread-one" },
       ...overrides,
     },
@@ -106,14 +106,14 @@ test("a compact effect issues the engine control and terminalizes on compaction 
 
   /* The control is durably marked in flight before the engine hears about it,
      and it never becomes a message. */
-  expect(transitions).toEqual([["op-compact", "delivering", undefined]]);
-  expect(requests).toEqual([{ operationId: "op-compact", threadId: "thread-one" }]);
+  expect(transitions).toEqual([["op-one", "delivering", undefined]]);
+  expect(requests).toEqual([{ operationId: "op-one", threadId: "thread-one" }]);
   expect(sent).toEqual([]);
 
   releaseEvidence("compaction-one");
   await settled;
 
-  expect(transitions.at(-1)).toEqual(["op-compact", "delivered", "compaction:compaction-one"]);
+  expect(transitions.at(-1)).toEqual(["op-one", "delivered", "compaction:compaction-one"]);
 });
 
 test("a second drain never reissues a compaction that is still awaiting evidence", async () => {
@@ -161,7 +161,7 @@ test("a compaction an earlier executor issued is never issued a second time", as
   expect(calls).toBe(0);
   expect(sent).toEqual([]);
   expect(transitions).toHaveLength(1);
-  expect(transitions[0]![0]).toBe("op-compact");
+  expect(transitions[0]![0]).toBe("op-one");
   expect(transitions[0]![1]).toBe("uncertain");
   expect(transitions[0]![2]).toContain("unverified");
 });
@@ -203,7 +203,7 @@ test("a runtime-host that rejects the uncertain status still settles the operati
   await queue.drain();
 
   expect(transitions.filter(([, status]) => status === "failed")).toEqual([
-    ["op-compact", "failed", "Codex app-server host was lost"],
+    ["op-one", "failed", "Codex app-server host was lost"],
   ]);
   expect(sent.map((entry) => entry.id)).toEqual(["op-send"]);
 });
@@ -260,6 +260,42 @@ test("an in-flight compaction holds messages but never holds kill", async () => 
   expect(transitions.some(([operationId]) => operationId === "op-send")).toBe(false);
 });
 
+test("a second compaction for a thread already compacting waits instead of compacting twice", async () => {
+  const sent: QueueEntry[] = [];
+  const issued: string[] = [];
+  let releaseFirst: () => void = () => {};
+  const host: CompactCapableHost = Object.assign(baseHost(sent), {
+    compact: async (request: { operationId: string; threadId: string }) => {
+      issued.push(request.operationId);
+      if (issued.length > 1) return { compactionId: `compaction-${request.operationId}` };
+      return new Promise<{ compactionId: string | null }>((resolve) => {
+        releaseFirst = () => resolve({ compactionId: "compaction-one" });
+      });
+    },
+  });
+  const second = compactEffect({ operationId: "op-two", idempotencyKey: "op-two" });
+  second.id = "effect:op-two";
+  second.eventSeq = 8;
+  const { port, transitions } = recorder([compactEffect(), second], ["delivered", "failed", "uncertain"]);
+  const queue = new StructuredDeliveryQueue(port, () => host);
+
+  await queue.drain();
+
+  /* Journal admission cannot refuse the second request — a compaction is not a
+     turn — so the queue is what keeps one thread to one compaction. The second
+     effect is left pending and untouched, not failed. */
+  expect(issued).toEqual(["op-one"]);
+  expect(transitions).toEqual([["op-one", "delivering", undefined]]);
+
+  releaseFirst();
+  await Bun.sleep(0);
+  await queue.drain();
+
+  expect(issued).toEqual(["op-one", "op-two"]);
+  expect(transitions.filter(([operationId]) => operationId === "op-two").map(([, status]) => status))
+    .toEqual(["delivering", "delivered"]);
+});
+
 test("a compact effect whose durable receipt cannot be read falls through to the host checks", async () => {
   const sent: QueueEntry[] = [];
   let compactions = 0;
@@ -276,7 +312,7 @@ test("a compact effect whose durable receipt cannot be read falls through to the
   await settled;
 
   expect(compactions).toBe(1);
-  expect(transitions.at(-1)).toEqual(["op-compact", "delivered", "compaction:compaction-one"]);
+  expect(transitions.at(-1)).toEqual(["op-one", "delivered", "compaction:compaction-one"]);
 });
 
 test("a busy structured turn fails the compact control instead of steering it", async () => {
@@ -293,7 +329,7 @@ test("a busy structured turn fails the compact control instead of steering it", 
 
   expect(calls).toBe(0);
   expect(sent).toEqual([]);
-  expect(transitions).toEqual([["op-compact", "failed", "busy-turn"]]);
+  expect(transitions).toEqual([["op-one", "failed", "busy-turn"]]);
 });
 
 test("an engine without a compact control reports a typed capability failure", async () => {
@@ -304,7 +340,7 @@ test("an engine without a compact control reports a typed capability failure", a
   await queue.drain();
 
   expect(sent).toEqual([]);
-  expect(transitions).toEqual([["op-compact", "failed", "unsupported-capability"]]);
+  expect(transitions).toEqual([["op-one", "failed", "unsupported-capability"]]);
 });
 
 test("a rejected compact request terminalizes as failed and an unverified one as uncertain", async () => {
@@ -316,7 +352,7 @@ test("a rejected compact request terminalizes as failed and an unverified one as
   await new StructuredDeliveryQueue(rejected.port, () => rejecting).drain();
   await rejected.settled;
   expect(rejected.transitions.at(-1)).toEqual([
-    "op-compact",
+    "op-one",
     "failed",
     "thread/compact/start was refused",
   ]);
@@ -328,7 +364,7 @@ test("a rejected compact request terminalizes as failed and an unverified one as
   await new StructuredDeliveryQueue(unverified.port, () => losing).drain();
   await unverified.settled;
   expect(unverified.transitions.at(-1)).toEqual([
-    "op-compact",
+    "op-one",
     "uncertain",
     "Codex app-server host was lost",
   ]);
@@ -363,9 +399,9 @@ test("a recovered host lets a queued compaction reach the engine on the next pas
   expect(recoveries).toEqual(["conversation-one"]);
   expect(compactions).toBe(1);
   expect(transitions).toEqual([
-    ["op-compact", "queued", "dead-host"],
-    ["op-compact", "delivering", undefined],
-    ["op-compact", "delivered", "compaction:compaction-one"],
+    ["op-one", "queued", "dead-host"],
+    ["op-one", "delivering", undefined],
+    ["op-one", "delivered", "compaction:compaction-one"],
   ]);
 });
 
@@ -423,7 +459,7 @@ test("a queued message behind an in-flight compaction waits for the control to s
   await queue.drain();
 
   expect(sent).toEqual([]);
-  expect(transitions.map(([operationId]) => operationId)).toEqual(["op-compact"]);
+  expect(transitions.map(([operationId]) => operationId)).toEqual(["op-one"]);
 
   releaseEvidence();
   await settled;

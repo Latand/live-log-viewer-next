@@ -587,6 +587,14 @@ export class StructuredDeliveryQueue {
    */
   private async drainCompact(effect: CompactEffect): Promise<ControlDrainResult> {
     if (this.activeCompactions.has(effect.operationId)) return { blocked: false, terminated: false };
+    /* A second compaction admitted for a thread that is already compacting is
+       left pending, untouched. The operator's second request is legitimate once
+       the first lands — journal admission cannot refuse it, because a
+       compaction is not a turn — but issuing both would compact the thread
+       twice and settle both receipts on one piece of evidence. The `retrySoon`
+       fired when the first settles brings this effect back. Holding it does not
+       block the group: kill must still get through. */
+    if (this.compactingConversations.has(effect.conversationId)) return { blocked: false, terminated: false };
     /* An unreadable receipt is not evidence of anything. Treat it as unknown
        and fall through to the host checks rather than aborting a drain pass
        that other conversations share. */
