@@ -54,9 +54,13 @@ export interface ConversationSelectionRequest {
    *
    * A completed generation can predate a launch by up to its refresh cadence, so
    * liveness filtered on the scan projection alone would drop a conversation
-   * that started a minute ago. Carrying the runtime's own answer here is what
-   * makes serving `liveOnly` from a completed generation correct instead of
-   * merely fast.
+   * whose row the scan still projects as idle. Carrying the runtime's own answer
+   * here is what makes serving `liveOnly` from a completed generation correct
+   * instead of merely fast.
+   *
+   * This rescues only rows the generation HAS. A launch newer than the
+   * generation has no row at all; `hostedSeen` in the result tells the caller
+   * which hosted paths were missing so it can recover them by identity.
    */
   hostedPaths?: ReadonlySet<string>;
 }
@@ -68,6 +72,16 @@ export interface ConversationSelection {
   matched: number;
   /** Conversation rows in the generation. */
   scanned: number;
+  /**
+   * Which `hostedPaths` the generation actually contains, whatever the filters
+   * did with them.
+   *
+   * Widening the liveness filter can only rescue a row the generation already
+   * has. A launch NEWER than the generation has no row to widen onto, and the
+   * caller has to recover it by identity. This set is how the caller knows
+   * which ones those are without a second pass over the corpus.
+   */
+  hostedSeen: ReadonlySet<string>;
   generation: number;
   cacheStatus: CachedFileScan["cacheStatus"];
   /** Always false: a selection consumes a completed generation, never a sweep. */
@@ -98,15 +112,19 @@ function isConversationRow(entry: FileEntry): boolean {
 export function selectConversationEntries(
   files: readonly FileEntry[],
   request: ConversationSelectionRequest,
-): Pick<ConversationSelection, "entries" | "matched" | "scanned"> {
+): Pick<ConversationSelection, "entries" | "matched" | "scanned" | "hostedSeen"> {
   const limit = Math.max(0, Math.floor(request.limit));
   const query = request.query ? request.query.toLocaleLowerCase() : "";
   const entries: FileEntry[] = [];
+  const hostedSeen = new Set<string>();
   let matched = 0;
   let scanned = 0;
   for (const entry of files) {
     if (!isConversationRow(entry)) continue;
     scanned += 1;
+    /* Recorded before the filters: a hosted row this generation holds under a
+       different project is still a row the caller need not recover. */
+    if (request.hostedPaths?.has(entry.path)) hostedSeen.add(entry.path);
     if (request.project && entry.project !== request.project) continue;
     if (request.liveOnly
       && entry.activity !== "live"
@@ -116,7 +134,7 @@ export function selectConversationEntries(
     matched += 1;
     if (entries.length < limit) entries.push(entry);
   }
-  return { entries, matched, scanned };
+  return { entries, matched, scanned, hostedSeen };
 }
 
 export type CompletedGenerationRead = (
@@ -219,7 +237,11 @@ export async function hydrateWithBudget<T, R>(
      handler — an unhandled rejection per cancelled call. Every worker is
      collected, then the first failure is rethrown. */
   const settled = await Promise.allSettled(Array.from(
-    { length: Math.max(1, Math.min(Math.floor(budget.concurrency), items.length || 1)) },
+    /* Never zero workers: `Array.from({ length: NaN })` is empty, which would
+       skip every row while still reporting the pass as complete. */
+    { length: Number.isFinite(budget.concurrency)
+      ? Math.max(1, Math.min(Math.floor(budget.concurrency), items.length || 1))
+      : 1 },
     () => worker(),
   ));
   const failure = settled.find((result) => result.status === "rejected");

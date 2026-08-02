@@ -127,7 +127,8 @@ export interface AgentLivenessRecord {
 export interface AgentLivenessTimings {
   /** Reading the completed generation and applying filters and the row limit. */
   inventorySelectionMs: number;
-  /** Registry, host and pipeline-lineage projection over the selected rows. */
+  /** Registry, host and pipeline-lineage projection: the index build plus the
+      per-row host and lineage resolution for every selected row. */
   journalProjectionMs: number;
   /** Bounded transcript-tail hydration. */
   evidenceReadMs: number;
@@ -144,6 +145,10 @@ export interface AgentLivenessSelectionReport {
   /** Rows matching project/liveness before the row limit. */
   matched: number;
   selected: number;
+  /** Rows resolved by identity because the generation did not contain them yet:
+      hosts younger than the generation. Non-zero means the catalog is behind
+      the runtime, which is the one thing a clean-looking report must not hide. */
+  recovered: number;
   /** Rows a transcript tail read was attempted for; `unreadable` is the subset
       of those whose tail could not be used. */
   hydrated: number;
@@ -437,6 +442,58 @@ function hostedTranscriptPaths(snapshot: Pick<RegistryFile, "entries">): Set<str
   return hosted;
 }
 
+/** Ceiling on identity recovery. Bounded by the registry's active hosts in
+    practice; the cap keeps a rotted registry from turning a catalog read into a
+    walk. */
+const HOSTED_RECOVERY_MAX = 64;
+
+/**
+ * The hosts the generation has not caught up with yet, resolved by identity.
+ *
+ * Widening the liveness filter rescues a hosted row the generation CONTAINS.
+ * A launch newer than the generation has no row to widen onto: an orchestrator
+ * that spawns an agent and immediately polls `agent_activity(project, liveOnly)`
+ * would not see it until the next completed generation — up to the ordinary
+ * refresh cadence away on a host with nothing else driving scans. The fresh
+ * whole-corpus sweep this change removes used to hide that.
+ *
+ * One `stat`-and-describe per unseen active host, so the recovery cost tracks
+ * the number of running agents rather than the size of the corpus.
+ */
+async function recoverHostedTranscripts(
+  hostedPaths: ReadonlySet<string>,
+  hostedSeen: ReadonlySet<string>,
+  project: string | undefined,
+  describe: AgentLivenessSources["describeTranscript"],
+): Promise<LivenessTranscript[]> {
+  const missing: string[] = [];
+  for (const path of hostedPaths) {
+    if (hostedSeen.has(path)) continue;
+    missing.push(path);
+    if (missing.length >= HOSTED_RECOVERY_MAX) break;
+  }
+  if (missing.length === 0) return [];
+  const described = await Promise.all(missing.map(async (path) => {
+    try {
+      return await describe(path);
+    } catch {
+      /* A host whose transcript cannot be described is not evidence of
+         anything; the rest of the answer still stands. */
+      return null;
+    }
+  }));
+  return described.filter((entry): entry is LivenessTranscript => entry !== null
+    && (entry.engine === "claude" || entry.engine === "codex")
+    && (!project || entry.project === project));
+}
+
+/** Newest first, with an unreadable mtime ranked last rather than poisoning the
+    comparator. */
+function byNewest(left: LivenessTranscript, right: LivenessTranscript): number {
+  const rank = (entry: LivenessTranscript) => Number.isFinite(entry.mtimeMs) ? entry.mtimeMs : Number.NEGATIVE_INFINITY;
+  return rank(right) - rank(left);
+}
+
 function livenessAbortError(reason?: unknown): Error {
   if (reason instanceof Error && reason.name === "AbortError") return reason;
   return new DOMException("liveness snapshot cancelled", "AbortError");
@@ -473,7 +530,7 @@ export async function agentLivenessSnapshot(
   const registry = sources.registrySnapshot();
   const pipelines = pipelineIndex(sources.pipelines());
   const hostedPaths = hostedTranscriptPaths(registry);
-  const journalProjectionMs = performance.now() - projectionStartedAt;
+  const indexProjectionMs = performance.now() - projectionStartedAt;
 
   /* A conversation id names its current generation's transcript; that is the
      only path whose liveness is meaningful. */
@@ -504,6 +561,7 @@ export async function agentLivenessSnapshot(
       scanned: requestedPaths.size,
       matched: entries.length,
       selected: entries.length,
+      recovered: 0,
       generation: null,
       cacheStatus: null,
       freshScan: false,
@@ -515,14 +573,17 @@ export async function agentLivenessSnapshot(
       limit,
       hostedPaths,
     };
+    let hostedSeen: ReadonlySet<string>;
     if (sources.selectInventory) {
       const selected = await sources.selectInventory(selectionRequest, { signal });
       entries = selected.entries.map(transcriptFromEntry);
+      hostedSeen = selected.hostedSeen ?? new Set(selected.entries.map((entry) => entry.path));
       selection = {
         scope: request.project ? "project" : "corpus",
         scanned: selected.scanned,
         matched: selected.matched,
         selected: selected.entries.length,
+        recovered: 0,
         generation: selected.generation,
         cacheStatus: selected.cacheStatus,
         freshScan: selected.freshScan,
@@ -530,17 +591,35 @@ export async function agentLivenessSnapshot(
     } else if (sources.listFiles) {
       const selected = selectConversationEntries(await sources.listFiles(), selectionRequest);
       entries = selected.entries.map(transcriptFromEntry);
+      hostedSeen = selected.hostedSeen;
       selection = {
         scope: request.project ? "project" : "corpus",
         scanned: selected.scanned,
         matched: selected.matched,
         selected: selected.entries.length,
+        recovered: 0,
         generation: null,
         cacheStatus: null,
         freshScan: true,
       };
     } else {
       throw new Error("liveness needs an inventory source: install selectInventory");
+    }
+
+    /* Hosts the generation has not caught up with yet. Newest-first ordering is
+       restored only when recovery actually found something, so the ordinary
+       path returns the generation's own order untouched. */
+    const recovered = await recoverHostedTranscripts(hostedPaths, hostedSeen, request.project, sources.describeTranscript);
+    const known = new Set(entries.map((entry) => entry.path));
+    const added = recovered.filter((entry) => !known.has(entry.path));
+    if (added.length > 0) {
+      entries = [...entries, ...added].sort(byNewest).slice(0, limit);
+      selection = {
+        ...selection,
+        matched: selection.matched + added.length,
+        selected: entries.length,
+        recovered: added.length,
+      };
     }
   }
   const inventorySelectionMs = performance.now() - selectionStartedAt;
@@ -560,7 +639,9 @@ export async function agentLivenessSnapshot(
       { signal: hydrationSignal },
     ),
     {
-      concurrency: Math.max(1, Math.floor(request.evidenceConcurrency ?? DEFAULT_EVIDENCE_CONCURRENCY)),
+      concurrency: Number.isFinite(request.evidenceConcurrency)
+        ? Math.max(1, Math.floor(request.evidenceConcurrency as number))
+        : DEFAULT_EVIDENCE_CONCURRENCY,
       maxBytes: Math.max(0, Math.floor(request.evidenceByteBudget ?? DEFAULT_EVIDENCE_BYTE_BUDGET)),
       /* Anchored HERE, on the same clock the budget reads. A cold generation can
          take tens of seconds to publish; anchoring at the start of the call
@@ -573,10 +654,12 @@ export async function agentLivenessSnapshot(
   const evidenceReadMs = performance.now() - evidenceStartedAt;
   if (signal?.aborted) throw livenessAbortError(signal.reason);
 
-  const serializationStartedAt = performance.now();
-  const conversations: AgentLivenessRecord[] = [];
+  /* Projection, then assembly, as two passes over the same rows — so each phase
+     timing measures the phase it is named after instead of splitting the
+     per-row registry and lineage lookups across both. */
+  const rowProjectionStartedAt = performance.now();
   let unreadable = 0;
-  for (const [index, entry] of hydratable.entries()) {
+  const projected = hydratable.map((entry, index) => {
     /* Three outcomes, kept apart: a read that produced evidence, a read that
        produced none, and a row the budget never reached. The counters below are
        derived from the same distinction, so the report and the per-row labels
@@ -590,29 +673,41 @@ export async function agentLivenessSnapshot(
        as stalled — the exact question this surface exists to answer. */
     const lastRecordMs = evidence?.lastRecordTs ?? (Number.isFinite(entry.mtimeMs) ? entry.mtimeMs : null);
     const silentForMs = lastRecordMs !== null ? Math.max(0, now - lastRecordMs) : null;
-    const registryEntry = entryForPath(registry, entry.path);
-    const host = hostEvidence(registryEntry, sources.probe);
-    const { lifecycle, reason } = evaluateLiveness({ host, turnState, silentForMs, stallAfterMs });
+    const host = hostEvidence(entryForPath(registry, entry.path), sources.probe);
     const conversationId = entry.conversationId ?? conversationIdForPath(registry, entry.path);
-    conversations.push({
+    return {
+      entry,
       conversationId,
-      transcriptPath: entry.path,
-      project: entry.project,
-      engine: entry.engine,
-      title: entry.title,
-      lastRecordAt: isoOrNull(lastRecordMs),
       turnState,
-      host,
-      lifecycle,
-      reason,
+      lastRecordMs,
       silentForMs,
-      stalledForMs: lifecycle === "stalled" || lifecycle === "gone" ? silentForMs : null,
+      host,
+      ...evaluateLiveness({ host, turnState, silentForMs, stallAfterMs }),
       pipeline: (conversationId ? pipelines.byConversation.get(conversationId) : undefined)
         ?? pipelines.byPath.get(entry.path)
         ?? null,
-      evidenceSource: !attempted ? "projection" : evidence !== null ? "transcript" : "unreadable",
-    });
-  }
+      evidenceSource: (!attempted ? "projection" : evidence !== null ? "transcript" : "unreadable") as AgentLivenessRecord["evidenceSource"],
+    };
+  });
+  const journalProjectionMs = indexProjectionMs + (performance.now() - rowProjectionStartedAt);
+
+  const serializationStartedAt = performance.now();
+  const conversations: AgentLivenessRecord[] = projected.map((row) => ({
+    conversationId: row.conversationId,
+    transcriptPath: row.entry.path,
+    project: row.entry.project,
+    engine: row.entry.engine,
+    title: row.entry.title,
+    lastRecordAt: isoOrNull(row.lastRecordMs),
+    turnState: row.turnState,
+    host: row.host,
+    lifecycle: row.lifecycle,
+    reason: row.reason,
+    silentForMs: row.silentForMs,
+    stalledForMs: row.lifecycle === "stalled" || row.lifecycle === "gone" ? row.silentForMs : null,
+    pipeline: row.pipeline,
+    evidenceSource: row.evidenceSource,
+  }));
   const serializationMs = performance.now() - serializationStartedAt;
 
   return {

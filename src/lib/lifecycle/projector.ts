@@ -251,6 +251,12 @@ export function lastObservedAgentState(file: LifecycleJournalFile): Map<string, 
  * an `agent_resumed` retiring it once a real read landed. An alarm surface that
  * fabricates alarm/all-clear pairs is worse than one that waits for the next
  * sweep to read the tail.
+ *
+ * The gate suppresses the all-clear as well as the alarm, and an actively
+ * appending transcript is the one most likely to lose the identity race that
+ * reports `unreadable` — so an outstanding `agent_stalled` can survive a poll
+ * cycle longer than it used to. The race window is sub-millisecond against a
+ * repeated sweep, so it retires on the next reading rather than persisting.
  */
 export function projectLivenessEvents(
   records: AgentLivenessRecord[],

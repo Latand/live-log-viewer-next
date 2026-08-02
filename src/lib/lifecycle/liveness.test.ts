@@ -601,7 +601,12 @@ test("a project-scoped live read serves one completed generation, hydrates only 
     budget: "complete",
   });
   expect(generation.starts()).toBe(1);
-  /* Warm, on the production-shaped corpus, well inside the 500 ms bar. */
+  expect(snapshot.selection.recovered).toBe(0);
+  /* The structural assertions above are what actually holds the repair: one
+     generation, six rows selected out of 10,001, six tails read. The wall clock
+     is a coarse backstop against a regression the counters cannot see — 26 ms
+     measured against a 500 ms bar, so a loaded runner has to be nineteen times
+     slower before it means anything. */
   expect(elapsedMs).toBeLessThan(500);
 });
 
@@ -688,10 +693,11 @@ test("twenty concurrent project reads share one completed generation and stay bo
   expect(generation.reads()).toBe(20);
   expect(snapshots.every((snapshot) => snapshot.selection.generation === 12)).toBe(true);
   expect(snapshots.every((snapshot) => snapshot.count === 6)).toBe(true);
-  /* Twenty readers of a 10,000-row generation, each hydrating six tails. The
-     RSS bar tracks what this actually costs — ~85 MiB of transient snapshot
-     clones — with room for GC timing, not a catastrophe guard: a regression
-     that reintroduced per-caller corpus work has to move this number. */
+  expect(snapshots.every((snapshot) => snapshot.selection.hydrated === 6)).toBe(true);
+  /* Sharing is proved by the counters above; the two resource bars are coarse
+     backstops for what counters cannot see. The RSS bar tracks what this
+     actually costs — ~85 MiB of transient snapshot clones — with room for GC
+     timing, so a regression that reintroduced per-caller corpus work moves it. */
   expect(elapsedMs).toBeLessThan(2_000);
   expect(rssDeltaBytes).toBeLessThan(256 * 1024 * 1024);
 });
@@ -954,4 +960,193 @@ test("a tail that was read and could not be used is unreadable, not unattempted 
   expect(snapshot.selection.hydrated).toBe(snapshot.count - snapshot.selection.projected);
   /* An unusable tail is no evidence at all, so it is not journaled either. */
   expect(projectLivenessEvents(snapshot.conversations.filter((record) => record.evidenceSource === "unreadable"))).toEqual([]);
+});
+
+/** One transcript described the way `describeTranscriptPath` describes it, with
+    no scan projection to carry — the shape identity recovery works from. */
+function describedTranscript(transcriptPath: string, project: string, mtimeMs: number): LivenessTranscript {
+  return {
+    path: transcriptPath,
+    project,
+    title: "just spawned",
+    engine: "claude",
+    mtimeMs,
+    sizeBytes: fs.statSync(transcriptPath).size,
+    conversationId: null,
+    activity: null,
+    activityReason: null,
+  };
+}
+
+test("a launch newer than the completed generation is recovered by identity, not missed (#860)", async () => {
+  const dir = sandbox();
+  /* The orchestrator spawned this a moment ago and is polling to confirm it
+     started. The generation predates the file, so no filter widening can reach
+     it — only the registry knows it exists. */
+  const spawned = path.join(dir, "just-spawned.jsonl");
+  fs.writeFileSync(spawned, liveTranscriptText(NOW - 1_000), "utf8");
+  const older = path.join(dir, "older.jsonl");
+  const generation = publishedGeneration([fileEntry({
+    path: older,
+    project: PROJECT,
+    engine: "claude",
+    conversationId: "conversation_older",
+    activity: "idle",
+    activityReason: "mtime_old",
+    mtime: Math.floor((NOW - 7_200_000) / 1000),
+  })]);
+  const described: string[] = [];
+
+  const snapshot = await agentLivenessSnapshot(
+    { project: PROJECT, liveOnly: true, limit: 10 },
+    corpusSources(generation, {
+      registrySnapshot: () => ({
+        entries: { "claude:just-spawned": structuredEntry(spawned, 4242) },
+        conversations: {},
+      }) as unknown as RegistryFile,
+      describeTranscript: async (transcriptPath) => {
+        described.push(transcriptPath);
+        return describedTranscript(transcriptPath, PROJECT, NOW - 1_000);
+      },
+    }),
+  );
+
+  expect(snapshot.conversations.map((record) => record.transcriptPath)).toEqual([spawned]);
+  expect(snapshot.conversations[0]!.lifecycle).toBe("running");
+  expect(snapshot.conversations[0]!.evidenceSource).toBe("transcript");
+  /* One stat per unseen active host, and the report says the catalog was behind
+     rather than presenting a clean empty answer. */
+  expect(described).toEqual([spawned]);
+  expect(snapshot.selection).toMatchObject({ recovered: 1, matched: 1, selected: 1, hydrated: 1 });
+});
+
+test("identity recovery honours the project filter and the row limit (#860)", async () => {
+  const dir = sandbox();
+  const mine = path.join(dir, "mine.jsonl");
+  const theirs = path.join(dir, "theirs.jsonl");
+  for (const target of [mine, theirs]) fs.writeFileSync(target, liveTranscriptText(NOW - 1_000), "utf8");
+  const stale = path.join(dir, "stale-live.jsonl");
+  fs.writeFileSync(stale, liveTranscriptText(NOW - 600_000), "utf8");
+  const generation = publishedGeneration([fileEntry({
+    path: stale,
+    project: PROJECT,
+    engine: "claude",
+    conversationId: "conversation_stale",
+    activity: "live",
+    activityReason: "jsonl_turn_open",
+    mtime: Math.floor((NOW - 600_000) / 1000),
+  })]);
+
+  const snapshot = await agentLivenessSnapshot(
+    { project: PROJECT, liveOnly: true, limit: 1 },
+    corpusSources(generation, {
+      registrySnapshot: () => ({
+        entries: {
+          "claude:mine": structuredEntry(mine, 4242),
+          "claude:theirs": structuredEntry(theirs, 4243),
+        },
+        conversations: {},
+      }) as unknown as RegistryFile,
+      describeTranscript: async (transcriptPath) => describedTranscript(
+        transcriptPath,
+        transcriptPath === theirs ? "another-project" : PROJECT,
+        NOW - 1_000,
+      ),
+    }),
+  );
+
+  /* The other project's host is described and dropped; the recovered row is
+     newer than the generation's, so it takes the single slot. */
+  expect(snapshot.conversations.map((record) => record.transcriptPath)).toEqual([mine]);
+  expect(snapshot.selection).toMatchObject({ recovered: 1, selected: 1 });
+});
+
+test("a hosted transcript the generation already contains is never re-described (#860)", async () => {
+  const dir = sandbox();
+  const hosted = path.join(dir, "hosted.jsonl");
+  fs.writeFileSync(hosted, liveTranscriptText(NOW - 1_000), "utf8");
+  const generation = publishedGeneration([fileEntry({
+    path: hosted,
+    project: PROJECT,
+    engine: "claude",
+    conversationId: "conversation_hosted",
+    activity: "idle",
+    activityReason: "mtime_old",
+  })]);
+  let describes = 0;
+
+  const snapshot = await agentLivenessSnapshot(
+    { project: PROJECT, liveOnly: true, limit: 10 },
+    corpusSources(generation, {
+      registrySnapshot: () => ({
+        entries: { "claude:hosted": structuredEntry(hosted, 4242) },
+        conversations: {},
+      }) as unknown as RegistryFile,
+      describeTranscript: async (transcriptPath) => {
+        describes += 1;
+        return describedTranscript(transcriptPath, PROJECT, NOW - 1_000);
+      },
+    }),
+  );
+
+  expect(snapshot.conversations.map((record) => record.transcriptPath)).toEqual([hosted]);
+  expect(describes).toBe(0);
+  expect(snapshot.selection.recovered).toBe(0);
+});
+
+test("a non-finite evidence concurrency falls back to the default instead of hydrating nothing (#860)", async () => {
+  const dir = sandbox();
+  const corpus = productionShapedCorpus(dir);
+  const generation = publishedGeneration(corpus.files);
+
+  const snapshot = await agentLivenessSnapshot(
+    { project: PROJECT, liveOnly: true, limit: 10, evidenceConcurrency: Number.NaN },
+    corpusSources(generation),
+  );
+
+  /* Zero workers would read nothing while still reporting `complete`: the one
+     way the report's two halves could disagree. */
+  expect(snapshot.selection).toMatchObject({ hydrated: 6, projected: 0, budget: "complete" });
+  expect(snapshot.conversations.every((record) => record.evidenceSource === "transcript")).toBe(true);
+});
+
+test("the projection timing covers the per-row host and lineage resolution (#860)", async () => {
+  const dir = sandbox();
+  const paths = ["a.jsonl", "b.jsonl", "c.jsonl"].map((name) => path.join(dir, name));
+  for (const target of paths) fs.writeFileSync(target, liveTranscriptText(NOW - 1_000), "utf8");
+  const generation = publishedGeneration(paths.map((target, index) => fileEntry({
+    path: target,
+    project: PROJECT,
+    engine: "claude",
+    conversationId: `conversation_timing_${index}`,
+    activity: "live",
+    activityReason: "jsonl_turn_open",
+  })));
+
+  const snapshot = await agentLivenessSnapshot(
+    { project: PROJECT, liveOnly: true, limit: 10 },
+    corpusSources(generation, {
+      registrySnapshot: () => ({
+        entries: Object.fromEntries(paths.map((target, index) => [`claude:timing-${index}`, structuredEntry(target, 4242 + index)])),
+        conversations: {},
+      }) as unknown as RegistryFile,
+      probe: {
+        now: () => NOW,
+        /* Host resolution with a measurable cost, spun rather than slept so the
+           phase it lands in is not a scheduling accident. */
+        pidAlive: () => {
+          const until = performance.now() + 5;
+          while (performance.now() < until) { /* spin */ }
+          return true;
+        },
+        processIdentity: () => "start-token-of-a-dead-host",
+      },
+    }),
+  );
+
+  expect(snapshot.count).toBe(3);
+  /* Three rows, five milliseconds of host resolution each: the projection
+     phase owns it, not serialization. */
+  expect(snapshot.timings.journalProjectionMs).toBeGreaterThanOrEqual(10);
+  expect(snapshot.timings.serializationMs).toBeLessThan(snapshot.timings.journalProjectionMs);
 });
