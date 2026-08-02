@@ -1,4 +1,4 @@
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, afterEach, expect, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -18,6 +18,15 @@ const { queryLifecycleEvents } = await import("./journal");
 const { refreshLifecycleJournal } = await import("./projector");
 
 afterAll(() => fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true }));
+
+/* The projection throttle is a `globalThis` stamp, so it outlives this file: a
+   stamp left behind here silently throttles the next test file's real
+   projection — and which file that is depends on the order the runner picks.
+   Every case here forces its own projection, so clearing the stamps between
+   them costs nothing and keeps the leak inside this file. */
+afterEach(() => {
+  delete (globalThis as typeof globalThis & { __llvLifecycleProjectionAt?: Record<string, number> }).__llvLifecycleProjectionAt;
+});
 
 const T0 = "2026-07-26T09:00:00.000Z";
 
@@ -151,6 +160,7 @@ function livenessRecord(overrides: Partial<AgentLivenessRecord>): AgentLivenessR
     silentForMs: 600_000,
     stalledForMs: 600_000,
     pipeline: null,
+    evidenceSource: "transcript",
     ...overrides,
   };
 }
@@ -220,6 +230,8 @@ test("a sweep journals agent_gone for an unfinished stage and agent_resumed when
 });
 
 test("a liveness-only refresh does not throttle a lifecycle refresh and vice versa", () => {
+  /* A minute ahead of the clock, so the second call in each domain is throttled
+     without the test sleeping through the window. */
   const now = Date.now() + 60_000;
 
   const livenessInput: Parameters<typeof refreshLifecycleJournal>[0] = {
@@ -246,4 +258,42 @@ test("a liveness-only refresh does not throttle a lifecycle refresh and vice ver
 
   const fourth = refreshLifecycleJournal(pipelineInput, { now });
   expect(fourth.throttled).toBe(true);
+});
+
+test("only a reading backed by a transcript read becomes a durable alarm (#860)", () => {
+  const stale = "2026-07-26T03:00:00.000Z";
+
+  /* The evidence budget was spent before this row came up, so its turn state
+     and freshness are the scan generation's — which may be minutes old. A
+     conversation that resumed since that generation completed would earn a
+     durable stall here that never happened. */
+  refreshLifecycleJournal({
+    liveness: [livenessRecord({
+      conversationId: "conversation_budget_degraded",
+      lastRecordAt: stale,
+      evidenceSource: "projection",
+    })],
+  }, { force: true });
+  expect(queryLifecycleEvents({ conversationId: "conversation_budget_degraded" }).count).toBe(0);
+
+  /* A tail that was read and could not be used says just as little. */
+  refreshLifecycleJournal({
+    liveness: [livenessRecord({
+      conversationId: "conversation_torn_tail",
+      lastRecordAt: stale,
+      evidenceSource: "unreadable",
+    })],
+  }, { force: true });
+  expect(queryLifecycleEvents({ conversationId: "conversation_torn_tail" }).count).toBe(0);
+
+  /* The same reading, with the tail actually read, is news. */
+  refreshLifecycleJournal({
+    liveness: [livenessRecord({
+      conversationId: "conversation_read_tail",
+      lastRecordAt: stale,
+      evidenceSource: "transcript",
+    })],
+  }, { force: true });
+  expect(queryLifecycleEvents({ conversationId: "conversation_read_tail" }).events.map((event) => event.type))
+    .toEqual(["agent_stalled"]);
 });
