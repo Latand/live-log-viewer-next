@@ -70,6 +70,7 @@ class FakeAppServer extends EventEmitter {
   oversizedTurnStartResult = false;
   readonly acceptedRealtimeSpeech: string[] = [];
   injectItemsError: string | null = null;
+  threadPath: string | null = null;
   private readonly serverRequestIds = new Set<string | number>();
   private turn = 0;
 
@@ -151,7 +152,7 @@ class FakeAppServer extends EventEmitter {
       return this.respond(message.id, {
         thread: {
           id,
-          path: `/sessions/${id}.jsonl`,
+          path: this.threadPath ?? `/sessions/${id}.jsonl`,
           turns: this.turns,
           ...(this.resumeStatus ? { status: this.resumeStatus } : {}),
         },
@@ -185,9 +186,16 @@ class FakeAppServer extends EventEmitter {
     }
     if (method === "turn/interrupt") return this.respond(message.id, {});
     if (method === "thread/inject_items") {
-      return this.injectItemsError
-        ? this.respondError(message.id, this.injectItemsError)
-        : this.respond(message.id, {});
+      if (this.injectItemsError) return this.respondError(message.id, this.injectItemsError);
+      if (this.threadPath) {
+        const items = (message.params as { items?: unknown[] }).items ?? [];
+        fs.appendFileSync(this.threadPath, items.map((payload) => JSON.stringify({
+          type: "response_item",
+          timestamp: "2026-08-02T10:00:00.000Z",
+          payload,
+        })).join("\n") + "\n");
+      }
+      return this.respond(message.id, {});
     }
     if (method === "thread/realtime/start") {
       this.respond(message.id, {});
@@ -303,10 +311,14 @@ describe("CodexAppServerHost", () => {
       spawnProcess: fakeSpawn(server),
     });
 
-    await expect(host.startRealtimeWebRtc("v=0\r\noffer")).resolves.toEqual({
+    const started = await host.startRealtimeWebRtc("v=0\r\noffer");
+    expect(started).toMatchObject({
       sdp: "v=0\r\nanswer",
       realtimeSessionId: "realtime-1",
+      personaBootstrap: { insertion: "accepted" },
     });
+    expect(started.personaBootstrap.receiptId).toMatch(/^voice_persona_[a-f0-9]{64}$/);
+    expect(started.personaBootstrap.itemId).toMatch(/^msg_voice_persona_[a-f0-9]{64}$/);
     // SDP requires a terminal CRLF; a missing one is healed, never trimmed —
     // OpenAI rejects an unterminated offer with "unmarshal SDP: EOF".
     /* The live model is named explicitly (#664): letting the backend choose
@@ -329,8 +341,12 @@ describe("CodexAppServerHost", () => {
     expect((injected?.params as { threadId?: string })?.threadId).toBe("voice-thread");
     /* Shape and ordering only. Which text arrives is pinned by the override
        test below, where the expected string cannot also be the default. */
-    expect((injected?.params as { items?: { role?: string; text?: string }[] })?.items)
-      .toEqual([{ role: "developer", text: voicePersona() }]);
+    expect((injected?.params as { items?: unknown[] })?.items).toEqual([{
+      type: "message",
+      id: started.personaBootstrap.itemId,
+      role: "developer",
+      content: [{ type: "input_text", text: voicePersona() }],
+    }]);
     expect(server.requests.findIndex((request) => request.method === "thread/inject_items"))
       .toBeLessThan(server.requests.findIndex((request) => request.method === "thread/realtime/start"));
 
@@ -344,6 +360,65 @@ describe("CodexAppServerHost", () => {
       threadId: "voice-thread",
     });
     await host.release();
+  });
+
+  test("reuses one canonical persona row and stable receipt after duplicate start and host restart", async () => {
+    const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-bootstrap-"));
+    const transcriptPath = path.join(isolated, "voice-thread.jsonl");
+    fs.writeFileSync(transcriptPath, "");
+    const configDirectory = path.join(isolated, "config");
+    const overridePath = path.join(configDirectory, "agent-log-viewer", ...VOICE_PERSONA_FILE.split("/"));
+    fs.mkdirSync(path.dirname(overridePath), { recursive: true });
+    fs.writeFileSync(overridePath, "First resolved call persona.\n");
+
+    const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = configDirectory;
+    let firstHost: CodexAppServerHost | null = null;
+    let resumedHost: CodexAppServerHost | null = null;
+    try {
+      const firstServer = new FakeAppServer("voice-thread");
+      firstServer.threadPath = transcriptPath;
+      firstHost = await CodexAppServerHost.start({
+        cwd: "/repo",
+        eventStore: new MemoryEventStore(),
+        spawnProcess: fakeSpawn(firstServer),
+      });
+      const first = await firstHost.startRealtimeWebRtc("v=0\r\nstable-offer");
+      expect(first.personaBootstrap.insertion).toBe("accepted");
+      await firstHost.stopRealtime();
+
+      fs.writeFileSync(overridePath, "Changed after the call was resolved.\n");
+      const duplicate = await firstHost.startRealtimeWebRtc("v=0\r\nstable-offer");
+      expect(duplicate.personaBootstrap).toEqual(first.personaBootstrap);
+      expect(firstServer.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(1);
+      await firstHost.stopRealtime();
+      await firstHost.release();
+      firstHost = null;
+
+      fs.writeFileSync(overridePath, "Changed again after host restart.\n");
+      const resumedServer = new FakeAppServer("voice-thread");
+      resumedServer.threadPath = transcriptPath;
+      resumedHost = await CodexAppServerHost.adopt("voice-thread", {
+        cwd: "/repo",
+        eventStore: new MemoryEventStore(),
+        spawnProcess: fakeSpawn(resumedServer),
+      });
+      const recovered = await resumedHost.startRealtimeWebRtc("v=0\r\nstable-offer");
+      expect(recovered.personaBootstrap).toEqual(first.personaBootstrap);
+      expect(resumedServer.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(0);
+
+      const canonical = fs.readFileSync(transcriptPath, "utf8").trim().split("\n")
+        .map((line) => JSON.parse(line) as { payload: { id?: string; content?: Array<{ text?: string }> } })
+        .filter((line) => line.payload.id === first.personaBootstrap.itemId);
+      expect(canonical).toHaveLength(1);
+      expect(canonical[0]?.payload.content?.[0]?.text).toBe("First resolved call persona.");
+    } finally {
+      if (firstHost) await firstHost.release();
+      if (resumedHost) await resumedHost.release();
+      if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      fs.rmSync(isolated, { recursive: true, force: true });
+    }
   });
 
   test("seeds a resumed realtime call with the interrupted duplex tail in canonical order", async () => {
@@ -708,8 +783,14 @@ describe("CodexAppServerHost", () => {
       await host.startRealtimeWebRtc("v=0\r\noffer");
 
       const injected = server.requests.find((request) => request.method === "thread/inject_items");
-      expect((injected?.params as { items?: { role?: string; text?: string }[] })?.items)
-        .toEqual([{ role: "developer", text: override }]);
+      const item = (injected?.params as {
+        items?: Array<{ type?: string; role?: string; content?: Array<{ type?: string; text?: string }> }>;
+      })?.items?.[0];
+      expect(item).toMatchObject({
+        type: "message",
+        role: "developer",
+        content: [{ type: "input_text", text: override }],
+      });
       await host.release();
     } finally {
       if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
@@ -3441,9 +3522,7 @@ describe("CodexAppServerHost", () => {
   });
 });
 
-test("a refused persona injection still yields a working call", async () => {
-  /* The persona is a nicety; the call is not. An app-server that refuses the
-     item shape — or the method outright — must cost the operator nothing. */
+test("a refused persona insertion returns a bounded rejected receipt before realtime starts", async () => {
   const server = new FakeAppServer("voice-thread");
   server.injectItemsError = "Invalid request: unknown field `role`";
   const host = await CodexAppServerHost.start({
@@ -3452,11 +3531,62 @@ test("a refused persona injection still yields a working call", async () => {
     spawnProcess: fakeSpawn(server),
   });
 
-  await expect(host.startRealtimeWebRtc("v=0\r\noffer")).resolves.toEqual({
-    sdp: "v=0\r\nanswer",
-    realtimeSessionId: "realtime-1",
+  const rejected = await host.startRealtimeWebRtc("v=0\r\noffer");
+  expect(rejected).toMatchObject({
+    sdp: null,
+    realtimeSessionId: null,
+    personaBootstrap: {
+      insertion: "rejected",
+      diagnostic: "Codex app-server request failed: Invalid request: unknown field `role`",
+    },
   });
+  expect(rejected.personaBootstrap.receiptId).toMatch(/^voice_persona_[a-f0-9]{64}$/);
+  expect(rejected.personaBootstrap.diagnostic?.length).toBeLessThanOrEqual(500);
+  expect(server.requests.find((request) => request.method === "thread/realtime/start")).toBeUndefined();
+  expect(host.currentRealtimeSessionId()).toBeNull();
   await host.release();
+});
+
+test("a rejected persona insertion retries the same resolved payload and stable receipt", async () => {
+  const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-bootstrap-retry-"));
+  const transcriptPath = path.join(isolated, "voice-thread.jsonl");
+  fs.writeFileSync(transcriptPath, "");
+  const configDirectory = path.join(isolated, "config");
+  const overridePath = path.join(configDirectory, "agent-log-viewer", ...VOICE_PERSONA_FILE.split("/"));
+  fs.mkdirSync(path.dirname(overridePath), { recursive: true });
+  fs.writeFileSync(overridePath, "Resolved before the rejected insertion.\n");
+  const previousConfigHome = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = configDirectory;
+
+  const server = new FakeAppServer("voice-thread");
+  server.threadPath = transcriptPath;
+  server.injectItemsError = "temporary insertion refusal";
+  const host = await CodexAppServerHost.start({
+    cwd: "/repo",
+    eventStore: new MemoryEventStore(),
+    spawnProcess: fakeSpawn(server),
+  });
+  try {
+    const rejected = await host.startRealtimeWebRtc("v=0\r\nretry-offer");
+    expect(rejected.personaBootstrap.insertion).toBe("rejected");
+
+    fs.writeFileSync(overridePath, "A later edit must not change this call.\n");
+    server.injectItemsError = null;
+    const accepted = await host.startRealtimeWebRtc("v=0\r\nretry-offer");
+    expect(accepted.personaBootstrap.receiptId).toBe(rejected.personaBootstrap.receiptId);
+    expect(accepted.personaBootstrap.itemId).toBe(rejected.personaBootstrap.itemId);
+    expect(accepted.personaBootstrap.insertion).toBe("accepted");
+
+    const attempts = server.requests.filter((request) => request.method === "thread/inject_items");
+    expect(attempts).toHaveLength(2);
+    expect((attempts[1]?.params as { items: Array<{ content: Array<{ text: string }> }> }).items[0]?.content[0]?.text)
+      .toBe("Resolved before the rejected insertion.");
+  } finally {
+    await host.release();
+    if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = previousConfigHome;
+    fs.rmSync(isolated, { recursive: true, force: true });
+  }
 });
 
 test("releasing the host hangs up a live call so the account's slot is freed", async () => {

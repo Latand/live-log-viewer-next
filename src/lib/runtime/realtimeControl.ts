@@ -4,6 +4,7 @@ import { redactCodexHostDiagnostic } from "./codexAppServerHost";
 import { structuredDeliveryHostForConversation } from "./structuredDeliveryController";
 import { permitRealtimeAction, type RealtimeCaller } from "./realtimeInjection";
 import type { RuntimeVoiceDelivery } from "./voiceDelivery";
+import type { VoicePersonaBootstrapReceipt } from "./voicePersona";
 import {
   admitVoiceSelectedContext,
   bindVoiceSession,
@@ -15,7 +16,11 @@ const MAX_SDP_BYTES = 512 * 1024;
 const MAX_SPEECH_BYTES = 8 * 1024;
 
 interface RealtimeHost {
-  startRealtimeWebRtc(sdp: string): Promise<{ sdp: string; realtimeSessionId: string | null }>;
+  startRealtimeWebRtc(sdp: string): Promise<{
+    sdp: string | null;
+    realtimeSessionId: string | null;
+    personaBootstrap?: VoicePersonaBootstrapReceipt;
+  }>;
   appendRealtimeSpeech(text: string): Promise<void>;
   deliverRealtimeWorkerResponse?(delivery: RuntimeVoiceDelivery): Promise<{
     deliveryId: string;
@@ -107,6 +112,19 @@ export async function executeRealtimeControl(
         return { status: 400, body: { error: "a valid WebRTC SDP offer is required" } };
       }
       const answer = await host.startRealtimeWebRtc(sdp);
+      if (answer.personaBootstrap?.insertion === "rejected") {
+        const diagnostic = redactCodexHostDiagnostic(answer.personaBootstrap.diagnostic ?? "Voice persona insertion was rejected");
+        return {
+          status: 409,
+          body: {
+            error: diagnostic,
+            personaBootstrap: { ...answer.personaBootstrap, diagnostic },
+          },
+        };
+      }
+      if (!answer.sdp) {
+        return { status: 409, body: { error: "Codex returned no WebRTC answer" } };
+      }
       /* #844 §4: the call belongs to the window that opened it, from here on.
          A browser that presents no usable view/device binds to nothing, which
          refuses every later selected-card reference rather than accepting the

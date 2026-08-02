@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 
 import { configFilePath } from "@/lib/configDir";
 
@@ -112,6 +113,25 @@ Stay silent until you are spoken to: this text is context, and there is nothing 
 /** Operator override, read at call time so wording changes need no deploy. */
 export const VOICE_PERSONA_FILE = "prompts/voice-persona.md";
 
+export type VoicePersonaBootstrapReceipt = {
+  receiptId: string;
+  itemId: string;
+  insertion: "accepted" | "rejected";
+  diagnostic?: string;
+};
+
+export type VoicePersonaBootstrap = {
+  receipt: VoicePersonaBootstrapReceipt;
+  item: {
+    type: "message";
+    id: string;
+    role: "developer";
+    content: [{ type: "input_text"; text: string }];
+  };
+};
+
+export type VoicePersonaBootstrapIdentity = Pick<VoicePersonaBootstrapReceipt, "receiptId" | "itemId">;
+
 /**
  * The persona text for a starting call: the operator's override when the file
  * exists and holds anything, otherwise {@link DEFAULT_VOICE_PERSONA}. Read per
@@ -126,4 +146,85 @@ export function voicePersona(readFile: (path: string) => string = (target) => fs
     /* no override on disk — the built-in persona stands */
   }
   return DEFAULT_VOICE_PERSONA;
+}
+
+/** Stable canonical identity for one thread-scoped WebRTC call attempt. */
+export function voicePersonaBootstrapIdentity(
+  threadId: string,
+  callIdentity: string,
+): VoicePersonaBootstrapIdentity {
+  const digest = createHash("sha256")
+    .update(threadId, "utf8")
+    .update("\0", "utf8")
+    .update(callIdentity, "utf8")
+    .digest("hex");
+  const receiptId = `voice_persona_${digest}`;
+  const itemId = `msg_${receiptId}`;
+  return { receiptId, itemId };
+}
+
+/** Canonical developer item resolved once after its identity is known absent. */
+export function voicePersonaBootstrap(
+  identity: VoicePersonaBootstrapIdentity,
+  readFile?: (path: string) => string,
+): VoicePersonaBootstrap {
+  const text = voicePersona(readFile);
+  return {
+    receipt: { ...identity, insertion: "accepted" },
+    item: {
+      type: "message",
+      id: identity.itemId,
+      role: "developer",
+      content: [{ type: "input_text", text }],
+    },
+  };
+}
+
+/**
+ * Check the app-server-owned canonical JSONL without loading a possibly large
+ * transcript into memory. A successful inject flushes this item before its RPC
+ * response, so finding the stable id is the durable idempotency receipt.
+ */
+export async function canonicalVoicePersonaBootstrapExists(
+  transcriptPath: string | null,
+  itemId: string,
+): Promise<boolean> {
+  if (!transcriptPath) return false;
+  const marker = `\"type\":\"message\",\"id\":\"${itemId}\",\"role\":\"developer\"`;
+  let handle: fs.promises.FileHandle;
+  try {
+    handle = await fs.promises.open(
+      transcriptPath,
+      fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0),
+    );
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return false;
+    throw error;
+  }
+  return new Promise<boolean>((resolve, reject) => {
+    const stream = handle.createReadStream({
+      encoding: "utf8",
+      autoClose: true,
+    });
+    let settled = false;
+    let carry = "";
+    const finish = (found: boolean) => {
+      if (settled) return;
+      settled = true;
+      stream.destroy();
+      resolve(found);
+    };
+    stream.on("data", (chunk) => {
+      const scanned = carry + String(chunk);
+      if (scanned.includes(marker)) return finish(true);
+      carry = scanned.slice(-(marker.length - 1));
+    });
+    stream.on("end", () => finish(false));
+    stream.on("error", (error: NodeJS.ErrnoException) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    });
+  });
 }

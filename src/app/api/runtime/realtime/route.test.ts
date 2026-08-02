@@ -125,6 +125,60 @@ test("keeps validation and backend admission errors bounded", async () => {
   expect(result).toEqual({ status: 409, body: { error: "AVAS 404" } });
 });
 
+test("returns the canonical persona insertion outcome and rejects a call whose bootstrap was refused", async () => {
+  const acceptedBootstrap = {
+    receiptId: `voice_persona_${"b".repeat(64)}`,
+    itemId: `msg_voice_persona_${"b".repeat(64)}`,
+    insertion: "accepted" as const,
+  };
+  const accepted = await executeRealtimeControl({
+    action: "start",
+    conversationId: "conversation_voice",
+    sdp: "v=0\r\noffer",
+  }, () => ({
+    async startRealtimeWebRtc() {
+      return { sdp: "v=0\r\nanswer", realtimeSessionId: "live-bootstrap", personaBootstrap: acceptedBootstrap };
+    },
+    async appendRealtimeSpeech() {},
+    async stopRealtime() {},
+  }), { operator: true });
+  expect(accepted).toEqual({
+    status: 200,
+    body: {
+      ok: true,
+      sdp: "v=0\r\nanswer",
+      realtimeSessionId: "live-bootstrap",
+      personaBootstrap: acceptedBootstrap,
+    },
+  });
+
+  const personaBootstrap = {
+    receiptId: `voice_persona_${"a".repeat(64)}`,
+    itemId: `msg_voice_persona_${"a".repeat(64)}`,
+    insertion: "rejected" as const,
+    diagnostic: "Codex app-server request failed: invalid developer item",
+  };
+  const result = await executeRealtimeControl({
+    action: "start",
+    conversationId: "conversation_voice",
+    sdp: "v=0\r\noffer",
+  }, () => ({
+    async startRealtimeWebRtc() {
+      return { sdp: null, realtimeSessionId: null, personaBootstrap };
+    },
+    async appendRealtimeSpeech() {},
+    async stopRealtime() {},
+  }), { operator: true });
+
+  expect(result).toEqual({
+    status: 409,
+    body: {
+      error: "Codex app-server request failed: invalid developer item",
+      personaBootstrap,
+    },
+  });
+});
+
 test("POST rejects a cross-origin browser before realtime admission", async () => {
   const response = await POST(request(
     { action: "stop", conversationId: "conversation_voice" },
