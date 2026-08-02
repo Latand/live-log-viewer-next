@@ -86,8 +86,14 @@ function isConversationRow(entry: FileEntry): boolean {
 
 /**
  * Project/liveness/query filters and the row limit, applied to a completed
- * generation's rows. Pure and allocation-light: it never copies the corpus, it
- * walks it once and stops collecting at `limit` while it keeps counting matches.
+ * generation's rows. Pure: one walk, collecting at most `limit` rows while it
+ * keeps counting matches.
+ *
+ * This function copies nothing, but the read that feeds it does:
+ * `completedFileScan` hands every caller a `structuredClone` of the snapshot,
+ * so twenty concurrent readers deep-copy the corpus twenty times. That clone
+ * dominates the warm cost of a project read and is the next lever if the bar
+ * tightens; it is not something selection can avoid from here.
  */
 export function selectConversationEntries(
   files: readonly FileEntry[],

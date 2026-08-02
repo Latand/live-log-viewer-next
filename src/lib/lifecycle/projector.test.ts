@@ -259,3 +259,41 @@ test("a liveness-only refresh does not throttle a lifecycle refresh and vice ver
   const fourth = refreshLifecycleJournal(pipelineInput, { now });
   expect(fourth.throttled).toBe(true);
 });
+
+test("only a reading backed by a transcript read becomes a durable alarm (#860)", () => {
+  const stale = "2026-07-26T03:00:00.000Z";
+
+  /* The evidence budget was spent before this row came up, so its turn state
+     and freshness are the scan generation's — which may be minutes old. A
+     conversation that resumed since that generation completed would earn a
+     durable stall here that never happened. */
+  refreshLifecycleJournal({
+    liveness: [livenessRecord({
+      conversationId: "conversation_budget_degraded",
+      lastRecordAt: stale,
+      evidenceSource: "projection",
+    })],
+  }, { force: true });
+  expect(queryLifecycleEvents({ conversationId: "conversation_budget_degraded" }).count).toBe(0);
+
+  /* A tail that was read and could not be used says just as little. */
+  refreshLifecycleJournal({
+    liveness: [livenessRecord({
+      conversationId: "conversation_torn_tail",
+      lastRecordAt: stale,
+      evidenceSource: "unreadable",
+    })],
+  }, { force: true });
+  expect(queryLifecycleEvents({ conversationId: "conversation_torn_tail" }).count).toBe(0);
+
+  /* The same reading, with the tail actually read, is news. */
+  refreshLifecycleJournal({
+    liveness: [livenessRecord({
+      conversationId: "conversation_read_tail",
+      lastRecordAt: stale,
+      evidenceSource: "transcript",
+    })],
+  }, { force: true });
+  expect(queryLifecycleEvents({ conversationId: "conversation_read_tail" }).events.map((event) => event.type))
+    .toEqual(["agent_stalled"]);
+});

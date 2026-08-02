@@ -101,9 +101,20 @@ export interface AgentLivenessRecord {
       `gone` lifecycle; null when it is not stalled. */
   stalledForMs: number | null;
   pipeline: AgentLivenessPipelineRef | null;
-  /** Whether this row's turn state came from its own transcript tail or from
-      the scan projection because the read budget was already spent (#860). */
-  evidenceSource: "transcript" | "projection";
+  /**
+   * Where this row's turn state came from (#860). The three states an operator
+   * diagnosing a degraded snapshot has to tell apart:
+   *
+   * - `transcript` — the tail was read and interpreted.
+   * - `unreadable` — the tail was read and could not be used (torn or racing
+   *   append), so the scan projection answered.
+   * - `projection` — no read was attempted: the evidence budget was already
+   *   spent when this row came up.
+   *
+   * Only `transcript` rows become durable journal events; see
+   * `projectLivenessEvents`.
+   */
+  evidenceSource: "transcript" | "unreadable" | "projection";
 }
 
 /**
@@ -133,9 +144,13 @@ export interface AgentLivenessSelectionReport {
   /** Rows matching project/liveness before the row limit. */
   matched: number;
   selected: number;
+  /** Rows a transcript tail read was attempted for; `unreadable` is the subset
+      of those whose tail could not be used. */
   hydrated: number;
-  /** Selected rows answered from the scan projection because the read budget
-      was exhausted before they were reached. */
+  unreadable: number;
+  /** Selected rows no read was attempted for, because the budget was exhausted
+      before they came up. Equals the number of `evidenceSource: "projection"`
+      records by construction. */
   projected: number;
   generation: number | null;
   cacheStatus: ConversationSelection["cacheStatus"] | null;
@@ -169,7 +184,14 @@ export interface AgentLivenessRequest {
   /** The caller's lifetime. Cancelling it stops the generation read and starts
       no further transcript tails. */
   signal?: AbortSignal | null;
-  /** Wall-clock ceiling on transcript-tail hydration for this call. */
+  /**
+   * Wall-clock ceiling on transcript-tail hydration, measured from the moment
+   * hydration STARTS — not from the start of the call. Selection may have
+   * waited on a cold generation for tens of seconds; charging that wait to this
+   * budget would spend it before the first tail is opened and answer the whole
+   * request from the scan projection, exactly when the operator is asking why
+   * nothing responds.
+   */
   evidenceDeadlineMs?: number;
   /** Byte ceiling on transcript-tail hydration for this call. */
   evidenceByteBudget?: number;
@@ -466,7 +488,9 @@ export async function agentLivenessSnapshot(
 
   const selectionStartedAt = performance.now();
   let entries: LivenessTranscript[];
-  let selection: Omit<AgentLivenessSelectionReport, "hydrated" | "projected" | "evidenceBytes" | "budget">;
+  /* Everything the selection phase knows; the hydration counters are filled in
+     once the evidence pass has run. */
+  let selection: Omit<AgentLivenessSelectionReport, "hydrated" | "unreadable" | "projected" | "evidenceBytes" | "budget">;
   if (targeted) {
     /* The targeted branch. A caller that named a specific target gets back what
        it named and nothing else — even an empty set. Falling through to the
@@ -538,7 +562,10 @@ export async function agentLivenessSnapshot(
     {
       concurrency: Math.max(1, Math.floor(request.evidenceConcurrency ?? DEFAULT_EVIDENCE_CONCURRENCY)),
       maxBytes: Math.max(0, Math.floor(request.evidenceByteBudget ?? DEFAULT_EVIDENCE_BYTE_BUDGET)),
-      deadlineAt: now + deadlineMs,
+      /* Anchored HERE, on the same clock the budget reads. A cold generation can
+         take tens of seconds to publish; anchoring at the start of the call
+         would hand hydration an already-expired budget. */
+      deadlineAt: sources.now() + deadlineMs,
       signal,
       now: sources.now,
     },
@@ -548,8 +575,15 @@ export async function agentLivenessSnapshot(
 
   const serializationStartedAt = performance.now();
   const conversations: AgentLivenessRecord[] = [];
+  let unreadable = 0;
   for (const [index, entry] of hydratable.entries()) {
+    /* Three outcomes, kept apart: a read that produced evidence, a read that
+       produced none, and a row the budget never reached. The counters below are
+       derived from the same distinction, so the report and the per-row labels
+       cannot disagree. */
+    const attempted = hydration.results.has(index);
     const evidence = hydration.results.get(index) ?? null;
+    if (attempted && evidence === null) unreadable += 1;
     const turnState = turnStateFromEvidence(evidence, entry);
     /* Freshness is the newest RECORD, tool traffic included. Reading it off the
        last assistant prose message reports a live agent in a long tool stretch
@@ -576,7 +610,7 @@ export async function agentLivenessSnapshot(
       pipeline: (conversationId ? pipelines.byConversation.get(conversationId) : undefined)
         ?? pipelines.byPath.get(entry.path)
         ?? null,
-      evidenceSource: evidence !== null ? "transcript" : "projection",
+      evidenceSource: !attempted ? "projection" : evidence !== null ? "transcript" : "unreadable",
     });
   }
   const serializationMs = performance.now() - serializationStartedAt;
@@ -590,6 +624,7 @@ export async function agentLivenessSnapshot(
     selection: {
       ...selection,
       hydrated: hydration.hydrated,
+      unreadable,
       projected: hydratable.length - hydration.hydrated,
       evidenceBytes: hydration.bytes,
       budget: hydration.stopped,

@@ -10,6 +10,7 @@ import type { FileEntry } from "@/lib/types";
 
 import { completedGenerationSelection, type CompletedGenerationRead } from "./inventorySelection";
 import { agentLivenessSnapshot, evaluateLiveness, type AgentLivenessSources } from "./liveness";
+import { projectLivenessEvents } from "./projector";
 import { readLivenessTranscriptEvidence, type LivenessTranscript, type LivenessTranscriptEvidence } from "./transcript";
 
 const sandboxes: string[] = [];
@@ -687,9 +688,12 @@ test("twenty concurrent project reads share one completed generation and stay bo
   expect(generation.reads()).toBe(20);
   expect(snapshots.every((snapshot) => snapshot.selection.generation === 12)).toBe(true);
   expect(snapshots.every((snapshot) => snapshot.count === 6)).toBe(true);
-  /* Twenty readers of a 10,000-row generation, each hydrating six tails. */
+  /* Twenty readers of a 10,000-row generation, each hydrating six tails. The
+     RSS bar tracks what this actually costs — ~85 MiB of transient snapshot
+     clones — with room for GC timing, not a catastrophe guard: a regression
+     that reintroduced per-caller corpus work has to move this number. */
   expect(elapsedMs).toBeLessThan(2_000);
-  expect(rssDeltaBytes).toBeLessThan(768 * 1024 * 1024);
+  expect(rssDeltaBytes).toBeLessThan(256 * 1024 * 1024);
 });
 
 test("a cancelled caller stops the read and starts no further transcript evidence (#860)", async () => {
@@ -832,4 +836,122 @@ test("a targeted read never consults the completed generation (#860)", async () 
   expect(snapshot.count).toBe(1);
   expect(snapshot.selection.scope).toBe("targeted");
   expect(generation.reads()).toBe(0);
+});
+
+test("rows the evidence budget degraded never reach the journal as durable alarms (#860)", async () => {
+  const dir = sandbox();
+  /* Three mid-turn transcripts under live hosts, all six hours silent: every
+     one of them reads as `stalled`. Only the row whose tail was actually read
+     may be journaled. */
+  const paths = ["read.jsonl", "degraded-a.jsonl", "degraded-b.jsonl"].map((name) => path.join(dir, name));
+  for (const target of paths) fs.writeFileSync(target, liveTranscriptText(FROZEN_AT), "utf8");
+  const generation = publishedGeneration(paths.map((target, index) => fileEntry({
+    path: target,
+    project: PROJECT,
+    engine: "claude",
+    conversationId: `conversation_budget_${index}`,
+    activity: "live",
+    activityReason: "jsonl_turn_open",
+    mtime: Math.floor(FROZEN_AT / 1000),
+    size: 4096,
+  })));
+
+  const snapshot = await agentLivenessSnapshot(
+    /* One row's worth of budget: the first is read, the rest are projected. */
+    { project: PROJECT, limit: 10, evidenceByteBudget: 4096 },
+    corpusSources(generation, {
+      registrySnapshot: () => ({
+        entries: Object.fromEntries(paths.map((target, index) => [`claude:budget-${index}`, structuredEntry(target, 4242 + index)])),
+        conversations: {},
+      }) as unknown as RegistryFile,
+      transcriptEvidence: async () => ({ turn: "busy" as const, lastRecordTs: FROZEN_AT }),
+    }),
+  );
+
+  expect(snapshot.count).toBe(3);
+  expect(snapshot.stalledCount).toBe(3);
+  expect(snapshot.selection).toMatchObject({ hydrated: 1, unreadable: 0, projected: 2, budget: "byte_budget" });
+
+  const events = projectLivenessEvents(snapshot.conversations);
+  expect(events.map((event) => event.type)).toEqual(["agent_stalled"]);
+  expect(events[0]!.conversationId).toBe("conversation_budget_0");
+});
+
+test("a cold generation does not spend the hydration deadline before hydration starts (#860)", async () => {
+  const dir = sandbox();
+  const corpus = productionShapedCorpus(dir);
+  const generation = publishedGeneration(corpus.files);
+  let clock = NOW;
+
+  const snapshot = await agentLivenessSnapshot(
+    { project: PROJECT, liveOnly: true, limit: 10, evidenceDeadlineMs: 2_000 },
+    corpusSources(generation, {
+      now: () => clock,
+      selectInventory: async (request, options) => {
+        const selection = await completedGenerationSelection(request, {
+          completedFileScan: generation.read,
+          signal: options?.signal ?? null,
+        });
+        /* The cold generation took thirty seconds to publish — ten times the
+           hydration budget, and none of it hydration's to spend. */
+        clock += 30_000;
+        return selection;
+      },
+    }),
+  );
+
+  expect(snapshot.selection).toMatchObject({ hydrated: 6, projected: 0, budget: "complete" });
+  expect(snapshot.conversations.every((record) => record.evidenceSource === "transcript")).toBe(true);
+});
+
+test("the hydration deadline stops the pass and leaves the remaining rows on the projection (#860)", async () => {
+  const dir = sandbox();
+  const corpus = productionShapedCorpus(dir);
+  const generation = publishedGeneration(corpus.files);
+  let clock = NOW;
+
+  const snapshot = await agentLivenessSnapshot(
+    { project: PROJECT, limit: 10, evidenceDeadlineMs: 1_000, evidenceConcurrency: 1 },
+    corpusSources(generation, {
+      now: () => clock,
+      transcriptEvidence: async () => {
+        /* Four hundred milliseconds a tail: the budget buys three. */
+        clock += 400;
+        return { turn: "busy" as const, lastRecordTs: clock - 1_000 };
+      },
+    }),
+  );
+
+  expect(snapshot.selection).toMatchObject({ hydrated: 3, unreadable: 0, projected: 7, budget: "deadline" });
+  expect(snapshot.conversations.filter((record) => record.evidenceSource === "transcript")).toHaveLength(3);
+  expect(snapshot.conversations.filter((record) => record.evidenceSource === "projection")).toHaveLength(7);
+});
+
+test("a tail that was read and could not be used is unreadable, not unattempted (#860)", async () => {
+  const dir = sandbox();
+  const corpus = productionShapedCorpus(dir);
+  const generation = publishedGeneration(corpus.files);
+  const torn = corpus.livePaths[0]!;
+
+  const snapshot = await agentLivenessSnapshot(
+    { project: PROJECT, liveOnly: true, limit: 10 },
+    corpusSources(generation, {
+      /* `readLivenessTranscriptEvidence` answers null for a torn or racing
+         tail. That is a read that failed, and the report must not present it as
+         a read that never happened. */
+      transcriptEvidence: async (_engine, transcriptPath) => transcriptPath === torn
+        ? null
+        : { turn: "busy" as const, lastRecordTs: NOW - 10_000 },
+    }),
+  );
+
+  expect(snapshot.selection).toMatchObject({ hydrated: 6, unreadable: 1, projected: 0, budget: "complete" });
+  const labels = snapshot.conversations.map((record) => record.evidenceSource);
+  expect(labels.filter((label) => label === "unreadable")).toHaveLength(1);
+  expect(labels.filter((label) => label === "transcript")).toHaveLength(5);
+  /* The two halves of the report agree by construction. */
+  expect(labels.filter((label) => label === "projection")).toHaveLength(snapshot.selection.projected);
+  expect(snapshot.selection.hydrated).toBe(snapshot.count - snapshot.selection.projected);
+  /* An unusable tail is no evidence at all, so it is not journaled either. */
+  expect(projectLivenessEvents(snapshot.conversations.filter((record) => record.evidenceSource === "unreadable"))).toEqual([]);
 });
