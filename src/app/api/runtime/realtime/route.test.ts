@@ -213,6 +213,34 @@ test("refuses a realtime answer that omits the mandatory persona bootstrap recei
   });
 });
 
+test("refuses malformed persona bootstrap receipts before binding the realtime session", async () => {
+  const digest = "d".repeat(64);
+  const malformedReceipts = [
+    { itemId: `msg_voice_persona_${digest}`, insertion: "accepted" },
+    { receiptId: `voice_persona_${digest}`, insertion: "accepted" },
+    { receiptId: `voice_persona_${digest}`, itemId: `msg_voice_persona_${digest}` },
+    { receiptId: `voice_persona_${digest}`, itemId: `msg_voice_persona_${digest}`, insertion: "pending" },
+  ];
+  for (const personaBootstrap of malformedReceipts) {
+    const result = await executeRealtimeControl({
+      action: "start",
+      conversationId: "conversation_voice",
+      sdp: "v=0\r\noffer",
+    }, () => ({
+      async startRealtimeWebRtc() {
+        return { sdp: "v=0\r\nanswer", realtimeSessionId: "live-malformed", personaBootstrap };
+      },
+      async appendRealtimeSpeech() {},
+      async stopRealtime() {},
+    }), { operator: true });
+
+    expect(result).toEqual({
+      status: 409,
+      body: { error: "Codex returned an invalid voice persona bootstrap receipt" },
+    });
+  }
+});
+
 test("POST rejects a cross-origin browser before realtime admission", async () => {
   const response = await POST(request(
     { action: "stop", conversationId: "conversation_voice" },

@@ -70,9 +70,11 @@ class FakeAppServer extends EventEmitter {
   oversizedTurnStartResult = false;
   readonly acceptedRealtimeSpeech: string[] = [];
   injectItemsError: string | null = null;
+  injectItemsDelayMs: number | null = null;
   holdInjectItems = false;
   readonly heldInjectItemIds: number[] = [];
   omitThreadPath = false;
+  omitThreadReadPath = false;
   threadPath: string | null = null;
   private readonly serverRequestIds = new Set<string | number>();
   private turn = 0;
@@ -166,7 +168,7 @@ class FakeAppServer extends EventEmitter {
       return this.respond(message.id, {
         thread: {
           id: this.threadId,
-          path: `/sessions/${this.threadId}.jsonl`,
+          ...(!this.omitThreadReadPath ? { path: this.threadPath ?? `/sessions/${this.threadId}.jsonl` } : {}),
           turns: this.readTurns ?? this.turns,
         },
       });
@@ -194,14 +196,15 @@ class FakeAppServer extends EventEmitter {
         this.heldInjectItemIds.push(message.id);
         return;
       }
-      if (this.threadPath) {
-        const items = (message.params as { items?: unknown[] }).items ?? [];
-        fs.appendFileSync(this.threadPath, items.map((payload) => JSON.stringify({
-          type: "response_item",
-          timestamp: "2026-08-02T10:00:00.000Z",
-          payload,
-        })).join("\n") + "\n");
+      if (this.injectItemsDelayMs !== null) {
+        const requestId = message.id;
+        setTimeout(() => {
+          this.persistInjectedItems(message);
+          this.respond(requestId, {});
+        }, this.injectItemsDelayMs);
+        return;
       }
+      this.persistInjectedItems(message);
       return this.respond(message.id, {});
     }
     if (method === "thread/realtime/start") {
@@ -243,6 +246,16 @@ class FakeAppServer extends EventEmitter {
     if (id === undefined) throw new Error("no held persona insertion");
     if (error) this.respondError(id, error);
     else this.respond(id, {});
+  }
+
+  private persistInjectedItems(message: Record<string, unknown>): void {
+    if (!this.threadPath) return;
+    const items = (message.params as { items?: unknown[] }).items ?? [];
+    fs.appendFileSync(this.threadPath, items.map((payload) => JSON.stringify({
+      type: "response_item",
+      timestamp: "2026-08-02T10:00:00.000Z",
+      payload,
+    })).join("\n") + "\n");
   }
 
   private respond(id: number, result: unknown): void {
@@ -3602,10 +3615,10 @@ test("an unreadable canonical transcript falls through to authoritative insertio
   }
 });
 
-test("a missing transcript path warns once and the host memo prevents repeated insertion", async () => {
-  const warnings = spyOn(console, "warn").mockImplementation(() => {});
+test("an unrecoverable transcript path rejects before persona insertion", async () => {
   const server = new FakeAppServer("voice-thread");
   server.omitThreadPath = true;
+  server.omitThreadReadPath = true;
   const host = await CodexAppServerHost.start({
     cwd: "/repo",
     eventStore: new MemoryEventStore(),
@@ -3613,21 +3626,56 @@ test("a missing transcript path warns once and the host memo prevents repeated i
   });
   try {
     const first = await host.startRealtimeWebRtc("v=0\r\no=- 406 2 IN IP4 127.0.0.1\r\n");
-    await host.stopRealtime();
     const repeated = await host.startRealtimeWebRtc("v=0\r\no=- 407 2 IN IP4 127.0.0.1\r\n");
     expect(repeated.personaBootstrap).toEqual(first.personaBootstrap);
-    expect(server.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(1);
-    expect(warnings).toHaveBeenCalledWith(
-      "[voice persona bootstrap] canonical scan unavailable; attempting insertion",
-      expect.objectContaining({
-        code: "NO_TRANSCRIPT_PATH",
+    expect(first).toMatchObject({
+      sdp: null,
+      personaBootstrap: {
+        insertion: "rejected",
         diagnostic: "canonical transcript path is unavailable",
-      }),
-    );
-    expect(warnings).toHaveBeenCalledTimes(1);
+      },
+    });
+    expect(server.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(0);
+    expect(server.requests.filter((request) => request.method === "thread/realtime/start")).toHaveLength(0);
   } finally {
-    warnings.mockRestore();
     await host.release();
+  }
+});
+
+test("replacement hosts recover an omitted canonical path and persist one persona row", async () => {
+  const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-bootstrap-path-recovery-"));
+  const transcriptPath = path.join(isolated, "voice-thread.jsonl");
+  fs.writeFileSync(transcriptPath, "");
+  const firstServer = new FakeAppServer("voice-thread");
+  firstServer.omitThreadPath = true;
+  firstServer.threadPath = transcriptPath;
+  const firstHost = await CodexAppServerHost.start({
+    cwd: "/repo",
+    eventStore: new MemoryEventStore(),
+    spawnProcess: fakeSpawn(firstServer),
+  });
+  let replacementHost: CodexAppServerHost | null = null;
+  try {
+    const first = await firstHost.startRealtimeWebRtc("v=0\r\no=- 408 2 IN IP4 127.0.0.1\r\n");
+    await firstHost.release();
+
+    const replacementServer = new FakeAppServer("voice-thread");
+    replacementServer.omitThreadPath = true;
+    replacementServer.threadPath = transcriptPath;
+    replacementHost = await CodexAppServerHost.adopt("voice-thread", {
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(replacementServer),
+    });
+    const recovered = await replacementHost.startRealtimeWebRtc("v=0\r\no=- 409 2 IN IP4 127.0.0.1\r\n");
+    expect(recovered.personaBootstrap).toEqual(first.personaBootstrap);
+    expect(firstServer.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(1);
+    expect(replacementServer.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(0);
+    expect(fs.readFileSync(transcriptPath, "utf8").split(recovered.personaBootstrap.itemId)).toHaveLength(2);
+  } finally {
+    await replacementHost?.release();
+    await firstHost.release();
+    fs.rmSync(isolated, { recursive: true, force: true });
   }
 });
 
@@ -3662,6 +3710,45 @@ test("a persisted persona row recovers an ambiguous insertion failure", async ()
     expect(server.requests.filter((candidate) => candidate.method === "thread/realtime/start")).toHaveLength(1);
   } finally {
     await host.release();
+    fs.rmSync(isolated, { recursive: true, force: true });
+  }
+});
+
+test("an uncertain persona insertion timeout fences the writer and recovers on a replacement host", async () => {
+  const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-bootstrap-timeout-"));
+  const transcriptPath = path.join(isolated, "voice-thread.jsonl");
+  fs.writeFileSync(transcriptPath, "");
+  const firstServer = new FakeAppServer("voice-thread", "voice-thread", true);
+  firstServer.threadPath = transcriptPath;
+  firstServer.injectItemsDelayMs = 25;
+  const firstHost = await CodexAppServerHost.start({
+    cwd: "/repo",
+    eventStore: new MemoryEventStore(),
+    spawnProcess: fakeSpawn(firstServer),
+    realtimePersonaTimeoutMs: 10,
+    shutdownGraceMs: 50,
+  });
+  let replacementHost: CodexAppServerHost | null = null;
+  try {
+    await expect(firstHost.startRealtimeWebRtc("v=0\r\no=- 910 2 IN IP4 127.0.0.1\r\n"))
+      .rejects.toThrow("thread/inject_items timed out; outcome is uncertain");
+    await Bun.sleep(40);
+    expect((await firstHost.health()).status).toBe("dead");
+
+    const replacementServer = new FakeAppServer("voice-thread");
+    replacementServer.threadPath = transcriptPath;
+    replacementHost = await CodexAppServerHost.adopt("voice-thread", {
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(replacementServer),
+    });
+    const recovered = await replacementHost.startRealtimeWebRtc("v=0\r\no=- 911 2 IN IP4 127.0.0.1\r\n");
+    expect(recovered.personaBootstrap.insertion).toBe("accepted");
+    expect(replacementServer.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(0);
+    expect(fs.readFileSync(transcriptPath, "utf8").split(recovered.personaBootstrap.itemId)).toHaveLength(2);
+  } finally {
+    await replacementHost?.release();
+    await firstHost.release();
     fs.rmSync(isolated, { recursive: true, force: true });
   }
 });

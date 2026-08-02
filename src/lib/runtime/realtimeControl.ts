@@ -55,6 +55,18 @@ function byteLength(value: string): number {
   return new TextEncoder().encode(value).byteLength;
 }
 
+function voicePersonaBootstrapReceipt(value: unknown): VoicePersonaBootstrapReceipt | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const receipt = value as Record<string, unknown>;
+  const receiptId = typeof receipt.receiptId === "string" ? receipt.receiptId : "";
+  const itemId = typeof receipt.itemId === "string" ? receipt.itemId : "";
+  if (!/^voice_persona_[a-f0-9]{64}$/.test(receiptId) || itemId !== `msg_${receiptId}`) return null;
+  if (receipt.insertion !== "accepted" && receipt.insertion !== "rejected") return null;
+  if (receipt.diagnostic !== undefined
+    && (typeof receipt.diagnostic !== "string" || receipt.diagnostic.length > 500)) return null;
+  return receipt as VoicePersonaBootstrapReceipt;
+}
+
 export async function executeRealtimeControl(
   body: unknown,
   resolveHost: (conversationId: string) => unknown = structuredDeliveryHostForConversation,
@@ -115,14 +127,18 @@ export async function executeRealtimeControl(
       if (!answer.personaBootstrap) {
         return { status: 409, body: { error: "Codex returned no voice persona bootstrap receipt" } };
       }
-      if (answer.personaBootstrap.insertion === "rejected") {
-        const diagnostic = redactCodexHostDiagnostic(answer.personaBootstrap.diagnostic ?? "Voice persona insertion was rejected");
+      const personaBootstrap = voicePersonaBootstrapReceipt(answer.personaBootstrap);
+      if (!personaBootstrap) {
+        return { status: 409, body: { error: "Codex returned an invalid voice persona bootstrap receipt" } };
+      }
+      if (personaBootstrap.insertion === "rejected") {
+        const diagnostic = redactCodexHostDiagnostic(personaBootstrap.diagnostic ?? "Voice persona insertion was rejected");
         const error = redactCodexHostDiagnostic(`Voice persona could not be recorded: ${diagnostic}`);
         return {
           status: 409,
           body: {
             error,
-            personaBootstrap: { ...answer.personaBootstrap, diagnostic },
+            personaBootstrap: { ...personaBootstrap, diagnostic },
           },
         };
       }
@@ -136,7 +152,7 @@ export async function executeRealtimeControl(
       if (answer.realtimeSessionId) {
         bindVoiceSession(conversationId, answer.realtimeSessionId, parseVoiceViewBinding(request.view));
       }
-      return { status: 200, body: { ok: true, ...answer } };
+      return { status: 200, body: { ok: true, ...answer, personaBootstrap } };
     }
     /**
      * The browser's utterance boundary (#844 §2).

@@ -162,6 +162,7 @@ export interface CodexAppServerHostOptions {
   approvalPolicy?: string;
   env?: NodeJS.ProcessEnv;
   requestTimeoutMs?: number;
+  realtimePersonaTimeoutMs?: number;
   deliveryConfirmationTimeoutMs?: number;
   shutdownGraceMs?: number;
   initialEventCursor?: number;
@@ -317,6 +318,7 @@ const MUTATING_RPC_METHODS = new Set([
   "turn/interrupt",
   "thread/realtime/start",
   "thread/realtime/stop",
+  "thread/inject_items",
 ]);
 
 function record(value: unknown): JsonObject | null {
@@ -567,6 +569,7 @@ export class CodexAppServerHost implements EngineHost {
 
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly requestTimeoutMs: number;
+  private readonly realtimePersonaTimeoutMs: number;
   private readonly deliveryConfirmationTimeoutMs: number;
   private readonly shutdownGraceMs: number;
   private readonly eventStore: RuntimeEventStore;
@@ -600,8 +603,8 @@ export class CodexAppServerHost implements EngineHost {
   private readonly pendingDeliveries = new Map<string, PendingDelivery>();
   private readonly realtimeDeliveries = new Map<string, RealtimeDeliveryState>();
   private readonly voiceStreams = new Map<string, VoiceStreamState>();
-  /* A host's thread identity is immutable, so one memo covers its one stable
-     persona item. Successor starts join the same insertion promise. */
+  /* A host's thread id is immutable, so one memo covers its one stable persona
+     item. Successor starts join the same insertion promise. */
   private unresolvedVoicePersonaBootstrap: VoicePersonaBootstrap | null = null;
   private voicePersonaBootstrapInsertion: VoicePersonaBootstrapInsertion | null = null;
   private voicePersonaBootstrapAccepted = false;
@@ -654,6 +657,7 @@ export class CodexAppServerHost implements EngineHost {
     this.child = child;
     this.identity = identity;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.realtimePersonaTimeoutMs = options.realtimePersonaTimeoutMs ?? REALTIME_PERSONA_TIMEOUT_MS;
     this.deliveryConfirmationTimeoutMs = options.deliveryConfirmationTimeoutMs
       ?? DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS;
     this.shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
@@ -1040,6 +1044,7 @@ export class CodexAppServerHost implements EngineHost {
     identity: VoicePersonaBootstrapIdentity,
     pendingStart: PendingRealtimeStart,
   ): Promise<"accepted" | "superseded"> {
+    await this.ensureCanonicalTranscriptPath();
     while (!this.voicePersonaBootstrapAccepted) {
       const active = this.voicePersonaBootstrapInsertion;
       if (active) {
@@ -1080,12 +1085,30 @@ export class CodexAppServerHost implements EngineHost {
     return "accepted";
   }
 
+  private async ensureCanonicalTranscriptPath(): Promise<void> {
+    if (this.identity.path) return;
+    const result = await this.rpc("thread/read", {
+      threadId: this.identity.threadId,
+      includeTurns: true,
+    });
+    const recovered = threadFromResult(result, "thread/read");
+    if (recovered.threadId !== this.identity.threadId) {
+      throw new Error("thread/read returned a different thread id");
+    }
+    if (!recovered.path) {
+      const error = new Error("canonical transcript path is unavailable") as NodeJS.ErrnoException;
+      error.code = "NO_TRANSCRIPT_PATH";
+      throw error;
+    }
+    this.identity.path = recovered.path;
+  }
+
   private async insertVoicePersonaBootstrap(bootstrap: VoicePersonaBootstrap, itemId: string): Promise<void> {
     try {
       await this.rpc("thread/inject_items", {
         threadId: this.identity.threadId,
         items: [bootstrap.item],
-      }, REALTIME_PERSONA_TIMEOUT_MS);
+      }, this.realtimePersonaTimeoutMs);
     } catch (error) {
       if (!await this.scanVoicePersonaBootstrap(itemId, "recovery scan unavailable")) throw error;
     }

@@ -131,6 +131,30 @@ export type VoicePersonaBootstrap = {
 
 export type VoicePersonaBootstrapIdentity = Pick<VoicePersonaBootstrapReceipt, "receiptId" | "itemId">;
 
+/* Larger than the host's maximum admissible app-server frame, while keeping a
+   transcript with an oversized unrelated row from growing scanner memory. */
+const MAX_CANONICAL_VOICE_PERSONA_RECORD_BYTES = 32 * 1024 * 1024;
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function isCanonicalVoicePersonaRecord(line: Buffer, itemId: string): boolean {
+  let row: Record<string, unknown> | null = null;
+  try {
+    row = record(JSON.parse(line.toString("utf8")));
+  } catch {
+    return false;
+  }
+  const payload = record(row?.payload);
+  return row?.type === "response_item"
+    && payload?.type === "message"
+    && payload.id === itemId
+    && payload.role === "developer";
+}
+
 /**
  * The persona text for a starting call: the operator's override when the file
  * exists and holds anything, otherwise {@link DEFAULT_VOICE_PERSONA}. The host
@@ -190,10 +214,6 @@ export async function canonicalVoicePersonaBootstrapExists(
     error.code = "NO_TRANSCRIPT_PATH";
     throw error;
   }
-  /* Codex app-server 0.146.0 serializes injected response items in this field
-     order. A serializer reorder makes this scan return false and can cause a
-     reinsertion, so upgrades must keep the live protocol probe current. */
-  const marker = `"type":"message","id":"${itemId}","role":"developer"`;
   let handle: fs.promises.FileHandle;
   try {
     handle = await fs.promises.open(
@@ -206,24 +226,62 @@ export async function canonicalVoicePersonaBootstrapExists(
     throw error;
   }
   return new Promise<boolean>((resolve, reject) => {
-    const stream = handle.createReadStream({
-      encoding: "utf8",
-      autoClose: true,
-    });
+    const stream = handle.createReadStream({ autoClose: true });
     let settled = false;
-    let carry = "";
+    let pending: Buffer[] = [];
+    let pendingBytes = 0;
+    let skippingRecord = false;
     const finish = (found: boolean) => {
       if (settled) return;
       settled = true;
       stream.destroy();
       resolve(found);
     };
+    const resetLine = () => {
+      pending = [];
+      pendingBytes = 0;
+      skippingRecord = false;
+    };
     stream.on("data", (chunk) => {
-      const scanned = carry + String(chunk);
-      if (scanned.includes(marker)) return finish(true);
-      carry = scanned.slice(-(marker.length - 1));
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      let cursor = 0;
+      while (cursor <= bytes.length) {
+        const newline = bytes.indexOf(0x0a, cursor);
+        if (newline === -1) {
+          const rest = bytes.length - cursor;
+          if (!skippingRecord && rest > 0) {
+            if (pendingBytes + rest > MAX_CANONICAL_VOICE_PERSONA_RECORD_BYTES) {
+              pending = [];
+              pendingBytes = 0;
+              skippingRecord = true;
+            } else {
+              pending.push(Buffer.from(bytes.subarray(cursor)));
+              pendingBytes += rest;
+            }
+          }
+          return;
+        }
+        if (!skippingRecord) {
+          const segment = bytes.subarray(cursor, newline);
+          if (pendingBytes + segment.length <= MAX_CANONICAL_VOICE_PERSONA_RECORD_BYTES) {
+            const line = pendingBytes
+              ? Buffer.concat([...pending, segment], pendingBytes + segment.length)
+              : segment;
+            if (isCanonicalVoicePersonaRecord(line, itemId)) return finish(true);
+          }
+        }
+        resetLine();
+        cursor = newline + 1;
+      }
     });
-    stream.on("end", () => finish(false));
+    stream.on("end", () => {
+      if (!skippingRecord && pendingBytes > 0
+        && isCanonicalVoicePersonaRecord(Buffer.concat(pending, pendingBytes), itemId)) {
+        finish(true);
+        return;
+      }
+      finish(false);
+    });
     stream.on("error", (error: NodeJS.ErrnoException) => {
       if (settled) return;
       settled = true;

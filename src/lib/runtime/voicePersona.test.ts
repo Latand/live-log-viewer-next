@@ -55,8 +55,8 @@ test("the built-in persona stands when no override file exists", () => {
 });
 
 test("an operator override replaces the built-in persona wholesale", () => {
-  /* Editing wording between two calls and hearing the difference on the second
-     is the entire point of the override, so it is read per call. */
+  /* A new thread resolves the current override wholesale; an established
+     thread keeps the developer item it already persisted. */
   const persona = voicePersona(() => "  You are the coordinator. Keep it short.  ");
   expect(persona).toBe("You are the coordinator. Keep it short.");
   expect(persona).not.toBe(DEFAULT_VOICE_PERSONA);
@@ -80,22 +80,47 @@ test("one durable thread identity produces one stable canonical developer item",
   });
 });
 
-test("canonical receipt scanning survives a stream chunk boundary and refuses a symlink", async () => {
+test("canonical receipt scanning recognizes reordered fields across a stream chunk boundary and refuses a symlink", async () => {
   const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-persona-scan-"));
   const transcript = path.join(isolated, "thread.jsonl");
   const linked = path.join(isolated, "linked.jsonl");
   const itemId = `msg_voice_persona_${"b".repeat(64)}`;
   const record = JSON.stringify({
+    padding: "x".repeat(65_400),
+    payload: { role: "developer", content: [], id: itemId, type: "message" },
     type: "response_item",
-    payload: { type: "message", id: itemId, role: "developer", content: [] },
   });
-  fs.writeFileSync(transcript, `${"x".repeat(65_500)}${record}\n`);
+  fs.writeFileSync(transcript, `${record}\n`);
   fs.symlinkSync(transcript, linked);
   try {
     expect(await canonicalVoicePersonaBootstrapExists(transcript, itemId)).toBeTrue();
     await expect(canonicalVoicePersonaBootstrapExists(linked, itemId)).rejects.toThrow();
     await expect(canonicalVoicePersonaBootstrapExists(null, itemId))
       .rejects.toThrow("canonical transcript path is unavailable");
+  } finally {
+    fs.rmSync(isolated, { recursive: true, force: true });
+  }
+});
+
+test("canonical receipt scanning ignores malformed rows and marker-like content", async () => {
+  const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-persona-structural-scan-"));
+  const transcript = path.join(isolated, "thread.jsonl");
+  const itemId = `msg_voice_persona_${"c".repeat(64)}`;
+  const markerLikeText = `"type":"message","id":"${itemId}","role":"developer"`;
+  fs.writeFileSync(transcript, [
+    `{malformed:${markerLikeText}}`,
+    JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "message",
+        id: "ordinary-system-row",
+        role: "developer",
+        content: [{ type: "input_text", text: markerLikeText }],
+      },
+    }),
+  ].join("\n") + "\n");
+  try {
+    expect(await canonicalVoicePersonaBootstrapExists(transcript, itemId)).toBeFalse();
   } finally {
     fs.rmSync(isolated, { recursive: true, force: true });
   }
