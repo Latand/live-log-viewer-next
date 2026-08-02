@@ -33,9 +33,16 @@ import type {
   EngineHost,
   HostState,
   QueueEntry,
+  RuntimeCompactOutcome,
+  RuntimeCompactRequest,
   RuntimeEvent,
 } from "./engineHost";
-import { normalizeQueueEntry, RuntimeReplayGapError, StructuredHostAdoptionCleanupError } from "./engineHost";
+import {
+  normalizeQueueEntry,
+  RuntimeReplayGapError,
+  StructuredCompactError,
+  StructuredHostAdoptionCleanupError,
+} from "./engineHost";
 import {
   FileRuntimeEventStore,
   nextRuntimeEventSequence,
@@ -88,6 +95,13 @@ type VoicePersonaBootstrapInsertion = {
   owner: PendingRealtimeStart;
   promise: Promise<void>;
 };
+type PendingCompaction = {
+  promise: Promise<RuntimeCompactOutcome>;
+  resolve(outcome: RuntimeCompactOutcome): void;
+  reject(error: Error): void;
+  timer: ReturnType<typeof setTimeout> | undefined;
+};
+
 type PendingDelivery = {
   text: string;
   contentDigest: string;
@@ -165,6 +179,7 @@ export interface CodexAppServerHostOptions {
   realtimePersonaTimeoutMs?: number;
   realtimeStartTimeoutMs?: number;
   deliveryConfirmationTimeoutMs?: number;
+  compactEvidenceTimeoutMs?: number;
   shutdownGraceMs?: number;
   initialEventCursor?: number;
   onEventCursorRecovery?: RuntimeEventCursorRecoveryReporter;
@@ -255,6 +270,10 @@ const DESKTOP_ENV_ALLOWLIST = [
 ] as const;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS = 5 * 60_000;
+/** How long a compaction may run before its outcome counts as unverified.
+    Compaction is a model call over the whole thread, so the budget is generous;
+    past it the operation terminalizes visibly rather than hanging (#862). */
+const DEFAULT_COMPACT_EVIDENCE_TIMEOUT_MS = 5 * 60_000;
 const ACTIVE_THREAD_READ_TIMEOUT_MULTIPLIER = 3;
 const LATE_THREAD_READ_RESPONSE_TTL_MULTIPLIER = 3;
 const MIN_LATE_THREAD_READ_RESPONSE_TTL_MS = 1_000;
@@ -320,6 +339,7 @@ const MUTATING_RPC_METHODS = new Set([
   "thread/realtime/start",
   "thread/realtime/stop",
   "thread/inject_items",
+  "thread/compact/start",
 ]);
 
 function record(value: unknown): JsonObject | null {
@@ -573,6 +593,7 @@ export class CodexAppServerHost implements EngineHost {
   private readonly realtimePersonaTimeoutMs: number;
   private readonly realtimeStartTimeoutMs: number;
   private readonly deliveryConfirmationTimeoutMs: number;
+  private readonly compactEvidenceTimeoutMs: number;
   private readonly shutdownGraceMs: number;
   private readonly eventStore: RuntimeEventStore;
   private readonly effort: string | undefined;
@@ -603,6 +624,7 @@ export class CodexAppServerHost implements EngineHost {
     contentDigest: string | null;
   }>();
   private readonly pendingDeliveries = new Map<string, PendingDelivery>();
+  private readonly pendingCompactions = new Map<string, PendingCompaction>();
   private readonly realtimeDeliveries = new Map<string, RealtimeDeliveryState>();
   private readonly voiceStreams = new Map<string, VoiceStreamState>();
   /* A host's thread id is immutable, so one memo covers its one stable persona
@@ -663,6 +685,7 @@ export class CodexAppServerHost implements EngineHost {
     this.realtimeStartTimeoutMs = options.realtimeStartTimeoutMs ?? REALTIME_START_TIMEOUT_MS;
     this.deliveryConfirmationTimeoutMs = options.deliveryConfirmationTimeoutMs
       ?? DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS;
+    this.compactEvidenceTimeoutMs = options.compactEvidenceTimeoutMs ?? DEFAULT_COMPACT_EVIDENCE_TIMEOUT_MS;
     this.shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
     this.eventStore = options.eventStore ?? new FileRuntimeEventStore();
     this.effort = options.effort;
@@ -957,6 +980,85 @@ export class CodexAppServerHost implements EngineHost {
     }
     if (!turnRef || this.activeTurnId !== turnRef) throw new Error("active turn fence is stale");
     await this.rpc("turn/interrupt", { threadId: this.identity.threadId, turnId: turnRef });
+  }
+
+  /**
+   * Manual context compaction as an engine control (#862). It travels the
+   * app-server control channel — `thread/compact/start` for the thread this
+   * host owns — so there is no path by which it becomes a user turn: no
+   * `turn/start`, no `turn/steer`, no message content anywhere in the request.
+   * The promise settles only on `contextCompaction` lifecycle evidence, so the
+   * durable receipt cannot claim success from an accepted request alone.
+   */
+  async compact(request: RuntimeCompactRequest): Promise<RuntimeCompactOutcome> {
+    if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
+      throw new StructuredCompactError("Codex app-server host is unavailable", "request");
+    }
+    if (request.threadId && request.threadId !== this.identity.threadId) {
+      throw new StructuredCompactError("compact target thread is not the thread this host owns", "request");
+    }
+    /* The boundary refuses a live turn even though admission already fenced it:
+       the turn may have started between admission and execution, and compacting
+       underneath a running turn is exactly the race this control must not run. */
+    if (this.activeTurnId) {
+      throw new StructuredCompactError("a turn is active; compaction would race it", "request");
+    }
+    const existing = this.pendingCompactions.get(request.operationId);
+    if (existing) return existing.promise;
+
+    let settle!: PendingCompaction;
+    const promise = new Promise<RuntimeCompactOutcome>((resolve, reject) => {
+      settle = { promise: undefined as unknown as Promise<RuntimeCompactOutcome>, resolve, reject, timer: undefined };
+    });
+    settle.promise = promise;
+    /* Registered before the request so a compaction the app-server reports
+       immediately cannot land in the gap and go unobserved. */
+    this.pendingCompactions.set(request.operationId, settle);
+    void promise.catch(() => undefined);
+    try {
+      await this.rpc("thread/compact/start", { threadId: this.identity.threadId });
+    } catch (error) {
+      this.pendingCompactions.delete(request.operationId);
+      const message = safeError(error);
+      /* A refusal proves nothing was compacted; a request that timed out may
+         still have started one, and `thread/compact/start` is registered as
+         mutating so the transport says which of the two happened. */
+      throw new StructuredCompactError(message, /outcome is uncertain/.test(message) ? "evidence" : "request");
+    }
+    if (this.pendingCompactions.get(request.operationId) === settle) {
+      settle.timer = setTimeout(() => {
+        this.pendingCompactions.delete(request.operationId);
+        settle.reject(new StructuredCompactError(
+          "Codex compaction evidence did not arrive; the outcome is unverified",
+          "evidence",
+        ));
+      }, this.compactEvidenceTimeoutMs);
+    }
+    return promise;
+  }
+
+  /** Every waiter settles on the first compaction the owned thread reports:
+      one thread compacts once at a time, so the item is the evidence. */
+  private resolveCompactions(compactionId: string | null): void {
+    if (this.pendingCompactions.size === 0) return;
+    const waiting = [...this.pendingCompactions.values()];
+    this.pendingCompactions.clear();
+    for (const compaction of waiting) {
+      if (compaction.timer) clearTimeout(compaction.timer);
+      compaction.resolve({ compactionId });
+    }
+  }
+
+  /** A host that dies mid-compaction leaves the engine outcome unknown, so the
+      waiters reject in the `evidence` phase and terminalize as uncertain. */
+  private rejectPendingCompactions(error: Error): void {
+    if (this.pendingCompactions.size === 0) return;
+    const waiting = [...this.pendingCompactions.values()];
+    this.pendingCompactions.clear();
+    for (const compaction of waiting) {
+      if (compaction.timer) clearTimeout(compaction.timer);
+      compaction.reject(new StructuredCompactError(safeError(error), "evidence"));
+    }
   }
 
   async startRealtimeWebRtc(sdp: string): Promise<CodexRealtimeWebRtcResult> {
@@ -2411,6 +2513,11 @@ export class CodexAppServerHost implements EngineHost {
         phase,
         ...(voiceResponse !== undefined ? { voiceResponse } : {}),
       });
+      /* #862: the compaction item is the completion signal for a manual
+         compact control. It is read after the emit so the durable event ledger
+         carries the evidence before any receipt terminalizes on it. */
+      const item = record(params.item);
+      if (item?.type === "contextCompaction") this.resolveCompactions(stringField(item, "id"));
       return;
     }
     if (method === "turn/completed" && turnId) {
@@ -2453,6 +2560,7 @@ export class CodexAppServerHost implements EngineHost {
     this.rejectRealtimeStart(error);
     this.rejectPendingAnswers(error);
     this.rejectPendingDeliveries(error);
+    this.rejectPendingCompactions(error);
     this.attentions.clear();
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);
@@ -2474,6 +2582,7 @@ export class CodexAppServerHost implements EngineHost {
     this.rejectRealtimeStart(error);
     this.rejectPendingAnswers(error);
     this.rejectPendingDeliveries(error);
+    this.rejectPendingCompactions(error);
     this.attentions.clear();
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);

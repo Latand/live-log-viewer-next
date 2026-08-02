@@ -18,6 +18,7 @@ import {
   type RuntimeEventInput,
   RuntimeIdempotencyConflictError,
   newOperationId,
+  runtimeCompactCapability,
   type NormalizedRuntimeEventInput,
   type RuntimeOperationCommand,
   type RuntimeOperationReceipt,
@@ -933,6 +934,15 @@ export class RuntimeJournal {
   }
 
   claimHostEpoch(): number {
+    const epoch = this.claimHostEpochInTransaction();
+    /* Outside the epoch transaction on purpose: the sweep opens transactions of
+       its own, and a claimed epoch must never be undone by a failure to settle
+       an old receipt. */
+    this.terminalizeUnverifiedCompactions();
+    return epoch;
+  }
+
+  private claimHostEpochInTransaction(): number {
     this.assertHealthy();
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -972,6 +982,27 @@ export class RuntimeJournal {
     } catch (error) {
       try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
       throw error;
+    }
+  }
+
+  /**
+   * #862: the executor writes `delivering` before it writes
+   * `thread/compact/start`, so a compact operation still in that state at a new
+   * host epoch is one whose engine outcome this process cannot verify. Replaying
+   * it could compact the thread twice, so it terminalizes visibly instead. A
+   * compact still `pending` was never issued and replays normally; a terminal
+   * one already has a completed outbox row and is never reissued.
+   */
+  private terminalizeUnverifiedCompactions(): void {
+    const rows = this.db.query<{ operation_id: string; request_json: string; receipt_json: string }, []>(
+      "SELECT operation_id, request_json, receipt_json FROM operations ORDER BY event_seq",
+    ).all();
+    for (const row of rows) {
+      const receipt = JSON.parse(row.receipt_json) as RuntimeOperationReceipt;
+      if (receipt.kind !== "compact" || receipt.status !== "delivering") continue;
+      this.transitionOperation(row.operation_id, "uncertain", {
+        reason: "compaction was in flight during a runtime-host restart; its outcome is unverified",
+      });
     }
   }
 
@@ -1160,7 +1191,7 @@ export class RuntimeJournal {
       if (!command.contentDigest) throw new Error("message content digest is required");
     }
     if (command.kind === "answer" && !command.attentionId.trim()) throw new Error("attentionId is required");
-    if ((command.kind === "kill" || (command.kind === "reconfigure" && command.sessionKey))
+    if ((command.kind === "kill" || command.kind === "compact" || (command.kind === "reconfigure" && command.sessionKey))
       && ((!command.sessionKey || (command.sessionKey.engine !== "codex" && command.sessionKey.engine !== "claude"))
         || !command.sessionKey.sessionId?.trim())) {
       throw new Error(`${command.kind} sessionKey is invalid`);
@@ -1273,6 +1304,32 @@ export class RuntimeJournal {
       } else {
         status = "pending";
         turnId = session.activeTurnId;
+      }
+    } else if (command.kind === "compact") {
+      /* #862: admission is the race-safe fence. It is evaluated inside the
+         BEGIN IMMEDIATE that admits the operation, so the durable turn axis it
+         reads cannot move underneath it — a compaction is only ever admitted
+         against a hosted, idle generation on an engine that has the control. */
+      turnId = null;
+      const capability = runtimeCompactCapability(command.sessionKey.engine);
+      if (!session || session.host !== "hosted") {
+        status = "rejected";
+        reason = session?.host === "dead" || session?.host === "unhosted" ? "dead-host" : "no-claim";
+      } else if (!capability.supported || session.hostKind !== "codex-app-server") {
+        status = "rejected";
+        reason = "unsupported-capability";
+      } else if (session.sessionKey.engine !== command.sessionKey.engine
+        || session.sessionKey.sessionId !== command.sessionKey.sessionId) {
+        status = "rejected";
+        reason = "stale-generation";
+      } else if (command.turnId !== undefined && command.turnId !== null && command.turnId !== session.activeTurnId) {
+        status = "rejected";
+        reason = "stale-turn";
+      } else if (session.turn === "running" || session.turn === "interrupt_requested" || session.activeTurnId) {
+        status = "rejected";
+        reason = "busy-turn";
+      } else {
+        status = "pending";
       }
     } else if (command.kind === "answer") {
       const attention = this.entity<RuntimeAttention>("attention", command.attentionId);

@@ -316,6 +316,7 @@ test("unrelated outbox effects cannot starve structured message delivery", async
     "runtime.kill",
     "runtime.kill-boundary",
     "runtime.reconfigure",
+    "runtime.compact",
   ]]);
   expect(sent).toEqual(["op-after-spawns"]);
 });

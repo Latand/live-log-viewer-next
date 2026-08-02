@@ -257,6 +257,7 @@ export async function bindStructuredDeliveryQueue(
     {
       effects: (kinds, afterEventSeq) => client.effectBatch(kinds, afterEventSeq),
       ...(typeof client.events === "function" ? { events: (afterEventSeq: number) => client.events(afterEventSeq) } : {}),
+      status: async (operationId: string) => (await client.operationStatus(operationId))?.receipt ?? null,
       transition: async (operationId, status, details) => {
         const result = await client.transitionOperation(operationId, status, details);
         if (status !== "delivered" && status !== "failed") return;
