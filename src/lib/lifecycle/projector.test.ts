@@ -260,6 +260,44 @@ test("superseded and closed decisions terminalize their queued lifecycle events 
   expect(queryLifecycleEvents({ pipelineId: closed.id, limit: 20 }).count).toBe(closedCount);
 });
 
+test("an unbound superseded decision identifies its source without inventing a target attempt (#852)", () => {
+  const pipeline = pipelineFixture("pipeline_decision_unbound", {
+    state: "needs_decision",
+    decisionRevision: 1,
+    decisions: [{
+      revision: 1,
+      stageId: "build",
+      sourceAttempt: 1,
+      targetAttempt: null,
+      state: "superseded",
+      input: null,
+      inputDigest: null,
+      clientMessageId: null,
+      operationId: null,
+      deliveryId: null,
+      resumeIntent: false,
+      createdAt: "2026-07-26T09:10:00.000Z",
+      updatedAt: "2026-07-26T09:11:00.000Z",
+      deliveryDeadlineAt: null,
+      terminalAt: "2026-07-26T09:11:00.000Z",
+      error: "superseded by retry-stage",
+    }],
+    runs: [{
+      stageId: "build",
+      attempts: [{ n: 1, state: "needs_decision", conversationId: "conversation_unbound" }],
+    }, { stageId: "review", attempts: [] }],
+  } as unknown as Partial<Pipeline>);
+
+  const event = projectPipelineEvents([pipeline]).find((candidate) => candidate.type === "delivery_expired");
+
+  expect(event).toMatchObject({
+    stageId: "build",
+    attempt: 1,
+    conversationId: "conversation_unbound",
+    summary: "build decision 1 superseded after source attempt 1 without creating a target attempt",
+  });
+});
+
 function livenessRecord(overrides: Partial<AgentLivenessRecord>): AgentLivenessRecord {
   return {
     conversationId: "conversation_agent_gone",

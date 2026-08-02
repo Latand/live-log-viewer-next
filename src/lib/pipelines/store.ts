@@ -11,13 +11,13 @@ import { withFileTransaction, withFileTransactionSync } from "@/lib/state/fileTr
 import type { BoardTask } from "@/lib/tasks/types";
 
 import { MAX_FAIL_EDGE_ROUNDS, MAX_PIPELINE_STAGES } from "./limits";
-import type { EffectivePipelineRole, Pipeline, PipelineCreationIntent, PipelineDecision, PipelineEdgeActivation, PipelineStage, PipelineTerminalReap, PipelineUnconfirmedHost } from "./types";
+import { PIPELINE_DECISION_DELIVERY_TIMEOUT_MS, type EffectivePipelineRole, type Pipeline, type PipelineCreationIntent, type PipelineDecision, type PipelineEdgeActivation, type PipelineStage, type PipelineTerminalReap, type PipelineUnconfirmedHost } from "./types";
 import { stageVerdictFrom } from "./verdict";
 
-export const PIPELINES_SCHEMA_VERSION = 5;
+export const PIPELINES_SCHEMA_VERSION = 6;
 /** Older registries are migrated in memory on load; the file is rewritten in
     the current shape by the next successful mutation, never by a read. */
-const MIGRATABLE_SCHEMA_VERSIONS = new Set([2, 3, 4, PIPELINES_SCHEMA_VERSION]);
+const MIGRATABLE_SCHEMA_VERSIONS = new Set([2, 3, 4, 5, PIPELINES_SCHEMA_VERSION]);
 const pipelinesFile = () => statePath("pipelines.json");
 const artifactsRoot = () => statePath("pipelines");
 
@@ -138,15 +138,18 @@ function isDecision(value: unknown): value is PipelineDecision {
     && typeof decision.resumeIntent === "boolean"
     && typeof decision.createdAt === "string"
     && typeof decision.updatedAt === "string"
+    && isNullableString(decision.deliveryDeadlineAt)
     && isNullableString(decision.terminalAt)
     && isNullableString(decision.error);
   if (!valid) return false;
   const state = decision.state!;
-  const bound = ["admitting", "held", "queued", "delivering", "delivered", "failed"].includes(state);
+  const pending = ["admitting", "held", "queued", "delivering"].includes(state);
+  const bound = pending || ["delivered", "failed"].includes(state);
   if (bound && (!decision.input || !decision.inputDigest || !decision.clientMessageId || !decision.operationId || !decision.resumeIntent)) return false;
   if (state === "awaiting_input" && (decision.input !== null || decision.inputDigest !== null
     || decision.clientMessageId !== null || decision.operationId !== null || decision.deliveryId !== null
-    || decision.resumeIntent || decision.terminalAt !== null)) return false;
+    || decision.resumeIntent || decision.deliveryDeadlineAt !== null || decision.terminalAt !== null)) return false;
+  if (pending ? typeof decision.deliveryDeadlineAt !== "string" : decision.deliveryDeadlineAt !== null) return false;
   if (["delivered", "failed", "superseded", "closed"].includes(state) && decision.terminalAt === null) return false;
   return true;
 }
@@ -509,10 +512,32 @@ function migrateDecisionState(raw: unknown): unknown {
     resumeIntent: false,
     createdAt,
     updatedAt: createdAt,
+    deliveryDeadlineAt: null,
     terminalAt: null,
     error: null,
   } satisfies PipelineDecision];
   return migrated;
+}
+
+function migrateDecisionDeliveryDeadlines(raw: unknown): unknown {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  const pipeline = raw as Record<string, unknown>;
+  if (!Array.isArray(pipeline.decisions)) return pipeline;
+  return {
+    ...pipeline,
+    decisions: pipeline.decisions.map((rawDecision) => {
+      if (!rawDecision || typeof rawDecision !== "object" || Array.isArray(rawDecision)) return rawDecision;
+      const decision = rawDecision as Record<string, unknown>;
+      const pending = ["admitting", "held", "queued", "delivering"].includes(String(decision.state));
+      const updatedAt = typeof decision.updatedAt === "string" ? Date.parse(decision.updatedAt) : Number.NaN;
+      return {
+        ...decision,
+        deliveryDeadlineAt: pending
+          ? new Date((Number.isFinite(updatedAt) ? updatedAt : 0) + PIPELINE_DECISION_DELIVERY_TIMEOUT_MS).toISOString()
+          : null,
+      };
+    }),
+  };
 }
 
 export function loadPipelines(): Pipeline[] {
@@ -526,7 +551,10 @@ export function loadPipelines(): Pipeline[] {
   if (!Array.isArray(file.pipelines)) throw new PipelineStoreError("pipeline registry contains malformed records");
   const legacyRecords = file.schemaVersion === 2 ? file.pipelines.map(migrateV2Pipeline) : file.pipelines;
   const taskRecords = file.schemaVersion < 4 ? legacyRecords.map(migrateTaskIds) : legacyRecords;
-  const records = file.schemaVersion < PIPELINES_SCHEMA_VERSION ? taskRecords.map(migrateDecisionState) : taskRecords;
+  const decisionRecords = file.schemaVersion < 5 ? taskRecords.map(migrateDecisionState) : taskRecords;
+  const records = file.schemaVersion < PIPELINES_SCHEMA_VERSION
+    ? decisionRecords.map(migrateDecisionDeliveryDeadlines)
+    : decisionRecords;
   if (!records.every(isPipeline)) throw new PipelineStoreError("pipeline registry contains malformed records");
   return records.map(reviveLoadedPipeline);
 }

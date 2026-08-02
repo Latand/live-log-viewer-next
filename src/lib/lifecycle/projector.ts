@@ -131,7 +131,9 @@ function pipelineDecisionEvent(pipeline: Pipeline, decision: Pipeline["decisions
     return {
       ...base,
       type: "delivery_expired",
-      summary: `${decision.stageId} decision ${decision.revision} ${decision.state} before attempt ${attemptN}`,
+      summary: decision.targetAttempt === null
+        ? `${decision.stageId} decision ${decision.revision} ${decision.state} after source attempt ${decision.sourceAttempt} without creating a target attempt`
+        : `${decision.stageId} decision ${decision.revision} ${decision.state} before attempt ${decision.targetAttempt}`,
     };
   }
   return null;

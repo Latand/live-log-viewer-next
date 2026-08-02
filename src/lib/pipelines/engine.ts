@@ -44,20 +44,21 @@ import { renderStagePrompt } from "./prompts";
 import { pipelineRoleLookup, resolvePipelineRole, validatePipelineRoleParams, type PipelineRoleLookup } from "./roles";
 import { buildPipeline, isEffectiveRole, loadPipelines, pipelineGraphError, pipelineIdentity, pipelineTaskLinkError, PipelineStoreError, withPipelineMutation } from "./store";
 import { ensurePipelineForTask, isTaskSpawnPipelineParams, type TaskPipelineSpawnParams, type TaskSpawnPipelineParams } from "./taskBinding";
-import type {
-  CreatePipelineRequest,
-  EffectivePipelineRole,
-  PatchPipelineRequest,
-  Pipeline,
-  PipelineDecision,
-  PipelineRoleId,
-  PipelineRepoPreflight,
-  PipelineRepoPreflightErrorCode,
-  PipelineStage,
-  PipelineStageInput,
-  PipelineStageAttempt,
-  PipelineTerminalReap,
-  PipelineUnconfirmedHost,
+import {
+  PIPELINE_DECISION_DELIVERY_TIMEOUT_MS,
+  type CreatePipelineRequest,
+  type EffectivePipelineRole,
+  type PatchPipelineRequest,
+  type Pipeline,
+  type PipelineDecision,
+  type PipelineRoleId,
+  type PipelineRepoPreflight,
+  type PipelineRepoPreflightErrorCode,
+  type PipelineStage,
+  type PipelineStageInput,
+  type PipelineStageAttempt,
+  type PipelineTerminalReap,
+  type PipelineUnconfirmedHost,
 } from "./types";
 import { parseStageVerdict, stageVerdictRejectionReason, type ParsedStageVerdict } from "./verdict";
 
@@ -677,6 +678,7 @@ const TERMINAL_STATES = new Set<Pipeline["state"]>(["completed", "closed"]);
 const MISSING_STAGE_VERDICT = "stage completed without a valid final JSON verdict";
 const VERDICT_RECOVERY_MAX_CHECKS = 3;
 const VERDICT_RECOVERY_INTERVAL_MS = 30_000;
+const DECISION_DELIVERY_DEADLINE_REASON = "operator decision delivery exceeded its 5 minute deadline";
 /** Attempt states that end a round; a pending cursor over one of these queues a
     fresh attempt on the next tick (tickRunStage/tickReviewStage). */
 const TERMINAL_ATTEMPT_STATES = new Set<PipelineStageAttempt["state"]>(["passed", "failed", "needs_decision", "skipped"]);
@@ -733,6 +735,7 @@ function ensureDecisionRequest(pipeline: Pipeline, attempt: PipelineStageAttempt
     resumeIntent: false,
     createdAt,
     updatedAt: createdAt,
+    deliveryDeadlineAt: null,
     terminalAt: null,
     error: null,
   });
@@ -745,6 +748,10 @@ function unixMs(value: string | null): number {
 
 function recoveryCheckAt(now: string): string {
   return new Date(unixMs(now) + VERDICT_RECOVERY_INTERVAL_MS).toISOString();
+}
+
+function decisionDeliveryDeadlineAt(now: string): string {
+  return new Date(unixMs(now) + PIPELINE_DECISION_DELIVERY_TIMEOUT_MS).toISOString();
 }
 
 function markVerdictRecoverySucceeded(attempt: PipelineStageAttempt, now: string, messageTs: number): void {
@@ -2036,6 +2043,39 @@ async function reconcilePipelineDecision(
       }
     }
   }
+  const checkedAt = ports.now();
+  if (decision.state === "delivering" && status && ["held", "queued"].includes(status.state)) {
+    status = {
+      ...status,
+      state: "delivering",
+      error: decision.error ?? "decision delivery outcome remains uncertain",
+    };
+  }
+  const deadlineExpired = decision.deliveryDeadlineAt !== null
+    && unixMs(checkedAt) >= unixMs(decision.deliveryDeadlineAt);
+  if (deadlineExpired && decision.state !== "delivering"
+    && (!status || status.state === "held" || status.state === "queued")) {
+    try {
+      status = await ports.terminalizeDecisionDelivery(decision.operationId, DECISION_DELIVERY_DEADLINE_REASON)
+        ?? {
+          state: "delivering",
+          operationId: decision.operationId,
+          deliveryId: decision.deliveryId,
+          at: checkedAt,
+          error: "decision delivery deadline terminalization is unconfirmed",
+        };
+    } catch (error) {
+      status = {
+        state: "delivering",
+        operationId: decision.operationId,
+        deliveryId: decision.deliveryId,
+        at: checkedAt,
+        error: error instanceof Error
+          ? `decision delivery deadline terminalization is uncertain: ${error.message}`
+          : "decision delivery deadline terminalization is uncertain",
+      };
+    }
+  }
   if (!status || status.operationId !== decision.operationId) return false;
 
   const before = JSON.stringify({ decision, target, state: pipeline.state, pausedState: pipeline.pausedState, cursor: pipeline.cursor });
@@ -2045,6 +2085,7 @@ async function reconcilePipelineDecision(
   decision.updatedAt = at;
   decision.error = status.error ?? null;
   if (status.state === "delivered") {
+    decision.deliveryDeadlineAt = null;
     decision.terminalAt = at;
     target.state = "running";
     target.startedAt ??= at;
@@ -2059,6 +2100,7 @@ async function reconcilePipelineDecision(
       pipeline.stateDetail = null;
     }
   } else if (status.state === "failed") {
+    decision.deliveryDeadlineAt = null;
     decision.terminalAt = at;
     target.state = "needs_decision";
     target.completedAt = at;
@@ -2771,6 +2813,7 @@ async function supersedePipelineDecision(
   }
   decision.state = terminalState;
   decision.updatedAt = terminalAt;
+  decision.deliveryDeadlineAt = null;
   decision.terminalAt = terminalAt;
   decision.error = reason;
   if (decision.targetAttempt !== null) {
@@ -2807,6 +2850,7 @@ async function closePipelineDecision(
         preserveDelivered = true;
         decision.state = "delivered";
         decision.updatedAt = terminalAt;
+        decision.deliveryDeadlineAt = null;
         decision.terminalAt = terminalAt;
         decision.error = null;
       }
@@ -2820,6 +2864,7 @@ async function closePipelineDecision(
   if (!preserveDelivered) {
     decision.state = "closed";
     decision.updatedAt = terminalAt;
+    decision.deliveryDeadlineAt = null;
     decision.terminalAt = terminalAt;
     decision.error = "pipeline closed";
   }
@@ -3192,7 +3237,9 @@ export async function patchPipeline(
       let target: PipelineStageAttempt | null;
       let identity: { clientMessageId: string; operationId: string };
       if (decision.state === "awaiting_input") {
-        if (pipeline.state !== "needs_decision") {
+        const parkedForDecision = pipeline.state === "needs_decision"
+          || (pipeline.state === "paused" && pipeline.pausedState === "needs_decision");
+        if (!parkedForDecision) {
           return { error: "pipeline does not have a stage awaiting operator input", status: 409 };
         }
         target = newAttempt(pipeline, decisionStage);
@@ -3242,8 +3289,11 @@ export async function patchPipeline(
       const admittedAt = ports.now();
       decision.state = "admitting";
       decision.updatedAt = admittedAt;
+      decision.deliveryDeadlineAt ??= decisionDeliveryDeadlineAt(admittedAt);
       decision.error = null;
-      pipeline.stateDetail = "submitting operator decision";
+      pipeline.stateDetail = pipeline.state === "paused"
+        ? "paused by user"
+        : "submitting operator decision";
       persist();
 
       let delivery: PipelineDecisionDeliveryResult;
@@ -3281,21 +3331,31 @@ export async function patchPipeline(
       decision.updatedAt = settledAt;
       decision.error = delivery.error ?? null;
       if (delivery.state === "delivered") {
+        decision.deliveryDeadlineAt = null;
         decision.terminalAt = settledAt;
         target.state = "running";
         target.startedAt = settledAt;
         setCursorState(pipeline, decisionStage.id, "running");
-        pipeline.state = "running";
-        pipeline.stateDetail = null;
+        if (pipeline.state === "paused") {
+          pipeline.pausedState = "running";
+          pipeline.stateDetail = "paused by user";
+        } else {
+          pipeline.state = "running";
+          pipeline.stateDetail = null;
+        }
       } else if (delivery.state === "failed") {
+        decision.deliveryDeadlineAt = null;
         decision.terminalAt = settledAt;
         target.state = "needs_decision";
         target.completedAt = settledAt;
         target.error = delivery.error ?? "decision delivery failed";
-        pipeline.stateDetail = target.error;
+        if (pipeline.state === "paused") pipeline.pausedState = "needs_decision";
+        pipeline.stateDetail = pipeline.state === "paused" ? "paused by user" : target.error;
         ensureDecisionRequest(pipeline, target);
       } else {
-        pipeline.stateDetail = `operator decision delivery is ${delivery.state}`;
+        pipeline.stateDetail = pipeline.state === "paused"
+          ? "paused by user"
+          : `operator decision delivery is ${delivery.state}`;
       }
     } else if (req.action === "retry-stage") {
       if (pipeline.state !== "needs_decision") return { error: "pipeline does not have a stage awaiting retry", status: 409 };

@@ -132,6 +132,8 @@ export type PipelineDecisionState =
   | "superseded"
   | "closed";
 
+export const PIPELINE_DECISION_DELIVERY_TIMEOUT_MS = 5 * 60_000;
+
 /**
  * Durable join between one parked attempt, one operator answer, and the one
  * fresh attempt that answer may reopen. The monotonic revision is the ABA
@@ -152,6 +154,10 @@ export type PipelineDecision = {
   resumeIntent: boolean;
   createdAt: string;
   updatedAt: string;
+  /** Stable timeout for an unclaimed held/queued reservation. Claimed or
+      otherwise uncertain operations retain authority until their receipt
+      settles, even after this timestamp. */
+  deliveryDeadlineAt: string | null;
   terminalAt: string | null;
   error: string | null;
 };
