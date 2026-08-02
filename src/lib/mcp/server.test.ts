@@ -449,7 +449,7 @@ describe("MCP tool service", () => {
      a large read is the exact cost the deadline was meant to stop. A caller that
      already gave up must not pay it, and must not have its clientRequestId burned
      on an answer it never received. */
-  test("an abandoned call writes no receipt, while a completed one still replays", async () => {
+  test("an abandoned bounded read writes no receipt, while a completed one still replays", async () => {
     const completed: string[] = [];
     const store: McpReceiptStore = {
       claim: () => ({ kind: "fresh" }),
@@ -473,6 +473,28 @@ describe("MCP tool service", () => {
 
     await service.callTool("list_pipelines", { clientRequestId: "answered" });
     expect(completed).toEqual(["list_pipelines:answered"]);
+  });
+
+  /* The skip is a bounded-read affordance. `pruneBoundedReceipts` sweeps an
+     unsettled claim only for retention='bounded', so leaving a durable mutation
+     claim open would strand a permanent result_json IS NULL row and answer that
+     clientRequestId with `call_interrupted` forever. */
+  test("an abandoned durable mutation still settles its claim", async () => {
+    const completed: string[] = [];
+    const store: McpReceiptStore = {
+      claim: () => ({ kind: "fresh" }),
+      complete: (key, _digest, _result, retention) => { completed.push(`${key}:${retention}`); },
+    };
+    const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [toolName, async () => ({})])) as unknown as McpToolBindings;
+    bindings.conversation_action = async (_args, context) => {
+      if (context?.signal?.aborted) throw context.signal.reason;
+      return {};
+    };
+    const abandoned = new AbortController();
+    abandoned.abort(new DeadlineExceededError("fixture deadline", 5_000));
+    await createMcpToolService(bindings, store)
+      .callTool("conversation_action", { clientRequestId: "abandoned-mutation" }, { signal: abandoned.signal });
+    expect(completed).toEqual(["conversation_action:abandoned-mutation:durable"]);
   });
 
   test("an ordinary tool failure still writes its receipt", async () => {

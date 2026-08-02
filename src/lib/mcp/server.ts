@@ -1409,10 +1409,19 @@ export function createMcpToolService(
            would burn the clientRequestId on an answer nobody received, so the
            obvious retry would replay a stale timeout forever. The claim is left
            unsettled instead, which is what "the previous call did not finish"
-           already means: a retry gets `call_interrupted`, retryable. Every
-           outcome that produced a real answer still writes, so idempotent replay
-           of a completed call is untouched. */
-        if (outcome === "deadline" || outcome === "cancelled") return settled;
+           already means: a retry gets `call_interrupted`, retryable, and the
+           bounded lease sweeps the row so the id comes back.
+
+           Bounded reads only. `pruneBoundedReceipts` deletes an unsettled claim
+           exclusively for `retention = 'bounded'` — durable mutation claims never
+           enter that expiry path by design — so skipping the write for a
+           mutating tool would strand a permanent `result_json IS NULL` row and
+           make its clientRequestId answer `call_interrupted` forever. A mutation
+           that was abandoned still settles, as it did before.
+
+           Every outcome that produced a real answer still writes, so idempotent
+           replay of a completed call is untouched. */
+        if (retention === "bounded" && (outcome === "deadline" || outcome === "cancelled")) return settled;
         const completionStartedAt = performance.now();
         await receipts.complete(key, digest, settled, retention);
         phaseDurations.completion = performance.now() - completionStartedAt;
@@ -1444,7 +1453,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   list_flows: "List durable implement-review flows.",
   get_flow: "Read one implement-review flow by durable id.",
   flow_action: "Apply a supported action to an implement-review flow.",
-  list_pipelines: "List durable pipelines.",
+  list_pipelines: "List durable pipelines as bounded board cards: id, task, project, branch/worktree, state and stateDetail, cursor stage, task links, and a per-stage summary (role, engine, attempt count, latest attempt's state and verdict). Deliberately carries no bodies — the spec, stage prompts, role scaffolds and every attempt's input/output transcript are read with get_pipeline, which still returns the whole record. hasSpec tells you a spec exists; long free text is truncated.",
   conversation_action: "Interrupt, kill, resume, compact, or answer a dialog for a Viewer conversation. Names the conversation by id, transcript path, or the selected-card reference the operator's turn carried — the last resolves directly, with no operator_snapshot call.",
   operator_snapshot: "Read the bounded, secret-redacted Viewer state currently visible to the operator.",
   list_tasks: "List durable board tasks.",

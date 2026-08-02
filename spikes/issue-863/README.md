@@ -129,9 +129,13 @@ once rather than in the two disjoint halves drafted in the appendix.
    projection's checkpoint, and the projection yields to the event loop between
    row batches so the 30 s deadline timer can actually fire instead of waiting
    for a synchronous walk to release the loop. `createMcpToolService` skips
-   `receipts.complete` for a `deadline`/`cancelled` outcome, so an abandoned call
-   leaves no receipt row and does not burn its `clientRequestId`; every outcome
-   that produced a real answer still writes, so replay is unchanged.
+   `receipts.complete` for a `deadline`/`cancelled` outcome **on bounded reads
+   only**, so an abandoned list call leaves no receipt row and its
+   `clientRequestId` returns with the bounded lease. Durable mutation claims are
+   excluded deliberately: `pruneBoundedReceipts` sweeps an unsettled claim only
+   for `retention = 'bounded'`, so skipping the write for a mutating tool would
+   strand a permanent `result_json IS NULL` row. Every outcome that produced a
+   real answer still writes, so replay is unchanged.
 5. **`src/lib/pipelines/engine.ts` and `types.ts` were not touched.** The list
    row type lives with the projection, and `getPipelines` stays the HTTP/detail
    seam — the binding reaches the bounded read through an optional
