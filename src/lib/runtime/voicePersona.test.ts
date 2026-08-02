@@ -94,6 +94,8 @@ test("canonical receipt scanning survives a stream chunk boundary and refuses a 
   try {
     expect(await canonicalVoicePersonaBootstrapExists(transcript, itemId)).toBeTrue();
     await expect(canonicalVoicePersonaBootstrapExists(linked, itemId)).rejects.toThrow();
+    await expect(canonicalVoicePersonaBootstrapExists(null, itemId))
+      .rejects.toThrow("canonical transcript path is unavailable");
   } finally {
     fs.rmSync(isolated, { recursive: true, force: true });
   }

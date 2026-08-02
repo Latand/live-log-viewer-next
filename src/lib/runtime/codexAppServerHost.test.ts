@@ -72,6 +72,7 @@ class FakeAppServer extends EventEmitter {
   injectItemsError: string | null = null;
   holdInjectItems = false;
   readonly heldInjectItemIds: number[] = [];
+  omitThreadPath = false;
   threadPath: string | null = null;
   private readonly serverRequestIds = new Set<string | number>();
   private turn = 0;
@@ -154,7 +155,7 @@ class FakeAppServer extends EventEmitter {
       return this.respond(message.id, {
         thread: {
           id,
-          path: this.threadPath ?? `/sessions/${id}.jsonl`,
+          ...(!this.omitThreadPath ? { path: this.threadPath ?? `/sessions/${id}.jsonl` } : {}),
           turns: this.turns,
           ...(this.resumeStatus ? { status: this.resumeStatus } : {}),
         },
@@ -3589,10 +3590,114 @@ test("an unreadable canonical transcript falls through to authoritative insertio
       "[voice persona bootstrap] canonical scan unavailable; attempting insertion",
       expect.objectContaining({ code: "ELOOP", diagnostic: expect.stringContaining("ELOOP") }),
     );
+    await host.stopRealtime();
+    const repeated = await host.startRealtimeWebRtc("v=0\r\no=- 405 2 IN IP4 127.0.0.1\r\n");
+    expect(repeated.personaBootstrap).toEqual(started.personaBootstrap);
+    expect(server.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(1);
+    expect(warnings).toHaveBeenCalledTimes(1);
   } finally {
     warnings.mockRestore();
     await host.release();
     fs.rmSync(isolated, { recursive: true, force: true });
+  }
+});
+
+test("a missing transcript path warns once and the host memo prevents repeated insertion", async () => {
+  const warnings = spyOn(console, "warn").mockImplementation(() => {});
+  const server = new FakeAppServer("voice-thread");
+  server.omitThreadPath = true;
+  const host = await CodexAppServerHost.start({
+    cwd: "/repo",
+    eventStore: new MemoryEventStore(),
+    spawnProcess: fakeSpawn(server),
+  });
+  try {
+    const first = await host.startRealtimeWebRtc("v=0\r\no=- 406 2 IN IP4 127.0.0.1\r\n");
+    await host.stopRealtime();
+    const repeated = await host.startRealtimeWebRtc("v=0\r\no=- 407 2 IN IP4 127.0.0.1\r\n");
+    expect(repeated.personaBootstrap).toEqual(first.personaBootstrap);
+    expect(server.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(1);
+    expect(warnings).toHaveBeenCalledWith(
+      "[voice persona bootstrap] canonical scan unavailable; attempting insertion",
+      expect.objectContaining({
+        code: "NO_TRANSCRIPT_PATH",
+        diagnostic: "canonical transcript path is unavailable",
+      }),
+    );
+    expect(warnings).toHaveBeenCalledTimes(1);
+  } finally {
+    warnings.mockRestore();
+    await host.release();
+  }
+});
+
+test("a persisted persona row recovers an ambiguous insertion failure", async () => {
+  const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-bootstrap-ambiguous-"));
+  const transcriptPath = path.join(isolated, "voice-thread.jsonl");
+  fs.writeFileSync(transcriptPath, "");
+  const server = new FakeAppServer("voice-thread");
+  server.threadPath = transcriptPath;
+  server.holdInjectItems = true;
+  const host = await CodexAppServerHost.start({
+    cwd: "/repo",
+    eventStore: new MemoryEventStore(),
+    spawnProcess: fakeSpawn(server),
+  });
+  try {
+    const pending = host.startRealtimeWebRtc("v=0\r\no=- 909 2 IN IP4 127.0.0.1\r\n");
+    void pending.catch(() => undefined);
+    for (let attempt = 0; attempt < 100 && server.heldInjectItemIds.length < 1; attempt += 1) {
+      await Bun.sleep(1);
+    }
+    const request = server.requests.find((candidate) => candidate.method === "thread/inject_items");
+    const item = (request?.params as { items?: unknown[] } | undefined)?.items?.[0];
+    if (!item) throw new Error("persona insertion item missing");
+    fs.appendFileSync(transcriptPath, `${JSON.stringify({ type: "response_item", payload: item })}\n`);
+    server.completeNextInject("thread/inject_items response was lost");
+
+    expect(await pending).toMatchObject({
+      sdp: "v=0\r\nanswer",
+      personaBootstrap: { insertion: "accepted" },
+    });
+    expect(server.requests.filter((candidate) => candidate.method === "thread/realtime/start")).toHaveLength(1);
+  } finally {
+    await host.release();
+    fs.rmSync(isolated, { recursive: true, force: true });
+  }
+});
+
+test("a successor start joins the cancelled call's in-flight persona insertion", async () => {
+  const server = new FakeAppServer("voice-thread");
+  server.holdInjectItems = true;
+  const host = await CodexAppServerHost.start({
+    cwd: "/repo",
+    eventStore: new MemoryEventStore(),
+    spawnProcess: fakeSpawn(server),
+  });
+  try {
+    const cancelled = host.startRealtimeWebRtc("v=0\r\no=- 1001 2 IN IP4 127.0.0.1\r\n");
+    void cancelled.catch(() => undefined);
+    for (let attempt = 0; attempt < 100 && server.heldInjectItemIds.length < 1; attempt += 1) {
+      await Bun.sleep(1);
+    }
+    expect(server.heldInjectItemIds).toHaveLength(1);
+    await host.stopRealtime();
+
+    const successor = host.startRealtimeWebRtc("v=0\r\no=- 1002 2 IN IP4 127.0.0.1\r\n");
+    void successor.catch(() => undefined);
+    await Bun.sleep(10);
+    expect(server.heldInjectItemIds).toHaveLength(1);
+    expect(server.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(1);
+    server.completeNextInject();
+
+    await expect(cancelled).rejects.toThrow("stopped during startup");
+    expect(await successor).toMatchObject({
+      sdp: "v=0\r\nanswer",
+      personaBootstrap: { insertion: "accepted" },
+    });
+    expect(server.requests.filter((request) => request.method === "thread/realtime/start")).toHaveLength(1);
+  } finally {
+    await host.release();
   }
 });
 
@@ -3615,13 +3720,14 @@ test("a cancelled persona insertion failure cannot reject the successor start", 
 
     const successor = host.startRealtimeWebRtc("v=0\r\no=- 808 2 IN IP4 127.0.0.1\r\n");
     void successor.catch(() => undefined);
-    for (let attempt = 0; attempt < 100 && server.heldInjectItemIds.length < 2; attempt += 1) {
-      await Bun.sleep(1);
-    }
-    expect(server.heldInjectItemIds).toHaveLength(2);
+    await Bun.sleep(10);
+    expect(server.heldInjectItemIds).toHaveLength(1);
     server.completeNextInject("cancelled call insertion failed");
     await expect(cancelled).rejects.toThrow("stopped during startup");
-    await Bun.sleep(0);
+    for (let attempt = 0; attempt < 100 && server.heldInjectItemIds.length < 1; attempt += 1) {
+      await Bun.sleep(1);
+    }
+    expect(server.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(2);
     server.completeNextInject();
 
     expect(await successor).toMatchObject({

@@ -185,7 +185,11 @@ export async function canonicalVoicePersonaBootstrapExists(
   transcriptPath: string | null,
   itemId: string,
 ): Promise<boolean> {
-  if (!transcriptPath) return false;
+  if (!transcriptPath) {
+    const error = new Error("canonical transcript path is unavailable") as NodeJS.ErrnoException;
+    error.code = "NO_TRANSCRIPT_PATH";
+    throw error;
+  }
   /* Codex app-server 0.146.0 serializes injected response items in this field
      order. A serializer reorder makes this scan return false and can cause a
      reinsertion, so upgrades must keep the live protocol probe current. */

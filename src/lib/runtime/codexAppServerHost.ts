@@ -48,6 +48,7 @@ import {
   voicePersonaBootstrap,
   voicePersonaBootstrapIdentity,
   type VoicePersonaBootstrap,
+  type VoicePersonaBootstrapIdentity,
   type VoicePersonaBootstrapReceipt,
 } from "./voicePersona";
 
@@ -82,6 +83,10 @@ type PendingRealtimeStart = {
   realtimeSessionId: string | null;
   sdp: string | null;
   personaBootstrap: VoicePersonaBootstrapReceipt;
+};
+type VoicePersonaBootstrapInsertion = {
+  owner: PendingRealtimeStart;
+  promise: Promise<void>;
 };
 type PendingDelivery = {
   text: string;
@@ -595,7 +600,11 @@ export class CodexAppServerHost implements EngineHost {
   private readonly pendingDeliveries = new Map<string, PendingDelivery>();
   private readonly realtimeDeliveries = new Map<string, RealtimeDeliveryState>();
   private readonly voiceStreams = new Map<string, VoiceStreamState>();
+  /* A host's thread identity is immutable, so one memo covers its one stable
+     persona item. Successor starts join the same insertion promise. */
   private unresolvedVoicePersonaBootstrap: VoicePersonaBootstrap | null = null;
+  private voicePersonaBootstrapInsertion: VoicePersonaBootstrapInsertion | null = null;
+  private voicePersonaBootstrapAccepted = false;
   private readonly pendingVoiceChunks = new Map<string, string>();
   private readonly cancelledVoiceTurns = new Set<string>();
   private readonly activeRealtimeDeliveries = new Map<string, {
@@ -979,51 +988,25 @@ export class CodexAppServerHost implements EngineHost {
     this.pendingRealtimeStart = pendingStart;
     void answer.catch(() => undefined);
 
-    /* The canonical item is the gate for first speech. Its stable id makes a
-       flushed insertion observable after a lost response or host restart. */
-    let exists = false;
     try {
-      exists = await canonicalVoicePersonaBootstrapExists(
-        this.identity.path,
-        personaBootstrapIdentity.itemId,
-      );
+      const outcome = await this.ensureVoicePersonaBootstrap(personaBootstrapIdentity, pendingStart);
+      if (outcome === "superseded") return answer;
     } catch (error) {
-      /* The insertion RPC is authoritative. A rollout that cannot be scanned
-         still gets one attempt to persist the canonical item. */
-      console.warn("[voice persona bootstrap] canonical scan unavailable; attempting insertion", {
-        code: (error as NodeJS.ErrnoException).code ?? "unknown",
-        diagnostic: safeError(error),
-      });
-    }
-    if (!exists) {
-      try {
-        const personaBootstrap = this.unresolvedVoicePersonaBootstrap
-          ?? voicePersonaBootstrap(personaBootstrapIdentity);
-        this.unresolvedVoicePersonaBootstrap = personaBootstrap;
-        await this.rpc("thread/inject_items", {
-          threadId: this.identity.threadId,
-          items: [personaBootstrap.item],
-        }, REALTIME_PERSONA_TIMEOUT_MS);
-        this.unresolvedVoicePersonaBootstrap = null;
-      } catch (error) {
-        if (this.pendingRealtimeStart !== pendingStart) return answer;
-        const pending = pendingStart;
-        this.pendingRealtimeStart = null;
-        clearTimeout(pending.timer);
-        const rejected: CodexRealtimeWebRtcRejection = {
-          sdp: null,
-          realtimeSessionId: null,
-          personaBootstrap: {
-            ...personaBootstrapIdentity,
-            insertion: "rejected",
-            diagnostic: safeError(error),
-          },
-        };
-        pending.resolve(rejected);
-        return answer;
-      }
-    } else {
-      this.unresolvedVoicePersonaBootstrap = null;
+      if (this.pendingRealtimeStart !== pendingStart) return answer;
+      const pending = pendingStart;
+      this.pendingRealtimeStart = null;
+      clearTimeout(pending.timer);
+      const rejected: CodexRealtimeWebRtcRejection = {
+        sdp: null,
+        realtimeSessionId: null,
+        personaBootstrap: {
+          ...personaBootstrapIdentity,
+          insertion: "rejected",
+          diagnostic: safeError(error),
+        },
+      };
+      pending.resolve(rejected);
+      return answer;
     }
     if (this.pendingRealtimeStart !== pendingStart) return answer;
     const realtimeContext = selectRealtimeContext(this.events);
@@ -1051,6 +1034,75 @@ export class CodexAppServerHost implements EngineHost {
       this.rejectRealtimeStart(error instanceof Error ? error : new Error(safeError(error)));
     }
     return answer;
+  }
+
+  private async ensureVoicePersonaBootstrap(
+    identity: VoicePersonaBootstrapIdentity,
+    pendingStart: PendingRealtimeStart,
+  ): Promise<"accepted" | "superseded"> {
+    while (!this.voicePersonaBootstrapAccepted) {
+      const active = this.voicePersonaBootstrapInsertion;
+      if (active) {
+        try {
+          await active.promise;
+        } catch (error) {
+          if (this.pendingRealtimeStart !== pendingStart) return "superseded";
+          if (active.owner === pendingStart) throw error;
+          continue;
+        }
+        continue;
+      }
+
+      if (await this.scanVoicePersonaBootstrap(identity.itemId, "canonical scan unavailable; attempting insertion")) {
+        this.voicePersonaBootstrapAccepted = true;
+        this.unresolvedVoicePersonaBootstrap = null;
+        break;
+      }
+      if (this.pendingRealtimeStart !== pendingStart) return "superseded";
+      if (this.voicePersonaBootstrapInsertion) continue;
+
+      const bootstrap = this.unresolvedVoicePersonaBootstrap ?? voicePersonaBootstrap(identity);
+      this.unresolvedVoicePersonaBootstrap = bootstrap;
+      const promise = this.insertVoicePersonaBootstrap(bootstrap, identity.itemId);
+      const insertion = { owner: pendingStart, promise };
+      this.voicePersonaBootstrapInsertion = insertion;
+      const clearInsertion = () => {
+        if (this.voicePersonaBootstrapInsertion === insertion) this.voicePersonaBootstrapInsertion = null;
+      };
+      void promise.then(clearInsertion, clearInsertion);
+      try {
+        await promise;
+      } catch (error) {
+        if (this.pendingRealtimeStart !== pendingStart) return "superseded";
+        throw error;
+      }
+    }
+    return "accepted";
+  }
+
+  private async insertVoicePersonaBootstrap(bootstrap: VoicePersonaBootstrap, itemId: string): Promise<void> {
+    try {
+      await this.rpc("thread/inject_items", {
+        threadId: this.identity.threadId,
+        items: [bootstrap.item],
+      }, REALTIME_PERSONA_TIMEOUT_MS);
+    } catch (error) {
+      if (!await this.scanVoicePersonaBootstrap(itemId, "recovery scan unavailable")) throw error;
+    }
+    this.voicePersonaBootstrapAccepted = true;
+    this.unresolvedVoicePersonaBootstrap = null;
+  }
+
+  private async scanVoicePersonaBootstrap(itemId: string, warning: string): Promise<boolean> {
+    try {
+      return await canonicalVoicePersonaBootstrapExists(this.identity.path, itemId);
+    } catch (error) {
+      console.warn(`[voice persona bootstrap] ${warning}`, {
+        code: (error as NodeJS.ErrnoException).code ?? "unknown",
+        diagnostic: safeError(error),
+      });
+      return false;
+    }
   }
 
   async appendRealtimeSpeech(text: string): Promise<void> {

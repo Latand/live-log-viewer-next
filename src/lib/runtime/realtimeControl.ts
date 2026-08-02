@@ -117,10 +117,11 @@ export async function executeRealtimeControl(
       }
       if (answer.personaBootstrap.insertion === "rejected") {
         const diagnostic = redactCodexHostDiagnostic(answer.personaBootstrap.diagnostic ?? "Voice persona insertion was rejected");
+        const error = redactCodexHostDiagnostic(`Voice persona could not be recorded: ${diagnostic}`);
         return {
           status: 409,
           body: {
-            error: diagnostic,
+            error,
             personaBootstrap: { ...answer.personaBootstrap, diagnostic },
           },
         };

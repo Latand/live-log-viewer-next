@@ -188,7 +188,7 @@ test("returns the canonical persona insertion outcome and rejects a call whose b
   expect(result).toEqual({
     status: 409,
     body: {
-      error: "Codex app-server request failed: invalid developer item",
+      error: "Voice persona could not be recorded: Codex app-server request failed: invalid developer item",
       personaBootstrap,
     },
   });
