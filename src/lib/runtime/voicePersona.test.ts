@@ -66,10 +66,10 @@ test("an empty or whitespace override falls back instead of muting the persona",
   expect(voicePersona(() => "   \n  ")).toBe(DEFAULT_VOICE_PERSONA);
 });
 
-test("one call identity produces one stable canonical developer item", () => {
-  const identity = voicePersonaBootstrapIdentity("thread-voice", "v=0\r\nstable-offer\r\n");
-  expect(voicePersonaBootstrapIdentity("thread-voice", "v=0\r\nstable-offer\r\n")).toEqual(identity);
-  expect(voicePersonaBootstrapIdentity("thread-voice", "v=0\r\nnew-offer\r\n")).not.toEqual(identity);
+test("one durable thread identity produces one stable canonical developer item", () => {
+  const identity = voicePersonaBootstrapIdentity("thread-voice");
+  expect(voicePersonaBootstrapIdentity("thread-voice")).toEqual(identity);
+  expect(voicePersonaBootstrapIdentity("thread-other")).not.toEqual(identity);
   expect(voicePersonaBootstrap(identity, () => "  Resolved call persona. \n")).toEqual({
     receipt: { ...identity, insertion: "accepted" },
     item: {

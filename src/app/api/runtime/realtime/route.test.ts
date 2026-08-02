@@ -5,6 +5,12 @@ import { executeRealtimeControl } from "@/lib/runtime/realtimeControl";
 
 import { POST } from "./route";
 
+const ACCEPTED_PERSONA_BOOTSTRAP = {
+  receiptId: `voice_persona_${"c".repeat(64)}`,
+  itemId: `msg_voice_persona_${"c".repeat(64)}`,
+  insertion: "accepted" as const,
+};
+
 function request(body: unknown, headers: Record<string, string> = {}): NextRequest {
   return new NextRequest("http://127.0.0.1/api/runtime/realtime", {
     method: "POST",
@@ -18,7 +24,11 @@ test("starts V3 WebRTC through the active hosted conversation", async () => {
   const host = {
     async startRealtimeWebRtc(sdp: string) {
       calls.push(["start", sdp]);
-      return { sdp: "v=0\r\nanswer", realtimeSessionId: "live-1" };
+      return {
+        sdp: "v=0\r\nanswer",
+        realtimeSessionId: "live-1",
+        personaBootstrap: ACCEPTED_PERSONA_BOOTSTRAP,
+      };
     },
     async appendRealtimeSpeech(text: string) {
       calls.push(["speech", text]);
@@ -48,7 +58,12 @@ test("starts V3 WebRTC through the active hosted conversation", async () => {
   );
   expect(started).toEqual({
     status: 200,
-    body: { ok: true, sdp: "v=0\r\nanswer", realtimeSessionId: "live-1" },
+    body: {
+      ok: true,
+      sdp: "v=0\r\nanswer",
+      realtimeSessionId: "live-1",
+      personaBootstrap: ACCEPTED_PERSONA_BOOTSTRAP,
+    },
   });
   await executeRealtimeControl(
     { action: "appendSpeech", conversationId: "conversation_voice", text: "progress" },
@@ -179,6 +194,25 @@ test("returns the canonical persona insertion outcome and rejects a call whose b
   });
 });
 
+test("refuses a realtime answer that omits the mandatory persona bootstrap receipt", async () => {
+  const result = await executeRealtimeControl({
+    action: "start",
+    conversationId: "conversation_voice",
+    sdp: "v=0\r\noffer",
+  }, () => ({
+    async startRealtimeWebRtc() {
+      return { sdp: "v=0\r\nanswer", realtimeSessionId: "live-without-bootstrap" };
+    },
+    async appendRealtimeSpeech() {},
+    async stopRealtime() {},
+  }), { operator: true });
+
+  expect(result).toEqual({
+    status: 409,
+    body: { error: "Codex returned no voice persona bootstrap receipt" },
+  });
+});
+
 test("POST rejects a cross-origin browser before realtime admission", async () => {
   const response = await POST(request(
     { action: "stop", conversationId: "conversation_voice" },
@@ -260,7 +294,13 @@ test("the transport authority is required, and an unasked question fails closed"
      site that passes the honest answer for "nobody asked" gets a refusal, never an
      open door. */
   const host = {
-    async startRealtimeWebRtc() { return { sdp: "v=0\r\nanswer", realtimeSessionId: "live-x" }; },
+    async startRealtimeWebRtc() {
+      return {
+        sdp: "v=0\r\nanswer",
+        realtimeSessionId: "live-x",
+        personaBootstrap: ACCEPTED_PERSONA_BOOTSTRAP,
+      };
+    },
     async appendRealtimeSpeech() {},
     async stopRealtime() {},
   };

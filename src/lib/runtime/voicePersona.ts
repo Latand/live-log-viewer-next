@@ -148,15 +148,13 @@ export function voicePersona(readFile: (path: string) => string = (target) => fs
   return DEFAULT_VOICE_PERSONA;
 }
 
-/** Stable canonical identity for one thread-scoped WebRTC call attempt. */
+/** Stable canonical identity shared by every WebRTC attempt on one thread. */
 export function voicePersonaBootstrapIdentity(
   threadId: string,
-  callIdentity: string,
 ): VoicePersonaBootstrapIdentity {
   const digest = createHash("sha256")
+    .update("voice-persona-bootstrap\0", "utf8")
     .update(threadId, "utf8")
-    .update("\0", "utf8")
-    .update(callIdentity, "utf8")
     .digest("hex");
   const receiptId = `voice_persona_${digest}`;
   const itemId = `msg_${receiptId}`;

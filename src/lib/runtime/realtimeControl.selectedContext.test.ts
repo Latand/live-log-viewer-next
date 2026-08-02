@@ -18,6 +18,11 @@ import { resetVoiceViewBindings, voiceSelectedContext } from "./voiceViewBinding
 const NOW = Date.now();
 const DESK = { viewSessionId: "vs-desk-1", deviceId: "dev-desk" };
 const PHONE = { viewSessionId: "vs-phone-1", deviceId: "dev-phone" };
+const ACCEPTED_PERSONA_BOOTSTRAP = {
+  receiptId: `voice_persona_${"d".repeat(64)}`,
+  itemId: `msg_voice_persona_${"d".repeat(64)}`,
+  insertion: "accepted" as const,
+};
 
 function reference(identity: { viewSessionId: string; deviceId: string }, card = "conversation_atlas_a"): SelectedContextRef {
   return captureSelectedContext({
@@ -33,7 +38,11 @@ function reference(identity: { viewSessionId: string; deviceId: string }, card =
 function hostFor(spoken: string[]) {
   return {
     async startRealtimeWebRtc() {
-      return { sdp: "v=0\r\nanswer", realtimeSessionId: "live-1" };
+      return {
+        sdp: "v=0\r\nanswer",
+        realtimeSessionId: "live-1",
+        personaBootstrap: ACCEPTED_PERSONA_BOOTSTRAP,
+      };
     },
     async appendRealtimeSpeech(text: string) {
       spoken.push(text);

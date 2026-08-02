@@ -375,6 +375,11 @@ describe("CodexAppServerHost", () => {
     process.env.XDG_CONFIG_HOME = configDirectory;
     let firstHost: CodexAppServerHost | null = null;
     let resumedHost: CodexAppServerHost | null = null;
+    const offers = [
+      "v=0\r\no=- 101 2 IN IP4 127.0.0.1\r\na=ice-ufrag:first\r\na=ice-pwd:first-password\r\na=fingerprint:sha-256 11:22\r\n",
+      "v=0\r\no=- 202 2 IN IP4 127.0.0.1\r\na=ice-ufrag:second\r\na=ice-pwd:second-password\r\na=fingerprint:sha-256 33:44\r\n",
+      "v=0\r\no=- 303 2 IN IP4 127.0.0.1\r\na=ice-ufrag:third\r\na=ice-pwd:third-password\r\na=fingerprint:sha-256 55:66\r\n",
+    ] as const;
     try {
       const firstServer = new FakeAppServer("voice-thread");
       firstServer.threadPath = transcriptPath;
@@ -383,12 +388,12 @@ describe("CodexAppServerHost", () => {
         eventStore: new MemoryEventStore(),
         spawnProcess: fakeSpawn(firstServer),
       });
-      const first = await firstHost.startRealtimeWebRtc("v=0\r\nstable-offer");
+      const first = await firstHost.startRealtimeWebRtc(offers[0]);
       expect(first.personaBootstrap.insertion).toBe("accepted");
       await firstHost.stopRealtime();
 
       fs.writeFileSync(overridePath, "Changed after the call was resolved.\n");
-      const duplicate = await firstHost.startRealtimeWebRtc("v=0\r\nstable-offer");
+      const duplicate = await firstHost.startRealtimeWebRtc(offers[1]);
       expect(duplicate.personaBootstrap).toEqual(first.personaBootstrap);
       expect(firstServer.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(1);
       await firstHost.stopRealtime();
@@ -403,7 +408,7 @@ describe("CodexAppServerHost", () => {
         eventStore: new MemoryEventStore(),
         spawnProcess: fakeSpawn(resumedServer),
       });
-      const recovered = await resumedHost.startRealtimeWebRtc("v=0\r\nstable-offer");
+      const recovered = await resumedHost.startRealtimeWebRtc(offers[2]);
       expect(recovered.personaBootstrap).toEqual(first.personaBootstrap);
       expect(resumedServer.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(0);
 
@@ -3547,6 +3552,31 @@ test("a refused persona insertion returns a bounded rejected receipt before real
   await host.release();
 });
 
+test("an unreadable canonical transcript falls through to authoritative insertion", async () => {
+  const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-bootstrap-scan-fault-"));
+  const transcriptPath = path.join(isolated, "voice-thread.jsonl");
+  const linkedPath = path.join(isolated, "linked-thread.jsonl");
+  fs.writeFileSync(transcriptPath, "");
+  fs.symlinkSync(transcriptPath, linkedPath);
+  const server = new FakeAppServer("voice-thread");
+  server.threadPath = linkedPath;
+  const host = await CodexAppServerHost.start({
+    cwd: "/repo",
+    eventStore: new MemoryEventStore(),
+    spawnProcess: fakeSpawn(server),
+  });
+  try {
+    const started = await host.startRealtimeWebRtc("v=0\r\no=- 404 2 IN IP4 127.0.0.1\r\n");
+    expect(started.personaBootstrap.insertion).toBe("accepted");
+    expect(server.requests.findIndex((request) => request.method === "thread/inject_items"))
+      .toBeLessThan(server.requests.findIndex((request) => request.method === "thread/realtime/start"));
+    expect(fs.readFileSync(transcriptPath, "utf8")).toContain(started.personaBootstrap.itemId);
+  } finally {
+    await host.release();
+    fs.rmSync(isolated, { recursive: true, force: true });
+  }
+});
+
 test("a rejected persona insertion retries the same resolved payload and stable receipt", async () => {
   const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-bootstrap-retry-"));
   const transcriptPath = path.join(isolated, "voice-thread.jsonl");
@@ -3567,12 +3597,16 @@ test("a rejected persona insertion retries the same resolved payload and stable 
     spawnProcess: fakeSpawn(server),
   });
   try {
-    const rejected = await host.startRealtimeWebRtc("v=0\r\nretry-offer");
+    const rejected = await host.startRealtimeWebRtc(
+      "v=0\r\no=- 505 2 IN IP4 127.0.0.1\r\na=ice-ufrag:rejected\r\n",
+    );
     expect(rejected.personaBootstrap.insertion).toBe("rejected");
 
     fs.writeFileSync(overridePath, "A later edit must not change this call.\n");
     server.injectItemsError = null;
-    const accepted = await host.startRealtimeWebRtc("v=0\r\nretry-offer");
+    const accepted = await host.startRealtimeWebRtc(
+      "v=0\r\no=- 606 2 IN IP4 127.0.0.1\r\na=ice-ufrag:retry\r\n",
+    );
     expect(accepted.personaBootstrap.receiptId).toBe(rejected.personaBootstrap.receiptId);
     expect(accepted.personaBootstrap.itemId).toBe(rejected.personaBootstrap.itemId);
     expect(accepted.personaBootstrap.insertion).toBe("accepted");
@@ -3581,6 +3615,7 @@ test("a rejected persona insertion retries the same resolved payload and stable 
     expect(attempts).toHaveLength(2);
     expect((attempts[1]?.params as { items: Array<{ content: Array<{ text: string }> }> }).items[0]?.content[0]?.text)
       .toBe("Resolved before the rejected insertion.");
+    expect(fs.readFileSync(transcriptPath, "utf8").split(accepted.personaBootstrap.itemId)).toHaveLength(2);
   } finally {
     await host.release();
     if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;

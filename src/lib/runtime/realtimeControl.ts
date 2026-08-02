@@ -19,7 +19,7 @@ interface RealtimeHost {
   startRealtimeWebRtc(sdp: string): Promise<{
     sdp: string | null;
     realtimeSessionId: string | null;
-    personaBootstrap?: VoicePersonaBootstrapReceipt;
+    personaBootstrap: VoicePersonaBootstrapReceipt;
   }>;
   appendRealtimeSpeech(text: string): Promise<void>;
   deliverRealtimeWorkerResponse?(delivery: RuntimeVoiceDelivery): Promise<{
@@ -112,7 +112,10 @@ export async function executeRealtimeControl(
         return { status: 400, body: { error: "a valid WebRTC SDP offer is required" } };
       }
       const answer = await host.startRealtimeWebRtc(sdp);
-      if (answer.personaBootstrap?.insertion === "rejected") {
+      if (!answer.personaBootstrap) {
+        return { status: 409, body: { error: "Codex returned no voice persona bootstrap receipt" } };
+      }
+      if (answer.personaBootstrap.insertion === "rejected") {
         const diagnostic = redactCodexHostDiagnostic(answer.personaBootstrap.diagnostic ?? "Voice persona insertion was rejected");
         return {
           status: 409,

@@ -961,7 +961,7 @@ export class CodexAppServerHost implements EngineHost {
        be reported against this one. */
     this.realtimeFailure = null;
     this.realtimeSessionId = null;
-    const personaBootstrapIdentity = voicePersonaBootstrapIdentity(this.identity.threadId, offer);
+    const personaBootstrapIdentity = voicePersonaBootstrapIdentity(this.identity.threadId);
 
     let pendingStart!: PendingRealtimeStart;
     const answer = new Promise<CodexRealtimeWebRtcResult>((resolve, reject) => {
@@ -983,14 +983,22 @@ export class CodexAppServerHost implements EngineHost {
 
     /* The canonical item is the gate for first speech. Its stable id makes a
        flushed insertion observable after a lost response or host restart. */
+    let exists = false;
     try {
-      const exists = await canonicalVoicePersonaBootstrapExists(
+      exists = await canonicalVoicePersonaBootstrapExists(
         this.identity.path,
         personaBootstrapIdentity.itemId,
       );
-      if (!exists) {
+    } catch {
+      /* The insertion RPC is authoritative. A rollout that cannot be scanned
+         still gets one attempt to persist the canonical item. */
+      console.warn("[voice persona bootstrap] canonical scan unavailable; attempting insertion");
+    }
+    if (!exists) {
+      try {
         const personaBootstrap = this.unresolvedVoicePersonaBootstraps.get(personaBootstrapIdentity.receiptId)
           ?? voicePersonaBootstrap(personaBootstrapIdentity);
+        this.unresolvedVoicePersonaBootstraps.delete(personaBootstrapIdentity.receiptId);
         this.unresolvedVoicePersonaBootstraps.set(personaBootstrapIdentity.receiptId, personaBootstrap);
         while (this.unresolvedVoicePersonaBootstraps.size > MAX_UNRESOLVED_VOICE_BOOTSTRAPS) {
           const oldest = this.unresolvedVoicePersonaBootstraps.keys().next().value;
@@ -1002,25 +1010,25 @@ export class CodexAppServerHost implements EngineHost {
           items: [personaBootstrap.item],
         }, REALTIME_PERSONA_TIMEOUT_MS);
         this.unresolvedVoicePersonaBootstraps.delete(personaBootstrapIdentity.receiptId);
-      } else {
-        this.unresolvedVoicePersonaBootstraps.delete(personaBootstrapIdentity.receiptId);
+      } catch (error) {
+        const pending = this.pendingRealtimeStart;
+        this.pendingRealtimeStart = null;
+        if (!pending) return answer;
+        clearTimeout(pending.timer);
+        const rejected: CodexRealtimeWebRtcRejection = {
+          sdp: null,
+          realtimeSessionId: null,
+          personaBootstrap: {
+            ...personaBootstrapIdentity,
+            insertion: "rejected",
+            diagnostic: safeError(error),
+          },
+        };
+        pending.resolve(rejected);
+        return answer;
       }
-    } catch (error) {
-      const pending = this.pendingRealtimeStart;
-      this.pendingRealtimeStart = null;
-      if (!pending) return answer;
-      clearTimeout(pending.timer);
-      const rejected: CodexRealtimeWebRtcRejection = {
-        sdp: null,
-        realtimeSessionId: null,
-        personaBootstrap: {
-          ...personaBootstrapIdentity,
-          insertion: "rejected",
-          diagnostic: safeError(error),
-        },
-      };
-      pending.resolve(rejected);
-      return answer;
+    } else {
+      this.unresolvedVoicePersonaBootstraps.delete(personaBootstrapIdentity.receiptId);
     }
     if (this.pendingRealtimeStart !== pendingStart) return answer;
     const realtimeContext = selectRealtimeContext(this.events);
