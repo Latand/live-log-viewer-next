@@ -145,15 +145,28 @@ const structuredImages = (imageInput: RuntimeImageCapability | null | undefined)
   imageInput?.supported ? ENABLED : disabled("composer.structuredImagesProtocol");
 
 /**
- * Compact on a pane-less structured host (#862). The cell is engine-aware
- * because the capability is: codex-app-server exposes `thread/compact/start`
- * and reports completion through the `contextCompaction` item, while the Claude
- * stream-json protocol has no client-originated compact control at all. The
- * disabled cell must say which of those two it is — the old blanket "not
- * supported yet" is now wrong for Codex and imprecise for Claude.
+ * Compact on a pane-less structured host (#862). Three facts decide the cell,
+ * and they are exactly the three the server gates on, so a click can only be
+ * refused for a reason that arrived after the render:
+ *
+ * - the engine: codex-app-server exposes `thread/compact/start` and reports
+ *   completion through the `contextCompaction` item, while the Claude
+ *   stream-json protocol has no client-originated compact control at all;
+ * - the host kind, which `dispatchStructuredControl` and journal admission both
+ *   require to be codex-app-server (a session view missing `sessionKey`
+ *   defaults its engine to codex, so the engine alone is not enough);
+ * - the turn, because admission rejects a compaction that would race a live one
+ *   — an enabled button there promises something the journal refuses.
  */
-const structuredCompact = (engine: string | null | undefined): Capability =>
-  engine === "codex" ? ENABLED : disabled("strip.compactEngineUnsupported");
+const structuredCompact = (session: RuntimeSessionView["session"] | undefined): Capability => {
+  if (session?.hostKind !== "codex-app-server" || session.sessionKey?.engine !== "codex") {
+    return disabled("strip.compactEngineUnsupported");
+  }
+  if (session.turn === "running" || session.turn === "interrupt_requested") {
+    return disabled("strip.compactBusyTurn");
+  }
+  return ENABLED;
+};
 
 /** A structured (pane-less) host that is currently alive. Gated by the
     structured-hosts rollback flag: with `structuredControlsEnabled` off no
@@ -298,7 +311,7 @@ export function capabilitiesFor(file: FileEntry, rv: RuntimeSessionView | null, 
           stop: ENABLED,
           // Compact is a real durable control on a Codex structured host and a
           // genuine protocol gap on a Claude one (#862).
-          compact: structuredCompact(rv?.session.sessionKey?.engine),
+          compact: structuredCompact(rv?.session),
           // The composer runtime pill owns selection here (issue #390): the cell
           // is enabled, and per-turn honesty comes from the session's negotiated
           // `runtimeSettings` capability, which disables individual rows when a

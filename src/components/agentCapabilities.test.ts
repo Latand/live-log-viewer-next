@@ -56,6 +56,20 @@ function rv(hostKind: HostKind, host: HostAxis, legacy = false, imageInput?: Run
   };
 }
 
+/** A hosted structured view whose `sessionKey` payload never arrived. */
+function rvWithoutSessionKey(hostKind: HostKind): RuntimeSessionView {
+  const view = rv(hostKind, "hosted");
+  const { sessionKey, ...session } = view.session as RuntimeSessionView["session"] & { sessionKey?: unknown };
+  void sessionKey;
+  return { ...view, session: session as RuntimeSessionView["session"] };
+}
+
+/** A hosted codex structured view on a named turn axis. */
+function rvTurn(turn: "unknown" | "idle" | "running" | "interrupt_requested"): RuntimeSessionView {
+  const view = rv("codex-app-server", "hosted");
+  return { ...view, session: { ...view.session, turn } };
+}
+
 /** Same view with the structured-hosts rollback flag OFF. */
 function rvGateOff(hostKind: HostKind, host: HostAxis): RuntimeSessionView {
   return { ...rv(hostKind, host), structuredControlsEnabled: false };
@@ -257,6 +271,15 @@ test("structured: stop+terminal+kill+runtime enabled, compact follows the engine
   expect(state("compact", f, view)).toBe("enabled");
   // ...and a genuine protocol gap on claude-broker, which names the engine.
   expect(reason("compact", f, rv("claude-broker", "hosted"))).toBe("strip.compactEngineUnsupported");
+  // The cell gates on exactly what the server gates on: host kind as well as
+  // engine. A session view whose sessionKey never arrived defaults its engine to
+  // codex, so the host kind is what keeps a claude-broker cell honest...
+  expect(reason("compact", f, rvWithoutSessionKey("claude-broker"))).toBe("strip.compactEngineUnsupported");
+  // ...and the turn, because admission rejects a compaction that races one.
+  expect(reason("compact", f, rvTurn("running"))).toBe("strip.compactBusyTurn");
+  expect(reason("compact", f, rvTurn("interrupt_requested"))).toBe("strip.compactBusyTurn");
+  expect(state("compact", f, rvTurn("idle"))).toBe("enabled");
+  expect(state("compact", f, rvTurn("unknown"))).toBe("enabled");
   // The composer RuntimePill owns runtime selection here (issue #390); per-row
   // honesty comes from the session's negotiated runtimeSettings capability.
   expect(state("runtime", f, view)).toBe("enabled");

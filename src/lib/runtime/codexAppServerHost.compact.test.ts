@@ -141,7 +141,7 @@ test("compact issues thread/compact/start for the owned thread and never a promp
 
   server.notify("item/completed", {
     threadId: server.threadId,
-    item: { id: "compaction-one", type: "contextCompaction", status: "completed" },
+    item: { id: "compaction-one", type: "contextCompaction" },
   });
 
   expect(await compaction).toEqual({ compactionId: "compaction-one" });
@@ -162,39 +162,40 @@ test("a compaction that has only started is not yet evidence", async () => {
     threadId: server.threadId,
     item: { id: "message-one", type: "agentMessage", text: "still working" },
   });
-  /* `item/started` carries status `in_progress`: the compaction is running, so
-     reporting success here would release queued sends into a compacting
+  /* The item carries no outcome — `{ id, type }` is its whole shape — so the
+     lifecycle phase is the only signal. A started compaction is still running,
+     and reporting success here would release queued sends into a compacting
      thread. */
   server.notify("item/started", {
     threadId: server.threadId,
-    item: { id: "compaction-two", type: "contextCompaction", status: "in_progress" },
+    item: { id: "compaction-two", type: "contextCompaction" },
   });
   await Bun.sleep(10);
   expect(settled).toBe(false);
 
   server.notify("item/completed", {
     threadId: server.threadId,
-    item: { id: "compaction-two", type: "contextCompaction", status: "completed" },
+    item: { id: "compaction-two", type: "contextCompaction" },
   });
   expect(await compaction).toEqual({ compactionId: "compaction-two" });
   await host.release();
 });
 
-test("a compaction the engine did not finish is a known failure, not an unverified one", async () => {
+test("the compaction item the wire actually carries is accepted as evidence", async () => {
   const server = new CompactAppServer();
   const host = await startHost(server);
 
   const compaction = host.compact({ operationId: "op-compact", threadId: server.threadId });
   await Bun.sleep(10);
+  /* `ContextCompactionThreadItem` is exactly `{ id, type }` in the app-server
+     schema — no status, no turn, nothing else. The evidence path must settle on
+     that payload and not on a richer one this repo invented. */
   server.notify("item/completed", {
     threadId: server.threadId,
-    item: { id: "compaction-two", type: "contextCompaction", status: "failed" },
+    item: { id: "compaction-real", type: "contextCompaction" },
   });
 
-  const error = await compaction.then(() => null, (reason: unknown) => reason);
-  expect(error).toBeInstanceOf(StructuredCompactError);
-  expect((error as StructuredCompactError).phase).toBe("refused");
-  expect((error as Error).message).toContain("failed");
+  expect(await compaction).toEqual({ compactionId: "compaction-real" });
   await host.release();
 });
 
@@ -206,7 +207,7 @@ test("a compaction that starts and never finishes terminalizes unverified", asyn
   await Bun.sleep(10);
   server.notify("item/started", {
     threadId: server.threadId,
-    item: { id: "compaction-two", type: "contextCompaction", status: "in_progress" },
+    item: { id: "compaction-two", type: "contextCompaction" },
   });
 
   const error = await compaction.then(() => null, (reason: unknown) => reason);
@@ -224,7 +225,7 @@ test("evidence that arrives before a failing start response still counts", async
   await Bun.sleep(10);
   server.notify("item/completed", {
     threadId: server.threadId,
-    item: { id: "compaction-one", type: "contextCompaction", status: "completed" },
+    item: { id: "compaction-one", type: "contextCompaction" },
   });
   await Bun.sleep(10);
   /* The request leg fails only after the app-server already reported the
@@ -249,7 +250,7 @@ test("a slow compact start does not fence the host on the default request budget
   server.releaseCompact();
   server.notify("item/completed", {
     threadId: server.threadId,
-    item: { id: "compaction-one", type: "contextCompaction", status: "completed" },
+    item: { id: "compaction-one", type: "contextCompaction" },
   });
   expect(await compaction).toEqual({ compactionId: "compaction-one" });
   await host.release();
@@ -319,7 +320,7 @@ test("a repeated compact for one operation awaits the same in-flight control", a
   server.releaseCompact();
   server.notify("item/completed", {
     threadId: server.threadId,
-    item: { id: "compaction-one", type: "contextCompaction", status: "completed" },
+    item: { id: "compaction-one", type: "contextCompaction" },
   });
 
   expect(await first).toEqual({ compactionId: "compaction-one" });

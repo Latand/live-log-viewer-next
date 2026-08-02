@@ -989,7 +989,9 @@ export class CodexAppServerHost implements EngineHost {
    * `turn/start`, no `turn/steer`, no message content anywhere in the request.
    * The promise settles only on a *completed* `contextCompaction` item, so the
    * durable receipt cannot claim success from an accepted request, nor from a
-   * compaction that has merely started.
+   * compaction that has merely started. `thread/compact/start` takes exactly
+   * `{ threadId }` and returns an empty ack, so the item lifecycle is the only
+   * place an outcome can come from.
    */
   async compact(request: RuntimeCompactRequest): Promise<RuntimeCompactOutcome> {
     if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
@@ -1052,28 +1054,26 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   /**
-   * Reads one `contextCompaction` item as compaction evidence. Only a
-   * *completed* compaction settles a waiter: the app-server emits this item
-   * twice, once at `item/started` carrying status `in_progress` and again at
-   * `item/completed`, and treating the first sighting as success would report
-   * `delivered` for a compaction still running — and would release queued
-   * messages into a thread mid-compaction. A completed item whose status is
-   * anything other than `completed` is a compaction the engine did not finish:
-   * that is a known failure, not an unverified one.
+   * Reads one `contextCompaction` item as compaction evidence.
+   *
+   * The item itself carries no outcome — its whole shape is `{ id, type }` per
+   * `ContextCompactionThreadItem` in the app-server schema, and that holds for
+   * every such item in the local event ledgers. The lifecycle *phase* is
+   * therefore the only signal: `item/started` says a compaction began and
+   * `item/completed` says it finished, so only the completed phase settles a
+   * waiter. Settling on the first sighting would report `delivered` for a
+   * compaction still running and release queued messages into a thread
+   * mid-compaction.
+   *
+   * There is consequently no fast failure signal: a compaction that starts and
+   * never completes is caught by `compactEvidenceTimeoutMs` (or sooner by host
+   * death), and terminalizes unverified — which is the honest verdict, since
+   * nothing on the wire says what became of it.
    */
   private acceptCompactionItem(item: unknown, phase: "started" | "completed"): void {
-    if (this.pendingCompactions.size === 0) return;
+    if (phase !== "completed" || this.pendingCompactions.size === 0) return;
     const compaction = record(item);
     if (!compaction) return;
-    const status = stringField(compaction, "status");
-    if (phase !== "completed" || status === "in_progress") return;
-    if (status && status !== "completed") {
-      this.settlePendingCompactions(new StructuredCompactError(
-        `Codex reported the compaction ${status}`,
-        "refused",
-      ));
-      return;
-    }
     this.settlePendingCompactions({ compactionId: stringField(compaction, "id") });
   }
 

@@ -400,8 +400,10 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
     /* #862: one durable operation per confirmed gesture. On a structured host
        this admits a real compaction, so a retry after a timeout or a failed
        response must replay that same operation — the id is only released once
-       the request is known to have landed. */
-    const operationId = compactOperationRef.current ?? `compact_${crypto.randomUUID()}`;
+       the request is known to have landed. `mintIdempotencyKey` is used for the
+       same reason the composer does: `crypto.randomUUID` needs a secure
+       context, and LAN http access gets the fallback. */
+    const operationId = compactOperationRef.current ?? mintIdempotencyKey();
     compactOperationRef.current = operationId;
     try {
       const response = await fetch("/api/tmux", {
@@ -409,10 +411,22 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ action: "compact", path: file.path, operationId }),
       });
-      const body = (await response.json()) as { ok?: boolean; error?: string };
-      const accepted = response.ok && Boolean(body.ok);
+      const body = (await response.json()) as {
+        ok?: boolean;
+        error?: string;
+        receipt?: { status?: string; reason?: string | null };
+      };
+      /* A structured control answers 202 `ok` for an admitted receipt AND for a
+         one the journal refused, so the receipt — not the HTTP status — decides
+         what the operator is told. Announcing a compaction that was rejected
+         (a live turn is the ordinary case) would leave them waiting for a band
+         that never arrives. */
+      const rejected = body.receipt?.status === "rejected";
+      const accepted = response.ok && Boolean(body.ok) && !rejected;
       if (accepted) compactOperationRef.current = null;
-      setStatus(accepted ? { kind: "ok", text: t("composer.compactSent") } : { kind: "err", text: body.error ?? t("composer.failedCompact") });
+      setStatus(accepted
+        ? { kind: "ok", text: t("composer.compactSent") }
+        : { kind: "err", text: body.receipt?.reason ?? body.error ?? t("composer.failedCompact") });
     } catch {
       setStatus({ kind: "err", text: t("common.serverUnavailable") });
     } finally {

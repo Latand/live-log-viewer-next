@@ -351,6 +351,7 @@ export const en = {
   "strip.compactSubagent": "not available for subagents",
   "strip.structuredUnsupported": "the structured host does not support this action yet",
   "strip.compactEngineUnsupported": "this engine has no compact control",
+  "strip.compactBusyTurn": "not while a turn is running",
   "strip.resolving": "resolving the agent host…",
 
   // Dead-host banner (issue #247)

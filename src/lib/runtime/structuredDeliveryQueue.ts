@@ -586,7 +586,15 @@ export class StructuredDeliveryQueue {
       return { blocked: false, terminated: false };
     }
     const host = this.resolveHost(effect.conversationId);
-    if (!host) return { blocked: true, terminated: false };
+    /* Controls sort ahead of sends, and a compaction can hold that slot for
+       minutes, so an unavailable host must start the same recovery a send would
+       — otherwise every message queued behind this control waits on a host
+       nobody asked to come back. */
+    if (!host) {
+      await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
+      await this.recoverUnavailableHost(effect);
+      return { blocked: true, terminated: false };
+    }
     if (!hostSupportsCompact(host)) {
       await this.port.transition(effect.operationId, "failed", { reason: "unsupported-capability" });
       return { blocked: false, terminated: false };
@@ -594,6 +602,7 @@ export class StructuredDeliveryQueue {
     const health = await host.health();
     if (health.status === "dead" || health.status === "unhosted") {
       await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
+      await this.recoverUnavailableHost(effect);
       return { blocked: true, terminated: false };
     }
     /* Admission fenced the durable turn axis; this re-reads the live host, so a
@@ -693,7 +702,7 @@ export class StructuredDeliveryQueue {
     return latest.operationId === effect.operationId && latest.eventSeq === effect.eventSeq;
   }
 
-  private async recoverUnavailableHost(effect: SendEffect): Promise<void> {
+  private async recoverUnavailableHost(effect: Pick<DeliveryEffect, "conversationId" | "operationId">): Promise<void> {
     if (!this.recoverHost) return;
     try {
       if (await this.recoverHost(effect.conversationId)) {

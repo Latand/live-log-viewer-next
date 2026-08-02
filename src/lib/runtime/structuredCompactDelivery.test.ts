@@ -263,22 +263,63 @@ test("a rejected compact request terminalizes as failed and an unverified one as
   ]);
 });
 
-test("a lost host keeps the compact control queued for recovery", async () => {
-  const { port, transitions } = recorder([compactEffect()], ["failed", "uncertain", "delivered"]);
-  const queue = new StructuredDeliveryQueue(port, () => null);
+test("a recovered host lets a queued compaction reach the engine on the next pass", async () => {
+  /* Controls sort ahead of sends, so a compaction parked in front of the queue
+     must not be the reason nobody asks the host to come back. */
+  const sent: QueueEntry[] = [];
+  let compactions = 0;
+  const recovered: CompactCapableHost = Object.assign(baseHost(sent), {
+    compact: async () => { compactions += 1; return { compactionId: "compaction-one" }; },
+  });
+  let hosted = false;
+  const recoveries: string[] = [];
+  const { port, transitions, settled } = recorder([compactEffect()]);
+  const queue = new StructuredDeliveryQueue(
+    port,
+    () => (hosted ? recovered : null),
+    undefined,
+    undefined,
+    async (conversationId) => {
+      recoveries.push(conversationId);
+      hosted = true;
+      return true;
+    },
+  );
 
   await queue.drain();
+  await settled;
 
-  expect(transitions).toEqual([]);
+  expect(recoveries).toEqual(["conversation-one"]);
+  expect(compactions).toBe(1);
+  expect(transitions).toEqual([
+    ["op-compact", "queued", "dead-host"],
+    ["op-compact", "delivering", undefined],
+    ["op-compact", "delivered", "compaction:compaction-one"],
+  ]);
+});
 
+test("a dead host asks for recovery and terminalizes the compaction when none starts", async () => {
   const sent: QueueEntry[] = [];
   const dead: CompactCapableHost = Object.assign(baseHost(sent), {
     compact: async () => ({ compactionId: null }),
   });
   dead.health = async () => idleState({ status: "dead" });
-  const deadRun = recorder([compactEffect()], ["queued"]);
-  await new StructuredDeliveryQueue(deadRun.port, () => dead).drain();
-  expect(deadRun.transitions).toEqual([["op-compact", "queued", "dead-host"]]);
+  const recoveries: string[] = [];
+  const { port, transitions, settled } = recorder([compactEffect()]);
+  const queue = new StructuredDeliveryQueue(
+    port,
+    () => dead,
+    undefined,
+    undefined,
+    async (conversationId) => { recoveries.push(conversationId); return false; },
+  );
+
+  await queue.drain();
+  await settled;
+
+  expect(recoveries).toEqual(["conversation-one"]);
+  expect(transitions.map(([, status]) => status)).toEqual(["queued", "failed"]);
+  expect(transitions.at(-1)![2]).toContain("recovery");
 });
 
 test("a queued message behind an in-flight compaction waits for the control to settle", async () => {
