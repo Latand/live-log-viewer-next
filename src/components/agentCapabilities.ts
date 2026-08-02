@@ -144,6 +144,32 @@ const enabledWithNote = (note: MessageKey): Capability => ({ state: "enabled", n
 const structuredImages = (imageInput: RuntimeImageCapability | null | undefined): Capability =>
   imageInput?.supported ? ENABLED : disabled("composer.structuredImagesProtocol");
 
+/**
+ * Compact on a pane-less structured host (#862). Three facts decide the cell,
+ * and they are exactly the three the server gates on, so a click can only be
+ * refused for a reason that arrived after the render:
+ *
+ * - the engine: codex-app-server exposes `thread/compact/start` and reports
+ *   completion through the `contextCompaction` item, while the Claude
+ *   stream-json protocol has no client-originated compact control at all;
+ * - the host kind, which `dispatchStructuredControl` and journal admission both
+ *   require to be codex-app-server (a session view missing `sessionKey`
+ *   defaults its engine to codex, so the engine alone is not enough);
+ * - the turn, because admission rejects a compaction that would race a live one
+ *   — an enabled button there promises something the journal refuses. Both
+ *   halves of that rejection are read: the turn axis AND a non-null
+ *   `activeTurnId`, which a session can project while its axis still says idle.
+ */
+const structuredCompact = (session: RuntimeSessionView["session"] | undefined): Capability => {
+  if (session?.hostKind !== "codex-app-server" || session.sessionKey?.engine !== "codex") {
+    return disabled("strip.compactEngineUnsupported");
+  }
+  if (session.turn === "running" || session.turn === "interrupt_requested" || session.activeTurnId) {
+    return disabled("strip.compactBusyTurn");
+  }
+  return ENABLED;
+};
+
 /** A structured (pane-less) host that is currently alive. Gated by the
     structured-hosts rollback flag: with `structuredControlsEnabled` off no
     session — however its registry state reads — counts as a structured host, so
@@ -223,12 +249,12 @@ export function surfaceFor(file: FileEntry, rv: RuntimeSessionView | null, opts:
 }
 
 /**
- * Resolve every control's capability for a conversation. Structured Kill ships
- * through the durable structured control channel, and structured images follow
- * the session's negotiated `capabilities.imageInput`. The remaining ⚠ cells —
- * compact and reconfigure on a structured host — stay `disabled` with a tooltip
- * because `dispatchStructuredControl` still rejects them (409); they flip to
- * `enabled` by editing exactly one row here once the host supports them.
+ * Resolve every control's capability for a conversation. Structured Kill and
+ * Compact ship through the durable structured control channel, structured
+ * images follow the session's negotiated `capabilities.imageInput`, and
+ * structured Compact follows the engine's own control protocol
+ * (`structuredCompact`). A cell that stays `disabled` here names a real gap in
+ * the engine or the surface, never a Viewer backlog item.
  */
 export function capabilitiesFor(file: FileEntry, rv: RuntimeSessionView | null, opts: HostOptions = {}): StripCapabilities {
   const surface = surfaceFor(file, rv, opts);
@@ -285,15 +311,16 @@ export function capabilitiesFor(file: FileEntry, rv: RuntimeSessionView | null, 
         surface,
         controls: {
           stop: ENABLED,
-          compact: disabled("strip.structuredUnsupported"),
+          // Compact is a real durable control on a Codex structured host and a
+          // genuine protocol gap on a Claude one (#862).
+          compact: structuredCompact(rv?.session),
           // The composer runtime pill owns selection here (issue #390): the cell
           // is enabled, and per-turn honesty comes from the session's negotiated
           // `runtimeSettings` capability, which disables individual rows when a
           // host can't honor a live change (never a whole-control fence).
           runtime: ENABLED,
-          // Kill enters the durable structured control channel (one structured
-          // request, never /api/proc). Compact and reconfigure stay fenced:
-          // dispatchStructuredControl still answers them with a 409.
+          // Kill and compact enter the durable structured control channel (one
+          // structured request, never /api/proc).
           kill: ENABLED,
           terminal: ENABLED,
           images: structuredImages(rv?.session.capabilities?.imageInput),

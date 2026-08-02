@@ -257,8 +257,13 @@ export async function bindStructuredDeliveryQueue(
     {
       effects: (kinds, afterEventSeq) => client.effectBatch(kinds, afterEventSeq),
       ...(typeof client.events === "function" ? { events: (afterEventSeq: number) => client.events(afterEventSeq) } : {}),
+      status: async (operationId: string) => (await client.operationStatus(operationId))?.receipt ?? null,
       transition: async (operationId, status, details) => {
         const result = await client.transitionOperation(operationId, status, details);
+        /* Only the two states a held delivery can settle into. A compaction's
+           `uncertain` is absent on purpose and costs nothing: this projection
+           is keyed on `heldDeliveries`, which only a composer message ever
+           creates, so a compact operation has no row here to settle (#862). */
         if (status !== "delivered" && status !== "failed") return;
         const conversationId = result.receipt.conversationId;
         if (!conversationId?.startsWith("conversation_")) return;

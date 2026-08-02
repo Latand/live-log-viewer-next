@@ -82,6 +82,7 @@ const STRUCTURED_HOST_OPERATION_EFFECT_KINDS = [
   "runtime.answer",
   "runtime.spawn",
   "runtime.reconfigure",
+  "runtime.compact",
 ] as const;
 
 interface StructuredStartupSignals {

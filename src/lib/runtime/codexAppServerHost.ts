@@ -33,9 +33,16 @@ import type {
   EngineHost,
   HostState,
   QueueEntry,
+  RuntimeCompactOutcome,
+  RuntimeCompactRequest,
   RuntimeEvent,
 } from "./engineHost";
-import { normalizeQueueEntry, RuntimeReplayGapError, StructuredHostAdoptionCleanupError } from "./engineHost";
+import {
+  normalizeQueueEntry,
+  RuntimeReplayGapError,
+  StructuredCompactError,
+  StructuredHostAdoptionCleanupError,
+} from "./engineHost";
 import {
   FileRuntimeEventStore,
   nextRuntimeEventSequence,
@@ -88,6 +95,13 @@ type VoicePersonaBootstrapInsertion = {
   owner: PendingRealtimeStart;
   promise: Promise<void>;
 };
+type PendingCompaction = {
+  promise: Promise<RuntimeCompactOutcome>;
+  resolve(outcome: RuntimeCompactOutcome): void;
+  reject(error: Error): void;
+  timer: ReturnType<typeof setTimeout> | undefined;
+};
+
 type PendingDelivery = {
   text: string;
   contentDigest: string;
@@ -165,6 +179,7 @@ export interface CodexAppServerHostOptions {
   realtimePersonaTimeoutMs?: number;
   realtimeStartTimeoutMs?: number;
   deliveryConfirmationTimeoutMs?: number;
+  compactEvidenceTimeoutMs?: number;
   shutdownGraceMs?: number;
   initialEventCursor?: number;
   onEventCursorRecovery?: RuntimeEventCursorRecoveryReporter;
@@ -255,6 +270,10 @@ const DESKTOP_ENV_ALLOWLIST = [
 ] as const;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS = 5 * 60_000;
+/** How long a compaction may run before its outcome counts as unverified.
+    Compaction is a model call over the whole thread, so the budget is generous;
+    past it the operation terminalizes visibly rather than hanging (#862). */
+const DEFAULT_COMPACT_EVIDENCE_TIMEOUT_MS = 5 * 60_000;
 const ACTIVE_THREAD_READ_TIMEOUT_MULTIPLIER = 3;
 const LATE_THREAD_READ_RESPONSE_TTL_MULTIPLIER = 3;
 const MIN_LATE_THREAD_READ_RESPONSE_TTL_MS = 1_000;
@@ -320,6 +339,7 @@ const MUTATING_RPC_METHODS = new Set([
   "thread/realtime/start",
   "thread/realtime/stop",
   "thread/inject_items",
+  "thread/compact/start",
 ]);
 
 function record(value: unknown): JsonObject | null {
@@ -573,6 +593,7 @@ export class CodexAppServerHost implements EngineHost {
   private readonly realtimePersonaTimeoutMs: number;
   private readonly realtimeStartTimeoutMs: number;
   private readonly deliveryConfirmationTimeoutMs: number;
+  private readonly compactEvidenceTimeoutMs: number;
   private readonly shutdownGraceMs: number;
   private readonly eventStore: RuntimeEventStore;
   private readonly effort: string | undefined;
@@ -603,6 +624,7 @@ export class CodexAppServerHost implements EngineHost {
     contentDigest: string | null;
   }>();
   private readonly pendingDeliveries = new Map<string, PendingDelivery>();
+  private readonly pendingCompactions = new Map<string, PendingCompaction>();
   private readonly realtimeDeliveries = new Map<string, RealtimeDeliveryState>();
   private readonly voiceStreams = new Map<string, VoiceStreamState>();
   /* A host's thread id is immutable, so one memo covers its one stable persona
@@ -663,6 +685,7 @@ export class CodexAppServerHost implements EngineHost {
     this.realtimeStartTimeoutMs = options.realtimeStartTimeoutMs ?? REALTIME_START_TIMEOUT_MS;
     this.deliveryConfirmationTimeoutMs = options.deliveryConfirmationTimeoutMs
       ?? DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS;
+    this.compactEvidenceTimeoutMs = options.compactEvidenceTimeoutMs ?? DEFAULT_COMPACT_EVIDENCE_TIMEOUT_MS;
     this.shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
     this.eventStore = options.eventStore ?? new FileRuntimeEventStore();
     this.effort = options.effort;
@@ -957,6 +980,162 @@ export class CodexAppServerHost implements EngineHost {
     }
     if (!turnRef || this.activeTurnId !== turnRef) throw new Error("active turn fence is stale");
     await this.rpc("turn/interrupt", { threadId: this.identity.threadId, turnId: turnRef });
+  }
+
+  /**
+   * Manual context compaction as an engine control (#862). It travels the
+   * app-server control channel — `thread/compact/start` for the thread this
+   * host owns — so there is no path by which it becomes a user turn: no
+   * `turn/start`, no `turn/steer`, no message content anywhere in the request.
+   * The promise settles only on a *completed* `contextCompaction` item, so the
+   * durable receipt cannot claim success from an accepted request, nor from a
+   * compaction that has merely started. `thread/compact/start` takes exactly
+   * `{ threadId }` and returns an empty ack, so nothing about the outcome comes
+   * back on the request leg.
+   */
+  async compact(request: RuntimeCompactRequest): Promise<RuntimeCompactOutcome> {
+    if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
+      throw new StructuredCompactError("Codex app-server host is unavailable", "refused");
+    }
+    if (request.threadId && request.threadId !== this.identity.threadId) {
+      throw new StructuredCompactError("compact target thread is not the thread this host owns", "refused");
+    }
+    /* The boundary refuses a live turn even though admission already fenced it:
+       the turn may have started between admission and execution, and compacting
+       underneath a running turn is exactly the race this control must not run. */
+    if (this.activeTurnId) {
+      throw new StructuredCompactError("a turn is active; compaction would race it", "refused");
+    }
+    const existing = this.pendingCompactions.get(request.operationId);
+    if (existing) return existing.promise;
+    /* One compaction per thread at a time. The delivery queue already holds a
+       second request back, so reaching here means something bypassed it — and
+       a concurrent `thread/compact/start` would compact the thread twice and
+       leave both waiters settling on whichever item arrived first. */
+    if (this.pendingCompactions.size > 0) {
+      throw new StructuredCompactError("a compaction is already running on this thread", "refused");
+    }
+
+    let settle!: PendingCompaction;
+    const promise = new Promise<RuntimeCompactOutcome>((resolve, reject) => {
+      settle = { promise: undefined as unknown as Promise<RuntimeCompactOutcome>, resolve, reject, timer: undefined };
+    });
+    settle.promise = promise;
+    /* Registered before the request so a compaction the app-server reports
+       immediately cannot land in the gap and go unobserved. */
+    this.pendingCompactions.set(request.operationId, settle);
+    void promise.catch(() => undefined);
+    try {
+      /* Budgeted like the compaction itself, not like an ordinary call.
+         `thread/compact/start` is a mutating method, so the default 30 s
+         request budget would fail the whole host — and take the operator's live
+         conversation with it — the moment a large thread takes longer than that
+         to begin compacting.
+
+         The fence at the far end of this budget is deliberate, not inherited: a
+         mutating call whose ack never arrives has left the thread in a state
+         this host cannot describe, and every other mutating method here fails
+         closed for that reason. Five minutes of silence on an ack that normally
+         returns at once is that case. The compaction itself terminalizes
+         `unverified` either way. */
+      await this.rpc(
+        "thread/compact/start",
+        { threadId: this.identity.threadId },
+        this.compactEvidenceTimeoutMs,
+      );
+    } catch (error) {
+      /* The evidence may have won the race: a compaction the app-server already
+         reported is a fact, and a late failure on the request leg must not
+         overwrite it. */
+      if (this.pendingCompactions.get(request.operationId) !== settle) return promise;
+      this.pendingCompactions.delete(request.operationId);
+      const message = safeError(error);
+      /* A refusal proves nothing was compacted; a request that timed out may
+         still have started one, and `thread/compact/start` is registered as
+         mutating so the transport says which of the two happened. */
+      throw new StructuredCompactError(message, /outcome is uncertain/.test(message) ? "unverified" : "refused");
+    }
+    if (this.pendingCompactions.get(request.operationId) === settle) {
+      settle.timer = setTimeout(() => {
+        this.pendingCompactions.delete(request.operationId);
+        settle.reject(new StructuredCompactError(
+          "Codex compaction evidence did not arrive; the outcome is unverified",
+          "unverified",
+        ));
+      }, this.compactEvidenceTimeoutMs);
+    }
+    return promise;
+  }
+
+  /**
+   * Reads one `contextCompaction` item as compaction evidence.
+   *
+   * The item itself carries no outcome — its whole shape is `{ id, type }` per
+   * `ContextCompactionThreadItem` in the app-server schema, and that holds for
+   * every such item in the local event ledgers. The lifecycle *phase* is
+   * therefore the only signal it offers: `item/started` says a compaction began
+   * and `item/completed` says it finished, so only the completed phase settles a
+   * waiter. Settling on the first sighting would report `delivered` for a
+   * compaction still running and release queued messages into a thread
+   * mid-compaction.
+   *
+   * There is consequently no fast failure signal: a compaction that starts and
+   * never completes is caught by `compactEvidenceTimeoutMs` (or sooner by host
+   * death), and terminalizes unverified — which is the honest verdict, since
+   * nothing on the wire says what became of it.
+   *
+   * Nor is there anything to correlate on. The item's `id` is minted by the
+   * engine and appears for the first time in this notification, so ANY completed
+   * compaction on the owned thread settles the waiter — including an
+   * auto-compaction that happened to land in the same window, whose id the
+   * receipt would then record. Two guards make that window small rather than
+   * closed: `compact()` refuses while a turn is active, and the delivery queue
+   * holds messages behind an unfinished compaction, so the thread should have no
+   * turn running to auto-compact. Recorded as a known limit of `{ id, type }`.
+   */
+  private acceptCompactionItem(item: unknown, phase: "started" | "completed"): void {
+    if (phase !== "completed" || this.pendingCompactions.size === 0) return;
+    const compaction = record(item);
+    if (!compaction) return;
+    this.settlePendingCompactions({ compactionId: stringField(compaction, "id") });
+  }
+
+  /**
+   * The deprecated `thread/compacted` notification, accepted as a second
+   * evidence channel for the thread this host owns.
+   *
+   * Every `contextCompaction` item observed locally came from auto-compaction
+   * *inside a turn*, and a manual `thread/compact/start` runs against an idle
+   * thread — nothing available here proves the app-server emits the item
+   * lifecycle in that case too. If it only sends this notification, reading the
+   * item alone would leave every manual compaction to time out as unverified
+   * and the control would never once report success. So the item stays the
+   * preferred channel (it is the documented replacement, and it names the
+   * compaction), and this one is a corroborating fallback rather than the
+   * primary source: whichever arrives first settles the waiters.
+   */
+  private acceptCompactedNotification(params: JsonObject): void {
+    if (this.pendingCompactions.size === 0) return;
+    if (stringField(params, "threadId") !== this.identity.threadId) return;
+    this.settlePendingCompactions({ compactionId: null });
+  }
+
+  /** A host that dies mid-compaction leaves the engine outcome unknown, so the
+      waiters reject as `unverified` and terminalize the receipt uncertain. */
+  private rejectPendingCompactions(error: Error): void {
+    this.settlePendingCompactions(new StructuredCompactError(safeError(error), "unverified"));
+  }
+
+  /** One thread compacts once at a time, so every waiter shares the outcome. */
+  private settlePendingCompactions(outcome: RuntimeCompactOutcome | StructuredCompactError): void {
+    if (this.pendingCompactions.size === 0) return;
+    const waiting = [...this.pendingCompactions.values()];
+    this.pendingCompactions.clear();
+    for (const compaction of waiting) {
+      if (compaction.timer) clearTimeout(compaction.timer);
+      if (outcome instanceof StructuredCompactError) compaction.reject(outcome);
+      else compaction.resolve(outcome);
+    }
   }
 
   async startRealtimeWebRtc(sdp: string): Promise<CodexRealtimeWebRtcResult> {
@@ -1512,6 +1691,11 @@ export class CodexAppServerHost implements EngineHost {
     this.rejectRealtimeStart(new Error("Codex app-server host released"));
     this.rejectPendingAnswers(new Error("Codex app-server host released"));
     this.rejectPendingDeliveries(new Error("Codex app-server host released"));
+    /* A graceful release is the one teardown `fail()` never sees — `close`
+       skips it while `releasing` is set — so a compaction waiting on evidence
+       would otherwise hang until its own timeout, holding this conversation's
+       queue behind it for minutes after the host is gone (#862). */
+    this.rejectPendingCompactions(new Error("Codex app-server host released"));
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);
       request.reject(new Error("Codex app-server host released"));
@@ -2411,6 +2595,10 @@ export class CodexAppServerHost implements EngineHost {
         phase,
         ...(voiceResponse !== undefined ? { voiceResponse } : {}),
       });
+      /* #862: the compaction item is the completion signal for a manual
+         compact control. It is read after the emit so the durable event ledger
+         carries the evidence before any receipt terminalizes on it. */
+      if (record(params.item)?.type === "contextCompaction") this.acceptCompactionItem(params.item, phase);
       return;
     }
     if (method === "turn/completed" && turnId) {
@@ -2438,6 +2626,10 @@ export class CodexAppServerHost implements EngineHost {
       this.emit({ kind: "limits", snapshot: params });
       return;
     }
+    if (method === "thread/compacted") {
+      this.acceptCompactedNotification(params);
+      return;
+    }
     if (method === "thread/status/changed") {
       const status = threadStatus(params);
       if (status) this.emitThreadStatus(status);
@@ -2453,6 +2645,7 @@ export class CodexAppServerHost implements EngineHost {
     this.rejectRealtimeStart(error);
     this.rejectPendingAnswers(error);
     this.rejectPendingDeliveries(error);
+    this.rejectPendingCompactions(error);
     this.attentions.clear();
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);
@@ -2474,6 +2667,7 @@ export class CodexAppServerHost implements EngineHost {
     this.rejectRealtimeStart(error);
     this.rejectPendingAnswers(error);
     this.rejectPendingDeliveries(error);
+    this.rejectPendingCompactions(error);
     this.attentions.clear();
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);

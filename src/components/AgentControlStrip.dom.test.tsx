@@ -22,7 +22,18 @@ function file(overrides: Partial<FileEntry> = {}): FileEntry {
 }
 
 function rv(hostKind: HostKind, host: HostAxis): RuntimeSessionView {
-  return { session: { hostKind, host } as RuntimeSessionView["session"], uiState: {} as RuntimeSessionView["uiState"], attentions: [], receipts: [], legacy: false, structuredControlsEnabled: true };
+  return {
+    session: {
+      hostKind,
+      host,
+      sessionKey: { engine: hostKind === "claude-broker" ? "claude" : "codex", sessionId: "session-one" },
+    } as RuntimeSessionView["session"],
+    uiState: {} as RuntimeSessionView["uiState"],
+    attentions: [],
+    receipts: [],
+    legacy: false,
+    structuredControlsEnabled: true,
+  };
 }
 
 function render(f: FileEntry, view: RuntimeSessionView | null, extra: Partial<Parameters<typeof AgentControlStripView>[0]> = {}) {
@@ -67,12 +78,20 @@ test("hidden controls never reach the DOM (resume hides stop/compact/kill)", () 
 });
 
 test("a disabled control keeps aria-disabled and appends the reason to its aria-label", () => {
-  const html = render(file({ proc: "running" }), rv("codex-app-server", "hosted"));
+  // A structured Claude host has no compact control in its protocol (#862), so
+  // that cell is the disabled one and names the engine gap.
+  const html = render(file({ proc: "running" }), rv("claude-broker", "hosted"));
   expect(html).toContain('data-strip-surface="structured"');
-  // compact is disabled with the structured-fence reason appended to the aria-label
-  const reason = translate("en", "strip.structuredUnsupported");
+  const reason = translate("en", "strip.compactEngineUnsupported");
   expect(html).toContain('aria-disabled="true"');
   expect(html).toContain(`context (/compact) — ${reason}`);
+});
+
+test("a structured Codex host renders Compact as a real, enabled control (#862)", () => {
+  const html = render(file({ proc: "running" }), rv("codex-app-server", "hosted"));
+  expect(html).toContain('data-strip-surface="structured"');
+  expect(html).toContain('aria-label="Compact the agent&#x27;s context (/compact)"');
+  expect(html).not.toContain(`context (/compact) — ${translate("en", "strip.compactEngineUnsupported")}`);
 });
 
 test("the structured surface renders no mode chip — the «structured» badge is gone (issue #390)", () => {

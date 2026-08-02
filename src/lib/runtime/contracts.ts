@@ -42,7 +42,7 @@ export interface RuntimeSessionAxes {
 
 export type RuntimeAttentionKind = "approval" | "permission" | "question" | "waiting_heuristic";
 export type RuntimeAttentionState = "open" | "resolving" | "resolved" | "expired-confirmed" | "cancelled" | "resolution-unknown";
-export type RuntimeOperationKind = "send" | "steer" | "interrupt" | "answer" | "kill" | "spawn" | "reconfigure";
+export type RuntimeOperationKind = "send" | "steer" | "interrupt" | "answer" | "kill" | "spawn" | "reconfigure" | "compact";
 export type RuntimeReceiptStatus =
   | "pending"
   | "delivering"
@@ -289,6 +289,46 @@ export type RuntimePendingReconfigure = Omit<RuntimeReconfigureCommand, "kind" |
   operationId: string;
 };
 
+/**
+ * A manual context compaction requested against one owned structured
+ * generation (issue #862). It is a control, never a message: the command
+ * carries no text and no images, so no path through the runtime can replay it
+ * as a user prompt. `sessionKey` fences the compaction to the exact generation
+ * the caller was looking at. There is deliberately no turn fence: a compaction
+ * is only ever admitted against an idle generation, so any turn a caller could
+ * name would already have made the request a `busy-turn` rejection.
+ */
+export interface RuntimeCompactCommand extends RuntimeCommandBase {
+  kind: "compact";
+  sessionKey: { engine: RuntimeEngine; sessionId: string };
+}
+
+/** An engine's truthful support for one client-originated engine control. */
+export interface RuntimeControlCapability {
+  control: "compact";
+  engine: RuntimeEngine;
+  supported: boolean;
+  reason?: string;
+}
+
+/**
+ * Codex app-server 0.146 exposes `thread/compact/start` and reports completion
+ * through the `contextCompaction` item lifecycle. The Claude stream-json
+ * transport exposes interrupt as its only client-originated control and has no
+ * manual compact subtype, so the capability reports false with the reason
+ * rather than degrading into a `/compact` prompt.
+ */
+export function runtimeCompactCapability(engine: RuntimeEngine): RuntimeControlCapability {
+  return engine === "codex"
+    ? { control: "compact", engine, supported: true }
+    : {
+        control: "compact",
+        engine,
+        supported: false,
+        reason: "The Claude stream-json protocol has no client-originated compact control; only interrupt is exposed.",
+      };
+}
+
 export interface RuntimeAnswerCommand extends RuntimeCommandBase {
   kind: "answer";
   attentionId: string;
@@ -307,7 +347,7 @@ export interface RuntimeSpawnCommand extends RuntimeCommandBase {
   sessionId?: string | null;
 }
 
-export type RuntimeOperationCommand = RuntimeSendCommand | RuntimeInterruptCommand | RuntimeAnswerCommand | RuntimeKillCommand | RuntimeSpawnCommand | RuntimeReconfigureCommand;
+export type RuntimeOperationCommand = RuntimeSendCommand | RuntimeInterruptCommand | RuntimeAnswerCommand | RuntimeKillCommand | RuntimeSpawnCommand | RuntimeReconfigureCommand | RuntimeCompactCommand;
 
 export interface RuntimeOperationResult {
   operationId: string;

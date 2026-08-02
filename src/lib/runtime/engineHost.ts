@@ -99,6 +99,43 @@ export interface EngineHost {
   release(): Promise<void>;
 }
 
+export interface RuntimeCompactRequest {
+  /** The durable operation this control belongs to. A repeat for the same id
+      joins the in-flight control instead of issuing a second compaction. */
+  operationId: string;
+  /** The generation the caller admitted the operation against. A mismatch is
+      refused so a re-seated host can never compact someone else's thread. */
+  threadId: string;
+}
+
+/** The compaction the engine actually performed, identified by its lifecycle
+    item so the durable receipt records which compaction closed the operation. */
+export interface RuntimeCompactOutcome {
+  compactionId: string | null;
+}
+
+/** A host whose engine exposes a client-originated compact control (#862). */
+export interface CompactCapableHost extends EngineHost {
+  compact(request: RuntimeCompactRequest): Promise<RuntimeCompactOutcome>;
+}
+
+export function hostSupportsCompact(host: EngineHost): host is CompactCapableHost {
+  return typeof (host as Partial<CompactCapableHost>).compact === "function";
+}
+
+/**
+ * A compact control that did not succeed. `phase` is the whole point:
+ * `refused` means the engine did not compact the thread and everyone can see
+ * why, while `unverified` means the request may have landed and nothing proved
+ * what became of it — the two must terminalize differently.
+ */
+export class StructuredCompactError extends Error {
+  constructor(message: string, readonly phase: "refused" | "unverified") {
+    super(message);
+    this.name = "StructuredCompactError";
+  }
+}
+
 export class StructuredHostAdoptionCleanupError<Host extends EngineHost = EngineHost> extends Error {
   constructor(message: string, readonly host: Host, options?: ErrorOptions) {
     super(message, options);
