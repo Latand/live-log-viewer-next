@@ -1,6 +1,7 @@
 import { identityAlive, livenessProbe, type LivenessProbe } from "@/lib/agent/accountLiveness";
 import type { AgentRegistryEntry, RegistryFile } from "@/lib/agent/registry";
 import { agentRegistry } from "@/lib/agent/registry";
+import { isAbortError } from "@/lib/deadline";
 import { getPipelines } from "@/lib/pipelines/engine";
 import type { Pipeline, PipelineStageAttempt } from "@/lib/pipelines/types";
 import { completedFileScan } from "@/lib/scanner/scanCache";
@@ -149,6 +150,10 @@ export interface AgentLivenessSelectionReport {
       hosts younger than the generation. Non-zero means the catalog is behind
       the runtime, which is the one thing a clean-looking report must not hide. */
   recovered: number;
+  /** More active hosts were missing from the generation than one call recovers,
+      so the newest `HOSTED_RECOVERY_MAX` of them were resolved and the rest
+      were not looked at. */
+  recoveryTruncated: boolean;
   /** Rows a transcript tail read was attempted for; `unreadable` is the subset
       of those whose tail could not be used. */
   hydrated: number;
@@ -172,6 +177,16 @@ export interface AgentLivenessSnapshot {
   /** Conversations whose lifecycle is `stalled`, so a poller can branch on one
       number instead of scanning the list. */
   stalledCount: number;
+  /**
+   * The subset of `stalledCount` whose silence was measured from a transcript
+   * read rather than the generation's file mtime (#860).
+   *
+   * A generation can be a refresh cadence old while the stall threshold is ten
+   * minutes, so a projection-backed row can read as stalled after resuming.
+   * This is the number that carries the same discipline the journal applies —
+   * a headline "N stalled" should prefer it.
+   */
+  stalledConfirmedCount: number;
   conversations: AgentLivenessRecord[];
   selection: AgentLivenessSelectionReport;
   timings: AgentLivenessTimings;
@@ -198,7 +213,9 @@ export interface AgentLivenessRequest {
    * nothing responds.
    */
   evidenceDeadlineMs?: number;
-  /** Byte ceiling on transcript-tail hydration for this call. */
+  /** Byte ceiling on transcript-tail hydration for this call. Defaults to the
+      row limit's worth of full tails, so the budget can always cover the rows
+      the limit admits. */
   evidenceByteBudget?: number;
   /** Tail reads in flight at once. */
   evidenceConcurrency?: number;
@@ -207,14 +224,25 @@ export interface AgentLivenessRequest {
 /** Tail reads in flight at once. Small on purpose: a `limit: 10` read is ten
     reads total, and twenty concurrent callers must not multiply into a storm. */
 export const DEFAULT_EVIDENCE_CONCURRENCY = 4;
-/** Bytes one call may charge to transcript evidence. A tail read is clamped to
-    128 KiB, so this is a ceiling of roughly sixty-four tails. */
-export const DEFAULT_EVIDENCE_BYTE_BUDGET = 8 * 1024 * 1024;
 /** Wall clock one call may spend on transcript evidence before the remaining
     rows fall back to the scan projection. */
 export const DEFAULT_EVIDENCE_DEADLINE_MS = 2_000;
 /** What one tail read actually costs, mirroring `readStableTailRecords`. */
-const EVIDENCE_TAIL_BYTES = 131_072;
+export const EVIDENCE_TAIL_BYTES = 131_072;
+
+/**
+ * The default byte budget follows the row limit, so the two agree.
+ *
+ * A fixed budget cannot: at 8 MiB it admitted exactly sixty-four full tails
+ * while the default limit is a hundred, so a default corpus read degraded rows
+ * 65+ to the scan projection on EVERY call — deterministically the same rows,
+ * and the journal gate then never recorded a stall for any of them. The budget
+ * exists to stop a call from reading an unbounded volume; the row limit is
+ * already that bound, and it is clamped to 200, so the ceiling here is 25 MiB.
+ */
+export function defaultEvidenceByteBudget(limit: number): number {
+  return Math.max(1, limit) * EVIDENCE_TAIL_BYTES;
+}
 
 export interface AgentLivenessSources {
   now(): number;
@@ -445,7 +473,7 @@ function hostedTranscriptPaths(snapshot: Pick<RegistryFile, "entries">): Set<str
 /** Ceiling on identity recovery. Bounded by the registry's active hosts in
     practice; the cap keeps a rotted registry from turning a catalog read into a
     walk. */
-const HOSTED_RECOVERY_MAX = 64;
+export const HOSTED_RECOVERY_MAX = 64;
 
 /**
  * The hosts the generation has not caught up with yet, resolved by identity.
@@ -465,15 +493,19 @@ async function recoverHostedTranscripts(
   hostedSeen: ReadonlySet<string>,
   project: string | undefined,
   describe: AgentLivenessSources["describeTranscript"],
-): Promise<LivenessTranscript[]> {
+): Promise<{ entries: LivenessTranscript[]; truncated: boolean }> {
   const missing: string[] = [];
   for (const path of hostedPaths) {
-    if (hostedSeen.has(path)) continue;
-    missing.push(path);
-    if (missing.length >= HOSTED_RECOVERY_MAX) break;
+    if (!hostedSeen.has(path)) missing.push(path);
   }
-  if (missing.length === 0) return [];
-  const described = await Promise.all(missing.map(async (path) => {
+  if (missing.length === 0) return { entries: [], truncated: false };
+  /* The registry iterates oldest-entry-first, and recovery exists for the
+     newest launches. Taking the head of an over-cap list would keep the stale
+     active-status rot — permanently absent from every generation, so it fills
+     the same slots on every call — and drop the agent that just started. */
+  const truncated = missing.length > HOSTED_RECOVERY_MAX;
+  const candidates = truncated ? missing.slice(-HOSTED_RECOVERY_MAX) : missing;
+  const described = await Promise.all(candidates.map(async (path) => {
     try {
       return await describe(path);
     } catch {
@@ -482,9 +514,12 @@ async function recoverHostedTranscripts(
       return null;
     }
   }));
-  return described.filter((entry): entry is LivenessTranscript => entry !== null
-    && (entry.engine === "claude" || entry.engine === "codex")
-    && (!project || entry.project === project));
+  return {
+    entries: described.filter((entry): entry is LivenessTranscript => entry !== null
+      && (entry.engine === "claude" || entry.engine === "codex")
+      && (!project || entry.project === project)),
+    truncated,
+  };
 }
 
 /** Newest first, with an unreadable mtime ranked last rather than poisoning the
@@ -562,6 +597,7 @@ export async function agentLivenessSnapshot(
       matched: entries.length,
       selected: entries.length,
       recovered: 0,
+      recoveryTruncated: false,
       generation: null,
       cacheStatus: null,
       freshScan: false,
@@ -584,6 +620,7 @@ export async function agentLivenessSnapshot(
         matched: selected.matched,
         selected: selected.entries.length,
         recovered: 0,
+        recoveryTruncated: false,
         generation: selected.generation,
         cacheStatus: selected.cacheStatus,
         freshScan: selected.freshScan,
@@ -598,6 +635,7 @@ export async function agentLivenessSnapshot(
         matched: selected.matched,
         selected: selected.entries.length,
         recovered: 0,
+        recoveryTruncated: false,
         generation: null,
         cacheStatus: null,
         freshScan: true,
@@ -609,16 +647,18 @@ export async function agentLivenessSnapshot(
     /* Hosts the generation has not caught up with yet. Newest-first ordering is
        restored only when recovery actually found something, so the ordinary
        path returns the generation's own order untouched. */
-    const recovered = await recoverHostedTranscripts(hostedPaths, hostedSeen, request.project, sources.describeTranscript);
+    const recovery = await recoverHostedTranscripts(hostedPaths, hostedSeen, request.project, sources.describeTranscript);
     const known = new Set(entries.map((entry) => entry.path));
-    const added = recovered.filter((entry) => !known.has(entry.path));
-    if (added.length > 0) {
-      entries = [...entries, ...added].sort(byNewest).slice(0, limit);
+    const added = recovery.entries.filter((entry) => !known.has(entry.path));
+    if (added.length > 0 || recovery.truncated) {
+      if (added.length > 0) entries = [...entries, ...added].sort(byNewest).slice(0, limit);
       selection = {
         ...selection,
         matched: selection.matched + added.length,
         selected: entries.length,
         recovered: added.length,
+        /* A capped recovery must not read as a complete one. */
+        recoveryTruncated: recovery.truncated,
       };
     }
   }
@@ -633,16 +673,23 @@ export async function agentLivenessSnapshot(
   const hydration = await hydrateWithBudget(
     hydratable,
     (entry) => Math.min(Number.isFinite(entry.sizeBytes) ? entry.sizeBytes as number : EVIDENCE_TAIL_BYTES, EVIDENCE_TAIL_BYTES),
-    async (entry, hydrationSignal) => sources.transcriptEvidence(
-      entry.engine as "claude" | "codex",
-      entry.path,
-      { signal: hydrationSignal },
-    ),
+    async (entry, hydrationSignal) => {
+      try {
+        return await sources.transcriptEvidence(entry.engine as "claude" | "codex", entry.path, { signal: hydrationSignal });
+      } catch (error) {
+        /* One bad row costs one row. Cancellation is the exception: it is the
+           caller going away, and it must still stop the pass. */
+        if (hydrationSignal?.aborted || isAbortError(error)) throw error;
+        return null;
+      }
+    },
     {
       concurrency: Number.isFinite(request.evidenceConcurrency)
         ? Math.max(1, Math.floor(request.evidenceConcurrency as number))
         : DEFAULT_EVIDENCE_CONCURRENCY,
-      maxBytes: Math.max(0, Math.floor(request.evidenceByteBudget ?? DEFAULT_EVIDENCE_BYTE_BUDGET)),
+      maxBytes: Number.isFinite(request.evidenceByteBudget)
+        ? Math.max(0, Math.floor(request.evidenceByteBudget as number))
+        : defaultEvidenceByteBudget(limit),
       /* Anchored HERE, on the same clock the budget reads. A cold generation can
          take tens of seconds to publish; anchoring at the start of the call
          would hand hydration an already-expired budget. */
@@ -715,6 +762,8 @@ export async function agentLivenessSnapshot(
     stallAfterMs,
     count: conversations.length,
     stalledCount: conversations.filter((record) => record.lifecycle === "stalled").length,
+    stalledConfirmedCount: conversations
+      .filter((record) => record.lifecycle === "stalled" && record.evidenceSource === "transcript").length,
     conversations,
     selection: {
       ...selection,

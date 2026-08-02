@@ -9,7 +9,7 @@ import type { FileScanSnapshot } from "@/lib/scanner/scanCache";
 import type { FileEntry } from "@/lib/types";
 
 import { completedGenerationSelection, type CompletedGenerationRead } from "./inventorySelection";
-import { agentLivenessSnapshot, evaluateLiveness, type AgentLivenessSources } from "./liveness";
+import { agentLivenessSnapshot, evaluateLiveness, HOSTED_RECOVERY_MAX, type AgentLivenessSources } from "./liveness";
 import { projectLivenessEvents } from "./projector";
 import { readLivenessTranscriptEvidence, type LivenessTranscript, type LivenessTranscriptEvidence } from "./transcript";
 
@@ -876,6 +876,10 @@ test("rows the evidence budget degraded never reach the journal as durable alarm
 
   expect(snapshot.count).toBe(3);
   expect(snapshot.stalledCount).toBe(3);
+  /* The headline count carries every stalled row; the confirmed count carries
+     only the ones a transcript read stands behind — the same discipline the
+     journal applies, so an operator subtitle can prefer it. */
+  expect(snapshot.stalledConfirmedCount).toBe(1);
   expect(snapshot.selection).toMatchObject({ hydrated: 1, unreadable: 0, projected: 2, budget: "byte_budget" });
 
   const events = projectLivenessEvents(snapshot.conversations);
@@ -1149,4 +1153,103 @@ test("the projection timing covers the per-row host and lineage resolution (#860
      phase owns it, not serialization. */
   expect(snapshot.timings.journalProjectionMs).toBeGreaterThanOrEqual(10);
   expect(snapshot.timings.serializationMs).toBeLessThan(snapshot.timings.journalProjectionMs);
+});
+
+test("the default byte budget covers the default row limit (#860)", async () => {
+  const dir = sandbox();
+  /* A hundred rows whose transcripts are far bigger than one tail, so every row
+     charges the full 128 KiB. A fixed 8 MiB budget stopped at row 64 on every
+     call, deterministically, and the journal then never recorded those rows. */
+  const rows = Array.from({ length: 100 }, (_, index) => fileEntry({
+    path: path.join(dir, `big-${index}.jsonl`),
+    project: PROJECT,
+    engine: "claude",
+    conversationId: `conversation_big_${index}`,
+    activity: "live",
+    activityReason: "jsonl_turn_open",
+    mtime: Math.floor((NOW - index * 1_000) / 1000),
+    size: 4 * 1024 * 1024,
+  }));
+  const generation = publishedGeneration(rows);
+
+  const snapshot = await agentLivenessSnapshot(
+    { project: PROJECT },
+    corpusSources(generation, {
+      transcriptEvidence: async () => ({ turn: "busy" as const, lastRecordTs: NOW - 1_000 }),
+    }),
+  );
+
+  expect(snapshot.count).toBe(100);
+  expect(snapshot.selection).toMatchObject({ hydrated: 100, projected: 0, budget: "complete" });
+  expect(snapshot.selection.evidenceBytes).toBe(100 * 131_072);
+});
+
+test("an over-cap identity recovery keeps the newest hosts and says it was truncated (#860)", async () => {
+  const dir = sandbox();
+  /* Registry entries iterate oldest-first. The rot at the front — active
+     statuses whose transcripts no longer exist — would fill every cap slot on
+     every call and crowd out the launch recovery exists for. */
+  const hosted = Array.from({ length: HOSTED_RECOVERY_MAX + 2 }, (_, index) => path.join(dir, `host-${index}.jsonl`));
+  for (const target of hosted) fs.writeFileSync(target, liveTranscriptText(NOW - 1_000), "utf8");
+  const generation = publishedGeneration([]);
+  const described: string[] = [];
+
+  const snapshot = await agentLivenessSnapshot(
+    { project: PROJECT, liveOnly: true, limit: 200 },
+    corpusSources(generation, {
+      registrySnapshot: () => ({
+        entries: Object.fromEntries(hosted.map((target, index) => [`claude:host-${index}`, structuredEntry(target, 4242 + index)])),
+        conversations: {},
+      }) as unknown as RegistryFile,
+      describeTranscript: async (transcriptPath) => {
+        described.push(transcriptPath);
+        return describedTranscript(transcriptPath, PROJECT, NOW - 1_000);
+      },
+      transcriptEvidence: async () => ({ turn: "busy" as const, lastRecordTs: NOW - 1_000 }),
+    }),
+  );
+
+  expect(described).toHaveLength(HOSTED_RECOVERY_MAX);
+  expect(described).toContain(hosted.at(-1)!);
+  expect(described).not.toContain(hosted[0]!);
+  expect(snapshot.selection).toMatchObject({ recovered: HOSTED_RECOVERY_MAX, recoveryTruncated: true });
+});
+
+test("a transcript read that throws costs one row, not the whole snapshot (#860)", async () => {
+  const dir = sandbox();
+  const corpus = productionShapedCorpus(dir);
+  const generation = publishedGeneration(corpus.files);
+  const broken = corpus.livePaths[0]!;
+
+  const snapshot = await agentLivenessSnapshot(
+    { project: PROJECT, liveOnly: true, limit: 10 },
+    corpusSources(generation, {
+      transcriptEvidence: async (_engine, transcriptPath) => {
+        if (transcriptPath === broken) throw new Error("EIO reading the tail");
+        return { turn: "busy" as const, lastRecordTs: NOW - 10_000 };
+      },
+    }),
+  );
+
+  expect(snapshot.count).toBe(6);
+  expect(snapshot.selection).toMatchObject({ hydrated: 6, unreadable: 1, projected: 0 });
+  expect(snapshot.conversations.find((record) => record.transcriptPath === broken)!.evidenceSource).toBe("unreadable");
+});
+
+test("a cancelled caller still stops the pass when a read throws (#860)", async () => {
+  const dir = sandbox();
+  const corpus = productionShapedCorpus(dir);
+  const generation = publishedGeneration(corpus.files);
+  const controller = new AbortController();
+
+  await expect(agentLivenessSnapshot(
+    { project: PROJECT, liveOnly: true, limit: 10, signal: controller.signal },
+    corpusSources(generation, {
+      transcriptEvidence: async () => {
+        controller.abort();
+        /* The per-row catch must not swallow the caller going away. */
+        throw new DOMException("cancelled", "AbortError");
+      },
+    }),
+  )).rejects.toMatchObject({ name: "AbortError" });
 });
