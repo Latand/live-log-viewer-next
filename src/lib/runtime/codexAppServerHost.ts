@@ -78,7 +78,7 @@ export type CodexRealtimeFailure = {
 type PendingRealtimeStart = {
   resolve(result: CodexRealtimeWebRtcResult): void;
   reject(error: Error): void;
-  timer: ReturnType<typeof setTimeout>;
+  timer: ReturnType<typeof setTimeout> | undefined;
   started: boolean;
   realtimeSessionId: string | null;
   sdp: string | null;
@@ -163,6 +163,7 @@ export interface CodexAppServerHostOptions {
   env?: NodeJS.ProcessEnv;
   requestTimeoutMs?: number;
   realtimePersonaTimeoutMs?: number;
+  realtimeStartTimeoutMs?: number;
   deliveryConfirmationTimeoutMs?: number;
   shutdownGraceMs?: number;
   initialEventCursor?: number;
@@ -570,6 +571,7 @@ export class CodexAppServerHost implements EngineHost {
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly requestTimeoutMs: number;
   private readonly realtimePersonaTimeoutMs: number;
+  private readonly realtimeStartTimeoutMs: number;
   private readonly deliveryConfirmationTimeoutMs: number;
   private readonly shutdownGraceMs: number;
   private readonly eventStore: RuntimeEventStore;
@@ -658,6 +660,7 @@ export class CodexAppServerHost implements EngineHost {
     this.identity = identity;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.realtimePersonaTimeoutMs = options.realtimePersonaTimeoutMs ?? REALTIME_PERSONA_TIMEOUT_MS;
+    this.realtimeStartTimeoutMs = options.realtimeStartTimeoutMs ?? REALTIME_START_TIMEOUT_MS;
     this.deliveryConfirmationTimeoutMs = options.deliveryConfirmationTimeoutMs
       ?? DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS;
     this.shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
@@ -976,13 +979,10 @@ export class CodexAppServerHost implements EngineHost {
 
     let pendingStart!: PendingRealtimeStart;
     const answer = new Promise<CodexRealtimeWebRtcResult>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.rejectRealtimeStart(new Error("thread/realtime/start timed out"));
-      }, REALTIME_START_TIMEOUT_MS);
       pendingStart = {
         resolve,
         reject,
-        timer,
+        timer: undefined,
         started: false,
         realtimeSessionId: null,
         sdp: null,
@@ -1019,6 +1019,10 @@ export class CodexAppServerHost implements EngineHost {
       durableTail: realtimeContext.diagnosticItems,
       truncated: realtimeContext.truncated,
     });
+    pendingStart.timer = setTimeout(() => {
+      if (this.pendingRealtimeStart !== pendingStart) return;
+      this.fail(new Error("thread/realtime/start timed out; outcome is uncertain"));
+    }, this.realtimeStartTimeoutMs);
     try {
       await this.rpc("thread/realtime/start", {
         threadId: this.identity.threadId,
@@ -1033,7 +1037,7 @@ export class CodexAppServerHost implements EngineHost {
            durable tail only when a streamed assistant response has no
            committed item; provider startup context owns the persisted history. */
         ...(realtimeContext.items.length > 0 ? { initialItems: realtimeContext.items } : {}),
-      }, REALTIME_START_TIMEOUT_MS);
+      }, this.realtimeStartTimeoutMs);
     } catch (error) {
       this.rejectRealtimeStart(error instanceof Error ? error : new Error(safeError(error)));
     }
@@ -1058,7 +1062,7 @@ export class CodexAppServerHost implements EngineHost {
         continue;
       }
 
-      if (await this.scanVoicePersonaBootstrap(identity.itemId, "canonical scan unavailable; attempting insertion")) {
+      if (await this.scanVoicePersonaBootstrap(identity.itemId, "canonical scan unavailable; refusing insertion")) {
         this.voicePersonaBootstrapAccepted = true;
         this.unresolvedVoicePersonaBootstrap = null;
         break;
@@ -1124,7 +1128,7 @@ export class CodexAppServerHost implements EngineHost {
         code: (error as NodeJS.ErrnoException).code ?? "unknown",
         diagnostic: safeError(error),
       });
-      return false;
+      throw error;
     }
   }
 

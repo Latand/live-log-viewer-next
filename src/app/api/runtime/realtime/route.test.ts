@@ -141,6 +141,7 @@ test("keeps validation and backend admission errors bounded", async () => {
 });
 
 test("returns the canonical persona insertion outcome and rejects a call whose bootstrap was refused", async () => {
+  let rejectedStops = 0;
   const acceptedBootstrap = {
     receiptId: `voice_persona_${"b".repeat(64)}`,
     itemId: `msg_voice_persona_${"b".repeat(64)}`,
@@ -182,7 +183,7 @@ test("returns the canonical persona insertion outcome and rejects a call whose b
       return { sdp: null, realtimeSessionId: null, personaBootstrap };
     },
     async appendRealtimeSpeech() {},
-    async stopRealtime() {},
+    async stopRealtime() { rejectedStops += 1; },
   }), { operator: true });
 
   expect(result).toEqual({
@@ -192,9 +193,11 @@ test("returns the canonical persona insertion outcome and rejects a call whose b
       personaBootstrap,
     },
   });
+  expect(rejectedStops).toBe(1);
 });
 
 test("refuses a realtime answer that omits the mandatory persona bootstrap receipt", async () => {
+  let stops = 0;
   const result = await executeRealtimeControl({
     action: "start",
     conversationId: "conversation_voice",
@@ -204,17 +207,19 @@ test("refuses a realtime answer that omits the mandatory persona bootstrap recei
       return { sdp: "v=0\r\nanswer", realtimeSessionId: "live-without-bootstrap" };
     },
     async appendRealtimeSpeech() {},
-    async stopRealtime() {},
+    async stopRealtime() { stops += 1; },
   }), { operator: true });
 
   expect(result).toEqual({
     status: 409,
     body: { error: "Codex returned no voice persona bootstrap receipt" },
   });
+  expect(stops).toBe(1);
 });
 
 test("refuses malformed persona bootstrap receipts before binding the realtime session", async () => {
   const digest = "d".repeat(64);
+  let stops = 0;
   const malformedReceipts = [
     { itemId: `msg_voice_persona_${digest}`, insertion: "accepted" },
     { receiptId: `voice_persona_${digest}`, insertion: "accepted" },
@@ -231,7 +236,7 @@ test("refuses malformed persona bootstrap receipts before binding the realtime s
         return { sdp: "v=0\r\nanswer", realtimeSessionId: "live-malformed", personaBootstrap };
       },
       async appendRealtimeSpeech() {},
-      async stopRealtime() {},
+      async stopRealtime() { stops += 1; },
     }), { operator: true });
 
     expect(result).toEqual({
@@ -239,6 +244,25 @@ test("refuses malformed persona bootstrap receipts before binding the realtime s
       body: { error: "Codex returned an invalid voice persona bootstrap receipt" },
     });
   }
+  expect(stops).toBe(malformedReceipts.length);
+});
+
+test("stops a started backend session whose accepted receipt has no WebRTC answer", async () => {
+  let stops = 0;
+  const result = await executeRealtimeControl({
+    action: "start",
+    conversationId: "conversation_voice",
+    sdp: "v=0\r\noffer",
+  }, () => ({
+    async startRealtimeWebRtc() {
+      return { sdp: null, realtimeSessionId: "live-without-answer", personaBootstrap: ACCEPTED_PERSONA_BOOTSTRAP };
+    },
+    async appendRealtimeSpeech() {},
+    async stopRealtime() { stops += 1; },
+  }), { operator: true });
+
+  expect(result).toEqual({ status: 409, body: { error: "Codex returned no WebRTC answer" } });
+  expect(stops).toBe(1);
 });
 
 test("POST rejects a cross-origin browser before realtime admission", async () => {

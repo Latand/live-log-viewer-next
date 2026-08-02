@@ -65,6 +65,8 @@ class FakeAppServer extends EventEmitter {
   modelList: unknown[] = [{ id: "gpt-5.3-codex-spark", isDefault: true, inputModalities: ["text"] }];
   modelListFailuresRemaining = 0;
   realtimeStartError: string | null = null;
+  realtimeStartDelayMs: number | null = null;
+  suppressRealtimeStartNotifications = false;
   realtimeAppendErrorAt: number | null = null;
   responseChunkBytes: number | null = null;
   oversizedTurnStartResult = false;
@@ -208,23 +210,12 @@ class FakeAppServer extends EventEmitter {
       return this.respond(message.id, {});
     }
     if (method === "thread/realtime/start") {
-      this.respond(message.id, {});
-      if (this.realtimeStartError) {
-        this.notify("thread/realtime/error", {
-          threadId: this.threadId,
-          message: this.realtimeStartError,
-        });
-      } else {
-        this.notify("thread/realtime/started", {
-          threadId: this.threadId,
-          realtimeSessionId: "realtime-1",
-          version: "v3",
-        });
-        this.notify("thread/realtime/sdp", {
-          threadId: this.threadId,
-          sdp: "v=0\r\nanswer",
-        });
+      if (this.realtimeStartDelayMs !== null) {
+        const requestId = message.id;
+        setTimeout(() => this.completeRealtimeStart(requestId), this.realtimeStartDelayMs);
+        return;
       }
+      this.completeRealtimeStart(message.id);
       return;
     }
     if (method === "thread/realtime/appendSpeech") {
@@ -256,6 +247,27 @@ class FakeAppServer extends EventEmitter {
       timestamp: "2026-08-02T10:00:00.000Z",
       payload,
     })).join("\n") + "\n");
+  }
+
+  private completeRealtimeStart(requestId: number): void {
+    this.respond(requestId, {});
+    if (this.suppressRealtimeStartNotifications) return;
+    if (this.realtimeStartError) {
+      this.notify("thread/realtime/error", {
+        threadId: this.threadId,
+        message: this.realtimeStartError,
+      });
+      return;
+    }
+    this.notify("thread/realtime/started", {
+      threadId: this.threadId,
+      realtimeSessionId: "realtime-1",
+      version: "v3",
+    });
+    this.notify("thread/realtime/sdp", {
+      threadId: this.threadId,
+      sdp: "v=0\r\nanswer",
+    });
   }
 
   private respond(id: number, result: unknown): void {
@@ -3579,38 +3591,50 @@ test("a refused persona insertion returns a bounded rejected receipt before real
   await host.release();
 });
 
-test("an unreadable canonical transcript falls through to authoritative insertion", async () => {
+test("replacement hosts reject an unverifiable canonical transcript without reinserting", async () => {
   const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-bootstrap-scan-fault-"));
   const transcriptPath = path.join(isolated, "voice-thread.jsonl");
   const linkedPath = path.join(isolated, "linked-thread.jsonl");
   fs.writeFileSync(transcriptPath, "");
   fs.symlinkSync(transcriptPath, linkedPath);
   const warnings = spyOn(console, "warn").mockImplementation(() => {});
-  const server = new FakeAppServer("voice-thread");
-  server.threadPath = linkedPath;
-  const host = await CodexAppServerHost.start({
+  const firstServer = new FakeAppServer("voice-thread");
+  firstServer.threadPath = linkedPath;
+  const firstHost = await CodexAppServerHost.start({
     cwd: "/repo",
     eventStore: new MemoryEventStore(),
-    spawnProcess: fakeSpawn(server),
+    spawnProcess: fakeSpawn(firstServer),
   });
+  let replacementHost: CodexAppServerHost | null = null;
   try {
-    const started = await host.startRealtimeWebRtc("v=0\r\no=- 404 2 IN IP4 127.0.0.1\r\n");
-    expect(started.personaBootstrap.insertion).toBe("accepted");
-    expect(server.requests.findIndex((request) => request.method === "thread/inject_items"))
-      .toBeLessThan(server.requests.findIndex((request) => request.method === "thread/realtime/start"));
-    expect(fs.readFileSync(transcriptPath, "utf8")).toContain(started.personaBootstrap.itemId);
+    const first = await firstHost.startRealtimeWebRtc("v=0\r\no=- 404 2 IN IP4 127.0.0.1\r\n");
+    expect(first).toMatchObject({
+      sdp: null,
+      personaBootstrap: { insertion: "rejected", diagnostic: expect.stringContaining("ELOOP") },
+    });
+    await firstHost.release();
+
+    const replacementServer = new FakeAppServer("voice-thread");
+    replacementServer.threadPath = linkedPath;
+    replacementHost = await CodexAppServerHost.adopt("voice-thread", {
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(replacementServer),
+    });
+    const replacement = await replacementHost.startRealtimeWebRtc("v=0\r\no=- 405 2 IN IP4 127.0.0.1\r\n");
+    expect(replacement.personaBootstrap).toEqual(first.personaBootstrap);
+    expect(firstServer.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(0);
+    expect(replacementServer.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(0);
+    expect(fs.readFileSync(transcriptPath, "utf8")).toBe("");
     expect(warnings).toHaveBeenCalledWith(
-      "[voice persona bootstrap] canonical scan unavailable; attempting insertion",
+      "[voice persona bootstrap] canonical scan unavailable; refusing insertion",
       expect.objectContaining({ code: "ELOOP", diagnostic: expect.stringContaining("ELOOP") }),
     );
-    await host.stopRealtime();
-    const repeated = await host.startRealtimeWebRtc("v=0\r\no=- 405 2 IN IP4 127.0.0.1\r\n");
-    expect(repeated.personaBootstrap).toEqual(started.personaBootstrap);
-    expect(server.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(1);
-    expect(warnings).toHaveBeenCalledTimes(1);
+    expect(warnings).toHaveBeenCalledTimes(2);
   } finally {
     warnings.mockRestore();
-    await host.release();
+    await replacementHost?.release();
+    await firstHost.release();
     fs.rmSync(isolated, { recursive: true, force: true });
   }
 });
@@ -3750,6 +3774,55 @@ test("an uncertain persona insertion timeout fences the writer and recovers on a
     await replacementHost?.release();
     await firstHost.release();
     fs.rmSync(isolated, { recursive: true, force: true });
+  }
+});
+
+test("persona bootstrap completes before the single fenced realtime-start deadline begins", async () => {
+  const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-realtime-start-deadline-"));
+  const transcriptPath = path.join(isolated, "voice-thread.jsonl");
+  fs.writeFileSync(transcriptPath, "");
+  const server = new FakeAppServer("voice-thread");
+  server.threadPath = transcriptPath;
+  server.injectItemsDelayMs = 20;
+  server.realtimeStartDelayMs = 20;
+  const host = await CodexAppServerHost.start({
+    cwd: "/repo",
+    eventStore: new MemoryEventStore(),
+    spawnProcess: fakeSpawn(server),
+    realtimePersonaTimeoutMs: 50,
+    realtimeStartTimeoutMs: 30,
+  });
+  try {
+    expect(await host.startRealtimeWebRtc("v=0\r\no=- 912 2 IN IP4 127.0.0.1\r\n")).toMatchObject({
+      sdp: "v=0\r\nanswer",
+      realtimeSessionId: "realtime-1",
+      personaBootstrap: { insertion: "accepted" },
+    });
+    expect(server.requests.filter((request) => request.method === "thread/realtime/start")).toHaveLength(1);
+  } finally {
+    await Bun.sleep(25);
+    if (host.currentRealtimeSessionId()) await host.stopRealtime();
+    await host.release();
+    fs.rmSync(isolated, { recursive: true, force: true });
+  }
+});
+
+test("the realtime notification deadline poisons a writer after the start RPC succeeds", async () => {
+  const server = new FakeAppServer("voice-thread");
+  server.suppressRealtimeStartNotifications = true;
+  const host = await CodexAppServerHost.start({
+    cwd: "/repo",
+    eventStore: new MemoryEventStore(),
+    spawnProcess: fakeSpawn(server),
+    realtimeStartTimeoutMs: 10,
+  });
+  try {
+    await expect(host.startRealtimeWebRtc("v=0\r\no=- 913 2 IN IP4 127.0.0.1\r\n"))
+      .rejects.toThrow("thread/realtime/start timed out; outcome is uncertain");
+    expect((await host.health()).status).toBe("dead");
+    expect(server.requests.filter((request) => request.method === "thread/realtime/start")).toHaveLength(1);
+  } finally {
+    await host.release();
   }
 });
 

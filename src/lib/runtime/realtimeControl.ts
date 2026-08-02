@@ -67,6 +67,24 @@ function voicePersonaBootstrapReceipt(value: unknown): VoicePersonaBootstrapRece
   return receipt as VoicePersonaBootstrapReceipt;
 }
 
+async function rejectStartedRealtimeContract(
+  host: RealtimeHost,
+  body: Record<string, unknown>,
+): Promise<RealtimeControlResult> {
+  try {
+    await host.stopRealtime();
+    return { status: 409, body };
+  } catch (error) {
+    return {
+      status: 409,
+      body: {
+        ...body,
+        error: redactCodexHostDiagnostic(`${String(body.error)}; realtime cleanup failed: ${redactCodexHostDiagnostic(error)}`),
+      },
+    };
+  }
+}
+
 export async function executeRealtimeControl(
   body: unknown,
   resolveHost: (conversationId: string) => unknown = structuredDeliveryHostForConversation,
@@ -125,25 +143,22 @@ export async function executeRealtimeControl(
       }
       const answer = await host.startRealtimeWebRtc(sdp);
       if (!answer.personaBootstrap) {
-        return { status: 409, body: { error: "Codex returned no voice persona bootstrap receipt" } };
+        return rejectStartedRealtimeContract(host, { error: "Codex returned no voice persona bootstrap receipt" });
       }
       const personaBootstrap = voicePersonaBootstrapReceipt(answer.personaBootstrap);
       if (!personaBootstrap) {
-        return { status: 409, body: { error: "Codex returned an invalid voice persona bootstrap receipt" } };
+        return rejectStartedRealtimeContract(host, { error: "Codex returned an invalid voice persona bootstrap receipt" });
       }
       if (personaBootstrap.insertion === "rejected") {
         const diagnostic = redactCodexHostDiagnostic(personaBootstrap.diagnostic ?? "Voice persona insertion was rejected");
         const error = redactCodexHostDiagnostic(`Voice persona could not be recorded: ${diagnostic}`);
-        return {
-          status: 409,
-          body: {
-            error,
-            personaBootstrap: { ...personaBootstrap, diagnostic },
-          },
-        };
+        return rejectStartedRealtimeContract(host, {
+          error,
+          personaBootstrap: { ...personaBootstrap, diagnostic },
+        });
       }
       if (!answer.sdp) {
-        return { status: 409, body: { error: "Codex returned no WebRTC answer" } };
+        return rejectStartedRealtimeContract(host, { error: "Codex returned no WebRTC answer" });
       }
       /* #844 §4: the call belongs to the window that opened it, from here on.
          A browser that presents no usable view/device binds to nothing, which
