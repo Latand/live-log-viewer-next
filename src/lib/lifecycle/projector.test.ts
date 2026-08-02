@@ -15,7 +15,7 @@ process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-lifecycle
 const { patchPipeline } = await import("@/lib/pipelines/engine");
 const { pipelineIdentity, savePipelines } = await import("@/lib/pipelines/store");
 const { queryLifecycleEvents } = await import("./journal");
-const { refreshLifecycleJournal } = await import("./projector");
+const { projectPipelineEvents, refreshLifecycleJournal } = await import("./projector");
 
 afterAll(() => fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true }));
 
@@ -40,6 +40,8 @@ function pipelineFixture(id: string, overrides: Partial<Pipeline> = {}): Pipelin
       { id: "review", kind: "review-loop", prompt: "review", next: null, onFail: null, effectiveRole: REVIEWER_ROLE },
     ],
     runs: [{ stageId: "build", attempts: [] }, { stageId: "review", attempts: [] }],
+    decisionRevision: 0,
+    decisions: [],
     cursor: { stageId: "build", state: "running", input: null, activatedBy: null },
     state: "running",
     pausedState: null,
@@ -134,6 +136,63 @@ test("a traversed fail edge emits repair_ready from the durable activation recor
 
   refreshLifecycleJournal({ pipelines: [pipeline] }, { force: true });
   expect(queryLifecycleEvents({ pipelineId: id, type: "repair_ready" }).count).toBe(1);
+});
+
+test("a revisioned pipeline decision projects queued and delivered transport truth without operator input (#852)", () => {
+  const id = "pipeline_decision_delivery";
+  const pipeline = pipelineFixture(id, {
+    state: "needs_decision",
+    stateDetail: "Choose a rollout window",
+    decisionRevision: 1,
+    decisions: [{
+      revision: 1,
+      stageId: "build",
+      sourceAttempt: 1,
+      targetAttempt: 2,
+      state: "queued",
+      input: "private operator answer",
+      inputDigest: "digest",
+      clientMessageId: "pipeline-message-1",
+      operationId: "pipeline-operation-1",
+      deliveryId: "pipeline-delivery-1",
+      resumeIntent: true,
+      createdAt: "2026-07-26T09:10:00.000Z",
+      updatedAt: "2026-07-26T09:11:00.000Z",
+      terminalAt: null,
+      error: null,
+    }],
+    runs: [{
+      stageId: "build",
+      attempts: [
+        { n: 1, state: "needs_decision", completedAt: "2026-07-26T09:09:00.000Z", conversationId: "conversation_builder" },
+        { n: 2, state: "pending", startedAt: null, completedAt: null, conversationId: "conversation_builder" },
+      ],
+    }, { stageId: "review", attempts: [] }],
+  } as unknown as Partial<Pipeline>);
+
+  const queued = projectPipelineEvents([pipeline]).find((event) => event.key.endsWith(":decision:1:queued"));
+  pipeline.decisions[0]!.state = "delivered";
+  pipeline.decisions[0]!.updatedAt = "2026-07-26T09:12:00.000Z";
+  pipeline.decisions[0]!.terminalAt = "2026-07-26T09:12:00.000Z";
+  const delivered = projectPipelineEvents([pipeline]).find((event) => event.key.endsWith(":decision:1:delivered"));
+
+  expect({ queued, delivered }).toMatchObject({
+    queued: {
+      type: "delivery_queued",
+      at: "2026-07-26T09:11:00.000Z",
+      pipelineId: id,
+      stageId: "build",
+      attempt: 2,
+      conversationId: "conversation_builder",
+      summary: "build decision 1 queued for attempt 2",
+    },
+    delivered: {
+      type: "delivery_delivered",
+      at: "2026-07-26T09:12:00.000Z",
+      summary: "build decision 1 started attempt 2",
+    },
+  });
+  expect(JSON.stringify({ queued, delivered })).not.toContain("private operator answer");
 });
 
 function livenessRecord(overrides: Partial<AgentLivenessRecord>): AgentLivenessRecord {

@@ -155,6 +155,8 @@ test("direct runtime send reaches durable admission while the runtime socket syn
           structured: true,
           target: "conversation_sync_window",
           outcome: "held",
+          operationId: "sync-window-operation",
+          deliveryId: "sync-window-delivery",
         };
       },
     },

@@ -11,13 +11,13 @@ import { withFileTransaction, withFileTransactionSync } from "@/lib/state/fileTr
 import type { BoardTask } from "@/lib/tasks/types";
 
 import { MAX_FAIL_EDGE_ROUNDS, MAX_PIPELINE_STAGES } from "./limits";
-import type { EffectivePipelineRole, Pipeline, PipelineCreationIntent, PipelineEdgeActivation, PipelineStage, PipelineTerminalReap, PipelineUnconfirmedHost } from "./types";
+import type { EffectivePipelineRole, Pipeline, PipelineCreationIntent, PipelineDecision, PipelineEdgeActivation, PipelineStage, PipelineTerminalReap, PipelineUnconfirmedHost } from "./types";
 import { stageVerdictFrom } from "./verdict";
 
-export const PIPELINES_SCHEMA_VERSION = 4;
+export const PIPELINES_SCHEMA_VERSION = 5;
 /** Older registries are migrated in memory on load; the file is rewritten in
     the current shape by the next successful mutation, never by a read. */
-const MIGRATABLE_SCHEMA_VERSIONS = new Set([2, 3, PIPELINES_SCHEMA_VERSION]);
+const MIGRATABLE_SCHEMA_VERSIONS = new Set([2, 3, 4, PIPELINES_SCHEMA_VERSION]);
 const pipelinesFile = () => statePath("pipelines.json");
 const artifactsRoot = () => statePath("pipelines");
 
@@ -119,6 +119,36 @@ function isVerdictRecovery(value: unknown): boolean {
     && (recovery.messageTs === null
       || (typeof recovery.messageTs === "number" && Number.isFinite(recovery.messageTs) && recovery.messageTs >= 0))
   );
+}
+
+function isDecision(value: unknown): value is PipelineDecision {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const decision = value as Partial<PipelineDecision>;
+  const valid = Number.isInteger(decision.revision) && (decision.revision as number) >= 1
+    && typeof decision.stageId === "string" && Boolean(decision.stageId)
+    && Number.isInteger(decision.sourceAttempt) && (decision.sourceAttempt as number) >= 1
+    && (decision.targetAttempt === null
+      || (Number.isInteger(decision.targetAttempt) && (decision.targetAttempt as number) > (decision.sourceAttempt as number)))
+    && ["awaiting_input", "admitting", "held", "queued", "delivering", "delivered", "failed", "superseded", "closed"].includes(String(decision.state))
+    && isNullableString(decision.input) && (decision.input?.length ?? 0) <= 32_000
+    && (decision.inputDigest === null || (typeof decision.inputDigest === "string" && /^[0-9a-f]{64}$/.test(decision.inputDigest)))
+    && isNullableString(decision.clientMessageId) && (decision.clientMessageId?.length ?? 0) <= 128
+    && isNullableString(decision.operationId) && (decision.operationId?.length ?? 0) <= 128
+    && isNullableString(decision.deliveryId)
+    && typeof decision.resumeIntent === "boolean"
+    && typeof decision.createdAt === "string"
+    && typeof decision.updatedAt === "string"
+    && isNullableString(decision.terminalAt)
+    && isNullableString(decision.error);
+  if (!valid) return false;
+  const state = decision.state!;
+  const bound = ["admitting", "held", "queued", "delivering", "delivered", "failed"].includes(state);
+  if (bound && (!decision.input || !decision.inputDigest || !decision.clientMessageId || !decision.operationId || !decision.resumeIntent)) return false;
+  if (state === "awaiting_input" && (decision.input !== null || decision.inputDigest !== null
+    || decision.clientMessageId !== null || decision.operationId !== null || decision.deliveryId !== null
+    || decision.resumeIntent || decision.terminalAt !== null)) return false;
+  if (["delivered", "failed", "superseded", "closed"].includes(state) && decision.terminalAt === null) return false;
+  return true;
 }
 
 function isAttempt(value: unknown, index: number): boolean {
@@ -299,6 +329,8 @@ function isPipeline(value: unknown): value is Pipeline {
     pipeline.stages.every(isStage) &&
     Array.isArray(pipeline.runs) &&
     pipeline.runs.every(isRun) &&
+    Number.isInteger(pipeline.decisionRevision) && (pipeline.decisionRevision as number) >= 0 &&
+    Array.isArray(pipeline.decisions) && pipeline.decisions.every(isDecision) &&
     ["draft", "provisioning", "running", "needs_decision", "paused", "completed", "closed"].includes(String(pipeline.state)) &&
     (pipeline.pausedState === null || ["provisioning", "running", "needs_decision", "completed", "closed"].includes(String(pipeline.pausedState))) &&
     (pipeline.pausedAt === undefined || isNullableString(pipeline.pausedAt)) &&
@@ -331,6 +363,18 @@ function isPipeline(value: unknown): value is Pipeline {
   if (new Set(ids).size !== ids.length) return false;
   if (pipelineGraphError(stages) !== null) return false;
   if (runs.some((run, index) => run.stageId !== stages[index]!.id)) return false;
+  if (pipeline.decisionRevision !== pipeline.decisions!.length) return false;
+  for (let index = 0; index < pipeline.decisions!.length; index += 1) {
+    const decision = pipeline.decisions![index]!;
+    if (decision.revision !== index + 1 || !ids.includes(decision.stageId)) return false;
+    const attempts = runs.find((run) => run.stageId === decision.stageId)?.attempts ?? [];
+    if (!attempts.some((attempt) => !attempt.historical && attempt.n === decision.sourceAttempt)) return false;
+    if (decision.targetAttempt !== null
+      && !attempts.some((attempt) => !attempt.historical && attempt.n === decision.targetAttempt)) return false;
+    if (decision.state === "awaiting_input" && decision.targetAttempt !== null) return false;
+    if (["admitting", "held", "queued", "delivering", "delivered", "failed"].includes(decision.state)
+      && decision.targetAttempt === null) return false;
+  }
   const expectedWorktree = path.join(path.dirname(pipeline.repoDir!), `${path.basename(pipeline.repoDir!)}-pipeline-${pipeline.id}`);
   if (pipeline.worktreeDir !== expectedWorktree || pipeline.branch !== `pipeline/${slugify(pipeline.task!)}-${pipeline.id}`) return false;
   const cursor = pipeline.cursor;
@@ -418,6 +462,59 @@ function migrateTaskIds(raw: unknown): unknown {
   return { taskIds: [], ...(raw as Record<string, unknown>) };
 }
 
+function migrateDecisionState(raw: unknown): unknown {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  const pipeline = raw as Record<string, unknown>;
+  const migrated: Record<string, unknown> = {
+    decisionRevision: 0,
+    decisions: [],
+    ...pipeline,
+  };
+  if (Array.isArray(pipeline.decisions) && Number.isInteger(pipeline.decisionRevision)) return migrated;
+  const pausedState = pipeline.state === "paused" ? pipeline.pausedState : null;
+  if (pipeline.state !== "needs_decision" && pausedState !== "needs_decision") return migrated;
+  const cursor = pipeline.cursor && typeof pipeline.cursor === "object" && !Array.isArray(pipeline.cursor)
+    ? pipeline.cursor as Record<string, unknown>
+    : null;
+  const stageId = typeof cursor?.stageId === "string" ? cursor.stageId : null;
+  const stages = Array.isArray(pipeline.stages) ? pipeline.stages : [];
+  const stage = stageId
+    ? stages.find((candidate) => candidate && typeof candidate === "object" && (candidate as { id?: unknown }).id === stageId) as Record<string, unknown> | undefined
+    : undefined;
+  if (stage?.kind !== "run") return migrated;
+  const runs = Array.isArray(pipeline.runs) ? pipeline.runs : [];
+  const run = stageId
+    ? runs.find((candidate) => candidate && typeof candidate === "object" && (candidate as { stageId?: unknown }).stageId === stageId) as { attempts?: unknown } | undefined
+    : undefined;
+  const attempts = Array.isArray(run?.attempts) ? run.attempts : [];
+  const source = attempts.findLast((candidate) => candidate && typeof candidate === "object" && !(candidate as { historical?: unknown }).historical) as Record<string, unknown> | undefined;
+  if (!stageId || !source || !Number.isInteger(source.n)
+    || source.paneId !== null
+    || typeof source.conversationId !== "string" || !source.conversationId
+    || typeof source.agentPath !== "string" || !source.agentPath) return migrated;
+  const createdAt = [source.completedAt, pipeline.resumedAt, pipeline.pausedAt, pipeline.createdAt]
+    .find((value): value is string => typeof value === "string") ?? "";
+  migrated.decisionRevision = 1;
+  migrated.decisions = [{
+    revision: 1,
+    stageId,
+    sourceAttempt: source.n as number,
+    targetAttempt: null,
+    state: "awaiting_input",
+    input: null,
+    inputDigest: null,
+    clientMessageId: null,
+    operationId: null,
+    deliveryId: null,
+    resumeIntent: false,
+    createdAt,
+    updatedAt: createdAt,
+    terminalAt: null,
+    error: null,
+  } satisfies PipelineDecision];
+  return migrated;
+}
+
 export function loadPipelines(): Pipeline[] {
   const raw = readJson(pipelinesFile());
   if (raw === null) return [];
@@ -428,7 +525,8 @@ export function loadPipelines(): Pipeline[] {
   }
   if (!Array.isArray(file.pipelines)) throw new PipelineStoreError("pipeline registry contains malformed records");
   const legacyRecords = file.schemaVersion === 2 ? file.pipelines.map(migrateV2Pipeline) : file.pipelines;
-  const records = file.schemaVersion < PIPELINES_SCHEMA_VERSION ? legacyRecords.map(migrateTaskIds) : legacyRecords;
+  const taskRecords = file.schemaVersion < 4 ? legacyRecords.map(migrateTaskIds) : legacyRecords;
+  const records = file.schemaVersion < PIPELINES_SCHEMA_VERSION ? taskRecords.map(migrateDecisionState) : taskRecords;
   if (!records.every(isPipeline)) throw new PipelineStoreError("pipeline registry contains malformed records");
   return records.map(reviveLoadedPipeline);
 }
@@ -447,6 +545,8 @@ function reviveLoadedPipeline(pipeline: Pipeline): Pipeline {
     baseRef: pipeline.baseRef ?? "",
     lastPassedCommit: pipeline.lastPassedCommit ?? "",
     publishedCommit: pipeline.publishedCommit ?? null,
+    decisionRevision: pipeline.decisionRevision ?? 0,
+    decisions: pipeline.decisions.map((decision) => ({ ...decision })),
     pausedState: pipeline.pausedState ?? null,
     stateDetail: pipeline.stateDetail ?? null,
     srcPath: pipeline.srcPath ?? null,
@@ -601,6 +701,8 @@ export function buildPipeline(input: {
     publishedCommit: null,
     stages: (JSON.parse(JSON.stringify(input.stages)) as PipelineStage[]).map((stage) => ({ ...stage, onFail: stage.onFail ?? null })),
     runs: input.stages.map((stage) => ({ stageId: stage.id, attempts: [] })),
+    decisionRevision: 0,
+    decisions: [],
     cursor: input.stages.length ? { stageId: input.stages[0]!.id, state: "pending", input: null, activatedBy: null } : null,
     state: input.state ?? "provisioning",
     pausedState: null,

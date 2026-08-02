@@ -42,7 +42,7 @@ const { registerPipelineTick } = await import("@/lib/pipelines/controllerSignal"
 test("pipeline PATCH accepts control and task-link actions", async () => {
   let ticks = 0;
   const unregister = registerPipelineTick(async () => { ticks += 1; });
-  for (const action of ["start", "update-draft", "set-position", "add-stage", "remove-stage", "reorder-stage", "set-edge", "pause", "resume", "retry-stage", "skip-stage", "override-stage", "link-task", "unlink-task", "set-src", "delete", "close"]) {
+  for (const action of ["start", "update-draft", "set-position", "add-stage", "remove-stage", "reorder-stage", "set-edge", "pause", "resume", "answer-decision", "retry-stage", "skip-stage", "override-stage", "link-task", "unlink-task", "set-src", "delete", "close"]) {
     const response = await PATCH(
       new NextRequest("http://127.0.0.1/api/pipelines/pipeline-1", { method: "PATCH", headers: { host: "127.0.0.1" }, body: JSON.stringify({ action }) }),
       { params: Promise.resolve({ id: "pipeline-1" }) },
@@ -50,7 +50,7 @@ test("pipeline PATCH accepts control and task-link actions", async () => {
     expect(response.status).toBe(200);
     await Promise.resolve();
   }
-  expect(ticks).toBe(4);
+  expect(ticks).toBe(5);
   unregister();
 });
 

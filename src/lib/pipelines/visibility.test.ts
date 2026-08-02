@@ -45,6 +45,8 @@ function hiddenPipeline(conversationId: string): Pipeline {
     baseBranch: "main",
     baseRef: "base",
     lastPassedCommit: "head",
+    decisionRevision: 0,
+    decisions: [],
     stages: [],
     runs: [{ stageId: "build", attempts: [{ conversationId, agentPath: "/old.jsonl" } as never] }],
     cursor: null,

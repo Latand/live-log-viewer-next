@@ -192,6 +192,122 @@ test("current production records without verdict recovery metadata load and roun
   });
 });
 
+test("a v4 paused needs_decision record reconstructs one awaiting decision revision after restart (#852)", () => {
+  sandboxed((sandbox) => {
+    const pipeline = buildPipeline({
+      id: "decide01",
+      task: "task",
+      project: "viewer",
+      repoDir: "/repo",
+      stages: v3Stages(),
+      srcPath: null,
+      srcConversationId: null,
+      now: "2026-07-31T18:00:00.000Z",
+    });
+    pipeline.state = "paused";
+    pipeline.pausedState = "needs_decision";
+    pipeline.pausedAt = "2026-07-31T18:02:00.000Z";
+    pipeline.stateDetail = "Which rollout window should I use?";
+    pipeline.cursor = { stageId: "build", state: "running", input: null, activatedBy: null };
+    pipeline.runs[0]!.attempts.push({
+      n: 1,
+      state: "needs_decision",
+      effectiveRole: { ...v3Role },
+      launchId: "launch-build-1",
+      conversationId: "conversation-build-1",
+      sessionId: "session-build-1",
+      agentPath: "/codex/build-1.jsonl",
+      paneId: null,
+      flowId: null,
+      startedAt: "2026-07-31T18:00:30.000Z",
+      completedAt: "2026-07-31T18:01:30.000Z",
+      input: null,
+      activatedBy: null,
+      output: "Which rollout window should I use?",
+      verdict: { status: "needs_decision", findings: ["Choose a rollout window"] },
+      error: null,
+    });
+    const legacy = JSON.parse(JSON.stringify(pipeline)) as Record<string, unknown>;
+    delete legacy.decisionRevision;
+    delete legacy.decisions;
+    fs.writeFileSync(path.join(sandbox, "pipelines.json"), JSON.stringify({
+      schemaVersion: 4,
+      pipelines: [legacy],
+    }), "utf8");
+
+    const loaded = loadPipelines()[0]!;
+
+    expect({
+      state: loaded.state,
+      pausedState: loaded.pausedState,
+      revision: loaded.decisionRevision,
+      decisions: loaded.decisions,
+    }).toMatchObject({
+      state: "paused",
+      pausedState: "needs_decision",
+      revision: 1,
+      decisions: [{
+        revision: 1,
+        stageId: "build",
+        sourceAttempt: 1,
+        targetAttempt: null,
+        state: "awaiting_input",
+        input: null,
+        operationId: null,
+      }],
+    });
+  });
+});
+
+test("a v4 pane-hosted decision does not advertise the structured answer action (#852)", () => {
+  sandboxed((sandbox) => {
+    const pipeline = buildPipeline({
+      id: "decide02",
+      task: "task",
+      project: "viewer",
+      repoDir: "/repo",
+      stages: v3Stages(),
+      srcPath: null,
+      srcConversationId: null,
+      now: "2026-07-31T18:00:00.000Z",
+    });
+    pipeline.state = "needs_decision";
+    pipeline.stateDetail = "continue the pane-hosted stage manually";
+    pipeline.cursor = { stageId: "build", state: "running", input: null, activatedBy: null };
+    pipeline.runs[0]!.attempts.push({
+      n: 1,
+      state: "needs_decision",
+      effectiveRole: { ...v3Role },
+      launchId: "launch-build-pane",
+      conversationId: "conversation-build-pane",
+      sessionId: "session-build-pane",
+      agentPath: "/codex/build-pane.jsonl",
+      paneId: "%11",
+      flowId: null,
+      startedAt: "2026-07-31T18:00:30.000Z",
+      completedAt: "2026-07-31T18:01:30.000Z",
+      input: null,
+      activatedBy: null,
+      output: null,
+      verdict: null,
+      error: pipeline.stateDetail,
+    });
+    const legacy = JSON.parse(JSON.stringify(pipeline)) as Record<string, unknown>;
+    delete legacy.decisionRevision;
+    delete legacy.decisions;
+    fs.writeFileSync(path.join(sandbox, "pipelines.json"), JSON.stringify({
+      schemaVersion: 4,
+      pipelines: [legacy],
+    }), "utf8");
+
+    expect(loadPipelines()[0]).toMatchObject({
+      state: "needs_decision",
+      decisionRevision: 0,
+      decisions: [],
+    });
+  });
+});
+
 test("a v2 registry migrates in memory preserving all attempt history (#353)", () => {
   sandboxed((sandbox) => {
     const pipeline = buildPipeline({ id: "mig00001", task: "task", project: "viewer", repoDir: "/repo", stages: v3Stages(), srcPath: null, srcConversationId: null, now: "now" });

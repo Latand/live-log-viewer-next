@@ -46,6 +46,8 @@ function draftPipeline(): Pipeline {
     baseBranch: "main",
     baseRef: "a",
     lastPassedCommit: "a",
+    decisionRevision: 0,
+    decisions: [],
     stages: [{
       id: "build",
       kind: "run",

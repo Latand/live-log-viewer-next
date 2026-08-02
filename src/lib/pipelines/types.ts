@@ -121,6 +121,41 @@ export type PipelineVerdictRecovery = {
   messageTs: number | null;
 };
 
+export type PipelineDecisionState =
+  | "awaiting_input"
+  | "admitting"
+  | "held"
+  | "queued"
+  | "delivering"
+  | "delivered"
+  | "failed"
+  | "superseded"
+  | "closed";
+
+/**
+ * Durable join between one parked attempt, one operator answer, and the one
+ * fresh attempt that answer may reopen. The monotonic revision is the ABA
+ * fence exposed to clients; message and operation identities stay stable on
+ * every replay and after a process restart.
+ */
+export type PipelineDecision = {
+  revision: number;
+  stageId: string;
+  sourceAttempt: number;
+  targetAttempt: number | null;
+  state: PipelineDecisionState;
+  input: string | null;
+  inputDigest: string | null;
+  clientMessageId: string | null;
+  operationId: string | null;
+  deliveryId: string | null;
+  resumeIntent: boolean;
+  createdAt: string;
+  updatedAt: string;
+  terminalAt: string | null;
+  error: string | null;
+};
+
 export type PipelineStageAttempt = {
   n: number;
   /** Lineage-adopted evidence. Historical attempts never drive the execution cursor. */
@@ -235,6 +270,9 @@ export type Pipeline = {
   publishedCommit?: string | null;
   stages: PipelineStage[];
   runs: PipelineStageRun[];
+  /** Monotonic ABA fence plus append-only operator-decision history (#852). */
+  decisionRevision: number;
+  decisions: PipelineDecision[];
   /** The cursor carries the durable relay record (#353): the forwarded input and
       the activating edge are persisted in the same atomic write as the verdict
       that advanced here, so a crash between advance and spawn replays the
@@ -296,6 +334,7 @@ export const PIPELINE_ACTIONS = [
   "set-edge",
   "pause",
   "resume",
+  "answer-decision",
   "retry-stage",
   "skip-stage",
   "override-stage",
@@ -326,6 +365,11 @@ export type PatchPipelineRequest = {
   stageId?: string;
   /** retry-stage identity fence for a retry initiated from a launch receipt. */
   launchId?: string;
+  /** answer-decision fences: the parked attempt and decision revision observed
+      by the client. Replays must carry the same input for this revision. */
+  attempt?: number;
+  expectedDecisionRevision?: number;
+  input?: string;
   role?: PipelineRoleRef | null;
   engine?: FlowEngine;
   model?: string | null;

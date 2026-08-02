@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic";
 
 const ACTIONS = new Set<PipelineAction>(PIPELINE_ACTIONS);
 
-const CONTROLLER_ACTIONS = new Set<PipelineAction>(["start", "resume", "retry-stage", "skip-stage"]);
+const CONTROLLER_ACTIONS = new Set<PipelineAction>(["start", "resume", "answer-decision", "retry-stage", "skip-stage"]);
 
 type PipelineApiError = ApiError & {
   code?: PipelineRepoPreflightErrorCode;

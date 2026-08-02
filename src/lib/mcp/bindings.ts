@@ -69,7 +69,7 @@ import {
 } from "./selectedContextTarget";
 import { mcpCallerIdentity, mcpToolPolicy, type ManagerTarget, type McpToolPolicy } from "./toolAllowlist";
 
-const PIPELINE_CONTROLLER_ACTIONS = new Set<PipelineAction>(["start", "resume", "retry-stage", "skip-stage"]);
+const PIPELINE_CONTROLLER_ACTIONS = new Set<PipelineAction>(["start", "resume", "answer-decision", "retry-stage", "skip-stage"]);
 
 interface LinkTaskToPipelineDependencies {
   getPipelines(): ReturnType<typeof getPipelines>;

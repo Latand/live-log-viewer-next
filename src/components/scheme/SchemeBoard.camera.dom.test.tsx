@@ -73,6 +73,8 @@ function pipeline(index: number): Pipeline {
     baseBranch: "main",
     baseRef: "abc",
     lastPassedCommit: "abc",
+    decisionRevision: 0,
+    decisions: [],
     stages: [{
       id: "build",
       kind: "run",

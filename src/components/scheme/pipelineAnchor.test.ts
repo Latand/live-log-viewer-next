@@ -25,6 +25,8 @@ function pipeline(overrides: Record<string, unknown> = {}): Pipeline {
     baseBranch: "main",
     baseRef: "abc",
     lastPassedCommit: "abc",
+    decisionRevision: 0,
+    decisions: [],
     stages: [],
     runs: [],
     cursor: null,

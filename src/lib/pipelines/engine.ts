@@ -27,6 +27,7 @@ import type { FileEntry } from "@/lib/types";
 import { realExec, type ExecPort } from "@/lib/workflows/provision";
 
 import { requestPipelineTick } from "./controllerSignal";
+import { deliverPipelineDecision, pipelineDecisionDeliveryStatus, terminalizePipelineDecisionDelivery, type PipelineDecisionDeliveryRequest, type PipelineDecisionDeliveryResult } from "./decisionDelivery";
 import { durableStageTurnEvidence, type StageTurnEvidence } from "./durableEvidence";
 import { commitPipelineStage, currentPipelineBranchHead, currentPipelineRemoteBranchHead, pipelineWorktreeChanges, provisionPipelineWorktree, publishPipelineBranch, resetPipelineStage, resolvePipelineBase, synchronizePipelineRetryHead } from "./git";
 import {
@@ -48,6 +49,7 @@ import type {
   EffectivePipelineRole,
   PatchPipelineRequest,
   Pipeline,
+  PipelineDecision,
   PipelineRoleId,
   PipelineRepoPreflight,
   PipelineRepoPreflightErrorCode,
@@ -169,6 +171,10 @@ export interface PipelinePorts {
   sourcePathAllowed(pathname: string): boolean;
   conversationIdForPath(pathname: string): string | null;
   pipelineAdoptionCandidates(pipelineId: string): PipelineAdoptionCandidate[];
+  /** Durable structured-message adapter for one attempt-linked operator answer. */
+  deliverDecision(input: PipelineDecisionDeliveryRequest): Promise<PipelineDecisionDeliveryResult>;
+  decisionDeliveryStatus(operationId: string): Promise<PipelineDecisionDeliveryResult | null>;
+  terminalizeDecisionDelivery(operationId: string, reason: string): Promise<PipelineDecisionDeliveryResult | null>;
   createFlow(req: CreateFlowRequest, entries: FileEntry[]): Promise<{ flow?: Flow; error?: string }>;
   patchFlow(id: string, action: "advance" | "pause" | "resume", note?: string): { error?: string; status?: number };
   closeFlow(id: string): Promise<{
@@ -633,6 +639,9 @@ export function defaultPipelinePorts(): PipelinePorts {
       return null;
     },
     pipelineAdoptionCandidates: (pipelineId) => adoptionCandidates().get(pipelineId) ?? [],
+    deliverDecision: deliverPipelineDecision,
+    decisionDeliveryStatus: pipelineDecisionDeliveryStatus,
+    terminalizeDecisionDelivery: terminalizePipelineDecisionDelivery,
     createFlow: async (request, entries) => {
       const result = await createFlowFromRequest(request, entries);
       flowSnapshot = null;
@@ -692,6 +701,41 @@ function runFor(pipeline: Pipeline, stageId: string) {
 
 function currentAttempt(pipeline: Pipeline, stageId: string): PipelineStageAttempt | null {
   return runFor(pipeline, stageId)?.attempts.findLast((attempt) => !attempt.historical) ?? null;
+}
+
+function currentDecision(pipeline: Pipeline): PipelineDecision | null {
+  return pipeline.decisions.at(-1) ?? null;
+}
+
+function ensureDecisionRequest(pipeline: Pipeline, attempt: PipelineStageAttempt | null): void {
+  const stageId = pipeline.cursor?.stageId ?? null;
+  const stage = stageId ? pipeline.stages.find((candidate) => candidate.id === stageId) ?? null : null;
+  if (!attempt || !stageId || stage?.kind !== "run"
+    || attempt.paneId !== null || !attempt.conversationId || !attempt.agentPath) return;
+  const existing = currentDecision(pipeline);
+  if (existing?.stageId === stageId
+    && existing.sourceAttempt === attempt.n
+    && existing.state === "awaiting_input") return;
+  const createdAt = attempt.completedAt ?? pipeline.createdAt;
+  const revision = pipeline.decisionRevision + 1;
+  pipeline.decisionRevision = revision;
+  pipeline.decisions.push({
+    revision,
+    stageId,
+    sourceAttempt: attempt.n,
+    targetAttempt: null,
+    state: "awaiting_input",
+    input: null,
+    inputDigest: null,
+    clientMessageId: null,
+    operationId: null,
+    deliveryId: null,
+    resumeIntent: false,
+    createdAt,
+    updatedAt: createdAt,
+    terminalAt: null,
+    error: null,
+  });
 }
 
 function unixMs(value: string | null): number {
@@ -765,6 +809,7 @@ function park(pipeline: Pipeline, detail: string, attempt?: PipelineStageAttempt
   pipeline.state = "needs_decision";
   pipeline.pausedState = null;
   pipeline.stateDetail = detail;
+  ensureDecisionRequest(pipeline, attempt ?? null);
 }
 
 /** Moves the cursor's lifecycle state while preserving the durable relay record
@@ -1924,6 +1969,110 @@ function reconcilePipelineEmbeddedFlows(pipeline: Pipeline, ports: PipelinePorts
   return changed;
 }
 
+const PENDING_DECISION_DELIVERY_STATES: ReadonlySet<PipelineDecision["state"]> = new Set([
+  "admitting",
+  "held",
+  "queued",
+  "delivering",
+]);
+
+/**
+ * Joins the durable transport receipt back to exactly the revision/attempt that
+ * admitted it. This runs before verdict recovery so a stale parked attempt can
+ * never race a just-started operator continuation after restart.
+ */
+async function reconcilePipelineDecision(
+  pipeline: Pipeline,
+  ports: PipelinePorts,
+): Promise<boolean> {
+  if (TERMINAL_STATES.has(pipeline.state)) return false;
+  const decision = currentDecision(pipeline);
+  if (!decision
+    || decision.revision !== pipeline.decisionRevision
+    || !PENDING_DECISION_DELIVERY_STATES.has(decision.state)
+    || !decision.operationId
+    || decision.targetAttempt === null) return false;
+  const run = runFor(pipeline, decision.stageId);
+  const target = run?.attempts.find((attempt) => !attempt.historical && attempt.n === decision.targetAttempt) ?? null;
+  if (!target) return false;
+  let status = await ports.decisionDeliveryStatus(decision.operationId);
+  if (!status && decision.state === "admitting") {
+    const source = run?.attempts.find((attempt) => !attempt.historical && attempt.n === decision.sourceAttempt) ?? null;
+    if (!source?.conversationId || !source.agentPath || !decision.input || !decision.clientMessageId) {
+      status = {
+        state: "failed",
+        operationId: decision.operationId,
+        deliveryId: decision.deliveryId,
+        error: "persisted decision admission is incomplete",
+      };
+    } else {
+      try {
+        status = await ports.deliverDecision({
+          pipelineId: pipeline.id,
+          stageId: decision.stageId,
+          sourceAttempt: source.n,
+          targetAttempt: target.n,
+          conversationId: source.conversationId,
+          path: source.agentPath,
+          input: decision.input,
+          clientMessageId: decision.clientMessageId,
+          operationId: decision.operationId,
+        });
+      } catch (error) {
+        status = {
+          state: "failed",
+          operationId: decision.operationId,
+          deliveryId: decision.deliveryId,
+          error: error instanceof Error ? error.message : "decision delivery replay failed",
+        };
+      }
+      if (status.operationId !== decision.operationId) {
+        status = {
+          state: "failed",
+          operationId: decision.operationId,
+          deliveryId: status.deliveryId,
+          error: "decision delivery operation identity changed during replay",
+        };
+      }
+    }
+  }
+  if (!status || status.operationId !== decision.operationId) return false;
+
+  const before = JSON.stringify({ decision, target, state: pipeline.state, pausedState: pipeline.pausedState, cursor: pipeline.cursor });
+  const at = status.at ?? ports.now();
+  decision.state = status.state;
+  decision.deliveryId = status.deliveryId ?? decision.deliveryId;
+  decision.updatedAt = at;
+  decision.error = status.error ?? null;
+  if (status.state === "delivered") {
+    decision.terminalAt = at;
+    target.state = "running";
+    target.startedAt ??= at;
+    target.completedAt = null;
+    target.error = null;
+    setCursorState(pipeline, decision.stageId, "running");
+    if (pipeline.state === "paused" && pipeline.pausedState === "needs_decision") {
+      pipeline.pausedState = "running";
+      pipeline.stateDetail = "paused by user";
+    } else if (pipeline.state === "needs_decision") {
+      pipeline.state = "running";
+      pipeline.stateDetail = null;
+    }
+  } else if (status.state === "failed") {
+    decision.terminalAt = at;
+    target.state = "needs_decision";
+    target.completedAt = at;
+    target.error = status.error ?? "decision delivery failed";
+    if (pipeline.state === "paused") pipeline.pausedState = "needs_decision";
+    else pipeline.state = "needs_decision";
+    pipeline.stateDetail = target.error;
+    ensureDecisionRequest(pipeline, target);
+  } else if (pipeline.state === "needs_decision") {
+    pipeline.stateDetail = `operator decision delivery is ${status.state}`;
+  }
+  return JSON.stringify({ decision, target, state: pipeline.state, pausedState: pipeline.pausedState, cursor: pipeline.cursor }) !== before;
+}
+
 function reconcileParkedStructuredSpawn(pipeline: Pipeline, ports: PipelinePorts): boolean {
   if (pipeline.state !== "needs_decision") return false;
   const stage = currentStage(pipeline);
@@ -2154,6 +2303,7 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
         pipelineChanged = reconcilePendingPipelineAdoptions(pipeline, ports) || pipelineChanged;
         pipelineChanged = await reconcileHistoricalAttempts(pipeline, entries, ports) || pipelineChanged;
         pipelineChanged = rebindPipelineAttemptPaths(pipeline, ports) || pipelineChanged;
+        pipelineChanged = await reconcilePipelineDecision(pipeline, ports) || pipelineChanged;
         pipelineChanged = await reconcileExhaustedVerdictRecovery(pipeline, ports, persist) || pipelineChanged;
         pipelineChanged = reconcileParkedVerdictMiss(pipeline, ports) || pipelineChanged;
         pipelineChanged = reconcileParkedStructuredSpawn(pipeline, ports) || pipelineChanged;
@@ -2581,6 +2731,109 @@ function verdictRecoveryResetRefusal(attempt: PipelineStageAttempt | null): { er
   };
 }
 
+function decisionDeliveryIdentity(
+  pipeline: Pipeline,
+  stageId: string,
+  sourceAttempt: number,
+  revision: number,
+): { clientMessageId: string; operationId: string } {
+  const digest = crypto.createHash("sha256")
+    .update(`${pipeline.id}\u0000${stageId}\u0000${sourceAttempt}\u0000${revision}`)
+    .digest("hex")
+    .slice(0, 32);
+  return {
+    clientMessageId: `pipeline_decision_message_${digest}`,
+    operationId: `pipeline_decision_${digest}`,
+  };
+}
+
+async function supersedePipelineDecision(
+  pipeline: Pipeline,
+  ports: PipelinePorts,
+  reason: string,
+  terminalState: Extract<PipelineDecision["state"], "superseded" | "closed"> = "superseded",
+): Promise<{ error: string; status: number } | null> {
+  const decision = currentDecision(pipeline);
+  if (!decision || decision.revision !== pipeline.decisionRevision
+    || ["delivered", "failed", "superseded", "closed"].includes(decision.state)) return null;
+  let terminalAt = ports.now();
+  if (decision.operationId) {
+    const result = await ports.terminalizeDecisionDelivery(decision.operationId, reason);
+    if (!result) return { error: "decision delivery receipt is unavailable", status: 409 };
+    if (result.state === "delivered") {
+      return { error: "operator decision already started a turn; wait for that attempt to settle", status: 409 };
+    }
+    if (result.state !== "failed") {
+      return { error: `operator decision delivery is ${result.state}; wait for a terminal receipt`, status: 409 };
+    }
+    terminalAt = result.at ?? terminalAt;
+    decision.deliveryId = result.deliveryId ?? decision.deliveryId;
+  }
+  decision.state = terminalState;
+  decision.updatedAt = terminalAt;
+  decision.terminalAt = terminalAt;
+  decision.error = reason;
+  if (decision.targetAttempt !== null) {
+    const target = runFor(pipeline, decision.stageId)?.attempts.find((candidate) =>
+      !candidate.historical && candidate.n === decision.targetAttempt) ?? null;
+    if (target && (target.state === "pending" || target.state === "spawning")) {
+      target.state = "skipped";
+      target.completedAt = terminalAt;
+      target.error = reason;
+    }
+  }
+  return null;
+}
+
+async function closePipelineDecision(
+  pipeline: Pipeline,
+  ports: PipelinePorts,
+): Promise<{ error: string; status: number } | null> {
+  const decision = currentDecision(pipeline);
+  if (!decision || decision.revision !== pipeline.decisionRevision
+    || ["failed", "superseded", "closed"].includes(decision.state)) return null;
+  let terminalAt = ports.now();
+  let preserveDelivered = decision.state === "delivered";
+  if (decision.operationId && decision.state !== "delivered") {
+    try {
+      const result = await ports.terminalizeDecisionDelivery(decision.operationId, "pipeline closed");
+      if (!result) return { error: "decision delivery receipt is unavailable", status: 409 };
+      if (!["failed", "delivered"].includes(result.state)) {
+        return { error: `operator decision delivery is ${result.state}; wait for a terminal receipt`, status: 409 };
+      }
+      terminalAt = result.at ?? terminalAt;
+      decision.deliveryId = result.deliveryId ?? decision.deliveryId;
+      if (result.state === "delivered") {
+        preserveDelivered = true;
+        decision.state = "delivered";
+        decision.updatedAt = terminalAt;
+        decision.terminalAt = terminalAt;
+        decision.error = null;
+      }
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.message : "decision delivery could not be terminalized",
+        status: 409,
+      };
+    }
+  }
+  if (!preserveDelivered) {
+    decision.state = "closed";
+    decision.updatedAt = terminalAt;
+    decision.terminalAt = terminalAt;
+    decision.error = "pipeline closed";
+  }
+  if (decision.targetAttempt === null) return null;
+  const target = runFor(pipeline, decision.stageId)?.attempts.find((candidate) =>
+    !candidate.historical && candidate.n === decision.targetAttempt) ?? null;
+  if (target && !TERMINAL_ATTEMPT_STATES.has(target.state)) {
+    target.state = "skipped";
+    target.completedAt = terminalAt;
+    target.error = "pipeline closed";
+  }
+  return null;
+}
+
 /**
  * Every host this pipeline ever launched, as a close must consider it.
  *
@@ -2910,6 +3163,140 @@ export async function patchPipeline(
       pipeline.resumedAt = ports.now();
       pipeline.stateDetail = null;
       if (flow?.state === "paused") ports.patchFlow(flow.id, "resume");
+    } else if (req.action === "answer-decision") {
+      if (!Number.isInteger(req.expectedDecisionRevision)) {
+        return { error: "expectedDecisionRevision is required", status: 400 };
+      }
+      const decision = pipeline.decisions.find((candidate) => candidate.revision === req.expectedDecisionRevision) ?? null;
+      if (!decision || decision.revision !== pipeline.decisionRevision) {
+        return {
+          error: `stale decision revision ${req.expectedDecisionRevision}; current revision is ${pipeline.decisionRevision}`,
+          status: 409,
+        };
+      }
+      if (typeof req.stageId !== "string" || req.stageId !== decision.stageId
+        || !Number.isInteger(req.attempt) || req.attempt !== decision.sourceAttempt) {
+        return { error: "the answered decision belongs to a different stage attempt", status: 409 };
+      }
+      const decisionStage = pipeline.stages.find((candidate) => candidate.id === decision.stageId) ?? null;
+      const decisionRun = runFor(pipeline, decision.stageId);
+      const source = decisionRun?.attempts.find((candidate) => !candidate.historical && candidate.n === decision.sourceAttempt) ?? null;
+      if (!decisionStage || !source || decisionStage.kind !== "run"
+        || source.paneId !== null || !source.conversationId || !source.agentPath) {
+        return { error: "this decision has no reusable structured conversation", status: 409 };
+      }
+      const input = typeof req.input === "string" ? req.input.trim() : "";
+      if (!input) return { error: "decision input is required", status: 400 };
+      if (Buffer.byteLength(input, "utf8") > 32_000) return { error: "decision input exceeds 32000 UTF-8 bytes", status: 400 };
+      const inputDigest = crypto.createHash("sha256").update(input).digest("hex");
+      let target: PipelineStageAttempt | null;
+      let identity: { clientMessageId: string; operationId: string };
+      if (decision.state === "awaiting_input") {
+        if (pipeline.state !== "needs_decision") {
+          return { error: "pipeline does not have a stage awaiting operator input", status: 409 };
+        }
+        target = newAttempt(pipeline, decisionStage);
+        if (!target) return { error: "pipeline stage run record is missing", status: 409 };
+        target.state = "pending";
+        target.launchId = null;
+        target.conversationId = source.conversationId;
+        target.sessionId = source.sessionId;
+        target.agentPath = source.agentPath;
+        target.paneId = null;
+        target.startedAt = null;
+        target.completedAt = null;
+        target.input = input;
+        target.output = null;
+        target.verdict = null;
+        target.error = null;
+        identity = decisionDeliveryIdentity(pipeline, decisionStage.id, source.n, decision.revision);
+        decision.targetAttempt = target.n;
+        decision.input = input;
+        decision.inputDigest = inputDigest;
+        decision.clientMessageId = identity.clientMessageId;
+        decision.operationId = identity.operationId;
+        decision.deliveryId = null;
+        decision.resumeIntent = true;
+        decision.terminalAt = null;
+        decision.error = null;
+      } else {
+        if (decision.inputDigest !== inputDigest) {
+          return {
+            error: `decision revision ${decision.revision} already has a different input payload`,
+            status: 409,
+          };
+        }
+        if (decision.state === "delivered") return { pipeline };
+        if (["failed", "superseded", "closed"].includes(decision.state)) {
+          return { error: `decision delivery is already ${decision.state}`, status: 409 };
+        }
+        target = decision.targetAttempt === null
+          ? null
+          : decisionRun?.attempts.find((candidate) => !candidate.historical && candidate.n === decision.targetAttempt) ?? null;
+        if (!target || !decision.clientMessageId || !decision.operationId) {
+          return { error: "decision delivery identity is incomplete", status: 409 };
+        }
+        identity = { clientMessageId: decision.clientMessageId, operationId: decision.operationId };
+      }
+
+      const admittedAt = ports.now();
+      decision.state = "admitting";
+      decision.updatedAt = admittedAt;
+      decision.error = null;
+      pipeline.stateDetail = "submitting operator decision";
+      persist();
+
+      let delivery: PipelineDecisionDeliveryResult;
+      try {
+        delivery = await ports.deliverDecision({
+          pipelineId: pipeline.id,
+          stageId: decisionStage.id,
+          sourceAttempt: source.n,
+          targetAttempt: target.n,
+          conversationId: source.conversationId,
+          path: source.agentPath,
+          input,
+          clientMessageId: identity.clientMessageId,
+          operationId: identity.operationId,
+        });
+      } catch (error) {
+        delivery = {
+          state: "failed",
+          operationId: identity.operationId,
+          deliveryId: null,
+          error: error instanceof Error ? error.message : "decision delivery failed",
+        };
+      }
+      if (delivery.operationId !== identity.operationId) {
+        delivery = {
+          state: "failed",
+          operationId: identity.operationId,
+          deliveryId: delivery.deliveryId,
+          error: "decision delivery operation identity changed during admission",
+        };
+      }
+      const settledAt = delivery.at ?? ports.now();
+      decision.state = delivery.state;
+      decision.deliveryId = delivery.deliveryId;
+      decision.updatedAt = settledAt;
+      decision.error = delivery.error ?? null;
+      if (delivery.state === "delivered") {
+        decision.terminalAt = settledAt;
+        target.state = "running";
+        target.startedAt = settledAt;
+        setCursorState(pipeline, decisionStage.id, "running");
+        pipeline.state = "running";
+        pipeline.stateDetail = null;
+      } else if (delivery.state === "failed") {
+        decision.terminalAt = settledAt;
+        target.state = "needs_decision";
+        target.completedAt = settledAt;
+        target.error = delivery.error ?? "decision delivery failed";
+        pipeline.stateDetail = target.error;
+        ensureDecisionRequest(pipeline, target);
+      } else {
+        pipeline.stateDetail = `operator decision delivery is ${delivery.state}`;
+      }
     } else if (req.action === "retry-stage") {
       if (pipeline.state !== "needs_decision") return { error: "pipeline does not have a stage awaiting retry", status: 409 };
       const recoveryRefusal = verdictRecoveryResetRefusal(attempt);
@@ -2954,6 +3341,9 @@ export async function patchPipeline(
       };
       const initialReceipt = validateRetryReceipt();
       if (initialReceipt.conflict) return initialReceipt.conflict;
+      const decisionSupersede = await supersedePipelineDecision(pipeline, ports, "superseded by retry-stage");
+      if (decisionSupersede) return decisionSupersede;
+      persist();
       const orphan = await orphanAgentPane(attempt, ports);
       if (orphan) return orphan;
       if (flow && flow.state !== "closed") {
@@ -3023,6 +3413,9 @@ export async function patchPipeline(
       if (pipeline.state !== "needs_decision" || !stage) return { error: "pipeline does not have a stage awaiting a decision", status: 409 };
       const recoveryRefusal = verdictRecoveryResetRefusal(attempt);
       if (recoveryRefusal) return recoveryRefusal;
+      const decisionSupersede = await supersedePipelineDecision(pipeline, ports, "superseded by skip-stage");
+      if (decisionSupersede) return decisionSupersede;
+      persist();
       const orphan = await orphanAgentPane(attempt, ports);
       if (orphan) return orphan;
       if (flow && flow.state !== "closed") {
@@ -3215,6 +3608,12 @@ export async function patchPipeline(
         if (closed?.stoppedReviewer && stage && attempt) {
           close.reviewers.push({ stageId: stage.id, attempt: attempt.n, flowId: flow.id, round: closed.stoppedReviewer.round });
         }
+      }
+      const decisionClose = await closePipelineDecision(pipeline, ports);
+      if (decisionClose) {
+        pipeline.stateDetail = decisionClose.error;
+        persist();
+        return { ...decisionClose, close };
       }
       /* A cursor can rest at state pending before its round's attempt
          materializes: the initial stage right after provisioning, the next stage
