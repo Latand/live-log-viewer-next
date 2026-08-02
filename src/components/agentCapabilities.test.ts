@@ -40,7 +40,14 @@ function imageCap(supported: boolean): RuntimeImageCapability {
     negotiated image capability. */
 function rv(hostKind: HostKind, host: HostAxis, legacy = false, imageInput?: RuntimeImageCapability): RuntimeSessionView {
   return {
-    session: { hostKind, host, capabilities: { steer: true, structuredAttention: true, ...(imageInput ? { imageInput } : {}) } } as RuntimeSessionView["session"],
+    session: {
+      hostKind,
+      host,
+      /* The engine the host speaks — structured Compact reads it, because the
+         compact control exists on codex-app-server and not on claude-broker. */
+      sessionKey: { engine: hostKind === "claude-broker" ? "claude" : "codex", sessionId: "session-one" },
+      capabilities: { steer: true, structuredAttention: true, ...(imageInput ? { imageInput } : {}) },
+    } as RuntimeSessionView["session"],
     uiState: {} as RuntimeSessionView["uiState"],
     attentions: [],
     receipts: [],
@@ -239,15 +246,17 @@ test("live-subagent: stop enabled (root-interrupt note), compact disabled, runti
   expect(state("images", f, null)).toBe("enabled");
 });
 
-test("structured: stop+terminal+kill+runtime enabled, compact still fenced, images follow the negotiated capability", () => {
+test("structured: stop+terminal+kill+runtime enabled, compact follows the engine, images follow the negotiated capability", () => {
   const f = file({ proc: "running" });
   const view = rv("codex-app-server", "hosted");
   expect(state("stop", f, view)).toBe("enabled");
   expect(state("terminal", f, view)).toBe("enabled");
   // Kill is enabled and routed through the durable structured control channel.
   expect(state("kill", f, view)).toBe("enabled");
-  // Compact stays disabled: dispatchStructuredControl still 409s it.
-  expect(reason("compact", f, view)).toBe("strip.structuredUnsupported");
+  // Compact is a real durable control on codex-app-server (#862)...
+  expect(state("compact", f, view)).toBe("enabled");
+  // ...and a genuine protocol gap on claude-broker, which names the engine.
+  expect(reason("compact", f, rv("claude-broker", "hosted"))).toBe("strip.compactEngineUnsupported");
   // The composer RuntimePill owns runtime selection here (issue #390); per-row
   // honesty comes from the session's negotiated runtimeSettings capability.
   expect(state("runtime", f, view)).toBe("enabled");

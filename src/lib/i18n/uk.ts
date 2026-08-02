@@ -367,6 +367,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "strip.stopSubagent": "перериває кореневого агента",
   "strip.compactSubagent": "недоступно для субагентів",
   "strip.structuredUnsupported": "структурований хост поки не підтримує цю дію",
+  "strip.compactEngineUnsupported": "цей двигун не має команди стиснення",
   "strip.resolving": "визначаємо середовище агента…",
 
   // Dead-host banner (issue #247)

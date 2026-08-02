@@ -32,8 +32,8 @@ test("the compact command parses into a durable operation fenced to one owned ge
   });
 });
 
-test("a compact command carries an optional turn fence and never carries prompt text", () => {
-  const fenced = parseRuntimeCommand("compact", {
+test("a compact command drops every field the engine could read as input or as a turn fence", () => {
+  const parsed = parseRuntimeCommand("compact", {
     conversationId: "conversation_one",
     idempotencyKey: "compact-key",
     sessionKey: { engine: "codex", sessionId: "thread-one" },
@@ -41,11 +41,13 @@ test("a compact command carries an optional turn fence and never carries prompt 
     text: "/compact",
   }) as RuntimeCompactCommand;
 
-  expect(fenced.turnId).toBe("turn-seven");
   /* A compact control is not a message: nothing the caller supplies may reach
-     the engine as user input. */
-  expect("text" in fenced).toBe(false);
-  expect("images" in fenced).toBe(false);
+     the engine as user input. A turn fence is equally meaningless — admission
+     only ever accepts an idle generation, so a named turn could only ever be a
+     busy-turn rejection. */
+  expect("text" in parsed).toBe(false);
+  expect("images" in parsed).toBe(false);
+  expect("turnId" in parsed).toBe(false);
 });
 
 test("a compact command without an owned session key is refused", () => {
@@ -79,9 +81,9 @@ test("a host without a compact control is detected structurally", () => {
 });
 
 test("a compact failure states whether the engine outcome is known", () => {
-  const rejected = new StructuredCompactError("thread/compact/start failed", "request");
-  const unverified = new StructuredCompactError("evidence timed out", "evidence");
-  expect(rejected.phase).toBe("request");
-  expect(unverified.phase).toBe("evidence");
-  expect(rejected).toBeInstanceOf(Error);
+  const refused = new StructuredCompactError("thread/compact/start failed", "refused");
+  const unverified = new StructuredCompactError("evidence timed out", "unverified");
+  expect(refused.phase).toBe("refused");
+  expect(unverified.phase).toBe("unverified");
+  expect(refused).toBeInstanceOf(Error);
 });

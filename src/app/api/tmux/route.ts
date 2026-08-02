@@ -136,13 +136,14 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
-  let body: { pid?: unknown; path?: unknown; conversationId?: unknown; clientMessageId?: unknown; text?: unknown; image?: unknown; images?: unknown; action?: unknown; key?: unknown; label?: unknown; question?: unknown; target?: unknown; model?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown };
+  let body: { pid?: unknown; path?: unknown; conversationId?: unknown; clientMessageId?: unknown; operationId?: unknown; text?: unknown; image?: unknown; images?: unknown; action?: unknown; key?: unknown; label?: unknown; question?: unknown; target?: unknown; model?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown };
   try {
     body = (await req.json()) as {
       pid?: unknown;
       path?: unknown;
       conversationId?: unknown;
       clientMessageId?: unknown;
+      operationId?: unknown;
       text?: unknown;
       image?: unknown;
       images?: unknown;
@@ -214,6 +215,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
       conversationId,
       transcriptPath: filePath,
       action: explicitAction,
+      /* #862: the caller owns operation identity for durable controls. Without
+         it every HTTP retry of one user gesture would mint a fresh operation —
+         and a second compaction — instead of replaying the first receipt. */
+      ...(typeof body.operationId === "string" && body.operationId.trim()
+        ? { operationId: body.operationId.trim() }
+        : {}),
       key: typeof body.key === "string" ? body.key : "",
       label: body.label,
       question: body.question,

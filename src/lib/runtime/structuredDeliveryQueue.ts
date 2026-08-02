@@ -94,7 +94,6 @@ interface CompactEffect {
   conversationId: string;
   kind: "compact";
   sessionKey: { engine: "codex" | "claude"; sessionId: string };
-  turnId?: string | null;
   eventSeq: number;
 }
 
@@ -218,16 +217,12 @@ function compactEffect(effect: StructuredDeliveryEffect): CompactEffect | null {
   if (!operationId || !conversationId || !key || typeof key !== "object" || Array.isArray(key)) return null;
   const candidate = key as Record<string, unknown>;
   if ((candidate.engine !== "codex" && candidate.engine !== "claude") || typeof candidate.sessionId !== "string") return null;
-  const turnId = typeof effect.payload.turnId === "string" || effect.payload.turnId === null
-    ? effect.payload.turnId
-    : undefined;
   return {
     operationId,
     conversationId,
     kind: "compact",
     sessionKey: { engine: candidate.engine, sessionId: candidate.sessionId },
     eventSeq: effect.eventSeq,
-    ...(turnId !== undefined ? { turnId } : {}),
   };
 }
 
@@ -584,9 +579,10 @@ export class StructuredDeliveryQueue {
          restart, or a terminal transition that never landed. This process
          cannot know whether the thread was compacted, and issuing the control
          again could compact it twice, so the receipt terminalizes unverified. */
-      await this.port.transition(effect.operationId, "uncertain", {
-        reason: "compaction was issued by an earlier executor; its outcome is unverified",
-      });
+      await this.terminalizeUnverified(
+        effect.operationId,
+        "compaction was issued by an earlier executor; its outcome is unverified",
+      );
       return { blocked: false, terminated: false };
     }
     const host = this.resolveHost(effect.conversationId);
@@ -604,10 +600,6 @@ export class StructuredDeliveryQueue {
        turn that started in between fails the control instead of racing it. */
     if (health.status !== "idle" || health.activeTurnRef) {
       await this.port.transition(effect.operationId, "failed", { reason: "busy-turn" });
-      return { blocked: false, terminated: false };
-    }
-    if (effect.turnId !== undefined && effect.turnId !== null && effect.turnId !== health.activeTurnRef) {
-      await this.port.transition(effect.operationId, "failed", { reason: "stale-turn" });
       return { blocked: false, terminated: false };
     }
     /* Durable marker first: a restart that finds the receipt in `delivering`
@@ -635,10 +627,25 @@ export class StructuredDeliveryQueue {
         reason: outcome.compactionId ? `compaction:${outcome.compactionId}` : null,
       });
     } catch (error) {
-      const unverified = error instanceof StructuredCompactError && error.phase === "evidence";
-      await this.port.transition(effect.operationId, unverified ? "uncertain" : "failed", {
-        reason: failureReason(error),
-      });
+      if (error instanceof StructuredCompactError && error.phase === "unverified") {
+        await this.terminalizeUnverified(effect.operationId, failureReason(error));
+        return;
+      }
+      await this.port.transition(effect.operationId, "failed", { reason: failureReason(error) });
+    }
+  }
+
+  /**
+   * Terminalizes a compaction whose outcome nothing proved. `uncertain` is a
+   * newer transition than the rest of this channel, so a runtime-host from
+   * before #862 rejects it; the operation must still settle rather than wedge
+   * the conversation's queue behind a receipt no pass can ever clear.
+   */
+  private async terminalizeUnverified(operationId: string, reason: string): Promise<void> {
+    try {
+      await this.port.transition(operationId, "uncertain", { reason });
+    } catch {
+      await this.port.transition(operationId, "failed", { reason });
     }
   }
 

@@ -1322,9 +1322,6 @@ export class RuntimeJournal {
         || session.sessionKey.sessionId !== command.sessionKey.sessionId) {
         status = "rejected";
         reason = "stale-generation";
-      } else if (command.turnId !== undefined && command.turnId !== null && command.turnId !== session.activeTurnId) {
-        status = "rejected";
-        reason = "stale-turn";
       } else if (session.turn === "running" || session.turn === "interrupt_requested" || session.activeTurnId) {
         status = "rejected";
         reason = "busy-turn";

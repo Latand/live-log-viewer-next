@@ -294,12 +294,13 @@ export type RuntimePendingReconfigure = Omit<RuntimeReconfigureCommand, "kind" |
  * generation (issue #862). It is a control, never a message: the command
  * carries no text and no images, so no path through the runtime can replay it
  * as a user prompt. `sessionKey` fences the compaction to the exact generation
- * the caller was looking at, and `turnId` is an optional caller fence.
+ * the caller was looking at. There is deliberately no turn fence: a compaction
+ * is only ever admitted against an idle generation, so any turn a caller could
+ * name would already have made the request a `busy-turn` rejection.
  */
 export interface RuntimeCompactCommand extends RuntimeCommandBase {
   kind: "compact";
   sessionKey: { engine: RuntimeEngine; sessionId: string };
-  turnId?: string | null;
 }
 
 /** An engine's truthful support for one client-originated engine control. */

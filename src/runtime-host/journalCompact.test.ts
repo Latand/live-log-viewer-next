@@ -101,6 +101,26 @@ test("a busy turn rejects compact admission instead of racing the running turn",
   journal.close();
 });
 
+test("a caller-supplied turn fence cannot smuggle a compaction past the busy-turn rule", () => {
+  const journal = new RuntimeJournal(path.join(sandbox("no-fence"), "events.sqlite"), { structuredHosts: true, now: () => 100 });
+  hostedCodexSession(journal, { conversationId: "conv-busy", turn: "running", activeTurnId: "turn-live" });
+
+  const result = journal.executeOperation({
+    kind: "compact",
+    operationId: "op-fenced",
+    idempotencyKey: "op-fenced",
+    conversationId: "conv-busy",
+    sessionKey: { engine: "codex", sessionId: "thread-one" },
+    /* The compact contract has no turn fence; a caller that names the live turn
+       anyway must still land on the busy-turn rejection. */
+    turnId: "turn-live",
+  } as never);
+
+  expect(result.receipt).toMatchObject({ status: "rejected", reason: "busy-turn" });
+  expect(journal.effectBatch()).toHaveLength(0);
+  journal.close();
+});
+
 test("compact admission refuses a lost host, a stale generation, and an unsupported engine", () => {
   const journal = new RuntimeJournal(path.join(sandbox("refusals"), "events.sqlite"), { structuredHosts: true, now: () => 100 });
   hostedCodexSession(journal, { conversationId: "conv-dead", host: "dead" });

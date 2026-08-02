@@ -295,6 +295,8 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
   const [compactBusy, setCompactBusy] = useState(false);
   const [recheckBusy, setRecheckBusy] = useState(false);
   const [compactArmed, setCompactArmed] = useState(false);
+  /** The durable operation a confirmed compact gesture owns until it lands. */
+  const compactOperationRef = useRef<string | null>(null);
   const [attachOpen, setAttachOpen] = useState(false);
   const [status, setStatus] = useState<{ kind: "ok" | "info" | "err"; text: string } | null>(null);
 
@@ -395,14 +397,22 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
     if (compactBusy) return;
     setCompactBusy(true);
     setStatus(null);
+    /* #862: one durable operation per confirmed gesture. On a structured host
+       this admits a real compaction, so a retry after a timeout or a failed
+       response must replay that same operation — the id is only released once
+       the request is known to have landed. */
+    const operationId = compactOperationRef.current ?? `compact_${crypto.randomUUID()}`;
+    compactOperationRef.current = operationId;
     try {
       const response = await fetch("/api/tmux", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action: "compact", path: file.path }),
+        body: JSON.stringify({ action: "compact", path: file.path, operationId }),
       });
       const body = (await response.json()) as { ok?: boolean; error?: string };
-      setStatus(response.ok && body.ok ? { kind: "ok", text: t("composer.compactSent") } : { kind: "err", text: body.error ?? t("composer.failedCompact") });
+      const accepted = response.ok && Boolean(body.ok);
+      if (accepted) compactOperationRef.current = null;
+      setStatus(accepted ? { kind: "ok", text: t("composer.compactSent") } : { kind: "err", text: body.error ?? t("composer.failedCompact") });
     } catch {
       setStatus({ kind: "err", text: t("common.serverUnavailable") });
     } finally {

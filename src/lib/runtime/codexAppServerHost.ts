@@ -987,21 +987,22 @@ export class CodexAppServerHost implements EngineHost {
    * app-server control channel — `thread/compact/start` for the thread this
    * host owns — so there is no path by which it becomes a user turn: no
    * `turn/start`, no `turn/steer`, no message content anywhere in the request.
-   * The promise settles only on `contextCompaction` lifecycle evidence, so the
-   * durable receipt cannot claim success from an accepted request alone.
+   * The promise settles only on a *completed* `contextCompaction` item, so the
+   * durable receipt cannot claim success from an accepted request, nor from a
+   * compaction that has merely started.
    */
   async compact(request: RuntimeCompactRequest): Promise<RuntimeCompactOutcome> {
     if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
-      throw new StructuredCompactError("Codex app-server host is unavailable", "request");
+      throw new StructuredCompactError("Codex app-server host is unavailable", "refused");
     }
     if (request.threadId && request.threadId !== this.identity.threadId) {
-      throw new StructuredCompactError("compact target thread is not the thread this host owns", "request");
+      throw new StructuredCompactError("compact target thread is not the thread this host owns", "refused");
     }
     /* The boundary refuses a live turn even though admission already fenced it:
        the turn may have started between admission and execution, and compacting
        underneath a running turn is exactly the race this control must not run. */
     if (this.activeTurnId) {
-      throw new StructuredCompactError("a turn is active; compaction would race it", "request");
+      throw new StructuredCompactError("a turn is active; compaction would race it", "refused");
     }
     const existing = this.pendingCompactions.get(request.operationId);
     if (existing) return existing.promise;
@@ -1016,48 +1017,81 @@ export class CodexAppServerHost implements EngineHost {
     this.pendingCompactions.set(request.operationId, settle);
     void promise.catch(() => undefined);
     try {
-      await this.rpc("thread/compact/start", { threadId: this.identity.threadId });
+      /* Budgeted like the compaction itself, not like an ordinary call.
+         `thread/compact/start` is a mutating method, so the default 30 s
+         request budget would fail the whole host — and take the operator's live
+         conversation with it — the moment a large thread takes longer than that
+         to begin compacting. */
+      await this.rpc(
+        "thread/compact/start",
+        { threadId: this.identity.threadId },
+        this.compactEvidenceTimeoutMs,
+      );
     } catch (error) {
+      /* The evidence may have won the race: a compaction the app-server already
+         reported is a fact, and a late failure on the request leg must not
+         overwrite it. */
+      if (this.pendingCompactions.get(request.operationId) !== settle) return promise;
       this.pendingCompactions.delete(request.operationId);
       const message = safeError(error);
       /* A refusal proves nothing was compacted; a request that timed out may
          still have started one, and `thread/compact/start` is registered as
          mutating so the transport says which of the two happened. */
-      throw new StructuredCompactError(message, /outcome is uncertain/.test(message) ? "evidence" : "request");
+      throw new StructuredCompactError(message, /outcome is uncertain/.test(message) ? "unverified" : "refused");
     }
     if (this.pendingCompactions.get(request.operationId) === settle) {
       settle.timer = setTimeout(() => {
         this.pendingCompactions.delete(request.operationId);
         settle.reject(new StructuredCompactError(
           "Codex compaction evidence did not arrive; the outcome is unverified",
-          "evidence",
+          "unverified",
         ));
       }, this.compactEvidenceTimeoutMs);
     }
     return promise;
   }
 
-  /** Every waiter settles on the first compaction the owned thread reports:
-      one thread compacts once at a time, so the item is the evidence. */
-  private resolveCompactions(compactionId: string | null): void {
+  /**
+   * Reads one `contextCompaction` item as compaction evidence. Only a
+   * *completed* compaction settles a waiter: the app-server emits this item
+   * twice, once at `item/started` carrying status `in_progress` and again at
+   * `item/completed`, and treating the first sighting as success would report
+   * `delivered` for a compaction still running — and would release queued
+   * messages into a thread mid-compaction. A completed item whose status is
+   * anything other than `completed` is a compaction the engine did not finish:
+   * that is a known failure, not an unverified one.
+   */
+  private acceptCompactionItem(item: unknown, phase: "started" | "completed"): void {
     if (this.pendingCompactions.size === 0) return;
-    const waiting = [...this.pendingCompactions.values()];
-    this.pendingCompactions.clear();
-    for (const compaction of waiting) {
-      if (compaction.timer) clearTimeout(compaction.timer);
-      compaction.resolve({ compactionId });
+    const compaction = record(item);
+    if (!compaction) return;
+    const status = stringField(compaction, "status");
+    if (phase !== "completed" || status === "in_progress") return;
+    if (status && status !== "completed") {
+      this.settlePendingCompactions(new StructuredCompactError(
+        `Codex reported the compaction ${status}`,
+        "refused",
+      ));
+      return;
     }
+    this.settlePendingCompactions({ compactionId: stringField(compaction, "id") });
   }
 
   /** A host that dies mid-compaction leaves the engine outcome unknown, so the
-      waiters reject in the `evidence` phase and terminalize as uncertain. */
+      waiters reject as `unverified` and terminalize the receipt uncertain. */
   private rejectPendingCompactions(error: Error): void {
+    this.settlePendingCompactions(new StructuredCompactError(safeError(error), "unverified"));
+  }
+
+  /** One thread compacts once at a time, so every waiter shares the outcome. */
+  private settlePendingCompactions(outcome: RuntimeCompactOutcome | StructuredCompactError): void {
     if (this.pendingCompactions.size === 0) return;
     const waiting = [...this.pendingCompactions.values()];
     this.pendingCompactions.clear();
     for (const compaction of waiting) {
       if (compaction.timer) clearTimeout(compaction.timer);
-      compaction.reject(new StructuredCompactError(safeError(error), "evidence"));
+      if (outcome instanceof StructuredCompactError) compaction.reject(outcome);
+      else compaction.resolve(outcome);
     }
   }
 
@@ -2516,8 +2550,7 @@ export class CodexAppServerHost implements EngineHost {
       /* #862: the compaction item is the completion signal for a manual
          compact control. It is read after the emit so the durable event ledger
          carries the evidence before any receipt terminalizes on it. */
-      const item = record(params.item);
-      if (item?.type === "contextCompaction") this.resolveCompactions(stringField(item, "id"));
+      if (record(params.item)?.type === "contextCompaction") this.acceptCompactionItem(params.item, phase);
       return;
     }
     if (method === "turn/completed" && turnId) {

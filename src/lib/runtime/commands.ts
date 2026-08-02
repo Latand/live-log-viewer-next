@@ -122,8 +122,9 @@ export function parseRuntimeCommand(kind: RuntimeOperationKind, value: unknown):
   }
 
   /* #862: a compact request is a control, so the parser deliberately reads no
-     content field. Whatever the caller sent alongside it cannot survive into
-     the command and therefore cannot reach the engine as a prompt. */
+     content field and no turn fence. Whatever the caller sent alongside it
+     cannot survive into the command and therefore cannot reach the engine as a
+     prompt. */
   if (kind === "compact") {
     return {
       kind,
@@ -131,7 +132,6 @@ export function parseRuntimeCommand(kind: RuntimeOperationKind, value: unknown):
       ...(operationId ? { operationId } : {}),
       idempotencyKey,
       sessionKey: runtimeSessionKey(body.sessionKey),
-      ...(turnId !== undefined ? { turnId } : {}),
     };
   }
 

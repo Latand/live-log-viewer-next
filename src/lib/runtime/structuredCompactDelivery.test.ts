@@ -166,6 +166,48 @@ test("a compaction an earlier executor issued is never issued a second time", as
   expect(transitions[0]![2]).toContain("unverified");
 });
 
+test("a runtime-host that rejects the uncertain status still settles the operation", async () => {
+  const sent: QueueEntry[] = [];
+  const host: CompactCapableHost = Object.assign(baseHost(sent), {
+    compact: async () => { throw new StructuredCompactError("Codex app-server host was lost", "unverified"); },
+  });
+  const effects = [
+    compactEffect(),
+    {
+      id: "effect:op-send",
+      kind: "runtime.send",
+      eventSeq: 9,
+      payload: {
+        kind: "send",
+        operationId: "op-send",
+        conversationId: "conversation-one",
+        idempotencyKey: "op-send",
+        text: "continue after the compaction",
+        policy: "queue",
+      },
+    } satisfies StructuredDeliveryEffect,
+  ];
+  const { port, transitions, settled } = recorder(effects);
+  const accept = port.transition;
+  /* A runtime-host from before #862 does not know the status. The operation
+     must still terminalize, or every later pass re-enters the same branch and
+     the conversation's queue never drains again. */
+  port.transition = async (operationId, status, details) => {
+    if (status === "uncertain") throw new Error("runtime operation transition status is invalid");
+    await accept(operationId, status, details);
+  };
+  const queue = new StructuredDeliveryQueue(port, () => host);
+
+  await queue.drain();
+  await settled;
+  await queue.drain();
+
+  expect(transitions.filter(([, status]) => status === "failed")).toEqual([
+    ["op-compact", "failed", "Codex app-server host was lost"],
+  ]);
+  expect(sent.map((entry) => entry.id)).toEqual(["op-send"]);
+});
+
 test("a busy structured turn fails the compact control instead of steering it", async () => {
   const sent: QueueEntry[] = [];
   let calls = 0;
@@ -197,7 +239,7 @@ test("an engine without a compact control reports a typed capability failure", a
 test("a rejected compact request terminalizes as failed and an unverified one as uncertain", async () => {
   const sent: QueueEntry[] = [];
   const rejecting: CompactCapableHost = Object.assign(baseHost(sent), {
-    compact: async () => { throw new StructuredCompactError("thread/compact/start was refused", "request"); },
+    compact: async () => { throw new StructuredCompactError("thread/compact/start was refused", "refused"); },
   });
   const rejected = recorder([compactEffect()]);
   await new StructuredDeliveryQueue(rejected.port, () => rejecting).drain();
@@ -209,7 +251,7 @@ test("a rejected compact request terminalizes as failed and an unverified one as
   ]);
 
   const losing: CompactCapableHost = Object.assign(baseHost(sent), {
-    compact: async () => { throw new StructuredCompactError("Codex app-server host was lost", "evidence"); },
+    compact: async () => { throw new StructuredCompactError("Codex app-server host was lost", "unverified"); },
   });
   const unverified = recorder([compactEffect()]);
   await new StructuredDeliveryQueue(unverified.port, () => losing).drain();

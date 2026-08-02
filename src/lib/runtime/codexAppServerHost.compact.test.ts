@@ -141,14 +141,14 @@ test("compact issues thread/compact/start for the owned thread and never a promp
 
   server.notify("item/completed", {
     threadId: server.threadId,
-    item: { id: "compaction-one", type: "contextCompaction" },
+    item: { id: "compaction-one", type: "contextCompaction", status: "completed" },
   });
 
   expect(await compaction).toEqual({ compactionId: "compaction-one" });
   await host.release();
 });
 
-test("compact resolves only on correlated compaction evidence", async () => {
+test("a compaction that has only started is not yet evidence", async () => {
   const server = new CompactAppServer();
   const host = await startHost(server);
   let settled = false;
@@ -162,14 +162,96 @@ test("compact resolves only on correlated compaction evidence", async () => {
     threadId: server.threadId,
     item: { id: "message-one", type: "agentMessage", text: "still working" },
   });
+  /* `item/started` carries status `in_progress`: the compaction is running, so
+     reporting success here would release queued sends into a compacting
+     thread. */
+  server.notify("item/started", {
+    threadId: server.threadId,
+    item: { id: "compaction-two", type: "contextCompaction", status: "in_progress" },
+  });
   await Bun.sleep(10);
   expect(settled).toBe(false);
 
-  server.notify("item/started", {
+  server.notify("item/completed", {
     threadId: server.threadId,
-    item: { id: "compaction-two", type: "contextCompaction" },
+    item: { id: "compaction-two", type: "contextCompaction", status: "completed" },
   });
   expect(await compaction).toEqual({ compactionId: "compaction-two" });
+  await host.release();
+});
+
+test("a compaction the engine did not finish is a known failure, not an unverified one", async () => {
+  const server = new CompactAppServer();
+  const host = await startHost(server);
+
+  const compaction = host.compact({ operationId: "op-compact", threadId: server.threadId });
+  await Bun.sleep(10);
+  server.notify("item/completed", {
+    threadId: server.threadId,
+    item: { id: "compaction-two", type: "contextCompaction", status: "failed" },
+  });
+
+  const error = await compaction.then(() => null, (reason: unknown) => reason);
+  expect(error).toBeInstanceOf(StructuredCompactError);
+  expect((error as StructuredCompactError).phase).toBe("refused");
+  expect((error as Error).message).toContain("failed");
+  await host.release();
+});
+
+test("a compaction that starts and never finishes terminalizes unverified", async () => {
+  const server = new CompactAppServer();
+  const host = await startHost(server, { compactEvidenceTimeoutMs: 40 });
+
+  const compaction = host.compact({ operationId: "op-compact", threadId: server.threadId });
+  await Bun.sleep(10);
+  server.notify("item/started", {
+    threadId: server.threadId,
+    item: { id: "compaction-two", type: "contextCompaction", status: "in_progress" },
+  });
+
+  const error = await compaction.then(() => null, (reason: unknown) => reason);
+  expect(error).toBeInstanceOf(StructuredCompactError);
+  expect((error as StructuredCompactError).phase).toBe("unverified");
+  await host.release();
+});
+
+test("evidence that arrives before a failing start response still counts", async () => {
+  const server = new CompactAppServer();
+  server.holdCompact = true;
+  const host = await startHost(server);
+
+  const compaction = host.compact({ operationId: "op-compact", threadId: server.threadId });
+  await Bun.sleep(10);
+  server.notify("item/completed", {
+    threadId: server.threadId,
+    item: { id: "compaction-one", type: "contextCompaction", status: "completed" },
+  });
+  await Bun.sleep(10);
+  /* The request leg fails only after the app-server already reported the
+     compaction. A verified fact must not be overwritten by a late error. */
+  server.releaseCompact("the compact request stream was reset");
+
+  expect(await compaction).toEqual({ compactionId: "compaction-one" });
+  await host.release();
+});
+
+test("a slow compact start does not fence the host on the default request budget", async () => {
+  const server = new CompactAppServer();
+  server.holdCompact = true;
+  /* The host's ordinary mutating-RPC budget; the compact request must be
+     budgeted like the compaction it starts, not like an ordinary call. */
+  const host = await startHost(server, { requestTimeoutMs: 30, compactEvidenceTimeoutMs: 5_000 });
+
+  const compaction = host.compact({ operationId: "op-compact", threadId: server.threadId });
+  await Bun.sleep(120);
+
+  expect((await host.health()).status).not.toBe("dead");
+  server.releaseCompact();
+  server.notify("item/completed", {
+    threadId: server.threadId,
+    item: { id: "compaction-one", type: "contextCompaction", status: "completed" },
+  });
+  expect(await compaction).toEqual({ compactionId: "compaction-one" });
   await host.release();
 });
 
@@ -182,7 +264,7 @@ test("a refused compact request reports a known-failed outcome", async () => {
     .then(() => null, (reason: unknown) => reason);
 
   expect(error).toBeInstanceOf(StructuredCompactError);
-  expect((error as StructuredCompactError).phase).toBe("request");
+  expect((error as StructuredCompactError).phase).toBe("refused");
   expect((error as Error).message).toContain("compaction is unavailable");
   await host.release();
 });
@@ -195,7 +277,7 @@ test("evidence that never arrives terminalizes as an unverified outcome", async 
     .then(() => null, (reason: unknown) => reason);
 
   expect(error).toBeInstanceOf(StructuredCompactError);
-  expect((error as StructuredCompactError).phase).toBe("evidence");
+  expect((error as StructuredCompactError).phase).toBe("unverified");
   await host.release();
 });
 
@@ -207,6 +289,7 @@ test("compact refuses a foreign thread and an active turn", async () => {
     .then(() => null, (reason: unknown) => reason);
   expect(foreign).toBeInstanceOf(StructuredCompactError);
   expect((foreign as Error).message).toContain("thread");
+  expect((foreign as StructuredCompactError).phase).toBe("refused");
 
   /* The send is left in flight on purpose: this is the state a compact control
      must refuse rather than steer. */
@@ -217,7 +300,7 @@ test("compact refuses a foreign thread and an active turn", async () => {
   const busy = await host.compact({ operationId: "op-busy", threadId: server.threadId })
     .then(() => null, (reason: unknown) => reason);
   expect(busy).toBeInstanceOf(StructuredCompactError);
-  expect((busy as StructuredCompactError).phase).toBe("request");
+  expect((busy as StructuredCompactError).phase).toBe("refused");
   expect(server.requests.filter((candidate) => candidate.method === "thread/compact/start")).toHaveLength(0);
   await host.release();
 });
@@ -236,7 +319,7 @@ test("a repeated compact for one operation awaits the same in-flight control", a
   server.releaseCompact();
   server.notify("item/completed", {
     threadId: server.threadId,
-    item: { id: "compaction-one", type: "contextCompaction" },
+    item: { id: "compaction-one", type: "contextCompaction", status: "completed" },
   });
 
   expect(await first).toEqual({ compactionId: "compaction-one" });

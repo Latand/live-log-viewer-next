@@ -124,13 +124,13 @@ export function hostSupportsCompact(host: EngineHost): host is CompactCapableHos
 }
 
 /**
- * A compact control that did not succeed. `phase` is the whole point: a
- * `request` failure proves the engine never started compacting, while an
- * `evidence` failure means the request was accepted and the outcome is
- * unverified — the two must terminalize differently.
+ * A compact control that did not succeed. `phase` is the whole point:
+ * `refused` means the engine did not compact the thread and everyone can see
+ * why, while `unverified` means the request may have landed and nothing proved
+ * what became of it — the two must terminalize differently.
  */
 export class StructuredCompactError extends Error {
-  constructor(message: string, readonly phase: "request" | "evidence") {
+  constructor(message: string, readonly phase: "refused" | "unverified") {
     super(message);
     this.name = "StructuredCompactError";
   }
