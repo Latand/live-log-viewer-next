@@ -5,8 +5,10 @@ import path from "node:path";
 
 import type { AgentRegistryEntry, RegistryFile } from "@/lib/agent/registry";
 import type { Pipeline, PipelineStageAttempt } from "@/lib/pipelines/types";
+import type { FileScanSnapshot } from "@/lib/scanner/scanCache";
 import type { FileEntry } from "@/lib/types";
 
+import { completedGenerationSelection, type CompletedGenerationRead } from "./inventorySelection";
 import { agentLivenessSnapshot, evaluateLiveness, type AgentLivenessSources } from "./liveness";
 import { readLivenessTranscriptEvidence, type LivenessTranscript, type LivenessTranscriptEvidence } from "./transcript";
 
@@ -432,4 +434,402 @@ test("a targeted query with an unknown conversation id returns an empty snapshot
 
   expect(snapshot.count).toBe(0);
   expect(snapshot.conversations).toEqual([]);
+});
+
+/* ------------------------------------------------------------------------- *
+ * #860 — bounded project-scoped selection.
+ *
+ * The incident: `agent_activity(project, liveOnly, limit: 10)` had not returned
+ * after seventy seconds on a corpus this shape, while a targeted read of the
+ * same deployment answered in 290 ms. Everything below is production-shaped and
+ * isolated: a 10,000-row corpus, 1,000 rows in the requested project, six live
+ * conversations and one multi-gigabyte transcript whose body is never opened.
+ * ------------------------------------------------------------------------- */
+
+const PROJECT = "viewer";
+/** 3 GiB, allocated sparsely: the row exists, its bytes are never read. */
+const HUGE_TRANSCRIPT_BYTES = 3 * 1024 ** 3;
+
+function liveTranscriptText(at: number): string {
+  return [
+    { type: "assistant", timestamp: new Date(at - 5_000).toISOString(), message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: {} }], stop_reason: "tool_use" } },
+    { type: "user", timestamp: new Date(at).toISOString(), message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] } },
+  ].map((row) => JSON.stringify(row)).join("\n") + "\n";
+}
+
+interface ProductionCorpus {
+  files: FileEntry[];
+  livePaths: string[];
+  hugePath: string;
+}
+
+/** 10,000 historical conversations, 1,000 in `PROJECT`, six live, one huge. */
+function productionShapedCorpus(dir: string): ProductionCorpus {
+  const files: FileEntry[] = [];
+  const livePaths: string[] = [];
+  for (let index = 0; index < 10_000; index += 1) {
+    const inProject = index % 10 === 0;
+    const project = inProject ? PROJECT : `other-${index % 41}`;
+    const live = inProject && livePaths.length < 6;
+    const transcriptPath = live
+      ? path.join(dir, `live-${index}.jsonl`)
+      : `${dir}/history/${project}/session-${index}.jsonl`;
+    if (live) {
+      fs.writeFileSync(transcriptPath, liveTranscriptText(NOW - 10_000), "utf8");
+      livePaths.push(transcriptPath);
+    }
+    files.push(fileEntry({
+      path: transcriptPath,
+      project,
+      engine: index % 3 === 0 ? "claude" : "codex",
+      conversationId: `conversation_${index}`,
+      mtime: Math.floor((NOW - index * 1_000) / 1000),
+      activity: live ? "live" : "idle",
+      activityReason: live ? "jsonl_turn_open" : "mtime_old",
+      size: 4096,
+    }));
+  }
+  /* The multi-gigabyte transcript: a real sparse file, in the project, idle.
+     Metadata-only selection must never open it. */
+  const hugePath = path.join(dir, "huge-history.jsonl");
+  const handle = fs.openSync(hugePath, "w");
+  fs.ftruncateSync(handle, HUGE_TRANSCRIPT_BYTES);
+  const tail = Buffer.from(liveTranscriptText(NOW - 3_600_000).repeat(1_400), "utf8");
+  fs.writeSync(handle, tail, 0, tail.length, HUGE_TRANSCRIPT_BYTES);
+  fs.closeSync(handle);
+  files.push(fileEntry({
+    path: hugePath,
+    project: PROJECT,
+    engine: "claude",
+    conversationId: "conversation_huge",
+    mtime: Math.floor((NOW - 3_600_000) / 1000),
+    activity: "idle",
+    activityReason: "mtime_old",
+    size: HUGE_TRANSCRIPT_BYTES + tail.length,
+  }));
+  files.sort((left, right) => right.mtime - left.mtime);
+  return { files, livePaths, hugePath };
+}
+
+interface GenerationStub {
+  read: CompletedGenerationRead;
+  starts: () => number;
+  reads: () => number;
+}
+
+/** One published generation, cloned per read exactly as `completedFileScan`
+    does, so the measured cost is the production cost. */
+function publishedGeneration(files: FileEntry[], options: { coldDelayMs?: number } = {}): GenerationStub {
+  const snapshot = { files, projectCatalog: [], complete: true } as FileScanSnapshot;
+  let starts = 0;
+  let reads = 0;
+  let published: Promise<void> | null = null;
+  const read: CompletedGenerationRead = async (readOptions) => {
+    reads += 1;
+    if (!published) {
+      starts += 1;
+      published = new Promise((resolve) => setTimeout(resolve, options.coldDelayMs ?? 0));
+    }
+    await published;
+    if (readOptions?.signal?.aborted) throw new DOMException("cancelled", "AbortError");
+    return {
+      snapshot: structuredClone(snapshot),
+      generation: 12,
+      targetGeneration: 12,
+      cacheStatus: "hit",
+      requestCount: reads,
+      cloneDurationMs: 0,
+    };
+  };
+  return { read, starts: () => starts, reads: () => reads };
+}
+
+function corpusSources(
+  generation: GenerationStub,
+  overrides: Partial<AgentLivenessSources> = {},
+): AgentLivenessSources {
+  return {
+    now: () => NOW,
+    probe: { now: () => NOW, pidAlive: () => true, processIdentity: () => "start-token-of-a-dead-host" },
+    listFiles: async () => {
+      throw new Error("a project-scoped read must never sweep the whole corpus");
+    },
+    selectInventory: (request, options) => completedGenerationSelection(request, {
+      completedFileScan: generation.read,
+      signal: options?.signal ?? null,
+    }),
+    describeTranscript: async () => {
+      throw new Error("a project-scoped read describes nothing by path");
+    },
+    registrySnapshot: () => ({ entries: {}, conversations: {} }) as unknown as RegistryFile,
+    pipelines: () => [],
+    transcriptEvidence: readLivenessTranscriptEvidence,
+    ...overrides,
+  };
+}
+
+test("a project-scoped live read serves one completed generation, hydrates only the rows it returns, and never sweeps the corpus (#860)", async () => {
+  const dir = sandbox();
+  const corpus = productionShapedCorpus(dir);
+  const generation = publishedGeneration(corpus.files);
+  const hydrated: string[] = [];
+
+  const startedAt = performance.now();
+  const snapshot = await agentLivenessSnapshot(
+    { project: PROJECT, liveOnly: true, limit: 10 },
+    corpusSources(generation, {
+      transcriptEvidence: async (engine, transcriptPath) => {
+        hydrated.push(transcriptPath);
+        return readLivenessTranscriptEvidence(engine, transcriptPath);
+      },
+    }),
+  );
+  const elapsedMs = performance.now() - startedAt;
+
+  expect(snapshot.count).toBe(6);
+  expect(hydrated).toHaveLength(6);
+  expect(hydrated.every((entry) => corpus.livePaths.includes(entry))).toBe(true);
+  expect(snapshot.selection).toMatchObject({
+    scope: "project",
+    scanned: 10_001,
+    matched: 6,
+    selected: 6,
+    hydrated: 6,
+    freshScan: false,
+    generation: 12,
+    budget: "complete",
+  });
+  expect(generation.starts()).toBe(1);
+  /* Warm, on the production-shaped corpus, well inside the 500 ms bar. */
+  expect(elapsedMs).toBeLessThan(500);
+});
+
+test("a limit of ten hydrates at most ten transcript tails out of a thousand project rows (#860)", async () => {
+  const dir = sandbox();
+  const corpus = productionShapedCorpus(dir);
+  const generation = publishedGeneration(corpus.files);
+  let hydrations = 0;
+
+  const snapshot = await agentLivenessSnapshot(
+    { project: PROJECT, limit: 10 },
+    corpusSources(generation, {
+      transcriptEvidence: async () => {
+        hydrations += 1;
+        return { turn: "idle" as const, lastRecordTs: NOW - 60_000 };
+      },
+    }),
+  );
+
+  expect(snapshot.count).toBe(10);
+  expect(hydrations).toBe(10);
+  expect(snapshot.selection.matched).toBe(1_001);
+  expect(snapshot.selection.selected).toBe(10);
+});
+
+test("the multi-gigabyte transcript is selected from metadata and never opened for a metadata-only read (#860)", async () => {
+  const dir = sandbox();
+  const corpus = productionShapedCorpus(dir);
+  const generation = publishedGeneration(corpus.files);
+  const opened: string[] = [];
+
+  const liveRead = await agentLivenessSnapshot(
+    { project: PROJECT, liveOnly: true, limit: 10 },
+    corpusSources(generation, {
+      transcriptEvidence: async (engine, transcriptPath) => {
+        opened.push(transcriptPath);
+        return readLivenessTranscriptEvidence(engine, transcriptPath);
+      },
+    }),
+  );
+
+  /* Present in the generation, absent from every read. */
+  expect(corpus.files.some((entry) => entry.path === corpus.hugePath)).toBe(true);
+  expect(liveRead.conversations.map((record) => record.transcriptPath)).not.toContain(corpus.hugePath);
+  expect(opened).not.toContain(corpus.hugePath);
+
+  /* When it IS selected, the evidence read stays a bounded tail: three
+     gigabytes of body would never come back in this budget. */
+  const startedAt = performance.now();
+  const hugeRead = await agentLivenessSnapshot(
+    { project: PROJECT, limit: 1, stallAfterMs: 60_000 },
+    corpusSources(generation, {
+      selectInventory: async (request, options) => {
+        const selection = await completedGenerationSelection(
+          { ...request, query: "huge-history" },
+          { completedFileScan: generation.read, signal: options?.signal ?? null },
+        );
+        return selection;
+      },
+    }),
+  );
+  const elapsedMs = performance.now() - startedAt;
+
+  expect(hugeRead.conversations[0]!.transcriptPath).toBe(corpus.hugePath);
+  expect(hugeRead.conversations[0]!.evidenceSource).toBe("transcript");
+  expect(elapsedMs).toBeLessThan(1_000);
+});
+
+test("twenty concurrent project reads share one completed generation and stay bounded (#860)", async () => {
+  const dir = sandbox();
+  const corpus = productionShapedCorpus(dir);
+  const generation = publishedGeneration(corpus.files, { coldDelayMs: 5 });
+
+  const before = process.memoryUsage().rss;
+  const startedAt = performance.now();
+  const snapshots = await Promise.all(Array.from({ length: 20 }, () => agentLivenessSnapshot(
+    { project: PROJECT, liveOnly: true, limit: 10 },
+    corpusSources(generation),
+  )));
+  const elapsedMs = performance.now() - startedAt;
+  const rssDeltaBytes = process.memoryUsage().rss - before;
+
+  expect(generation.starts()).toBe(1);
+  expect(generation.reads()).toBe(20);
+  expect(snapshots.every((snapshot) => snapshot.selection.generation === 12)).toBe(true);
+  expect(snapshots.every((snapshot) => snapshot.count === 6)).toBe(true);
+  /* Twenty readers of a 10,000-row generation, each hydrating six tails. */
+  expect(elapsedMs).toBeLessThan(2_000);
+  expect(rssDeltaBytes).toBeLessThan(768 * 1024 * 1024);
+});
+
+test("a cancelled caller stops the read and starts no further transcript evidence (#860)", async () => {
+  const dir = sandbox();
+  const corpus = productionShapedCorpus(dir);
+  const generation = publishedGeneration(corpus.files);
+  const controller = new AbortController();
+  const started: string[] = [];
+
+  const pending = agentLivenessSnapshot(
+    { project: PROJECT, liveOnly: true, limit: 10, signal: controller.signal },
+    corpusSources(generation, {
+      transcriptEvidence: async (_engine, transcriptPath) => {
+        started.push(transcriptPath);
+        if (started.length === 1) controller.abort();
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        return { turn: "busy" as const, lastRecordTs: NOW - 1_000 };
+      },
+    }),
+  );
+
+  await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+  const settled = started.length;
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  expect(started.length).toBe(settled);
+  expect(settled).toBeLessThan(6);
+});
+
+test("a caller cancelled before the generation is read never touches it (#860)", async () => {
+  const dir = sandbox();
+  const corpus = productionShapedCorpus(dir);
+  const generation = publishedGeneration(corpus.files);
+  const controller = new AbortController();
+  controller.abort();
+
+  await expect(agentLivenessSnapshot(
+    { project: PROJECT, liveOnly: true, limit: 10, signal: controller.signal },
+    corpusSources(generation),
+  )).rejects.toMatchObject({ name: "AbortError" });
+  expect(generation.reads()).toBe(0);
+});
+
+test("phase timings are reported as bare numbers, carrying no identity (#860)", async () => {
+  const dir = sandbox();
+  const corpus = productionShapedCorpus(dir);
+  const generation = publishedGeneration(corpus.files);
+
+  const snapshot = await agentLivenessSnapshot(
+    { project: PROJECT, liveOnly: true, limit: 10 },
+    corpusSources(generation),
+  );
+
+  expect(Object.keys(snapshot.timings).sort()).toEqual([
+    "evidenceReadMs",
+    "inventorySelectionMs",
+    "journalProjectionMs",
+    "serializationMs",
+    "totalMs",
+  ]);
+  for (const value of Object.values(snapshot.timings)) {
+    expect(typeof value).toBe("number");
+    expect(Number.isFinite(value)).toBe(true);
+    expect(value).toBeGreaterThanOrEqual(0);
+  }
+  /* Nothing in the phase report can name a path, a project or an account. */
+  const reported = { ...snapshot.timings, ...snapshot.selection };
+  for (const [key, value] of Object.entries(reported)) {
+    if (key === "scope" || key === "cacheStatus" || key === "budget") continue;
+    expect(typeof value === "number" || typeof value === "boolean").toBe(true);
+  }
+});
+
+test("the evidence budget degrades extra rows to the scan projection instead of reading unbounded tails (#860)", async () => {
+  const dir = sandbox();
+  const corpus = productionShapedCorpus(dir);
+  const generation = publishedGeneration(corpus.files);
+  let hydrations = 0;
+
+  const snapshot = await agentLivenessSnapshot(
+    { project: PROJECT, limit: 50, evidenceByteBudget: 4 * 4096 },
+    corpusSources(generation, {
+      transcriptEvidence: async () => {
+        hydrations += 1;
+        return { turn: "busy" as const, lastRecordTs: NOW - 1_000 };
+      },
+    }),
+  );
+
+  expect(hydrations).toBe(4);
+  expect(snapshot.count).toBe(50);
+  expect(snapshot.selection).toMatchObject({ hydrated: 4, projected: 46, budget: "byte_budget" });
+  /* The unread rows still answer honestly, from the generation's projection. */
+  expect(snapshot.conversations.filter((record) => record.evidenceSource === "projection")).toHaveLength(46);
+});
+
+test("a runtime-hosted conversation survives the liveness filter the completed generation still calls idle (#860)", async () => {
+  const dir = sandbox();
+  const agentPath = path.join(dir, "just-launched.jsonl");
+  fs.writeFileSync(agentPath, liveTranscriptText(NOW - 1_000), "utf8");
+  const generation = publishedGeneration([
+    fileEntry({ path: agentPath, project: PROJECT, engine: "claude", activity: "idle", activityReason: "mtime_old", conversationId: "conversation_new" }),
+    fileEntry({ path: path.join(dir, "old.jsonl"), project: PROJECT, activity: "idle", activityReason: "mtime_old", conversationId: "conversation_old" }),
+  ]);
+
+  const snapshot = await agentLivenessSnapshot(
+    { project: PROJECT, liveOnly: true, limit: 10 },
+    corpusSources(generation, {
+      registrySnapshot: () => ({
+        entries: { "claude:just-launched": structuredEntry(agentPath, 4242) },
+        conversations: {},
+      }) as unknown as RegistryFile,
+    }),
+  );
+
+  expect(snapshot.conversations.map((record) => record.transcriptPath)).toEqual([agentPath]);
+});
+
+test("a targeted read never consults the completed generation (#860)", async () => {
+  const dir = sandbox();
+  const agentPath = path.join(dir, "targeted.jsonl");
+  fs.writeFileSync(agentPath, liveTranscriptText(NOW - 1_000), "utf8");
+  const generation = publishedGeneration([]);
+
+  const snapshot = await agentLivenessSnapshot(
+    { transcriptPath: agentPath, limit: 1 },
+    corpusSources(generation, {
+      describeTranscript: async (transcriptPath) => ({
+        path: transcriptPath,
+        project: PROJECT,
+        title: "targeted agent",
+        engine: "claude",
+        mtimeMs: NOW - 1_000,
+        conversationId: null,
+        activity: null,
+        activityReason: null,
+      }),
+    }),
+  );
+
+  expect(snapshot.count).toBe(1);
+  expect(snapshot.selection.scope).toBe("targeted");
+  expect(generation.reads()).toBe(0);
 });

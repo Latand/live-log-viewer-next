@@ -3,9 +3,17 @@ import type { AgentRegistryEntry, RegistryFile } from "@/lib/agent/registry";
 import { agentRegistry } from "@/lib/agent/registry";
 import { getPipelines } from "@/lib/pipelines/engine";
 import type { Pipeline, PipelineStageAttempt } from "@/lib/pipelines/types";
-import { listFiles } from "@/lib/scanner";
+import { completedFileScan } from "@/lib/scanner/scanCache";
 import type { Engine, FileEntry } from "@/lib/types";
 
+import {
+  completedGenerationSelection,
+  hydrateWithBudget,
+  selectConversationEntries,
+  type CompletedGenerationRead,
+  type ConversationSelection,
+  type ConversationSelectionRequest,
+} from "./inventorySelection";
 import {
   describeTranscriptPath,
   readLivenessTranscriptEvidence,
@@ -93,6 +101,48 @@ export interface AgentLivenessRecord {
       `gone` lifecycle; null when it is not stalled. */
   stalledForMs: number | null;
   pipeline: AgentLivenessPipelineRef | null;
+  /** Whether this row's turn state came from its own transcript tail or from
+      the scan projection because the read budget was already spent (#860). */
+  evidenceSource: "transcript" | "projection";
+}
+
+/**
+ * Phase timings, in milliseconds and nothing else (#860).
+ *
+ * Deliberately identity-free: a timing report travels through logs and PR
+ * bodies, so it carries numbers a reader can act on and never a path, a project
+ * or an account.
+ */
+export interface AgentLivenessTimings {
+  /** Reading the completed generation and applying filters and the row limit. */
+  inventorySelectionMs: number;
+  /** Registry, host and pipeline-lineage projection over the selected rows. */
+  journalProjectionMs: number;
+  /** Bounded transcript-tail hydration. */
+  evidenceReadMs: number;
+  /** Assembling the records this call returns. */
+  serializationMs: number;
+  totalMs: number;
+}
+
+export interface AgentLivenessSelectionReport {
+  /** `targeted` names a conversation or path; the others read the catalog. */
+  scope: "targeted" | "project" | "corpus";
+  /** Conversation rows in the generation this call consumed. */
+  scanned: number;
+  /** Rows matching project/liveness before the row limit. */
+  matched: number;
+  selected: number;
+  hydrated: number;
+  /** Selected rows answered from the scan projection because the read budget
+      was exhausted before they were reached. */
+  projected: number;
+  generation: number | null;
+  cacheStatus: ConversationSelection["cacheStatus"] | null;
+  /** True only on the legacy whole-inventory adapter. */
+  freshScan: boolean;
+  evidenceBytes: number;
+  budget: "complete" | "byte_budget" | "deadline";
 }
 
 export interface AgentLivenessSnapshot {
@@ -103,39 +153,85 @@ export interface AgentLivenessSnapshot {
       number instead of scanning the list. */
   stalledCount: number;
   conversations: AgentLivenessRecord[];
+  selection: AgentLivenessSelectionReport;
+  timings: AgentLivenessTimings;
 }
 
 export interface AgentLivenessRequest {
   conversationId?: string;
   transcriptPath?: string;
   project?: string;
-  /** Restrict to conversations the scan still projects as live or stalled. */
+  /** Restrict to conversations the scan still projects as live or stalled, or
+      that the registry projection currently hosts. */
   liveOnly?: boolean;
   stallAfterMs?: number;
   limit?: number;
+  /** The caller's lifetime. Cancelling it stops the generation read and starts
+      no further transcript tails. */
+  signal?: AbortSignal | null;
+  /** Wall-clock ceiling on transcript-tail hydration for this call. */
+  evidenceDeadlineMs?: number;
+  /** Byte ceiling on transcript-tail hydration for this call. */
+  evidenceByteBudget?: number;
+  /** Tail reads in flight at once. */
+  evidenceConcurrency?: number;
 }
+
+/** Tail reads in flight at once. Small on purpose: a `limit: 10` read is ten
+    reads total, and twenty concurrent callers must not multiply into a storm. */
+export const DEFAULT_EVIDENCE_CONCURRENCY = 4;
+/** Bytes one call may charge to transcript evidence. A tail read is clamped to
+    128 KiB, so this is a ceiling of roughly sixty-four tails. */
+export const DEFAULT_EVIDENCE_BYTE_BUDGET = 8 * 1024 * 1024;
+/** Wall clock one call may spend on transcript evidence before the remaining
+    rows fall back to the scan projection. */
+export const DEFAULT_EVIDENCE_DEADLINE_MS = 2_000;
+/** What one tail read actually costs, mirroring `readStableTailRecords`. */
+const EVIDENCE_TAIL_BYTES = 131_072;
 
 export interface AgentLivenessSources {
   now(): number;
   /**
-   * The whole inventory. In production this is the scanner sweep: root
-   * discovery, a process-table refresh, a tmux pane map and a tail read per
-   * transcript. Only a request that names no single conversation calls it.
+   * Bounded selection over ONE completed scanner generation (#860): filters and
+   * the row limit are applied to metadata the process already published, before
+   * anything opens a transcript. Only a request that names no single
+   * conversation calls it.
    */
-  listFiles(): Promise<FileEntry[]>;
+  selectInventory?(
+    request: ConversationSelectionRequest,
+    options?: { signal?: AbortSignal | null },
+  ): Promise<ConversationSelection>;
+  /**
+   * The legacy whole-inventory adapter, kept for injected callers that predate
+   * the selection seam. Production never installs it: it is the fresh
+   * whole-corpus sweep #860 exists to remove.
+   */
+  listFiles?(): Promise<FileEntry[]>;
   /** One transcript by path, described with no sweep of any kind. */
   describeTranscript(transcriptPath: string): Promise<LivenessTranscript | null>;
   registrySnapshot(): Pick<RegistryFile, "entries" | "conversations">;
   pipelines(): Pipeline[];
   /** Turn state and newest-record freshness from ONE tail read. */
-  transcriptEvidence(engine: "claude" | "codex", transcriptPath: string): Promise<LivenessTranscriptEvidence | null>;
+  transcriptEvidence(
+    engine: "claude" | "codex",
+    transcriptPath: string,
+    options?: { signal?: AbortSignal | null },
+  ): Promise<LivenessTranscriptEvidence | null>;
   probe: LivenessProbe;
 }
 
-export function productionLivenessSources(): AgentLivenessSources {
+export function productionLivenessSources(
+  dependencies: { completedFileScan?: CompletedGenerationRead } = {},
+): AgentLivenessSources {
+  const read = dependencies.completedFileScan ?? completedFileScan;
   return {
     now: () => Date.now(),
-    listFiles: () => listFiles({ fresh: true, persist: false }),
+    /* Consumes the COMPLETED generation the process already published. One scan
+       generation serves every catalog read; this one opens none of its own. */
+    selectInventory: (request, options) => completedGenerationSelection(request, {
+      completedFileScan: read,
+      signal: options?.signal ?? null,
+    }),
     describeTranscript: describeTranscriptPath,
     registrySnapshot: () => agentRegistry().readOnlySnapshot(),
     pipelines: () => getPipelines().pipelines,
@@ -286,6 +382,7 @@ function transcriptFromEntry(entry: FileEntry): LivenessTranscript {
     title: entry.title,
     engine: entry.engine,
     mtimeMs: Number.isFinite(entry.mtime) ? entry.mtime * 1000 : Number.NaN,
+    sizeBytes: Number.isFinite(entry.size) ? entry.size : undefined,
     conversationId: entry.conversationId ?? null,
     activity: entry.activity ?? null,
     activityReason: entry.activityReason ?? null,
@@ -305,17 +402,56 @@ function conversationIdForPath(
   return null;
 }
 
+/** The transcripts the registry projection currently hosts. A completed
+    generation can predate a launch by its whole refresh cadence, so liveness
+    filtered on the scan projection alone would drop a conversation that started
+    a minute ago — the correctness half of not sweeping the corpus (#860). */
+function hostedTranscriptPaths(snapshot: Pick<RegistryFile, "entries">): Set<string> {
+  const hosted = new Set<string>();
+  for (const entry of Object.values(snapshot.entries)) {
+    if (entry.status !== "starting" && entry.status !== "live" && entry.status !== "idle" && entry.status !== "handoff") continue;
+    if (entry.artifactPath) hosted.add(entry.artifactPath);
+  }
+  return hosted;
+}
+
+function livenessAbortError(reason?: unknown): Error {
+  if (reason instanceof Error && reason.name === "AbortError") return reason;
+  return new DOMException("liveness snapshot cancelled", "AbortError");
+}
+
+function roundMs(value: number): number {
+  return Math.round(Math.max(0, value) * 100) / 100;
+}
+
+/**
+ * The liveness answer for a request, bounded end to end (#860).
+ *
+ * The order is the whole repair: project, liveness and the row limit are
+ * applied to one COMPLETED scanner generation, and only the rows that survive
+ * are hydrated — at bounded concurrency, under byte and time budgets, with the
+ * caller's cancellation reaching both phases. Before this, ten rows of answer
+ * cost a fresh whole-corpus sweep plus a sequential tail read per surviving row,
+ * and a caller that timed out left all of it running.
+ */
 export async function agentLivenessSnapshot(
   request: AgentLivenessRequest,
   sources: AgentLivenessSources,
 ): Promise<AgentLivenessSnapshot> {
+  const startedAt = performance.now();
   const now = sources.now();
+  const signal = request.signal ?? null;
+  if (signal?.aborted) throw livenessAbortError(signal.reason);
   const stallAfterMs = Number.isFinite(request.stallAfterMs) && (request.stallAfterMs as number) > 0
     ? Math.floor(request.stallAfterMs as number)
     : DEFAULT_STALL_AFTER_MS;
   const limit = Math.max(1, Math.min(200, Number.isInteger(request.limit) ? request.limit as number : 100));
+
+  const projectionStartedAt = performance.now();
   const registry = sources.registrySnapshot();
   const pipelines = pipelineIndex(sources.pipelines());
+  const hostedPaths = hostedTranscriptPaths(registry);
+  const journalProjectionMs = performance.now() - projectionStartedAt;
 
   /* A conversation id names its current generation's transcript; that is the
      only path whose liveness is meaningful. */
@@ -328,26 +464,92 @@ export async function agentLivenessSnapshot(
     if (path) requestedPaths.add(path);
   }
 
-  /* The targeted branch. A caller that named a specific target gets back what
-     it named and nothing else — even an empty set. Falling through to the full
-     inventory would turn a stale alias into an unrelated sweep. */
-  const entries: LivenessTranscript[] = targeted
-    ? (requestedPaths.size > 0
+  const selectionStartedAt = performance.now();
+  let entries: LivenessTranscript[];
+  let selection: Omit<AgentLivenessSelectionReport, "hydrated" | "projected" | "evidenceBytes" | "budget">;
+  if (targeted) {
+    /* The targeted branch. A caller that named a specific target gets back what
+       it named and nothing else — even an empty set. Falling through to the
+       catalog would turn a stale alias into an unrelated read. */
+    entries = requestedPaths.size > 0
       ? (await Promise.all([...requestedPaths].slice(0, limit).map((path) => sources.describeTranscript(path))))
         .filter((entry): entry is LivenessTranscript => entry !== null)
-      : [])
-    : (await sources.listFiles())
-      .filter((entry) => entry.engine === "claude" || entry.engine === "codex")
-      .filter((entry) => !request.project || entry.project === request.project)
-      .filter((entry) => !request.liveOnly || entry.activity === "live" || entry.activity === "stalled")
-      .slice(0, limit)
-      .map(transcriptFromEntry);
+      : [];
+    selection = {
+      scope: "targeted",
+      scanned: requestedPaths.size,
+      matched: entries.length,
+      selected: entries.length,
+      generation: null,
+      cacheStatus: null,
+      freshScan: false,
+    };
+  } else {
+    const selectionRequest: ConversationSelectionRequest = {
+      project: request.project,
+      liveOnly: request.liveOnly,
+      limit,
+      hostedPaths,
+    };
+    if (sources.selectInventory) {
+      const selected = await sources.selectInventory(selectionRequest, { signal });
+      entries = selected.entries.map(transcriptFromEntry);
+      selection = {
+        scope: request.project ? "project" : "corpus",
+        scanned: selected.scanned,
+        matched: selected.matched,
+        selected: selected.entries.length,
+        generation: selected.generation,
+        cacheStatus: selected.cacheStatus,
+        freshScan: selected.freshScan,
+      };
+    } else if (sources.listFiles) {
+      const selected = selectConversationEntries(await sources.listFiles(), selectionRequest);
+      entries = selected.entries.map(transcriptFromEntry);
+      selection = {
+        scope: request.project ? "project" : "corpus",
+        scanned: selected.scanned,
+        matched: selected.matched,
+        selected: selected.entries.length,
+        generation: null,
+        cacheStatus: null,
+        freshScan: true,
+      };
+    } else {
+      throw new Error("liveness needs an inventory source: install selectInventory");
+    }
+  }
+  const inventorySelectionMs = performance.now() - selectionStartedAt;
+  if (signal?.aborted) throw livenessAbortError(signal.reason);
 
+  const hydratable = entries.filter((entry) => entry.engine === "claude" || entry.engine === "codex");
+  const evidenceStartedAt = performance.now();
+  const deadlineMs = Number.isFinite(request.evidenceDeadlineMs) && (request.evidenceDeadlineMs as number) > 0
+    ? Math.floor(request.evidenceDeadlineMs as number)
+    : DEFAULT_EVIDENCE_DEADLINE_MS;
+  const hydration = await hydrateWithBudget(
+    hydratable,
+    (entry) => Math.min(Number.isFinite(entry.sizeBytes) ? entry.sizeBytes as number : EVIDENCE_TAIL_BYTES, EVIDENCE_TAIL_BYTES),
+    async (entry, hydrationSignal) => sources.transcriptEvidence(
+      entry.engine as "claude" | "codex",
+      entry.path,
+      { signal: hydrationSignal },
+    ),
+    {
+      concurrency: Math.max(1, Math.floor(request.evidenceConcurrency ?? DEFAULT_EVIDENCE_CONCURRENCY)),
+      maxBytes: Math.max(0, Math.floor(request.evidenceByteBudget ?? DEFAULT_EVIDENCE_BYTE_BUDGET)),
+      deadlineAt: now + deadlineMs,
+      signal,
+      now: sources.now,
+    },
+  );
+  const evidenceReadMs = performance.now() - evidenceStartedAt;
+  if (signal?.aborted) throw livenessAbortError(signal.reason);
+
+  const serializationStartedAt = performance.now();
   const conversations: AgentLivenessRecord[] = [];
-  for (const entry of entries) {
-    if (entry.engine !== "claude" && entry.engine !== "codex") continue;
-    const engine = entry.engine;
-    const evidence = await sources.transcriptEvidence(engine, entry.path);
+  for (const [index, entry] of hydratable.entries()) {
+    const evidence = hydration.results.get(index) ?? null;
     const turnState = turnStateFromEvidence(evidence, entry);
     /* Freshness is the newest RECORD, tool traffic included. Reading it off the
        last assistant prose message reports a live agent in a long tool stretch
@@ -374,8 +576,10 @@ export async function agentLivenessSnapshot(
       pipeline: (conversationId ? pipelines.byConversation.get(conversationId) : undefined)
         ?? pipelines.byPath.get(entry.path)
         ?? null,
+      evidenceSource: evidence !== null ? "transcript" : "projection",
     });
   }
+  const serializationMs = performance.now() - serializationStartedAt;
 
   return {
     observedAt: new Date(now).toISOString(),
@@ -383,5 +587,19 @@ export async function agentLivenessSnapshot(
     count: conversations.length,
     stalledCount: conversations.filter((record) => record.lifecycle === "stalled").length,
     conversations,
+    selection: {
+      ...selection,
+      hydrated: hydration.hydrated,
+      projected: hydratable.length - hydration.hydrated,
+      evidenceBytes: hydration.bytes,
+      budget: hydration.stopped,
+    },
+    timings: {
+      inventorySelectionMs: roundMs(inventorySelectionMs),
+      journalProjectionMs: roundMs(journalProjectionMs),
+      evidenceReadMs: roundMs(evidenceReadMs),
+      serializationMs: roundMs(serializationMs),
+      totalMs: roundMs(performance.now() - startedAt),
+    },
   };
 }

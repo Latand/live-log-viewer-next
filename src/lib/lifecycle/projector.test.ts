@@ -1,4 +1,4 @@
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, afterEach, expect, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -18,6 +18,15 @@ const { queryLifecycleEvents } = await import("./journal");
 const { refreshLifecycleJournal } = await import("./projector");
 
 afterAll(() => fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true }));
+
+/* The projection throttle is a `globalThis` stamp, so it outlives this file: a
+   stamp left behind here silently throttles the next test file's real
+   projection — and which file that is depends on the order the runner picks.
+   Every case here forces its own projection, so clearing the stamps between
+   them costs nothing and keeps the leak inside this file. */
+afterEach(() => {
+  delete (globalThis as typeof globalThis & { __llvLifecycleProjectionAt?: Record<string, number> }).__llvLifecycleProjectionAt;
+});
 
 const T0 = "2026-07-26T09:00:00.000Z";
 
@@ -151,6 +160,7 @@ function livenessRecord(overrides: Partial<AgentLivenessRecord>): AgentLivenessR
     silentForMs: 600_000,
     stalledForMs: 600_000,
     pipeline: null,
+    evidenceSource: "transcript",
     ...overrides,
   };
 }
@@ -220,6 +230,8 @@ test("a sweep journals agent_gone for an unfinished stage and agent_resumed when
 });
 
 test("a liveness-only refresh does not throttle a lifecycle refresh and vice versa", () => {
+  /* A minute ahead of the clock, so the second call in each domain is throttled
+     without the test sleeping through the window. */
   const now = Date.now() + 60_000;
 
   const livenessInput: Parameters<typeof refreshLifecycleJournal>[0] = {
