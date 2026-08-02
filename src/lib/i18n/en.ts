@@ -395,6 +395,7 @@ export const en = {
   "receipt.human.duplicate": "already delivered",
   "receipt.human.turnActive": "the agent is mid-turn",
   "receipt.human.noTurn": "there is no active turn",
+  "receipt.human.unsupportedCapability": "this engine has no such control",
   "receipt.human.verbatim": "not delivered: {reason}",
 
   // DraftAgentPane

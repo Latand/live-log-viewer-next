@@ -990,8 +990,8 @@ export class CodexAppServerHost implements EngineHost {
    * The promise settles only on a *completed* `contextCompaction` item, so the
    * durable receipt cannot claim success from an accepted request, nor from a
    * compaction that has merely started. `thread/compact/start` takes exactly
-   * `{ threadId }` and returns an empty ack, so the item lifecycle is the only
-   * place an outcome can come from.
+   * `{ threadId }` and returns an empty ack, so nothing about the outcome comes
+   * back on the request leg.
    */
   async compact(request: RuntimeCompactRequest): Promise<RuntimeCompactOutcome> {
     if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
@@ -1059,8 +1059,8 @@ export class CodexAppServerHost implements EngineHost {
    * The item itself carries no outcome — its whole shape is `{ id, type }` per
    * `ContextCompactionThreadItem` in the app-server schema, and that holds for
    * every such item in the local event ledgers. The lifecycle *phase* is
-   * therefore the only signal: `item/started` says a compaction began and
-   * `item/completed` says it finished, so only the completed phase settles a
+   * therefore the only signal it offers: `item/started` says a compaction began
+   * and `item/completed` says it finished, so only the completed phase settles a
    * waiter. Settling on the first sighting would report `delivered` for a
    * compaction still running and release queued messages into a thread
    * mid-compaction.
@@ -1075,6 +1075,26 @@ export class CodexAppServerHost implements EngineHost {
     const compaction = record(item);
     if (!compaction) return;
     this.settlePendingCompactions({ compactionId: stringField(compaction, "id") });
+  }
+
+  /**
+   * The deprecated `thread/compacted` notification, accepted as a second
+   * evidence channel for the thread this host owns.
+   *
+   * Every `contextCompaction` item observed locally came from auto-compaction
+   * *inside a turn*, and a manual `thread/compact/start` runs against an idle
+   * thread — nothing available here proves the app-server emits the item
+   * lifecycle in that case too. If it only sends this notification, reading the
+   * item alone would leave every manual compaction to time out as unverified
+   * and the control would never once report success. So the item stays the
+   * preferred channel (it is the documented replacement, and it names the
+   * compaction), and this one is a corroborating fallback rather than the
+   * primary source: whichever arrives first settles the waiters.
+   */
+  private acceptCompactedNotification(params: JsonObject): void {
+    if (this.pendingCompactions.size === 0) return;
+    if (stringField(params, "threadId") !== this.identity.threadId) return;
+    this.settlePendingCompactions({ compactionId: null });
   }
 
   /** A host that dies mid-compaction leaves the engine outcome unknown, so the
@@ -2576,6 +2596,10 @@ export class CodexAppServerHost implements EngineHost {
     }
     if (method === "account/rateLimits/updated") {
       this.emit({ kind: "limits", snapshot: params });
+      return;
+    }
+    if (method === "thread/compacted") {
+      this.acceptCompactedNotification(params);
       return;
     }
     if (method === "thread/status/changed") {

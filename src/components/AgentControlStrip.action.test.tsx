@@ -266,11 +266,38 @@ test("a rejected compaction is reported as the refusal, not as a started compact
 
   expect(bodies).toHaveLength(1);
   expect(bodies[0]!.action).toBe("compact");
-  expect(statusText(host)).toBe("busy-turn");
+  /* The operator reads a sentence, not the durable record's machine token. */
+  expect(statusText(host)).toBe(translate("en", "receipt.human.turnActive"));
   expect(statusText(host)).not.toBe(translate("en", "composer.compactSent"));
 
-  /* The refusal did not consume the gesture's operation, so a retry replays it
-     rather than admitting a second compaction. */
+  /* The refusal is terminal and stored, and idempotency replays a stored
+     receipt for the same key forever — so the gesture's operation is released
+     and the next attempt is a genuinely new one. Holding the id would answer
+     every later click with this same stale refusal. */
+  await confirmCompact(host);
+  expect(bodies).toHaveLength(2);
+  expect(bodies[1]!.operationId).not.toBe(bodies[0]!.operationId);
+  await act(async () => root.unmount());
+});
+
+test("an ambiguous transport failure keeps the gesture on one operation", async () => {
+  sessionView = structuredCodexView();
+  const bodies: Array<Record<string, unknown>> = [];
+  globalThis.fetch = ((url: string, init?: RequestInit) => {
+    bodies.push(init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {});
+    /* The runtime-host socket failed and no receipt came back: the compaction
+       may or may not have been admitted, so the retry must name the same
+       operation rather than risk a second one. */
+    return Promise.resolve({
+      ok: false,
+      json: () => Promise.resolve({ error: "runtime host request timed out" }),
+    } as unknown as Response);
+  }) as typeof fetch;
+
+  const { host, root } = await mount(structuredRoot);
+  await confirmCompact(host);
+  expect(statusText(host)).toBe("runtime host request timed out");
+
   await confirmCompact(host);
   expect(bodies).toHaveLength(2);
   expect(bodies[1]!.operationId).toBe(bodies[0]!.operationId);

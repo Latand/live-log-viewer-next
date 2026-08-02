@@ -208,6 +208,77 @@ test("a runtime-host that rejects the uncertain status still settles the operati
   expect(sent.map((entry) => entry.id)).toEqual(["op-send"]);
 });
 
+test("an in-flight compaction holds messages but never holds kill", async () => {
+  const sent: QueueEntry[] = [];
+  const terminations: string[] = [];
+  const host: CompactCapableHost = Object.assign(baseHost(sent), {
+    /* A compaction that never settles: in production this window is minutes. */
+    compact: async () => new Promise<{ compactionId: string | null }>(() => {}),
+  });
+  const effects = [
+    compactEffect(),
+    {
+      id: "effect:op-kill",
+      kind: "runtime.kill",
+      eventSeq: 8,
+      payload: {
+        kind: "kill",
+        operationId: "op-kill",
+        conversationId: "conversation-one",
+        idempotencyKey: "op-kill",
+        sessionKey: { engine: "codex", sessionId: "thread-one" },
+      },
+    } satisfies StructuredDeliveryEffect,
+    {
+      id: "effect:op-send",
+      kind: "runtime.send",
+      eventSeq: 9,
+      payload: {
+        kind: "send",
+        operationId: "op-send",
+        conversationId: "conversation-one",
+        idempotencyKey: "op-send",
+        text: "this must wait for the compaction",
+        policy: "queue",
+      },
+    } satisfies StructuredDeliveryEffect,
+  ];
+  const { port, transitions } = recorder(effects, ["delivered"]);
+  const queue = new StructuredDeliveryQueue(port, () => host, async (conversationId) => {
+    terminations.push(conversationId);
+    return true;
+  });
+
+  await queue.drain();
+
+  /* Kill is the operator's safety valve: it must reach the host while the
+     compaction is still running. The message must not. */
+  expect(terminations).toEqual(["conversation-one"]);
+  expect(transitions.filter(([operationId]) => operationId === "op-kill").map(([, status]) => status))
+    .toEqual(["delivering", "delivered"]);
+  expect(sent).toEqual([]);
+  expect(transitions.some(([operationId]) => operationId === "op-send")).toBe(false);
+});
+
+test("a compact effect whose durable receipt cannot be read falls through to the host checks", async () => {
+  const sent: QueueEntry[] = [];
+  let compactions = 0;
+  const host: CompactCapableHost = Object.assign(baseHost(sent), {
+    compact: async () => { compactions += 1; return { compactionId: "compaction-one" }; },
+  });
+  const { port, transitions, settled } = recorder([compactEffect()]);
+  /* A drain pass is shared by every conversation, so an unreadable receipt must
+     not take the other groups down with it. */
+  port.status = async () => { throw new Error("runtime host request timed out"); };
+  const queue = new StructuredDeliveryQueue(port, () => host);
+
+  await queue.drain();
+  await settled;
+
+  expect(compactions).toBe(1);
+  expect(transitions.at(-1)).toEqual(["op-compact", "delivered", "compaction:compaction-one"]);
+});
+
 test("a busy structured turn fails the compact control instead of steering it", async () => {
   const sent: QueueEntry[] = [];
   let calls = 0;
@@ -356,6 +427,10 @@ test("a queued message behind an in-flight compaction waits for the control to s
 
   releaseEvidence();
   await settled;
+  /* The barrier is cleared in the compaction's `finally`, one tick after the
+     terminal transition — production reaches the next pass through the
+     `retrySoon` fired from that same callback. */
+  await Bun.sleep(0);
   await queue.drain();
 
   expect(sent.map((entry) => entry.id)).toEqual(["op-send"]);

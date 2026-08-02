@@ -412,6 +412,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "receipt.human.duplicate": "вже доставлено",
   "receipt.human.turnActive": "агент посеред ходу",
   "receipt.human.noTurn": "немає активного ходу",
+  "receipt.human.unsupportedCapability": "цей двигун не має такої команди",
   "receipt.human.verbatim": "не доставлено: {reason}",
 
   "draft.readPrompt": "Прочитай розмову агента у файлі {src} і продовж роботу звідти: ",

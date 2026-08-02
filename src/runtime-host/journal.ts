@@ -994,8 +994,14 @@ export class RuntimeJournal {
    * one already has a completed outbox row and is never reissued.
    */
   private terminalizeUnverifiedCompactions(): void {
-    const rows = this.db.query<{ operation_id: string; request_json: string; receipt_json: string }, []>(
-      "SELECT operation_id, request_json, receipt_json FROM operations ORDER BY event_seq",
+    /* Prefiltered in SQL: an epoch claim is on the startup path, and every row
+       this sweep can act on names both tokens in its stored receipt. The JSON
+       parse below still decides — LIKE only keeps the scan off rows that cannot
+       possibly match. */
+    const rows = this.db.query<{ operation_id: string; receipt_json: string }, []>(
+      `SELECT operation_id, receipt_json FROM operations
+       WHERE receipt_json LIKE '%"kind":"compact"%' AND receipt_json LIKE '%"status":"delivering"%'
+       ORDER BY event_seq`,
     ).all();
     for (const row of rows) {
       const receipt = JSON.parse(row.receipt_json) as RuntimeOperationReceipt;

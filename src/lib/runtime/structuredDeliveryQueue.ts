@@ -304,6 +304,10 @@ export class StructuredDeliveryQueue {
       arrived. The effect stays pending in the journal meanwhile, so every later
       drain pass must find it here and leave it alone (#862). */
   private readonly activeCompactions = new Map<string, Promise<void>>();
+  /** The conversations those compactions belong to. Reads block on this rather
+      than on a whole-group barrier, so an unfinished compaction holds messages
+      without holding kill, interrupt, or answer. */
+  private readonly compactingConversations = new Set<string>();
 
   constructor(
     private readonly port: StructuredDeliveryQueuePort,
@@ -417,6 +421,13 @@ export class StructuredDeliveryQueue {
       }
     }
     for (const effect of effects) {
+      /* #862: a compaction in flight holds back everything that would write to
+         the thread — messages and reconfigures — but never another control.
+         Kill is the operator's safety valve and interrupt/answer are how a turn
+         is reached at all; leaving them inert for the length of a compaction
+         would be a worse failure than the one the barrier prevents. Controls
+         sort ahead of these, so by here every one of them has already run. */
+      if (!isControlEffect(effect) && this.compactingConversations.has(effect.conversationId)) return true;
       if (isReconfigureEffect(effect)) {
         if (effect !== currentReconfigure) continue;
         if (effect.sessionKey
@@ -565,15 +576,21 @@ export class StructuredDeliveryQueue {
 
   /**
    * Executes a durable compact receipt (#862). The pass never waits for the
-   * compaction itself: it issues the control, reports the conversation blocked
-   * so no message can slip past an unfinished compaction, and lets the evidence
-   * terminalize the receipt out of band. Duplicate execution is impossible
-   * because the operation is registered in flight before the control is issued
-   * and the outbox row is only cleared by the terminal transition.
+   * compaction itself: it issues the control, records the conversation as
+   * compacting so no message can slip past an unfinished compaction, and lets
+   * the evidence terminalize the receipt out of band. Duplicate execution is
+   * impossible because the operation is registered in flight before the control
+   * is issued and the outbox row is only cleared by the terminal transition.
+   *
+   * It never reports the group blocked for an in-flight compaction: the
+   * remaining control effects — kill above all — must still run.
    */
   private async drainCompact(effect: CompactEffect): Promise<ControlDrainResult> {
-    if (this.activeCompactions.has(effect.operationId)) return { blocked: true, terminated: false };
-    const durable = await this.port.status?.(effect.operationId);
+    if (this.activeCompactions.has(effect.operationId)) return { blocked: false, terminated: false };
+    /* An unreadable receipt is not evidence of anything. Treat it as unknown
+       and fall through to the host checks rather than aborting a drain pass
+       that other conversations share. */
+    const durable = await this.port.status?.(effect.operationId).catch(() => null);
     if (durable?.status === "delivering") {
       /* An earlier executor issued this control and never settled it — a Viewer
          restart, or a terminal transition that never landed. This process
@@ -615,13 +632,17 @@ export class StructuredDeliveryQueue {
        knows the control may already have reached the engine and terminalizes it
        as unverified instead of compacting the thread a second time. */
     await this.port.transition(effect.operationId, "delivering");
+    /* Marked before the run exists: a compaction that settles immediately would
+       otherwise clear the barrier before it was ever raised. */
+    this.compactingConversations.add(effect.conversationId);
     const run = this.runCompaction(host, effect).finally(() => {
       this.activeCompactions.delete(effect.operationId);
+      this.compactingConversations.delete(effect.conversationId);
       this.retrySoon();
     });
     this.activeCompactions.set(effect.operationId, run);
     void run.catch(() => undefined);
-    return { blocked: true, terminated: false };
+    return { blocked: false, terminated: false };
   }
 
   private async runCompaction(host: CompactCapableHost, effect: CompactEffect): Promise<void> {

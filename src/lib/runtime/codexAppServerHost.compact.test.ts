@@ -199,6 +199,42 @@ test("the compaction item the wire actually carries is accepted as evidence", as
   await host.release();
 });
 
+test("the deprecated thread/compacted notification is accepted as corroborating evidence", async () => {
+  const server = new CompactAppServer();
+  const host = await startHost(server);
+
+  const compaction = host.compact({ operationId: "op-compact", threadId: server.threadId });
+  await Bun.sleep(10);
+  /* Every compaction item observed locally came from auto-compaction inside a
+     turn; nothing proves the app-server emits that lifecycle for a manual
+     compact against an idle thread. If it only sends this notification, reading
+     the item alone would leave the control timing out as unverified forever. */
+  server.notify("thread/compacted", { threadId: server.threadId, turnId: "turn-1" });
+
+  expect(await compaction).toEqual({ compactionId: null });
+  await host.release();
+});
+
+test("a compacted notification for another thread is not evidence", async () => {
+  const server = new CompactAppServer();
+  const host = await startHost(server, { compactEvidenceTimeoutMs: 60 });
+  let settled = false;
+
+  const compaction = host.compact({ operationId: "op-compact", threadId: server.threadId });
+  void compaction.then(() => { settled = true; }, () => { settled = true; });
+  await Bun.sleep(10);
+  server.notify("thread/compacted", { threadId: "someone-elses-thread", turnId: "turn-1" });
+  await Bun.sleep(10);
+
+  expect(settled).toBe(false);
+  server.notify("item/completed", {
+    threadId: server.threadId,
+    item: { id: "compaction-one", type: "contextCompaction" },
+  });
+  expect(await compaction).toEqual({ compactionId: "compaction-one" });
+  await host.release();
+});
+
 test("a compaction that starts and never finishes terminalizes unverified", async () => {
   const server = new CompactAppServer();
   const host = await startHost(server, { compactEvidenceTimeoutMs: 40 });
