@@ -90,6 +90,15 @@ export async function deliverPipelineDecision(
   }
   if (!result.ok) {
     if (result.receipt) return resultFromReceipt(result.receipt, deliveryId);
+    if (result.transportUncertain) {
+      return {
+        state: "delivering",
+        operationId: request.operationId,
+        deliveryId,
+        at: null,
+        error: result.error,
+      };
+    }
     return {
       state: "failed",
       operationId: result.operationId ?? request.operationId,

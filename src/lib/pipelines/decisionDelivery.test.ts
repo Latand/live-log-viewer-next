@@ -162,6 +162,62 @@ test("an uncertain admission keeps the original operation in flight (#852)", asy
   });
 });
 
+test("a receipt-less transport timeout keeps its durable operation in flight (#852)", async () => {
+  const request = {
+    pipelineId: "pipeline-transport-uncertain",
+    stageId: "build",
+    sourceAttempt: 1,
+    targetAttempt: 2,
+    conversationId: "conversation-transport-uncertain",
+    path: "/sessions/pipeline-transport-uncertain.jsonl",
+    input: "Continue once the transport outcome settles.",
+    clientMessageId: "pipeline-decision-message-transport-uncertain",
+    operationId: "pipeline-decision-operation-transport-uncertain",
+  };
+  const deliveryId = "pipeline-decision-delivery-transport-uncertain";
+  const result = await deliverPipelineDecision(request, {
+    enqueue: async () => ({
+      ok: false,
+      structured: true,
+      outcome: "failed",
+      error: "structured host command timed out after reservation claim",
+      status: 503,
+      operationId: request.operationId,
+      transportUncertain: true,
+    }),
+    registry: () => ({
+      readOnlySnapshot: () => ({
+        deliveryOperationOwners: {
+          [request.operationId]: {
+            deliveryId,
+            terminalState: null,
+            createdAt: "2026-07-31T18:00:00.000Z",
+          },
+        },
+        heldDeliveries: {
+          [deliveryId]: {
+            id: deliveryId,
+            state: "delivery-uncertain",
+            attempts: 1,
+            error: "structured host command timed out after reservation claim",
+            createdAt: "2026-07-31T18:00:00.000Z",
+            assignedAt: "2026-07-31T18:00:01.000Z",
+            deliveredAt: null,
+          },
+        },
+      }),
+    }) as unknown as AgentRegistry,
+  });
+
+  expect(result).toEqual({
+    state: "delivering",
+    operationId: request.operationId,
+    deliveryId,
+    at: null,
+    error: "structured host command timed out after reservation claim",
+  });
+});
+
 test("a delivery claim racing terminalization stays uncertain until its runtime receipt settles (#852)", async () => {
   const operationId = "pipeline_decision_race";
   const deliveryId = "delivery-race";
