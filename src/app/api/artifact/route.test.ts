@@ -164,6 +164,9 @@ test("content that contradicts the extension is refused", async () => {
   const pngRes = await GET(request({ path: fakePng }));
   expect(pngRes.status).toBe(415);
   expect(await errorCode(pngRes)).toBe("mime-mismatch");
+  /* meta refuses too: the mismatch surfaces at open time */
+  const pngMeta = await GET(request({ path: fakePng, mode: "meta" }));
+  expect(pngMeta.status).toBe(415);
 
   const fakePdf = write("doc.pdf", "just text, no pdf header");
   const pdfRes = await GET(request({ path: fakePdf }));

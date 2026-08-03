@@ -217,6 +217,15 @@ export async function GET(req: NextRequest): Promise<NextResponse<FailBody> | Ne
     const limits = artifactLimits();
     const download = req.nextUrl.searchParams.get("download") === "1";
 
+    /* Before meta as well: a mismatched file must fail at open time with the
+       explicit unsupported state, not after a pane mounted around it. */
+    const head = Buffer.alloc(Math.min(SNIFF_BYTES, stat.size));
+    if (head.length > 0) await handle.read(head, 0, head.length, 0);
+    if (!sniffAgrees(mime, head)) {
+      await handle.close();
+      return fail("mime-mismatch", "file content does not match its extension");
+    }
+
     if (req.nextUrl.searchParams.get("mode") === "meta") {
       await handle.close();
       return NextResponse.json(
@@ -234,13 +243,6 @@ export async function GET(req: NextRequest): Promise<NextResponse<FailBody> | Ne
     if (stat.size > limits.maxBytes) {
       await handle.close();
       return fail("too-large", "artifact exceeds the configured byte bound");
-    }
-
-    const head = Buffer.alloc(Math.min(SNIFF_BYTES, stat.size));
-    if (head.length > 0) await handle.read(head, 0, head.length, 0);
-    if (!sniffAgrees(mime, head)) {
-      await handle.close();
-      return fail("mime-mismatch", "file content does not match its extension");
     }
 
     const headers = baseHeaders(mime, etag, name, download);
