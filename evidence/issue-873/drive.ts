@@ -279,7 +279,7 @@ async function main(): Promise<void> {
        graph, and dev-mode module init arms long-lived watchers that keep the
        event loop alive after every scenario is done — the run then hangs in
        epoll with all its children long gone. */
-    process.env.NODE_ENV = "production";
+    Object.assign(process.env, { NODE_ENV: "production" });
     const stateDir = runtime.env.LLV_STATE_DIR!;
     const { productionDomainDependencies, viewerMcpBindings } = await import("../../src/lib/mcp/bindings");
     const { createMcpToolService, MemoryMcpReceiptStore, FileMcpReceiptStore } = await import("../../src/lib/mcp/server");
