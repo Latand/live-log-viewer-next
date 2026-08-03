@@ -390,15 +390,13 @@ test("no rootId can be named by the caller", async () => {
 });
 
 /*
- * B+ item 2: typed focus belongs to EVERY caller — the Viewer surface is one
- * management plane, and a session losing it because it was classified as a
- * worker is the defect the operator escalated (the voice coordinator and the
- * designated manager were both refused, and the historical root conversation
- * was unresumable, so nothing could focus a session at all).
- *
- * What replaces the refusal is ATTRIBUTION: the record durably names WHO
- * raised it, derived server-side from the durable caller identity, never from
- * anything the caller states.
+ * #873 review, finding 1: this call moves the operator's screen the moment it
+ * is made — no confirmation surface stands between the caller and the camera
+ * anymore — so who may make it is gated on server-derived authority. The tool
+ * stays on every session's surface (B+ availability is untouched); what the
+ * binding refuses is EXECUTION: only the operator's own root/gateway session
+ * and the target project's validated orchestrator seat move the view. A
+ * refused caller files nothing: zero attention records, zero navigation.
  */
 
 const workerCaller: AttentionCallerAuthority = {
@@ -411,23 +409,22 @@ function serviceAs(authority: AttentionCallerAuthority) {
   return createMcpToolService(bindings(undefined, undefined, () => authority), new MemoryMcpReceiptStore());
 }
 
-test("a worker holding this tool raises the focus request — refused for nobody", async () => {
+test("a worker caller is refused before anything durable exists: no record, no navigation", async () => {
   const browser = desk();
   try {
-    const result = await serviceAs(workerCaller).callTool("request_attention", ask()) as McpToolResult & { attentionId?: string };
+    const result = await serviceAs(workerCaller).callTool("request_attention", ask()) as McpToolResult;
 
-    expect(result.ok).toBe(true);
-    expect(result.attentionId).toStartWith("attention_");
-    /* The record durably attributes the actual caller: a worker's ask never
-       masquerades as the operator's own root agent asking. */
-    expect(readAttentionFile().requests[0]!.raisedBy)
-      .toEqual({ kind: "agent", conversationId: "conversation_reviewer", role: "reviewer" });
+    expect(result.ok).toBe(false);
+    expect((result as { details?: { code?: string; refusedAs?: string } }).details?.code).toBe("ATTENTION_NOT_PERMITTED");
+    expect((result as { details?: { refusedAs?: string } }).details?.refusedAs).toBe("worker");
+    /* Zero durable traces: nothing for any browser poll to navigate later. */
+    expect(readAttentionFile().requests).toHaveLength(0);
   } finally {
     browser.stop();
   }
 });
 
-test("the gateway's raise is attributed as the gateway, a worker's as its own conversation", async () => {
+test("the gateway's raise is attributed as the gateway", async () => {
   const browser = desk();
   try {
     await serviceAs(ROOT_CALLER).callTool("request_attention", ask({ clientRequestId: "raise-root" }));
@@ -438,17 +435,18 @@ test("the gateway's raise is attributed as the gateway, a worker's as its own co
   }
 });
 
-test("a caller no recorded host names is allowed through, attributed as unidentified", async () => {
+test("a caller no recorded host names is refused: an unattributable identity may not move the screen", async () => {
   const browser = desk();
   try {
-    /* The operator's root session is often a terminal the Viewer observes rather
-       than launched, so there are ordinary setups with no host evidence naming
-       it. The record says so instead of guessing. */
+    /* Unidentified is an honest label for snapshots and reports, and exactly
+       the identity that must never hold the camera: nothing durable would say
+       WHO moved the operator's view. */
     const result = await serviceAs({ kind: "unidentified" }).callTool("request_attention", ask()) as McpToolResult;
 
-    expect(result.ok).toBe(true);
-    expect(readAttentionFile().requests).toHaveLength(1);
-    expect(readAttentionFile().requests[0]!.raisedBy).toEqual({ kind: "unidentified", conversationId: null, role: null });
+    expect(result.ok).toBe(false);
+    expect((result as { details?: { code?: string; refusedAs?: string } }).details?.code).toBe("ATTENTION_NOT_PERMITTED");
+    expect((result as { details?: { refusedAs?: string } }).details?.refusedAs).toBe("unidentified");
+    expect(readAttentionFile().requests).toHaveLength(0);
   } finally {
     browser.stop();
   }

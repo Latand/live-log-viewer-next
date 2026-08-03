@@ -14,10 +14,11 @@ import {
   ATTENTION_ARRIVAL_TIMEOUT_MS,
   awaitAttentionArrival,
   raiseAttentionRequest,
-  resolveDirectedAttentionDevice,
+  resolveDirectedAttentionView,
 } from "@/lib/attention/service";
+import { readAttentionFile } from "@/lib/attention/store";
 import { geometricFrameRect, isFocusTarget, isGeometricTarget } from "@/lib/attention/targets";
-import type { FocusIntent, FocusTarget, ZoomIntent } from "@/lib/attention/types";
+import type { AttentionRequestV1, FocusIntent, FocusTarget, ZoomIntent } from "@/lib/attention/types";
 import { boardFor } from "@/lib/board/store";
 import { applyConversationAction } from "@/lib/conversation/actions";
 import { DeadlineExceededError, deadlineSignal } from "@/lib/deadline";
@@ -74,7 +75,7 @@ import {
   selectedConversationTail,
   type SelectedContextTargetDependencies,
 } from "./selectedContextTarget";
-import { mcpCallerIdentity, mcpToolPolicy, type ManagerTarget, type McpToolPolicy } from "./toolAllowlist";
+import { mcpCallerIdentity, mcpToolPolicy, permitAttentionHandoff, type ManagerTarget, type McpToolPolicy } from "./toolAllowlist";
 
 const PIPELINE_CONTROLLER_ACTIONS = new Set<PipelineAction>(["start", "resume", "retry-stage", "skip-stage"]);
 
@@ -252,6 +253,10 @@ export interface ViewerMcpDomainDependencies {
       reports. Optional so partial test harnesses fall back to a label derived
       from {@link attentionAuthority} alone (manager reads as agent there). */
   callerAttribution?(): CallerAttribution;
+  /** #873 restart replay: the durable record an earlier, interrupted run of
+      the same MCP operation already raised. Optional so partial harnesses
+      fall back to the shared attention file. */
+  findAttentionByOperation?(operationKey: string): AttentionRequestV1 | null;
   /** Validated per-project manager seats (fail-closed — see
       `@/lib/orchestrator/authority`), for project-scoped directive routing.
       Optional so partial harnesses fall back to the production resolver. */
@@ -388,7 +393,9 @@ function attentionCallerSources(): AttentionCallerSources {
   };
 }
 
-const productionDomainDependencies: ViewerMcpDomainDependencies = {
+/** Exported for the isolated evidence driver, which runs the REAL production
+    dependency set and overrides only the caller-authority seam per scenario. */
+export const productionDomainDependencies: ViewerMcpDomainDependencies = {
   listFiles,
   targetedFileEntry: targetedFileEntry,
   selectedContext: productionSelectedContextDependencies,
@@ -458,6 +465,13 @@ function spawnAttemptId(value: string): string {
 
 function mcpOperationId(toolName: string, value: string): string {
   return `mcp_${toolName}_${crypto.createHash("sha256").update(value).digest("hex").slice(0, 24)}`;
+}
+
+/** The durable identity one `request_attention` call writes on its record —
+    exported so tests and evidence can construct the record an interrupted run
+    would have left behind. */
+export function requestAttentionOperationKey(clientRequestId: string): string {
+  return mcpOperationId("request_attention", clientRequestId);
 }
 
 async function spawnAgent(args: McpToolArgs, control: ViewerControlDependencies): Promise<McpToolPayload> {
@@ -1831,6 +1845,21 @@ async function requestAttention(
   dependencies: ViewerMcpDomainDependencies,
   context: McpToolCallContext = {},
 ): Promise<McpToolPayload> {
+  /* ── The authority gate, BEFORE any resolution or durable write ──────────
+     This call moves the operator's screen with no confirmation surface left
+     in front of it, so who may make it is decided first, from server-derived
+     evidence only: the durable caller identity (process ancestry merged with
+     the admission-injected spawn capability) against the validated
+     orchestrator seats, which already fail closed on revoked, superseded,
+     conflicting, unknown and cross-project designations. A refused caller
+     files nothing, names nothing and learns nothing about the board — the
+     identity half runs before the target is even read. */
+  const authority = dependencies.attentionAuthority();
+  const seats = dependencies.authorizedSeats?.() ?? authorizedManagerSeats(productionManagerAuthoritySources());
+  const admission = permitAttentionHandoff(authority, seats, null);
+  if (!admission.allowed) {
+    throw new McpToolRefusal(admission.error, { code: "ATTENTION_NOT_PERMITTED", refusedAs: admission.refusedAs });
+  }
   const raisedBy = attributionOf(dependencies);
 
   const target = args.target;
@@ -1843,40 +1872,70 @@ async function requestAttention(
   const contextLabel = text(args.contextLabel);
   const project = await focusTargetProject(target, text(args.project), dependencies);
 
-  /* Resolved BEFORE anything durable is written: with no view that can move,
-     the honest answer is a refusal, not a pending ask nobody could ever act
-     on. Ambiguity is already settled deterministically inside the resolver —
-     latest interaction wins — and background/inactive devices are named
-     nowhere, so no competing offer can reach them. */
-  const deviceId = resolveDirectedAttentionDevice();
-  if (!deviceId) {
-    throw new McpToolRefusal(
-      "no active Viewer can be moved right now: no visible, active desktop board is open",
-      { code: "NO_ACTIVE_VIEW" },
-    );
+  /* The project half of the same gate: an orchestrator directs its OWN
+     project's screen estate. A seat naming a different project is refused
+     here, still before anything durable exists. */
+  const projectVerdict = permitAttentionHandoff(authority, seats, project);
+  if (!projectVerdict.allowed) {
+    throw new McpToolRefusal(projectVerdict.error, { code: "ATTENTION_NOT_PERMITTED", refusedAs: projectVerdict.refusedAs });
   }
 
-  /* Before the request is written, not after: the request names the root by the
-     identity this call may have just extended with a fresh session. */
-  dependencies.adoptRootSession();
-  const created = dependencies.raiseAttentionRequest({
-    origin: "root-agent",
-    raisedBy,
-    target,
-    /* Geometric targets ARE their own frame; everything else records that no
-       board was read, so a vanished anchor reports `lost` rather than landing
-       the operator at the world origin. */
-    frameAtCreation: {
-      project,
-      rect: isGeometricTarget(target) ? geometricFrameRect(target) : UNREAD_FRAME_RECT,
-      boardRevision: null,
-    },
-    intent,
-    reason,
-    directedAt: deviceId,
-    ...(zoom ? { zoom } : {}),
-    ...(contextLabel ? { contextLabel } : {}),
-  });
+  /* ── Restart replay (#873 review, finding 3) ─────────────────────────────
+     The operation's durable identity is derived from the clientRequestId and
+     written ON the record at creation — before any browser can navigate — so
+     a run interrupted anywhere after that point leaves a record this re-run
+     can find. Adoption means: no second record, no second navigation; the
+     re-run simply waits out the SAME handoff and reports how it ended. */
+  const operationKey = mcpOperationId("request_attention", requestId(args));
+  const findByOperation = dependencies.findAttentionByOperation
+    ?? ((key: string) => readAttentionFile().requests.find((request) => request.operationKey === key) ?? null);
+  let request = findByOperation(operationKey);
+  let created: ReturnType<typeof raiseAttentionRequest> | null = null;
+  if (!request) {
+    /* Resolved BEFORE anything durable is written: with no view that can move,
+       the honest answer is a refusal, not a pending ask nobody could ever act
+       on. Ambiguity is already settled deterministically inside the resolver —
+       latest interaction wins — and background/inactive devices are named
+       nowhere, so no competing offer can reach them. The SESSION is part of
+       the answer: two tabs share a device id, and only the named tab may run
+       the move. */
+    const view = resolveDirectedAttentionView();
+    if (!view) {
+      throw new McpToolRefusal(
+        "no active Viewer can be moved right now: no visible, active desktop board is open",
+        { code: "NO_ACTIVE_VIEW" },
+      );
+    }
+
+    /* Before the request is written, not after: the request names the root by
+       the identity this call may have just extended with a fresh session. */
+    dependencies.adoptRootSession();
+    created = dependencies.raiseAttentionRequest({
+      origin: "root-agent",
+      raisedBy,
+      target,
+      /* Geometric targets ARE their own frame; everything else records that no
+         board was read, so a vanished anchor reports `lost` rather than landing
+         the operator at the world origin. */
+      frameAtCreation: {
+        project,
+        rect: isGeometricTarget(target) ? geometricFrameRect(target) : UNREAD_FRAME_RECT,
+        boardRevision: null,
+      },
+      intent,
+      reason,
+      directedAt: view.deviceId,
+      directedAtSession: view.viewSessionId,
+      operationKey,
+      ...(zoom ? { zoom } : {}),
+      ...(contextLabel ? { contextLabel } : {}),
+    });
+    request = created.request;
+    /* `adopted` means another process won the transactional race for this
+       operation between the read above and the create — its record is the
+       one, and this run reports it rather than counting a creation. */
+    if (created.adopted) created = null;
+  }
 
   /* Inside the caller's own transport deadline, so the bounded failure is OURS
      to report rather than a timeout the caller reads as silence. */
@@ -1884,10 +1943,11 @@ async function requestAttention(
     ? ATTENTION_ARRIVAL_TIMEOUT_MS
     : Math.max(1_000, Math.min(ATTENTION_ARRIVAL_TIMEOUT_MS, context.deadlineAt - Date.now() - 2_000));
   const waitForArrival = dependencies.awaitAttentionArrival ?? awaitAttentionArrival;
-  const outcome = await waitForArrival(created.request.id, {
+  const outcome = await waitForArrival(request.id, {
     timeoutMs: budget,
     ...(context.signal ? { signal: context.signal } : {}),
   });
+  const deviceId = request.acknowledgedBy ?? null;
   if (outcome.kind === "failed") {
     const messages: Record<typeof outcome.code, string> = {
       TARGET_LOST: "the view arrived nowhere: the target no longer resolves to anything on the board",
@@ -1897,30 +1957,34 @@ async function requestAttention(
     };
     throw new McpToolRefusal(messages[outcome.code], {
       code: outcome.code,
-      attentionId: created.request.id,
+      attentionId: request.id,
       deviceId,
       ...(outcome.request ? { state: outcome.request.state, ...(outcome.request.expiredCause ? { expiredCause: outcome.request.expiredCause } : {}) } : {}),
     });
   }
 
-  const operationId = mcpOperationId("request_attention", requestId(args));
   return redactPayload({
     attentionId: outcome.request.id,
     request: outcome.request,
     /* The durable postcondition the success stands on: the record has already
-       landed, the device is named, and the pre-move return point is captured. */
+       landed, the one executing view is named down to the browser session, and
+       the pre-move return point is captured. */
     handoff: {
       deviceId,
+      viewSessionId: outcome.request.directedSessionId ?? null,
       state: outcome.request.state,
       resolution: outcome.request.resolution ?? null,
       arrivedAt: outcome.request.stateChangedAt,
     },
+    /* True when this run adopted a record an interrupted earlier run of the
+       SAME operation already raised — the restart-replay path. */
+    recovered: created === null,
     /* A newer request from the same root replaces its own unanswered ones, and
        an overfull queue drops the oldest routine entry. Both are named so the
        agent can say so out loud instead of leaving a dropped ask silent. */
-    superseded: created.superseded,
-    dropped: created.dropped,
-    ...mutationReceipt(operationId),
+    superseded: created?.superseded ?? [],
+    dropped: created?.dropped ?? [],
+    ...mutationReceipt(operationKey),
   });
 }
 

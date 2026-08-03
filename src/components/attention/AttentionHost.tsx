@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import { viewBus } from "@/hooks/viewPresenceBus";
 import { stableDeviceId } from "@/hooks/useViewPresence";
@@ -11,7 +11,8 @@ import { useAttentionOffers, type PostOutcome, type ViewportCapture } from "@/co
 
 import { FocusReturnChip } from "./FocusReturnChip";
 import { focusHandoffBus, type FocusHandoffBus } from "./focusHandoffBus";
-import { restoreFocusPoint, runFocusHandoff, type HandoffTiming } from "./navigate";
+import { claimHandoff, clearHandoffClaim, readHandoffClaim } from "./handoffClaim";
+import { restoreFocusPoint, runFocusTransaction, type FocusObservation, type HandoffTiming } from "./navigate";
 import { forgetReturnProject, readReturnProject, rememberReturnProject } from "./returnProjectMemory";
 
 /**
@@ -50,9 +51,27 @@ export interface AttentionHostProps {
   /** Test seams. Production passes none of these. */
   bus?: FocusHandoffBus;
   deviceId?: string | null;
+  /** This tab's presence session id. Production reads it off the view bus. */
+  viewSessionId?: string | null;
+  /** Per-tab claim storage. Production uses `window.sessionStorage`. */
+  claimStorage?: Pick<Storage, "getItem" | "setItem" | "removeItem"> | null;
   fetchFn?: typeof fetch;
   pollMs?: number;
   timing?: HandoffTiming;
+  observe?: () => FocusObservation;
+}
+
+/**
+ * The transactions currently moving this DOCUMENT, shared across every mount
+ * of this component in it. A duplicate mount (strict mode, a shell reshuffle
+ * that briefly renders two hosts) must join the flight already in the air,
+ * not launch a second one — the durable claim in sessionStorage answers "has
+ * this TAB ever started it", and this map answers "is it running right now".
+ */
+const runningHandoffs = new Map<string, AbortController>();
+
+export function resetHandoffTransactionsForTest(): void {
+  runningHandoffs.clear();
 }
 
 type CapturedViewport = Pick<ReturnPoint, "mode" | "camera" | "focusedPath"> & { project: string | null };
@@ -96,7 +115,25 @@ function browserStorage(): Storage | null {
   }
 }
 
-export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedDeviceId, fetchFn, pollMs, timing }: AttentionHostProps) {
+function tabStorage(): Storage | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+/** What the live view shows right now — the observation an arrival report
+    stands on. Read from the same bus presence publishes from. */
+function observeLiveView(): FocusObservation {
+  const slice = viewBus.getSlice();
+  return { camera: slice.camera, focusedPath: slice.focusedPath };
+}
+
+const subscribeIdentity = (listener: () => void) => viewBus.subscribe(listener);
+
+export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedDeviceId, viewSessionId: forcedViewSessionId, claimStorage, fetchFn, pollMs, timing, observe }: AttentionHostProps) {
   const { t } = useLocale();
   const [resolvedDeviceId, setResolvedDeviceId] = useState<string | null>(forcedDeviceId ?? null);
   useEffect(() => {
@@ -109,6 +146,28 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
      phone neither moves its own board nor consumes a request a desktop should
      answer — rather than relying on each call site to remember. */
   const deviceId = mobile ? null : (forcedDeviceId ?? resolvedDeviceId);
+
+  /* This TAB's presence session — the identity a directed record names as its
+     one executor. Reported to the bus by the presence publisher once mounted;
+     until it is known, a session-scoped directed request waits rather than
+     letting an unnamed tab race the named one for the camera. */
+  const busIdentity = useSyncExternalStore(subscribeIdentity, () => viewBus.getIdentity(), () => null);
+  const viewSessionId = forcedViewSessionId !== undefined ? forcedViewSessionId : busIdentity?.viewSessionId ?? null;
+  const claimStore = claimStorage !== undefined ? claimStorage : tabStorage();
+  const observeView = observe ?? observeLiveView;
+
+  /* Transactions THIS mount started, so unmounting aborts exactly its own
+     in-flight moves (cleanup for finding 4) and never a concurrent mount's.
+     The durable claim survives in sessionStorage, so a remount resumes the
+     handoff with the original pre-move viewport instead of restarting it. */
+  const ownTransactions = useRef(new Set<AbortController>());
+  useEffect(() => {
+    const owned = ownTransactions.current;
+    return () => {
+      for (const controller of owned) controller.abort();
+      owned.clear();
+    };
+  }, []);
 
   /* The viewport the operator is leaving, taken before the move and handed to
      the arrival that records it. Held in a ref because `arrive` reads it after
@@ -123,9 +182,14 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
   const leaving = useRef(new Map<string, CapturedViewport>());
 
   const captureViewport = useCallback<ViewportCapture>((requestId) => {
-    const captured = leaving.current.get(requestId) ?? currentViewport();
+    /* The ref, then the tab's durable claim, then — only for a request nothing
+       ever claimed — the live viewport. The claim is what keeps a remounted
+       host from writing the DESTINATION down as the way back. */
+    const captured = leaving.current.get(requestId)
+      ?? readHandoffClaim(claimStore, requestId)
+      ?? currentViewport();
     return { mode: captured.mode, camera: captured.camera, focusedPath: captured.focusedPath };
-  }, []);
+  }, [claimStore]);
 
   /* Arrivals this device made on the board but has not got an answer about.
      Only transport failures land here: a refusal is the server having decided,
@@ -142,28 +206,62 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
   /** Move this device to a request the record already names as ours, and
       report the arrival. The pre-move viewport must already be in `leaving`
       and the return project already remembered — the two things that have to
-      be taken before anything moves. */
-  const completeHandoff = useCallback(async (request: AttentionRequestV1) => {
+      be taken before anything moves.
+
+      ONE abortable transaction per request, per document: a duplicate mount
+      finds it in `runningHandoffs` and never starts a second, and this
+      mount's unmount aborts it — an aborted move posts NOTHING, keeps the
+      durable claim, and the remounted host resumes from the original
+      viewport. The arrival itself is posted only after the transaction has
+      OBSERVED the camera at the frame (see `runFocusTransaction`). */
+  const completeHandoff = useCallback(async (request: AttentionRequestV1, resume = false) => {
+    if (runningHandoffs.has(request.id)) return;
+    const controller = new AbortController();
+    runningHandoffs.set(request.id, controller);
+    ownTransactions.current.add(controller);
     let keepReturnPoint = false;
     try {
-      const outcome = await runFocusHandoff(request, bus, timing ?? {});
+      const outcome = await runFocusTransaction(request, bus, {
+        ...(timing ?? {}),
+        signal: controller.signal,
+        observe: observeView,
+        resume,
+      });
+      if (outcome.aborted) {
+        /* Nothing decided, nothing posted. The claim and the return project
+           stay for the resume; the server's own deadline is the only thing
+           entitled to close the record over this. */
+        keepReturnPoint = true;
+        return;
+      }
       const arrival = await offers.arrive(request, outcome.resolution);
       /* The record says `following` only when the server said so. A move that
          happened on this screen but never reached the record is NOT a follow:
          nothing will offer a Return control for it, and treating it as one
          leaves the operator at the target with the way back already discarded. */
-      if (arrival.ok) keepReturnPoint = true;
-      else if (!decided(arrival) && outcome.resolution !== "lost") {
+      if (arrival.ok) {
+        /* The claim is deliberately KEPT on success: it is this tab's guard
+           against re-executing the same request from a stale poll view (a
+           duplicate mount whose fetch predates the arrival). It dies with the
+           tab, with the Return, or with the record moving on. */
+        keepReturnPoint = true;
+      } else if (!decided(arrival) && outcome.resolution !== "lost") {
         /* Nothing was decided, so this is still owed to the record. Keep the
            pre-move viewport and retry it below. */
         keepReturnPoint = true;
         unconfirmedArrivals.current.set(request.id, outcome.resolution);
+      } else {
+        /* Decided against this device, or nowhere to land: the record has
+           moved on and the claim would only replay a dead handoff. */
+        clearHandoffClaim(claimStore, request.id);
       }
     } finally {
+      if (runningHandoffs.get(request.id) === controller) runningHandoffs.delete(request.id);
+      ownTransactions.current.delete(controller);
       if (!unconfirmedArrivals.current.has(request.id)) leaving.current.delete(request.id);
       if (!keepReturnPoint) forgetReturnProject(browserStorage(), deviceId, request.id);
     }
-  }, [offers, bus, deviceId, timing]);
+  }, [offers, bus, deviceId, timing, claimStore, observeView]);
 
   const onAccept = useCallback(async (request: AttentionRequestV1) => {
     const before = currentViewport();
@@ -178,10 +276,12 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
       return;
     }
     /* Written after the server confirmed ownership, so a rejected device
-       never stores a return point it will never use. */
+       never stores a return point it will never use. The claim makes the same
+       viewport durable against a remount mid-move. */
     rememberReturnProject(browserStorage(), deviceId, request.id, before.project);
+    claimHandoff(claimStore, request.id, () => before);
     await completeHandoff(request);
-  }, [offers, deviceId, completeHandoff]);
+  }, [offers, deviceId, completeHandoff, claimStore]);
 
   /**
    * A DIRECTED request (#873): the server already resolved this device as the
@@ -196,14 +296,19 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
        chance to be heard. The request id keys the dedupe, so however many polls
        re-deliver it, it rings once. */
     playCue({ cue: "attention", eventId: `attention:${request.id}` });
-    const before = currentViewport();
-    leaving.current.set(request.id, before);
+    if (runningHandoffs.has(request.id)) return;
+    /* The pre-move viewport is captured EXACTLY ONCE per tab, durably: a
+       duplicate mount or a remount gets the original back from the claim, so
+       however the host churns, the Return point is the frame the operator
+       actually left. */
+    const claim = claimHandoff(claimStore, request.id, currentViewport);
+    leaving.current.set(request.id, claim.viewport);
     /* Ownership is already on the record — `acknowledgedBy` names this device —
        so the return project is remembered up front, exactly as the accept path
        does once the server confirms. */
-    rememberReturnProject(browserStorage(), deviceId, request.id, before.project);
-    await completeHandoff(request);
-  }, [deviceId, completeHandoff]);
+    rememberReturnProject(browserStorage(), deviceId, request.id, claim.viewport.project);
+    await completeHandoff(request, !claim.first);
+  }, [deviceId, completeHandoff, claimStore]);
 
   const onReturn = useCallback(async (request: AttentionRequestV1) => {
     const point = request.returnPoints.find((entry) => entry.deviceId === deviceId);
@@ -216,8 +321,11 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
        the server never received leaves the control on screen, and a second
        press with the memory already dropped restores the viewport into
        whichever project happens to be open instead of the one departed from. */
-    if (decided(outcome)) forgetReturnProject(browserStorage(), deviceId, request.id);
-  }, [offers, bus, deviceId, timing]);
+    if (decided(outcome)) {
+      forgetReturnProject(browserStorage(), deviceId, request.id);
+      clearHandoffClaim(claimStore, request.id);
+    }
+  }, [offers, bus, deviceId, timing, claimStore]);
 
   /**
    * Re-report an arrival the network swallowed, on the next poll that still
@@ -247,6 +355,7 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
            reconcile, and the captured viewport is only noise from here. */
         unconfirmedArrivals.current.delete(entry.request.id);
         leaving.current.delete(entry.request.id);
+        clearHandoffClaim(claimStore, entry.request.id);
         continue;
       }
       reconciling.current.add(entry.request.id);
@@ -256,13 +365,14 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
           if (!decided(retry)) return;
           unconfirmedArrivals.current.delete(entry.request.id);
           leaving.current.delete(entry.request.id);
+          clearHandoffClaim(claimStore, entry.request.id);
           if (!retry.ok) forgetReturnProject(browserStorage(), deviceId, entry.request.id);
         } finally {
           reconciling.current.delete(entry.request.id);
         }
       })();
     }
-  }, [pollGeneration, offers, deviceId]);
+  }, [pollGeneration, offers, deviceId, claimStore]);
 
   /**
    * Follow an explicit focus event, exactly once.
@@ -284,11 +394,17 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
   /* A directed request still owed its move: the server accepted it FOR this
      device and no arrival is on the record yet. The return-point check is what
      keeps a remount from re-treating a landed-but-unreported request as new —
-     that case belongs to the arrival reconciliation above. */
+     that case belongs to the arrival reconciliation above. The SESSION check
+     is what keeps two tabs on one device from both executing: the record
+     names its one executing browser session, and only that tab moves (a
+     legacy record without one keeps the device-scoped behavior). An unknown
+     own-session id waits — it resolves within a heartbeat, and guessing would
+     re-open the duplicate-executor hole this gate closes. */
   const directedRequest = offer
     && offer.status === "following"
     && offer.request.state === "accepted"
     && offer.request.acknowledgedBy === deviceId
+    && (offer.request.directedSessionId === undefined || offer.request.directedSessionId === viewSessionId)
     && !offer.request.returnPoints.some((point) => point.deviceId === deviceId)
     ? offer.request : null;
   const directedRequestId = directedRequest?.id ?? null;
@@ -311,8 +427,12 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
      the agent through the focus-follow outcome rather than as a banner over the
      operator's board. Gated on the record's OWN `following` — not merely on the
      device status — so a directed request still mid-flight (`accepted`, nothing
-     moved yet) never shows a Return before there is anywhere to return from. */
+     moved yet) never shows a Return before there is anywhere to return from.
+     And on the executing SESSION: two tabs share a device id, but the return
+     point was captured from ONE tab's viewport — a Return rendered on the
+     other would restore that framing into a board it never left. */
   if (!offer || offer.status !== "following" || offer.request.state !== "following") return null;
+  if (offer.request.directedSessionId !== undefined && offer.request.directedSessionId !== viewSessionId) return null;
 
   return <FocusReturnChip onReturn={onReturnClick} precise={offer.returnAvailable} t={t} />;
 }

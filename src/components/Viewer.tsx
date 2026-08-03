@@ -496,6 +496,18 @@ export function Viewer() {
     setPlaceRequest((prev) => ({ path, nonce: (prev?.nonce ?? 0) + 1 }));
   }, []);
 
+  /* The history-recording half of `requestFocus` without the glide half: an
+     `intent: "open"` handoff and a camera-exact Return both frame their own
+     destination through the board controller, so what they still owe is the
+     card in the layout and the typed history entry — never a second, competing
+     camera move (#873 review). */
+  const openPathQuiet = useCallback((path: string) => {
+    setPendingHash(null);
+    const file = filesRef.current.find((entry) => entry.path === path);
+    if (file) recordFocusNavigation(file, projectKey(file));
+    setPlaceRequest((prev) => ({ path, nonce: (prev?.nonce ?? 0) + 1 }));
+  }, []);
+
   /* #688: the shell half of a focus handoff. An accepted request opens the
      project it lives in and, when its intent is `open`, the conversation
      itself — the same hand-off an attention jump already uses, so a handoff and
@@ -505,6 +517,7 @@ export function Viewer() {
     openProject: selectProject,
     openPath: requestFocus,
     placePath: placeOnBoard,
+    openPathQuiet,
     /* The overview is a project selection like any other here — it just is not
        a project. `selectProject` already speaks the sentinel; the bus should
        not have to. */
@@ -515,7 +528,7 @@ export function Viewer() {
       if (targetProject && targetProject !== project) applyProject(targetProject);
       if (path) requestFocus(path);
     },
-  }), [project, selectProject, requestFocus, placeOnBoard, applyProject]);
+  }), [project, selectProject, requestFocus, placeOnBoard, openPathQuiet, applyProject]);
 
   /* The N-cycle position anchors to an id: an item answered elsewhere drops
      out without moving the pointer's neighbors (D12). */

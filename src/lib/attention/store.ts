@@ -185,6 +185,13 @@ export interface AttentionCreateInput {
    * device of its choosing.
    */
   directedAt?: string;
+  /** The one browser session the directed handoff executes on — see
+      `AttentionRequestV1.directedSessionId`. Only meaningful with `directedAt`. */
+  directedAtSession?: string;
+  /** Durable MCP operation identity — see `AttentionRequestV1.operationKey`.
+      Creation is idempotent over it: a second create with the same key returns
+      the existing record instead of raising a twin. */
+  operationKey?: string;
   desktopTarget?: DesktopWindowRef;
 }
 
@@ -213,6 +220,12 @@ function validate(input: AttentionCreateInput): void {
   }
   if (input.directedAt !== undefined && (typeof input.directedAt !== "string" || input.directedAt.length === 0)) {
     throw new AttentionValidationError("INVALID_DIRECTED_AT", "a directed handoff must name the device it moves");
+  }
+  if (input.directedAtSession !== undefined && (typeof input.directedAtSession !== "string" || input.directedAtSession.length === 0 || input.directedAt === undefined)) {
+    throw new AttentionValidationError("INVALID_DIRECTED_SESSION", "a directed session must be a browser session id on a directed handoff");
+  }
+  if (input.operationKey !== undefined && (typeof input.operationKey !== "string" || input.operationKey.length === 0)) {
+    throw new AttentionValidationError("INVALID_OPERATION_KEY", "an operation key must be a non-empty identity");
   }
 }
 
@@ -244,10 +257,18 @@ export function liveAttentionRequests(file: AttentionFileV1): AttentionRequestV1
 export function createAttentionRequest(
   input: AttentionCreateInput,
   options: { filePath?: string; now?: Date; id?: string } = {},
-): { request: AttentionRequestV1; superseded: string[]; dropped: string[] } {
+): { request: AttentionRequestV1; superseded: string[]; dropped: string[]; adopted: boolean } {
   validate(input);
   const now = options.now ?? new Date();
-  return mutateAttention((file) => {
+  return mutateAttention<{ request: AttentionRequestV1; superseded: string[]; dropped: string[]; adopted: boolean }>((file) => {
+    /* Idempotence over the durable operation identity, decided INSIDE the
+       serialized transaction so two processes replaying one interrupted MCP
+       call can never mint twins: the second reader finds the first one's
+       record and adopts it — one record, one navigation, one receipt. */
+    if (input.operationKey !== undefined) {
+      const existing = file.requests.find((request) => request.operationKey === input.operationKey);
+      if (existing) return { requests: undefined, result: { request: existing, superseded: [], dropped: [], adopted: true } };
+    }
     const id = options.id ?? `attention_${crypto.randomUUID()}`;
     const request: AttentionRequestV1 = {
       id,
@@ -271,6 +292,8 @@ export function createAttentionRequest(
         : input.origin === "operator" && input.offeredTo?.length
           ? { acknowledgedBy: input.offeredTo[0], acceptedVia: "operator" as const }
           : {}),
+      ...(input.directedAtSession !== undefined ? { directedSessionId: input.directedAtSession } : {}),
+      ...(input.operationKey !== undefined ? { operationKey: input.operationKey } : {}),
       returnPoints: [],
       ...(input.desktopTarget !== undefined ? { desktopTarget: input.desktopTarget } : {}),
       revision: 0,
@@ -302,7 +325,7 @@ export function createAttentionRequest(
       requests = requests.map((entry) => (entry.id === victim.id ? transition.request : entry));
     }
 
-    return { requests: [...requests, request], result: { request, superseded, dropped } };
+    return { requests: [...requests, request], result: { request, superseded, dropped, adopted: false } };
   }, { filePath: options.filePath, now });
 }
 

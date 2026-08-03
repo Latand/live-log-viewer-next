@@ -242,6 +242,23 @@ export interface AttentionRequestV1 {
   offeredTo: string[];
   /** Which device said yes. Accepting on one withdraws the offer on the others. */
   acknowledgedBy?: string;
+  /**
+   * The ONE browser session (tab) a directed handoff executes on (#873). Two
+   * tabs share a device id, so a record that named only the device made every
+   * tab on the machine an executor — duplicate navigations racing each other
+   * for one camera. Server-resolved from presence at creation; absent on
+   * offered (non-directed) requests and on records written before it existed.
+   */
+  directedSessionId?: string;
+  /**
+   * Durable identity of the MCP operation that raised this request (#873).
+   * Written BEFORE any navigation can happen, so a process that dies mid-call
+   * leaves a record a restarted server can find again: the retried operation
+   * adopts this record instead of raising a second one — one record, one
+   * navigation, whatever happens to the process. Server-internal; the HTTP
+   * validator never accepts it from a client.
+   */
+  operationKey?: string;
   acceptedVia?: "operator" | "auto-follow";
   /** One entry per device that has been moved. Viewports are never mirrored;
       what is shared is the target and the acknowledgement. */

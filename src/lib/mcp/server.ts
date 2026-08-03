@@ -96,6 +96,23 @@ const MUTATING_MCP_TOOL_NAMES = new Set<McpToolName>([
   "rotate_orchestrator",
 ]);
 
+/**
+ * Tools whose binding is idempotent over its own durable state, so a claim the
+ * previous process never settled is RECONCILED by re-running the binding
+ * rather than answered `call_interrupted` forever (#873 review, finding 3).
+ *
+ * `request_attention` qualifies because the operation's identity is written on
+ * the attention record itself before anything can navigate: the re-run adopts
+ * that record — one record, one navigation — waits out the same handoff, and
+ * finally settles the durable receipt, so the retry that used to be a
+ * permanent dead end becomes the deterministic answer to what actually
+ * happened. The digest check above still refuses a same-id call with
+ * different arguments.
+ */
+const INTERRUPTED_RECOVERABLE_TOOLS: ReadonlySet<McpToolName> = new Set<McpToolName>([
+  "request_attention",
+]);
+
 export type McpToolArgs = Record<string, unknown> & { clientRequestId?: unknown };
 export type McpToolPayload = Record<string, unknown>;
 export interface McpToolCallContext {
@@ -1366,7 +1383,7 @@ export function createMcpToolService(
           outcome = "conflict";
           return failure(toolName, requestId, "idempotency_conflict", "clientRequestId was already used with different arguments", false, true);
         }
-        if (claim.kind === "pending") {
+        if (claim.kind === "pending" && !INTERRUPTED_RECOVERABLE_TOOLS.has(typedTool)) {
           outcome = "pending";
           unfinishedAgeMs = claim.unfinishedAgeMs;
           return failure(toolName, requestId, "call_interrupted", "The previous MCP process ended before this call completed", true, true);
@@ -1463,7 +1480,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   conversation_migration: "Reseat, retry, or roll back a conversation account migration.",
   agent_activity: "Read agent liveness: last transcript record, turn state, whether the host is alive or gone, and how long a stalled conversation has been silent.",
   lifecycle_events: "Query the durable lifecycle event journal by lineage and cursor, or poll a bounded relay digest of what changed since the last one.",
-  request_attention: "Move the operator's one active Viewer to a typed target immediately and verify the arrival — no confirmation prompt, no pending offer. The latest-interaction active view is chosen deterministically; success is returned only after that view's camera/focus actually landed, and a missing view, lost target, or timeout is an explicit bounded failure. Durably attributed to the calling session, idempotent by clientRequestId, and the operator keeps a one-action Return control that restores exactly where they were.",
+  request_attention: "Move the operator's one active Viewer to a typed target immediately and verify the arrival — no confirmation prompt, no pending offer. Execution is gated on server-derived authority: only the operator's root/gateway session or the target project's designated orchestrator seat may direct it; workers and unidentified callers are refused (ATTENTION_NOT_PERMITTED) with nothing recorded. The latest-interaction active view is chosen deterministically (down to the one executing browser tab); success is returned only after that view's camera/focus actually landed, and a missing view, lost target, or timeout is an explicit bounded failure. Durably attributed to the calling session, idempotent by clientRequestId across restarts, and the operator keeps a one-action Return control that restores exactly where they were.",
   bridge_report: "Append one bounded report to the durable bridge log for the voice gateway to relay. Callable from any session; the origin is labeled server-side and a non-orchestrator report is visibly attributed to its own session.",
   bridge_directive: "Relay the user's intent to the designated manager. The recipient and the delivery id are derived server-side, so a retry of the same root turn is one instruction, never two.",
   get_orchestrator: "Read a project's designated orchestrator: designation, health and activity, model and prompt version, transcript size, message/tool/compaction counts, context usage against its model's configured window (clearly labelled when estimated), predecessor lineage, and a bounded rotation recommendation — STRONGLY_RECOMMEND_ROTATION once usage reaches the configured threshold. Words only: it never rotates, creates, or interrupts anything itself.",

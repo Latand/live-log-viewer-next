@@ -1,7 +1,9 @@
 import { agentRegistry, type ConversationLookup } from "@/lib/agent/registry";
 import { rootIdentity } from "@/lib/root/store";
 import { freshness, listPresence } from "@/lib/view/presenceStore";
-import type { ViewMode } from "@/lib/view/types";
+import type { StoredViewSession } from "@/lib/view/types";
+
+import { attentionCapablePresence } from "./eligibility";
 
 import {
   applyAttentionEvent,
@@ -142,38 +144,32 @@ export function raiseAttentionRequest(
  * one place to be taken.
  */
 /**
- * Modes a desktop can actually BE moved in.
+ * The presence sessions an attention handoff may move, in presence's
+ * deterministic order (latest interaction first), one per device.
  *
- * A focus handoff needs a board controller, and only the scheme board and the
- * phone's focus view ever register one. A desktop sitting in the history list
- * has no camera and no anchors to select: the handoff finds no controller,
- * reports `lost`, and nothing on screen moves. Offering to it is therefore the
- * silent failure this whole surface exists to remove — the request is accepted,
- * the agent is told which desktop is watching, and the operator sees nothing.
- *
- * `overview` stays offerable, and the distinction is not arbitrary: a handoff
- * from the overview OPENS the target's project, which mounts the board, and
- * `runFocusHandoff` already waits for that board to publish. The list is the
- * mode the operator has chosen INSTEAD of a board, so no wait can produce one.
- *
- * The mode reported by presence is the only signal that crosses the process
- * boundary here — the bus lives in the browser and this runs wherever the tool
- * was called — so it is what the offer has to answer from.
+ * Eligibility is the SHARED predicate (`@/lib/attention/eligibility`): the
+ * same rules the surfaces enforce — visible and active, not a phone, wide
+ * enough to actually mount the attention host, in a mode a board can be
+ * mounted in — so the list never promises the agent a view that will not
+ * move. The mode and viewport reported by presence are the only signals that
+ * cross the process boundary here — the bus lives in the browser and this
+ * runs wherever the tool was called — so they are what the answer stands on.
  */
-const FOLLOWABLE_MODES = new Set<ViewMode>(["overview", "scheme", "mobile-focus", "mobile-map"]);
+function followCapableSessions(now = new Date()): StoredViewSession[] {
+  const at = now.getTime();
+  const sessions: StoredViewSession[] = [];
+  for (const session of listPresence(at)) {
+    if (!attentionCapablePresence({ ...session, freshness: freshness(session, at) })) continue;
+    /* Two tabs on one machine are one place to be taken; the latest-interaction
+       one is the tab the operator counts as being at. */
+    if (sessions.some((held) => held.deviceId === session.deviceId)) continue;
+    sessions.push(session);
+  }
+  return sessions;
+}
 
 function followCapableDevices(now = new Date()): string[] {
-  const at = now.getTime();
-  const devices: string[] = [];
-  for (const session of listPresence(at)) {
-    if (session.device.kind === "mobile") continue;
-    if (!FOLLOWABLE_MODES.has(session.mode)) continue;
-    /* The same guard a standing auto-follow passes, so "who was this offered
-       to" and "who may be moved" can never drift apart. */
-    if (!autoFollowEligible({ visibility: session.visibility, freshness: freshness(session, at) })) continue;
-    if (!devices.includes(session.deviceId)) devices.push(session.deviceId);
-  }
-  return devices;
+  return followCapableSessions(now).map((session) => session.deviceId);
 }
 
 /**
@@ -193,22 +189,42 @@ function canonicalConversationTarget(target: FocusTarget, lookup?: ConversationL
   return current && current.path !== target.path ? { kind: "conversation", path: current.path } : target;
 }
 
+/** The exact view a directed handoff executes on: the device the Return
+    control belongs to, and the ONE browser session (tab) that owns the move. */
+export interface DirectedAttentionView {
+  deviceId: string;
+  viewSessionId: string;
+}
+
 /**
  * The one view an immediate directed handoff moves (#873).
  *
- * `followCapableDevices` already applies every eligibility rule the surfaces
- * enforce — visible, active, non-mobile, in a mode a board can be mounted in —
- * and preserves presence's deterministic order: latest interaction first, then
- * latest heartbeat, then session id. So "which device does the operator count
- * as being at" has exactly one answer, and two active devices are never a
- * coin toss: the one they touched last wins, every time, and the other is
- * named nowhere on the record — no competing offer can ever reach it.
+ * `followCapableSessions` already applies every eligibility rule the surfaces
+ * enforce — the shared `attentionCapablePresence` predicate — and preserves
+ * presence's deterministic order: latest interaction first, then latest
+ * heartbeat, then session id. So "which view does the operator count as being
+ * at" has exactly one answer, and two active devices are never a coin toss:
+ * the one they touched last wins, every time, and the other is named nowhere
+ * on the record — no competing offer can ever reach it.
+ *
+ * The SESSION is part of the answer, not a detail collapsed into the device:
+ * two tabs share one device id, and a record that named only the device made
+ * every tab on that machine an executor — duplicate navigations racing each
+ * other for one camera. The record names the winning tab, and only that tab
+ * runs the move.
  *
  * Null is the explicit no-view answer. The caller reports it as a bounded
  * failure rather than filing a pending ask nobody could ever act on.
  */
+export function resolveDirectedAttentionView(now = new Date()): DirectedAttentionView | null {
+  const session = followCapableSessions(now)[0];
+  return session ? { deviceId: session.deviceId, viewSessionId: session.viewSessionId } : null;
+}
+
+/** Device-only projection of {@link resolveDirectedAttentionView}, kept for
+    callers that need nothing session-scoped. */
 export function resolveDirectedAttentionDevice(now = new Date()): string | null {
-  return followCapableDevices(now)[0] ?? null;
+  return resolveDirectedAttentionView(now)?.deviceId ?? null;
 }
 
 /** How long the raise waits for the directed view to land before closing the

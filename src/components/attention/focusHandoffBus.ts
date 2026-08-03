@@ -71,6 +71,20 @@ export interface ShellNavigator {
    */
   placePath(path: string): void;
   /**
+   * The history-recording half of `openPath`, WITHOUT the camera glide.
+   *
+   * An `intent: "open"` handoff frames its own destination through `moveTo`,
+   * at the request's own zoom. `openPath` after that armed the board's
+   * pending-focus channel — a SECOND glide racing the one that just landed,
+   * so the operator watched the view arrive and then slide off it. What the
+   * open still owes beyond the frame is the record of the gesture: the card
+   * materialized in the layout and one typed focus entry in history. This is
+   * that half. Optional so a partial test navigator keeps working; the
+   * handoff falls back to `placePath` (materialize, no history) rather than
+   * to the gliding `openPath`.
+   */
+  openPathQuiet?(path: string): void;
+  /**
    * Leave every project and show the overview.
    *
    * `openProject` cannot express this: the overview is the ABSENCE of an open
