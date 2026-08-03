@@ -10,7 +10,12 @@ import { VIEWER_SPAWN_CAPABILITY_ENV, VIEWER_SPAWN_CAPABILITY_HEADER } from "@/l
 import { applyConversationMigration } from "@/lib/accounts/migration/conversationCommand";
 import { attentionCallerAuthority, processAncestry, type AttentionCallerAuthority, type AttentionCallerSources } from "@/lib/attention/callerAuthority";
 import { UNREAD_FRAME_RECT } from "@/lib/attention/frames";
-import { raiseAttentionRequest } from "@/lib/attention/service";
+import {
+  ATTENTION_ARRIVAL_TIMEOUT_MS,
+  awaitAttentionArrival,
+  raiseAttentionRequest,
+  resolveDirectedAttentionDevice,
+} from "@/lib/attention/service";
 import { geometricFrameRect, isFocusTarget, isGeometricTarget } from "@/lib/attention/targets";
 import type { FocusIntent, FocusTarget, ZoomIntent } from "@/lib/attention/types";
 import { boardFor } from "@/lib/board/store";
@@ -233,6 +238,10 @@ export interface ViewerMcpDomainDependencies {
       from. Called on the raise path, which is the moment that identity matters. */
   adoptRootSession(): void;
   raiseAttentionRequest: typeof raiseAttentionRequest;
+  /** #873: block until the directed view lands or the handoff closes as a
+      bounded failure. Optional so partial harnesses fall back to the real
+      awaiter; tests override it only to shorten its clocks. */
+  awaitAttentionArrival?: typeof awaitAttentionArrival;
   /** Who is running this MCP server. Resolved from process ancestry and the
       registry's recorded hosts merged with the admission-injected spawn
       capability, never from anything the caller says. Under B+ it ATTRIBUTES —
@@ -1797,19 +1806,31 @@ async function focusTargetProject(
 }
 
 /**
- * Typed focus for every agent session (B+ item 2): move the operator's active
- * Viewer to a typed target, immediately.
+ * Typed focus for every agent session (B+ item 2), as an immediate VERIFIED
+ * handoff (#873): move the operator's one active Viewer to a typed target, and
+ * answer only once it is there.
  *
- * The desktop follows an explicit focus event with no consent step — see
- * `AttentionHost` — and the record keeps a one-action way back: the return
- * point is captured before the move and a single Return control restores it.
- * What replaced the old worker refusal is ATTRIBUTION: `raisedBy` is derived
+ * The production incident this shape closes: the call used to commit a
+ * `pending` record, offer it to every follow-capable device, and return success
+ * while the camera sat still until some browser's next poll auto-followed. Now
+ * the server resolves exactly one latest-interaction active view UP FRONT, the
+ * record is born `accepted` for that device — no confirmation surface, no
+ * actionable pending/offered state — and the response is written only after the
+ * arrival landed on the record, or after a bounded explicit failure closed it.
+ *
+ * The record keeps a one-action way back: the return point is captured on the
+ * device before the move and a single Return control restores it exactly. What
+ * replaced the old worker refusal is ATTRIBUTION: `raisedBy` is derived
  * server-side from the durable caller identity and stored on the record, so a
  * worker's ask is visibly a worker's ask and can never masquerade as the
  * operator's own root agent. The root identity is still resolved server-side,
  * which is why no rootId appears in this schema.
  */
-async function requestAttention(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): Promise<McpToolPayload> {
+async function requestAttention(
+  args: McpToolArgs,
+  dependencies: ViewerMcpDomainDependencies,
+  context: McpToolCallContext = {},
+): Promise<McpToolPayload> {
   const raisedBy = attributionOf(dependencies);
 
   const target = args.target;
@@ -1821,6 +1842,19 @@ async function requestAttention(args: McpToolArgs, dependencies: ViewerMcpDomain
   const reason = required(args, "reason");
   const contextLabel = text(args.contextLabel);
   const project = await focusTargetProject(target, text(args.project), dependencies);
+
+  /* Resolved BEFORE anything durable is written: with no view that can move,
+     the honest answer is a refusal, not a pending ask nobody could ever act
+     on. Ambiguity is already settled deterministically inside the resolver —
+     latest interaction wins — and background/inactive devices are named
+     nowhere, so no competing offer can reach them. */
+  const deviceId = resolveDirectedAttentionDevice();
+  if (!deviceId) {
+    throw new McpToolRefusal(
+      "no active Viewer can be moved right now: no visible, active desktop board is open",
+      { code: "NO_ACTIVE_VIEW" },
+    );
+  }
 
   /* Before the request is written, not after: the request names the root by the
      identity this call may have just extended with a fresh session. */
@@ -1839,13 +1873,48 @@ async function requestAttention(args: McpToolArgs, dependencies: ViewerMcpDomain
     },
     intent,
     reason,
+    directedAt: deviceId,
     ...(zoom ? { zoom } : {}),
     ...(contextLabel ? { contextLabel } : {}),
   });
+
+  /* Inside the caller's own transport deadline, so the bounded failure is OURS
+     to report rather than a timeout the caller reads as silence. */
+  const budget = context.deadlineAt === undefined
+    ? ATTENTION_ARRIVAL_TIMEOUT_MS
+    : Math.max(1_000, Math.min(ATTENTION_ARRIVAL_TIMEOUT_MS, context.deadlineAt - Date.now() - 2_000));
+  const waitForArrival = dependencies.awaitAttentionArrival ?? awaitAttentionArrival;
+  const outcome = await waitForArrival(created.request.id, {
+    timeoutMs: budget,
+    ...(context.signal ? { signal: context.signal } : {}),
+  });
+  if (outcome.kind === "failed") {
+    const messages: Record<typeof outcome.code, string> = {
+      TARGET_LOST: "the view arrived nowhere: the target no longer resolves to anything on the board",
+      HANDOFF_TIMEOUT: "the chosen view did not complete the handoff in time; the request was closed, nothing is left pending",
+      HANDOFF_ABORTED: "the call was cancelled before the view arrived; the request was closed, nothing is left pending",
+      REQUEST_LOST: "the attention record disappeared before the view arrived",
+    };
+    throw new McpToolRefusal(messages[outcome.code], {
+      code: outcome.code,
+      attentionId: created.request.id,
+      deviceId,
+      ...(outcome.request ? { state: outcome.request.state, ...(outcome.request.expiredCause ? { expiredCause: outcome.request.expiredCause } : {}) } : {}),
+    });
+  }
+
   const operationId = mcpOperationId("request_attention", requestId(args));
   return redactPayload({
-    attentionId: created.request.id,
-    request: created.request,
+    attentionId: outcome.request.id,
+    request: outcome.request,
+    /* The durable postcondition the success stands on: the record has already
+       landed, the device is named, and the pre-move return point is captured. */
+    handoff: {
+      deviceId,
+      state: outcome.request.state,
+      resolution: outcome.request.resolution ?? null,
+      arrivedAt: outcome.request.stateChangedAt,
+    },
     /* A newer request from the same root replaces its own unanswered ones, and
        an overfull queue drops the oldest routine entry. Both are named so the
        agent can say so out loud instead of leaving a dropped ask silent. */
@@ -1941,7 +2010,7 @@ export function viewerMcpBindings(
     conversation_migration: (args) => conversationMigration(args, domainDependencies),
     agent_activity: (args) => agentActivity(args, domainDependencies),
     lifecycle_events: (args) => lifecycleEvents(args, controlDependencies, domainDependencies),
-    request_attention: (args) => requestAttention(args, domainDependencies),
+    request_attention: (args, context) => requestAttention(args, domainDependencies, context),
     bridge_report: (args) => Promise.resolve(bridgeReport(args, domainDependencies)),
     bridge_directive: (args) => bridgeDirective(args, controlDependencies, domainDependencies),
     get_orchestrator: (args) => getOrchestrator(args, domainDependencies),

@@ -138,20 +138,13 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
     ...(pollMs ? { pollMs } : {}),
   });
 
-  const onAccept = useCallback(async (request: AttentionRequestV1) => {
-    const before = currentViewport();
-    leaving.current.set(request.id, before);
+  /** Move this device to a request the record already names as ours, and
+      report the arrival. The pre-move viewport must already be in `leaving`
+      and the return project already remembered — the two things that have to
+      be taken before anything moves. */
+  const completeHandoff = useCallback(async (request: AttentionRequestV1) => {
     let keepReturnPoint = false;
     try {
-      /* `auto-follow`, because that is what this is: nothing was put in front of
-         the operator and nothing was pressed. Recording it as the operator's own
-         act would tell the agent they chose to come — the one thing the record
-         is there to keep honest. */
-      const accepted = await offers.accept(request, "auto-follow");
-      if (!accepted.ok) return;
-      /* Written after the server confirmed ownership, so a rejected device
-         never stores a return point it will never use. */
-      rememberReturnProject(browserStorage(), deviceId, request.id, before.project);
       const outcome = await runFocusHandoff(request, bus, timing ?? {});
       const arrival = await offers.arrive(request, outcome.resolution);
       /* The record says `following` only when the server said so. A move that
@@ -170,6 +163,41 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
       if (!keepReturnPoint) forgetReturnProject(browserStorage(), deviceId, request.id);
     }
   }, [offers, bus, deviceId, timing]);
+
+  const onAccept = useCallback(async (request: AttentionRequestV1) => {
+    const before = currentViewport();
+    leaving.current.set(request.id, before);
+    /* `auto-follow`, because that is what this is: nothing was put in front of
+       the operator and nothing was pressed. Recording it as the operator's own
+       act would tell the agent they chose to come — the one thing the record
+       is there to keep honest. */
+    const accepted = await offers.accept(request, "auto-follow");
+    if (!accepted.ok) {
+      leaving.current.delete(request.id);
+      return;
+    }
+    /* Written after the server confirmed ownership, so a rejected device
+       never stores a return point it will never use. */
+    rememberReturnProject(browserStorage(), deviceId, request.id, before.project);
+    await completeHandoff(request);
+  }, [offers, deviceId, completeHandoff]);
+
+  /**
+   * A DIRECTED request (#873): the server already resolved this device as the
+   * one active view and wrote the record `accepted` for it — the tool call is
+   * blocked on the arrival right now. There is nothing to accept and nothing
+   * to confirm; what is owed is the move itself and the arrival report, with
+   * the pre-move viewport captured before anything happens.
+   */
+  const onDirected = useCallback(async (request: AttentionRequestV1) => {
+    const before = currentViewport();
+    leaving.current.set(request.id, before);
+    /* Ownership is already on the record — `acknowledgedBy` names this device —
+       so the return project is remembered up front, exactly as the accept path
+       does once the server confirms. */
+    rememberReturnProject(browserStorage(), deviceId, request.id, before.project);
+    await completeHandoff(request);
+  }, [deviceId, completeHandoff]);
 
   const onReturn = useCallback(async (request: AttentionRequestV1) => {
     const point = request.returnPoints.find((entry) => entry.deviceId === deviceId);
@@ -247,12 +275,24 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
   const offer = offers.offer;
   const actionableRequestId = offer && offer.status === "actionable" ? offer.request.id : null;
   const actionableRequest = offer && offer.status === "actionable" ? offer.request : null;
+  /* A directed request still owed its move: the server accepted it FOR this
+     device and no arrival is on the record yet. The return-point check is what
+     keeps a remount from re-treating a landed-but-unreported request as new —
+     that case belongs to the arrival reconciliation above. */
+  const directedRequest = offer
+    && offer.status === "following"
+    && offer.request.state === "accepted"
+    && offer.request.acknowledgedBy === deviceId
+    && !offer.request.returnPoints.some((point) => point.deviceId === deviceId)
+    ? offer.request : null;
+  const directedRequestId = directedRequest?.id ?? null;
   useEffect(() => {
-    if (!deviceId || !actionableRequestId || !actionableRequest) return;
-    if (followed.current.has(actionableRequestId)) return;
-    followed.current.add(actionableRequestId);
-    void onAccept(actionableRequest);
-  }, [deviceId, actionableRequestId, actionableRequest, onAccept]);
+    if (!deviceId) return;
+    const request = actionableRequest ?? directedRequest;
+    if (!request || followed.current.has(request.id)) return;
+    followed.current.add(request.id);
+    void (actionableRequest ? onAccept(request) : onDirected(request));
+  }, [deviceId, actionableRequestId, actionableRequest, directedRequestId, directedRequest, onAccept, onDirected]);
 
   const onReturnClick = useCallback(() => {
     if (offer) void onReturn(offer.request);
@@ -263,8 +303,10 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
      the accept/preview/decline row, the refusal band — is gone. A move that has
      already happened does not need announcing, and a failed one is reported to
      the agent through the focus-follow outcome rather than as a banner over the
-     operator's board. */
-  if (!offer || offer.status !== "following") return null;
+     operator's board. Gated on the record's OWN `following` — not merely on the
+     device status — so a directed request still mid-flight (`accepted`, nothing
+     moved yet) never shows a Return before there is anywhere to return from. */
+  if (!offer || offer.status !== "following" || offer.request.state !== "following") return null;
 
   return <FocusReturnChip onReturn={onReturnClick} precise={offer.returnAvailable} t={t} />;
 }

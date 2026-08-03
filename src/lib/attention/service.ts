@@ -19,7 +19,7 @@ import {
   transitionAttentionRequest,
   type AttentionCreateInput,
 } from "./store";
-import type { AttentionRequestV1, FocusTarget } from "./types";
+import { isTerminalAttentionState, type AttentionRequestV1, type FocusTarget } from "./types";
 
 /**
  * What the surfaces call (#688 slice 3): raise a request, read what this device
@@ -118,7 +118,8 @@ export function raiseAttentionRequest(
        the agent was told nobody was there while the operator watched the board.
        An explicit list still wins: the operator's own commands name their own
        device, and nothing here may overrule that. */
-    offeredTo: input.offeredTo ?? (input.origin === "root-agent" ? followCapableDevices(options.now) : undefined),
+    offeredTo: input.offeredTo
+      ?? (input.origin === "root-agent" && input.directedAt === undefined ? followCapableDevices(options.now) : undefined),
     target: canonicalConversationTarget(input.target, options.conversations),
     rootId: rootIdentity(),
   }, options);
@@ -190,6 +191,110 @@ function canonicalConversationTarget(target: FocusTarget, lookup?: ConversationL
   const conversations = lookup ?? agentRegistry();
   const current = conversations.conversationForPath(target.path)?.generations.at(-1);
   return current && current.path !== target.path ? { kind: "conversation", path: current.path } : target;
+}
+
+/**
+ * The one view an immediate directed handoff moves (#873).
+ *
+ * `followCapableDevices` already applies every eligibility rule the surfaces
+ * enforce — visible, active, non-mobile, in a mode a board can be mounted in —
+ * and preserves presence's deterministic order: latest interaction first, then
+ * latest heartbeat, then session id. So "which device does the operator count
+ * as being at" has exactly one answer, and two active devices are never a
+ * coin toss: the one they touched last wins, every time, and the other is
+ * named nowhere on the record — no competing offer can ever reach it.
+ *
+ * Null is the explicit no-view answer. The caller reports it as a bounded
+ * failure rather than filing a pending ask nobody could ever act on.
+ */
+export function resolveDirectedAttentionDevice(now = new Date()): string | null {
+  return followCapableDevices(now)[0] ?? null;
+}
+
+/** How long the raise waits for the directed view to land before closing the
+    request as lost. Generous against the browser's own clocks — a 4s offer
+    poll plus a 4s board wait — while staying far inside the MCP transport's
+    30s call deadline. */
+export const ATTENTION_ARRIVAL_TIMEOUT_MS = 15_000;
+const ATTENTION_ARRIVAL_POLL_MS = 250;
+
+export type AttentionArrivalOutcome =
+  /** The chosen view landed: the record is `following` (or already `returned`,
+      when the operator arrived and went straight back), with the pre-move
+      return point captured on it. */
+  | { kind: "arrived"; request: AttentionRequestV1 }
+  /** The handoff finished as an explicit bounded failure; the record is
+      terminal and nothing is left for a later poll to navigate. */
+  | { kind: "failed"; code: "TARGET_LOST" | "HANDOFF_TIMEOUT" | "HANDOFF_ABORTED" | "REQUEST_LOST"; request: AttentionRequestV1 | null };
+
+export interface AttentionArrivalWait {
+  filePath?: string;
+  timeoutMs?: number;
+  pollMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+  signal?: AbortSignal;
+}
+
+const wait = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
+
+function arrivalOf(request: AttentionRequestV1): AttentionArrivalOutcome | null {
+  /* `returned` counts as an arrival: the view landed and the operator pressed
+     Return before this reader caught up. Reporting that as a failure would
+     deny a move that visibly happened. */
+  if (request.state === "following" || (request.state === "returned" && request.returnPoints.length > 0)) {
+    return { kind: "arrived", request };
+  }
+  if (isTerminalAttentionState(request.state)) {
+    return { kind: "failed", code: request.expiredCause === "lost" ? "TARGET_LOST" : "HANDOFF_TIMEOUT", request };
+  }
+  return null;
+}
+
+/**
+ * Block until a directed request lands or fails, bounded (#873).
+ *
+ * Polled off the shared file rather than any in-process signal because the
+ * arrival is written by ANOTHER process: the browser posts it to the Next
+ * server, and this wait usually runs inside the stdio MCP server. The file is
+ * the one place both of them already agree on.
+ *
+ * The deadline closes the record rather than merely giving up on it: an
+ * `accepted` request left behind would be navigated by whichever poll comes
+ * next — success the caller was already told did not happen. The close races
+ * the arrival through the store's serialized transition, so whichever lands
+ * first wins and the loser reads the truth: an expiry refused because the
+ * record just reached `following` is reported as the arrival it is.
+ */
+export async function awaitAttentionArrival(id: string, options: AttentionArrivalWait = {}): Promise<AttentionArrivalOutcome> {
+  const timeoutMs = options.timeoutMs ?? ATTENTION_ARRIVAL_TIMEOUT_MS;
+  const pollMs = options.pollMs ?? ATTENTION_ARRIVAL_POLL_MS;
+  const sleep = options.sleep ?? wait;
+  const now = options.now ?? (() => Date.now());
+  const deadline = now() + timeoutMs;
+
+  const read = (): AttentionRequestV1 | null =>
+    readAttentionFile(options.filePath).requests.find((request) => request.id === id) ?? null;
+
+  for (;;) {
+    const request = read();
+    if (!request) return { kind: "failed", code: "REQUEST_LOST", request: null };
+    const settled = arrivalOf(request);
+    if (settled) return settled;
+
+    const aborted = options.signal?.aborted === true;
+    if (aborted || now() >= deadline) {
+      /* Close it, race-safely: `expire` is refused from `following`, so an
+         arrival that beat this write turns the close into the success it
+         really was. */
+      const closed = transitionAttentionRequest(id, { kind: "expire", cause: "lost" }, { filePath: options.filePath });
+      if (closed.ok) return { kind: "failed", code: aborted ? "HANDOFF_ABORTED" : "HANDOFF_TIMEOUT", request: closed.request };
+      const current = read();
+      const late = current ? arrivalOf(current) : null;
+      return late ?? { kind: "failed", code: aborted ? "HANDOFF_ABORTED" : "HANDOFF_TIMEOUT", request: current };
+    }
+    await sleep(Math.min(pollMs, Math.max(1, deadline - now())));
+  }
 }
 
 export function answerAttentionRequest(

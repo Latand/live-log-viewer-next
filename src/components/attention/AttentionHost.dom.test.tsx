@@ -562,3 +562,150 @@ test("a conversation the board is not showing is asked for, followed once, and r
   expect(log.restored).toEqual([{ x: 120, y: 340, zoom: 0.55 }]);
   expect(record().state).toBe("returned");
 });
+
+/* ── #873: the directed handoff — the server already chose this device ───── */
+
+/** What the MCP tool now records: born `accepted` for this one device, with
+    the unread frame every tool-raised request carries. */
+function raiseDirected(rect: FocusRect = RAISED_RECT, id = "attention_1") {
+  return raiseAttentionRequest({
+    origin: "root-agent",
+    target: { kind: "conversation", path: ANCHOR },
+    frameAtCreation: { project: "demo", rect, boardRevision: 4 },
+    intent: "show",
+    reason: "The reviewer finished with request-changes.",
+    directedAt: DEVICE,
+  }, { now, id }).request;
+}
+
+/** The transport, with every POSTed event kind on the record. */
+function recordedTransport() {
+  const posted: string[] = [];
+  const inner = transport();
+  const fetchFn = (async (url: string, init?: { body?: string }) => {
+    if (init?.body) posted.push((JSON.parse(init.body) as { kind: string }).kind);
+    return inner(url as never, init as never);
+  }) as unknown as typeof fetch;
+  return { posted, fetchFn };
+}
+
+function mountWith(bus: ReturnType<typeof board>["bus"], fetchFn: typeof fetch) {
+  const host = dom.document.createElement("div");
+  dom.document.body.appendChild(host);
+  const root = createRoot(host as unknown as Element);
+  flushSync(() => root.render(
+    <AttentionHost mobile={false} bus={bus} deviceId={DEVICE} fetchFn={fetchFn} pollMs={100_000} timing={{ timeoutMs: 0, pollMs: 0 }} />,
+  ));
+  roots.push(root);
+}
+
+test("a directed request moves the real board without one offer or accept POST", async () => {
+  raiseDirected();
+  expect(record().state).toBe("accepted");
+  const { bus, log } = board({ [ANCHOR]: LIVE_RECT });
+  const { posted, fetchFn } = recordedTransport();
+
+  mountWith(bus, fetchFn);
+  await settle();
+
+  /* The camera physically moved to the target's live rect... */
+  expect(log.moved).toEqual([LIVE_RECT]);
+  /* ...and the ONLY thing this device ever said to the record is the arrival:
+     no offer, no accept, no confirmation of any kind. The MCP call blocked on
+     exactly this transition, so this is the moment its success becomes true. */
+  expect(posted).toEqual(["arrive"]);
+  expect(record().state).toBe("following");
+  expect(record().acceptedVia).toBe("auto-follow");
+  /* The pre-move viewport is on the record, captured before anything moved. */
+  expect(record().returnPoints).toHaveLength(1);
+  expect(record().returnPoints[0]).toMatchObject({
+    deviceId: DEVICE,
+    mode: "scheme",
+    camera: { x: 120, y: 340, zoom: 0.55 },
+    focusedPath: "/tmp/what-i-was-reading.jsonl",
+  });
+});
+
+test("exactly one Return action, and it restores the original frame exactly", async () => {
+  raiseDirected();
+  const { bus, log } = board({ [ANCHOR]: LIVE_RECT });
+  mount(bus);
+  await settle();
+
+  const chip = one("[data-testid='focus-return-chip']")!;
+  expect(chip.querySelectorAll("button")).toHaveLength(1);
+
+  click(one("[data-testid='attention-return']")!);
+  await settle();
+
+  /* The exact viewport the operator was at before the automatic move. */
+  expect(log.restored).toEqual([{ x: 120, y: 340, zoom: 0.55 }]);
+  expect(record().state).toBe("returned");
+  expect(record().returnedVia).toBe("control");
+  /* Once taken, the way back is gone: one Return, not a mode. */
+  expect(one("[data-testid='focus-return-chip']")).toBeNull();
+});
+
+test("polls never re-navigate a directed request: one arrival, however many heartbeats", async () => {
+  raiseDirected();
+  const { bus, log } = board({ [ANCHOR]: LIVE_RECT });
+  mount(bus);
+  await settle();
+  expect(log.moved).toHaveLength(1);
+
+  for (let i = 0; i < 20; i += 1) await poll();
+
+  expect(log.moved).toHaveLength(1);
+  expect(record().state).toBe("following");
+  expect(record().returnPoints).toHaveLength(1);
+});
+
+test("a directed request whose target is gone abandons: nothing moves, the record closes as lost", async () => {
+  raiseDirected(UNREAD_FRAME_RECT);
+  const { bus, log } = board({});
+  mount(bus);
+  await settle();
+
+  expect(log.moved).toEqual([]);
+  expect(one("[data-testid='focus-return-chip']")).toBeNull();
+  /* The bounded failure the blocked MCP call reports as TARGET_LOST. */
+  expect(record().state).toBe("expired");
+  expect(record().expiredCause).toBe("lost");
+});
+
+test("an arrival the network swallowed is retried with the pre-move viewport, and no Return shows before the record has it", async () => {
+  raiseDirected();
+  unreachable = new Set(["arrive"]);
+  const { bus, log } = board({ [ANCHOR]: LIVE_RECT });
+  mount(bus);
+  await settle();
+
+  /* The move happened, the record does not know: the request is still
+     `accepted`, so there is no follow to offer a Return for — and none shows. */
+  expect(log.moved).toEqual([LIVE_RECT]);
+  expect(record().state).toBe("accepted");
+  expect(one("[data-testid='focus-return-chip']")).toBeNull();
+
+  /* The camera is at the TARGET now. The retry must not recapture it. */
+  viewBus.reportSlice({ ...WHERE_I_WAS, camera: { x: 900, y: 1_400, zoom: 0.9, worldRect: { x: 0, y: 0, width: 1_000, height: 800 } } });
+  unreachable = new Set();
+  await poll();
+
+  /* One arrival, carrying the viewport from BEFORE the move. */
+  expect(record().state).toBe("following");
+  expect(record().returnPoints).toHaveLength(1);
+  expect(record().returnPoints[0]).toMatchObject({
+    deviceId: DEVICE,
+    mode: "scheme",
+    camera: { x: 120, y: 340, zoom: 0.55 },
+    focusedPath: "/tmp/what-i-was-reading.jsonl",
+  });
+  /* And the view never moved a second time. */
+  expect(log.moved).toHaveLength(1);
+
+  /* Now — and only now — the way back is on offer, and it works. */
+  click(one("[data-testid='attention-return']")!);
+  await settle();
+  expect(log.restored).toEqual([{ x: 120, y: 340, zoom: 0.55 }]);
+  expect(record().state).toBe("returned");
+});

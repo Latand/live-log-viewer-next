@@ -174,6 +174,17 @@ export interface AttentionCreateInput {
   contextLabel?: string;
   candidates?: JournalEventRef[];
   offeredTo?: string[];
+  /**
+   * #873: an immediate directed handoff. The server has already resolved the
+   * one active view this request moves, so the record is born `accepted` for
+   * that device — it never passes through an actionable `pending`/`offered`
+   * state, no other device is named, and nothing renders a confirmation for
+   * it. `acceptedVia` is `auto-follow`, because nothing was put in front of
+   * the operator and nothing was pressed. Server-internal only: the HTTP
+   * validator never passes this through, so no client can direct-accept a
+   * device of its choosing.
+   */
+  directedAt?: string;
   desktopTarget?: DesktopWindowRef;
 }
 
@@ -199,6 +210,9 @@ function validate(input: AttentionCreateInput): void {
   }
   if (!input.frameAtCreation || typeof input.frameAtCreation.project !== "string" || input.frameAtCreation.project.length === 0) {
     throw new AttentionValidationError("INVALID_FRAME", "a request must record the frame it was created against");
+  }
+  if (input.directedAt !== undefined && (typeof input.directedAt !== "string" || input.directedAt.length === 0)) {
+    throw new AttentionValidationError("INVALID_DIRECTED_AT", "a directed handoff must name the device it moves");
   }
 }
 
@@ -248,13 +262,15 @@ export function createAttentionRequest(
       reason: input.reason.trim(),
       ...(input.contextLabel !== undefined ? { contextLabel: input.contextLabel } : {}),
       ...(input.candidates !== undefined ? { candidates: input.candidates } : {}),
-      state: input.origin === "operator" ? "accepted" : "pending",
+      state: input.origin === "operator" || input.directedAt !== undefined ? "accepted" : "pending",
       stateChangedAt: now.toISOString(),
       expiresAt: expiryFrom(now),
-      offeredTo: input.offeredTo ?? [],
-      ...(input.origin === "operator" && input.offeredTo?.length
-        ? { acknowledgedBy: input.offeredTo[0], acceptedVia: "operator" as const }
-        : {}),
+      offeredTo: input.directedAt !== undefined ? [input.directedAt] : input.offeredTo ?? [],
+      ...(input.directedAt !== undefined
+        ? { acknowledgedBy: input.directedAt, acceptedVia: input.origin === "operator" ? ("operator" as const) : ("auto-follow" as const) }
+        : input.origin === "operator" && input.offeredTo?.length
+          ? { acknowledgedBy: input.offeredTo[0], acceptedVia: "operator" as const }
+          : {}),
       returnPoints: [],
       ...(input.desktopTarget !== undefined ? { desktopTarget: input.desktopTarget } : {}),
       revision: 0,
