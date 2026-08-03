@@ -21,7 +21,7 @@ test("the canonical voice persona developer item is first and renders through th
       timestamp: "2026-08-02T10:00:00.000Z",
       payload: {
         type: "message",
-        id: `msg_voice_persona_${"a".repeat(64)}`,
+        id: `msg_voice_persona_${"a".repeat(46)}`,
         role: "developer",
         content: [{ type: "input_text", text: persona }],
       },

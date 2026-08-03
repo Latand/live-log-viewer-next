@@ -70,6 +70,7 @@ test("one durable thread identity produces one stable canonical developer item",
   const identity = voicePersonaBootstrapIdentity("thread-voice");
   expect(voicePersonaBootstrapIdentity("thread-voice")).toEqual(identity);
   expect(voicePersonaBootstrapIdentity("thread-other")).not.toEqual(identity);
+  expect(identity.itemId.length).toBeLessThanOrEqual(64);
   expect(voicePersonaBootstrap(identity, () => "  Resolved call persona. \n")).toEqual({
     item: {
       type: "message",
@@ -84,7 +85,7 @@ test("canonical receipt scanning recognizes reordered fields across a stream chu
   const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-persona-scan-"));
   const transcript = path.join(isolated, "thread.jsonl");
   const linked = path.join(isolated, "linked.jsonl");
-  const itemId = `msg_voice_persona_${"b".repeat(64)}`;
+  const itemId = `msg_voice_persona_${"b".repeat(46)}`;
   const record = JSON.stringify({
     padding: "x".repeat(65_400),
     payload: { role: "developer", content: [], id: itemId, type: "message" },
@@ -105,7 +106,7 @@ test("canonical receipt scanning recognizes reordered fields across a stream chu
 test("canonical receipt scanning ignores malformed rows and marker-like content", async () => {
   const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-persona-structural-scan-"));
   const transcript = path.join(isolated, "thread.jsonl");
-  const itemId = `msg_voice_persona_${"c".repeat(64)}`;
+  const itemId = `msg_voice_persona_${"c".repeat(46)}`;
   const markerLikeText = `"type":"message","id":"${itemId}","role":"developer"`;
   fs.writeFileSync(transcript, [
     `{malformed:${markerLikeText}}`,

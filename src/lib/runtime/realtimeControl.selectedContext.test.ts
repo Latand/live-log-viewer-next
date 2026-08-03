@@ -19,8 +19,8 @@ const NOW = Date.now();
 const DESK = { viewSessionId: "vs-desk-1", deviceId: "dev-desk" };
 const PHONE = { viewSessionId: "vs-phone-1", deviceId: "dev-phone" };
 const ACCEPTED_PERSONA_BOOTSTRAP = {
-  receiptId: `voice_persona_${"d".repeat(64)}`,
-  itemId: `msg_voice_persona_${"d".repeat(64)}`,
+  receiptId: `voice_persona_${"d".repeat(46)}`,
+  itemId: `msg_voice_persona_${"d".repeat(46)}`,
   insertion: "accepted" as const,
 };
 

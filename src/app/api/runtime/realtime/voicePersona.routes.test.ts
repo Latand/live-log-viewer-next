@@ -15,7 +15,7 @@ test("canonical voice persona transcripts are discoverable through files and rea
     `rollout-2026-08-02T10-00-00-${sessionId}.jsonl`,
   );
   const persona = "Your name is Alik. Speak the operator's language.";
-  const itemId = `msg_voice_persona_${"a".repeat(64)}`;
+  const itemId = `msg_voice_persona_${"a".repeat(46)}`;
   fs.mkdirSync(sessions, { recursive: true });
   fs.writeFileSync(transcript, [
     JSON.stringify({

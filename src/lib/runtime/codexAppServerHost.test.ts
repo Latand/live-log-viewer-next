@@ -356,8 +356,8 @@ describe("CodexAppServerHost", () => {
       realtimeSessionId: "realtime-1",
       personaBootstrap: { insertion: "accepted" },
     });
-    expect(started.personaBootstrap.receiptId).toMatch(/^voice_persona_[a-f0-9]{64}$/);
-    expect(started.personaBootstrap.itemId).toMatch(/^msg_voice_persona_[a-f0-9]{64}$/);
+    expect(started.personaBootstrap.receiptId).toMatch(/^voice_persona_[a-f0-9]{46}$/);
+    expect(started.personaBootstrap.itemId).toMatch(/^msg_voice_persona_[a-f0-9]{46}$/);
     // SDP requires a terminal CRLF; a missing one is healed, never trimmed —
     // OpenAI rejects an unterminated offer with "unmarshal SDP: EOF".
     /* The live model is named explicitly (#664): letting the backend choose
@@ -3588,7 +3588,7 @@ test("a refused persona insertion returns a bounded rejected receipt before real
       diagnostic: "Codex app-server request failed: Invalid request: unknown field `role`",
     },
   });
-  expect(rejected.personaBootstrap.receiptId).toMatch(/^voice_persona_[a-f0-9]{64}$/);
+  expect(rejected.personaBootstrap.receiptId).toMatch(/^voice_persona_[a-f0-9]{46}$/);
   expect(rejected.personaBootstrap.diagnostic?.length).toBeLessThanOrEqual(500);
   expect(server.requests.find((request) => request.method === "thread/realtime/start")).toBeUndefined();
   expect(host.currentRealtimeSessionId()).toBeNull();

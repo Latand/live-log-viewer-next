@@ -134,6 +134,9 @@ export type VoicePersonaBootstrapIdentity = Pick<VoicePersonaBootstrapReceipt, "
 /* Larger than the host's maximum admissible app-server frame, while keeping a
    transcript with an oversized unrelated row from growing scanner memory. */
 const MAX_CANONICAL_VOICE_PERSONA_RECORD_BYTES = 32 * 1024 * 1024;
+/* Responses API item ids accept at most 64 characters. `msg_voice_persona_`
+   consumes 18, leaving 46 hex characters (184 bits) for the stable digest. */
+const VOICE_PERSONA_ID_DIGEST_HEX = 46;
 
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -178,7 +181,8 @@ export function voicePersonaBootstrapIdentity(
   const digest = createHash("sha256")
     .update("voice-persona-bootstrap\0", "utf8")
     .update(threadId, "utf8")
-    .digest("hex");
+    .digest("hex")
+    .slice(0, VOICE_PERSONA_ID_DIGEST_HEX);
   const receiptId = `voice_persona_${digest}`;
   const itemId = `msg_${receiptId}`;
   return { receiptId, itemId };
