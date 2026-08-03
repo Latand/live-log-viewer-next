@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { viewBus } from "@/hooks/viewPresenceBus";
 import { stableDeviceId } from "@/hooks/useViewPresence";
+import { playCue } from "@/lib/audio/app";
 import type { AttentionRequestV1, FocusResolutionKind, ReturnPoint } from "@/lib/attention/types";
 import { useLocale } from "@/lib/i18n";
 import { useAttentionOffers, type PostOutcome, type ViewportCapture } from "@/components/overlay/useAttentionOffers";
@@ -190,6 +191,11 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
    * the pre-move viewport captured before anything happens.
    */
   const onDirected = useCallback(async (request: AttentionRequestV1) => {
+    /* The same cue the offer path rings when a request first reaches a screen —
+       a directed request never passes through `pending`, so this is its one
+       chance to be heard. The request id keys the dedupe, so however many polls
+       re-deliver it, it rings once. */
+    playCue({ cue: "attention", eventId: `attention:${request.id}` });
     const before = currentViewport();
     leaving.current.set(request.id, before);
     /* Ownership is already on the record — `acknowledgedBy` names this device —

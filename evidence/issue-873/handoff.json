@@ -1,0 +1,161 @@
+{
+  "issue": 873,
+  "capturedAt": "2026-08-03T12:40:44.357Z",
+  "runner": "headless host Chrome over raw CDP against the isolated demo runtime (fixtures/demo-home); the real MCP request_attention binding called cross-process over the same shared LLV_STATE_DIR",
+  "contract": "success only after the chosen view's verified arrival; one deterministic device; no pending/offered state; one exact Return; idempotent replay; explicit bounded failures",
+  "checks": [
+    {
+      "name": "presence names the live Chrome desktop on the shared record",
+      "pass": true,
+      "detail": {
+        "sessions": 1,
+        "mode": "scheme"
+      }
+    },
+    {
+      "name": "MCP success exists and names a completed arrival",
+      "pass": true,
+      "detail": {
+        "handoff": {
+          "deviceId": "vs-b7sscjq8kplmsd7vlmn",
+          "state": "following",
+          "resolution": "exact",
+          "arrivedAt": "2026-08-03T12:40:14.311Z"
+        },
+        "elapsedMs": 1832
+      }
+    },
+    {
+      "name": "the durable record is following with the pre-move return point at the instant of success",
+      "pass": true,
+      "detail": {
+        "state": "following",
+        "returnPoints": 1,
+        "offeredTo": [
+          "vs-b7sscjq8kplmsd7vlmn"
+        ]
+      }
+    },
+    {
+      "name": "the page's only word to the record was the arrival — no offer, no accept, no confirmation",
+      "pass": true,
+      "detail": [
+        "arrive"
+      ]
+    },
+    {
+      "name": "the target card physically arrived on screen before success, same-document",
+      "pass": true,
+      "detail": {
+        "before": {
+          "aRect": {
+            "x": 272,
+            "y": 280,
+            "w": 117,
+            "h": 152
+          },
+          "bRect": {
+            "x": 716,
+            "y": 280,
+            "w": 117,
+            "h": 152
+          }
+        },
+        "after": {
+          "aRect": {
+            "x": -1545,
+            "y": 64,
+            "w": 558,
+            "h": 725
+          },
+          "bRect": {
+            "x": 565,
+            "y": 64,
+            "w": 558,
+            "h": 725
+          }
+        },
+        "viewport": {
+          "w": 1440,
+          "h": 813
+        }
+      }
+    },
+    {
+      "name": "exactly one Return action is on screen",
+      "pass": true,
+      "detail": {
+        "chips": 1,
+        "buttons": 1
+      }
+    },
+    {
+      "name": "replaying the same clientRequestId returns the committed receipt and moves nothing",
+      "pass": true,
+      "detail": {
+        "replayed": true,
+        "requests": 1
+      }
+    },
+    {
+      "name": "the record's captured return point is the settled pre-move camera",
+      "pass": true,
+      "detail": {
+        "captured": {
+          "x": 4.451127819548873,
+          "y": 220.33458646616543,
+          "zoom": 0.19548872180451127
+        },
+        "preMove": {
+          "x": 4.451127819548873,
+          "y": 220.33458646616543,
+          "zoom": 0.19548872180451127,
+          "worldRect": {
+            "x": -22.769230769230774,
+            "y": -1127.096153846154,
+            "width": 6097.538461538462,
+            "height": 3954.192307692308
+          }
+        }
+      }
+    },
+    {
+      "name": "one Return restores the exact pre-move camera and closes the record as returned",
+      "pass": true,
+      "detail": {
+        "restoredCamera": {
+          "x": 4.451127819548873,
+          "y": 220.33458646616543,
+          "zoom": 0.19548872180451127,
+          "worldRect": {
+            "x": -22.769230769230774,
+            "y": -1127.096153846154,
+            "width": 6097.538461538462,
+            "height": 3954.192307692308
+          }
+        },
+        "preMove": {
+          "x": 4.451127819548873,
+          "y": 220.33458646616543,
+          "zoom": 0.19548872180451127,
+          "worldRect": {
+            "x": -22.769230769230774,
+            "y": -1127.096153846154,
+            "width": 6097.538461538462,
+            "height": 3954.192307692308
+          }
+        },
+        "state": "returned"
+      }
+    },
+    {
+      "name": "with no active view the call refuses as NO_ACTIVE_VIEW and files nothing",
+      "pass": true,
+      "detail": {
+        "code": "NO_ACTIVE_VIEW",
+        "requests": 1
+      }
+    }
+  ],
+  "verdict": "PASS"
+}
