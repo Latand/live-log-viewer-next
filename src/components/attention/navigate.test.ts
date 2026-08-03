@@ -594,13 +594,18 @@ test("a cross-project OPEN handoff is one gesture: quiet project half plus exact
   expect(log.opened).toEqual([]);
 });
 
-test("a cross-project SHOW handoff stays a lone project switch and records it as before", async () => {
+test("a cross-project SHOW handoff applies the project quietly: the arrival record is its one entry", async () => {
+  /* Before the arrival record existed (#866 production regression), the show
+     handoff's project switch was its only history trace, so it went through
+     the recording `openProject`. Now the verified arrival records the card
+     entry, and a recorded project switch under it would make Back a
+     two-press traversal. */
   const { bus, log } = harness("other", { "/tmp/reviewer.jsonl": RECT }, "demo");
 
   await runFocusHandoff(request({ intent: "show", frameAtCreation: frame("other") }), bus, NO_WAIT);
 
-  expect(log.projects).toEqual(["other"]);
-  expect(log.combined).toEqual([]);
+  expect(log.projects).toEqual([]);
+  expect(log.combined).toEqual([["other", null]]);
   expect(log.opened).toEqual([]);
 });
 

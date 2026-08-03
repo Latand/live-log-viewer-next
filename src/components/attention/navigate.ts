@@ -146,14 +146,18 @@ export async function runFocusHandoff(
 ): Promise<FocusHandoffResult> {
   const project = focusHandoffProject(request);
   const shell = bus.shell();
-  /* A handoff that will OPEN a conversation is ONE gesture, so it must leave
-     ONE history entry (issue #866 review): the project applies quietly here —
-     early, because the target board has to publish before the resolution below
-     can run — and the single entry is recorded by `openPath` further down. A
-     frame-only handoff is a lone project switch and records as before. */
-  const opensConversation = request.intent === "open" && request.target.kind === "conversation";
+  /* EVERY conversation handoff is ONE gesture, so it must leave ONE history
+     entry (issue #866, both rounds): the project applies quietly here — early,
+     because the target board has to publish before the resolution below can
+     run — and the single entry is the transaction's verified-arrival record
+     (which, for `open`, the quiet open coalesces with). Letting `openProject`
+     record its own project navigation under that entry would make Back a
+     two-press traversal through a state that was never a gesture. A handoff
+     with no conversation behind it stays a lone project switch and records
+     as before. */
+  const conversationHandoff = request.target.kind === "conversation";
   if (shell && shell.project !== project) {
-    if (opensConversation) shell.openConversation(project, null);
+    if (conversationHandoff) shell.openConversation(project, null);
     else shell.openProject(project);
   }
 
