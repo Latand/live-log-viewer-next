@@ -121,9 +121,17 @@ test("an explicit spawn account is durably pinned while an omitted account uses 
       body: JSON.stringify({ engine: "claude", model: "claude-sonnet-4-6", cwd, prompt: "inspect", clientAttemptId, ...(accountId ? { accountId } : {}) }),
     }), dependencies);
 
-    expect((await post("account_pin_20260731", "pinned")).status).toBe(202);
-    expect(store.spawnReceiptForClientAttempt("account_pin_20260731")).toMatchObject({
-      accountId: "pinned",
+    const pinnedResponses = await Promise.all([
+      post("account_pin_a_20260731", "pinned-a"),
+      post("account_pin_b_20260731", "pinned-b"),
+    ]);
+    expect(pinnedResponses.map((response) => response.status)).toEqual([202, 202]);
+    expect(store.spawnReceiptForClientAttempt("account_pin_a_20260731")).toMatchObject({
+      accountId: "pinned-a",
+      accountPin: true,
+    });
+    expect(store.spawnReceiptForClientAttempt("account_pin_b_20260731")).toMatchObject({
+      accountId: "pinned-b",
       accountPin: true,
     });
 
@@ -241,6 +249,130 @@ test("an unusable explicit account creates a terminal retryable pinned receipt a
       retrySafe: true,
       error: "the requested account is not available for this launch",
     });
+  } finally {
+    if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previous.transport;
+    if (previous.hosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous.hosts;
+    if (previous.events === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previous.events;
+    if (previous.socket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previous.socket;
+    if (previous.ui === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previous.ui;
+  }
+});
+
+test("a failed pinned reviewer preserves canonical child and pipeline lineage", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "failed-pinned-lineage-"));
+  const store = registry();
+  const sourceSessionId = crypto.randomUUID();
+  const sourceAccount = createManagedCodexAccount(`failed-pinned-lineage-${sourceSessionId}`);
+  const sourcePath = path.join(sourceAccount.sessionsDir, `${sourceSessionId}.jsonl`);
+  fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+  fs.writeFileSync(sourcePath, "{}\n");
+  const source = store.ensureConversation("codex", sourcePath, "source-account");
+  const reviewed = store.ensureConversation("codex", path.join(cwd, "reviewed.jsonl"), "reviewed-account");
+  const predecessor = store.ensureConversation("codex", path.join(cwd, "predecessor.jsonl"), "predecessor-account");
+  const previous = {
+    transport: process.env.LLV_SPAWN_TRANSPORT,
+    hosts: process.env.LLV_STRUCTURED_HOSTS,
+    events: process.env.LLV_RUNTIME_EVENTS,
+    socket: process.env.LLV_RUNTIME_HOST_SOCKET,
+    ui: process.env.NEXT_PUBLIC_RUNTIME_UI,
+  };
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  try {
+    const dependencies = {
+      ...structuredRouteDependencies(cwd),
+      registry: () => store,
+      resolveHealthySpawnAccount: async () => ({
+        engine: "codex" as const,
+        accountId: "selected-account",
+        kind: "managed" as const,
+        home: path.join(cwd, "selected-account"),
+        transcriptRoot: path.join(cwd, "selected-account", "sessions"),
+        env: { CODEX_HOME: path.join(cwd, "selected-account"), NODE_ENV: "test" as const },
+      }),
+      pipelineAttemptTargetForSource: () => ({
+        pipelineId: "pipeline-failed-pin",
+        stageId: "review",
+        stageOrder: 2,
+        role: "reviewer",
+      }),
+    } satisfies SpawnRouteTestDependencies;
+    const body = {
+      engine: "codex",
+      model: "gpt-5.6-sol",
+      cwd,
+      ["prompt"]: "inspect account-pinned lineage",
+      accountId: "unavailable-account",
+      clientAttemptId: "failed_pinned_lineage_20260803",
+      src: sourcePath,
+      role: "reviewer",
+      roleParams: { diffSource: "PR 842", lens: "correctness" },
+      reviews: reviewed.id,
+      project: "account-pinned-project",
+      supersedes: predecessor.id,
+      mcpServers: ["viewer"],
+    };
+    const post = () => POST.withDependencies(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+      method: "POST",
+      headers: {
+        origin: "http://127.0.0.1:8898",
+        host: "127.0.0.1:8898",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+    }), dependencies);
+
+    const first = await post();
+    expect(first.status).toBe(200);
+    const firstBody = await first.json() as { launchId: string };
+    const replay = await post();
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ launchId: firstBody.launchId, state: "failed" });
+
+    const receipt = store.spawnReceiptForClientAttempt(body.clientAttemptId)!;
+    expect(receipt).toMatchObject({
+      accountId: body.accountId,
+      accountPin: true,
+      state: "failed",
+      parentConversationId: source.id,
+      parentSource: "explicit",
+      agentRole: "reviewer",
+      delegationDepth: 0,
+      explicitProject: body.project,
+      supersedes: { conversationId: predecessor.id, reason: "recovery-spawn" },
+      launchProfile: {
+        parentConversationId: source.id,
+        mcpServers: ["viewer"],
+        plugins: [],
+      },
+    });
+    expect(store.snapshot().lineageEdges[receipt.conversationId]).toMatchObject({
+      parentConversationId: source.id,
+      parentArtifactPath: sourcePath,
+      kind: "review",
+      role: "reviewer",
+      reviewsConversationId: reviewed.id,
+    });
+    expect(store.snapshot().memberships[receipt.conversationId]).toEqual([
+      expect.objectContaining({
+        kind: "pipeline",
+        containerId: "pipeline-failed-pin",
+        role: "reviewer",
+        stageId: "review",
+        stageOrder: 2,
+        parentConversationId: source.id,
+        runtime: { engine: "codex", model: "gpt-5.6-sol", effort: "xhigh" },
+      }),
+    ]);
   } finally {
     if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
     else process.env.LLV_SPAWN_TRANSPORT = previous.transport;
