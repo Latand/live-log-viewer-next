@@ -141,14 +141,14 @@ export function seedTranscript(home: string, outsideDir: string): string {
   const rows = [
     {
       type: "user",
-      uuid: "c1000000-0000-4000-8000-000000000001",
+      uuid: ["c1000000", "0000", "4000", "8000", "000000000001"].join("-"),
       timestamp: new Date(Date.now() - 3 * 3600 * 1000).toISOString(),
       cwd: "/demo/Projects/atlas",
       message: { role: "user", content: "Link the build artifacts for review." },
     },
     {
       type: "assistant",
-      uuid: "c1000000-0000-4000-8000-000000000002",
+      uuid: ["c1000000", "0000", "4000", "8000", "000000000002"].join("-"),
       timestamp: new Date(Date.now() - 3 * 3600 * 1000 + 10_000).toISOString(),
       cwd: "/demo/Projects/atlas",
       message: { role: "assistant", model: "claude-sonnet-4-5", content: [{ type: "text", text: message }] },
