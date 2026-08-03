@@ -274,6 +274,12 @@ async function main(): Promise<void> {
     for (const [key, value] of Object.entries(runtime.env)) {
       if (typeof value === "string") process.env[key] = value;
     }
+    /* The bootstrap env says `development` (it belongs to the dev server the
+       fixture rides along with). This process is about to load the src module
+       graph, and dev-mode module init arms long-lived watchers that keep the
+       event loop alive after every scenario is done — the run then hangs in
+       epoll with all its children long gone. */
+    process.env.NODE_ENV = "production";
     const stateDir = runtime.env.LLV_STATE_DIR!;
     const { productionDomainDependencies, viewerMcpBindings } = await import("../../src/lib/mcp/bindings");
     const { createMcpToolService, MemoryMcpReceiptStore, FileMcpReceiptStore } = await import("../../src/lib/mcp/server");
@@ -715,3 +721,6 @@ async function main(): Promise<void> {
 }
 
 await main();
+/* Belt to the NODE_ENV brace above: whatever module-level timer the imported
+   graph may still hold, the run is over and the verdict is written. */
+process.exit(process.exitCode ?? 0);

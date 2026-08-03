@@ -1,7 +1,7 @@
 {
   "issue": 873,
-  "capturedAt": "2026-08-03T14:31:29.784Z",
-  "buildHead": "2a5aaccaf033598fe188fea444be9d1accba81e0",
+  "capturedAt": "2026-08-03T14:40:18.504Z",
+  "buildHead": "0bed0eea443b2a79a94ece8f7ffc47f631db4b08",
   "runner": "exact-head production build served by `next start` over the isolated demo runtime (fixtures/demo-home); headless host Chrome (two same-device tabs) over raw CDP; the real MCP tool service + bindings called cross-process over the same shared LLV_STATE_DIR, with only the caller-authority seam injected per scenario",
   "contract": "authority-gated execution (root/orchestrator only, refusals file nothing); one browser session executes; success only after the chosen view's verified arrival; one-glide one-entry open; idempotent replay and restart replay over the durable operation identity; abort closes the record; one exact Return restoring camera and focus; explicit bounded failures",
   "checks": [
@@ -43,13 +43,13 @@
       "pass": true,
       "detail": {
         "handoff": {
-          "deviceId": "vs-8r6gixv89prmsdbtq5e",
-          "viewSessionId": "vs-ng3rg0hdklmsdbtq5g",
+          "deviceId": "vs-9t5tr92b45msdc557u",
+          "viewSessionId": "vs-rlcp0rt2wwdmsdc557w",
           "state": "following",
           "resolution": "exact",
-          "arrivedAt": "2026-08-03T14:30:47.188Z"
+          "arrivedAt": "2026-08-03T14:39:36.105Z"
         },
-        "elapsedMs": 3557
+        "elapsedMs": 784
       }
     },
     {
@@ -67,10 +67,10 @@
       "detail": {
         "chosenTab": "A",
         "chosenB": {
-          "x": 716,
-          "y": 323,
-          "w": 117,
-          "h": 152
+          "x": 672,
+          "y": 261,
+          "w": 240,
+          "h": 312
         },
         "idleA": {
           "x": 272,
@@ -116,16 +116,16 @@
         },
         "after": {
           "aRect": {
-            "x": 272,
-            "y": 323,
-            "w": 117,
-            "h": 152
+            "x": -236,
+            "y": 261,
+            "w": 240,
+            "h": 312
           },
           "bRect": {
-            "x": 716,
-            "y": 323,
-            "w": 117,
-            "h": 152
+            "x": 672,
+            "y": 261,
+            "w": 240,
+            "h": 312
           }
         },
         "viewport": {
