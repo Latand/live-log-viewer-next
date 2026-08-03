@@ -1,7 +1,9 @@
 import { agentRegistry, type ConversationLookup } from "@/lib/agent/registry";
 import { rootIdentity } from "@/lib/root/store";
 import { freshness, listPresence } from "@/lib/view/presenceStore";
-import type { ViewMode } from "@/lib/view/types";
+import type { StoredViewSession } from "@/lib/view/types";
+
+import { attentionCapablePresence } from "./eligibility";
 
 import {
   applyAttentionEvent,
@@ -19,7 +21,7 @@ import {
   transitionAttentionRequest,
   type AttentionCreateInput,
 } from "./store";
-import type { AttentionRequestV1, FocusTarget } from "./types";
+import { isTerminalAttentionState, type AttentionRequestV1, type FocusTarget } from "./types";
 
 /**
  * What the surfaces call (#688 slice 3): raise a request, read what this device
@@ -118,7 +120,8 @@ export function raiseAttentionRequest(
        the agent was told nobody was there while the operator watched the board.
        An explicit list still wins: the operator's own commands name their own
        device, and nothing here may overrule that. */
-    offeredTo: input.offeredTo ?? (input.origin === "root-agent" ? followCapableDevices(options.now) : undefined),
+    offeredTo: input.offeredTo
+      ?? (input.origin === "root-agent" && input.directedAt === undefined ? followCapableDevices(options.now) : undefined),
     target: canonicalConversationTarget(input.target, options.conversations),
     rootId: rootIdentity(),
   }, options);
@@ -141,38 +144,32 @@ export function raiseAttentionRequest(
  * one place to be taken.
  */
 /**
- * Modes a desktop can actually BE moved in.
+ * The presence sessions an attention handoff may move, in presence's
+ * deterministic order (latest interaction first), one per device.
  *
- * A focus handoff needs a board controller, and only the scheme board and the
- * phone's focus view ever register one. A desktop sitting in the history list
- * has no camera and no anchors to select: the handoff finds no controller,
- * reports `lost`, and nothing on screen moves. Offering to it is therefore the
- * silent failure this whole surface exists to remove — the request is accepted,
- * the agent is told which desktop is watching, and the operator sees nothing.
- *
- * `overview` stays offerable, and the distinction is not arbitrary: a handoff
- * from the overview OPENS the target's project, which mounts the board, and
- * `runFocusHandoff` already waits for that board to publish. The list is the
- * mode the operator has chosen INSTEAD of a board, so no wait can produce one.
- *
- * The mode reported by presence is the only signal that crosses the process
- * boundary here — the bus lives in the browser and this runs wherever the tool
- * was called — so it is what the offer has to answer from.
+ * Eligibility is the SHARED predicate (`@/lib/attention/eligibility`): the
+ * same rules the surfaces enforce — visible and active, not a phone, wide
+ * enough to actually mount the attention host, in a mode a board can be
+ * mounted in — so the list never promises the agent a view that will not
+ * move. The mode and viewport reported by presence are the only signals that
+ * cross the process boundary here — the bus lives in the browser and this
+ * runs wherever the tool was called — so they are what the answer stands on.
  */
-const FOLLOWABLE_MODES = new Set<ViewMode>(["overview", "scheme", "mobile-focus", "mobile-map"]);
+function followCapableSessions(now = new Date()): StoredViewSession[] {
+  const at = now.getTime();
+  const sessions: StoredViewSession[] = [];
+  for (const session of listPresence(at)) {
+    if (!attentionCapablePresence({ ...session, freshness: freshness(session, at) })) continue;
+    /* Two tabs on one machine are one place to be taken; the latest-interaction
+       one is the tab the operator counts as being at. */
+    if (sessions.some((held) => held.deviceId === session.deviceId)) continue;
+    sessions.push(session);
+  }
+  return sessions;
+}
 
 function followCapableDevices(now = new Date()): string[] {
-  const at = now.getTime();
-  const devices: string[] = [];
-  for (const session of listPresence(at)) {
-    if (session.device.kind === "mobile") continue;
-    if (!FOLLOWABLE_MODES.has(session.mode)) continue;
-    /* The same guard a standing auto-follow passes, so "who was this offered
-       to" and "who may be moved" can never drift apart. */
-    if (!autoFollowEligible({ visibility: session.visibility, freshness: freshness(session, at) })) continue;
-    if (!devices.includes(session.deviceId)) devices.push(session.deviceId);
-  }
-  return devices;
+  return followCapableSessions(now).map((session) => session.deviceId);
 }
 
 /**
@@ -190,6 +187,130 @@ function canonicalConversationTarget(target: FocusTarget, lookup?: ConversationL
   const conversations = lookup ?? agentRegistry();
   const current = conversations.conversationForPath(target.path)?.generations.at(-1);
   return current && current.path !== target.path ? { kind: "conversation", path: current.path } : target;
+}
+
+/** The exact view a directed handoff executes on: the device the Return
+    control belongs to, and the ONE browser session (tab) that owns the move. */
+export interface DirectedAttentionView {
+  deviceId: string;
+  viewSessionId: string;
+}
+
+/**
+ * The one view an immediate directed handoff moves (#873).
+ *
+ * `followCapableSessions` already applies every eligibility rule the surfaces
+ * enforce — the shared `attentionCapablePresence` predicate — and preserves
+ * presence's deterministic order: latest interaction first, then latest
+ * heartbeat, then session id. So "which view does the operator count as being
+ * at" has exactly one answer, and two active devices are never a coin toss:
+ * the one they touched last wins, every time, and the other is named nowhere
+ * on the record — no competing offer can ever reach it.
+ *
+ * The SESSION is part of the answer, not a detail collapsed into the device:
+ * two tabs share one device id, and a record that named only the device made
+ * every tab on that machine an executor — duplicate navigations racing each
+ * other for one camera. The record names the winning tab, and only that tab
+ * runs the move.
+ *
+ * Null is the explicit no-view answer. The caller reports it as a bounded
+ * failure rather than filing a pending ask nobody could ever act on.
+ */
+export function resolveDirectedAttentionView(now = new Date()): DirectedAttentionView | null {
+  const session = followCapableSessions(now)[0];
+  return session ? { deviceId: session.deviceId, viewSessionId: session.viewSessionId } : null;
+}
+
+/** Device-only projection of {@link resolveDirectedAttentionView}, kept for
+    callers that need nothing session-scoped. */
+export function resolveDirectedAttentionDevice(now = new Date()): string | null {
+  return resolveDirectedAttentionView(now)?.deviceId ?? null;
+}
+
+/** How long the raise waits for the directed view to land before closing the
+    request as lost. Generous against the browser's own clocks — a 4s offer
+    poll plus a 4s board wait — while staying far inside the MCP transport's
+    30s call deadline. */
+export const ATTENTION_ARRIVAL_TIMEOUT_MS = 15_000;
+const ATTENTION_ARRIVAL_POLL_MS = 250;
+
+export type AttentionArrivalOutcome =
+  /** The chosen view landed: the record is `following` (or already `returned`,
+      when the operator arrived and went straight back), with the pre-move
+      return point captured on it. */
+  | { kind: "arrived"; request: AttentionRequestV1 }
+  /** The handoff finished as an explicit bounded failure; the record is
+      terminal and nothing is left for a later poll to navigate. */
+  | { kind: "failed"; code: "TARGET_LOST" | "HANDOFF_TIMEOUT" | "HANDOFF_ABORTED" | "REQUEST_LOST"; request: AttentionRequestV1 | null };
+
+export interface AttentionArrivalWait {
+  filePath?: string;
+  timeoutMs?: number;
+  pollMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+  signal?: AbortSignal;
+}
+
+const wait = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
+
+function arrivalOf(request: AttentionRequestV1): AttentionArrivalOutcome | null {
+  /* `returned` counts as an arrival: the view landed and the operator pressed
+     Return before this reader caught up. Reporting that as a failure would
+     deny a move that visibly happened. */
+  if (request.state === "following" || (request.state === "returned" && request.returnPoints.length > 0)) {
+    return { kind: "arrived", request };
+  }
+  if (isTerminalAttentionState(request.state)) {
+    return { kind: "failed", code: request.expiredCause === "lost" ? "TARGET_LOST" : "HANDOFF_TIMEOUT", request };
+  }
+  return null;
+}
+
+/**
+ * Block until a directed request lands or fails, bounded (#873).
+ *
+ * Polled off the shared file rather than any in-process signal because the
+ * arrival is written by ANOTHER process: the browser posts it to the Next
+ * server, and this wait usually runs inside the stdio MCP server. The file is
+ * the one place both of them already agree on.
+ *
+ * The deadline closes the record rather than merely giving up on it: an
+ * `accepted` request left behind would be navigated by whichever poll comes
+ * next — success the caller was already told did not happen. The close races
+ * the arrival through the store's serialized transition, so whichever lands
+ * first wins and the loser reads the truth: an expiry refused because the
+ * record just reached `following` is reported as the arrival it is.
+ */
+export async function awaitAttentionArrival(id: string, options: AttentionArrivalWait = {}): Promise<AttentionArrivalOutcome> {
+  const timeoutMs = options.timeoutMs ?? ATTENTION_ARRIVAL_TIMEOUT_MS;
+  const pollMs = options.pollMs ?? ATTENTION_ARRIVAL_POLL_MS;
+  const sleep = options.sleep ?? wait;
+  const now = options.now ?? (() => Date.now());
+  const deadline = now() + timeoutMs;
+
+  const read = (): AttentionRequestV1 | null =>
+    readAttentionFile(options.filePath).requests.find((request) => request.id === id) ?? null;
+
+  for (;;) {
+    const request = read();
+    if (!request) return { kind: "failed", code: "REQUEST_LOST", request: null };
+    const settled = arrivalOf(request);
+    if (settled) return settled;
+
+    const aborted = options.signal?.aborted === true;
+    if (aborted || now() >= deadline) {
+      /* Close it, race-safely: `expire` is refused from `following`, so an
+         arrival that beat this write turns the close into the success it
+         really was. */
+      const closed = transitionAttentionRequest(id, { kind: "expire", cause: "lost" }, { filePath: options.filePath });
+      if (closed.ok) return { kind: "failed", code: aborted ? "HANDOFF_ABORTED" : "HANDOFF_TIMEOUT", request: closed.request };
+      const current = read();
+      const late = current ? arrivalOf(current) : null;
+      return late ?? { kind: "failed", code: aborted ? "HANDOFF_ABORTED" : "HANDOFF_TIMEOUT", request: current };
+    }
+    await sleep(Math.min(pollMs, Math.max(1, deadline - now())));
+  }
 }
 
 export function answerAttentionRequest(

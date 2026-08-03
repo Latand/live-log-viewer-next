@@ -6,8 +6,16 @@ import path from "node:path";
 import { resetPresenceForTest, upsertPresence } from "@/lib/view/presenceStore";
 import type { PresencePayloadV1 } from "@/lib/view/types";
 
-import { readAttentionFile } from "./store";
-import { answerAttentionRequest, attentionForDevice, autoFollowEligible, raiseAttentionRequest } from "./service";
+import { AttentionValidationError, readAttentionFile } from "./store";
+import {
+  ATTENTION_ARRIVAL_TIMEOUT_MS,
+  answerAttentionRequest,
+  attentionForDevice,
+  autoFollowEligible,
+  awaitAttentionArrival,
+  raiseAttentionRequest,
+  resolveDirectedAttentionDevice,
+} from "./service";
 import { AttentionRequestError, validateAttentionCreate, validateAttentionEvent } from "./validation";
 import { FOLLOW_HOLD_MS, OFFER_TTL_MS, RETURN_WINDOW_MS, type FocusFrame, type ReturnPoint } from "./types";
 
@@ -410,4 +418,131 @@ test("an operator command still names its own device and nothing else", () => {
 
   expect(raised.offeredTo).toEqual([DEVICE]);
   expect(raised.acknowledgedBy).toBe(DEVICE);
+});
+
+/* ── #873: the immediate directed handoff ───────────────────────────────── */
+
+test("resolving the directed device: nobody movable is an explicit null, never a guess", () => {
+  /* Nothing at all. */
+  expect(resolveDirectedAttentionDevice(T0)).toBeNull();
+  /* A phone is chat-only, a hidden tab is not being watched, and the history
+     list has no board to move — each is excluded for the same reason the old
+     offer path excluded it, so "who may be moved" cannot drift from "who was
+     this directed at". */
+  upsertPresence(view({ viewSessionId: "view-phone", deviceId: "device-phone", device: { kind: "mobile", browser: "safari" } }), T0.getTime());
+  upsertPresence(view({ viewSessionId: "view-hidden", deviceId: "device-hidden", visibility: "hidden" }), T0.getTime());
+  upsertPresence(view({ viewSessionId: "view-list", deviceId: "device-list", mode: "list" }), T0.getTime());
+  expect(resolveDirectedAttentionDevice(T0)).toBeNull();
+});
+
+test("two active desks resolve deterministically: the latest interaction wins", () => {
+  upsertPresence(view({ viewSessionId: "view-older", deviceId: "device-older" }), T0.getTime() - 5_000);
+  upsertPresence(view({ viewSessionId: "view-newer", deviceId: "device-newer" }), T0.getTime());
+
+  expect(resolveDirectedAttentionDevice(T0)).toBe("device-newer");
+  /* Same answer on every read: ambiguity is settled by the record, not by
+     iteration order. */
+  expect(resolveDirectedAttentionDevice(T0)).toBe("device-newer");
+});
+
+test("a directed request is born accepted for exactly one device — no pending, no offer, no competitor", () => {
+  upsertPresence(view(), T0.getTime());
+  upsertPresence(view({ viewSessionId: "view-second", deviceId: "device-second" }), T0.getTime());
+
+  const { request } = raise({ directedAt: DEVICE });
+
+  expect(request.state).toBe("accepted");
+  expect(request.acknowledgedBy).toBe(DEVICE);
+  /* The desktop followed on its own; nothing was pressed. */
+  expect(request.acceptedVia).toBe("auto-follow");
+  /* One device on the record: the second active desk is named nowhere, so no
+     surface can render it a competing offer. */
+  expect(request.offeredTo).toEqual([DEVICE]);
+  expect(attentionForDevice("device-second", { now: T0 }).offer).toBeNull();
+});
+
+test("a directed raise supersedes the same root's earlier unanswered ask", () => {
+  raise();
+  const second = raiseAttentionRequest({
+    origin: "root-agent",
+    target: { kind: "conversation", path: "/tmp/verifier.jsonl" },
+    frameAtCreation: frame,
+    intent: "show",
+    reason: "The verifier is blocked on you.",
+    directedAt: DEVICE,
+  }, { now: later(1_000), id: "attention_2" });
+
+  expect(second.superseded).toEqual(["attention_1"]);
+  expect(readAttentionFile().requests.find((entry) => entry.id === "attention_1")!.state).toBe("superseded");
+});
+
+test("a directed handoff must name its device", () => {
+  expect(() => raise({ directedAt: "" })).toThrow(AttentionValidationError);
+});
+
+test("the arrival wait resolves once the view lands, with the return point already captured", async () => {
+  raise({ directedAt: DEVICE });
+  const landing = setTimeout(() => {
+    answerAttentionRequest("attention_1", { kind: "arrive", deviceId: DEVICE, returnPoint: whereIWas, resolution: "exact" });
+  }, 20);
+  try {
+    const outcome = await awaitAttentionArrival("attention_1", { pollMs: 5, timeoutMs: 1_000 });
+
+    expect(outcome.kind).toBe("arrived");
+    if (outcome.kind === "arrived") {
+      expect(outcome.request.state).toBe("following");
+      expect(outcome.request.returnPoints).toEqual([whereIWas]);
+    }
+  } finally {
+    clearTimeout(landing);
+  }
+});
+
+test("an arrival the operator already returned from still counts as the arrival it was", async () => {
+  raise({ directedAt: DEVICE });
+  answerAttentionRequest("attention_1", { kind: "arrive", deviceId: DEVICE, returnPoint: whereIWas, resolution: "exact" });
+  answerAttentionRequest("attention_1", { kind: "return", deviceId: DEVICE, via: "control" });
+
+  const outcome = await awaitAttentionArrival("attention_1", { pollMs: 5, timeoutMs: 50 });
+
+  expect(outcome.kind).toBe("arrived");
+  if (outcome.kind === "arrived") expect(outcome.request.state).toBe("returned");
+});
+
+test("a handoff nobody completes is closed as lost within its bound — nothing is left to navigate later", async () => {
+  raise({ directedAt: DEVICE });
+
+  const outcome = await awaitAttentionArrival("attention_1", { pollMs: 5, timeoutMs: 40 });
+
+  expect(outcome).toMatchObject({ kind: "failed", code: "HANDOFF_TIMEOUT" });
+  const stored = readAttentionFile().requests[0]!;
+  expect(stored.state).toBe("expired");
+  expect(stored.expiredCause).toBe("lost");
+  /* Closed means closed: a later arrive is refused, so no poll can turn the
+     failure the caller was told into a surprise navigation. */
+  expect(answerAttentionRequest("attention_1", { kind: "arrive", deviceId: DEVICE, returnPoint: whereIWas, resolution: "exact" }).ok).toBe(false);
+});
+
+test("a view that found nowhere to land is an explicit lost target", async () => {
+  raise({ directedAt: DEVICE });
+  answerAttentionRequest("attention_1", { kind: "abandon", deviceId: DEVICE });
+
+  const outcome = await awaitAttentionArrival("attention_1", { pollMs: 5, timeoutMs: 200 });
+
+  expect(outcome).toMatchObject({ kind: "failed", code: "TARGET_LOST" });
+});
+
+test("an aborted wait closes the request rather than leaving it in flight", async () => {
+  raise({ directedAt: DEVICE });
+  const controller = new AbortController();
+  controller.abort();
+
+  const outcome = await awaitAttentionArrival("attention_1", { pollMs: 5, timeoutMs: 5_000, signal: controller.signal });
+
+  expect(outcome).toMatchObject({ kind: "failed", code: "HANDOFF_ABORTED" });
+  expect(readAttentionFile().requests[0]!.state).toBe("expired");
+});
+
+test("the default wait stays far inside the MCP transport's own deadline", () => {
+  expect(ATTENTION_ARRIVAL_TIMEOUT_MS).toBeLessThan(30_000);
 });

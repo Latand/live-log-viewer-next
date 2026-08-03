@@ -6,6 +6,7 @@ import { MCP_TOOL_NAMES } from "./server";
 import {
   HEALTH_PROBE_ALLOWED_TOOLS,
   mcpCallerIdentity,
+  permitAttentionHandoff,
   permitMcpTool,
   type ManagerTarget,
 } from "./toolAllowlist";
@@ -105,4 +106,70 @@ test("the manager is recognized by conversation id alone, whatever role it carri
     const manager = mcpCallerIdentity({ kind: "worker", conversationId: MANAGER_CONVERSATION, role }, MANAGER);
     expect(manager).toEqual({ kind: "unrestricted", reason: "manager" });
   }
+});
+
+/* ── #873 review, finding 1: who may execute an attention handoff ────────── */
+
+const TARGET_PROJECT = "live-log-viewer-next";
+
+test("the root/gateway session directs the handoff in either phase", () => {
+  for (const targetProject of [null, TARGET_PROJECT]) {
+    expect(permitAttentionHandoff({ kind: "root", conversationId: "conversation_root" }, [], targetProject))
+      .toEqual({ allowed: true, via: "root" });
+    expect(permitAttentionHandoff({ kind: "root", conversationId: null }, [], targetProject))
+      .toEqual({ allowed: true, via: "root" });
+  }
+});
+
+test("an unidentified caller is refused in the identity phase, before any target is read", () => {
+  const verdict = permitAttentionHandoff({ kind: "unidentified" }, [], null);
+  expect(verdict.allowed).toBe(false);
+  if (!verdict.allowed) expect(verdict.refusedAs).toBe("unidentified");
+});
+
+test("a worker with no validated seat is refused in the identity phase", () => {
+  const verdict = permitAttentionHandoff(
+    { kind: "worker", conversationId: "conversation_reviewer", role: "reviewer" },
+    [{ conversationId: "conversation_manager", project: TARGET_PROJECT }],
+    null,
+  );
+  expect(verdict.allowed).toBe(false);
+  if (!verdict.allowed) expect(verdict.refusedAs).toBe("worker");
+});
+
+test("the validated orchestrator seat for the target's project is allowed", () => {
+  expect(permitAttentionHandoff(
+    { kind: "worker", conversationId: "conversation_manager", role: "orchestrator" },
+    [{ conversationId: "conversation_manager", project: TARGET_PROJECT }],
+    TARGET_PROJECT,
+  )).toEqual({ allowed: true, via: "orchestrator" });
+});
+
+test("an orchestrator seated in a different project is refused cross-project", () => {
+  const verdict = permitAttentionHandoff(
+    { kind: "worker", conversationId: "conversation_manager", role: "orchestrator" },
+    [{ conversationId: "conversation_manager", project: "another-project" }],
+    TARGET_PROJECT,
+  );
+  expect(verdict.allowed).toBe(false);
+  if (!verdict.allowed) expect(verdict.refusedAs).toBe("cross-project");
+});
+
+test("the legacy unscoped designation (null project) covers any target project", () => {
+  expect(permitAttentionHandoff(
+    { kind: "worker", conversationId: "conversation_manager", role: null },
+    [{ conversationId: "conversation_manager", project: null }],
+    TARGET_PROJECT,
+  )).toEqual({ allowed: true, via: "orchestrator" });
+});
+
+test("nothing the caller states participates: the verdict reads authority and seats alone", () => {
+  /* A role string that CLAIMS orchestrator changes nothing — the seat list is
+     the only statement of designation, exactly as the deploy gate reads it. */
+  const verdict = permitAttentionHandoff(
+    { kind: "worker", conversationId: "conversation_impostor", role: "orchestrator" },
+    [{ conversationId: "conversation_manager", project: TARGET_PROJECT }],
+    TARGET_PROJECT,
+  );
+  expect(verdict.allowed).toBe(false);
 });

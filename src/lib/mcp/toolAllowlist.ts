@@ -113,6 +113,69 @@ export function permitMcpTool(
   return ALLOWED;
 }
 
+/**
+ * Who may move the operator's screen (#873 review, finding 1).
+ *
+ * `request_attention` navigates the operator's one active view the moment it
+ * is called — there is no confirmation surface left to stand between a caller
+ * and the camera. That is an OPERATION contract in the B+ sense (like deploy
+ * execution above), not a tool-availability gate: the tool stays on every
+ * session's surface, and the binding itself refuses executions the durable
+ * identity does not entitle.
+ *
+ * Entitled: the operator's own root/gateway session, and the validated
+ * designated orchestrator seat for the project the target lives in. Refused,
+ * with nothing written and nothing moved: unidentified callers, ordinary
+ * workers, and an orchestrator whose seat names a DIFFERENT project than the
+ * target (cross-project). Revoked, superseded and unknown identities never
+ * appear in the validated seat list at all (`@/lib/orchestrator/authority`
+ * fails closed), so they refuse as workers here. Server-attributed authority
+ * only — nothing the caller says participates.
+ */
+export type AttentionHandoffVerdict =
+  | { allowed: true; via: "root" | "orchestrator" }
+  | { allowed: false; refusedAs: "unidentified" | "worker" | "cross-project"; error: string };
+
+/**
+ * One decision, callable in two phases: `targetProject: null` settles the
+ * identity half before the binding reads anything (an unauthorized caller
+ * learns nothing about the board from target-resolution errors), and the
+ * project half runs once the target has named its project.
+ */
+export function permitAttentionHandoff(
+  authority: AttentionCallerAuthority,
+  seats: readonly { conversationId: string; project: string | null }[],
+  targetProject: string | null,
+): AttentionHandoffVerdict {
+  if (authority.kind === "root") return { allowed: true, via: "root" };
+  if (authority.kind === "unidentified") {
+    return {
+      allowed: false,
+      refusedAs: "unidentified",
+      error: "request_attention moves the operator's screen, and no durable evidence names this caller; only the root session or the designated orchestrator may direct it",
+    };
+  }
+  const held = seats.filter((seat) => seat.conversationId === authority.conversationId);
+  if (held.length === 0) {
+    return {
+      allowed: false,
+      refusedAs: "worker",
+      error: "request_attention moves the operator's screen; a worker session may not direct it — signal the orchestrator or the root session instead",
+    };
+  }
+  /* A seat with no recorded project is the legacy single-instance designation:
+     the operator named one manager for the whole machine, so it is not a
+     cross-project claim to refuse. */
+  if (targetProject === null || held.some((seat) => seat.project === null || seat.project === targetProject)) {
+    return { allowed: true, via: "orchestrator" };
+  }
+  return {
+    allowed: false,
+    refusedAs: "cross-project",
+    error: "this orchestrator seat is designated for a different project than the target; re-designate or target your own project",
+  };
+}
+
 /** The shape {@link import("./server").createMcpToolService} consults. Kept
     narrow so the service does not depend on how an identity was resolved. */
 export interface McpToolPolicy {

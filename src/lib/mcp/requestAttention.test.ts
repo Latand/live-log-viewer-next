@@ -6,7 +6,7 @@ import path from "node:path";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import type { AttentionCallerAuthority } from "@/lib/attention/callerAuthority";
 import type { RegistryConversation } from "@/lib/agent/registry";
-import { raiseAttentionRequest } from "@/lib/attention/service";
+import { answerAttentionRequest, awaitAttentionArrival, raiseAttentionRequest } from "@/lib/attention/service";
 import { readAttentionFile } from "@/lib/attention/store";
 import { adoptLiveRootSession } from "@/lib/root/adopt";
 import { readRootLineage } from "@/lib/root/store";
@@ -19,12 +19,12 @@ import { viewerMcpBindings } from "./bindings";
 import { createMcpToolService, MemoryMcpReceiptStore, MCP_TOOL_NAMES, type McpToolResult } from "./server";
 
 /*
- * The root agent's own door into #688.
- *
- * Before this there was none: the record, the machine and the HTTP surface all
- * existed, and the only way to raise a request was a hand-written POST. The
- * agent could not ask for the operator's attention through the surface it
- * actually has.
+ * The root agent's own door into #688 — since #873, an immediate VERIFIED
+ * handoff: the call resolves the one active view, moves it, and answers only
+ * after the arrival landed on the record. The wait/selection/failure contract
+ * itself lives in `requestAttention.immediate.test.ts`; this file keeps the
+ * door's other properties — attribution, target resolution, refusals, receipt
+ * durability, and the server-resolved root identity.
  */
 
 let sandbox = "";
@@ -34,14 +34,19 @@ beforeEach(() => {
   previousStateDir = process.env.LLV_STATE_DIR;
   sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-attention-"));
   process.env.LLV_STATE_DIR = sandbox;
+  /* Presence decides which view the handoff moves, so a view left over from
+     another test would answer this one's question for it. */
+  resetPresenceForTest();
 });
 afterEach(() => {
+  resetPresenceForTest();
   if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
   else process.env.LLV_STATE_DIR = previousStateDir;
   fs.rmSync(sandbox, { recursive: true, force: true });
 });
 
 const REVIEWER = "/tmp/reviewer.jsonl";
+const DEVICE = "device-desktop";
 
 const reviewerFile = {
   path: REVIEWER,
@@ -68,6 +73,10 @@ interface Adoptions { count: number }
     otherwise. The guard itself is exercised by the D4 tests at the bottom. */
 const ROOT_CALLER: AttentionCallerAuthority = { kind: "root", conversationId: "conversation_root" };
 
+/** The real awaiter on a clock a test can afford. */
+const fastArrival: typeof awaitAttentionArrival = (id, options = {}) =>
+  awaitAttentionArrival(id, { pollMs: 5, timeoutMs: 1_500, ...options });
+
 function bindings(
   adoptions: Adoptions = { count: 0 },
   adoptRootSession = () => { adoptions.count += 1; },
@@ -87,11 +96,59 @@ function bindings(
     /* The real one: it resolves the state path per call, so the sandbox set in
        beforeEach applies and the request lands on a real record. */
     raiseAttentionRequest,
+    awaitAttentionArrival: fastArrival,
   } as never);
 }
 
 function service(adoptions: Adoptions = { count: 0 }) {
   return createMcpToolService(bindings(adoptions), new MemoryMcpReceiptStore());
+}
+
+function openView(overrides: Partial<PresencePayloadV1> = {}): PresencePayloadV1 {
+  return {
+    schemaVersion: 1,
+    viewSessionId: "view-1",
+    deviceId: DEVICE,
+    device: { kind: "desktop", browser: "chrome" },
+    visibility: "visible",
+    sequence: 1,
+    inputSequence: 1,
+    project: "live-log-viewer-next",
+    mode: "scheme",
+    viewport: { width: 1_600, height: 900, dpr: 2 },
+    camera: { x: 10, y: 20, zoom: 0.6, worldRect: { x: 0, y: 0, width: 100, height: 80 } },
+    focusedPath: null,
+    selectedPaths: [],
+    visiblePaths: [],
+    board: { renderedRevision: 4, durableRevision: 4, sync: "current" },
+    ...overrides,
+  };
+}
+
+/** An open desk plus its browser: lands every request directed at it, so the
+    verified handoff can complete and the property under test stays visible. */
+function desk() {
+  upsertPresence(openView());
+  const timer = setInterval(() => {
+    try {
+      for (const request of readAttentionFile().requests) {
+        if (request.state !== "accepted" || request.acknowledgedBy !== DEVICE) continue;
+        answerAttentionRequest(request.id, {
+          kind: "arrive",
+          deviceId: DEVICE,
+          returnPoint: {
+            deviceId: DEVICE,
+            mode: "scheme",
+            camera: { x: 120, y: 340, zoom: 0.55 },
+            focusedPath: "/tmp/what-i-was-reading.jsonl",
+            capturedAt: new Date().toISOString(),
+          },
+          resolution: "exact",
+        });
+      }
+    } catch { /* mid-write read; the next tick sees the settled file */ }
+  }, 10);
+  return { stop: () => clearInterval(timer) };
 }
 
 /** A root conversation exactly as the registry holds one — the `root` role on
@@ -135,172 +192,211 @@ const ask = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
-test("the root agent can raise a request through its normal tool surface", async () => {
-  const adoptions = { count: 0 };
-  const result = await service(adoptions).callTool("request_attention", ask()) as McpToolResult & { attentionId?: string };
+test("the root agent can move the view through its normal tool surface", async () => {
+  const browser = desk();
+  try {
+    const adoptions = { count: 0 };
+    const result = await service(adoptions).callTool("request_attention", ask()) as McpToolResult & { attentionId?: string };
 
-  expect(result.ok).toBe(true);
-  expect(result.attentionId).toStartWith("attention_");
-  const stored = readAttentionFile().requests[0]!;
-  /* It only ASKS: nothing moves until the operator agrees on a device. */
-  expect(stored.state).toBe("pending");
-  expect(stored.origin).toBe("root-agent");
-  expect(stored.intent).toBe("show");
-  /* The project is derived from the target rather than taken from the caller,
-     and the frame records that no board was read. */
-  expect(stored.frameAtCreation).toEqual({ project: "live-log-viewer-next", rect: { x: 0, y: 0, w: 0, h: 0 }, boardRevision: null });
-  /* The root is named by stable identity, never by a session path — and the
-     live session was folded into the chain on the way past. */
-  expect(stored.requestedBy.rootId).toBe(readRootLineage()!.rootId);
-  expect(adoptions.count).toBe(1);
+    expect(result.ok).toBe(true);
+    expect(result.attentionId).toStartWith("attention_");
+    const stored = readAttentionFile().requests[0]!;
+    /* #873: the success stands on a landed record — never on a pending ask. */
+    expect(stored.state).toBe("following");
+    expect(stored.origin).toBe("root-agent");
+    expect(stored.intent).toBe("show");
+    /* The project is derived from the target rather than taken from the caller,
+       and the frame records that no board was read. */
+    expect(stored.frameAtCreation).toEqual({ project: "live-log-viewer-next", rect: { x: 0, y: 0, w: 0, h: 0 }, boardRevision: null });
+    /* The root is named by stable identity, never by a session path — and the
+       live session was folded into the chain on the way past. */
+    expect(stored.requestedBy.rootId).toBe(readRootLineage()!.rootId);
+    expect(adoptions.count).toBe(1);
+  } finally {
+    browser.stop();
+  }
 });
 
-test("a repeated clientRequestId replays the same receipt instead of asking twice", async () => {
-  const tools = service();
+test("a repeated clientRequestId replays the same receipt instead of moving twice", async () => {
+  const browser = desk();
+  try {
+    const tools = service();
 
-  const first = await tools.callTool("request_attention", ask()) as McpToolResult & { attentionId?: string };
-  const again = await tools.callTool("request_attention", ask()) as McpToolResult & { attentionId?: string };
+    const first = await tools.callTool("request_attention", ask()) as McpToolResult & { attentionId?: string };
+    const again = await tools.callTool("request_attention", ask()) as McpToolResult & { attentionId?: string };
 
-  expect(again.replayed).toBe(true);
-  expect(again.attentionId).toBe(first.attentionId!);
-  /* One ask on the record. Without this a retried tool call would supersede its
-     own previous request and the operator would watch the card replace itself. */
-  expect(readAttentionFile().requests).toHaveLength(1);
+    expect(again.replayed).toBe(true);
+    expect(again.attentionId).toBe(first.attentionId!);
+    /* One move on the record. Without this a retried tool call would supersede
+       its own previous request and navigate the operator a second time. */
+    expect(readAttentionFile().requests).toHaveLength(1);
+  } finally {
+    browser.stop();
+  }
 });
 
-test("the same key with different arguments is a conflict, not a second ask", async () => {
-  const tools = service();
-  await tools.callTool("request_attention", ask());
+test("the same key with different arguments is a conflict, not a second move", async () => {
+  const browser = desk();
+  try {
+    const tools = service();
+    await tools.callTool("request_attention", ask());
 
-  const conflict = await tools.callTool("request_attention", ask({ reason: "Something else entirely." })) as McpToolResult;
+    const conflict = await tools.callTool("request_attention", ask({ reason: "Something else entirely." })) as McpToolResult;
 
-  expect(conflict).toMatchObject({ ok: false, code: "idempotency_conflict" });
-  expect(readAttentionFile().requests).toHaveLength(1);
+    expect(conflict).toMatchObject({ ok: false, code: "idempotency_conflict" });
+    expect(readAttentionFile().requests).toHaveLength(1);
+  } finally {
+    browser.stop();
+  }
 });
 
 test("every target kind the server can attribute resolves its own project", async () => {
-  const tools = service();
+  const browser = desk();
+  try {
+    const tools = service();
 
-  for (const [key, target, project] of [
-    ["pipeline", { kind: "pipeline", pipelineId: "pipeline_1" }, "pipeline-project"],
-    ["stage", { kind: "stage", pipelineId: "pipeline_1", stageId: "review" }, "pipeline-project"],
-    ["flow", { kind: "flowRound", flowId: "flow_1", round: 2 }, "flow-project"],
-    ["task", { kind: "task", taskId: "task_1" }, "other-project"],
-    ["point", { kind: "point", project: "geometric", x: 10, y: 20 }, "geometric"],
-  ] as const) {
-    const result = await tools.callTool("request_attention", ask({ clientRequestId: `raise-${key}`, target })) as McpToolResult;
-    expect(result.ok).toBe(true);
-    expect(readAttentionFile().requests.at(-1)!.frameAtCreation.project).toBe(project);
+    for (const [key, target, project] of [
+      ["pipeline", { kind: "pipeline", pipelineId: "pipeline_1" }, "pipeline-project"],
+      ["stage", { kind: "stage", pipelineId: "pipeline_1", stageId: "review" }, "pipeline-project"],
+      ["flow", { kind: "flowRound", flowId: "flow_1", round: 2 }, "flow-project"],
+      ["task", { kind: "task", taskId: "task_1" }, "other-project"],
+      ["point", { kind: "point", project: "geometric", x: 10, y: 20 }, "geometric"],
+    ] as const) {
+      const result = await tools.callTool("request_attention", ask({ clientRequestId: `raise-${key}`, target })) as McpToolResult;
+      expect(result.ok).toBe(true);
+      expect(readAttentionFile().requests.at(-1)!.frameAtCreation.project).toBe(project);
+    }
+
+    /* A geometric target IS its own frame, so it is the one kind that can degrade
+       to a real destination when nothing named survives. */
+    expect(readAttentionFile().requests.at(-1)!.frameAtCreation.rect).toEqual({ x: -290, y: -280, w: 600, h: 600 });
+  } finally {
+    browser.stop();
   }
-
-  /* A geometric target IS its own frame, so it is the one kind that can degrade
-     to a real destination when nothing named survives. */
-  expect(readAttentionFile().requests.at(-1)!.frameAtCreation.rect).toEqual({ x: -290, y: -280, w: 600, h: 600 });
 });
 
 test("a target the server cannot attribute is refused rather than filed under a guess", async () => {
-  const tools = service();
+  const browser = desk();
+  try {
+    const tools = service();
 
-  const draft = await tools.callTool("request_attention", ask({ clientRequestId: "raise-draft", target: { kind: "draft", draftId: "d1" } })) as McpToolResult;
-  const missing = await tools.callTool("request_attention", ask({ clientRequestId: "raise-missing", target: { kind: "conversation", path: "/tmp/nope.jsonl" } })) as McpToolResult;
-  const nonsense = await tools.callTool("request_attention", ask({ clientRequestId: "raise-nonsense", target: { kind: "elsewhere" } })) as McpToolResult;
+    const draft = await tools.callTool("request_attention", ask({ clientRequestId: "raise-draft", target: { kind: "draft", draftId: "d1" } })) as McpToolResult;
+    const missing = await tools.callTool("request_attention", ask({ clientRequestId: "raise-missing", target: { kind: "conversation", path: "/tmp/nope.jsonl" } })) as McpToolResult;
+    const nonsense = await tools.callTool("request_attention", ask({ clientRequestId: "raise-nonsense", target: { kind: "elsewhere" } })) as McpToolResult;
 
-  expect(draft).toMatchObject({ ok: false, error: "a draft target needs an explicit project" });
-  expect(missing).toMatchObject({ ok: false, error: "no conversation on the board has that transcript path" });
-  expect(nonsense).toMatchObject({ ok: false, error: "target must be a typed focus target" });
-  expect(readAttentionFile().requests).toEqual([]);
+    expect(draft).toMatchObject({ ok: false, error: "a draft target needs an explicit project" });
+    expect(missing).toMatchObject({ ok: false, error: "no conversation on the board has that transcript path" });
+    expect(nonsense).toMatchObject({ ok: false, error: "target must be a typed focus target" });
+    expect(readAttentionFile().requests).toEqual([]);
 
-  /* Naming the project explicitly is the way through for a board draft. */
-  const named = await tools.callTool("request_attention", ask({ clientRequestId: "raise-draft-2", target: { kind: "draft", draftId: "d1" }, project: "demo" })) as McpToolResult;
-  expect(named.ok).toBe(true);
-  expect(readAttentionFile().requests[0]!.frameAtCreation.project).toBe("demo");
+    /* Naming the project explicitly is the way through for a board draft. */
+    const named = await tools.callTool("request_attention", ask({ clientRequestId: "raise-draft-2", target: { kind: "draft", draftId: "d1" }, project: "demo" })) as McpToolResult;
+    expect(named.ok).toBe(true);
+    expect(readAttentionFile().requests[0]!.frameAtCreation.project).toBe("demo");
+  } finally {
+    browser.stop();
+  }
 });
 
 test("a geometric target may not be opened, and the refusal reaches the caller", async () => {
-  const tools = service();
+  const browser = desk();
+  try {
+    const refused = await service().callTool("request_attention", ask({
+      target: { kind: "region", project: "demo", rect: { x: 0, y: 0, w: 100, h: 100 } },
+      intent: "open",
+    })) as McpToolResult;
 
-  const refused = await tools.callTool("request_attention", ask({
-    target: { kind: "region", project: "demo", rect: { x: 0, y: 0, w: 100, h: 100 } },
-    intent: "open",
-  })) as McpToolResult;
-
-  /* Refused, never silently downgraded: the operator is told which of show and
-     open they are agreeing to, so a rewritten intent would make that a lie. */
-  expect(refused).toMatchObject({ ok: false, error: "a geometric target can only be shown, not opened" });
-  expect(readAttentionFile().requests).toEqual([]);
+    /* Refused, never silently downgraded: the operator is told which of show and
+       open they are agreeing to, so a rewritten intent would make that a lie. */
+    expect(refused).toMatchObject({ ok: false, error: "a geometric target can only be shown, not opened" });
+    expect(readAttentionFile().requests).toEqual([]);
+  } finally {
+    browser.stop();
+  }
 });
 
-test("the ask is a mutation, so its receipt outlives the MCP process", async () => {
-  const retentions: string[] = [];
-  const store = new MemoryMcpReceiptStore();
-  const spy = {
-    claim: (key: string, digest: string, retention: string) => {
-      retentions.push(retention);
-      return store.claim(key, digest);
-    },
-    complete: (key: string, digest: string, result: McpToolResult) => store.complete(key, digest, result),
-  };
+test("the move is a mutation, so its receipt outlives the MCP process", async () => {
+  const browser = desk();
+  try {
+    const retentions: string[] = [];
+    const store = new MemoryMcpReceiptStore();
+    const spy = {
+      claim: (key: string, digest: string, retention: string) => {
+        retentions.push(retention);
+        return store.claim(key, digest);
+      },
+      complete: (key: string, digest: string, result: McpToolResult) => store.complete(key, digest, result),
+    };
 
-  await createMcpToolService(bindings(), spy as never).callTool("request_attention", ask());
+    await createMcpToolService(bindings(), spy as never).callTool("request_attention", ask());
 
-  /* A bounded receipt would let a retry after a restart ask the operator a
-     second time for the same thing. */
-  expect(retentions).toEqual(["durable"]);
-  expect(MCP_TOOL_NAMES).toContain("request_attention");
+    /* A bounded receipt would let a retry after a restart move the operator a
+       second time for the same logical call. */
+    expect(retentions).toEqual(["durable"]);
+    expect(MCP_TOOL_NAMES).toContain("request_attention");
+  } finally {
+    browser.stop();
+  }
 });
 
 test("a raise folds the real live root session into the chain, and a rollover keeps the link", async () => {
-  /* The adoption runs for real here against registry-shaped conversations — not
-     a counter — because the defect this closes was the resolution reading a
-     field the registry never writes `root` into: the raise worked, the chain
-     stayed empty, and every request named an identity with no sessions behind
-     it. Only a production-shaped source can tell the two apart. */
-  let live = [rootConversation("conversation_root", "/tmp/root.jsonl", "2026-07-01T10:00:00.000Z")];
-  const tools = createMcpToolService(
-    bindings(undefined, () => { adoptLiveRootSession({ conversations: live, configuredRootId: null }); }),
-    new MemoryMcpReceiptStore(),
-  );
+  const browser = desk();
+  try {
+    /* The adoption runs for real here against registry-shaped conversations — not
+       a counter — because the defect this closes was the resolution reading a
+       field the registry never writes `root` into: the raise worked, the chain
+       stayed empty, and every request named an identity with no sessions behind
+       it. Only a production-shaped source can tell the two apart. */
+    let live = [rootConversation("conversation_root", "/tmp/root.jsonl", "2026-07-01T10:00:00.000Z")];
+    const tools = createMcpToolService(
+      bindings(undefined, () => { adoptLiveRootSession({ conversations: live, configuredRootId: null }); }),
+      new MemoryMcpReceiptStore(),
+    );
 
-  await tools.callTool("request_attention", ask());
+    await tools.callTool("request_attention", ask());
 
-  const identity = readRootLineage()!.rootId;
-  expect(readRootLineage()!.sessions).toHaveLength(1);
-  expect(readRootLineage()!.sessions[0]).toMatchObject({ conversationId: "conversation_root", path: "/tmp/root.jsonl" });
+    const identity = readRootLineage()!.rootId;
+    expect(readRootLineage()!.sessions).toHaveLength(1);
+    expect(readRootLineage()!.sessions[0]).toMatchObject({ conversationId: "conversation_root", path: "/tmp/root.jsonl" });
 
-  /* The rollover D5 exists for: the session the operator is talking to is
-     replaced, and a request raised before it must still resolve after. */
-  live = [...live, rootConversation("conversation_root_2", "/tmp/root-2.jsonl", "2026-07-01T11:00:00.000Z")];
-  await tools.callTool("request_attention", ask({ clientRequestId: "raise-2", reason: "The verifier is blocked on you." }));
+    /* The rollover D5 exists for: the session the operator is talking to is
+       replaced, and a request raised before it must still resolve after. */
+    live = [...live, rootConversation("conversation_root_2", "/tmp/root-2.jsonl", "2026-07-01T11:00:00.000Z")];
+    await tools.callTool("request_attention", ask({ clientRequestId: "raise-2", reason: "The verifier is blocked on you." }));
 
-  const sessions = readRootLineage()!.sessions;
-  expect(sessions.map((session) => session.conversationId)).toEqual(["conversation_root", "conversation_root_2"]);
-  expect(sessions[1]!.seededFrom).toBe("conversation_root");
-  /* Same stable identity across the rollover, and both requests named it. */
-  expect(readRootLineage()!.rootId).toBe(identity);
-  expect(readAttentionFile().requests.map((entry) => entry.requestedBy.rootId)).toEqual([identity, identity]);
+    const sessions = readRootLineage()!.sessions;
+    expect(sessions.map((session) => session.conversationId)).toEqual(["conversation_root", "conversation_root_2"]);
+    expect(sessions[1]!.seededFrom).toBe("conversation_root");
+    /* Same stable identity across the rollover, and both requests named it. */
+    expect(readRootLineage()!.rootId).toBe(identity);
+    expect(readAttentionFile().requests.map((entry) => entry.requestedBy.rootId)).toEqual([identity, identity]);
+  } finally {
+    browser.stop();
+  }
 });
 
 test("no rootId can be named by the caller", async () => {
-  const tools = service();
+  const browser = desk();
+  try {
+    await service().callTool("request_attention", ask({ rootId: "root_somebody_else" }));
 
-  await tools.callTool("request_attention", ask({ rootId: "root_somebody_else" }));
-
-  /* D4's authority rule: the service resolves the root identity itself, so a
-     worker holding this tool still cannot speak as a root of its choosing. */
-  expect(readAttentionFile().requests[0]!.requestedBy.rootId).toBe(readRootLineage()!.rootId);
-  expect(readAttentionFile().requests[0]!.requestedBy.rootId).not.toBe("root_somebody_else");
+    /* D4's authority rule: the service resolves the root identity itself, so a
+       worker holding this tool still cannot speak as a root of its choosing. */
+    expect(readAttentionFile().requests[0]!.requestedBy.rootId).toBe(readRootLineage()!.rootId);
+    expect(readAttentionFile().requests[0]!.requestedBy.rootId).not.toBe("root_somebody_else");
+  } finally {
+    browser.stop();
+  }
 });
 
 /*
- * B+ item 2: typed focus belongs to EVERY caller — the Viewer surface is one
- * management plane, and a session losing it because it was classified as a
- * worker is the defect the operator escalated (the voice coordinator and the
- * designated manager were both refused, and the historical root conversation
- * was unresumable, so nothing could focus a session at all).
- *
- * What replaces the refusal is ATTRIBUTION: the record durably names WHO
- * raised it, derived server-side from the durable caller identity, never from
- * anything the caller states.
+ * #873 review, finding 1: this call moves the operator's screen the moment it
+ * is made — no confirmation surface stands between the caller and the camera
+ * anymore — so who may make it is gated on server-derived authority. The tool
+ * stays on every session's surface (B+ availability is untouched); what the
+ * binding refuses is EXECUTION: only the operator's own root/gateway session
+ * and the target project's validated orchestrator seat move the view. A
+ * refused caller files nothing: zero attention records, zero navigation.
  */
 
 const workerCaller: AttentionCallerAuthority = {
@@ -313,81 +409,77 @@ function serviceAs(authority: AttentionCallerAuthority) {
   return createMcpToolService(bindings(undefined, undefined, () => authority), new MemoryMcpReceiptStore());
 }
 
-test("a worker holding this tool raises the focus request — refused for nobody", async () => {
-  const result = await serviceAs(workerCaller).callTool("request_attention", ask()) as McpToolResult & { attentionId?: string };
+test("a worker caller is refused before anything durable exists: no record, no navigation", async () => {
+  const browser = desk();
+  try {
+    const result = await serviceAs(workerCaller).callTool("request_attention", ask()) as McpToolResult;
 
-  expect(result.ok).toBe(true);
-  expect(result.attentionId).toStartWith("attention_");
-  /* The record durably attributes the actual caller: a worker's ask never
-     masquerades as the operator's own root agent asking. */
-  expect(readAttentionFile().requests[0]!.raisedBy)
-    .toEqual({ kind: "agent", conversationId: "conversation_reviewer", role: "reviewer" });
+    expect(result.ok).toBe(false);
+    expect((result as { details?: { code?: string; refusedAs?: string } }).details?.code).toBe("ATTENTION_NOT_PERMITTED");
+    expect((result as { details?: { refusedAs?: string } }).details?.refusedAs).toBe("worker");
+    /* Zero durable traces: nothing for any browser poll to navigate later. */
+    expect(readAttentionFile().requests).toHaveLength(0);
+  } finally {
+    browser.stop();
+  }
 });
 
-test("the gateway's raise is attributed as the gateway, a worker's as its own conversation", async () => {
-  await serviceAs(ROOT_CALLER).callTool("request_attention", ask({ clientRequestId: "raise-root" }));
-  const stored = readAttentionFile().requests[0]!;
-  expect(stored.raisedBy).toEqual({ kind: "gateway", conversationId: "conversation_root", role: null });
+test("the gateway's raise is attributed as the gateway", async () => {
+  const browser = desk();
+  try {
+    await serviceAs(ROOT_CALLER).callTool("request_attention", ask({ clientRequestId: "raise-root" }));
+    const stored = readAttentionFile().requests[0]!;
+    expect(stored.raisedBy).toEqual({ kind: "gateway", conversationId: "conversation_root", role: null });
+  } finally {
+    browser.stop();
+  }
 });
 
-test("a caller no recorded host names is allowed through, attributed as unidentified", async () => {
-  /* The operator's root session is often a terminal the Viewer observes rather
-     than launched, so there are ordinary setups with no host evidence naming
-     it. The record says so instead of guessing. */
-  const result = await serviceAs({ kind: "unidentified" }).callTool("request_attention", ask()) as McpToolResult;
+test("a caller no recorded host names is refused: an unattributable identity may not move the screen", async () => {
+  const browser = desk();
+  try {
+    /* Unidentified is an honest label for snapshots and reports, and exactly
+       the identity that must never hold the camera: nothing durable would say
+       WHO moved the operator's view. */
+    const result = await serviceAs({ kind: "unidentified" }).callTool("request_attention", ask()) as McpToolResult;
 
-  expect(result.ok).toBe(true);
-  expect(readAttentionFile().requests).toHaveLength(1);
-  expect(readAttentionFile().requests[0]!.raisedBy).toEqual({ kind: "unidentified", conversationId: null, role: null });
+    expect(result.ok).toBe(false);
+    expect((result as { details?: { code?: string; refusedAs?: string } }).details?.code).toBe("ATTENTION_NOT_PERMITTED");
+    expect((result as { details?: { refusedAs?: string } }).details?.refusedAs).toBe("unidentified");
+    expect(readAttentionFile().requests).toHaveLength(0);
+  } finally {
+    browser.stop();
+  }
 });
 
-/* ── What the answer says about who will see it ─────────────────────────── */
-
-function openView(overrides: Partial<PresencePayloadV1> = {}): PresencePayloadV1 {
-  return {
-    schemaVersion: 1,
-    viewSessionId: "view-1",
-    deviceId: "device-desktop",
-    device: { kind: "desktop", browser: "chrome" },
-    visibility: "visible",
-    sequence: 1,
-    inputSequence: 1,
-    project: "live-log-viewer-next",
-    mode: "scheme",
-    viewport: { width: 1_600, height: 900, dpr: 2 },
-    camera: { x: 10, y: 20, zoom: 0.6, worldRect: { x: 0, y: 0, width: 100, height: 80 } },
-    focusedPath: null,
-    selectedPaths: [],
-    visiblePaths: [],
-    board: { renderedRevision: 4, durableRevision: 4, sync: "current" },
-    ...overrides,
-  };
-}
+/* ── What the answer says about who was moved ───────────────────────────── */
 
 test("the answer names the desktop the operator is sitting in front of", async () => {
-  /* The reported defect, at the exact surface it was reported from: an open,
-     visible desktop viewer, and a tool answering `offeredTo: []`. The presence
-     the browser publishes lives in the server's process; the tool runs in
-     another one, so the answer has to come off the shared record rather than
-     out of whichever map this process happens to hold. */
-  resetPresenceForTest();
-  upsertPresence(openView());
+  /* The #873 successor of the old `offeredTo: []` defect: the tool runs in
+     another process than the presence heartbeat, so the answer has to come off
+     the shared record rather than out of whichever map this process holds —
+     and it now names the ONE device that was actually moved. */
+  const browser = desk();
+  try {
+    const result = await service().callTool("request_attention", ask()) as McpToolResult
+      & { request?: { offeredTo?: string[]; state?: string }; handoff?: { deviceId?: string } };
 
-  const result = await service().callTool("request_attention", ask()) as McpToolResult & { request?: { offeredTo?: string[]; state?: string } };
-
-  expect(result.ok).toBe(true);
-  expect(result.request!.offeredTo).toEqual(["device-desktop"]);
-  /* Still only an ask: naming the desktop is not agreeing on its behalf. */
-  expect(result.request!.state).toBe("pending");
-  resetPresenceForTest();
+    expect(result.ok).toBe(true);
+    expect(result.request!.offeredTo).toEqual([DEVICE]);
+    expect(result.handoff!.deviceId).toBe(DEVICE);
+    /* Landed, not asked: success exists only after the arrival. */
+    expect(result.request!.state).toBe("following");
+  } finally {
+    browser.stop();
+  }
 });
 
-test("with nobody at a desk the answer says so rather than naming a device that will not move", async () => {
-  resetPresenceForTest();
+test("with nobody at a desk the call fails explicitly rather than naming a device that will not move", async () => {
   upsertPresence(openView({ viewSessionId: "view-phone", deviceId: "device-phone", device: { kind: "mobile", browser: "safari" } }));
 
-  const result = await service().callTool("request_attention", ask()) as McpToolResult & { request?: { offeredTo?: string[] } };
+  const result = await service().callTool("request_attention", ask()) as McpToolResult;
 
-  expect(result.request!.offeredTo).toEqual([]);
-  resetPresenceForTest();
+  expect(result.ok).toBe(false);
+  expect((result as { details?: { code?: string } }).details?.code).toBe("NO_ACTIVE_VIEW");
+  expect(readAttentionFile().requests).toEqual([]);
 });

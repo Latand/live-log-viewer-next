@@ -1,0 +1,278 @@
+{
+  "issue": 873,
+  "capturedAt": "2026-08-03T14:40:18.504Z",
+  "buildHead": "0bed0eea443b2a79a94ece8f7ffc47f631db4b08",
+  "runner": "exact-head production build served by `next start` over the isolated demo runtime (fixtures/demo-home); headless host Chrome (two same-device tabs) over raw CDP; the real MCP tool service + bindings called cross-process over the same shared LLV_STATE_DIR, with only the caller-authority seam injected per scenario",
+  "contract": "authority-gated execution (root/orchestrator only, refusals file nothing); one browser session executes; success only after the chosen view's verified arrival; one-glide one-entry open; idempotent replay and restart replay over the durable operation identity; abort closes the record; one exact Return restoring camera and focus; explicit bounded failures",
+  "checks": [
+    {
+      "name": "a worker caller is refused before anything durable exists",
+      "pass": true,
+      "detail": {
+        "code": "ATTENTION_NOT_PERMITTED",
+        "refusedAs": "worker",
+        "requests": 0
+      }
+    },
+    {
+      "name": "an unidentified caller is refused the same way",
+      "pass": true,
+      "detail": {
+        "refusedAs": "unidentified",
+        "requests": 0
+      }
+    },
+    {
+      "name": "the same worker cannot execute a deployment: the designated-seat barrier refuses it",
+      "pass": true,
+      "detail": {
+        "code": "deploy_caller_not_designated"
+      }
+    },
+    {
+      "name": "presence names one device with two live browser sessions",
+      "pass": true,
+      "detail": {
+        "sessions": 2,
+        "devices": 1,
+        "visible": 1
+      }
+    },
+    {
+      "name": "MCP success exists and names a completed arrival",
+      "pass": true,
+      "detail": {
+        "handoff": {
+          "deviceId": "vs-9t5tr92b45msdc557u",
+          "viewSessionId": "vs-rlcp0rt2wwdmsdc557w",
+          "state": "following",
+          "resolution": "exact",
+          "arrivedAt": "2026-08-03T14:39:36.105Z"
+        },
+        "elapsedMs": 784
+      }
+    },
+    {
+      "name": "the durable record names ONE executing browser session and holds the pre-move return point",
+      "pass": true,
+      "detail": {
+        "state": "following",
+        "returnPoints": 1,
+        "directedSession": "tab-A"
+      }
+    },
+    {
+      "name": "the duplicate-host race resolves to exactly one navigation: the chosen tab moved, the other did not",
+      "pass": true,
+      "detail": {
+        "chosenTab": "A",
+        "chosenB": {
+          "x": 672,
+          "y": 261,
+          "w": 240,
+          "h": 312
+        },
+        "idleA": {
+          "x": 272,
+          "y": 323,
+          "w": 117,
+          "h": 152
+        },
+        "posts": {
+          "a": [
+            "arrive"
+          ],
+          "b": []
+        }
+      }
+    },
+    {
+      "name": "the pages' only word to the record was the arrival — no offer, no accept, no confirmation",
+      "pass": true,
+      "detail": {
+        "a": [
+          "arrive"
+        ],
+        "b": []
+      }
+    },
+    {
+      "name": "the target card physically arrived on screen before success, same-document",
+      "pass": true,
+      "detail": {
+        "before": {
+          "aRect": {
+            "x": 272,
+            "y": 323,
+            "w": 117,
+            "h": 152
+          },
+          "bRect": {
+            "x": 716,
+            "y": 323,
+            "w": 117,
+            "h": 152
+          }
+        },
+        "after": {
+          "aRect": {
+            "x": -236,
+            "y": 261,
+            "w": 240,
+            "h": 312
+          },
+          "bRect": {
+            "x": 672,
+            "y": 261,
+            "w": 240,
+            "h": 312
+          }
+        },
+        "viewport": {
+          "w": 1440,
+          "h": 900
+        }
+      }
+    },
+    {
+      "name": "exactly one Return action is on screen, on the chosen tab only",
+      "pass": true,
+      "detail": {
+        "chips": 1,
+        "buttons": 1
+      }
+    },
+    {
+      "name": "replaying the same clientRequestId returns the committed receipt and moves nothing",
+      "pass": true,
+      "detail": {
+        "replayed": true,
+        "requests": 1
+      }
+    },
+    {
+      "name": "a RESTARTED service adopts the same record: one record, one navigation, a recovered receipt",
+      "pass": true,
+      "detail": {
+        "recovered": true,
+        "attentionMatches": true
+      }
+    },
+    {
+      "name": "a durable receipt survives the process: the second life replays the first's settled success",
+      "pass": true,
+      "detail": {
+        "okA": true,
+        "recoveredA": true,
+        "okB": true,
+        "replayedB": true,
+        "idsMatch": true
+      }
+    },
+    {
+      "name": "the record's captured return point is the settled pre-move camera",
+      "pass": true,
+      "detail": {
+        "captured": {
+          "x": 4.451127819548873,
+          "y": 263.83458646616543,
+          "zoom": 0.19548872180451127
+        },
+        "preMove": {
+          "x": 4.451127819548873,
+          "y": 263.83458646616543,
+          "zoom": 0.19548872180451127,
+          "worldRect": {
+            "x": -22.769230769230774,
+            "y": -1349.6153846153848,
+            "width": 6097.538461538462,
+            "height": 4399.2307692307695
+          }
+        }
+      }
+    },
+    {
+      "name": "one Return restores the exact pre-move camera and focused card, and closes the record as returned",
+      "pass": true,
+      "detail": {
+        "restoredCamera": {
+          "x": 4.451127819548873,
+          "y": 263.83458646616543,
+          "zoom": 0.19548872180451127,
+          "worldRect": {
+            "x": -22.769230769230774,
+            "y": -1349.6153846153848,
+            "width": 6097.538461538462,
+            "height": 4399.2307692307695
+          }
+        },
+        "preMove": {
+          "x": 4.451127819548873,
+          "y": 263.83458646616543,
+          "zoom": 0.19548872180451127,
+          "worldRect": {
+            "x": -22.769230769230774,
+            "y": -1349.6153846153848,
+            "width": 6097.538461538462,
+            "height": 4399.2307692307695
+          }
+        },
+        "focusedPath": null,
+        "captured": null,
+        "state": "returned"
+      }
+    },
+    {
+      "name": "the validated orchestrator seat for the target's project directs the handoff",
+      "pass": true,
+      "detail": {
+        "ok": true,
+        "state": "following",
+        "project": "resolved"
+      }
+    },
+    {
+      "name": "intent=open lands with ONE glide and ONE history entry — no second move fights the camera",
+      "pass": true,
+      "detail": {
+        "historyDelta": 1,
+        "openRect": {
+          "x": 574,
+          "y": 145,
+          "w": 540,
+          "h": 702
+        },
+        "settledRect": {
+          "x": 574,
+          "y": 145,
+          "w": 540,
+          "h": 702
+        }
+      }
+    },
+    {
+      "name": "the open handoff's Return closes its record too",
+      "pass": true,
+      "detail": {
+        "state": "returned"
+      }
+    },
+    {
+      "name": "an aborted call is an explicit HANDOFF_ABORTED with a terminal record and zero movement",
+      "pass": true,
+      "detail": {
+        "code": "HANDOFF_ABORTED",
+        "recordState": "expired"
+      }
+    },
+    {
+      "name": "with no active view the call refuses as NO_ACTIVE_VIEW and files nothing",
+      "pass": true,
+      "detail": {
+        "code": "NO_ACTIVE_VIEW",
+        "requests": 4
+      }
+    }
+  ],
+  "verdict": "PASS"
+}

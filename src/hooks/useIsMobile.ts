@@ -2,7 +2,12 @@
 
 import { useSyncExternalStore } from "react";
 
-const QUERY = "(max-width: 767px)";
+import { MOBILE_LAYOUT_QUERY } from "@/lib/attention/eligibility";
+
+/* Shared with attention-handoff selection: a window this narrow disables the
+   attention host, so the selection predicate must count it out by the SAME
+   number — see `@/lib/attention/eligibility`. */
+const QUERY = MOBILE_LAYOUT_QUERY;
 
 function subscribe(onChange: () => void) {
   const mq = window.matchMedia(QUERY);

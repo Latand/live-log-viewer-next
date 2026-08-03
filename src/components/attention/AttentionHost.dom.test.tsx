@@ -16,8 +16,10 @@ import { validateAttentionEvent } from "@/lib/attention/validation";
 import { buildFocusFrameIndex, type FocusLayoutSlice } from "@/components/scheme/focusFrames";
 import type { MiniStack, SchemeRect } from "@/components/scheme/layout";
 
-import { AttentionHost } from "./AttentionHost";
+import { AttentionHost, resetHandoffTransactionsForTest } from "./AttentionHost";
 import { createFocusHandoffBus, type BoardFocusController } from "./focusHandoffBus";
+import { claimHandoff, readHandoffClaim } from "./handoffClaim";
+import type { FocusObservation } from "./navigate";
 
 /*
  * #688's last mile, end to end on a device.
@@ -42,6 +44,7 @@ const OVERRIDES: Record<string, unknown> = {
   localStorage: dom.localStorage,
   ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
 };
+OVERRIDES.sessionStorage = dom.sessionStorage;
 const HAS: Record<string, boolean> = {};
 const SAVED: Record<string, unknown> = {};
 const settle = async () => { for (let i = 0; i < 8; i += 1) await new Promise((r) => setTimeout(r, 0)); };
@@ -70,6 +73,10 @@ beforeEach(() => {
   /* The return-project memory lives here and is keyed by request id, which the
      tests reuse; a leak between them would hide the case where it is empty. */
   dom.localStorage.clear();
+  /* The per-tab handoff claims and the per-document transaction registry are
+     keyed the same way and leak the same way. */
+  tabClaims = memoryStorage();
+  resetHandoffTransactionsForTest();
   /* The tests that wait a clock out move this, so it is put back rather than
      leaking a later `now` into whichever test runs next. */
   now = new Date("2026-07-01T10:00:00.000Z");
@@ -136,11 +143,34 @@ interface BoardLog {
 /** The board the handoff lands on. `project` names which project's layout this
     is — the tests that pass another one are the ones about a camera or a name
     that must not cross a project boundary. */
+/** The most recent fake board's live-view observation — what `mount` hands the
+    host's settled-arrival wait by default. */
+let observedView: FocusObservation = { camera: null, focusedPath: null };
+
+/** Per-test tab claim storage. happy-dom's Storage drops `setItem` writes when
+    reached through the overridden global window, so the harness supplies a
+    real map — duplicate mounts of one "tab" share it, a second "tab" gets its
+    own. */
+function memoryStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> {
+  const map = new Map<string, string>();
+  return {
+    getItem: (key) => map.get(key) ?? null,
+    setItem: (key, value) => { map.set(key, value); },
+    removeItem: (key) => { map.delete(key); },
+  };
+}
+let tabClaims = memoryStorage();
+
 function board(rects: Record<string, FocusRect>, project = "demo") {
   const bus = createFocusHandoffBus();
   const log: BoardLog = { moved: [], restored: [] };
   const opened: string[] = [];
   const placed: string[] = [];
+  /* What the live view "shows": follows the fake board the way the presence
+     slice follows the real one, so the transaction's settled-arrival wait has
+     an honest observation to read. A move lands the camera ON the rect it was
+     asked to frame; a restore lands it on the restored coordinates. */
+  const view: FocusObservation = { camera: null, focusedPath: null };
   const controller: BoardFocusController = {
     project,
     index: {
@@ -149,8 +179,16 @@ function board(rects: Record<string, FocusRect>, project = "demo") {
       rectFor: (key) => rects[key] ?? null,
       named: [{ key: ANCHOR, label: "Reviewer — login fix", rect: LIVE_RECT }],
     },
-    moveTo: ({ rect }) => { log.moved.push(rect); return true; },
-    restoreCamera: (camera) => { log.restored.push(camera); return true; },
+    moveTo: ({ rect }) => {
+      log.moved.push(rect);
+      view.camera = { x: rect.x, y: rect.y, zoom: 1, worldRect: { x: rect.x - 50, y: rect.y - 50, width: rect.w + 100, height: rect.h + 100 } };
+      return true;
+    },
+    restoreCamera: (camera) => {
+      log.restored.push(camera);
+      view.camera = { ...camera, worldRect: { x: camera.x - 50, y: camera.y - 50, width: 1_000, height: 800 } };
+      return true;
+    },
   };
   bus.setBoard(controller);
   bus.setShell({
@@ -161,7 +199,8 @@ function board(rects: Record<string, FocusRect>, project = "demo") {
     placePath: (path) => { placed.push(path); },
     openOverview: () => {},
   });
-  return { bus, log, opened, placed };
+  observedView = view;
+  return { bus, log, opened, placed, view };
 }
 
 function raise(rect: FocusRect = RAISED_RECT) {
@@ -174,14 +213,28 @@ function raise(rect: FocusRect = RAISED_RECT) {
   }, { now, id: "attention_1" }).request;
 }
 
-function mount(bus: ReturnType<typeof board>["bus"]) {
+function mount(
+  bus: ReturnType<typeof board>["bus"],
+  overrides: Partial<Parameters<typeof AttentionHost>[0]> = {},
+) {
   const host = dom.document.createElement("div");
   dom.document.body.appendChild(host);
   const root = createRoot(host as unknown as Element);
   flushSync(() => root.render(
-    <AttentionHost mobile={false} bus={bus} deviceId={DEVICE} fetchFn={transport()} pollMs={100_000} timing={{ timeoutMs: 0, pollMs: 0 }} />,
+    <AttentionHost
+      mobile={false}
+      bus={bus}
+      deviceId={DEVICE}
+      fetchFn={transport()}
+      pollMs={100_000}
+      timing={{ timeoutMs: 0, pollMs: 0 }}
+      observe={() => observedView}
+      claimStorage={tabClaims}
+      {...overrides}
+    />,
   ));
   roots.push(root);
+  return root;
 }
 
 const one = (selector: string) => dom.document.querySelector(selector) as unknown as HTMLElement | null;
@@ -478,12 +531,22 @@ function layoutBoard(slice: FocusLayoutSlice, onOpenPath?: (path: string, publis
   const log: BoardLog = { moved: [], restored: [] };
   const opened: string[] = [];
   const placed: string[] = [];
+  const view: FocusObservation = { camera: null, focusedPath: null };
+  observedView = view;
   const publish = (next: FocusLayoutSlice) => {
     bus.setBoard({
       project: "demo",
       index: buildFocusFrameIndex(next, "demo", { boardRevision: 9 }),
-      moveTo: ({ rect }) => { log.moved.push(rect); return true; },
-      restoreCamera: (camera) => { log.restored.push(camera); return true; },
+      moveTo: ({ rect }) => {
+        log.moved.push(rect);
+        view.camera = { x: rect.x, y: rect.y, zoom: 1, worldRect: { x: rect.x - 50, y: rect.y - 50, width: rect.w + 100, height: rect.h + 100 } };
+        return true;
+      },
+      restoreCamera: (camera) => {
+        log.restored.push(camera);
+        view.camera = { ...camera, worldRect: { x: camera.x - 50, y: camera.y - 50, width: 1_000, height: 800 } };
+        return true;
+      },
     });
   };
   publish(slice);
@@ -561,4 +624,266 @@ test("a conversation the board is not showing is asked for, followed once, and r
   await settle();
   expect(log.restored).toEqual([{ x: 120, y: 340, zoom: 0.55 }]);
   expect(record().state).toBe("returned");
+});
+
+/* ── #873: the directed handoff — the server already chose this device ───── */
+
+/** What the MCP tool now records: born `accepted` for this one device, with
+    the unread frame every tool-raised request carries. */
+function raiseDirected(rect: FocusRect = RAISED_RECT, id = "attention_1") {
+  return raiseAttentionRequest({
+    origin: "root-agent",
+    target: { kind: "conversation", path: ANCHOR },
+    frameAtCreation: { project: "demo", rect, boardRevision: 4 },
+    intent: "show",
+    reason: "The reviewer finished with request-changes.",
+    directedAt: DEVICE,
+  }, { now, id }).request;
+}
+
+/** The transport, with every POSTed event kind on the record. */
+function recordedTransport() {
+  const posted: string[] = [];
+  const inner = transport();
+  const fetchFn = (async (url: string, init?: { body?: string }) => {
+    if (init?.body) posted.push((JSON.parse(init.body) as { kind: string }).kind);
+    return inner(url as never, init as never);
+  }) as unknown as typeof fetch;
+  return { posted, fetchFn };
+}
+
+function mountWith(bus: ReturnType<typeof board>["bus"], fetchFn: typeof fetch) {
+  mount(bus, { fetchFn });
+}
+
+test("a directed request moves the real board without one offer or accept POST", async () => {
+  raiseDirected();
+  expect(record().state).toBe("accepted");
+  const { bus, log } = board({ [ANCHOR]: LIVE_RECT });
+  const { posted, fetchFn } = recordedTransport();
+
+  mountWith(bus, fetchFn);
+  await settle();
+
+  /* The camera physically moved to the target's live rect... */
+  expect(log.moved).toEqual([LIVE_RECT]);
+  /* ...and the ONLY thing this device ever said to the record is the arrival:
+     no offer, no accept, no confirmation of any kind. The MCP call blocked on
+     exactly this transition, so this is the moment its success becomes true. */
+  expect(posted).toEqual(["arrive"]);
+  expect(record().state).toBe("following");
+  expect(record().acceptedVia).toBe("auto-follow");
+  /* The pre-move viewport is on the record, captured before anything moved. */
+  expect(record().returnPoints).toHaveLength(1);
+  expect(record().returnPoints[0]).toMatchObject({
+    deviceId: DEVICE,
+    mode: "scheme",
+    camera: { x: 120, y: 340, zoom: 0.55 },
+    focusedPath: "/tmp/what-i-was-reading.jsonl",
+  });
+});
+
+test("exactly one Return action, and it restores the original frame exactly", async () => {
+  raiseDirected();
+  const { bus, log } = board({ [ANCHOR]: LIVE_RECT });
+  mount(bus);
+  await settle();
+
+  const chip = one("[data-testid='focus-return-chip']")!;
+  expect(chip.querySelectorAll("button")).toHaveLength(1);
+
+  click(one("[data-testid='attention-return']")!);
+  await settle();
+
+  /* The exact viewport the operator was at before the automatic move. */
+  expect(log.restored).toEqual([{ x: 120, y: 340, zoom: 0.55 }]);
+  expect(record().state).toBe("returned");
+  expect(record().returnedVia).toBe("control");
+  /* Once taken, the way back is gone: one Return, not a mode. */
+  expect(one("[data-testid='focus-return-chip']")).toBeNull();
+});
+
+test("polls never re-navigate a directed request: one arrival, however many heartbeats", async () => {
+  raiseDirected();
+  const { bus, log } = board({ [ANCHOR]: LIVE_RECT });
+  mount(bus);
+  await settle();
+  expect(log.moved).toHaveLength(1);
+
+  for (let i = 0; i < 20; i += 1) await poll();
+
+  expect(log.moved).toHaveLength(1);
+  expect(record().state).toBe("following");
+  expect(record().returnPoints).toHaveLength(1);
+});
+
+test("a directed request whose target is gone abandons: nothing moves, the record closes as lost", async () => {
+  raiseDirected(UNREAD_FRAME_RECT);
+  const { bus, log } = board({});
+  mount(bus);
+  await settle();
+
+  expect(log.moved).toEqual([]);
+  expect(one("[data-testid='focus-return-chip']")).toBeNull();
+  /* The bounded failure the blocked MCP call reports as TARGET_LOST. */
+  expect(record().state).toBe("expired");
+  expect(record().expiredCause).toBe("lost");
+});
+
+test("an arrival the network swallowed is retried with the pre-move viewport, and no Return shows before the record has it", async () => {
+  raiseDirected();
+  unreachable = new Set(["arrive"]);
+  const { bus, log } = board({ [ANCHOR]: LIVE_RECT });
+  mount(bus);
+  await settle();
+
+  /* The move happened, the record does not know: the request is still
+     `accepted`, so there is no follow to offer a Return for — and none shows. */
+  expect(log.moved).toEqual([LIVE_RECT]);
+  expect(record().state).toBe("accepted");
+  expect(one("[data-testid='focus-return-chip']")).toBeNull();
+
+  /* The camera is at the TARGET now. The retry must not recapture it. */
+  viewBus.reportSlice({ ...WHERE_I_WAS, camera: { x: 900, y: 1_400, zoom: 0.9, worldRect: { x: 0, y: 0, width: 1_000, height: 800 } } });
+  unreachable = new Set();
+  await poll();
+
+  /* One arrival, carrying the viewport from BEFORE the move. */
+  expect(record().state).toBe("following");
+  expect(record().returnPoints).toHaveLength(1);
+  expect(record().returnPoints[0]).toMatchObject({
+    deviceId: DEVICE,
+    mode: "scheme",
+    camera: { x: 120, y: 340, zoom: 0.55 },
+    focusedPath: "/tmp/what-i-was-reading.jsonl",
+  });
+  /* And the view never moved a second time. */
+  expect(log.moved).toHaveLength(1);
+
+  /* Now — and only now — the way back is on offer, and it works. */
+  click(one("[data-testid='attention-return']")!);
+  await settle();
+  expect(log.restored).toEqual([{ x: 120, y: 340, zoom: 0.55 }]);
+  expect(record().state).toBe("returned");
+});
+
+/* ── #873 review, finding 2: one browser session owns the execution ──────── */
+
+function raiseDirectedAtSession(sessionId: string, id = "attention_1") {
+  return raiseAttentionRequest({
+    origin: "root-agent",
+    target: { kind: "conversation", path: ANCHOR },
+    frameAtCreation: { project: "demo", rect: RAISED_RECT, boardRevision: 4 },
+    intent: "show",
+    reason: "The reviewer finished with request-changes.",
+    directedAt: DEVICE,
+    directedAtSession: sessionId,
+  }, { now, id }).request;
+}
+
+test("two tabs on one device: only the session the record names executes; the other never moves", async () => {
+  raiseDirectedAtSession("tab-active");
+  const named = board({ [ANCHOR]: LIVE_RECT });
+  const other = board({ [ANCHOR]: LIVE_RECT });
+
+  /* The unnamed tab first — if execution were device-scoped it would win the
+     race and both would move. Each tab observes its OWN board. */
+  mount(other.bus, { viewSessionId: "tab-idle", claimStorage: memoryStorage(), observe: () => other.view });
+  mount(named.bus, { viewSessionId: "tab-active", claimStorage: memoryStorage(), observe: () => named.view });
+  await settle();
+
+  expect(named.log.moved).toEqual([LIVE_RECT]);
+  expect(other.log.moved).toEqual([]);
+  expect(record().state).toBe("following");
+  expect(record().returnPoints).toHaveLength(1);
+  /* Exactly ONE Return across both tabs: the point was captured from the named
+     tab's viewport, so only that tab may offer the way back. */
+  await poll();
+  expect(dom.document.querySelectorAll("[data-testid='attention-return']").length).toBe(1);
+});
+
+test("a tab that does not know its own session yet waits instead of racing the named one", async () => {
+  raiseDirectedAtSession("tab-active");
+  const { bus, log } = board({ [ANCHOR]: LIVE_RECT });
+
+  /* The presence publisher has not reported the identity — production's first
+     poll can land in that window. */
+  mount(bus, { viewSessionId: null, claimStorage: memoryStorage() });
+  await settle();
+
+  expect(log.moved).toEqual([]);
+  expect(record().state).toBe("accepted");
+});
+
+test("duplicate mounts share one transaction: exactly one navigation, one arrival", async () => {
+  raiseDirected();
+  const { bus, log } = board({ [ANCHOR]: LIVE_RECT });
+  const { posted, fetchFn } = recordedTransport();
+
+  /* Two hosts in one document — a strict-mode double mount, a shell reshuffle
+     that briefly renders both. They share the tab's claim storage and the
+     document's transaction registry. */
+  mount(bus, { fetchFn });
+  mount(bus, { fetchFn });
+  await settle();
+
+  /* ONE navigation, whatever the mount interleaving. A second mount whose poll
+     view predates the arrival may re-post the arrival — the record refuses it
+     (409) and the surface re-reads — but it never moves the camera again and
+     never overwrites the original return point. */
+  expect(log.moved).toEqual([LIVE_RECT]);
+  expect(posted.every((kind) => kind === "arrive")).toBe(true);
+  expect(record().state).toBe("following");
+  expect(record().returnPoints).toHaveLength(1);
+  expect(record().returnPoints[0]).toMatchObject({ camera: { x: 120, y: 340, zoom: 0.55 } });
+});
+
+test("a remount after the move landed resumes with the ORIGINAL viewport and re-issues nothing", async () => {
+  raiseDirected();
+  const { bus, log, view } = board({ [ANCHOR]: LIVE_RECT });
+
+  /* The first mount claimed the handoff, moved the camera, and died before the
+     arrival report went out: the claim holds the pre-move viewport, the live
+     view already shows the target. */
+  claimHandoff(tabClaims, "attention_1", () => ({
+    mode: "scheme",
+    camera: { x: 120, y: 340, zoom: 0.55 },
+    focusedPath: "/tmp/what-i-was-reading.jsonl",
+    project: "demo",
+  }));
+  view.camera = { x: LIVE_RECT.x, y: LIVE_RECT.y, zoom: 1, worldRect: { x: LIVE_RECT.x - 50, y: LIVE_RECT.y - 50, width: LIVE_RECT.w + 100, height: LIVE_RECT.h + 100 } };
+
+  mount(bus);
+  await settle();
+
+  /* No second navigation: the camera was already there. The arrival is on the
+     record, carrying the viewport captured BEFORE the first mount moved — not
+     the destination a fresh capture would have written down. */
+  expect(log.moved).toEqual([]);
+  expect(record().state).toBe("following");
+  expect(record().returnPoints[0]).toMatchObject({
+    camera: { x: 120, y: 340, zoom: 0.55 },
+    focusedPath: "/tmp/what-i-was-reading.jsonl",
+  });
+});
+
+test("unmounting mid-handoff aborts the transaction: nothing is posted about a move nobody finished", async () => {
+  raiseDirected();
+  const { bus, log } = board({ [ANCHOR]: LIVE_RECT });
+  const { posted, fetchFn } = recordedTransport();
+  /* The observation never reaches the frame, so the transaction is still in
+     its settle wait when the host unmounts. */
+  const root = mount(bus, { fetchFn, observe: () => ({ camera: null, focusedPath: null }), timing: { timeoutMs: 60_000, pollMs: 1 } });
+  await settle();
+  flushSync(() => root.unmount());
+  roots = roots.filter((held) => held !== root);
+  await settle();
+
+  /* The move started; the report never went out. The record stays `accepted`
+     for the server's own deadline to close honestly — and the claim survives
+     for a remount to resume. */
+  expect(log.moved).toEqual([LIVE_RECT]);
+  expect(posted).toEqual([]);
+  expect(record().state).toBe("accepted");
+  expect(readHandoffClaim(tabClaims, "attention_1")).not.toBeNull();
 });
