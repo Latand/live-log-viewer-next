@@ -8,6 +8,7 @@ import type { Flow } from "@/lib/flows/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 import type { AgentRegistry as AgentRegistryType } from "@/lib/agent/registry";
+import { accountManager } from "@/lib/accounts/manager";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-engine-"));
 const engineModule = await import("./engine");
@@ -50,6 +51,82 @@ test("default pipeline projections reuse one registry parse across the historica
   } finally {
     fileReads.mockRestore();
     reads.mockRestore();
+    setAgentRegistryForTests(null);
+  }
+});
+
+test("a pipeline stage keeps its reserved account through a routing change before settlement", async () => {
+  const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "pipeline-account-pin-registry.json"));
+  const cwd = process.env.LLV_STATE_DIR!;
+  setAgentRegistryForTests(registry);
+  const resolveSpawn = spyOn(accountManager, "resolveSpawn").mockImplementation(() => ({
+    engine: "codex",
+    accountId: "limited",
+    kind: "managed",
+    home: process.env.LLV_STATE_DIR!,
+    transcriptRoot: process.env.LLV_STATE_DIR!,
+    env: { NODE_ENV: "test" },
+  }));
+  const reservations: Array<{ launchId: string; conversationId: string }> = [];
+  try {
+    const ports = defaultPipelinePorts();
+    await expect(ports.spawnAgent({
+      role: {
+        roleId: "builder",
+        engine: "codex",
+        model: "gpt-5.6-sol",
+        effort: "xhigh",
+        access: "read-write",
+        promptScaffold: "Builder guidance",
+      },
+      cwd,
+      ["prompt"]: "Build the scoped change",
+      parentPath: null,
+      clientAttemptId: "pipeline_account_pin_attempt",
+      membership: {
+        kind: "pipeline",
+        containerId: "pipeline-account-pin",
+        role: "builder",
+        slot: "build:1",
+        stageId: "build",
+        stageOrder: 0,
+        round: 1,
+        parentConversationId: null,
+      },
+      creatorConversationId: null,
+    }, (created) => {
+      reservations.push(created);
+      registry.commitMigrationIntent({
+        engine: "codex",
+        targetId: "healthy",
+        origin: "manual",
+        requestId: "pipeline-routing-change",
+        expectedRevision: registry.engineRouting("codex").revision,
+      });
+      throw new Error("reservation captured");
+    })).rejects.toThrow("reservation captured");
+    const reservation = reservations[0];
+    if (!reservation) throw new Error("pipeline reservation was not captured");
+    const receipt = registry.snapshot().receipts[reservation.launchId]!;
+    const settled = registry.stageStructuredSpawn(receipt.launchId, {
+      key: { engine: "codex", sessionId: crypto.randomUUID() },
+      artifactPath: path.join(cwd, "pinned-pipeline-stage.jsonl"),
+      cwd,
+      accountId: "limited",
+      launchProfile: receipt.launchProfile,
+      status: "starting",
+      host: null,
+      structuredHost: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: "spawn",
+    });
+    if (settled.kind !== "settled") throw new Error("pipeline settlement conflicted");
+
+    expect(settled.receipt).toMatchObject({ accountId: "limited", accountPin: true });
+    expect(settled.conversation).toMatchObject({ pinnedAccountId: "limited", migration: null });
+  } finally {
+    resolveSpawn.mockRestore();
     setAgentRegistryForTests(null);
   }
 });

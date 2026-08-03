@@ -252,6 +252,8 @@ async function postTaskSpawn(
   const clientAttemptId = typeof body.clientAttemptId === "string"
     ? body.clientAttemptId
     : nextTaskAttemptId(registry, task, shape);
+  const accountPin = registry.spawnReceiptForClientAttempt(clientAttemptId)?.accountPin
+    ?? (previous !== null);
   const specBase = freshSpecFor(engine, cwdResult.cwd, {
     model: selectedModel.model,
     effort: reasoning.effort,
@@ -275,6 +277,7 @@ async function postTaskSpawn(
     cwd: cwdResult.cwd,
     transport: "tmux",
     accountId: account.accountId,
+    accountPin,
     origin: { kind: "operator" },
     ownStartingActuation: true,
     launchProfile: spec.launchProfile,

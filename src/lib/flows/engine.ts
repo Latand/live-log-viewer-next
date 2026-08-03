@@ -188,6 +188,7 @@ export function reserveReviewerSpawn(
     engine: role.engine,
     cwd: flow.cwd,
     accountId,
+    accountPin: accountId !== null,
     parentConversationId: owner.id,
     parentSessionKey: sessionKeyFromTranscript(owner.engine, parentPath),
     parentArtifactPath: parentPath,
