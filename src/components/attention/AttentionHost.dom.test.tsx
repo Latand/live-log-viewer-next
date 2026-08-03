@@ -156,6 +156,7 @@ function board(rects: Record<string, FocusRect>, project = "demo") {
   bus.setShell({
     project,
     openProject: () => {},
+    openConversation: () => {},
     openPath: (path) => { opened.push(path); },
     placePath: (path) => { placed.push(path); },
     openOverview: () => {},
@@ -489,6 +490,7 @@ function layoutBoard(slice: FocusLayoutSlice, onOpenPath?: (path: string, publis
   bus.setShell({
     project: "demo",
     openProject: () => {},
+    openConversation: () => {},
     openPath: (path) => { opened.push(path); },
     /* Placement is what the recovery asks for now, so this is the stub that has
        to make the card appear. The camera is untouched: the only entry that

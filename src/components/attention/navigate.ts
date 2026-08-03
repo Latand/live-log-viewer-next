@@ -120,7 +120,16 @@ export async function runFocusHandoff(
 ): Promise<FocusHandoffResult> {
   const project = focusHandoffProject(request);
   const shell = bus.shell();
-  if (shell && shell.project !== project) shell.openProject(project);
+  /* A handoff that will OPEN a conversation is ONE gesture, so it must leave
+     ONE history entry (issue #866 review): the project applies quietly here —
+     early, because the target board has to publish before the resolution below
+     can run — and the single entry is recorded by `openPath` further down. A
+     frame-only handoff is a lone project switch and records as before. */
+  const opensConversation = request.intent === "open" && request.target.kind === "conversation";
+  if (shell && shell.project !== project) {
+    if (opensConversation) shell.openConversation(project, null);
+    else shell.openProject(project);
+  }
 
   let board = await boardForProject(bus, project, timing);
   let resolved = resolveFocusTarget(request.target, usableFrame(request.frameAtCreation), board?.index ?? null);
@@ -217,7 +226,13 @@ export async function restoreFocusPoint(
     return true;
   }
 
-  if (project && shell && shell.project !== project) shell.openProject(project);
+  /* A return that is going straight to a focused card (the voice/PiP
+     return-to-card case) is ONE gesture and records ONE entry through the
+     combined open below. A camera restore — or a bare project return — is a
+     lone project switch and records as before. */
+  const switchNeeded = Boolean(project && shell && shell.project !== project);
+  const focusOnly = Boolean(point.focusedPath) && !(point.camera && project);
+  if (switchNeeded && !focusOnly) shell!.openProject(project!);
 
   if (point.camera && project) {
     const board = await boardForProject(bus, project, timing);
@@ -226,7 +241,8 @@ export async function restoreFocusPoint(
        is the only part of that viewport it can put back. */
   }
   if (point.focusedPath && shell) {
-    shell.openPath(point.focusedPath);
+    if (focusOnly) shell.openConversation(switchNeeded ? project : null, point.focusedPath);
+    else shell.openPath(point.focusedPath);
     return true;
   }
   /* Nothing was captured worth restoring — an overview with no focused card is

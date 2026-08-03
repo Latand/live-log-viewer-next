@@ -81,6 +81,18 @@ export interface ShellNavigator {
    * nothing at all.
    */
   openOverview(): void;
+  /**
+   * The combined cross-project conversation open (issue #866 review): one
+   * gesture, one history entry. Applies `project` WITHOUT recording a project
+   * navigation of its own — the focus record that `path` produces already
+   * carries the project — then opens the conversation. `project` null means
+   * the shell is already where the conversation lives; `path` null performs
+   * only the quiet project half, for a caller that must switch early (to let
+   * the target board publish) but records its single entry through `openPath`
+   * later in the same gesture. A LONE project switch is not this: it stays on
+   * `openProject`, which records a project navigation as before.
+   */
+  openConversation(project: string | null, path: string | null): void;
 }
 
 export interface FocusHandoffBus {

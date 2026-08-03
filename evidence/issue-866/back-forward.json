@@ -1,6 +1,6 @@
 {
   "issue": 866,
-  "capturedAt": "2026-08-03T08:26:08.877Z",
+  "capturedAt": "2026-08-03T10:09:37.560Z",
   "runner": "headless host Chrome over raw CDP against the isolated demo runtime (fixtures/demo-home)",
   "traversal": "history.back()/history.forward() — the session-history traversal browser and mouse Back/Forward perform",
   "checks": [

@@ -163,6 +163,49 @@ export function retargetRecordedProject(project: string, fallbackUrl: string): v
 }
 
 /**
+ * Fence for ONE history traversal (issue #866 review, medium finding).
+ *
+ * A traversal that lands on a typed entry dispatches `popstate` and then — only
+ * when the URL fragment actually changed — `hashchange`, both inside the same
+ * traversal task. The popstate half replays the entry with its full stored
+ * identity, so the hashchange half of that SAME traversal must be skipped, or
+ * it would overwrite the intent with a weaker one derived from the bare hash.
+ *
+ * A boolean flag was the wrong shape for this: a multi-entry jump
+ * (`history.go(-n)`) can land on a typed entry whose URL equals the current one,
+ * in which case NO hashchange fires, nothing consumed the flag, and it silently
+ * swallowed the next genuine hashchange — e.g. a cross-project conversation
+ * open issued through a `location.hash` assignment. The fence is therefore
+ * keyed to the traversal's own target hash (it can only ever swallow a
+ * hashchange to exactly that hash) and self-clears on the next macrotask, after
+ * the traversal task has fully dispatched both events.
+ */
+export interface TraversalFence {
+  /** Arm for the traversal that just delivered a typed popstate; `hash` is the
+      document's fragment after that traversal updated the URL. */
+  arm(hash: string): void;
+  /** Whether this hashchange is the armed traversal's own follow-up. */
+  swallows(hash: string): boolean;
+}
+
+export function createTraversalFence(
+  schedule: (clear: () => void) => void = (clear) => { setTimeout(clear, 0); },
+): TraversalFence {
+  let armed: string | null = null;
+  return {
+    arm(hash) {
+      armed = hash;
+      schedule(() => {
+        if (armed === hash) armed = null;
+      });
+    },
+    swallows(hash) {
+      return armed !== null && armed === hash;
+    },
+  };
+}
+
+/**
  * The replay half: Back/Forward (button, keyboard, mouse side-buttons) lands on
  * an entry and the browser fires `popstate`. Typed entries go to the handler;
  * untyped ones are left for the legacy `hashchange` listener, which already

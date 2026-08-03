@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  createTraversalFence,
   decideFocusAction,
   decideProjectAction,
   FOCUS_HISTORY_STATE_KEY,
@@ -115,5 +116,52 @@ describe("decideProjectAction", () => {
 
   test("a project selection over an untyped entry replaces, as before", () => {
     expect(decideProjectAction(null)).toBe("replace");
+  });
+});
+
+describe("createTraversalFence", () => {
+  const manual = () => {
+    const clears: Array<() => void> = [];
+    return {
+      schedule: (clear: () => void) => clears.push(clear),
+      runClears: () => { for (const clear of clears.splice(0)) clear(); },
+    };
+  };
+
+  test("swallows exactly the hashchange of the armed traversal", () => {
+    const timers = manual();
+    const fence = createTraversalFence(timers.schedule);
+    fence.arm("#c=conv-a");
+    expect(fence.swallows("#c=conv-a")).toBe(true);
+  });
+
+  test("a same-URL multi-entry jump leaves the fence armed only for its own hash — a cross-project location.hash open still processes", () => {
+    const timers = manual();
+    const fence = createTraversalFence(timers.schedule);
+    /* history.go(-2) landed on a typed entry whose URL equals the current one:
+       no hashchange fires, nothing consumes the fence. */
+    fence.arm("#c=conv-a");
+    /* The next genuine hashchange (a cross-project conversation open through a
+       location.hash assignment) targets a different hash and must not be
+       swallowed by the leftover arm. */
+    expect(fence.swallows("#c=conv-b")).toBe(false);
+    expect(fence.swallows("#f=/logs/other.jsonl")).toBe(false);
+  });
+
+  test("the arm self-clears after the traversal task, so even a later same-hash hashchange processes", () => {
+    const timers = manual();
+    const fence = createTraversalFence(timers.schedule);
+    fence.arm("#c=conv-a");
+    timers.runClears();
+    expect(fence.swallows("#c=conv-a")).toBe(false);
+  });
+
+  test("re-arming for a newer traversal replaces the previous arm", () => {
+    const timers = manual();
+    const fence = createTraversalFence(timers.schedule);
+    fence.arm("#c=conv-a");
+    fence.arm("#c=conv-b");
+    expect(fence.swallows("#c=conv-a")).toBe(false);
+    expect(fence.swallows("#c=conv-b")).toBe(true);
   });
 });

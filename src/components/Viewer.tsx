@@ -4,7 +4,7 @@ import { Crown, Filter, TriangleAlert, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 
 import { formatConversationHash, parseConversationHash, resolveConversationTarget, withoutArchivedPredecessors, type ConversationHash } from "@/lib/accounts/identity";
-import { parseFocusHistoryState, recordFocusNavigation, recordProjectNavigation, retargetRecordedProject } from "@/lib/navigation/focusHistory";
+import { createTraversalFence, parseFocusHistoryState, recordFocusNavigation, recordProjectNavigation, retargetRecordedProject } from "@/lib/navigation/focusHistory";
 import { onAccountPanelRequest } from "@/lib/accounts/openPanel";
 import { useAgentChimes } from "@/hooks/useAgentChimes";
 import { useArchivedProjects } from "@/hooks/useArchivedProjects";
@@ -174,9 +174,12 @@ export function Viewer() {
   const pendingHashRef = useRef<ConversationHash | null>(null);
   const staleTimerRef = useRef<number | null>(null);
   /* One history traversal fires `popstate` first, then `hashchange`. When the
-     popstate half already replayed a typed focus entry, the hashchange half
-     must not re-derive a weaker intent from the bare hash. */
-  const popstateHandledRef = useRef(false);
+     popstate half already replayed a typed focus entry, the hashchange half of
+     that SAME traversal must not re-derive a weaker intent from the bare hash.
+     Keyed to the traversal's target hash and self-clearing, so a same-URL
+     multi-entry jump (which fires no hashchange) cannot leave a stale arm that
+     swallows the next genuine hashchange — see `createTraversalFence`. */
+  const traversalFenceRef = useRef(createTraversalFence());
   useEffect(() => {
     filesRef.current = files;
   }, [files]);
@@ -207,10 +210,7 @@ export function Viewer() {
       /* The popstate half of this same traversal already replayed a typed
          focus entry with its full stored identity; deriving a second, weaker
          intent from the bare hash would drop the project and path support. */
-      if (popstateHandledRef.current) {
-        popstateHandledRef.current = false;
-        return;
-      }
+      if (traversalFenceRef.current.swallows(location.hash)) return;
       const next = readHash();
       if (next.filePath || next.conversationId) {
         dispatchCatalogPin({ kind: "release" });
@@ -242,8 +242,10 @@ export function Viewer() {
   useEffect(() => {
     const onPop = (event: PopStateEvent) => {
       const entry = parseFocusHistoryState(event.state);
-      popstateHandledRef.current = Boolean(entry);
       if (!entry) return;
+      /* The browser has already applied this traversal's URL, so the fragment
+         read here is exactly the hash whose follow-up hashchange must skip. */
+      traversalFenceRef.current.arm(location.hash);
       dispatchCatalogPin({ kind: "release" });
       setFocusRequest(null);
       /* Cross-project entries select the stored project first, then resolve. */
@@ -507,7 +509,13 @@ export function Viewer() {
        a project. `selectProject` already speaks the sentinel; the bus should
        not have to. */
     openOverview: () => selectProject(OVERVIEW),
-  }), [project, selectProject, requestFocus, placeOnBoard]);
+    /* One gesture, one entry: the quiet project half plus the recording focus
+       half (`requestFocus` writes the typed entry, which stores the project). */
+    openConversation: (targetProject, path) => {
+      if (targetProject && targetProject !== project) applyProject(targetProject);
+      if (path) requestFocus(path);
+    },
+  }), [project, selectProject, requestFocus, placeOnBoard, applyProject]);
 
   /* The N-cycle position anchors to an id: an item answered elsewhere drops
      out without moving the pointer's neighbors (D12). */
