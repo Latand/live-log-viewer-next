@@ -46,11 +46,11 @@ describe("feed markdown links", () => {
 
 describe("feed markdown images", () => {
   test("embeds image markdown instead of rendering a link", () => {
-    const rendered = md("![Admins screen](/home/latand/Projects/app/shot.png)");
+    const rendered = md("![Admins screen](~/Projects/app/shot.png)");
     const img = findImg(rendered);
     expect(img).not.toBeNull();
     expect(img!.props.alt).toBe("Admins screen");
-    expect(img!.props.src).toBe("/home/latand/Projects/app/shot.png");
+    expect(img!.props.src).toBe("~/Projects/app/shot.png");
     expect(() => findAnchor(rendered)).toThrow();
   });
 
