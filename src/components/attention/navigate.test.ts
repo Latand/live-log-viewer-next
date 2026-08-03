@@ -34,11 +34,14 @@ interface Moves {
   /** How many times the shell was sent back to the overview. */
   overview: number;
   projects: string[];
+  /** COMBINED cross-project conversation opens: quiet project half + at most
+      one recorded focus. `[project, path]` per call. */
+  combined: Array<[string | null, string | null]>;
 }
 
 function harness(project: string, rects: Record<string, FocusRect>, shellProject: string | null = project) {
   const bus = createFocusHandoffBus();
-  const log: Moves = { moved: [], restored: [], opened: [], placed: [], projects: [], overview: 0 };
+  const log: Moves = { moved: [], restored: [], opened: [], placed: [], projects: [], overview: 0, combined: [] };
   const board: BoardFocusController = {
     project,
     index: index(project, rects),
@@ -51,6 +54,7 @@ function harness(project: string, rects: Record<string, FocusRect>, shellProject
     openPath: (path) => log.opened.push(path),
     placePath: (path) => { log.placed.push(path); },
     openOverview: () => { log.overview += 1; },
+    openConversation: (proj, path) => { log.combined.push([proj, path]); },
   };
   bus.setBoard(board);
   bus.setShell(shell);
@@ -127,10 +131,11 @@ test("a vanished anchor whose request never read a board reports lost rather tha
 
 test("a target in another project opens that project first and waits for its board", async () => {
   const bus = createFocusHandoffBus();
-  const log: Moves = { moved: [], restored: [], opened: [], placed: [], projects: [], overview: 0 };
+  const log: Moves = { moved: [], restored: [], opened: [], placed: [], projects: [], overview: 0, combined: [] };
   bus.setShell({
     placePath: () => {},
     openOverview: () => {},
+    openConversation: () => {},
     project: "demo",
     openProject: (next) => {
       log.projects.push(next);
@@ -159,8 +164,8 @@ test("a target in another project opens that project first and waits for its boa
 
 test("nothing moves when no board ever answers for the target's project", async () => {
   const bus = createFocusHandoffBus();
-  const log: Moves = { moved: [], restored: [], opened: [], placed: [], projects: [], overview: 0 };
-  bus.setShell({ project: "demo", openProject: (next) => { log.projects.push(next); }, openPath: (path) => { log.opened.push(path); }, placePath: (path) => { log.placed.push(path); }, openOverview: () => {} });
+  const log: Moves = { moved: [], restored: [], opened: [], placed: [], projects: [], overview: 0, combined: [] };
+  bus.setShell({ project: "demo", openProject: (next) => { log.projects.push(next); }, openPath: (path) => { log.opened.push(path); }, placePath: (path) => { log.placed.push(path); }, openOverview: () => {}, openConversation: () => {} });
 
   const outcome = await runFocusHandoff(request({ frameAtCreation: frame("gone") }), bus, { timeoutMs: 5, pollMs: 1 });
 
@@ -194,7 +199,7 @@ test("returning on a camera-less surface falls back to what was focused there", 
   const bus = createFocusHandoffBus();
   const opened: string[] = [];
   bus.setBoard({ project: "demo", index: index("demo", {}), moveTo: () => true, restoreCamera: () => false });
-  bus.setShell({ project: "demo", openProject: () => {}, openPath: (path) => { opened.push(path); }, placePath: () => {}, openOverview: () => {} });
+  bus.setShell({ project: "demo", openProject: () => {}, openPath: (path) => { opened.push(path); }, placePath: () => {}, openOverview: () => {}, openConversation: () => {} });
 
   const restored = await restoreFocusPoint(
     { mode: "scheme" as const, camera: { x: 1, y: 2, zoom: 3 }, focusedPath: "/tmp/what-i-was-reading.jsonl" },
@@ -240,6 +245,7 @@ test("Back after a recovered handoff returns to the exact camera the operator le
     openPath: (path) => log.opened.push(path),
     placePath: (path) => { log.placed.push(path); rects[path] = { x: 40, y: 60, w: 600, h: 780 }; },
     openOverview: () => {},
+    openConversation: () => {},
   });
   const wasReading = { x: 1_204, y: 88, zoom: 0.42 };
 
@@ -281,9 +287,12 @@ test("a camera is never restored into a project it was not captured in", async (
 
   expect(log.restored).toEqual([]);
   /* The focused path names a thing rather than a coordinate, so it is the part
-     of that viewport that still means the same thing anywhere. */
+     of that viewport that still means the same thing anywhere. It comes back
+     through the combined open (one gesture, one history entry — #866 review),
+     with no project half because none was captured. */
   expect(restored).toBe(true);
-  expect(log.opened).toEqual(["/tmp/what-i-was-reading.jsonl"]);
+  expect(log.combined).toEqual([[null, "/tmp/what-i-was-reading.jsonl"]]);
+  expect(log.opened).toEqual([]);
   expect(log.projects).toEqual([]);
 });
 
@@ -298,8 +307,11 @@ test("returning to a camera-less mode restores what was focused there instead", 
   );
 
   expect(restored).toBe(true);
-  expect(log.projects).toEqual(["demo"]);
-  expect(log.opened).toEqual(["/tmp/what-i-was-reading.jsonl"]);
+  /* One combined entry carries both halves of the return (#866 review): the
+     project applies quietly and the focus record is the single history entry. */
+  expect(log.projects).toEqual([]);
+  expect(log.combined).toEqual([["demo", "/tmp/what-i-was-reading.jsonl"]]);
+  expect(log.opened).toEqual([]);
 });
 
 test("an unmounting board never blanks the controller a fresh one just published", () => {
@@ -340,7 +352,7 @@ test("a launched stage reaches a key-navigating surface as the card the board is
     },
     restoreCamera: () => false,
   });
-  bus.setShell({ project: "demo", openProject: () => {}, openPath: () => {}, placePath: () => {}, openOverview: () => {} });
+  bus.setShell({ project: "demo", openProject: () => {}, openPath: () => {}, placePath: () => {}, openOverview: () => {}, openConversation: () => {} });
 
   const outcome = await runFocusHandoff({
     target: { kind: "stage", pipelineId: "p1", stageId: "review" },
@@ -372,7 +384,7 @@ test("a stage still waiting to launch is pinned by its own slot", async () => {
     moveTo: (destination) => { destinations.push(destination); return true; },
     restoreCamera: () => false,
   });
-  bus.setShell({ project: "demo", openProject: () => {}, openPath: () => {}, placePath: () => {}, openOverview: () => {} });
+  bus.setShell({ project: "demo", openProject: () => {}, openPath: () => {}, placePath: () => {}, openOverview: () => {}, openConversation: () => {} });
 
   await runFocusHandoff({
     target: { kind: "stage", pipelineId: "p1", stageId: "deploy" },
@@ -401,6 +413,7 @@ test("a conversation the board is not showing is asked for, and the handoff land
        the camera stays exactly where the operator left it. */
     placePath: (path) => { log.placed.push(path); rects[path] = landed; },
     openOverview: () => {},
+    openConversation: () => {},
   });
 
   const outcome = await runFocusHandoff(
@@ -445,6 +458,7 @@ test("recovering a missing card still moves the camera exactly once, at the requ
     },
     placePath: (path) => { log.placed.push(path); rects[path] = landed; },
     openOverview: () => {},
+    openConversation: () => {},
   });
 
   const outcome = await runFocusHandoff(
@@ -551,4 +565,57 @@ test("an overview return with no shell to steer reports that it did not restore"
 
   expect(await restoreFocusPoint({ mode: "overview", camera: null, focusedPath: null }, null, bus, NO_WAIT))
     .toBe(false);
+});
+
+test("a cross-project OPEN handoff is one gesture: quiet project half plus exactly one recorded focus", async () => {
+  /* The review's medium bar for #866: openProject + openPath stacked TWO
+     history entries for a single accepted handoff. The project half must apply
+     without recording; `openPath` writes the one entry. */
+  const { bus, log } = harness("other", { "/tmp/reviewer.jsonl": RECT }, "demo");
+
+  await runFocusHandoff(request({ intent: "open", frameAtCreation: frame("other") }), bus, NO_WAIT);
+
+  expect(log.projects).toEqual([]);
+  expect(log.combined).toEqual([["other", null]]);
+  expect(log.opened).toEqual(["/tmp/reviewer.jsonl"]);
+});
+
+test("a cross-project SHOW handoff stays a lone project switch and records it as before", async () => {
+  const { bus, log } = harness("other", { "/tmp/reviewer.jsonl": RECT }, "demo");
+
+  await runFocusHandoff(request({ intent: "show", frameAtCreation: frame("other") }), bus, NO_WAIT);
+
+  expect(log.projects).toEqual(["other"]);
+  expect(log.combined).toEqual([]);
+  expect(log.opened).toEqual([]);
+});
+
+test("a cross-project return to a focused card (voice/PiP return) records one combined entry", async () => {
+  const { bus, log } = harness("other", {}, "demo");
+
+  const restored = await restoreFocusPoint({ camera: null, focusedPath: "/tmp/root.jsonl", mode: "scheme" }, "other", bus, NO_WAIT);
+
+  expect(restored).toBe(true);
+  expect(log.projects).toEqual([]);
+  expect(log.combined).toEqual([["other", "/tmp/root.jsonl"]]);
+  expect(log.opened).toEqual([]);
+});
+
+test("a same-project return to a focused card records the focus without a project half", async () => {
+  const { bus, log } = harness("demo", {});
+
+  await restoreFocusPoint({ camera: null, focusedPath: "/tmp/root.jsonl", mode: "scheme" }, "demo", bus, NO_WAIT);
+
+  expect(log.projects).toEqual([]);
+  expect(log.combined).toEqual([[null, "/tmp/root.jsonl"]]);
+});
+
+test("a camera-only return stays a lone project switch", async () => {
+  const { bus, log } = harness("other", {}, "demo");
+
+  await restoreFocusPoint({ camera: { x: 5, y: 6, zoom: 1 }, focusedPath: null, mode: "scheme" }, "other", bus, NO_WAIT);
+
+  expect(log.projects).toEqual(["other"]);
+  expect(log.combined).toEqual([]);
+  expect(log.restored).toEqual([{ x: 5, y: 6, zoom: 1 }]);
 });

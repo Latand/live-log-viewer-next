@@ -1660,6 +1660,7 @@ export const en = {
   // Viewer
   "viewer.closeProjects": "Close the project list",
   "viewer.agentWaiting": "Agent is waiting for a reply",
+  "viewer.staleFocusEntry": "That conversation is no longer available",
   "viewer.closeNotification": "Close the notification",
 
   // Viewer attention queue

@@ -34,7 +34,8 @@ import { PipelineTemplatePicker } from "./pipelines/PipelineTemplatePicker";
 import { buildSchemeLayout } from "./scheme/layout";
 import { buildSubagentTrays } from "./scheme/subagentTray";
 import type { SubagentTrayApi } from "./scheme/SubagentTrayView";
-import { conversationIdentity } from "@/lib/accounts/identity";
+import { conversationIdentity, formatConversationHash } from "@/lib/accounts/identity";
+import { recordFocusNavigation } from "@/lib/navigation/focusHistory";
 import { collapsibleWorkerFiles, groupWorkerStacks, pipelineOriginOf, pipelineStagePipelineIds, protectedReviewerNodes } from "./scheme/workerCollapse";
 import { launchHistoryFor, pipelineRetryTarget, retryPipelineLaunch } from "./launchHistoryModel";
 import { LaunchHistory } from "./LaunchHistory";
@@ -1214,9 +1215,16 @@ function ProjectDashboardView({
     const fileProject = projectKey(file);
     if (fileProject !== project) {
       queueColumnOpen(fileProject, file.path, isChildConversation(file));
-      gotoProject(fileProject);
+      /* Cross-project open navigates by CONVERSATION hash, not project hash:
+         the shell's resolver switches the project and focuses the card, and the
+         entry this assignment pushes gets typed in place by that resolver — one
+         deliberate gesture, one Back/Forward entry (issue #866). */
+      location.hash = formatConversationHash(file);
       return;
     }
+    /* Every same-project branch below is a deliberate card focus: record the
+       typed history entry once, up front. Repeats coalesce. */
+    recordFocusNavigation(file, project);
     /* Compact pipeline history stays out of Fit All/minimap until requested.
        A transcript click restores one ephemeral pane for inspection without
        changing durable board membership or duplicating the evidence row. */
@@ -1259,6 +1267,9 @@ function ProjectDashboardView({
       openSwitchboardFile(file);
       return;
     }
+    /* A folded sub-agent is a card focus like any other for history purposes;
+       the reveal itself stays ephemeral and never mutates durable placement. */
+    recordFocusNavigation(file, project);
     pendingFocusRef.current = path;
     setEphemeral((prev) => (prev.includes(path) ? prev : [...prev, path]));
   };
