@@ -28,9 +28,12 @@ function findImg(node: unknown): ReactElement<ImgProps> | null {
 }
 
 describe("feed markdown links", () => {
-  test("renders local markdown links as viewer deep links", () => {
-    const link = findAnchor(md("see [markdown.tsx](/home/latand/app/src/components/feed/markdown.tsx:57)"));
-    expect(link.props.href).toBe("#f=%2Fhome%2Flatand%2Fapp%2Fsrc%2Fcomponents%2Ffeed%2Fmarkdown.tsx");
+  test("hands local links to the Anchor with their raw spelling", () => {
+    /* The Anchor decides at render time: artifact extensions (like this .tsx)
+       open the in-app preview (#875), transcripts keep the `#f=` deep link —
+       see artifactAnchor.dom.test.tsx for the rendered behavior of both. */
+    const link = findAnchor(md("see [markdown.tsx](~/app/src/components/feed/markdown.tsx:57)"));
+    expect(link.props.href).toBe("~/app/src/components/feed/markdown.tsx:57");
     expect(link.props.label).toBe("markdown.tsx");
   });
 
