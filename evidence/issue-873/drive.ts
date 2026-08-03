@@ -214,7 +214,9 @@ async function main(): Promise<void> {
   /* The demo env allows the docker-bridge host for dev browsing; loopback
      renders SSR-empty. Assembled at runtime (see the note on A_ID). */
   const devHost = [172, 17, 0, 1].join(".");
-  const baseUrl = `http://${devHost}:${port}`;
+  /* The browser talks only to the PRODUCTION server, one port above the dev
+     one the bootstrap starts. */
+  const baseUrl = `http://${devHost}:${port + 1}`;
   const checks: Check[] = [];
   const expect = (name: string, pass: boolean, detail: unknown = null) => {
     checks.push({ name, pass, detail });
@@ -232,12 +234,35 @@ async function main(): Promise<void> {
     execSync("bunx next build --webpack", { cwd: repoRoot, env: buildEnv, stdio: "inherit" });
   }
 
-  console.log("booting isolated demo runtime (production server)…");
-  const runtime = await bootstrapDemoRuntime(repoRoot, port, undefined, { server: "start" });
+  console.log("booting isolated demo runtime…");
+  /* The shared bootstrap materializes the disposable fixture home, the tmux
+     pane and the isolated env (its own dev server rides along, unused). The
+     PRODUCTION server under test is spawned here, from the exact-head build
+     above, on a second isolated port with the same runtime env — so the demo
+     fixture module stays untouched by this evidence. */
+  const runtime = await bootstrapDemoRuntime(repoRoot, port);
+  const prodPort = port + 1;
   let chrome: ChildProcess | null = null;
+  let prodServer: ChildProcess | null = null;
   try {
-    await runtime.waitUntilReady();
-    console.log("demo server ready");
+    prodServer = spawn(
+      "bunx",
+      ["next", "start", "--hostname", "0.0.0.0", "--port", String(prodPort)],
+      { cwd: repoRoot, env: { ...runtime.env, NODE_ENV: "production" }, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    const prodDeadline = Date.now() + 60_000;
+    for (;;) {
+      if (prodServer.exitCode !== null) throw new Error(`production server exited with ${prodServer.exitCode}`);
+      try {
+        const response = await fetch(`http://127.0.0.1:${prodPort}/api/files`);
+        if (response.ok) break;
+      } catch {
+        /* still booting */
+      }
+      if (Date.now() > prodDeadline) throw new Error("production server did not become ready");
+      await sleep(250);
+    }
+    console.log("production server ready");
 
     /* This process becomes a sibling of the demo server over the SAME isolated
        state dir — the cross-process shape the MCP stdio server has in
@@ -684,6 +709,7 @@ async function main(): Promise<void> {
     if (failed.length) process.exitCode = 1;
   } finally {
     if (chrome) chrome.kill("SIGKILL");
+    if (prodServer && prodServer.exitCode === null) prodServer.kill("SIGKILL");
     await runtime.shutdown();
   }
 }

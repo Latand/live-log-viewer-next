@@ -522,18 +522,11 @@ export async function bootstrapDemoRuntime(
   repoRoot: string,
   port: number,
   questionPaneScript?: { source: string; args: string[] },
-  options: {
-    /** `start` serves the PRODUCTION build the caller has already made (the
-        #873 evidence runs the exact-head `next build`); `dev` compiles from
-        source as before. */
-    server?: "dev" | "start";
-  } = {},
 ): Promise<DemoRuntime> {
   const uid = process.getuid?.() ?? 1000;
   const root = captureRoot(repoRoot);
   removeGeneratedRuntime(root);
-  const production = options.server === "start";
-  const env = buildDemoEnvironment(repoRoot, uid, production ? { ...process.env, NODE_ENV: "production" } : process.env);
+  const env = buildDemoEnvironment(repoRoot, uid);
   ensureRuntimeDirectories(env, uid);
   copyFixtureSource(repoRoot, env.HOME!);
   materializeTemplates(env.HOME!, env.HOME!);
@@ -544,7 +537,7 @@ export async function bootstrapDemoRuntime(
   await startPendingQuestionPane(root, pendingPath, env, questionPaneScript);
   const server = spawn(
     "bunx",
-    ["next", production ? "start" : "dev", "--hostname", "0.0.0.0", "--port", String(port)],
+    ["next", "dev", "--hostname", "0.0.0.0", "--port", String(port)],
     { cwd: repoRoot, env, stdio: ["ignore", "pipe", "pipe"] },
   );
   const serverLogs = outputLines(server, "demo server output");
