@@ -16,7 +16,7 @@ import type { HostState, RuntimeEvent } from "./engineHost";
 import { adoptCodexRegistryHosts, bindCodexHostPersistence, persistCodexHost, startCodexStructuredHost, structuredHostsEnabled } from "./registry";
 import { STRUCTURED_IMAGE_CAPABILITY, structuredContent, type StructuredImageRef } from "./structuredContent";
 import type { RuntimeVoiceDelivery } from "./voiceDelivery";
-import { DEFAULT_VOICE_PERSONA, VOICE_PERSONA_FILE, voicePersona } from "./voicePersona";
+import { DEFAULT_VOICE_PERSONA, VOICE_PERSONA_FILE, legacyVoicePersonaBootstrapItemId, voicePersona } from "./voicePersona";
 
 class MemoryEventStore implements RuntimeEventStore {
   private readonly events = new Map<string, RuntimeEvent[]>();
@@ -356,8 +356,8 @@ describe("CodexAppServerHost", () => {
       realtimeSessionId: "realtime-1",
       personaBootstrap: { insertion: "accepted" },
     });
-    expect(started.personaBootstrap.receiptId).toMatch(/^voice_persona_[a-f0-9]{64}$/);
-    expect(started.personaBootstrap.itemId).toMatch(/^msg_voice_persona_[a-f0-9]{64}$/);
+    expect(started.personaBootstrap.receiptId).toMatch(/^voice_persona_[a-f0-9]{46}$/);
+    expect(started.personaBootstrap.itemId).toMatch(/^msg_voice_persona_[a-f0-9]{46}$/);
     // SDP requires a terminal CRLF; a missing one is healed, never trimmed —
     // OpenAI rejects an unterminated offer with "unmarshal SDP: EOF".
     /* The live model is named explicitly (#664): letting the backend choose
@@ -463,6 +463,48 @@ describe("CodexAppServerHost", () => {
       else process.env.XDG_CONFIG_HOME = previousConfigHome;
       fs.rmSync(isolated, { recursive: true, force: true });
     }
+  });
+
+  test("recognizes one persisted legacy persona row across repeated host restarts", async () => {
+    const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-legacy-voice-bootstrap-"));
+    const transcriptPath = path.join(isolated, "legacy-voice-thread.jsonl");
+    const threadId = "legacy-voice-thread";
+    const legacyItemId = legacyVoicePersonaBootstrapItemId(threadId);
+    fs.writeFileSync(transcriptPath, `${JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "message",
+        id: legacyItemId,
+        role: "developer",
+        content: [{ type: "input_text", text: "Persisted legacy persona." }],
+      },
+    })}\n`);
+
+    for (const suffix of ["first", "second"]) {
+      const server = new FakeAppServer(threadId);
+      server.threadPath = transcriptPath;
+      const host = await CodexAppServerHost.adopt(threadId, {
+        cwd: "/repo",
+        eventStore: new MemoryEventStore(),
+        spawnProcess: fakeSpawn(server),
+      });
+      try {
+        const started = await host.startRealtimeWebRtc(`v=0\r\na=ice-ufrag:${suffix}\r\n`);
+        expect(started.personaBootstrap.insertion).toBe("accepted");
+        expect(started.personaBootstrap.itemId.length).toBeLessThanOrEqual(64);
+        expect(server.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(0);
+        await host.stopRealtime();
+      } finally {
+        await host.release();
+      }
+    }
+
+    const personaRows = fs.readFileSync(transcriptPath, "utf8").trim().split("\n")
+      .map((line) => JSON.parse(line) as { payload?: { id?: string; role?: string } })
+      .filter((line) => line.payload?.role === "developer" && line.payload.id?.startsWith("msg_voice_persona_"));
+    expect(personaRows).toHaveLength(1);
+    expect(personaRows[0]?.payload?.id).toBe(legacyItemId);
+    fs.rmSync(isolated, { recursive: true, force: true });
   });
 
   test("seeds a resumed realtime call with the interrupted duplex tail in canonical order", async () => {
@@ -3588,7 +3630,7 @@ test("a refused persona insertion returns a bounded rejected receipt before real
       diagnostic: "Codex app-server request failed: Invalid request: unknown field `role`",
     },
   });
-  expect(rejected.personaBootstrap.receiptId).toMatch(/^voice_persona_[a-f0-9]{64}$/);
+  expect(rejected.personaBootstrap.receiptId).toMatch(/^voice_persona_[a-f0-9]{46}$/);
   expect(rejected.personaBootstrap.diagnostic?.length).toBeLessThanOrEqual(500);
   expect(server.requests.find((request) => request.method === "thread/realtime/start")).toBeUndefined();
   expect(host.currentRealtimeSessionId()).toBeNull();
