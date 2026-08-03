@@ -4,6 +4,7 @@ import { Crown, Filter, TriangleAlert, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 
 import { formatConversationHash, parseConversationHash, resolveConversationTarget, withoutArchivedPredecessors, type ConversationHash } from "@/lib/accounts/identity";
+import { parseFocusHistoryState, recordFocusNavigation, recordProjectNavigation, retargetRecordedProject } from "@/lib/navigation/focusHistory";
 import { onAccountPanelRequest } from "@/lib/accounts/openPanel";
 import { useAgentChimes } from "@/hooks/useAgentChimes";
 import { useArchivedProjects } from "@/hooks/useArchivedProjects";
@@ -71,13 +72,20 @@ export function reduceCatalogPin(state: CatalogPinState, event: CatalogPinEvent)
   return current;
 }
 
-function writeHash(project: string) {
-  if (project !== OVERVIEW) {
-    history.replaceState(null, "", "#p=" + encodeURIComponent(project));
-    return;
-  }
-  history.replaceState(null, "", location.pathname);
+/** The URL a project selection lands on: the project hash, or the bare route
+    for the overview. History semantics (push over a focused-card entry, replace
+    otherwise) live in `recordProjectNavigation`. */
+function projectUrl(project: string): string {
+  return project !== OVERVIEW ? "#p=" + encodeURIComponent(project) : location.pathname;
 }
+
+/** How long a Back/Forward replay waits for its pinned poll to resolve the
+    target before it reports the entry stale (issue #866): a few poll rounds,
+    then the intent clears so later history actions stay usable. */
+const STALE_FOCUS_REPLAY_MS = 8_000;
+
+/** How long the stale-entry notice stays up before it dismisses itself. */
+const STALE_FOCUS_NOTICE_MS = 6_000;
 
 /** One-line reason a queue item waits: question header, screen tail, or the stalled wording. */
 function attentionSnippet(t: TFunction, item: AttentionItem): string {
@@ -156,6 +164,25 @@ export function Viewer() {
   /* Placement without navigation — see `placePath` below. Its own state and its
      own nonce, so a place and a focus can never consume each other's edge. */
   const [placeRequest, setPlaceRequest] = useState<{ path: string; nonce: number } | null>(null);
+  /* A Back/Forward replay whose target never resolved (issue #866): the entry
+     is stale — deleted, purged, or beyond this machine. Fails visibly, then the
+     rest of the history stays usable. */
+  const [staleFocusNotice, setStaleFocusNotice] = useState(false);
+  /* Mirrors for the popstate replay path, which must read the latest values
+     from stable event listeners without re-registering them per poll. */
+  const filesRef = useRef<FileEntry[]>([]);
+  const pendingHashRef = useRef<ConversationHash | null>(null);
+  const staleTimerRef = useRef<number | null>(null);
+  /* One history traversal fires `popstate` first, then `hashchange`. When the
+     popstate half already replayed a typed focus entry, the hashchange half
+     must not re-derive a weaker intent from the bare hash. */
+  const popstateHandledRef = useRef(false);
+  useEffect(() => {
+    filesRef.current = files;
+  }, [files]);
+  useEffect(() => {
+    pendingHashRef.current = pendingHash;
+  }, [pendingHash]);
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
@@ -170,11 +197,20 @@ export function Viewer() {
     if (canonical === project) return;
     setProject(canonical);
     localStorage.setItem(PROJECT_KEY, canonical);
-    writeHash(canonical);
+    /* A rename, not a navigation: a typed focus entry keeps its place in the
+       history stack and only re-labels its stored project. */
+    retargetRecordedProject(canonical, projectUrl(canonical));
   }, [project, projectAliases]);
 
   useEffect(() => {
     const onHash = () => {
+      /* The popstate half of this same traversal already replayed a typed
+         focus entry with its full stored identity; deriving a second, weaker
+         intent from the bare hash would drop the project and path support. */
+      if (popstateHandledRef.current) {
+        popstateHandledRef.current = false;
+        return;
+      }
       const next = readHash();
       if (next.filePath || next.conversationId) {
         dispatchCatalogPin({ kind: "release" });
@@ -188,14 +224,66 @@ export function Viewer() {
         dispatchCatalogPin({ kind: "release" });
         setFocusRequest(null);
         if (next.project) setProject(next.project);
+        /* Back cleared the hash entirely: that entry was the overview. */
+        else if (!location.hash) setProject(OVERVIEW);
       }
     };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
+
+  /* Browser/mouse Back and Forward (issue #866): a typed entry replays through
+     the SAME bounded resolver a live deep link uses — pendingHash pins the
+     target into the ongoing poll, `resolveConversationTarget` resolves by
+     stable conversation id (aliases, migrations, launch routes included), and
+     `openPinnedFile` moves the existing camera. No reload, no route remount,
+     no board rebuild, no snapshot: this handler only sets the two states the
+     hashchange path already sets. Untyped entries fall through to it. */
+  useEffect(() => {
+    const onPop = (event: PopStateEvent) => {
+      const entry = parseFocusHistoryState(event.state);
+      popstateHandledRef.current = Boolean(entry);
+      if (!entry) return;
+      dispatchCatalogPin({ kind: "release" });
+      setFocusRequest(null);
+      /* Cross-project entries select the stored project first, then resolve. */
+      setProject(entry.project);
+      localStorage.setItem(PROJECT_KEY, entry.project);
+      const intent: ConversationHash = entry.conversationId
+        ? { conversationId: entry.conversationId, filePath: null, project: entry.project }
+        : { conversationId: null, filePath: entry.path, project: entry.project };
+      setPendingHash(intent);
+      /* A replay target the polls cannot produce is stale: report it and free
+         the stack instead of pinning a dead intent forever. */
+      if (staleTimerRef.current !== null) window.clearTimeout(staleTimerRef.current);
+      staleTimerRef.current = window.setTimeout(() => {
+        staleTimerRef.current = null;
+        const pending = pendingHashRef.current;
+        if (!pending) return;
+        if ((pending.conversationId ?? pending.filePath) !== (intent.conversationId ?? intent.filePath)) return;
+        setPendingHash(null);
+        dispatchCatalogPin({ kind: "release" });
+        setStaleFocusNotice(true);
+      }, STALE_FOCUS_REPLAY_MS);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => {
+      window.removeEventListener("popstate", onPop);
+      if (staleTimerRef.current !== null) window.clearTimeout(staleTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!staleFocusNotice) return;
+    const timer = window.setTimeout(() => setStaleFocusNotice(false), STALE_FOCUS_NOTICE_MS);
+    return () => window.clearTimeout(timer);
+  }, [staleFocusNotice]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  const selectProject = useCallback((nextProject: string) => {
+  /* The state half of a project selection, shared by routes that write their
+     own history entry (a card focus records `#c=`, which already names the
+     project) and routes that record a plain project navigation. */
+  const applyProject = useCallback((nextProject: string) => {
     setProject(nextProject);
     /* Explicit project navigation replaces the hash without a hashchange
        event, so any unresolved conversation intent is cancelled here. */
@@ -203,9 +291,13 @@ export function Viewer() {
     dispatchCatalogPin({ kind: "release" });
     setFocusRequest(null);
     localStorage.setItem(PROJECT_KEY, nextProject);
-    writeHash(nextProject);
     setDrawerOpen(false);
   }, []);
+
+  const selectProject = useCallback((nextProject: string) => {
+    applyProject(nextProject);
+    recordProjectNavigation(projectUrl(nextProject));
+  }, [applyProject]);
 
   /* The overview board has no project view state to report: presence publishes
      the overview context/slice here, and ProjectDashboard takes over the moment
@@ -233,15 +325,18 @@ export function Viewer() {
     return onAccountPanelRequest(() => setDrawerOpen(true));
   }, [isMobile]);
 
-  /* A file open (overview card, deep link) becomes a column of its project. */
+  /* A file open (overview card, deep link) becomes a column of its project.
+     One deliberate gesture, one typed history entry: the card focus record
+     carries the project, so no separate project entry is written. */
   const openFile = useCallback(
     (file: FileEntry) => {
       const key = projectKey(file);
       queueColumnOpen(key, file.path, isChildConversation(file));
-      selectProject(key);
+      applyProject(key);
+      recordFocusNavigation(file, key);
       setOpenNonce((value) => value + 1);
     },
-    [selectProject],
+    [applyProject],
   );
 
   /* Full-catalog list/search rows can sit beyond the scheme window. Their path
@@ -256,8 +351,11 @@ export function Viewer() {
     setDrawerOpen(false);
     setOpenNonce((value) => value + 1);
     setFocusRequest((previous) => ({ path: file.path, nonce: (previous?.nonce ?? 0) + 1, catalog: true }));
-    const hash = formatConversationHash(file);
-    history.replaceState(null, "", hash);
+    /* A hydrated open is the RESOLVER arriving (deep link, hashchange,
+       popstate replay): it re-types the entry the tab is standing on and never
+       pushes, so initial restoration adds no duplicate and a replay cannot
+       loop. A direct catalog click records the deliberate navigation. */
+    recordFocusNavigation(file, key, { restore: hydrated });
   }, []);
 
   const openCatalogFile = useCallback((file: FileEntry) => {
@@ -289,7 +387,7 @@ export function Viewer() {
   const releaseCatalogFile = useCallback((path: string) => {
     dispatchCatalogPin({ kind: "release", path });
     setFocusRequest((current) => current?.path === path ? null : current);
-    if (catalogPin?.path === path) writeHash(project);
+    if (catalogPin?.path === path) recordProjectNavigation(projectUrl(project));
   }, [catalogPin, project]);
 
   useEffect(() => {
@@ -379,6 +477,11 @@ export function Viewer() {
        unresolved deep-link intent; a stale pin must never re-steal focus when
        its target shows up in a later poll. */
     setPendingHash(null);
+    /* Every route through here is a deliberate focus (attention jump, crown
+       favorite, N-cycle, an accepted handoff's `openPath`): record it. A path
+       with no scanned entry still navigates, it just leaves no history. */
+    const file = filesRef.current.find((entry) => entry.path === path);
+    if (file) recordFocusNavigation(file, projectKey(file));
     setFocusRequest((prev) => ({ path, nonce: (prev?.nonce ?? 0) + 1, catalog: false }));
   }, []);
 
@@ -462,11 +565,13 @@ export function Viewer() {
   const jumpToItem = useCallback(
     (item: AttentionItem) => {
       setQueueOpen(false);
-      if (item.project !== project) selectProject(item.project);
+      /* One gesture, one history entry: the focus record below names the
+         project, so the switch itself writes nothing. */
+      if (item.project !== project) applyProject(item.project);
       cycleRef.current = item.id;
       requestFocus(item.file.path);
     },
-    [project, selectProject, requestFocus],
+    [project, applyProject, requestFocus],
   );
 
   /* A crowned row in the popover focuses its conversation, switching project
@@ -474,10 +579,10 @@ export function Viewer() {
   const openFavorite = useCallback(
     (row: FavoriteRow) => {
       setQueueOpen(false);
-      if (row.project !== project) selectProject(row.project);
+      if (row.project !== project) applyProject(row.project);
       requestFocus(row.file.path);
     },
-    [project, selectProject, requestFocus],
+    [project, applyProject, requestFocus],
   );
 
   useEffect(() => {
@@ -756,6 +861,16 @@ export function Viewer() {
       {/* Staging instances (#659) announce themselves on every device; prod
           renders nothing. Top-center, clear of both corner anchors. */}
       <StagingBadge />
+      {/* A Back/Forward entry whose conversation no longer resolves (issue
+          #866): says so and self-dismisses; the surrounding history keeps
+          working. Below the staging badge's anchor so the two never overlap. */}
+      {staleFocusNotice ? (
+        <div className="pointer-events-none fixed left-1/2 top-10 z-40 -translate-x-1/2" role="status" data-stale-focus-notice>
+          <div className="rounded-full border border-warning/45 bg-warning-soft px-3.5 py-1.5 text-[12px] font-semibold text-warning shadow-1 backdrop-blur">
+            {t("viewer.staleFocusEntry")}
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 

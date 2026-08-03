@@ -1603,6 +1603,7 @@ export const uk: Record<keyof typeof en, Message> = {
 
   "viewer.closeProjects": "Закрити список проєктів",
   "viewer.agentWaiting": "Агент чекає відповіді",
+  "viewer.staleFocusEntry": "Ця розмова більше недоступна",
   "viewer.closeNotification": "Закрити сповіщення",
 
   "attention.badge": { one: "{count} чекає", few: "{count} чекають", many: "{count} чекають", other: "{count} чекають" },
