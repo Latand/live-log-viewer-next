@@ -1,0 +1,321 @@
+{
+  "issue": 866,
+  "capturedAt": "2026-08-03T08:26:08.877Z",
+  "runner": "headless host Chrome over raw CDP against the isolated demo runtime (fixtures/demo-home)",
+  "traversal": "history.back()/history.forward() — the session-history traversal browser and mouse Back/Forward perform",
+  "checks": [
+    {
+      "name": "focus A records a typed entry keyed by stable identity",
+      "pass": true,
+      "detail": {
+        "hash": "#f=<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/22222222-x.jsonl",
+        "entry": {
+          "v": 1,
+          "conversationId": null,
+          "path": "<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/22222222-x.jsonl",
+          "project": "project_unresolved"
+        },
+        "pushes": 1,
+        "replaces": 1,
+        "marker": "alive",
+        "navEntries": 1
+      }
+    },
+    {
+      "name": "composer draft typed into card A",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "focus B pushes a second entry",
+      "pass": true,
+      "detail": {
+        "hash": "#f=<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/11111111-x.jsonl",
+        "entry": {
+          "v": 1,
+          "conversationId": null,
+          "path": "<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/11111111-x.jsonl",
+          "project": "project_unresolved"
+        },
+        "pushes": 2,
+        "replaces": 2,
+        "marker": "alive",
+        "navEntries": 1
+      }
+    },
+    {
+      "name": "repeated focus on B coalesces (no third entry)",
+      "pass": true,
+      "detail": {
+        "hash": "#f=<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/11111111-x.jsonl",
+        "entry": {
+          "v": 1,
+          "conversationId": null,
+          "path": "<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/11111111-x.jsonl",
+          "project": "project_unresolved"
+        },
+        "pushes": 2,
+        "replaces": 4,
+        "marker": "alive",
+        "navEntries": 1
+      }
+    },
+    {
+      "name": "sub-agent focus C records a third entry",
+      "pass": true,
+      "detail": {
+        "hash": "#f=<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/11111111-x/subagents/agent-builder.jsonl",
+        "entry": {
+          "v": 1,
+          "conversationId": null,
+          "path": "<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/11111111-x/subagents/agent-builder.jsonl",
+          "project": "project_unresolved"
+        },
+        "pushes": 3,
+        "replaces": 5,
+        "marker": "alive",
+        "navEntries": 1
+      }
+    },
+    {
+      "name": "Back focuses B",
+      "pass": true,
+      "detail": {
+        "hash": "#f=<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/11111111-x.jsonl",
+        "entry": {
+          "v": 1,
+          "conversationId": null,
+          "path": "<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/11111111-x.jsonl",
+          "project": "project_unresolved"
+        },
+        "pushes": 3,
+        "replaces": 8,
+        "marker": "alive",
+        "navEntries": 1
+      }
+    },
+    {
+      "name": "Back focuses A",
+      "pass": true,
+      "detail": {
+        "hash": "#f=<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/22222222-x.jsonl",
+        "entry": {
+          "v": 1,
+          "conversationId": null,
+          "path": "<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/22222222-x.jsonl",
+          "project": "project_unresolved"
+        },
+        "pushes": 3,
+        "replaces": 11,
+        "marker": "alive",
+        "navEntries": 1
+      }
+    },
+    {
+      "name": "Forward focuses B",
+      "pass": true,
+      "detail": {
+        "hash": "#f=<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/11111111-x.jsonl",
+        "entry": {
+          "v": 1,
+          "conversationId": null,
+          "path": "<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/11111111-x.jsonl",
+          "project": "project_unresolved"
+        },
+        "pushes": 3,
+        "replaces": 14,
+        "marker": "alive",
+        "navEntries": 1
+      }
+    },
+    {
+      "name": "Forward focuses C",
+      "pass": true,
+      "detail": {
+        "hash": "#f=<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/11111111-x/subagents/agent-builder.jsonl",
+        "entry": {
+          "v": 1,
+          "conversationId": null,
+          "path": "<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/11111111-x/subagents/agent-builder.jsonl",
+          "project": "project_unresolved"
+        },
+        "pushes": 3,
+        "replaces": 17,
+        "marker": "alive",
+        "navEntries": 1
+      }
+    },
+    {
+      "name": "traversal replay pushed no entries (no loops)",
+      "pass": true,
+      "detail": {
+        "hash": "#f=<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/11111111-x/subagents/agent-builder.jsonl",
+        "entry": {
+          "v": 1,
+          "conversationId": null,
+          "path": "<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/11111111-x/subagents/agent-builder.jsonl",
+          "project": "project_unresolved"
+        },
+        "pushes": 3,
+        "replaces": 17,
+        "marker": "alive",
+        "navEntries": 1
+      }
+    },
+    {
+      "name": "no document reload across traversal",
+      "pass": true,
+      "detail": {
+        "hash": "#f=<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/11111111-x/subagents/agent-builder.jsonl",
+        "entry": {
+          "v": 1,
+          "conversationId": null,
+          "path": "<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/11111111-x/subagents/agent-builder.jsonl",
+          "project": "project_unresolved"
+        },
+        "pushes": 3,
+        "replaces": 17,
+        "marker": "alive",
+        "navEntries": 1
+      }
+    },
+    {
+      "name": "board kept its DOM identity and unrelated card A stayed present",
+      "pass": true,
+      "detail": {
+        "nodeAlive": false,
+        "layerAlive": false,
+        "hostAlive": false,
+        "mainAlive": true,
+        "nodePresent": true,
+        "draft": "issue-866 draft survives traversal"
+      }
+    },
+    {
+      "name": "unsent composer draft survived Back/Forward",
+      "pass": true,
+      "detail": {
+        "nodeAlive": false,
+        "layerAlive": false,
+        "hostAlive": false,
+        "mainAlive": true,
+        "nodePresent": true,
+        "draft": "issue-866 draft survives traversal"
+      }
+    },
+    {
+      "name": "navigation never called /api/agent/snapshot",
+      "pass": true,
+      "detail": []
+    },
+    {
+      "name": "a new focus after Back truncates the forward branch",
+      "pass": true,
+      "detail": {
+        "beforeForward": {
+          "hash": "#f=<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/22222222-x.jsonl",
+          "entry": {
+            "v": 1,
+            "conversationId": null,
+            "path": "<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/22222222-x.jsonl",
+            "project": "project_unresolved"
+          },
+          "pushes": 4,
+          "replaces": 21,
+          "marker": "alive",
+          "navEntries": 1
+        },
+        "after": {
+          "hash": "#f=<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/22222222-x.jsonl",
+          "entry": {
+            "v": 1,
+            "conversationId": null,
+            "path": "<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/22222222-x.jsonl",
+            "project": "project_unresolved"
+          },
+          "pushes": 4,
+          "replaces": 21,
+          "marker": "alive",
+          "navEntries": 1
+        }
+      }
+    },
+    {
+      "name": "cross-project overview row found and clicked",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "cross-project focus stores a different project",
+      "pass": true,
+      "detail": "relay"
+    },
+    {
+      "name": "cross-project Back re-selects the stored project and focuses A",
+      "pass": true,
+      "detail": "project_unresolved"
+    },
+    {
+      "name": "cross-project traversal still no reload",
+      "pass": true,
+      "detail": {
+        "hash": "#f=<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/22222222-x.jsonl",
+        "entry": {
+          "v": 1,
+          "conversationId": null,
+          "path": "<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/22222222-x.jsonl",
+          "project": "project_unresolved"
+        },
+        "pushes": 6,
+        "replaces": 27,
+        "marker": "alive",
+        "navEntries": 1
+      }
+    },
+    {
+      "name": "stale replay target fails visibly",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "history remains usable after the stale entry",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "mobile 396px focus records the same typed entry",
+      "pass": true,
+      "detail": {
+        "hash": "#f=<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/22222222-x.jsonl",
+        "entry": {
+          "v": 1,
+          "conversationId": null,
+          "path": "<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/22222222-x.jsonl",
+          "project": "project_unresolved"
+        },
+        "pushes": 1,
+        "replaces": 1,
+        "marker": "alive",
+        "navEntries": 1
+      }
+    },
+    {
+      "name": "mobile Back/Forward replays without reload",
+      "pass": true,
+      "detail": {
+        "hash": "#f=<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/22222222-x.jsonl",
+        "entry": {
+          "v": 1,
+          "conversationId": null,
+          "path": "<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/22222222-x.jsonl",
+          "project": "project_unresolved"
+        },
+        "pushes": 1,
+        "replaces": 5,
+        "marker": "alive",
+        "navEntries": 1
+      }
+    }
+  ],
+  "verdict": "PASS"
+}
