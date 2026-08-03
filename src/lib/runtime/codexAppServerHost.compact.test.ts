@@ -348,6 +348,51 @@ test("a failed compaction terminalizes without killing the reusable app-server h
   await host.release();
 });
 
+test("an interrupted compaction terminalizes unverified and leaves the host reusable", async () => {
+  const server = new CompactAppServer();
+  const host = await startHost(server);
+
+  const compaction = host.compact({ operationId: "op-interrupted-compact", threadId: server.threadId });
+  await Bun.sleep(10);
+  server.notify("turn/started", {
+    threadId: server.threadId,
+    turn: { id: "compact-turn" },
+  });
+  server.notify("item/started", {
+    threadId: server.threadId,
+    turnId: "compact-turn",
+    item: { id: "compaction-interrupted", type: "contextCompaction" },
+  });
+  server.notify("turn/completed", {
+    threadId: server.threadId,
+    turn: { id: "compact-turn", status: "interrupted" },
+  });
+
+  const error = await compaction.then(() => null, (reason: unknown) => reason);
+  expect(error).toBeInstanceOf(StructuredCompactError);
+  expect((error as StructuredCompactError).phase).toBe("unverified");
+  expect(await host.health()).toMatchObject({ status: "idle", activeTurnRef: null });
+  expect(server.signals).toEqual([]);
+
+  /* Late evidence cannot re-settle the completed operation or poison the next
+     turn after its pending row has been removed. */
+  server.notify("item/completed", {
+    threadId: server.threadId,
+    turnId: "compact-turn",
+    item: { id: "compaction-interrupted", type: "contextCompaction" },
+  });
+  const delivery = host.send({ id: "after-interrupted-compact", text: "continue" });
+  await Bun.sleep(10);
+  server.notify("item/completed", {
+    threadId: server.threadId,
+    turnId: "turn-1",
+    item: { type: "userMessage", clientId: "after-interrupted-compact", content: [{ type: "input_text", text: "continue" }] },
+  });
+  expect(await delivery).toEqual({ outcome: "turn-started", turnId: "turn-1" });
+  expect(server.signals).toEqual([]);
+  await host.release();
+});
+
 test("evidence that arrives before a failing start response still counts", async () => {
   const server = new CompactAppServer();
   server.holdCompact = true;
