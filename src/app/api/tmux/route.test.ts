@@ -455,6 +455,46 @@ test("/api/tmux admits pane-less kill through the structured control path", asyn
   }
 });
 
+test("/api/tmux carries the caller's compact operation id so a retry replays one receipt", async () => {
+  const previous = process.env.LLV_STRUCTURED_HOSTS;
+  structuredControlCalls = 0;
+  structuredControlRequest = null;
+  structuredControlResult = {
+    status: 202,
+    body: {
+      ok: true,
+      structured: true,
+      target: "conversation-compact",
+      operationId: "compact_gesture-one",
+      receipt: { operationId: "compact_gesture-one", status: "pending" },
+    },
+  };
+  try {
+    process.env.LLV_STRUCTURED_HOSTS = "1";
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await POST(post({
+        path: PATHNAME,
+        conversationId: "conversation-compact",
+        action: "compact",
+        operationId: "compact_gesture-one",
+      }));
+      expect(response.status).toBe(202);
+    }
+    /* Both attempts of one gesture name the same operation, so the journal
+       replays the first receipt instead of admitting a second compaction. */
+    expect(structuredControlCalls).toBe(2);
+    expect((structuredControlRequest as unknown as { operationId?: string }).operationId).toBe("compact_gesture-one");
+
+    structuredControlRequest = null;
+    await POST(post({ path: PATHNAME, conversationId: "conversation-compact", action: "compact" }));
+    expect("operationId" in (structuredControlRequest as unknown as Record<string, unknown>)).toBe(false);
+  } finally {
+    structuredControlResult = null;
+    if (previous === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous;
+  }
+});
+
 test("/api/tmux forwards account-aware structured reconfigure as one durable control", async () => {
   const previous = process.env.LLV_STRUCTURED_HOSTS;
   structuredControlCalls = 0;

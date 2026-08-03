@@ -156,7 +156,10 @@ export class RuntimeHost {
           && status !== "applied"
           && status !== "interrupted"
           && status !== "answered"
-          && status !== "failed") {
+          && status !== "failed"
+          /* #862: a compaction whose evidence never arrived is terminal and
+             unverified, which is a different fact from a failed control. */
+          && status !== "uncertain") {
           throw new Error("runtime operation transition status is invalid");
         }
         const details = request.params?.details;

@@ -4,6 +4,7 @@ import { redactCodexHostDiagnostic } from "./codexAppServerHost";
 import { structuredDeliveryHostForConversation } from "./structuredDeliveryController";
 import { permitRealtimeAction, type RealtimeCaller } from "./realtimeInjection";
 import type { RuntimeVoiceDelivery } from "./voiceDelivery";
+import type { VoicePersonaBootstrapReceipt } from "./voicePersona";
 import {
   admitVoiceSelectedContext,
   bindVoiceSession,
@@ -15,7 +16,11 @@ const MAX_SDP_BYTES = 512 * 1024;
 const MAX_SPEECH_BYTES = 8 * 1024;
 
 interface RealtimeHost {
-  startRealtimeWebRtc(sdp: string): Promise<{ sdp: string; realtimeSessionId: string | null }>;
+  startRealtimeWebRtc(sdp: string): Promise<{
+    sdp: string | null;
+    realtimeSessionId: string | null;
+    personaBootstrap: VoicePersonaBootstrapReceipt;
+  }>;
   appendRealtimeSpeech(text: string): Promise<void>;
   deliverRealtimeWorkerResponse?(delivery: RuntimeVoiceDelivery): Promise<{
     deliveryId: string;
@@ -48,6 +53,36 @@ function realtimeHost(value: unknown): RealtimeHost | null {
 
 function byteLength(value: string): number {
   return new TextEncoder().encode(value).byteLength;
+}
+
+function voicePersonaBootstrapReceipt(value: unknown): VoicePersonaBootstrapReceipt | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const receipt = value as Record<string, unknown>;
+  const receiptId = typeof receipt.receiptId === "string" ? receipt.receiptId : "";
+  const itemId = typeof receipt.itemId === "string" ? receipt.itemId : "";
+  if (!/^voice_persona_[a-f0-9]{64}$/.test(receiptId) || itemId !== `msg_${receiptId}`) return null;
+  if (receipt.insertion !== "accepted" && receipt.insertion !== "rejected") return null;
+  if (receipt.diagnostic !== undefined
+    && (typeof receipt.diagnostic !== "string" || receipt.diagnostic.length > 500)) return null;
+  return receipt as VoicePersonaBootstrapReceipt;
+}
+
+async function rejectStartedRealtimeContract(
+  host: RealtimeHost,
+  body: Record<string, unknown>,
+): Promise<RealtimeControlResult> {
+  try {
+    await host.stopRealtime();
+    return { status: 409, body };
+  } catch (error) {
+    return {
+      status: 409,
+      body: {
+        ...body,
+        error: redactCodexHostDiagnostic(`${String(body.error)}; realtime cleanup failed: ${redactCodexHostDiagnostic(error)}`),
+      },
+    };
+  }
 }
 
 export async function executeRealtimeControl(
@@ -107,6 +142,24 @@ export async function executeRealtimeControl(
         return { status: 400, body: { error: "a valid WebRTC SDP offer is required" } };
       }
       const answer = await host.startRealtimeWebRtc(sdp);
+      if (!answer.personaBootstrap) {
+        return rejectStartedRealtimeContract(host, { error: "Codex returned no voice persona bootstrap receipt" });
+      }
+      const personaBootstrap = voicePersonaBootstrapReceipt(answer.personaBootstrap);
+      if (!personaBootstrap) {
+        return rejectStartedRealtimeContract(host, { error: "Codex returned an invalid voice persona bootstrap receipt" });
+      }
+      if (personaBootstrap.insertion === "rejected") {
+        const diagnostic = redactCodexHostDiagnostic(personaBootstrap.diagnostic ?? "Voice persona insertion was rejected");
+        const error = redactCodexHostDiagnostic(`Voice persona could not be recorded: ${diagnostic}`);
+        return rejectStartedRealtimeContract(host, {
+          error,
+          personaBootstrap: { ...personaBootstrap, diagnostic },
+        });
+      }
+      if (!answer.sdp) {
+        return rejectStartedRealtimeContract(host, { error: "Codex returned no WebRTC answer" });
+      }
       /* #844 §4: the call belongs to the window that opened it, from here on.
          A browser that presents no usable view/device binds to nothing, which
          refuses every later selected-card reference rather than accepting the
@@ -114,7 +167,7 @@ export async function executeRealtimeControl(
       if (answer.realtimeSessionId) {
         bindVoiceSession(conversationId, answer.realtimeSessionId, parseVoiceViewBinding(request.view));
       }
-      return { status: 200, body: { ok: true, ...answer } };
+      return { status: 200, body: { ok: true, ...answer, personaBootstrap } };
     }
     /**
      * The browser's utterance boundary (#844 §2).

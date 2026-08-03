@@ -12,7 +12,7 @@ import { interruptRuntime, refreshRuntime } from "@/hooks/useRuntime";
 import { useLocale, type MessageKey, type TFunction } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
-import { mintIdempotencyKey } from "@/components/runtime/runtimeModel";
+import { humanReceiptReasonKey, mintIdempotencyKey } from "@/components/runtime/runtimeModel";
 import { useAgentCapabilities } from "./useAgentCapabilities";
 import {
   stripHasVisibleControls,
@@ -125,6 +125,28 @@ export interface AgentControlStripViewProps {
 }
 
 const visible = (cap: Capability) => cap.state !== "hidden";
+
+/**
+ * Operator-facing text for a compact that did not start. Receipt reasons are
+ * machine tokens (`busy-turn`, `stale-generation`, …) meant for the durable
+ * record, so they go through the same reason→sentence map the composer's
+ * receipt chips use; anything unmapped falls back to the generic failure line
+ * rather than showing a token to someone reading Ukrainian.
+ */
+function compactFailureText(
+  t: TFunction,
+  reason: string | null | undefined,
+  error: string | undefined,
+  code: string | undefined,
+): string {
+  const key = humanReceiptReasonKey(reason);
+  if (key) return t(key);
+  /* A refusal that never became a receipt still has a machine code. The
+     capability body's `error` is a server-side English sentence, so the code is
+     what gets translated. */
+  if (code === "unsupported-capability") return t("receipt.human.unsupportedCapability");
+  return error ?? t("composer.failedCompact");
+}
 
 /**
  * Presentational unified control strip (issue #241). Pure — its control set,
@@ -295,6 +317,8 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
   const [compactBusy, setCompactBusy] = useState(false);
   const [recheckBusy, setRecheckBusy] = useState(false);
   const [compactArmed, setCompactArmed] = useState(false);
+  /** The durable operation a confirmed compact gesture owns until it lands. */
+  const compactOperationRef = useRef<string | null>(null);
   const [attachOpen, setAttachOpen] = useState(false);
   const [status, setStatus] = useState<{ kind: "ok" | "info" | "err"; text: string } | null>(null);
 
@@ -395,14 +419,43 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
     if (compactBusy) return;
     setCompactBusy(true);
     setStatus(null);
+    /* #862: one durable operation per confirmed gesture. On a structured host
+       this admits a real compaction, so a retry after a timeout or a failed
+       response must replay that same operation — the id is only released once
+       the request is known to have landed. `mintIdempotencyKey` is used for the
+       same reason the composer does: `crypto.randomUUID` needs a secure
+       context, and LAN http access gets the fallback. */
+    const operationId = compactOperationRef.current ?? mintIdempotencyKey();
+    compactOperationRef.current = operationId;
     try {
       const response = await fetch("/api/tmux", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action: "compact", path: file.path }),
+        body: JSON.stringify({ action: "compact", path: file.path, operationId }),
       });
-      const body = (await response.json()) as { ok?: boolean; error?: string };
-      setStatus(response.ok && body.ok ? { kind: "ok", text: t("composer.compactSent") } : { kind: "err", text: body.error ?? t("composer.failedCompact") });
+      const body = (await response.json()) as {
+        ok?: boolean;
+        error?: string;
+        code?: string;
+        receipt?: { status?: string; reason?: string | null };
+      };
+      /* A structured control answers 202 `ok` for an admitted receipt AND for
+         one the journal refused, so the receipt — not the HTTP status — decides
+         what the operator is told. Announcing a compaction that was rejected
+         (a live turn is the ordinary case) would leave them waiting for a band
+         that never arrives. */
+      const settled = body.receipt?.status === "rejected" || body.receipt?.status === "failed";
+      const accepted = response.ok && Boolean(body.ok) && !settled;
+      /* The gesture's operation is released as soon as the journal reaches a
+         verdict, refusal included. Idempotency replays a stored receipt for the
+         same key forever, so holding the id past a rejection would answer every
+         later click with that same stale refusal — the button would never
+         compact this conversation again. It is held only while the outcome is
+         genuinely unknown: a transport failure, or a throw below. */
+      if (accepted || settled) compactOperationRef.current = null;
+      setStatus(accepted
+        ? { kind: "ok", text: t("composer.compactSent") }
+        : { kind: "err", text: compactFailureText(t, body.receipt?.reason, body.error, body.code) });
     } catch {
       setStatus({ kind: "err", text: t("common.serverUnavailable") });
     } finally {

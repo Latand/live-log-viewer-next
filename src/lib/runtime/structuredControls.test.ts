@@ -60,19 +60,126 @@ function structuredConversation(
   return { registry, path: pathname, conversationId: begun.receipt.conversationId };
 }
 
-test.each(["compact", "dialog-key"])(
-  "structured ownership fences the %s control before legacy routing",
-  async (action) => {
-    const fixture = structuredConversation();
-    const result = await dispatchStructuredControl({ path: fixture.path, conversationId: "", action }, {
-      registry: fixture.registry,
-      client: null,
-      enabled: () => true,
-    });
+test("structured ownership fences the dialog-key control before legacy routing", async () => {
+  const fixture = structuredConversation();
+  const result = await dispatchStructuredControl({ path: fixture.path, conversationId: "", action: "dialog-key" }, {
+    registry: fixture.registry,
+    client: null,
+    enabled: () => true,
+  });
 
-    expect(result).toEqual({ status: 409, body: { error: `structured host does not support the ${action} control` } });
-  },
-);
+  expect(result).toEqual({ status: 409, body: { error: "structured host does not support the dialog-key control" } });
+});
+
+test("structured compact enters the durable command channel for the owned codex thread", async () => {
+  const fixture = structuredConversation();
+  const commands: unknown[] = [];
+  const client = {
+    command: async (command: unknown) => {
+      commands.push(command);
+      return { operationId: "compact-one", receipt: { operationId: "compact-one", status: "pending" }, replayed: false };
+    },
+  } as unknown as RuntimeHostClient;
+
+  const result = await dispatchStructuredControl({ path: fixture.path, conversationId: "", action: "compact" }, {
+    registry: fixture.registry,
+    client,
+    operationId: () => "compact-one",
+    enabled: () => true,
+  });
+
+  expect(result).toMatchObject({ status: 202, body: { operationId: "compact-one", receipt: { status: "pending" } } });
+  expect(commands).toEqual([{
+    kind: "compact",
+    operationId: "compact-one",
+    idempotencyKey: "compact-one",
+    conversationId: fixture.conversationId,
+    sessionKey: {
+      engine: "codex",
+      sessionId: fixture.registry.conversation(fixture.conversationId as `conversation_${string}`)!.generations.at(-1)!.id,
+    },
+  }]);
+});
+
+test("a caller-supplied compact operation id keeps a retry on one durable operation", async () => {
+  const fixture = structuredConversation();
+  const commands: unknown[] = [];
+  const client = {
+    command: async (command: unknown) => {
+      commands.push(command);
+      return { operationId: "compact-caller", receipt: { operationId: "compact-caller", status: "pending" }, replayed: true };
+    },
+  } as unknown as RuntimeHostClient;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await dispatchStructuredControl({
+      path: fixture.path,
+      conversationId: "",
+      action: "compact",
+      operationId: "compact-caller",
+    }, { registry: fixture.registry, client, enabled: () => true });
+  }
+
+  expect(commands).toEqual([
+    { kind: "compact", operationId: "compact-caller", idempotencyKey: "compact-caller", conversationId: fixture.conversationId, sessionKey: { engine: "codex", sessionId: fixture.registry.conversation(fixture.conversationId as `conversation_${string}`)!.generations.at(-1)!.id } },
+    { kind: "compact", operationId: "compact-caller", idempotencyKey: "compact-caller", conversationId: fixture.conversationId, sessionKey: { engine: "codex", sessionId: fixture.registry.conversation(fixture.conversationId as `conversation_${string}`)!.generations.at(-1)!.id } },
+  ]);
+});
+
+test("a compact transport failure answers from the durable receipt instead of reissuing", async () => {
+  const fixture = structuredConversation();
+  let commands = 0;
+  const client = {
+    command: async () => {
+      commands += 1;
+      throw new RuntimeHostUnavailableError("runtime host request timed out");
+    },
+    operationStatus: async (operationId: string) => ({
+      operationId,
+      receipt: { operationId, status: "delivered" },
+      replayed: true,
+    }),
+  } as unknown as RuntimeHostClient;
+
+  const result = await dispatchStructuredControl({
+    path: fixture.path,
+    conversationId: "",
+    action: "compact",
+    operationId: "compact-durable",
+  }, { registry: fixture.registry, client, enabled: () => true });
+
+  expect(commands).toBe(1);
+  expect(result).toMatchObject({
+    status: 200,
+    body: { operationId: "compact-durable", receipt: { status: "delivered" } },
+  });
+});
+
+test("a structured claude conversation answers compact with a typed capability error", async () => {
+  const fixture = structuredConversation({ engine: "claude" });
+  const commands: unknown[] = [];
+  const client = {
+    command: async (command: unknown) => {
+      commands.push(command);
+      throw new Error("an unsupported compact reached the runtime host");
+    },
+  } as unknown as RuntimeHostClient;
+
+  const result = await dispatchStructuredControl({ path: fixture.path, conversationId: "", action: "compact" }, {
+    registry: fixture.registry,
+    client,
+    enabled: () => true,
+  });
+
+  expect(commands).toEqual([]);
+  expect(result).toMatchObject({
+    status: 409,
+    body: {
+      code: "unsupported-capability",
+      capability: { control: "compact", engine: "claude", supported: false },
+    },
+  });
+});
 
 test("structured reconfigure validates and enters the runtime command channel", async () => {
   const fixture = structuredConversation();
@@ -352,13 +459,13 @@ test("dead structured resume falls through to canonical recovery", async () => {
 
   expect(result).toBeNull();
 
-  // every other control on the dead entry stays fenced (only resume recovers)
-  const compact = await dispatchStructuredControl({ path: fixture.path, conversationId: "", action: "compact" }, {
+  // controls the structured host does not implement stay fenced (only resume recovers)
+  const dialogKey = await dispatchStructuredControl({ path: fixture.path, conversationId: "", action: "dialog-key" }, {
     registry: fixture.registry,
     client: null,
     enabled: () => true,
   });
-  expect(compact).toEqual({ status: 409, body: { error: "structured host does not support the compact control" } });
+  expect(dialogKey).toEqual({ status: 409, body: { error: "structured host does not support the dialog-key control" } });
 });
 
 test("structured interrupt uses the runtime command channel", async () => {

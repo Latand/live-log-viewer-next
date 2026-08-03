@@ -1,7 +1,8 @@
 import { parseSelectedContextRef, type SelectedContextRef } from "@/lib/selection/selectedContext";
 
 import type { RuntimeSendSettings } from "./contracts";
-import type { DeliveryReceipt, EngineHost, QueueEntry } from "./engineHost";
+import type { CompactCapableHost, DeliveryReceipt, EngineHost, QueueEntry } from "./engineHost";
+import { hostSupportsCompact, StructuredCompactError } from "./engineHost";
 import type { RuntimeHostClient } from "./client";
 import {
   parseStructuredImageRefs,
@@ -16,7 +17,7 @@ export interface StructuredDeliveryEffect {
   eventSeq: number;
 }
 
-export type StructuredDeliveryTransition = "queued" | "delivering" | "applying" | "delivered" | "applied" | "answered" | "interrupted" | "failed";
+export type StructuredDeliveryTransition = "queued" | "delivering" | "applying" | "delivered" | "applied" | "answered" | "interrupted" | "failed" | "uncertain";
 
 export interface StructuredDeliveryQueuePort {
   effects(kinds?: readonly string[], afterEventSeq?: number): Promise<StructuredDeliveryEffect[]>;
@@ -25,6 +26,10 @@ export interface StructuredDeliveryQueuePort {
     status: StructuredDeliveryTransition,
     details?: { turnId?: string | null; reason?: string | null },
   ): Promise<void>;
+  /** The durable receipt state, when the port can read it. The compact control
+      needs it to tell a control it must issue from one an earlier executor
+      already issued and never settled (#862). */
+  status?(operationId: string): Promise<{ status: string } | null>;
 }
 
 export type StructuredHostResolver = (conversationId: string) => EngineHost | null;
@@ -39,6 +44,7 @@ export function runtimeClientDeliveryPort(client: RuntimeHostClient): Structured
     transition: async (operationId, status, details) => {
       await client.transitionOperation(operationId, status, details);
     },
+    status: async (operationId) => (await client.operationStatus(operationId))?.receipt ?? null,
   };
 }
 
@@ -81,6 +87,16 @@ interface ControlEffect {
   eventSeq: number;
 }
 
+/** A manual compaction (#862): a control fenced to one owned generation that
+    carries no content, so nothing on it can be replayed as user input. */
+interface CompactEffect {
+  operationId: string;
+  conversationId: string;
+  kind: "compact";
+  sessionKey: { engine: "codex" | "claude"; sessionId: string };
+  eventSeq: number;
+}
+
 export interface StructuredReconfigureEffect {
   operationId: string;
   conversationId: string;
@@ -103,7 +119,7 @@ export type StructuredReconfigureHandler = (
   ownership: StructuredReconfigureOwnership,
 ) => Promise<void | "applied" | "pending">;
 
-type DeliveryEffect = SendEffect | ControlEffect | StructuredReconfigureEffect;
+type DeliveryEffect = SendEffect | ControlEffect | CompactEffect | StructuredReconfigureEffect;
 
 interface ControlDrainResult {
   blocked: boolean;
@@ -116,8 +132,12 @@ interface SuccessfulKillBoundary {
   eventSeq: number;
 }
 
-function isControlEffect(effect: DeliveryEffect): effect is ControlEffect {
-  return effect.kind === "answer" || effect.kind === "interrupt" || effect.kind === "kill";
+function isControlEffect(effect: DeliveryEffect): effect is ControlEffect | CompactEffect {
+  return effect.kind === "answer" || effect.kind === "interrupt" || effect.kind === "kill" || effect.kind === "compact";
+}
+
+function isCompactEffect(effect: DeliveryEffect): effect is CompactEffect {
+  return effect.kind === "compact";
 }
 
 function isReconfigureEffect(effect: DeliveryEffect): effect is StructuredReconfigureEffect {
@@ -189,6 +209,23 @@ function controlEffect(effect: StructuredDeliveryEffect): ControlEffect | null {
   return { operationId, conversationId, kind: "interrupt", eventSeq: effect.eventSeq, ...(turnId !== undefined ? { turnId } : {}) };
 }
 
+function compactEffect(effect: StructuredDeliveryEffect): CompactEffect | null {
+  if (effect.kind !== "runtime.compact") return null;
+  const operationId = typeof effect.payload.operationId === "string" ? effect.payload.operationId : "";
+  const conversationId = typeof effect.payload.conversationId === "string" ? effect.payload.conversationId : "";
+  const key = effect.payload.sessionKey;
+  if (!operationId || !conversationId || !key || typeof key !== "object" || Array.isArray(key)) return null;
+  const candidate = key as Record<string, unknown>;
+  if ((candidate.engine !== "codex" && candidate.engine !== "claude") || typeof candidate.sessionId !== "string") return null;
+  return {
+    operationId,
+    conversationId,
+    kind: "compact",
+    sessionKey: { engine: candidate.engine, sessionId: candidate.sessionId },
+    eventSeq: effect.eventSeq,
+  };
+}
+
 function reconfigureEffect(effect: StructuredDeliveryEffect): StructuredReconfigureEffect | null {
   if (effect.kind !== "runtime.reconfigure") return null;
   const operationId = typeof effect.payload.operationId === "string" ? effect.payload.operationId : "";
@@ -224,7 +261,7 @@ function reconfigureEffect(effect: StructuredDeliveryEffect): StructuredReconfig
 }
 
 function deliveryEffect(effect: StructuredDeliveryEffect): DeliveryEffect | null {
-  return controlEffect(effect) ?? reconfigureEffect(effect) ?? sendEffect(effect);
+  return controlEffect(effect) ?? compactEffect(effect) ?? reconfigureEffect(effect) ?? sendEffect(effect);
 }
 
 function successfulKillBoundary(effect: StructuredDeliveryEffect): SuccessfulKillBoundary | null {
@@ -263,6 +300,14 @@ export class StructuredDeliveryQueue {
   private rerun = false;
   private readonly interruptAcknowledged = new Set<string>();
   private readonly successfulKillBoundaries = new Map<string, SuccessfulKillBoundary>();
+  /** Compactions whose engine control is issued and whose evidence has not
+      arrived. The effect stays pending in the journal meanwhile, so every later
+      drain pass must find it here and leave it alone (#862). */
+  private readonly activeCompactions = new Map<string, Promise<void>>();
+  /** The conversations those compactions belong to. Reads block on this rather
+      than on a whole-group barrier, so an unfinished compaction holds messages
+      without holding kill, interrupt, or answer. */
+  private readonly compactingConversations = new Set<string>();
 
   constructor(
     private readonly port: StructuredDeliveryQueuePort,
@@ -310,7 +355,7 @@ export class StructuredDeliveryQueue {
     let afterEventSeq = 0;
     while (true) {
       const page = await this.port.effects(
-        ["runtime.send", "runtime.steer", "runtime.answer", "runtime.interrupt", "runtime.kill", "runtime.kill-boundary", "runtime.reconfigure"],
+        ["runtime.send", "runtime.steer", "runtime.answer", "runtime.interrupt", "runtime.kill", "runtime.kill-boundary", "runtime.reconfigure", "runtime.compact"],
         afterEventSeq,
       );
       if (page.length === 0) break;
@@ -376,6 +421,13 @@ export class StructuredDeliveryQueue {
       }
     }
     for (const effect of effects) {
+      /* #862: a compaction in flight holds back everything that would write to
+         the thread — messages and reconfigures — but never another control.
+         Kill is the operator's safety valve and interrupt/answer are how a turn
+         is reached at all; leaving them inert for the length of a compaction
+         would be a worse failure than the one the barrier prevents. Controls
+         sort ahead of these, so by here every one of them has already run. */
+      if (!isControlEffect(effect) && this.compactingConversations.has(effect.conversationId)) return true;
       if (isReconfigureEffect(effect)) {
         if (effect !== currentReconfigure) continue;
         if (effect.sessionKey
@@ -389,7 +441,9 @@ export class StructuredDeliveryQueue {
         continue;
       }
       if (isControlEffect(effect)) {
-        const result = await this.drainControl(effect);
+        const result = isCompactEffect(effect)
+          ? await this.drainCompact(effect)
+          : await this.drainControl(effect);
         if (result.blocked) return true;
         if (result.terminated && effect.kind === "kill") {
           if (effect.sessionKey) {
@@ -520,6 +574,135 @@ export class StructuredDeliveryQueue {
     return false;
   }
 
+  /**
+   * Executes a durable compact receipt (#862). The pass never waits for the
+   * compaction itself: it issues the control, records the conversation as
+   * compacting so no message can slip past an unfinished compaction, and lets
+   * the evidence terminalize the receipt out of band. Duplicate execution is
+   * impossible because the operation is registered in flight before the control
+   * is issued and the outbox row is only cleared by the terminal transition.
+   *
+   * It never reports the group blocked, in any branch: compact is the first
+   * control that can occupy this slot for minutes, and a kill sorted behind it
+   * must still run in the same pass. Messages are held by the per-conversation
+   * barrier instead, which is read only for non-control effects.
+   */
+  private async drainCompact(effect: CompactEffect): Promise<ControlDrainResult> {
+    if (this.activeCompactions.has(effect.operationId)) return { blocked: false, terminated: false };
+    /* A second compaction admitted for a thread that is already compacting is
+       left pending, untouched. The operator's second request is legitimate once
+       the first lands — journal admission cannot refuse it, because a
+       compaction is not a turn — but issuing both would compact the thread
+       twice and settle both receipts on one piece of evidence. The `retrySoon`
+       fired when the first settles brings this effect back. Holding it does not
+       block the group: kill must still get through. */
+    if (this.compactingConversations.has(effect.conversationId)) return { blocked: false, terminated: false };
+    /* An unreadable receipt is not evidence of anything. Treat it as unknown
+       and fall through to the host checks rather than aborting a drain pass
+       that other conversations share. */
+    const durable = await this.port.status?.(effect.operationId).catch(() => null);
+    if (durable?.status === "delivering") {
+      /* An earlier executor issued this control and never settled it — a Viewer
+         restart, or a terminal transition that never landed. This process
+         cannot know whether the thread was compacted, and issuing the control
+         again could compact it twice, so the receipt terminalizes unverified. */
+      await this.terminalizeUnverified(
+        effect.operationId,
+        "compaction was issued by an earlier executor; its outcome is unverified",
+      );
+      return { blocked: false, terminated: false };
+    }
+    /* A conversation the operator deliberately terminated must not be brought
+       back to compact it. A compact admitted between a kill's admission and its
+       execution is still pending afterwards — kill admission does not move the
+       session's host axis — and the recovery below would otherwise respawn the
+       host purely to run this control. Sends are fenced the same way. */
+    const killBoundary = this.successfulKillBoundaries.get(effect.conversationId);
+    if (killBoundary && effect.eventSeq <= killBoundary.eventSeq) {
+      await this.port.transition(effect.operationId, "failed", {
+        reason: "structured host was intentionally terminated; retry the operation",
+      });
+      return { blocked: false, terminated: false };
+    }
+    const host = this.resolveHost(effect.conversationId);
+    /* Controls sort ahead of sends, and a compaction can hold that slot for
+       minutes, so an unavailable host must start the same recovery a send would
+       — otherwise every message queued behind this control waits on a host
+       nobody asked to come back. The group is not reported blocked: recovery is
+       asynchronous, and a kill behind this effect must not wait a whole pass
+       for it. */
+    if (!host) {
+      await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
+      await this.recoverUnavailableHost(effect);
+      return { blocked: false, terminated: false };
+    }
+    if (!hostSupportsCompact(host)) {
+      await this.port.transition(effect.operationId, "failed", { reason: "unsupported-capability" });
+      return { blocked: false, terminated: false };
+    }
+    const health = await host.health();
+    if (health.status === "dead" || health.status === "unhosted") {
+      await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
+      await this.recoverUnavailableHost(effect);
+      return { blocked: false, terminated: false };
+    }
+    /* Admission fenced the durable turn axis; this re-reads the live host, so a
+       turn that started in between fails the control instead of racing it. */
+    if (health.status !== "idle" || health.activeTurnRef) {
+      await this.port.transition(effect.operationId, "failed", { reason: "busy-turn" });
+      return { blocked: false, terminated: false };
+    }
+    /* Durable marker first: a restart that finds the receipt in `delivering`
+       knows the control may already have reached the engine and terminalizes it
+       as unverified instead of compacting the thread a second time. */
+    await this.port.transition(effect.operationId, "delivering");
+    /* Marked before the run exists: a compaction that settles immediately would
+       otherwise clear the barrier before it was ever raised. */
+    this.compactingConversations.add(effect.conversationId);
+    const run = this.runCompaction(host, effect).finally(() => {
+      this.activeCompactions.delete(effect.operationId);
+      this.compactingConversations.delete(effect.conversationId);
+      this.retrySoon();
+    });
+    this.activeCompactions.set(effect.operationId, run);
+    void run.catch(() => undefined);
+    return { blocked: false, terminated: false };
+  }
+
+  private async runCompaction(host: CompactCapableHost, effect: CompactEffect): Promise<void> {
+    try {
+      const outcome = await host.compact({
+        operationId: effect.operationId,
+        threadId: effect.sessionKey.sessionId,
+      });
+      /* The receipt records which compaction closed it: the only durable place
+         the lifecycle evidence survives alongside the operation. */
+      await this.port.transition(effect.operationId, "delivered", {
+        reason: outcome.compactionId ? `compaction:${outcome.compactionId}` : null,
+      });
+    } catch (error) {
+      if (error instanceof StructuredCompactError && error.phase === "unverified") {
+        await this.terminalizeUnverified(effect.operationId, failureReason(error));
+        return;
+      }
+      await this.port.transition(effect.operationId, "failed", { reason: failureReason(error) });
+    }
+  }
+
+  /**
+   * Terminalizes a compaction whose outcome nothing proved. `uncertain` is a
+   * newer transition than the rest of this channel, so a runtime-host from
+   * before #862 rejects it; the operation must still settle rather than wedge
+   * the conversation's queue behind a receipt no pass can ever clear.
+   */
+  private async terminalizeUnverified(operationId: string, reason: string): Promise<void> {
+    try {
+      await this.port.transition(operationId, "uncertain", { reason });
+    } catch {
+      await this.port.transition(operationId, "failed", { reason });
+    }
+  }
+
   private async drainReconfigure(effect: StructuredReconfigureEffect): Promise<boolean> {
     const host = this.resolveHost(effect.conversationId);
     if (host) {
@@ -564,7 +747,7 @@ export class StructuredDeliveryQueue {
     return latest.operationId === effect.operationId && latest.eventSeq === effect.eventSeq;
   }
 
-  private async recoverUnavailableHost(effect: SendEffect): Promise<void> {
+  private async recoverUnavailableHost(effect: Pick<DeliveryEffect, "conversationId" | "operationId">): Promise<void> {
     if (!this.recoverHost) return;
     try {
       if (await this.recoverHost(effect.conversationId)) {

@@ -240,6 +240,23 @@ export function lastObservedAgentState(file: LifecycleJournalFile): Map<string, 
  * agents nobody is waiting on. It is recorded only for a conversation the
  * Viewer still expects work from: one whose pipeline attempt has not reached a
  * terminal state, or one the journal already saw stall.
+ *
+ * Only readings backed by an actual transcript read become durable events
+ * (#860). A row whose turn state came from the scan projection — because the
+ * evidence budget was spent before it, or because its tail was torn — is
+ * honest enough to display, and it stays in the caller's snapshot, but its
+ * freshness is the generation's file mtime. A generation may be minutes old, so
+ * a conversation that resumed since it completed would cross the stall
+ * threshold and earn a durable `agent_stalled` that never happened, followed by
+ * an `agent_resumed` retiring it once a real read landed. An alarm surface that
+ * fabricates alarm/all-clear pairs is worse than one that waits for the next
+ * sweep to read the tail.
+ *
+ * The gate suppresses the all-clear as well as the alarm, and an actively
+ * appending transcript is the one most likely to lose the identity race that
+ * reports `unreadable` — so an outstanding `agent_stalled` can survive a poll
+ * cycle longer than it used to. The race window is sub-millisecond against a
+ * repeated sweep, so it retires on the next reading rather than persisting.
  */
 export function projectLivenessEvents(
   records: AgentLivenessRecord[],
@@ -247,6 +264,7 @@ export function projectLivenessEvents(
 ): LifecycleEventInput[] {
   const events: LifecycleEventInput[] = [];
   for (const record of records) {
+    if (record.evidenceSource !== "transcript") continue;
     const subject = record.conversationId ?? record.transcriptPath;
     const marker = record.lastRecordAt ?? "unknown";
     const at = record.lastRecordAt ?? new Date().toISOString();

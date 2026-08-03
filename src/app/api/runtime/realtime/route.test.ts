@@ -5,6 +5,12 @@ import { executeRealtimeControl } from "@/lib/runtime/realtimeControl";
 
 import { POST } from "./route";
 
+const ACCEPTED_PERSONA_BOOTSTRAP = {
+  receiptId: `voice_persona_${"c".repeat(64)}`,
+  itemId: `msg_voice_persona_${"c".repeat(64)}`,
+  insertion: "accepted" as const,
+};
+
 function request(body: unknown, headers: Record<string, string> = {}): NextRequest {
   return new NextRequest("http://127.0.0.1/api/runtime/realtime", {
     method: "POST",
@@ -18,7 +24,11 @@ test("starts V3 WebRTC through the active hosted conversation", async () => {
   const host = {
     async startRealtimeWebRtc(sdp: string) {
       calls.push(["start", sdp]);
-      return { sdp: "v=0\r\nanswer", realtimeSessionId: "live-1" };
+      return {
+        sdp: "v=0\r\nanswer",
+        realtimeSessionId: "live-1",
+        personaBootstrap: ACCEPTED_PERSONA_BOOTSTRAP,
+      };
     },
     async appendRealtimeSpeech(text: string) {
       calls.push(["speech", text]);
@@ -48,7 +58,12 @@ test("starts V3 WebRTC through the active hosted conversation", async () => {
   );
   expect(started).toEqual({
     status: 200,
-    body: { ok: true, sdp: "v=0\r\nanswer", realtimeSessionId: "live-1" },
+    body: {
+      ok: true,
+      sdp: "v=0\r\nanswer",
+      realtimeSessionId: "live-1",
+      personaBootstrap: ACCEPTED_PERSONA_BOOTSTRAP,
+    },
   });
   await executeRealtimeControl(
     { action: "appendSpeech", conversationId: "conversation_voice", text: "progress" },
@@ -123,6 +138,131 @@ test("keeps validation and backend admission errors bounded", async () => {
     async stopRealtime() {},
   }), { operator: true });
   expect(result).toEqual({ status: 409, body: { error: "AVAS 404" } });
+});
+
+test("returns the canonical persona insertion outcome and rejects a call whose bootstrap was refused", async () => {
+  let rejectedStops = 0;
+  const acceptedBootstrap = {
+    receiptId: `voice_persona_${"b".repeat(64)}`,
+    itemId: `msg_voice_persona_${"b".repeat(64)}`,
+    insertion: "accepted" as const,
+  };
+  const accepted = await executeRealtimeControl({
+    action: "start",
+    conversationId: "conversation_voice",
+    sdp: "v=0\r\noffer",
+  }, () => ({
+    async startRealtimeWebRtc() {
+      return { sdp: "v=0\r\nanswer", realtimeSessionId: "live-bootstrap", personaBootstrap: acceptedBootstrap };
+    },
+    async appendRealtimeSpeech() {},
+    async stopRealtime() {},
+  }), { operator: true });
+  expect(accepted).toEqual({
+    status: 200,
+    body: {
+      ok: true,
+      sdp: "v=0\r\nanswer",
+      realtimeSessionId: "live-bootstrap",
+      personaBootstrap: acceptedBootstrap,
+    },
+  });
+
+  const personaBootstrap = {
+    receiptId: `voice_persona_${"a".repeat(64)}`,
+    itemId: `msg_voice_persona_${"a".repeat(64)}`,
+    insertion: "rejected" as const,
+    diagnostic: "Codex app-server request failed: invalid developer item",
+  };
+  const result = await executeRealtimeControl({
+    action: "start",
+    conversationId: "conversation_voice",
+    sdp: "v=0\r\noffer",
+  }, () => ({
+    async startRealtimeWebRtc() {
+      return { sdp: null, realtimeSessionId: null, personaBootstrap };
+    },
+    async appendRealtimeSpeech() {},
+    async stopRealtime() { rejectedStops += 1; },
+  }), { operator: true });
+
+  expect(result).toEqual({
+    status: 409,
+    body: {
+      error: "Voice persona could not be recorded: Codex app-server request failed: invalid developer item",
+      personaBootstrap,
+    },
+  });
+  expect(rejectedStops).toBe(1);
+});
+
+test("refuses a realtime answer that omits the mandatory persona bootstrap receipt", async () => {
+  let stops = 0;
+  const result = await executeRealtimeControl({
+    action: "start",
+    conversationId: "conversation_voice",
+    sdp: "v=0\r\noffer",
+  }, () => ({
+    async startRealtimeWebRtc() {
+      return { sdp: "v=0\r\nanswer", realtimeSessionId: "live-without-bootstrap" };
+    },
+    async appendRealtimeSpeech() {},
+    async stopRealtime() { stops += 1; },
+  }), { operator: true });
+
+  expect(result).toEqual({
+    status: 409,
+    body: { error: "Codex returned no voice persona bootstrap receipt" },
+  });
+  expect(stops).toBe(1);
+});
+
+test("refuses malformed persona bootstrap receipts before binding the realtime session", async () => {
+  const digest = "d".repeat(64);
+  let stops = 0;
+  const malformedReceipts = [
+    { itemId: `msg_voice_persona_${digest}`, insertion: "accepted" },
+    { receiptId: `voice_persona_${digest}`, insertion: "accepted" },
+    { receiptId: `voice_persona_${digest}`, itemId: `msg_voice_persona_${digest}` },
+    { receiptId: `voice_persona_${digest}`, itemId: `msg_voice_persona_${digest}`, insertion: "pending" },
+  ];
+  for (const personaBootstrap of malformedReceipts) {
+    const result = await executeRealtimeControl({
+      action: "start",
+      conversationId: "conversation_voice",
+      sdp: "v=0\r\noffer",
+    }, () => ({
+      async startRealtimeWebRtc() {
+        return { sdp: "v=0\r\nanswer", realtimeSessionId: "live-malformed", personaBootstrap };
+      },
+      async appendRealtimeSpeech() {},
+      async stopRealtime() { stops += 1; },
+    }), { operator: true });
+
+    expect(result).toEqual({
+      status: 409,
+      body: { error: "Codex returned an invalid voice persona bootstrap receipt" },
+    });
+  }
+  expect(stops).toBe(malformedReceipts.length);
+});
+
+test("stops a started backend session whose accepted receipt has no WebRTC answer", async () => {
+  let stops = 0;
+  const result = await executeRealtimeControl({
+    action: "start",
+    conversationId: "conversation_voice",
+    sdp: "v=0\r\noffer",
+  }, () => ({
+    async startRealtimeWebRtc() {
+      return { sdp: null, realtimeSessionId: "live-without-answer", personaBootstrap: ACCEPTED_PERSONA_BOOTSTRAP };
+    },
+    async appendRealtimeSpeech() {},
+    async stopRealtime() { stops += 1; },
+  }), { operator: true });
+
+  expect(result).toEqual({ status: 409, body: { error: "Codex returned no WebRTC answer" } });
+  expect(stops).toBe(1);
 });
 
 test("POST rejects a cross-origin browser before realtime admission", async () => {
@@ -206,7 +346,13 @@ test("the transport authority is required, and an unasked question fails closed"
      site that passes the honest answer for "nobody asked" gets a refusal, never an
      open door. */
   const host = {
-    async startRealtimeWebRtc() { return { sdp: "v=0\r\nanswer", realtimeSessionId: "live-x" }; },
+    async startRealtimeWebRtc() {
+      return {
+        sdp: "v=0\r\nanswer",
+        realtimeSessionId: "live-x",
+        personaBootstrap: ACCEPTED_PERSONA_BOOTSTRAP,
+      };
+    },
     async appendRealtimeSpeech() {},
     async stopRealtime() {},
   };

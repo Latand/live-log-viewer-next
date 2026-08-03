@@ -121,6 +121,20 @@ export function parseRuntimeCommand(kind: RuntimeOperationKind, value: unknown):
     };
   }
 
+  /* #862: a compact request is a control, so the parser deliberately reads no
+     content field and no turn fence. Whatever the caller sent alongside it
+     cannot survive into the command and therefore cannot reach the engine as a
+     prompt. */
+  if (kind === "compact") {
+    return {
+      kind,
+      conversationId,
+      ...(operationId ? { operationId } : {}),
+      idempotencyKey,
+      sessionKey: runtimeSessionKey(body.sessionKey),
+    };
+  }
+
   if (kind === "answer") {
     if (!("resolution" in body)) throw new Error("resolution is required");
     return {

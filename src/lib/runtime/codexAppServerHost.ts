@@ -33,9 +33,16 @@ import type {
   EngineHost,
   HostState,
   QueueEntry,
+  RuntimeCompactOutcome,
+  RuntimeCompactRequest,
   RuntimeEvent,
 } from "./engineHost";
-import { normalizeQueueEntry, RuntimeReplayGapError, StructuredHostAdoptionCleanupError } from "./engineHost";
+import {
+  normalizeQueueEntry,
+  RuntimeReplayGapError,
+  StructuredCompactError,
+  StructuredHostAdoptionCleanupError,
+} from "./engineHost";
 import {
   FileRuntimeEventStore,
   nextRuntimeEventSequence,
@@ -43,7 +50,14 @@ import {
   type RuntimeEventCursorRecoveryReporter,
   type RuntimeEventStore,
 } from "./eventStore";
-import { voicePersona } from "./voicePersona";
+import {
+  canonicalVoicePersonaBootstrapExists,
+  voicePersonaBootstrap,
+  voicePersonaBootstrapIdentity,
+  type VoicePersonaBootstrap,
+  type VoicePersonaBootstrapIdentity,
+  type VoicePersonaBootstrapReceipt,
+} from "./voicePersona";
 
 type JsonObject = Record<string, unknown>;
 type PendingRpc = {
@@ -69,13 +83,25 @@ export type CodexRealtimeFailure = {
   realtimeSessionId: string | null;
 };
 type PendingRealtimeStart = {
-  resolve(result: CodexRealtimeWebRtcAnswer): void;
+  resolve(result: CodexRealtimeWebRtcResult): void;
   reject(error: Error): void;
-  timer: ReturnType<typeof setTimeout>;
+  timer: ReturnType<typeof setTimeout> | undefined;
   started: boolean;
   realtimeSessionId: string | null;
   sdp: string | null;
+  personaBootstrap: VoicePersonaBootstrapReceipt;
 };
+type VoicePersonaBootstrapInsertion = {
+  owner: PendingRealtimeStart;
+  promise: Promise<void>;
+};
+type PendingCompaction = {
+  promise: Promise<RuntimeCompactOutcome>;
+  resolve(outcome: RuntimeCompactOutcome): void;
+  reject(error: Error): void;
+  timer: ReturnType<typeof setTimeout> | undefined;
+};
+
 type PendingDelivery = {
   text: string;
   contentDigest: string;
@@ -150,7 +176,10 @@ export interface CodexAppServerHostOptions {
   approvalPolicy?: string;
   env?: NodeJS.ProcessEnv;
   requestTimeoutMs?: number;
+  realtimePersonaTimeoutMs?: number;
+  realtimeStartTimeoutMs?: number;
   deliveryConfirmationTimeoutMs?: number;
+  compactEvidenceTimeoutMs?: number;
   shutdownGraceMs?: number;
   initialEventCursor?: number;
   onEventCursorRecovery?: RuntimeEventCursorRecoveryReporter;
@@ -173,7 +202,19 @@ export interface CodexThreadIdentity {
 export interface CodexRealtimeWebRtcAnswer {
   sdp: string;
   realtimeSessionId: string | null;
+  personaBootstrap: VoicePersonaBootstrapReceipt;
 }
+
+export interface CodexRealtimeWebRtcRejection {
+  sdp: null;
+  realtimeSessionId: null;
+  personaBootstrap: VoicePersonaBootstrapReceipt & {
+    insertion: "rejected";
+    diagnostic: string;
+  };
+}
+
+export type CodexRealtimeWebRtcResult = CodexRealtimeWebRtcAnswer | CodexRealtimeWebRtcRejection;
 
 const CHILD_ENV_ALLOWLIST = [
   "PATH",
@@ -229,15 +270,18 @@ const DESKTOP_ENV_ALLOWLIST = [
 ] as const;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS = 5 * 60_000;
+/** How long a compaction may run before its outcome counts as unverified.
+    Compaction is a model call over the whole thread, so the budget is generous;
+    past it the operation terminalizes visibly rather than hanging (#862). */
+const DEFAULT_COMPACT_EVIDENCE_TIMEOUT_MS = 5 * 60_000;
 const ACTIVE_THREAD_READ_TIMEOUT_MULTIPLIER = 3;
 const LATE_THREAD_READ_RESPONSE_TTL_MULTIPLIER = 3;
 const MIN_LATE_THREAD_READ_RESPONSE_TTL_MS = 1_000;
 const MAX_LATE_THREAD_READ_RESPONSES = 32;
 const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
 const REALTIME_START_TIMEOUT_MS = 90_000;
-/* The persona is optional; never let it hold the microphone waiting. An
-   app-server that rejects the method answers immediately, so this bound only
-   covers one that accepts it and then stalls. */
+/* First speech waits for the persona's durable insertion outcome. Keep that
+   gate bounded when an app-server accepts the method and then stalls. */
 const REALTIME_PERSONA_TIMEOUT_MS = 3_000;
 /* Releasing the host must not block on a wedged app-server, but the hangup is
    worth a moment: skipping it strands the account's realtime slot. */
@@ -294,6 +338,8 @@ const MUTATING_RPC_METHODS = new Set([
   "turn/interrupt",
   "thread/realtime/start",
   "thread/realtime/stop",
+  "thread/inject_items",
+  "thread/compact/start",
 ]);
 
 function record(value: unknown): JsonObject | null {
@@ -544,7 +590,10 @@ export class CodexAppServerHost implements EngineHost {
 
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly requestTimeoutMs: number;
+  private readonly realtimePersonaTimeoutMs: number;
+  private readonly realtimeStartTimeoutMs: number;
   private readonly deliveryConfirmationTimeoutMs: number;
+  private readonly compactEvidenceTimeoutMs: number;
   private readonly shutdownGraceMs: number;
   private readonly eventStore: RuntimeEventStore;
   private readonly effort: string | undefined;
@@ -575,8 +624,14 @@ export class CodexAppServerHost implements EngineHost {
     contentDigest: string | null;
   }>();
   private readonly pendingDeliveries = new Map<string, PendingDelivery>();
+  private readonly pendingCompactions = new Map<string, PendingCompaction>();
   private readonly realtimeDeliveries = new Map<string, RealtimeDeliveryState>();
   private readonly voiceStreams = new Map<string, VoiceStreamState>();
+  /* A host's thread id is immutable, so one memo covers its one stable persona
+     item. Successor starts join the same insertion promise. */
+  private unresolvedVoicePersonaBootstrap: VoicePersonaBootstrap | null = null;
+  private voicePersonaBootstrapInsertion: VoicePersonaBootstrapInsertion | null = null;
+  private voicePersonaBootstrapAccepted = false;
   private readonly pendingVoiceChunks = new Map<string, string>();
   private readonly cancelledVoiceTurns = new Set<string>();
   private readonly activeRealtimeDeliveries = new Map<string, {
@@ -626,8 +681,11 @@ export class CodexAppServerHost implements EngineHost {
     this.child = child;
     this.identity = identity;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.realtimePersonaTimeoutMs = options.realtimePersonaTimeoutMs ?? REALTIME_PERSONA_TIMEOUT_MS;
+    this.realtimeStartTimeoutMs = options.realtimeStartTimeoutMs ?? REALTIME_START_TIMEOUT_MS;
     this.deliveryConfirmationTimeoutMs = options.deliveryConfirmationTimeoutMs
       ?? DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS;
+    this.compactEvidenceTimeoutMs = options.compactEvidenceTimeoutMs ?? DEFAULT_COMPACT_EVIDENCE_TIMEOUT_MS;
     this.shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
     this.eventStore = options.eventStore ?? new FileRuntimeEventStore();
     this.effort = options.effort;
@@ -924,7 +982,163 @@ export class CodexAppServerHost implements EngineHost {
     await this.rpc("turn/interrupt", { threadId: this.identity.threadId, turnId: turnRef });
   }
 
-  async startRealtimeWebRtc(sdp: string): Promise<CodexRealtimeWebRtcAnswer> {
+  /**
+   * Manual context compaction as an engine control (#862). It travels the
+   * app-server control channel — `thread/compact/start` for the thread this
+   * host owns — so there is no path by which it becomes a user turn: no
+   * `turn/start`, no `turn/steer`, no message content anywhere in the request.
+   * The promise settles only on a *completed* `contextCompaction` item, so the
+   * durable receipt cannot claim success from an accepted request, nor from a
+   * compaction that has merely started. `thread/compact/start` takes exactly
+   * `{ threadId }` and returns an empty ack, so nothing about the outcome comes
+   * back on the request leg.
+   */
+  async compact(request: RuntimeCompactRequest): Promise<RuntimeCompactOutcome> {
+    if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
+      throw new StructuredCompactError("Codex app-server host is unavailable", "refused");
+    }
+    if (request.threadId && request.threadId !== this.identity.threadId) {
+      throw new StructuredCompactError("compact target thread is not the thread this host owns", "refused");
+    }
+    /* The boundary refuses a live turn even though admission already fenced it:
+       the turn may have started between admission and execution, and compacting
+       underneath a running turn is exactly the race this control must not run. */
+    if (this.activeTurnId) {
+      throw new StructuredCompactError("a turn is active; compaction would race it", "refused");
+    }
+    const existing = this.pendingCompactions.get(request.operationId);
+    if (existing) return existing.promise;
+    /* One compaction per thread at a time. The delivery queue already holds a
+       second request back, so reaching here means something bypassed it — and
+       a concurrent `thread/compact/start` would compact the thread twice and
+       leave both waiters settling on whichever item arrived first. */
+    if (this.pendingCompactions.size > 0) {
+      throw new StructuredCompactError("a compaction is already running on this thread", "refused");
+    }
+
+    let settle!: PendingCompaction;
+    const promise = new Promise<RuntimeCompactOutcome>((resolve, reject) => {
+      settle = { promise: undefined as unknown as Promise<RuntimeCompactOutcome>, resolve, reject, timer: undefined };
+    });
+    settle.promise = promise;
+    /* Registered before the request so a compaction the app-server reports
+       immediately cannot land in the gap and go unobserved. */
+    this.pendingCompactions.set(request.operationId, settle);
+    void promise.catch(() => undefined);
+    try {
+      /* Budgeted like the compaction itself, not like an ordinary call.
+         `thread/compact/start` is a mutating method, so the default 30 s
+         request budget would fail the whole host — and take the operator's live
+         conversation with it — the moment a large thread takes longer than that
+         to begin compacting.
+
+         The fence at the far end of this budget is deliberate, not inherited: a
+         mutating call whose ack never arrives has left the thread in a state
+         this host cannot describe, and every other mutating method here fails
+         closed for that reason. Five minutes of silence on an ack that normally
+         returns at once is that case. The compaction itself terminalizes
+         `unverified` either way. */
+      await this.rpc(
+        "thread/compact/start",
+        { threadId: this.identity.threadId },
+        this.compactEvidenceTimeoutMs,
+      );
+    } catch (error) {
+      /* The evidence may have won the race: a compaction the app-server already
+         reported is a fact, and a late failure on the request leg must not
+         overwrite it. */
+      if (this.pendingCompactions.get(request.operationId) !== settle) return promise;
+      this.pendingCompactions.delete(request.operationId);
+      const message = safeError(error);
+      /* A refusal proves nothing was compacted; a request that timed out may
+         still have started one, and `thread/compact/start` is registered as
+         mutating so the transport says which of the two happened. */
+      throw new StructuredCompactError(message, /outcome is uncertain/.test(message) ? "unverified" : "refused");
+    }
+    if (this.pendingCompactions.get(request.operationId) === settle) {
+      settle.timer = setTimeout(() => {
+        this.pendingCompactions.delete(request.operationId);
+        settle.reject(new StructuredCompactError(
+          "Codex compaction evidence did not arrive; the outcome is unverified",
+          "unverified",
+        ));
+      }, this.compactEvidenceTimeoutMs);
+    }
+    return promise;
+  }
+
+  /**
+   * Reads one `contextCompaction` item as compaction evidence.
+   *
+   * The item itself carries no outcome — its whole shape is `{ id, type }` per
+   * `ContextCompactionThreadItem` in the app-server schema, and that holds for
+   * every such item in the local event ledgers. The lifecycle *phase* is
+   * therefore the only signal it offers: `item/started` says a compaction began
+   * and `item/completed` says it finished, so only the completed phase settles a
+   * waiter. Settling on the first sighting would report `delivered` for a
+   * compaction still running and release queued messages into a thread
+   * mid-compaction.
+   *
+   * There is consequently no fast failure signal: a compaction that starts and
+   * never completes is caught by `compactEvidenceTimeoutMs` (or sooner by host
+   * death), and terminalizes unverified — which is the honest verdict, since
+   * nothing on the wire says what became of it.
+   *
+   * Nor is there anything to correlate on. The item's `id` is minted by the
+   * engine and appears for the first time in this notification, so ANY completed
+   * compaction on the owned thread settles the waiter — including an
+   * auto-compaction that happened to land in the same window, whose id the
+   * receipt would then record. Two guards make that window small rather than
+   * closed: `compact()` refuses while a turn is active, and the delivery queue
+   * holds messages behind an unfinished compaction, so the thread should have no
+   * turn running to auto-compact. Recorded as a known limit of `{ id, type }`.
+   */
+  private acceptCompactionItem(item: unknown, phase: "started" | "completed"): void {
+    if (phase !== "completed" || this.pendingCompactions.size === 0) return;
+    const compaction = record(item);
+    if (!compaction) return;
+    this.settlePendingCompactions({ compactionId: stringField(compaction, "id") });
+  }
+
+  /**
+   * The deprecated `thread/compacted` notification, accepted as a second
+   * evidence channel for the thread this host owns.
+   *
+   * Every `contextCompaction` item observed locally came from auto-compaction
+   * *inside a turn*, and a manual `thread/compact/start` runs against an idle
+   * thread — nothing available here proves the app-server emits the item
+   * lifecycle in that case too. If it only sends this notification, reading the
+   * item alone would leave every manual compaction to time out as unverified
+   * and the control would never once report success. So the item stays the
+   * preferred channel (it is the documented replacement, and it names the
+   * compaction), and this one is a corroborating fallback rather than the
+   * primary source: whichever arrives first settles the waiters.
+   */
+  private acceptCompactedNotification(params: JsonObject): void {
+    if (this.pendingCompactions.size === 0) return;
+    if (stringField(params, "threadId") !== this.identity.threadId) return;
+    this.settlePendingCompactions({ compactionId: null });
+  }
+
+  /** A host that dies mid-compaction leaves the engine outcome unknown, so the
+      waiters reject as `unverified` and terminalize the receipt uncertain. */
+  private rejectPendingCompactions(error: Error): void {
+    this.settlePendingCompactions(new StructuredCompactError(safeError(error), "unverified"));
+  }
+
+  /** One thread compacts once at a time, so every waiter shares the outcome. */
+  private settlePendingCompactions(outcome: RuntimeCompactOutcome | StructuredCompactError): void {
+    if (this.pendingCompactions.size === 0) return;
+    const waiting = [...this.pendingCompactions.values()];
+    this.pendingCompactions.clear();
+    for (const compaction of waiting) {
+      if (compaction.timer) clearTimeout(compaction.timer);
+      if (outcome instanceof StructuredCompactError) compaction.reject(outcome);
+      else compaction.resolve(outcome);
+    }
+  }
+
+  async startRealtimeWebRtc(sdp: string): Promise<CodexRealtimeWebRtcResult> {
     if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
       throw new Error("Codex app-server host is unavailable");
     }
@@ -940,42 +1154,54 @@ export class CodexAppServerHost implements EngineHost {
        be reported against this one. */
     this.realtimeFailure = null;
     this.realtimeSessionId = null;
+    const personaBootstrapIdentity = voicePersonaBootstrapIdentity(this.identity.threadId);
 
-    const answer = new Promise<CodexRealtimeWebRtcAnswer>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.rejectRealtimeStart(new Error("thread/realtime/start timed out"));
-      }, REALTIME_START_TIMEOUT_MS);
-      this.pendingRealtimeStart = {
+    let pendingStart!: PendingRealtimeStart;
+    const answer = new Promise<CodexRealtimeWebRtcResult>((resolve, reject) => {
+      pendingStart = {
         resolve,
         reject,
-        timer,
+        timer: undefined,
         started: false,
         realtimeSessionId: null,
         sdp: null,
+        personaBootstrap: { ...personaBootstrapIdentity, insertion: "accepted" },
       };
     });
+    this.pendingRealtimeStart = pendingStart;
     void answer.catch(() => undefined);
 
-    /* The persona is a durable thread item, so `includeStartupContext` carries
-       it into every call and reconnect. Best effort by construction — a
-       rejected injection must never cost the operator their call, so the start
-       proceeds with whatever instructions the thread already holds. */
     try {
-      await this.rpc("thread/inject_items", {
-        threadId: this.identity.threadId,
-        items: [{ role: "developer", text: voicePersona() }],
-      }, REALTIME_PERSONA_TIMEOUT_MS);
-    } catch {
-      /* Swallowed on purpose: the app-server records the rejected RPC in its
-         own log, which is where a wrong item shape gets diagnosed, and the
-         operator gets their call either way. */
+      const outcome = await this.ensureVoicePersonaBootstrap(personaBootstrapIdentity, pendingStart);
+      if (outcome === "superseded") return answer;
+    } catch (error) {
+      if (this.pendingRealtimeStart !== pendingStart) return answer;
+      const pending = pendingStart;
+      this.pendingRealtimeStart = null;
+      clearTimeout(pending.timer);
+      const rejected: CodexRealtimeWebRtcRejection = {
+        sdp: null,
+        realtimeSessionId: null,
+        personaBootstrap: {
+          ...personaBootstrapIdentity,
+          insertion: "rejected",
+          diagnostic: safeError(error),
+        },
+      };
+      pending.resolve(rejected);
+      return answer;
     }
+    if (this.pendingRealtimeStart !== pendingStart) return answer;
     const realtimeContext = selectRealtimeContext(this.events);
     console.info("[realtime context] selected", {
       providerStartupContext: true,
       durableTail: realtimeContext.diagnosticItems,
       truncated: realtimeContext.truncated,
     });
+    pendingStart.timer = setTimeout(() => {
+      if (this.pendingRealtimeStart !== pendingStart) return;
+      this.fail(new Error("thread/realtime/start timed out; outcome is uncertain"));
+    }, this.realtimeStartTimeoutMs);
     try {
       await this.rpc("thread/realtime/start", {
         threadId: this.identity.threadId,
@@ -990,11 +1216,99 @@ export class CodexAppServerHost implements EngineHost {
            durable tail only when a streamed assistant response has no
            committed item; provider startup context owns the persisted history. */
         ...(realtimeContext.items.length > 0 ? { initialItems: realtimeContext.items } : {}),
-      }, REALTIME_START_TIMEOUT_MS);
+      }, this.realtimeStartTimeoutMs);
     } catch (error) {
       this.rejectRealtimeStart(error instanceof Error ? error : new Error(safeError(error)));
     }
     return answer;
+  }
+
+  private async ensureVoicePersonaBootstrap(
+    identity: VoicePersonaBootstrapIdentity,
+    pendingStart: PendingRealtimeStart,
+  ): Promise<"accepted" | "superseded"> {
+    await this.ensureCanonicalTranscriptPath();
+    while (!this.voicePersonaBootstrapAccepted) {
+      const active = this.voicePersonaBootstrapInsertion;
+      if (active) {
+        try {
+          await active.promise;
+        } catch (error) {
+          if (this.pendingRealtimeStart !== pendingStart) return "superseded";
+          if (active.owner === pendingStart) throw error;
+          continue;
+        }
+        continue;
+      }
+
+      if (await this.scanVoicePersonaBootstrap(identity.itemId, "canonical scan unavailable; refusing insertion")) {
+        this.voicePersonaBootstrapAccepted = true;
+        this.unresolvedVoicePersonaBootstrap = null;
+        break;
+      }
+      if (this.pendingRealtimeStart !== pendingStart) return "superseded";
+      if (this.voicePersonaBootstrapInsertion) continue;
+
+      const bootstrap = this.unresolvedVoicePersonaBootstrap ?? voicePersonaBootstrap(identity);
+      this.unresolvedVoicePersonaBootstrap = bootstrap;
+      const promise = this.insertVoicePersonaBootstrap(bootstrap, identity.itemId);
+      const insertion = { owner: pendingStart, promise };
+      this.voicePersonaBootstrapInsertion = insertion;
+      const clearInsertion = () => {
+        if (this.voicePersonaBootstrapInsertion === insertion) this.voicePersonaBootstrapInsertion = null;
+      };
+      void promise.then(clearInsertion, clearInsertion);
+      try {
+        await promise;
+      } catch (error) {
+        if (this.pendingRealtimeStart !== pendingStart) return "superseded";
+        throw error;
+      }
+    }
+    return "accepted";
+  }
+
+  private async ensureCanonicalTranscriptPath(): Promise<void> {
+    if (this.identity.path) return;
+    const result = await this.rpc("thread/read", {
+      threadId: this.identity.threadId,
+      includeTurns: true,
+    });
+    const recovered = threadFromResult(result, "thread/read");
+    if (recovered.threadId !== this.identity.threadId) {
+      throw new Error("thread/read returned a different thread id");
+    }
+    if (!recovered.path) {
+      const error = new Error("canonical transcript path is unavailable") as NodeJS.ErrnoException;
+      error.code = "NO_TRANSCRIPT_PATH";
+      throw error;
+    }
+    this.identity.path = recovered.path;
+  }
+
+  private async insertVoicePersonaBootstrap(bootstrap: VoicePersonaBootstrap, itemId: string): Promise<void> {
+    try {
+      await this.rpc("thread/inject_items", {
+        threadId: this.identity.threadId,
+        items: [bootstrap.item],
+      }, this.realtimePersonaTimeoutMs);
+    } catch (error) {
+      if (!await this.scanVoicePersonaBootstrap(itemId, "recovery scan unavailable")) throw error;
+    }
+    this.voicePersonaBootstrapAccepted = true;
+    this.unresolvedVoicePersonaBootstrap = null;
+  }
+
+  private async scanVoicePersonaBootstrap(itemId: string, warning: string): Promise<boolean> {
+    try {
+      return await canonicalVoicePersonaBootstrapExists(this.identity.path, itemId);
+    } catch (error) {
+      console.warn(`[voice persona bootstrap] ${warning}`, {
+        code: (error as NodeJS.ErrnoException).code ?? "unknown",
+        diagnostic: safeError(error),
+      });
+      throw error;
+    }
   }
 
   async appendRealtimeSpeech(text: string): Promise<void> {
@@ -1373,9 +1687,15 @@ export class CodexAppServerHost implements EngineHost {
       this.realtimeSessionId = null;
     }
     this.releasing = true;
+    this.unresolvedVoicePersonaBootstrap = null;
     this.rejectRealtimeStart(new Error("Codex app-server host released"));
     this.rejectPendingAnswers(new Error("Codex app-server host released"));
     this.rejectPendingDeliveries(new Error("Codex app-server host released"));
+    /* A graceful release is the one teardown `fail()` never sees — `close`
+       skips it while `releasing` is set — so a compaction waiting on evidence
+       would otherwise hang until its own timeout, holding this conversation's
+       queue behind it for minutes after the host is gone (#862). */
+    this.rejectPendingCompactions(new Error("Codex app-server host released"));
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);
       request.reject(new Error("Codex app-server host released"));
@@ -2275,6 +2595,10 @@ export class CodexAppServerHost implements EngineHost {
         phase,
         ...(voiceResponse !== undefined ? { voiceResponse } : {}),
       });
+      /* #862: the compaction item is the completion signal for a manual
+         compact control. It is read after the emit so the durable event ledger
+         carries the evidence before any receipt terminalizes on it. */
+      if (record(params.item)?.type === "contextCompaction") this.acceptCompactionItem(params.item, phase);
       return;
     }
     if (method === "turn/completed" && turnId) {
@@ -2302,6 +2626,10 @@ export class CodexAppServerHost implements EngineHost {
       this.emit({ kind: "limits", snapshot: params });
       return;
     }
+    if (method === "thread/compacted") {
+      this.acceptCompactedNotification(params);
+      return;
+    }
     if (method === "thread/status/changed") {
       const status = threadStatus(params);
       if (status) this.emitThreadStatus(status);
@@ -2317,6 +2645,7 @@ export class CodexAppServerHost implements EngineHost {
     this.rejectRealtimeStart(error);
     this.rejectPendingAnswers(error);
     this.rejectPendingDeliveries(error);
+    this.rejectPendingCompactions(error);
     this.attentions.clear();
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);
@@ -2338,6 +2667,7 @@ export class CodexAppServerHost implements EngineHost {
     this.rejectRealtimeStart(error);
     this.rejectPendingAnswers(error);
     this.rejectPendingDeliveries(error);
+    this.rejectPendingCompactions(error);
     this.attentions.clear();
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);
@@ -2386,6 +2716,7 @@ export class CodexAppServerHost implements EngineHost {
     pending.resolve({
       sdp: pending.sdp,
       realtimeSessionId: pending.realtimeSessionId,
+      personaBootstrap: pending.personaBootstrap,
     });
   }
 

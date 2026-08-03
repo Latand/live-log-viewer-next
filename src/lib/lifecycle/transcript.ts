@@ -42,6 +42,10 @@ export interface LivenessTranscript {
   title: string;
   engine: Engine;
   mtimeMs: number;
+  /** File size, for the caller's read budget. A tail read is clamped well below
+      it — a multi-gigabyte transcript costs the same bounded tail as any other
+      — but the budget is charged before the read, so it needs the number. */
+  sizeBytes?: number;
   /** The scan's own conversation attribution. Null for a targeted lookup, which
       resolves the owner from the registry snapshot it already holds. */
   conversationId: string | null;
@@ -118,6 +122,7 @@ export async function describeTranscriptPath(transcriptPath: string): Promise<Li
     title: description.title,
     engine: description.engine,
     mtimeMs: stat.mtimeMs,
+    sizeBytes: stat.size,
     conversationId: null,
     activity: null,
     activityReason: null,
