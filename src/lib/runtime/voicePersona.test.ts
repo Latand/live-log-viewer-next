@@ -7,6 +7,7 @@ import { expect, test } from "bun:test";
 import {
   canonicalVoicePersonaBootstrapExists,
   DEFAULT_VOICE_PERSONA,
+  legacyVoicePersonaBootstrapItemId,
   PERSONA_NAME,
   voicePersona,
   voicePersonaBootstrap,
@@ -71,6 +72,8 @@ test("one durable thread identity produces one stable canonical developer item",
   expect(voicePersonaBootstrapIdentity("thread-voice")).toEqual(identity);
   expect(voicePersonaBootstrapIdentity("thread-other")).not.toEqual(identity);
   expect(identity.itemId.length).toBeLessThanOrEqual(64);
+  expect(legacyVoicePersonaBootstrapItemId("thread-voice")).toStartWith(identity.itemId);
+  expect(legacyVoicePersonaBootstrapItemId("thread-voice").length).toBe(82);
   expect(voicePersonaBootstrap(identity, () => "  Resolved call persona. \n")).toEqual({
     item: {
       type: "message",

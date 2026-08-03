@@ -52,6 +52,7 @@ import {
 } from "./eventStore";
 import {
   canonicalVoicePersonaBootstrapExists,
+  legacyVoicePersonaBootstrapItemId,
   voicePersonaBootstrap,
   voicePersonaBootstrapIdentity,
   type VoicePersonaBootstrap,
@@ -1262,7 +1263,15 @@ export class CodexAppServerHost implements EngineHost {
         continue;
       }
 
-      if (await this.scanVoicePersonaBootstrap(identity.itemId, "canonical scan unavailable; refusing insertion")) {
+      const canonicalExists = await this.scanVoicePersonaBootstrap(
+        identity.itemId,
+        "canonical scan unavailable; refusing insertion",
+      );
+      const legacyExists = canonicalExists ? false : await this.scanVoicePersonaBootstrap(
+        legacyVoicePersonaBootstrapItemId(this.identity.threadId),
+        "legacy canonical scan unavailable; refusing insertion",
+      );
+      if (canonicalExists || legacyExists) {
         this.voicePersonaBootstrapAccepted = true;
         this.unresolvedVoicePersonaBootstrap = null;
         break;

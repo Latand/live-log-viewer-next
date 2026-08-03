@@ -174,15 +174,23 @@ export function voicePersona(readFile: (path: string) => string = (target) => fs
   return DEFAULT_VOICE_PERSONA;
 }
 
+function voicePersonaBootstrapDigest(threadId: string): string {
+  return createHash("sha256")
+    .update("voice-persona-bootstrap\0", "utf8")
+    .update(threadId, "utf8")
+    .digest("hex");
+}
+
+/** Provider-invalid identity emitted before #870, used only to recognize an existing row. */
+export function legacyVoicePersonaBootstrapItemId(threadId: string): string {
+  return `msg_voice_persona_${voicePersonaBootstrapDigest(threadId)}`;
+}
+
 /** Stable canonical identity shared by every WebRTC attempt on one thread. */
 export function voicePersonaBootstrapIdentity(
   threadId: string,
 ): VoicePersonaBootstrapIdentity {
-  const digest = createHash("sha256")
-    .update("voice-persona-bootstrap\0", "utf8")
-    .update(threadId, "utf8")
-    .digest("hex")
-    .slice(0, VOICE_PERSONA_ID_DIGEST_HEX);
+  const digest = voicePersonaBootstrapDigest(threadId).slice(0, VOICE_PERSONA_ID_DIGEST_HEX);
   const receiptId = `voice_persona_${digest}`;
   const itemId = `msg_${receiptId}`;
   return { receiptId, itemId };
