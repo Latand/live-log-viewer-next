@@ -2267,10 +2267,13 @@ describe("CodexAppServerHost", () => {
       if (index === 0) expect(event).toMatchObject({ kind: "session-status", status: "active", activeFlags: ["waitingForApproval"] });
       if (index === 1) expect(event).toMatchObject({ kind: "session-status", status: "idle" });
       if (index === 2) expect(event).toMatchObject({ kind: "session-status", status: "unhosted" });
-      if (index === 3) expect(event).toMatchObject({ kind: "session-status", status: "dead", activeFlags: ["recovering"] });
+      if (index === 3) expect(event).toMatchObject({ kind: "session-status", status: "idle", activeFlags: ["recovering"] });
     }
-    expect((await stream.next()).done).toBeTrue();
+    expect(await host.health()).toMatchObject({ status: "idle", activeTurnRef: null });
+    expect(server.signals).toEqual([]);
     await host.release();
+    expect((await stream.next()).value).toMatchObject({ kind: "session-status", status: "unhosted" });
+    expect((await stream.next()).done).toBeTrue();
   });
 
   test("release awaits TERM and escalates to KILL before resolving", async () => {
@@ -3062,13 +3065,14 @@ describe("CodexAppServerHost", () => {
     expect(failure.message.length).toBeLessThanOrEqual(500);
   });
 
-  test("requires an exact opt-in value", async () => {
-    expect(structuredHostsEnabled({ NODE_ENV: "test" })).toBeFalse();
-    expect(structuredHostsEnabled({ NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "true" })).toBeFalse();
+  test("keeps structured hosting enabled unless the rollback switch is explicit", async () => {
+    expect(structuredHostsEnabled({ NODE_ENV: "test" })).toBeTrue();
+    expect(structuredHostsEnabled({ NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "true" })).toBeTrue();
     expect(structuredHostsEnabled({ NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "1" })).toBeTrue();
+    expect(structuredHostsEnabled({ NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "0" })).toBeFalse();
     await expect(startCodexStructuredHost(
       { cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(new FakeAppServer()) },
-      { NODE_ENV: "test" },
+      { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "0" },
     )).rejects.toThrow("structured hosts are disabled");
   });
 
@@ -3102,7 +3106,7 @@ describe("CodexAppServerHost", () => {
     const disabled = await adoptCodexRegistryHosts(
       registry,
       () => ({ cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(new FakeAppServer("adopted-thread")) }),
-      { NODE_ENV: "test" },
+      { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "0" },
     );
     expect(disabled).toEqual([]);
 

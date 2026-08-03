@@ -31,6 +31,7 @@ class CompactAppServer extends EventEmitter {
   readonly stderr = new PassThrough();
   readonly pid = 5151;
   readonly requests: Array<{ method: string; params: Record<string, unknown> }> = [];
+  readonly signals: NodeJS.Signals[] = [];
   compactError: string | null = null;
   holdCompact = false;
   private heldCompactIds: number[] = [];
@@ -51,7 +52,8 @@ class CompactAppServer extends EventEmitter {
     });
   }
 
-  kill(): boolean {
+  kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
+    this.signals.push(signal);
     queueMicrotask(() => this.emit("close", 0, "SIGTERM"));
     return true;
   }
@@ -289,6 +291,105 @@ test("a compaction that starts and never finishes terminalizes unverified", asyn
   const error = await compaction.then(() => null, (reason: unknown) => reason);
   expect(error).toBeInstanceOf(StructuredCompactError);
   expect((error as StructuredCompactError).phase).toBe("unverified");
+  await host.release();
+});
+
+test("a failed compaction terminalizes without killing the reusable app-server host", async () => {
+  const server = new CompactAppServer();
+  const host = await startHost(server);
+
+  const compaction = host.compact({ operationId: "op-failed-compact", threadId: server.threadId });
+  await Bun.sleep(10);
+  server.notify("turn/started", {
+    threadId: server.threadId,
+    turn: { id: "compact-turn" },
+  });
+  server.notify("item/started", {
+    threadId: server.threadId,
+    turnId: "compact-turn",
+    item: { id: "compaction-failed", type: "contextCompaction" },
+  });
+  server.notify("thread/status/changed", {
+    threadId: server.threadId,
+    status: { type: "systemError" },
+  });
+  server.notify("error", {
+    threadId: server.threadId,
+    turnId: "compact-turn",
+    error: { message: "remote compaction failed oauth_token=must-stay-private" },
+    willRetry: false,
+  });
+  server.notify("turn/completed", {
+    threadId: server.threadId,
+    turn: {
+      id: "compact-turn",
+      status: "failed",
+      error: { message: "remote compaction failed oauth_token=must-stay-private" },
+    },
+  });
+
+  const error = await compaction.then(() => null, (reason: unknown) => reason);
+  expect(error).toBeInstanceOf(StructuredCompactError);
+  expect((error as StructuredCompactError).phase).toBe("refused");
+  expect((error as Error).message).toContain("remote compaction failed");
+  expect((error as Error).message).not.toContain("must-stay-private");
+  expect(await host.health()).toMatchObject({ status: "idle", activeTurnRef: null });
+  expect(server.signals).toEqual([]);
+
+  const delivery = host.send({ id: "after-failed-compact", text: "continue" });
+  await Bun.sleep(10);
+  server.notify("item/completed", {
+    threadId: server.threadId,
+    turnId: "turn-1",
+    item: { type: "userMessage", clientId: "after-failed-compact", content: [{ type: "input_text", text: "continue" }] },
+  });
+  expect(await delivery).toEqual({ outcome: "turn-started", turnId: "turn-1" });
+  expect(server.signals).toEqual([]);
+  await host.release();
+});
+
+test("an interrupted compaction terminalizes unverified and leaves the host reusable", async () => {
+  const server = new CompactAppServer();
+  const host = await startHost(server);
+
+  const compaction = host.compact({ operationId: "op-interrupted-compact", threadId: server.threadId });
+  await Bun.sleep(10);
+  server.notify("turn/started", {
+    threadId: server.threadId,
+    turn: { id: "compact-turn" },
+  });
+  server.notify("item/started", {
+    threadId: server.threadId,
+    turnId: "compact-turn",
+    item: { id: "compaction-interrupted", type: "contextCompaction" },
+  });
+  server.notify("turn/completed", {
+    threadId: server.threadId,
+    turn: { id: "compact-turn", status: "interrupted" },
+  });
+
+  const error = await compaction.then(() => null, (reason: unknown) => reason);
+  expect(error).toBeInstanceOf(StructuredCompactError);
+  expect((error as StructuredCompactError).phase).toBe("unverified");
+  expect(await host.health()).toMatchObject({ status: "idle", activeTurnRef: null });
+  expect(server.signals).toEqual([]);
+
+  /* Late evidence cannot re-settle the completed operation or poison the next
+     turn after its pending row has been removed. */
+  server.notify("item/completed", {
+    threadId: server.threadId,
+    turnId: "compact-turn",
+    item: { id: "compaction-interrupted", type: "contextCompaction" },
+  });
+  const delivery = host.send({ id: "after-interrupted-compact", text: "continue" });
+  await Bun.sleep(10);
+  server.notify("item/completed", {
+    threadId: server.threadId,
+    turnId: "turn-1",
+    item: { type: "userMessage", clientId: "after-interrupted-compact", content: [{ type: "input_text", text: "continue" }] },
+  });
+  expect(await delivery).toEqual({ outcome: "turn-started", turnId: "turn-1" });
+  expect(server.signals).toEqual([]);
   await host.release();
 });
 
