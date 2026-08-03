@@ -85,6 +85,23 @@ export interface ShellNavigator {
    */
   openPathQuiet?(path: string): void;
   /**
+   * Record the ONE typed focus-history entry a VERIFIED conversation arrival
+   * owes (#866 production regression).
+   *
+   * `intent: "show"` frames the target and deliberately opens nothing — which
+   * left it with no route into focus history at all: the camera moved, no
+   * entry was pushed, and the next Back crossed the document boundary,
+   * remounted the app and terminated the active voice call. This is the
+   * recording half alone — no placement, no camera, no surface — called by
+   * the focus transaction once, after it has OBSERVED the arrival, for every
+   * successful conversation-target handoff of either intent. Idempotent at
+   * the history layer: a same-target re-record coalesces into a replace, so
+   * the `open` path's quiet open beside it still yields exactly one entry.
+   * Optional so a partial test navigator keeps working; without it the
+   * handoff records nothing, exactly as before.
+   */
+  recordFocusArrival?(path: string, project: string): void;
+  /**
    * Leave every project and show the overview.
    *
    * `openProject` cannot express this: the overview is the ABSENCE of an open
