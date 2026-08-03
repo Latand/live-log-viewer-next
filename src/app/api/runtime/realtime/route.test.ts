@@ -6,8 +6,8 @@ import { executeRealtimeControl } from "@/lib/runtime/realtimeControl";
 import { POST } from "./route";
 
 const ACCEPTED_PERSONA_BOOTSTRAP = {
-  receiptId: `voice_persona_${"c".repeat(64)}`,
-  itemId: `msg_voice_persona_${"c".repeat(64)}`,
+  receiptId: `voice_persona_${"c".repeat(46)}`,
+  itemId: `msg_voice_persona_${"c".repeat(46)}`,
   insertion: "accepted" as const,
 };
 
@@ -143,8 +143,8 @@ test("keeps validation and backend admission errors bounded", async () => {
 test("returns the canonical persona insertion outcome and rejects a call whose bootstrap was refused", async () => {
   let rejectedStops = 0;
   const acceptedBootstrap = {
-    receiptId: `voice_persona_${"b".repeat(64)}`,
-    itemId: `msg_voice_persona_${"b".repeat(64)}`,
+    receiptId: `voice_persona_${"b".repeat(46)}`,
+    itemId: `msg_voice_persona_${"b".repeat(46)}`,
     insertion: "accepted" as const,
   };
   const accepted = await executeRealtimeControl({
@@ -169,8 +169,8 @@ test("returns the canonical persona insertion outcome and rejects a call whose b
   });
 
   const personaBootstrap = {
-    receiptId: `voice_persona_${"a".repeat(64)}`,
-    itemId: `msg_voice_persona_${"a".repeat(64)}`,
+    receiptId: `voice_persona_${"a".repeat(46)}`,
+    itemId: `msg_voice_persona_${"a".repeat(46)}`,
     insertion: "rejected" as const,
     diagnostic: "Codex app-server request failed: invalid developer item",
   };
@@ -218,7 +218,7 @@ test("refuses a realtime answer that omits the mandatory persona bootstrap recei
 });
 
 test("refuses malformed persona bootstrap receipts before binding the realtime session", async () => {
-  const digest = "d".repeat(64);
+  const digest = "d".repeat(46);
   let stops = 0;
   const malformedReceipts = [
     { itemId: `msg_voice_persona_${digest}`, insertion: "accepted" },

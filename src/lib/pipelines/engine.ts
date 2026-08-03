@@ -257,6 +257,7 @@ async function spawnPipelineAgent(
     cwd: input.cwd,
     transport: "structured",
     accountId: account.accountId,
+    accountPin: true,
     parentConversationId: parent.conversationId,
     parentSessionKey: parent.sessionKey,
     parentArtifactPath: parent.conversationId ? input.parentPath : null,

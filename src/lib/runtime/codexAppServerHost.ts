@@ -52,6 +52,7 @@ import {
 } from "./eventStore";
 import {
   canonicalVoicePersonaBootstrapExists,
+  legacyVoicePersonaBootstrapItemId,
   voicePersonaBootstrap,
   voicePersonaBootstrapIdentity,
   type VoicePersonaBootstrap,
@@ -1138,6 +1139,27 @@ export class CodexAppServerHost implements EngineHost {
     }
   }
 
+  /** A terminal compaction turn gives stronger evidence than the compact item:
+      `failed` proves the engine rejected the operation, while `interrupted`
+      leaves its effect uncertain. The app-server does not put an operation id
+      on either notification, and this host admits only one idle-thread
+      compaction at a time. */
+  private settlePendingCompactionsFromTerminalTurn(
+    turn: JsonObject | null,
+    status: "completed" | "interrupted" | "error",
+  ): void {
+    if (status === "completed" || this.pendingCompactions.size === 0) return;
+    const providerError = record(turn?.error);
+    const message = safeError(stringField(providerError, "message")
+      ?? (status === "interrupted"
+        ? "Codex compaction was interrupted; the outcome is unverified"
+        : "Codex compaction failed"));
+    this.settlePendingCompactions(new StructuredCompactError(
+      message,
+      status === "interrupted" ? "unverified" : "refused",
+    ));
+  }
+
   async startRealtimeWebRtc(sdp: string): Promise<CodexRealtimeWebRtcResult> {
     if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
       throw new Error("Codex app-server host is unavailable");
@@ -1241,7 +1263,15 @@ export class CodexAppServerHost implements EngineHost {
         continue;
       }
 
-      if (await this.scanVoicePersonaBootstrap(identity.itemId, "canonical scan unavailable; refusing insertion")) {
+      const canonicalExists = await this.scanVoicePersonaBootstrap(
+        identity.itemId,
+        "canonical scan unavailable; refusing insertion",
+      );
+      const legacyExists = canonicalExists ? false : await this.scanVoicePersonaBootstrap(
+        legacyVoicePersonaBootstrapItemId(this.identity.threadId),
+        "legacy canonical scan unavailable; refusing insertion",
+      );
+      if (canonicalExists || legacyExists) {
         this.voicePersonaBootstrapAccepted = true;
         this.unresolvedVoicePersonaBootstrap = null;
         break;
@@ -2255,7 +2285,11 @@ export class CodexAppServerHost implements EngineHost {
 
   private emitThreadStatus(status: ThreadStatus): void {
     if (status.type === "systemError") {
-      this.fail(new Error("Codex app-server reported a system error"), status.activeFlags);
+      /* app-server publishes `systemError` for an ordinary failed turn. Its
+         error notification and terminal `turn/completed` follow on the same
+         live process, and the next turn clears the status. Preserve that
+         recovery lifecycle and project the loaded thread as idle. */
+      this.setSessionStatus("idle", status.activeFlags);
       return;
     }
     const mapped = status.type === "notLoaded" ? "unhosted" : status.type;
@@ -2620,6 +2654,7 @@ export class CodexAppServerHost implements EngineHost {
         this.voiceStreams.delete(turnId);
       }
       this.emit({ kind: "turn-ended", turnId, status });
+      this.settlePendingCompactionsFromTerminalTurn(turn, status);
       return;
     }
     if (method === "account/rateLimits/updated") {

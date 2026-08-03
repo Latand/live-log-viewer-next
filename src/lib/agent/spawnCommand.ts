@@ -9,7 +9,7 @@ import { claudeSettingsPath, isManagedClaudeHome, UnknownClaudeAccountError } fr
 import { accountManager, resolveHealthySpawnAccount } from "@/lib/accounts/manager";
 import { emptyLaunchProfile, validExplicitProject } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
-import { agentRegistry, SpawnChildLimitError } from "@/lib/agent/registry";
+import { agentRegistry, SpawnChildLimitError, type SpawnRequest } from "@/lib/agent/registry";
 import { reasoningFromBody } from "@/lib/agent/efforts";
 import { mcpServersForSession, normalizeSpawnMcpServers } from "@/lib/agent/mcpAllowlist";
 import { normalizeSpawnPlugins, pluginAllowlistForSession, sessionOriginFor } from "@/lib/agent/pluginAllowlist";
@@ -301,9 +301,6 @@ export async function executeSpawnRequest(
   try {
     const clientAttemptId = typeof body.clientAttemptId === "string" ? body.clientAttemptId : null;
     const existingAttempt = clientAttemptId ? registry.spawnReceiptForClientAttempt(clientAttemptId) : null;
-    const account = existingAttempt && body.accountId === undefined && existingAttempt.accountId !== null
-      ? dependencies.resolveSpawnAccount(existingAttempt.engine, existingAttempt.accountId)
-      : await dependencies.resolveHealthySpawnAccount(engine, body.accountId);
     const lineage = resolveSpawnLineage(spawnLineageSelectorForCaller(authenticatedCaller, {
       ...body,
       role: role.value?.role,
@@ -357,13 +354,13 @@ export async function executeSpawnRequest(
     /* Same shape for MCP: a delegated launch holds the Viewer baseline whatever
        it asked for, so a granted connector cannot travel down a spawn chain. */
     const grantedServers = mcpServersForSession({ origin: sessionOrigin, requested: requestedMcpServers });
-    const digest = spawnRequestDigest({
+    const requestDigestForAccount = (accountId: string) => spawnRequestDigest({
       engine,
       cwd,
       model: selectedModel.model,
       effort: reasoning.effort,
       fast: reasoning.fast,
-      accountId: account.accountId,
+      accountId,
       role: role.value?.role ?? null,
       mcpServers: grantedServers,
       ...(plugins.length ? { plugins } : {}),
@@ -378,6 +375,108 @@ export async function executeSpawnRequest(
     const pipelineAttemptTarget = pipelineSourceConversationId && dependencies.pipelineAttemptTargetForSource
       ? dependencies.pipelineAttemptTargetForSource(pipelineSourceConversationId)
       : null;
+    const launchDisplay = (userPrompt.trim() || images.length)
+      ? { ["prompt"]: userPrompt, images: images.length, echo: prompt }
+      : null;
+    /* Both a runnable launch and an explicit-account preflight failure reserve
+       the same durable launch identity. Keep the request assembled at this
+       seam so the terminal receipt retains the lineage, origin, grants and
+       pipeline evidence a runnable receipt would carry. */
+    const canonicalSpawnRequest = (
+      accountId: string,
+      launchProfile: ReturnType<typeof emptyLaunchProfile>,
+      requestDigest: string,
+    ): SpawnRequest => ({
+      engine,
+      cwd,
+      transport,
+      accountId,
+      accountPin: body.accountId !== undefined,
+      parentConversationId,
+      parentSource,
+      parentSessionKey,
+      parentArtifactPath,
+      role: role.value?.role ?? null,
+      reviewsConversationId: reviewedConversationId,
+      explicitProject,
+      supersedes: supersedesConversationId,
+      supersedesReason: "recovery-spawn",
+      liveChildrenCap: authenticatedCaller?.liveChildrenCap,
+      /* Initiating origin (#393): the authenticated capability caller is the
+         origin of agent-lane launches; same-origin UI and operator-capability
+         launches are depth-0 roots. Lineage parents stay projection metadata. */
+      origin: authenticatedCaller?.kind === "agent"
+        ? { kind: "agent", conversationId: authenticatedCaller.conversationId }
+        : { kind: "operator" },
+      launchProfile,
+      clientAttemptId,
+      requestDigest,
+      /* Durable launch DISPLAY payload (issue #614/#615): the RAW operator
+         draft and canonical delivered echo persist through scan lag. */
+      launchDisplay,
+      memberships: pipelineAttemptTarget && pipelineSourceConversationId ? [{
+        kind: "pipeline",
+        containerId: pipelineAttemptTarget.pipelineId,
+        role: pipelineAttemptTarget.role,
+        slot: `adopt:${pipelineAttemptTarget.stageId}:${requestDigest.slice(0, 24)}`,
+        stageId: pipelineAttemptTarget.stageId,
+        stageOrder: pipelineAttemptTarget.stageOrder,
+        round: null,
+        parentConversationId: pipelineSourceConversationId as `conversation_${string}`,
+        runtime: {
+          engine,
+          model: launchProfile.model,
+          effort: launchProfile.effort,
+        },
+      }] : [],
+    });
+    const preflightLaunchProfile = emptyLaunchProfile({
+      cwd,
+      model: selectedModel.model,
+      effort: reasoning.effort,
+      fast: reasoning.fast,
+      parentConversationId,
+      allowSubagents: body.allowSubagents === true,
+      mcpServers: grantedServers,
+      plugins,
+      ...(explicitProject ? { project: explicitProject } : {}),
+    });
+    const terminalizePinnedAccountFailure = (failure: unknown): NextResponse<SpawnResponse | ApiError> => {
+      const accountId = body.accountId as string;
+      const reason = (failure instanceof Error ? failure.message : String(failure)).slice(0, 240);
+      const begun = registry.beginSpawnRequest(canonicalSpawnRequest(
+        accountId,
+        preflightLaunchProfile,
+        /* The digest binds this terminal preflight to the same canonical public
+           launch identity as a runnable request. Prompt and image bytes enter
+           durable identity only through one-way hashes. */
+        requestDigestForAccount(accountId),
+      ));
+      if (begun.kind === "conflict") {
+        return NextResponse.json({ error: "spawn attempt conflicts with its original request" }, { status: 409 });
+      }
+      if (begun.kind === "created") {
+        if (transport === "structured") registry.failStructuredSpawn(begun.receipt.launchId, reason);
+        else registry.failSpawn(begun.receipt.launchId, reason);
+      }
+      const receipt = registry.readOnlySnapshot().receipts[begun.receipt.launchId] ?? begun.receipt;
+      return NextResponse.json(spawnResponseForReceipt(receipt, receipt.artifactPath, {
+        structured: transport === "structured",
+      }));
+    };
+    let account;
+    try {
+      account = existingAttempt && body.accountId === undefined && existingAttempt.accountId !== null
+        ? dependencies.resolveSpawnAccount(existingAttempt.engine, existingAttempt.accountId)
+        : await dependencies.resolveHealthySpawnAccount(engine, body.accountId);
+    } catch (error) {
+      if (body.accountId === undefined) throw error;
+      return terminalizePinnedAccountFailure(error);
+    }
+    if (body.accountId !== undefined && account.accountId !== body.accountId) {
+      return terminalizePinnedAccountFailure(new Error("the requested account is not available for this launch"));
+    }
+    const digest = requestDigestForAccount(account.accountId);
     const specBase = freshSpecFor(engine, cwd, {
       model: selectedModel.model,
       effort: reasoning.effort,
@@ -409,55 +508,7 @@ export async function executeSpawnRequest(
         ...(explicitProject ? { project: explicitProject } : {}),
       }),
     };
-    const begun = registry.beginSpawnRequest({
-      engine,
-      cwd,
-      transport,
-      accountId: account.accountId,
-      parentConversationId,
-      parentSource,
-      parentSessionKey,
-      parentArtifactPath,
-      role: role.value?.role ?? null,
-      reviewsConversationId: reviewedConversationId,
-      explicitProject,
-      supersedes: supersedesConversationId,
-      supersedesReason: "recovery-spawn",
-      liveChildrenCap: authenticatedCaller?.liveChildrenCap,
-      /* Initiating origin (#393): the authenticated capability caller is the
-         origin of agent-lane launches; same-origin UI and operator-capability
-         launches are depth-0 roots. Lineage parents stay projection metadata. */
-      origin: authenticatedCaller?.kind === "agent"
-        ? { kind: "agent", conversationId: authenticatedCaller.conversationId }
-        : { kind: "operator" },
-      launchProfile: spec.launchProfile,
-      clientAttemptId,
-      requestDigest: digest,
-      /* Durable launch DISPLAY payload (issue #614/#615): the RAW operator draft
-         for the first user bubble, the scaffold-composed delivered text as its
-         canonical transcript-echo identity, and the image count — persisted with
-         the receipt so a surface that never ran the composer shows the bubble
-         through starting, scan-lag and text-scrubbed delivery, and retires it on
-         the real (possibly scaffolded) transcript echo. */
-      launchDisplay: (userPrompt.trim() || images.length)
-        ? { prompt: userPrompt, images: images.length, echo: prompt }
-        : null,
-      memberships: pipelineAttemptTarget && pipelineSourceConversationId ? [{
-        kind: "pipeline",
-        containerId: pipelineAttemptTarget.pipelineId,
-        role: pipelineAttemptTarget.role,
-        slot: `adopt:${pipelineAttemptTarget.stageId}:${digest.slice(0, 24)}`,
-        stageId: pipelineAttemptTarget.stageId,
-        stageOrder: pipelineAttemptTarget.stageOrder,
-        round: null,
-        parentConversationId: pipelineSourceConversationId as `conversation_${string}`,
-        runtime: {
-          engine,
-          model: spec.launchProfile.model,
-          effort: spec.launchProfile.effort,
-        },
-      }] : [],
-    });
+    const begun = registry.beginSpawnRequest(canonicalSpawnRequest(account.accountId, spec.launchProfile, digest));
     if (begun.kind === "conflict") return NextResponse.json({ error: "spawn attempt conflicts with its original request" }, { status: 409 });
     const adoptMaterializedAttempt = async (receipt: typeof begun.receipt, agentPath: string): Promise<void> => {
       if (!pipelineSourceConversationId || !dependencies.adoptPipelineAttemptFromSource) return;

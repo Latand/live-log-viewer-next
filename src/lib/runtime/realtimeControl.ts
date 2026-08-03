@@ -60,7 +60,7 @@ function voicePersonaBootstrapReceipt(value: unknown): VoicePersonaBootstrapRece
   const receipt = value as Record<string, unknown>;
   const receiptId = typeof receipt.receiptId === "string" ? receipt.receiptId : "";
   const itemId = typeof receipt.itemId === "string" ? receipt.itemId : "";
-  if (!/^voice_persona_[a-f0-9]{64}$/.test(receiptId) || itemId !== `msg_${receiptId}`) return null;
+  if (!/^voice_persona_[a-f0-9]{46}$/.test(receiptId) || itemId !== `msg_${receiptId}`) return null;
   if (receipt.insertion !== "accepted" && receipt.insertion !== "rejected") return null;
   if (receipt.diagnostic !== undefined
     && (typeof receipt.diagnostic !== "string" || receipt.diagnostic.length > 500)) return null;

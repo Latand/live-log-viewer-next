@@ -397,6 +397,7 @@ test("retryOfLaunchId relaunches a pathless failed assignment with a fresh attem
     updatedAt: "2026-07-19T10:00:00.000Z",
   }];
   let failNextSpawn = true;
+  let rerouteRetryBeforeSettlement = false;
   const dependencies = {
     registry: () => registry,
     loadTasks: () => tasks,
@@ -416,6 +417,15 @@ test("retryOfLaunchId relaunches a pathless failed assignment with a fresh attem
     resolveSpawnedTranscriptPath: async () => artifactPath,
     spawnAgentWithPrompt: async (_spec: unknown, _prompt: string, receipt: SpawnReceipt) => {
       if (failNextSpawn) throw new Error("pane allocation failed before binding");
+      if (rerouteRetryBeforeSettlement) {
+        registry.commitMigrationIntent({
+          engine: "claude",
+          targetId: "claude-healthy",
+          origin: "manual",
+          requestId: "task-retry-routing-change",
+          expectedRevision: registry.engineRouting("claude").revision,
+        });
+      }
       const binding = {
         endpoint: "/tmp",
         server: { pid: 91, startIdentity: "91:one" },
@@ -468,6 +478,7 @@ test("retryOfLaunchId relaunches a pathless failed assignment with a fresh attem
   }), context, dependencies)).status).toBe(400);
 
   failNextSpawn = false;
+  rerouteRetryBeforeSettlement = true;
   const retried = await POST.withDependencies(request({ retryOfLaunchId: failedBody.launchId }), context, dependencies);
   const retriedBody = await retried.json();
   expect(retried.status).toBe(200);
@@ -478,12 +489,18 @@ test("retryOfLaunchId relaunches a pathless failed assignment with a fresh attem
   const original = snapshot.receipts[failedBody.launchId]!;
   const fresh = snapshot.receipts[retriedBody.launchId]!;
   expect(original.state).toBe("failed");
+  expect(original.accountPin).toBeFalse();
   expect(fresh.clientAttemptId).not.toBe(original.clientAttemptId);
   expect(fresh).toMatchObject({
     engine: "claude",
     cwd: original.cwd,
     accountId: original.accountId,
+    accountPin: true,
     launchProfile: expect.objectContaining({ model: "opus", effort: "high" }),
+  });
+  expect(registry.conversation(fresh.conversationId)).toMatchObject({
+    pinnedAccountId: fresh.accountId,
+    migration: null,
   });
   /* The failed audit assignment survives beside the fresh delivered one. */
   expect(tasks[0]!.assignments).toEqual([

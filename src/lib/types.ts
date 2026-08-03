@@ -41,6 +41,9 @@ export interface StructuredSpawnCardState {
   launchId: string;
   clientAttemptId: string | null;
   accountId: string | null;
+  /** The displayed account came from an explicit launch pin, so account
+      selection changes cannot retarget this launch. */
+  accountPin?: boolean;
   /** The durable conversation this launch created/owns (issue #653). The client
       keys the launch-owned optimistic bubble on THIS id, so a pane renders the
       bubble only inside its own conversation — never leaked into an unrelated

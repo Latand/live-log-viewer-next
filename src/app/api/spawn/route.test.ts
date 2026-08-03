@@ -9,6 +9,7 @@ import { agentRegistry, AgentRegistry } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { codexSessionRoots, createManagedCodexAccount } from "@/lib/accounts/codex";
 import { spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
+import { projectLaunchConversations } from "@/lib/agent/spawnProjection";
 import { rotateOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { spawnReplayStatus, spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
 import { resolveSpawnLineage, resolveSpawnLineageParent, resolveSpawnParent, SpawnParentError } from "@/lib/agent/spawnParent";
@@ -85,6 +86,305 @@ test("spawn admission rejects malformed MCP allowlists", async () => {
 
   expect(response.status).toBe(400);
   expect(await response.json()).toEqual({ error: "mcpServers must be an array of non-empty server names" });
+});
+
+test("an explicit spawn account is durably pinned while an omitted account uses the selected fallback", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "account-pin-"));
+  const store = registry();
+  const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
+  const previousHosts = process.env.LLV_STRUCTURED_HOSTS;
+  const previousEvents = process.env.LLV_RUNTIME_EVENTS;
+  const previousSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
+  const previousUi = process.env.NEXT_PUBLIC_RUNTIME_UI;
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  try {
+    const dependencies = {
+      ...structuredRouteDependencies(cwd),
+      registry: () => store,
+      resolveHealthySpawnAccount: async (_engine: "claude" | "codex", requested?: string | null) => ({
+        engine: "claude" as const,
+        accountId: requested ?? "selected",
+        kind: "managed" as const,
+        home: path.join(cwd, requested ?? "selected"),
+        transcriptRoot: path.join(cwd, "projects"),
+        env: { NODE_ENV: "test" as const },
+      }),
+      defer: () => {},
+    };
+    const post = async (clientAttemptId: string, accountId?: string) => await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+      method: "POST",
+      headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
+      body: JSON.stringify({ engine: "claude", model: "claude-sonnet-4-6", cwd, prompt: "inspect", clientAttemptId, ...(accountId ? { accountId } : {}) }),
+    }), dependencies);
+
+    const pinnedResponses = await Promise.all([
+      post("account_pin_a_20260731", "pinned-a"),
+      post("account_pin_b_20260731", "pinned-b"),
+    ]);
+    expect(pinnedResponses.map((response) => response.status)).toEqual([202, 202]);
+    expect(store.spawnReceiptForClientAttempt("account_pin_a_20260731")).toMatchObject({
+      accountId: "pinned-a",
+      accountPin: true,
+    });
+    expect(store.spawnReceiptForClientAttempt("account_pin_b_20260731")).toMatchObject({
+      accountId: "pinned-b",
+      accountPin: true,
+    });
+
+    expect((await post("account_fallback_20260731")).status).toBe(202);
+    expect(store.spawnReceiptForClientAttempt("account_fallback_20260731")).toMatchObject({
+      accountId: "selected",
+      accountPin: false,
+    });
+  } finally {
+    if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
+    if (previousHosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previousHosts;
+    if (previousEvents === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previousEvents;
+    if (previousSocket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previousSocket;
+    if (previousUi === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previousUi;
+  }
+});
+
+test("an unusable explicit account creates a terminal retryable pinned receipt and card", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "unusable-account-pin-"));
+  const store = registry();
+  const previous = {
+    transport: process.env.LLV_SPAWN_TRANSPORT,
+    hosts: process.env.LLV_STRUCTURED_HOSTS,
+    events: process.env.LLV_RUNTIME_EVENTS,
+    socket: process.env.LLV_RUNTIME_HOST_SOCKET,
+    ui: process.env.NEXT_PUBLIC_RUNTIME_UI,
+  };
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  try {
+    const dependencies = {
+      ...structuredRouteDependencies(cwd),
+      registry: () => store,
+      resolveHealthySpawnAccount: async () => ({
+        engine: "claude" as const,
+        accountId: "selected-account",
+        kind: "managed" as const,
+        home: path.join(cwd, "selected-account"),
+        transcriptRoot: path.join(cwd, "selected-account", "projects"),
+        env: { NODE_ENV: "test" as const },
+      }),
+    };
+    const capability = rotateOperatorSpawnCapability();
+    const baseRequest = {
+      engine: "claude",
+      model: "claude-sonnet-4-6",
+      cwd,
+      ["prompt"]: "inspect",
+      accountId: "unusable-pin",
+      clientAttemptId: "unusable_pin_20260731",
+    };
+    const post = async (overrides: Record<string, unknown> = {}) => await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+      method: "POST",
+      headers: {
+        origin: "http://127.0.0.1",
+        host: "127.0.0.1",
+        "content-type": "application/json",
+        "sec-fetch-site": "same-origin",
+        "x-llv-spawn-capability": capability,
+      },
+      body: JSON.stringify({
+        ...baseRequest,
+        ...overrides,
+      }),
+    }), dependencies);
+
+    const response = await post();
+    const responseBody = await response.json();
+    expect(response.status).toBe(200);
+    expect(responseBody).toMatchObject({
+      state: "failed",
+      initialMessage: "failed",
+      retrySafe: true,
+      error: "the requested account is not available for this launch",
+    });
+    const replay = await post();
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ launchId: responseBody.launchId, state: "failed" });
+
+    const parent = store.ensureConversation("claude", path.join(cwd, "parent.jsonl"), "parent-account");
+    const conflicts = [
+      { accountId: "other-unusable-pin" },
+      { ["prompt"]: "inspect a different target" },
+      { parentConversationId: parent.id },
+      { role: "builder" },
+      { allowSubagents: true },
+    ];
+    for (const changed of conflicts) {
+      const conflict = await post(changed);
+      expect(conflict.status).toBe(409);
+      expect(await conflict.json()).toEqual({ error: "spawn attempt conflicts with its original request" });
+    }
+
+    const receipt = store.spawnReceiptForClientAttempt("unusable_pin_20260731");
+    expect(receipt).toMatchObject({
+      accountId: "unusable-pin",
+      accountPin: true,
+      requestDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      state: "failed",
+      error: "the requested account is not available for this launch",
+    });
+    const card = projectLaunchConversations([], store.snapshot(), Date.now()).cards[0]?.spawn;
+    expect(card).toMatchObject({
+      accountId: "unusable-pin",
+      accountPin: true,
+      state: "failed",
+      retrySafe: true,
+      error: "the requested account is not available for this launch",
+    });
+  } finally {
+    if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previous.transport;
+    if (previous.hosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous.hosts;
+    if (previous.events === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previous.events;
+    if (previous.socket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previous.socket;
+    if (previous.ui === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previous.ui;
+  }
+});
+
+test("a failed pinned reviewer preserves canonical child and pipeline lineage", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "failed-pinned-lineage-"));
+  const store = registry();
+  const sourceSessionId = crypto.randomUUID();
+  const sourceAccount = createManagedCodexAccount(`failed-pinned-lineage-${sourceSessionId}`);
+  const sourcePath = path.join(sourceAccount.sessionsDir, `${sourceSessionId}.jsonl`);
+  fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+  fs.writeFileSync(sourcePath, "{}\n");
+  const source = store.ensureConversation("codex", sourcePath, "source-account");
+  const reviewed = store.ensureConversation("codex", path.join(cwd, "reviewed.jsonl"), "reviewed-account");
+  const predecessor = store.ensureConversation("codex", path.join(cwd, "predecessor.jsonl"), "predecessor-account");
+  const previous = {
+    transport: process.env.LLV_SPAWN_TRANSPORT,
+    hosts: process.env.LLV_STRUCTURED_HOSTS,
+    events: process.env.LLV_RUNTIME_EVENTS,
+    socket: process.env.LLV_RUNTIME_HOST_SOCKET,
+    ui: process.env.NEXT_PUBLIC_RUNTIME_UI,
+  };
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  try {
+    const dependencies = {
+      ...structuredRouteDependencies(cwd),
+      registry: () => store,
+      resolveHealthySpawnAccount: async () => ({
+        engine: "codex" as const,
+        accountId: "selected-account",
+        kind: "managed" as const,
+        home: path.join(cwd, "selected-account"),
+        transcriptRoot: path.join(cwd, "selected-account", "sessions"),
+        env: { CODEX_HOME: path.join(cwd, "selected-account"), NODE_ENV: "test" as const },
+      }),
+      pipelineAttemptTargetForSource: () => ({
+        pipelineId: "pipeline-failed-pin",
+        stageId: "review",
+        stageOrder: 2,
+        role: "reviewer",
+      }),
+    } satisfies SpawnRouteTestDependencies;
+    const body = {
+      engine: "codex",
+      model: "gpt-5.6-sol",
+      cwd,
+      ["prompt"]: "inspect account-pinned lineage",
+      accountId: "unavailable-account",
+      clientAttemptId: "failed_pinned_lineage_20260803",
+      src: sourcePath,
+      role: "reviewer",
+      roleParams: { diffSource: "PR 842", lens: "correctness" },
+      reviews: reviewed.id,
+      project: "account-pinned-project",
+      supersedes: predecessor.id,
+      mcpServers: ["viewer"],
+    };
+    const post = () => POST.withDependencies(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+      method: "POST",
+      headers: {
+        origin: "http://127.0.0.1:8898",
+        host: "127.0.0.1:8898",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+    }), dependencies);
+
+    const first = await post();
+    expect(first.status).toBe(200);
+    const firstBody = await first.json() as { launchId: string };
+    const replay = await post();
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ launchId: firstBody.launchId, state: "failed" });
+
+    const receipt = store.spawnReceiptForClientAttempt(body.clientAttemptId)!;
+    expect(receipt).toMatchObject({
+      accountId: body.accountId,
+      accountPin: true,
+      state: "failed",
+      parentConversationId: source.id,
+      parentSource: "explicit",
+      agentRole: "reviewer",
+      delegationDepth: 0,
+      explicitProject: body.project,
+      supersedes: { conversationId: predecessor.id, reason: "recovery-spawn" },
+      launchProfile: {
+        parentConversationId: source.id,
+        mcpServers: ["viewer"],
+        plugins: [],
+      },
+    });
+    expect(store.snapshot().lineageEdges[receipt.conversationId]).toMatchObject({
+      parentConversationId: source.id,
+      parentArtifactPath: sourcePath,
+      kind: "review",
+      role: "reviewer",
+      reviewsConversationId: reviewed.id,
+    });
+    expect(store.snapshot().memberships[receipt.conversationId]).toEqual([
+      expect.objectContaining({
+        kind: "pipeline",
+        containerId: "pipeline-failed-pin",
+        role: "reviewer",
+        stageId: "review",
+        stageOrder: 2,
+        parentConversationId: source.id,
+        runtime: { engine: "codex", model: "gpt-5.6-sol", effort: "xhigh" },
+      }),
+    ]);
+  } finally {
+    if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previous.transport;
+    if (previous.hosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous.hosts;
+    if (previous.events === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previous.events;
+    if (previous.socket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previous.socket;
+    if (previous.ui === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previous.ui;
+  }
 });
 
 test("spawn admission grants MCP servers by session origin and refuses ungranted names", async () => {
