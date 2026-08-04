@@ -1,7 +1,7 @@
 {
   "issue": 875,
-  "capturedAt": "2026-08-03T16:08:34.923Z",
-  "buildHead": "6dadc5a31619d58abd9969258e05454fd5a034f8",
+  "capturedAt": "2026-08-04T04:53:55.883Z",
+  "buildHead": "2341993bf13dda5c2e8b1ec1f6068dd24d558d75",
   "runner": "exact-head production build served by `next start` over the isolated demo runtime (fixtures/demo-home); synthetic runtime-generated artifact fixtures; headless host Chrome over raw CDP",
   "screenshots": [
     "desktop-pdf.png",
@@ -124,6 +124,11 @@
       "detail": null
     },
     {
+      "name": "search prev/next walk the occurrence list the counter reports",
+      "pass": true,
+      "detail": null
+    },
+    {
       "name": "bounded text offered an explicit Load more",
       "pass": true,
       "detail": null
@@ -152,8 +157,9 @@
           "pushes": 0,
           "replaces": 0,
           "paths": [
-            "/api/tmux/targets",
+            "/api/board",
             "/api/attention",
+            "/api/tmux/targets",
             "/api/view/presence",
             "/api/tts/backend"
           ]
@@ -172,8 +178,9 @@
         "pushes": 0,
         "replaces": 0,
         "paths": [
-          "/api/tmux/targets",
+          "/api/board",
           "/api/attention",
+          "/api/tmux/targets",
           "/api/view/presence",
           "/api/tts/backend",
           "/api/artifact"
@@ -228,6 +235,134 @@
         "marker": "alive",
         "nav": 1
       }
+    },
+    {
+      "name": "every interactive control in the mobile text preview is at least 44px",
+      "pass": true,
+      "detail": [
+        {
+          "label": "Download file",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Open in a new tab",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Close preview",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Search loaded text",
+          "w": 192,
+          "h": 44
+        },
+        {
+          "label": "Previous match",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Next match",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Wrap lines",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Load more",
+          "w": 81,
+          "h": 44
+        }
+      ]
+    },
+    {
+      "name": "every interactive control in the mobile pdf preview is at least 44px",
+      "pass": true,
+      "detail": [
+        {
+          "label": "Download file",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Open in a new tab",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Close preview",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Previous page",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Next page",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Zoom out",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Zoom in",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Fit width",
+          "w": 44,
+          "h": 44
+        }
+      ]
+    },
+    {
+      "name": "every interactive control in the mobile image preview is at least 44px",
+      "pass": true,
+      "detail": [
+        {
+          "label": "Download file",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Open in a new tab",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Close preview",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Zoom out",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Zoom in",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Fit to pane",
+          "w": 44,
+          "h": 44
+        }
+      ]
     }
   ],
   "verdict": "PASS"
