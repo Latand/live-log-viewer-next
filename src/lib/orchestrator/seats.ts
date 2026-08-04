@@ -69,6 +69,21 @@ export interface OrchestratorSeat {
   activatedAt: string | null;
 }
 
+/** A pending intent moved out of the blocking position — never deleted. The
+    full seat snapshot (key, mandate, epoch, mode, error, timestamps) stays
+    readable so the operator can see what was attempted and why it failed. */
+export interface OrchestratorSeatTerminalization {
+  seat: OrchestratorSeat;
+  /** Why it stopped blocking: it recorded a terminal error, or its epoch fell
+      below the project's active seat (something else already seated it). */
+  reason: "terminal_error" | "superseded_epoch";
+  terminalizedAt: string;
+}
+
+/** Newest-last bound on terminalized history, so the file cannot grow without
+    limit; the oldest entries are trimmed first. */
+export const ORCHESTRATOR_SEAT_HISTORY_CAP = 50;
+
 export interface OrchestratorRevocation {
   project: string;
   conversationId: string;
@@ -88,6 +103,9 @@ interface OrchestratorSeatFile {
   /** Pending designate-and-inject intents per project. */
   pending: Record<string, OrchestratorSeat>;
   revocations: OrchestratorRevocation[];
+  /** Terminalized pending intents, oldest first, bounded by
+      ORCHESTRATOR_SEAT_HISTORY_CAP. */
+  history: OrchestratorSeatTerminalization[];
 }
 
 const seatsFile = () => statePath("orchestrator-seats.json");
@@ -98,7 +116,7 @@ export function canonicalOrchestratorProject(project: string): string {
 }
 
 function emptyFile(): OrchestratorSeatFile {
-  return { schemaVersion: ORCHESTRATOR_SEATS_SCHEMA_VERSION, nextSeatEpoch: 1, seats: {}, pending: {}, revocations: [] };
+  return { schemaVersion: ORCHESTRATOR_SEATS_SCHEMA_VERSION, nextSeatEpoch: 1, seats: {}, pending: {}, revocations: [], history: [] };
 }
 
 function atomicWriteJson(filePath: string, value: unknown): void {
@@ -193,13 +211,27 @@ export function readOrchestratorSeatFile(): OrchestratorSeatFile {
         });
       }
     }
+    for (const candidate of Array.isArray(parsed.history) ? parsed.history : []) {
+      const entry = candidate as Partial<OrchestratorSeatTerminalization>;
+      const seat = normalizeSeat(entry.seat);
+      if (seat
+        && (entry.reason === "terminal_error" || entry.reason === "superseded_epoch")
+        && typeof entry.terminalizedAt === "string") {
+        file.history.push({
+          seat: { ...seat, project: canonicalOrchestratorProject(seat.project) },
+          reason: entry.reason,
+          terminalizedAt: entry.terminalizedAt,
+        });
+      }
+    }
     /* The epoch counter must postdate everything on file, or a corrupted
        counter would let a fresh seat land at an epoch a revocation already
        covers and be born dead. */
     const highest = Math.max(0,
       ...Object.values(file.seats).map((seat) => seat.seatEpoch),
       ...Object.values(file.pending).map((seat) => seat.seatEpoch),
-      ...file.revocations.map((revocation) => revocation.seatEpoch));
+      ...file.revocations.map((revocation) => revocation.seatEpoch),
+      ...file.history.map((entry) => entry.seat.seatEpoch));
     if (file.nextSeatEpoch <= highest) file.nextSeatEpoch = highest + 1;
     return file;
   } catch {
@@ -211,16 +243,28 @@ function writeSeatFile(file: OrchestratorSeatFile): void {
   atomicWriteJson(seatsFile(), file);
 }
 
-/** The active seat and any pending intent for one project. */
-export function orchestratorSeatFor(project: string): { active: OrchestratorSeat | null; pending: OrchestratorSeat | null } {
+/** The active seat, any pending intent, and the terminalized-intent history
+    for one project (oldest first). */
+export function orchestratorSeatFor(project: string): {
+  active: OrchestratorSeat | null;
+  pending: OrchestratorSeat | null;
+  history: OrchestratorSeatTerminalization[];
+} {
   const file = readOrchestratorSeatFile();
   const canonical = canonicalOrchestratorProject(project);
-  return { active: file.seats[canonical] ?? null, pending: file.pending[canonical] ?? null };
+  return {
+    active: file.seats[canonical] ?? null,
+    pending: file.pending[canonical] ?? null,
+    history: file.history.filter((entry) => entry.seat.project === canonical),
+  };
 }
 
 export type BeginSeatIntentResult =
-  /** A fresh pending intent, or the same intent replayed by its own key. */
-  | { kind: "begun" | "replay"; seat: OrchestratorSeat }
+  /** A fresh pending intent; `terminalized` names the abandoned intent it
+      moved into durable history, when there was one. */
+  | { kind: "begun"; seat: OrchestratorSeat; terminalized?: OrchestratorSeatTerminalization }
+  /** The same intent replayed by its own key, for the caller to finish. */
+  | { kind: "replay"; seat: OrchestratorSeat }
   /** Another request owns the in-flight transition for this project. */
   | { kind: "in_progress"; seat: OrchestratorSeat }
   /** The same key already completed: designation and injection both happened. */
@@ -229,9 +273,13 @@ export type BeginSeatIntentResult =
 /**
  * Persist the designate-and-inject intent BEFORE any side effect. Idempotent on
  * `clientRequestId`: a replay of a completed intent short-circuits to the active
- * seat (deliver nothing twice), a replay of a pending one returns it for the
- * caller to finish, and a NEW key simply replaces an abandoned pending intent —
- * the abandoned one never activated, so nothing durable referenced it.
+ * seat (deliver nothing twice), and a replay of a pending one returns it for the
+ * caller to finish. A NEW key is blocked (`in_progress`) only by a genuinely
+ * in-flight pending intent — one with no terminal error whose epoch is at or
+ * above the project's active seat. An ABANDONED pending intent — terminal
+ * `intent.error` recorded, or epoch below the active seat — is TERMINALIZED in
+ * the same write: moved out of the blocking `pending` position into the bounded
+ * durable `history`, never deleted, and the new intent proceeds.
  */
 export function beginOrchestratorSeatIntent(input: {
   project: string;
@@ -252,7 +300,21 @@ export function beginOrchestratorSeatIntent(input: {
   if (pending && pending.intent.clientRequestId === input.clientRequestId) {
     return { kind: "replay", seat: pending };
   }
-  if (pending) return { kind: "in_progress", seat: pending };
+  let terminalized: OrchestratorSeatTerminalization | undefined;
+  if (pending) {
+    const abandoned = pending.intent.error !== null || (active !== undefined && pending.seatEpoch < active.seatEpoch);
+    if (!abandoned) return { kind: "in_progress", seat: pending };
+    terminalized = {
+      seat: pending,
+      reason: pending.intent.error !== null ? "terminal_error" : "superseded_epoch",
+      terminalizedAt: input.now ?? new Date().toISOString(),
+    };
+    file.history.push(terminalized);
+    if (file.history.length > ORCHESTRATOR_SEAT_HISTORY_CAP) {
+      file.history.splice(0, file.history.length - ORCHESTRATOR_SEAT_HISTORY_CAP);
+    }
+    delete file.pending[project];
+  }
   const seat: OrchestratorSeat = {
     project,
     seatEpoch: file.nextSeatEpoch,
@@ -269,7 +331,7 @@ export function beginOrchestratorSeatIntent(input: {
   file.nextSeatEpoch += 1;
   file.pending[project] = seat;
   writeSeatFile(file);
-  return { kind: "begun", seat };
+  return { kind: "begun", seat, ...(terminalized ? { terminalized } : {}) };
 }
 
 export type CompleteSeatIntentResult =

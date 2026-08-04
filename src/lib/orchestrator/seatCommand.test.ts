@@ -5,7 +5,7 @@ import path from "node:path";
 
 import { setRetireManagerForTests } from "./retire";
 import { executeOrchestratorRotation, executeOrchestratorSeatRequest, type SeatCommandDependencies } from "./seatCommand";
-import { orchestratorRevocations, orchestratorSeatFor } from "./seats";
+import { activeOrchestratorSeats, orchestratorRevocations, orchestratorSeatFor } from "./seats";
 import { readOrchestratorRecord } from "./store";
 
 let sandbox = "";
@@ -64,10 +64,37 @@ function dependencies(overrides: Partial<SeatCommandDependencies> = {}): { deps:
     }),
     syncLegacyRecord: (input) => { recorded.legacySyncs.push({ conversationId: input.conversationId }); },
     projectTasks: () => [],
+    launchSettlement: () => ({ kind: "unknown" }),
     now: () => AT,
     ...overrides,
   };
   return { deps, recorded };
+}
+
+/** Durable residue of an accepting request that died between begin and
+    activate: a pending spawn intent holding the launch receipt id. */
+function seedPendingLaunchIntent(input: { clientRequestId: string; launchId: string | null; error?: string | null }): void {
+  fs.writeFileSync(path.join(sandbox, "orchestrator-seats.json"), JSON.stringify({
+    schemaVersion: 1,
+    nextSeatEpoch: 2,
+    seats: {},
+    pending: {
+      "proj-a": {
+        project: "proj-a",
+        seatEpoch: 1,
+        conversationId: null,
+        path: null,
+        mandate: "own the board",
+        promptVersion: null,
+        predecessorConversationId: null,
+        state: "pending",
+        intent: { clientRequestId: input.clientRequestId, mode: "spawn", launchId: input.launchId, error: input.error ?? null },
+        designatedAt: AT,
+        activatedAt: null,
+      },
+    },
+    revocations: [],
+  }), "utf8");
 }
 
 const spawnRequest = (clientRequestId = "req_00000001") => ({
@@ -443,6 +470,129 @@ test("a pending replay completes with the ORIGINAL mandate, not a recomposed one
   /* The retry recomposes a different mandate; the durable intent's text wins. */
   await executeOrchestratorSeatRequest({ ...spawnRequest(), mandate: "recomposed differently" }, deps);
   expect(recorded.spawns.map((body) => body.prompt)).toEqual(["own the board", "own the board"]);
+});
+
+test("rotation preserves the requested effort end to end into the successor spawn body", async () => {
+  const { deps, recorded } = dependencies();
+  await executeOrchestratorSeatRequest(spawnRequest(), deps);
+
+  const rotated = await executeOrchestratorRotation({
+    project: "proj-a",
+    clientRequestId: "req_00000030",
+    effort: "medium",
+  }, deps);
+
+  expect(rotated.status).toBe(200);
+  expect(recorded.spawns).toHaveLength(2);
+  expect(recorded.spawns[1]).toMatchObject({ effort: "medium" });
+});
+
+test("the stuck shape from #878: an errored pending intent no longer blocks rotation and stays readable in history", async () => {
+  const { deps } = dependencies();
+  await executeOrchestratorSeatRequest(spawnRequest("req_00000041"), deps);
+
+  /* Wedge the project: a replacement attempt whose spawn terminally failed
+     leaves a pending intent carrying the error. */
+  const failing = dependencies({
+    spawn: async () => ({ status: 409, body: { error: "spawn attempt conflicts with its original request" } }),
+  });
+  await executeOrchestratorSeatRequest({ ...spawnRequest("req_00000042"), replaceIncumbent: true }, failing.deps);
+  expect(orchestratorSeatFor("proj-a").pending?.intent.error).toBe("spawn attempt conflicts with its original request");
+
+  const SUCCESSOR = "conversation_88888888-8888-4888-8888-888888888888";
+  const rotating = dependencies({
+    spawn: async () => ({ status: 200, body: { ok: true, conversationId: SUCCESSOR, path: "/tmp/successor.jsonl" } }),
+  });
+  const rotated = await executeOrchestratorRotation({ project: "proj-a", clientRequestId: "req_00000043" }, rotating.deps);
+
+  expect(rotated.status).toBe(200);
+  const { active, pending, history } = orchestratorSeatFor("proj-a");
+  expect(active?.conversationId).toBe(SUCCESSOR);
+  expect(pending).toBeNull();
+  /* Terminalized, not deleted: the wedged attempt's evidence survives. */
+  expect(history).toHaveLength(1);
+  expect(history[0]).toMatchObject({
+    reason: "terminal_error",
+    seat: { intent: { clientRequestId: "req_00000042", error: "spawn attempt conflicts with its original request" } },
+  });
+});
+
+test("a pending intent whose accepted launch settled reconciles to the launched conversation and rotation proceeds", async () => {
+  seedPendingLaunchIntent({ clientRequestId: "req_00000050", launchId: "launch_42" });
+
+  const SUCCESSOR = "conversation_99999999-9999-4999-8999-999999999999";
+  const { deps } = dependencies({
+    launchSettlement: ({ launchId, clientRequestId }) =>
+      launchId === "launch_42" && clientRequestId === "req_00000050"
+        ? { kind: "settled", conversationId: NEW_ID, path: "/tmp/new.jsonl", launchId: "launch_42" }
+        : { kind: "unknown" },
+    spawn: async () => ({ status: 200, body: { ok: true, conversationId: SUCCESSOR, path: "/tmp/successor.jsonl" } }),
+  });
+
+  const rotated = await executeOrchestratorRotation({ project: "proj-a", clientRequestId: "req_00000051" }, deps);
+
+  expect(rotated.status).toBe(200);
+  /* The launch converged to its seat first; rotation then replaced it with a
+     durable revocation, so lineage names the reconciled conversation. */
+  expect(rotated.body.rotatedFrom).toMatchObject({ conversationId: NEW_ID });
+  const { active, pending } = orchestratorSeatFor("proj-a");
+  expect(active?.conversationId).toBe(SUCCESSOR);
+  expect(pending).toBeNull();
+  expect(activeOrchestratorSeats()).toHaveLength(1);
+  expect(orchestratorRevocations()).toEqual([expect.objectContaining({ conversationId: NEW_ID, successorConversationId: SUCCESSOR })]);
+});
+
+test("replaying the accepting request's own key after its launch settled converges without spawning again", async () => {
+  seedPendingLaunchIntent({ clientRequestId: "req_00000050", launchId: "launch_42" });
+
+  const { deps, recorded } = dependencies({
+    launchSettlement: () => ({ kind: "settled", conversationId: NEW_ID, path: "/tmp/new.jsonl", launchId: "launch_42" }),
+    spawn: async () => {
+      throw new Error("a settled accepted launch must reconcile from durable state, never spawn again");
+    },
+  });
+
+  const replay = await executeOrchestratorSeatRequest(spawnRequest("req_00000050"), deps);
+
+  expect(replay.status).toBe(200);
+  expect(replay.body).toMatchObject({ replayed: true, conversationId: NEW_ID });
+  expect(recorded.spawns).toEqual([]);
+  expect(orchestratorSeatFor("proj-a").active?.conversationId).toBe(NEW_ID);
+  expect(orchestratorSeatFor("proj-a").pending).toBeNull();
+});
+
+test("a pending intent whose launch terminally failed records the failure and stops blocking a fresh designation", async () => {
+  seedPendingLaunchIntent({ clientRequestId: "req_00000050", launchId: "launch_42" });
+
+  const { deps } = dependencies({
+    launchSettlement: () => ({ kind: "failed", error: "launch exited before a transcript materialized" }),
+  });
+
+  const result = await executeOrchestratorSeatRequest(spawnRequest("req_00000052"), deps);
+
+  expect(result.status).toBe(200);
+  const { active, pending, history } = orchestratorSeatFor("proj-a");
+  expect(active?.conversationId).toBe(NEW_ID);
+  expect(pending).toBeNull();
+  expect(history).toHaveLength(1);
+  expect(history[0]).toMatchObject({
+    reason: "terminal_error",
+    seat: { intent: { clientRequestId: "req_00000050", launchId: "launch_42", error: "launch exited before a transcript materialized" } },
+  });
+});
+
+test("an unsettled accepted launch still returns 409 seat_intent_in_progress for a different key", async () => {
+  seedPendingLaunchIntent({ clientRequestId: "req_00000050", launchId: "launch_42" });
+
+  const { deps, recorded } = dependencies({
+    launchSettlement: () => ({ kind: "unknown" }),
+  });
+
+  const blocked = await executeOrchestratorSeatRequest(spawnRequest("req_00000053"), deps);
+
+  expect(blocked).toMatchObject({ status: 409, body: { code: "seat_intent_in_progress" } });
+  expect(recorded.spawns).toEqual([]);
+  expect(orchestratorSeatFor("proj-a").pending?.intent.clientRequestId).toBe("req_00000050");
 });
 
 test("validation refuses a missing project, empty mandate, and malformed request id", async () => {

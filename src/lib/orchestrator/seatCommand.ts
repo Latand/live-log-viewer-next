@@ -60,8 +60,20 @@ export interface SeatCommandDependencies {
   syncLegacyRecord(input: { conversationId: string; path: string | null; engine?: string; model?: string }): void;
   /** Bounded open work for a rotation handoff; empty when unknown. */
   projectTasks(project: string): { id: string; status: string; text: string }[];
+  /** Durable outcome of the spawn a pending intent's request attempted, read
+      from the launch receipt, for reconciling an accepted launch whose
+      accepting request died before activation. */
+  launchSettlement(input: { launchId: string | null; clientRequestId: string }): LaunchSettlement;
   now(): string;
 }
+
+export type LaunchSettlement =
+  /** The launch durably produced a conversation; the intent can activate on it. */
+  | { kind: "settled"; conversationId: string; path: string | null; launchId: string | null }
+  /** The launch terminally failed; the intent can record the error. */
+  | { kind: "failed"; error: string }
+  /** No settled receipt to reconcile against — leave the intent alone. */
+  | { kind: "unknown" };
 
 export type ExistingConversationTarget =
   | { kind: "eligible"; conversationId: string; path: string; cwd: string; project: string }
@@ -155,6 +167,24 @@ export const productionSeatCommandDependencies: SeatCommandDependencies = {
   projectTasks: (project) => loadTasks()
     .filter((task) => task.project === project && task.status !== "done")
     .map((task) => ({ id: task.id, status: task.status, text: task.text })),
+  launchSettlement: ({ launchId, clientRequestId }) => {
+    /* The seat spawn path always sends the intent's clientRequestId as the
+       spawn clientAttemptId, so the durable receipt is found by it even when
+       the intent never recorded a launchId before its request died. */
+    const receipt = agentRegistry().spawnReceiptForClientAttempt(clientRequestId);
+    if (!receipt || (launchId && receipt.launchId !== launchId)) return { kind: "unknown" };
+    if (receipt.rejection || receipt.state === "failed" || receipt.state === "conflicted") {
+      return { kind: "failed", error: receipt.error ?? receipt.rejection?.guidance ?? `spawn receipt is terminally ${receipt.state}` };
+    }
+    /* An admitted receipt reserved its conversation at birth — the same
+       durably-accepted evidence the synchronous 202 path activates on. */
+    return {
+      kind: "settled",
+      conversationId: receipt.conversationId,
+      path: receipt.artifactLifecycle === "materialized" ? receipt.artifactPath : null,
+      launchId: receipt.launchId,
+    };
+  },
   now: () => new Date().toISOString(),
 };
 
@@ -233,6 +263,43 @@ async function activate(
   return { seat: completed.seat };
 }
 
+/**
+ * Reconcile a pending spawn intent against the durable settlement of the launch
+ * its request attempted, so a 202 Accepted spawn converges to exactly one seat
+ * whether or not the accepting request survived. A settled launch activates the
+ * intent on its conversation (the same atomic write the surviving request would
+ * have made — revoking a differing predecessor, so no interleaving yields two
+ * seats or an accepted launch with no seat); a terminally failed one records
+ * the error, making the intent terminalizable by the next begin. An unsettled
+ * launch is left pending — the genuinely in-flight guard stays intact.
+ *
+ * Returns null — synchronously, with no await point — whenever there is
+ * nothing to activate, so a request with no reconcilable intent still
+ * progresses synchronously to its durable begin before yielding, which is what
+ * keeps two concurrent requests serialized by the pending-intent write.
+ */
+function reconcilePendingSeatIntent(project: string, dependencies: SeatCommandDependencies): Promise<unknown> | null {
+  const pending = orchestratorSeatFor(project).pending;
+  if (!pending || pending.intent.mode !== "spawn" || pending.intent.error !== null) return null;
+  const settlement = dependencies.launchSettlement({
+    launchId: pending.intent.launchId,
+    clientRequestId: pending.intent.clientRequestId,
+  });
+  if (settlement.kind === "settled") {
+    return activate({
+      project,
+      clientRequestId: pending.intent.clientRequestId,
+      conversationId: settlement.conversationId,
+      path: settlement.path,
+      launchId: settlement.launchId ?? pending.intent.launchId,
+    }, dependencies);
+  }
+  if (settlement.kind === "failed") {
+    failOrchestratorSeatIntent(project, pending.intent.clientRequestId, settlement.error);
+  }
+  return null;
+}
+
 export async function executeOrchestratorSeatRequest(
   rawBody: Record<string, unknown>,
   dependencies: SeatCommandDependencies = productionSeatCommandDependencies,
@@ -256,6 +323,9 @@ export async function executeOrchestratorSeatRequest(
   const promptVersion = typeof rawBody.promptVersion === "number" && Number.isInteger(rawBody.promptVersion)
     ? rawBody.promptVersion
     : null;
+
+  const reconciliation = reconcilePendingSeatIntent(project, dependencies);
+  if (reconciliation) await reconciliation;
 
   if (existingConversationId) {
     const target = dependencies.conversationTarget(existingConversationId);
@@ -445,6 +515,10 @@ export async function executeOrchestratorRotation(
   if (!CLIENT_REQUEST_ID.test(clientRequestId)) {
     return { status: 400, body: { error: "clientRequestId must be 8-128 URL-safe characters" } };
   }
+  /* An accepted launch whose request died may hold the seat this rotation must
+     replace; converge it first so the rotation sees its real incumbent. */
+  const reconciliation = reconcilePendingSeatIntent(project, dependencies);
+  if (reconciliation) await reconciliation;
   const incumbent = orchestratorSeatFor(project).active;
   if (!incumbent?.conversationId) {
     return {
@@ -480,6 +554,7 @@ export async function executeOrchestratorRotation(
     promptVersion: incumbent.promptVersion,
     ...(rawBody.engine !== undefined ? { engine: rawBody.engine } : {}),
     ...(rawBody.model !== undefined ? { model: rawBody.model } : {}),
+    ...(rawBody.effort !== undefined ? { effort: rawBody.effort } : {}),
     ...(rawBody.cwd !== undefined ? { cwd: rawBody.cwd } : {}),
     ...(rawBody.accountId !== undefined ? { accountId: rawBody.accountId } : {}),
   }, dependencies);
