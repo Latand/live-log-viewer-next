@@ -139,6 +139,117 @@ test("a sync contender fails quickly while another process owns the file lock", 
   });
 });
 
+/* The queue is shared across pid namespaces (viewer container, runtime-host
+   container, host workers). A ticket whose pid collides with a live local
+   process but was written in another namespace must expire by heartbeat age,
+   never survive on the pid match. */
+test("a stale foreign-namespace ticket is reaped even when its pid matches a live process", async () => {
+  const state = path.join(sandbox, "foreign-ns-state");
+  const result = path.join(sandbox, "foreign-ns-result.json");
+  const modulePath = path.join(import.meta.dir, "accountMutation.ts");
+  const procPath = path.join(import.meta.dir, "..", "proc", "index.ts");
+  const child = Bun.spawn({
+    cmd: [process.execPath, "-e", `
+      process.env.LLV_STATE_DIR = ${JSON.stringify(state)};
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+      const { procBackend } = await import(${JSON.stringify(procPath)});
+      const queue = path.join(${JSON.stringify(state)}, "account-selection.lock.queue");
+      fs.mkdirSync(queue, { recursive: true, mode: 0o700 });
+      const head = path.join(queue, "0000000000000001-99-foreign.json");
+      fs.writeFileSync(head, JSON.stringify({
+        pid: process.pid,
+        startIdentity: procBackend.processIdentity(process.pid),
+        ns: "pid:[4099999999]",
+        token: "foreign-token",
+      }));
+      const past = new Date(Date.now() - 60_000);
+      fs.utimesSync(head, past, past);
+      const { withAccountMutationLock } = await import(${JSON.stringify(modulePath)});
+      let ran = false;
+      withAccountMutationLock(() => { ran = true; });
+      fs.writeFileSync(${JSON.stringify(result)}, JSON.stringify({ ran, headRemoved: !fs.existsSync(head) }));
+    `],
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+  const exit = await child.exited;
+  const error = await new Response(child.stderr).text();
+  expect({ exit, error }).toEqual({ exit: 0, error: "" });
+  expect(JSON.parse(fs.readFileSync(result, "utf8"))).toEqual({ ran: true, headRemoved: true });
+});
+
+test("a fresh foreign-namespace ticket keeps its place in the queue", async () => {
+  const state = path.join(sandbox, "foreign-fresh-state");
+  const result = path.join(sandbox, "foreign-fresh-result.json");
+  const modulePath = path.join(import.meta.dir, "accountMutation.ts");
+  const child = Bun.spawn({
+    cmd: [process.execPath, "-e", `
+      process.env.LLV_STATE_DIR = ${JSON.stringify(state)};
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+      const queue = path.join(${JSON.stringify(state)}, "account-selection.lock.queue");
+      fs.mkdirSync(queue, { recursive: true, mode: 0o700 });
+      const head = path.join(queue, "0000000000000001-99-foreign.json");
+      fs.writeFileSync(head, JSON.stringify({
+        pid: 99,
+        startIdentity: "99:1",
+        ns: "pid:[4099999999]",
+        token: "foreign-token",
+      }));
+      const { withAccountMutationLock } = await import(${JSON.stringify(modulePath)});
+      let failed = false;
+      try { withAccountMutationLock(() => undefined); }
+      catch { failed = true; }
+      fs.writeFileSync(${JSON.stringify(result)}, JSON.stringify({ failed, headKept: fs.existsSync(head) }));
+    `],
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+  const exit = await child.exited;
+  const error = await new Response(child.stderr).text();
+  expect({ exit, error }).toEqual({ exit: 0, error: "" });
+  expect(JSON.parse(fs.readFileSync(result, "utf8"))).toEqual({ failed: true, headKept: true });
+});
+
+test("a ticket past the hard age cap is reaped even when its owner looks alive", async () => {
+  const state = path.join(sandbox, "hard-cap-state");
+  const result = path.join(sandbox, "hard-cap-result.json");
+  const modulePath = path.join(import.meta.dir, "accountMutation.ts");
+  const procPath = path.join(import.meta.dir, "..", "proc", "index.ts");
+  const child = Bun.spawn({
+    cmd: [process.execPath, "-e", `
+      process.env.LLV_STATE_DIR = ${JSON.stringify(state)};
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+      const { procBackend } = await import(${JSON.stringify(procPath)});
+      let ns = null;
+      try { ns = fs.readlinkSync("/proc/self/ns/pid"); } catch {}
+      const queue = path.join(${JSON.stringify(state)}, "account-selection.lock.queue");
+      fs.mkdirSync(queue, { recursive: true, mode: 0o700 });
+      const head = path.join(queue, "0000000000000001-99-leaked.json");
+      fs.writeFileSync(head, JSON.stringify({
+        pid: process.pid,
+        startIdentity: procBackend.processIdentity(process.pid),
+        ns,
+        token: "leaked-token",
+      }));
+      const past = new Date(Date.now() - 700_000);
+      fs.utimesSync(head, past, past);
+      const { withAccountMutationLock } = await import(${JSON.stringify(modulePath)});
+      let ran = false;
+      withAccountMutationLock(() => { ran = true; });
+      fs.writeFileSync(${JSON.stringify(result)}, JSON.stringify({ ran, headRemoved: !fs.existsSync(head) }));
+    `],
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+  const exit = await child.exited;
+  const error = await new Response(child.stderr).text();
+  expect({ exit, error }).toEqual({ exit: 0, error: "" });
+  expect(JSON.parse(fs.readFileSync(result, "utf8"))).toEqual({ ran: true, headRemoved: true });
+});
+
 test("a duplicated module copy joins the transaction instead of failing busy", async () => {
   const state = path.join(sandbox, "duplicate-copy-state");
   const result = path.join(sandbox, "duplicate-copy-result.json");
