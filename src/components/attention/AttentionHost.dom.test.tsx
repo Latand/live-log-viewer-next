@@ -166,6 +166,9 @@ function board(rects: Record<string, FocusRect>, project = "demo") {
   const log: BoardLog = { moved: [], restored: [] };
   const opened: string[] = [];
   const placed: string[] = [];
+  /* The typed focus-history entries a verified arrival records (#866
+     production regression): `[path, project]` per call. */
+  const recorded: Array<[string, string]> = [];
   /* What the live view "shows": follows the fake board the way the presence
      slice follows the real one, so the transaction's settled-arrival wait has
      an honest observation to read. A move lands the camera ON the rect it was
@@ -198,9 +201,10 @@ function board(rects: Record<string, FocusRect>, project = "demo") {
     openPath: (path) => { opened.push(path); },
     placePath: (path) => { placed.push(path); },
     openOverview: () => {},
+    recordFocusArrival: (path, targetProject) => { recorded.push([path, targetProject]); },
   });
   observedView = view;
-  return { bus, log, opened, placed, view };
+  return { bus, log, opened, placed, recorded, view };
 }
 
 function raise(rect: FocusRect = RAISED_RECT) {
@@ -886,4 +890,62 @@ test("unmounting mid-handoff aborts the transaction: nothing is posted about a m
   expect(posted).toEqual([]);
   expect(record().state).toBe("accepted");
   expect(readHandoffClaim(tabClaims, "attention_1")).not.toBeNull();
+});
+
+/* ── #866 production regression: the verified arrival records the typed focus
+      entry, exactly once per handoff — replays and duplicate mounts included ── */
+
+test("a directed SHOW handoff records the typed focus entry once, after the verified arrival", async () => {
+  raiseDirected();
+  const { bus, recorded, opened, placed } = board({ [ANCHOR]: LIVE_RECT });
+
+  mount(bus);
+  await settle();
+
+  /* The camera arrived and the record follows — and the tab's history now
+     holds the one entry Back needs to stay inside the document. */
+  expect(record().state).toBe("following");
+  expect(recorded).toEqual([[ANCHOR, "demo"]]);
+  /* `show` framed the card and stopped there: no surface open rode along. */
+  expect(opened).toEqual([]);
+  expect(placed).toEqual([]);
+});
+
+test("replayed polls never re-record: one entry, however many heartbeats", async () => {
+  raiseDirected();
+  const { bus, recorded } = board({ [ANCHOR]: LIVE_RECT });
+  mount(bus);
+  await settle();
+
+  for (let i = 0; i < 20; i += 1) await poll();
+
+  expect(recorded).toEqual([[ANCHOR, "demo"]]);
+});
+
+test("duplicate mounts still yield one history entry: every record names the same target and coalesces", async () => {
+  raiseDirected();
+  const { bus, recorded } = board({ [ANCHOR]: LIVE_RECT });
+
+  mount(bus);
+  mount(bus);
+  await settle();
+
+  /* A second mount whose poll view predates the arrival may resume the landed
+     handoff and re-record it — exactly as it may re-post the arrival the
+     record then refuses. The history layer's `decideFocusAction` coalesces a
+     same-target re-record into a replace, so however the mounts interleave,
+     every record here names the ONE target and the tab's history gains ONE
+     entry (the DOM-history proof is focusHistory.dom.test's coalescing case). */
+  expect(recorded.length).toBeGreaterThanOrEqual(1);
+  expect(recorded.every(([path, targetProject]) => path === ANCHOR && targetProject === "demo")).toBe(true);
+});
+
+test("a directed request whose target is gone records no focus entry", async () => {
+  raiseDirected(UNREAD_FRAME_RECT);
+  const { bus, recorded } = board({});
+  mount(bus);
+  await settle();
+
+  expect(record().state).toBe("expired");
+  expect(recorded).toEqual([]);
 });

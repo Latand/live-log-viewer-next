@@ -529,6 +529,19 @@ export function Viewer() {
       if (targetProject && targetProject !== project) applyProject(targetProject);
       if (path) requestFocus(path);
     },
+    /* The typed entry a VERIFIED attention arrival owes (#866 production
+       regression) — record only, no placement and no camera. Identity comes
+       from the scanned entry when the poll has it; a path the polls have not
+       produced yet still records by bounded path identity, so Back after a
+       `show` handoff stays inside the document. The operator was moved, so a
+       still-unresolved deep-link intent must not re-steal the camera later —
+       the same rule `requestFocus` applies. */
+    recordFocusArrival: (path, targetProject) => {
+      setPendingHash(null);
+      const file = filesRef.current.find((entry) => entry.path === path);
+      if (file) recordFocusNavigation(file, projectKey(file));
+      else recordFocusNavigation({ path }, targetProject);
+    },
   }), [project, selectProject, requestFocus, placeOnBoard, openPathQuiet, applyProject]);
 
   /* The N-cycle position anchors to an id: an item answered elsewhere drops
