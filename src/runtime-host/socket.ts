@@ -5,6 +5,7 @@ import path from "node:path";
 import type { RuntimeSocketRequest, RuntimeSocketResponse } from "@/lib/runtime/contracts";
 
 import type { RuntimeHost } from "./host";
+import { PreserializedJson } from "./preserializedJson";
 
 const MAX_FRAME_BYTES = 512 * 1024;
 const DEFAULT_SOCKET_TIMEOUT_MS = 31_000;
@@ -52,7 +53,12 @@ export function serveRuntimeHost(socketPath: string, host: RuntimeHostSocketHand
       if (settled) return;
       settled = true;
       if (socket.destroyed || socket.writableEnded || !socket.writable) return;
-      socket.end(JSON.stringify(response) + "\n");
+      // A preserialized result (the snapshot) splices into the frame verbatim,
+      // so its megabytes are not re-stringified once per connection.
+      const frame = response.ok && response.result instanceof PreserializedJson
+        ? `{"id":${JSON.stringify(response.id)},"ok":true,"result":${response.result.json}}`
+        : JSON.stringify(response);
+      socket.end(frame + "\n");
     };
     socket.on("data", (chunk) => {
       if (handled) return;

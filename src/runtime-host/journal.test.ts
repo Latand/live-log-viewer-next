@@ -2591,3 +2591,92 @@ test("issue 367: a failed structured kill leaves the live projection untouched",
   });
   journal.close();
 });
+
+test("snapshotJson rebuilds only when the database has changed", () => {
+  const dir = sandbox("snapshot-cache");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 100, now: () => 100 });
+  journal.append({ scope: runtimeScope("session", "one"), kind: "turn.started", payload: { turnId: "a" } });
+  const first = journal.snapshotJson();
+  expect(JSON.parse(first)).toEqual(JSON.parse(JSON.stringify(journal.snapshot())));
+  // Identity equality proves the cached string was reused, not rebuilt.
+  expect(journal.snapshotJson()).toBe(first);
+  journal.append({ scope: runtimeScope("session", "one"), kind: "turn.completed", payload: { turnId: "a" } });
+  const second = journal.snapshotJson();
+  expect(second).not.toBe(first);
+  expect(JSON.parse(second).snapshotSeq).toBe(2);
+  journal.close();
+});
+
+test("receipt maintenance keeps only the latest engine receipt per session prefix", () => {
+  const dir = sandbox("receipt-sweep-engine");
+  const filename = path.join(dir, "events.sqlite");
+  const journal = new RuntimeJournal(filename, { maxEvents: 100, now: () => 100 });
+  journal.append({
+    scope: runtimeScope("session", "one"),
+    kind: "turn.started",
+    payload: { turnId: "a" },
+    producer: { kind: "codex-app-server", eventKey: "engine-host:codex:legacy-session:50" },
+  });
+  journal.close();
+  // Legacy accumulation predating the append-path dedupe: rows the sweep,
+  // not a future append in the same prefix, must reclaim.
+  const raw = new Database(filename, { strict: true });
+  for (let sequence = 0; sequence < 40; sequence += 1) {
+    raw.query("INSERT INTO producer_receipts(producer_kind, producer_key, event_json) VALUES (?, ?, ?)")
+      .run("codex-app-server", `engine-host:codex:legacy-session:${sequence}`, JSON.stringify({ seq: 1 }));
+  }
+  raw.close();
+  const reopened = new RuntimeJournal(filename, { maxEvents: 100, now: () => 200 });
+  let deleted = 0;
+  for (let pass = 0; pass < 10; pass += 1) {
+    const result = reopened.maintainProducerReceipts(16);
+    deleted += result.deleted;
+    if (result.cycled && result.deleted === 0) break;
+  }
+  expect(deleted).toBe(40);
+  const survivors = new Database(filename, { readonly: true })
+    .query<{ producer_key: string }, []>("SELECT producer_key FROM producer_receipts WHERE producer_key LIKE 'engine-host:codex:legacy-session:%'")
+    .all();
+  expect(survivors.map((row) => row.producer_key)).toEqual(["engine-host:codex:legacy-session:50"]);
+  reopened.close();
+});
+
+test("receipt maintenance expires non-engine receipts below the compaction anchor and keeps the rest", () => {
+  const dir = sandbox("receipt-sweep-anchor");
+  const filename = path.join(dir, "events.sqlite");
+  const journal = new RuntimeJournal(filename, { maxEvents: 2, now: () => 100 });
+  journal.append({ scope: runtimeScope("session", "one"), kind: "turn.started", payload: { turnId: "a" }, producerKey: "native:a" });
+  journal.append({ scope: runtimeScope("session", "one"), kind: "turn.completed", payload: { turnId: "a" }, producerKey: "native:b" });
+  // Third append compacts the first event beneath the anchor.
+  journal.append({ scope: runtimeScope("session", "one"), kind: "turn.started", payload: { turnId: "b" }, producerKey: "native:c" });
+  const anchor = JSON.parse(journal.snapshotJson()).retentionFloorSeq as number;
+  expect(anchor).toBeGreaterThanOrEqual(1);
+  const before = new Database(filename, { readonly: true })
+    .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM producer_receipts").get()!.n;
+  expect(before).toBe(3);
+  const result = journal.maintainProducerReceipts();
+  expect(result.cycled).toBe(true);
+  expect(result.deleted).toBe(1);
+  const survivors = new Database(filename, { readonly: true })
+    .query<{ producer_key: string }, []>("SELECT producer_key FROM producer_receipts ORDER BY producer_key").all();
+  expect(survivors.map((row) => row.producer_key)).toEqual(["native:b", "native:c"]);
+  journal.close();
+});
+
+test("snapshot over the socket splices the cached frame and stays a valid response", async () => {
+  const dir = sandbox("snapshot-socket-splice");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 100, now: () => 100 });
+  journal.append({ scope: runtimeScope("session", "one"), kind: "turn.started", payload: { turnId: "a" } });
+  const host = new RuntimeHost(journal);
+  const socketPath = path.join(dir, "host.sock");
+  const server = serveRuntimeHost(socketPath, host);
+  try {
+    const client = new UnixRuntimeHostClient(socketPath);
+    const snapshot = await client.snapshot();
+    expect(snapshot.snapshotSeq).toBe(1);
+    expect(snapshot.sessions).toHaveLength(1);
+  } finally {
+    server.close();
+    journal.close();
+  }
+});

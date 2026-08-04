@@ -104,9 +104,28 @@ const legacyScheduler = process.env.LLV_RUNTIME_LEGACY_SCHEDULER === "1" ? creat
 const legacyTimer = legacyScheduler ? setInterval(() => {
   void legacyScheduler.runDue().catch(() => console.error("[runtime scheduler] tick failed; next tick will retry"));
 }, 1_000) : null;
+/* Producer-receipt retention runs on wall clock, not on append traffic, so a
+   quiet journal still drains its backlog. Each tick is bounded inside
+   maintainProducerReceipts; the multi-week legacy accumulation drains across
+   ticks while the sweep itself never blocks the socket loop noticeably. */
+let receiptSweepDeleted = 0;
+const receiptSweepTimer = journal.isWritable() ? setInterval(() => {
+  if (!journal.isWritable()) return;
+  try {
+    const pass = journal.maintainProducerReceipts();
+    receiptSweepDeleted += pass.deleted;
+    if (pass.cycled && receiptSweepDeleted > 0) {
+      console.error(`[runtime journal] receipt sweep cycle removed ${receiptSweepDeleted} stale producer receipts`);
+      receiptSweepDeleted = 0;
+    }
+  } catch (error) {
+    console.error(`[runtime journal] receipt sweep failed; next tick will retry: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}, 10_000) : null;
 
 function stop(): void {
   if (legacyTimer) clearInterval(legacyTimer);
+  if (receiptSweepTimer) clearInterval(receiptSweepTimer);
   deploymentProxy?.close();
   server.close(() => {
     journal.close();
@@ -148,6 +167,7 @@ function handOffToStagedSuccessor(context: { deploymentId: string; revision: str
   handoffStarted = true;
   console.error(`[runtime host] deployment ${context.deploymentId} staged successor ${context.successor.image} (${context.revision}); handing off this generation`);
   if (legacyTimer) clearInterval(legacyTimer);
+  if (receiptSweepTimer) clearInterval(receiptSweepTimer);
   deploymentProxy?.close();
   server.close(() => {
     journal.close();

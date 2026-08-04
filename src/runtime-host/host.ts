@@ -5,6 +5,7 @@ import { consumeRuntimeEvent, type RuntimeConsumerPorts } from "@/lib/runtime/co
 import { RuntimeJournal } from "./journal";
 import type { ViewerDeploymentCoordinator } from "./deployment";
 import type { McpHealthProbeAdmissions } from "./mcpHealthProbeAdmission";
+import { PreserializedJson } from "./preserializedJson";
 
 export { RuntimeHostFence } from "./runtimeHostFence";
 
@@ -79,7 +80,7 @@ export class RuntimeHost {
   async handle(request: RuntimeSocketRequest, options: { signal?: AbortSignal } = {}): Promise<RuntimeSocketResponse> {
     try {
       let result: unknown;
-      if (request.method === "snapshot") result = this.journal.snapshot();
+      if (request.method === "snapshot") result = new PreserializedJson(this.journal.snapshotJson());
       else if (request.method === "events") result = this.journal.replay(Number(request.params?.after ?? 0));
       else if (request.method === "wait") result = await this.journal.waitForEvents(
         Number(request.params?.after ?? 0),
