@@ -456,6 +456,70 @@ describe("agent registry", () => {
       .toThrow(DeliveryReservationConflictError);
   });
 
+  test("a new payload supersedes a stale terminal failed reservation instead of poisoning the key", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("codex", "/stale-failed-supersede.jsonl", "default");
+    const stale = store.holdDelivery(conversation.id, "continue the stalled task", "poisoned-client-message");
+    store.beginDeliveryAttempt(stale.id, conversation.generations.at(-1)!.id);
+    store.recordDeliveryOutcome(stale.id, "failed", "structured host delivery failed");
+    expect(store.snapshot().heldDeliveries[stale.id]).toMatchObject({ state: "failed" });
+
+    /* The composer typed a genuinely NEW message but re-stamped the stale key
+       (its record of the failed generation is gone). The terminal failed
+       reservation can never actuate, so it releases the key and the new
+       message admits as a fresh reservation. */
+    const fresh = store.holdDelivery(conversation.id, "a brand new message", "poisoned-client-message");
+    expect(fresh.id).not.toBe(stale.id);
+    expect(fresh).toMatchObject({ state: "assigned", clientMessageId: "poisoned-client-message" });
+    expect(store.snapshot().heldDeliveries[stale.id]).toMatchObject({ state: "failed", clientMessageId: null });
+
+    /* The fresh reservation now owns the key: an exact replay is idempotent,
+       and a changed payload against the IN-FLIGHT record still conflicts. */
+    expect(store.holdDelivery(conversation.id, "a brand new message", "poisoned-client-message").id).toBe(fresh.id);
+    expect(() => store.holdDelivery(conversation.id, "yet another payload", "poisoned-client-message"))
+      .toThrow(DeliveryReservationConflictError);
+
+    /* An exact replay of a terminal failed reservation still re-arms the SAME
+       record — a retry of the failed message never duplicates. */
+    store.recordDeliveryOutcome(fresh.id, "failed", "structured host delivery failed");
+    expect(store.holdDelivery(conversation.id, "a brand new message", "poisoned-client-message"))
+      .toMatchObject({ id: fresh.id, state: "assigned" });
+  });
+
+  test("a restarted no-generation failed reservation releases its key to a new payload", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("codex", "/no-generation-failed.jsonl", "default");
+    /* The production shape: the host went away and the registry retained a
+       terminal failed delivery carrying no generation. */
+    const snapshot = store.snapshot();
+    snapshot.heldDeliveries["dead-host-delivery"] = {
+      id: "dead-host-delivery",
+      conversationId: conversation.id,
+      runtimeConversationId: conversation.id,
+      text: "message that never reached the dead host",
+      createdAt: "2026-07-30T00:00:00.000Z",
+      clientMessageId: "dead-host-client-message",
+      payloadKind: "text",
+      runtimeImages: [],
+      contentDigest: null,
+      artifactPaths: [],
+      command: { operationId: "dead-host-delivery", kind: "send", policy: "interrupt-active" },
+      requestDigest: null,
+      state: "failed",
+      generationId: null,
+      attempts: 1,
+      assignedAt: null,
+      deliveredAt: null,
+      error: "delivery target is unavailable and remains recoverable",
+    } as unknown as (typeof snapshot.heldDeliveries)[string];
+    fs.writeFileSync(store.filename, JSON.stringify(snapshot));
+
+    const restarted = new AgentRegistry(store.filename);
+    const fresh = restarted.holdDelivery(conversation.id, "the operator's new message", "dead-host-client-message");
+    expect(fresh.id).not.toBe("dead-host-delivery");
+    expect(fresh).toMatchObject({ state: "assigned", clientMessageId: "dead-host-client-message" });
+  });
+
   test("corrupt persisted image refs become a visible recoverable failure with zero actuation", () => {
     const store = registry();
     const conversation = store.ensureConversation("claude", "/corrupt-image-refs.jsonl", "default");
