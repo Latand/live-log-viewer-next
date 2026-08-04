@@ -15,6 +15,16 @@ import type { FileEntry, ApiError } from "@/lib/types";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/* Registry-first ownership (issue #891, phase 0): the durable generation or
+   receipt record names the owning account; the path-layout regex remains only
+   as recovery for artifacts the registry never saw. */
+function registryFirstAccountIdForPath(pathname: string): string {
+  const registry = agentRegistry();
+  return registry.transcriptAccountId("claude", pathname)
+    ?? registry.transcriptAccountId("codex", pathname)
+    ?? accountIdFromPath(pathname);
+}
+
 /** Best-effort account id → human label; falls back to the id itself. */
 function accountLabelFor(engine: AgentEngine, accountId: string): string {
   try {
@@ -83,7 +93,7 @@ function resolveLaunchPath(launchId: string, files: FileEntry[]): NextResponse<A
     resolveByPath: (target) => resolveAttachCommand(target, {
       files,
       resumeSpecFor,
-      accountIdForPath: accountIdFromPath,
+      accountIdForPath: registryFirstAccountIdForPath,
       accountLabelFor,
       launchProfileForPath: (p) => registry.launchProfileForPath(p),
     }),
@@ -149,7 +159,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<AttachCommand 
     const resolution = resolveAttachCommand(path, {
       files,
       resumeSpecFor,
-      accountIdForPath: accountIdFromPath,
+      accountIdForPath: registryFirstAccountIdForPath,
       accountLabelFor,
       launchProfileForPath: (p) => agentRegistry().launchProfileForPath(p),
     });

@@ -5086,6 +5086,25 @@ export class AgentRegistry {
     return receipt ? clone(receipt.launchProfile) : null;
   }
 
+  /** Durable account ownership for a transcript path (issue #891, phase 0).
+      The generation record is the source of truth for which account owns a
+      conversation; deriving the account from the path layout stays in the
+      account manager only as recovery for artifacts the registry never saw. */
+  transcriptAccountId(engine: Extract<AgentEngine, "claude" | "codex">, artifactPath: string): string | null {
+    const snapshot = this.readOnlySnapshot();
+    for (const conversation of Object.values(snapshot.conversations)) {
+      if (conversation.engine !== engine) continue;
+      const generation = conversation.generations.find((item) => item.path === artifactPath);
+      if (generation?.accountId) return generation.accountId;
+      if (conversation.continuityPaths.includes(artifactPath)) {
+        const current = conversation.generations.at(-1);
+        if (current?.accountId) return current.accountId;
+      }
+    }
+    const receipt = Object.values(snapshot.receipts).find((item) => item.artifactPath === artifactPath && item.engine === engine);
+    return receipt?.accountId ?? null;
+  }
+
   updateConversationLaunchProfile(
     id: ViewerConversationId,
     patch: Pick<LaunchProfile, "model" | "effort" | "fast">,

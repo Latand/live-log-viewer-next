@@ -3736,3 +3736,20 @@ describe("account migration retry identity (#708)", () => {
     expect(retried.migration!.operationId).toBe(operationId);
   });
 });
+
+describe("transcript ownership (issue #891 phase 0)", () => {
+  test("transcriptAccountId reads durable ownership for a settled spawn artifact", () => {
+    const store = registry();
+    const begun = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "terra" });
+    if (begun.kind !== "created") throw new Error("expected create");
+    const entry = spawnEntry("/sessions/rollout-terra-session.jsonl", null as unknown as string);
+    store.completeObservedSpawn(begun.receipt.launchId, entry);
+
+    expect(store.transcriptAccountId("codex", entry.artifactPath)).toBe("terra");
+    // Engine scoping: the same path under the other engine names nobody.
+    expect(store.transcriptAccountId("claude", entry.artifactPath)).toBeNull();
+    // Unregistered artifacts stay unresolved — path-layout recovery in the
+    // account manager remains the only signal for those.
+    expect(store.transcriptAccountId("codex", "/sessions/rollout-unseen.jsonl")).toBeNull();
+  });
+});
