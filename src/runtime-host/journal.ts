@@ -272,6 +272,8 @@ export class RuntimeJournal {
   private readonly secretKey: Buffer;
   private readonly waiters = new Set<() => void>();
   private fault: string | null = null;
+  private snapshotCache: { changes: number; json: string } | null = null;
+  private receiptSweepCursor = 0;
 
   constructor(filename: string, options: RuntimeJournalOptions = {}) {
     this.db = new Database(filename, { create: true, strict: true });
@@ -745,6 +747,26 @@ export class RuntimeJournal {
     }
   }
 
+  /** Serialized snapshot, rebuilt only when the database has changed since the
+      cached build. Concurrent snapshot consumers otherwise stack full O(state)
+      rebuilds on the event loop until every socket request exceeds the
+      client's timeout and the retry storm keeps the host saturated (the
+      2026-08-04 spawn freeze). total_changes() counts every row this
+      connection has written, so no mutation path needs to remember to
+      invalidate. serverTime inside the cached frame dates from the last
+      mutation; no consumer reads it. */
+  snapshotJson(): string {
+    const changes = this.totalChanges();
+    if (this.snapshotCache?.changes === changes) return this.snapshotCache.json;
+    const json = JSON.stringify(this.snapshot());
+    this.snapshotCache = { changes, json };
+    return json;
+  }
+
+  private totalChanges(): number {
+    return Number(this.db.query<{ changes: number }, []>("SELECT total_changes() AS changes").get()?.changes ?? 0);
+  }
+
   replay(after: number, limit = 128): RuntimeReplay {
     this.assertHealthy();
     const floorSeq = Number(this.meta("anchor_seq"));
@@ -1106,6 +1128,67 @@ export class RuntimeJournal {
       try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
       throw error;
     }
+  }
+
+  /** Bounded producer-receipt retention pass; the timer in main.ts owns the
+      cadence. compact() bounds every other table but never touched
+      producer_receipts, which grew to 1.5M rows / 1.66 GB in production —
+      85% of the journal file. Two rules, applied to at most `budget` rows per
+      call so a pass never stalls the socket loop:
+      - engine-cursor receipts (`engine-host:…:<seq>`) keep only the highest
+        sequence per session prefix — the same invariant the append path
+        enforces, extended to prefixes that stopped appending before that
+        dedupe shipped;
+      - other receipts expire once their event falls below the compaction
+        anchor, matching the retention of the operations table. A duplicate
+        eventKey older than the events window re-appends instead of deduping,
+        the trade compact() already made for operations.
+      The cursor is in-memory: a restart rescans from rowid 0, and the pass is
+      idempotent. */
+  maintainProducerReceipts(budget = 4_096): { scanned: number; deleted: number; cycled: boolean } {
+    this.assertHealthy();
+    const limit = Math.max(1, budget);
+    const anchorSeq = Number(this.meta("anchor_seq"));
+    const rows = this.db.query<{ rowid: number; producer_kind: string; producer_key: string; event_seq: number | null }, [number, number]>(
+      "SELECT rowid, producer_kind, producer_key, CAST(json_extract(event_json, '$.seq') AS INTEGER) AS event_seq FROM producer_receipts WHERE rowid > ? ORDER BY rowid LIMIT ?",
+    ).all(this.receiptSweepCursor, limit);
+    const cycled = rows.length < limit;
+    this.receiptSweepCursor = cycled ? 0 : rows[rows.length - 1]!.rowid;
+    const latestByPrefix = new Map<string, string>();
+    const stale: number[] = [];
+    for (const row of rows) {
+      const cursor = engineProducerCursor(row.producer_kind, row.producer_key);
+      if (cursor) {
+        const group = `${row.producer_kind} ${cursor.prefix}`;
+        let latestKey = latestByPrefix.get(group);
+        if (latestKey === undefined) {
+          latestKey = this.db.query<{ producer_key: string }, [string, string, string, string]>(
+            "SELECT producer_key FROM producer_receipts WHERE producer_kind = ? AND producer_key >= ? AND producer_key < ? ORDER BY CAST(substr(producer_key, length(?) + 1) AS INTEGER) DESC LIMIT 1",
+          ).get(row.producer_kind, cursor.prefix, `${cursor.prefix}\uffff`, cursor.prefix)?.producer_key ?? row.producer_key;
+          latestByPrefix.set(group, latestKey);
+        }
+        if (row.producer_key !== latestKey) stale.push(row.rowid);
+      } else if (row.event_seq !== null && row.event_seq <= anchorSeq) {
+        stale.push(row.rowid);
+      }
+    }
+    if (stale.length > 0) {
+      this.db.exec("BEGIN IMMEDIATE");
+      try {
+        for (let start = 0; start < stale.length; start += 500) {
+          const batch = stale.slice(start, start + 500);
+          this.db.query(`DELETE FROM producer_receipts WHERE rowid IN (${batch.map(() => "?").join(", ")})`).run(...batch);
+        }
+        this.db.exec("COMMIT");
+      } catch (error) {
+        try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+        throw error;
+      }
+      // Reclaims pages only where the file was born with auto_vacuum set
+      // (fresh databases); on older files the freed pages are still reused.
+      this.db.exec("PRAGMA incremental_vacuum(2048)");
+    }
+    return { scanned: rows.length, deleted: stale.length, cycled };
   }
 
   close(): void { this.db.close(); }
