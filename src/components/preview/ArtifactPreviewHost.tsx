@@ -5,6 +5,7 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom";
 
 import { classifyArtifact, type ArtifactKind } from "@/lib/artifact/classify";
+import { parseArtifactFragment } from "@/lib/artifact/fragment";
 import { useLocale, type TFunction } from "@/lib/i18n";
 
 import { useModalLayer } from "../modalLayer";
@@ -34,6 +35,10 @@ interface OpenRequest {
   path: string;
   /** Bumps on every open so re-opening the same path restarts its load. */
   nonce: number;
+  /** The open came from the `#a=` URL fragment (issue #884), not a clicked
+      link: hash navigation away closes it, and a user close strips the
+      fragment so a reload does not resurrect the sheet. */
+  fromFragment?: boolean;
 }
 
 function kindLabel(t: TFunction, kind: ArtifactKind | null): string {
@@ -67,9 +72,18 @@ function storedWidth(): number {
 /**
  * The ONE in-app document preview surface (issue #875). Mounted once in the
  * Viewer shell; any rendered artifact link opens it through the preview bus.
- * Pure same-document React state: opening, switching and closing write nothing
- * to the URL, history, board or transcript, and trigger no snapshot or scan —
- * the only network the surface owns is /api/artifact.
+ * A click-open is pure same-document React state: opening, switching and
+ * closing write nothing to the URL, history, board or transcript, and trigger
+ * no snapshot or scan — the only network the surface owns is /api/artifact.
+ *
+ * The `#a=` fragment (issue #884) is the surface's second entry point: a
+ * pasted or bookmarked URL naming an artifact opens the same sheet on load,
+ * through the same classifier and the same /api/artifact authorization —
+ * unsupported, out-of-root and missing paths land on the explicit failure
+ * states exactly as a click would. Only that entry touches the URL: hash
+ * navigation away closes a fragment-opened sheet, and a user close strips the
+ * fragment in place (replaceState, never push) so Back keeps the browser's
+ * semantics and a reload does not resurrect the preview.
  */
 export function ArtifactPreviewHost({ mobile }: { mobile: boolean }) {
   const [open, setOpen] = useState<OpenRequest | null>(null);
@@ -80,7 +94,32 @@ export function ArtifactPreviewHost({ mobile }: { mobile: boolean }) {
       }),
     [],
   );
-  const close = useCallback(() => setOpen(null), []);
+  /* The initial `#a=` read IS this entry point's load: the fragment is
+     invisible to the server render, so it applies exactly once on mount and
+     then tracks hash navigation. */
+  useEffect(() => {
+    const applyFragment = () => {
+      const path = parseArtifactFragment(window.location.hash);
+      setOpen((previous) => {
+        if (path !== null) return { path, nonce: (previous?.nonce ?? 0) + 1, fromFragment: true };
+        /* The hash moved elsewhere (Back included): a preview the fragment
+           opened follows it closed; a click-opened one is URL-independent
+           state and stays. */
+        return previous?.fromFragment ? null : previous;
+      });
+    };
+    applyFragment();
+    window.addEventListener("hashchange", applyFragment);
+    return () => window.removeEventListener("hashchange", applyFragment);
+  }, []);
+  const close = useCallback(() => {
+    setOpen(null);
+    /* A URL still naming the artifact would resurrect it on reload. Replace
+       in place — never push — so history length and Back stay untouched. */
+    if (parseArtifactFragment(window.location.hash) !== null) {
+      window.history.replaceState(window.history.state, "", window.location.pathname + window.location.search);
+    }
+  }, []);
   if (!open) return null;
   return <PreviewSheet key="sheet" open={open} mobile={mobile} onClose={close} onReload={setOpen} />;
 }
@@ -158,7 +197,7 @@ function PreviewSheet({
   const kind = meta?.kind ?? classifyArtifact(open.path)?.kind ?? null;
   const state = failure ?? (meta ? "ready" : "loading");
   const reload = useCallback(
-    () => onReload({ path: open.path, nonce: open.nonce + 1 }),
+    () => onReload({ ...open, nonce: open.nonce + 1 }),
     [onReload, open],
   );
   const onPaneFailure = useCallback((code: ArtifactFailure) => setFailure(code), []);

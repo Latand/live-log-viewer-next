@@ -4,7 +4,7 @@ import { filesApiUrl } from "@/hooks/useFiles";
 import { parseConversationHash } from "@/lib/accounts/identity";
 
 import { OVERVIEW } from "./projectModel";
-import { filesRequestPin, initialProjectFromState, reduceCatalogPin } from "./Viewer";
+import { filesRequestPin, initialProjectFromState, recognizedFragment, reduceCatalogPin } from "./Viewer";
 
 test("initialProjectFromState reads a direct project hash before polling", () => {
   expect(initialProjectFromState("#p=example-dispatcher", null)).toBe("example-dispatcher");
@@ -15,6 +15,26 @@ test("initialProjectFromState falls back to saved project only without a project
   expect(initialProjectFromState("", "CelestiaCompose")).toBe("CelestiaCompose");
   expect(initialProjectFromState("#f=/tmp/session.jsonl", "CelestiaCompose")).toBe("CelestiaCompose");
   expect(initialProjectFromState("", null)).toBe(OVERVIEW);
+});
+
+test("initialProjectFromState treats an artifact fragment like any non-project hash", () => {
+  expect(initialProjectFromState("#a=%2Fcheckouts%2Ffigures%2Fdiagram.png", "CelestiaCompose")).toBe("CelestiaCompose");
+});
+
+test("recognizedFragment knows every fragment key the app speaks — and refuses everything else", () => {
+  for (const known of [
+    "",
+    "#c=conversation-1",
+    "#c=conversation-1#question",
+    "#f=%2Fcheckouts%2Fsession.jsonl",
+    "#p=My%20Project",
+    "#a=%2Fcheckouts%2Ffigures%2Fdiagram.png",
+  ]) {
+    expect(recognizedFragment(known)).toBeTrue();
+  }
+  for (const unknown of ["#garbage", "#f=", "#a=", "#x=1", "#=value", "#question"]) {
+    expect(recognizedFragment(unknown)).toBeFalse();
+  }
 });
 
 test("a resolved capped-out catalog open remains pinned after its hash intent clears", () => {

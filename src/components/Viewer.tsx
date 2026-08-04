@@ -56,6 +56,15 @@ export function filesRequestPin(pendingHash: ConversationHash | null, retainedPa
   return pendingHash?.filePath ?? pendingHash?.conversationId ?? retainedPath;
 }
 
+/** Every fragment key this app speaks, each with a payload: conversation
+    (`#c=`), transcript path (`#f=`), project (`#p=`), artifact preview
+    (`#a=`, issue #884 — handled by ArtifactPreviewHost) — plus the empty
+    hash. A pasted URL outside this set means nothing here; quietly landing
+    on the default view read as a broken deployment, so the shell says so. */
+export function recognizedFragment(hash: string): boolean {
+  return hash === "" || /^#(?:c|f|p|a)=./.test(hash);
+}
+
 export type CatalogPinState = { path: string; hydrated: boolean; conversationId: string | null } | null;
 export type CatalogPinEvent =
   | { kind: "open"; path: string; conversationId?: string }
@@ -169,6 +178,9 @@ export function Viewer() {
      is stale — deleted, purged, or beyond this machine. Fails visibly, then the
      rest of the history stays usable. */
   const [staleFocusNotice, setStaleFocusNotice] = useState(false);
+  /* A pasted URL whose fragment the app cannot interpret (issue #884): name
+     the failure instead of quietly showing the default view. */
+  const [unknownFragmentNotice, setUnknownFragmentNotice] = useState(false);
   /* Mirrors for the popstate replay path, which must read the latest values
      from stable event listeners without re-registering them per poll. */
   const filesRef = useRef<FileEntry[]>([]);
@@ -194,6 +206,7 @@ export function Viewer() {
     if (initial.filePath || initial.conversationId) setPendingHash(initial);
     const savedProject = initial.project ?? localStorage.getItem(PROJECT_KEY);
     if (savedProject) setProject(savedProject);
+    if (!recognizedFragment(location.hash)) setUnknownFragmentNotice(true);
   }, []);
 
   useEffect(() => {
@@ -228,6 +241,7 @@ export function Viewer() {
         /* Back cleared the hash entirely: that entry was the overview. */
         else if (!location.hash) setProject(OVERVIEW);
       }
+      if (!recognizedFragment(location.hash)) setUnknownFragmentNotice(true);
     };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
@@ -281,6 +295,12 @@ export function Viewer() {
     const timer = window.setTimeout(() => setStaleFocusNotice(false), STALE_FOCUS_NOTICE_MS);
     return () => window.clearTimeout(timer);
   }, [staleFocusNotice]);
+
+  useEffect(() => {
+    if (!unknownFragmentNotice) return;
+    const timer = window.setTimeout(() => setUnknownFragmentNotice(false), STALE_FOCUS_NOTICE_MS);
+    return () => window.clearTimeout(timer);
+  }, [unknownFragmentNotice]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   /* The state half of a project selection, shared by routes that write their
@@ -908,6 +928,16 @@ export function Viewer() {
         <div className="pointer-events-none fixed left-1/2 top-10 z-40 -translate-x-1/2" role="status" data-stale-focus-notice>
           <div className="rounded-full border border-warning/45 bg-warning-soft px-3.5 py-1.5 text-[12px] font-semibold text-warning shadow-1 backdrop-blur">
             {t("viewer.staleFocusEntry")}
+          </div>
+        </div>
+      ) : null}
+      {/* A pasted URL whose fragment the app does not speak (issue #884):
+          the silent version of this looked like an undeployed feature. Same
+          anchor as the stale notice; the two intents cannot co-occur. */}
+      {unknownFragmentNotice ? (
+        <div className="pointer-events-none fixed left-1/2 top-10 z-40 -translate-x-1/2" role="status" data-unknown-fragment-notice>
+          <div className="rounded-full border border-warning/45 bg-warning-soft px-3.5 py-1.5 text-[12px] font-semibold text-warning shadow-1 backdrop-blur">
+            {t("viewer.unknownFragment")}
           </div>
         </div>
       ) : null}
