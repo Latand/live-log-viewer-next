@@ -92,7 +92,7 @@ test("the card account chip queues a conversation-scoped switch and disables sig
 
   const chip = host.querySelector("[data-conversation-account-chip]")!;
   await act(async () => { chip.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event); });
-  const menu = host.querySelector("[data-conversation-account-menu]")!;
+  const menu = document.querySelector("[data-conversation-account-menu]")!;
   const rows = [...menu.querySelectorAll('[role="menuitemradio"]')] as HTMLButtonElement[];
   expect(rows.map((row) => row.textContent?.trim())).toEqual(["Source", "Target", "Signed out"]);
   expect(rows[2]!.disabled).toBe(true);
@@ -124,7 +124,7 @@ test("a legacy account switch settles when scanner ownership reaches the target 
     host.querySelector<HTMLElement>("[data-conversation-account-chip]")!
       .dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
   });
-  const rows = [...host.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')];
+  const rows = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')];
   await act(async () => {
     rows[1]!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -147,7 +147,7 @@ test("a failed legacy account switch clears its pending badge and re-enables cho
     host.querySelector<HTMLElement>("[data-conversation-account-chip]")!
       .dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
   });
-  const rows = [...host.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')];
+  const rows = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')];
   await act(async () => {
     rows[1]!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -175,7 +175,7 @@ test("a failed legacy account switch clears its pending badge and re-enables cho
     host.querySelector<HTMLElement>("[data-conversation-account-chip]")!
       .dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
   });
-  const reopenedRows = [...host.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')];
+  const reopenedRows = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')];
   expect(reopenedRows[1]!.disabled).toBeFalse();
   await act(async () => root.unmount());
 });
@@ -195,7 +195,7 @@ test("an account switch carries the latest conversation runtime profile", async 
     host.querySelector<HTMLElement>("[data-conversation-account-chip]")!
       .dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
   });
-  const rows = [...host.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')];
+  const rows = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')];
   await act(async () => {
     rows[1]!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
     await new Promise((resolve) => setTimeout(resolve, 0));

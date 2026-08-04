@@ -43,6 +43,26 @@ export function legacyClaudeHome(): string { return path.resolve(process.env.LLV
 export function claudeAccountsRoot(): string { return path.join(path.dirname(stateDir()), "accounts", "claude"); }
 export function claudeRegistryPath(): string { return statePath("claude-accounts.json"); }
 export function claudeCapabilitiesRoot(): string { return path.join(path.dirname(stateDir()), "shared", "claude"); }
+
+/* Shared transcript store (issue #891, phase 1). Transcripts are viewer data,
+   not credentials — the per-account layout was a side effect of per-account
+   CLI config homes, never an isolation requirement. When an account home's
+   `projects` is a symlink into this root, the account reports the canonical
+   shared path: every consumer (scanner, spawn specs, migration provider)
+   then addresses one store while the CLI keeps writing through its own
+   $CLAUDE_CONFIG_DIR/projects. Homes not yet cut over keep their local dir,
+   so the store can be adopted per account. */
+export function sharedClaudeProjectsRoot(): string { return path.join(claudeCapabilitiesRoot(), "projects"); }
+
+function projectsDirFor(home: string): string {
+  const local = path.join(home, "projects");
+  try {
+    if (!fs.lstatSync(local).isSymbolicLink()) return local;
+    const shared = sharedClaudeProjectsRoot();
+    if (fs.realpathSync(local) === fs.realpathSync(shared)) return shared;
+  } catch { /* unresolved link or missing dir: treat as not cut over */ }
+  return local;
+}
 function managedHome(id: string): string { return path.join(claudeAccountsRoot(), id); }
 function defaults(): Registry { return { version: VERSION, active: DEFAULT_ID, accounts: [], retired: [] }; }
 function key(file: string): string { try { const s = fs.statSync(file); return `${s.mtimeMs}:${s.size}`; } catch { return "missing"; } }
@@ -141,20 +161,29 @@ export function managedClaudeCredentialIsSafe(home: string, required = false): b
   try { const s = fs.lstatSync(file); return s.isFile() && !s.isSymbolicLink() && s.uid === (process.getuid?.() ?? s.uid) && (s.mode & 0o077) === 0; } catch { return !required; }
 }
 function credentialIsSafe(home: string): boolean { return managedClaudeCredentialIsSafe(home, true); }
-function account(stored: StoredAccount): ClaudeAccount { const home = managedHome(stored.id); return { ...stored, home, projectsDir: path.join(home, "projects"), authPresent: credentialIsSafe(home) }; }
-function main(): ClaudeAccount { const home = legacyClaudeHome(); return { id: DEFAULT_ID, label: "Main", kind: "legacy", home, projectsDir: path.join(home, "projects"), authPresent: credentialIsSafe(home), createdAt: 0 }; }
+function account(stored: StoredAccount): ClaudeAccount { const home = managedHome(stored.id); return { ...stored, home, projectsDir: projectsDirFor(home), authPresent: credentialIsSafe(home) }; }
+function main(): ClaudeAccount { const home = legacyClaudeHome(); return { id: DEFAULT_ID, label: "Main", kind: "legacy", home, projectsDir: projectsDirFor(home), authPresent: credentialIsSafe(home), createdAt: 0 }; }
 export function listClaudeAccounts(): ClaudeAccount[] { return [main(), ...readRegistry().registry.accounts.map(account)]; }
 export function activeClaudeAccountId(): string { const active = readRegistry().registry.active; return listClaudeAccounts().some((item) => item.id === active) ? active : DEFAULT_ID; }
 export function claudeAccountsMutationLocked(): boolean { return readRegistry().corrupt; }
 export function claudeAccountForSpawn(requested?: string | null): Pick<ClaudeAccount, "id" | "kind" | "home" | "projectsDir"> { const found = listClaudeAccounts().find((item) => item.id === (requested ?? activeClaudeAccountId())); if (!found) throw new UnknownClaudeAccountError(requested ?? ""); if (found.kind === "managed" && (!managedClaudeHomeIsSafe(found.id, true) || !managedClaudeCredentialIsSafe(found.home))) throw new UnsafeClaudeHomeError(); return { id: found.id, kind: found.kind, home: found.home, projectsDir: found.projectsDir }; }
 export function setActiveClaudeAccount(id: string): void { withRegistryLock(() => { cached = null; const registry = mutable(); if (!listClaudeAccounts().some((item) => item.id === id)) throw new UnknownClaudeAccountError(id); write({ ...registry, active: id }); }); }
 /** Transcript trees kept by removed accounts (issue #643). Their homes hold nothing else. */
-export function retiredClaudeProjectRoots(): string[] { return readRegistry().registry.retired.map((item) => path.join(managedHome(item.id), "projects")); }
+export function retiredClaudeProjectRoots(): string[] { return readRegistry().registry.retired.map((item) => projectsDirFor(managedHome(item.id))); }
 /** Every Claude transcript root the scanner reads: live accounts first, then retained archives. */
 export function claudeProjectRoots(): string[] { return [...new Set([...listClaudeAccounts().map((item) => item.projectsDir), ...retiredClaudeProjectRoots()])]; }
 
 export function claudeHomeOwningTranscript(pathname: string): string | null {
   let real: string; try { real = fs.realpathSync(pathname); } catch { return null; }
+  /* Inside the shared store the path names no owner — every cut-over account
+     resolves to the same realpath, so a containment match would return
+     whichever account lists first. Ownership there is the registry's job
+     (transcriptAccountId, phase 0); refusing to guess beats a plausible
+     wrong answer. */
+  try {
+    const shared = fs.realpathSync(sharedClaudeProjectsRoot());
+    if (real.startsWith(shared + path.sep)) return null;
+  } catch { /* store not provisioned: per-account layout still authoritative */ }
   for (const item of listClaudeAccounts()) {
     try { const root = fs.realpathSync(item.projectsDir); if (real.startsWith(root + path.sep)) return item.home; } catch { /* missing home */ }
   }

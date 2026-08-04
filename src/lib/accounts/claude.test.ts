@@ -217,3 +217,36 @@ test("concurrent child processes create and select accounts without losing regis
   expect(await left.exited).toBe(0); expect(await right.exited).toBe(0);
   expect(["child-a", "child-b"]).toContain(mod.activeClaudeAccountId());
 });
+
+test("a home whose projects symlinks into the shared store reports the canonical root", () => {
+  const shared = mod.sharedClaudeProjectsRoot();
+  fs.mkdirSync(shared, { recursive: true, mode: 0o700 });
+  const home = process.env.LLV_CLAUDE_HOME!;
+  fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+  fs.symlinkSync(shared, path.join(home, "projects"));
+  try {
+    const main = mod.listClaudeAccounts()[0]!;
+    expect(main.projectsDir).toBe(shared);
+    // Inside the shared store the path names no owner: ownership is the
+    // registry's job (phase 0), so containment refuses to guess.
+    const project = path.join(shared, "-repo");
+    fs.mkdirSync(project, { recursive: true, mode: 0o700 });
+    const transcript = path.join(project, "session.jsonl");
+    fs.writeFileSync(transcript, "{}\n", { mode: 0o600 });
+    expect(mod.claudeHomeOwningTranscript(transcript)).toBeNull();
+  } finally {
+    fs.rmSync(path.join(SANDBOX, "shared"), { recursive: true, force: true });
+  }
+});
+
+test("a home with a real projects directory keeps its local root", () => {
+  const home = process.env.LLV_CLAUDE_HOME!;
+  const local = path.join(home, "projects");
+  fs.mkdirSync(local, { recursive: true, mode: 0o700 });
+  expect(mod.listClaudeAccounts()[0]!.projectsDir).toBe(local);
+  const project = path.join(local, "-repo");
+  fs.mkdirSync(project, { recursive: true, mode: 0o700 });
+  const transcript = path.join(project, "session.jsonl");
+  fs.writeFileSync(transcript, "{}\n", { mode: 0o600 });
+  expect(mod.claudeHomeOwningTranscript(transcript)).toBe(home);
+});

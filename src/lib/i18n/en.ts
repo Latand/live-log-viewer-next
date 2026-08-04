@@ -140,6 +140,7 @@ export const en = {
   "accounts.conversationTitle": "Run this conversation on",
   "accounts.conversationPending": "Account switch pending",
   "accounts.conversationApplied": "Conversation account switched",
+  "accounts.conversationUnconfirmed": "Account switch got no confirmation — try again",
   "accounts.manage": "Manage accounts…",
   "accounts.addFailed": "Could not add account",
   "accounts.loginOpened": "Device login opened in {target}",

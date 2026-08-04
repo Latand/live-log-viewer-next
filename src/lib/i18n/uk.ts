@@ -134,6 +134,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "accounts.conversationTitle": "Запустити цю розмову через",
   "accounts.conversationPending": "Зміна акаунта очікує",
   "accounts.conversationApplied": "Акаунт розмови змінено",
+  "accounts.conversationUnconfirmed": "Зміна акаунта без підтвердження — спробуйте ще раз",
   "accounts.manage": "Керувати акаунтами…",
   "accounts.addFailed": "Не вдалося додати акаунт",
   "accounts.loginOpened": "Вхід через пристрій відкрито в {target}",

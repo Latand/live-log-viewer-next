@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 import { Check, ChevronDown, Loader2 } from "@/components/icons";
 import { type AccountAuthHealth, useEngineAccounts } from "@/hooks/useEngineAccounts";
@@ -89,6 +90,11 @@ export function AccountBadge({
   const accounts = useEngineAccounts(engine);
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
+  /* The menu renders through a portal with fixed positioning: card headers
+     clip overflow, so an in-flow absolute menu was cut off and unreachable. */
+  const [menuPosition, setMenuPosition] = useState<{ top: number; right: number } | null>(null);
+  const anchorRef = useRef<HTMLSpanElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const operationRef = useRef<string | null>(null);
   const targetAccountRef = useRef<string | null>(null);
   const migrationBaselineRef = useRef<string | null>(null);
@@ -126,6 +132,42 @@ export function AccountBadge({
     setPending(false);
     pushTaskToast("ok", t("accounts.conversationApplied"));
   }, [accountId, pending, t]);
+
+  /* Confirmation flows through runtime receipts and the migration projection —
+     both go silent when the conversation's host is dead (a session-limit stop,
+     a crashed pane). Without this escape a switch attempt on such a card left
+     `pending` stuck forever and every menu item disabled. */
+  useEffect(() => {
+    if (!pending) return;
+    const timer = window.setTimeout(() => {
+      operationRef.current = null;
+      targetAccountRef.current = null;
+      migrationBaselineRef.current = null;
+      setPending(false);
+      pushTaskToast("err", t("accounts.conversationUnconfirmed"));
+    }, 60_000);
+    return () => window.clearTimeout(timer);
+  }, [pending, t]);
+
+  /* Portal menu closes on any press outside the chip or the menu itself. */
+  useEffect(() => {
+    if (!open) return;
+    const onPress = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (anchorRef.current?.contains(target) || menuRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    document.addEventListener("pointerdown", onPress);
+    return () => document.removeEventListener("pointerdown", onPress);
+  }, [open]);
+
+  const toggleMenu = () => {
+    if (!open) {
+      const rect = anchorRef.current?.getBoundingClientRect();
+      setMenuPosition(rect ? { top: rect.bottom + 4, right: Math.max(8, window.innerWidth - rect.right) } : { top: 8, right: 8 });
+    }
+    setOpen((value) => !value);
+  };
 
   useEffect(() => {
     const migration = file?.migration;
@@ -183,7 +225,7 @@ export function AccountBadge({
   const button = (
     <button
       type="button"
-      onClick={() => file ? setOpen((value) => !value) : requestAccountPanel(engine, accountId)}
+      onClick={() => file ? toggleMenu() : requestAccountPanel(engine, accountId)}
       aria-label={aria}
       aria-haspopup={file ? "menu" : undefined}
       aria-expanded={file ? open : undefined}
@@ -211,45 +253,51 @@ export function AccountBadge({
     </button>
   );
 
-  return (
-    <span className="relative inline-flex" onPointerDown={(event) => event.stopPropagation()}>
-      <Hint label={label}>{button}</Hint>
-      {open && file ? (
-        <div
-          role="menu"
-          data-conversation-account-menu
-          className="absolute right-0 top-full z-50 mt-1 min-w-52 rounded-surface border border-border bg-raised p-1.5 font-sans text-ui shadow-2"
-        >
-          <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted">
-            {t("accounts.conversationTitle")}
-          </div>
-          {accounts.accounts.map((account) => {
-            const available = account.authPresent && !account.loginPending;
-            return (
-              <button
-                key={account.id}
-                type="button"
-                role="menuitemradio"
-                aria-checked={account.id === accountId}
-                disabled={!available || pending}
-                onClick={() => void switchConversation(account.id)}
-                className="flex min-h-9 w-full items-center gap-2 rounded-control px-2 py-1.5 text-left hover:bg-sunken disabled:opacity-45"
-              >
-                <span className="min-w-0 flex-1 truncate">{account.label}</span>
-                {account.id === accountId ? <Check className="h-3.5 w-3.5 text-accent" aria-hidden /> : null}
-              </button>
-            );
-          })}
+  const menu = open && file && menuPosition ? createPortal(
+    <div
+      ref={menuRef}
+      role="menu"
+      data-conversation-account-menu
+      onPointerDown={(event) => event.stopPropagation()}
+      style={{ top: menuPosition.top, right: menuPosition.right }}
+      className="fixed z-[95] min-w-52 rounded-surface border border-border bg-raised p-1.5 font-sans text-ui shadow-2"
+    >
+      <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted">
+        {t("accounts.conversationTitle")}
+      </div>
+      {accounts.accounts.map((account) => {
+        const available = account.authPresent && !account.loginPending;
+        return (
           <button
+            key={account.id}
             type="button"
-            role="menuitem"
-            onClick={() => { setOpen(false); requestAccountPanel(engine, accountId); }}
-            className="mt-1 w-full border-t border-border px-2 pt-2 text-left text-[11px] font-semibold text-accent"
+            role="menuitemradio"
+            aria-checked={account.id === accountId}
+            disabled={!available || pending}
+            onClick={() => void switchConversation(account.id)}
+            className="flex min-h-9 w-full items-center gap-2 rounded-control px-2 py-1.5 text-left hover:bg-sunken disabled:opacity-45"
           >
-            {t("accounts.manage")}
+            <span className="min-w-0 flex-1 truncate">{account.label}</span>
+            {account.id === accountId ? <Check className="h-3.5 w-3.5 text-accent" aria-hidden /> : null}
           </button>
-        </div>
-      ) : null}
+        );
+      })}
+      <button
+        type="button"
+        role="menuitem"
+        onClick={() => { setOpen(false); requestAccountPanel(engine, accountId); }}
+        className="mt-1 w-full border-t border-border px-2 pt-2 text-left text-[11px] font-semibold text-accent"
+      >
+        {t("accounts.manage")}
+      </button>
+    </div>,
+    document.body,
+  ) : null;
+
+  return (
+    <span ref={anchorRef} className="relative inline-flex" onPointerDown={(event) => event.stopPropagation()}>
+      <Hint label={label}>{button}</Hint>
+      {menu}
       {pending ? <span className="sr-only" role="status">{t("accounts.conversationPending")}</span> : null}
     </span>
   );
