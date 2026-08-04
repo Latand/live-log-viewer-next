@@ -214,6 +214,37 @@ test("a repository binding on one member never absorbs a directory project", () 
   expect(result.projectRemap.get("dir-22222222222222222222222222222222")).toBe("dir-22222222222222222222222222222222");
 });
 
+test("a repository checkout recorded as a folder group's projectRoot never renames it", () => {
+  // A session in a plain folder that administers a repository records the
+  // checkout as its projectRoot metadata — the folder group must keep its
+  // directory identity anyway.
+  const repositoryRoot = process.cwd();
+  const repoIdentity = projectInfoFromCwd(repositoryRoot)!;
+  const result = consolidateProjectCatalogByRepository([
+    {
+      project: "dir-33333333333333333333333333333333",
+      displayName: "home-operator",
+      smt: 50,
+      conversations: 600,
+      projectRoot: repositoryRoot,
+    },
+    {
+      project: repoIdentity.project,
+      displayName: repoIdentity.displayName,
+      smt: 40,
+      conversations: 12,
+      projectRoot: repositoryRoot,
+      repository: "owner/shared-repository",
+    },
+  ]);
+
+  const projects = result.projectCatalog.map((entry) => entry.project).sort();
+  expect(projects).toEqual(["dir-33333333333333333333333333333333", repoIdentity.project].sort());
+  expect(result.projectRemap.get("dir-33333333333333333333333333333333")).toBe("dir-33333333333333333333333333333333");
+  const folder = result.projectCatalog.find((entry) => entry.project.startsWith("dir-"))!;
+  expect(folder.displayName).toBe("home-operator");
+});
+
 test("catalog aliases collapse a legacy dashed-path variant before grouping", () => {
   const canonical = "repo-0123456789abcdef0123456789abcdef";
   const result = consolidateProjectCatalogByRepository(
