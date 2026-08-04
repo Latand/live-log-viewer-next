@@ -38,7 +38,7 @@ test("quota visibility remains fresh when automatic balancing is disabled", asyn
         };
       },
     };
-    const controller = new QuotaController(registry, probe, "00000000-0000-4000-8000-000000000000", () => current);
+    const controller = new QuotaController(registry, probe, "boot-visibility-test", () => current);
 
     registry.setAutoBalancePolicy("codex", false);
     await controller.tick("codex");
@@ -83,7 +83,7 @@ test("a failed probe keeps the last known limits instead of blanking them", asyn
           observedAt: now,
         };
       },
-    }, "00000000-0000-4000-8000-000000000041", () => current);
+    }, "boot-carry-forward-test", () => current);
     await controller.tick("codex");
     const firstObservedAt = registry.snapshot().quotaObservations.codex.default!.observedAt;
     fail = true;
@@ -123,7 +123,7 @@ test("a hung probe times out without delaying or blanking the other accounts", a
           observedAt: now,
         };
       },
-    }, "00000000-0000-4000-8000-000000000042", () => Date.parse("2026-07-10T12:00:00.000Z"), 50);
+    }, "boot-hung-probe-test", () => Date.parse("2026-07-10T12:00:00.000Z"), 50);
     await controller.tick("codex");
     expect(registry.snapshot().quotaObservations.codex.default?.provenance).toMatchObject({ source: "unavailable", reason: "quota-probe-timeout" });
     expect(registry.snapshot().quotaObservations.codex.managed?.limits?.session?.usedPercent).toBe(40);
@@ -166,7 +166,7 @@ test("a live sign-out answer replaces the cached limits instead of hiding behind
           observedAt: now,
         };
       },
-    }, "00000000-0000-4000-8000-000000000043", () => current);
+    }, "boot-signout-test", () => current);
     await controller.tick("codex");
     signedOut = true;
     current += 120_000;
@@ -205,7 +205,7 @@ test("a failed home records a closed code while the controller sweeps later home
           observedAt: now,
         };
       },
-    }, "00000000-0000-4000-8000-000000000040", () => Date.parse("2026-07-10T12:00:00.000Z"));
+    }, "boot-sweep-test", () => Date.parse("2026-07-10T12:00:00.000Z"));
     await controller.tick("codex");
     expect(visited.sort()).toEqual(["default", "managed"]);
     expect(registry.snapshot().quotaObservations.codex.default?.provenance.reason).toBe("quota-probe-failed");
