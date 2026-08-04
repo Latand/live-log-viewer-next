@@ -189,6 +189,31 @@ test("repository-backed catalog rows collapse to the current repository identity
   expect(result.projectRemap.get("repo-00000000000000000000000000000000")).toBe(canonical.project);
 });
 
+test("a repository binding on one member never absorbs a directory project", () => {
+  const result = consolidateProjectCatalogByRepository([
+    {
+      project: "repo-11111111111111111111111111111111",
+      displayName: "shared-repository",
+      smt: 30,
+      conversations: 12,
+      repository: "owner/shared-repository",
+    },
+    {
+      // A folder group whose one recent session happens to be MCP-bound to
+      // the repository above — the folder keeps its own project.
+      project: "dir-22222222222222222222222222222222",
+      displayName: "home-operator",
+      smt: 40,
+      conversations: 600,
+      repository: "owner/shared-repository",
+    },
+  ]);
+
+  const projects = result.projectCatalog.map((entry) => entry.project).sort();
+  expect(projects).toEqual(["dir-22222222222222222222222222222222", "repo-11111111111111111111111111111111"]);
+  expect(result.projectRemap.get("dir-22222222222222222222222222222222")).toBe("dir-22222222222222222222222222222222");
+});
+
 test("catalog aliases collapse a legacy dashed-path variant before grouping", () => {
   const canonical = "repo-0123456789abcdef0123456789abcdef";
   const result = consolidateProjectCatalogByRepository(

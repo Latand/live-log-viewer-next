@@ -14,7 +14,7 @@ import { loadFlows } from "@/lib/flows/store";
 import { reviewOutcomeFor } from "@/lib/flows/reviewOutcome";
 import { overlayPromptDisplayTitles, projectDisplayName } from "@/lib/displayNames";
 import { projectAliasSnapshot } from "@/lib/projects/aliases";
-import { isCanonicalProjectId, projectIdentityFromRepositoryRoot, UNRESOLVED_PROJECT, UNRESOLVED_PROJECT_NAME } from "@/lib/projects/identity";
+import { isCanonicalProjectId, isRepositoryProjectId, projectIdentityFromRepositoryRoot, UNRESOLVED_PROJECT, UNRESOLVED_PROJECT_NAME } from "@/lib/projects/identity";
 import { projectRestoredFlows } from "@/lib/flows/visibility";
 import { reconcileEmbeddedReviewFlows } from "@/lib/pipelines/engine";
 import { loadPipelinesForProjection } from "@/lib/pipelines/store";
@@ -106,8 +106,11 @@ export function consolidateProjectCatalogByRepository(
   for (const entry of entries) {
     const identity = entry.projectRoot ? projectIdentityFromRepositoryRoot(entry.projectRoot) : null;
     const aliasedProject = resolveCatalogAlias(entry.project, aliases);
+    /* Only repository-shaped identities participate in binding/display-name
+       convergence — a directory group must never absorb (or be absorbed by)
+       a repository project through a shared binding. */
     const displayCandidate = identity?.project
-      ?? (isCanonicalProjectId(aliasedProject) ? aliasedProject : null);
+      ?? (isRepositoryProjectId(aliasedProject) ? aliasedProject : null);
     if (displayCandidate) {
       const displayName = (identity?.displayName
         ?? displayNames[displayCandidate]
@@ -122,7 +125,7 @@ export function consolidateProjectCatalogByRepository(
     if (!entry.repository) continue;
     const repository = entry.repository.toLowerCase();
     const candidate = identity?.project
-      ?? (isCanonicalProjectId(aliasedProject) ? aliasedProject : null);
+      ?? (isRepositoryProjectId(aliasedProject) ? aliasedProject : null);
     if (candidate && (identity || !repositoryProjects.has(repository))) {
       repositoryProjects.set(repository, candidate);
     }
@@ -143,11 +146,20 @@ export function consolidateProjectCatalogByRepository(
     const displayNameProject = displayName === UNRESOLVED_PROJECT_NAME.toLocaleLowerCase()
       ? null
       : uniqueRepositoryProjectByDisplayName.get(displayName);
-    const key = repositoryProject || displayNameProject
-      ? `project:${repositoryProject ?? displayNameProject}`
-      : repository
-        ? `repository:${repository}`
-        : `project:${aliasedProject}`;
+    /* A directory-derived project is a standing group of unrelated sessions
+       that merely share a folder. One member carrying a repository binding
+       (an MCP-bound session working on some repo) must never drag the whole
+       folder group into that repository's project — the operator's entire
+       home-directory history once vanished into the repo it was administering
+       this way. Directory groups therefore always keep their own key; only
+       repository-shaped identities converge through bindings. */
+    const key = aliasedProject.startsWith("dir-")
+      ? `project:${aliasedProject}`
+      : repositoryProject || displayNameProject
+        ? `project:${repositoryProject ?? displayNameProject}`
+        : repository
+          ? `repository:${repository}`
+          : `project:${aliasedProject}`;
     const group = groups.get(key) ?? [];
     group.push({ entry, aliasedProject });
     groups.set(key, group);
