@@ -1136,12 +1136,15 @@ function allowedSeatFields(args: McpToolArgs, keys: readonly string[]): Record<s
  */
 async function getOrchestrator(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): Promise<McpToolPayload> {
   const project = canonicalOrchestratorProject(required(args, "project"));
-  const { active, pending } = orchestratorSeatFor(project);
+  const { active, pending, history } = orchestratorSeatFor(project);
   const revocations = orchestratorRevocations().filter((revocation) => revocation.project === project);
   const base = {
     project,
     defaultPromptVersion: ORCHESTRATOR_PROMPT_VERSION,
     pendingIntent: pending,
+    /* Terminalized pending intents (#878), oldest first: what was attempted
+       and why it failed, preserved after the intent stopped blocking. */
+    intentHistory: history,
     /* Predecessor lineage, oldest first: each entry names the seat epoch it
        ended and the successor that replaced it. */
     lineage: revocations.map((revocation) => ({
@@ -1310,7 +1313,7 @@ async function rotateOrchestrator(args: McpToolArgs, control: ViewerControlDepen
   const result = await control.post("/api/orchestrator/rotate", {
     project,
     clientRequestId: spawnAttemptId(requestId(args)),
-    ...allowedSeatFields(args, ["mandate", "handoffNotes", "cwd", "engine", "model", "accountId"]),
+    ...allowedSeatFields(args, ["mandate", "handoffNotes", "cwd", "engine", "model", "effort", "accountId"]),
   }, callerCapabilityHeaders());
   return redactPayload({
     project,
