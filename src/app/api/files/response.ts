@@ -14,7 +14,7 @@ import { loadFlows } from "@/lib/flows/store";
 import { reviewOutcomeFor } from "@/lib/flows/reviewOutcome";
 import { overlayPromptDisplayTitles, projectDisplayName } from "@/lib/displayNames";
 import { projectAliasSnapshot } from "@/lib/projects/aliases";
-import { projectIdentityFromRepositoryRoot, UNRESOLVED_PROJECT, UNRESOLVED_PROJECT_NAME } from "@/lib/projects/identity";
+import { isCanonicalProjectId, projectIdentityFromRepositoryRoot, UNRESOLVED_PROJECT, UNRESOLVED_PROJECT_NAME } from "@/lib/projects/identity";
 import { projectRestoredFlows } from "@/lib/flows/visibility";
 import { reconcileEmbeddedReviewFlows } from "@/lib/pipelines/engine";
 import { loadPipelinesForProjection } from "@/lib/pipelines/store";
@@ -107,7 +107,7 @@ export function consolidateProjectCatalogByRepository(
     const identity = entry.projectRoot ? projectIdentityFromRepositoryRoot(entry.projectRoot) : null;
     const aliasedProject = resolveCatalogAlias(entry.project, aliases);
     const displayCandidate = identity?.project
-      ?? (/^repo-[0-9a-f]{32}$/.test(aliasedProject) ? aliasedProject : null);
+      ?? (isCanonicalProjectId(aliasedProject) ? aliasedProject : null);
     if (displayCandidate) {
       const displayName = (identity?.displayName
         ?? displayNames[displayCandidate]
@@ -122,7 +122,7 @@ export function consolidateProjectCatalogByRepository(
     if (!entry.repository) continue;
     const repository = entry.repository.toLowerCase();
     const candidate = identity?.project
-      ?? (/^repo-[0-9a-f]{32}$/.test(aliasedProject) ? aliasedProject : null);
+      ?? (isCanonicalProjectId(aliasedProject) ? aliasedProject : null);
     if (candidate && (identity || !repositoryProjects.has(repository))) {
       repositoryProjects.set(repository, candidate);
     }
@@ -159,7 +159,7 @@ export function consolidateProjectCatalogByRepository(
       .map(({ entry }) => entry.projectRoot ? projectIdentityFromRepositoryRoot(entry.projectRoot) : null)
       .find((identity) => identity !== null);
     const canonical = repositoryIdentity?.project
-      ?? group.find(({ aliasedProject }) => /^repo-[0-9a-f]{32}$/.test(aliasedProject))?.aliasedProject
+      ?? group.find(({ aliasedProject }) => isCanonicalProjectId(aliasedProject))?.aliasedProject
       ?? group[0]!.aliasedProject;
     for (const { entry } of group) projectRemap.set(entry.project, canonical);
     const preferred = group.find(({ aliasedProject }) => aliasedProject === canonical)?.entry ?? group[0]!.entry;

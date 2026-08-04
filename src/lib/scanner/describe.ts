@@ -5,6 +5,8 @@ import { stateDir } from "@/lib/configDir";
 import { canonicalProject, projectAliasSnapshot } from "@/lib/projects/aliases";
 import {
   displayNameFromProjectIdentity,
+  isCanonicalProjectId,
+  projectIdentityFromDirectory,
   projectIdentityFromRepositoryRoot,
   repositoryRootForPath,
   UNRESOLVED_PROJECT,
@@ -326,7 +328,7 @@ function aliasedProjectInfo(
   repo?: string,
 ): ProjectInfo {
   const canonical = canonicalProject(project);
-  if (canonical === project && canonical !== UNRESOLVED_PROJECT && !/^repo-[0-9a-f]{32}$/.test(canonical)) {
+  if (canonical === project && canonical !== UNRESOLVED_PROJECT && !isCanonicalProjectId(canonical)) {
     return unresolvedProjectInfo(worktree);
   }
   const repositoryIdentity = repo ? projectIdentityFromRepositoryRoot(repo) : null;
@@ -549,19 +551,27 @@ export function projectInfoFromCwd(cwd: string): ProjectInfo | null {
       }
     }
   }
+  /* No repository claims the cwd: the directory itself is the project
+     (operator decision, 2026-08-04). "Unresolved project" remains only for
+     cwds that name nothing at all. */
+  const directoryProjectInfo = (): ProjectInfo => {
+    const identity = projectIdentityFromDirectory(cwd);
+    return identity
+      ? { project: identity.project, displayName: identity.displayName, ...(worktree?.worktree ? { worktree: worktree.worktree } : {}) }
+      : unresolvedProjectInfo(worktree?.worktree);
+  };
   const root = worktree?.repo || repositoryRootForPath(cwd);
   if (!root) {
-    const hinted = codexWorktree?.projectHint
+    const resolvedInfo = codexWorktree?.projectHint
       ? aliasedProjectInfo(codexWorktree.projectHint, worktree?.worktree)
-      : unresolvedProjectInfo(worktree?.worktree);
-    const unresolved = hinted;
-    projectInfoCwdCache.set(cwd, [Date.now() + PROJECT_INFO_CWD_TTL_MS, resolutionState, unresolved]);
-    return unresolved;
+      : directoryProjectInfo();
+    projectInfoCwdCache.set(cwd, [Date.now() + PROJECT_INFO_CWD_TTL_MS, resolutionState, resolvedInfo]);
+    return resolvedInfo;
   }
   const identity = projectIdentityFromRepositoryRoot(root);
   const resolved = identity
     ? { project: identity.project, displayName: identity.displayName, worktree: worktree?.worktree, repo: root }
-    : unresolvedProjectInfo(worktree?.worktree);
+    : directoryProjectInfo();
   projectInfoCwdCache.set(cwd, [Date.now() + PROJECT_INFO_CWD_TTL_MS, resolutionState, resolved]);
   return resolved;
 }

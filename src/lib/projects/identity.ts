@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 export interface RepositoryProjectIdentity {
@@ -10,6 +11,33 @@ export interface RepositoryProjectIdentity {
 
 export const UNRESOLVED_PROJECT = "project_unresolved";
 export const UNRESOLVED_PROJECT_NAME = "Unresolved project";
+
+export interface DirectoryProjectIdentity {
+  project: string;
+  displayName: string;
+}
+
+/** Both durable project id shapes the resolver mints: repository identities
+    and directory identities. Everything else is an operator alias slug. */
+export function isCanonicalProjectId(project: string): boolean {
+  return /^(?:repo|dir)-[0-9a-f]{32}$/.test(project);
+}
+
+/** Stable identity for a cwd with no repository (operator decision,
+    2026-08-04): the directory itself is the project, so sessions in plain
+    folders group by folder instead of pooling in "Unresolved project". The
+    home directory gets a `home-` prefixed name — bare "latand" would read
+    like a repository. */
+export function projectIdentityFromDirectory(cwd: string): DirectoryProjectIdentity | null {
+  const resolved = (() => {
+    try { return fs.realpathSync.native(cwd); } catch { return path.resolve(cwd); }
+  })();
+  const base = path.basename(resolved);
+  if (!base || resolved === path.sep) return null;
+  const displayName = resolved === os.homedir() ? `home-${base}` : base;
+  const digest = crypto.createHash("sha256").update(`dir:${resolved}`).digest("hex").slice(0, 32);
+  return { project: `dir-${digest}`, displayName };
+}
 
 export function displayNameFromProjectIdentity(project: string): string {
   if (project === UNRESOLVED_PROJECT) return UNRESOLVED_PROJECT_NAME;

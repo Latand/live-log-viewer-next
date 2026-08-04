@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { afterAll, expect, test } from "bun:test";
 
-import { projectIdentityFromRepositoryRoot, repositoryRootForPath } from "./identity";
+import { isCanonicalProjectId, projectIdentityFromDirectory, projectIdentityFromRepositoryRoot, repositoryRootForPath } from "./identity";
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-project-identity-"));
 
@@ -76,4 +76,18 @@ test("a vestigial .git directory without HEAD is not a repository", () => {
 
   expect(projectIdentityFromRepositoryRoot(root)).toBeNull();
   expect(repositoryRootForPath(path.join(root, "nested", "dir"))).toBeNull();
+});
+
+test("a cwd without a repository resolves to a directory-derived project", () => {
+  const plain = path.join(SANDBOX, "plain-folder");
+  fs.mkdirSync(plain, { recursive: true });
+  const identity = projectIdentityFromDirectory(plain)!;
+  expect(identity.displayName).toBe("plain-folder");
+  expect(identity.project).toMatch(/^dir-[0-9a-f]{32}$/);
+  expect(isCanonicalProjectId(identity.project)).toBeTrue();
+  // Stable across calls and path spellings.
+  expect(projectIdentityFromDirectory(path.join(plain, "."))).toEqual(identity);
+  // The home directory reads as home-<name>, never like a repository.
+  const home = projectIdentityFromDirectory(os.homedir())!;
+  expect(home.displayName).toBe(`home-${path.basename(os.homedir())}`);
 });
