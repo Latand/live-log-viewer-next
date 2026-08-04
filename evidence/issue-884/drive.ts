@@ -376,6 +376,10 @@ async function main(): Promise<void> {
            outside dir percent-ENCODED — scrub that spelling too. */
         .replaceAll(encodeURIComponent(outsideDir), encodeURIComponent("/outside"))
         .replaceAll(encodeURIComponent(repoRoot), encodeURIComponent("/repo"))
+        /* The synthetic session id is assembled at runtime so no UUID shape
+           lands in published sources; scrub it from the output too (a %2F
+           prefix defeats the \b in the generic pattern below). */
+        .replaceAll(S_ID, "s-x")
         .replace(/\b([0-9a-f]{8})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, "$1-x"),
     );
     console.log(`\n${output.verdict}: ${checks.length - failed.length}/${checks.length} checks`);

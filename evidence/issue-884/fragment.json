@@ -1,7 +1,7 @@
 {
   "issue": 884,
-  "capturedAt": "2026-08-04T06:40:15.722Z",
-  "buildHead": "3a1ccec9c3a4d30404203dd8f98f321c3d5f3114",
+  "capturedAt": "2026-08-04T06:41:34.750Z",
+  "buildHead": "597e8bf9c7fa3f6587d4ee3be61acb0b44998209",
   "runner": "exact-head production build served by `next start` over the isolated demo runtime (fixtures/demo-home); synthetic runtime-generated artifact fixtures; headless host Chrome over raw CDP",
   "screenshots": [
     "desktop-pasted-open.png",
@@ -62,7 +62,7 @@
       "name": "a pasted .jsonl transcript fragment lands on the explicit unsupported state with the URL held — no silent redirect",
       "pass": true,
       "detail": {
-        "hash": "#a=~%2F.claude%2Fprojects%2Fx%2Fd4d4d4d4-d4d4-4d4d-8d4d-d4d4d4d4d4d4.jsonl",
+        "hash": "#a=~%2F.claude%2Fprojects%2Fx%2Fs-x.jsonl",
         "marker": "alive"
       }
     },
