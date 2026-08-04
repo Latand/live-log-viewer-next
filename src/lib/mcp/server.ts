@@ -1779,6 +1779,7 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     cwd: z.string().optional(),
     engine: z.enum(["claude", "codex"]).optional(),
     model: z.string().optional(),
+    effort: z.string().optional().describe("Reasoning effort for the successor; round-trips into its spawn like create_orchestrator's."),
     accountId: z.string().optional(),
   }).passthrough(),
 };

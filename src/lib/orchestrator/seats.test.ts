@@ -6,6 +6,7 @@ import path from "node:path";
 import { persistProjectAliases } from "@/lib/projects/aliases";
 
 import {
+  ORCHESTRATOR_SEAT_HISTORY_CAP,
   activeOrchestratorSeats,
   beginOrchestratorSeatIntent,
   completeOrchestratorSeatIntent,
@@ -112,6 +113,135 @@ test("a concurrent key cannot displace a pending intent, and a stale completion 
   expect(competing.kind).toBe("in_progress");
   expect(completeOrchestratorSeatIntent({ project: "proj-a", clientRequestId: "req_0000001", conversationId: "conversation_x", path: null, now: AT }).kind).toBe("activated");
   expect(completeOrchestratorSeatIntent({ project: "proj-a", clientRequestId: "req_0000002", conversationId: "conversation_y", path: null, now: AT }).kind).toBe("missing");
+});
+
+const LATER = "2026-07-29T01:00:00.000Z";
+
+function seatRow(overrides: {
+  seatEpoch: number;
+  state: "pending" | "active";
+  conversationId: string | null;
+  clientRequestId: string;
+  error?: string | null;
+  launchId?: string | null;
+  activatedAt?: string | null;
+}): Record<string, unknown> {
+  return {
+    project: "proj-a",
+    seatEpoch: overrides.seatEpoch,
+    conversationId: overrides.conversationId,
+    path: null,
+    mandate: `mandate for ${overrides.clientRequestId}`,
+    promptVersion: null,
+    predecessorConversationId: null,
+    state: overrides.state,
+    intent: { clientRequestId: overrides.clientRequestId, mode: "spawn", launchId: overrides.launchId ?? null, error: overrides.error ?? null },
+    designatedAt: AT,
+    activatedAt: overrides.activatedAt ?? null,
+  };
+}
+
+test("a pending intent carrying a terminal error is terminalized into durable history and a NEW key proceeds", () => {
+  beginOrchestratorSeatIntent({ project: "proj-a", mandate: "first try", clientRequestId: "req_0000001", mode: "spawn", now: AT });
+  failOrchestratorSeatIntent("proj-a", "req_0000001", "spawn attempt conflicts with its original request");
+
+  const begun = beginOrchestratorSeatIntent({ project: "proj-a", mandate: "second try", clientRequestId: "req_0000002", mode: "spawn", now: LATER });
+  expect(begun.kind).toBe("begun");
+
+  const { pending, history } = orchestratorSeatFor("proj-a");
+  expect(pending?.intent.clientRequestId).toBe("req_0000002");
+  /* Evidence preserved, never deleted: key, mandate, epoch, mode, error and
+     timestamps all stay readable after terminalization. */
+  expect(history).toHaveLength(1);
+  expect(history[0]).toMatchObject({
+    reason: "terminal_error",
+    terminalizedAt: LATER,
+    seat: {
+      seatEpoch: 1,
+      mandate: "first try",
+      designatedAt: AT,
+      intent: { clientRequestId: "req_0000001", mode: "spawn", error: "spawn attempt conflicts with its original request" },
+    },
+  });
+  /* Durable, not in-memory: a fresh read of the file still carries it. */
+  expect(readOrchestratorSeatFile().history).toHaveLength(1);
+});
+
+test("a pending intent below the project's active seat epoch is abandoned: a NEW key proceeds and the intent moves to history", () => {
+  /* The observed stuck shape: an unrelated seat activated at a higher epoch
+     while an old pending intent (no terminal error) lingered below it. */
+  fs.writeFileSync(path.join(sandbox, "orchestrator-seats.json"), JSON.stringify({
+    schemaVersion: 1,
+    nextSeatEpoch: 38,
+    seats: { "proj-a": seatRow({ seatEpoch: 37, state: "active", conversationId: "conversation_b", clientRequestId: "req_0000037", activatedAt: AT }) },
+    pending: { "proj-a": seatRow({ seatEpoch: 31, state: "pending", conversationId: null, clientRequestId: "req_0000031" }) },
+    revocations: [],
+  }), "utf8");
+
+  const begun = beginOrchestratorSeatIntent({ project: "proj-a", mandate: "recover", clientRequestId: "req_0000040", mode: "spawn", now: LATER });
+  expect(begun.kind).toBe("begun");
+  expect(begun.seat.seatEpoch).toBe(38);
+
+  const { active, pending, history } = orchestratorSeatFor("proj-a");
+  expect(active?.seatEpoch).toBe(37);
+  expect(pending?.intent.clientRequestId).toBe("req_0000040");
+  expect(history).toHaveLength(1);
+  expect(history[0]).toMatchObject({
+    reason: "superseded_epoch",
+    seat: { seatEpoch: 31, intent: { clientRequestId: "req_0000031", error: null } },
+  });
+});
+
+test("a genuinely in-flight intent — no error, epoch at or above the active seat — still blocks a different key", () => {
+  beginOrchestratorSeatIntent({ project: "proj-a", mandate: "first", clientRequestId: "req_0000001", mode: "spawn", now: AT });
+  completeOrchestratorSeatIntent({ project: "proj-a", clientRequestId: "req_0000001", conversationId: "conversation_a", path: null, now: AT });
+  beginOrchestratorSeatIntent({ project: "proj-a", mandate: "second", clientRequestId: "req_0000002", mode: "spawn", now: AT });
+
+  const blocked = beginOrchestratorSeatIntent({ project: "proj-a", mandate: "third", clientRequestId: "req_0000003", mode: "spawn", now: AT });
+  expect(blocked.kind).toBe("in_progress");
+  if (blocked.kind === "in_progress") expect(blocked.seat.intent.clientRequestId).toBe("req_0000002");
+  expect(orchestratorSeatFor("proj-a").history).toEqual([]);
+});
+
+test("an errored pending intent replayed by its OWN key is still returned for the caller to finish", () => {
+  beginOrchestratorSeatIntent({ project: "proj-a", mandate: "m", clientRequestId: "req_0000001", mode: "spawn", now: AT });
+  failOrchestratorSeatIntent("proj-a", "req_0000001", "transient");
+  const replay = beginOrchestratorSeatIntent({ project: "proj-a", mandate: "m", clientRequestId: "req_0000001", mode: "spawn", now: AT });
+  expect(replay.kind).toBe("replay");
+  expect(orchestratorSeatFor("proj-a").history).toEqual([]);
+});
+
+test("terminalized history is bounded so the seat file cannot grow without limit", () => {
+  const key = (index: number) => `req_1${String(index).padStart(6, "0")}`;
+  const rounds = ORCHESTRATOR_SEAT_HISTORY_CAP + 10;
+  for (let index = 0; index < rounds; index += 1) {
+    beginOrchestratorSeatIntent({ project: "proj-a", mandate: `m${index}`, clientRequestId: key(index), mode: "spawn", now: AT });
+    failOrchestratorSeatIntent("proj-a", key(index), "boom");
+  }
+  beginOrchestratorSeatIntent({ project: "proj-a", mandate: "final", clientRequestId: "req_2000000", mode: "spawn", now: AT });
+
+  const history = orchestratorSeatFor("proj-a").history;
+  expect(history).toHaveLength(ORCHESTRATOR_SEAT_HISTORY_CAP);
+  /* Oldest entries are the ones trimmed. */
+  expect(history.at(-1)?.seat.mandate).toBe(`m${rounds - 1}`);
+});
+
+test("the epoch counter postdates history epochs so a recovered file never reissues a terminalized epoch", () => {
+  fs.writeFileSync(path.join(sandbox, "orchestrator-seats.json"), JSON.stringify({
+    schemaVersion: 1,
+    nextSeatEpoch: 1,
+    seats: {},
+    pending: {},
+    revocations: [],
+    history: [{
+      seat: seatRow({ seatEpoch: 5, state: "pending", conversationId: null, clientRequestId: "req_0000005", error: "boom" }),
+      reason: "terminal_error",
+      terminalizedAt: AT,
+    }],
+  }), "utf8");
+  const begun = beginOrchestratorSeatIntent({ project: "proj-a", mandate: "m", clientRequestId: "req_0000006", mode: "spawn", now: AT });
+  expect(begun.kind).toBe("begun");
+  expect(begun.seat.seatEpoch).toBe(6);
 });
 
 test("a malformed file reads as empty and the epoch counter postdates everything on file", () => {
