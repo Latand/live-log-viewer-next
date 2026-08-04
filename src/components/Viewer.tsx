@@ -23,6 +23,7 @@ import type { FileEntry } from "@/lib/types";
 import { attentionId, buildAttentionQueue, nextAttention, STALLED_ATTENTION_TTL, type AttentionItem } from "./attention";
 import { AttentionHost } from "./attention/AttentionHost";
 import { purgeLegacyOperatorCredential } from "./operatorCredential";
+import { ArtifactPreviewHost } from "./preview/ArtifactPreviewHost";
 import { VoiceBridgeRelayHost } from "./voice/VoiceBridgeRelayHost";
 import { VoiceComposerHost } from "./voice/VoiceComposerHost";
 import { VoicePipHost } from "./voice/VoicePipHost";
@@ -880,6 +881,11 @@ export function Viewer() {
           root agent's focus handoff when there is one to answer. Renders
           nothing at all the rest of the time. */}
       <AttentionHost mobile={isMobile} />
+      {/* #875: the ONE document preview surface. Transcript artifact links
+          publish to its bus from anywhere in the feed; it renders nothing until
+          one opens, and its state is pure same-document React state — no hash,
+          no history entry, no snapshot. */}
+      <ArtifactPreviewHost mobile={isMobile} />
       {/* #691: the ONE voice conversation panel, portalled into the card's dock
           slot or the floating PiP window. Mounted here rather than in the card
           because the card unmounts on board navigation while the call keeps
