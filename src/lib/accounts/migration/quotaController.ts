@@ -92,7 +92,7 @@ export class QuotaController {
   constructor(
     private readonly registry: AgentRegistry = agentRegistry(),
     private readonly probe: QuotaProbePort = productionProbe,
-    private readonly bootId = crypto.randomUUID(),
+    private readonly bootId: string = crypto.randomUUID(),
     private readonly now: () => number = () => Date.now(),
     private readonly probeTimeoutMs: number = PROBE_TIMEOUT_MS,
   ) {}
