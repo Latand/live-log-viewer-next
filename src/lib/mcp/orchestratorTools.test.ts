@@ -353,6 +353,17 @@ test("the adoption target reaches the authorized seat route while prompt provena
   expect(rotate!.body).not.toHaveProperty("promptVersion");
 });
 
+test("rotate_orchestrator forwards the requested effort to the rotation route so it reaches the successor spawn", async () => {
+  const { posts, control } = controlStub({ "/api/orchestrator/rotate": { ok: true } });
+  await bindingsWith(control).rotate_orchestrator({
+    clientRequestId: "rotate-effort",
+    project: "proj-a",
+    effort: "medium",
+  });
+  expect(posts).toHaveLength(1);
+  expect(posts[0]!.body.effort).toBe("medium");
+});
+
 test("rotate_orchestrator relays to the rotation route and reports the lineage it produced", async () => {
   const { posts, control } = controlStub({
     "/api/orchestrator/rotate": {
