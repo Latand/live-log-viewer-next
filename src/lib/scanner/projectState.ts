@@ -4,9 +4,10 @@ import path from "node:path";
 
 import { stateDir } from "@/lib/configDir";
 
-/* 6: a .git directory without HEAD no longer counts as a repository, so
-   unresolved identities minted from vestigial markers must re-derive. */
-export const PROJECT_RESOLUTION_VERSION = 6;
+/* 7: a cwd with no repository resolves to a directory-derived project
+   (dir-<hash>) instead of "Unresolved project", so pooled unresolved
+   identities must re-derive. */
+export const PROJECT_RESOLUTION_VERSION = 7;
 
 /* Project summaries depend on the attribution facts consumed by
    persistedProjects(). Hashing these stable projections keeps controller

@@ -121,14 +121,16 @@ test("repository identity is independent of the resolver HOME", () => {
   expect(new Set(projects)).toHaveLength(1);
 });
 
-test("an unidentifiable cwd is projected into one visible unresolved state", () => {
+test("a cwd with no repository projects into its directory-derived project", () => {
+  // Even a deleted cwd keeps a stable directory identity — sessions survive
+  // their folder being removed, mirroring the worktree-grouping invariant.
   const missing = path.join(SANDBOX, "missing-repository");
   expect(fs.existsSync(missing)).toBe(false);
-  expect(projectInfoFromCwd(missing)).toEqual({
-    project: "project_unresolved",
-    displayName: "Unresolved project",
-    unresolved: true,
-  });
+  const info = projectInfoFromCwd(missing)!;
+  expect(info.displayName).toBe("missing-repository");
+  expect(info.project).toMatch(/^dir-[0-9a-f]{32}$/);
+  expect(info.unresolved).toBeUndefined();
+  expect(projectInfoFromCwd(missing)).toEqual(info);
 });
 
 test("search text hydration retries after a transient filesystem failure", () => {
