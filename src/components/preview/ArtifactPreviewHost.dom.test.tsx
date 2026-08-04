@@ -220,6 +220,122 @@ test("switching artifacts reuses the same sheet element", async () => {
   expect(surface()!.textContent).toContain("other.md");
 });
 
+test("search walks every occurrence: a multi-hit line counts per occurrence and wrap reaches all", async () => {
+  const OCC_PATH = "~/fixtures/occurrences.log";
+  const OCC_BODY = "alpha needle beta needle\nplain line\nneedle end\n";
+  routes = [
+    (url) => {
+      if (url.searchParams.get("path") !== OCC_PATH) return null;
+      if (url.searchParams.get("mode") === "meta") {
+        return {
+          status: 200,
+          body: { name: "occurrences.log", kind: "text", mime: "text/plain; charset=utf-8", size: OCC_BODY.length, etag: '"o1"' },
+        };
+      }
+      return {
+        status: 206,
+        body: OCC_BODY,
+        headers: { "content-range": `bytes 0-${OCC_BODY.length - 1}/${OCC_BODY.length}`, etag: '"o1"' },
+      };
+    },
+  ];
+  await render();
+  await act(async () => openArtifactPreview(OCC_PATH));
+  await flush();
+  await flush();
+
+  const input = surface()!.querySelector("input[type='search']") as unknown as HTMLInputElement;
+  await act(async () => {
+    input.value = "needle";
+    input.dispatchEvent(new dom.Event("input", { bubbles: true }) as unknown as Event);
+  });
+  const counter = () => surface()!.querySelector("[data-preview-matches]")!.textContent;
+  /* three occurrences across two lines: two on line 0, one on line 2 */
+  expect(counter()).toBe("1/3");
+
+  const next = surface()!.querySelector('[aria-label="Next match"]') as unknown as HTMLElement;
+  const prev = surface()!.querySelector('[aria-label="Previous match"]') as unknown as HTMLElement;
+  await act(async () => next.click());
+  expect(counter()).toBe("2/3");
+  await act(async () => next.click());
+  expect(counter()).toBe("3/3");
+  await act(async () => next.click());
+  expect(counter()).toBe("1/3");
+  await act(async () => prev.click());
+  expect(counter()).toBe("3/3");
+});
+
+const IMG_PATH = "~/fixtures/shot.png";
+
+function imageRoute(contentStatus: number) {
+  return (url: URL): Route | null => {
+    if (url.searchParams.get("path") !== IMG_PATH) return null;
+    if (url.searchParams.get("mode") === "meta") {
+      return {
+        status: 200,
+        body: { name: "shot.png", kind: "image", mime: "image/png", size: 4, etag: '"i1"' },
+      };
+    }
+    if (contentStatus === 413) return { status: 413, body: { error: "artifact exceeds the configured byte bound", code: "too-large" } };
+    return { status: 200, body: "PNG!", headers: { etag: '"i1"' } };
+  };
+}
+
+test("image bytes load through a validator-bound fetch into an object url", async () => {
+  routes = [imageRoute(200)];
+  await render();
+  await act(async () => openArtifactPreview(IMG_PATH));
+  await flush();
+  await flush();
+  await flush();
+
+  expect(surface()!.getAttribute("data-artifact-state")).toBe("ready");
+  const img = surface()!.querySelector("img");
+  expect(img).not.toBeNull();
+  expect((img!.getAttribute("src") ?? "").startsWith("blob:")).toBe(true);
+  const content = fetchLog.filter((call) => !call.url.includes("mode=meta"));
+  expect(content.length).toBe(1);
+  expect(content[0].headers["if-match"]).toBe('"i1"');
+});
+
+test("an image over the byte bound shows the explicit oversized state", async () => {
+  routes = [imageRoute(413)];
+  await render();
+  await act(async () => openArtifactPreview(IMG_PATH));
+  await flush();
+  await flush();
+  await flush();
+  expect(surface()!.getAttribute("data-artifact-state")).toBe("oversized");
+});
+
+test("mobile pane controls carry the 44px touch-target sizing", async () => {
+  textRoutes();
+  routes.push(imageRoute(200));
+  await render(true);
+  await act(async () => openArtifactPreview(TEXT_PATH));
+  await flush();
+  await flush();
+
+  const sheet = surface()!;
+  const input = sheet.querySelector("input[type='search']")!;
+  expect(input.className).toContain("h-11");
+  await act(async () => {
+    (input as unknown as HTMLInputElement).value = "needle";
+    input.dispatchEvent(new dom.Event("input", { bubbles: true }) as unknown as Event);
+  });
+  for (const label of ["Previous match", "Next match", "Wrap lines"]) {
+    expect(sheet.querySelector(`[aria-label="${label}"]`)!.className).toContain("h-11 w-11");
+  }
+
+  await act(async () => openArtifactPreview(IMG_PATH));
+  await flush();
+  await flush();
+  await flush();
+  for (const label of ["Zoom out", "Zoom in", "Fit to pane"]) {
+    expect(surface()!.querySelector(`[aria-label="${label}"]`)!.className).toContain("h-11 w-11");
+  }
+});
+
 test("the mobile sheet is a labelled full-height dialog", async () => {
   textRoutes();
   await render(true);

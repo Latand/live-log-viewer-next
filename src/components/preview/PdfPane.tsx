@@ -35,9 +35,16 @@ function loadPdfjs(): Promise<Pdfjs> {
  */
 export default function PdfPane({
   path,
+  etag,
+  mobile,
   onFailure,
 }: {
   path: string;
+  /** Meta validator: every pdf.js range request carries it as If-Match, so a
+      file replaced mid-load answers 412 → the explicit "changed" state instead
+      of splicing bytes from two inodes into a corrupted parse. */
+  etag: string;
+  mobile: boolean;
   onFailure: (failure: ArtifactFailure) => void;
 }) {
   const { t } = useLocale();
@@ -56,6 +63,7 @@ export default function PdfPane({
       .then((pdfjs) => {
         task = pdfjs.getDocument({
           url: artifactContentUrl(path),
+          httpHeaders: { "if-match": etag },
           rangeChunkSize: RANGE_CHUNK,
           disableAutoFetch: true,
         });
@@ -73,7 +81,7 @@ export default function PdfPane({
       cancelled = true;
       void task?.destroy().catch(() => {});
     };
-  }, [path, onFailure]);
+  }, [path, etag, onFailure]);
 
   const paint = useCallback(async () => {
     const canvas = canvasRef.current;
@@ -117,6 +125,10 @@ export default function PdfPane({
     return () => observer.disconnect();
   }, [fitWidth, paint]);
 
+  /* Same touch-target contract as the host header: 44 px controls on mobile. */
+  const control = mobile ? "h-11 w-11" : "h-7 w-7";
+  const icon = mobile ? "h-5 w-5" : "h-3.5 w-3.5";
+
   const pages = doc?.numPages ?? 0;
   const go = useCallback(
     (delta: number) => setPage((previous) => Math.min(Math.max(previous + delta, 1), Math.max(pages, 1))),
@@ -132,9 +144,9 @@ export default function PdfPane({
           title={t("preview.prevPage")}
           disabled={page <= 1}
           onClick={() => go(-1)}
-          className="flex h-7 w-7 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+          className={`flex ${control} items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40`}
         >
-          <ChevronLeft className="h-3.5 w-3.5" aria-hidden />
+          <ChevronLeft className={icon} aria-hidden />
         </button>
         <span data-pdf-page-label className="tabular-nums">
           {pages ? t("preview.pageOf", { page: String(page), pages: String(pages) }) : t("preview.loading")}
@@ -145,9 +157,9 @@ export default function PdfPane({
           title={t("preview.nextPage")}
           disabled={pages === 0 || page >= pages}
           onClick={() => go(1)}
-          className="flex h-7 w-7 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+          className={`flex ${control} items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40`}
         >
-          <ChevronRight className="h-3.5 w-3.5" aria-hidden />
+          <ChevronRight className={icon} aria-hidden />
         </button>
         <span className="ml-auto flex items-center gap-1.5">
           <button
@@ -155,9 +167,9 @@ export default function PdfPane({
             aria-label={t("lightbox.zoomOut")}
             title={t("lightbox.zoomOut")}
             onClick={() => setZoom((value) => Math.max(value / 1.25, MIN_ZOOM))}
-            className="flex h-7 w-7 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className={`flex ${control} items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40`}
           >
-            <Minus className="h-3.5 w-3.5" aria-hidden />
+            <Minus className={icon} aria-hidden />
           </button>
           <span className="w-10 text-center tabular-nums">{Math.round(zoom * 100)}%</span>
           <button
@@ -165,9 +177,9 @@ export default function PdfPane({
             aria-label={t("lightbox.zoomIn")}
             title={t("lightbox.zoomIn")}
             onClick={() => setZoom((value) => Math.min(value * 1.25, MAX_ZOOM))}
-            className="flex h-7 w-7 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className={`flex ${control} items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40`}
           >
-            <Plus className="h-3.5 w-3.5" aria-hidden />
+            <Plus className={icon} aria-hidden />
           </button>
           <button
             type="button"
@@ -175,11 +187,11 @@ export default function PdfPane({
             aria-label={t("preview.fitWidth")}
             title={t("preview.fitWidth")}
             onClick={() => setFitWidth((value) => !value)}
-            className={`flex h-7 w-7 items-center justify-center rounded-[8px] border border-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+            className={`flex ${control} items-center justify-center rounded-[8px] border border-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
               fitWidth ? "bg-accent/15 text-accent" : "bg-canvas text-muted hover:text-primary"
             }`}
           >
-            <MoveHorizontal className="h-3.5 w-3.5" aria-hidden />
+            <MoveHorizontal className={icon} aria-hidden />
           </button>
         </span>
       </div>

@@ -183,9 +183,9 @@ function PreviewSheet({
       {t("preview.loading")}
     </div>
   ) : meta.kind === "text" ? (
-    <TextPane key={`${open.nonce}`} path={open.path} meta={meta} onFailure={onPaneFailure} />
+    <TextPane key={`${open.nonce}`} path={open.path} meta={meta} mobile={mobile} onFailure={onPaneFailure} />
   ) : meta.kind === "image" ? (
-    <ImagePane key={`${open.nonce}`} path={open.path} meta={meta} onFailure={onPaneFailure} />
+    <ImagePane key={`${open.nonce}`} path={open.path} meta={meta} mobile={mobile} onFailure={onPaneFailure} />
   ) : (
     <Suspense
       fallback={
@@ -194,7 +194,7 @@ function PreviewSheet({
         </div>
       }
     >
-      <PdfPane key={`${open.nonce}`} path={open.path} onFailure={onPaneFailure} />
+      <PdfPane key={`${open.nonce}`} path={open.path} etag={meta.etag} mobile={mobile} onFailure={onPaneFailure} />
     </Suspense>
   );
 

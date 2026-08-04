@@ -57,10 +57,12 @@ function MarkedLine({ line, query }: { line: string; query: string }) {
 export function TextPane({
   path,
   meta,
+  mobile,
   onFailure,
 }: {
   path: string;
   meta: ArtifactMeta;
+  mobile: boolean;
   onFailure: (failure: ArtifactFailure) => void;
 }) {
   const { t } = useLocale();
@@ -130,36 +132,38 @@ export function TextPane({
     [highlighted],
   );
 
-  const matchLines = useMemo(() => {
+  /* Every occurrence, flat: the counter counts and prev/next walk this one
+     list, so a line holding the query twice contributes two stops. */
+  const matches = useMemo(() => {
     if (!query) return [];
-    const hits: number[] = [];
+    const hits: { line: number; offset: number }[] = [];
     lines.forEach((line, index) => {
-      if (matchesIn(line, query).length) hits.push(index);
+      for (const offset of matchesIn(line, query)) hits.push({ line: index, offset });
     });
     return hits;
   }, [lines, query]);
-  const totalMatches = useMemo(
-    () => (query ? lines.reduce((total, line) => total + matchesIn(line, query).length, 0) : 0),
-    [lines, query],
-  );
 
   const jump = useCallback(
     (direction: 1 | -1) => {
-      if (!matchLines.length) return;
-      setCursor((previous) => (previous + direction + matchLines.length) % matchLines.length);
+      if (!matches.length) return;
+      setCursor((previous) => (previous + direction + matches.length) % matches.length);
     },
-    [matchLines.length],
+    [matches.length],
   );
 
   useEffect(() => {
-    if (!query || !matchLines.length) return;
-    const line = matchLines[Math.min(cursor, matchLines.length - 1)];
+    if (!query || !matches.length) return;
+    const line = matches[Math.min(cursor, matches.length - 1)].line;
     scrollRef.current
       ?.querySelector(`[data-preview-line="${line}"]`)
       ?.scrollIntoView({ block: "center" });
-  }, [query, cursor, matchLines]);
+  }, [query, cursor, matches]);
 
   const gutterWidth = `${Math.max(String(lines.length).length, 3)}ch`;
+
+  /* Same touch-target contract as the host header: 44 px controls on mobile. */
+  const control = mobile ? "h-11 w-11" : "h-7 w-7";
+  const icon = mobile ? "h-5 w-5" : "h-3.5 w-3.5";
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -173,11 +177,11 @@ export function TextPane({
           }}
           placeholder={t("preview.searchPlaceholder")}
           aria-label={t("preview.searchPlaceholder")}
-          className="h-7 min-w-0 flex-1 rounded-[8px] border border-border bg-canvas px-2 text-[12px] text-primary placeholder:text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className={`${mobile ? "h-11" : "h-7"} min-w-0 flex-1 rounded-[8px] border border-border bg-canvas px-2 text-[12px] text-primary placeholder:text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40`}
         />
         {query ? (
           <span className="text-[11.5px] tabular-nums text-muted" data-preview-matches>
-            {totalMatches ? `${Math.min(cursor + 1, matchLines.length)}/${totalMatches}` : t("preview.noMatches")}
+            {matches.length ? `${Math.min(cursor + 1, matches.length)}/${matches.length}` : t("preview.noMatches")}
           </span>
         ) : null}
         {query ? (
@@ -187,18 +191,18 @@ export function TextPane({
               aria-label={t("preview.prevMatch")}
               title={t("preview.prevMatch")}
               onClick={() => jump(-1)}
-              className="flex h-7 w-7 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className={`flex ${control} items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40`}
             >
-              <ChevronUp className="h-3.5 w-3.5" aria-hidden />
+              <ChevronUp className={icon} aria-hidden />
             </button>
             <button
               type="button"
               aria-label={t("preview.nextMatch")}
               title={t("preview.nextMatch")}
               onClick={() => jump(1)}
-              className="flex h-7 w-7 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className={`flex ${control} items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40`}
             >
-              <ChevronDown className="h-3.5 w-3.5" aria-hidden />
+              <ChevronDown className={icon} aria-hidden />
             </button>
           </>
         ) : null}
@@ -208,11 +212,11 @@ export function TextPane({
           aria-label={t("preview.wrapLines")}
           title={t("preview.wrapLines")}
           onClick={() => setWrap((value) => !value)}
-          className={`flex h-7 w-7 items-center justify-center rounded-[8px] border border-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+          className={`flex ${control} items-center justify-center rounded-[8px] border border-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
             wrap ? "bg-accent/15 text-accent" : "bg-canvas text-muted hover:text-primary"
           }`}
         >
-          <WrapText className="h-3.5 w-3.5" aria-hidden />
+          <WrapText className={icon} aria-hidden />
         </button>
       </div>
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto bg-canvas font-mono text-[11.5px] leading-[1.5]">
@@ -250,7 +254,7 @@ export function TextPane({
             type="button"
             disabled={loading}
             onClick={() => void loadMore()}
-            className="ml-auto rounded-[8px] border border-border bg-card px-2.5 py-1 font-semibold text-primary hover:bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50"
+            className={`ml-auto rounded-[8px] border border-border bg-card font-semibold text-primary hover:bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 ${mobile ? "h-11 px-3" : "px-2.5 py-1"}`}
           >
             {loading ? t("preview.loading") : t("preview.loadMore")}
           </button>

@@ -425,6 +425,12 @@ async function main(): Promise<void> {
       wrapPressed: ${SHEET}.querySelector('[aria-label="Wrap lines"]').getAttribute("aria-pressed"),
     }))()`);
     await tab.screenshot("desktop-text.png");
+    /* Occurrence navigation: prev/next walk the same list the counter counts. */
+    await click(tab, `${SHEET}.querySelector('[aria-label="Next match"]')`, "next match");
+    await poll(tab, `/^2\\//.test(${SHEET}.querySelector("[data-preview-matches]").textContent)`, "match cursor advanced to 2/N");
+    await click(tab, `${SHEET}.querySelector('[aria-label="Previous match"]')`, "previous match");
+    await poll(tab, `/^1\\//.test(${SHEET}.querySelector("[data-preview-matches]").textContent)`, "match cursor returned to 1/N");
+    expect("search prev/next walk the occurrence list the counter reports", true);
     await click(tab, `${SHEET}.querySelector('[aria-label="Wrap lines"]')`, "wrap toggle");
     const linesBefore = await tab.eval<number>(`${SHEET}.querySelectorAll("[data-line-number]").length`);
     /* Clear the search first: load-more grows the numbered content. */
@@ -546,9 +552,41 @@ async function main(): Promise<void> {
         && mobile.closeBox.w >= 44 && mobile.closeBox.h >= 44 && mobile.marker === "alive" && mobile.nav === 1,
       mobile);
     await mob.screenshot("mobile-text.png");
+
+    /* Every interactive control in the 396px sheet must measure at least
+       44px; this covers the pane toolbars as well as the host header. */
+    const measureControls = () => mob.eval<{ label: string; w: number; h: number }[]>(`(() => {
+      const s = ${SHEET};
+      return [...s.querySelectorAll("button, a, input")].map((el) => {
+        const r = el.getBoundingClientRect();
+        return { label: el.getAttribute("aria-label") || (el.textContent || "").trim().slice(0, 24) || el.tagName, w: Math.round(r.width), h: Math.round(r.height) };
+      });
+    })()`);
+    const allAtLeast44 = (controls: { w: number; h: number }[]) => controls.every((c) => c.w >= 44 && c.h >= 44);
+    await mob.eval(`(() => {
+      const input = ${SHEET}.querySelector('input[type="search"]');
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+      setter.call(input, "needle");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      return true;
+    })()`);
+    await poll(mob, `!!${SHEET}.querySelector("[data-preview-matches]")`, "mobile match controls rendered");
+    const mobileTextControls = await measureControls();
+    expect("every interactive control in the mobile text preview is at least 44px",
+      mobileTextControls.length >= 8 && allAtLeast44(mobileTextControls), mobileTextControls);
+
     await openArtifact(mob, "report.pdf", "ready", "mobile report.pdf");
     await poll(mob, `(() => { const c = ${SHEET}.querySelector("canvas"); return !!c && c.width > 50; })()`, "mobile pdf painted", 30_000);
+    const mobilePdfControls = await measureControls();
+    expect("every interactive control in the mobile pdf preview is at least 44px",
+      mobilePdfControls.length >= 8 && allAtLeast44(mobilePdfControls), mobilePdfControls);
     await mob.screenshot("mobile-pdf.png");
+
+    await openArtifact(mob, "board.png", "ready", "mobile board.png");
+    await poll(mob, `!!${SHEET}.querySelector("[data-image-dimensions]")`, "mobile image dimensions", 30_000);
+    const mobileImageControls = await measureControls();
+    expect("every interactive control in the mobile image preview is at least 44px",
+      mobileImageControls.length >= 6 && allAtLeast44(mobileImageControls), mobileImageControls);
     mob.close();
 
     const failed = checks.filter((check) => !check.pass);
