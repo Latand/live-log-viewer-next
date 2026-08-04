@@ -167,10 +167,19 @@ export function consolidateProjectCatalogByRepository(
   const projectRemap = new Map<string, string>();
   const projectCatalog: ProjectCatalogEntry[] = [];
   for (const group of groups.values()) {
-    const repositoryIdentity = group
+    /* A directory group keeps its directory identity even when a member's
+       registry metadata carries a repository checkout as projectRoot (a
+       session in a plain folder administering a repo records that root) —
+       letting that root's identity name the group re-absorbs the folder
+       into the repository project past the grouping-key guard above. */
+    const directoryProject = group
+      .find(({ aliasedProject }) => aliasedProject.startsWith("dir-") && isCanonicalProjectId(aliasedProject))
+      ?.aliasedProject;
+    const repositoryIdentity = directoryProject ? null : group
       .map(({ entry }) => entry.projectRoot ? projectIdentityFromRepositoryRoot(entry.projectRoot) : null)
       .find((identity) => identity !== null);
-    const canonical = repositoryIdentity?.project
+    const canonical = directoryProject
+      ?? repositoryIdentity?.project
       ?? group.find(({ aliasedProject }) => isCanonicalProjectId(aliasedProject))?.aliasedProject
       ?? group[0]!.aliasedProject;
     for (const { entry } of group) projectRemap.set(entry.project, canonical);
