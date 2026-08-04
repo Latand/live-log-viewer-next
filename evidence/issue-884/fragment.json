@@ -1,0 +1,123 @@
+{
+  "issue": 884,
+  "capturedAt": "2026-08-04T06:41:34.750Z",
+  "buildHead": "597e8bf9c7fa3f6587d4ee3be61acb0b44998209",
+  "runner": "exact-head production build served by `next start` over the isolated demo runtime (fixtures/demo-home); synthetic runtime-generated artifact fixtures; headless host Chrome over raw CDP",
+  "screenshots": [
+    "desktop-pasted-open.png",
+    "desktop-after-close.png",
+    "desktop-unsupported-jsonl.png",
+    "desktop-denied.png",
+    "desktop-missing.png",
+    "desktop-forward-reopened.png",
+    "desktop-transcript-deeplink.png",
+    "desktop-unknown-fragment.png",
+    "mobile-pasted-open.png",
+    "mobile-missing.png"
+  ],
+  "checks": [
+    {
+      "name": "a pasted URL opens the text preview directly on load, no conversation context",
+      "pass": true,
+      "detail": {
+        "kind": "text",
+        "name": true,
+        "hash": "#a=~%2Fartifacts%2Frun.log",
+        "artifactFetches": [
+          "/api/artifact?path=%7E%2Fartifacts%2Frun.log&mode=meta",
+          "/api/artifact?path=%7E%2Fartifacts%2Frun.log"
+        ],
+        "nav": 1
+      }
+    },
+    {
+      "name": "the fragment read its bytes ONLY through /api/artifact — the clicked-link authorization",
+      "pass": true,
+      "detail": [
+        "/api/artifact?path=%7E%2Fartifacts%2Frun.log&mode=meta",
+        "/api/artifact?path=%7E%2Fartifacts%2Frun.log"
+      ]
+    },
+    {
+      "name": "closing the fragment-opened preview strips the fragment in place: one replaceState, zero pushes, no reload, app coherent",
+      "pass": true,
+      "detail": {
+        "beforeClose": {
+          "pushes": 0,
+          "replaces": 1,
+          "len": 2
+        },
+        "afterClose": {
+          "pushes": 0,
+          "replaces": 2,
+          "len": 2,
+          "hash": "",
+          "marker": "alive",
+          "nav": 1,
+          "alive": true
+        }
+      }
+    },
+    {
+      "name": "a pasted .jsonl transcript fragment lands on the explicit unsupported state with the URL held — no silent redirect",
+      "pass": true,
+      "detail": {
+        "hash": "#a=~%2F.claude%2Fprojects%2Fx%2Fs-x.jsonl",
+        "marker": "alive"
+      }
+    },
+    {
+      "name": "a pasted out-of-root fragment lands on the explicit denied state with the URL held — no silent redirect",
+      "pass": true,
+      "detail": {
+        "hash": "#a=%2Foutside%2Fdenied.md",
+        "marker": "alive"
+      }
+    },
+    {
+      "name": "a pasted missing-file fragment lands on the explicit missing state with the URL held — no silent redirect",
+      "pass": true,
+      "detail": {
+        "hash": "#a=~%2Fartifacts%2Fmissing.md",
+        "marker": "alive"
+      }
+    },
+    {
+      "name": "Back closes and Forward reopens the hash-opened preview with the same document alive",
+      "pass": true,
+      "detail": {
+        "marker": "alive",
+        "nav": 1,
+        "hash": "#a=~%2Fartifacts%2Fboard.png"
+      }
+    },
+    {
+      "name": "#f= keeps deep-linking the .jsonl transcript to its conversation card — no preview, no notice",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "a fragment the app cannot interpret shows the explicit notice instead of quietly navigating away",
+      "pass": true,
+      "detail": {
+        "text": "This link names nothing the viewer recognizes",
+        "preview": false
+      }
+    },
+    {
+      "name": "396px: the pasted URL opens a full-height labelled dialog with 44px close target",
+      "pass": true,
+      "detail": {
+        "role": "dialog",
+        "label": true,
+        "fullHeight": true,
+        "fullWidth": true,
+        "closeBox": {
+          "w": 44,
+          "h": 44
+        }
+      }
+    }
+  ],
+  "verdict": "PASS"
+}

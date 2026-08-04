@@ -4,14 +4,18 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 import { installActEnv } from "@/test-helpers/actEnv";
+import { formatArtifactFragment } from "@/lib/artifact/fragment";
 import { setLocale } from "@/lib/i18n";
 
 import { ArtifactPreviewHost } from "./ArtifactPreviewHost";
+import { artifactMetaUrl } from "./artifactResource";
 import { openArtifactPreview } from "./previewBus";
 
 installActEnv();
 
-const dom = new Window();
+/* A real http URL so the fragment-routing tests can read and write
+   location.hash and history entries like a served page. */
+const dom = new Window({ url: "http://localhost:3000/" });
 Object.assign(globalThis, {
   window: dom,
   document: dom.document,
@@ -86,6 +90,13 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root?.unmount());
   dom.document.body.replaceChildren();
+  /* The shared window carries its URL across tests: strip any fragment a
+     fragment-routing test left behind so later tests start hash-free, and
+     drain the async hashchange happy-dom schedules for every fragment
+     mutation (the strip here, a close's replaceState inside a test) so no
+     stray event fires into the next test outside act. */
+  dom.history.replaceState(null, "", dom.location.pathname);
+  await new Promise((resolve) => setTimeout(resolve, 0));
 });
 
 const flush = async () => {
@@ -334,6 +345,112 @@ test("mobile pane controls carry the 44px touch-target sizing", async () => {
   for (const label of ["Zoom out", "Zoom in", "Fit to pane"]) {
     expect(surface()!.querySelector(`[aria-label="${label}"]`)!.className).toContain("h-11 w-11");
   }
+});
+
+/* ── #884: the #a= fragment is the preview's own URL entry point ──────── */
+
+/** Set the fragment and drain the hashchange happy-dom schedules on a later
+    task, all inside act — no event may leak across act boundaries or into
+    the next test. */
+async function setHash(hash: string): Promise<void> {
+  await act(async () => {
+    dom.history.replaceState(null, "", hash || dom.location.pathname);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
+const navigateHash = setHash;
+
+test("a pasted #a= URL opens the preview on load through the same /api/artifact authorization a click uses", async () => {
+  textRoutes();
+  await setHash(formatArtifactFragment(TEXT_PATH));
+  await render();
+  await flush();
+  await flush();
+
+  const sheet = surface();
+  expect(sheet).not.toBeNull();
+  expect(sheet!.getAttribute("data-artifact-state")).toBe("ready");
+  expect(sheet!.textContent).toContain("build.log");
+  /* The security invariant: the fragment funnels into the exact request a
+     clicked link issues — no other read path exists. */
+  expect(fetchLog[0].url).toBe(artifactMetaUrl(TEXT_PATH));
+  for (const call of fetchLog) expect(call.url.startsWith("/api/artifact")).toBe(true);
+});
+
+test("fragment-named unsupported, out-of-root and missing paths land on the explicit states — never a silent redirect", async () => {
+  routes = [() => ({ status: 415, body: { error: "not a previewable artifact type", code: "unsupported" } })];
+  await setHash(formatArtifactFragment("~/checkouts/session.jsonl"));
+  await render();
+  await flush();
+  expect(surface()!.getAttribute("data-artifact-state")).toBe("unsupported");
+
+  routes = [() => ({ status: 403, body: { error: "path is outside the allowed roots", code: "access-denied" } })];
+  await navigateHash(formatArtifactFragment("/outside/secret.md"));
+  await flush();
+  expect(surface()!.getAttribute("data-artifact-state")).toBe("denied");
+
+  routes = [];
+  await navigateHash(formatArtifactFragment("~/checkouts/gone.png"));
+  await flush();
+  expect(surface()!.getAttribute("data-artifact-state")).toBe("missing");
+});
+
+test("navigating the hash off the artifact fragment closes a fragment-opened preview; a click-opened one stays", async () => {
+  textRoutes();
+  await setHash(formatArtifactFragment(TEXT_PATH));
+  await render();
+  await flush();
+  await flush();
+  expect(surface()).not.toBeNull();
+
+  await navigateHash("#p=board");
+  expect(surface()).toBeNull();
+
+  /* A click-opened preview is pure same-document state (#875): hash
+     navigation elsewhere in the app must not tear it down. */
+  await act(async () => openArtifactPreview(TEXT_PATH));
+  await flush();
+  await flush();
+  expect(surface()).not.toBeNull();
+  await navigateHash("#p=elsewhere");
+  expect(surface()).not.toBeNull();
+});
+
+test("closing a fragment-opened preview strips the fragment in place: no new history entry, no resurrect on reload", async () => {
+  textRoutes();
+  await setHash(formatArtifactFragment(TEXT_PATH));
+  await render();
+  await flush();
+  await flush();
+  expect(surface()).not.toBeNull();
+
+  const length = dom.history.length;
+  await act(async () => {
+    dom.window.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never);
+    /* Drain the async hashchange the strip's replaceState schedules, inside
+       this act: the closed host must shrug it off (no reopen, no throw). */
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(surface()).toBeNull();
+  expect(dom.location.hash).toBe("");
+  expect(dom.history.length).toBe(length);
+});
+
+test("closing a click-opened preview leaves a foreign hash untouched", async () => {
+  textRoutes();
+  await setHash("#p=board");
+  await render();
+  await act(async () => openArtifactPreview(TEXT_PATH));
+  await flush();
+  await flush();
+  expect(surface()).not.toBeNull();
+
+  await act(async () => {
+    dom.window.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never);
+  });
+  expect(surface()).toBeNull();
+  expect(dom.location.hash).toBe("#p=board");
 });
 
 test("the mobile sheet is a labelled full-height dialog", async () => {

@@ -1694,6 +1694,7 @@ export const en = {
   "viewer.closeProjects": "Close the project list",
   "viewer.agentWaiting": "Agent is waiting for a reply",
   "viewer.staleFocusEntry": "That conversation is no longer available",
+  "viewer.unknownFragment": "This link names nothing the viewer recognizes",
   "viewer.closeNotification": "Close the notification",
 
   // Viewer attention queue

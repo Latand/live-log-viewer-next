@@ -42,6 +42,9 @@ describe("parseConversationHash", () => {
     expect(parseConversationHash("#p=My%20Project")).toEqual({ conversationId: null, filePath: null, project: "My Project" });
     expect(parseConversationHash("")).toEqual({ conversationId: null, filePath: null, project: null });
   });
+  test("an #a= artifact fragment (issue #884) is never a conversation intent", () => {
+    expect(parseConversationHash("#a=%2Fcheckouts%2Ffigures%2Fdiagram.png")).toEqual({ conversationId: null, filePath: null, project: null });
+  });
 });
 
 describe("formatConversationHash", () => {
