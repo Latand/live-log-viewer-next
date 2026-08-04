@@ -40,11 +40,14 @@ interface Moves {
   /** COMBINED cross-project conversation opens: quiet project half + at most
       one recorded focus. `[project, path]` per call. */
   combined: Array<[string | null, string | null]>;
+  /** ARRIVAL RECORDS: the typed focus-history entry a verified conversation
+      arrival owes (#866 production regression). `[path, project]` per call. */
+  recorded: Array<[string, string]>;
 }
 
 function harness(project: string, rects: Record<string, FocusRect>, shellProject: string | null = project) {
   const bus = createFocusHandoffBus();
-  const log: Moves = { moved: [], restored: [], opened: [], openedQuiet: [], placed: [], projects: [], overview: 0, combined: [] };
+  const log: Moves = { moved: [], restored: [], opened: [], openedQuiet: [], placed: [], projects: [], overview: 0, combined: [], recorded: [] };
   const board: BoardFocusController = {
     project,
     index: index(project, rects),
@@ -59,6 +62,7 @@ function harness(project: string, rects: Record<string, FocusRect>, shellProject
     placePath: (path) => { log.placed.push(path); },
     openOverview: () => { log.overview += 1; },
     openConversation: (proj, path) => { log.combined.push([proj, path]); },
+    recordFocusArrival: (path, proj) => { log.recorded.push([path, proj]); },
   };
   bus.setBoard(board);
   bus.setShell(shell);
@@ -138,7 +142,7 @@ test("a vanished anchor whose request never read a board reports lost rather tha
 
 test("a target in another project opens that project first and waits for its board", async () => {
   const bus = createFocusHandoffBus();
-  const log: Moves = { moved: [], restored: [], opened: [], openedQuiet: [], placed: [], projects: [], overview: 0, combined: [] };
+  const log: Moves = { moved: [], restored: [], opened: [], openedQuiet: [], placed: [], projects: [], overview: 0, combined: [], recorded: [] };
   bus.setShell({
     placePath: () => {},
     openOverview: () => {},
@@ -171,7 +175,7 @@ test("a target in another project opens that project first and waits for its boa
 
 test("nothing moves when no board ever answers for the target's project", async () => {
   const bus = createFocusHandoffBus();
-  const log: Moves = { moved: [], restored: [], opened: [], openedQuiet: [], placed: [], projects: [], overview: 0, combined: [] };
+  const log: Moves = { moved: [], restored: [], opened: [], openedQuiet: [], placed: [], projects: [], overview: 0, combined: [], recorded: [] };
   bus.setShell({ project: "demo", openProject: (next) => { log.projects.push(next); }, openPath: (path) => { log.opened.push(path); }, placePath: (path) => { log.placed.push(path); }, openOverview: () => {}, openConversation: () => {} });
 
   const outcome = await runFocusHandoff(request({ frameAtCreation: frame("gone") }), bus, { timeoutMs: 5, pollMs: 1 });
@@ -590,13 +594,18 @@ test("a cross-project OPEN handoff is one gesture: quiet project half plus exact
   expect(log.opened).toEqual([]);
 });
 
-test("a cross-project SHOW handoff stays a lone project switch and records it as before", async () => {
+test("a cross-project SHOW handoff applies the project quietly: the arrival record is its one entry", async () => {
+  /* Before the arrival record existed (#866 production regression), the show
+     handoff's project switch was its only history trace, so it went through
+     the recording `openProject`. Now the verified arrival records the card
+     entry, and a recorded project switch under it would make Back a
+     two-press traversal. */
   const { bus, log } = harness("other", { "/tmp/reviewer.jsonl": RECT }, "demo");
 
   await runFocusHandoff(request({ intent: "show", frameAtCreation: frame("other") }), bus, NO_WAIT);
 
-  expect(log.projects).toEqual(["other"]);
-  expect(log.combined).toEqual([]);
+  expect(log.projects).toEqual([]);
+  expect(log.combined).toEqual([["other", null]]);
   expect(log.opened).toEqual([]);
 });
 
@@ -784,4 +793,134 @@ test("a cross-project Return with camera and card applies the project quietly: n
   expect(log.combined).toEqual([["other", null]]);
   expect(log.restored).toEqual([{ x: 5, y: 6, zoom: 1 }]);
   expect(log.openedQuiet).toEqual(["/tmp/what-i-was-reading.jsonl"]);
+});
+
+/* ── #866 production regression: a verified conversation arrival records the
+      typed focus entry — for SHOW exactly as for OPEN. The shipped code moved
+      the camera for `show` and recorded nothing, so the next Back crossed the
+      document boundary and killed the active voice call. ─────────────────── */
+
+test("a verified SHOW arrival records exactly one typed focus entry through the canonical seam", async () => {
+  const { bus, log } = harness("demo", { "/tmp/reviewer.jsonl": RECT });
+
+  const outcome = await runFocusTransaction(request(), bus, {
+    pollMs: 0,
+    timeoutMs: 60_000,
+    sleep: async () => {},
+    observe: () => ({ camera: cameraIn(AT_FRAME), focusedPath: null }),
+  });
+
+  expect(outcome.moved).toBe(true);
+  expect(log.recorded).toEqual([["/tmp/reviewer.jsonl", "demo"]]);
+  /* `show` still frames and stops there: no surface open rides along. */
+  expect(log.openedQuiet).toEqual([]);
+  expect(log.opened).toEqual([]);
+});
+
+test("the entry is recorded only after the OBSERVED arrival, never at move time", async () => {
+  const { bus, log } = harness("demo", { "/tmp/reviewer.jsonl": RECT });
+  let reads = 0;
+  let recordedMidGlide = false;
+  const observe = (): FocusObservation => {
+    reads += 1;
+    /* Any record already written while the camera is still elsewhere is the
+       move-time record this contract forbids. */
+    if (reads < 3 && log.recorded.length > 0) recordedMidGlide = true;
+    return { camera: cameraIn(reads < 3 ? ELSEWHERE : AT_FRAME), focusedPath: null };
+  };
+
+  await runFocusTransaction(request(), bus, { pollMs: 0, timeoutMs: 60_000, sleep: async () => {}, observe });
+
+  expect(recordedMidGlide).toBe(false);
+  expect(log.recorded).toEqual([["/tmp/reviewer.jsonl", "demo"]]);
+});
+
+test("an OPEN arrival records through the same seam, beside its quiet open", async () => {
+  /* Both halves may record — `decideFocusAction` coalesces a same-target
+     re-record into a replace, so history still gains exactly one entry. */
+  const { bus, log } = harness("demo", { "/tmp/reviewer.jsonl": RECT });
+
+  const outcome = await runFocusTransaction(request({ intent: "open" }), bus, {
+    pollMs: 0,
+    timeoutMs: 60_000,
+    sleep: async () => {},
+    observe: () => ({ camera: cameraIn(AT_FRAME), focusedPath: null }),
+  });
+
+  expect(outcome.moved).toBe(true);
+  expect(log.openedQuiet).toEqual(["/tmp/reviewer.jsonl"]);
+  expect(log.recorded).toEqual([["/tmp/reviewer.jsonl", "demo"]]);
+});
+
+test("a cross-project SHOW arrival records the target's own project", async () => {
+  const { bus, log } = harness("other", { "/tmp/reviewer.jsonl": RECT }, "demo");
+
+  const outcome = await runFocusTransaction(request({ frameAtCreation: frame("other") }), bus, {
+    pollMs: 0,
+    timeoutMs: 60_000,
+    sleep: async () => {},
+    observe: () => ({ camera: cameraIn(AT_FRAME), focusedPath: null }),
+  });
+
+  expect(outcome.moved).toBe(true);
+  expect(log.recorded).toEqual([["/tmp/reviewer.jsonl", "other"]]);
+});
+
+test("a lost handoff records nothing: no arrival, no entry", async () => {
+  const { bus, log } = harness("demo", {});
+
+  const outcome = await runFocusTransaction(request({ frameAtCreation: frame("demo", UNREAD_FRAME_RECT) }), bus, {
+    ...NO_WAIT,
+    observe: () => ({ camera: null, focusedPath: null }),
+  });
+
+  expect(outcome.moved).toBe(false);
+  expect(log.recorded).toEqual([]);
+});
+
+test("a glide that never lands records nothing", async () => {
+  const { bus, log } = harness("demo", { "/tmp/reviewer.jsonl": RECT });
+  let clock = 0;
+
+  const outcome = await runFocusTransaction(request(), bus, {
+    pollMs: 1,
+    timeoutMs: 200,
+    sleep: async () => { clock += 100; },
+    now: () => clock,
+    observe: () => ({ camera: cameraIn(ELSEWHERE), focusedPath: null }),
+  });
+
+  expect(outcome.moved).toBe(false);
+  expect(log.recorded).toEqual([]);
+});
+
+test("an aborted transaction records nothing — the resume owes the entry later", async () => {
+  const { bus, log } = harness("demo", { "/tmp/reviewer.jsonl": RECT });
+  const controller = new AbortController();
+  const observe = (): FocusObservation => {
+    controller.abort();
+    return { camera: cameraIn(ELSEWHERE), focusedPath: null };
+  };
+
+  const outcome = await runFocusTransaction(request(), bus, { pollMs: 0, timeoutMs: 60_000, sleep: async () => {}, signal: controller.signal, observe });
+
+  expect(outcome.aborted).toBe(true);
+  expect(log.recorded).toEqual([]);
+});
+
+test("a RESUMED arrival still records the entry the interrupted move never wrote", async () => {
+  /* The remount-mid-handoff recovery: the first mount moved the camera and
+     aborted before the verified arrival — so nothing was recorded. The resume
+     that finds the camera already at the frame owes the record AND the entry. */
+  const { bus, log } = harness("demo", { "/tmp/reviewer.jsonl": RECT });
+
+  const outcome = await runFocusTransaction(request(), bus, {
+    ...NO_WAIT,
+    resume: true,
+    observe: () => ({ camera: cameraIn(AT_FRAME), focusedPath: null }),
+  });
+
+  expect(outcome.moved).toBe(true);
+  expect(log.moved).toEqual([]);
+  expect(log.recorded).toEqual([["/tmp/reviewer.jsonl", "demo"]]);
 });

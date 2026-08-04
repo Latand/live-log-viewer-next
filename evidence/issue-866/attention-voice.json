@@ -1,0 +1,163 @@
+{
+  "issue": 866,
+  "capturedAt": "2026-08-03T15:26:09.818Z",
+  "buildHead": "a2080169eca7b723433b78ac997f18479b6a6c53",
+  "runner": "exact-head production build served by `next start` over the isolated demo runtime (fixtures/demo-home); headless host Chrome with a fake media device over raw CDP; the real MCP tool service + bindings called cross-process over the same shared LLV_STATE_DIR, with only the root caller-authority seam injected",
+  "contract": "every successful conversation-target request_attention handoff records exactly one typed same-document focus entry after verified arrival; Back/Forward traverse the previous and target cards with no document reload, remount, snapshot fetch, voice interruption, composer loss or duplicate entry; replays record nothing; sub-agent and open targets record the same single entry; a stale target fails visibly and leaves history usable",
+  "voiceSentinel": "live fake-device getUserMedia stream + running AudioContext + CONNECTED loopback RTCPeerConnection carrying the audio track + advancing heartbeat — the in-page state an active voice conversation is made of, which a document navigation would terminate",
+  "checks": [
+    {
+      "name": "composer draft typed into card A",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "focusing A recorded its own typed entry, and the voice pipeline is live",
+      "pass": true,
+      "detail": {
+        "entryKey": "<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/22222222-x.jsonl",
+        "voice": {
+          "pc": "connected",
+          "trackLive": true,
+          "streamActive": true,
+          "audio": "running",
+          "beats": 9
+        }
+      }
+    },
+    {
+      "name": "the show handoff verified its arrival: MCP success, camera at B, same document",
+      "pass": true,
+      "detail": {
+        "ok": true,
+        "state": "following",
+        "bRect": {
+          "x": 544,
+          "y": 80,
+          "w": 600,
+          "h": 780
+        }
+      }
+    },
+    {
+      "name": "the verified show arrival recorded EXACTLY ONE typed focus entry for B",
+      "pass": true,
+      "detail": {
+        "pushesDelta": 1,
+        "entryKey": "<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/11111111-x.jsonl",
+        "entryProject": "project_unresolved"
+      }
+    },
+    {
+      "name": "a replayed request_attention returns the committed receipt: no new entry, no move",
+      "pass": true,
+      "detail": {
+        "replayed": true,
+        "pushesDelta": 0
+      }
+    },
+    {
+      "name": "Back traverses to the previous card inside the document — no reload, no remount",
+      "pass": true,
+      "detail": {
+        "entryKey": "<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/22222222-x.jsonl",
+        "marker": "alive",
+        "navEntries": 1,
+        "mainAlive": true,
+        "nodeAPresent": true
+      }
+    },
+    {
+      "name": "the live voice pipeline survived Back: connected peer, live track, running audio, advancing heartbeat",
+      "pass": true,
+      "detail": {
+        "voice": {
+          "pc": "connected",
+          "trackLive": true,
+          "streamActive": true,
+          "audio": "running",
+          "beats": 25
+        },
+        "beatsBeforeBack": 22
+      }
+    },
+    {
+      "name": "the unsent composer draft survived Back",
+      "pass": true,
+      "detail": {
+        "draft": "issue-866 draft survives the attention handoff"
+      }
+    },
+    {
+      "name": "Forward restores the target card's entry; traversal replay pushed nothing",
+      "pass": true,
+      "detail": {
+        "entryKey": "<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/11111111-x.jsonl",
+        "pushesDelta": 0
+      }
+    },
+    {
+      "name": "a sub-agent target handoff records exactly one entry keyed by the child conversation",
+      "pass": true,
+      "detail": {
+        "ok": true,
+        "pushesDelta": 1,
+        "entryKey": "<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/11111111-x/subagents/agent-builder.jsonl"
+      }
+    },
+    {
+      "name": "intent=open records exactly one entry: the quiet open and the arrival record coalesce",
+      "pass": true,
+      "detail": {
+        "ok": true,
+        "pushesDelta": 1,
+        "entryKey": "<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/11111111-x.jsonl"
+      }
+    },
+    {
+      "name": "a stale target is an explicit failure with no focus entry",
+      "pass": true,
+      "detail": {
+        "ok": false,
+        "error": "no conversation on the board has that transcript path",
+        "code": null,
+        "pushesDelta": 0
+      }
+    },
+    {
+      "name": "Back still works after the failed handoff, same document, voice alive",
+      "pass": true,
+      "detail": {
+        "entryKey": "<repo>/fixtures/demo-home/.capture/home/.claude/projects/-repo--fixtures-demo-home--capture-home-Projects-atlas/22222222-x.jsonl",
+        "navEntries": 1,
+        "voice": {
+          "pc": "connected",
+          "trackLive": true,
+          "streamActive": true,
+          "audio": "running",
+          "beats": 75
+        }
+      }
+    },
+    {
+      "name": "navigation never called /api/agent/snapshot",
+      "pass": true,
+      "detail": []
+    },
+    {
+      "name": "document, board and voice identity survived the entire run",
+      "pass": true,
+      "detail": {
+        "navEntries": 1,
+        "voice": {
+          "pc": "connected",
+          "trackLive": true,
+          "streamActive": true,
+          "audio": "running",
+          "beats": 75
+        }
+      }
+    }
+  ],
+  "verdict": "PASS"
+}
