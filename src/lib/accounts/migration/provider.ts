@@ -5,6 +5,7 @@ import path from "node:path";
 import { accountManager } from "@/lib/accounts/manager";
 import type { AccountContext, AccountManager } from "@/lib/accounts/contracts";
 import { CodexAppServerClient, CodexAppServerError } from "@/lib/accounts/codexAppServer";
+import { sharedClaudeProjectsRoot } from "@/lib/accounts/claude";
 import { realClaudeLoginPorts } from "@/lib/accounts/claudeLogin";
 import { claudeSuccessorSpecFor } from "@/lib/agent/cli";
 import { agentRegistry, type AgentRegistry, type SpawnReceipt, type TmuxHostEvidence } from "@/lib/agent/registry";
@@ -897,12 +898,23 @@ export async function authorizeCodexForkRetry(
   });
 }
 
+/* The shared Claude transcript store (issue #891, phase 1) is the one
+   transcript root that legitimately lives outside every account home; a
+   cut-over account reports its canonical path directly. */
+function isSharedClaudeTranscriptRoot(transcriptRoot: string): boolean {
+  try { return fs.realpathSync(transcriptRoot) === fs.realpathSync(sharedClaudeProjectsRoot()); }
+  catch { return false; }
+}
+
 function ensureTargetRoot(account: AccountContext): void {
   const home = fs.lstatSync(account.home);
   if (!home.isDirectory() || home.isSymbolicLink() || (process.getuid && home.uid !== process.getuid()) || (home.mode & 0o022) !== 0) {
     throw new Error("target account home failed safety checks");
   }
-  if (path.dirname(path.resolve(account.transcriptRoot)) !== path.resolve(account.home)) throw new Error("target transcript root is outside its account home");
+  if (path.dirname(path.resolve(account.transcriptRoot)) !== path.resolve(account.home)
+    && !(account.engine === "claude" && isSharedClaudeTranscriptRoot(account.transcriptRoot))) {
+    throw new Error("target transcript root is outside its account home");
+  }
   try { fs.mkdirSync(account.transcriptRoot, { mode: 0o700 }); } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   }
