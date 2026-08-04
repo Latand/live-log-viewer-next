@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { expect, test } from "bun:test";
 
-import { CodexReplayFrameReducer, ReplayFrameOverflowError, sanitizeCodexImageFrame, type ImageSink, type ReplayFrameBudgets } from "./codexImageFrames";
+import { CodexReplayFrameReducer, ReplayFrameOverflowError, sanitizeCodexImageFrame, shrinkReducedReplayFrame, type ImageSink, type ReplayFrameBudgets } from "./codexImageFrames";
 import { MAX_STRUCTURED_IMAGE_ENCODED_BYTES } from "./runtimeImageStore";
 
 const PNG = Buffer.from(
@@ -219,4 +219,20 @@ test("the output budget fails the frame closed", () => {
   const line = JSON.stringify({ result: { items: Array.from({ length: 64 }, () => ({ text: "t".repeat(31) })) } });
   const reducer = new CodexReplayFrameReducer(budgets({ maxOutputUnits: 256 }));
   expect(() => { reducer.feed(line); reducer.finish(); }).toThrow(ReplayFrameOverflowError);
+});
+
+test("shrinkReducedReplayFrame re-reduces a frame until it fits the byte budget", () => {
+  const frame = JSON.stringify({ id: 7, result: { items: Array.from({ length: 100 }, (_, index) => ({ id: `item-${index}`, text: "\u0449".repeat(4096) })) } });
+  const shrunk = shrinkReducedReplayFrame(frame, 300 * 1024, budgets({ maxStringUnits: 4096, maxOutputUnits: 64 * 1024 * 1024, maxRawUnits: 256 * 1024 * 1024 }));
+  expect(Buffer.byteLength(shrunk)).toBeLessThanOrEqual(300 * 1024);
+  const parsed = JSON.parse(shrunk) as { id: number; result: { items: Array<{ id: string; text: string }> } };
+  expect(parsed.id).toBe(7);
+  expect(parsed.result.items).toHaveLength(100);
+  expect(parsed.result.items[0]!.id).toBe("item-0");
+  expect(parsed.result.items[0]!.text).toContain("truncated");
+});
+
+test("shrinkReducedReplayFrame returns a frame already inside the budget untouched", () => {
+  const frame = JSON.stringify({ id: 1, result: { text: "short" } });
+  expect(shrinkReducedReplayFrame(frame, 1024, budgets({}))).toBe(frame);
 });

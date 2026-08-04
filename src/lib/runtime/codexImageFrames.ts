@@ -99,6 +99,36 @@ export class ReplayFrameOverflowError extends Error {
 
 const STRING_HEAD_SNIFF_UNITS = 64;
 const IMAGE_STRING_PREFIX = /^data:[a-z0-9.+-]+\/[a-z0-9.+-]+;base64,/i;
+const MIN_SHRINK_STRING_UNITS = 64;
+
+/**
+ * Re-reduces an already-reduced replay frame until it fits a byte budget.
+ * One streaming pass bounds each string in UTF-16 units, but a history-heavy
+ * envelope (production: a 49 MB `thread/resume` response over a 100 MB
+ * Cyrillic-dominated thread) can stay over the frame guard on structure alone,
+ * and unit counts undercount UTF-8 bytes for non-ASCII text. Each pass quarters
+ * the string cap; from the second pass inline image strings shrink too — at
+ * that point losing a replayed inline image beats failing the whole resume,
+ * which previously killed account switching for the conversation outright.
+ * Returns the smallest frame achieved; the caller enforces the budget on it.
+ */
+export function shrinkReducedReplayFrame(frame: string, maxBytes: number, budgets: ReplayFrameBudgets): string {
+  let reduced = frame;
+  let cap = budgets.maxStringUnits;
+  let shrinkImages = false;
+  while (Buffer.byteLength(reduced) > maxBytes && cap > MIN_SHRINK_STRING_UNITS) {
+    cap = Math.max(MIN_SHRINK_STRING_UNITS, Math.floor(cap / 4));
+    const reducer = new CodexReplayFrameReducer({
+      ...budgets,
+      maxStringUnits: cap,
+      ...(shrinkImages ? { maxImageStringUnits: cap } : {}),
+    });
+    reducer.feed(reduced);
+    reduced = reducer.finish();
+    shrinkImages = true;
+  }
+  return reduced;
+}
 
 /**
  * Streaming reducer for one admitted replay JSONL frame (a `thread/resume` or

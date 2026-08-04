@@ -1359,6 +1359,41 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
+  /* Production 2026-08-04: a 49 MB thread/resume envelope over a Cyrillic-heavy
+     thread stayed above the frame guard even with every string capped, so the
+     resume — and with it every account switch for the conversation — failed
+     with "oversized JSONL frame". The finished frame now shrinks its string
+     caps until it fits instead. */
+  test("a replay envelope still oversized after string reduction shrinks instead of failing the resume", async () => {
+    const threadId = "shrink-resume-thread";
+    /* Every text part sits exactly at the string cap, so the first reduction
+       pass keeps all ~25 MB and only the shrink passes can fit the frame. */
+    const content = Array.from({ length: 1550 }, () => ({ type: "text", text: "z".repeat(16 * 1024) }));
+    const server = new FakeAppServer(threadId, threadId, false, [{
+      id: "shrink-turn",
+      status: "completed",
+      items: [{
+        id: "shrink-call-0",
+        type: "mcpToolCall",
+        status: "completed",
+        result: { Ok: { content } },
+      }],
+    }]);
+    const eventStore = new MemoryEventStore();
+    const host = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore,
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect((await host.health()).status).not.toBe("dead");
+    const items = eventStore.load(threadId).filter((event) => event.kind === "item");
+    expect(items).toHaveLength(1);
+    expect(JSON.stringify(items)).toContain("truncated");
+    expect(await host.send({ id: "post-shrink", text: "ping" })).toMatchObject({ outcome: "turn-started" });
+    await host.release();
+  }, 30_000);
+
   test("inline image history in the replay envelope reaches the ledger only as a bounded reference", async () => {
     const threadId = "image-replay-thread";
     const body = Buffer.alloc(1024 * 1024, 5).toString("base64");
