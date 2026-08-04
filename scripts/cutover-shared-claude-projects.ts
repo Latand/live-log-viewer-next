@@ -43,21 +43,72 @@ export function transcriptRoots(): string[] {
 
 type Plan = { root: string; files: number; bytes: number };
 
-export function scanRoot(root: string, seen: Map<string, string>): { plan: Plan; collisions: string[] } {
-  let files = 0; let bytes = 0; const collisions: string[] = [];
-  for (const project of fs.readdirSync(root)) {
-    const projectDir = path.join(root, project);
-    if (!fs.lstatSync(projectDir).isDirectory()) continue;
-    for (const file of fs.readdirSync(projectDir)) {
-      const relative = path.join(project, file);
-      const holder = seen.get(relative);
-      if (holder) collisions.push(`${relative}: ${holder} vs ${root}`);
-      else seen.set(relative, root);
-      files += 1;
-      try { bytes += fs.statSync(path.join(projectDir, file)).size; } catch { /* raced away */ }
+function sameContent(left: string, right: string): boolean {
+  try {
+    const a = fs.statSync(left); const b = fs.statSync(right);
+    if (a.size !== b.size) return false;
+    return fs.readFileSync(left).equals(fs.readFileSync(right));
+  } catch { return false; }
+}
+
+/* Same-name file collision policy across roots:
+   - `.jsonl` transcripts carry session identity — never mergeable, hard abort.
+   - identical content deduplicates silently.
+   - MEMORY.md is a line index — the union of both sides is the merge.
+   - anything else keeps the first arrival and preserves the other under a
+     `.from-<root>` suffix, so nothing is ever lost. */
+type Resolution = "abort" | "dedupe" | "union" | "suffix";
+
+function resolutionFor(relative: string, existing: string, incoming: string): Resolution {
+  if (relative.endsWith(".jsonl")) return "abort";
+  if (sameContent(existing, incoming)) return "dedupe";
+  if (path.basename(relative) === "MEMORY.md") return "union";
+  return "suffix";
+}
+
+function walkFiles(root: string, visit: (absolute: string, relative: string) => void): void {
+  const stack: string[] = [""];
+  while (stack.length > 0) {
+    const relative = stack.pop()!;
+    const absolute = path.join(root, relative);
+    for (const entry of fs.readdirSync(absolute, { withFileTypes: true })) {
+      const childRelative = path.join(relative, entry.name);
+      if (entry.isDirectory()) stack.push(childRelative);
+      else if (entry.isFile()) visit(path.join(root, childRelative), childRelative);
     }
   }
-  return { plan: { root, files, bytes }, collisions };
+}
+
+export function scanRoot(root: string, seen: Map<string, string>): { plan: Plan; collisions: string[]; merges: string[] } {
+  let files = 0; let bytes = 0; const collisions: string[] = []; const merges: string[] = [];
+  walkFiles(root, (absolute, relative) => {
+    files += 1;
+    try { bytes += fs.statSync(absolute).size; } catch { /* raced away */ }
+    const holder = seen.get(relative);
+    if (!holder) { seen.set(relative, absolute); return; }
+    const resolution = resolutionFor(relative, holder, absolute);
+    if (resolution === "abort") collisions.push(`${relative}: ${path.dirname(holder)} vs ${root}`);
+    else merges.push(`${relative}: ${resolution} (${root})`);
+  });
+  return { plan: { root, files, bytes }, collisions, merges };
+}
+
+function suffixedName(filename: string, root: string): string {
+  const extension = path.extname(filename);
+  const label = path.basename(path.dirname(root)).replace(/[^a-zA-Z0-9-]+/g, "-") || "root";
+  return `${filename.slice(0, filename.length - extension.length)}.from-${label}${extension}`;
+}
+
+function unionLines(target: string, source: string): void {
+  const existing = fs.readFileSync(target, "utf8").split("\n");
+  const known = new Set(existing.filter((line) => line.trim().length > 0));
+  const additions = fs.readFileSync(source, "utf8").split("\n")
+    .filter((line) => line.trim().length > 0 && !known.has(line));
+  if (additions.length > 0) {
+    const body = existing.join("\n").replace(/\n*$/, "\n") + additions.join("\n") + "\n";
+    fs.writeFileSync(target, body, { mode: 0o600 });
+  }
+  fs.rmSync(source, { force: true });
 }
 
 function llvContainersRunning(): string[] {
@@ -67,18 +118,28 @@ function llvContainersRunning(): string[] {
   } catch { return []; }
 }
 
+function mergeTree(source: string, target: string, root: string): void {
+  if (!fs.existsSync(target)) { fs.renameSync(source, target); return; }
+  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+    const from = path.join(source, entry.name);
+    const to = path.join(target, entry.name);
+    if (entry.isDirectory()) { mergeTree(from, to, root); continue; }
+    if (!entry.isFile()) continue;
+    if (!fs.existsSync(to)) { fs.renameSync(from, to); continue; }
+    const resolution = resolutionFor(entry.name, to, from);
+    if (resolution === "abort") throw new Error(`transcript collision surfaced during merge: ${to}`);
+    if (resolution === "dedupe") { fs.rmSync(from, { force: true }); continue; }
+    if (resolution === "union") { unionLines(to, from); continue; }
+    fs.renameSync(from, path.join(target, suffixedName(entry.name, root)));
+  }
+  fs.rmdirSync(source);
+}
+
 export function mergeRoot(root: string, shared: string): void {
   for (const project of fs.readdirSync(root)) {
     const source = path.join(root, project);
     if (!fs.lstatSync(source).isDirectory()) continue;
-    const target = path.join(shared, project);
-    if (!fs.existsSync(target)) { fs.renameSync(source, target); continue; }
-    for (const file of fs.readdirSync(source)) {
-      const destination = path.join(target, file);
-      if (fs.existsSync(destination)) throw new Error(`collision surfaced during merge: ${project}/${file}`);
-      fs.renameSync(path.join(source, file), destination);
-    }
-    fs.rmdirSync(source);
+    mergeTree(source, path.join(shared, project), root);
   }
   // Stray top-level files (none expected) stay behind in the retired dir.
   const leftovers = fs.readdirSync(root);
@@ -126,20 +187,24 @@ function main(): void {
   if (roots.length === 0) { console.log("nothing to cut over — every root already points at the shared store"); return; }
 
   const seen = new Map<string, string>();
-  const plans: Plan[] = []; const collisions: string[] = [];
+  const plans: Plan[] = []; const collisions: string[] = []; const merges: string[] = [];
   for (const root of roots) {
-    const { plan, collisions: found } = scanRoot(root, seen);
-    plans.push(plan); collisions.push(...found);
+    const { plan, collisions: found, merges: resolvable } = scanRoot(root, seen);
+    plans.push(plan); collisions.push(...found); merges.push(...resolvable);
   }
   console.log(`shared root: ${shared}`);
   for (const plan of plans) console.log(`  ${plan.root}: ${plan.files} files, ${(plan.bytes / 1e6).toFixed(1)} MB`);
   if (collisions.length > 0) {
-    console.error(`\nABORT: ${collisions.length} collision(s):`);
+    console.error(`\nABORT: ${collisions.length} transcript collision(s):`);
     for (const line of collisions) console.error(`  ${line}`);
     process.exitCode = 1;
     return;
   }
-  console.log("collisions: 0");
+  console.log("transcript collisions: 0");
+  if (merges.length > 0) {
+    console.log(`resolvable same-name files: ${merges.length}`);
+    for (const line of merges) console.log(`  ${line}`);
+  }
 
   const rewrites = rewriteStateFiles(roots, shared, false);
   for (const { file, replaced } of rewrites) console.log(`  state rewrite: ${path.basename(file)} — ${replaced} path(s)`);

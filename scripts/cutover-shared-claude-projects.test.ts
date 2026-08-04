@@ -65,7 +65,7 @@ test("cutover merges disjoint roots, symlinks them, and rewrites state paths", (
   expect(JSON.parse(fs.readFileSync(stateFile, "utf8")).path).toBe(path.join(shared, "-repo-a", "two.jsonl"));
 });
 
-test("a collision aborts the plan before anything moves", () => {
+test("a transcript collision aborts the plan before anything moves", () => {
   const rootA = path.join(SANDBOX, "collide", "a", "projects");
   const rootB = path.join(SANDBOX, "collide", "b", "projects");
   seedRoot(rootA, "-repo", "same.jsonl", "a\n");
@@ -74,4 +74,39 @@ test("a collision aborts the plan before anything moves", () => {
   const collisions = [rootA, rootB].flatMap((root) => scanRoot(root, seen).collisions);
   expect(collisions).toHaveLength(1);
   expect(collisions[0]).toContain(path.join("-repo", "same.jsonl"));
+});
+
+test("per-project memory directories merge as a union with MEMORY.md line-merged", () => {
+  const rootA = path.join(SANDBOX, "memmerge", "a", "projects");
+  const rootB = path.join(SANDBOX, "memmerge", "b", "projects");
+  const shared = path.join(SANDBOX, "memmerge", "shared");
+  fs.mkdirSync(path.join(rootA, "-repo", "memory"), { recursive: true, mode: 0o700 });
+  fs.mkdirSync(path.join(rootB, "-repo", "memory"), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(rootA, "-repo", "memory", "alpha.md"), "alpha\n");
+  fs.writeFileSync(path.join(rootA, "-repo", "memory", "MEMORY.md"), "- [Alpha](alpha.md)\n");
+  fs.writeFileSync(path.join(rootB, "-repo", "memory", "beta.md"), "beta\n");
+  fs.writeFileSync(path.join(rootB, "-repo", "memory", "MEMORY.md"), "- [Beta](beta.md)\n");
+  // Same-name, different content, non-index: preserved under a suffix.
+  fs.writeFileSync(path.join(rootA, "-repo", "memory", "note.md"), "from a\n");
+  fs.writeFileSync(path.join(rootB, "-repo", "memory", "note.md"), "from b\n");
+
+  const seen = new Map<string, string>();
+  const outcomes = [rootA, rootB].map((root) => scanRoot(root, seen));
+  expect(outcomes.flatMap((outcome) => outcome.collisions)).toEqual([]);
+  expect(outcomes.flatMap((outcome) => outcome.merges).sort()).toEqual([
+    `${path.join("-repo", "memory", "MEMORY.md")}: union (${rootB})`,
+    `${path.join("-repo", "memory", "note.md")}: suffix (${rootB})`,
+  ]);
+
+  fs.mkdirSync(shared, { recursive: true, mode: 0o700 });
+  mergeRoot(rootA, shared);
+  mergeRoot(rootB, shared);
+  const memory = path.join(shared, "-repo", "memory");
+  expect(fs.readFileSync(path.join(memory, "alpha.md"), "utf8")).toBe("alpha\n");
+  expect(fs.readFileSync(path.join(memory, "beta.md"), "utf8")).toBe("beta\n");
+  expect(fs.readFileSync(path.join(memory, "MEMORY.md"), "utf8")).toBe("- [Alpha](alpha.md)\n- [Beta](beta.md)\n");
+  expect(fs.readFileSync(path.join(memory, "note.md"), "utf8")).toBe("from a\n");
+  const suffixed = fs.readdirSync(memory).find((name) => name.startsWith("note.from-"));
+  expect(suffixed).toBeDefined();
+  expect(fs.readFileSync(path.join(memory, suffixed!), "utf8")).toBe("from b\n");
 });
