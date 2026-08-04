@@ -79,6 +79,34 @@ export type ExistingConversationTarget =
   | { kind: "eligible"; conversationId: string; path: string; cwd: string; project: string }
   | { kind: "ineligible"; code: "conversation_ineligible" | "invalid_cwd" | "missing_transcript" | "missing_project"; error: string };
 
+/** Issue #903: the spawn fallback must never be this server process's own
+    working directory — in the deployed container that is `/app`, a path
+    outside every scanner root, so the successor's transcript lands where the
+    Viewer cannot see it and the seat holds its authority while permanently
+    inert. With no explicit cwd and no operator override, the project's own
+    newest existing checkout is the only honest default; failing the call
+    beats minting a dead seat. */
+function resolveOrchestratorCwd(project: string, requested: unknown): string | null {
+  if (typeof requested === "string" && requested.trim()) return requested.trim();
+  const override = process.env.LLV_ORCHESTRATOR_CWD?.trim();
+  if (override) return override;
+  const usable = (candidate: string | undefined | null): candidate is string => {
+    if (!candidate) return false;
+    try { return fs.statSync(candidate).isDirectory(); } catch { return false; }
+  };
+  const conversations = Object.values(agentRegistry().readOnlySnapshot().conversations)
+    .filter((conversation) => conversation.projectOwnership?.project === project
+      || conversation.generations.some((generation) => generation.launchProfile?.project === project))
+    .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
+  for (const conversation of conversations) {
+    for (let index = conversation.generations.length - 1; index >= 0; index -= 1) {
+      const candidate = conversation.generations[index]?.launchProfile?.cwd;
+      if (usable(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
 async function postSpawnInProcess(body: Record<string, unknown>): Promise<{ status: number; body: Record<string, unknown> }> {
   const { executeSpawnRequest } = await import("@/lib/agent/spawnCommand");
   /* An in-process call on the operator's behalf: the seat route has already
@@ -432,16 +460,24 @@ export async function executeOrchestratorSeatRequest(
   const spawnMandate = begun.kind === "replay" ? begun.seat.mandate : mandate;
 
   const spawnFields = ["engine", "model", "cwd", "effort", "fast", "accountId", "images", "roleParams", "allowSubagents"] as const;
+  const cwd = resolveOrchestratorCwd(project, rawBody.cwd);
+  if (!cwd) {
+    failOrchestratorSeatIntent(project, clientRequestId, "orchestrator cwd could not be resolved");
+    return {
+      status: 400,
+      body: {
+        error: "orchestrator cwd could not be resolved — pass cwd explicitly or set LLV_ORCHESTRATOR_CWD",
+        code: "cwd_unresolved",
+        seat: orchestratorSeatFor(project).pending,
+      },
+    };
+  }
   const spawnBody: Record<string, unknown> = {
     ...Object.fromEntries(spawnFields.flatMap((field) => (rawBody[field] === undefined ? [] : [[field, rawBody[field]]]))),
     role: "orchestrator",
     roleParams: rawBody.roleParams ?? { mode: "standard" },
     project,
-    /* A fresh orchestrator spawns in the Viewer's own checkout unless the
-       caller names a directory — same default the legacy chat-button flow uses. */
-    cwd: typeof rawBody.cwd === "string" && rawBody.cwd.trim()
-      ? rawBody.cwd
-      : (process.env.LLV_ORCHESTRATOR_CWD?.trim() || process.cwd()),
+    cwd,
     ["prompt"]: spawnMandate,
     clientAttemptId: clientRequestId,
   };
@@ -555,7 +591,15 @@ export async function executeOrchestratorRotation(
     ...(rawBody.engine !== undefined ? { engine: rawBody.engine } : {}),
     ...(rawBody.model !== undefined ? { model: rawBody.model } : {}),
     ...(rawBody.effort !== undefined ? { effort: rawBody.effort } : {}),
-    ...(rawBody.cwd !== undefined ? { cwd: rawBody.cwd } : {}),
+    /* Issue #903: a rotation without an explicit cwd continues in the
+       predecessor's checkout rather than falling through to the generic
+       resolver — the successor inherits the incumbent's mandate, so it
+       inherits its working directory too. */
+    ...(rawBody.cwd !== undefined
+      ? { cwd: rawBody.cwd }
+      : predecessor
+        ? { cwd: predecessor.cwd }
+        : {}),
     ...(rawBody.accountId !== undefined ? { accountId: rawBody.accountId } : {}),
   }, dependencies);
   return {

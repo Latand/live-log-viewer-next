@@ -601,3 +601,60 @@ test("validation refuses a missing project, empty mandate, and malformed request
   expect((await executeOrchestratorSeatRequest({ project: "proj-a", mandate: "  ", clientRequestId: "req_00000007" }, deps)).status).toBe(400);
   expect((await executeOrchestratorSeatRequest({ project: "proj-a", mandate: "m", clientRequestId: "no" }, deps)).status).toBe(400);
 });
+
+/* Issue #903: a spawn falling back to the server's own working directory
+   minted seats in /app — outside every scanner root — that held authority
+   while permanently inert. */
+test("spawn mode without a cwd fails closed instead of inheriting the server process directory", async () => {
+  const previous = process.env.LLV_ORCHESTRATOR_CWD;
+  delete process.env.LLV_ORCHESTRATOR_CWD;
+  try {
+    const { deps, recorded } = dependencies();
+    const request: Record<string, unknown> = { ...spawnRequest("req_00000201") };
+    delete request.cwd;
+    const result = await executeOrchestratorSeatRequest(request, deps);
+    expect(result.status).toBe(400);
+    expect(result.body.code).toBe("cwd_unresolved");
+    expect(recorded.spawns).toHaveLength(0);
+    expect(orchestratorSeatFor("proj-a").active).toBeNull();
+  } finally {
+    if (previous === undefined) delete process.env.LLV_ORCHESTRATOR_CWD;
+    else process.env.LLV_ORCHESTRATOR_CWD = previous;
+  }
+});
+
+test("spawn mode without a cwd honors the operator override", async () => {
+  const previous = process.env.LLV_ORCHESTRATOR_CWD;
+  process.env.LLV_ORCHESTRATOR_CWD = "/operator/checkout";
+  try {
+    const { deps, recorded } = dependencies();
+    const request: Record<string, unknown> = { ...spawnRequest("req_00000202") };
+    delete request.cwd;
+    const result = await executeOrchestratorSeatRequest(request, deps);
+    expect(result.status).toBe(200);
+    expect(recorded.spawns[0]).toMatchObject({ cwd: "/operator/checkout" });
+  } finally {
+    if (previous === undefined) delete process.env.LLV_ORCHESTRATOR_CWD;
+    else process.env.LLV_ORCHESTRATOR_CWD = previous;
+  }
+});
+
+test("rotation without a cwd continues in the predecessor's checkout", async () => {
+  const previous = process.env.LLV_ORCHESTRATOR_CWD;
+  delete process.env.LLV_ORCHESTRATOR_CWD;
+  try {
+    const { deps, recorded } = dependencies();
+    const seeded = await executeOrchestratorSeatRequest(spawnRequest("req_00000203"), deps);
+    expect(seeded.status).toBe(200);
+    const rotated = await executeOrchestratorRotation({
+      project: "proj-a",
+      clientRequestId: "req_00000204",
+    }, deps);
+    expect(rotated.status).toBe(200);
+    expect(recorded.spawns).toHaveLength(2);
+    expect(recorded.spawns[1]).toMatchObject({ cwd: "/workspace" });
+  } finally {
+    if (previous === undefined) delete process.env.LLV_ORCHESTRATOR_CWD;
+    else process.env.LLV_ORCHESTRATOR_CWD = previous;
+  }
+});
