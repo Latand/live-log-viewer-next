@@ -38,7 +38,7 @@ test("quota visibility remains fresh when automatic balancing is disabled", asyn
         };
       },
     };
-    const controller = new QuotaController(registry, probe, "00000000-0000-4000-8000-000000000000", () => current);
+    const controller = new QuotaController(registry, probe, "boot-visibility-test", () => current);
 
     registry.setAutoBalancePolicy("codex", false);
     await controller.tick("codex");
@@ -54,6 +54,127 @@ test("quota visibility remains fresh when automatic balancing is disabled", asyn
       limits: { session: { usedPercent: 10 } },
     });
     expect(Object.values(registry.snapshot().migrationIntents)).toHaveLength(0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a failed probe keeps the last known limits instead of blanking them", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-quota-carry-"));
+  try {
+    const registry = new AgentRegistry(path.join(root, "registry.json"));
+    const accounts: CodexAccount[] = [
+      { id: "default", label: "Main", kind: "legacy", home: "/homes/main", sessionsDir: "/homes/main/sessions", authPresent: true, loginPane: null, createdAt: 0 },
+    ];
+    let current = Date.parse("2026-07-10T12:00:00.000Z");
+    let fail = false;
+    const controller = new QuotaController(registry, {
+      list: () => accounts,
+      active: () => "default",
+      async probe(engine, account, now) {
+        if (fail) throw new Error("provider down");
+        return {
+          engine,
+          accountId: account.id,
+          authenticated: true,
+          authCheckedAt: now,
+          limits: { session: { usedPercent: 30, resetsAt: null }, weekly: null, plan: "pro", capturedAt: Math.floor(now / 1000) },
+          provenance: { source: "live" as const, reason: null, staleSince: null },
+          observedAt: now,
+        };
+      },
+    }, "boot-carry-forward-test", () => current);
+    await controller.tick("codex");
+    const firstObservedAt = registry.snapshot().quotaObservations.codex.default!.observedAt;
+    fail = true;
+    current += 120_000;
+    await controller.tick("codex");
+    const carried = registry.snapshot().quotaObservations.codex.default!;
+    expect(carried.limits?.session?.usedPercent).toBe(30);
+    expect(carried.authenticated).toBeTrue();
+    expect(carried.provenance).toMatchObject({ source: "cache", reason: "quota-probe-failed" });
+    expect(carried.provenance.staleSince).toBe(firstObservedAt);
+    expect(carried.observedAt).toBe(firstObservedAt);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a hung probe times out without delaying or blanking the other accounts", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-quota-hang-"));
+  try {
+    const registry = new AgentRegistry(path.join(root, "registry.json"));
+    const accounts: CodexAccount[] = [
+      { id: "default", label: "Main", kind: "legacy", home: "/homes/main", sessionsDir: "/homes/main/sessions", authPresent: true, loginPane: null, createdAt: 0 },
+      { id: "managed", label: "Managed", kind: "managed", home: "/homes/managed", sessionsDir: "/homes/managed/sessions", authPresent: true, loginPane: null, createdAt: 1 },
+    ];
+    const controller = new QuotaController(registry, {
+      list: () => accounts,
+      active: () => "default",
+      async probe(engine, account, now) {
+        if (account.id === "default") return await new Promise<never>(() => { /* wedged provider */ });
+        return {
+          engine,
+          accountId: account.id,
+          authenticated: true,
+          authCheckedAt: now,
+          limits: { session: { usedPercent: 40, resetsAt: null }, weekly: null, plan: "pro", capturedAt: Math.floor(now / 1000) },
+          provenance: { source: "live" as const, reason: null, staleSince: null },
+          observedAt: now,
+        };
+      },
+    }, "boot-hung-probe-test", () => Date.parse("2026-07-10T12:00:00.000Z"), 50);
+    await controller.tick("codex");
+    expect(registry.snapshot().quotaObservations.codex.default?.provenance).toMatchObject({ source: "unavailable", reason: "quota-probe-timeout" });
+    expect(registry.snapshot().quotaObservations.codex.managed?.limits?.session?.usedPercent).toBe(40);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a live sign-out answer replaces the cached limits instead of hiding behind them", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-quota-signout-"));
+  try {
+    const registry = new AgentRegistry(path.join(root, "registry.json"));
+    const accounts: CodexAccount[] = [
+      { id: "default", label: "Main", kind: "legacy", home: "/homes/main", sessionsDir: "/homes/main/sessions", authPresent: true, loginPane: null, createdAt: 0 },
+    ];
+    let current = Date.parse("2026-07-10T12:00:00.000Z");
+    let signedOut = false;
+    const controller = new QuotaController(registry, {
+      list: () => accounts,
+      active: () => "default",
+      async probe(engine, account, now) {
+        if (signedOut) {
+          return {
+            engine,
+            accountId: account.id,
+            authenticated: false,
+            authCheckedAt: now,
+            limits: null,
+            provenance: { source: "live" as const, reason: null, staleSince: null },
+            observedAt: now,
+          };
+        }
+        return {
+          engine,
+          accountId: account.id,
+          authenticated: true,
+          authCheckedAt: now,
+          limits: { session: { usedPercent: 25, resetsAt: null }, weekly: null, plan: "pro", capturedAt: Math.floor(now / 1000) },
+          provenance: { source: "live" as const, reason: null, staleSince: null },
+          observedAt: now,
+        };
+      },
+    }, "boot-signout-test", () => current);
+    await controller.tick("codex");
+    signedOut = true;
+    current += 120_000;
+    await controller.tick("codex");
+    const observation = registry.snapshot().quotaObservations.codex.default!;
+    expect(observation.authenticated).toBeFalse();
+    expect(observation.limits).toBeNull();
+    expect(observation.provenance.source).toBe("live");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -84,7 +205,7 @@ test("a failed home records a closed code while the controller sweeps later home
           observedAt: now,
         };
       },
-    }, "00000000-0000-4000-8000-000000000040", () => Date.parse("2026-07-10T12:00:00.000Z"));
+    }, "boot-sweep-test", () => Date.parse("2026-07-10T12:00:00.000Z"));
     await controller.tick("codex");
     expect(visited.sort()).toEqual(["default", "managed"]);
     expect(registry.snapshot().quotaObservations.codex.default?.provenance.reason).toBe("quota-probe-failed");
