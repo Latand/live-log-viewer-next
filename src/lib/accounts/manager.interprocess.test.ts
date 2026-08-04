@@ -17,6 +17,11 @@ const { accountMutationRevisionForTests, withAccountMutationLock } = await impor
 const { AgentRegistry } = await import("@/lib/agent/registry");
 const { syncCompatibilityRouting } = await import("./migration/controller");
 
+function selfPidNamespace(): string | null {
+  try { return fs.readlinkSync("/proc/self/ns/pid"); }
+  catch { return null; }
+}
+
 beforeEach(() => {
   fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
   fs.rmSync(path.join(sandbox, "accounts"), { recursive: true, force: true });
@@ -145,6 +150,9 @@ test("simultaneous stale-lock recovery admits one account mutation at a time", a
   fs.writeFileSync(lockPath, JSON.stringify({
     pid: 999_999_999,
     startIdentity: "dead",
+    // Same pid namespace as the contenders — dead-pid recovery is instant
+    // there; a lock from a foreign namespace instead expires by heartbeat age.
+    ns: selfPidNamespace(),
     token: "stale",
   }));
   const managerPath = path.join(import.meta.dir, "manager.ts");
