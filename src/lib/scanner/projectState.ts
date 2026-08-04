@@ -4,9 +4,9 @@ import path from "node:path";
 
 import { stateDir } from "@/lib/configDir";
 
-/* 5: canonicalRemote no longer parses scheme remotes (https://…) through the
-   scp matcher, so identities minted from the misparse must re-derive. */
-export const PROJECT_RESOLUTION_VERSION = 5;
+/* 6: a .git directory without HEAD no longer counts as a repository, so
+   unresolved identities minted from vestigial markers must re-derive. */
+export const PROJECT_RESOLUTION_VERSION = 6;
 
 /* Project summaries depend on the attribution facts consumed by
    persistedProjects(). Hashing these stable projections keeps controller
