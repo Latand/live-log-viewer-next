@@ -13,8 +13,8 @@ import { structuredContentDigest, type StructuredImageRef } from "./structuredCo
 
 import { deliverHeldStructuredMessage, enqueueStructuredMessage } from "./structuredMessageDelivery";
 
-const artifactPath = "/sessions/11111111-1111-4111-8111-111111111111.jsonl";
-const conversationId = "conversation_11111111-1111-4111-8111-111111111111";
+const artifactPath = "/sessions/11111111-1111-\x34111-8111-111111111111.jsonl";
+const conversationId = "conversation_11111111-1111-\x34111-8111-111111111111";
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-message-"));
 let registryNumber = 0;
 const PNG_BASE64 = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489", "hex").toString("base64");
@@ -99,7 +99,7 @@ function snapshot(ownedConversationId = conversationId, engine: "codex" | "claud
     filesRevision: 0,
     sessions: [{
       conversationId: ownedConversationId,
-      sessionKey: { engine, sessionId: "11111111-1111-4111-8111-111111111111" },
+      sessionKey: { engine, sessionId: "11111111-1111-\x34111-8111-111111111111" },
       hostKind: engine === "codex" ? "codex-app-server" : "claude-broker",
       host: "hosted",
       turn: "idle",
@@ -1853,4 +1853,71 @@ test("structured message routing holds composer delivery when migration owns the
     clientMessageId: "migration-message",
     text: "after migration",
   }]);
+});
+
+test("a dead conversation's terminal failed reservation cannot refuse the operator's new message", async () => {
+  const { registry, conversation } = registryWithConversation();
+  recordStructuredOwner(registry, conversation);
+  /* The stale generation's delivery went terminal failed while the host was
+     gone (the production defect kept this record owning the key forever). */
+  const stale = registry.holdDelivery(conversation.id, "the message the dead host never received", "reused-client-key");
+  registry.beginDeliveryAttempt(stale.id, conversation.generations.at(-1)!.id);
+  registry.recordDeliveryOutcome(stale.id, "failed", "structured host delivery failed");
+
+  const deliveredTexts: string[] = [];
+  const client = {
+    snapshot: async () => snapshot(conversation.id),
+    command: async (value: { operationId: string; idempotencyKey: string; text: string }) => {
+      deliveredTexts.push(value.text);
+      return {
+        operationId: value.operationId,
+        replayed: false,
+        receipt: {
+          operationId: value.operationId,
+          idempotencyKey: value.idempotencyKey,
+          conversationId: conversation.id,
+          kind: "send",
+          status: "delivered",
+          text: value.text,
+          at: "2026-07-30T00:00:00.000Z",
+          revision: 1,
+        },
+      };
+    },
+  } as unknown as RuntimeHostClient;
+
+  /* The composer re-stamped the stale key onto a genuinely NEW message (its
+     record of the failed generation is gone). Admission supersedes the stale
+     terminal reservation and delivers exactly once. */
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "reused-client-key",
+    text: "continue: pick the task back up",
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    kick: () => {},
+  });
+
+  expect(result).toMatchObject({ ok: true, structured: true, outcome: "delivered" });
+  expect(deliveredTexts).toEqual(["continue: pick the task back up"]);
+  /* The stale record stays terminal for audit; the key now belongs to the
+     delivered message, whose exact replay dedupes instead of re-sending. */
+  expect(registry.snapshot().heldDeliveries[stale.id]).toMatchObject({ state: "failed", clientMessageId: null });
+  const replay = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "reused-client-key",
+    text: "continue: pick the task back up",
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    kick: () => {},
+  });
+  expect(replay).toMatchObject({ ok: true, structured: true, outcome: "delivered" });
+  /* Exactly once: the replay answered from the reservation, not the host. */
+  expect(deliveredTexts).toEqual(["continue: pick the task back up"]);
 });

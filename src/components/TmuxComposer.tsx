@@ -1379,9 +1379,14 @@ export function TmuxComposerCore({
     pendingDeliveries.current = restoredPending;
     setReplayGenerationAvailable(restoredPending.some((entry) => entry.payloadComplete !== false));
     runtimeSendSnapshots.current = new Map();
-    /* Replay ownership survives independently from the editable draft. The
-       next submit resolves the oldest unresolved generation first while text
-       and attachments prepared for a later turn remain in the composer. */
+    /* Replay ownership survives independently from the editable draft: an
+       unresolved generation replays through its durable OUTBOX entry, whose id
+       is its idempotency key. The restored key is NEVER lent to the composer's
+       next submission — a genuinely new message must mint its own key, or a
+       stale unresolved generation (e.g. one stranded by a dead host) would
+       hijack the new message into a replay of its old bytes and, once its
+       durable record went terminal, poison the conversation with reservation
+       conflicts (P1: a dead conversation could not be continued). */
     const draftNow = typeof window !== "undefined" ? sessionStorage.getItem(draftKey(cardId)) ?? "" : "";
     const resumable = restoredPending.find((entry) => entry.payloadComplete !== false);
     const draftImages = readDraftImages(cardId);
@@ -1389,9 +1394,8 @@ export function TmuxComposerCore({
     const trayImages = draftImages ?? (resumable?.text === draftNow ? resumable.images : []);
     const restoredImages = attachments.replace(trayImages.map((image) => ({ ...image })));
     queueMicrotask(() => { attachmentDraftHydrated.current = true; });
-    if (resumable && restoredImages) {
-      idempotencyKey.current = resumable.key;
-      if (resumable.runtimeCaptured) runtimeSendSnapshots.current.set(resumable.key, resumable.runtime);
+    if (resumable && restoredImages && resumable.runtimeCaptured) {
+      runtimeSendSnapshots.current.set(resumable.key, resumable.runtime);
     }
     const reconcilingKeys = restoredPending.filter((entry) => entry.reconciling).map((entry) => entry.key);
     const hasIncompletePayload = restoredPending.some((entry) => entry.payloadComplete === false);
@@ -1590,9 +1594,8 @@ export function TmuxComposerCore({
    * wall — the queue only ever holds messages that may still be delivered.
    */
   /* `preserveDraft` queues a message that stands apart from the operator's
-     current draft — the quick-ack (finding 5). It carries no attachments, mints
-     its OWN idempotency key (leaving the draft's key intact), and leaves the
-     composer's typed text and staged tiles exactly where they were. */
+     current draft — the quick-ack (finding 5). It carries no attachments and
+     leaves the composer's typed text and staged tiles exactly where they were. */
   const queueSubmit = (overrideText?: string, options?: { preserveDraft?: boolean }) => {
     const preserveDraft = options?.preserveDraft ?? false;
     const requestedText = overrideText ?? textRef.current;
@@ -1612,12 +1615,12 @@ export function TmuxComposerCore({
       return;
     }
     if (structuredSession && requestedImages.length && !attachments.validate()) return;
-    /* The entry owns the idempotency key of its generation; the composer mints
-       a fresh one straight away so the next message is a different generation
-       even if it is submitted before this one leaves. A `preserveDraft` ack takes
-       its own fresh key and does not disturb the draft's pending key. */
-    const clientMessageId = preserveDraft ? mintIdempotencyKey() : idempotencyKey.current;
-    if (!preserveDraft) idempotencyKey.current = mintIdempotencyKey();
+    /* Every queued submission is its own logical generation and mints its own
+       fresh key at the moment it enters the queue. Replay identity lives on
+       the durable outbox entry (its id IS the key), never on composer state a
+       remount may have restored from an older unresolved generation — reusing
+       such a key would stamp a NEW message as a replay of stale bytes. */
+    const clientMessageId = mintIdempotencyKey();
     outboxImages.current.set(clientMessageId, requestedImages);
     outboxKeys.current.add(clientMessageId);
     enqueueOutbox(cardId, {

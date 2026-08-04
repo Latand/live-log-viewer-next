@@ -1527,6 +1527,10 @@ interface DeliveryReservationInspection {
   existing: HeldDelivery | undefined;
   requestDigest: string;
   terminalOperationRetry: DeliveryOperationOwner | null;
+  /** A terminal FAILED reservation whose key the request is taking over: it can
+      never actuate, so a changed payload under its client message id is a NEW
+      logical message, not a conflict. `holdDelivery` releases its key claim. */
+  supersededFailed: HeldDelivery | null;
 }
 
 function inspectDeliveryReservation(
@@ -1538,17 +1542,29 @@ function inspectDeliveryReservation(
   commandInput: HeldDeliveryCommandInput,
 ): DeliveryReservationInspection {
   const canonicalId = resolveConversationAlias(file, conversationId);
-  const existing = clientMessageId ? Object.values(file.heldDeliveries).find((item) =>
+  let existing = clientMessageId ? Object.values(file.heldDeliveries).find((item) =>
     resolveConversationAlias(file, item.conversationId) === canonicalId
     && item.clientMessageId === clientMessageId) : undefined;
   const requestedCommand = canonicalHeldDeliveryCommand(commandInput, existing?.id ?? "pending-delivery");
   const requestDigest = heldDeliveryRequestDigest(canonicalId, text, requestedCommand);
   const requestedDigests = heldDeliveryRequestDigests(file, canonicalId, text, requestedCommand);
-  if (existing?.requestDigest && !requestedDigests.has(existing.requestDigest)) {
-    throw new DeliveryReservationConflictError();
-  }
-  if (existing?.contentDigest && contentDigest && contentDigest !== existing.contentDigest) {
-    throw new DeliveryReservationConflictError();
+  const payloadChanged = Boolean(
+    (existing?.requestDigest && !requestedDigests.has(existing.requestDigest))
+    || (existing?.contentDigest && contentDigest && contentDigest !== existing.contentDigest));
+  let supersededFailed: HeldDelivery | null = null;
+  if (payloadChanged) {
+    /* An in-flight or delivered reservation genuinely owns its key: refusing a
+       changed payload is the guard's whole purpose. A terminal FAILED record
+       can never actuate — leaving it the key would poison the conversation
+       forever, refusing every legitimately new message the client stamps with
+       a key whose first attempt it no longer remembers. A corrupt-image
+       failure keeps its claim: its recovery contract is an exact same-key
+       replay. */
+    if (existing!.state !== "failed" || existing!.error === CORRUPT_HELD_DELIVERY_IMAGES_ERROR) {
+      throw new DeliveryReservationConflictError();
+    }
+    supersededFailed = existing!;
+    existing = undefined;
   }
   let terminalOperationRetry: DeliveryOperationOwner | null = null;
   if (!existing && commandInput.operationId) {
@@ -1576,7 +1592,7 @@ function inspectDeliveryReservation(
     }
     if (matchingOwner && operationOwner.terminalState) terminalOperationRetry = clone(operationOwner);
   }
-  return { canonicalId, existing, requestDigest, terminalOperationRetry };
+  return { canonicalId, existing, requestDigest, terminalOperationRetry, supersededFailed };
 }
 
 function terminalDeliveryReplay(
@@ -5878,6 +5894,13 @@ export class AgentRegistry {
         commandInput,
       );
       const { canonicalId, existing, requestDigest } = inspection;
+      /* The stale terminal failed record stays for audit but releases the
+         client message id: the new reservation below owns the key from now on
+         (a dead conversation stays continuable — its poisoned key retires). */
+      if (inspection.supersededFailed) {
+        const stale = file.heldDeliveries[inspection.supersededFailed.id];
+        if (stale) stale.clientMessageId = null;
+      }
       const conversation = file.conversations[canonicalId];
       const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
       const signature = conversation ? migrationReadinessSignature(file, conversation.engine, paths) : "";
