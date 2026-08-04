@@ -57,7 +57,9 @@ export interface ClaudeLoginPorts {
   pidStartToken(pid: number): string | null;
   isExpectedClaude(pid: number): boolean;
   waitForExit(pid: number, startToken: string): Promise<void>;
-  status(home: string): Promise<{ loggedIn: boolean; method: string | null; email: string | null; plan: string | null }>;
+  /** `indeterminate` marks a status read that failed to observe the account
+      (timeout, spawn failure, bad output) — distinct from a live sign-out. */
+  status(home: string): Promise<{ loggedIn: boolean; method: string | null; email: string | null; plan: string | null; indeterminate?: boolean }>;
   now(): number;
   setTimeout(callback: () => void, ms: number): NodeJS.Timeout;
   clearTimeout(timer: NodeJS.Timeout): void;
@@ -104,20 +106,23 @@ export function claudeStatusEnvironment(home: string): NodeJS.ProcessEnv {
   return isSupervisedClaudeHome(home) ? claudeManagedEnvironment(home) : withoutWakatimeCredential(process.env);
 }
 
-async function structuredStatus(home: string): Promise<{ loggedIn: boolean; method: string | null; email: string | null; plan: string | null }> {
+async function structuredStatus(home: string): Promise<{ loggedIn: boolean; method: string | null; email: string | null; plan: string | null; indeterminate?: boolean }> {
   return await new Promise((resolve) => {
     const child = spawn(resolveBinary("claude"), ["auth", "status", "--json"], { env: claudeStatusEnvironment(home), stdio: ["ignore", "pipe", "ignore"], detached: false });
     let text = "";
     child.stdout?.on("data", (part: Buffer) => { if (text.length < OUTPUT_LIMIT) text += part.toString("utf8"); });
-    const timer = setTimeout(() => { child.kill("SIGKILL"); resolve({ loggedIn: false, method: null, email: null, plan: null }); }, 5_000);
+    /* Timeout, spawn failure, and unparseable output say nothing about the
+       account — `indeterminate` lets callers keep the previous auth reading
+       instead of painting a live sign-out they never observed. */
+    const timer = setTimeout(() => { child.kill("SIGKILL"); resolve({ loggedIn: false, method: null, email: null, plan: null, indeterminate: true }); }, 5_000);
     child.once("close", () => {
       clearTimeout(timer);
       try {
         const raw = JSON.parse(text) as Record<string, unknown>;
         resolve({ loggedIn: raw.loggedIn === true, method: typeof raw.authMethod === "string" ? raw.authMethod : null, email: typeof raw.email === "string" ? raw.email : null, plan: typeof raw.subscriptionType === "string" ? raw.subscriptionType : null });
-      } catch { resolve({ loggedIn: false, method: null, email: null, plan: null }); }
+      } catch { resolve({ loggedIn: false, method: null, email: null, plan: null, indeterminate: true }); }
     });
-    child.once("error", () => { clearTimeout(timer); resolve({ loggedIn: false, method: null, email: null, plan: null }); });
+    child.once("error", () => { clearTimeout(timer); resolve({ loggedIn: false, method: null, email: null, plan: null, indeterminate: true }); });
   });
 }
 

@@ -24,7 +24,11 @@ const productionProbe: QuotaProbePort = {
   async probe(engine, account, now) {
     if (engine === "claude") {
       const candidate = account as ClaudeAccount;
-      const auth = await realClaudeLoginPorts.status(candidate.home).catch(() => ({ loggedIn: false }));
+      const auth = await realClaudeLoginPorts.status(candidate.home).catch(() => ({ loggedIn: false, indeterminate: true }));
+      /* An indeterminate status read observed nothing about the account —
+         throwing routes it to the carry-forward path instead of recording a
+         sign-out that never happened. */
+      if (auth.indeterminate) throw new Error("quota-auth-indeterminate");
       const limits = auth.loggedIn
         ? await fetchClaudeLimits(path.join(candidate.home, ".credentials.json"))
         : { data: null, source: "unavailable" as const, reason: "live authentication check failed" };
@@ -55,6 +59,9 @@ const productionProbe: QuotaProbePort = {
       // The reader owns redacted server-local detail and returns a closed code
       // suitable for the durable quota registry.
       const limits = await readCodexLimits({ account: candidate, liveReader: async () => Promise.reject(error) });
+      /* An empty transcript fallback after a failed live probe observed
+         nothing — rethrow so the controller keeps the last known reading. */
+      if (!limits.data) throw error;
       return {
         engine,
         accountId: candidate.id,
@@ -69,17 +76,16 @@ const productionProbe: QuotaProbePort = {
   },
 };
 
-async function mapLimit<T, R>(values: T[], limit: number, visit: (value: T) => Promise<R>): Promise<R[]> {
-  const output = new Array<R>(values.length);
-  let cursor = 0;
-  await Promise.all(Array.from({ length: Math.min(limit, values.length) }, async () => {
-    for (;;) {
-      const index = cursor++;
-      if (index >= values.length) return;
-      output[index] = await visit(values[index]!);
-    }
-  }));
-  return output;
+/* One hung provider (e.g. a wedged Codex app-server) must not delay or blank
+   the other accounts' readings: every account is probed concurrently and a
+   probe that outlives this deadline is treated as failed for this tick. */
+const PROBE_TIMEOUT_MS = 15_000;
+
+function probeTimeout(timeoutMs: number): Promise<never> {
+  return new Promise((_, reject) => {
+    const timer = setTimeout(() => reject(new Error("quota-probe-timeout")), timeoutMs);
+    timer.unref?.();
+  });
 }
 
 export class QuotaController {
@@ -88,27 +94,63 @@ export class QuotaController {
     private readonly probe: QuotaProbePort = productionProbe,
     private readonly bootId = crypto.randomUUID(),
     private readonly now: () => number = () => Date.now(),
+    private readonly probeTimeoutMs: number = PROBE_TIMEOUT_MS,
   ) {}
+
+  /* A failed probe must not erase the last successful reading — the panel
+     always shows the most recent known limits plus when they were observed.
+     The carried observation keeps the previous limits and timestamps and is
+     marked as cache provenance, which keeps it ineligible for auto-balance
+     decisions (those require a fresh live observation). */
+  private carryForward(engine: MigrationEngine, accountId: string, reason: string, now: number): QuotaObservation {
+    const previous = this.registry.readOnlySnapshot().quotaObservations[engine][accountId];
+    if (previous?.limits) {
+      return {
+        engine,
+        accountId,
+        authenticated: previous.authenticated,
+        authCheckedAt: Date.parse(previous.authCheckedAt) || now,
+        limits: previous.limits,
+        provenance: {
+          source: "cache",
+          reason,
+          staleSince: previous.provenance.staleSince ?? previous.observedAt,
+        },
+        observedAt: Date.parse(previous.observedAt) || now,
+        envelope: null,
+      };
+    }
+    return {
+      engine,
+      accountId,
+      authenticated: false,
+      authCheckedAt: now,
+      limits: null,
+      provenance: { source: "unavailable", reason, staleSince: null },
+      observedAt: now,
+      envelope: null,
+    };
+  }
 
   async tick(engine: MigrationEngine): Promise<void> {
     const now = this.now();
     const accounts = this.probe.list(engine);
-    const observations = await mapLimit(accounts, 2, async (account) => {
+    const observations = await Promise.all(accounts.map(async (account) => {
       try {
-        return await this.probe.probe(engine, account, now);
-      } catch {
-        return {
-          engine,
-          accountId: account.id,
-          authenticated: false,
-          authCheckedAt: now,
-          limits: null,
-          provenance: { source: "unavailable" as const, reason: "quota-probe-failed", staleSince: null },
-          observedAt: now,
-          envelope: null,
-        };
+        const observation = await Promise.race([this.probe.probe(engine, account, now), probeTimeout(this.probeTimeoutMs)]);
+        /* An authenticated account whose limits fetch came back empty-handed
+           (rate-limited, provider hiccup) keeps its last known numbers. A live
+           `authenticated: false` answer is a real state change — sign-out must
+           surface, so it records as returned. */
+        if (observation.authenticated && !observation.limits) {
+          return this.carryForward(engine, account.id, observation.provenance.reason ?? "quota-probe-empty", now);
+        }
+        return observation;
+      } catch (error) {
+        const reason = error instanceof Error && error.message === "quota-probe-timeout" ? "quota-probe-timeout" : "quota-probe-failed";
+        return this.carryForward(engine, account.id, reason, now);
       }
-    });
+    }));
     observations.forEach((observation, index) => {
       const account = accounts[index]!;
       logQuotaEvent({

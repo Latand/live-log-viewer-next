@@ -191,6 +191,7 @@ export const en = {
   "accounts.effectiveTip": "{window} binds",
   "accounts.effectiveStale": "{window} binds · stale",
   "accounts.limitsAria": "Quota windows for {label}",
+  "accounts.limitsChecked": "Checked",
   "accounts.limitsStale": "Last known values",
   "accounts.limitsStaleTip": "Last known values — not a live read",
   // Claude sign-in slice (#61)

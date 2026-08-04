@@ -50,6 +50,16 @@ export function windowLabel(t: TFunction, key: WindowKey, windowMinutes: number 
   return t("limits.windowMinutes", { n: Math.round(windowMinutes) });
 }
 
+/** Absolute moment a limits read happened: same-day reads show the hour,
+    older ones the date too. Mirrors {@link formatResetClock} so both timestamps
+    in an account row read identically. */
+export function formatCheckedClock(checkedAt: string): string {
+  const d = new Date(checkedAt);
+  const time = d.toLocaleTimeString(localeBcp47(), { hour: "2-digit", minute: "2-digit", hour12: false });
+  if (Date.now() - d.getTime() < 86_400_000) return time;
+  return d.toLocaleDateString(localeBcp47(), { day: "numeric", month: "short" }) + " " + time;
+}
+
 /** Absolute reset moment: today's resets show the hour, later ones the date too. */
 export function formatResetClock(resetsAt: number, now: number): string {
   const d = new Date(resetsAt * 1000);

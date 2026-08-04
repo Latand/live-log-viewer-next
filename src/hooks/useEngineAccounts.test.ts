@@ -62,9 +62,15 @@ test("parseAccountLimits keeps fresh/stale reads with their windows and drops th
   expect(parseAccountLimits({ state: "fresh", session: null, weekly: null })).toBeNull();
   // A malformed window is dropped; a valid sibling survives. resetsAt is optional.
   expect(parseAccountLimits({ state: "fresh", session: { usedPercent: "nope" }, weekly: { usedPercent: 40, resetsAt: 1_700_000_000 } }))
-    .toEqual({ freshness: "fresh", session: null, weekly: { usedPercent: 40, resetsAt: 1_700_000_000, windowMinutes: null } });
+    .toEqual({ freshness: "fresh", session: null, weekly: { usedPercent: 40, resetsAt: 1_700_000_000, windowMinutes: null }, checkedAt: null });
   expect(parseAccountLimits({ state: "stale", session: { usedPercent: 88, resetsAt: null }, weekly: null }))
-    .toEqual({ freshness: "stale", session: { usedPercent: 88, resetsAt: null, windowMinutes: null }, weekly: null });
+    .toEqual({ freshness: "stale", session: { usedPercent: 88, resetsAt: null, windowMinutes: null }, weekly: null, checkedAt: null });
+  // The observation timestamp survives the projection so the panel can say
+  // when the numbers were last read; garbage timestamps degrade to null.
+  expect(parseAccountLimits({ state: "stale", session: { usedPercent: 10, resetsAt: null }, weekly: null, checkedAt: "2026-08-04T09:00:00.000Z" })?.checkedAt)
+    .toBe("2026-08-04T09:00:00.000Z");
+  expect(parseAccountLimits({ state: "fresh", session: { usedPercent: 10, resetsAt: null }, weekly: null, checkedAt: "not-a-date" })?.checkedAt)
+    .toBeNull();
 });
 
 test("a store parses per-account session/weekly limit windows for the panel", async () => {
@@ -89,7 +95,7 @@ test("a store parses per-account session/weekly limit windows for the panel", as
   const store = createEngineAccountsStore("claude", { fetcher });
   const unsub = store.subscribe(() => {});
   await advance();
-  expect(store.accounts[0]?.limits).toEqual({ freshness: "fresh", session: { usedPercent: 88, resetsAt: 1_700_000_000, windowMinutes: null }, weekly: { usedPercent: 30, resetsAt: 1_700_500_000, windowMinutes: null } });
+  expect(store.accounts[0]?.limits).toEqual({ freshness: "fresh", session: { usedPercent: 88, resetsAt: 1_700_000_000, windowMinutes: null }, weekly: { usedPercent: 30, resetsAt: 1_700_500_000, windowMinutes: null }, checkedAt: null });
   expect(store.accounts[1]?.limits).toBeNull();
   unsub();
 });

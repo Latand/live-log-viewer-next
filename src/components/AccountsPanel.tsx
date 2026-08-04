@@ -16,7 +16,7 @@ import { handleOverlayEscape } from "@/lib/overlay";
 
 import { Loader2, SquareTerminal, Trash2, X } from "./icons";
 import { Badge } from "./ui/Badge";
-import { formatResetClock, formatResetEta, windowLabel } from "./rateLimit";
+import { formatCheckedClock, formatResetClock, formatResetEta, windowLabel } from "./rateLimit";
 import { engineTintOf } from "./utils";
 
 /** Amber that clears contrast on the panel background — state legibility never
@@ -89,8 +89,15 @@ function AccountLimitsDetail({ account, engine }: { account: AccountOption; engi
     >
       {/* Freshness is a visible, screen-reader-readable line — not opacity or a
           title tooltip alone (touch has no hover, and `title` AT support is
-          spotty), so historical numbers never read as current. */}
-      {stale ? <div className="text-[9.5px] font-semibold text-secondary">{t("accounts.limitsStale")}</div> : null}
+          spotty), so historical numbers never read as current. The check time
+          renders for fresh reads too — the panel always says when the numbers
+          were last observed. */}
+      {stale || limits.checkedAt ? (
+        <div className="text-[9.5px] font-semibold text-secondary">
+          {stale ? t("accounts.limitsStale") : t("accounts.limitsChecked")}
+          {limits.checkedAt ? ` · ${formatCheckedClock(limits.checkedAt)}` : null}
+        </div>
+      ) : null}
       {windows.map(({ key, label, window: w }) => {
         const left = Math.max(0, Math.min(100, 100 - w.usedPercent));
         const color = capacityColor(left, tint.color);

@@ -106,6 +106,8 @@ export type AccountLimits = {
   freshness: "fresh" | "stale";
   session: AccountLimitWindow | null;
   weekly: AccountLimitWindow | null;
+  /** ISO timestamp of the read these numbers come from, when the route sent one. */
+  checkedAt?: string | null;
 };
 
 export type AccountAuthHealth = "authenticated" | "signed_out" | "unknown" | "error";
@@ -151,7 +153,8 @@ export function parseAccountLimits(raw: unknown): AccountLimits | null {
   const session = parseLimitWindow(record.session);
   const weekly = parseLimitWindow(record.weekly);
   if (!session && !weekly) return null;
-  return { freshness, session, weekly };
+  const checkedAt = typeof record.checkedAt === "string" && Number.isFinite(Date.parse(record.checkedAt)) ? record.checkedAt : null;
+  return { freshness, session, weekly, checkedAt };
 }
 export type AccountLoadState = "loading" | "ready" | "error";
 export type AccountOperation = "refresh" | "add" | "switch" | "login" | "remove" | "terminal";

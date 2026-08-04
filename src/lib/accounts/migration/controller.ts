@@ -44,9 +44,17 @@ export async function reconcileAccountMigrationCycle(
 ): Promise<void> {
   registry.compactDeliveryReservations();
   await yieldToRuntime();
-  await reconcileMigrations(provider, delivery, registry);
-  await yieldToRuntime();
-  await Promise.all([quota.tick("claude"), quota.tick("codex")]);
+  /* Quota ticks run alongside migration reconciliation, not after it: a slow
+     or stuck migration pass (lock contention, wedged provider) must never
+     leave the account panel without fresh limits readings. Migration
+     decisions already consume the previous tick's durable observations, so
+     ordering between the two is immaterial. */
+  const quotaTicks = Promise.all([quota.tick("claude"), quota.tick("codex")]);
+  try {
+    await reconcileMigrations(provider, delivery, registry);
+  } finally {
+    await quotaTicks;
+  }
 }
 
 export function syncCompatibilityRouting(registry: AgentRegistry): void {
