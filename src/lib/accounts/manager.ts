@@ -121,6 +121,20 @@ export const accountManager: AccountManager = {
       : selected;
   },
   resolveTranscriptOwner(engine, transcript) {
+    /* Registry first (issue #891, phase 0): the durable generation record
+       names the owning account directly. Path-layout derivation below stays
+       as recovery for artifacts the registry never saw — it collapses once
+       transcript roots stop being account-scoped. */
+    const recorded = agentRegistry().transcriptAccountId(engine, transcript);
+    if (recorded) {
+      if (engine === "claude") {
+        const item = listClaudeAccounts().find((candidate) => candidate.id === recorded);
+        if (item) return { engine, accountId: item.id, kind: item.kind, home: item.home, transcriptRoot: item.projectsDir, env: item.kind === "managed" ? claudeManagedEnvironment(item.home) : withoutWakatimeCredential(process.env) };
+      } else {
+        const item = listCodexAccounts().find((candidate) => candidate.id === recorded);
+        if (item) return { engine, accountId: item.id, kind: item.kind, home: item.home, transcriptRoot: item.sessionsDir, env: { ...withoutWakatimeCredential(process.env), CODEX_HOME: item.home } };
+      }
+    }
     if (engine === "claude") { const home = claudeHomeOwningTranscript(transcript); if (!home) return null; const item = listClaudeAccounts().find((candidate) => candidate.home === home); return item ? { engine, accountId: item.id, kind: item.kind, home, transcriptRoot: item.projectsDir, env: item.kind === "managed" ? claudeManagedEnvironment(home) : withoutWakatimeCredential(process.env) } : null; }
     const home = codexHomeOwningSessionPath(transcript); if (!home) return null; const item = listCodexAccounts().find((candidate) => candidate.home === home); return item ? { engine, accountId: item.id, kind: item.kind, home, transcriptRoot: item.sessionsDir, env: { ...withoutWakatimeCredential(process.env), CODEX_HOME: home } } : null;
   },
