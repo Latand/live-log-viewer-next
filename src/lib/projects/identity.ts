@@ -16,15 +16,27 @@ export function displayNameFromProjectIdentity(project: string): string {
   return project;
 }
 
+/* Every real git directory carries HEAD; tooling sometimes plants a vestigial
+   `.git/` holding only auxiliary files (a bare `info/exclude` in the operator's
+   home directory swallowed 1000+ conversations into "Unresolved project").
+   Git itself refuses such a directory, so the identity walk must too — an
+   unvalidated marker turns the whole subtree into a phantom repository root. */
+function looksLikeGitDirectory(directory: string): boolean {
+  try { return fs.statSync(path.join(directory, "HEAD")).isFile(); }
+  catch { return false; }
+}
+
 function gitDirectory(root: string): string | null {
   const marker = path.join(root, ".git");
   try {
     const stat = fs.lstatSync(marker);
-    if (stat.isDirectory()) return marker;
+    if (stat.isDirectory()) return looksLikeGitDirectory(marker) ? marker : null;
     if (!stat.isFile()) return null;
     const pointer = fs.readFileSync(marker, "utf8").slice(0, 4096);
     const target = /^gitdir:\s*(.+?)\s*$/im.exec(pointer)?.[1];
-    return target ? path.resolve(root, target) : null;
+    if (!target) return null;
+    const resolved = path.resolve(root, target);
+    return looksLikeGitDirectory(resolved) ? resolved : null;
   } catch {
     return null;
   }

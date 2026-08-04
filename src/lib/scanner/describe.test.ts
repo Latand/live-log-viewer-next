@@ -28,6 +28,7 @@ function createRepository(
   remote = "ssh://git@example.invalid/team/shared-repository.git",
 ) {
   fs.mkdirSync(path.join(root, ".git"), { recursive: true });
+  fs.writeFileSync(path.join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
   fs.writeFileSync(path.join(root, ".git", "config"), [
     '[remote "origin"]',
     `\turl = ${remote}`,
@@ -346,6 +347,7 @@ test("a project-state change recomputes only the overlay, never transcript metad
   // The checkout appears (reconciliation would rewrite the project state and
   // change the resolution state key with it).
   fs.mkdirSync(path.join(repo, ".git", "worktrees", "live-log-viewer-split-branch"), { recursive: true });
+  fs.writeFileSync(path.join(repo, ".git", "worktrees", "live-log-viewer-split-branch", "HEAD"), "ref: refs/heads/main\n");
   fs.mkdirSync(worktree, { recursive: true });
   fs.writeFileSync(
     path.join(worktree, ".git"),
@@ -411,6 +413,7 @@ test("a wrong-HOME durable mapping is corrected by repository evidence after wor
   const identity = createRepository(repo);
   const worktree = path.join(base, "live-log-viewer-branchx");
   fs.mkdirSync(path.join(repo, ".git", "worktrees", "live-log-viewer-branchx"), { recursive: true });
+  fs.writeFileSync(path.join(repo, ".git", "worktrees", "live-log-viewer-branchx", "HEAD"), "ref: refs/heads/main\n");
   fs.mkdirSync(worktree, { recursive: true });
   fs.writeFileSync(
     path.join(worktree, ".git"),

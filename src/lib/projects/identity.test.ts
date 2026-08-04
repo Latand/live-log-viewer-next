@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { afterAll, expect, test } from "bun:test";
 
-import { projectIdentityFromRepositoryRoot } from "./identity";
+import { projectIdentityFromRepositoryRoot, repositoryRootForPath } from "./identity";
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-project-identity-"));
 
@@ -15,6 +15,7 @@ afterAll(() => {
 function createRepository(name: string, remote: string): string {
   const root = path.join(SANDBOX, name);
   fs.mkdirSync(path.join(root, ".git"), { recursive: true });
+  fs.writeFileSync(path.join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
   fs.writeFileSync(path.join(root, ".git", "config"), [
     '[remote "origin"]',
     `\turl = ${remote}`,
@@ -26,6 +27,7 @@ function createRepository(name: string, remote: string): string {
 function createLocalRepository(name: string): string {
   const root = path.join(SANDBOX, name);
   fs.mkdirSync(path.join(root, ".git"), { recursive: true });
+  fs.writeFileSync(path.join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
   fs.writeFileSync(path.join(root, ".git", "config"), "[core]\n\trepositoryformatversion = 0\n");
   return root;
 }
@@ -63,4 +65,15 @@ test("a local repository without origin still has one stable non-unresolved iden
     canonicalRemote: `local:${root}`,
   });
   expect(first?.project).toMatch(/^repo-[a-f0-9]{32}$/);
+});
+
+test("a vestigial .git directory without HEAD is not a repository", () => {
+  const root = path.join(SANDBOX, "vestigial-home");
+  // Tooling plants auxiliary files like info/exclude without ever running
+  // `git init` to completion — git itself refuses such a directory.
+  fs.mkdirSync(path.join(root, ".git", "info"), { recursive: true });
+  fs.writeFileSync(path.join(root, ".git", "info", "exclude"), "**/ignored\n");
+
+  expect(projectIdentityFromRepositoryRoot(root)).toBeNull();
+  expect(repositoryRootForPath(path.join(root, "nested", "dir"))).toBeNull();
 });
