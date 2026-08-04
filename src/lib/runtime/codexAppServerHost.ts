@@ -9,7 +9,7 @@ import { headlessCodexThreadConfig } from "@/lib/codexHeadlessConfig";
 import { grantedPluginServerNames, grantedPlugins } from "@/lib/agent/pluginAllowlist";
 import { hardenedRedact } from "@/lib/view/compactText";
 import { decodeCodexStructuredUserText, encodeCodexStructuredUserText } from "./codexStructuredUserText";
-import { CodexReplayFrameReducer, ReplayFrameOverflowError, sanitizeCodexImageFrame, type ImageSink, type ReplayFrameBudgets } from "./codexImageFrames";
+import { CodexReplayFrameReducer, ReplayFrameOverflowError, sanitizeCodexImageFrame, shrinkReducedReplayFrame, type ImageSink, type ReplayFrameBudgets } from "./codexImageFrames";
 import { MAX_STRUCTURED_IMAGE_ENCODED_BYTES, runtimeImageStore } from "./runtimeImageStore";
 import { STRUCTURED_IMAGE_CAPABILITY, type StructuredImageRef } from "./structuredContent";
 import {
@@ -316,6 +316,12 @@ const REPLAY_ENVELOPE_METHODS = new Set(["thread/resume", "thread/read"]);
 const REPLAY_REDUCTION_THRESHOLD_BYTES = MAX_REPLAY_ENVELOPE_BYTES;
 const REPLAY_STRING_UNITS = 16 * 1024;
 const MAX_REPLAY_RAW_UNITS = 512 * 1024 * 1024;
+/* The streaming pass bounds memory, not the final frame: a history-heavy
+   envelope can exceed MAX_LINE_BYTES on structure alone even with every
+   string capped, and unit counts undercount UTF-8 bytes for non-ASCII text.
+   `shrinkReducedReplayFrame` brings the finished frame under MAX_LINE_BYTES
+   with progressively smaller string caps instead of failing the resume. */
+const REPLAY_STREAM_OUTPUT_UNITS = 64 * 1024 * 1024;
 const MAX_TRACKED_REPLAY_ENVELOPE_REQUESTS = 64;
 /* Codex serializes responses as `{"id":N,"result":…}` (the test fake keeps the
    `jsonrpc` member first); anything else fails closed like before. */
@@ -325,7 +331,7 @@ const REPLAY_FRAME_BUDGETS: ReplayFrameBudgets = {
   /* Keep a full admissible image encoding intact (plus data-URL prefix room)
      so replayed inline images still collapse into bounded references. */
   maxImageStringUnits: MAX_STRUCTURED_IMAGE_ENCODED_BYTES + 64,
-  maxOutputUnits: MAX_LINE_BYTES,
+  maxOutputUnits: REPLAY_STREAM_OUTPUT_UNITS,
   maxRawUnits: MAX_REPLAY_RAW_UNITS,
 };
 const MAX_STDERR_TAIL_BYTES = 16 * 1024;
@@ -2439,6 +2445,9 @@ export class CodexAppServerHost implements EngineHost {
     let reduced: string;
     try {
       reduced = reducer.finish().trim();
+      if (Buffer.byteLength(reduced) > MAX_LINE_BYTES) {
+        reduced = shrinkReducedReplayFrame(reduced, MAX_LINE_BYTES, REPLAY_FRAME_BUDGETS).trim();
+      }
     } catch (error) {
       this.fail(error instanceof ReplayFrameOverflowError ? error : new Error(safeError(error)));
       return;
