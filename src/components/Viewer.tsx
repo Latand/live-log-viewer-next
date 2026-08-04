@@ -23,6 +23,7 @@ import type { FileEntry } from "@/lib/types";
 import { attentionId, buildAttentionQueue, nextAttention, STALLED_ATTENTION_TTL, type AttentionItem } from "./attention";
 import { AttentionHost } from "./attention/AttentionHost";
 import { purgeLegacyOperatorCredential } from "./operatorCredential";
+import { ArtifactPreviewHost } from "./preview/ArtifactPreviewHost";
 import { VoiceBridgeRelayHost } from "./voice/VoiceBridgeRelayHost";
 import { VoiceComposerHost } from "./voice/VoiceComposerHost";
 import { VoicePipHost } from "./voice/VoicePipHost";
@@ -528,6 +529,19 @@ export function Viewer() {
       if (targetProject && targetProject !== project) applyProject(targetProject);
       if (path) requestFocus(path);
     },
+    /* The typed entry a VERIFIED attention arrival owes (#866 production
+       regression) — record only, no placement and no camera. Identity comes
+       from the scanned entry when the poll has it; a path the polls have not
+       produced yet still records by bounded path identity, so Back after a
+       `show` handoff stays inside the document. The operator was moved, so a
+       still-unresolved deep-link intent must not re-steal the camera later —
+       the same rule `requestFocus` applies. */
+    recordFocusArrival: (path, targetProject) => {
+      setPendingHash(null);
+      const file = filesRef.current.find((entry) => entry.path === path);
+      if (file) recordFocusNavigation(file, projectKey(file));
+      else recordFocusNavigation({ path }, targetProject);
+    },
   }), [project, selectProject, requestFocus, placeOnBoard, openPathQuiet, applyProject]);
 
   /* The N-cycle position anchors to an id: an item answered elsewhere drops
@@ -867,6 +881,11 @@ export function Viewer() {
           root agent's focus handoff when there is one to answer. Renders
           nothing at all the rest of the time. */}
       <AttentionHost mobile={isMobile} />
+      {/* #875: the ONE document preview surface. Transcript artifact links
+          publish to its bus from anywhere in the feed; it renders nothing until
+          one opens, and its state is pure same-document React state — no hash,
+          no history entry, no snapshot. */}
+      <ArtifactPreviewHost mobile={isMobile} />
       {/* #691: the ONE voice conversation panel, portalled into the card's dock
           slot or the floating PiP window. Mounted here rather than in the card
           because the card unmounts on board navigation while the call keeps

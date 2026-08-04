@@ -3,6 +3,10 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
+import { artifactContentUrl } from "@/components/preview/artifactResource";
+import { openArtifactPreview } from "@/components/preview/previewBus";
+import { classifyArtifact } from "@/lib/artifact/classify";
+
 import { CopyButton, copyText } from "./CopyButton";
 import { useHighlighted } from "./highlight";
 import { Lightbox } from "./Lightbox";
@@ -87,15 +91,46 @@ function linkHref(raw: string): string {
   return href;
 }
 
-function Anchor({ href, label }: { href: string; label: string }) {
-  const external = /^https?:\/\//.test(href);
+const ANCHOR_CLASS = "break-all text-accent underline decoration-accent/40 underline-offset-2 hover:decoration-accent";
+
+/** The local spelling of a link, or null when it is not a local path. */
+function localPath(href: string): string | null {
+  const local = href.replace(/^file:\/\//, "");
+  return /^(?:\/|~\/)/.test(local) ? local : null;
+}
+
+function Anchor({ href: raw, label }: { href: string; label: string }) {
+  const href = raw.replace(/\\([()])/g, "$1");
+  const local = localPath(href);
+  /* A linked local artifact (issue #875) opens the in-app preview surface —
+     same-document, no navigation, no history entry. The href still names the
+     resource route so copy/middle-click keep working; everything else keeps
+     the legacy behavior (`#f=` conversation deep link, ordinary web anchor). */
+  const artifact = local !== null && classifyArtifact(local) !== null;
+  if (artifact) {
+    return (
+      <a
+        href={artifactContentUrl(local!)}
+        title={href}
+        className={ANCHOR_CLASS}
+        onClick={(event) => {
+          event.preventDefault();
+          openArtifactPreview(local!);
+        }}
+      >
+        {label}
+      </a>
+    );
+  }
+  const resolved = local !== null ? linkHref(raw) : href;
+  const external = /^https?:\/\//.test(resolved);
   return (
     <a
-      href={href}
+      href={resolved}
       target={external ? "_blank" : undefined}
       rel={external ? "noreferrer" : undefined}
       title={href}
-      className="break-all text-accent underline decoration-accent/40 underline-offset-2 hover:decoration-accent"
+      className={ANCHOR_CLASS}
     >
       {label}
     </a>
@@ -117,7 +152,7 @@ function MdImage({ alt, src }: { alt: string; src: string }) {
   const [full, setFull] = useState(false);
   const [failed, setFailed] = useState(false);
   const resolved = imageSrc(src);
-  if (failed) return <Anchor href={linkHref(src)} label={alt || src} />;
+  if (failed) return <Anchor href={src} label={alt || src} />;
   return (
     <>
       {/* eslint-disable-next-line @next/next/no-img-element -- arbitrary local/remote src, next/image cannot serve it */}
@@ -159,7 +194,7 @@ export function md(text: string): ReactNode {
     if (image) return <MdImage key={i} alt={image[1]} src={image[2]} />;
     const linked = part.match(/^\[([^\]]+)\]\(([^)\s]+)\)$/);
     if (linked) {
-      return <Anchor key={i} href={linkHref(linked[2])} label={linked[1]} />;
+      return <Anchor key={i} href={linked[2]} label={linked[1]} />;
     }
     if (/^https?:\/\//.test(part)) {
       /* Bare URLs in prose often carry sentence punctuation; keep it as text. */

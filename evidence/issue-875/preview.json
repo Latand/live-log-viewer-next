@@ -1,0 +1,369 @@
+{
+  "issue": 875,
+  "capturedAt": "2026-08-04T04:53:55.883Z",
+  "buildHead": "2341993bf13dda5c2e8b1ec1f6068dd24d558d75",
+  "runner": "exact-head production build served by `next start` over the isolated demo runtime (fixtures/demo-home); synthetic runtime-generated artifact fixtures; headless host Chrome over raw CDP",
+  "screenshots": [
+    "desktop-pdf.png",
+    "desktop-image.png",
+    "desktop-text.png",
+    "desktop-missing.png",
+    "desktop-oversized.png",
+    "desktop-changed.png",
+    "mobile-text.png",
+    "mobile-pdf.png"
+  ],
+  "checks": [
+    {
+      "name": "production route serves text with nosniff + no-store + inline disposition",
+      "pass": true,
+      "detail": {
+        "content-disposition": "inline; filename=\"run.log\"",
+        "content-length": "617824",
+        "content-security-policy": "sandbox; default-src 'none'; script-src 'none'; style-src 'unsafe-inline'",
+        "content-type": "text/plain; charset=utf-8",
+        "x-content-type-options": "nosniff"
+      }
+    },
+    {
+      "name": "production route answers single byte ranges with 206 + Content-Range",
+      "pass": true,
+      "detail": {
+        "status": 206,
+        "contentRange": "bytes 0-1023/221248"
+      }
+    },
+    {
+      "name": "unsatisfiable range is 416",
+      "pass": true,
+      "detail": 416
+    },
+    {
+      "name": "traversal, out-of-root and symlink-escape reads are all 403",
+      "pass": true,
+      "detail": {
+        "traversal": 403,
+        "outside": 403,
+        "symlink": 403
+      }
+    },
+    {
+      "name": "transcript .jsonl is refused as unsupported",
+      "pass": true,
+      "detail": 415
+    },
+    {
+      "name": "markup renamed to .png is refused (magic-byte disagreement)",
+      "pass": true,
+      "detail": 415
+    },
+    {
+      "name": "a file over the configured bound is 413",
+      "pass": true,
+      "detail": 413
+    },
+    {
+      "name": "a cross-origin caller is rejected",
+      "pass": true,
+      "detail": 403
+    },
+    {
+      "name": "a mid-stream abort resolves client-side",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "the server keeps serving after an aborted stream",
+      "pass": true,
+      "detail": 206
+    },
+    {
+      "name": "draft typed + voice sentinel + card identity captured",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "preview is a labelled dialog and focus moved inside",
+      "pass": true,
+      "detail": {
+        "role": "dialog",
+        "modal": "true",
+        "label": "report.pdf — document preview",
+        "focusInside": true,
+        "labels": [
+          "Close preview",
+          "Download file",
+          "Open in a new tab"
+        ]
+      }
+    },
+    {
+      "name": "pdf page navigation, zoom and fit-width controls work",
+      "pass": true,
+      "detail": {
+        "page": "Page 2 of 3",
+        "fitPressed": "true"
+      }
+    },
+    {
+      "name": "pdf.js loaded the document through multiple /api/artifact requests (ranged transport)",
+      "pass": true,
+      "detail": 2
+    },
+    {
+      "name": "image preview renders with intrinsic dimensions",
+      "pass": true,
+      "detail": {
+        "dims": "64 × 40",
+        "kind": "image"
+      }
+    },
+    {
+      "name": "search input accepted a query",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "search prev/next walk the occurrence list the counter reports",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "bounded text offered an explicit Load more",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "text search counted matches in the loaded portion and wrap toggles",
+      "pass": true,
+      "detail": {
+        "matches": "1/94",
+        "loaded": "Loaded 256 KiB of 603 KiB",
+        "wrapPressed": "true"
+      }
+    },
+    {
+      "name": "opening/switching previews added only /api/artifact requests (no snapshot, scan or transcript rescan)",
+      "pass": true,
+      "detail": [
+        "/api/artifact"
+      ]
+    },
+    {
+      "name": "previews wrote no history entries and never reloaded the document",
+      "pass": true,
+      "detail": {
+        "before": {
+          "pushes": 0,
+          "replaces": 0,
+          "paths": [
+            "/api/board",
+            "/api/attention",
+            "/api/tmux/targets",
+            "/api/view/presence",
+            "/api/tts/backend"
+          ]
+        },
+        "after": {
+          "pushes": 0,
+          "replaces": 0,
+          "nav": 1
+        }
+      }
+    },
+    {
+      "name": "draft, voice sentinel, card DOM identity and geometry survived preview open/switch",
+      "pass": true,
+      "detail": {
+        "pushes": 0,
+        "replaces": 0,
+        "paths": [
+          "/api/board",
+          "/api/attention",
+          "/api/tmux/targets",
+          "/api/view/presence",
+          "/api/tts/backend",
+          "/api/artifact"
+        ],
+        "marker": "alive",
+        "nav": 1,
+        "draft": "issue-875 draft survives preview and traversal",
+        "sentinel": "issue-875-voice-session-alive",
+        "cardAlive": true,
+        "rectSame": true,
+        "sheetCount": 1
+      }
+    },
+    {
+      "name": "Back/Forward kept the same document, draft, sentinel and preview surface",
+      "pass": true,
+      "detail": {
+        "marker": "alive",
+        "nav": 1,
+        "draft": "issue-875 draft survives preview and traversal",
+        "sentinel": "issue-875-voice-session-alive",
+        "sheet": true
+      }
+    },
+    {
+      "name": "Escape closed the preview and focus returned to the originating link",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "missing, denied, symlink-escape, mismatch and oversized states all rendered explicitly",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "changed state offered Reload",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "396px mobile preview is a full-height labelled dialog with 44px touch targets",
+      "pass": true,
+      "detail": {
+        "role": "dialog",
+        "label": "run.log — document preview",
+        "fullHeight": true,
+        "fullWidth": true,
+        "closeBox": {
+          "w": 44,
+          "h": 44
+        },
+        "marker": "alive",
+        "nav": 1
+      }
+    },
+    {
+      "name": "every interactive control in the mobile text preview is at least 44px",
+      "pass": true,
+      "detail": [
+        {
+          "label": "Download file",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Open in a new tab",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Close preview",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Search loaded text",
+          "w": 192,
+          "h": 44
+        },
+        {
+          "label": "Previous match",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Next match",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Wrap lines",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Load more",
+          "w": 81,
+          "h": 44
+        }
+      ]
+    },
+    {
+      "name": "every interactive control in the mobile pdf preview is at least 44px",
+      "pass": true,
+      "detail": [
+        {
+          "label": "Download file",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Open in a new tab",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Close preview",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Previous page",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Next page",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Zoom out",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Zoom in",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Fit width",
+          "w": 44,
+          "h": 44
+        }
+      ]
+    },
+    {
+      "name": "every interactive control in the mobile image preview is at least 44px",
+      "pass": true,
+      "detail": [
+        {
+          "label": "Download file",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Open in a new tab",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Close preview",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Zoom out",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Zoom in",
+          "w": 44,
+          "h": 44
+        },
+        {
+          "label": "Fit to pane",
+          "w": 44,
+          "h": 44
+        }
+      ]
+    }
+  ],
+  "verdict": "PASS"
+}

@@ -146,14 +146,18 @@ export async function runFocusHandoff(
 ): Promise<FocusHandoffResult> {
   const project = focusHandoffProject(request);
   const shell = bus.shell();
-  /* A handoff that will OPEN a conversation is ONE gesture, so it must leave
-     ONE history entry (issue #866 review): the project applies quietly here —
-     early, because the target board has to publish before the resolution below
-     can run — and the single entry is recorded by `openPath` further down. A
-     frame-only handoff is a lone project switch and records as before. */
-  const opensConversation = request.intent === "open" && request.target.kind === "conversation";
+  /* EVERY conversation handoff is ONE gesture, so it must leave ONE history
+     entry (issue #866, both rounds): the project applies quietly here — early,
+     because the target board has to publish before the resolution below can
+     run — and the single entry is the transaction's verified-arrival record
+     (which, for `open`, the quiet open coalesces with). Letting `openProject`
+     record its own project navigation under that entry would make Back a
+     two-press traversal through a state that was never a gesture. A handoff
+     with no conversation behind it stays a lone project switch and records
+     as before. */
+  const conversationHandoff = request.target.kind === "conversation";
   if (shell && shell.project !== project) {
-    if (opensConversation) shell.openConversation(project, null);
+    if (conversationHandoff) shell.openConversation(project, null);
     else shell.openProject(project);
   }
 
@@ -253,11 +257,37 @@ function cameraAtFrame(camera: FocusObservation["camera"], frame: FocusFrame): b
  * only then returns a result the caller may report. The signal ends it at any
  * step: an aborted transaction reports `aborted` and the caller posts
  * NOTHING — the server's own bounded deadline closes the record honestly.
+ *
+ * The settled arrival is also where the gesture enters focus history (#866
+ * production regression): every successful conversation-target handoff —
+ * `show` exactly as `open` — records ONE typed same-document entry through
+ * the shell, and only here. `show` used to move the camera and record
+ * nothing, so the next Back left the in-app stack, crossed the document
+ * boundary and terminated the active voice conversation. Recording at this
+ * one exit keeps the invariant structural: a lost or aborted transaction
+ * records nothing (nothing verified an arrival — the resume owes the entry
+ * later), a replayed request never reaches a second transaction, and the
+ * history layer's own coalescing (`decideFocusAction`) absorbs the `open`
+ * path's quiet-open record beside it.
  */
 export async function runFocusTransaction(
   request: Pick<AttentionRequestV1, "target" | "frameAtCreation" | "intent" | "zoom">,
   bus: FocusHandoffBus,
   options: FocusTransactionOptions = {},
+): Promise<FocusHandoffResult> {
+  const result = await settleFocusTransaction(request, bus, options);
+  if (result.moved && result.aborted !== true && request.target.kind === "conversation") {
+    bus.shell()?.recordFocusArrival?.(request.target.path, focusHandoffProject(request));
+  }
+  return result;
+}
+
+/** The move and the observed-postcondition wait, without the arrival record —
+    see `runFocusTransaction`, whose one exit owns that record. */
+async function settleFocusTransaction(
+  request: Pick<AttentionRequestV1, "target" | "frameAtCreation" | "intent" | "zoom">,
+  bus: FocusHandoffBus,
+  options: FocusTransactionOptions,
 ): Promise<FocusHandoffResult> {
   const aborted = (): boolean => options.signal?.aborted === true;
   if (aborted()) return { resolution: "lost", moved: false, frame: null, aborted: true };
