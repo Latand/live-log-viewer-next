@@ -23,6 +23,14 @@ export function isCanonicalProjectId(project: string): boolean {
   return /^(?:repo|dir)-[0-9a-f]{32}$/.test(project);
 }
 
+/** Repository identities only — the shape eligible for repository-binding
+    convergence. Directory identities never converge through bindings: a
+    folder group and a repository must stay distinct projects no matter which
+    sessions inside them share a repository. */
+export function isRepositoryProjectId(project: string): boolean {
+  return /^repo-[0-9a-f]{32}$/.test(project);
+}
+
 /** Stable identity for a cwd with no repository (operator decision,
     2026-08-04): the directory itself is the project, so sessions in plain
     folders group by folder instead of pooling in "Unresolved project". The
