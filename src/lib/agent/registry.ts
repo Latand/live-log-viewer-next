@@ -64,7 +64,11 @@ import {
   resolveRegistryBackend,
   type RegistryBackendResolution,
 } from "./registryBackendIdentity";
-import { SqliteAgentRegistryStore, type SqliteRegistrySnapshot } from "./sqliteRegistryStore";
+import {
+  SqliteAgentRegistryStore,
+  type SqliteRegistryReplacement,
+  type SqliteRegistrySnapshot,
+} from "./sqliteRegistryStore";
 import type { ResumePaneRecord } from "@/lib/resumePanesFile";
 import { parseMessageOrigin } from "@/lib/runtime/messageOrigin";
 import { assertStructuredTextEnvelope, parseStructuredImageRefs, structuredContent, type StructuredImageRef } from "@/lib/runtime/structuredContent";
@@ -3550,8 +3554,20 @@ export class AgentRegistry {
       if (changed) writeAtomicPayload(this.filename, payload);
       if (sqlite && !changed) this.assertSqliteParity();
       if (sqlite && changed) {
-        this.beforeDualWriteMutationReplace?.();
-        const replacement = this.sqliteStore!.replace(file, sqlite.revision);
+        let replacement: SqliteRegistryReplacement;
+        try {
+          this.beforeDualWriteMutationReplace?.();
+          replacement = this.sqliteStore!.replace(file, sqlite.revision);
+        } catch (error) {
+          const durableSqlite = this.sqliteStore!.snapshot();
+          if (durableSqlite.revision === sqlite.revision) {
+            if (original.payload === null) writeAtomic(this.filename, original.file, sqlite.revision);
+            else writeAtomicPayload(this.filename, original.payload);
+          } else {
+            this.mirrorSqliteSnapshot(durableSqlite);
+          }
+          throw error;
+        }
         if (!replacement.replaced) {
           this.mirrorSqliteSnapshot(replacement);
           throw new RegistryParityError(
@@ -3728,6 +3744,30 @@ export class AgentRegistry {
             && (existing.supersedes?.conversationId ?? null) === supersedes
             && existing.launchProfile.permissionMode === profile.permissionMode
             && titleCompatible;
+          if (compatible && !existingTitle && requestedTitle) {
+            existing.launchProfile.title = requestedTitle;
+            const existingConversationId = resolveConversationAlias(file, existing.conversationId);
+            const titledConversation = file.conversations[existingConversationId];
+            if (titledConversation) {
+              const ownedPaths = new Set(titledConversation.generations.map((generation) => generation.path));
+              for (const generation of titledConversation.generations) {
+                if (!semanticTitle(generation.launchProfile.title)) generation.launchProfile.title = requestedTitle;
+              }
+              for (const entry of Object.values(file.entries)) {
+                if (ownedPaths.has(entry.artifactPath) && entry.launchProfile && !semanticTitle(entry.launchProfile.title)) {
+                  entry.launchProfile.title = requestedTitle;
+                }
+              }
+              for (const receipt of Object.values(file.receipts)) {
+                if (resolveConversationAlias(file, receipt.conversationId) === existingConversationId
+                  && !semanticTitle(receipt.launchProfile.title)) {
+                  receipt.launchProfile.title = requestedTitle;
+                }
+              }
+              titledConversation.updatedAt = now();
+              file.conversationRevision[titledConversation.engine] += 1;
+            }
+          }
           return { kind: compatible ? "replay" : "conflict", receipt: clone(existing) };
         }
       }
