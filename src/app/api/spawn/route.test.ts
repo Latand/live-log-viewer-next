@@ -9,7 +9,7 @@ import { agentRegistry, AgentRegistry } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { codexSessionRoots, createManagedCodexAccount } from "@/lib/accounts/codex";
 import { NoHealthyClaudeAccountError } from "@/lib/accounts/spawnHealth";
-import { spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
+import { spawnParentSelector, spawnRequestDigest, spawnRequestDigests } from "@/lib/agent/spawnIdentity";
 import { projectLaunchConversations } from "@/lib/agent/spawnProjection";
 import { rotateOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { spawnReplayStatus, spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
@@ -174,6 +174,99 @@ test("an explicit spawn account is durably pinned while an omitted account uses 
     else process.env.LLV_RUNTIME_HOST_SOCKET = previousSocket;
     if (previousUi === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
     else process.env.NEXT_PUBLIC_RUNTIME_UI = previousUi;
+  }
+});
+
+test("a titleless client-attempt replay accepts the pre-title digest shape", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "title-digest-replay-"));
+  const store = registry();
+  const previous = {
+    transport: process.env.LLV_SPAWN_TRANSPORT,
+    hosts: process.env.LLV_STRUCTURED_HOSTS,
+    events: process.env.LLV_RUNTIME_EVENTS,
+    socket: process.env.LLV_RUNTIME_HOST_SOCKET,
+    ui: process.env.NEXT_PUBLIC_RUNTIME_UI,
+  };
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  try {
+    const post = async (activeStore: AgentRegistry) => POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+      method: "POST",
+      headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
+      body: JSON.stringify({
+        engine: "claude",
+        model: "sonnet",
+        cwd,
+        ["prompt"]: "inspect",
+        clientAttemptId: "title_digest_replay_20260805",
+      }),
+    }), {
+      ...structuredRouteDependencies(cwd),
+      registry: () => activeStore,
+      defer: () => {},
+    });
+
+    const first = await post(store);
+    const firstBody = await first.json();
+    expect(first.status).toBe(202);
+    const receipt = store.spawnReceiptForClientAttempt("title_digest_replay_20260805")!;
+    const digests = spawnRequestDigests({
+      engine: receipt.engine,
+      cwd: receipt.cwd,
+      model: receipt.launchProfile.model,
+      effort: receipt.launchProfile.effort,
+      fast: receipt.launchProfile.fast,
+      accountId: receipt.accountId,
+      role: null,
+      title: receipt.launchProfile.title!,
+      mcpServers: receipt.launchProfile.mcpServers,
+      ...(receipt.launchProfile.plugins.length ? { plugins: receipt.launchProfile.plugins } : {}),
+      parent: null,
+      ["prompt"]: "inspect",
+      images: [],
+    });
+    expect(receipt.requestDigest).toBe(digests.current);
+
+    const migratedFilename = `${crypto.randomUUID()}.jsonl`;
+    const legacyPath = path.join(cwd, "legacy-projects", "-repo", migratedFilename);
+    const sharedPath = path.join(cwd, "shared-projects", "-repo", migratedFilename);
+    fs.mkdirSync(path.dirname(sharedPath), { recursive: true });
+    fs.writeFileSync(sharedPath, "{}\n");
+    const template = store.ensureConversation("claude", legacyPath, null);
+    const legacy = store.snapshot();
+    const reservedConversation = legacy.conversations[template.id]!;
+    delete legacy.conversations[template.id];
+    reservedConversation.id = receipt.conversationId;
+    legacy.conversations[receipt.conversationId] = reservedConversation;
+    legacy.receipts[receipt.launchId]!.requestDigest = digests.withoutTitle;
+    legacy.receipts[receipt.launchId]!.artifactPath = legacyPath;
+    legacy.receipts[receipt.launchId]!.resumeSourcePath = legacyPath;
+    fs.writeFileSync(store.filename, `${JSON.stringify(legacy, null, 2)}\n`);
+    const restarted = new AgentRegistry(store.filename, undefined, undefined, { sqliteMode: "off" });
+    expect(restarted.runIdentityWaveMigration({
+      now: "2026-08-05T12:00:00.000Z",
+      transcriptTitle: () => null,
+      sharedPathForLegacy: (pathname) => pathname === legacyPath ? sharedPath : null,
+      orchestratorSeats: [],
+    })).toMatchObject({ rekeyed: 1 });
+    const replay = await post(restarted);
+
+    expect(replay.status).toBe(202);
+    expect(await replay.json()).toMatchObject({ launchId: firstBody.launchId, path: sharedPath });
+  } finally {
+    if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previous.transport;
+    if (previous.hosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous.hosts;
+    if (previous.events === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previous.events;
+    if (previous.socket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previous.socket;
+    if (previous.ui === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previous.ui;
   }
 });
 

@@ -13,6 +13,7 @@ export interface SpawnRequestIdentity {
   title: string;
   allowSubagents?: boolean;
   mcpServers: string[];
+  plugins?: string[];
   /** Explicit operator project ownership; absent for cwd-attributed spawns. */
   project?: string;
   parent: SpawnParentSelector;
@@ -38,5 +39,18 @@ export function spawnParentSelector(body: { src?: unknown; parent?: unknown; par
 }
 
 export function spawnRequestDigest(input: SpawnRequestIdentity): string {
-  return digest(input);
+  return spawnRequestDigests(input).current;
+}
+
+export function spawnRequestDigests(input: SpawnRequestIdentity): {
+  current: string;
+  withoutTitle: string;
+} {
+  const withoutTitle = Object.fromEntries(
+    Object.entries(input).filter(([key]) => key !== "title"),
+  );
+  return {
+    current: digest(input),
+    withoutTitle: digest(withoutTitle),
+  };
 }
