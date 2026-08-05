@@ -244,6 +244,41 @@ test("derived, custom-title, and migrated generic receipts preserve pre-title re
       receipt: { launchId: receipt.launchId },
     });
 
+    const nullTitleAttemptId = "null_title_digest_replay_20260805";
+    expect((await post(store, { clientAttemptId: nullTitleAttemptId })).status).toBe(202);
+    const nullTitleReceipt = store.spawnReceiptForClientAttempt(nullTitleAttemptId)!;
+    const nullTitlePath = path.join(cwd, "null-title-replay.jsonl");
+    const nullTitleSessionId = crypto.randomUUID();
+    const nullTitleSettlement = store.settleSpawn(nullTitleReceipt.launchId, {
+      key: { engine: "claude", sessionId: nullTitleSessionId },
+      artifactPath: nullTitlePath,
+      cwd,
+      accountId: nullTitleReceipt.accountId,
+      launchProfile: nullTitleReceipt.launchProfile,
+      status: "starting",
+      host: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: "spawn",
+    });
+    if (nullTitleSettlement.kind === "conflict") throw new Error(nullTitleSettlement.code);
+    const preTitle = store.snapshot();
+    preTitle.receipts[nullTitleReceipt.launchId]!.launchProfile.title = null;
+    preTitle.conversations[nullTitleReceipt.conversationId]!.generations.at(-1)!.launchProfile.title = null;
+    const nullTitleEntry = Object.values(preTitle.entries)
+      .find((entry) => entry.artifactPath === nullTitlePath);
+    if (!nullTitleEntry?.launchProfile) throw new Error("settled null-title entry is missing");
+    nullTitleEntry.launchProfile.title = null;
+    fs.writeFileSync(store.filename, `${JSON.stringify(preTitle, null, 2)}\n`);
+
+    const preTitleRestarted = new AgentRegistry(store.filename, undefined, undefined, { sqliteMode: "off" });
+    expect((await post(preTitleRestarted, { clientAttemptId: nullTitleAttemptId })).status).toBe(200);
+    expect(preTitleRestarted.spawnReceiptForClientAttempt(nullTitleAttemptId)?.launchProfile.title).toBe("claude · inspect");
+    expect(preTitleRestarted.conversation(nullTitleReceipt.conversationId)?.generations.at(-1)?.launchProfile.title)
+      .toBe("claude · inspect");
+    expect(Object.values(preTitleRestarted.snapshot().entries)
+      .find((entry) => entry.artifactPath === nullTitlePath)?.launchProfile?.title).toBe("claude · inspect");
+
     const customTitle = "Inspect release evidence";
     const customAttemptId = "custom_title_digest_replay_20260805";
     const customResponse = await post(store, { clientAttemptId: customAttemptId, title: customTitle });
