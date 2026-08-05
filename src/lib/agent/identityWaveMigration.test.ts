@@ -419,6 +419,109 @@ test("startup retries a partial orchestrator-store rekey before completing the m
   }
 });
 
+test("a concurrent orchestrator rotation cannot be overwritten by the startup wave", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-wave-rotation-race-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  const ready = path.join(directory, "mutation-ready");
+  const release = path.join(directory, "mutation-release");
+  let holder: ReturnType<typeof Bun.spawn> | null = null;
+  try {
+    process.env.LLV_STATE_DIR = directory;
+    const filename = path.join(directory, "agent-registry.json");
+    const legacyPath = path.join(directory, "legacy.jsonl");
+    const sharedPath = path.join(directory, "shared.jsonl");
+    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const conversation = registry.ensureConversation("claude", legacyPath, null);
+    beginOrchestratorSeatIntent({
+      project: "viewer",
+      mandate: "own migrations",
+      clientRequestId: "req_00003001",
+      mode: "spawn",
+      now: NOW,
+    });
+    completeOrchestratorSeatIntent({
+      project: "viewer",
+      clientRequestId: "req_00003001",
+      conversationId: conversation.id,
+      path: legacyPath,
+      now: NOW,
+    });
+    replaceOrchestratorIncumbent({ conversationId: conversation.id, path: legacyPath, createdAt: NOW });
+
+    const mutationPath = path.join(import.meta.dir, "../accounts/accountMutation.ts");
+    holder = Bun.spawn({
+      cmd: [process.execPath, "-e", `
+        const fs = await import("node:fs");
+        const { withAccountMutationLockAsync } = await import(${JSON.stringify(mutationPath)});
+        await withAccountMutationLockAsync(async () => {
+          fs.writeFileSync(${JSON.stringify(ready)}, "ready");
+          while (!fs.existsSync(${JSON.stringify(release)})) await Bun.sleep(5);
+        });
+      `],
+      env: { ...process.env, LLV_STATE_DIR: directory },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    for (let attempt = 0; attempt < 100 && !fs.existsSync(ready); attempt += 1) await Bun.sleep(10);
+    expect(fs.existsSync(ready)).toBeTrue();
+
+    const overrides = {
+      registry,
+      now: () => NOW,
+      transcriptTitle: () => null,
+      sharedPath: (pathname: string) => pathname === legacyPath ? sharedPath : null,
+      log: () => {},
+      env: {},
+    };
+    expect(() => runIdentityWaveMigrationAtStartup(overrides)).toThrow("account mutation is busy");
+    expect(registry.snapshot().identityMigrations[IDENTITY_WAVE_MIGRATION]).toBeUndefined();
+    expect(orchestratorSeatFor("viewer").active).toMatchObject({
+      conversationId: conversation.id,
+      seatEpoch: 1,
+      path: legacyPath,
+    });
+
+    fs.writeFileSync(release, "release");
+    const holderExit = await holder.exited;
+    const holderError = await new Response(holder.stderr as ReadableStream<Uint8Array>).text();
+    expect({ holderExit, holderError }).toEqual({ holderExit: 0, holderError: "" });
+    holder = null;
+
+    beginOrchestratorSeatIntent({
+      project: "viewer",
+      mandate: "own the newer rotation",
+      clientRequestId: "req_00003002",
+      mode: "spawn",
+      now: NOW,
+    });
+    completeOrchestratorSeatIntent({
+      project: "viewer",
+      clientRequestId: "req_00003002",
+      conversationId: "conversation_new",
+      path: legacyPath,
+      now: NOW,
+    });
+    replaceOrchestratorIncumbent({ conversationId: "conversation_new", path: legacyPath, createdAt: NOW });
+
+    expect(runIdentityWaveMigrationAtStartup(overrides)).toMatchObject({ alreadyCompleted: false, rekeyed: 1 });
+    expect(orchestratorSeatFor("viewer").active).toMatchObject({
+      conversationId: "conversation_new",
+      seatEpoch: 2,
+      path: sharedPath,
+    });
+    expect(readOrchestratorRecord()).toMatchObject({ conversationId: "conversation_new", path: sharedPath });
+    expect(registry.snapshot().identityMigrations[IDENTITY_WAVE_MIGRATION]?.completedAt).toBe(NOW);
+  } finally {
+    if (holder) {
+      fs.writeFileSync(release, "release");
+      await holder.exited;
+    }
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("a shared-path ownership collision aborts before mutation and leaves the marker open", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-wave-collision-"));
   try {

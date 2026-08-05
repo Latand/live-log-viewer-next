@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import fs from "node:fs";
 
+import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
 import { validExplicitProject } from "@/lib/accounts/migration/contracts";
 import { agentRegistry } from "@/lib/agent/registry";
 import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
@@ -278,23 +279,26 @@ async function activate(
   input: { project: string; clientRequestId: string; conversationId: string; path: string | null; launchId?: string | null; engine?: string; model?: string },
   dependencies: SeatCommandDependencies,
 ): Promise<{ seat: OrchestratorSeat } | null> {
-  const completed = completeOrchestratorSeatIntent({
-    project: input.project,
-    clientRequestId: input.clientRequestId,
-    conversationId: input.conversationId,
-    path: input.path,
-    launchId: input.launchId,
-    now: dependencies.now(),
-  });
-  if (completed.kind === "missing") return null;
-  if (completed.kind === "activated") {
-    dependencies.syncLegacyRecord({
+  const completed = withAccountMutationLock(() => {
+    const result = completeOrchestratorSeatIntent({
+      project: input.project,
+      clientRequestId: input.clientRequestId,
       conversationId: input.conversationId,
       path: input.path,
-      ...(input.engine ? { engine: input.engine } : {}),
-      ...(input.model ? { model: input.model } : {}),
+      launchId: input.launchId,
+      now: dependencies.now(),
     });
-  }
+    if (result.kind === "activated") {
+      dependencies.syncLegacyRecord({
+        conversationId: input.conversationId,
+        path: input.path,
+        ...(input.engine ? { engine: input.engine } : {}),
+        ...(input.model ? { model: input.model } : {}),
+      });
+    }
+    return result;
+  });
+  if (completed.kind === "missing") return null;
   dependencies.stampRegistryIdentity(completed.seat);
   return { seat: completed.seat };
 }

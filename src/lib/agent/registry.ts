@@ -3884,7 +3884,7 @@ export class AgentRegistry {
     if (input.dryRun) {
       return applyIdentityWaveMigration(clone(this.readOnlySnapshot()), { ...input, dryRun: true });
     }
-    return this.mutate((file) => applyIdentityWaveMigration(file, input));
+    return withAccountMutationLock(() => this.mutate((file) => applyIdentityWaveMigration(file, input)));
   }
 
   stampOrchestratorSeatIdentity(seat: IdentityWaveSeat): boolean {

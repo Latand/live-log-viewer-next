@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
 import { statePath } from "@/lib/configDir";
 import { canonicalProject } from "@/lib/projects/aliases";
 import type { IdentityWavePathRekey } from "@/lib/agent/identityWaveMigration";
@@ -291,48 +292,50 @@ export function beginOrchestratorSeatIntent(input: {
   promptVersion?: number | null;
   now?: string;
 }): BeginSeatIntentResult {
-  const file = readOrchestratorSeatFile();
-  const project = canonicalOrchestratorProject(input.project);
-  const active = file.seats[project];
-  if (active && active.intent.clientRequestId === input.clientRequestId) {
-    return { kind: "completed", seat: active };
-  }
-  const pending = file.pending[project];
-  if (pending && pending.intent.clientRequestId === input.clientRequestId) {
-    return { kind: "replay", seat: pending };
-  }
-  let terminalized: OrchestratorSeatTerminalization | undefined;
-  if (pending) {
-    const abandoned = pending.intent.error !== null || (active !== undefined && pending.seatEpoch < active.seatEpoch);
-    if (!abandoned) return { kind: "in_progress", seat: pending };
-    terminalized = {
-      seat: pending,
-      reason: pending.intent.error !== null ? "terminal_error" : "superseded_epoch",
-      terminalizedAt: input.now ?? new Date().toISOString(),
-    };
-    file.history.push(terminalized);
-    if (file.history.length > ORCHESTRATOR_SEAT_HISTORY_CAP) {
-      file.history.splice(0, file.history.length - ORCHESTRATOR_SEAT_HISTORY_CAP);
+  return withAccountMutationLock(() => {
+    const file = readOrchestratorSeatFile();
+    const project = canonicalOrchestratorProject(input.project);
+    const active = file.seats[project];
+    if (active && active.intent.clientRequestId === input.clientRequestId) {
+      return { kind: "completed", seat: active };
     }
-    delete file.pending[project];
-  }
-  const seat: OrchestratorSeat = {
-    project,
-    seatEpoch: file.nextSeatEpoch,
-    conversationId: input.conversationId ?? null,
-    path: null,
-    mandate: input.mandate,
-    promptVersion: input.promptVersion ?? null,
-    predecessorConversationId: null,
-    state: "pending",
-    intent: { clientRequestId: input.clientRequestId, mode: input.mode, launchId: null, error: null },
-    designatedAt: input.now ?? new Date().toISOString(),
-    activatedAt: null,
-  };
-  file.nextSeatEpoch += 1;
-  file.pending[project] = seat;
-  writeSeatFile(file);
-  return { kind: "begun", seat, ...(terminalized ? { terminalized } : {}) };
+    const pending = file.pending[project];
+    if (pending && pending.intent.clientRequestId === input.clientRequestId) {
+      return { kind: "replay", seat: pending };
+    }
+    let terminalized: OrchestratorSeatTerminalization | undefined;
+    if (pending) {
+      const abandoned = pending.intent.error !== null || (active !== undefined && pending.seatEpoch < active.seatEpoch);
+      if (!abandoned) return { kind: "in_progress", seat: pending };
+      terminalized = {
+        seat: pending,
+        reason: pending.intent.error !== null ? "terminal_error" : "superseded_epoch",
+        terminalizedAt: input.now ?? new Date().toISOString(),
+      };
+      file.history.push(terminalized);
+      if (file.history.length > ORCHESTRATOR_SEAT_HISTORY_CAP) {
+        file.history.splice(0, file.history.length - ORCHESTRATOR_SEAT_HISTORY_CAP);
+      }
+      delete file.pending[project];
+    }
+    const seat: OrchestratorSeat = {
+      project,
+      seatEpoch: file.nextSeatEpoch,
+      conversationId: input.conversationId ?? null,
+      path: null,
+      mandate: input.mandate,
+      promptVersion: input.promptVersion ?? null,
+      predecessorConversationId: null,
+      state: "pending",
+      intent: { clientRequestId: input.clientRequestId, mode: input.mode, launchId: null, error: null },
+      designatedAt: input.now ?? new Date().toISOString(),
+      activatedAt: null,
+    };
+    file.nextSeatEpoch += 1;
+    file.pending[project] = seat;
+    writeSeatFile(file);
+    return { kind: "begun", seat, ...(terminalized ? { terminalized } : {}) };
+  });
 }
 
 export type CompleteSeatIntentResult =
@@ -355,52 +358,56 @@ export function completeOrchestratorSeatIntent(input: {
   launchId?: string | null;
   now?: string;
 }): CompleteSeatIntentResult {
-  const file = readOrchestratorSeatFile();
-  const project = canonicalOrchestratorProject(input.project);
-  const active = file.seats[project];
-  if (active && active.intent.clientRequestId === input.clientRequestId) {
-    return { kind: "replay", seat: active };
-  }
-  const pending = file.pending[project];
-  if (!pending || pending.intent.clientRequestId !== input.clientRequestId) return { kind: "missing" };
-  const now = input.now ?? new Date().toISOString();
-  let revoked: OrchestratorRevocation | null = null;
-  if (active && active.conversationId && active.conversationId !== input.conversationId) {
-    revoked = {
-      project,
-      conversationId: active.conversationId,
-      seatEpoch: active.seatEpoch,
-      revokedAt: now,
-      /* Bidirectional lineage: the revocation names its successor, the
-         successor seat names its predecessor, and both cards stay navigable. */
-      successorConversationId: input.conversationId,
+  return withAccountMutationLock(() => {
+    const file = readOrchestratorSeatFile();
+    const project = canonicalOrchestratorProject(input.project);
+    const active = file.seats[project];
+    if (active && active.intent.clientRequestId === input.clientRequestId) {
+      return { kind: "replay", seat: active };
+    }
+    const pending = file.pending[project];
+    if (!pending || pending.intent.clientRequestId !== input.clientRequestId) return { kind: "missing" };
+    const now = input.now ?? new Date().toISOString();
+    let revoked: OrchestratorRevocation | null = null;
+    if (active && active.conversationId && active.conversationId !== input.conversationId) {
+      revoked = {
+        project,
+        conversationId: active.conversationId,
+        seatEpoch: active.seatEpoch,
+        revokedAt: now,
+        /* Bidirectional lineage: the revocation names its successor, the
+           successor seat names its predecessor, and both cards stay navigable. */
+        successorConversationId: input.conversationId,
+      };
+      file.revocations.push(revoked);
+    }
+    const seat: OrchestratorSeat = {
+      ...pending,
+      conversationId: input.conversationId,
+      path: input.path,
+      predecessorConversationId: revoked?.conversationId ?? pending.predecessorConversationId,
+      state: "active",
+      intent: { ...pending.intent, launchId: input.launchId ?? pending.intent.launchId, error: null },
+      activatedAt: now,
     };
-    file.revocations.push(revoked);
-  }
-  const seat: OrchestratorSeat = {
-    ...pending,
-    conversationId: input.conversationId,
-    path: input.path,
-    predecessorConversationId: revoked?.conversationId ?? pending.predecessorConversationId,
-    state: "active",
-    intent: { ...pending.intent, launchId: input.launchId ?? pending.intent.launchId, error: null },
-    activatedAt: now,
-  };
-  delete file.pending[project];
-  file.seats[project] = seat;
-  writeSeatFile(file);
-  return { kind: "activated", seat, revoked };
+    delete file.pending[project];
+    file.seats[project] = seat;
+    writeSeatFile(file);
+    return { kind: "activated", seat, revoked };
+  });
 }
 
 /** Record why a pending intent could not complete; the seat stays pending and
     recoverable, and the previous active seat (if any) stays authoritative. */
 export function failOrchestratorSeatIntent(project: string, clientRequestId: string, error: string): void {
-  const file = readOrchestratorSeatFile();
-  const canonical = canonicalOrchestratorProject(project);
-  const pending = file.pending[canonical];
-  if (!pending || pending.intent.clientRequestId !== clientRequestId) return;
-  pending.intent.error = error.slice(0, 500);
-  writeSeatFile(file);
+  withAccountMutationLock(() => {
+    const file = readOrchestratorSeatFile();
+    const canonical = canonicalOrchestratorProject(project);
+    const pending = file.pending[canonical];
+    if (!pending || pending.intent.clientRequestId !== clientRequestId) return;
+    pending.intent.error = error.slice(0, 500);
+    writeSeatFile(file);
+  });
 }
 
 /** Every active seat, for the authority resolver. */
@@ -453,18 +460,20 @@ export function activeOrchestratorSeatsForMigration(): OrchestratorSeat[] {
  * replacement is idempotent, so a partial external-store retry is safe. */
 export function rekeyOrchestratorSeatPaths(rekeys: readonly IdentityWavePathRekey[]): void {
   if (rekeys.length === 0) return;
-  const active = activeOrchestratorSeatsForMigration();
-  if (active.length === 0) return;
-  const replacements = new Map(rekeys.map((rekey) => [rekey.legacyPath, rekey.sharedPath]));
-  const changed = active.filter((seat) => seat.path && replacements.has(seat.path));
-  if (changed.length === 0) return;
+  withAccountMutationLock(() => {
+    const active = activeOrchestratorSeatsForMigration();
+    if (active.length === 0) return;
+    const replacements = new Map(rekeys.map((rekey) => [rekey.legacyPath, rekey.sharedPath]));
+    const changed = active.filter((seat) => seat.path && replacements.has(seat.path));
+    if (changed.length === 0) return;
 
-  const file = readOrchestratorSeatFile();
-  for (const seat of changed) {
-    const stored = file.seats[canonicalOrchestratorProject(seat.project)];
-    if (stored?.path) stored.path = replacements.get(stored.path) ?? stored.path;
-  }
-  writeSeatFile(file);
+    const file = readOrchestratorSeatFile();
+    for (const seat of changed) {
+      const stored = file.seats[canonicalOrchestratorProject(seat.project)];
+      if (stored?.path) stored.path = replacements.get(stored.path) ?? stored.path;
+    }
+    writeSeatFile(file);
+  });
 }
 
 /** Every durable revocation, for the authority resolver's ABA guard. */
