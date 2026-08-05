@@ -448,10 +448,11 @@ export async function executeSpawnRequest(
         prompt,
         images: images.map((image) => ({ mime: image.mime, digest: spawnContentDigest({ image: image.base64 }) })),
       });
-      const legacyTitleCompatible = body.title === undefined || explicitTitle === derivedTitle;
-      return legacyTitleCompatible && existingAttempt?.requestDigest === digests.withoutTitle
-        ? digests.withoutTitle
-        : digests.current;
+      const existingSemanticTitle = semanticTitle(existingAttempt?.launchProfile.title, 120);
+      if (!existingAttempt || !existingSemanticTitle || existingSemanticTitle === launchTitle) {
+        return existingAttempt?.requestDigest === digests.current ? digests.current : digests.withoutTitle;
+      }
+      return digests.current;
     };
     const pipelineAttemptTarget = pipelineSourceConversationId && dependencies.pipelineAttemptTargetForSource
       ? dependencies.pipelineAttemptTargetForSource(pipelineSourceConversationId)
