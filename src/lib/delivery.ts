@@ -646,7 +646,9 @@ export async function deliverConversationMessage(message: ConversationMessage, o
     if (!filePath || !(overrides.pathAllowed ?? pathAllowed)(filePath)) {
       return settle(failure("process is not in a tmux session", 409));
     }
-    const all = await (overrides.listFiles ?? listFiles)();
+    /* Pinned: the reopenable transcript may have aged past the scan's recency
+       cap — a conversation the operator can still message must stay openable. */
+    const all = await (overrides.listFiles ?? listFiles)({ pin: filePath });
     const entry = all.find((item) => item.path === filePath);
     if (!entry) {
       return settle(failure("file is unknown to the viewer", 403));
