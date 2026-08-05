@@ -313,7 +313,9 @@ test("a flow reviewer reserves the canonical review edge before process launch",
   const implementer = registry.ensureConversation("codex", "/sessions/implementer.jsonl", "terra");
   const flow = {
     id: "flow-lineage",
+    project: "viewer",
     cwd: "/repo",
+    spec: "Ship reviewer identity\nAC: preserve lineage",
     implementerPath: "/sessions/implementer.jsonl",
     implementerConversationId: implementer.id,
     roles: { reviewer: { engine: "codex", model: null, effort: "xhigh" } },
@@ -326,7 +328,12 @@ test("a flow reviewer reserves the canonical review edge before process launch",
   expect(begun.kind).toBe("created");
   /* Flow reviewer rounds are container-origin launches (#393): the reviewer
      identity and its delegation depth are durable before any process exists. */
-  expect(begun.receipt).toMatchObject({ agentRole: "reviewer", delegationDepth: 1, rejection: null });
+  expect(begun.receipt).toMatchObject({
+    agentRole: "reviewer",
+    delegationDepth: 1,
+    rejection: null,
+    launchProfile: expect.objectContaining({ title: "Ship reviewer identity · review round 1" }),
+  });
   expect(round).toMatchObject({ launchId: begun.receipt.launchId, reviewerConversationId: begun.receipt.conversationId });
   expect(registry.snapshot()).toMatchObject({
     lineageEdges: {

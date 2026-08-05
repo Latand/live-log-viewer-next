@@ -136,10 +136,10 @@ test("an explicit spawn account is durably pinned while an omitted account uses 
       }),
       defer: () => {},
     };
-    const post = async (clientAttemptId: string, accountId?: string) => await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+    const post = async (clientAttemptId: string, accountId?: string, title?: string) => await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
       method: "POST",
       headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
-      body: JSON.stringify({ engine: "claude", model: "sonnet", cwd, prompt: "inspect", clientAttemptId, ...(accountId ? { accountId } : {}) }),
+      body: JSON.stringify({ engine: "claude", model: "sonnet", cwd, prompt: "inspect", clientAttemptId, ...(accountId ? { accountId } : {}), ...(title ? { title } : {}) }),
     }), dependencies);
 
     const pinnedResponses = await Promise.all([
@@ -150,16 +150,18 @@ test("an explicit spawn account is durably pinned while an omitted account uses 
     expect(store.spawnReceiptForClientAttempt("account_pin_a_20260731")).toMatchObject({
       accountId: "pinned-a",
       accountPin: true,
+      launchProfile: expect.objectContaining({ title: "claude · inspect" }),
     });
     expect(store.spawnReceiptForClientAttempt("account_pin_b_20260731")).toMatchObject({
       accountId: "pinned-b",
       accountPin: true,
     });
 
-    expect((await post("account_fallback_20260731")).status).toBe(202);
+    expect((await post("account_fallback_20260731", undefined, "Inspect account routing")).status).toBe(202);
     expect(store.spawnReceiptForClientAttempt("account_fallback_20260731")).toMatchObject({
       accountId: "selected",
       accountPin: false,
+      launchProfile: expect.objectContaining({ title: "Inspect account routing" }),
     });
   } finally {
     if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
@@ -2980,6 +2982,7 @@ function digestForParent(body: { parentConversationId: string }): string {
     fast: false,
     accountId: "terra",
     role: "worker",
+    title: "worker · implement",
     mcpServers: ["viewer"],
     parent: spawnParentSelector(body),
     "prompt": "implement",
