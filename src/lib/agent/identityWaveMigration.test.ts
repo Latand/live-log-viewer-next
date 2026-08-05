@@ -580,6 +580,53 @@ test("seat evidence failure leaves startup migration unmarked for retry", () => 
   }
 });
 
+test("a dual-write publication failure restores an open marker and a retry converges both mirrors", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-wave-dual-write-retry-"));
+  try {
+    const filename = path.join(directory, "agent-registry.json");
+    const transcriptPath = path.join(directory, "legacy.jsonl");
+    const seed = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const conversation = seed.ensureConversation("codex", transcriptPath, null);
+    const seeded = seed.snapshot();
+    seeded.conversations[conversation.id]!.generations.at(-1)!.launchProfile.title = "Codex session";
+    fs.writeFileSync(filename, `${JSON.stringify(seeded, null, 2)}\n`);
+
+    let failPublication = true;
+    const registry = new AgentRegistry(filename, undefined, undefined, {
+      sqliteMode: "dual-write",
+      beforeDualWriteMutationReplace: () => {
+        if (!failPublication) return;
+        failPublication = false;
+        throw new Error("injected SQLite publication failure");
+      },
+    });
+    const input = {
+      now: NOW,
+      transcriptTitle: () => "Recover dual-write identity",
+      sharedPathForLegacy: () => null,
+      orchestratorSeats: [],
+    };
+
+    expect(() => registry.runIdentityWaveMigration(input)).toThrow("injected SQLite publication failure");
+    const afterFailure = JSON.parse(fs.readFileSync(filename, "utf8")) as ReturnType<AgentRegistry["snapshot"]>;
+    expect(afterFailure.identityMigrations[IDENTITY_WAVE_MIGRATION]).toBeUndefined();
+    expect(afterFailure.conversations[conversation.id]?.generations.at(-1)?.launchProfile.title).toBe("Codex session");
+
+    expect(registry.runIdentityWaveMigration(input)).toMatchObject({
+      alreadyCompleted: false,
+      retitled: 1,
+    });
+    const jsonSnapshot = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" }).snapshot();
+    const sqliteSnapshot = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" }).snapshot();
+    expect(sqliteSnapshot).toEqual(jsonSnapshot);
+    expect(jsonSnapshot.identityMigrations[IDENTITY_WAVE_MIGRATION]?.completedAt).toBe(NOW);
+    expect(jsonSnapshot.conversations[conversation.id]?.generations.at(-1)?.launchProfile.title)
+      .toBe("Recover dual-write identity");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("the startup wrapper logs populated counters and persists migrated JSON and SQLite fields", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-wave-parity-"));
   try {
