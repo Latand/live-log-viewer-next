@@ -290,6 +290,8 @@ export async function registerViewerRuntime(): Promise<void> {
   discardWakatimeEnvironmentCredential();
   await activateViewerRuntimeWhenCurrent(async () => {
     await initializeOperatorSpawnCapabilityAtStartup();
+    const { runIdentityWaveMigrationAtStartup } = await import("@/lib/agent/identityWaveStartup");
+    runIdentityWaveMigrationAtStartup();
     await startWakatimeIntegrationIfEnabled();
     if (structuredHostsEnabled()) {
       const { adoptStructuredHostsAtStartup } = await import("@/lib/runtime/startup");

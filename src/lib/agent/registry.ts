@@ -36,6 +36,11 @@ import {
 } from "@/lib/accounts/migration/intentLiveness";
 
 import type { AgentEngine } from "./cli";
+import {
+  applyIdentityWaveMigration,
+  type IdentityWaveMigrationInput,
+  type IdentityWaveMigrationResult,
+} from "./identityWaveMigration";
 import { mcpServersForStoredSession, reboundAssembledMcpGrants, reboundEntryMcpGrant, reboundStoredMcpGrants, type McpGrantPolicy } from "./mcpAllowlist";
 import { liveAccountConversationIds, type AccountLivenessOptions } from "./accountLiveness";
 import { loadSpawnNestingPolicy } from "./nestingPolicy";
@@ -240,7 +245,7 @@ export interface SpawnLineageEdge {
 
 export interface DurableConversationMembership {
   conversationId: ViewerConversationId;
-  kind: "flow" | "pipeline";
+  kind: "flow" | "pipeline" | "orchestrator";
   containerId: string;
   role: string;
   slot: string;
@@ -444,6 +449,12 @@ export interface RegistryFile {
   receipts: Record<string, SpawnReceipt>;
   lineageEdges: Record<string, SpawnLineageEdge>;
   memberships: Record<string, DurableConversationMembership[]>;
+  identityMigrations: Record<string, {
+    completedAt: string;
+    retitled: number;
+    rekeyed: number;
+    edgesStamped: number;
+  }>;
   importedResumePanes: boolean;
   /** Compatibility evidence only. It never authorizes a pane until the live
       resolver proves server, process, engine, and transcript ownership. */
@@ -1002,6 +1013,7 @@ const EMPTY: RegistryFile = {
   receipts: {},
   lineageEdges: {},
   memberships: {},
+  identityMigrations: {},
   importedResumePanes: false,
   legacyResumePanes: { serverPid: null, panes: {} },
   conversations: {},
@@ -1182,7 +1194,7 @@ function normalizeMemberships(value: unknown): RegistryFile["memberships"] {
     const valid = rows.flatMap((candidate): DurableConversationMembership[] => {
       if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return [];
       const row = candidate as Partial<DurableConversationMembership>;
-      if ((row.kind !== "flow" && row.kind !== "pipeline")
+      if ((row.kind !== "flow" && row.kind !== "pipeline" && row.kind !== "orchestrator")
         || typeof row.containerId !== "string" || !row.containerId
         || typeof row.role !== "string" || !row.role
         || typeof row.slot !== "string" || !row.slot) return [];
@@ -1213,6 +1225,24 @@ function normalizeMemberships(value: unknown): RegistryFile["memberships"] {
     if (valid.length) normalized[conversationId] = valid;
   }
   return normalized;
+}
+
+function normalizeIdentityMigrations(value: unknown): RegistryFile["identityMigrations"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).flatMap(([key, candidate]) => {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return [];
+    const marker = candidate as Record<string, unknown>;
+    if (typeof marker.completedAt !== "string"
+      || !Number.isSafeInteger(marker.retitled) || (marker.retitled as number) < 0
+      || !Number.isSafeInteger(marker.rekeyed) || (marker.rekeyed as number) < 0
+      || !Number.isSafeInteger(marker.edgesStamped) || (marker.edgesStamped as number) < 0) return [];
+    return [[key, {
+      completedAt: marker.completedAt,
+      retitled: marker.retitled as number,
+      rekeyed: marker.rekeyed as number,
+      edgesStamped: marker.edgesStamped as number,
+    }]];
+  }));
 }
 
 function normalizeProviderReceipt(value: ProviderReceipt | null | undefined): ProviderReceipt | null {
@@ -2085,7 +2115,7 @@ function recordMembership(
   input: DurableMembershipInput,
   createdAt: string,
 ): DurableConversationMembership {
-  if ((input.kind !== "flow" && input.kind !== "pipeline") || !input.containerId.trim() || !input.role.trim() || !input.slot.trim()) {
+  if ((input.kind !== "flow" && input.kind !== "pipeline" && input.kind !== "orchestrator") || !input.containerId.trim() || !input.role.trim() || !input.slot.trim()) {
     throw new Error("durable membership is invalid");
   }
   const canonicalConversationId = resolveConversationAlias(file, conversationId);
@@ -2564,6 +2594,7 @@ export function normalizeRegistry(value: unknown, policy?: McpGrantPolicy): Regi
         ? Object.fromEntries(Object.entries(parsed.lineageEdges).map(([id, edge]) => [id, normalizeLineageEdge(edge)]))
         : {},
       memberships: normalizeMemberships(parsed.memberships),
+      identityMigrations: normalizeIdentityMigrations(parsed.identityMigrations),
       importedResumePanes: parsed.importedResumePanes === true,
       legacyResumePanes: legacy && typeof legacy === "object" && "panes" in legacy
         ? { serverPid: typeof (legacy as { serverPid?: unknown }).serverPid === "number" ? (legacy as { serverPid: number }).serverPid : null, panes: ((legacy as { panes?: unknown }).panes as Record<string, ResumePaneRecord>) ?? {} }
@@ -3838,6 +3869,13 @@ export class AgentRegistry {
 
   rememberMembership(conversationId: ViewerConversationId, membership: DurableMembershipInput): DurableConversationMembership {
     return this.mutate((file) => clone(recordMembership(file, conversationId, membership, now())));
+  }
+
+  runIdentityWaveMigration(input: IdentityWaveMigrationInput): IdentityWaveMigrationResult {
+    if (input.dryRun) {
+      return applyIdentityWaveMigration(clone(this.readOnlySnapshot()), { ...input, dryRun: true });
+    }
+    return this.mutate((file) => applyIdentityWaveMigration(file, input));
   }
 
   beginSpawn(engine: AgentEngine, cwd: string, launchProfile: Partial<LaunchProfile> = {}): SpawnReceipt {
