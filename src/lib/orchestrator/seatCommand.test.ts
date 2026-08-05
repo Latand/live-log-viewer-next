@@ -77,7 +77,13 @@ function dependencies(overrides: Partial<SeatCommandDependencies> = {}): { deps:
 
 /** Durable residue of an accepting request that died between begin and
     activate: a pending spawn intent holding the launch receipt id. */
-function seedPendingLaunchIntent(input: { clientRequestId: string; launchId: string | null; error?: string | null }): void {
+function seedPendingLaunchIntent(input: {
+  clientRequestId: string;
+  launchId: string | null;
+  error?: string | null;
+  engine?: string | null;
+  model?: string | null;
+}): void {
   fs.writeFileSync(path.join(sandbox, "orchestrator-seats.json"), JSON.stringify({
     schemaVersion: 1,
     nextSeatEpoch: 2,
@@ -88,6 +94,8 @@ function seedPendingLaunchIntent(input: { clientRequestId: string; launchId: str
         seatEpoch: 1,
         conversationId: null,
         path: null,
+        engine: input.engine ?? null,
+        model: input.model ?? null,
         mandate: "own the board",
         promptVersion: null,
         predecessorConversationId: null,
@@ -234,6 +242,35 @@ test("a completed seat replay repairs a failed legacy manager sync before report
   expect(recorded.spawns).toHaveLength(1);
   expect(recorded.identityStamps).toHaveLength(1);
   expect(readOrchestratorRecord()).toMatchObject({ conversationId: NEW_ID, path: "/tmp/new.jsonl" });
+});
+
+test("a completed seat replay preserves the incumbent engine and model from its durable intent", async () => {
+  const { deps, recorded } = dependencies({
+    syncLegacyRecord: (input) => { replaceOrchestratorIncumbent({ ...input, createdAt: AT }); },
+  });
+  const request = {
+    ...spawnRequest("req_00001005"),
+    engine: "codex",
+    model: "gpt-5.6-sol",
+  };
+
+  expect((await executeOrchestratorSeatRequest(request, deps)).status).toBe(200);
+  expect(readOrchestratorRecord()).toMatchObject({
+    conversationId: NEW_ID,
+    engine: "codex",
+    model: "gpt-5.6-sol",
+  });
+
+  const replay = await executeOrchestratorSeatRequest({
+    project: request.project,
+    mandate: request.mandate,
+    clientRequestId: request.clientRequestId,
+    cwd: request.cwd,
+  }, deps);
+
+  expect(replay).toMatchObject({ status: 200, body: { replayed: true, conversationId: NEW_ID } });
+  expect(recorded.spawns).toHaveLength(1);
+  expect(readOrchestratorRecord()).toMatchObject({ engine: "codex", model: "gpt-5.6-sol" });
 });
 
 test("an admitted asynchronous spawn activates the seat from its durable conversation id", async () => {
@@ -674,6 +711,32 @@ test("replaying the accepting request's own key after its launch settled converg
   expect(recorded.spawns).toEqual([]);
   expect(orchestratorSeatFor("proj-a").active?.conversationId).toBe(NEW_ID);
   expect(orchestratorSeatFor("proj-a").pending).toBeNull();
+});
+
+test("creator-death reconciliation restores manager metadata from the pending seat", async () => {
+  seedPendingLaunchIntent({
+    clientRequestId: "req_00000052",
+    launchId: "launch_52",
+    engine: "codex",
+    model: "gpt-5.6-sol",
+  });
+  const { deps } = dependencies({
+    launchSettlement: () => ({ kind: "settled", conversationId: NEW_ID, path: "/tmp/new.jsonl", launchId: "launch_52" }),
+    syncLegacyRecord: (input) => { replaceOrchestratorIncumbent({ ...input, createdAt: AT }); },
+    spawn: async () => {
+      throw new Error("a settled accepted launch must reconcile from durable state, never spawn again");
+    },
+  });
+
+  const replay = await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "own the board",
+    clientRequestId: "req_00000052",
+    cwd: "/tmp",
+  }, deps);
+
+  expect(replay).toMatchObject({ status: 200, body: { replayed: true, conversationId: NEW_ID } });
+  expect(readOrchestratorRecord()).toMatchObject({ engine: "codex", model: "gpt-5.6-sol" });
 });
 
 test("a pending intent whose launch terminally failed records the failure and stops blocking a fresh designation", async () => {
