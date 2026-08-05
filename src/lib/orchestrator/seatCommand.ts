@@ -288,19 +288,40 @@ async function activate(
       launchId: input.launchId,
       now: dependencies.now(),
     });
-    if (result.kind === "activated") {
-      dependencies.syncLegacyRecord({
-        conversationId: input.conversationId,
-        path: input.path,
-        ...(input.engine ? { engine: input.engine } : {}),
-        ...(input.model ? { model: input.model } : {}),
-      });
-    }
+    if (result.kind !== "missing") reconcileAuthorityProjections(result.seat, input, dependencies);
     return result;
   });
   if (completed.kind === "missing") return null;
-  dependencies.stampRegistryIdentity(completed.seat);
   return { seat: completed.seat };
+}
+
+function reconcileAuthorityProjections(
+  seat: OrchestratorSeat,
+  input: { engine?: string; model?: string },
+  dependencies: SeatCommandDependencies,
+): void {
+  if (!seat.conversationId) throw new Error("active orchestrator seat is missing its conversation identity");
+  dependencies.syncLegacyRecord({
+    conversationId: seat.conversationId,
+    path: seat.path,
+    ...(input.engine ? { engine: input.engine } : {}),
+    ...(input.model ? { model: input.model } : {}),
+  });
+  dependencies.stampRegistryIdentity(seat);
+}
+
+function reconcileCompletedSeatReplay(
+  project: string,
+  clientRequestId: string,
+  input: { engine?: string; model?: string },
+  dependencies: SeatCommandDependencies,
+): OrchestratorSeat | null {
+  return withAccountMutationLock(() => {
+    const seat = orchestratorSeatFor(project).active;
+    if (!seat || seat.intent.clientRequestId !== clientRequestId) return null;
+    reconcileAuthorityProjections(seat, input, dependencies);
+    return seat;
+  });
 }
 
 /**
@@ -367,11 +388,12 @@ export async function executeOrchestratorSeatRequest(
   const reconciliation = reconcilePendingSeatIntent(project, dependencies);
   if (reconciliation) await reconciliation;
 
-  const completedReplay = orchestratorSeatFor(project).active;
-  if (completedReplay?.intent.clientRequestId === clientRequestId) {
-    dependencies.stampRegistryIdentity(completedReplay);
-    return replayedSeatResponse(completedReplay);
-  }
+  const authorityInput = {
+    ...(typeof rawBody.engine === "string" ? { engine: rawBody.engine } : {}),
+    ...(typeof rawBody.model === "string" ? { model: rawBody.model } : {}),
+  };
+  const completedReplay = reconcileCompletedSeatReplay(project, clientRequestId, authorityInput, dependencies);
+  if (completedReplay) return replayedSeatResponse(completedReplay);
 
   if (existingConversationId) {
     const target = dependencies.conversationTarget(existingConversationId);
@@ -396,8 +418,9 @@ export async function executeOrchestratorSeatRequest(
       now: dependencies.now(),
     });
     if (begun.kind === "completed") {
-      dependencies.stampRegistryIdentity(begun.seat);
-      return replayedSeatResponse(begun.seat);
+      const repaired = reconcileCompletedSeatReplay(project, clientRequestId, authorityInput, dependencies);
+      if (!repaired) return { status: 409, body: { error: "seat intent was superseded by a newer designation" } };
+      return replayedSeatResponse(repaired);
     }
     if (begun.kind === "in_progress") return inProgressSeatResponse(begun.seat);
 
@@ -474,8 +497,9 @@ export async function executeOrchestratorSeatRequest(
   }
   const begun = beginOrchestratorSeatIntent({ project, mandate, clientRequestId, mode: "spawn", promptVersion, now: dependencies.now() });
   if (begun.kind === "completed") {
-    dependencies.stampRegistryIdentity(begun.seat);
-    return replayedSeatResponse(begun.seat);
+    const repaired = reconcileCompletedSeatReplay(project, clientRequestId, authorityInput, dependencies);
+    if (!repaired) return { status: 409, body: { error: "seat intent was superseded by a newer designation" } };
+    return replayedSeatResponse(repaired);
   }
   if (begun.kind === "in_progress") return inProgressSeatResponse(begun.seat);
   /* A pending replay spawns the ORIGINAL intent's mandate: the spawn receipt is

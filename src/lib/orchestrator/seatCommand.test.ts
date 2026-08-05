@@ -8,7 +8,7 @@ import { AgentRegistry } from "@/lib/agent/registry";
 import { setRetireManagerForTests } from "./retire";
 import { executeOrchestratorRotation, executeOrchestratorSeatRequest, type SeatCommandDependencies } from "./seatCommand";
 import { activeOrchestratorSeats, orchestratorRevocations, orchestratorSeatFor, type OrchestratorSeat } from "./seats";
-import { readOrchestratorRecord } from "./store";
+import { readOrchestratorRecord, replaceOrchestratorIncumbent } from "./store";
 
 let sandbox = "";
 let previousStateDir: string | undefined;
@@ -210,6 +210,30 @@ test("a completed seat replay repairs a failed registry stamp without revalidati
   expect(stampAttempts).toBe(2);
   expect(targetReads).toBe(1);
   expect(recorded.deliveries).toHaveLength(1);
+});
+
+test("a completed seat replay repairs a failed legacy manager sync before reporting success", async () => {
+  let syncAttempts = 0;
+  const { deps, recorded } = dependencies({
+    syncLegacyRecord: (input) => {
+      syncAttempts += 1;
+      if (syncAttempts === 1) throw new Error("temporary manager sync failure");
+      replaceOrchestratorIncumbent({ ...input, createdAt: AT });
+    },
+  });
+  const request = spawnRequest("req_00001004");
+
+  await expect(executeOrchestratorSeatRequest(request, deps)).rejects.toThrow("temporary manager sync failure");
+  expect(orchestratorSeatFor("proj-a").active?.conversationId).toBe(NEW_ID);
+  expect(readOrchestratorRecord()).toBeNull();
+
+  const replay = await executeOrchestratorSeatRequest(request, deps);
+
+  expect(replay).toMatchObject({ status: 200, body: { replayed: true, conversationId: NEW_ID } });
+  expect(syncAttempts).toBe(2);
+  expect(recorded.spawns).toHaveLength(1);
+  expect(recorded.identityStamps).toHaveLength(1);
+  expect(readOrchestratorRecord()).toMatchObject({ conversationId: NEW_ID, path: "/tmp/new.jsonl" });
 });
 
 test("an admitted asynchronous spawn activates the seat from its durable conversation id", async () => {
