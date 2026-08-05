@@ -174,7 +174,7 @@ test("an explicit spawn account is durably pinned while an omitted account uses 
   }
 });
 
-test("a titleless client-attempt replay accepts the pre-title digest shape", async () => {
+test("derived and custom-title receipts remain replayable by a pre-title binary", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "title-digest-replay-"));
   const store = registry();
   const previous = {
@@ -190,7 +190,7 @@ test("a titleless client-attempt replay accepts the pre-title digest shape", asy
   process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
   process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
   try {
-    const post = async (activeStore: AgentRegistry) => POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+    const post = async (activeStore: AgentRegistry, request: { clientAttemptId?: string; title?: string } = {}) => POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
       method: "POST",
       headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
       body: JSON.stringify({
@@ -198,7 +198,8 @@ test("a titleless client-attempt replay accepts the pre-title digest shape", asy
         model: "claude-sonnet-4-6",
         cwd,
         ["prompt"]: "inspect",
-        clientAttemptId: "title_digest_replay_20260805",
+        clientAttemptId: request.clientAttemptId ?? "title_digest_replay_20260805",
+        ...(request.title ? { title: request.title } : {}),
       }),
     }), {
       ...structuredRouteDependencies(cwd),
@@ -225,7 +226,104 @@ test("a titleless client-attempt replay accepts the pre-title digest shape", asy
       ["prompt"]: "inspect",
       images: [],
     });
-    expect(receipt.requestDigest).toBe(digests.current);
+    expect(receipt.launchProfile.title).toBe("claude · inspect");
+    expect(receipt.requestDigest).toBe(digests.withoutTitle);
+    const rollbackReplay = store.beginSpawnRequest({
+      engine: receipt.engine,
+      cwd: receipt.cwd,
+      transport: receipt.transport,
+      launchProfile: { permissionMode: receipt.launchProfile.permissionMode },
+      clientAttemptId: receipt.clientAttemptId,
+      requestDigest: digests.withoutTitle,
+      accountPin: receipt.accountPin,
+      explicitProject: receipt.explicitProject,
+      supersedes: receipt.supersedes?.conversationId ?? null,
+    });
+    expect(rollbackReplay).toMatchObject({
+      kind: "replay",
+      receipt: { launchId: receipt.launchId },
+    });
+
+    const customTitle = "Inspect release evidence";
+    const customAttemptId = "custom_title_digest_replay_20260805";
+    const customResponse = await post(store, { clientAttemptId: customAttemptId, title: customTitle });
+    expect(customResponse.status).toBe(202);
+    const customReceipt = store.spawnReceiptForClientAttempt(customAttemptId)!;
+    const customDigests = spawnRequestDigests({
+      engine: customReceipt.engine,
+      cwd: customReceipt.cwd,
+      model: customReceipt.launchProfile.model,
+      effort: customReceipt.launchProfile.effort,
+      fast: customReceipt.launchProfile.fast,
+      accountId: customReceipt.accountId,
+      role: null,
+      title: customTitle,
+      mcpServers: customReceipt.launchProfile.mcpServers,
+      ...(customReceipt.launchProfile.plugins.length ? { plugins: customReceipt.launchProfile.plugins } : {}),
+      parent: null,
+      ["prompt"]: "inspect",
+      images: [],
+    });
+    expect(customReceipt.requestDigest).toBe(customDigests.withoutTitle);
+    expect(store.beginSpawnRequest({
+      engine: customReceipt.engine,
+      cwd: customReceipt.cwd,
+      transport: customReceipt.transport,
+      launchProfile: { permissionMode: customReceipt.launchProfile.permissionMode },
+      clientAttemptId: customReceipt.clientAttemptId,
+      requestDigest: customDigests.withoutTitle,
+      accountPin: customReceipt.accountPin,
+      explicitProject: customReceipt.explicitProject,
+      supersedes: customReceipt.supersedes?.conversationId ?? null,
+    })).toMatchObject({
+      kind: "replay",
+      receipt: { launchId: customReceipt.launchId },
+    });
+    const mismatchedTitle = await post(store, {
+      clientAttemptId: customAttemptId,
+      title: "Inspect unrelated evidence",
+    });
+    expect(mismatchedTitle.status).toBe(409);
+
+    let accountResolutions = 0;
+    let releaseAccounts = () => {};
+    const accountBarrier = new Promise<void>((resolve) => { releaseAccounts = resolve; });
+    const concurrentDependencies = {
+      ...structuredRouteDependencies(cwd),
+      registry: () => store,
+      resolveHealthySpawnAccount: async () => {
+        accountResolutions += 1;
+        if (accountResolutions === 2) releaseAccounts();
+        await accountBarrier;
+        return {
+          engine: "claude" as const,
+          accountId: "claude-test",
+          kind: "managed" as const,
+          home: path.join(cwd, "account"),
+          transcriptRoot: path.join(cwd, "projects"),
+          env: { NODE_ENV: "test" as const },
+        };
+      },
+      defer: () => {},
+    } satisfies SpawnRouteTestDependencies;
+    const concurrentAttemptId = "concurrent_title_digest_replay_20260805";
+    const concurrentPost = (title: string) => POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+      method: "POST",
+      headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
+      body: JSON.stringify({
+        engine: "claude",
+        model: "claude-sonnet-4-6",
+        cwd,
+        ["prompt"]: "inspect",
+        title,
+        clientAttemptId: concurrentAttemptId,
+      }),
+    }), concurrentDependencies);
+    const concurrentResponses = await Promise.all([
+      concurrentPost("Inspect release branch"),
+      concurrentPost("Inspect deployment branch"),
+    ]);
+    expect(concurrentResponses.map((response) => response.status).sort()).toEqual([202, 409]);
 
     const migratedFilename = `${crypto.randomUUID()}.jsonl`;
     const legacyPath = path.join(cwd, "legacy-projects", "-repo", migratedFilename);
@@ -238,7 +336,6 @@ test("a titleless client-attempt replay accepts the pre-title digest shape", asy
     delete legacy.conversations[template.id];
     reservedConversation.id = receipt.conversationId;
     legacy.conversations[receipt.conversationId] = reservedConversation;
-    legacy.receipts[receipt.launchId]!.requestDigest = digests.withoutTitle;
     legacy.receipts[receipt.launchId]!.artifactPath = legacyPath;
     legacy.receipts[receipt.launchId]!.resumeSourcePath = legacyPath;
     fs.writeFileSync(store.filename, `${JSON.stringify(legacy, null, 2)}\n`);
@@ -331,8 +428,8 @@ test("an upgraded orchestrator retry accepts its pre-title receipt digest", asyn
       ["prompt"]: receipt.launchDisplay?.echo ?? prompt,
       images: [],
     });
+    expect(receipt.requestDigest).toBe(digests.withoutTitle);
     const legacy = store.snapshot();
-    legacy.receipts[receipt.launchId]!.requestDigest = digests.withoutTitle;
     fs.writeFileSync(store.filename, `${JSON.stringify(legacy, null, 2)}\n`);
     const restarted = new AgentRegistry(store.filename, undefined, undefined, { sqliteMode: "off" });
 

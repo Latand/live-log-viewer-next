@@ -3608,6 +3608,9 @@ export class AgentRegistry {
       if (input.clientAttemptId) {
         const existing = Object.values(file.receipts).find((receipt) => receipt.clientAttemptId === input.clientAttemptId);
         if (existing) {
+          const existingTitle = semanticTitle(existing.launchProfile.title);
+          const requestedTitle = semanticTitle(profile.title);
+          const titleCompatible = !existingTitle || !requestedTitle || existingTitle === requestedTitle;
           const compatible = existing.requestDigest === (input.requestDigest ?? null)
             && existing.engine === input.engine
             && existing.cwd === input.cwd
@@ -3615,7 +3618,8 @@ export class AgentRegistry {
             && existing.accountPin === (input.accountPin === true)
             && existing.explicitProject === explicitProject
             && (existing.supersedes?.conversationId ?? null) === supersedes
-            && existing.launchProfile.permissionMode === profile.permissionMode;
+            && existing.launchProfile.permissionMode === profile.permissionMode
+            && titleCompatible;
           return { kind: compatible ? "replay" : "conflict", receipt: clone(existing) };
         }
       }
