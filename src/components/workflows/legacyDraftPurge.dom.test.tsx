@@ -135,6 +135,20 @@ const agentField = (id: string, name: string) => `llvDraftPane:${id}:${name}`;
 const WF_FIELDS = ["template", "dir", "task", "mode"];
 const agentA = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
 
+/* The working directory is a picker now (#887), so the chosen path lives on the
+   closed trigger instead of an input's value — same assertion, new surface. */
+const directoryTrigger = () => dom.document.querySelector("[data-directory-trigger]") as unknown as HTMLButtonElement | null;
+const directoryValue = () => directoryTrigger()?.getAttribute("data-directory-value") ?? null;
+
+/* React's own onChange, the way the sibling draft suites drive the composer:
+   happy-dom's `input` event does not reach a controlled textarea. */
+const typePrompt = (text: string) => {
+  const textarea = dom.document.querySelector('textarea[aria-label="First prompt text"]') as unknown as HTMLTextAreaElement;
+  const propsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
+  const props = (textarea as unknown as Record<string, { onChange: (event: unknown) => void }>)[propsKey]!;
+  flushSync(() => props.onChange({ target: { value: text } }));
+};
+
 const dashboardProps = (project: string) => ({
   files: [],
   flows: [],
@@ -204,11 +218,10 @@ test("a restored project draft renders with its deterministic project directory 
   roots.push(mount(<ProjectDashboard {...dashboardProps(project)} />));
 
   expect(await waitFor(() => dom.document.querySelector(AGENT_PANE) !== null)).toBe(true);
-  const directory = dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
-  expect(directory?.value).toBe(`/home/tester/Projects/${project}`);
+  expect(directoryValue()).toBe(`/home/tester/Projects/${project}`);
 });
 
-test("the 390px draft working-directory editor keeps a 44px touch target", async () => {
+test("the 390px draft working-directory picker keeps a 44px touch target", async () => {
   const project = "mobile-cwd-target-project";
   const windowWithMatchMedia = dom as unknown as { matchMedia: typeof mobileMatchMedia };
   const previousMatchMedia = windowWithMatchMedia.matchMedia;
@@ -224,10 +237,13 @@ test("the 390px draft working-directory editor keeps a 44px touch target", async
     const agent = dom.document.querySelector('[role="menuitem"]') as unknown as HTMLButtonElement | null;
     agent?.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
     expect(await waitFor(() => dom.document.querySelector(AGENT_PANE) !== null)).toBe(true);
-    const directory = dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
     expect(dom.innerWidth).toBe(390);
-    expect(directory?.className).toContain("min-h-11");
-    expect(directory?.className).toContain("sm:min-h-0");
+    expect(directoryTrigger()?.className).toContain("min-h-11");
+    expect(directoryTrigger()?.className).toContain("sm:min-h-0");
+    /* The list the trigger opens is reachable and its rows are targets too. */
+    flushSync(() => directoryTrigger()?.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+    const option = dom.document.querySelector('[role="option"]') as unknown as HTMLElement | null;
+    expect(option?.className).toContain("min-h-11");
   } finally {
     windowWithMatchMedia.matchMedia = previousMatchMedia;
     (dom as unknown as { innerWidth: number }).innerWidth = previousInnerWidth;
@@ -261,16 +277,15 @@ test("a task card agent action seeds the task prompt and canonical project direc
     send?.click();
 
     expect(await waitFor(() => dom.document.querySelector(AGENT_PANE) !== null)).toBe(true);
-    const directory = dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
     const prompt = dom.document.querySelector('textarea[aria-label="First prompt text"]') as unknown as HTMLTextAreaElement | null;
-    expect(directory?.value).toBe(projectRoot);
+    expect(directoryValue()).toBe(projectRoot);
     expect(prompt?.value).toBe(task.text);
   } finally {
     G.matchMedia = previousMatchMedia;
   }
 });
 
-test("a restored handoff draft guards a populated source cwd until validation", async () => {
+test("a restored handoff draft shows its populated source cwd and never asks to confirm it (#887)", async () => {
   const project = "handoff-project";
   const sourcePath = "/sessions/source.jsonl";
   const sourceCwd = "/repos/handoff/.worktrees/source-branch";
@@ -312,9 +327,8 @@ test("a restored handoff draft guards a populated source cwd until validation", 
   roots.push(mount(<ProjectDashboard {...dashboardProps(project)} files={[source]} />));
 
   expect(await waitFor(() => dom.document.querySelector(AGENT_PANE) !== null)).toBe(true);
-  const directory = dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
-  expect(directory?.value).toBe(sourceCwd);
-  expect(dom.document.querySelector('p[role="alert"]')?.textContent).toContain("Confirm the working directory");
+  expect(directoryValue()).toBe(sourceCwd);
+  expect(dom.document.querySelector('p[role="alert"]')).toBeNull();
 });
 
 test("a fresh handoff replaces its provisional project root with the resolved source cwd", async () => {
@@ -355,14 +369,11 @@ test("a fresh handoff replaces its provisional project root with the resolved so
   expect(await waitFor(() => dom.document.querySelector('[aria-label="Hand the conversation to a new agent — a draft appears below"]') !== null)).toBe(true);
   const handoff = dom.document.querySelector('[aria-label="Hand the conversation to a new agent — a draft appears below"]') as unknown as HTMLElement;
   handoff.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
-  expect(await waitFor(() => {
-    const directory = dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
-    return directory?.value === sourceCwd;
-  })).toBe(true);
+  expect(await waitFor(() => directoryValue() === sourceCwd)).toBe(true);
   expect(dom.document.querySelector('p[role="alert"]')).toBeNull();
 });
 
-test("a fresh handoff guards a populated cwd when the source checkout was deleted", async () => {
+test("a fresh handoff shows a deleted source checkout's cwd without gating on it (#887)", async () => {
   const project = "fresh-deleted-handoff-project";
   const sourcePath = "/sessions/fresh-deleted-source.jsonl";
   const projectRoot = "/repos/fresh-deleted-handoff";
@@ -405,11 +416,8 @@ test("a fresh handoff guards a populated cwd when the source checkout was delete
   expect(await waitFor(() => dom.document.querySelector('[aria-label="Hand the conversation to a new agent — a draft appears below"]') !== null)).toBe(true);
   const handoff = dom.document.querySelector('[aria-label="Hand the conversation to a new agent — a draft appears below"]') as unknown as HTMLElement;
   handoff.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
-  expect(await waitFor(() => {
-    const directory = dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
-    return directory?.value === sourceCwd;
-  })).toBe(true);
-  expect(dom.document.querySelector('p[role="alert"]')?.textContent).toContain("Confirm the working directory");
+  expect(await waitFor(() => directoryValue() === sourceCwd)).toBe(true);
+  expect(dom.document.querySelector('p[role="alert"]')).toBeNull();
 });
 
 test("a restored handoff waits for its out-of-snapshot source cwd before exposing the composer", async () => {
@@ -435,13 +443,10 @@ test("a restored handoff waits for its out-of-snapshot source cwd before exposin
   expect(await waitFor(() => spawnRequested)).toBe(true);
   expect(dom.document.querySelector(AGENT_PANE)).toBeNull();
   releaseSpawn();
-  expect(await waitFor(() => {
-    const directory = dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
-    return directory?.value === sourceCwd;
-  })).toBe(true);
+  expect(await waitFor(() => directoryValue() === sourceCwd)).toBe(true);
 });
 
-test("a restored handoff keeps a deleted source checkout cwd behind confirmation", async () => {
+test("a deleted source checkout's cwd launches with no confirmation in the way (#887)", async () => {
   const project = "deleted-checkout-handoff-project";
   const sourcePath = "/archive/deleted-checkout-source.jsonl";
   const sourceCwd = "/repos/deleted-checkout/.worktrees/source-branch";
@@ -466,15 +471,13 @@ test("a restored handoff keeps a deleted source checkout cwd behind confirmation
 
   roots.push(mount(<ProjectDashboard {...dashboardProps(project)} />));
 
-  expect(await waitFor(() => {
-    const directory = dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
-    return directory?.value === sourceCwd;
-  })).toBe(true);
-  expect(dom.document.querySelector('p[role="alert"]')?.textContent).toContain("Confirm the working directory");
+  expect(await waitFor(() => directoryValue() === sourceCwd)).toBe(true);
+  expect(dom.document.querySelector('p[role="alert"]')).toBeNull();
+  typePrompt("Continue the review in the recovered checkout");
   const launch = dom.document.querySelector('[aria-label="Launch the agent"]') as unknown as HTMLButtonElement | null;
   launch?.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
   await settle();
-  expect(launchCalls).toBe(0);
+  expect(launchCalls).toBe(1);
 });
 
 test("a restored handoff stays unresolved while source cwd lookup retries", async () => {
@@ -506,10 +509,7 @@ test("a restored handoff stays unresolved while source cwd lookup retries", asyn
   expect(await waitFor(() => spawnCalls === 3, 250)).toBe(true);
   expect(dom.document.querySelector(AGENT_PANE)).toBeNull();
   releaseSuccess();
-  expect(await waitFor(() => {
-    const directory = dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
-    return directory?.value === sourceCwd;
-  })).toBe(true);
+  expect(await waitFor(() => directoryValue() === sourceCwd)).toBe(true);
 });
 
 test("a cold dashboard cannot create an agent draft before project metadata hydrates", async () => {
@@ -548,16 +548,15 @@ test("the desktop agent control stays disabled until project metadata hydrates",
   }
 });
 
-test("an unmatched metadata-poor project opens a guarded nonempty draft", async () => {
+test("an unmatched metadata-poor project opens a nonempty draft on the root placeholder", async () => {
   const project = "unmatched-task-only-project";
   roots.push(mount(<ProjectDashboard {...dashboardProps(project)} projectCwd={undefined} />));
 
   const create = dom.document.querySelector('[aria-label="New conversation with an agent"]') as unknown as HTMLButtonElement | null;
   create?.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
   expect(await waitFor(() => dom.document.querySelector(AGENT_PANE) !== null)).toBe(true);
-  const directory = dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
-  expect(directory?.value).toBe("/");
-  expect(dom.document.querySelector('p[role="alert"]')?.textContent).toContain("Confirm the working directory");
+  expect(directoryValue()).toBe("/");
+  expect(dom.document.querySelector('p[role="alert"]')).toBeNull();
 });
 
 test("an untouched provisional project draft adopts a canonical root after catalog hydration", async () => {
@@ -569,8 +568,7 @@ test("an untouched provisional project draft adopts a canonical root after catal
   const create = dom.document.querySelector('[aria-label="New conversation with an agent"]') as unknown as HTMLButtonElement | null;
   create?.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
   expect(await waitFor(() => dom.document.querySelector(AGENT_PANE) !== null)).toBe(true);
-  const directory = () => dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
-  expect(directory()?.value).toBe("/");
+  expect(directoryValue()).toBe("/");
 
   flushSync(() => root.render(
     <ProjectDashboard
@@ -580,7 +578,7 @@ test("an untouched provisional project draft adopts a canonical root after catal
     />,
   ));
 
-  expect(await waitFor(() => directory()?.value === canonicalRoot)).toBe(true);
+  expect(await waitFor(() => directoryValue() === canonicalRoot)).toBe(true);
   expect(dom.document.querySelector('p[role="alert"]')).toBeNull();
 });
 
@@ -612,14 +610,14 @@ test("a missing restored handoff reaches an editable bounded recovery card", asy
   expect(settledCalls).toBeLessThanOrEqual(5);
   await new Promise((resolve) => setTimeout(resolve, 1100));
   expect(spawnCalls).toBe(settledCalls);
-  const directory = dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
-  expect(directory?.value).toBe(`/home/tester/Projects/${project}`);
-  expect(directory?.disabled).toBe(false);
-  expect(dom.document.querySelector('p[role="alert"]')?.textContent).toContain("Confirm the working directory");
+  expect(directoryValue()).toBe(`/home/tester/Projects/${project}`);
+  expect(directoryTrigger()?.disabled).toBe(false);
+  expect(dom.document.querySelector('p[role="alert"]')).toBeNull();
+  typePrompt("Rebuild the lost handoff from the project root");
   const launch = dom.document.querySelector('[aria-label="Launch the agent"]') as unknown as HTMLButtonElement | null;
   launch?.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
   await settle();
-  expect(launchCalls).toBe(0);
+  expect(launchCalls).toBe(1);
 });
 
 test("closing a conversation card reports its path to the dashboard owner", async () => {

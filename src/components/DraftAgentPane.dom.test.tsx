@@ -311,3 +311,60 @@ test("an admitted structured spawn adopts its provisional card in the same mount
   expect(spawned).toEqual([provisional]);
   expect(posts).toHaveLength(1);
 });
+
+test("a recovered directory launches without a confirmation, and the picker's choice is what launches (#887)", async () => {
+  const posts: Record<string, unknown>[] = [];
+  const recovered = "/repos/handoff/.worktrees/deleted-source";
+  const chosen = "/repos/handoff/.worktrees/live-source";
+  sessionStorage.setItem("llvDraftPane:pick-draft:cwd", recovered);
+  sessionStorage.setItem("llvDraftPane:pick-draft:cwdSeed", recovered);
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    const auxiliary = auxiliaryResponse(url);
+    if (auxiliary) return auxiliary;
+    if (url === "/api/spawn" && init?.method === "POST") {
+      posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return { ok: true, status: 202, json: async () => ({ ok: true, state: "starting", launched: false, path: null, launchId: "launch-pick", conversationId: "conversation_pick" }) } as Response;
+    }
+    if (url.startsWith("/api/spawn?")) {
+      /* The server's own answer for a deleted checkout: it still names the
+         directory, and nothing about it blocks the launch any more. */
+      return { ok: true, json: async () => ({ ...imageNegotiation("tmux"), dirs: [recovered, chosen], cwd: null }) } as Response;
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  const host = document.createElement("div");
+  document.body.append(host);
+  root = createRoot(host);
+  flushSync(() => root!.render(
+    <DraftAgentPane draftId="pick-draft" project="proj" files={[]} onClose={() => {}} onSpawned={() => {}} />,
+  ));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  /* No banner, no launch-blocking check, and no session field carrying doubt. */
+  expect(host.querySelector('p[role="alert"]')).toBeNull();
+  expect(host.textContent).not.toContain("Confirm the working directory");
+  expect(sessionStorage.getItem("llvDraftPane:pick-draft:cwdUnverified")).toBeNull();
+
+  const trigger = host.querySelector("[data-directory-trigger]") as HTMLButtonElement;
+  expect(trigger.getAttribute("data-directory-value")).toBe(recovered);
+  flushSync(() => trigger.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  const option = [...host.querySelectorAll('[role="option"]')].find((row) => row.getAttribute("data-directory-option") === chosen)!;
+  flushSync(() => option.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  expect((host.querySelector("[data-directory-trigger]") as HTMLButtonElement).getAttribute("data-directory-value")).toBe(chosen);
+  expect(sessionStorage.getItem("llvDraftPane:pick-draft:cwd")).toBe(chosen);
+  /* The operator's pick outranks the seed, so a late system answer cannot
+     quietly move the launch back to the recovered checkout. */
+  expect(sessionStorage.getItem("llvDraftPane:pick-draft:cwdSeed")).toBe(recovered);
+
+  const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+  const propsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
+  const props = (textarea as unknown as Record<string, { onChange: (event: unknown) => void }>)[propsKey]!;
+  flushSync(() => props.onChange({ target: { value: "Continue in the live checkout" } }));
+  flushSync(() => host.querySelector("form")!.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(posts).toHaveLength(1);
+  expect(posts[0]).toMatchObject({ cwd: chosen, prompt: "Continue in the live checkout" });
+});

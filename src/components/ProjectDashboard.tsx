@@ -23,7 +23,7 @@ import { BoardHistoryControls } from "./BoardHistoryControls";
 import { createFocusEdgeGate } from "./focusRequestEdge";
 import { TaskStrip } from "./BranchPane";
 import { ConversationList } from "./ConversationList";
-import { clearDraftStorage, draftCwd, draftParentConversationId, draftSrc, replaceUnverifiedDraftCwd, requireDraftCwdConfirmation, seedDraftCwd, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
+import { clearDraftStorage, draftCwd, draftParentConversationId, draftSrc, resolveSystemDraftCwd, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
 import { reviewerCloseMutations } from "./reviewerAutoClose";
 import { directReviewFlows, isDirectReviewFlow } from "./flows/directReviewGroups";
@@ -475,16 +475,15 @@ function ProjectDashboardView({
       if (!isWorkflowDraftId(id)) {
         const sourcePath = draftSrc(id) || undefined;
         if (draftCwd(id)) {
-          if (!sourcePath && initialDraftCwdVerified) replaceUnverifiedDraftCwd(id, initialDraftCwd);
+          if (!sourcePath && initialDraftCwdVerified) resolveSystemDraftCwd(id, initialDraftCwd);
           continue;
         }
         const sourceCwd = sourcePath
           ? files.find((file) => file.path === sourcePath)?.cwd?.trim()
           : undefined;
-        if (sourceCwd) requireDraftCwdConfirmation(id, sourceCwd);
+        if (sourceCwd) setDraftCwd(id, sourceCwd);
         else if (sourcePath) unresolved.push({ id, sourcePath });
-        else if (initialDraftCwdVerified) seedDraftCwd(id, initialDraftCwd);
-        else requireDraftCwdConfirmation(id, initialDraftCwd);
+        else setDraftCwd(id, initialDraftCwd);
       }
     }
     /* eslint-disable-next-line react-hooks/set-state-in-effect */
@@ -494,14 +493,13 @@ function ProjectDashboardView({
       void fetch("/api/spawn?project=" + encodeURIComponent(project) + "&src=" + encodeURIComponent(sourcePath))
         .then(async (response) => {
           if (!response.ok) throw new Error(`spawn suggestions failed: ${response.status}`);
-          return response.json() as Promise<{ cwd?: string | null; cwdExists?: boolean }>;
+          return response.json() as Promise<{ cwd?: string | null }>;
         })
         .then((body) => {
           const sourceCwd = typeof body.cwd === "string" ? body.cwd.trim() : "";
           if (!sourceCwd) throw new Error("spawn suggestions omitted the source cwd");
           if (cancelled) return;
-          if (body.cwdExists === false) requireDraftCwdConfirmation(id, sourceCwd);
-          else seedDraftCwd(id, sourceCwd);
+          setDraftCwd(id, sourceCwd);
           setPendingRestoredHandoffs((current) => {
             if (!current.has(id)) return current;
             const next = new Set(current);
@@ -512,7 +510,7 @@ function ProjectDashboardView({
         .catch(() => {
           if (cancelled) return;
           if (attempt + 1 >= HANDOFF_CWD_MAX_ATTEMPTS) {
-            requireDraftCwdConfirmation(id, initialDraftCwd);
+            setDraftCwd(id, initialDraftCwd);
             setPendingRestoredHandoffs((current) => {
               if (!current.has(id)) return current;
               const next = new Set(current);
@@ -1021,8 +1019,7 @@ function ProjectDashboardView({
     if (!loaded) return;
     onUserNavigate?.();
     const id = newDraftId();
-    if (initialDraftCwdVerified) setDraftCwd(id, initialDraftCwd);
-    else requireDraftCwdConfirmation(id, initialDraftCwd);
+    setDraftCwd(id, initialDraftCwd);
     persistDrafts([...drafts, id]);
     pendingFocusRef.current = "draft::" + id;
   };
@@ -1050,7 +1047,7 @@ function ProjectDashboardView({
     const id = newDraftId();
     setDraftSrc(id, file.path, file.conversationId);
     const handoffCwd = projectDraftWorkingDirectory(files, project, projectCatalogEntries, file.path, projectCwdFallbacks, initialDraftCwd);
-    requireDraftCwdConfirmation(id, handoffCwd);
+    setDraftCwd(id, handoffCwd);
     persistDrafts([...drafts, id]);
     pendingFocusRef.current = "draft::" + id;
   };
@@ -1068,8 +1065,7 @@ function ProjectDashboardView({
     onUserNavigate?.();
     const id = newDraftId();
     setDraftText(id, task.text);
-    if (initialDraftCwdVerified) setDraftCwd(id, initialDraftCwd);
-    else requireDraftCwdConfirmation(id, initialDraftCwd);
+    setDraftCwd(id, initialDraftCwd);
     persistDrafts([...drafts, id]);
     pendingFocusRef.current = "draft::" + id;
   };
@@ -1089,7 +1085,7 @@ function ProjectDashboardView({
     }
     const id = newDraftId();
     if (file.goal?.objective) setDraftText(id, file.goal.objective);
-    requireDraftCwdConfirmation(id, file.cwd?.trim() || initialDraftCwd);
+    setDraftCwd(id, file.cwd?.trim() || initialDraftCwd);
     persistDrafts([...drafts, id]);
     pendingFocusRef.current = "draft::" + id;
   };
