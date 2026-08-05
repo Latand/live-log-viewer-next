@@ -10,11 +10,12 @@ export type AgentModelOption = {
 
 export const CODEX_SOL_MODEL = "gpt-5.6-sol";
 export const CODEX_TERRA_MODEL = "gpt-5.6-terra";
+export const CODEX_LUNA_MODEL = "gpt-5.6-luna";
 
 const CODEX_IMAGE_INPUT_MODELS = new Set([
   CODEX_SOL_MODEL,
   CODEX_TERRA_MODEL,
-  "gpt-5.6-luna",
+  CODEX_LUNA_MODEL,
   "gpt-5.5",
   "gpt-5.4",
   "gpt-5.4-mini",
@@ -36,6 +37,7 @@ export const ENGINE_MODELS: Record<"claude" | "codex", readonly AgentModelOption
   codex: [
     { id: CODEX_SOL_MODEL, label: "GPT-5.6-Sol", shortLabel: "5.6-Sol", use: "review" },
     { id: CODEX_TERRA_MODEL, label: "GPT-5.6-Terra", shortLabel: "5.6-Terra", use: "implement" },
+    { id: CODEX_LUNA_MODEL, label: "GPT-5.6-Luna", shortLabel: "5.6-Luna", use: "general" },
   ],
 };
 
