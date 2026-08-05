@@ -175,7 +175,7 @@ function normalizedMcpServers(value: readonly string[] | undefined): string[] {
 function configuredCodexMcpServers(home: string, cwd: string): string[] {
   const env: NodeJS.ProcessEnv = { ...process.env, CODEX_HOME: home };
   delete env.LLV_TOKEN;
-  const listed = spawnSync(process.env.LLV_CODEX_BINARY ?? resolveBinary("codex"), ["mcp", "list", "--json"], {
+  const listed = spawnSync(process.env.LLV_CODEX_BINARY ?? resolveBinary("codex"), ["-c", "features.plugins=false", "mcp", "list", "--json"], {
     cwd,
     env,
     encoding: "utf8",
@@ -195,10 +195,20 @@ function configuredCodexMcpServers(home: string, cwd: string): string[] {
 
 function codexMcpRuntimeOverrides(home: string, cwd: string, allowlist: readonly string[]): string[] {
   const enabled = new Set(allowlist);
-  return configuredCodexMcpServers(home, cwd).map((name) => {
-    const key = /^[A-Za-z0-9_-]+$/.test(name) ? name : JSON.stringify(name);
-    return `mcp_servers.${key}.enabled=${enabled.has(name)}`;
-  });
+  return [
+    /* Plugin-contributed servers (computer-use, github, …) carry no
+       `[mcp_servers.*]` block in config.toml, so a fabricated
+       `mcp_servers.<name>.enabled` override for them leaves codex a server
+       table with only `enabled` — its config loader fails the whole launch
+       with "invalid transport". Plugins are off for Viewer-spawned sessions,
+       and the enumeration runs under the same flag so the override list can
+       never name a plugin server. */
+    "features.plugins=false",
+    ...configuredCodexMcpServers(home, cwd).map((name) => {
+      const key = /^[A-Za-z0-9_-]+$/.test(name) ? name : JSON.stringify(name);
+      return `mcp_servers.${key}.enabled=${enabled.has(name)}`;
+    }),
+  ];
 }
 
 function pushClaudePolicyArgs(
