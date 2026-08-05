@@ -1737,6 +1737,61 @@ describe("CodexAppServerHost", () => {
     }
   });
 
+  test("an oversized server request whose id collides with a pending client rpc is answered, not misread as a response", async () => {
+    const threadId = "oversized-collision-thread";
+    const server = new FakeAppServer(threadId, threadId, false, [], undefined, null, ["turn/start"]);
+    const eventStore = new MemoryEventStore();
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const host = await CodexAppServerHost.start({
+        cwd: "/repo",
+        eventStore,
+        spawnProcess: fakeSpawn(server),
+        ...stubbedTermination(server),
+      });
+
+      /* Hold turn/start unanswered so its rpc id stays pending, then emit an
+         oversized server request reusing that exact numeric id — the server's
+         outgoing-request counter and the client's rpc counter are independent
+         id spaces, so this collision is legal. */
+      const sendPromise = host.send({ id: "collide", text: "hi" });
+      sendPromise.catch(() => {});
+      const requestDeadline = Date.now() + 2000;
+      while (!server.requests.some((request) => request.method === "turn/start") && Date.now() < requestDeadline) {
+        await Bun.sleep(5);
+      }
+      const turnStart = server.requests.find((request) => request.method === "turn/start") as
+        { id: number; params: { input: unknown } };
+      expect(typeof turnStart?.id).toBe("number");
+
+      server.stdout.write(`{"jsonrpc":"2.0","id":${turnStart.id},"method":"execCommandApproval","params":{"pad":"${"x".repeat(26 * 1024 * 1024)}"}}\n`);
+      const replyDeadline = Date.now() + 2000;
+      let errorReply: Record<string, unknown> | undefined;
+      while (!errorReply && Date.now() < replyDeadline) {
+        errorReply = server.requests.find((request) => request.id === turnStart.id && request.error !== undefined);
+        await Bun.sleep(5);
+      }
+      expect(errorReply?.error).toMatchObject({ message: "oversized frame skipped by client" });
+      expect((await host.health()).status).not.toBe("dead");
+
+      const diagnostics = eventStore.load(threadId)
+        .filter((event) => event.kind === "item" && JSON.stringify(event.item).includes("oversized"));
+      expect(diagnostics).toHaveLength(1);
+      expect(((diagnostics[0] as { item: { text: string } }).item).text).toContain("execCommandApproval");
+
+      server.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: turnStart.id, result: { turn: { id: "turn-collide" } } })}\n`);
+      server.notify("item/completed", {
+        threadId,
+        turnId: "turn-collide",
+        item: { type: "userMessage", clientId: "collide", content: turnStart.params.input },
+      });
+      await expect(sendPromise).resolves.toMatchObject({ outcome: "turn-started", turnId: "turn-collide" });
+      await host.release();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   test("an unterminated oversized tail buffer is discarded to the next newline and the host survives", async () => {
     const threadId = "oversized-tail-thread";
     const server = new FakeAppServer(threadId);

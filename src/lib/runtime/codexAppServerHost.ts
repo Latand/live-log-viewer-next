@@ -2697,7 +2697,10 @@ export class CodexAppServerHost implements EngineHost {
     const method = /"method"\s*:\s*"([^"]{1,128})"/.exec(envelope)?.[1] ?? null;
     const idToken = /"id"\s*:\s*(\d+|"[^"\\]{1,128}")/.exec(envelope)?.[1] ?? null;
     const numericId = idToken !== null && !idToken.startsWith("\"") ? Number(idToken) : null;
-    const pending = numericId !== null ? this.pending.get(numericId) : undefined;
+    /* Mirrors acceptParsedMessage: a frame carrying a method is a server
+       request or notification even when its id equals a pending client rpc id
+       — the two counters are independent JSON-RPC id spaces. */
+    const pending = method === null && numericId !== null ? this.pending.get(numericId) : undefined;
     const descriptor = method ?? (pending ? `response to ${pending.method}` : "unknown message type");
     const diagnostic = oversizedFrameDiagnostic(observedBytes, descriptor);
     this.warnOversizedFrame(observedBytes, descriptor);
