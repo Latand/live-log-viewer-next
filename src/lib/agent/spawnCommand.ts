@@ -39,7 +39,7 @@ import { adoptPipelineAttemptFromSource, pipelineAttemptTargetForSource } from "
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { projectDirectoryCandidates } from "@/lib/scanner/projectDirectories";
-import { derivedSpawnTitle, semanticTitle } from "@/lib/title";
+import { derivedSpawnTitle, firstPromptLine, semanticTitle } from "@/lib/title";
 import { buildImagePayload, collectImagePayloads, deleteInboxImages, spawnAgentWithPrompt, verifyTmuxHostEvidence } from "@/lib/tmux";
 import { en } from "@/lib/i18n/en";
 import { uk } from "@/lib/i18n/uk";
@@ -255,11 +255,13 @@ export async function executeSpawnRequest(
   if (body.title !== undefined && !explicitTitle) {
     return NextResponse.json({ error: "title must be a semantic, non-placeholder string" }, { status: 400 });
   }
-  const launchTitle = explicitTitle ?? derivedSpawnTitle(
-    role.value?.role ?? engine,
-    userPrompt,
-    images.length ? "Image task" : "New task",
-  );
+  const derivedTitle = firstPromptLine(userPrompt, 60)
+    ? derivedSpawnTitle(role.value?.role ?? engine, userPrompt)
+    : null;
+  if (!explicitTitle && !derivedTitle) {
+    return NextResponse.json({ error: "title is required when prompt has no semantic first line" }, { status: 400 });
+  }
+  const launchTitle = explicitTitle ?? derivedTitle!;
   let transport;
   try {
     transport = spawnTransport();
@@ -446,7 +448,8 @@ export async function executeSpawnRequest(
         prompt,
         images: images.map((image) => ({ mime: image.mime, digest: spawnContentDigest({ image: image.base64 }) })),
       });
-      return body.title === undefined && existingAttempt?.requestDigest === digests.withoutTitle
+      const legacyTitleCompatible = body.title === undefined || explicitTitle === derivedTitle;
+      return legacyTitleCompatible && existingAttempt?.requestDigest === digests.withoutTitle
         ? digests.withoutTitle
         : digests.current;
     };
