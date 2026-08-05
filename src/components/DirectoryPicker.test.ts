@@ -11,7 +11,7 @@ test("the last segment is what a path is split on, so it is never the part that 
 });
 
 test("an over-long head elides in the middle, keeping the root and the segments next to the tail", () => {
-  const head = "/home/tester/Projects/live-log-viewer/.worktrees/";
+  const head = "/home/user/Projects/live-log-viewer/.worktrees/";
   expect(elideDirectoryHead(head, 96)).toBe(head);
   const elided = elideDirectoryHead(head, 30);
   expect(elided.startsWith("/home/")).toBe(true);
@@ -23,8 +23,8 @@ test("an over-long head elides in the middle, keeping the root and the segments 
 });
 
 test("two sibling checkouts stay distinguishable after elision", () => {
-  const a = elideDirectoryHead("/home/tester/Projects/live-log-viewer/.worktrees/", 34);
-  const b = elideDirectoryHead("/home/tester/Projects/other-viewer/.worktrees/", 34);
+  const a = elideDirectoryHead("/home/user/Projects/live-log-viewer/.worktrees/", 34);
+  const b = elideDirectoryHead("/home/user/Projects/other-viewer/.worktrees/", 34);
   expect(a).not.toBe(b);
 });
 

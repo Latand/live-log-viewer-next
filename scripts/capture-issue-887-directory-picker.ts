@@ -137,12 +137,7 @@ function buildEnvironment(port: number): NodeJS.ProcessEnv {
     LLV_REAPER_ENABLED: "0",
     NEXT_TELEMETRY_DISABLED: "1",
     PORT: String(port),
-    TZ: "UTC",
-    LANG: "C.UTF-8",
-    LC_ALL: "C.UTF-8",
-    USER: "demo",
-    LOGNAME: "demo",
-    SHELL: "/bin/sh",
+    TZ: "UTC", LANG: "C.UTF-8", LC_ALL: "C.UTF-8", USER: "demo", LOGNAME: "demo", SHELL: "/bin/sh",
   };
 }
 

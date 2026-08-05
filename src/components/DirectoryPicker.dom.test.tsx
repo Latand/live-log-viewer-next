@@ -20,13 +20,13 @@ Object.assign(globalThis, {
 });
 (dom.HTMLElement.prototype as unknown as { scrollIntoView: () => void }).scrollIntoView = () => {};
 
-const REPO = "/home/tester/Projects/live-log-viewer";
+const REPO = "/home/user/Projects/live-log-viewer";
 const DIRS = [
   REPO,
   `${REPO}/.worktrees/fix-887`,
   `${REPO}/.worktrees/fix-902`,
-  "/home/tester/Projects/other-viewer/.worktrees/fix-887",
-  "/home/tester/Projects/notes",
+  "/home/user/Projects/other-viewer/.worktrees/fix-887",
+  "/home/user/Projects/notes",
 ];
 
 let root: Root | null = null;
@@ -89,7 +89,7 @@ test("similar paths are listed whole, so their tails tell them apart", () => {
   const siblings = options().filter((option) => option.getAttribute("data-directory-option")?.endsWith("fix-887"));
   expect(siblings).toHaveLength(2);
   expect(siblings[0].textContent).toContain(`${REPO}/.worktrees/fix-887`);
-  expect(siblings[1].textContent).toContain("/home/tester/Projects/other-viewer/.worktrees/fix-887");
+  expect(siblings[1].textContent).toContain("/home/user/Projects/other-viewer/.worktrees/fix-887");
   expect(siblings[0].textContent).not.toBe(siblings[1].textContent);
 });
 

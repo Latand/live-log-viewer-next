@@ -133,7 +133,9 @@ const draftsKey = (project: string) => `llvDrafts:${project}`;
 const wfField = (id: string, name: string) => `llvWfDraft:${id}:${name}`;
 const agentField = (id: string, name: string) => `llvDraftPane:${id}:${name}`;
 const WF_FIELDS = ["template", "dir", "task", "mode"];
-const agentA = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+/* A draft id, deliberately not uuid-shaped: publication surfaces carry no
+   identifier that reads like a real resource id. */
+const agentA = "agent_3f2504e0_4f89_41d3";
 
 /* The working directory is a picker now (#887), so the chosen path lives on the
    closed trigger instead of an input's value — same assertion, new surface. */
@@ -160,7 +162,7 @@ const dashboardProps = (project: string) => ({
   openNonce: 0,
   archived: false,
   catalogKnown: true,
-  projectCwd: `/home/tester/Projects/${project}`,
+  projectCwd: `/home/user/Projects/${project}`,
   catalogConversationCount: 0,
   onArchive: () => {},
   onUnarchive: () => {},
@@ -218,7 +220,7 @@ test("a restored project draft renders with its deterministic project directory 
   roots.push(mount(<ProjectDashboard {...dashboardProps(project)} />));
 
   expect(await waitFor(() => dom.document.querySelector(AGENT_PANE) !== null)).toBe(true);
-  expect(directoryValue()).toBe(`/home/tester/Projects/${project}`);
+  expect(directoryValue()).toBe(`/home/user/Projects/${project}`);
 });
 
 test("the 390px draft working-directory picker keeps a 44px touch target", async () => {
@@ -252,7 +254,7 @@ test("the 390px draft working-directory picker keeps a 44px touch target", async
 
 test("a task card agent action seeds the task prompt and canonical project directory", async () => {
   const project = "task-agent-project";
-  const projectRoot = `/home/tester/Projects/${project}`;
+  const projectRoot = `/home/user/Projects/${project}`;
   const task: BoardTask = {
     id: "task-agent-draft",
     project,
@@ -610,7 +612,7 @@ test("a missing restored handoff reaches an editable bounded recovery card", asy
   expect(settledCalls).toBeLessThanOrEqual(5);
   await new Promise((resolve) => setTimeout(resolve, 1100));
   expect(spawnCalls).toBe(settledCalls);
-  expect(directoryValue()).toBe(`/home/tester/Projects/${project}`);
+  expect(directoryValue()).toBe(`/home/user/Projects/${project}`);
   expect(directoryTrigger()?.disabled).toBe(false);
   expect(dom.document.querySelector('p[role="alert"]')).toBeNull();
   typePrompt("Rebuild the lost handoff from the project root");

@@ -228,11 +228,7 @@ test("Reviewer role persists and submits the reviewed conversation", async () =>
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   expect(posts).toHaveLength(1);
-  expect(posts[0]).toMatchObject({
-    role: "reviewer",
-    reviews: implementer.conversationId,
-    prompt: "Review the durable membership work",
-  });
+  expect(posts[0]).toMatchObject({ role: "reviewer", reviews: implementer.conversationId, prompt: "Review the durable membership work" });
   expect(filesRefreshes).toBe(1);
   window.removeEventListener(FILES_CHANGED_EVENT, onFilesChanged);
 });
