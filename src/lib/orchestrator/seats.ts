@@ -56,6 +56,10 @@ export interface OrchestratorSeat {
   /** Null only while a spawn-mode intent has not settled a conversation. */
   conversationId: string | null;
   path: string | null;
+  /** Incumbent runtime identity frozen with the request so creator-death and
+      completed replays cannot reconstruct it from a changed retry payload. */
+  engine?: string | null;
+  model?: string | null;
   /** The mandate text delivered (active) or to be delivered (pending). */
   mandate: string;
   /** Version of the approved default prompt the mandate was based on; null
@@ -147,6 +151,8 @@ function normalizeSeat(value: unknown): OrchestratorSeat | null {
     seatEpoch: seat.seatEpoch,
     conversationId: seat.conversationId ?? null,
     path: seat.path ?? null,
+    engine: typeof seat.engine === "string" && seat.engine.trim() ? seat.engine : null,
+    model: typeof seat.model === "string" && seat.model.trim() ? seat.model : null,
     mandate: seat.mandate,
     promptVersion: typeof seat.promptVersion === "number" && Number.isInteger(seat.promptVersion) ? seat.promptVersion : null,
     predecessorConversationId: typeof seat.predecessorConversationId === "string" ? seat.predecessorConversationId : null,
@@ -289,6 +295,8 @@ export function beginOrchestratorSeatIntent(input: {
   clientRequestId: string;
   mode: "spawn" | "existing";
   conversationId?: string | null;
+  engine?: string | null;
+  model?: string | null;
   promptVersion?: number | null;
   now?: string;
 }): BeginSeatIntentResult {
@@ -323,6 +331,8 @@ export function beginOrchestratorSeatIntent(input: {
       seatEpoch: file.nextSeatEpoch,
       conversationId: input.conversationId ?? null,
       path: null,
+      engine: input.engine?.trim() || null,
+      model: input.model?.trim() || null,
       mandate: input.mandate,
       promptVersion: input.promptVersion ?? null,
       predecessorConversationId: null,

@@ -79,7 +79,7 @@ export type LaunchSettlement =
   | { kind: "unknown" };
 
 export type ExistingConversationTarget =
-  | { kind: "eligible"; conversationId: string; path: string; cwd: string; project: string }
+  | { kind: "eligible"; conversationId: string; path: string; cwd: string; project: string; engine?: string | null; model?: string | null }
   | { kind: "ineligible"; code: "conversation_ineligible" | "invalid_cwd" | "missing_transcript" | "missing_project"; error: string };
 
 /** Issue #903: the spawn fallback must never be this server process's own
@@ -184,6 +184,8 @@ export const productionSeatCommandDependencies: SeatCommandDependencies = {
       path: transcriptPath,
       cwd,
       project: canonicalOrchestratorProject(ownedProject),
+      engine: conversation.engine,
+      model: generation?.launchProfile.model ?? null,
     };
   },
   projectTasks: (project) => loadTasks()
@@ -403,6 +405,8 @@ export async function executeOrchestratorSeatRequest(
       clientRequestId,
       mode: "existing",
       conversationId: target.conversationId,
+      engine: target.engine ?? null,
+      model: target.model ?? null,
       promptVersion,
       now: dependencies.now(),
     });
@@ -486,7 +490,16 @@ export async function executeOrchestratorSeatRequest(
   }
   const modelError = explicitSeatModelError(rawBody);
   if (modelError) return { status: 400, body: { error: modelError } };
-  const begun = beginOrchestratorSeatIntent({ project, mandate, clientRequestId, mode: "spawn", promptVersion, now: dependencies.now() });
+  const begun = beginOrchestratorSeatIntent({
+    project,
+    mandate,
+    clientRequestId,
+    mode: "spawn",
+    engine: typeof rawBody.engine === "string" ? rawBody.engine : null,
+    model: typeof rawBody.model === "string" ? rawBody.model : null,
+    promptVersion,
+    now: dependencies.now(),
+  });
   if (begun.kind === "completed") {
     const repaired = reconcileCompletedSeatReplay(project, clientRequestId, dependencies);
     if (!repaired) return { status: 409, body: { error: "seat intent was superseded by a newer designation" } };
