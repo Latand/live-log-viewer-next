@@ -9,6 +9,7 @@ import type { FileEntry } from "@/lib/types";
 
 import { registerPipelineTick } from "./controllerSignal";
 import { tickPipelines } from "./engine";
+import { archiveSettledPipelines } from "./store";
 
 export type FlowPipelineControllerPhase = "pipelines" | "scan" | "flows" | "idle";
 export type FlowPipelineControllerHeartbeatState =
@@ -67,6 +68,7 @@ type PhaseOutcome<T> =
 
 const DEFAULT_PHASE_DEADLINE_MS = 15_000;
 const DEFAULT_MAX_PASSES = 8;
+const ARCHIVE_SWEEP_INTERVAL_MS = 60 * 60 * 1_000;
 export const FLOW_PIPELINE_WATCHDOG_MS = 30_000;
 const HEARTBEAT_FILE = "flow-pipeline-controller-heartbeat.json";
 
@@ -104,6 +106,7 @@ export class FlowPipelineController {
   private trailingCycleRequested = false;
   private trailingTrigger = "signal";
   private cycle = 0;
+  private lastArchiveSweepAt = 0;
   private readonly activePhases = new Map<Exclude<FlowPipelineControllerPhase, "idle">, ActivePhase>();
   private readonly ports: Required<FlowPipelineControllerPorts>;
   private readonly phaseDeadlineMs: number;
@@ -190,6 +193,7 @@ export class FlowPipelineController {
         || (scanOutcome?.state === "completed" && scanOutcome.value.complete);
       if (!changed) break;
     }
+    this.sweepSettledArchive();
     const blocked = [...this.activePhases.entries()]
       .sort((left, right) => left[1].startedAt - right[1].startedAt)[0];
     if (blocked) {
@@ -211,6 +215,19 @@ export class FlowPipelineController {
         startedAt: this.ports.now(),
       });
     }
+  }
+
+  /** Hourly, off the cycle's critical path: move settled pipeline records to
+      the cold archive so the hot registry stays small. */
+  private sweepSettledArchive(): void {
+    const now = this.ports.now();
+    if (now - this.lastArchiveSweepAt < ARCHIVE_SWEEP_INTERVAL_MS) return;
+    this.lastArchiveSweepAt = now;
+    void archiveSettledPipelines(now).then((archived) => {
+      if (archived > 0) this.ports.log(`[flow pipeline controller] archived ${archived} settled pipeline record(s)`);
+    }).catch((error) => {
+      this.ports.log("[flow pipeline controller] settled pipeline archive sweep failed", error);
+    });
   }
 
   private async runPhase<T>(

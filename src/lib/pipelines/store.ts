@@ -561,6 +561,67 @@ export function savePipelines(pipelines: Pipeline[]): void {
   withFileTransactionSync(pipelinesFile(), "pipeline state is busy", () => savePipelinesUnlocked(pipelines));
 }
 
+const pipelinesArchiveFile = () => statePath("pipelines-archive.json");
+
+/** Settled records leave the hot registry after this long; the archive keeps
+    the full record for the closed list and by-id reads. */
+const SETTLED_PIPELINE_ARCHIVE_AFTER_MS = 3 * 24 * 60 * 60 * 1000;
+
+/** Lenient read: the archive is cold storage, so a malformed or legacy record
+    is skipped with a log line instead of poisoning every closed-list read. */
+export function loadArchivedPipelines(): Pipeline[] {
+  const raw = readJson(pipelinesArchiveFile());
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+  const file = raw as Partial<PipelineFile>;
+  if (typeof file.schemaVersion !== "number" || !MIGRATABLE_SCHEMA_VERSIONS.has(file.schemaVersion) || !Array.isArray(file.pipelines)) return [];
+  const legacyRecords = file.schemaVersion === 2 ? file.pipelines.map(migrateV2Pipeline) : file.pipelines;
+  const migrated = file.schemaVersion < PIPELINES_SCHEMA_VERSION ? legacyRecords.map(migrateTaskIds) : legacyRecords;
+  const records = migrated.filter(isPipeline);
+  if (records.length !== migrated.length) {
+    console.error(`[pipelines] skipped ${migrated.length - records.length} malformed archived pipeline record(s)`);
+  }
+  return records.map(reviveLoadedPipeline);
+}
+
+function pipelineSettledForArchive(pipeline: Pipeline, nowMs: number): boolean {
+  /* Closed records archive on closedAt; hidden drafts never close, so their
+     hiddenAt stands in. Anything still actionable (running, needs_decision,
+     visible drafts) stays hot. */
+  const settledAt = pipeline.closedAt ?? (pipeline.state === "draft" ? pipeline.hiddenAt : null);
+  if (!settledAt) return false;
+  const parsed = Date.parse(settledAt);
+  return Number.isFinite(parsed) && nowMs - parsed > SETTLED_PIPELINE_ARCHIVE_AFTER_MS;
+}
+
+/** Move settled records out of the hot registry. Every mutation re-parses and
+    rewrites the whole pipelines.json, so hundreds of closed records tax each
+    tick (a 7.2 MB hot registry helped freeze the production Viewer). */
+export async function archiveSettledPipelines(nowMs = Date.now()): Promise<number> {
+  return withPipelineMutation((pipelines, persist) => {
+    const settled = pipelines.filter((pipeline) => pipelineSettledForArchive(pipeline, nowMs));
+    if (settled.length === 0) return 0;
+    const archived = loadArchivedPipelines();
+    const archivedIds = new Set(archived.map((pipeline) => pipeline.id));
+    atomicWriteJson(pipelinesArchiveFile(), {
+      schemaVersion: PIPELINES_SCHEMA_VERSION,
+      pipelines: [...archived, ...settled.filter((pipeline) => !archivedIds.has(pipeline.id))],
+    });
+    const settledIds = new Set(settled.map((pipeline) => pipeline.id));
+    const active = pipelines.filter((pipeline) => !settledIds.has(pipeline.id));
+    pipelines.length = 0;
+    pipelines.push(...active);
+    persist();
+    return settled.length;
+  });
+}
+
+/** Full-record read by id: the hot registry first, then the archive. */
+export function findPipelineRecord(pipelineId: string): Pipeline | null {
+  return loadPipelines().find((pipeline) => pipeline.id === pipelineId)
+    ?? loadArchivedPipelines().find((pipeline) => pipeline.id === pipelineId)
+    ?? null;
+}
+
 /** Validates durable task membership at the pipeline store seam. */
 export function pipelineTaskLinkError(
   pipeline: Pick<Pipeline, "project">,
