@@ -199,6 +199,36 @@ export async function startWakatimeIntegrationIfEnabled(
   }
 }
 
+export function runIdentityWaveMigrationWithoutBlockingStartup(
+  run: () => unknown,
+  log: (...args: unknown[]) => void = console.error,
+  options: {
+    maxAttempts?: number;
+    initialRetryMs?: number;
+    schedule?: (callback: () => void, delayMs: number) => ActivationTimer;
+  } = {},
+): void {
+  const maxAttempts = Math.max(1, Math.floor(options.maxAttempts ?? 3));
+  const initialRetryMs = Math.max(0, options.initialRetryMs ?? 5_000);
+  const schedule = options.schedule ?? ((callback, delayMs) => setTimeout(callback, delayMs));
+  let attempts = 0;
+  const attempt = () => {
+    attempts += 1;
+    try {
+      run();
+    } catch (error) {
+      if (attempts >= maxAttempts) {
+        log("[identity-wave] registry migration failed; retry limit reached", { attempt: attempts, error });
+        return;
+      }
+      const retryInMs = initialRetryMs * (2 ** (attempts - 1));
+      log("[identity-wave] registry migration failed; retry scheduled", { attempt: attempts, retryInMs, error });
+      schedule(attempt, retryInMs).unref?.();
+    }
+  };
+  attempt();
+}
+
 async function startWakatimeWorker(): Promise<void> {
   if (wakatimeWorkerStore.__llvWakatimeWorker) return;
   const cwd = process.cwd();
@@ -291,7 +321,7 @@ export async function registerViewerRuntime(): Promise<void> {
   await activateViewerRuntimeWhenCurrent(async () => {
     await initializeOperatorSpawnCapabilityAtStartup();
     const { runIdentityWaveMigrationAtStartup } = await import("@/lib/agent/identityWaveStartup");
-    runIdentityWaveMigrationAtStartup();
+    runIdentityWaveMigrationWithoutBlockingStartup(runIdentityWaveMigrationAtStartup);
     await startWakatimeIntegrationIfEnabled();
     if (structuredHostsEnabled()) {
       const { adoptStructuredHostsAtStartup } = await import("@/lib/runtime/startup");

@@ -3,9 +3,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { AgentRegistry } from "@/lib/agent/registry";
+
 import { setRetireManagerForTests } from "./retire";
 import { executeOrchestratorRotation, executeOrchestratorSeatRequest, type SeatCommandDependencies } from "./seatCommand";
-import { activeOrchestratorSeats, orchestratorRevocations, orchestratorSeatFor } from "./seats";
+import { activeOrchestratorSeats, orchestratorRevocations, orchestratorSeatFor, type OrchestratorSeat } from "./seats";
 import { readOrchestratorRecord } from "./store";
 
 let sandbox = "";
@@ -42,10 +44,11 @@ interface Recorded {
   spawns: Record<string, unknown>[];
   deliveries: { conversationId: string; clientMessageId: string; text: string }[];
   legacySyncs: { conversationId: string }[];
+  identityStamps: OrchestratorSeat[];
 }
 
 function dependencies(overrides: Partial<SeatCommandDependencies> = {}): { deps: SeatCommandDependencies; recorded: Recorded } {
-  const recorded: Recorded = { spawns: [], deliveries: [], legacySyncs: [] };
+  const recorded: Recorded = { spawns: [], deliveries: [], legacySyncs: [], identityStamps: [] };
   const deps: SeatCommandDependencies = {
     spawn: async (body) => {
       recorded.spawns.push(body);
@@ -63,6 +66,7 @@ function dependencies(overrides: Partial<SeatCommandDependencies> = {}): { deps:
       project: "proj-a",
     }),
     syncLegacyRecord: (input) => { recorded.legacySyncs.push({ conversationId: input.conversationId }); },
+    stampRegistryIdentity: (seat) => { recorded.identityStamps.push(seat); },
     projectTasks: () => [],
     launchSettlement: () => ({ kind: "unknown" }),
     now: () => AT,
@@ -124,6 +128,88 @@ test("spawn mode designates and injects together: mandate rides the spawn prompt
   expect(active?.mandate).toBe("own the board");
   expect(pending).toBeNull();
   expect(recorded.legacySyncs).toEqual([{ conversationId: NEW_ID }]);
+});
+
+test("a seat designated after the identity wave stamps registry role, membership, and rotation lineage", async () => {
+  const registry = new AgentRegistry(path.join(sandbox, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const oldPath = path.join(sandbox, "old.jsonl");
+  const newPath = path.join(sandbox, "new.jsonl");
+  const oldConversation = registry.ensureConversation("claude", oldPath, null);
+  const newConversation = registry.ensureConversation("codex", newPath, null);
+  registry.runIdentityWaveMigration({
+    now: AT,
+    transcriptTitle: () => null,
+    sharedPathForLegacy: () => null,
+    orchestratorSeats: [],
+  });
+  const { deps } = dependencies({
+    conversationTarget: (conversationId) => ({
+      kind: "eligible",
+      conversationId,
+      path: conversationId === oldConversation.id ? oldPath : newPath,
+      cwd: sandbox,
+      project: "proj-a",
+    }),
+    stampRegistryIdentity: (seat) => { registry.stampOrchestratorSeatIdentity(seat); },
+  });
+
+  await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "own the first wave",
+    clientRequestId: "req_00001001",
+    conversationId: oldConversation.id,
+  }, deps);
+  await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "own the next wave",
+    clientRequestId: "req_00001002",
+    conversationId: newConversation.id,
+  }, deps);
+
+  const snapshot = registry.snapshot();
+  expect(snapshot.identityMigrations["identity-wave-a-d-913"]).toBeDefined();
+  expect(snapshot.conversations[oldConversation.id]).toMatchObject({ agentRole: "orchestrator", delegationDepth: 0 });
+  expect(snapshot.conversations[newConversation.id]).toMatchObject({ agentRole: "orchestrator", delegationDepth: 0 });
+  expect(snapshot.memberships[newConversation.id]).toContainEqual(expect.objectContaining({
+    kind: "orchestrator",
+    containerId: "proj-a",
+    parentConversationId: oldConversation.id,
+  }));
+  expect(snapshot.lineageEdges[newConversation.id]).toMatchObject({
+    parentConversationId: oldConversation.id,
+    role: "orchestrator",
+  });
+});
+
+test("a completed seat replay repairs a failed registry stamp without revalidating the target", async () => {
+  let stampAttempts = 0;
+  let targetReads = 0;
+  const { deps, recorded } = dependencies({
+    conversationTarget: (conversationId) => {
+      targetReads += 1;
+      return targetReads === 1
+        ? { kind: "eligible", conversationId, path: path.join(sandbox, "existing.jsonl"), cwd: sandbox, project: "proj-a" }
+        : null;
+    },
+    stampRegistryIdentity: () => {
+      stampAttempts += 1;
+      if (stampAttempts === 1) throw new Error("temporary registry write failure");
+    },
+  });
+  const request = {
+    project: "proj-a",
+    mandate: "own repairs",
+    clientRequestId: "req_00001003",
+    conversationId: OLD_ID,
+  };
+
+  await expect(executeOrchestratorSeatRequest(request, deps)).rejects.toThrow("temporary registry write failure");
+  const replay = await executeOrchestratorSeatRequest(request, deps);
+
+  expect(replay).toMatchObject({ status: 200, body: { replayed: true, conversationId: OLD_ID } });
+  expect(stampAttempts).toBe(2);
+  expect(targetReads).toBe(1);
+  expect(recorded.deliveries).toHaveLength(1);
 });
 
 test("an admitted asynchronous spawn activates the seat from its durable conversation id", async () => {

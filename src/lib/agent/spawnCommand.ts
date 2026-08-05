@@ -16,7 +16,7 @@ import { normalizeSpawnPlugins, pluginAllowlistForSession, sessionOriginFor } fr
 import { codexModelSupportsImages, modelFromBody } from "@/lib/agent/models";
 import { resolveSpawnRole } from "@/lib/roles/registry";
 import { assertDarwinStructuredRuntime } from "@/lib/proc/darwinIdentity";
-import { spawnContentDigest, spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
+import { spawnContentDigest, spawnParentSelector, spawnRequestDigests } from "@/lib/agent/spawnIdentity";
 import { sessionKeyFromTranscript, sessionKeyId } from "@/lib/agent/sessionKey";
 import { resolveSpawnLineage, SpawnParentError } from "@/lib/agent/spawnParent";
 import { SpawnAdmissionError, isSpawnDeniedRole } from "@/lib/agent/spawnAdmission";
@@ -367,25 +367,30 @@ export async function executeSpawnRequest(
     /* Same shape for MCP: a delegated launch holds the Viewer baseline whatever
        it asked for, so a granted connector cannot travel down a spawn chain. */
     const grantedServers = mcpServersForSession({ origin: sessionOrigin, requested: requestedMcpServers });
-    const requestDigestForAccount = (accountId: string) => spawnRequestDigest({
-      engine,
-      cwd,
-      model: selectedModel.model,
-      effort: reasoning.effort,
-      fast: reasoning.fast,
-      accountId,
-      role: role.value?.role ?? null,
-      title: launchTitle,
-      mcpServers: grantedServers,
-      ...(plugins.length ? { plugins } : {}),
-      ...(body.allowSubagents === true ? { allowSubagents: true } : {}),
-      ...(explicitProject ? { project: explicitProject } : {}),
-      parent: spawnParentSelector({ parentConversationId: parentConversationId ?? undefined }),
-      ...(reviewedConversationId ? { reviews: spawnParentSelector({ parentConversationId: reviewedConversationId }) } : {}),
-      ...(supersedesConversationId ? { supersedes: spawnParentSelector({ parentConversationId: supersedesConversationId }) } : {}),
-      prompt,
-      images: images.map((image) => ({ mime: image.mime, digest: spawnContentDigest({ image: image.base64 }) })),
-    });
+    const requestDigestForAccount = (accountId: string) => {
+      const digests = spawnRequestDigests({
+        engine,
+        cwd,
+        model: selectedModel.model,
+        effort: reasoning.effort,
+        fast: reasoning.fast,
+        accountId,
+        role: role.value?.role ?? null,
+        title: launchTitle,
+        mcpServers: grantedServers,
+        ...(plugins.length ? { plugins } : {}),
+        ...(body.allowSubagents === true ? { allowSubagents: true } : {}),
+        ...(explicitProject ? { project: explicitProject } : {}),
+        parent: spawnParentSelector({ parentConversationId: parentConversationId ?? undefined }),
+        ...(reviewedConversationId ? { reviews: spawnParentSelector({ parentConversationId: reviewedConversationId }) } : {}),
+        ...(supersedesConversationId ? { supersedes: spawnParentSelector({ parentConversationId: supersedesConversationId }) } : {}),
+        prompt,
+        images: images.map((image) => ({ mime: image.mime, digest: spawnContentDigest({ image: image.base64 }) })),
+      });
+      return body.title === undefined && existingAttempt?.requestDigest === digests.withoutTitle
+        ? digests.withoutTitle
+        : digests.current;
+    };
     const pipelineAttemptTarget = pipelineSourceConversationId && dependencies.pipelineAttemptTargetForSource
       ? dependencies.pipelineAttemptTargetForSource(pipelineSourceConversationId)
       : null;

@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
 import { canonicalProject } from "@/lib/projects/aliases";
+import type { IdentityWavePathRekey } from "@/lib/agent/identityWaveMigration";
 
 /* Operator-selected PER-PROJECT orchestrator seats.
  *
@@ -405,6 +406,65 @@ export function failOrchestratorSeatIntent(project: string, clientRequestId: str
 /** Every active seat, for the authority resolver. */
 export function activeOrchestratorSeats(): OrchestratorSeat[] {
   return Object.values(readOrchestratorSeatFile().seats);
+}
+
+/** Active-seat evidence for the one-time identity migration. A missing store
+ * is valid before any designation; unreadable or malformed durable evidence
+ * must keep the migration marker open for a later retry. */
+export function activeOrchestratorSeatsForMigration(): OrchestratorSeat[] {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(seatsFile(), "utf8");
+  } catch (error) {
+    if (error && typeof error === "object" && (error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error("orchestrator seat evidence is malformed", { cause: error });
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("orchestrator seat evidence is malformed");
+  }
+  const file = parsed as Partial<OrchestratorSeatFile>;
+  if (file.schemaVersion !== ORCHESTRATOR_SEATS_SCHEMA_VERSION
+    || !file.seats
+    || typeof file.seats !== "object"
+    || Array.isArray(file.seats)) {
+    throw new Error("orchestrator seat evidence is malformed");
+  }
+
+  const seats: Record<string, OrchestratorSeat> = {};
+  for (const [project, candidate] of Object.entries(file.seats)) {
+    const seat = normalizeSeat(candidate);
+    if (!seat || seat.project !== project || seat.state !== "active" || !seat.conversationId) {
+      throw new Error("orchestrator seat evidence is malformed");
+    }
+    retainNewestSeat(seats, { ...seat, project: canonicalOrchestratorProject(project) });
+  }
+  return Object.values(seats);
+}
+
+/** Converge the active authority paths with registry generation rekeys. The
+ * caller invokes this before completing the one-time marker; every exact
+ * replacement is idempotent, so a partial external-store retry is safe. */
+export function rekeyOrchestratorSeatPaths(rekeys: readonly IdentityWavePathRekey[]): void {
+  if (rekeys.length === 0) return;
+  const active = activeOrchestratorSeatsForMigration();
+  if (active.length === 0) return;
+  const replacements = new Map(rekeys.map((rekey) => [rekey.legacyPath, rekey.sharedPath]));
+  const changed = active.filter((seat) => seat.path && replacements.has(seat.path));
+  if (changed.length === 0) return;
+
+  const file = readOrchestratorSeatFile();
+  for (const seat of changed) {
+    const stored = file.seats[canonicalOrchestratorProject(seat.project)];
+    if (stored?.path) stored.path = replacements.get(stored.path) ?? stored.path;
+  }
+  writeSeatFile(file);
 }
 
 /** Every durable revocation, for the authority resolver's ABA guard. */

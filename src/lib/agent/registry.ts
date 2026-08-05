@@ -38,8 +38,10 @@ import {
 import type { AgentEngine } from "./cli";
 import {
   applyIdentityWaveMigration,
+  stampOrchestratorLineage,
   type IdentityWaveMigrationInput,
   type IdentityWaveMigrationResult,
+  type IdentityWaveSeat,
 } from "./identityWaveMigration";
 import { mcpServersForStoredSession, reboundAssembledMcpGrants, reboundEntryMcpGrant, reboundStoredMcpGrants, type McpGrantPolicy } from "./mcpAllowlist";
 import { liveAccountConversationIds, type AccountLivenessOptions } from "./accountLiveness";
@@ -3876,6 +3878,14 @@ export class AgentRegistry {
       return applyIdentityWaveMigration(clone(this.readOnlySnapshot()), { ...input, dryRun: true });
     }
     return this.mutate((file) => applyIdentityWaveMigration(file, input));
+  }
+
+  stampOrchestratorSeatIdentity(seat: IdentityWaveSeat): boolean {
+    return this.mutate((file) => {
+      const stamped = stampOrchestratorLineage(file, seat, seat.activatedAt ?? seat.designatedAt);
+      if (stamped.changed && stamped.engine) file.conversationRevision[stamped.engine] += 1;
+      return stamped.changed;
+    });
   }
 
   beginSpawn(engine: AgentEngine, cwd: string, launchProfile: Partial<LaunchProfile> = {}): SpawnReceipt {
