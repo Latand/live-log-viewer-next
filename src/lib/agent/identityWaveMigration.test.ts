@@ -214,6 +214,7 @@ test("the identity wave retitles, rekeys, stamps roots, supports dry-run, and co
     expect(migrated.receipts[reserved.receipt.launchId]).toMatchObject({
       artifactPath: receiptSharedPath,
       resumeSourcePath: receiptSharedPath,
+      identityWaveTitleBackfill: true,
       launchProfile: expect.objectContaining({ title: "Implement receipt backfill" }),
     });
     expect(migrated.conversations[receiptConversation.id]!.migration).toMatchObject({
@@ -566,6 +567,7 @@ test("the startup wrapper logs populated counters and persists migrated JSON and
     expect(sqliteSnapshot.receipts[reserved.receipt.launchId]).toMatchObject({
       artifactPath: sharedPath,
       resumeSourcePath: sharedPath,
+      identityWaveTitleBackfill: true,
     });
     expect(sqliteSnapshot.memberships[legacyConversation.id]).toContainEqual(expect.objectContaining({
       kind: "orchestrator",
