@@ -214,10 +214,16 @@ export function reserveReviewerSpawn(
     .update(`${flow.id}:${round.n}:${reviewerBindingId}`)
     .digest("hex")
     .slice(0, 24);
+  const clientAttemptId = `flow_${flow.id}_${correlation}`;
+  const reservedTitle = semanticTitle(
+    registry.spawnReceiptForClientAttempt(clientAttemptId)?.launchProfile.title,
+    120,
+  );
   const flowTitle = firstPromptLine(flow.spec ?? "", 80)
     ?? semanticTitle(owner.generations.at(-1)?.launchProfile.title, 80)
     ?? semanticTitle(flow.project, 80)
     ?? "Review flow";
+  const reviewerTitle = reservedTitle ?? cleanTitle(`${flowTitle} · review round ${round.n}`, 120);
   const begun = registry.beginSpawnRequest({
     engine: role.engine,
     cwd: flow.cwd,
@@ -234,7 +240,7 @@ export function reserveReviewerSpawn(
     launchProfile: emptyLaunchProfile({
       cwd: flow.cwd,
       parentConversationId: owner.id,
-      title: cleanTitle(`${flowTitle} · review round ${round.n}`, 120),
+      title: reviewerTitle,
     }),
     memberships: [{
       kind: "flow",
@@ -246,7 +252,7 @@ export function reserveReviewerSpawn(
       round: round.n,
       parentConversationId: owner.id,
     }],
-    clientAttemptId: `flow_${flow.id}_${correlation}`,
+    clientAttemptId,
     requestDigest: crypto.createHash("sha256").update(JSON.stringify({
       flowId: flow.id,
       round: round.n,
