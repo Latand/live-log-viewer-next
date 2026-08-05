@@ -13,6 +13,12 @@ export interface IdentityWaveSeat {
   predecessorConversationId: string | null;
   designatedAt: string;
   activatedAt: string | null;
+  path?: string | null;
+}
+
+export interface IdentityWavePathRekey {
+  legacyPath: string;
+  sharedPath: string;
 }
 
 export interface IdentityWaveMigrationInput {
@@ -21,6 +27,7 @@ export interface IdentityWaveMigrationInput {
   transcriptTitle(pathname: string, engine: "claude" | "codex"): string | null;
   sharedPathForLegacy(pathname: string): string | null;
   orchestratorSeats: readonly IdentityWaveSeat[];
+  commitExternalPathRekeys?(rekeys: readonly IdentityWavePathRekey[]): void;
 }
 
 export interface IdentityWaveMigrationResult {
@@ -60,12 +67,24 @@ function receiptTitles(file: RegistryFile): Map<ViewerConversationId, string> {
   return titles;
 }
 
-function safeSharedPath(input: IdentityWaveMigrationInput, pathname: string): string | null {
+type EvidenceResolution<T> =
+  | { kind: "found"; value: T }
+  | { kind: "absent" }
+  | { kind: "failed"; error: unknown };
+
+interface ConversationEvidence {
+  pathRekeys: IdentityWavePathRekey[];
+  transcriptTitle: string | null;
+}
+
+function safeSharedPath(input: IdentityWaveMigrationInput, pathname: string): EvidenceResolution<string> {
   try {
     const candidate = input.sharedPathForLegacy(pathname);
-    return candidate && candidate !== pathname ? candidate : null;
-  } catch {
-    return null;
+    return candidate && candidate !== pathname
+      ? { kind: "found", value: candidate }
+      : { kind: "absent" };
+  } catch (error) {
+    return { kind: "failed", error };
   }
 }
 
@@ -73,15 +92,134 @@ function safeTranscriptTitle(
   input: IdentityWaveMigrationInput,
   pathname: string,
   engine: "claude" | "codex",
-): string | null {
+): EvidenceResolution<string> {
   try {
-    return semanticEvidence(input.transcriptTitle(pathname, engine));
-  } catch {
-    return null;
+    const title = semanticEvidence(input.transcriptTitle(pathname, engine));
+    return title ? { kind: "found", value: title } : { kind: "absent" };
+  } catch (error) {
+    return { kind: "failed", error };
   }
 }
 
-function stampOrchestratorLineage(
+function evidenceValue<T>(resolution: EvidenceResolution<T>): T | null {
+  if (resolution.kind === "failed") throw resolution.error;
+  return resolution.kind === "found" ? resolution.value : null;
+}
+
+function resolveConversationEvidence(
+  file: RegistryFile,
+  input: IdentityWaveMigrationInput,
+  titlesByReceipt: ReadonlyMap<ViewerConversationId, string>,
+): Map<ViewerConversationId, ConversationEvidence> {
+  const evidence = new Map<ViewerConversationId, ConversationEvidence>();
+  for (const conversation of Object.values(file.conversations)) {
+    const generation = conversation.generations.at(-1);
+    if (!generation) continue;
+    const pathRekeys = conversation.generations.flatMap((ownedGeneration) => {
+      const sharedPath = evidenceValue(safeSharedPath(input, ownedGeneration.path));
+      return sharedPath ? [{ legacyPath: ownedGeneration.path, sharedPath }] : [];
+    });
+    const transcriptPath = pathRekeys.find((rekey) => rekey.legacyPath === generation.path)?.sharedPath
+      ?? generation.path;
+    const currentTitle = generation.launchProfile.title;
+    const needsTranscriptTitle = currentTitle !== null
+      && semanticTitle(currentTitle) === null
+      && !titlesByReceipt.has(conversation.id);
+    const transcriptTitle = needsTranscriptTitle
+      ? evidenceValue(safeTranscriptTitle(input, transcriptPath, conversation.engine))
+      : null;
+    evidence.set(conversation.id, { pathRekeys, transcriptTitle });
+  }
+  return evidence;
+}
+
+function assertRekeyOwnership(
+  file: RegistryFile,
+  evidence: ReadonlyMap<ViewerConversationId, ConversationEvidence>,
+): IdentityWavePathRekey[] {
+  const owners = new Map<string, Set<ViewerConversationId>>();
+  const generationPaths = new Map<string, Set<ViewerConversationId>>();
+  const rememberOwner = (map: Map<string, Set<ViewerConversationId>>, pathname: string, conversationId: ViewerConversationId) => {
+    const pathOwners = map.get(pathname) ?? new Set<ViewerConversationId>();
+    pathOwners.add(conversationId);
+    map.set(pathname, pathOwners);
+  };
+  for (const conversation of Object.values(file.conversations)) {
+    for (const generation of conversation.generations) {
+      rememberOwner(owners, generation.path, conversation.id);
+      rememberOwner(generationPaths, generation.path, conversation.id);
+    }
+    for (const pathname of conversation.continuityPaths) rememberOwner(owners, pathname, conversation.id);
+  }
+
+  const targetSources = new Map<string, string>();
+  const rekeys: IdentityWavePathRekey[] = [];
+  for (const [conversationId, conversationEvidence] of evidence) {
+    for (const rekey of conversationEvidence.pathRekeys) {
+      const pathOwners = owners.get(rekey.sharedPath);
+      const sourceOwners = owners.get(rekey.legacyPath);
+      const generationOwners = generationPaths.get(rekey.sharedPath);
+      const priorSource = targetSources.get(rekey.sharedPath);
+      if (!sourceOwners || sourceOwners.size !== 1 || !sourceOwners.has(conversationId)
+        || (pathOwners && [...pathOwners].some((owner) => owner !== conversationId))
+        || (generationOwners && rekey.sharedPath !== rekey.legacyPath)
+        || (priorSource && priorSource !== rekey.legacyPath)) {
+        throw new Error("identity wave shared-path ownership collision");
+      }
+      targetSources.set(rekey.sharedPath, rekey.legacyPath);
+      rekeys.push(rekey);
+    }
+  }
+  return rekeys;
+}
+
+function rekeyProviderReceipt(
+  receipt: { path: string; continuityPaths: string[] },
+  legacyPath: string,
+  sharedPath: string,
+): void {
+  if (receipt.path === legacyPath) receipt.path = sharedPath;
+  receipt.continuityPaths = [...new Set(receipt.continuityPaths.map((pathname) => (
+    pathname === legacyPath ? sharedPath : pathname
+  )))];
+}
+
+function rekeyArtifactReferences(file: RegistryFile, legacyPath: string, sharedPath: string): void {
+  for (const entry of Object.values(file.entries)) {
+    if (entry.artifactPath === legacyPath) entry.artifactPath = sharedPath;
+  }
+  for (const receipt of Object.values(file.receipts)) {
+    if (receipt.artifactPath === legacyPath) receipt.artifactPath = sharedPath;
+    if (receipt.resumeSourcePath === legacyPath) receipt.resumeSourcePath = sharedPath;
+  }
+  for (const edge of Object.values(file.lineageEdges)) {
+    if (edge.childArtifactPath === legacyPath) edge.childArtifactPath = sharedPath;
+    if (edge.parentArtifactPath === legacyPath) edge.parentArtifactPath = sharedPath;
+  }
+  for (const delivery of Object.values(file.heldDeliveries)) {
+    delivery.artifactPaths = [...new Set(delivery.artifactPaths.map((pathname) => (
+      pathname === legacyPath ? sharedPath : pathname
+    )))];
+  }
+  for (const conversation of Object.values(file.conversations)) {
+    const migration = conversation.migration;
+    if (!migration) continue;
+    if (migration.providerReceipt) rekeyProviderReceipt(migration.providerReceipt, legacyPath, sharedPath);
+    migration.pendingContinuityPaths = [...new Set(migration.pendingContinuityPaths.map((pathname) => (
+      pathname === legacyPath ? sharedPath : pathname
+    )))];
+  }
+  for (const pending of Object.values(file.pendingSuccessorCleanups)) {
+    rekeyProviderReceipt(pending.receipt, legacyPath, sharedPath);
+  }
+  const resumePane = file.legacyResumePanes.panes[legacyPath];
+  if (resumePane) {
+    file.legacyResumePanes.panes[sharedPath] ??= resumePane;
+    delete file.legacyResumePanes.panes[legacyPath];
+  }
+}
+
+export function stampOrchestratorLineage(
   file: RegistryFile,
   seat: IdentityWaveSeat,
   createdAt: string,
@@ -119,11 +257,11 @@ function stampOrchestratorLineage(
     });
     changed = true;
   }
-  if (conversation.agentRole === null) {
+  if (conversation.agentRole !== "orchestrator") {
     conversation.agentRole = "orchestrator";
     changed = true;
   }
-  if (conversation.delegationDepth === null) {
+  if (conversation.delegationDepth !== 0) {
     conversation.delegationDepth = 0;
     changed = true;
   }
@@ -162,6 +300,14 @@ export function applyIdentityWaveMigration(
   }
 
   const titlesByReceipt = receiptTitles(file);
+  // Resolve every fallible evidence read before mutating the registry. A failed
+  // read aborts the transaction and leaves the durable completion marker open
+  // for a later startup retry.
+  const evidenceByConversation = resolveConversationEvidence(file, input, titlesByReceipt);
+  const externalPathRekeys = assertRekeyOwnership(file, evidenceByConversation);
+  if (!dryRun && externalPathRekeys.length > 0) {
+    input.commitExternalPathRekeys?.(externalPathRekeys);
+  }
   const changedEngines = new Set<"claude" | "codex">();
   let retitled = 0;
   let rekeyed = 0;
@@ -171,14 +317,16 @@ export function applyIdentityWaveMigration(
     const generation = conversation.generations.at(-1);
     if (!generation) continue;
     let conversationChanged = false;
-    const sharedPath = safeSharedPath(input, generation.path);
-    if (sharedPath) {
-      const legacyPath = generation.path;
-      if (!conversation.continuityPaths.includes(legacyPath)) conversation.continuityPaths.push(legacyPath);
-      conversation.continuityPaths = conversation.continuityPaths.filter((pathname) => pathname !== sharedPath);
-      generation.path = sharedPath;
-      for (const entry of Object.values(file.entries)) {
-        if (entry.artifactPath === legacyPath) entry.artifactPath = sharedPath;
+    const evidence = evidenceByConversation.get(conversation.id);
+    const pathRekeys = evidence?.pathRekeys ?? [];
+    if (pathRekeys.length > 0) {
+      for (const { legacyPath, sharedPath } of pathRekeys) {
+        if (!conversation.continuityPaths.includes(legacyPath)) conversation.continuityPaths.push(legacyPath);
+        conversation.continuityPaths = conversation.continuityPaths.filter((pathname) => pathname !== sharedPath);
+        for (const ownedGeneration of conversation.generations) {
+          if (ownedGeneration.path === legacyPath) ownedGeneration.path = sharedPath;
+        }
+        rekeyArtifactReferences(file, legacyPath, sharedPath);
       }
       rekeyed += 1;
       conversationChanged = true;
@@ -187,10 +335,10 @@ export function applyIdentityWaveMigration(
     const currentTitle = generation.launchProfile.title;
     if (currentTitle !== null && semanticTitle(currentTitle) === null) {
       const replacement = titlesByReceipt.get(conversation.id)
-        ?? safeTranscriptTitle(input, generation.path, conversation.engine);
+        ?? evidence?.transcriptTitle
+        ?? null;
       for (const ownedGeneration of conversation.generations) {
-        if (ownedGeneration.launchProfile.title !== null
-          && semanticTitle(ownedGeneration.launchProfile.title) === null) {
+        if (semanticTitle(ownedGeneration.launchProfile.title) === null) {
           ownedGeneration.launchProfile.title = replacement;
         }
       }
@@ -198,9 +346,14 @@ export function applyIdentityWaveMigration(
       for (const entry of Object.values(file.entries)) {
         if (ownedPaths.has(entry.artifactPath)
           && entry.launchProfile
-          && entry.launchProfile.title !== null
           && semanticTitle(entry.launchProfile.title) === null) {
           entry.launchProfile.title = replacement;
+        }
+      }
+      for (const receipt of Object.values(file.receipts)) {
+        if (canonicalConversationId(file, receipt.conversationId) === conversation.id
+          && semanticTitle(receipt.launchProfile.title) === null) {
+          receipt.launchProfile.title = replacement;
         }
       }
       if (replacement) retitled += 1;

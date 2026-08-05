@@ -64,6 +64,8 @@ export interface SeatCommandDependencies {
       from the launch receipt, for reconciling an accepted launch whose
       accepting request died before activation. */
   launchSettlement(input: { launchId: string | null; clientRequestId: string }): LaunchSettlement;
+  /** Persist the active seat's role, membership, and rotation lineage. */
+  stampRegistryIdentity(seat: OrchestratorSeat): void;
   now(): string;
 }
 
@@ -204,6 +206,9 @@ export const productionSeatCommandDependencies: SeatCommandDependencies = {
       launchId: receipt.launchId,
     };
   },
+  stampRegistryIdentity: (seat) => {
+    agentRegistry().stampOrchestratorSeatIdentity(seat);
+  },
   now: () => new Date().toISOString(),
 };
 
@@ -283,6 +288,7 @@ async function activate(
     now: dependencies.now(),
   });
   if (completed.kind === "missing") return null;
+  dependencies.stampRegistryIdentity(completed.seat);
   return { seat: completed.seat };
 }
 
@@ -350,6 +356,12 @@ export async function executeOrchestratorSeatRequest(
   const reconciliation = reconcilePendingSeatIntent(project, dependencies);
   if (reconciliation) await reconciliation;
 
+  const completedReplay = orchestratorSeatFor(project).active;
+  if (completedReplay?.intent.clientRequestId === clientRequestId) {
+    dependencies.stampRegistryIdentity(completedReplay);
+    return replayedSeatResponse(completedReplay);
+  }
+
   if (existingConversationId) {
     const target = dependencies.conversationTarget(existingConversationId);
     if (!target) return { status: 404, body: { error: "conversation is unknown to the registry" } };
@@ -372,7 +384,10 @@ export async function executeOrchestratorSeatRequest(
       promptVersion,
       now: dependencies.now(),
     });
-    if (begun.kind === "completed") return replayedSeatResponse(begun.seat);
+    if (begun.kind === "completed") {
+      dependencies.stampRegistryIdentity(begun.seat);
+      return replayedSeatResponse(begun.seat);
+    }
     if (begun.kind === "in_progress") return inProgressSeatResponse(begun.seat);
 
     /* The durable intent owns the target on replay. A retried request may carry
@@ -449,7 +464,10 @@ export async function executeOrchestratorSeatRequest(
   const modelError = explicitSeatModelError(rawBody);
   if (modelError) return { status: 400, body: { error: modelError } };
   const begun = beginOrchestratorSeatIntent({ project, mandate, clientRequestId, mode: "spawn", promptVersion, now: dependencies.now() });
-  if (begun.kind === "completed") return replayedSeatResponse(begun.seat);
+  if (begun.kind === "completed") {
+    dependencies.stampRegistryIdentity(begun.seat);
+    return replayedSeatResponse(begun.seat);
+  }
   if (begun.kind === "in_progress") return inProgressSeatResponse(begun.seat);
   /* A pending replay spawns the ORIGINAL intent's mandate: the spawn receipt is
      matched by clientAttemptId AND request digest, so a recomposed retry would

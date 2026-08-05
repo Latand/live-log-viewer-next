@@ -2,12 +2,20 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { legacyClaudeHome, sharedClaudeProjectsRoot } from "@/lib/accounts/claude";
-import { activeOrchestratorSeats } from "@/lib/orchestrator/seats";
+import { activeOrchestratorSeatsForMigration, rekeyOrchestratorSeatPaths } from "@/lib/orchestrator/seats";
+import { rekeyOrchestratorRecordPath } from "@/lib/orchestrator/store";
 import { searchTextForTranscript } from "@/lib/scanner/describe";
 import { semanticTitle } from "@/lib/title";
 
 import { agentRegistry, type AgentRegistry } from "./registry";
-import type { IdentityWaveMigrationResult, IdentityWaveSeat } from "./identityWaveMigration";
+import type { IdentityWaveMigrationResult, IdentityWavePathRekey, IdentityWaveSeat } from "./identityWaveMigration";
+
+function evidenceIsAbsent(error: unknown): boolean {
+  const code = error && typeof error === "object"
+    ? (error as NodeJS.ErrnoException).code
+    : undefined;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
 
 export function titleFromTranscriptHead(pathname: string, engine: "claude" | "codex"): string | null {
   try {
@@ -15,8 +23,9 @@ export function titleFromTranscriptHead(pathname: string, engine: "claude" | "co
     if (!stat.isFile()) return null;
     const text = searchTextForTranscript(pathname, stat.size, engine);
     return semanticTitle(text.title) ?? semanticTitle(text.firstPrompt);
-  } catch {
-    return null;
+  } catch (error) {
+    if (evidenceIsAbsent(error)) return null;
+    throw error;
   }
 }
 
@@ -31,8 +40,9 @@ export function sharedPathForLegacyClaudeTranscript(
   if (candidate === pathname) return null;
   try {
     return fs.statSync(candidate).isFile() ? candidate : null;
-  } catch {
-    return null;
+  } catch (error) {
+    if (evidenceIsAbsent(error)) return null;
+    throw error;
   }
 }
 
@@ -42,6 +52,7 @@ export interface IdentityWaveStartupDependencies {
   now(): string;
   transcriptTitle(pathname: string, engine: "claude" | "codex"): string | null;
   sharedPath(pathname: string): string | null;
+  commitExternalPathRekeys(rekeys: readonly IdentityWavePathRekey[]): void;
   log(message: string, detail: Record<string, unknown>): void;
   env: Readonly<Record<string, string | undefined>>;
 }
@@ -51,10 +62,14 @@ export function runIdentityWaveMigrationAtStartup(
 ): IdentityWaveMigrationResult {
   const dependencies: IdentityWaveStartupDependencies = {
     registry: overrides.registry ?? agentRegistry(),
-    seats: overrides.seats ?? activeOrchestratorSeats,
+    seats: overrides.seats ?? activeOrchestratorSeatsForMigration,
     now: overrides.now ?? (() => new Date().toISOString()),
     transcriptTitle: overrides.transcriptTitle ?? titleFromTranscriptHead,
     sharedPath: overrides.sharedPath ?? sharedPathForLegacyClaudeTranscript,
+    commitExternalPathRekeys: overrides.commitExternalPathRekeys ?? ((rekeys) => {
+      rekeyOrchestratorSeatPaths(rekeys);
+      rekeyOrchestratorRecordPath(rekeys);
+    }),
     log: overrides.log ?? ((message, detail) => console.info(message, detail)),
     env: overrides.env ?? process.env,
   };
@@ -64,6 +79,7 @@ export function runIdentityWaveMigrationAtStartup(
     transcriptTitle: dependencies.transcriptTitle,
     sharedPathForLegacy: dependencies.sharedPath,
     orchestratorSeats: dependencies.seats(),
+    commitExternalPathRekeys: dependencies.commitExternalPathRekeys,
   });
   dependencies.log("[identity-wave] registry migration", {
     dryRun: result.dryRun,

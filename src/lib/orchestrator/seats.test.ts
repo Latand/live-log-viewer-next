@@ -8,12 +8,14 @@ import { persistProjectAliases } from "@/lib/projects/aliases";
 import {
   ORCHESTRATOR_SEAT_HISTORY_CAP,
   activeOrchestratorSeats,
+  activeOrchestratorSeatsForMigration,
   beginOrchestratorSeatIntent,
   completeOrchestratorSeatIntent,
   failOrchestratorSeatIntent,
   orchestratorRevocations,
   orchestratorSeatFor,
   readOrchestratorSeatFile,
+  rekeyOrchestratorSeatPaths,
 } from "./seats";
 
 let sandbox = "";
@@ -247,6 +249,7 @@ test("the epoch counter postdates history epochs so a recovered file never reiss
 test("a malformed file reads as empty and the epoch counter postdates everything on file", () => {
   fs.writeFileSync(path.join(sandbox, "orchestrator-seats.json"), "{not json", "utf8");
   expect(activeOrchestratorSeats()).toEqual([]);
+  expect(() => activeOrchestratorSeatsForMigration()).toThrow("orchestrator seat evidence is malformed");
 
   beginOrchestratorSeatIntent({ project: "proj-a", mandate: "m", clientRequestId: "req_0000001", mode: "spawn", now: AT });
   completeOrchestratorSeatIntent({ project: "proj-a", clientRequestId: "req_0000001", conversationId: "conversation_a", path: null, now: AT });
@@ -254,6 +257,23 @@ test("a malformed file reads as empty and the epoch counter postdates everything
   raw.nextSeatEpoch = 0;
   fs.writeFileSync(path.join(sandbox, "orchestrator-seats.json"), JSON.stringify(raw), "utf8");
   expect(readOrchestratorSeatFile().nextSeatEpoch).toBe(2);
+});
+
+test("identity migration rekeys the active seat path idempotently", () => {
+  const legacyPath = path.join(sandbox, "legacy.jsonl");
+  const sharedPath = path.join(sandbox, "shared.jsonl");
+  beginOrchestratorSeatIntent({ project: "proj-a", mandate: "m", clientRequestId: "req_0000001", mode: "spawn", now: AT });
+  completeOrchestratorSeatIntent({
+    project: "proj-a",
+    clientRequestId: "req_0000001",
+    conversationId: "conversation_a",
+    path: legacyPath,
+    now: AT,
+  });
+
+  rekeyOrchestratorSeatPaths([{ legacyPath, sharedPath }]);
+  rekeyOrchestratorSeatPaths([{ legacyPath, sharedPath }]);
+  expect(orchestratorSeatFor("proj-a").active?.path).toBe(sharedPath);
 });
 
 test("seats are independent per project", () => {
