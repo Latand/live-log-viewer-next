@@ -618,6 +618,10 @@ test("a pending replay completes with the ORIGINAL mandate, not a recomposed one
   expect(prompts[0]).toStartWith("own the board");
   expect(prompts[0]!.split(ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE)).toHaveLength(2);
   expect(prompts[0]).not.toContain("recomposed differently");
+  expect(recorded.spawns.map((body) => body.title)).toEqual([
+    "orchestrator · own the board",
+    "orchestrator · own the board",
+  ]);
 });
 
 test("rotation preserves the requested effort end to end into the successor spawn body", async () => {
