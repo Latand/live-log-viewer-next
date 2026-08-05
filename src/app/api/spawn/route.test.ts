@@ -174,7 +174,7 @@ test("an explicit spawn account is durably pinned while an omitted account uses 
   }
 });
 
-test("derived and custom-title receipts remain replayable by a pre-title binary", async () => {
+test("derived, custom-title, and migrated generic receipts preserve pre-title replay", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "title-digest-replay-"));
   const store = registry();
   const previous = {
@@ -335,7 +335,11 @@ test("derived and custom-title receipts remain replayable by a pre-title binary"
     const reservedConversation = legacy.conversations[template.id]!;
     delete legacy.conversations[template.id];
     reservedConversation.id = receipt.conversationId;
+    for (const generation of reservedConversation.generations) {
+      generation.launchProfile.title = "Claude session";
+    }
     legacy.conversations[receipt.conversationId] = reservedConversation;
+    legacy.receipts[receipt.launchId]!.launchProfile.title = "Claude session";
     legacy.receipts[receipt.launchId]!.artifactPath = legacyPath;
     legacy.receipts[receipt.launchId]!.resumeSourcePath = legacyPath;
     fs.writeFileSync(store.filename, `${JSON.stringify(legacy, null, 2)}\n`);
@@ -345,7 +349,12 @@ test("derived and custom-title receipts remain replayable by a pre-title binary"
       transcriptTitle: () => null,
       sharedPathForLegacy: (pathname) => pathname === legacyPath ? sharedPath : null,
       orchestratorSeats: [],
-    })).toMatchObject({ rekeyed: 1 });
+    })).toMatchObject({ retitled: 1, rekeyed: 1 });
+    expect(restarted.spawnReceiptForClientAttempt("title_digest_replay_20260805")).toMatchObject({
+      requestDigest: digests.withoutTitle,
+      identityWaveTitleBackfill: true,
+      launchProfile: expect.objectContaining({ title: "inspect" }),
+    });
     const replay = await post(restarted);
 
     expect(replay.status).toBe(202);

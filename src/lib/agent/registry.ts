@@ -152,6 +152,8 @@ export interface SpawnReceipt {
   clientAttemptId: string | null;
   /** SHA-256 of the public launch shape. Prompt/image contents never persist. */
   requestDigest: string | null;
+  /** The identity wave replaced this receipt's generic launch title. */
+  identityWaveTitleBackfill?: true;
   /** Launch transport fixed when the idempotent reservation is created. */
   transport: "tmux" | "structured" | null;
   /** Process that owns pre-host structured admission. A replacement may take
@@ -2407,6 +2409,7 @@ function normalizeReceipt(value: SpawnReceipt, policy?: McpGrantPolicy): SpawnRe
     ...value,
     clientAttemptId: typeof value.clientAttemptId === "string" ? value.clientAttemptId : null,
     requestDigest: typeof value.requestDigest === "string" ? value.requestDigest : null,
+    ...(value.identityWaveTitleBackfill === true ? { identityWaveTitleBackfill: true as const } : {}),
     transport: value.transport === "tmux" || value.transport === "structured" ? value.transport : null,
     admissionOwner: value.admissionOwner
       && Number.isInteger(value.admissionOwner.pid)
