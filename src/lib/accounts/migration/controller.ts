@@ -129,14 +129,14 @@ async function reconcileControllerRuntime(registry: AgentRegistry, files: Contro
   const transcriptHosts = await readTranscriptHosts(true, files);
   try {
     await runReaperCycle({ registry, hosts: transcriptHosts.hosts, files });
-  } catch {
-    console.error("[agent reaper] lifecycle reconciliation failed");
+  } catch (error) {
+    console.error("[agent reaper] lifecycle reconciliation failed", error);
   }
   try {
     const report = await runHeadlessProcessReaper({ hosts: transcriptHosts.hosts, flows: loadFlows() });
     if (report.signaled > 0) console.warn(`[headless process reaper] terminated ${report.signaled} stale process group(s)`);
-  } catch {
-    console.error("[headless process reaper] reconciliation failed");
+  } catch (error) {
+    console.error("[headless process reaper] reconciliation failed", error);
   }
 }
 
@@ -246,8 +246,8 @@ const globalController = globalThis as unknown as {
 function startInventoryController(registry: AgentRegistry, quota: QuotaController): void {
   const controller = globalController.__llvAccountMigrationController ??= new AccountMigrationController(registry, quota);
   if (!globalController.__llvAccountMigrationTimer) {
-    const timer = setInterval(() => void controller.poll().catch(() => {
-      console.error("[account migration controller] durable reconciliation tick failed");
+    const timer = setInterval(() => void controller.poll().catch((error) => {
+      console.error("[account migration controller] durable reconciliation tick failed", error);
     }), CONTROLLER_INTERVAL_MS);
     timer.unref?.();
     globalController.__llvAccountMigrationTimer = timer;
@@ -256,8 +256,8 @@ function startInventoryController(registry: AgentRegistry, quota: QuotaControlle
     globalController.__llvAccountMigrationBootstrapStarted = true;
     const timer = setTimeout(() => {
       globalController.__llvAccountMigrationInitialTimer = undefined;
-      void controller.poll().catch(() => {
-        console.error("[account migration controller] initial inventory reconciliation failed");
+      void controller.poll().catch((error) => {
+        console.error("[account migration controller] initial inventory reconciliation failed", error);
       });
     }, INITIAL_INVENTORY_DELAY_MS);
     timer.unref?.();
@@ -323,8 +323,8 @@ export async function startAccountMigrationController(): Promise<void> {
     () => reconcileAccountMigrationCycle(registry, quota),
   );
   registerAccountMigrationTick(() => fastController.tick());
-  void fastController.tick().catch(() => {
-    console.error("[account migration controller] initial durable reconciliation failed");
+  void fastController.tick().catch((error) => {
+    console.error("[account migration controller] initial durable reconciliation failed", error);
   });
   startInventoryControllerWorker();
 }

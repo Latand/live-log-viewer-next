@@ -22,7 +22,7 @@
 import type { FlowEngine } from "@/lib/flows/types";
 
 import { latestOperationalStageAttempt } from "./attemptSelection";
-import { loadPipelinesForList } from "./store";
+import { loadArchivedPipelines, loadPipelinesForList } from "./store";
 import type {
   Pipeline,
   PipelineAccess,
@@ -253,7 +253,12 @@ export async function projectPipelineListRows(
 ): Promise<PipelineListRow[]> {
   const checkpoint = options.checkpoint ?? (() => {});
   checkpoint();
-  const records = (options.source ?? loadPipelinesForList)();
+  const hot = (options.source ?? loadPipelinesForList)();
+  /* Settled records live in the cold archive; only a closed-inclusive list
+     pays for reading them. */
+  const records = filter.includeClosed === true && !options.source
+    ? [...hot, ...loadArchivedPipelines()]
+    : hot;
   checkpoint();
   const selected = selectPipelineListRecords(records, filter);
   const rows: PipelineListRow[] = [];

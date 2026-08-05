@@ -91,11 +91,12 @@ describe("agent registry", () => {
     const snapshot = store.snapshot();
     for (let index = 0; index < 105; index += 1) {
       const id = `legacy-${String(index).padStart(3, "0")}`;
+      const settledAt = new Date(Date.now() - (105 - index) * 1_000).toISOString();
       snapshot.heldDeliveries[id] = {
         id,
         conversationId: conversation.id,
         text: `legacy body ${index}`,
-        createdAt: `2026-07-11T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`,
+        createdAt: settledAt,
         clientMessageId: id,
         payloadKind: "text",
         runtimeImages: [],
@@ -105,7 +106,7 @@ describe("agent registry", () => {
         generationId: conversation.generations.at(-1)!.id,
         attempts: 1,
         assignedAt: null,
-        deliveredAt: `2026-07-11T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`,
+        deliveredAt: settledAt,
         error: null,
       } as unknown as (typeof snapshot.heldDeliveries)[string];
     }
@@ -119,6 +120,43 @@ describe("agent registry", () => {
     expect(retained.every((delivery) => delivery.text === "")).toBe(true);
     expect(retained.map((delivery) => delivery.id)).not.toContain("legacy-000");
     expect(retained.map((delivery) => delivery.id)).toContain("legacy-104");
+  });
+
+  test("startup compaction expires terminal deliveries past the retention window", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("codex", "/expired-deliveries.jsonl", "default");
+    const snapshot = store.snapshot();
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1_000).toISOString();
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1_000).toISOString();
+    const seed = (id: string, state: "delivered" | "failed", settledAt: string) => {
+      snapshot.heldDeliveries[id] = {
+        id,
+        conversationId: conversation.id,
+        text: "",
+        createdAt: settledAt,
+        clientMessageId: id,
+        payloadKind: "text",
+        runtimeImages: [],
+        contentDigest: null,
+        artifactPaths: [],
+        state,
+        generationId: conversation.generations.at(-1)!.id,
+        attempts: 1,
+        assignedAt: null,
+        deliveredAt: state === "delivered" ? settledAt : null,
+        error: state === "failed" ? "structured host delivery failed" : null,
+      } as unknown as (typeof snapshot.heldDeliveries)[string];
+    };
+    seed("expired-delivered", "delivered", eightDaysAgo);
+    seed("expired-failed", "failed", eightDaysAgo);
+    seed("recent-delivered", "delivered", oneHourAgo);
+    fs.writeFileSync(store.filename, JSON.stringify(snapshot));
+
+    const restarted = new AgentRegistry(store.filename);
+    const retained = restarted.snapshot().heldDeliveries;
+    expect(retained["expired-delivered"]).toBeUndefined();
+    expect(retained["expired-failed"]).toBeUndefined();
+    expect(retained["recent-delivered"]).toMatchObject({ state: "delivered" });
   });
 
   test("compaction retains explicit operation ownership after its delivery tombstone expires", () => {
@@ -346,11 +384,12 @@ describe("agent registry", () => {
     const store = registry();
     const conversation = store.ensureConversation("codex", "/legacy-delivered-retry.jsonl", "default");
     const snapshot = store.snapshot();
+    const legacySettledAt = new Date(Date.now() - 60 * 60 * 1_000).toISOString();
     snapshot.heldDeliveries["legacy-delivered"] = {
       id: "legacy-delivered",
       conversationId: conversation.id,
       text: "",
-      createdAt: "2026-07-11T00:00:00.000Z",
+      createdAt: legacySettledAt,
       clientMessageId: "legacy-client-message",
       payloadKind: "text",
       runtimeImages: [],
@@ -359,8 +398,8 @@ describe("agent registry", () => {
       state: "delivered",
       generationId: conversation.generations.at(-1)!.id,
       attempts: 1,
-      assignedAt: "2026-07-11T00:00:01.000Z",
-      deliveredAt: "2026-07-11T00:00:02.000Z",
+      assignedAt: legacySettledAt,
+      deliveredAt: legacySettledAt,
       error: null,
     } as unknown as (typeof snapshot.heldDeliveries)[string];
     fs.writeFileSync(store.filename, JSON.stringify(snapshot));
@@ -433,7 +472,7 @@ describe("agent registry", () => {
     ).id).toBe(held.id);
   });
 
-  test("a retirement-aged delivered reservation still replays exactly and conflicts by digest", () => {
+  test("a delivered reservation inside the retention window replays exactly; past it the key releases", () => {
     const store = registry();
     const conversation = store.ensureConversation("claude", "/retired-tombstone.jsonl", "default");
     const refs = [{ sha256: "a".repeat(64), mime: "image/png" as const, bytes: 67 }];
@@ -441,19 +480,26 @@ describe("agent registry", () => {
     const held = store.holdDelivery(conversation.id, content.content.text, "retired-key", "runtime-images", refs, content.contentDigest);
     store.beginDeliveryAttempt(held.id, conversation.generations.at(-1)!.id);
     store.recordDeliveryOutcome(held.id, "delivered");
-    /* Age the tombstone far past the reachability retirement grace: blob refs
-       may retire from quota accounting, but the digest tombstone itself keeps
-       replay and conflict semantics untouched. */
-    const snapshot = store.snapshot();
+    /* Inside the terminal retention window the digest tombstone keeps replay
+       and conflict semantics untouched. */
+    const withinRetention = new AgentRegistry(store.filename);
+    expect(withinRetention.holdDelivery(conversation.id, content.content.text, "retired-key", "runtime-images", refs, content.contentDigest))
+      .toMatchObject({ id: held.id, state: "delivered" });
+    const changed = structuredContent("retired but idempotent", [{ sha256: "b".repeat(64), mime: "image/png" as const, bytes: 91 }]);
+    expect(() => withinRetention.holdDelivery(conversation.id, changed.content.text, "retired-key", "runtime-images", changed.content.images, changed.contentDigest))
+      .toThrow(DeliveryReservationConflictError);
+
+    /* Past the retention window startup compaction expires the tombstone, so
+       the client message key releases and a new payload admits as a fresh
+       reservation instead of replaying the long-settled one. */
+    const snapshot = withinRetention.snapshot();
     snapshot.heldDeliveries[held.id]!.deliveredAt = "2026-01-01T00:00:00.000Z";
     fs.writeFileSync(store.filename, JSON.stringify(snapshot));
     const restarted = new AgentRegistry(store.filename);
-
-    expect(restarted.holdDelivery(conversation.id, content.content.text, "retired-key", "runtime-images", refs, content.contentDigest))
-      .toMatchObject({ id: held.id, state: "delivered" });
-    const changed = structuredContent("retired but idempotent", [{ sha256: "b".repeat(64), mime: "image/png" as const, bytes: 91 }]);
-    expect(() => restarted.holdDelivery(conversation.id, changed.content.text, "retired-key", "runtime-images", changed.content.images, changed.contentDigest))
-      .toThrow(DeliveryReservationConflictError);
+    expect(restarted.snapshot().heldDeliveries[held.id]).toBeUndefined();
+    const readmitted = restarted.holdDelivery(conversation.id, changed.content.text, "retired-key", "runtime-images", changed.content.images, changed.contentDigest);
+    expect(readmitted.id).not.toBe(held.id);
+    expect(readmitted.state).toBe("assigned");
   });
 
   test("a new payload supersedes a stale terminal failed reservation instead of poisoning the key", () => {

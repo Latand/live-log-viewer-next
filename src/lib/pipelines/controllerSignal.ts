@@ -48,8 +48,8 @@ export function requestPipelineTick(): void {
     signal.scheduled = false;
     const tick = signal.tick;
     if (tick === null) return;
-    void tick().catch(() => {
-      console.error("[pipeline controller] requested tick failed");
+    void tick().catch((error) => {
+      console.error("[pipeline controller] requested tick failed", error);
     });
   });
 }
