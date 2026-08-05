@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
 import { legacyClaudeHome, sharedClaudeProjectsRoot } from "@/lib/accounts/claude";
 import { activeOrchestratorSeatsForMigration, rekeyOrchestratorSeatPaths } from "@/lib/orchestrator/seats";
 import { rekeyOrchestratorRecordPath } from "@/lib/orchestrator/store";
@@ -73,14 +74,14 @@ export function runIdentityWaveMigrationAtStartup(
     log: overrides.log ?? ((message, detail) => console.info(message, detail)),
     env: overrides.env ?? process.env,
   };
-  const result = dependencies.registry.runIdentityWaveMigration({
+  const result = withAccountMutationLock(() => dependencies.registry.runIdentityWaveMigration({
     dryRun: dependencies.env.LLV_IDENTITY_WAVE_DRY_RUN === "1",
     now: dependencies.now(),
     transcriptTitle: dependencies.transcriptTitle,
     sharedPathForLegacy: dependencies.sharedPath,
     orchestratorSeats: dependencies.seats(),
     commitExternalPathRekeys: dependencies.commitExternalPathRekeys,
-  });
+  }));
   dependencies.log("[identity-wave] registry migration", {
     dryRun: result.dryRun,
     alreadyCompleted: result.alreadyCompleted,

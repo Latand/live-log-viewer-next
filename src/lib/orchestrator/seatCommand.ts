@@ -266,7 +266,7 @@ function inProgressSeatResponse(seat: OrchestratorSeat): SeatCommandResult {
 
 /**
  * Activation epilogue shared by both modes: seat the conversation, revoke a
- * differing predecessor, sync the legacy record.
+ * differing predecessor, and stamp the registry identity.
  *
  * AXIS SEPARATION (two-axis contract): revocation removes MANAGER-LEVEL
  * authority — manager voice and confirmation minting — and nothing else. The
