@@ -357,6 +357,44 @@ test("a flow reviewer reserves the canonical review edge before process launch",
   });
 });
 
+test("a reserved flow reviewer keeps its semantic title across an identity-wave retitle", () => {
+  const filename = path.join(process.env.LLV_STATE_DIR!, "review-title-replay-registry.json");
+  const seed = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+  const implementer = seed.ensureConversation("codex", "/sessions/title-replay-implementer.jsonl", "terra");
+  const raw = JSON.parse(fs.readFileSync(filename, "utf8")) as {
+    conversations: Record<string, { generations: { launchProfile: { title: string | null } }[] }>;
+  };
+  const generation = raw.conversations[implementer.id]?.generations.at(-1);
+  if (!generation) throw new Error("test implementer generation is missing");
+  generation.launchProfile.title = "Codex session";
+  fs.writeFileSync(filename, JSON.stringify(raw), "utf8");
+
+  const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+  const flow = {
+    id: "flow-title-replay",
+    project: "viewer",
+    cwd: "/repo",
+    implementerPath: "/sessions/title-replay-implementer.jsonl",
+    implementerConversationId: implementer.id,
+    roles: { reviewer: { engine: "codex", model: null, effort: "xhigh" } },
+    rounds: [],
+  } as unknown as Flow;
+  const round = newRound(flow, "button", null);
+  const first = reserveReviewerSpawn(flow, round, flow.roles.reviewer, "terra", registry);
+  expect(first.receipt.launchProfile.title).toBe("viewer · review round 1");
+
+  expect(registry.runIdentityWaveMigration({
+    now: "2026-08-05T00:00:00.000Z",
+    transcriptTitle: () => "Implement durable identity",
+    sharedPathForLegacy: () => null,
+    orchestratorSeats: [],
+  })).toMatchObject({ retitled: 1 });
+
+  const replay = reserveReviewerSpawn(flow, round, flow.roles.reviewer, "terra", registry);
+  expect(replay.kind).toBe("replay");
+  expect(replay.receipt.launchProfile.title).toBe("viewer · review round 1");
+});
+
 test("a flow reviewer keeps its frozen account through a routing change before settlement", () => {
   const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "review-account-pin-registry.json"));
   const implementer = registry.ensureConversation("codex", "/sessions/pinned-implementer.jsonl", "limited");
