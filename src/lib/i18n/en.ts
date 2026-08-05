@@ -65,6 +65,17 @@ export const en = {
   "rail.projects": "Projects",
   "rail.overview": "Overview",
   "rail.archive": "Archive",
+  "rail.crown": "Crown — pin to top",
+  "rail.uncrown": "Remove crown",
+  "rail.createProject": "Create project",
+  "rail.newProjectName": "Project name",
+  "rail.newProjectRoot": "Root directory (absolute path)",
+  "rail.create": "Create",
+  "rail.creating": "Creating…",
+  "rail.invalidName": "Enter a project name",
+  "rail.invalidRoot": "Directory not found",
+  "rail.duplicateProject": "This project already exists",
+  "rail.createFailed": "Couldn't create the project",
 
   // ProjectDashboard
   "dash.branchesLive": { one: "{count} branch running", other: "{count} branches running" },

@@ -344,6 +344,9 @@ export interface FilesResponse {
   projectAliases?: Record<string, string>;
   /** Stable repository identity to human display label. */
   projectDisplayNames?: Record<string, string>;
+  /** Projects the operator crowned (server-durable): they pin to the top of the
+      rail on every client, unlimited count. */
+  crownedProjects?: string[];
   /** Existing local repository fallback for projects whose conversations lack cwd metadata. */
   projectCwds?: Record<string, string>;
   flows: Flow[];

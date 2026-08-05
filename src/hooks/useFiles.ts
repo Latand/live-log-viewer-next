@@ -38,6 +38,8 @@ export interface FilesData {
   projectCatalog: ProjectCatalogEntry[];
   projectAliases: Record<string, string>;
   projectDisplayNames: Record<string, string>;
+  /** Server-durable crowned projects: pinned to the top of the rail. */
+  crownedProjects: string[];
   projectCwds: Record<string, string>;
   flows: Flow[];
   pipelines: Pipeline[];
@@ -58,7 +60,7 @@ export interface FilesData {
 }
 
 const HEALTHY_SYSTEM = { tmux: { status: "healthy" as const } };
-const EMPTY: FilesData = { files: [], pinOverlayPaths: [], requestScope: null, projectCatalog: [], projectAliases: {}, projectDisplayNames: {}, projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, launchRoutes: {}, loaded: false, catalogFailures: 0 };
+const EMPTY: FilesData = { files: [], pinOverlayPaths: [], requestScope: null, projectCatalog: [], projectAliases: {}, projectDisplayNames: {}, crownedProjects: [], projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, launchRoutes: {}, loaded: false, catalogFailures: 0 };
 
 export function filesApiUrl(_project?: string | null, pinnedPath?: string | null): string {
   const params: string[] = [];
@@ -123,7 +125,7 @@ function patchRows<T>(previous: readonly T[], incoming: readonly T[], keyOf: (va
 
 function parsedFilesData(parsed: FilesResponse | FileEntry[], requestScope: string): FilesData {
   if (Array.isArray(parsed)) {
-    return { files: parsed, pinOverlayPaths: [], requestScope, projectCatalog: [], projectAliases: {}, projectDisplayNames: {}, projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, launchRoutes: {}, loaded: true, catalogFailures: 0 };
+    return { files: parsed, pinOverlayPaths: [], requestScope, projectCatalog: [], projectAliases: {}, projectDisplayNames: {}, crownedProjects: [], projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, launchRoutes: {}, loaded: true, catalogFailures: 0 };
   }
   return {
     files: parsed.files ?? [],
@@ -132,6 +134,7 @@ function parsedFilesData(parsed: FilesResponse | FileEntry[], requestScope: stri
     projectCatalog: parsed.projectCatalog ?? [],
     projectAliases: parsed.projectAliases ?? {},
     projectDisplayNames: parsed.projectDisplayNames ?? {},
+    crownedProjects: parsed.crownedProjects ?? [],
     projectCwds: parsed.projectCwds ?? {},
     flows: parsed.flows ?? [],
     pipelines: parsed.pipelines ?? [],
@@ -157,6 +160,9 @@ function patchFilesData(previous: FilesData, incoming: FilesData): FilesData {
     projectDisplayNames: equalValue(previous.projectDisplayNames, incoming.projectDisplayNames)
       ? previous.projectDisplayNames
       : incoming.projectDisplayNames,
+    crownedProjects: equalValue(previous.crownedProjects, incoming.crownedProjects)
+      ? previous.crownedProjects
+      : incoming.crownedProjects,
     projectCwds: equalValue(previous.projectCwds, incoming.projectCwds) ? previous.projectCwds : incoming.projectCwds,
     flows: patchRows(previous.flows, incoming.flows, (flow) => flow.id),
     pipelines: patchRows(previous.pipelines, incoming.pipelines, (pipeline) => pipeline.id),
