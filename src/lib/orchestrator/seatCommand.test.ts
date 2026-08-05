@@ -116,6 +116,7 @@ test("spawn mode designates and injects together: mandate rides the spawn prompt
     role: "orchestrator",
     project: "proj-a",
     ["prompt"]: "own the board",
+    title: "orchestrator · own the board",
     clientAttemptId: "req_00000001",
   });
   const { active, pending } = orchestratorSeatFor("proj-a");

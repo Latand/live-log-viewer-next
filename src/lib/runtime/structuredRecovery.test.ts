@@ -42,6 +42,7 @@ test("the recovery reservation converges repeated calls onto one successor spawn
     effort: "high",
     permissionMode: "bypassPermissions",
     readOnly: false,
+    title: "Recover durable identity",
     parentConversationId,
   });
   let registry = new AgentRegistry(registryFilename, undefined, undefined, { sqliteMode: "off" });
@@ -178,7 +179,7 @@ test("the recovery reservation converges repeated calls onto one successor spawn
       expect(input.spec).toMatchObject({
         cwd,
         ["transcript"]: artifactPath,
-        launchProfile: profile,
+        launchProfile: { ...profile, title: expect.any(String) },
       });
       expect(structuredResumeSessionId(input)).toBe(sessionId);
       const claimed = registry.claimStructuredHost(key, { pid: process.pid, startIdentity: null }, { allowUnhosted: true });
@@ -433,7 +434,7 @@ test("dead Codex structured recovery retains ownership and starts a pane-less re
         cwd,
         engine: "codex",
         ["transcript"]: artifactPath,
-        launchProfile: profile,
+        launchProfile: { ...profile, title: expect.any(String) },
       });
       return {
         ok: true,
@@ -563,7 +564,7 @@ test("dead Claude structured recovery retains ownership and starts a pane-less r
         cwd,
         engine: "claude",
         ["transcript"]: artifactPath,
-        launchProfile: profile,
+        launchProfile: { ...profile, title: expect.any(String) },
       });
       return {
         ok: true,

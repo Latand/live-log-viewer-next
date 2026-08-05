@@ -211,6 +211,21 @@ afterEach(() => {
 });
 
 describe("durable account migration coordinator", () => {
+  test("generic scanner titles stay writable until one semantic title freezes", async () => {
+    const store = registry();
+    const pathname = path.join(path.dirname(store.filename), "semantic-title.jsonl");
+    fs.writeFileSync(pathname, "{}\n");
+
+    await reconcileMigrationInventory(store, [inventoryEntry(pathname, { title: "Codex session" })]);
+    expect(store.conversationForPath(pathname)?.generations.at(-1)?.launchProfile.title).toBeNull();
+
+    await reconcileMigrationInventory(store, [inventoryEntry(pathname, { title: "Implement semantic spawn titles" })]);
+    expect(store.conversationForPath(pathname)?.generations.at(-1)?.launchProfile.title).toBe("Implement semantic spawn titles");
+
+    await reconcileMigrationInventory(store, [inventoryEntry(pathname, { title: "A later scanner guess" })]);
+    expect(store.conversationForPath(pathname)?.generations.at(-1)?.launchProfile.title).toBe("Implement semantic spawn titles");
+  });
+
   test("inventory builds path ownership from one registry snapshot", async () => {
     const store = registry();
     const firstPath = path.join(path.dirname(store.filename), "first.jsonl");

@@ -8,6 +8,7 @@ import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { deliverConversationMessage } from "@/lib/delivery";
 import { structuredHostsEnabled } from "@/lib/runtime/flags";
 import { projectForCwd } from "@/lib/scanner/describe";
+import { derivedSpawnTitle } from "@/lib/title";
 
 import { loadTasks } from "@/lib/tasks/store";
 import {
@@ -479,6 +480,7 @@ export async function executeOrchestratorSeatRequest(
     project,
     cwd,
     ["prompt"]: spawnMandate,
+    title: derivedSpawnTitle("orchestrator", spawnMandate, project),
     clientAttemptId: clientRequestId,
   };
   const spawned = await dependencies.spawn(spawnBody);

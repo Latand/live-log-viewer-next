@@ -80,6 +80,7 @@ test("a pipeline stage keeps its reserved account through a routing change befor
         promptScaffold: "Builder guidance",
       },
       cwd,
+      title: "Build scoped change · build",
       ["prompt"]: "Build the scoped change",
       parentPath: null,
       clientAttemptId: "pipeline_account_pin_attempt",
@@ -123,7 +124,11 @@ test("a pipeline stage keeps its reserved account through a routing change befor
     });
     if (settled.kind !== "settled") throw new Error("pipeline settlement conflicted");
 
-    expect(settled.receipt).toMatchObject({ accountId: "limited", accountPin: true });
+    expect(settled.receipt).toMatchObject({
+      accountId: "limited",
+      accountPin: true,
+      launchProfile: expect.objectContaining({ title: "Build scoped change · build" }),
+    });
     expect(settled.conversation).toMatchObject({ pinnedAccountId: "limited", migration: null });
   } finally {
     resolveSpawn.mockRestore();
@@ -175,6 +180,7 @@ function entry(pathname: string): FileEntry {
 function harness() {
   const calls: string[] = [];
   const spawnRoles: Array<Parameters<PipelinePorts["spawnAgent"]>[0]["role"]> = [];
+  const spawnTitles: string[] = [];
   const messages = new Map<string, { text: string; ts: number }>();
   const durableTurns = new Map<string, StageTurnEvidence>();
   const flows = new Map<string, Flow>();
@@ -225,9 +231,10 @@ function harness() {
     },
     spawnReceipt: () => null,
     claimSpawnRetry: () => "claimed",
-    spawnAgent: async ({ role, parentPath, clientAttemptId, membership, supersedes }, onReserved) => {
+    spawnAgent: async ({ role, title, parentPath, clientAttemptId, membership, supersedes }, onReserved) => {
       spawn += 1;
       spawnRoles.push(structuredClone(role));
+      spawnTitles.push(title);
       calls.push(`spawn:${clientAttemptId}:parent=${parentPath ?? "root"}:supersedes=${supersedes ?? "none"}`);
       calls.push(`membership:${membership.kind}:${membership.containerId}:${membership.slot}:${membership.role}:${membership.stageOrder}:round=${membership.round}`);
       onReserved({ launchId: `launch-${spawn}`, conversationId: `conversation_stage_${spawn}` });
@@ -295,6 +302,7 @@ function harness() {
     durableTurns,
     flows,
     spawnRoles,
+    spawnTitles,
     finish,
     setBuilderEffort: (effort: string) => { builderEffort = effort; },
     setPaneAlive: (alive: boolean) => { paneAlive = alive; },
@@ -1231,6 +1239,7 @@ test("starting a draft enters the existing provision and stage-spawn path", asyn
   expect(loadPipelines()[0]!.runs[0]!.attempts[0]!.state).toBe("running");
   expect(h.calls.some((call) => call.includes("worktree add"))).toBe(true);
   expect(h.calls.some((call) => call.startsWith("spawn:"))).toBe(true);
+  expect(h.spawnTitles).toEqual(["Start after review · plan"]);
 });
 
 test("role params are accepted, persisted on the stage, and type-checked", async () => {

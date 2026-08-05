@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
+import { semanticTitle } from "@/lib/title";
 import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
 import {
   emptyLaunchProfile,
@@ -753,7 +754,7 @@ function mergeResumeLaunchProfile(current: LaunchProfile, requested: LaunchProfi
     /* The plugin grant was decided at spawn from the session's origin; a
        resume replays the durable value and can never widen it (issue #687). */
     plugins: current.plugins ?? [],
-    title: requested.title ?? current.title,
+    title: semanticTitle(requested.title) ?? semanticTitle(current.title),
     project: requested.project ?? current.project,
     parentConversationId: requested.parentConversationId ?? current.parentConversationId,
     role: current.role === "root" || requested.role === "root" ? "root" : "worker",
@@ -4903,7 +4904,10 @@ export class AgentRegistry {
               id: nativeGenerationId(observation.path),
               path: observation.path,
               accountId: observation.accountId,
-              launchProfile: emptyLaunchProfile(observation.launchProfile),
+              launchProfile: emptyLaunchProfile({
+                ...observation.launchProfile,
+                title: semanticTitle(observation.launchProfile.title),
+              }),
               historyHash: null,
               host: null,
               createdAt,
@@ -4947,7 +4951,7 @@ export class AgentRegistry {
           permissionMode: generation.launchProfile.permissionMode ?? observation.launchProfile.permissionMode,
           readOnly: generation.launchProfile.readOnly ?? observation.launchProfile.readOnly,
           mcpServers: generation.launchProfile.mcpServers,
-          title: generation.launchProfile.title ?? observation.launchProfile.title,
+          title: semanticTitle(generation.launchProfile.title) ?? semanticTitle(observation.launchProfile.title),
           project: observation.launchProfile.project ?? generation.launchProfile.project,
           parentConversationId: lineage?.source === "viewer-spawn"
             ? lineage.parentConversationId

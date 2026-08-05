@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { withSpawnCapability, type ResumeSpec } from "@/lib/agent/cli";
+import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { AgentRegistry, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { beginRegistryResume, createTranscriptHostObserver, createTranscriptHostResolver, reconcileObservedTranscriptHosts, type TranscriptHost } from "@/lib/agent/transcriptHost";
 import { TmuxDeliveryUncertainError } from "@/lib/tmux";
@@ -254,7 +255,15 @@ test("completed launch host polls reuse the SQLite registry read cache", () => {
 test("registry resume receives one conversation-bound capability at central actuation", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-resume-capability-"));
   const registry = new AgentRegistry(path.join(directory, "registry.json"));
-  const conversation = registry.ensureConversation("codex", PATHNAME, "terra");
+  const reconciled = registry.reconcileConversations([{
+    engine: "codex",
+    path: PATHNAME,
+    accountId: "terra",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Resume durable identity" }),
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-08-05T00:00:00.000Z",
+  }]);
+  const conversation = Object.values(reconciled.conversations)[0]!;
   const previousDigest = "a".repeat(64);
   registry.beginSpawnRequest({
     engine: "codex",
@@ -271,6 +280,8 @@ test("registry resume receives one conversation-bound capability at central actu
 
   expect(registry.conversationIdForSpawnCapabilityDigest(previousDigest)).toBeNull();
   expect(registry.conversationIdForSpawnCapabilityDigest(digest)).toBe(conversation.id);
+  expect(prepared.receipt.launchProfile.title).toBe("Resume durable identity");
+  expect(prepared.spec.launchProfile?.title).toBe("Resume durable identity");
   expect(launchSpec.command.match(/LLV_SPAWN_CAPABILITY=/g)).toHaveLength(1);
   fs.rmSync(directory, { recursive: true, force: true });
 });

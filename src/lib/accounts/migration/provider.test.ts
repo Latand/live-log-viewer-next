@@ -370,6 +370,7 @@ test("Claude successor provider uses registered homes and shared model normaliza
   fs.mkdirSync(path.dirname(sourcePath), { recursive: true, mode: 0o700 });
   fs.writeFileSync(sourcePath, "{}\n", { mode: 0o600 });
   let command = "";
+  const registry = new AgentRegistry(path.join(base, "provider-registry.json"));
   const dependencies: ProviderDependencies = {
     accounts: {
       resolveSpawn: () => target,
@@ -384,7 +385,7 @@ test("Claude successor provider uses registered homes and shared model normaliza
       return { paneId: "%9", panePid: 99, host: claudeHost("%9", 99) };
     },
     verifyClaudeHost: async () => true,
-    registry: new AgentRegistry(path.join(base, "provider-registry.json")),
+    registry,
     claudeJournalRoot: path.join(base, "claude-operations"),
     now: () => "2026-07-10T12:00:00.000Z",
   };
@@ -393,7 +394,7 @@ test("Claude successor provider uses registered homes and shared model normaliza
     id: "019f423a-d6e9-\x37903-b597-3e676b6ff3d4",
     path: sourcePath,
     accountId: "source",
-    launchProfile: emptyLaunchProfile({ cwd: "/repo", model: "claude-fable-20260701", effort: "high" }),
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", model: "claude-fable-20260701", effort: "high", title: "Migrate durable identity" }),
     historyHash: null,
     host: null,
     createdAt: "2026-07-10T11:00:00.000Z",
@@ -405,6 +406,9 @@ test("Claude successor provider uses registered homes and shared model normaliza
   expect(command).not.toContain("claude-fable-");
   expect(command).toContain("--effort' 'high'");
   expect(receipt.path.startsWith(target.transcriptRoot + path.sep)).toBeTrue();
+  expect(Object.values(registry.snapshot().receipts)).toContainEqual(expect.objectContaining({
+    launchProfile: expect.objectContaining({ title: "Migrate durable identity" }),
+  }));
   await expect(provider.verify(receipt, { engine: "claude", targetAccountId: "target", launchProfile: sourceGeneration.launchProfile })).resolves.toBeUndefined();
 });
 
