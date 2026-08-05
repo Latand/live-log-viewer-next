@@ -87,6 +87,7 @@ interface CurrentReleaseControllerLoaders {
 
 interface ViewerRuntimeActivationSteps {
   initializeOperatorCapability: () => Promise<void>;
+  runIdentityMigration?: () => Promise<void> | void;
   startWakatime: () => Promise<void>;
   startStructuredHosts: (() => void) | null;
   startControllers: () => Promise<void>;
@@ -477,6 +478,7 @@ export async function completeViewerRuntimeActivation(
   steps: ViewerRuntimeActivationSteps,
 ): Promise<void> {
   await steps.initializeOperatorCapability();
+  await steps.runIdentityMigration?.();
   await steps.startWakatime();
   steps.publishHotStateActivation();
   steps.startStructuredHosts?.();
@@ -498,6 +500,10 @@ export async function registerViewerRuntime(): Promise<void> {
     let activatedAuthority: HotStateAuthority | null = null;
     await completeViewerRuntimeActivation({
       initializeOperatorCapability: initializeOperatorSpawnCapabilityAtStartup,
+      runIdentityMigration: async () => {
+        const { runIdentityWaveMigrationAtStartup } = await import("@/lib/agent/identityWaveStartup");
+        runIdentityWaveMigrationAtStartup();
+      },
       startWakatime: startWakatimeIntegrationIfEnabled,
       startStructuredHosts: structuredHostsEnabled()
         ? () => {
