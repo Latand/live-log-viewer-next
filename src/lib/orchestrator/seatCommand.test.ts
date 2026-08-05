@@ -557,6 +557,10 @@ test("a pending replay completes with the ORIGINAL mandate, not a recomposed one
   /* The retry recomposes a different mandate; the durable intent's text wins. */
   await executeOrchestratorSeatRequest({ ...spawnRequest(), mandate: "recomposed differently" }, deps);
   expect(recorded.spawns.map((body) => body.prompt)).toEqual(["own the board", "own the board"]);
+  expect(recorded.spawns.map((body) => body.title)).toEqual([
+    "orchestrator · own the board",
+    "orchestrator · own the board",
+  ]);
 });
 
 test("rotation preserves the requested effort end to end into the successor spawn body", async () => {

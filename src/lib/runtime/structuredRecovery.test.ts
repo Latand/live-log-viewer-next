@@ -179,7 +179,7 @@ test("the recovery reservation converges repeated calls onto one successor spawn
       expect(input.spec).toMatchObject({
         cwd,
         ["transcript"]: artifactPath,
-        launchProfile: { ...profile, title: expect.any(String) },
+        launchProfile: { ...profile, title: "Recover durable identity" },
       });
       expect(structuredResumeSessionId(input)).toBe(sessionId);
       const claimed = registry.claimStructuredHost(key, { pid: process.pid, startIdentity: null }, { allowUnhosted: true });
@@ -359,6 +359,7 @@ test("dead Codex structured recovery retains ownership and starts a pane-less re
     permissionMode: "never",
     allowSubagents: true,
     parentConversationId: parent.id,
+    goal: { objective: "Restore Codex review session", status: "active", tokensUsed: null, timeUsedSeconds: null },
   });
   const conversation = registry.ensureConversation("codex", artifactPath, "retained-account");
   const original = registry.beginSpawnRequest({
@@ -434,7 +435,7 @@ test("dead Codex structured recovery retains ownership and starts a pane-less re
         cwd,
         engine: "codex",
         ["transcript"]: artifactPath,
-        launchProfile: { ...profile, title: expect.any(String) },
+        launchProfile: { ...profile, title: "recovery · Restore Codex review session" },
       });
       return {
         ok: true,
@@ -489,6 +490,7 @@ test("dead Claude structured recovery retains ownership and starts a pane-less r
     permissionMode: "default",
     allowSubagents: true,
     parentConversationId: reviewed.id,
+    goal: { objective: "Restore Claude review session", status: "active", tokensUsed: null, timeUsedSeconds: null },
   });
   const conversation = registry.ensureConversation("claude", artifactPath, "retained-claude-account");
   const original = registry.beginSpawnRequest({
@@ -564,7 +566,7 @@ test("dead Claude structured recovery retains ownership and starts a pane-less r
         cwd,
         engine: "claude",
         ["transcript"]: artifactPath,
-        launchProfile: { ...profile, title: expect.any(String) },
+        launchProfile: { ...profile, title: "recovery · Restore Claude review session" },
       });
       return {
         ok: true,

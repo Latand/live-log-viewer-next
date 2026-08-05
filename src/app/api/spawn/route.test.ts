@@ -88,6 +88,24 @@ test("spawn admission rejects malformed MCP allowlists", async () => {
   expect(await response.json()).toEqual({ error: "mcpServers must be an array of non-empty server names" });
 });
 
+test("empty and image-only prompts require an explicit semantic title", async () => {
+  const png = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489", "hex").toString("base64");
+  const post = async (body: Record<string, unknown>) => POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+    method: "POST",
+    headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
+    body: JSON.stringify({ engine: "claude", cwd: routeSandbox, ...body }),
+  }), structuredRouteDependencies(routeSandbox));
+
+  for (const body of [
+    { prompt: "" },
+    { images: [{ base64: png, mime: "image/png" }] },
+  ]) {
+    const rejected = await post(body);
+    expect(rejected.status).toBe(400);
+    expect(await rejected.json()).toEqual({ error: "title is required when prompt has no semantic first line" });
+  }
+});
+
 test("an explicit spawn account is durably pinned while an omitted account uses the selected fallback", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "account-pin-"));
   const store = registry();
@@ -235,6 +253,95 @@ test("a titleless client-attempt replay accepts the pre-title digest shape", asy
 
     expect(replay.status).toBe(202);
     expect(await replay.json()).toMatchObject({ launchId: firstBody.launchId, path: sharedPath });
+  } finally {
+    if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previous.transport;
+    if (previous.hosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous.hosts;
+    if (previous.events === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previous.events;
+    if (previous.socket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previous.socket;
+    if (previous.ui === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previous.ui;
+  }
+});
+
+test("an upgraded orchestrator retry accepts its pre-title receipt digest", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "orchestrator-title-digest-replay-"));
+  const store = registry();
+  const previous = {
+    transport: process.env.LLV_SPAWN_TRANSPORT,
+    hosts: process.env.LLV_STRUCTURED_HOSTS,
+    events: process.env.LLV_RUNTIME_EVENTS,
+    socket: process.env.LLV_RUNTIME_HOST_SOCKET,
+    ui: process.env.NEXT_PUBLIC_RUNTIME_UI,
+  };
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  try {
+    const prompt = "Own the queued review work";
+    const title = "orchestrator · Own the queued review work";
+    const clientAttemptId = "orchestrator_title_replay_20260805";
+    const post = async (activeStore: AgentRegistry) => POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+      method: "POST",
+      headers: {
+        origin: "http://127.0.0.1",
+        host: "127.0.0.1",
+        "content-type": "application/json",
+        "sec-fetch-site": "same-origin",
+        "x-llv-spawn-capability": rotateOperatorSpawnCapability(),
+      },
+      body: JSON.stringify({
+        engine: "claude",
+        model: "claude-sonnet-4-6",
+        cwd,
+        role: "orchestrator",
+        project: "viewer",
+        prompt,
+        title,
+        clientAttemptId,
+      }),
+    }), {
+      ...structuredRouteDependencies(cwd),
+      registry: () => activeStore,
+      defer: () => {},
+    });
+
+    const first = await post(store);
+    expect(first.status).toBe(202);
+    const firstBody = await first.json();
+    const receipt = store.spawnReceiptForClientAttempt(clientAttemptId)!;
+    const digests = spawnRequestDigests({
+      engine: receipt.engine,
+      cwd: receipt.cwd,
+      model: receipt.launchProfile.model,
+      effort: receipt.launchProfile.effort,
+      fast: receipt.launchProfile.fast,
+      accountId: receipt.accountId,
+      role: "orchestrator",
+      title,
+      mcpServers: receipt.launchProfile.mcpServers,
+      ...(receipt.launchProfile.plugins.length ? { plugins: receipt.launchProfile.plugins } : {}),
+      project: "viewer",
+      parent: null,
+      ["prompt"]: receipt.launchDisplay?.echo ?? prompt,
+      images: [],
+    });
+    const legacy = store.snapshot();
+    legacy.receipts[receipt.launchId]!.requestDigest = digests.withoutTitle;
+    fs.writeFileSync(store.filename, `${JSON.stringify(legacy, null, 2)}\n`);
+    const restarted = new AgentRegistry(store.filename, undefined, undefined, { sqliteMode: "off" });
+
+    const replay = await post(restarted);
+    expect(replay.status).toBe(202);
+    expect(await replay.json()).toMatchObject({
+      launchId: firstBody.launchId,
+      conversationId: firstBody.conversationId,
+    });
   } finally {
     if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
     else process.env.LLV_SPAWN_TRANSPORT = previous.transport;
@@ -1551,7 +1658,7 @@ test("agent callers cannot grant themselves native sub-agent permission", async 
       "content-type": "application/json",
       "x-llv-spawn-capability": capability,
     },
-    body: JSON.stringify({ src: callerPath, role: "orchestrator", allowSubagents: true }),
+    body: JSON.stringify({ src: callerPath, role: "orchestrator", prompt: "Delegate orchestration", allowSubagents: true }),
   }));
 
   expect(response.status).toBe(403);
@@ -1567,7 +1674,7 @@ test("operator callers may grant native sub-agent permission", async () => {
       "content-type": "application/json",
       "x-llv-spawn-capability": capability,
     },
-    body: JSON.stringify({ src: "/caller.jsonl", role: "orchestrator", allowSubagents: true }),
+    body: JSON.stringify({ src: "/caller.jsonl", role: "orchestrator", prompt: "Delegate orchestration", allowSubagents: true }),
   }));
 
   expect(response.status).toBe(400);
