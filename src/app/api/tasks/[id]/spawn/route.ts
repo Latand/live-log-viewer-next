@@ -23,6 +23,7 @@ import { applyAssignmentPatches, pinnedAccountId, type AssignmentPatch, type Tas
 import { isoNow } from "@/lib/tasks/helpers";
 import { loadTasks, mutateTasks } from "@/lib/tasks/store";
 import type { BoardTask, TaskAssignment } from "@/lib/tasks/types";
+import { isGenericSessionTitle } from "@/lib/title";
 import { spawnAgentWithPrompt, type SpawnedPane } from "@/lib/tmux";
 import type { ApiError } from "@/lib/types";
 
@@ -269,13 +270,14 @@ async function postTaskSpawn(
     claudeProjectsDir: engine === "claude" ? account.transcriptRoot : null,
   });
   const project = projectInfoFromCwd(cwdResult.cwd)?.project ?? task.project;
+  const taskTitle = task.text.split("\n")[0]?.trim() ?? "";
   const spec = {
     ...specBase,
     launchProfile: emptyLaunchProfile({
       ...(specBase.launchProfile ?? {}),
       cwd: cwdResult.cwd,
       project,
-      title: task.text.split("\n")[0]?.trim() || null,
+      title: taskTitle && !isGenericSessionTitle(taskTitle) ? taskTitle : `Task ${task.id}`,
     }),
   };
   const begun = registry.beginSpawnRequest({

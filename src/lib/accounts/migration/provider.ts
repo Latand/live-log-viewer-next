@@ -18,8 +18,9 @@ import { StructuredHostAdoptionCleanupError } from "@/lib/runtime/engineHost";
 import { hasStructuredDeliveryHost, publishStructuredDeliveryHost, releaseStructuredDeliveryHost, requireStructuredDeliveryControllerPublication } from "@/lib/runtime/structuredDeliveryController";
 import { bindClaudeHostPersistence, bindCodexHostPersistence, structuredHostsEnabled } from "@/lib/runtime/registry";
 import { cleanupTmuxHostIfMatches, forgetResumePaneIfMatches, spawnAgentWithPrompt, verifyTmuxHostEvidence, type TmuxHostCleanupResult } from "@/lib/tmux";
+import { derivedSpawnTitle, semanticTitle } from "@/lib/title";
 
-import type { LaunchProfile, ProviderReceipt, SuccessorProviderPort } from "./contracts";
+import { emptyLaunchProfile, type LaunchProfile, type ProviderReceipt, type SuccessorProviderPort } from "./contracts";
 import { hashValidatedHistory, HistorySecurityError, MigrationTargetUnavailableError, safeCopyHistory, validateHistorySource } from "./safeHistoryCopy";
 
 interface StructuredHostPublicationInput {
@@ -1140,7 +1141,15 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     if (!status.loggedIn) throw new MigrationTargetUnavailableError("not-authenticated", "target Claude account is not authenticated");
     const history = hashValidatedHistory(sourcePath, source.transcriptRoot);
     const nativeId = candidateUuid(operationId);
-    const spec = claudeSuccessorSpecFor({ sourcePath, candidateId: nativeId, targetHome: target.home, targetProjectsDir: target.transcriptRoot, profile });
+    const successorProfile = emptyLaunchProfile({
+      ...profile,
+      title: semanticTitle(profile.title, 120) ?? derivedSpawnTitle(
+        "migration successor",
+        profile.goal?.objective ?? profile.cwd,
+        "Conversation migration",
+      ),
+    });
+    const spec = claudeSuccessorSpecFor({ sourcePath, candidateId: nativeId, targetHome: target.home, targetProjectsDir: target.transcriptRoot, profile: successorProfile });
     const successorPath = spec.transcript ?? path.join(target.transcriptRoot, `${nativeId}.jsonl`);
     const registry = this.dependencies.registry ?? agentRegistry();
     const recordContinuityOrCancel = async (launchId: string, host: TmuxHostEvidence): Promise<void> => {
@@ -1158,8 +1167,8 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     const requestDigest = crypto.createHash("sha256").update(JSON.stringify({ operationId, conversationId, target: target.accountId, nativeId })).digest("hex");
     const begun = registry.beginSpawnRequest({
       engine: "claude",
-      cwd: profile.cwd,
-      launchProfile: profile,
+      cwd: successorProfile.cwd,
+      launchProfile: successorProfile,
       clientAttemptId: `migration-successor:${operationId}`,
       requestDigest,
       accountId: target.accountId,

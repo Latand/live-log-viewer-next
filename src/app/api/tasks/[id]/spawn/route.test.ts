@@ -624,7 +624,7 @@ test("retryOfLaunchId relaunches a pathless failed assignment with a fresh attem
     cwd: original.cwd,
     accountId: original.accountId,
     accountPin: true,
-    launchProfile: expect.objectContaining({ model: "opus", effort: "high" }),
+    launchProfile: expect.objectContaining({ model: "opus", effort: "high", title: tasks[0]!.text.split("\n")[0] }),
   });
   expect(registry.conversation(fresh.conversationId)).toMatchObject({
     pinnedAccountId: fresh.accountId,

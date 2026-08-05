@@ -39,6 +39,7 @@ import { adoptPipelineAttemptFromSource, pipelineAttemptTargetForSource } from "
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { projectDirectoryCandidates } from "@/lib/scanner/projectDirectories";
+import { derivedSpawnTitle, semanticTitle } from "@/lib/title";
 import { buildImagePayload, collectImagePayloads, deleteInboxImages, spawnAgentWithPrompt, verifyTmuxHostEvidence } from "@/lib/tmux";
 import { en } from "@/lib/i18n/en";
 import { uk } from "@/lib/i18n/uk";
@@ -181,7 +182,7 @@ export async function executeSpawnRequest(
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
-  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown; parent?: unknown; parentConversationId?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; clientAttemptId?: unknown; role?: unknown; roleParams?: unknown; confirm?: unknown; reviews?: unknown; allowSubagents?: unknown; mcpServers?: unknown; plugins?: unknown; project?: unknown; supersedes?: unknown };
+  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; title?: unknown; images?: unknown; src?: unknown; parent?: unknown; parentConversationId?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; clientAttemptId?: unknown; role?: unknown; roleParams?: unknown; confirm?: unknown; reviews?: unknown; allowSubagents?: unknown; mcpServers?: unknown; plugins?: unknown; project?: unknown; supersedes?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -247,6 +248,18 @@ export async function executeSpawnRequest(
   if (imageError) {
     return NextResponse.json({ error: imageError.error }, { status: imageError.status });
   }
+  const explicitTitle = body.title === undefined ? null : semanticTitle(
+    typeof body.title === "string" ? body.title : null,
+    120,
+  );
+  if (body.title !== undefined && !explicitTitle) {
+    return NextResponse.json({ error: "title must be a semantic, non-placeholder string" }, { status: 400 });
+  }
+  const launchTitle = explicitTitle ?? derivedSpawnTitle(
+    role.value?.role ?? engine,
+    userPrompt,
+    images.length ? "Image task" : "New task",
+  );
   let transport;
   try {
     transport = spawnTransport();
@@ -421,6 +434,7 @@ export async function executeSpawnRequest(
       fast: reasoning.fast,
       accountId,
       role: role.value?.role ?? null,
+      title: launchTitle,
       mcpServers: grantedServers,
       ...(plugins.length ? { plugins } : {}),
       ...(body.allowSubagents === true ? { allowSubagents: true } : {}),
@@ -504,6 +518,7 @@ export async function executeSpawnRequest(
       allowSubagents: body.allowSubagents === true,
       mcpServers: grantedServers,
       plugins,
+      title: launchTitle,
       ...(explicitProject ? { project: explicitProject } : {}),
     });
     const terminalizePinnedAccountFailure = (failure: unknown): NextResponse<SpawnResponse | ApiError> => {
@@ -610,7 +625,7 @@ export async function executeSpawnRequest(
           mcpServers: grantedServers,
           plugins,
           permissionMode,
-          ...(title ? { title } : {}),
+          title: title ?? launchTitle,
           ...(explicitProject ? { project: explicitProject } : {}),
         }),
       };

@@ -117,6 +117,7 @@ test("spawn mode designates and injects together: mandate rides the spawn prompt
   expect(recorded.spawns[0]).toMatchObject({
     role: "orchestrator",
     project: "proj-a",
+    title: "orchestrator · own the board",
     clientAttemptId: "req_00000001",
   });
   expect(String(recorded.spawns[0]!.prompt)).toStartWith("own the board");

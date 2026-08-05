@@ -10,6 +10,7 @@ import { deliverConversationMessage } from "@/lib/delivery";
 import { structuredHostsEnabled } from "@/lib/runtime/flags";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { resolveSpawnRole } from "@/lib/roles/registry";
+import { derivedSpawnTitle } from "@/lib/title";
 
 import { loadTasks } from "@/lib/tasks/store";
 import { orchestratorMandateForDelivery } from "./prompt";
@@ -475,6 +476,7 @@ export async function executeOrchestratorSeatRequest(
     project,
     cwd,
     ["prompt"]: spawnMandate,
+    title: derivedSpawnTitle("orchestrator", spawnMandate, project),
     clientAttemptId: clientRequestId,
   };
   const spawned = await dependencies.spawn(spawnBody);

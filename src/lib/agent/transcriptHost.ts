@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 
 import type { ResumeSpec } from "@/lib/agent/cli";
+import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type SpawnReceipt, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
 import { procBackend } from "@/lib/proc";
@@ -25,6 +26,7 @@ import {
   type SpawnedPane,
 } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
+import { derivedSpawnTitle, semanticTitle } from "@/lib/title";
 
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 const MAX_ANCESTRY_HOPS = 64;
@@ -777,6 +779,14 @@ export function beginRegistryResume(
   const conversation = registry.conversationForPath(entry.path)
     ?? registry.ensureConversation(entry.engine, entry.path, null);
   const current = conversation.generations.at(-1);
+  const launchProfile = emptyLaunchProfile({
+    ...(current?.launchProfile ?? {}),
+    ...(spec.launchProfile ?? {}),
+    cwd: spec.launchProfile?.cwd || current?.launchProfile.cwd || spec.cwd,
+    title: semanticTitle(current?.launchProfile.title, 120)
+      ?? semanticTitle(spec.launchProfile?.title, 120)
+      ?? derivedSpawnTitle("resume", current?.launchProfile.goal?.objective ?? spec.cwd, "Conversation resume"),
+  });
   const begun = registry.beginSpawnRequest({
     engine: entry.engine,
     cwd: spec.cwd,
@@ -784,9 +794,9 @@ export function beginRegistryResume(
     conversationId: conversation.id,
     purpose: "resume-successor",
     origin: { kind: "successor" },
-    launchProfile: spec.launchProfile ?? current?.launchProfile,
+    launchProfile,
   });
-  return { receipt: begun.receipt, spec };
+  return { receipt: begun.receipt, spec: { ...spec, launchProfile } };
 }
 
 async function serializeRegistryDelivery(entry: FileEntry, task: () => Promise<HostDeliveryOutcome>): Promise<HostDeliveryOutcome> {

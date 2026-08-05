@@ -10,6 +10,7 @@ export interface SpawnRequestIdentity {
   fast: boolean | null;
   accountId: string | null;
   role: string | null;
+  title: string;
   allowSubagents?: boolean;
   mcpServers: string[];
   /** Explicit operator project ownership; absent for cwd-attributed spawns. */
