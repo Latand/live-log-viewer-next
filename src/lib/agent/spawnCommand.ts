@@ -360,6 +360,12 @@ export async function executeSpawnRequest(
   try {
     const clientAttemptId = typeof body.clientAttemptId === "string" ? body.clientAttemptId : null;
     const existingAttempt = clientAttemptId ? registry.spawnReceiptForClientAttempt(clientAttemptId) : null;
+    const deterministicTitleReplay = body.title === undefined || explicitTitle === derivedTitle;
+    const identityWaveTitleReplay = existingAttempt?.identityWaveTitleBackfill === true
+      && deterministicTitleReplay;
+    const requestProfileTitle = identityWaveTitleReplay
+      ? semanticTitle(existingAttempt.launchProfile.title, 120) ?? launchTitle
+      : launchTitle;
     const lineage = resolveSpawnLineage(spawnLineageSelectorForCaller(authenticatedCaller, {
       ...body,
       role: role.value?.role,
@@ -448,6 +454,9 @@ export async function executeSpawnRequest(
         prompt,
         images: images.map((image) => ({ mime: image.mime, digest: spawnContentDigest({ image: image.base64 }) })),
       });
+      if (identityWaveTitleReplay) {
+        return existingAttempt.requestDigest === digests.current ? digests.current : digests.withoutTitle;
+      }
       const existingSemanticTitle = semanticTitle(existingAttempt?.launchProfile.title, 120);
       if (!existingAttempt || !existingSemanticTitle || existingSemanticTitle === launchTitle) {
         return existingAttempt?.requestDigest === digests.current ? digests.current : digests.withoutTitle;
@@ -527,7 +536,7 @@ export async function executeSpawnRequest(
       allowSubagents: body.allowSubagents === true,
       mcpServers: grantedServers,
       plugins,
-      title: launchTitle,
+      title: requestProfileTitle,
       ...(explicitProject ? { project: explicitProject } : {}),
     });
     const terminalizePinnedAccountFailure = (failure: unknown): NextResponse<SpawnResponse | ApiError> => {
@@ -634,7 +643,7 @@ export async function executeSpawnRequest(
           mcpServers: grantedServers,
           plugins,
           permissionMode,
-          title: title ?? launchTitle,
+          title: title ?? requestProfileTitle,
           ...(explicitProject ? { project: explicitProject } : {}),
         }),
       };

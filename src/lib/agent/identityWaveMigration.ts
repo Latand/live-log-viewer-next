@@ -354,6 +354,7 @@ export function applyIdentityWaveMigration(
         if (canonicalConversationId(file, receipt.conversationId) === conversation.id
           && semanticTitle(receipt.launchProfile.title) === null) {
           receipt.launchProfile.title = replacement;
+          if (replacement) receipt.identityWaveTitleBackfill = true;
         }
       }
       if (replacement) retitled += 1;
