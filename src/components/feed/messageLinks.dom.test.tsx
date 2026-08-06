@@ -5,9 +5,10 @@ import type { ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 import { installActEnv } from "@/test-helpers/actEnv";
-import { setLocale } from "@/lib/i18n";
+import { setLocale, translate, type TFunction } from "@/lib/i18n";
 import type { ReviewCardItem } from "@/lib/review";
 import { OutboxBubblesView } from "@/components/conversation/OutboxBubbles";
+import type { OutboxEntry } from "@/components/conversation/outbox";
 import { StreamingMd } from "./markdown";
 import { FeedItem } from "./FeedItem";
 import type { Item } from "./parse";
@@ -90,6 +91,8 @@ function item(partial: Record<string, unknown>): Item {
   return partial as unknown as Item;
 }
 
+const translator = (locale: "en"): TFunction => (key, params) => translate(locale, key, params);
+
 test("a transcript prose message links every reference", async () => {
   await render(<FeedItem item={item({ kind: "prose", ts: 0, text: SAMPLE, engine: "claude" })} />);
   expect(renderedLinks()).toEqual(HREFS);
@@ -130,13 +133,9 @@ test("a live streaming row links every reference once its lines settle", async (
 });
 
 test("a queued outbox bubble links every reference, like the bubble that replaces it", async () => {
+  const entry: OutboxEntry = { id: "o1", text: SAMPLE, images: 0, at: 0, state: "queued" };
   await render(
-    <OutboxBubblesView
-      entries={[{ id: "o1", text: SAMPLE, state: "queued", createdAt: 0 } as never]}
-      t={((key: string) => key) as never}
-      onCancel={() => {}}
-      onRetry={() => {}}
-    />,
+    <OutboxBubblesView entries={[entry]} t={translator("en")} onCancel={() => {}} onRetry={() => {}} />,
   );
   expect(renderedLinks()).toEqual(HREFS);
 });
