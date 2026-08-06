@@ -82,6 +82,27 @@ export function rolesFromRequest(req: CreateFlowRequest): Record<"implementer" |
   return { implementer, reviewer };
 }
 
+const LEGACY_PRE_ACTUATION_RELAY_FAILURES = new Set([
+  "structured resume host claim is unavailable",
+]);
+
+/**
+ * Releases the stale relay-start checkpoint written by the pre-retry engine
+ * only when its failure proves structured recovery stopped before transport
+ * selection. A missing transport on any other interrupted relay remains
+ * operator-owned because legacy tmux delivery cannot be replayed safely.
+ */
+export function isRecoverableLegacyRelayFailurePause(flow: Flow): boolean {
+  if (flow.state !== "paused" || flow.pausedState !== "relaying" || !flow.stateDetail) return false;
+  const round = lastRound(flow);
+  return round?.relayStartedAt != null
+    && round.relayedAt == null
+    && round.relayDelivery == null
+    && round.relayDeliveryTransport == null
+    && round.error === flow.stateDetail
+    && LEGACY_PRE_ACTUATION_RELAY_FAILURES.has(flow.stateDetail);
+}
+
 export function normalizeFlowSpec(value: unknown): { ok: true; spec?: string } | { ok: false } {
   if (value === undefined) return { ok: true };
   if (typeof value !== "string") return { ok: false };
@@ -355,6 +376,12 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
     }
   } else if (req.action === "resume") {
     if (flow.state === "paused") {
+      if (round && isRecoverableLegacyRelayFailurePause(flow)) {
+        round.relayStartedAt = null;
+        round.relayDeliveryTransport = null;
+        round.relayRetryAt = null;
+        round.relayRetryRequiresIdempotency = false;
+      }
       flow.state = flow.pausedState && flow.pausedState !== "paused" ? flow.pausedState : "waiting_ready";
       flow.pausedState = null;
       flow.stateDetail = null;
@@ -413,6 +440,11 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
       launchId: null,
       launchLeaseUntil: null,
       relayStartedAt: null,
+      relayRetryCount: 0,
+      relayDeliveryAttempt: 0,
+      relayDeliveryTransport: null,
+      relayRetryAt: null,
+      relayRetryRequiresIdempotency: false,
       relayDelivery: null,
       reviewedAt: null,
       terminalAt: null,

@@ -265,6 +265,44 @@ test("a legacy registry loads pipelines with an empty durable task binding", () 
   });
 });
 
+test("a v4 review-loop fail edge migrates without poisoning the pipeline registry", () => {
+  sandboxed((sandbox) => {
+    expect(PIPELINES_SCHEMA_VERSION).toBe(5);
+    const pipeline = buildPipeline({
+      id: "reviewv4",
+      task: "legacy review edge",
+      project: "viewer",
+      repoDir: "/repo",
+      stages: [
+        { id: "build", kind: "run", prompt: "build", next: "review", effectiveRole: { ...v3Role } },
+        { id: "review", kind: "review-loop", prompt: "review", next: null, onFail: { to: "build", maxRounds: 3 }, effectiveRole: { ...v3Role, access: "read-only" } },
+      ],
+      srcPath: null,
+      srcConversationId: null,
+      now: "2026-08-05T20:47:07.961Z",
+    });
+    fs.writeFileSync(path.join(sandbox, "pipelines.json"), JSON.stringify({
+      schemaVersion: 4,
+      pipelines: [pipeline],
+    }), "utf8");
+
+    const loaded = loadPipelines();
+    expect(loaded[0]!.stages.find((stage) => stage.id === "review")!.onFail).toBeNull();
+
+    const beforeWrite = JSON.parse(fs.readFileSync(path.join(sandbox, "pipelines.json"), "utf8"));
+    expect(beforeWrite).toMatchObject({
+      schemaVersion: 4,
+      pipelines: [{ stages: [{ id: "build" }, { id: "review", onFail: { to: "build", maxRounds: 3 } }] }],
+    });
+
+    savePipelines(loaded);
+    expect(JSON.parse(fs.readFileSync(path.join(sandbox, "pipelines.json"), "utf8"))).toMatchObject({
+      schemaVersion: 5,
+      pipelines: [{ stages: [{ id: "build" }, { id: "review", onFail: null }] }],
+    });
+  });
+});
+
 test("v3 validation: acyclic pass edges, valid fail edges, 1–8 stage bounds (#353)", () => {
   sandboxed(() => {
     /* A one-stage non-draft pipeline is the minimum graph. */
@@ -305,6 +343,14 @@ test("v3 validation: acyclic pass edges, valid fail edges, 1–8 stage bounds (#
       { id: "build", kind: "run", prompt: "build", next: null, effectiveRole: { ...v3Role } },
     ], srcPath: null, srcConversationId: null, now: "now" });
     expect(() => savePipelines([orphanReview])).toThrow("malformed pipeline record");
+
+    /* Review verdict recovery belongs to the bound flow, so a persisted
+       review-loop fail edge is rejected before it can become unreachable. */
+    const reviewFailEdge = buildPipeline({ id: "bad00005", task: "task", project: "viewer", repoDir: "/repo", stages: [
+      { id: "build", kind: "run", prompt: "build", next: "review", effectiveRole: { ...v3Role } },
+      { id: "review", kind: "review-loop", prompt: "review", next: null, onFail: { to: "build", maxRounds: 3 }, effectiveRole: { ...v3Role, access: "read-only" } },
+    ], srcPath: null, srcConversationId: null, now: "now" });
+    expect(() => savePipelines([reviewFailEdge])).toThrow("malformed pipeline record");
   });
 });
 

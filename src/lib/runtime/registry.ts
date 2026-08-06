@@ -126,9 +126,12 @@ async function bindStructuredHostPersistence(
   host.setWriterFence(() => registry.ownsStructuredHostClaim(key, claimOwner, writerClaimEpoch));
   let lastPersistedState: HostState;
   const persist = (state: HostState, terminal = false): AgentRegistryEntry => {
+    const columns = columnsFromState(state, writerClaimEpoch);
     const persisted = registry.setStructuredHostClaimed(
       key,
-      columnsFromState(state, writerClaimEpoch),
+      /* `unhosted` releases the writer claim permanently. Keeping its wrapper
+         PID would make the released row appear owned for every successor. */
+      terminal && state.status === "unhosted" ? { ...columns, process: null } : columns,
       terminal && releasedStatus === "dead" ? "dead" : registryStatus(state),
       claimOwner,
       writerClaimEpoch,
