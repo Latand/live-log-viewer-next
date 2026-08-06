@@ -366,6 +366,8 @@ export function completeOrchestratorSeatIntent(input: {
   conversationId: string;
   path: string | null;
   launchId?: string | null;
+  engine?: string | null;
+  model?: string | null;
   now?: string;
 }): CompleteSeatIntentResult {
   return withAccountMutationLock(() => {
@@ -395,6 +397,8 @@ export function completeOrchestratorSeatIntent(input: {
       ...pending,
       conversationId: input.conversationId,
       path: input.path,
+      engine: pending.engine ?? (input.engine?.trim() || null),
+      model: pending.model ?? (input.model?.trim() || null),
       predecessorConversationId: revoked?.conversationId ?? pending.predecessorConversationId,
       state: "active",
       intent: { ...pending.intent, launchId: input.launchId ?? pending.intent.launchId, error: null },
@@ -404,6 +408,29 @@ export function completeOrchestratorSeatIntent(input: {
     file.seats[project] = seat;
     writeSeatFile(file);
     return { kind: "activated", seat, revoked };
+  });
+}
+
+/** Fill runtime metadata on active seats created before engine/model became
+ * durable seat fields. Existing values remain authoritative. */
+export function repairOrchestratorSeatRuntimeIdentity(input: {
+  project: string;
+  conversationId: string;
+  engine?: string | null;
+  model?: string | null;
+}): OrchestratorSeat | null {
+  return withAccountMutationLock(() => {
+    const file = readOrchestratorSeatFile();
+    const project = canonicalOrchestratorProject(input.project);
+    const seat = file.seats[project];
+    if (!seat || seat.conversationId !== input.conversationId) return null;
+    const engine = seat.engine ?? (input.engine?.trim() || null);
+    const model = seat.model ?? (input.model?.trim() || null);
+    if (engine === seat.engine && model === seat.model) return seat;
+    const repaired = { ...seat, engine, model };
+    file.seats[project] = repaired;
+    writeSeatFile(file);
+    return repaired;
   });
 }
 
