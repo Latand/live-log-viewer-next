@@ -20,6 +20,7 @@ import { conversationIdentity, withoutArchivedPredecessors } from "@/lib/account
 import type { RuntimeImageCapability } from "@/lib/runtime/structuredContent";
 
 import { ComposerBar } from "./ComposerBar";
+import { DirectoryPicker } from "./DirectoryPicker";
 import { DraftLaunchStatus } from "./DraftLaunchStatus";
 import {
   CONFIRM_ATTENTION_MS,
@@ -305,7 +306,7 @@ function scaffoldPreview(scaffold: string, params: Record<string, string | numbe
 
 /** Everything a draft keeps in sessionStorage; called when the draft leaves the scheme. */
 export function clearDraftStorage(id: string) {
-  for (const name of ["engine", "model", "cwd", "cwdUnverified", "text", "boot", "src", "parentConversationId", "effort", "speed", "accountId", "role", "roleParams", "reviews", "confirm"]) sessionStorage.removeItem(field(id, name));
+  for (const name of ["engine", "model", "cwd", "cwdSeed", "text", "boot", "src", "parentConversationId", "effort", "speed", "accountId", "role", "roleParams", "reviews", "confirm"]) sessionStorage.removeItem(field(id, name));
 }
 
 /** Source transcript a handoff draft continues; empty for a plain draft. */
@@ -334,36 +335,35 @@ export function setDraftText(id: string, text: string) {
   writeField(id, "text", text);
 }
 
-/** Seeds a draft's editable cwd before its first render. */
+/** Seeds a draft's editable cwd before its first render, recording it as the
+    system's own answer (see {@link draftCwdIsUntouched}). */
 export function setDraftCwd(id: string, cwd: string) {
-  writeField(id, "cwd", cwd);
-  writeField(id, "cwdUnverified", "");
-}
-
-/** Fills a missing directory while preserving a restored draft's edited value. */
-export function seedDraftCwd(id: string, cwd: string) {
   const next = cwd.trim();
-  if (!readField(id, "cwd").trim() && next) writeField(id, "cwd", next);
-  if (next) writeField(id, "cwdUnverified", "");
-}
-
-/** Exposes a missing-source handoff with a safe editable fallback while
-    requiring the user to confirm its directory through an edit before launch. */
-export function requireDraftCwdConfirmation(id: string, cwd: string) {
-  writeField(id, "cwd", cwd.trim());
-  writeField(id, "cwdUnverified", "1");
-}
-
-const DRAFT_CWD_VERIFIED_EVENT = "llv:draft-cwd-verified";
-
-/** Replaces a system-provided fallback after project metadata identifies the
-    canonical root. User edits clear the marker and remain untouched. */
-export function replaceUnverifiedDraftCwd(id: string, cwd: string): boolean {
-  const next = cwd.trim();
-  if (!next || readField(id, "cwdUnverified") !== "1") return false;
   writeField(id, "cwd", next);
-  writeField(id, "cwdUnverified", "");
-  window.dispatchEvent(new window.CustomEvent(DRAFT_CWD_VERIFIED_EVENT, { detail: { id, cwd: next } }));
+  writeField(id, "cwdSeed", next);
+}
+
+/**
+ * Whether the draft still holds the directory the system put there — nothing
+ * empty, nothing the operator picked. Provenance, not doubt: a better system
+ * answer arriving late (the project's canonical root, the source transcript's
+ * own cwd) may replace an untouched seed, and must never overwrite a directory
+ * the operator chose.
+ */
+export function draftCwdIsUntouched(id: string): boolean {
+  const current = readField(id, "cwd").trim();
+  return !current || current === readField(id, "cwdSeed").trim();
+}
+
+const DRAFT_CWD_RESOLVED_EVENT = "llv:draft-cwd-resolved";
+
+/** Replaces an untouched seed once better metadata identifies the canonical
+    root, and tells a mounted pane to redraw with it. */
+export function resolveSystemDraftCwd(id: string, cwd: string): boolean {
+  const next = cwd.trim();
+  if (!next || !draftCwdIsUntouched(id) || readField(id, "cwd").trim() === next) return false;
+  setDraftCwd(id, next);
+  window.dispatchEvent(new window.CustomEvent(DRAFT_CWD_RESOLVED_EVENT, { detail: { id, cwd: next } }));
   return true;
 }
 
@@ -415,8 +415,10 @@ export function DraftAgentPane({
   const [parentConversationId] = useState(() => readField(draftId, "parentConversationId"));
   const srcFile = src ? (files.find((entry) => entry.path === src) ?? null) : null;
   const [initialCwd] = useState(() => readField(draftId, "cwd"));
-  const [cwdNeedsConfirmation, setCwdNeedsConfirmation] = useState(() => readField(draftId, "cwdUnverified") === "1");
-  const awaitingInheritedCwdRef = useRef(Boolean(src && ((!initialCwd && !srcFile?.cwd?.trim()) || readField(draftId, "cwdUnverified") === "1")));
+  /* A handoff draft opens on a locally guessed directory; the spawn route
+     answers with the source transcript's own cwd, which replaces the guess as
+     long as the operator has not picked a directory of their own. */
+  const awaitingInheritedCwdRef = useRef(Boolean(src && draftCwdIsUntouched(draftId)));
   const [engine, setEngineState] = useState<Engine>(() => {
     const stored = readField(draftId, "engine");
     if (stored === "codex" || stored === "claude") return stored;
@@ -454,15 +456,14 @@ export function DraftAgentPane({
   const replayedAttemptIds = useRef(new Set<string>());
 
   useEffect(() => {
-    const applyVerifiedCwd = (event: Event) => {
+    const applyResolvedCwd = (event: Event) => {
       const detail = (event as CustomEvent<{ id?: string; cwd?: string }>).detail;
       if (detail?.id !== draftId || typeof detail.cwd !== "string") return;
       awaitingInheritedCwdRef.current = false;
       setCwdState(detail.cwd);
-      setCwdNeedsConfirmation(false);
     };
-    window.addEventListener(DRAFT_CWD_VERIFIED_EVENT, applyVerifiedCwd);
-    return () => window.removeEventListener(DRAFT_CWD_VERIFIED_EVENT, applyVerifiedCwd);
+    window.addEventListener(DRAFT_CWD_RESOLVED_EVENT, applyResolvedCwd);
+    return () => window.removeEventListener(DRAFT_CWD_RESOLVED_EVENT, applyResolvedCwd);
   }, [draftId]);
 
   const setModel = (value: string) => {
@@ -490,12 +491,12 @@ export function DraftAgentPane({
        carried-over invalid tier falls back to the CLI default. */
     if (effort && !isEngineEffort(value, effort)) setEffort("");
   };
+  /* The operator's own pick: it outranks every system answer from here on, so
+     the seed is deliberately left behind rather than moved onto the new value. */
   const setCwd = (value: string) => {
     awaitingInheritedCwdRef.current = false;
-    setCwdNeedsConfirmation(false);
     setCwdState(value);
     writeField(draftId, "cwd", value);
-    writeField(draftId, "cwdUnverified", "");
   };
   const setRoleParams = (value: Record<string, string | number>) => {
     setRoleParamsState(value);
@@ -586,22 +587,17 @@ export function DraftAgentPane({
     fetch("/api/spawn?project=" + encodeURIComponent(project) + (src ? "&src=" + encodeURIComponent(src) : ""))
       .then(async (res) => {
         if (!res.ok) throw new Error("spawn capability request failed");
-        return await res.json() as { dirs?: string[]; cwd?: string | null; cwdExists?: boolean; spawnTransport?: unknown; imageInput?: unknown };
+        return await res.json() as { dirs?: string[]; cwd?: string | null; spawnTransport?: unknown; imageInput?: unknown };
       })
       .then((json) => {
         if (cancelled) return;
         if (Array.isArray(json.dirs)) setDirs(json.dirs);
         const inherited = typeof json.cwd === "string" ? json.cwd.trim() : "";
         const shouldInherit = Boolean(awaitingInheritedCwdRef.current && inherited);
-        if (shouldInherit) {
-          awaitingInheritedCwdRef.current = false;
-          const needsConfirmation = json.cwdExists === false;
-          setCwdNeedsConfirmation(needsConfirmation);
-          writeField(draftId, "cwdUnverified", needsConfirmation ? "1" : "");
-        }
+        if (shouldInherit) awaitingInheritedCwdRef.current = false;
         setCwdState((prev) => {
           const next = (shouldInherit && inherited) || prev || inherited || json.dirs?.[0] || "";
-          if (next !== prev) writeField(draftId, "cwd", next);
+          if (next !== prev) setDraftCwd(draftId, next);
           return next;
         });
         const negotiation = spawnImageNegotiationValue(json);
@@ -785,10 +781,6 @@ export function DraftAgentPane({
       return;
     }
     if (attachments.images.length && !attachments.validate()) return;
-    if (cwdNeedsConfirmation) {
-      setStatus({ kind: "err", text: t("draft.confirmRecoveredDir") });
-      return;
-    }
     if (!cwd.trim()) {
       setStatus({ kind: "err", text: t("draft.needDir") });
       return;
@@ -842,7 +834,7 @@ export function DraftAgentPane({
 
   const tint = engineTintOf(engine);
   const fieldsDisabled = composer.fieldsDisabled;
-  const dirListId = "draft-dirs-" + draftId;
+  const dirPickerId = "draft-dirs-" + draftId;
   /* Display phase drives the frozen-card copy. `busy` (POST in flight) shows as
      `launching`; a durable attempt shows booting/booting-slow/confirming/attention. */
   const phase = displayPhase(attempt, busy, slowBoot);
@@ -898,28 +890,19 @@ export function DraftAgentPane({
         </button>
       </header>
 
-      <div className="flex shrink-0 items-center gap-1.5 border-b border-border bg-sunken px-2.5 py-1.5">
+      {/* The picker's popup hangs out of this strip, so the strip cannot clip
+          its own overflow — the pane below it scrolls, the strip does not. */}
+      <div className="relative z-20 flex shrink-0 items-center gap-1.5 border-b border-border bg-sunken px-2.5 py-1.5">
         <span className="shrink-0 text-[10px] font-semibold text-muted">{t("draft.directory")}</span>
-        <input
+        <DirectoryPicker
+          id={dirPickerId}
           value={cwd}
+          dirs={dirs}
           disabled={fieldsDisabled}
-          onChange={(event) => setCwd(event.target.value)}
-          list={dirListId}
-          placeholder="/home/…/Projects/…"
-          aria-label={t("draft.dirAria")}
-          className="min-h-11 min-w-0 flex-1 rounded-[6px] border border-border bg-card px-2 py-1 font-mono text-[11px] text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60 sm:min-h-0"
+          ariaLabel={t("draft.dirAria")}
+          onChange={setCwd}
         />
-        <datalist id={dirListId}>
-          {dirs.map((dir) => (
-            <option key={dir} value={dir} />
-          ))}
-        </datalist>
       </div>
-      {cwdNeedsConfirmation ? (
-        <p role="alert" className="shrink-0 border-b border-warning/30 bg-warning-soft px-2.5 py-1.5 text-[10.5px] leading-4 text-warning">
-          {t("draft.confirmRecoveredDir")}
-        </p>
-      ) : null}
 
       <RoleSection
         idPrefix={draftId}
