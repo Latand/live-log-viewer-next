@@ -511,7 +511,16 @@ export async function executeOrchestratorSeatRequest(
      otherwise conflict with its own first attempt. */
   const spawnMandate = orchestratorMandateForDelivery(begun.kind === "replay" ? begun.seat.mandate : mandate);
 
-  const spawnFields = ["engine", "model", "cwd", "effort", "fast", "accountId", "images", "roleParams", "allowSubagents"] as const;
+  const spawnFields = ["cwd", "effort", "fast", "accountId", "images", "roleParams", "allowSubagents"] as const;
+  const spawnRuntime = begun.kind === "replay"
+    ? {
+        ...(begun.seat.engine ? { engine: begun.seat.engine } : {}),
+        ...(begun.seat.model ? { model: begun.seat.model } : {}),
+      }
+    : {
+        ...(rawBody.engine !== undefined ? { engine: rawBody.engine } : {}),
+        ...(rawBody.model !== undefined ? { model: rawBody.model } : {}),
+      };
   const cwd = resolveOrchestratorCwd(project, rawBody.cwd);
   if (!cwd) {
     failOrchestratorSeatIntent(project, clientRequestId, "orchestrator cwd could not be resolved");
@@ -526,6 +535,7 @@ export async function executeOrchestratorSeatRequest(
   }
   const spawnBody: Record<string, unknown> = {
     ...Object.fromEntries(spawnFields.flatMap((field) => (rawBody[field] === undefined ? [] : [[field, rawBody[field]]]))),
+    ...spawnRuntime,
     role: "orchestrator",
     roleParams: rawBody.roleParams ?? { mode: "standard" },
     project,
