@@ -5,7 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
-import { durableSemanticTitle } from "@/lib/title";
+import { durableSemanticTitle, SPAWN_TITLE_REQUIRED_ERROR } from "@/lib/title";
 import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
 import {
   emptyLaunchProfile,
@@ -3702,6 +3702,7 @@ export class AgentRegistry {
           return { kind: compatible ? "replay" : "conflict", receipt: clone(existing) };
         }
       }
+      if (!durableSemanticTitle(profile.title)) throw new Error(SPAWN_TITLE_REQUIRED_ERROR);
       /* Origin admission (#393): reviewer isolation and bounded nesting run
          inside the same mutation that writes the receipt, so no call site —
          present or future MCP — can race or bypass it. Successor purposes are

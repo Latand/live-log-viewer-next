@@ -1725,6 +1725,7 @@ test("agent capability binds src to the caller conversation", () => {
     engine: "codex",
     cwd: "/repo",
     spawnCapabilityDigest: crypto.createHash("sha256").update(capability).digest("hex"),
+    launchProfile: { title: "Bind agent capability source" },
   });
   if (begun.kind !== "created") throw new Error("expected create");
   const settled = store.settleSpawn(begun.receipt.launchId, {
@@ -1785,6 +1786,7 @@ test("operator capability file failures preserve agent admission and reject unkn
     engine: "codex",
     cwd: "/repo",
     spawnCapabilityDigest: crypto.createHash("sha256").update(capability).digest("hex"),
+    launchProfile: { title: "Preserve agent capability admission" },
   });
   if (begun.kind !== "created") throw new Error("expected create");
   store.settleSpawn(begun.receipt.launchId, {
@@ -1844,6 +1846,7 @@ test("agent callers cannot grant themselves native sub-agent permission", async 
     engine: "codex",
     cwd: "/repo",
     spawnCapabilityDigest: crypto.createHash("sha256").update(capability).digest("hex"),
+    launchProfile: { title: "Refuse delegated sub-agent grant" },
   });
   if (begun.kind !== "created") throw new Error("expected create");
   store.settleSpawn(begun.receipt.launchId, {
@@ -1895,7 +1898,12 @@ test("operator and agent structured Claude role launches both retain bypass perm
   const callerPath = path.join(callerAccount.sessionsDir, `${callerSessionId}.jsonl`);
   fs.mkdirSync(path.dirname(callerPath), { recursive: true });
   fs.writeFileSync(callerPath, "{}\n");
-  const caller = store.beginSpawnRequest({ engine: "codex", cwd, accountId: "caller" });
+  const caller = store.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    accountId: "caller",
+    launchProfile: { title: "Exercise Claude role permissions" },
+  });
   if (caller.kind !== "created") throw new Error("expected caller reservation");
   const settledCaller = store.settleSpawn(caller.receipt.launchId, {
     key: { engine: "codex", sessionId: callerSessionId },
@@ -2564,7 +2572,14 @@ test("a clientAttemptId replay recovers the reserved card from runtime evidence"
 
 test("spawn route projects a launched path-pending receipt as a truthful success", () => {
   const store = registry();
-  const begun = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "terra", clientAttemptId: "attempt_path_pending", requestDigest: "digest" });
+  const begun = store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    accountId: "terra",
+    clientAttemptId: "attempt_path_pending",
+    requestDigest: "digest",
+    launchProfile: { title: "Project path-pending spawn response" },
+  });
   if (begun.kind !== "created") throw new Error("expected a new receipt");
   store.bindSpawnPane(begun.receipt.launchId, { endpoint: "/tmp", server: { pid: 9, startIdentity: "9:a" }, paneId: "%9", panePid: { pid: 99, startIdentity: "99:a" }, target: "agents:9.0" });
   expect(spawnResponseForReceipt(store.snapshot().receipts[begun.receipt.launchId]!)).toMatchObject({ launched: false, target: "%9" });
@@ -2591,7 +2606,12 @@ test("spawn route projects a launched path-pending receipt as a truthful success
 test("a completed pane-less receipt replays as a launched structured conversation", () => {
   const store = registry();
   const pathname = `/sessions/${crypto.randomUUID()}.jsonl`;
-  const begun = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "terra" });
+  const begun = store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    accountId: "terra",
+    launchProfile: { title: "Replay completed structured conversation" },
+  });
   if (begun.kind !== "created") throw new Error("expected a new receipt");
   const settled = store.settleSpawn(begun.receipt.launchId, {
     key: { engine: "codex", sessionId: crypto.randomUUID() },
@@ -2644,7 +2664,12 @@ test("a staged pane-less receipt replays with accepted status", () => {
 
 test("a pane-bound launch verification failure returns launched false with its teaching error", () => {
   const store = registry();
-  const begun = store.beginSpawnRequest({ engine: "claude", cwd: "/repo", accountId: "account-test" });
+  const begun = store.beginSpawnRequest({
+    engine: "claude",
+    cwd: "/repo",
+    accountId: "account-test",
+    launchProfile: { title: "Report pane verification failure" },
+  });
   if (begun.kind !== "created") throw new Error("expected a new receipt");
   store.bindSpawnPane(begun.receipt.launchId, { endpoint: "/tmp", server: { pid: 9, startIdentity: "9:a" }, paneId: "%9", panePid: { pid: 99, startIdentity: "99:a" }, target: "agents:9.0" });
   store.failSpawn(begun.receipt.launchId, "test spawn failure");
@@ -2745,6 +2770,7 @@ test("operator caller can reserve more than the ordinary live-child cap", () => 
     parentConversationId: parent.id,
     role: "builder",
     liveChildrenCap: operator.liveChildrenCap,
+    launchProfile: { title: "Exercise operator child reservation" },
   }));
 
   expect(reservations.every((reservation) => reservation.kind === "created")).toBe(true);
@@ -2785,6 +2811,7 @@ test("spawn replay keeps its identity after parent succession", () => {
     parentConversationId: firstEvidence.conversationId,
     parentSessionKey: firstEvidence.sessionKey,
     parentArtifactPath: firstEvidence.artifactPath,
+    launchProfile: { title: "Replay spawn after parent succession" },
   });
   if (first.kind !== "created") throw new Error("expected create");
   const resumed = store.beginSpawnRequest({
@@ -2793,6 +2820,7 @@ test("spawn replay keeps its identity after parent succession", () => {
     accountId: "terra",
     conversationId: parent.id,
     purpose: "resume-successor",
+    launchProfile: { title: "Resume parent for succession replay" },
   });
   if (resumed.kind !== "created") throw new Error("expected resume receipt");
   expect(store.settleSpawn(resumed.receipt.launchId, {
@@ -2851,6 +2879,7 @@ test("spawn replay keeps its identity after parent alias adoption", () => {
     parentConversationId: firstEvidence.conversationId,
     parentSessionKey: firstEvidence.sessionKey,
     parentArtifactPath: firstEvidence.artifactPath,
+    launchProfile: { title: "Replay spawn after parent adoption" },
   });
   if (first.kind !== "created") throw new Error("expected create");
   const migration = store.beginSpawnRequest({
@@ -2860,6 +2889,7 @@ test("spawn replay keeps its identity after parent alias adoption", () => {
     conversationId: canonical.id,
     purpose: "migration-successor",
     expectedArtifactPath: provisionalPath,
+    launchProfile: { title: "Adopt canonical parent identity" },
   });
   if (migration.kind !== "created") throw new Error("expected migration receipt");
   expect(store.settleSpawn(migration.receipt.launchId, {
