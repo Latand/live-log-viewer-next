@@ -106,3 +106,72 @@ test("issue 626: mixed projections claim one assistant response once", () => {
     expect.objectContaining({ itemId: null, omittedItems: 3, omittedChars: 120 }),
   ]);
 });
+
+test("a canonical tool card claims its live tool row during the running turn and after feed eviction", () => {
+  const toolId = "tool-claim-live";
+  const live: RuntimeLiveTurn = {
+    turnId: "turn-tool-claim",
+    text: "",
+    items: [{
+      kind: "tool",
+      itemId: toolId,
+      text: JSON.stringify({ cmd: "bun test src/components/conversation/liveTurnHandoff.test.ts" }),
+      toolName: "exec_command",
+      toolEngine: "codex",
+      phase: "streaming",
+      startedAt: "2026-08-06T09:20:00.000Z",
+      completedAt: null,
+    }],
+  };
+  const canonicalFeed = [{
+    anchorKey: "row:30:0",
+    key: "30:0",
+    item: {
+      kind: "tool",
+      id: toolId,
+      ts: "2026-08-06T09:20:00.100Z",
+      srcCall: 30,
+      family: "shell",
+      tool: "exec_command",
+      icon: "shell",
+      summary: "bun test src/components/conversation/liveTurnHandoff.test.ts",
+      chips: [],
+      status: "run",
+      statusLabel: "Executing",
+      outputPreview: "",
+      outputTruncated: false,
+      open: false,
+    },
+  }] as FeedEntry[];
+
+  publishCanonicalAssistantClaims("conversation-tool-claim", canonicalFeed);
+  const persisted = readCanonicalAssistantClaims("conversation-tool-claim");
+  expect([...persisted]).toEqual([toolId]);
+  expect(visibleRuntimeLiveTurnItems(live, canonicalFeed, persisted, "running")).toEqual([]);
+  expect(visibleRuntimeLiveTurnItems(live, [], persisted, "running")).toEqual([]);
+});
+
+test("a canonical command group publishes claims for every grouped tool call", () => {
+  const groupedFeed = [{
+    anchorKey: "row:40:0",
+    key: "40:0",
+    item: {
+      kind: "cmd-group",
+      ids: ["grouped-command", "grouped-read"],
+      calls: [],
+      t0: "2026-08-06T09:21:00.000Z",
+      t1: "2026-08-06T09:21:01.000Z",
+      byTool: { exec_command: 1, Read: 1 },
+      okCount: 2,
+      errCount: 0,
+      hasErr: false,
+      active: false,
+    },
+  }] as FeedEntry[];
+
+  publishCanonicalAssistantClaims("conversation-grouped-tools", groupedFeed);
+  expect([...readCanonicalAssistantClaims("conversation-grouped-tools")]).toEqual([
+    "grouped-command",
+    "grouped-read",
+  ]);
+});

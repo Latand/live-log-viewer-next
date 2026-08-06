@@ -12,7 +12,7 @@ import {
   type RuntimeLiveTurnItem,
 } from "@/lib/runtime/liveTurn";
 
-interface CanonicalAssistantItem {
+interface CanonicalLiveItem {
   sourceId: string | null;
   text: string;
   at: number | null;
@@ -25,10 +25,14 @@ const EMPTY_CLAIMS: ReadonlySet<string> = new Set();
 
 const storageKey = (conversationId: string) => `llvAssistantClaims:${conversationId}`;
 
-function sourceIdOf({ item }: FeedEntry): string | null {
+function sourceIdsOf({ item }: FeedEntry): string[] {
+  if (item.kind === "tool" && item.id) return [item.id];
+  if (item.kind === "cmd-group") {
+    return [...new Set(item.ids.filter((id) => typeof id === "string" && id.length > 0))];
+  }
   return "sourceId" in item && typeof item.sourceId === "string" && item.sourceId
-    ? item.sourceId
-    : null;
+    ? [item.sourceId]
+    : [];
 }
 
 export function readCanonicalAssistantClaims(conversationId: string): ReadonlySet<string> {
@@ -68,10 +72,7 @@ export function publishCanonicalAssistantClaims(
 ): void {
   if (!conversationId) return;
   const previous = readCanonicalAssistantClaims(conversationId);
-  const discovered = feed.flatMap((entry) => {
-    const sourceId = sourceIdOf(entry);
-    return sourceId ? [sourceId] : [];
-  });
+  const discovered = feed.flatMap(sourceIdsOf);
   if (!discovered.some((sourceId) => !previous.has(sourceId))) return;
   const merged = new Set(previous);
   for (const sourceId of discovered) {
@@ -124,23 +125,22 @@ function timestamp(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function canonicalAssistantItems(feed: readonly FeedEntry[]): CanonicalAssistantItem[] {
+function canonicalLiveItems(feed: readonly FeedEntry[]): CanonicalLiveItem[] {
   return feed.flatMap((entry) => {
     const { item } = entry;
-    const sourceId = sourceIdOf(entry);
+    const sourceIds = sourceIdsOf(entry);
     if (item.kind === "prose") {
       return [{
-        sourceId,
+        sourceId: sourceIds[0] ?? null,
         text: item.text.trim(),
         at: timestamp(item.ts),
       }];
     }
-    if (!sourceId) return [];
-    return [{
+    return sourceIds.map((sourceId) => ({
       sourceId,
       text: "",
       at: item.kind === "review" ? timestamp(item.ts) : null,
-    }];
+    }));
   });
 }
 
@@ -180,7 +180,7 @@ export function visibleRuntimeLiveTurnItems(
 ): RuntimeLiveTurnItem[] {
   const overlay = runtimeLiveTurnItems(liveTurn);
   if (!overlay.length) return overlay;
-  const canonical = canonicalAssistantItems(feed);
+  const canonical = canonicalLiveItems(feed);
   const currentClaims = new Set(canonical.flatMap((item) => item.sourceId ? [item.sourceId] : []));
   const transcriptAt = newestTranscriptInstant(feed);
   const claimed = new Set<number>();
@@ -190,8 +190,8 @@ export function visibleRuntimeLiveTurnItems(
     return transcriptAt !== null && liveAt !== null && liveAt <= transcriptAt;
   };
   return overlay.filter((live) => {
-    if (live.phase === "streaming") return sessionTurn !== "idle" || !transcriptMovedPast(live);
     if (live.itemId && (persistedClaims.has(live.itemId) || currentClaims.has(live.itemId))) return false;
+    if (live.phase === "streaming") return sessionTurn !== "idle" || !transcriptMovedPast(live);
     let owner = live.itemId
       ? canonical.findIndex((item, index) => !claimed.has(index) && item.sourceId === live.itemId)
       : -1;

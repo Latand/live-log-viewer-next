@@ -94,6 +94,37 @@ test("a settled live row renders the same markdown as its transcript counterpart
   expect(liveRow(host).querySelector("pre")?.textContent).toBe("const x = 1;");
 });
 
+test("a live tool row renders its readable summary in response order between assistant rows", () => {
+  const { host, root } = mount();
+  const command = "bun test src/components/conversation/liveTurnMarkdown.dom.test.tsx";
+  paint(root, <LiveTurnRows items={[
+    item("I will run the focused DOM test.", "awaiting-echo", { itemId: "assistant-before" }),
+    {
+      kind: "tool",
+      itemId: "tool-live-dom",
+      text: JSON.stringify({ cmd: command, workdir: "/repo" }),
+      toolName: "exec_command",
+      toolEngine: "codex",
+      phase: "streaming",
+      startedAt: "2026-08-06T09:30:00.000Z",
+      completedAt: null,
+    },
+    item("The test completed.", "awaiting-echo", { itemId: "assistant-after" }),
+  ]} />);
+
+  const rows = [...host.querySelectorAll<HTMLElement>("[data-live-turn]")];
+  expect(rows).toHaveLength(3);
+  expect(rows.map((row) => row.dataset.liveTurnItemId)).toEqual([
+    "assistant-before",
+    "tool-live-dom",
+    "assistant-after",
+  ]);
+  expect(rows[1]?.dataset.liveTurnTool).toBe("exec_command");
+  expect(rows[1]?.textContent).toContain(command);
+  expect(rows[1]?.textContent).not.toContain("workdir");
+  expect(rows[1]?.querySelector("svg")).not.toBeNull();
+});
+
 test("streaming a message delta by delta lands on exactly the settled rendering", () => {
   const { host, root } = mount();
   stream(root, SAMPLE, 7);
