@@ -14,6 +14,7 @@ import { loadFlows } from "@/lib/flows/store";
 import { reviewOutcomeFor } from "@/lib/flows/reviewOutcome";
 import { overlayPromptDisplayTitles, projectDisplayName } from "@/lib/displayNames";
 import { projectAliasSnapshot } from "@/lib/projects/aliases";
+import { projectCurationSnapshot } from "@/lib/projects/curation";
 import { isCanonicalProjectId, isRepositoryProjectId, projectIdentityFromRepositoryRoot, UNRESOLVED_PROJECT, UNRESOLVED_PROJECT_NAME } from "@/lib/projects/identity";
 import { projectRestoredFlows } from "@/lib/flows/visibility";
 import { reconcileEmbeddedReviewFlows } from "@/lib/pipelines/engine";
@@ -686,6 +687,25 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   markTiming("files-project-rate-limits");
   let effectiveProjectCatalog = projectedProjectCatalog(projectCatalog, registrySnapshot);
   const projectAliases = projectAliasSnapshot();
+  /* Operator-created projects (rail "create project"): catalog rows with zero
+     conversations until real sessions land in their root, at which point the
+     scanned entry carries the same minted identity and wins this guard. */
+  const curation = projectCurationSnapshot();
+  {
+    const known = new Set(effectiveProjectCatalog.map((entry) => resolveCatalogAlias(entry.project, projectAliases.aliases)));
+    for (const manual of curation.manualProjects) {
+      const project = resolveCatalogAlias(manual.project, projectAliases.aliases);
+      if (known.has(project)) continue;
+      known.add(project);
+      effectiveProjectCatalog.push({
+        project,
+        displayName: manual.displayName,
+        projectRoot: manual.root,
+        smt: manual.createdAt,
+        conversations: 0,
+      });
+    }
+  }
   /* GitHub repository identity for readiness issue links (issue #290): cached
      per project root from local .git/config, nullable on any failure. */
   for (const entry of effectiveProjectCatalog) {
@@ -759,12 +779,21 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     const info = projectInfoFromCwd(cwd);
     if (info?.project === project) projectDisplayNames[project] = info.displayName;
   }
+  /* The operator's chosen name outlives every derived label, including the
+     repository-derived one once sessions exist in the created project. */
+  for (const manual of curation.manualProjects) {
+    projectDisplayNames[remapProject(resolveCatalogAlias(manual.project, projectAliases.aliases))] = manual.displayName;
+  }
+  const crownedProjects = [...new Set(
+    curation.crowned.map((project) => remapProject(resolveCatalogAlias(project, projectAliases.aliases))),
+  )];
   const body = JSON.stringify({
     files: projected.files,
     ...(responsePinOverlayPaths.size ? { pinOverlayPaths: [...responsePinOverlayPaths] } : {}),
     projectCatalog: effectiveProjectCatalog,
     projectAliases: effectiveProjectAliases,
     projectDisplayNames,
+    ...(crownedProjects.length ? { crownedProjects } : {}),
     ...(Object.keys(projectCwds).length ? { projectCwds } : {}),
     flows: projected.flows,
     pipelines,
