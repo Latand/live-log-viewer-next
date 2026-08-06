@@ -6,6 +6,7 @@ import path from "node:path";
 
 import { accountForSpawn, codexHomeOwningSessionPath, isManagedCodexHome } from "@/lib/accounts/codex";
 import { claudeSettingsPath, claudeTranscriptOwnership, isManagedClaudeHome, legacyClaudeHome } from "@/lib/accounts/claude";
+import { isUnderClaudeSubagentsDir } from "@/lib/scanner/claudeNative";
 
 import { claudeTranscriptPath, headCwd } from "./transcript";
 import { grantedMcpServers } from "./mcpAllowlist";
@@ -408,7 +409,7 @@ export function resumeEligibility(root: string, pathname: string, options: Resum
   const recordedCwd = options.cwd && options.cwd.trim() ? options.cwd : null;
   const cwd = () => recordedCwd ?? resumeCwd(pathname);
   if (root === "claude-projects" && base.endsWith(".jsonl")) {
-    if (pathname.includes(path.sep + "subagents" + path.sep)) {
+    if (isUnderClaudeSubagentsDir(pathname)) {
       return { ok: false, reason: "a Claude subagent transcript has no session of its own to resume" };
     }
     const sid = base.slice(0, -".jsonl".length);

@@ -1216,6 +1216,8 @@ test("a tmux resume rebuilds the command with the conversation's stored MCP gran
     },
     recover: async () => null,
     listFiles: async () => [{ root: "codex-sessions", path: pathname, project: "p", mtime: 0, size: 0 } as unknown as FileEntry],
+    // Liveness is injected so the case never reads this machine's processes.
+    processMayBeRunning: () => false,
     resumeSpecFor: (_root: string, _path: string, given: { mcpServers?: readonly string[] }) => {
       options.push(given);
       return { command: "resume", transcript: pathname, launchProfile: profile };

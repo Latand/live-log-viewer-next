@@ -52,6 +52,10 @@ function terminalBornEntry(pathname: string, overrides: Partial<FileEntry> = {})
   } as unknown as FileEntry;
 }
 
+/** Liveness is injected everywhere so no case reads the machine's real
+    processes: the probe answers for the entry under test alone. */
+const NOTHING_RUNNING = () => false;
+
 test("a terminal-born transcript is admitted and resumes through the transcript-host bridge", async () => {
   const pathname = path.join(SANDBOX, `${SESSION_ID}.jsonl`);
   fs.writeFileSync(pathname, "{}\n");
@@ -67,6 +71,7 @@ test("a terminal-born transcript is admitted and resumes through the transcript-
     pathAllowed: () => true,
     registry,
     listFiles: async () => [entry],
+    processMayBeRunning: NOTHING_RUNNING,
     recover: async (request: { path: string; conversationId?: string | null }) => {
       bridgeRequests.push({ path: request.path, conversationId: request.conversationId });
       /* The deployed bridge only owns a conversation the registry holds an
@@ -102,6 +107,7 @@ test("admission records the transcript's own provenance, not a default", () => {
     launchModel: "opus",
     effort: "high",
   } as Partial<FileEntry>), {
+    processMayBeRunning: NOTHING_RUNNING,
     resolveAccount: () => ({
       engine: "claude",
       accountId: "account-b",
@@ -178,19 +184,21 @@ test("a live tmux pane keeps its own delivery: the foreign-terminal refusal is o
 test("an unreadable transcript and a transcript with no session id each name their own refusal", () => {
   const registry = registryFor("named-refusals");
 
-  expect(admitTranscriptConversation(registry, terminalBornEntry(path.join(SANDBOX, `${SESSION_ID}.jsonl`)))).toEqual({
+  const dependencies = { processMayBeRunning: NOTHING_RUNNING };
+
+  expect(admitTranscriptConversation(registry, terminalBornEntry(path.join(SANDBOX, `${SESSION_ID}.jsonl`)), dependencies)).toEqual({
     ok: false,
     reason: "the conversation transcript cannot be read from disk",
   });
   const unnamed = path.join(SANDBOX, "notes.jsonl");
   fs.writeFileSync(unnamed, "{}\n");
-  expect(admitTranscriptConversation(registry, terminalBornEntry(unnamed))).toEqual({
+  expect(admitTranscriptConversation(registry, terminalBornEntry(unnamed), dependencies)).toEqual({
     ok: false,
     reason: "the transcript filename carries no Claude session id",
   });
   const shell = path.join(SANDBOX, "task.log");
   fs.writeFileSync(shell, "output\n");
-  expect(admitTranscriptConversation(registry, terminalBornEntry(shell, { engine: "shell" }))).toEqual({
+  expect(admitTranscriptConversation(registry, terminalBornEntry(shell, { engine: "shell" }), dependencies)).toEqual({
     ok: false,
     reason: "this entry is not an agent conversation, so it has no session to continue",
   });
@@ -204,10 +212,192 @@ test("a Codex transcript born in a terminal is admitted the same way", () => {
   const admission = admitTranscriptConversation(registry, terminalBornEntry(pathname, {
     root: "codex-sessions",
     engine: "codex",
-  }), { resolveAccount: () => null });
+  }), { resolveAccount: () => null, processMayBeRunning: NOTHING_RUNNING });
 
   expect(admission).toMatchObject({ ok: true });
   const conversation = registry.conversationForPath(pathname)!;
   expect(conversation.engine).toBe("codex");
   expect(conversation.generations.at(-1)!.id).toBe(SESSION_ID);
+});
+
+/*
+ * Round 2. The liveness decision, not the eligibility decision, is what makes
+ * admission safe: `entry.proc` is the scanner's best-effort UI attribution and
+ * it is documented to leave a live owner unset for an idle transcript, for one
+ * sorted past the fd-holder scan's recency cap, and for a plain `claude` whose
+ * argv carries no session id — the population this lane exists to serve. The
+ * refusal now rests on the same uncapped guard the delete routes use.
+ */
+
+test("a live foreign owner the scanner never attributed is still refused by name (no second agent on one session)", async () => {
+  const pathname = path.join(SANDBOX, `${SESSION_ID}.jsonl`);
+  fs.writeFileSync(pathname, "{}\n");
+  const registry = registryFor("unattributed-live");
+  setAgentRegistryForTests(registry);
+  let legacyLaunches = 0;
+  let bridgeCalls = 0;
+  const probed: string[] = [];
+
+  const outcome = await resumeConversation(pathname, {
+    pathAllowed: () => true,
+    registry,
+    // Idle and unattributed: exactly what the scanner reports for a terminal
+    // session parked at its composer for half an hour.
+    listFiles: async () => [terminalBornEntry(pathname, { proc: null, pid: null, activity: "idle" })],
+    processMayBeRunning: (entry: FileEntry) => {
+      probed.push(entry.path);
+      return true;
+    },
+    livePaneHost: async () => null,
+    recover: async () => {
+      bridgeCalls += 1;
+      return null;
+    },
+    deliver: async () => {
+      legacyLaunches += 1;
+      return { ok: true, outcome: "resumed", target: "%9" };
+    },
+  } as never);
+
+  expect(outcome).toMatchObject({
+    ok: false,
+    status: 409,
+    error: "the session is still running in a terminal the viewer does not own; close it there, then continue from here",
+  });
+  expect(probed).toEqual([pathname]);
+  expect(legacyLaunches).toBe(0);
+  // No identity minted, and the bridge was never asked to take it a second time.
+  expect(registry.conversationForPath(pathname)).toBeNull();
+  expect(bridgeCalls).toBe(1);
+});
+
+test("a dead terminal-born session the scanner never attributed still admits and bridges", async () => {
+  const pathname = path.join(SANDBOX, `${SESSION_ID}.jsonl`);
+  fs.writeFileSync(pathname, "{}\n");
+  const registry = registryFor("unattributed-dead");
+  setAgentRegistryForTests(registry);
+
+  const outcome = await resumeConversation(pathname, {
+    pathAllowed: () => true,
+    registry,
+    listFiles: async () => [terminalBornEntry(pathname, { proc: null, pid: null, activity: "idle" })],
+    processMayBeRunning: NOTHING_RUNNING,
+    livePaneHost: async () => null,
+    recover: async (request: { path: string; conversationId?: string | null }) => {
+      const conversation = registry.conversationForPath(request.path);
+      return conversation ? { target: null, path: request.path, conversationId: conversation.id, spawned: true } : null;
+    },
+    deliver: async () => ({ ok: true, outcome: "resumed", target: "%9" }),
+  } as never);
+
+  // The guard is conservative, not absolute: an absent pid alone never refuses.
+  expect(outcome).toMatchObject({ ok: true, outcome: "resumed", spawned: true, structured: true });
+  expect(registry.conversationForPath(pathname)).not.toBeNull();
+});
+
+test("a pane the viewer owns still takes its own delivery when the scanner left the entry unattributed", async () => {
+  const pathname = path.join(SANDBOX, `${SESSION_ID}.jsonl`);
+  fs.writeFileSync(pathname, "{}\n");
+  const registry = registryFor("unattributed-pane");
+  setAgentRegistryForTests(registry);
+  let legacyDeliveries = 0;
+
+  const outcome = await resumeConversation(pathname, {
+    pathAllowed: () => true,
+    registry,
+    listFiles: async () => [terminalBornEntry(pathname, { proc: null, pid: null, activity: "idle" })],
+    processMayBeRunning: () => true,
+    livePaneHost: async () => ({ paneId: "%3", display: "0:0.0" }),
+    recover: async () => null,
+    resumeSpecFor: () => ({ command: "resume", launchProfile: null }),
+    deliver: async () => {
+      legacyDeliveries += 1;
+      return { ok: true, outcome: "delivered-to-live", target: "%3" };
+    },
+  } as never);
+
+  /* The live-pane branch has to stay reachable through the fresh probe too:
+     a pane the viewer can type into is not the foreign terminal. */
+  expect(outcome).toMatchObject({ ok: true, target: "%3" });
+  expect(legacyDeliveries).toBe(1);
+  expect(registry.conversationForPath(pathname)).toBeNull();
+});
+
+test("an unregistered Claude subagent leaf keeps its own refusal instead of buying a host", async () => {
+  const leafDir = path.join(SANDBOX, "-repo", "subagents");
+  fs.mkdirSync(leafDir, { recursive: true });
+  const pathname = path.join(leafDir, `${SESSION_ID}.jsonl`);
+  fs.writeFileSync(pathname, "{}\n");
+  const registry = registryFor("subagent-leaf");
+  setAgentRegistryForTests(registry);
+  let legacyLaunches = 0;
+  const bridgeRequests: string[] = [];
+
+  const outcome = await resumeConversation(pathname, {
+    pathAllowed: () => true,
+    registry,
+    listFiles: async () => [terminalBornEntry(pathname, { kind: "subagent", parent: path.join(SANDBOX, "-repo.jsonl") })],
+    processMayBeRunning: NOTHING_RUNNING,
+    livePaneHost: async () => null,
+    recover: async (request: { path: string }) => {
+      bridgeRequests.push(request.path);
+      return null;
+    },
+    /* The real eligibility gate answers here: admission must agree with it,
+       not run ahead of it. */
+    resumeSpecFor: () => null,
+    deliver: async () => {
+      legacyLaunches += 1;
+      return { ok: true, outcome: "resumed", target: "%9" };
+    },
+  } as never);
+
+  expect(outcome).toMatchObject({
+    ok: false,
+    status: 409,
+    error: "a Claude subagent transcript has no session of its own to resume",
+  });
+  expect(legacyLaunches).toBe(0);
+  // No root identity minted for a leaf, and no `claude --resume <leaf>` paid for.
+  expect(registry.conversationForPath(pathname)).toBeNull();
+  expect(bridgeRequests).toEqual([pathname]);
+});
+
+test("admission names the subagent refusal itself, without consuming the legacy ladder's turn", () => {
+  const leafDir = path.join(SANDBOX, "-repo", "subagents", "workflows", "w1");
+  fs.mkdirSync(leafDir, { recursive: true });
+  const pathname = path.join(leafDir, `agent-${SESSION_ID}.jsonl`);
+  fs.writeFileSync(pathname, "{}\n");
+  const registry = registryFor("subagent-named");
+
+  const admission = admitTranscriptConversation(registry, terminalBornEntry(pathname), {
+    processMayBeRunning: NOTHING_RUNNING,
+  });
+
+  expect(admission).toEqual({
+    ok: false,
+    reason: "a Claude subagent transcript has no session of its own to resume",
+  });
+  expect(registry.conversationForPath(pathname)).toBeNull();
+});
+
+test("an admitted transcript with a known parent records the lineage edge", () => {
+  const parentPath = path.join(SANDBOX, `rollout-2026-08-07T09-00-00-${SESSION_ID}.jsonl`);
+  const childId = "87654321-4321-4321-4321-cba987654321";
+  const childPath = path.join(SANDBOX, `rollout-2026-08-07T10-00-00-${childId}.jsonl`);
+  fs.writeFileSync(parentPath, "{}\n");
+  fs.writeFileSync(childPath, "{}\n");
+  const registry = registryFor("admitted-lineage");
+  const codex = { root: "codex-sessions", engine: "codex" } as Partial<FileEntry>;
+  const dependencies = { resolveAccount: () => null, processMayBeRunning: NOTHING_RUNNING };
+
+  expect(admitTranscriptConversation(registry, terminalBornEntry(parentPath, codex), dependencies)).toMatchObject({ ok: true });
+  const admitted = admitTranscriptConversation(registry, terminalBornEntry(childPath, { ...codex, parent: parentPath }), dependencies);
+
+  expect(admitted).toMatchObject({ ok: true });
+  /* Dropping `entry.parent` left the minted identity with no lineage edge, so
+     a delegated child surfaced on the board as its own root card. */
+  const parent = registry.conversationForPath(parentPath)!;
+  const child = registry.conversationForPath(childPath)!;
+  expect(registry.readOnlySnapshot().lineageEdges[child.id]).toMatchObject({ parentConversationId: parent.id });
 });
