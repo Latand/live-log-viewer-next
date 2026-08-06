@@ -14,7 +14,15 @@ import {
 } from "./liveTurnHandoff";
 
 const dom = new Window({ url: "http://localhost/" });
-Object.assign(globalThis, { window: dom, navigator: dom.navigator, sessionStorage: dom.sessionStorage });
+Object.assign(globalThis, {
+  window: dom,
+  document: dom.document,
+  navigator: dom.navigator,
+  sessionStorage: dom.sessionStorage,
+  Node: dom.Node,
+  HTMLElement: dom.HTMLElement,
+  Event: dom.Event,
+});
 setLocale("en");
 
 beforeEach(() => {
