@@ -1085,7 +1085,7 @@ test("a cross-engine historical adoption settles with the child runtime", async 
     cwd: "/repo",
     accountId: "claude-test",
     parentConversationId: "conversation_source_codex",
-    launchProfile: { model: "claude-sonnet-4-6", effort: "high" },
+    launchProfile: { model: "claude-sonnet-4-6", effort: "high", title: "Adopt cross-engine pipeline stage" },
     memberships: [{
       kind: "pipeline",
       containerId: pipeline.id,
@@ -4414,7 +4414,13 @@ test("issue 533: a cross-process late recovery loses atomically to a claimed ret
   const registryPath = path.join(process.env.LLV_STATE_DIR!, `retry-race-${pipeline.id}.json`);
   const retryRegistry = new AgentRegistry(registryPath, undefined, undefined, { sqliteMode: "off" });
   const competingRegistry = new AgentRegistry(registryPath, undefined, undefined, { sqliteMode: "off" });
-  const begun = retryRegistry.beginSpawnRequest({ engine: "codex", cwd: pipeline.worktreeDir, transport: "structured", accountId: "work" });
+  const begun = retryRegistry.beginSpawnRequest({
+    engine: "codex",
+    cwd: pipeline.worktreeDir,
+    transport: "structured",
+    accountId: "work",
+    launchProfile: { title: "Recover claimed pipeline retry" },
+  });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
   const key = { engine: "codex" as const, sessionId: `retry-race-${pipeline.id}` };
   const artifactPath = path.join(pipeline.worktreeDir, "late-original.jsonl");

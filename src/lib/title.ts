@@ -31,8 +31,14 @@ const GENERIC_SESSION_TITLES = new Set([
 
 export const SPAWN_TITLE_REQUIRED_ERROR = "title is required for every new spawn";
 
+function genericSessionTitleKey(value: string): string {
+  return cleanTitle(value)
+    .toLocaleLowerCase()
+    .replace(/^[\p{P}\p{S}\s]+|[\p{P}\p{S}\s]+$/gu, "");
+}
+
 export function isGenericSessionTitle(value: string | null | undefined): boolean {
-  return typeof value === "string" && GENERIC_SESSION_TITLES.has(cleanTitle(value).toLocaleLowerCase());
+  return typeof value === "string" && GENERIC_SESSION_TITLES.has(genericSessionTitleKey(value));
 }
 
 /** Validate a durable title without rewriting its meaningful punctuation. */

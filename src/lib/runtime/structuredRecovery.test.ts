@@ -415,7 +415,12 @@ function establishRolledBackTmuxOwner(engine: "codex" | "claude", label: string)
   const cwd = path.join(sandbox, `${engine}-${label}-${sessionId}`);
   const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
   const accountId = `${engine}-${label}-account`;
-  const profile = emptyLaunchProfile({ cwd, model: `${engine}-${label}-model`, effort: "high" });
+  const profile = emptyLaunchProfile({
+    cwd,
+    model: `${engine}-${label}-model`,
+    effort: "high",
+    title: `Recover ${engine} ${label} ownership`,
+  });
   const key = { engine, sessionId } as const;
   fs.mkdirSync(cwd, { recursive: true });
   fs.writeFileSync(artifactPath, "");
@@ -501,6 +506,7 @@ test("dead Codex structured recovery retains ownership and starts a pane-less re
     permissionMode: "never",
     allowSubagents: true,
     parentConversationId: parent.id,
+    title: "recovery · Restore Codex review session",
     goal: { objective: "Restore Codex review session", status: "active", tokensUsed: null, timeUsedSeconds: null },
   });
   const conversation = registry.ensureConversation("codex", artifactPath, "retained-account");
@@ -632,6 +638,7 @@ test("dead Claude structured recovery retains ownership and starts a pane-less r
     permissionMode: "default",
     allowSubagents: true,
     parentConversationId: reviewed.id,
+    title: "recovery · Restore Claude review session",
     goal: { objective: "Restore Claude review session", status: "active", tokensUsed: null, timeUsedSeconds: null },
   });
   const conversation = registry.ensureConversation("claude", artifactPath, "retained-claude-account");
@@ -757,7 +764,12 @@ test("Codex and Claude worker and root recovery retain their original lineage sh
       const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
       const parentPath = path.join(cwd, "parent.jsonl");
       const parent = registry.ensureConversation(engine, parentPath, `${engine}-account`);
-      const profile = emptyLaunchProfile({ cwd, parentConversationId: role === "worker" ? parent.id : null, role });
+      const profile = emptyLaunchProfile({
+        cwd,
+        parentConversationId: role === "worker" ? parent.id : null,
+        role,
+        title: `Recover ${engine} ${role} lineage`,
+      });
       const conversation = registry.ensureConversation(engine, artifactPath, `${engine}-account`);
       if (role === "worker") {
         const original = registry.beginSpawnRequest({
@@ -1216,7 +1228,7 @@ test("a registered legacy Codex transcript bridges into the structured app serve
     transport: "tmux",
     conversationId: conversation.id,
     expectedArtifactPath: artifactPath,
-    launchProfile: emptyLaunchProfile({ cwd }),
+    launchProfile: emptyLaunchProfile({ cwd, title: "Recover legacy Codex tmux ownership" }),
   });
   const failedStructuredAttempt = registry.beginSpawnRequest({
     engine: "codex",
@@ -1224,7 +1236,7 @@ test("a registered legacy Codex transcript bridges into the structured app serve
     transport: "structured",
     conversationId: conversation.id,
     expectedArtifactPath: artifactPath,
-    launchProfile: emptyLaunchProfile({ cwd }),
+    launchProfile: emptyLaunchProfile({ cwd, title: "Recover legacy Codex structured ownership" }),
   });
   registry.failSpawn(failedStructuredAttempt.receipt.launchId, "structured launch failed before ownership");
   let spawnCalls = 0;

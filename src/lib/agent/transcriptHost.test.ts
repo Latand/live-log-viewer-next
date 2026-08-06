@@ -214,7 +214,12 @@ test("completed launch host polls reuse the SQLite registry read cache", () => {
     agent: { pid: 200, startIdentity: "200:one" },
     argv: ["codex", "resume", SESSION],
   };
-  const begun = registry.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "terra" });
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    accountId: "terra",
+    launchProfile: { title: "Reconcile completed launch hosts" },
+  });
   if (begun.kind !== "created") throw new Error("expected create");
   registry.completeObservedSpawn(begun.receipt.launchId, {
     key: { engine: "codex", sessionId: SESSION },
@@ -270,6 +275,7 @@ test("registry resume receives one conversation-bound capability at central actu
     cwd: "/repo",
     conversationId: conversation.id,
     spawnCapabilityDigest: previousDigest,
+    launchProfile: { title: "Resume issue #913 identity" },
   });
 
   const prepared = beginRegistryResume(entry(), spec, registry);
@@ -497,7 +503,12 @@ describe("transcript host resolver", () => {
     const accountPath = `/home/user/.config/agent-log-viewer/accounts/claude/work/projects/-repo/${sessionId}.jsonl`;
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-account-home-host-"));
     const registry = new AgentRegistry(path.join(directory, "registry.json"));
-    const begun = registry.beginSpawnRequest({ engine: "claude", cwd: "/repo", accountId: "work" });
+    const begun = registry.beginSpawnRequest({
+      engine: "claude",
+      cwd: "/repo",
+      accountId: "work",
+      launchProfile: { title: "Resolve account-home Claude session" },
+    });
     if (begun.kind !== "created") throw new Error("expected create");
     registry.bindSpawnPane(begun.receipt.launchId, {
       endpoint: "/tmp",
@@ -567,7 +578,12 @@ describe("transcript host resolver", () => {
   test("successful composer delivery releases a recoverable pane quarantine", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-delivery-quarantine-"));
     const registry = new AgentRegistry(path.join(directory, "registry.json"));
-    const begun = registry.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: null });
+    const begun = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd: "/repo",
+      accountId: null,
+      launchProfile: { title: "Release composer delivery quarantine" },
+    });
     if (begun.kind !== "created") throw new Error("expected create");
     registry.bindSpawnPane(begun.receipt.launchId, {
       endpoint: "/tmp",
@@ -866,6 +882,7 @@ test("the structured-transport resume ladder refuses to open a legacy tmux Claud
         cwd: "/repo",
         windowName: "claude-resume",
         engine: "claude",
+        launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Refuse legacy Claude resume pane" }),
       },
       payload: "hello",
     });

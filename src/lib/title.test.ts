@@ -11,8 +11,18 @@ test("spawn titles derive from the role and a sixty-character first prompt line"
 });
 
 test("legacy engine placeholders have no semantic title value", () => {
-  for (const placeholder of ["Codex session", "Claude session", "Codex", "Claude"]) {
+  for (const placeholder of [
+    "Codex session",
+    "Claude session",
+    "Codex",
+    "Claude",
+    "Codex session.",
+    "Claude session!",
+    "(Codex session)",
+    "— Claude —",
+  ]) {
     expect(isGenericSessionTitle(placeholder)).toBeTrue();
+    expect(durableSemanticTitle(placeholder)).toBeNull();
     expect(semanticTitle(placeholder)).toBeNull();
   }
   expect(semanticTitle("Implement registry identity")).toBe("Implement registry identity");

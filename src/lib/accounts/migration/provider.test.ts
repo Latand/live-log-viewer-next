@@ -49,6 +49,16 @@ function claudeHost(paneId: string, panePid: number, agentPid = panePid + 10_000
   };
 }
 
+function titledProviderSource(source: NativeGeneration): NativeGeneration {
+  return {
+    ...source,
+    launchProfile: emptyLaunchProfile({
+      ...source.launchProfile,
+      title: source.launchProfile.title ?? "Migrate provider fixture",
+    }),
+  };
+}
+
 afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
@@ -442,11 +452,11 @@ test("Claude successor verification rejects a missing durable transcript", async
     operationId: "019f423a-d6e9-\x34903-8597-3e676b6ff3d4",
     conversationId: "conversation_test",
     targetAccountId: "target",
-    source: { id: "source", path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
+    source: { id: "source", path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Migrate provider fixture" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
     recordContinuityPath() {},
   });
 
-  await expect(provider.verify(receipt, { engine: "claude", targetAccountId: "target", launchProfile: emptyLaunchProfile({ cwd: "/repo" }) }))
+  await expect(provider.verify(receipt, { engine: "claude", targetAccountId: "target", launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Migrate provider fixture" }) }))
     .rejects.toThrow("durable");
 });
 
@@ -477,7 +487,7 @@ test("Claude agent exit fails full host verification and leaves the persisted re
     operationId: "claude-host-failure",
     conversationId: "conversation_claude_host_failure",
     targetAccountId: "target",
-    source: { id: "source", path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
+    source: { id: "source", path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Migrate provider fixture" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
     recordContinuityPath() {},
   });
   const persisted = structuredClone(receipt);
@@ -485,7 +495,7 @@ test("Claude agent exit fails full host verification and leaves the persisted re
   await expect(provider.verify(receipt, {
     engine: "claude",
     targetAccountId: "target",
-    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Migrate provider fixture" }),
   })).rejects.toThrow("host is not live");
   expect(receipt).toEqual(persisted);
   expect(verifiedHost).toMatchObject({ paneId: "%12", panePid: { pid: 1212 }, agent: { pid: 11212 } });
@@ -600,7 +610,7 @@ test("concurrent Claude creates reuse one durable migration spawn receipt", asyn
     operationId: "claude-concurrent-operation",
     conversationId: conversation.id,
     targetAccountId: "target",
-    source: conversation.generations[0]!,
+    source: titledProviderSource(conversation.generations[0]!),
     recordContinuityPath() {},
   };
 
@@ -643,7 +653,7 @@ test("Claude create cancels the live host when continuity persistence fails", as
     operationId: "claude-continuity-failure",
     conversationId: conversation.id,
     targetAccountId: "target",
-    source: conversation.generations[0]!,
+    source: titledProviderSource(conversation.generations[0]!),
     recordContinuityPath() { throw new Error("registry unavailable"); },
   })).rejects.toThrow("registry unavailable");
 
@@ -654,7 +664,7 @@ test("Claude create cancels the live host when continuity persistence fails", as
     engine: "claude",
     path: spawnReceipt.artifactPath!,
     accountId: "target",
-    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Migrate provider fixture" }),
     turn: { state: "idle", source: "empty", terminalAt: null },
     observedAt: "2026-07-10T12:01:00.000Z",
   }]);
@@ -688,7 +698,7 @@ test("Claude replay cancels its verified host when continuity persistence fails"
     operationId: "claude-replay-continuity-failure",
     conversationId: conversation.id,
     targetAccountId: "target",
-    source: conversation.generations[0]!,
+    source: titledProviderSource(conversation.generations[0]!),
     recordContinuityPath() {},
   };
   await new RegisteredSuccessorProvider(dependencies).create(input);
@@ -736,7 +746,7 @@ test("Claude replay resumes a pane-free birth receipt and fences terminal spawn 
     operationId: "claude-pane-free-retry",
     conversationId: conversation.id,
     targetAccountId: "target",
-    source: conversation.generations[0]!,
+    source: titledProviderSource(conversation.generations[0]!),
     recordContinuityPath() {},
   };
 
@@ -789,7 +799,7 @@ test("Claude crash recovery reuses the exact host and observer settlement keeps 
     operationId: "claude-crash-operation",
     conversationId: conversation.id,
     targetAccountId: "target",
-    source: conversation.generations[0]!,
+    source: titledProviderSource(conversation.generations[0]!),
     recordContinuityPath() {},
   };
 
@@ -850,7 +860,7 @@ test("unknown Claude transcript model omits the successor override", async () =>
     operationId: "019f423a-d6e9-\x34903-8597-3e676b6ff3d4",
     conversationId: "conversation_test",
     targetAccountId: "target",
-    source: { id: "native", path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo", model: "mythos-1" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
+    source: { id: "native", path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo", model: "mythos-1", title: "Migrate unknown Claude model" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
     recordContinuityPath() {},
   });
   expect(command).not.toContain("--model");
@@ -947,6 +957,7 @@ test("a definite Codex fork rejection can retry the same operation", async () =>
     },
     async resumeThread(id: string) { return { id, path: null }; },
     async readThread(id: string) { return { id, path: null }; },
+    async setThreadName() {},
     close() {},
   }) as unknown as CodexAppServerClient;
   const provider = new RegisteredSuccessorProvider({
@@ -955,7 +966,7 @@ test("a definite Codex fork rejection can retry the same operation", async () =>
     spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
     now: () => "2026-07-10T12:00:00.000Z", journalRoot: path.join(base, "journal"),
   });
-  const input = { engine: "codex" as const, operationId: "definite-fork-retry", conversationId: "conversation_definite" as const, targetAccountId: "target", source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo" }), historyHash: null, host: null, createdAt: "now", archivedAt: null }, recordContinuityPath() {} };
+  const input = { engine: "codex" as const, operationId: "definite-fork-retry", conversationId: "conversation_definite" as const, targetAccountId: "target", source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Migrate provider fixture" }), historyHash: null, host: null, createdAt: "now", archivedAt: null }, recordContinuityPath() {} };
   await expect(provider.create(input)).rejects.toThrow("request rejected before dispatch");
   await expect(provider.create(input)).resolves.toMatchObject({ nativeId: forkId });
   expect(forkCalls).toBe(2);
@@ -984,6 +995,7 @@ test("concurrent Codex creates publish one successor for the same operation", as
     },
     async resumeThread(id: string) { return { id, path: null }; },
     async readThread(id: string) { return { id, path: null }; },
+    async setThreadName() {},
     close() {},
   }) as unknown as CodexAppServerClient;
   const provider = new RegisteredSuccessorProvider({
@@ -999,7 +1011,7 @@ test("concurrent Codex creates publish one successor for the same operation", as
     operationId: "concurrent-operation",
     conversationId: "conversation_test" as const,
     targetAccountId: "target",
-    source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
+    source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Migrate provider fixture" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
     recordContinuityPath() {},
   };
 
@@ -1030,6 +1042,7 @@ test("a fresh 51-conversation Codex drain skips recovery history scans", async (
     },
     async resumeThread(id: string) { return { id, path: null }; },
     async readThread(id: string) { return { id, path: null }; },
+    async setThreadName() {},
     close() {},
   }) as unknown as CodexAppServerClient;
   const provider = new RegisteredSuccessorProvider({
@@ -1041,7 +1054,7 @@ test("a fresh 51-conversation Codex drain skips recovery history scans", async (
     scanCodexForkArtifacts() { scanCalls += 1; return []; },
     now: () => "2026-07-10T12:00:00.000Z",
   });
-  const generation = { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo" }), historyHash: null, host: null, createdAt: "now", archivedAt: null };
+  const generation = { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Migrate provider fixture" }), historyHash: null, host: null, createdAt: "now", archivedAt: null };
 
   for (let index = 0; index < 51; index += 1) {
     await provider.create({
@@ -1078,6 +1091,7 @@ test("first Codex operation fsyncs every newly created journal directory entry",
     },
     async resumeThread(id: string) { return { id, path: null }; },
     async readThread(id: string) { return { id, path: null }; },
+    async setThreadName() {},
     close() {},
   }) as unknown as CodexAppServerClient;
   const provider = new RegisteredSuccessorProvider({
@@ -1103,7 +1117,7 @@ test("first Codex operation fsyncs every newly created journal directory entry",
       operationId: "journal-first-operation",
       conversationId: "conversation_journal_fsync",
       targetAccountId: "target",
-      source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
+      source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Migrate provider fixture" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
       recordContinuityPath() {},
     });
   } finally {
@@ -1137,6 +1151,7 @@ test("Codex successor provider recovers a validated fork created before exact re
     },
     async resumeThread(id: string) { return { id, path: null }; },
     async readThread(id: string) { return { id, path: null }; },
+    async setThreadName() {},
     close() {},
   }) as unknown as CodexAppServerClient;
   const dependencies = {
@@ -1166,7 +1181,7 @@ test("Codex successor provider recovers a validated fork created before exact re
     operationId: "operation-fork-recovery",
     conversationId: conversation.id,
     targetAccountId: "target",
-    source: conversation.generations[0]!,
+    source: titledProviderSource(conversation.generations[0]!),
     recordContinuityPath(pathname: string) { registry.recordConversationContinuityPath(conversation.id, pathname); },
   };
   const crashed = new RegisteredSuccessorProvider({
@@ -1228,6 +1243,7 @@ test("Codex successor provider reuses one published copy after a crash", async (
     },
     async resumeThread(id: string) { return { id, path: null }; },
     async readThread(id: string) { return { id, path: null }; },
+    async setThreadName() {},
     close() {},
   }) as unknown as CodexAppServerClient;
   const dependencies = {
@@ -1253,7 +1269,7 @@ test("Codex successor provider reuses one published copy after a crash", async (
     operationId: "operation-copy-recovery",
     conversationId: conversation.id,
     targetAccountId: "target",
-    source: conversation.generations[0]!,
+    source: titledProviderSource(conversation.generations[0]!),
     recordContinuityPath(pathname: string) { registry.recordConversationContinuityPath(conversation.id, pathname); },
   };
   const crashed = new RegisteredSuccessorProvider({
@@ -1306,6 +1322,7 @@ test("Codex successor provider rejects an unregistered fork path before recordin
   const client = {
     async readAccount() { return { account: { type: "chatgpt" }, requiresOpenaiAuth: true }; },
     async forkThread() { return { id: "019f423a-d6e9-\x34903-8597-3e676b6ff3d4", path: foreignPath }; },
+    async setThreadName() {},
     close() {},
   } as unknown as CodexAppServerClient;
   const provider = new RegisteredSuccessorProvider({
@@ -1322,7 +1339,7 @@ test("Codex successor provider rejects an unregistered fork path before recordin
     operationId: "foreign-fork",
     conversationId: "conversation_test",
     targetAccountId: "target",
-    source: { id: "source", path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
+    source: { id: "source", path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Migrate provider fixture" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
     recordContinuityPath(pathname) { recorded.push(pathname); },
   })).rejects.toThrow("unsafe-source");
   expect(recorded).toEqual([]);
@@ -1354,6 +1371,7 @@ test("a retry under a fresh operation identity recovers the fork the failed atte
     },
     async resumeThread(id: string) { return { id, path: null }; },
     async readThread(id: string) { return { id, path: null }; },
+    async setThreadName() {},
     close() {},
   }) as unknown as CodexAppServerClient;
   const provider = new RegisteredSuccessorProvider({
@@ -1370,7 +1388,7 @@ test("a retry under a fresh operation identity recovers the fork the failed atte
     operationId,
     conversationId: "conversation_cross_operation" as const,
     targetAccountId: "target",
-    source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
+    source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Migrate provider fixture" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
     recordContinuityPath(pathname: string) { recorded.push(pathname); },
   });
 
@@ -1431,6 +1449,7 @@ test("orphan forks whose provenance died with their journals are re-forked once 
     },
     async resumeThread(id: string) { return { id, path: null }; },
     async readThread(id: string) { return { id, path: null }; },
+    async setThreadName() {},
     close() {},
   }) as unknown as CodexAppServerClient;
   const recorded: string[] = [];
@@ -1448,7 +1467,7 @@ test("orphan forks whose provenance died with their journals are re-forked once 
     operationId: "orphan-recovery",
     conversationId,
     targetAccountId: "target",
-    source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
+    source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Migrate provider fixture" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
     recordContinuityPath(pathname: string) { recorded.push(pathname); },
   });
 
@@ -1477,7 +1496,7 @@ test("orphan forks whose provenance died with their journals are re-forked once 
     operationId: "orphan-recovery",
     conversationId,
     targetAccountId: "target",
-    source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
+    source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Migrate provider fixture" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
     recordContinuityPath(pathname: string) { recorded.push(pathname); },
   });
 
@@ -1530,6 +1549,7 @@ test("orphan forks recorded by journals that predate conversation identity are s
     },
     async resumeThread(id: string) { return { id, path: null }; },
     async readThread(id: string) { return { id, path: null }; },
+    async setThreadName() {},
     close() {},
   }) as unknown as CodexAppServerClient;
   const recorded: string[] = [];
@@ -1547,7 +1567,7 @@ test("orphan forks recorded by journals that predate conversation identity are s
     operationId: "legacy-recovery",
     conversationId: "conversation_legacy_journals",
     targetAccountId: "target",
-    source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
+    source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Migrate provider fixture" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
     recordContinuityPath(pathname: string) { recorded.push(pathname); },
   });
 
@@ -1596,6 +1616,7 @@ test("two forks inside one operation's own window resolve to the newest", async 
     },
     async resumeThread(id: string) { return { id, path: null }; },
     async readThread(id: string) { return { id, path: null }; },
+    async setThreadName() {},
     close() {},
   }) as unknown as CodexAppServerClient;
   const recorded: string[] = [];
@@ -1612,7 +1633,7 @@ test("two forks inside one operation's own window resolve to the newest", async 
     operationId: "same-operation-ambiguity",
     conversationId: "conversation_same_operation" as const,
     targetAccountId: "target",
-    source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
+    source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Migrate provider fixture" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
     recordContinuityPath(pathname: string) { recorded.push(pathname); },
   };
 
@@ -1652,6 +1673,7 @@ test("an explicit retry reauthorizes one fork after an unknown outcome produced 
     },
     async resumeThread(id: string) { return { id, path: null }; },
     async readThread(id: string) { return { id, path: null }; },
+    async setThreadName() {},
     close() {},
   }) as unknown as CodexAppServerClient;
   const dependencies = {
@@ -1668,7 +1690,7 @@ test("an explicit retry reauthorizes one fork after an unknown outcome produced 
     operationId: "empty-unknown-operation",
     conversationId: "conversation_empty_unknown" as const,
     targetAccountId: "target",
-    source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
+    source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Migrate provider fixture" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
     recordContinuityPath() {},
   };
 
@@ -1719,6 +1741,7 @@ test("a late artifact from the first uncertain attempt is adopted after an opera
     },
     async resumeThread(id: string) { return { id, path: null }; },
     async readThread(id: string) { return { id, path: null }; },
+    async setThreadName() {},
     close() {},
   }) as unknown as CodexAppServerClient;
   const dependencies = {
@@ -1735,7 +1758,7 @@ test("a late artifact from the first uncertain attempt is adopted after an opera
     operationId: "late-fork-operation",
     conversationId: "conversation_late_fork" as const,
     targetAccountId: "target",
-    source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
+    source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Migrate provider fixture" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
     recordContinuityPath() {},
   };
 
@@ -1821,6 +1844,7 @@ test("a retry re-forks when the source gained turns while the migration was park
     },
     async resumeThread(id: string) { return { id, path: null }; },
     async readThread(id: string) { return { id, path: null }; },
+    async setThreadName() {},
     close() {},
   }) as unknown as CodexAppServerClient;
   const provider = new RegisteredSuccessorProvider({
@@ -1837,7 +1861,7 @@ test("a retry re-forks when the source gained turns while the migration was park
     operationId,
     conversationId: "conversation_parked_advance" as const,
     targetAccountId: "target",
-    source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
+    source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Migrate provider fixture" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
     recordContinuityPath(pathname: string) { recorded.push(pathname); },
   });
 

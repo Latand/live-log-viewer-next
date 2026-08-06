@@ -50,21 +50,31 @@ function spawnAtDepth(
   origin: Parameters<InstanceType<typeof AgentRegistry>["beginSpawnRequest"]>[0]["origin"],
   role: string | null = null,
 ): { launchId: string; conversationId: ViewerConversationId } {
-  const begun = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", origin, role });
+  const begun = store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    origin,
+    role,
+    launchProfile: { title: `Exercise ${role ?? "root"} admission` },
+  });
   if (begun.kind !== "created") throw new Error("expected create");
   return { launchId: begun.receipt.launchId, conversationId: settleLaunch(store, begun.receipt.launchId) };
 }
 
-test("fresh spawn admission normalizes generic placeholder titles", () => {
+test("fresh spawn admission rejects missing and generic placeholder titles", () => {
   const { store } = registryAt("placeholder-title");
-  const placeholder = store.beginSpawnRequest({
+  expect(() => store.beginSpawnRequest({
     engine: "codex",
     cwd: "/repo",
     origin: { kind: "operator" },
     launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Codex session" }),
-  });
-  if (placeholder.kind !== "created") throw new Error("expected create");
-  expect(placeholder.receipt.launchProfile.title).toBeNull();
+  })).toThrow("title is required for every new spawn");
+  expect(() => store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    origin: { kind: "operator" },
+  })).toThrow("title is required for every new spawn");
+  expect(Object.keys(store.snapshot().receipts)).toHaveLength(0);
 
   const semantic = store.beginSpawnRequest({
     engine: "codex",
@@ -154,7 +164,7 @@ test("a delegated conversation never acquires a Codex plugin grant (#687)", () =
     cwd: "/repo",
     role: "builder",
     origin: { kind: "operator" },
-    launchProfile: emptyLaunchProfile({ cwd: "/repo", ...claimed }),
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Exercise delegated plugin grants", ...claimed }),
   });
   if (roleLaunch.kind !== "created") throw new Error("expected create");
   const roleConversation = settleLaunch(store, roleLaunch.receipt.launchId);
@@ -174,7 +184,7 @@ test("a delegated conversation never acquires a Codex plugin grant (#687)", () =
     cwd: "/repo",
     parentConversationId: parent.id,
     origin: { kind: "agent", conversationId: parent.id },
-    launchProfile: emptyLaunchProfile({ cwd: "/repo", ...claimed }),
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Exercise child plugin grants", ...claimed }),
   });
   if (childLaunch.kind !== "created") throw new Error("expected create");
   expect(childLaunch.receipt.launchProfile.plugins).toEqual([]);
@@ -184,7 +194,7 @@ test("a delegated conversation never acquires a Codex plugin grant (#687)", () =
     engine: "codex",
     cwd: "/repo",
     origin: { kind: "operator" },
-    launchProfile: emptyLaunchProfile({ cwd: "/repo", ...claimed }),
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Exercise root plugin grants", ...claimed }),
   });
   if (rootLaunch.kind !== "created") throw new Error("expected create");
   expect(rootLaunch.receipt.launchProfile.plugins).toEqual(["computer-use"]);
@@ -200,6 +210,7 @@ test("a reviewer-origin launch is terminally rejected with a durable typed recei
     reviewsConversationId: implementer.id,
     parentConversationId: implementer.id,
     origin: { kind: "operator" },
+    launchProfile: { title: "Review admission boundaries" },
   });
   if (reviewerBegun.kind !== "created") throw new Error("expected create");
   expect(reviewerBegun.receipt.agentRole).toBe("reviewer");
@@ -216,6 +227,7 @@ test("a reviewer-origin launch is terminally rejected with a durable typed recei
     clientAttemptId: "reviewer-child-attempt-1",
     requestDigest: "digest-1",
     memberships: [],
+    launchProfile: { title: "Exercise denied reviewer delegation" },
   });
   expect(attempt).toThrow(SpawnAdmissionError);
 
@@ -275,6 +287,7 @@ test("delegation depth records at birth and the ceiling rejects the child that w
       engine: "codex",
       cwd: "/repo",
       origin: { kind: "agent", conversationId: second.conversationId },
+      launchProfile: { title: "Exercise nesting rejection" },
     });
   } catch (error) {
     rejection = error as InstanceType<typeof SpawnAdmissionError>;
@@ -298,6 +311,7 @@ test("the durable nesting policy governs the ceiling", () => {
       engine: "codex",
       cwd: "/repo",
       origin: { kind: "agent", conversationId: first.conversationId },
+      launchProfile: { title: "Exercise nesting policy" },
     })).toThrow("capped at depth 1");
   } finally {
     fs.rmSync(path.join(process.env.LLV_STATE_DIR!, "spawn-nesting.json"), { force: true });
@@ -314,6 +328,7 @@ test("container origin keys on the creator, not the lineage parent, and records 
     reviewsConversationId: implementer.id,
     parentConversationId: implementer.id,
     origin: { kind: "operator" },
+    launchProfile: { title: "Review container admission" },
   });
   if (reviewerBegun.kind !== "created") throw new Error("expected create");
   const reviewerId = settleLaunch(store, reviewerBegun.receipt.launchId);
@@ -325,6 +340,7 @@ test("container origin keys on the creator, not the lineage parent, and records 
     cwd: "/repo",
     parentConversationId: reviewerId,
     role: "builder",
+    launchProfile: { title: "Build container admission fixture" },
     origin: { kind: "container", container: "pipeline", containerId: "pipe1234", creatorConversationId: null },
     memberships: [{
       kind: "pipeline",
@@ -350,6 +366,7 @@ test("container origin keys on the creator, not the lineage parent, and records 
     cwd: "/repo",
     parentConversationId: stage.receipt.conversationId,
     role: "reviewer",
+    launchProfile: { title: "Review container admission fixture" },
     origin: { kind: "container", container: "pipeline", containerId: "pipe1234", creatorConversationId: null },
   });
   if (reviewStage.kind !== "created") throw new Error("expected create");
@@ -361,6 +378,7 @@ test("container origin keys on the creator, not the lineage parent, and records 
     engine: "codex",
     cwd: "/repo",
     origin: { kind: "container", container: "pipeline", containerId: "pipe9999", creatorConversationId: reviewerId },
+    launchProfile: { title: "Exercise reviewer container denial" },
   })).toThrow(SpawnAdmissionError);
 });
 
@@ -374,6 +392,7 @@ test("successor purposes are exempt, carry recorded identity, and force reviewer
     reviewsConversationId: implementer.id,
     parentConversationId: implementer.id,
     origin: { kind: "operator" },
+    launchProfile: { title: "Review successor identity" },
   });
   if (reviewerBegun.kind !== "created") throw new Error("expected create");
   const reviewerId = settleLaunch(store, reviewerBegun.receipt.launchId);
@@ -400,6 +419,7 @@ test("successor purposes are exempt, carry recorded identity, and force reviewer
     conversationId: reviewerId,
     purpose: "migration-successor",
     origin: { kind: "successor" },
+    launchProfile: { title: "Review successor identity" },
   });
   if (migration.kind !== "created") throw new Error("expected create");
   expect(migration.receipt).toMatchObject({ agentRole: "reviewer", delegationDepth: 0, rejection: null });
