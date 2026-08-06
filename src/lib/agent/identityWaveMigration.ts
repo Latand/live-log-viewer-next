@@ -52,7 +52,7 @@ function canonicalConversationId(file: RegistryFile, conversationId: string): Vi
 function semanticEvidence(value: string | null | undefined): string | null {
   if (typeof value !== "string") return null;
   const firstNonEmptyLine = value.split(/\r?\n/).find((line) => line.trim());
-  return durableSemanticTitle(firstNonEmptyLine, 120);
+  return semanticTitle(firstNonEmptyLine, 120);
 }
 
 function receiptTitles(file: RegistryFile): Map<ViewerConversationId, string> {
