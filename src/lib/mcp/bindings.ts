@@ -53,7 +53,7 @@ import { completedFileScan } from "@/lib/scanner/scanCache";
 import { readResources } from "@/lib/resources";
 import { adoptLiveRootSession, conversationRole, liveRootSession, type RootSessionSource } from "@/lib/root/adopt";
 import { listRoles } from "@/lib/roles/registry";
-import type { RoleParameter } from "@/lib/roles/types";
+import type { RoleDefinition, RoleParameter } from "@/lib/roles/types";
 import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
 import { ledgerDeployment, ledgerDeployments } from "@/lib/runtime/deploymentLedger";
 import { SELECTED_TAIL_MAX_LINES } from "@/lib/selection/resolve";
@@ -500,10 +500,13 @@ function roleParamShape(parameter: RoleParameter): string {
   return "non-empty string up to 2000 characters";
 }
 
-export function defaultMcpSpawnRoleParams(args: McpToolArgs): Record<string, unknown> | undefined {
+export function defaultMcpSpawnRoleParams(
+  args: McpToolArgs,
+  definitions: readonly RoleDefinition[] = listRoles(),
+): Record<string, unknown> | undefined {
   const role = text(args.role);
   if (!role) return undefined;
-  const definition = listRoles().find((candidate) => candidate.id === role);
+  const definition = definitions.find((candidate) => candidate.id === role);
   if (!definition) return undefined;
   const raw = args.roleParams;
   if (raw !== undefined && (!raw || typeof raw !== "object" || Array.isArray(raw))) return undefined;
@@ -887,7 +890,7 @@ async function entryForPath(
   });
   try {
     try {
-      let releaseCatalogWait = () => undefined;
+      let releaseCatalogWait: () => void = () => {};
       const catalogWait = new Promise<never>((_resolve, reject) => {
         const onAbort = () => reject(catalog.signal.reason);
         catalog.signal.addEventListener("abort", onAbort, { once: true });
@@ -970,20 +973,14 @@ async function getConversation(
   const requestedId = selected.conversationId;
   const requestedPath = text(args.transcriptPath) || text(args.path);
   const tailLines = integer(args.tailLines, 0);
-  if (!requestedId && !requestedPath && tailLines <= 0) {
+  if (!requestedId && !requestedPath) {
     throw new Error("conversationId, transcriptPath or selectedContext is required");
   }
-  /* #844 §6: the bounded route. An explicit `tailLines` says "answer from the
-     identity alone" — one keyed registry lookup and one clamped tail read, with
-     no completed generation consulted and no pinned walk reserved, so the
-     selected card stays answerable while the corpus scan is degraded. */
-  if (tailLines > 0) {
-    if (!requestedId) {
-      throw new McpToolRefusal(
-        "tailLines reads a conversation by identity: pass conversationId or selectedContext.",
-        { code: "selected_tail_requires_identity" },
-      );
-    }
+  /* #844 §6: with an identity, explicit `tailLines` uses one keyed registry
+     lookup and one clamped tail read, so the selected card stays answerable
+     while the corpus scan is degraded. A transcript path continues through the
+     root-validated bounded reader below. */
+  if (tailLines > 0 && requestedId) {
     const answer = selectedConversationTail(
       { conversationId: requestedId, maxLines: Math.max(1, Math.min(tailLines, SELECTED_TAIL_MAX_LINES)) },
       selectedDependencies,

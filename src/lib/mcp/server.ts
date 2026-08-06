@@ -14,7 +14,7 @@ import { DEFAULT_STALL_AFTER_MS } from "@/lib/lifecycle/liveness";
 import { PIPELINE_LIST_DEFAULT_LIMIT, PIPELINE_LIST_MAX_LIMIT } from "@/lib/pipelines/listProjection";
 import { PIPELINE_ACTIONS } from "@/lib/pipelines/types";
 import { procBackend } from "@/lib/proc";
-import { ROLE_IDS } from "@/lib/roles/types";
+import { ROLE_IDS, type RoleId } from "@/lib/roles/types";
 import { SELECTED_TAIL_MAX_LINES } from "@/lib/selection/resolve";
 import {
   MAX_SCOPE_PATHS, MAX_SNAPSHOT_CHARS_PER_CONVERSATION, MAX_SNAPSHOT_LAST_MESSAGES, MAX_SNAPSHOT_STRING_LENGTH,
@@ -129,6 +129,7 @@ export interface McpBoundedNumericArg {
   min: number;
   max: number;
   fallback: number;
+  role?: RoleId;
 }
 
 /**
@@ -141,6 +142,10 @@ export interface McpBoundedNumericArg {
  * exact validation at the protocol boundary.
  */
 export const MCP_BOUNDED_NUMERIC_ARGS: Partial<Record<McpToolName, readonly McpBoundedNumericArg[]>> = {
+  spawn_agent: [
+    { path: ["roleParams", "maxWorkers"], min: 1, max: 20, fallback: 3, role: "orchestrator" },
+    { path: ["roleParams", "parallelN"], min: 1, max: 8, fallback: 1, role: "reviewer" },
+  ],
   list_conversations: [
     { path: ["limit"], min: 1, max: 100, fallback: 50 },
   ],
@@ -216,6 +221,7 @@ export function normalizeBoundedMcpNumerics(
   const normalized = { ...args };
   const clamped: Record<string, number> = {};
   for (const spec of specs) {
+    if (spec.role !== undefined && args.role !== spec.role) continue;
     const input = valueAtPath(args, spec.path);
     if (input === undefined) continue;
     const applied = boundedNumericValue(input, spec);
@@ -1647,7 +1653,8 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     model: z.string().optional(),
     effort: z.string().optional(),
     role: z.enum(ROLE_IDS).optional(),
-    roleParams: z.record(z.string(), z.unknown()).optional(),
+    roleParams: z.record(z.string(), z.unknown()).optional()
+      .describe("Role-specific parameters. Bounded integers accept numeric strings, clamp to their declared role bounds, and report the applied value in clamped."),
     reviews: z.string().optional(),
     parentConversationId: z.string().optional(),
     project: z.string().optional(),

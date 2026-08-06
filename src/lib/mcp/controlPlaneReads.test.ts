@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { targetedConversationAtPath, viewerMcpBindings, type TargetedConversationDependencies } from "./bindings";
+import { createMcpToolService, MemoryMcpReceiptStore } from "./server";
 
 /**
  * The control-plane reads consume ONE completed scan and ONE projection (#845).
@@ -211,6 +212,28 @@ test("get_conversation hydrates one known transcript after a completed miss and 
   expect(targetedCalls).toEqual([{ pathname: transcriptPath, signal: controller.signal, deadlineAt }]);
 });
 
+test("get_conversation keeps a validated transcript-path read when tailLines clamps from zero", async () => {
+  const { counts, injected } = dependencies({ completedTranscript: false });
+  const service = createMcpToolService(
+    viewerMcpBindings(undefined, undefined, injected),
+    new MemoryMcpReceiptStore(),
+  );
+
+  const result = await service.callTool("get_conversation", {
+    clientRequestId: "get-path-clamped-tail",
+    transcriptPath,
+    tailLines: 0,
+  });
+
+  expect(result).toMatchObject({
+    ok: true,
+    transcriptPath,
+    clamped: { tailLines: 1 },
+  });
+  expect(counts.targetedReads).toBe(1);
+  expect(counts.rawScans).toBe(0);
+});
+
 test("get_conversation cancels a targeted miss when its caller leaves", async () => {
   const { counts, injected } = dependencies({ completedTranscript: false });
   let started!: () => void;
@@ -300,7 +323,11 @@ test("get_conversation returns hydrated records when the deadline lands after th
   const result = await bindings.get_conversation(
     { clientRequestId: "get-deadline-partial", transcriptPath, maxRecords: 8 },
     { deadlineAt: Date.now() + 5 },
-  ) as { messages: Array<{ text: string }>; truncated: boolean; hint: string };
+  ) as {
+    messages: Array<{ kind: "message"; role: "assistant"; ts: null; text: string }>;
+    truncated: boolean;
+    hint: string;
+  };
 
   expect(result.messages).toEqual([{ kind: "message", role: "assistant", ts: null, text: "partial answer" }]);
   expect(result.truncated).toBe(true);

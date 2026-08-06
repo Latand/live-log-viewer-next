@@ -7,14 +7,16 @@ import { AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
 import { DeadlineExceededError } from "@/lib/deadline";
 import { CORPUS_BODY_MARKERS, pipelineCorpus } from "@/lib/pipelines/fixtures/corpus";
 import type { Pipeline } from "@/lib/pipelines/types";
+import { listRoles } from "@/lib/roles/registry";
+import type { RoleDefinition } from "@/lib/roles/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
 import { queryLifecycleEvents } from "@/lib/lifecycle/journal";
 import { refreshLifecycleJournal } from "@/lib/lifecycle/projector";
 
-import { viewerMcpBindings } from "./bindings";
-import { createMcpToolService, type McpToolResult } from "./server";
+import { defaultMcpSpawnRoleParams, viewerMcpBindings } from "./bindings";
+import { createMcpToolService, MemoryMcpReceiptStore, type McpToolResult } from "./server";
 
 const sandboxes: string[] = [];
 const originalStateDir = process.env.LLV_STATE_DIR;
@@ -106,6 +108,43 @@ test("spawn_agent derives required role params from the prompt and preserves sup
   ]);
 });
 
+test("spawn_agent coerces and clamps bounded role params before the control request", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  const service = createMcpToolService(viewerMcpBindings(undefined, {
+    post: async (_pathname, body) => {
+      bodies.push(body);
+      return {
+        conversationId: `conversation_${bodies.length}`,
+        path: `/repo/session-${bodies.length}.jsonl`,
+        launchId: `launch_${bodies.length}`,
+        state: "queued",
+      };
+    },
+  }), new MemoryMcpReceiptStore());
+
+  const reviewer = await service.callTool("spawn_agent", {
+    clientRequestId: "bounded-reviewer-parallel",
+    cwd: "/repo",
+    ["prompt"]: "Review PR #915.",
+    role: "reviewer",
+    roleParams: { parallelN: "4" },
+  });
+  const orchestrator = await service.callTool("spawn_agent", {
+    clientRequestId: "bounded-orchestrator-workers",
+    cwd: "/repo",
+    ["prompt"]: "Coordinate the assigned work.",
+    role: "orchestrator",
+    roleParams: { maxWorkers: 99 },
+  });
+
+  expect(reviewer).toMatchObject({ ok: true, clamped: { "roleParams.parallelN": 4 } });
+  expect(orchestrator).toMatchObject({ ok: true, clamped: { "roleParams.maxWorkers": 20 } });
+  expect(bodies.map((body) => body.roleParams)).toEqual([
+    { diffSource: "PR #915", parallelN: 4 },
+    { maxWorkers: 20 },
+  ]);
+});
+
 test("spawn_agent reports every underivable required role param with its shape in one error", async () => {
   let posts = 0;
   const spawn = viewerMcpBindings(undefined, {
@@ -131,6 +170,23 @@ test("spawn_agent reports every underivable required role param with its shape i
       `missing required roleParams for ${candidate.role}: ${candidate.param}: non-empty string up to 2000 characters`,
     );
   }
+
+  const reviewer = listRoles().find((candidate) => candidate.id === "reviewer")!;
+  const roleWithTwoRequiredParams: RoleDefinition = {
+    ...reviewer,
+    parameters: [
+      { key: "diffSource", label: "Diff source", description: "Diff to inspect.", kind: "text", required: true },
+      { key: "claims", label: "Claims", description: "Claims to verify.", kind: "text", required: true },
+    ],
+  };
+  expect(() => defaultMcpSpawnRoleParams({
+    clientRequestId: "missing-multiple-reviewer-params",
+    cwd: "/repo",
+    ["prompt"]: "",
+    role: "reviewer",
+  }, [roleWithTwoRequiredParams])).toThrow(
+    "missing required roleParams for reviewer: diffSource: non-empty string up to 2000 characters; claims: non-empty string up to 2000 characters",
+  );
   expect(posts).toBe(0);
 });
 

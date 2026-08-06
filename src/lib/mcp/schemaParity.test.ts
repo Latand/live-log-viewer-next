@@ -58,11 +58,33 @@ function requiredRoleParams(role: ReturnType<typeof listRoles>[number]): Record<
 function setAtPath(target: Record<string, unknown>, path: readonly string[], value: unknown): void {
   let parent = target;
   for (const part of path.slice(0, -1)) {
-    const child: Record<string, unknown> = {};
-    parent[part] = child;
-    parent = child;
+    const existing = parent[part];
+    if (existing && typeof existing === "object" && !Array.isArray(existing)) {
+      parent = existing as Record<string, unknown>;
+    } else {
+      const child: Record<string, unknown> = {};
+      parent[part] = child;
+      parent = child;
+    }
   }
   parent[path.at(-1)!] = value;
+}
+
+function boundedArgs(
+  toolName: McpToolName,
+  spec: NonNullable<(typeof MCP_BOUNDED_NUMERIC_ARGS)[McpToolName]>[number],
+  clientRequestId: string,
+): Record<string, unknown> {
+  const args: Record<string, unknown> = { clientRequestId };
+  if (toolName === "spawn_agent") {
+    Object.assign(args, {
+      cwd: ".",
+      ["prompt"]: "Review PR #1.",
+      role: spec.role,
+      roleParams: {},
+    });
+  }
+  return args;
 }
 
 function valueAtPath(target: Record<string, unknown>, path: readonly string[]): unknown {
@@ -95,7 +117,7 @@ test("every harmless bounded MCP numeric clamps, coerces, and defaults before it
         const highIsSafe = spec.max < Number.MAX_SAFE_INTEGER;
         const outside = highIsSafe ? spec.max + 1 : spec.min - 1;
         const boundary = highIsSafe ? spec.max : spec.min;
-        const clampArgs: Record<string, unknown> = { clientRequestId: `${toolName}-${index}-clamp` };
+        const clampArgs = boundedArgs(toolName, spec, `${toolName}-${index}-clamp`);
         setAtPath(clampArgs, spec.path, outside);
         const clamped = await client.callTool({ name: toolName, arguments: clampArgs });
         expect(clamped.isError).not.toBe(true);
@@ -106,7 +128,7 @@ test("every harmless bounded MCP numeric clamps, coerces, and defaults before it
         expect(valueAtPath((clamped.structuredContent as { applied: Record<string, unknown> }).applied, spec.path)).toBe(boundary);
 
         const coercionValue = Math.max(spec.min, Math.min(spec.max, spec.fallback));
-        const coercionArgs: Record<string, unknown> = { clientRequestId: `${toolName}-${index}-coerce` };
+        const coercionArgs = boundedArgs(toolName, spec, `${toolName}-${index}-coerce`);
         setAtPath(coercionArgs, spec.path, String(coercionValue));
         const coerced = await client.callTool({ name: toolName, arguments: coercionArgs });
         expect(coerced.isError).not.toBe(true);
@@ -116,7 +138,7 @@ test("every harmless bounded MCP numeric clamps, coerces, and defaults before it
         });
         expect(valueAtPath((coerced.structuredContent as { applied: Record<string, unknown> }).applied, spec.path)).toBe(coercionValue);
 
-        const fallbackArgs: Record<string, unknown> = { clientRequestId: `${toolName}-${index}-fallback` };
+        const fallbackArgs = boundedArgs(toolName, spec, `${toolName}-${index}-fallback`);
         setAtPath(fallbackArgs, spec.path, { ambiguous: true });
         const defaulted = await client.callTool({ name: toolName, arguments: fallbackArgs });
         expect(defaulted.isError).not.toBe(true);
@@ -129,7 +151,7 @@ test("every harmless bounded MCP numeric clamps, coerces, and defaults before it
     }
   });
 
-  expect([...calls.keys()].sort()).toEqual(Object.keys(MCP_BOUNDED_NUMERIC_ARGS).sort());
+  expect([...calls.keys()].sort()).toEqual((Object.keys(MCP_BOUNDED_NUMERIC_ARGS) as McpToolName[]).sort());
 });
 
 test("operator mutations and identity-bearing numerics retain exact protocol validation", async () => {
