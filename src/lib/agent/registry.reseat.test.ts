@@ -67,6 +67,54 @@ function seededRegistry(mode: AgentRegistrySqliteMode, filename: string): { stor
 }
 
 for (const mode of ["off", "sqlite"] as const) {
+  test(`a terminal ${mode === "off" ? "JSON" : "SQLite"} row keeps its live structured writer claim`, () => {
+    const filename = registryFile();
+    const key = { engine: "codex" as const, sessionId: `terminal-live-writer-${mode}` };
+    const liveProcess = { pid: 41, startIdentity: "41:host" };
+    const liveWriter = { pid: 42, startIdentity: "42:writer" };
+    const store = new AgentRegistry(
+      filename,
+      (owner) => owner.pid === liveProcess.pid || owner.pid === liveWriter.pid,
+      undefined,
+      { sqliteMode: mode },
+    );
+    store.upsert({
+      key,
+      artifactPath: `/sessions/terminal-live-writer-${mode}.jsonl`,
+      cwd: "/repo/checkout",
+      accountId: "work",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo/checkout" }),
+      status: "dead",
+      host: null,
+      structuredHost: {
+        kind: "codex-app-server",
+        endpoint: "stdio:terminal-live-writer",
+        process: liveProcess,
+        eventCursor: 9,
+        protocolVersion: "1",
+        writerClaimEpoch: 7,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      },
+      claimEpoch: 7,
+      claimOwner: `structured-host:${JSON.stringify(liveWriter)}`,
+      pendingAction: null,
+    });
+
+    expect(store.claimStructuredHost(
+      key,
+      { pid: 43, startIdentity: "43:successor" },
+      { allowUnhosted: true },
+    )).toBeNull();
+    expect(store.readOnlySnapshot().entries[`codex:${key.sessionId}`]).toMatchObject({
+      status: "dead",
+      claimEpoch: 7,
+      claimOwner: `structured-host:${JSON.stringify(liveWriter)}`,
+      structuredHost: { process: liveProcess, writerClaimEpoch: 7 },
+    });
+  });
+
   test(`a requested reseat survives a ${mode === "off" ? "JSON" : "SQLite"} registry restart with cwd and parentage intact`, () => {
     const filename = registryFile();
     const { store, id } = seededRegistry(mode, filename);
