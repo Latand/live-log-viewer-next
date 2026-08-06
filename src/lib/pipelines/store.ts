@@ -14,10 +14,10 @@ import { MAX_FAIL_EDGE_ROUNDS, MAX_PIPELINE_STAGES } from "./limits";
 import type { EffectivePipelineRole, Pipeline, PipelineCreationIntent, PipelineEdgeActivation, PipelineStage, PipelineTerminalReap, PipelineUnconfirmedHost } from "./types";
 import { stageVerdictFrom } from "./verdict";
 
-export const PIPELINES_SCHEMA_VERSION = 4;
+export const PIPELINES_SCHEMA_VERSION = 5;
 /** Older registries are migrated in memory on load; the file is rewritten in
     the current shape by the next successful mutation, never by a read. */
-const MIGRATABLE_SCHEMA_VERSIONS = new Set([2, 3, PIPELINES_SCHEMA_VERSION]);
+const MIGRATABLE_SCHEMA_VERSIONS = new Set([2, 3, 4, PIPELINES_SCHEMA_VERSION]);
 const pipelinesFile = () => statePath("pipelines.json");
 const artifactsRoot = () => statePath("pipelines");
 
@@ -420,6 +420,30 @@ function migrateTaskIds(raw: unknown): unknown {
   return { taskIds: [], ...(raw as Record<string, unknown>) };
 }
 
+/** v4 accepted review-loop fail edges even though the embedded flow owns every
+    review verdict and no engine path could traverse those edges. Clear that
+    unreachable configuration before the v5 graph validator runs. */
+function migrateReviewLoopFailEdges(raw: unknown): unknown {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  const pipeline = raw as Record<string, unknown>;
+  if (!Array.isArray(pipeline.stages)) return raw;
+  return {
+    ...pipeline,
+    stages: pipeline.stages.map((stage) => {
+      if (!stage || typeof stage !== "object" || Array.isArray(stage)) return stage;
+      const record = stage as Record<string, unknown>;
+      return record.kind === "review-loop" ? { ...record, onFail: null } : stage;
+    }),
+  };
+}
+
+function migratePipelineRecord(raw: unknown, schemaVersion: number): unknown {
+  let migrated = schemaVersion === 2 ? migrateV2Pipeline(raw) : raw;
+  if (schemaVersion < 4) migrated = migrateTaskIds(migrated);
+  if (schemaVersion < 5) migrated = migrateReviewLoopFailEdges(migrated);
+  return migrated;
+}
+
 export function loadPipelines(): Pipeline[] {
   const raw = readJson(pipelinesFile());
   if (raw === null) return [];
@@ -429,8 +453,7 @@ export function loadPipelines(): Pipeline[] {
     throw new PipelineStoreError(`unsupported pipeline registry schema: ${String(file.schemaVersion)}`);
   }
   if (!Array.isArray(file.pipelines)) throw new PipelineStoreError("pipeline registry contains malformed records");
-  const legacyRecords = file.schemaVersion === 2 ? file.pipelines.map(migrateV2Pipeline) : file.pipelines;
-  const records = file.schemaVersion < PIPELINES_SCHEMA_VERSION ? legacyRecords.map(migrateTaskIds) : legacyRecords;
+  const records = file.pipelines.map((pipeline) => migratePipelineRecord(pipeline, file.schemaVersion!));
   if (!records.every(isPipeline)) throw new PipelineStoreError("pipeline registry contains malformed records");
   return records.map(reviveLoadedPipeline);
 }
@@ -576,8 +599,7 @@ export function loadArchivedPipelines(): Pipeline[] {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
   const file = raw as Partial<PipelineFile>;
   if (typeof file.schemaVersion !== "number" || !MIGRATABLE_SCHEMA_VERSIONS.has(file.schemaVersion) || !Array.isArray(file.pipelines)) return [];
-  const legacyRecords = file.schemaVersion === 2 ? file.pipelines.map(migrateV2Pipeline) : file.pipelines;
-  const migrated = file.schemaVersion < PIPELINES_SCHEMA_VERSION ? legacyRecords.map(migrateTaskIds) : legacyRecords;
+  const migrated = file.pipelines.map((pipeline) => migratePipelineRecord(pipeline, file.schemaVersion!));
   const records = migrated.filter(isPipeline);
   if (records.length !== migrated.length) {
     console.error(`[pipelines] skipped ${migrated.length - records.length} malformed archived pipeline record(s)`);
