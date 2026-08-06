@@ -55,6 +55,27 @@ function spawnAtDepth(
   return { launchId: begun.receipt.launchId, conversationId: settleLaunch(store, begun.receipt.launchId) };
 }
 
+test("fresh spawn admission normalizes generic placeholder titles", () => {
+  const { store } = registryAt("placeholder-title");
+  const placeholder = store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    origin: { kind: "operator" },
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Codex session" }),
+  });
+  if (placeholder.kind !== "created") throw new Error("expected create");
+  expect(placeholder.receipt.launchProfile.title).toBeNull();
+
+  const semantic = store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    origin: { kind: "operator" },
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Review the release checklist" }),
+  });
+  if (semantic.kind !== "created") throw new Error("expected create");
+  expect(semantic.receipt.launchProfile.title).toBe("Review the release checklist");
+});
+
 test("a delegated conversation never acquires a Codex plugin grant (#687)", () => {
   const { store } = registryAt("plugin-grant-delegation");
   const parent = store.ensureConversation("codex", "/sessions/plugin-grant-parent.jsonl", "terra");

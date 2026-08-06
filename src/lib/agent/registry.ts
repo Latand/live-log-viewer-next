@@ -3602,6 +3602,7 @@ export class AgentRegistry {
       const requestedProfile = emptyLaunchProfile({
         cwd: input.cwd,
         ...(input.launchProfile ?? {}),
+        title: semanticTitle(input.launchProfile?.title),
         ...(explicitProject ? { project: explicitProject } : {}),
         parentConversationId,
       });
