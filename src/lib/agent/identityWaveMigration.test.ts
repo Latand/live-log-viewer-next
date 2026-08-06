@@ -190,6 +190,7 @@ test("the identity wave retitles, rekeys, stamps roots, supports dry-run, and co
       alreadyCompleted: false,
       retitled: 2,
       rekeyed: 2,
+      quarantinedRekeys: 0,
       edgesStamped: 2,
     });
     expect(fs.readFileSync(filename, "utf8")).toBe(beforeDryRun);
@@ -199,6 +200,7 @@ test("the identity wave retitles, rekeys, stamps roots, supports dry-run, and co
       alreadyCompleted: false,
       retitled: 2,
       rekeyed: 2,
+      quarantinedRekeys: 0,
       edgesStamped: 2,
     });
     const migrated = registry.snapshot();
@@ -271,6 +273,7 @@ test("the identity wave retitles, rekeys, stamps roots, supports dry-run, and co
       alreadyCompleted: true,
       retitled: 0,
       rekeyed: 0,
+      quarantinedRekeys: 0,
       edgesStamped: 0,
     });
   } finally {
@@ -404,6 +407,7 @@ test("the wave cleans older placeholder surfaces when the newest generation is a
       alreadyCompleted: true,
       retitled: 0,
       rekeyed: 0,
+      quarantinedRekeys: 0,
       edgesStamped: 0,
     });
   } finally {
@@ -441,6 +445,7 @@ test("the completed wave preserves an accepted orchestrator seat until its conve
       alreadyCompleted: false,
       retitled: 0,
       rekeyed: 0,
+      quarantinedRekeys: 0,
       edgesStamped: 1,
     });
     expect(registry.snapshot().conversations[begun.receipt.conversationId]).toBeUndefined();
@@ -622,6 +627,7 @@ test("resolver failures leave the identity wave unmarked and a retry can complet
         alreadyCompleted: false,
         retitled: 1,
         rekeyed: 1,
+        quarantinedRekeys: 0,
         edgesStamped: 0,
       });
       const retried = registry.snapshot();
@@ -823,7 +829,7 @@ test("a concurrent orchestrator rotation cannot be overwritten by the startup wa
   }
 });
 
-test("a shared-path ownership collision aborts before mutation and leaves the marker open", () => {
+test("a shared-path ownership collision is quarantined and counted, and the wave still completes", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-wave-collision-"));
   try {
     const filename = path.join(directory, "agent-registry.json");
@@ -833,14 +839,96 @@ test("a shared-path ownership collision aborts before mutation and leaves the ma
     const legacy = registry.ensureConversation("claude", legacyPath, null);
     registry.ensureConversation("claude", occupiedSharedPath, null);
 
-    expect(() => registry.runIdentityWaveMigration({
+    expect(registry.runIdentityWaveMigration({
       now: NOW,
       transcriptTitle: () => null,
       sharedPathForLegacy: (pathname) => pathname === legacyPath ? occupiedSharedPath : null,
       orchestratorSeats: [],
-    })).toThrow("identity wave shared-path ownership collision");
-    expect(registry.snapshot().identityMigrations[IDENTITY_WAVE_MIGRATION]).toBeUndefined();
+    })).toMatchObject({ alreadyCompleted: false, rekeyed: 0, quarantinedRekeys: 1 });
+    expect(registry.snapshot().identityMigrations[IDENTITY_WAVE_MIGRATION]?.completedAt).toBe(NOW);
     expect(registry.conversation(legacy.id)?.generations.at(-1)?.path).toBe(legacyPath);
+    expect(registry.conversation(legacy.id)?.continuityPaths).toEqual([]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a quarantined rekey pair leaves clean rekeys and every retitle intact", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-wave-quarantine-"));
+  try {
+    const filename = path.join(directory, "agent-registry.json");
+    const cleanLegacyPath = path.join(directory, "clean-legacy.jsonl");
+    const cleanSharedPath = path.join(directory, "clean-shared.jsonl");
+    const phantomLegacyPath = path.join(directory, "phantom-legacy.jsonl");
+    const phantomSharedPath = path.join(directory, "phantom-shared.jsonl");
+    const duplicatePath = path.join(directory, "duplicate-legacy.jsonl");
+    const duplicateSharedPath = path.join(directory, "duplicate-shared.jsonl");
+    const seed = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const clean = seed.ensureConversation("codex", cleanLegacyPath, null);
+    const phantomSource = seed.ensureConversation("codex", phantomLegacyPath, null);
+    // The #912 phantom duplicate: the shared copy was admitted as its own conversation.
+    const phantomOwner = seed.ensureConversation("codex", phantomSharedPath, null);
+    const duplicate = seed.ensureConversation("codex", duplicatePath, null);
+    const seeded = seed.snapshot();
+    for (const conversationId of [clean.id, phantomSource.id, duplicate.id]) {
+      seeded.conversations[conversationId]!.generations.at(-1)!.launchProfile.title = "Codex session";
+    }
+    seeded.conversations[phantomOwner.id]!.generations.at(-1)!.launchProfile.title = "Own the shared copy";
+    // A second registry row claiming one transcript — the other live collision class.
+    const duplicateTwin = structuredClone(seeded.conversations[duplicate.id]!);
+    duplicateTwin.id = "conversation_duplicate_twin" as typeof duplicate.id;
+    duplicateTwin.generations = duplicateTwin.generations.map((generation) => ({
+      ...generation,
+      id: crypto.randomUUID(),
+      launchProfile: { ...generation.launchProfile, title: "Codex session" },
+    }));
+    seeded.conversations[duplicateTwin.id] = duplicateTwin;
+    fs.writeFileSync(filename, `${JSON.stringify(seeded, null, 2)}\n`);
+
+    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const transcriptTitles: Record<string, string> = {
+      [cleanSharedPath]: "Repair the clean rekey",
+      [phantomLegacyPath]: "Repair the phantom duplicate",
+      [phantomSharedPath]: "Repair the phantom duplicate",
+      [duplicatePath]: "Repair the duplicate row",
+      [duplicateSharedPath]: "Repair the duplicate row",
+    };
+    const result = registry.runIdentityWaveMigration({
+      now: NOW,
+      transcriptTitle: (pathname) => transcriptTitles[pathname] ?? null,
+      sharedPathForLegacy: (pathname) => {
+        if (pathname === cleanLegacyPath) return cleanSharedPath;
+        if (pathname === phantomLegacyPath) return phantomSharedPath;
+        if (pathname === duplicatePath) return duplicateSharedPath;
+        return null;
+      },
+      orchestratorSeats: [],
+    });
+
+    expect(result).toMatchObject({ alreadyCompleted: false, rekeyed: 1, quarantinedRekeys: 3, retitled: 4 });
+    expect(registry.snapshot().identityMigrations[IDENTITY_WAVE_MIGRATION]?.completedAt).toBe(NOW);
+
+    const migrated = registry.snapshot();
+    expect(migrated.conversations[clean.id]!.generations.at(-1)).toMatchObject({
+      path: cleanSharedPath,
+      launchProfile: expect.objectContaining({ title: "Repair the clean rekey" }),
+    });
+    expect(migrated.conversations[clean.id]!.continuityPaths).toEqual([cleanLegacyPath]);
+    for (const [conversationId, quarantinedPath, title] of [
+      [phantomSource.id, phantomLegacyPath, "Repair the phantom duplicate"],
+      [duplicate.id, duplicatePath, "Repair the duplicate row"],
+      [duplicateTwin.id, duplicatePath, "Repair the duplicate row"],
+    ] as const) {
+      expect(migrated.conversations[conversationId]!.generations.at(-1)).toMatchObject({
+        path: quarantinedPath,
+        launchProfile: expect.objectContaining({ title }),
+      });
+      expect(migrated.conversations[conversationId]!.continuityPaths).toEqual([]);
+    }
+    expect(migrated.conversations[phantomOwner.id]!.generations.at(-1)).toMatchObject({
+      path: phantomSharedPath,
+      launchProfile: expect.objectContaining({ title: "Own the shared copy" }),
+    });
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -1005,6 +1093,7 @@ test("the startup wrapper logs populated counters and persists migrated JSON and
       alreadyCompleted: false,
       retitled: 1,
       rekeyed: 1,
+      quarantinedRekeys: 0,
       edgesStamped: 2,
     }]]);
     const jsonSnapshot = registry.snapshot();
