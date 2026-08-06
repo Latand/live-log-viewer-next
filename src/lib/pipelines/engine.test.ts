@@ -1242,6 +1242,28 @@ test("starting a draft enters the existing provision and stage-spawn path", asyn
   expect(h.spawnTitles).toEqual(["Start after review · plan"]);
 });
 
+test("long pipeline tasks keep distinct stage identifiers in every spawn title", async () => {
+  const h = harness();
+  savePipelines([]);
+  const created = await createPipelineFromRequest({
+    task: "x".repeat(4_000),
+    repoDir: "/repo",
+    stages: RUN_STAGES as never,
+  }, h.ports);
+  expect(created.pipeline).toBeDefined();
+
+  await tickPipelines([], h.ports); // provision
+  await tickPipelines([], h.ports); // spawn plan
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass", "plan output")], h.ports);
+  await tickPipelines([], h.ports); // spawn build
+
+  expect(h.spawnTitles).toHaveLength(2);
+  expect(h.spawnTitles[0]).toEndWith(" · plan");
+  expect(h.spawnTitles[1]).toEndWith(" · build");
+  expect(h.spawnTitles[0]).not.toBe(h.spawnTitles[1]);
+  expect(h.spawnTitles.every((title) => title.length <= 120)).toBe(true);
+});
+
 test("role params are accepted, persisted on the stage, and type-checked", async () => {
   const { ports } = harness();
   savePipelines([]);
