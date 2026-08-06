@@ -414,6 +414,7 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
       launchLeaseUntil: null,
       relayStartedAt: null,
       relayRetryCount: 0,
+      relayDeliveryAttempt: 0,
       relayRetryAt: null,
       relayRetryRequiresIdempotency: false,
       relayDelivery: null,

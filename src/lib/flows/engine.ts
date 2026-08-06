@@ -72,6 +72,13 @@ class UnsafeInterruptedRelayRetryError extends Error {
   }
 }
 
+class StructuredRelayDeliveryUncertainError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StructuredRelayDeliveryUncertainError";
+  }
+}
+
 interface TickResult {
   flows: Flow[];
   changed: boolean;
@@ -157,6 +164,7 @@ export function newRound(flow: Flow, triggeredBy: Round["triggeredBy"], readyNot
     launchLeaseUntil: null,
     relayStartedAt: null,
     relayRetryCount: 0,
+    relayDeliveryAttempt: 0,
     relayRetryAt: null,
     relayRetryRequiresIdempotency: false,
     relayDelivery: null,
@@ -290,7 +298,9 @@ export interface RelayDeliveryOverrides {
 
 function relayClientMessageId(flow: Flow): string {
   const round = flow.rounds?.at(-1);
-  const identity = `${flow.id}:${round?.n ?? "legacy"}:${round?.reviewerBindingId ?? "legacy"}`;
+  const deliveryAttempt = round?.relayDeliveryAttempt ?? 0;
+  const identity = `${flow.id}:${round?.n ?? "legacy"}:${round?.reviewerBindingId ?? "legacy"}`
+    + (deliveryAttempt > 0 ? `:retry:${deliveryAttempt}` : "");
   return `flow_relay_${crypto.createHash("sha256").update(identity).digest("hex").slice(0, 32)}`;
 }
 
@@ -330,7 +340,12 @@ export async function sendToImplementer(
         { registry: () => registry },
       );
       if (!structured) throw new Error("structured delivery ownership is unavailable");
-      if (!structured.ok) throw new Error(structured.error);
+      if (!structured.ok) {
+        if (structured.transportUncertain || structured.receipt?.status === "uncertain") {
+          throw new StructuredRelayDeliveryUncertainError(structured.error);
+        }
+        throw new Error(structured.error);
+      }
       return recovered.path;
     }
   }
@@ -707,6 +722,7 @@ function retryHeadlessRound(flow: Flow, round: Round): void {
     launchLeaseUntil: null,
     relayStartedAt: null,
     relayRetryCount: 0,
+    relayDeliveryAttempt: 0,
     relayRetryAt: null,
     relayRetryRequiresIdempotency: false,
     reviewedAt: null,
@@ -752,6 +768,9 @@ function scheduleRelayRetry(
   }
   const next = consumed + 1;
   round.relayRetryCount = next;
+  if (!requireIdempotentDelivery) {
+    round.relayDeliveryAttempt = (round.relayDeliveryAttempt ?? 0) + 1;
+  }
   round.relayRetryAt = new Date(Date.now() + RELAY_RETRY_BACKOFF_MS[next - 1]!).toISOString();
   round.relayStartedAt = null;
   round.relayRetryRequiresIdempotency = requireIdempotentDelivery;
@@ -995,8 +1014,10 @@ export async function tickFlow(
           round.error = detail;
           round.relayRetryAt = null;
           markNeedsDecision(flow, detail);
+        } else if (error instanceof StructuredRelayDeliveryUncertainError) {
+          scheduleRelayRetry(flow, round, detail, true);
         } else {
-          scheduleRelayRetry(flow, round, detail);
+          scheduleRelayRetry(flow, round, detail, false);
         }
         relayStartedThisProcess.delete(relayKey);
         persistCheckpoint();

@@ -7,7 +7,11 @@ import path from "node:path";
 import type { FileEntry } from "@/lib/types";
 import { procBackend } from "@/lib/proc";
 import { AgentRegistry, agentRegistry } from "@/lib/agent/registry";
+import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
+import type { RuntimeHostClient } from "@/lib/runtime/client";
+import { enqueueStructuredMessage } from "@/lib/runtime/structuredMessageDelivery";
 import { TmuxDeliveryUncertainError } from "@/lib/tmux";
+import { RuntimeJournal } from "@/runtime-host/journal";
 
 import type { Flow } from "./types";
 
@@ -1386,17 +1390,76 @@ test("overlapping relay ticks deliver one review and settle the round once (#529
   }
 });
 
-test("a relay rejection retries after bounded backoff and reaches fixing", async () => {
-  let deliveries = 0;
-  const restoreDelivery = setRelayDeliveryForTest(async (flow) => {
-    deliveries += 1;
-    if (deliveries === 1) throw new Error("structured resume host claim is unavailable");
-    return flow.implementerPath;
-  });
+test("a definitive structured journal rejection retries with a fresh identity and reaches fixing", async () => {
+  const journal = new RuntimeJournal(path.join(process.env.LLV_STATE_DIR!, "relay-retry-runtime.sqlite"), { structuredHosts: true });
+  const registry = agentRegistry();
+  const sessionId = ["079f421e", "02e1", "73e0", "9b77", "bebde063f529"].join("-");
   const implementer = writeCodexEntry("relay-retry-implementer.jsonl", {
-    id: ["049f421e", "02e1", "73e0", "9b77", "bebde063f529"].join("-"),
+    id: sessionId,
     cwd: "/repo",
   }, Date.now() / 1_000);
+  const conversation = registry.ensureConversation("codex", implementer.path, null);
+  const launchProfile = emptyLaunchProfile({ cwd: "/repo" });
+  registry.upsert({
+    key: { engine: "codex", sessionId },
+    artifactPath: implementer.path,
+    cwd: "/repo",
+    accountId: null,
+    launchProfile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:relay-retry",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 0,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  journal.append({
+    scope: { type: "session", id: conversation.id },
+    kind: "session-status",
+    payload: {
+      conversationId: conversation.id,
+      sessionKey: { engine: "codex", sessionId },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      artifactPath: implementer.path,
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  const commands: Parameters<RuntimeHostClient["command"]>[0][] = [];
+  const client = {
+    snapshot: async () => journal.snapshot(),
+    command: async (command: Parameters<RuntimeHostClient["command"]>[0]) => {
+      commands.push(command);
+      const admitted = journal.executeOperation(command);
+      if (commands.length === 1) {
+        journal.transitionOperation(admitted.operationId, "rejected", { reason: "structured resume host claim is unavailable" });
+        return journal.operationResult(admitted.operationId)!;
+      }
+      return admitted;
+    },
+  } as RuntimeHostClient;
+  const restoreDelivery = setRelayDeliveryForTest(async (flow, entries, text, options) => sendToImplementer(flow, entries, text, {
+    ...options,
+    recover: async () => ({ target: null, path: implementer.path, conversationId: conversation.id, spawned: false }),
+    enqueueStructured: async (request) => enqueueStructuredMessage(request, {
+      enabled: () => true,
+      client: () => client,
+      registry: () => registry,
+      kick: () => {},
+    }),
+  }));
   const findingsPath = path.join(process.env.LLV_STATE_DIR!, "relay-retry-findings.md");
   fs.writeFileSync(findingsPath, "VERDICT: REQUEST_CHANGES\n\nRepair the host claim.\n");
   const round = {
@@ -1410,6 +1473,7 @@ test("a relay rejection retries after bounded backoff and reaches fixing", async
   saveFlows([raceFlow({
     id: "flow-relay-retry",
     implementerPath: implementer.path,
+    implementerConversationId: conversation.id,
     state: "relaying",
     rounds: [round],
   })]);
@@ -1423,25 +1487,34 @@ test("a relay rejection retries after bounded backoff and reaches fixing", async
       stateDetail: expect.stringContaining("retrying automatically (1/3)"),
       rounds: [{
         relayRetryCount: 1,
+        relayDeliveryAttempt: 1,
         relayRetryAt: expect.any(String),
         relayStartedAt: null,
         relayedAt: null,
         error: "structured resume host claim is unavailable",
       }],
     });
-    expect(deliveries).toBe(1);
+    expect(commands).toHaveLength(1);
 
     Object.assign(retrying.rounds[0]!, { relayRetryAt: "2026-08-05T20:47:08.000Z" });
     saveFlows([retrying]);
     await tickFlows([implementer]);
 
-    expect(deliveries).toBe(2);
+    expect(commands).toHaveLength(2);
+    expect(commands[0]!.idempotencyKey).toMatch(/^flow_relay_[0-9a-f]{32}$/);
+    expect(commands[1]!.idempotencyKey).not.toBe(commands[0]!.idempotencyKey);
+    const firstOperationId = commands[0]!.operationId;
+    const secondOperationId = commands[1]!.operationId;
+    if (!firstOperationId || !secondOperationId) throw new Error("structured journal commands require operation ids");
+    expect(journal.operationResult(firstOperationId)?.receipt.status).toBe("rejected");
+    expect(journal.operationResult(secondOperationId)?.receipt.status).toBe("queued");
     expect(loadFlows()[0]).toMatchObject({
       state: "fixing",
       pausedState: null,
       stateDetail: null,
       rounds: [{
         relayRetryCount: 1,
+        relayDeliveryAttempt: 1,
         relayRetryAt: null,
         relayDelivery: { path: implementer.path, deliveredAt: expect.any(String) },
         relayedAt: expect.any(String),
@@ -1450,6 +1523,7 @@ test("a relay rejection retries after bounded backoff and reaches fixing", async
     });
   } finally {
     restoreDelivery();
+    journal.close();
   }
 });
 
@@ -1540,6 +1614,7 @@ test("a restart-interrupted relay retries through the idempotent structured path
       stateDetail: expect.stringContaining("retrying automatically (1/3)"),
       rounds: [{
         relayRetryCount: 1,
+        relayDeliveryAttempt: 0,
         relayRetryAt: expect.any(String),
         relayRetryRequiresIdempotency: true,
         relayStartedAt: null,
@@ -1556,6 +1631,7 @@ test("a restart-interrupted relay retries through the idempotent structured path
       stateDetail: null,
       rounds: [{
         relayRetryCount: 1,
+        relayDeliveryAttempt: 0,
         relayRetryAt: null,
         relayRetryRequiresIdempotency: false,
         relayedAt: expect.any(String),
@@ -1886,8 +1962,13 @@ test("a structured relay that cannot be owned surfaces its reason instead of rep
   })).rejects.toThrow("runtime host is unavailable");
 });
 
-test("structured relay retries reuse one durable client-message identity", async () => {
+test("uncertain structured relay retries reuse the current durable client-message identity", async () => {
   const subject = structuredImplementer("idempotent-relay-implementer");
+  subject.flow.rounds = [{
+    n: 1,
+    reviewerBindingId: "relay-binding",
+    relayDeliveryAttempt: 1,
+  } as Flow["rounds"][number]];
   const clientMessageIds: Array<string | null | undefined> = [];
   const overrides: import("./engine").RelayDeliveryOverrides = {
     recover: async () => ({ target: null, path: subject.implementerPath, conversationId: subject.conversationId, spawned: false }),
@@ -1899,6 +1980,10 @@ test("structured relay retries reuse one durable client-message identity", async
   };
 
   await sendToImplementer(subject.flow, subject.entries, "same relay", overrides);
+  Object.assign(subject.flow.rounds[0]!, {
+    relayRetryCount: 3,
+    relayRetryRequiresIdempotency: true,
+  });
   await sendToImplementer(subject.flow, subject.entries, "same relay", overrides);
 
   expect(clientMessageIds).toHaveLength(2);
