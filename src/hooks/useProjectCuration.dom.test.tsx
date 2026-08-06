@@ -37,6 +37,7 @@ async function renderHook(initialCrowned: readonly string[] = []): Promise<{
   rerender: (serverCrowned: readonly string[]) => Promise<void>;
 }> {
   let current: UseProjectCuration | null = null;
+  let pollRequestId = 0;
   function Harness({ serverCrowned }: { serverCrowned: readonly string[] }) {
     current = useProjectCuration(serverCrowned, []);
     return null;
@@ -51,7 +52,16 @@ async function renderHook(initialCrowned: readonly string[] = []): Promise<{
       return current;
     },
     rerender: async (serverCrowned) => {
-      await act(async () => { root!.render(<Harness serverCrowned={serverCrowned} />); });
+      const requestId = ++pollRequestId;
+      await act(async () => {
+        window.dispatchEvent(new dom.CustomEvent("llv:files-revalidation-started", {
+          detail: { requestId },
+        }) as unknown as Event);
+        root!.render(<Harness serverCrowned={serverCrowned} />);
+        window.dispatchEvent(new dom.CustomEvent("llv:files-revalidated", {
+          detail: { requestId, crownedProjects: serverCrowned },
+        }) as unknown as Event);
+      });
     },
   };
 }
@@ -97,6 +107,69 @@ test("rapid crown choices serialize per project and persist in click order", asy
   await act(async () => {
     responses[1]!.resolve(new Response(null, { status: 200 }));
     await responses[1]!.promise;
+  });
+
+  await hook.rerender(["viewer"]);
+  expect(hook.current().crownedProjects.has("viewer")).toBe(false);
+  await hook.rerender([]);
+  await hook.rerender(["viewer"]);
+  expect(hook.current().crownedProjects.has("viewer")).toBe(true);
+});
+
+test("a successful equal-value poll acknowledges the latest queued crown choice", async () => {
+  const responses = [deferred<Response>(), deferred<Response>()];
+  let request = 0;
+  globalThis.fetch = mock(() => responses[request++]!.promise) as unknown as typeof fetch;
+  const uncrowned: readonly string[] = [];
+  const hook = await renderHook(uncrowned);
+
+  await act(async () => {
+    hook.current().toggleCrown("viewer", true);
+    hook.current().toggleCrown("viewer", false);
+    await Promise.resolve();
+  });
+  await act(async () => {
+    responses[0]!.resolve(new Response(null, { status: 200 }));
+    await responses[0]!.promise;
+    await Promise.resolve();
+    responses[1]!.resolve(new Response(null, { status: 200 }));
+    await responses[1]!.promise;
+  });
+
+  await act(async () => {
+    window.dispatchEvent(new dom.CustomEvent("llv:files-revalidation-started", {
+      detail: { requestId: 1 },
+    }) as unknown as Event);
+    window.dispatchEvent(new dom.CustomEvent("llv:files-revalidated", {
+      detail: { requestId: 1, crownedProjects: uncrowned },
+    }) as unknown as Event);
+  });
+  await hook.rerender(uncrowned);
+  await hook.rerender(["viewer"]);
+  expect(hook.current().crownedProjects.has("viewer")).toBe(true);
+});
+
+test("a poll started before the latest crown success cannot acknowledge it", async () => {
+  const responses = [deferred<Response>(), deferred<Response>()];
+  let request = 0;
+  globalThis.fetch = mock(() => responses[request++]!.promise) as unknown as typeof fetch;
+  const hook = await renderHook([]);
+
+  await act(async () => {
+    hook.current().toggleCrown("viewer", true);
+    hook.current().toggleCrown("viewer", false);
+    await Promise.resolve();
+    window.dispatchEvent(new dom.CustomEvent("llv:files-revalidation-started", {
+      detail: { requestId: 1 },
+    }) as unknown as Event);
+    responses[0]!.resolve(new Response(null, { status: 200 }));
+    await responses[0]!.promise;
+    await Promise.resolve();
+    responses[1]!.resolve(new Response(null, { status: 200 }));
+    await responses[1]!.promise;
+    window.dispatchEvent(new dom.CustomEvent("llv:files-revalidated", {
+      detail: { requestId: 1, crownedProjects: [] },
+    }) as unknown as Event);
   });
 
   await hook.rerender(["viewer"]);

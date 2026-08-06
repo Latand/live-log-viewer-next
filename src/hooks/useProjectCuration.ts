@@ -2,6 +2,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import {
+  FILES_REVALIDATED_EVENT,
+  FILES_REVALIDATION_STARTED_EVENT,
+  type FilesRevalidatedDetail,
+  type FilesRevalidationStartedDetail,
+} from "@/lib/filesEvents";
 import type { ProjectCatalogEntry } from "@/lib/types";
 
 export type CreateProjectOutcome =
@@ -41,9 +47,7 @@ export function useProjectCuration(
   const crownMutationAcknowledgements = useRef(new Map<string, { sequence: number; afterPoll: number }>());
   const crownPollSequence = useRef(0);
 
-  useEffect(() => {
-    const pollSequence = crownPollSequence.current + 1;
-    crownPollSequence.current = pollSequence;
+  const reconcileCrownPoll = useCallback((pollSequence: number, polledCrowned: readonly string[]) => {
     /* Reconcile against the fresh server payload. The same-reference return
        below makes an already-settled state a render no-op. */
     setOverrides((previous) => {
@@ -55,13 +59,31 @@ export function useProjectCuration(
         if (acknowledgement
           && acknowledgement.sequence === latestSequence
           && pollSequence > acknowledgement.afterPoll
-          && serverCrowned.includes(project) === crowned) {
+          && polledCrowned.includes(project) === crowned) {
           next.delete(project);
+          crownMutationAcknowledgements.current.delete(project);
         }
       }
       return next.size === previous.size ? previous : next;
     });
-  }, [serverCrowned]);
+  }, []);
+
+  useEffect(() => {
+    const onStarted = (event: Event) => {
+      const requestId = (event as CustomEvent<FilesRevalidationStartedDetail>).detail.requestId;
+      crownPollSequence.current = Math.max(crownPollSequence.current, requestId);
+    };
+    const onRevalidated = (event: Event) => {
+      const { requestId, crownedProjects } = (event as CustomEvent<FilesRevalidatedDetail>).detail;
+      reconcileCrownPoll(requestId, crownedProjects);
+    };
+    window.addEventListener(FILES_REVALIDATION_STARTED_EVENT, onStarted);
+    window.addEventListener(FILES_REVALIDATED_EVENT, onRevalidated);
+    return () => {
+      window.removeEventListener(FILES_REVALIDATION_STARTED_EVENT, onStarted);
+      window.removeEventListener(FILES_REVALIDATED_EVENT, onRevalidated);
+    };
+  }, [reconcileCrownPoll]);
 
   useEffect(() => {
     /* eslint-disable-next-line react-hooks/set-state-in-effect -- same
