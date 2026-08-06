@@ -236,6 +236,7 @@ function parseFlowsFromDisk(): Flow[] {
       relayStartedAt: round.relayStartedAt ?? null,
       relayRetryCount: round.relayRetryCount ?? 0,
       relayDeliveryAttempt: round.relayDeliveryAttempt ?? 0,
+      relayDeliveryTransport: round.relayDeliveryTransport ?? null,
       relayRetryAt: round.relayRetryAt ?? null,
       relayRetryRequiresIdempotency: round.relayRetryRequiresIdempotency ?? false,
       relayDelivery: round.relayDelivery ?? null,

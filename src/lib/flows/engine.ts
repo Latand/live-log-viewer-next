@@ -34,7 +34,7 @@ import {
 } from "./findings";
 import { relayPrompt, reviewerPrompt } from "./prompts";
 import { atomicWriteText, findingsPathFor, loadFlows, loadPresets, saveFlows } from "./store";
-import type { Flow, FlowPreset, FlowState, RoleConfig, Round } from "./types";
+import type { Flow, FlowPreset, FlowState, RelayDeliveryTransport, RoleConfig, Round } from "./types";
 import { chooseHeadlessReviewer, rateLimitStateDetail } from "./reviewerPolicy";
 
 const TERMINAL_STATES = new Set<FlowState>(["approved", "done_comment", "needs_decision", "closed"]);
@@ -165,6 +165,7 @@ export function newRound(flow: Flow, triggeredBy: Round["triggeredBy"], readyNot
     relayStartedAt: null,
     relayRetryCount: 0,
     relayDeliveryAttempt: 0,
+    relayDeliveryTransport: null,
     relayRetryAt: null,
     relayRetryRequiresIdempotency: false,
     relayDelivery: null,
@@ -294,6 +295,9 @@ export interface RelayDeliveryOverrides {
   /** Restart recovery uses this fence when the prior process may have sent the
       relay before its durable settlement write. */
   requireIdempotentDelivery?: boolean;
+  /** Reports the selected transport before either structured or legacy
+      actuation can begin, allowing the caller to checkpoint it. */
+  onTransportSelected?: (transport: RelayDeliveryTransport) => void;
 }
 
 function relayClientMessageId(flow: Flow): string {
@@ -330,6 +334,7 @@ export async function sendToImplementer(
       { registry },
     );
     if (recovered) {
+      overrides.onTransportSelected?.("structured");
       const structured = await (overrides.enqueueStructured ?? enqueueStructuredMessage)(
         {
           path: recovered.path,
@@ -361,6 +366,7 @@ export async function sendToImplementer(
     plugins: agentRegistry().launchProfileForPath(entry.path)?.plugins,
   });
   if (!spec) throw new Error("implementer session cannot be resumed");
+  overrides.onTransportSelected?.("legacy");
   const outcome = await (overrides.deliver ?? deliverToTranscriptHost)({ entry, spec, payload: text });
   if (!outcome.ok) {
     if (outcome.actuation === "started") {
@@ -723,6 +729,7 @@ function retryHeadlessRound(flow: Flow, round: Round): void {
     relayStartedAt: null,
     relayRetryCount: 0,
     relayDeliveryAttempt: 0,
+    relayDeliveryTransport: null,
     relayRetryAt: null,
     relayRetryRequiresIdempotency: false,
     reviewedAt: null,
@@ -737,7 +744,7 @@ async function relayFindings(
   flow: Flow,
   entriesByPath: Map<string, FileEntry>,
   round: Round,
-  options: Pick<RelayDeliveryOverrides, "requireIdempotentDelivery"> = {},
+  options: Pick<RelayDeliveryOverrides, "requireIdempotentDelivery" | "onTransportSelected"> = {},
 ): Promise<void> {
   if (!round.findingsPath) throw new Error("round has no findings artifact");
   const findings = fs.readFileSync(round.findingsPath, "utf8");
@@ -992,7 +999,16 @@ export async function tickFlow(
       return JSON.stringify(flow) !== before;
     }
     if (round.relayStartedAt && round.relayedAt === null && !relayStartedThisProcess.has(relayKey)) {
-      scheduleRelayRetry(flow, round, "relay was interrupted before delivery settlement", true);
+      if (round.relayDeliveryTransport === "structured") {
+        scheduleRelayRetry(flow, round, "structured relay was interrupted before delivery settlement", true);
+      } else {
+        const detail = round.relayDeliveryTransport === "legacy"
+          ? "legacy relay was interrupted before delivery settlement; automatic replay is unsafe"
+          : "relay transport was not durably classified before interruption; automatic replay is unsafe";
+        round.error = detail;
+        round.relayRetryAt = null;
+        markNeedsDecision(flow, detail);
+      }
       return JSON.stringify(flow) !== before;
     }
     if (round.relayRetryAt && Date.now() < unixMs(round.relayRetryAt)) {
@@ -1001,11 +1017,16 @@ export async function tickFlow(
     const lease = (async () => {
       try {
         round.relayRetryAt = null;
+        round.relayDeliveryTransport = null;
         round.relayStartedAt = isoNow();
         relayStartedThisProcess.add(relayKey);
         persistCheckpoint();
         await relayFindings(flow, entriesByPath, round, {
           requireIdempotentDelivery: round.relayRetryRequiresIdempotency ?? false,
+          onTransportSelected: (transport) => {
+            round.relayDeliveryTransport = transport;
+            persistCheckpoint();
+          },
         });
         persistCheckpoint();
       } catch (error) {

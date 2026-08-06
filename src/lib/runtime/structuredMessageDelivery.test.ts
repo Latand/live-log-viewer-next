@@ -1921,3 +1921,61 @@ test("a dead conversation's terminal failed reservation cannot refuse the operat
   /* Exactly once: the replay answered from the reservation, not the host. */
   expect(deliveredTexts).toEqual(["continue: pick the task back up"]);
 });
+
+test("a post-admission settlement failure preserves the accepted receipt as delivery uncertainty", async () => {
+  const { registry, conversation } = registryWithConversation();
+  const originalRecordDeliveryOutcome = registry.recordDeliveryOutcome.bind(registry);
+  registry.recordDeliveryOutcome = ((...args: Parameters<AgentRegistry["recordDeliveryOutcome"]>) => {
+    originalRecordDeliveryOutcome(...args);
+    throw new Error("injected registry settlement failure");
+  }) as AgentRegistry["recordDeliveryOutcome"];
+  let commands = 0;
+  const client = {
+    snapshot: async () => snapshot(conversation.id),
+    command: async (command: Parameters<RuntimeHostClient["command"]>[0]) => {
+      commands += 1;
+      return {
+        operationId: command.operationId!,
+        replayed: false,
+        receipt: {
+          operationId: command.operationId!,
+          idempotencyKey: command.idempotencyKey,
+          conversationId: conversation.id,
+          kind: "send" as const,
+          status: "delivered" as const,
+          at: "2026-08-06T12:00:00.000Z",
+          revision: 1,
+        },
+      };
+    },
+  } as RuntimeHostClient;
+  const request = {
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "post-admission-settlement",
+    text: "deliver once through settlement failure",
+  };
+  const dependencies = {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    kick: () => {},
+  };
+
+  const uncertain = await enqueueStructuredMessage(request, dependencies);
+
+  expect(uncertain).toMatchObject({
+    ok: false,
+    structured: true,
+    outcome: "failed",
+    transportUncertain: true,
+    operationId: expect.any(String),
+    receipt: { status: "delivered", idempotencyKey: request.clientMessageId },
+  });
+  expect(await enqueueStructuredMessage(request, dependencies)).toMatchObject({
+    ok: true,
+    structured: true,
+    outcome: "delivered",
+  });
+  expect(commands).toBe(1);
+});

@@ -15,7 +15,7 @@ import type { HeldDelivery, HeldDeliveryCommand, ViewerConversationId } from "@/
 import type { SelectedContextRef } from "@/lib/selection/selectedContext";
 
 import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "./client";
-import type { RuntimeOperationReceipt, RuntimeSendSettings, RuntimeSession } from "./contracts";
+import type { RuntimeOperationReceipt, RuntimeOperationResult, RuntimeSendSettings, RuntimeSession } from "./contracts";
 import { republishStructuredDeliveryHost } from "./structuredDeliveryController";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
 import { runtimeImageCapability, runtimeImageRefsForUploads, runtimeImageStore, type RuntimeImageUpload } from "./runtimeImageStore";
@@ -168,7 +168,7 @@ function requiresStructuredHeldCommand(request: HeldStructuredMessageRequest): b
       || command.turnId !== undefined);
 }
 
-function deliveryFailure(error: unknown): StructuredMessageResult {
+function deliveryFailure(error: unknown): Extract<StructuredMessageResult, { ok: false }> {
   return {
     ok: false,
     structured: true,
@@ -671,6 +671,7 @@ export async function enqueueStructuredMessage(
   if (encodedImageBytes > imageCapability.maxEncodedBytesPerRequest) {
     return { ok: false, structured: true, outcome: "failed", error: "runtime image request encoding is too large", status: 413 };
   }
+  let commandResult: RuntimeOperationResult | null = null;
   try {
     /* Conflict preflight computes candidate refs and digest before writing.
        A changed payload under an existing client message id rejects with zero
@@ -757,7 +758,7 @@ export async function enqueueStructuredMessage(
         status: 409,
       };
     }
-    const result = await client.command({
+    commandResult = await client.command({
       kind: reservation.command.kind,
       operationId: reservation.command.operationId,
       conversationId: reservation.runtimeConversationId,
@@ -770,6 +771,7 @@ export async function enqueueStructuredMessage(
       ...(request.runtime ? { runtime: request.runtime } : {}),
       ...(request.selectedContext ? { selectedContext: request.selectedContext } : {}),
     });
+    const result = commandResult;
     const receipt = result.receipt;
     if (receipt.status === "rejected" || receipt.status === "failed" || receipt.status === "uncertain") {
       if (claimedReservationId && receipt.status !== "uncertain") {
@@ -802,6 +804,19 @@ export async function enqueueStructuredMessage(
       ...(recoveredHost ? { spawned: true } : {}),
     };
   } catch (error) {
-    return deliveryFailure(error);
+    const failure = deliveryFailure(error);
+    if (!commandResult) return failure;
+    const receipt = commandResult.receipt;
+    const definitiveFailure = receipt.status === "failed" || receipt.status === "rejected";
+    return {
+      ok: false,
+      structured: true,
+      outcome: "failed",
+      error: failure.error,
+      status: failure.status,
+      operationId: commandResult.operationId,
+      receipt,
+      ...(!definitiveFailure ? { transportUncertain: true } : {}),
+    };
   }
 }

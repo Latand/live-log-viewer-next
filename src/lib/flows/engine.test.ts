@@ -1441,6 +1441,7 @@ test("a definitive structured journal rejection retries with a fresh identity an
   const client = {
     snapshot: async () => journal.snapshot(),
     command: async (command: Parameters<RuntimeHostClient["command"]>[0]) => {
+      expect(loadFlows()[0]!.rounds[0]).toMatchObject({ relayDeliveryTransport: "structured" });
       commands.push(command);
       const admitted = journal.executeOperation(command);
       if (commands.length === 1) {
@@ -1597,6 +1598,7 @@ test("a restart-interrupted relay retries through the idempotent structured path
     reviewedAt: "2026-08-05T20:47:07.961Z",
     terminalAt: "2026-08-05T20:47:07.961Z",
     relayStartedAt: "2026-08-05T20:47:08.000Z",
+    relayDeliveryTransport: "structured" as const,
   };
   saveFlows([raceFlow({
     id: "flow-relay-restart",
@@ -1636,6 +1638,53 @@ test("a restart-interrupted relay retries through the idempotent structured path
         relayRetryRequiresIdempotency: false,
         relayedAt: expect.any(String),
         error: null,
+      }],
+    });
+  } finally {
+    restoreDelivery();
+  }
+});
+
+test("a restart-interrupted legacy relay parks before a newly available structured delivery", async () => {
+  let deliveries = 0;
+  const restoreDelivery = setRelayDeliveryForTest(async (flow) => {
+    deliveries += 1;
+    return flow.implementerPath;
+  });
+  const implementer = writeCodexEntry("relay-restart-legacy-implementer.jsonl", {
+    id: ["089f421e", "02e1", "73e0", "9b77", "bebde063f529"].join("-"),
+    cwd: "/repo",
+  }, Date.now() / 1_000);
+  const findingsPath = path.join(process.env.LLV_STATE_DIR!, "relay-restart-legacy-findings.md");
+  fs.writeFileSync(findingsPath, "VERDICT: REQUEST_CHANGES\n\nDo not duplicate this legacy relay.\n");
+  saveFlows([raceFlow({
+    id: "flow-relay-restart-legacy",
+    implementerPath: implementer.path,
+    state: "relaying",
+    rounds: [{
+      ...newRound(raceFlow({ rounds: [] }), "marker", "head ready"),
+      findingsPath,
+      verdict: "REQUEST_CHANGES",
+      findingsCount: 1,
+      reviewedAt: "2026-08-05T20:47:07.961Z",
+      terminalAt: "2026-08-05T20:47:07.961Z",
+      relayStartedAt: "2026-08-05T20:47:08.000Z",
+      relayDeliveryTransport: "legacy",
+    }],
+  })]);
+
+  try {
+    await tickFlows([implementer]);
+
+    expect(deliveries).toBe(0);
+    expect(loadFlows()[0]).toMatchObject({
+      state: "needs_decision",
+      stateDetail: expect.stringContaining("legacy relay was interrupted before delivery settlement"),
+      rounds: [{
+        relayRetryCount: 0,
+        relayRetryAt: null,
+        relayDeliveryTransport: "legacy",
+        relayedAt: null,
       }],
     });
   } finally {
