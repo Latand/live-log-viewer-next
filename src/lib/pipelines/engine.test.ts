@@ -2690,6 +2690,7 @@ test("a bound review flow paused while relaying resumes without operator action"
     verdict: "REQUEST_CHANGES",
     reviewHeadSha: ORIGIN_MAIN_SHA,
     relayStartedAt: "2026-08-05T20:47:08.000Z",
+    error: "structured resume host claim is unavailable",
     reviewerPath: "/codex/reviewer.jsonl",
     reviewerConversationId: "conversation_reviewer",
   } as never);
@@ -2720,6 +2721,47 @@ test("a bound review flow paused while relaying resumes without operator action"
     flowId: "flow-1",
     agentPath: "/codex/reviewer.jsonl",
     conversationId: "conversation_reviewer",
+  });
+});
+
+test("an operator pause during relay stays paused across pipeline reconciliation", async () => {
+  const h = harness();
+  const stages = [
+    { id: "build", kind: "run", prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as const;
+  await create(h.ports, stages as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const flow = h.flows.get("flow-1")!;
+  flow.rounds.push({
+    n: 3,
+    verdict: "REQUEST_CHANGES",
+    reviewHeadSha: ORIGIN_MAIN_SHA,
+    relayStartedAt: "2026-08-05T20:47:08.000Z",
+    error: "structured resume host claim is unavailable",
+    reviewerPath: "/codex/reviewer.jsonl",
+    reviewerConversationId: "conversation_reviewer",
+  } as never);
+  flow.state = "paused";
+  flow.pausedState = "relaying";
+  flow.stateDetail = "paused by user";
+
+  await tickPipelines([entry("/codex/reviewer.jsonl")], h.ports);
+  await tickPipelines([entry("/codex/reviewer.jsonl")], h.ports);
+
+  expect(flow).toMatchObject({ state: "paused", pausedState: "relaying", stateDetail: "paused by user" });
+  expect(h.calls).not.toContain("flow-patch:flow-1:resume");
+  expect(loadPipelines()[0]).toMatchObject({
+    state: "needs_decision",
+    stateDetail: "review flow paused in relaying: paused by user",
+  });
+  expect(loadPipelines()[0]!.runs[1]!.attempts[0]).toMatchObject({
+    state: "needs_decision",
+    error: "review flow paused in relaying: paused by user",
   });
 });
 

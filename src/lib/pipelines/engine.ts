@@ -1896,6 +1896,14 @@ function terminalReviewFlowError(flow: Flow): string | null {
   return `review loop ended in ${flow.state}: ${flow.stateDetail ?? "operator decision required"}`;
 }
 
+function isLegacyRelayFailurePause(flow: Flow): boolean {
+  if (flow.state !== "paused" || flow.pausedState !== "relaying" || !flow.stateDetail) return false;
+  const round = flow.rounds.at(-1);
+  return round?.relayStartedAt != null
+    && round.relayedAt == null
+    && round.error === flow.stateDetail;
+}
+
 function reconcileBoundReviewFlow(pipeline: Pipeline, ports: PipelinePorts): boolean {
   if (pipeline.state !== "needs_decision") return false;
   const stage = currentStage(pipeline);
@@ -1910,7 +1918,7 @@ function reconcileBoundReviewFlow(pipeline: Pipeline, ports: PipelinePorts): boo
     || !RECONCILABLE_REVIEW_FLOW_STATES.has(flow.state)
   ) return false;
   if (flow.state === "paused") {
-    if (flow.pausedState !== "relaying") return false;
+    if (!isLegacyRelayFailurePause(flow)) return false;
     const resumed = ports.patchFlow(flow.id, "resume");
     if (resumed.error) return false;
     flow = ports.getFlow(flow.id);
