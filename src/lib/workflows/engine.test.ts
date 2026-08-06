@@ -78,6 +78,7 @@ function makeHarness() {
     flows: new Map<string, Flow>(),
     createFlowError: null as string | null,
     spawnCount: 0,
+    spawnTitles: [] as (string | undefined)[],
     prUrl: "https://github.com/o/r/pull/9",
     nowTick: 1_000_000,
   };
@@ -98,8 +99,9 @@ function makeHarness() {
       return { pid: 4242 };
     },
     setupStatus: () => ({ status: state.setup, detail: state.setupDetail }),
-    spawnAgent: async (role, cwd, prompt) => {
+    spawnAgent: async (role, cwd, prompt, _accountId, title) => {
       calls.push(`spawn:${role.engine}:${role.effort ?? role.model ?? "default"}`);
+      state.spawnTitles.push(title);
       if (state.spawnFail) throw new Error("tmux window failed to open");
       state.spawnCount += 1;
       const transcript = role.engine === "claude" ? `/claude/agent-${state.spawnCount}.jsonl` : null;
@@ -235,6 +237,7 @@ test("happy path: provision → two stages → review flow → PR", async () => 
   await tickWorkflows([], ports);
   cur = load(wf.id);
   expect(calls.some((call) => call.startsWith("spawn:codex:xhigh"))).toBe(true);
+  expect(state.spawnTitles[0]).toBe("Build the thing · stage 1");
   expect(cur.stageRuns[0]!.paneId).toBe("%1");
   expect(cur.stageRuns[0]!.agentPath).toBeNull();
 
@@ -257,6 +260,7 @@ test("happy path: provision → two stages → review flow → PR", async () => 
   await tickWorkflows([doneEntry], ports);
   cur = load(wf.id);
   expect(calls.some((call) => call.startsWith("spawn:claude:fable"))).toBe(true);
+  expect(state.spawnTitles[1]).toBe("Build the thing · stage 2");
   const stage1 = cur.stageRuns[1]!.agentPath!;
   expect(stage1).toContain("/claude/");
   /* Lineage: the UI stage descends from the backend stage. */
@@ -269,6 +273,7 @@ test("happy path: provision → two stages → review flow → PR", async () => 
   cur = load(wf.id);
   expect(cur.state).toBe("reviewing");
   expect(calls.some((call) => call.startsWith("spawn:codex:low"))).toBe(true);
+  expect(state.spawnTitles[2]).toBe("Build the thing · review fixer");
 
   const fixer = "/codex/rollout-fixer.jsonl";
   state.cwds.set(fixer, cur.worktreeDir);
