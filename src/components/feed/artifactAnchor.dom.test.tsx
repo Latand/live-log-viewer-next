@@ -96,6 +96,11 @@ test("ordinary web links keep their normal behavior", async () => {
   expect(opened).toEqual([]);
 });
 
+test("an escaped paren resolves back into the URL", async () => {
+  await renderMd("Read [the page](https://example.com/acme/widgets/wiki/Home_\\(draft\\)) now.");
+  expect(anchor().getAttribute("href")).toBe("https://example.com/acme/widgets/wiki/Home_(draft)");
+});
+
 test("a local link with a :line suffix previews the file itself", async () => {
   await renderMd("Fix [the bug](~/fixtures/src/main.ts:42).");
   await act(async () => {

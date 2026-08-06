@@ -13,10 +13,26 @@ import { Lightbox } from "./Lightbox";
 import { ACTION_ANCHOR, ACTION_GUTTER, MESSAGE_ACTION } from "./actionStyles";
 import { tr } from "./parse";
 
+/* A link/image target: one unbroken run, in which a backslash escapes the
+   character after it — the spelling agents use for parens inside a URL
+   (`…/Home_\(draft\)`), which a bare `[^)\s]+` would cut at the first `)`.
+   The two branches are disjoint (the second excludes the backslash), so a
+   target that never closes fails linearly instead of backtracking. */
+const MD_URL = String.raw`(?:\\.|[^)\s\\])+`;
+const MD_IMAGE = String.raw`!\[[^\]]*\]\(${MD_URL}\)`;
+const MD_LINK = String.raw`\[[^\]]+\]\(${MD_URL}\)`;
+
 /* Image markdown wins over the link pattern, so `![alt](url)` embeds instead
-   of leaking a literal «!» and a link. */
-const MD_INLINE_RE = /(!\[[^\]]*\]\([^)\s]+\)|`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\([^)\s]+\)|https?:\/\/[^\s<>"')\]]+)/g;
-const IMAGE_LINE_RE = /^\s*!\[([^\]]*)\]\(([^)\s]+)\)\s*$/;
+   of leaking a literal «!» and a link. Bold comes before the link only so a
+   `**…**` run keeps its emphasis: its body goes back through this same pass
+   (see `md`), so a link inside bold is still a link. */
+const MD_INLINE_RE = new RegExp(
+  `(${MD_IMAGE}|\`[^\`]+\`|\\*\\*[^*]+\\*\\*|${MD_LINK}|https?://[^\\s<>"')\\]]+)`,
+  "g",
+);
+const IMAGE_LINE_RE = new RegExp(String.raw`^\s*!\[([^\]]*)\]\((${MD_URL})\)\s*$`);
+const IMAGE_PART_RE = new RegExp(String.raw`^!\[([^\]]*)\]\((${MD_URL})\)$`);
+const LINK_PART_RE = new RegExp(String.raw`^\[([^\]]+)\]\((${MD_URL})\)$`);
 
 /* Inline monospace chip that copies itself on click. A span, not a button:
    it keeps text flow and selection intact, and inside a <summary> a button
@@ -189,10 +205,15 @@ export function md(text: string): ReactNode {
     if (part.startsWith("`") && part.endsWith("`")) {
       return <InlineCode key={i} text={part.slice(1, -1)} />;
     }
-    if (part.startsWith("**") && part.endsWith("**")) return <b key={i}>{part.slice(2, -2)}</b>;
-    const image = part.match(/^!\[([^\]]*)\]\(([^)\s]+)\)$/);
+    /* A bold run is emphasis around markdown, not a leaf: its body goes back
+       through the pass, so `**[#12](https://…)**` — how an agent writes a
+       release note — renders as a bold LINK instead of literal brackets. The
+       body cannot contain another `**` (the alternative is `[^*]+`), so this
+       recurses exactly once. */
+    if (part.startsWith("**") && part.endsWith("**")) return <b key={i}>{md(part.slice(2, -2))}</b>;
+    const image = part.match(IMAGE_PART_RE);
     if (image) return <MdImage key={i} alt={image[1]} src={image[2]} />;
-    const linked = part.match(/^\[([^\]]+)\]\(([^)\s]+)\)$/);
+    const linked = part.match(LINK_PART_RE);
     if (linked) {
       return <Anchor key={i} href={linked[2]} label={linked[1]} />;
     }
