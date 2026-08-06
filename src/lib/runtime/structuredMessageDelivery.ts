@@ -54,7 +54,7 @@ export interface StructuredMessageRequest {
 
 export type StructuredMessageResult =
   | { ok: true; structured: true; target: string | null; outcome: "queued" | "delivering" | "delivered"; operationId: string; receipt: RuntimeOperationReceipt; spawned?: boolean }
-  | { ok: true; structured: true; target: string | null; outcome: "held"; spawned?: boolean }
+  | { ok: true; structured: true; target: string | null; outcome: "held"; operationId: string; deliveryId: string; spawned?: boolean }
   | { ok: false; structured: true; outcome: "failed"; error: string; status: number; operationId?: string; receipt?: RuntimeOperationReceipt; successorConversationId?: string; transportUncertain?: true };
 
 export interface StructuredMessageDependencies {
@@ -315,6 +315,8 @@ function holdDuringRuntimeSynchronization(
       structured: true,
       target: conversation.id,
       outcome: "held",
+      operationId: reservation.command.operationId,
+      deliveryId: reservation.id,
     };
   } catch (error) {
     return deliveryFailure(error);
@@ -723,6 +725,8 @@ export async function enqueueStructuredMessage(
         structured: true,
         target: recoveredHost ? null : conversation.id,
         outcome: "held",
+        operationId: reservation.command.operationId,
+        deliveryId: reservation.id,
         ...(recoveredHost ? { spawned: true } : {}),
       };
     }
@@ -744,6 +748,8 @@ export async function enqueueStructuredMessage(
           structured: true,
           target: recoveredHost ? null : conversation.id,
           outcome: "held",
+          operationId: reservation.command.operationId,
+          deliveryId: reservation.id,
           ...(recoveredHost ? { spawned: true } : {}),
         };
       }

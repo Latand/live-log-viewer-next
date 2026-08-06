@@ -95,10 +95,58 @@ function repairReadyEvent(
   };
 }
 
+function pipelineDecisionEvent(pipeline: Pipeline, decision: Pipeline["decisions"][number]): LifecycleEventInput | null {
+  const run = pipeline.runs.find((candidate) => candidate.stageId === decision.stageId);
+  const attemptN = decision.targetAttempt ?? decision.sourceAttempt;
+  const attempt = run?.attempts.find((candidate) => !candidate.historical && candidate.n === attemptN) ?? null;
+  const lineage = {
+    project: pipeline.project,
+    pipelineId: pipeline.id,
+    stageId: decision.stageId,
+    attempt: attemptN,
+    conversationId: attempt?.conversationId ?? null,
+    role: attempt?.effectiveRole?.roleId ?? null,
+  };
+  const base = {
+    ...lineage,
+    key: `pipeline:${pipeline.id}:stage:${decision.stageId}:decision:${decision.revision}:${decision.state}`,
+    at: decision.terminalAt ?? decision.updatedAt,
+  };
+  if (decision.state === "awaiting_input") {
+    return { ...base, type: "stage_blocked", summary: `${decision.stageId} decision ${decision.revision} awaits operator input` };
+  }
+  if (decision.state === "held") {
+    return { ...base, type: "delivery_held", summary: `${decision.stageId} decision ${decision.revision} held for attempt ${attemptN}` };
+  }
+  if (["admitting", "queued", "delivering"].includes(decision.state)) {
+    return { ...base, type: "delivery_queued", summary: `${decision.stageId} decision ${decision.revision} ${decision.state} for attempt ${attemptN}` };
+  }
+  if (decision.state === "delivered") {
+    return { ...base, type: "delivery_delivered", summary: `${decision.stageId} decision ${decision.revision} started attempt ${attemptN}` };
+  }
+  if (decision.state === "failed") {
+    return { ...base, type: "delivery_expired", summary: `${decision.stageId} decision ${decision.revision} failed for attempt ${attemptN}` };
+  }
+  if (decision.state === "superseded" || decision.state === "closed") {
+    return {
+      ...base,
+      type: "delivery_expired",
+      summary: decision.targetAttempt === null
+        ? `${decision.stageId} decision ${decision.revision} ${decision.state} after source attempt ${decision.sourceAttempt} without creating a target attempt`
+        : `${decision.stageId} decision ${decision.revision} ${decision.state} before attempt ${decision.targetAttempt}`,
+    };
+  }
+  return null;
+}
+
 export function projectPipelineEvents(pipelines: Pipeline[]): LifecycleEventInput[] {
   const events: LifecycleEventInput[] = [];
   for (const pipeline of pipelines) {
     events.push(...pipelinePauseEvents(pipeline));
+    for (const decision of pipeline.decisions ?? []) {
+      const event = pipelineDecisionEvent(pipeline, decision);
+      if (event) events.push(event);
+    }
     /* A repair is ready as soon as the fail edge is traversed — visible on the
        pending cursor before the repair agent exists, and on the attempt once it
        does. Both build the same key, so it is journaled exactly once. */
@@ -159,6 +207,7 @@ export function projectPipelineEvents(pipelines: Pipeline[]): LifecycleEventInpu
 
 const DELIVERY_EVENT_TYPE: Partial<Record<HeldDelivery["state"], LifecycleEventType>> = {
   held: "delivery_held",
+  assigned: "delivery_queued",
   delivered: "delivery_delivered",
   failed: "delivery_expired",
 };

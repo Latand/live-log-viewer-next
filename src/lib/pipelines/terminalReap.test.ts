@@ -65,6 +65,8 @@ function pipelineRecord(input: {
     baseRef: "48c739bbcc87b3244aee7fb0e2d1b3f8e312548f",
     lastPassedCommit: "48c739bbcc87b3244aee7fb0e2d1b3f8e312548f",
     publishedCommit: null,
+    decisionRevision: 0,
+    decisions: [],
     stages: [{ id: "implement", kind: "run", prompt: "{{task}}", next: null, onFail: null, effectiveRole: { ...ROLE } }],
     runs: [{ stageId: "implement", attempts: input.attempts }],
     cursor: null,
@@ -120,6 +122,9 @@ function harness() {
     getFlow: () => null,
     findFlow: () => null,
     projectForCwd: () => "viewer",
+    deliverDecision: async (request) => ({ state: "failed", operationId: request.operationId, deliveryId: null, error: "unused" }),
+    decisionDeliveryStatus: async () => null,
+    terminalizeDecisionDelivery: async () => null,
     now: () => new Date((clock += 1_000)).toISOString(),
   };
   return {

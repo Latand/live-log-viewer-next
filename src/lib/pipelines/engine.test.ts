@@ -262,6 +262,14 @@ function harness() {
       ? "conversation_creator"
       : pathname.includes("stage-1") ? "conversation_stage_1" : pathname.includes("stage-2") ? "conversation_stage_2" : null,
     pipelineAdoptionCandidates: () => [],
+    deliverDecision: async (request) => ({
+      state: "failed",
+      operationId: request.operationId,
+      deliveryId: null,
+      error: "decision delivery is not configured for this test",
+    }),
+    decisionDeliveryStatus: async () => null,
+    terminalizeDecisionDelivery: async () => null,
     createFlow: async (req) => {
       calls.push(`flow:${req.implementerPath}:${req.baseRef}:${req.targetSha}:${req.spec}`);
       const flow = { id: `flow-${flows.size + 1}`, implementerPath: req.implementerPath, baseRef: req.baseRef, headRef: req.headRef, targetSha: req.targetSha, state: "waiting_ready", rounds: [], createdAt: new Date(clock).toISOString(), closedAt: null } as unknown as Flow;
@@ -2104,6 +2112,886 @@ test("a genuinely terminal turn without a valid verdict exhausts recovery and pr
   expect(attempt.launchId).toBeTruthy();
   expect(attempt.conversationId).toBeTruthy();
   expect(attempt.agentPath).toBe("/codex/stage-1.jsonl");
+});
+
+test("answer-decision binds one immediate delivery while preserving the paused top-level state (#852)", async () => {
+  const h = harness();
+  const pipeline = await runningStructuredStage(h);
+  h.setConversationActive(false);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: {
+      text: "Choose a safe rollout window.\n\n```json\n{\"status\":\"needs_decision\",\"findings\":[\"Which window should I use?\"]}\n```",
+      ts: 5_000_000,
+    },
+  });
+  await tickPipelines([], h.ports);
+  const paused = await patchPipeline(pipeline.id, { action: "pause" }, h.ports);
+  expect(paused.pipeline).toMatchObject({ state: "paused", pausedState: "needs_decision" });
+
+  const deliveries: Array<Record<string, unknown>> = [];
+  Object.assign(h.ports, {
+    deliverDecision: async (request: Record<string, unknown>) => {
+      deliveries.push(request);
+      return {
+        state: "delivered",
+        operationId: request.operationId,
+        deliveryId: "delivery-decision-1",
+        at: "1970-01-01T01:20:00.000Z",
+      };
+    },
+  });
+
+  const result = await patchPipeline(pipeline.id, {
+    action: "answer-decision",
+    stageId: "plan",
+    attempt: 1,
+    expectedDecisionRevision: 1,
+    input: "Use the low-traffic window and continue.",
+  } as never, h.ports);
+
+  expect({ status: result.status, error: result.error }).toEqual({ status: undefined, error: undefined });
+  const persisted = loadPipelines()[0]!;
+  const resultPipeline = result.pipeline!;
+  expect({
+    error: result.error,
+    result: {
+      state: resultPipeline.state,
+      pausedState: resultPipeline.pausedState,
+      stateDetail: resultPipeline.stateDetail,
+      decisionRevision: resultPipeline.decisionRevision,
+      decision: resultPipeline.decisions.at(-1),
+      attempts: resultPipeline.runs[0]!.attempts,
+    },
+    deliveries,
+    persisted: {
+      state: persisted.state,
+      attempts: persisted.runs[0]!.attempts.map(({ n }) => ({ n })),
+    },
+  }).toMatchObject({
+    error: undefined,
+    result: {
+      state: "paused",
+      pausedState: "running",
+      stateDetail: "paused by user",
+      decisionRevision: 1,
+      decision: {
+        revision: 1,
+        stageId: "plan",
+        sourceAttempt: 1,
+        targetAttempt: 2,
+        state: "delivered",
+        deliveryId: "delivery-decision-1",
+        input: "Use the low-traffic window and continue.",
+        resumeIntent: true,
+      },
+      attempts: [
+        { n: 1, state: "needs_decision" },
+        {
+          n: 2,
+          state: "running",
+          conversationId: "conversation_stage_1",
+          agentPath: "/codex/stage-1.jsonl",
+          input: "Use the low-traffic window and continue.",
+        },
+      ],
+    },
+    deliveries: [{
+      pipelineId: pipeline.id,
+      stageId: "plan",
+      sourceAttempt: 1,
+      targetAttempt: 2,
+      input: "Use the low-traffic window and continue.",
+    }],
+    persisted: {
+      state: "paused",
+      attempts: [{ n: 1 }, { n: 2 }],
+    },
+  });
+
+  const resumed = await patchPipeline(pipeline.id, { action: "resume" }, h.ports);
+  expect(resumed.pipeline).toMatchObject({ state: "running", pausedState: null, stateDetail: null });
+});
+
+test("an exact answer-decision replay reuses its operation and fresh attempt (#852)", async () => {
+  const h = harness();
+  const pipeline = await runningStructuredStage(h);
+  h.setConversationActive(false);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: {
+      text: "Choose a safe rollout window.\n\n```json\n{\"status\":\"needs_decision\"}\n```",
+      ts: 5_000_000,
+    },
+  });
+  await tickPipelines([], h.ports);
+
+  const deliveries: Array<Record<string, unknown>> = [];
+  h.ports.deliverDecision = async (request) => {
+    deliveries.push(request);
+    return { state: "queued", operationId: request.operationId, deliveryId: "delivery-decision-replay" };
+  };
+  const request = {
+    action: "answer-decision",
+    stageId: "plan",
+    attempt: 1,
+    expectedDecisionRevision: 1,
+    input: "Use the low-traffic window and continue.",
+  } as const;
+
+  const first = await patchPipeline(pipeline.id, request as never, h.ports);
+  const replay = await patchPipeline(pipeline.id, request as never, h.ports);
+  const persisted = loadPipelines()[0]!;
+
+  expect({
+    firstError: first.error,
+    replayError: replay.error,
+    attempts: persisted.runs[0]!.attempts.map(({ n }) => n),
+    decisions: persisted.decisions.map(({ revision, targetAttempt, state }) => ({ revision, targetAttempt, state })),
+    deliveryIdentities: deliveries.map(({ clientMessageId, operationId, targetAttempt }) => ({ clientMessageId, operationId, targetAttempt })),
+  }).toEqual({
+    firstError: undefined,
+    replayError: undefined,
+    attempts: [1, 2],
+    decisions: [{ revision: 1, targetAttempt: 2, state: "queued" }],
+    deliveryIdentities: [
+      {
+        clientMessageId: deliveries[0]!.clientMessageId,
+        operationId: deliveries[0]!.operationId,
+        targetAttempt: 2,
+      },
+      {
+        clientMessageId: deliveries[0]!.clientMessageId,
+        operationId: deliveries[0]!.operationId,
+        targetAttempt: 2,
+      },
+    ],
+  });
+});
+
+test("an answer-decision replay rejects changed input without another delivery or attempt (#852)", async () => {
+  const h = harness();
+  const pipeline = await runningStructuredStage(h);
+  h.setConversationActive(false);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: "Need input.\n\n```json\n{\"status\":\"needs_decision\"}\n```", ts: 5_000_000 },
+  });
+  await tickPipelines([], h.ports);
+
+  const deliveries: string[] = [];
+  h.ports.deliverDecision = async (request) => {
+    deliveries.push(request.input);
+    return { state: "queued", operationId: request.operationId, deliveryId: "delivery-conflict" };
+  };
+  await patchPipeline(pipeline.id, {
+    action: "answer-decision",
+    stageId: "plan",
+    attempt: 1,
+    expectedDecisionRevision: 1,
+    input: "Use window A.",
+  } as never, h.ports);
+  const conflict = await patchPipeline(pipeline.id, {
+    action: "answer-decision",
+    stageId: "plan",
+    attempt: 1,
+    expectedDecisionRevision: 1,
+    input: "Use window B.",
+  } as never, h.ports);
+
+  const persisted = loadPipelines()[0]!;
+  expect({
+    conflict: { status: conflict.status, error: conflict.error },
+    deliveries,
+    attempts: persisted.runs[0]!.attempts.map(({ n }) => n),
+    decisionInput: persisted.decisions[0]!.input,
+  }).toEqual({
+    conflict: { status: 409, error: "decision revision 1 already has a different input payload" },
+    deliveries: ["Use window A."],
+    attempts: [1, 2],
+    decisionInput: "Use window A.",
+  });
+});
+
+test("a late receipt for an older decision revision cannot reopen its attempt after a fresh answer (#852)", async () => {
+  const h = harness();
+  const pipeline = await runningStructuredStage(h);
+  h.setConversationActive(false);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: "Need input.\n\n```json\n{\"status\":\"needs_decision\"}\n```", ts: 5_000_000 },
+  });
+  await tickPipelines([], h.ports);
+
+  const deliveredOperations: string[] = [];
+  h.ports.deliverDecision = async (request) => {
+    deliveredOperations.push(request.operationId);
+    return {
+      state: "queued",
+      operationId: request.operationId,
+      deliveryId: `delivery-${deliveredOperations.length}`,
+    };
+  };
+  await patchPipeline(pipeline.id, {
+    action: "answer-decision",
+    stageId: "plan",
+    attempt: 1,
+    expectedDecisionRevision: 1,
+    input: "First answer.",
+  } as never, h.ports);
+  const firstOperation = deliveredOperations[0]!;
+  h.ports.decisionDeliveryStatus = async (operationId) => ({
+    state: "failed",
+    operationId,
+    deliveryId: "delivery-1",
+    at: "1970-01-01T02:00:00.000Z",
+    error: "delivery lease expired",
+  });
+  await tickPipelines([], h.ports);
+
+  await patchPipeline(pipeline.id, {
+    action: "answer-decision",
+    stageId: "plan",
+    attempt: 2,
+    expectedDecisionRevision: 2,
+    input: "Fresh answer.",
+  } as never, h.ports);
+  const freshOperation = deliveredOperations[1]!;
+  const statusQueries: string[] = [];
+  h.ports.decisionDeliveryStatus = async (operationId) => {
+    statusQueries.push(operationId);
+    return operationId === firstOperation
+      ? { state: "delivered", operationId, deliveryId: "delivery-1", at: "1970-01-01T02:01:00.000Z" }
+      : { state: "queued", operationId, deliveryId: "delivery-2" };
+  };
+  await tickPipelines([], h.ports);
+  const staleReplay = await patchPipeline(pipeline.id, {
+    action: "answer-decision",
+    stageId: "plan",
+    attempt: 1,
+    expectedDecisionRevision: 1,
+    input: "First answer.",
+  } as never, h.ports);
+
+  const persisted = loadPipelines()[0]!;
+  expect({
+    state: persisted.state,
+    revision: persisted.decisionRevision,
+    decisions: persisted.decisions.map(({ revision, state, targetAttempt, operationId }) => ({ revision, state, targetAttempt, operationId })),
+    attempts: persisted.runs[0]!.attempts.map(({ n, state }) => ({ n, state })),
+    statusQueries,
+    staleReplay: { status: staleReplay.status, error: staleReplay.error },
+  }).toEqual({
+    state: "needs_decision",
+    revision: 2,
+    decisions: [
+      { revision: 1, state: "failed", targetAttempt: 2, operationId: firstOperation },
+      { revision: 2, state: "queued", targetAttempt: 3, operationId: freshOperation },
+    ],
+    attempts: [{ n: 1, state: "needs_decision" }, { n: 2, state: "needs_decision" }, { n: 3, state: "pending" }],
+    statusQueries: [freshOperation],
+    staleReplay: { status: 409, error: "stale decision revision 1; current revision is 2" },
+  });
+});
+
+test("a restarted controller reopens the fresh attempt only after the queued decision starts a turn (#852)", async () => {
+  const h = harness();
+  const pipeline = await runningStructuredStage(h);
+  h.setConversationActive(false);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: {
+      text: "Choose a safe rollout window.\n\n```json\n{\"status\":\"needs_decision\"}\n```",
+      ts: 5_000_000,
+    },
+  });
+  await tickPipelines([], h.ports);
+
+  let operationId = "";
+  h.ports.deliverDecision = async (request) => {
+    operationId = request.operationId;
+    return { state: "queued", operationId, deliveryId: "delivery-restart" };
+  };
+  await patchPipeline(pipeline.id, {
+    action: "answer-decision",
+    stageId: "plan",
+    attempt: 1,
+    expectedDecisionRevision: 1,
+    input: "Use the low-traffic window and continue.",
+  } as never, h.ports);
+
+  /* A fresh process reconstructs solely from the two durable stores. */
+  savePipelines(loadPipelines());
+  Object.assign(h.ports, {
+    decisionDeliveryStatus: async (requestedOperationId: string) => ({
+      state: "delivered",
+      operationId: requestedOperationId,
+      deliveryId: "delivery-restart",
+      at: "1970-01-01T01:30:00.000Z",
+    }),
+  });
+  await tickPipelines([], h.ports);
+
+  const reopened = loadPipelines()[0]!;
+  expect({
+    state: reopened.state,
+    cursor: reopened.cursor,
+    decision: reopened.decisions.at(-1),
+    attempts: reopened.runs[0]!.attempts.map(({ n, state, startedAt, conversationId }) => ({ n, state, startedAt, conversationId })),
+    spawnCalls: h.calls.filter((call) => call.startsWith("spawn:")).length,
+    operationId,
+  }).toMatchObject({
+    state: "running",
+    cursor: { stageId: "plan", state: "running" },
+    decision: {
+      revision: 1,
+      state: "delivered",
+      operationId,
+      deliveryId: "delivery-restart",
+      terminalAt: "1970-01-01T01:30:00.000Z",
+    },
+    attempts: [
+      { n: 1, state: "needs_decision", conversationId: "conversation_stage_1" },
+      { n: 2, state: "running", startedAt: "1970-01-01T01:30:00.000Z", conversationId: "conversation_stage_1" },
+    ],
+    spawnCalls: 1,
+    operationId,
+  });
+});
+
+test("a restarted controller terminalizes an unclaimed decision after its durable delivery deadline (#852)", async () => {
+  const h = harness();
+  const pipeline = await runningStructuredStage(h);
+  h.setConversationActive(false);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: "Need input.\n\n```json\n{\"status\":\"needs_decision\"}\n```", ts: 5_000_000 },
+  });
+  await tickPipelines([], h.ports);
+  h.ports.deliverDecision = async (request) => ({
+    state: "queued",
+    operationId: request.operationId,
+    deliveryId: "delivery-deadline",
+  });
+  await patchPipeline(pipeline.id, {
+    action: "answer-decision",
+    stageId: "plan",
+    attempt: 1,
+    expectedDecisionRevision: 1,
+    input: "Continue when the host is ready.",
+  } as never, h.ports);
+
+  /* Reconstruct from disk before the deadline expires. The persisted binding
+     owns the timeout across controller processes. */
+  savePipelines(loadPipelines());
+  const deadline = loadPipelines()[0]!.decisions[0]!.deliveryDeadlineAt!;
+  h.ports.now = () => new Date(Date.parse(deadline) + 1).toISOString();
+  h.ports.decisionDeliveryStatus = async (operationId) => ({
+    state: "queued",
+    operationId,
+    deliveryId: "delivery-deadline",
+    at: "1970-01-01T00:20:00.000Z",
+  });
+  const terminalizations: Array<{ operationId: string; reason: string }> = [];
+  h.ports.terminalizeDecisionDelivery = async (operationId, reason) => {
+    terminalizations.push({ operationId, reason });
+    return {
+      state: "failed",
+      operationId,
+      deliveryId: "delivery-deadline",
+      at: new Date(Date.parse(deadline) + 1).toISOString(),
+      error: reason,
+    };
+  };
+
+  await tickPipelines([], h.ports);
+
+  const recovered = loadPipelines()[0]!;
+  expect({
+    state: recovered.state,
+    revision: recovered.decisionRevision,
+    decisions: recovered.decisions.map(({ revision, state, targetAttempt, deliveryDeadlineAt, error }) => ({
+      revision,
+      state,
+      targetAttempt,
+      deliveryDeadlineAt,
+      error,
+    })),
+    attempts: recovered.runs[0]!.attempts.map(({ n, state }) => ({ n, state })),
+    terminalizations,
+  }).toEqual({
+    state: "needs_decision",
+    revision: 2,
+    decisions: [
+      {
+        revision: 1,
+        state: "failed",
+        targetAttempt: 2,
+        deliveryDeadlineAt: null,
+        error: "operator decision delivery exceeded its 5 minute deadline",
+      },
+      {
+        revision: 2,
+        state: "awaiting_input",
+        targetAttempt: null,
+        deliveryDeadlineAt: null,
+        error: null,
+      },
+    ],
+    attempts: [{ n: 1, state: "needs_decision" }, { n: 2, state: "needs_decision" }],
+    terminalizations: [{
+      operationId: recovered.decisions[0]!.operationId!,
+      reason: "operator decision delivery exceeded its 5 minute deadline",
+    }],
+  });
+});
+
+test("a claimed uncertain decision stays fenced after its delivery deadline (#852)", async () => {
+  const h = harness();
+  const pipeline = await runningStructuredStage(h);
+  h.setConversationActive(false);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: "Need input.\n\n```json\n{\"status\":\"needs_decision\"}\n```", ts: 5_000_000 },
+  });
+  await tickPipelines([], h.ports);
+  h.ports.deliverDecision = async (request) => ({
+    state: "delivering",
+    operationId: request.operationId,
+    deliveryId: "delivery-claimed",
+    error: "delivery claim is in flight",
+  });
+  await patchPipeline(pipeline.id, {
+    action: "answer-decision",
+    stageId: "plan",
+    attempt: 1,
+    expectedDecisionRevision: 1,
+    input: "Continue once the claimed delivery settles.",
+  } as never, h.ports);
+
+  savePipelines(loadPipelines());
+  const deadline = loadPipelines()[0]!.decisions[0]!.deliveryDeadlineAt!;
+  h.ports.now = () => new Date(Date.parse(deadline) + 1).toISOString();
+  /* A stale owner projection may look queued while the decision has already
+     observed a claimed/uncertain receipt. It must never move backwards into
+     the set that deadline terminalization can cancel. */
+  h.ports.decisionDeliveryStatus = async (operationId) => ({
+    state: "queued",
+    operationId,
+    deliveryId: "delivery-claimed",
+    at: "1970-01-01T00:20:00.000Z",
+  });
+  let terminalizations = 0;
+  h.ports.terminalizeDecisionDelivery = async () => {
+    terminalizations += 1;
+    throw new Error("claimed delivery reached deadline terminalization");
+  };
+
+  await tickPipelines([], h.ports);
+
+  const preserved = loadPipelines()[0]!;
+  expect({
+    state: preserved.state,
+    decision: preserved.decisions[0],
+    target: preserved.runs[0]!.attempts[1],
+    terminalizations,
+  }).toMatchObject({
+    state: "needs_decision",
+    decision: {
+      state: "delivering",
+      operationId: preserved.decisions[0]!.operationId,
+      deliveryDeadlineAt: deadline,
+      terminalAt: null,
+      error: "delivery claim is in flight",
+    },
+    target: { n: 2, state: "pending" },
+    terminalizations: 0,
+  });
+});
+
+test("an uncertain decision admission reopens one fresh attempt after turn start (#852)", async () => {
+  const h = harness();
+  const pipeline = await runningStructuredStage(h);
+  h.setConversationActive(false);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: "Need input.\n\n```json\n{\"status\":\"needs_decision\"}\n```", ts: 5_000_000 },
+  });
+  await tickPipelines([], h.ports);
+
+  const admissionOperations: string[] = [];
+  h.ports.deliverDecision = async (request) => {
+    admissionOperations.push(request.operationId);
+    return {
+      state: "delivering",
+      operationId: request.operationId,
+      deliveryId: "delivery-uncertain-admission",
+      error: "delivery outcome is unknown",
+    };
+  };
+  await patchPipeline(pipeline.id, {
+    action: "answer-decision",
+    stageId: "plan",
+    attempt: 1,
+    expectedDecisionRevision: 1,
+    input: "Continue once delivery is confirmed.",
+  } as never, h.ports);
+
+  const operationId = admissionOperations[0]!;
+  const statusOperations: string[] = [];
+  h.ports.decisionDeliveryStatus = async (requestedOperationId) => {
+    statusOperations.push(requestedOperationId);
+    return {
+      state: "delivered",
+      operationId: requestedOperationId,
+      deliveryId: "delivery-uncertain-admission",
+      at: "1970-01-01T01:31:00.000Z",
+    };
+  };
+  await tickPipelines([], h.ports);
+
+  const reopened = loadPipelines()[0]!;
+  expect({
+    state: reopened.state,
+    revisions: reopened.decisions.map(({ revision, state, operationId: id }) => ({ revision, state, operationId: id })),
+    attempts: reopened.runs[0]!.attempts.map(({ n, state }) => ({ n, state })),
+    admissionOperations,
+    statusOperations,
+  }).toEqual({
+    state: "running",
+    revisions: [{ revision: 1, state: "delivered", operationId }],
+    attempts: [{ n: 1, state: "needs_decision" }, { n: 2, state: "running" }],
+    admissionOperations: [operationId],
+    statusOperations: [operationId],
+  });
+});
+
+test("a restarted controller replays an admitting decision with the same identities when no reservation exists (#852)", async () => {
+  const h = harness();
+  const pipeline = await runningStructuredStage(h);
+  h.setConversationActive(false);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: "Need input.\n\n```json\n{\"status\":\"needs_decision\"}\n```", ts: 5_000_000 },
+  });
+  await tickPipelines([], h.ports);
+  h.ports.deliverDecision = async (request) => ({
+    state: "queued",
+    operationId: request.operationId,
+    deliveryId: "delivery-before-crash",
+  });
+  await patchPipeline(pipeline.id, {
+    action: "answer-decision",
+    stageId: "plan",
+    attempt: 1,
+    expectedDecisionRevision: 1,
+    input: "Continue in the low-traffic window.",
+  } as never, h.ports);
+
+  /* Persist the exact crash-window shape: local binding committed, transport
+     admission has no observable reservation yet. */
+  const crashed = loadPipelines()[0]!;
+  const decision = crashed.decisions[0]!;
+  const identity = { clientMessageId: decision.clientMessageId, operationId: decision.operationId };
+  decision.state = "admitting";
+  decision.deliveryId = null;
+  decision.updatedAt = "1970-01-01T02:10:00.000Z";
+  savePipelines([crashed]);
+
+  const replays: Array<Record<string, unknown>> = [];
+  h.ports.decisionDeliveryStatus = async () => null;
+  h.ports.deliverDecision = async (request) => {
+    replays.push(request);
+    return { state: "held", operationId: request.operationId, deliveryId: "delivery-after-restart" };
+  };
+  await tickPipelines([], h.ports);
+
+  const recovered = loadPipelines()[0]!;
+  expect({
+    state: recovered.state,
+    decision: recovered.decisions[0],
+    attempts: recovered.runs[0]!.attempts.map(({ n, state }) => ({ n, state })),
+    replays,
+  }).toMatchObject({
+    state: "needs_decision",
+    decision: {
+      state: "held",
+      deliveryId: "delivery-after-restart",
+      ...identity,
+    },
+    attempts: [{ n: 1, state: "needs_decision" }, { n: 2, state: "pending" }],
+    replays: [{
+      pipelineId: pipeline.id,
+      stageId: "plan",
+      sourceAttempt: 1,
+      targetAttempt: 2,
+      input: "Continue in the low-traffic window.",
+      ...identity,
+    }],
+  });
+});
+
+test("a failed decision delivery terminalizes its attempt and exposes one fresh revision (#852)", async () => {
+  const h = harness();
+  const pipeline = await runningStructuredStage(h);
+  h.setConversationActive(false);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: "Need input.\n\n```json\n{\"status\":\"needs_decision\"}\n```", ts: 5_000_000 },
+  });
+  await tickPipelines([], h.ports);
+  h.ports.deliverDecision = async (request) => ({
+    state: "failed",
+    operationId: request.operationId,
+    deliveryId: "delivery-failed",
+    error: "structured host rejected the turn",
+  });
+
+  await patchPipeline(pipeline.id, {
+    action: "answer-decision",
+    stageId: "plan",
+    attempt: 1,
+    expectedDecisionRevision: 1,
+    input: "Continue safely.",
+  } as never, h.ports);
+
+  const failed = loadPipelines()[0]!;
+  expect({
+    state: failed.state,
+    detail: failed.stateDetail,
+    revision: failed.decisionRevision,
+    decisions: failed.decisions.map(({ revision, sourceAttempt, targetAttempt, state }) => ({ revision, sourceAttempt, targetAttempt, state })),
+    attempts: failed.runs[0]!.attempts.map(({ n, state }) => ({ n, state })),
+  }).toEqual({
+    state: "needs_decision",
+    detail: "structured host rejected the turn",
+    revision: 2,
+    decisions: [
+      { revision: 1, sourceAttempt: 1, targetAttempt: 2, state: "failed" },
+      { revision: 2, sourceAttempt: 2, targetAttempt: null, state: "awaiting_input" },
+    ],
+    attempts: [{ n: 1, state: "needs_decision" }, { n: 2, state: "needs_decision" }],
+  });
+});
+
+test("retry-stage terminalizes and supersedes a queued decision attempt before resetting (#852)", async () => {
+  const h = harness();
+  const pipeline = await runningStructuredStage(h);
+  h.setConversationActive(false);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: "Need input.\n\n```json\n{\"status\":\"needs_decision\"}\n```", ts: 5_000_000 },
+  });
+  await tickPipelines([], h.ports);
+  h.ports.deliverDecision = async (request) => ({
+    state: "queued",
+    operationId: request.operationId,
+    deliveryId: "delivery-to-supersede",
+  });
+  await patchPipeline(pipeline.id, {
+    action: "answer-decision",
+    stageId: "plan",
+    attempt: 1,
+    expectedDecisionRevision: 1,
+    input: "Continue safely.",
+  } as never, h.ports);
+  const operationId = loadPipelines()[0]!.decisions[0]!.operationId!;
+  const terminalizations: Array<{ operationId: string; reason: string }> = [];
+  Object.assign(h.ports, {
+    terminalizeDecisionDelivery: async (requestedOperationId: string, reason: string) => {
+      terminalizations.push({ operationId: requestedOperationId, reason });
+      return {
+        state: "failed",
+        operationId: requestedOperationId,
+        deliveryId: "delivery-to-supersede",
+        at: "1970-01-01T01:40:00.000Z",
+        error: reason,
+      };
+    },
+  });
+
+  const retried = await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
+  const persisted = loadPipelines()[0]!;
+
+  expect({
+    error: retried.error,
+    state: persisted.state,
+    cursor: persisted.cursor,
+    decision: persisted.decisions[0],
+    attempts: persisted.runs[0]!.attempts.map(({ n, state, completedAt, error }) => ({ n, state, completedAt, error })),
+    terminalizations,
+  }).toMatchObject({
+    error: undefined,
+    state: "running",
+    cursor: { stageId: "plan", state: "pending" },
+    decision: {
+      state: "superseded",
+      terminalAt: "1970-01-01T01:40:00.000Z",
+      error: "superseded by retry-stage",
+    },
+    attempts: [
+      { n: 1, state: "needs_decision" },
+      { n: 2, state: "skipped", completedAt: "1970-01-01T01:40:00.000Z", error: "superseded by retry-stage" },
+    ],
+    terminalizations: [{ operationId, reason: "superseded by retry-stage" }],
+  });
+});
+
+test("a malformed receipt retry leaves its queued decision and delivery untouched (#852)", async () => {
+  const h = harness();
+  const pipeline = await runningStructuredStage(h);
+  h.setConversationActive(false);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: "Need input.\n\n```json\n{\"status\":\"needs_decision\"}\n```", ts: 5_000_000 },
+  });
+  await tickPipelines([], h.ports);
+  h.ports.deliverDecision = async (request) => ({
+    state: "queued",
+    operationId: request.operationId,
+    deliveryId: "delivery-malformed-retry",
+  });
+  await patchPipeline(pipeline.id, {
+    action: "answer-decision",
+    stageId: "plan",
+    attempt: 1,
+    expectedDecisionRevision: 1,
+    input: "Continue safely.",
+  } as never, h.ports);
+  let terminalizations = 0;
+  h.ports.terminalizeDecisionDelivery = async () => {
+    terminalizations += 1;
+    throw new Error("malformed retry reached delivery terminalization");
+  };
+
+  const result = await patchPipeline(pipeline.id, { action: "retry-stage", stageId: "plan" }, h.ports);
+  const persisted = loadPipelines()[0]!;
+
+  expect({
+    result: { status: result.status, error: result.error },
+    state: persisted.state,
+    decision: persisted.decisions[0],
+    target: persisted.runs[0]!.attempts[1],
+    terminalizations,
+  }).toMatchObject({
+    result: { status: 400, error: "receipt retry requires both stageId and launchId" },
+    state: "needs_decision",
+    decision: { state: "queued", targetAttempt: 2 },
+    target: { n: 2, state: "pending" },
+    terminalizations: 0,
+  });
+});
+
+test("close terminalizes a queued decision and prevents its late receipt from reopening the pipeline (#852)", async () => {
+  const h = harness();
+  const pipeline = await runningStructuredStage(h);
+  h.setConversationActive(false);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: "Need input.\n\n```json\n{\"status\":\"needs_decision\"}\n```", ts: 5_000_000 },
+  });
+  await tickPipelines([], h.ports);
+  h.ports.deliverDecision = async (request) => ({
+    state: "queued",
+    operationId: request.operationId,
+    deliveryId: "delivery-to-close",
+  });
+  await patchPipeline(pipeline.id, {
+    action: "answer-decision",
+    stageId: "plan",
+    attempt: 1,
+    expectedDecisionRevision: 1,
+    input: "Continue safely.",
+  } as never, h.ports);
+  const operationId = loadPipelines()[0]!.decisions[0]!.operationId!;
+  const terminalized: string[] = [];
+  h.ports.terminalizeDecisionDelivery = async (requestedOperationId, reason) => {
+    terminalized.push(`${requestedOperationId}:${reason}`);
+    return {
+      state: "failed",
+      operationId: requestedOperationId,
+      deliveryId: "delivery-to-close",
+      at: "1970-01-01T01:50:00.000Z",
+      error: reason,
+    };
+  };
+
+  await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+  h.ports.decisionDeliveryStatus = async (requestedOperationId) => ({
+    state: "delivered",
+    operationId: requestedOperationId,
+    deliveryId: "delivery-to-close",
+    at: "1970-01-01T01:51:00.000Z",
+  });
+  await tickPipelines([], h.ports);
+
+  const closed = loadPipelines()[0]!;
+  expect({
+    state: closed.state,
+    cursor: closed.cursor,
+    decision: closed.decisions[0],
+    target: closed.runs[0]!.attempts[1],
+    terminalized,
+  }).toMatchObject({
+    state: "closed",
+    cursor: null,
+    decision: {
+      state: "closed",
+      terminalAt: "1970-01-01T01:50:00.000Z",
+      error: "pipeline closed",
+    },
+    target: {
+      n: 2,
+      state: "skipped",
+      completedAt: "1970-01-01T01:50:00.000Z",
+      error: "pipeline closed",
+    },
+    terminalized: [`${operationId}:pipeline closed`],
+  });
+});
+
+test("close stays visible when a queued decision becomes transport-uncertain during terminalization (#852)", async () => {
+  const h = harness();
+  const pipeline = await runningStructuredStage(h);
+  h.setConversationActive(false);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: "Need input.\n\n```json\n{\"status\":\"needs_decision\"}\n```", ts: 5_000_000 },
+  });
+  await tickPipelines([], h.ports);
+  h.ports.deliverDecision = async (request) => ({
+    state: "queued",
+    operationId: request.operationId,
+    deliveryId: "delivery-close-race",
+  });
+  await patchPipeline(pipeline.id, {
+    action: "answer-decision",
+    stageId: "plan",
+    attempt: 1,
+    expectedDecisionRevision: 1,
+    input: "Continue safely.",
+  } as never, h.ports);
+  h.ports.terminalizeDecisionDelivery = async (operationId) => ({
+    state: "delivering",
+    operationId,
+    deliveryId: "delivery-close-race",
+    error: "delivery claim raced terminalization",
+  });
+
+  const result = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+  const persisted = loadPipelines()[0]!;
+
+  expect({
+    result: { status: result.status, error: result.error },
+    state: persisted.state,
+    decision: persisted.decisions[0],
+    target: persisted.runs[0]!.attempts[1],
+  }).toMatchObject({
+    result: { status: 409, error: "operator decision delivery is delivering; wait for a terminal receipt" },
+    state: "needs_decision",
+    decision: { state: "queued", targetAttempt: 2 },
+    target: { n: 2, state: "pending" },
+  });
 });
 
 test("a durable fail verdict parks with the verdict receipt preserved", async () => {

@@ -1726,6 +1726,10 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     pipelineId: entityIdSchema,
     /* #774: was `z.string().min(1)` while the route admitted a fixed set. */
     action: z.enum(PIPELINE_ACTIONS),
+    stageId: z.string().min(1).optional(),
+    attempt: z.number().int().positive().optional(),
+    expectedDecisionRevision: z.number().int().positive().optional(),
+    input: z.string().min(1).max(32_000).optional(),
   }).passthrough(),
   link_task_to_pipeline: z.object({
     clientRequestId: clientRequestIdSchema,

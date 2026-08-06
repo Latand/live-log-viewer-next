@@ -11,7 +11,7 @@ function pipeline(): Pipeline {
   return {
     id: "12345678", task: "task", taskIds: [], project: "viewer", repoDir: "/repo", worktreeDir: "/repo-pipeline-12345678",
     branch: "pipeline/task-12345678", baseBranch: "", baseRef: "", lastPassedCommit: "base",
-    stages: [], runs: [], cursor: null, state: "running", pausedState: null, stateDetail: null,
+    decisionRevision: 0, decisions: [], stages: [], runs: [], cursor: null, state: "running", pausedState: null, stateDetail: null,
     srcPath: null, srcConversationId: null, createdAt: "now", closedAt: null,
   };
 }

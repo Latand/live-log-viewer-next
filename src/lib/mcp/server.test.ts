@@ -1628,3 +1628,25 @@ test("#774 tool schemas publish the closed sets their servers enforce", () => {
     unknown: true,
   }).success).toBe(false);
 });
+
+test("pipeline_action publishes the revision-fenced answer-decision payload (#852)", () => {
+  const schema = TOOL_INPUT_SCHEMAS.pipeline_action;
+  expect(schema.safeParse({
+    clientRequestId: "decision-answer-1",
+    pipelineId: "pipeline_1",
+    action: "answer-decision",
+    stageId: "build",
+    attempt: 2,
+    expectedDecisionRevision: 3,
+    input: "Continue during the low-traffic window.",
+  }).success).toBe(true);
+  expect(schema.safeParse({
+    clientRequestId: "decision-answer-overflow",
+    pipelineId: "pipeline_1",
+    action: "answer-decision",
+    stageId: "build",
+    attempt: 2,
+    expectedDecisionRevision: 3,
+    input: "x".repeat(32_001),
+  }).success).toBe(false);
+});

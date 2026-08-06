@@ -45,6 +45,8 @@ function oneStagePipeline(): { pipeline: Pipeline; stage: PipelineStage } {
     baseBranch: "main",
     baseRef: "a",
     lastPassedCommit: "a",
+    decisionRevision: 0,
+    decisions: [],
     stages: [stage],
     runs: [{ stageId: "implement", attempts: [] }],
     cursor: { stageId: "implement", state: "pending", input: null, activatedBy: null },
