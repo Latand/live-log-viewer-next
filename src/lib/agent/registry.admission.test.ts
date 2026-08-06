@@ -70,10 +70,10 @@ test("fresh spawn admission normalizes generic placeholder titles", () => {
     engine: "codex",
     cwd: "/repo",
     origin: { kind: "operator" },
-    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Review the release checklist" }),
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Review issue #913" }),
   });
   if (semantic.kind !== "created") throw new Error("expected create");
-  expect(semantic.receipt.launchProfile.title).toBe("Review the release checklist");
+  expect(semantic.receipt.launchProfile.title).toBe("Review issue #913");
 });
 
 test("a delegated conversation never acquires a Codex plugin grant (#687)", () => {
