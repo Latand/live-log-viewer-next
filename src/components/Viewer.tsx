@@ -121,6 +121,23 @@ function attentionSnippet(t: TFunction, item: AttentionItem): string {
   return t("status.stalled");
 }
 
+function useStableDashboardFiles(files: FileEntry[], project: string): FileEntry[] {
+  const selected = useMemo(
+    () => project === OVERVIEW ? [] : files.filter((file) => projectKey(file) === project),
+    [files, project],
+  );
+  const [committed, setCommitted] = useState(() => ({ project, files: selected }));
+  const unchanged = committed.project === project
+    && committed.files.length === selected.length
+    && selected.every((file, index) => file === committed.files[index]);
+
+  if (unchanged) return committed.files;
+  /* Guarded derived state lets React restart this render with the new
+     selection while unrelated project updates keep the prior array identity. */
+  setCommitted({ project, files: selected });
+  return selected;
+}
+
 export function Viewer() {
   const { t } = useLocale();
   /* There is no operator credential to claim: same-origin IS the operator (see
@@ -177,19 +194,7 @@ export function Viewer() {
       && folded.some((file) => file.conversationId === pinned.conversationId);
     return currentGenerationPresent ? folded : [...folded, pinned];
   }, [allFiles, catalogPin]);
-  const dashboardFilesRef = useRef<{ project: string; files: FileEntry[] } | null>(null);
-  const dashboardFiles = useMemo(() => {
-    if (project === OVERVIEW) return [];
-    const selected = files.filter((file) => projectKey(file) === project);
-    const previous = dashboardFilesRef.current;
-    const stable = previous?.project === project
-      && previous.files.length === selected.length
-      && selected.every((file, index) => file === previous.files[index])
-      ? previous.files
-      : selected;
-    dashboardFilesRef.current = { project, files: stable };
-    return stable;
-  }, [files, project]);
+  const dashboardFiles = useStableDashboardFiles(files, project);
   useEffect(() => {
     publishConversationAvailability(new Set(allFiles.flatMap((file) => file.conversationId ? [file.conversationId] : [])));
   }, [allFiles]);
