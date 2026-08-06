@@ -1770,7 +1770,8 @@ async function tickReviewStage(
     return;
   }
   if (flow.state === "paused") {
-    park(pipeline, `review flow paused during startup: ${flow.stateDetail ?? "operator decision required"}`, attempt);
+    const phase = flow.pausedState && flow.pausedState !== "paused" ? flow.pausedState : "unknown phase";
+    park(pipeline, `review flow paused in ${phase}: ${flow.stateDetail ?? "operator decision required"}`, attempt);
     return;
   }
   /* Advance appends round 1 synchronously, so waiting_ready with zero rounds
@@ -1857,12 +1858,16 @@ const RECONCILABLE_REVIEW_FLOW_STATES: ReadonlySet<Flow["state"]> = new Set([
   "relaying",
   "fixing",
   "approved",
+  "paused",
   "needs_decision",
   "done_comment",
   "closed",
 ]);
 const RECONCILABLE_BOUND_FLOW_ERRORS = [
   "review flow startup paused:",
+  "review flow paused in ",
+  /* Compatibility with pipeline attempts parked before the phase-specific
+     wording shipped. */
   "review flow paused during startup:",
   "advancing the review flow failed:",
   "review loop ended in ",
@@ -1897,13 +1902,20 @@ function reconcileBoundReviewFlow(pipeline: Pipeline, ports: PipelinePorts): boo
   if (stage?.kind !== "review-loop") return false;
   const attempt = currentAttempt(pipeline, stage.id);
   const attemptError = attempt?.error;
-  const flow = attempt?.flowId ? ports.getFlow(attempt.flowId) : null;
+  let flow = attempt?.flowId ? ports.getFlow(attempt.flowId) : null;
   if (
     !attemptError
     || !RECONCILABLE_BOUND_FLOW_ERRORS.some((prefix) => attemptError.startsWith(prefix))
     || !flow
     || !RECONCILABLE_REVIEW_FLOW_STATES.has(flow.state)
   ) return false;
+  if (flow.state === "paused") {
+    if (flow.pausedState !== "relaying") return false;
+    const resumed = ports.patchFlow(flow.id, "resume");
+    if (resumed.error) return false;
+    flow = ports.getFlow(flow.id);
+    if (!flow || flow.state !== "relaying") return false;
+  }
   if (attemptError === terminalReviewFlowError(flow)) return false;
   pipeline.state = "running";
   pipeline.stateDetail = null;

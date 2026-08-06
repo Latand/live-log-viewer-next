@@ -271,6 +271,12 @@ function harness() {
     patchFlow: (id, action, note) => {
       calls.push(`flow-patch:${id}:${action}`);
       if (note) calls.push(`flow-note:${note}`);
+      const flow = flows.get(id);
+      if (flow && action === "resume" && flow.state === "paused") {
+        flow.state = flow.pausedState && flow.pausedState !== "paused" ? flow.pausedState : "waiting_ready";
+        flow.pausedState = null;
+        flow.stateDetail = null;
+      }
       return {};
     },
     closeFlow: async (id) => {
@@ -2622,6 +2628,57 @@ test("a paused review flow parks its pipeline", async () => {
   expect(loadPipelines()[0]!.stateDetail).toContain("kickoff delivery failed");
 });
 
+test("a bound review flow paused while relaying resumes without operator action", async () => {
+  const h = harness();
+  const stages = [
+    { id: "build", kind: "run", prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as const;
+  await create(h.ports, stages as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const flow = h.flows.get("flow-1")!;
+  flow.rounds.push({
+    n: 3,
+    verdict: "REQUEST_CHANGES",
+    reviewHeadSha: ORIGIN_MAIN_SHA,
+    relayStartedAt: "2026-08-05T20:47:08.000Z",
+    reviewerPath: "/codex/reviewer.jsonl",
+    reviewerConversationId: "conversation_reviewer",
+  } as never);
+  flow.state = "paused";
+  flow.pausedState = "relaying";
+  flow.stateDetail = "structured resume host claim is unavailable";
+
+  await tickPipelines([entry("/codex/reviewer.jsonl")], h.ports);
+  const parked = loadPipelines()[0]!;
+  expect(parked).toMatchObject({
+    state: "needs_decision",
+    stateDetail: "review flow paused in relaying: structured resume host claim is unavailable",
+  });
+  expect(parked.runs[1]!.attempts[0]).toMatchObject({
+    state: "needs_decision",
+    error: "review flow paused in relaying: structured resume host claim is unavailable",
+    flowId: "flow-1",
+  });
+
+  await tickPipelines([entry("/codex/reviewer.jsonl")], h.ports);
+
+  expect(flow).toMatchObject({ state: "relaying", pausedState: null, stateDetail: null });
+  expect(h.calls).toContain("flow-patch:flow-1:resume");
+  expect(loadPipelines()[0]).toMatchObject({ state: "running", stateDetail: null });
+  expect(loadPipelines()[0]!.runs[1]!.attempts[0]).toMatchObject({
+    state: "reviewing",
+    error: null,
+    flowId: "flow-1",
+    agentPath: "/codex/reviewer.jsonl",
+    conversationId: "conversation_reviewer",
+  });
+});
+
 test("a later exact-head approval replaces a stale startup pause and completes after controller restart (#526)", async () => {
   const h = harness();
   const stages = [
@@ -2636,6 +2693,7 @@ test("a later exact-head approval replaces a stale startup pause and completes a
 
   const flow = h.flows.get("flow-1")!;
   flow.state = "paused";
+  flow.pausedState = "reviewing";
   flow.stateDetail = "paused by user";
   await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
   const parked = loadPipelines()[0]!;
@@ -2643,7 +2701,7 @@ test("a later exact-head approval replaces a stale startup pause and completes a
   expect(parked.runs[1]!.attempts[0]).toMatchObject({
     flowId: "flow-1",
     state: "needs_decision",
-    error: "review flow paused during startup: paused by user",
+    error: "review flow paused in reviewing: paused by user",
   });
 
   flow.rounds.push({
@@ -2969,10 +3027,11 @@ for (const terminalState of ["done_comment", "needs_decision"] as const) {
 
     const flow = h.flows.get("flow-1")!;
     flow.state = "paused";
+    flow.pausedState = "spawning";
     flow.stateDetail = "startup transport unavailable";
     await tickPipelines([], h.ports);
     expect(loadPipelines()[0]!.runs[1]!.attempts[0]!.error)
-      .toBe("review flow paused during startup: startup transport unavailable");
+      .toBe("review flow paused in spawning: startup transport unavailable");
 
     flow.rounds.push({
       n: 1,
