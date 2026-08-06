@@ -557,9 +557,25 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
       });
     }
   }, [memoryKey, launch?.launchId, launch?.initialMessage, launch?.deliveredAt, launch?.promptAt, launch?.error, launchOwner, launchOwnsThisPane]);
+  /* The newest rendered transcript moment: past a delivered bubble's settle
+     time, it proves the agent's output already moved beyond the delivery and
+     retires the bubble even when its echo was missed (a scaffolded payload, a
+     tail attached after the echo row) — the tail section must never paint the
+     operator's delivered message below newer records. */
+  const newestTranscriptAtMs = useMemo(() => {
+    let newest: number | undefined;
+    for (const { item } of feed.items) {
+      if (!("ts" in item)) continue;
+      const at = typeof item.ts === "number" ? item.ts : Date.parse(String(item.ts ?? ""));
+      if (Number.isFinite(at) && (newest === undefined || at > newest)) newest = at;
+    }
+    return newest;
+  }, [feed.items]);
   /* Launch bubbles fail closed without exact canonical ownership; ordinary
      composer entries still render from this conversation-scoped queue. */
-  const pendingOutbox = file ? visibleOutbox(outbox, transcriptEchoCounts, nowMs(), paneLaunchOwner) : [];
+  const pendingOutbox = file
+    ? visibleOutbox(outbox, transcriptEchoCounts, nowMs(), paneLaunchOwner, newestTranscriptAtMs)
+    : [];
   useEffect(() => {
     if (!memoryKey || !file) return;
     adoptCanonicalAssistantClaims(file.path, memoryKey);
