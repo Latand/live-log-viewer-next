@@ -5,13 +5,13 @@ import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
 import { validExplicitProject } from "@/lib/accounts/migration/contracts";
 import { agentRegistry } from "@/lib/agent/registry";
 import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
+import { defaultModelFor } from "@/lib/agent/models";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { deliverConversationMessage } from "@/lib/delivery";
 import { structuredHostsEnabled } from "@/lib/runtime/flags";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { resolveSpawnRole } from "@/lib/roles/registry";
 import { derivedSpawnTitle } from "@/lib/title";
-import { resolveSpawnRole } from "@/lib/roles/registry";
 
 import { loadTasks } from "@/lib/tasks/store";
 import { orchestratorMandateForDelivery } from "./prompt";
@@ -195,7 +195,7 @@ export const productionSeatCommandDependencies: SeatCommandDependencies = {
       cwd,
       project: canonicalOrchestratorProject(ownedProject),
       engine: conversation.engine,
-      model: generation?.launchProfile.model ?? null,
+      model: generation?.launchProfile.model?.trim() || defaultModelFor(conversation.engine),
     };
   },
   projectTasks: (project) => loadTasks()
@@ -223,9 +223,12 @@ export const productionSeatCommandDependencies: SeatCommandDependencies = {
   },
   runtimeIdentity: (conversationId) => {
     const conversation = agentRegistry().conversation(conversationId as `conversation_${string}`);
+    const conversationModel = conversation
+      ? conversation.generations.at(-1)?.launchProfile.model?.trim() || defaultModelFor(conversation.engine)
+      : null;
     return {
       engine: conversation?.engine ?? null,
-      model: conversation?.generations.at(-1)?.launchProfile.model ?? null,
+      model: conversationModel,
     };
   },
   stampRegistryIdentity: (seat) => {

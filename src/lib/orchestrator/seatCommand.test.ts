@@ -3,7 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { AgentRegistry } from "@/lib/agent/registry";
+import { defaultModelFor } from "@/lib/agent/models";
+import { AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
 
 import {
   ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE,
@@ -11,7 +12,12 @@ import {
   ORCHESTRATOR_SYSTEM_PROMPT,
 } from "./prompt";
 import { setRetireManagerForTests } from "./retire";
-import { executeOrchestratorRotation, executeOrchestratorSeatRequest, type SeatCommandDependencies } from "./seatCommand";
+import {
+  executeOrchestratorRotation,
+  executeOrchestratorSeatRequest,
+  productionSeatCommandDependencies,
+  type SeatCommandDependencies,
+} from "./seatCommand";
 import { activeOrchestratorSeats, orchestratorRevocations, orchestratorSeatFor, type OrchestratorSeat } from "./seats";
 
 let sandbox = "";
@@ -35,6 +41,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setRetireManagerForTests(null);
+  setAgentRegistryForTests(null);
   if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
   else process.env.LLV_STATE_DIR = previousStateDir;
   fs.rmSync(sandbox, { recursive: true, force: true });
@@ -444,6 +451,51 @@ test("selecting an EXISTING conversation delivers a caller-edited current-versio
     conversationId: OLD_ID,
     mandate: "updated mandate",
     promptVersion: ORCHESTRATOR_PROMPT_VERSION,
+  });
+});
+
+test("adopting a model-less Codex conversation records its engine-specific effective model", async () => {
+  const registry = new AgentRegistry(path.join(sandbox, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+  setAgentRegistryForTests(registry);
+  const transcript = path.join(sandbox, "model-less-codex.jsonl");
+  fs.writeFileSync(transcript, "", "utf8");
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd: sandbox,
+    role: "orchestrator",
+    launchProfile: { title: "Adopt model-less Codex conversation" },
+  });
+  if (begun.kind !== "created") throw new Error("expected a spawn receipt");
+  registry.settleSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: "model-less-codex" },
+    artifactPath: transcript,
+    cwd: sandbox,
+    accountId: null,
+    launchProfile: begun.receipt.launchProfile,
+    status: "live",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const target = productionSeatCommandDependencies.conversationTarget(begun.receipt.conversationId);
+  if (!target || target.kind !== "eligible") throw new Error("expected an eligible Codex target");
+  const { deps } = dependencies({
+    conversationTarget: productionSeatCommandDependencies.conversationTarget,
+    runtimeIdentity: productionSeatCommandDependencies.runtimeIdentity,
+  });
+
+  const result = await executeOrchestratorSeatRequest({
+    project: target.project,
+    mandate: "Own the Codex project",
+    clientRequestId: "req_model_less_codex_1",
+    conversationId: begun.receipt.conversationId,
+  }, deps);
+
+  expect(result.status).toBe(200);
+  expect(orchestratorSeatFor(target.project).active).toMatchObject({
+    engine: "codex",
+    model: defaultModelFor("codex"),
   });
 });
 
