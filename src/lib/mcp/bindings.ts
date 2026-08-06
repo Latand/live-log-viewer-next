@@ -943,7 +943,12 @@ async function entryForPath(
         const completedRead = dependencies.completedFileScan({ signal: catalog.signal });
         const completed = (await Promise.race([completedRead, catalogWait]).finally(releaseCatalogWait)).snapshot.files;
         const known = completed.find((candidate) => candidate.path === transcriptPath);
-        if (known) return { entry: known };
+        /* A catalog row is a discovery hint. The transcript may have grown or
+           been replaced since that row was measured, so production reopens it
+           through the descriptor-pinned reader before deriving truncation or
+           parsing content. Older injected adapters without that seam retain
+           their completed-row behavior. */
+        if (known && !dependencies.targetedFileEntry) return { entry: known };
       } catch (error) {
         if (overall.signal.aborted) {
           const reason = overall.signal.reason;

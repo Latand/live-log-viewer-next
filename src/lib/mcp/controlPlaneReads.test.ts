@@ -477,6 +477,54 @@ test("get_conversation returns a bounded partial from a synthetic 100 MiB transc
   expect(result.hint).toContain("oversized transcript");
 });
 
+test("get_conversation reopens a warm catalog hit that grew beyond the parse window", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-grown-conversation-"));
+  sandboxes.push(directory);
+  const root = path.join(directory, "sessions");
+  fs.mkdirSync(root);
+  const pathname = path.join(root, "rollout-grown.jsonl");
+  fs.writeFileSync(pathname, `${JSON.stringify({
+    type: "session_meta",
+    payload: { id: "grown-fixture", timestamp: "2026-07-01T09:00:00.000Z", cwd: "/repo/fixture" },
+  })}\n`);
+  const staleEntry = {
+    ...scanRow(0),
+    path: pathname,
+    name: path.basename(pathname),
+    size: fs.statSync(pathname).size,
+  };
+  fs.truncateSync(pathname, 100 * 1024 * 1024);
+  fs.appendFileSync(pathname, `\n${Array.from({ length: 8 }, (_value, index) => JSON.stringify({
+    type: "response_item",
+    payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: `grown-${index}` }] },
+  })).join("\n")}\n`);
+  const pathAllowed = (candidate: string) => {
+    try { return fs.realpathSync(candidate).startsWith(fs.realpathSync(root) + path.sep); } catch { return false; }
+  };
+  let targetedReads = 0;
+  const injected = {
+    completedFileScan: async () => ({ snapshot: { files: [staleEntry], projectCatalog: [], complete: true } }),
+    targetedFileEntry: (candidate: string, context: { signal?: AbortSignal; deadlineAt?: number } = {}) => {
+      targetedReads += 1;
+      return targetedConversationAtPath(candidate, context, { roots: [["codex-sessions", root]], pathAllowed });
+    },
+    listFiles: async () => { throw new Error("warm hits must stay off the raw scan path"); },
+  } as never;
+  const bindings = viewerMcpBindings(undefined, undefined, injected);
+
+  const result = await bindings.get_conversation(
+    { clientRequestId: "get-grown-partial", transcriptPath: pathname, maxRecords: 8 },
+    { deadlineAt: Date.now() + 2_000 },
+  ) as { truncated: boolean; hint: string; messages: Array<{ text: string }> };
+
+  expect(targetedReads).toBe(1);
+  expect(result.messages.map((message) => message.text)).toEqual(
+    Array.from({ length: 8 }, (_value, index) => `grown-${index}`),
+  );
+  expect(result.truncated).toBe(true);
+  expect(result.hint).toContain("oversized transcript");
+});
+
 test("targeted conversation opens one canonical regular transcript and retains its title", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-targeted-open-"));
   sandboxes.push(directory);
