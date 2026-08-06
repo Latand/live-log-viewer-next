@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { ProjectCatalogEntry } from "@/lib/types";
 
@@ -31,6 +31,8 @@ export function useProjectCuration(
 ): UseProjectCuration {
   const [overrides, setOverrides] = useState<ReadonlyMap<string, boolean>>(new Map());
   const [createdCatalog, setCreatedCatalog] = useState<ProjectCatalogEntry[]>([]);
+  const crownMutationQueues = useRef(new Map<string, Promise<void>>());
+  const crownMutationSequences = useRef(new Map<string, number>());
 
   useEffect(() => {
     /* eslint-disable-next-line react-hooks/set-state-in-effect -- reconciling
@@ -68,23 +70,33 @@ export function useProjectCuration(
 
   const toggleCrown = useCallback((project: string, crowned: boolean) => {
     setOverrides((previous) => new Map(previous).set(project, crowned));
-    void fetch("/api/projects/crown", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ project, crowned }),
-    }).then((response) => {
-      if (response.ok) return;
+    const sequence = (crownMutationSequences.current.get(project) ?? 0) + 1;
+    crownMutationSequences.current.set(project, sequence);
+    const previousMutation = crownMutationQueues.current.get(project) ?? Promise.resolve();
+    const mutation = previousMutation.then(async () => {
+      let succeeded = false;
+      try {
+        const response = await fetch("/api/projects/crown", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ project, crowned }),
+        });
+        succeeded = response.ok;
+      } catch {
+        // The still-current optimistic choice is reverted below.
+      }
+      if (succeeded || crownMutationSequences.current.get(project) !== sequence) return;
       setOverrides((previous) => {
         const next = new Map(previous);
         next.delete(project);
         return next;
       });
-    }).catch(() => {
-      setOverrides((previous) => {
-        const next = new Map(previous);
-        next.delete(project);
-        return next;
-      });
+    });
+    crownMutationQueues.current.set(project, mutation);
+    void mutation.finally(() => {
+      if (crownMutationQueues.current.get(project) !== mutation) return;
+      crownMutationQueues.current.delete(project);
+      crownMutationSequences.current.delete(project);
     });
   }, []);
 
