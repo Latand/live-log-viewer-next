@@ -31,6 +31,12 @@ import { rolledBack, RUNTIME_PLANE_ABSENT } from "@/lib/runtime/flags";
 export const SNAPSHOT_URL = "/api/runtime/snapshot";
 export const STREAM_URL = "/api/runtime/stream";
 
+/** Fired on `window` whenever the tab's SSE transport re-subscribes (connection
+ *  returns to `live`). A draft's launch watch listens to reset its convergence
+ *  window (issue #919): a reconnect means everything observed before it may be
+ *  stale, so recovery timers restart instead of giving up. */
+export const STREAM_RECONNECTED_EVENT = "llv:stream-reconnected";
+
 /** No heartbeat/traffic for this long means the transport is silently dead. */
 const HEARTBEAT_TIMEOUT_MS = 20_000;
 /** Reconnect backoff: base doubles up to the ceiling. */
@@ -145,7 +151,11 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
   }
 
   function setState(patch: Partial<RuntimeBusState>): void {
+    const previousConnection = state.connection;
     state = { ...state, ...patch };
+    if (state.connection === "live" && previousConnection !== "live" && typeof window !== "undefined") {
+      window.dispatchEvent(new Event(STREAM_RECONNECTED_EVENT));
+    }
     emit();
   }
 
