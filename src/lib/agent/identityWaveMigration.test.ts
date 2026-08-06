@@ -361,7 +361,7 @@ test("the wave cleans older placeholder surfaces when the newest generation is a
 
     const seeded = seed.snapshot();
     const olderGeneration = seeded.conversations[conversation.id]!.generations.at(-1)!;
-    olderGeneration.launchProfile.title = "Codex session";
+    olderGeneration.launchProfile.title = "Codex_session";
     olderGeneration.archivedAt = NOW;
     seeded.conversations[conversation.id]!.generations.push({
       ...structuredClone(olderGeneration),
@@ -373,9 +373,9 @@ test("the wave cleans older placeholder surfaces when the newest generation is a
     });
     seeded.entries[key.engine + ":" + key.sessionId]!.launchProfile = {
       ...olderGeneration.launchProfile,
-      title: "Claude/session",
+      title: "Claude#session",
     };
-    seeded.receipts[reserved.receipt.launchId]!.launchProfile.title = "Codex · session";
+    seeded.receipts[reserved.receipt.launchId]!.launchProfile.title = "Codex*session";
     fs.writeFileSync(filename, `${JSON.stringify(seeded, null, 2)}\n`);
 
     const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "dual-write" });

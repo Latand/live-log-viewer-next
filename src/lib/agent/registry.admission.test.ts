@@ -63,7 +63,19 @@ function spawnAtDepth(
 
 test("fresh spawn admission rejects missing and generic placeholder titles", () => {
   const { store } = registryAt("placeholder-title");
-  for (const title of ["Codex session", "Codex-session", "Claude/session", "Codex · session", "Claude: session"]) {
+  for (const title of [
+    "Codex session",
+    "Codex-session",
+    "Claude/session",
+    "Codex · session",
+    "Claude: session",
+    "Codex_session",
+    "Claude_session",
+    "Codex*session",
+    "Claude#session",
+    "Codex>session",
+    "Claude~session",
+  ]) {
     expect(() => store.beginSpawnRequest({
       engine: "codex",
       cwd: "/repo",
@@ -121,6 +133,65 @@ test("observations and resume successors preserve semantic title punctuation", (
     observedAt: "2026-08-06T00:01:00.000Z",
   }]);
   expect(refreshed.conversations[conversation.id]?.generations.at(-1)?.launchProfile.title).toBe("Own issue #913");
+});
+
+test("resume admission preserves a frozen semantic title through replay and settlement", () => {
+  const filename = path.join(sandbox, "resume-frozen-title.json");
+  const store = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "dual-write" });
+  const sourceSessionId = crypto.randomUUID();
+  const successorSessionId = crypto.randomUUID();
+  const sourcePath = `/sessions/${sourceSessionId}.jsonl`;
+  const successorPath = `/sessions/${successorSessionId}.jsonl`;
+  const first = store.reconcileConversations([{
+    engine: "codex",
+    path: sourcePath,
+    accountId: "terra",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Original issue #913" }),
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-08-06T00:00:00.000Z",
+  }]);
+  const conversation = Object.values(first.conversations)[0]!;
+  const request = {
+    engine: "codex" as const,
+    cwd: "/repo",
+    conversationId: conversation.id,
+    purpose: "resume-successor" as const,
+    origin: { kind: "successor" as const },
+    expectedArtifactPath: successorPath,
+    clientAttemptId: "resume-frozen-title",
+    requestDigest: "resume-frozen-title-digest",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Replacement issue #999" }),
+  };
+
+  const begun = store.beginSpawnRequest(request);
+  if (begun.kind !== "created") throw new Error("expected create");
+  expect(begun.receipt.launchProfile.title).toBe("Original issue #913");
+  const replayed = store.beginSpawnRequest(request);
+  expect(replayed.kind).toBe("replay");
+  expect(replayed.receipt.launchProfile.title).toBe("Original issue #913");
+
+  const entry = () => ({
+    key: { engine: "codex" as const, sessionId: successorSessionId },
+    artifactPath: successorPath,
+    cwd: "/repo",
+    accountId: "terra",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Replacement issue #999" }),
+    status: "live" as const,
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  expect(store.settleSpawn(begun.receipt.launchId, entry()).kind).toBe("settled");
+  expect(store.settleSpawn(begun.receipt.launchId, entry()).kind).toBe("settled");
+
+  const snapshot = store.snapshot();
+  expect(snapshot.receipts[begun.receipt.launchId]?.launchProfile.title).toBe("Original issue #913");
+  expect(snapshot.conversations[conversation.id]?.generations.map((generation) => generation.launchProfile.title))
+    .toEqual(["Original issue #913", "Original issue #913"]);
+  expect(Object.values(snapshot.entries).find((candidate) => candidate.artifactPath === successorPath)?.launchProfile?.title)
+    .toBe("Original issue #913");
+  expect(new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" }).snapshot()).toEqual(snapshot);
 });
 
 test("same-path settlement publishes a newly inherited semantic title to the durable generation", () => {
