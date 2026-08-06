@@ -236,6 +236,11 @@ export function stampOrchestratorLineage(
   const predecessor = predecessorId && predecessorId !== conversationId
     ? file.conversations[predecessorId]
     : null;
+  const lineageWouldCycle = predecessorId && predecessor
+    ? wouldCreateLineageCycle(file, conversationId, predecessorId)
+    : false;
+  const lineagePredecessorId = lineageWouldCycle ? null : predecessorId;
+  const lineagePredecessor = lineageWouldCycle ? null : predecessor;
   const rows = file.memberships[conversationId] ??= [];
   let changed = false;
 
@@ -251,7 +256,7 @@ export function stampOrchestratorLineage(
       stageId: null,
       stageOrder: null,
       round: null,
-      parentConversationId: predecessor ? predecessorId : null,
+      parentConversationId: lineagePredecessor ? lineagePredecessorId : null,
       runtime: null,
       createdAt,
     });
@@ -265,14 +270,16 @@ export function stampOrchestratorLineage(
     conversation.delegationDepth = 0;
     changed = true;
   }
-  if (predecessor && !file.lineageEdges[conversationId]) {
+  if (lineagePredecessor && !file.lineageEdges[conversationId]) {
     const generation = conversation.generations.at(-1);
-    const parentGeneration = predecessor.generations.at(-1);
+    const parentGeneration = lineagePredecessor.generations.at(-1);
     const edge: SpawnLineageEdge = {
       childConversationId: conversationId,
-      parentConversationId: predecessorId!,
+      parentConversationId: lineagePredecessorId!,
       childSessionKey: generation ? sessionKeyFromTranscript(conversation.engine, generation.path) : null,
-      parentSessionKey: parentGeneration ? sessionKeyFromTranscript(predecessor.engine, parentGeneration.path) : null,
+      parentSessionKey: parentGeneration
+        ? sessionKeyFromTranscript(lineagePredecessor.engine, parentGeneration.path)
+        : null,
       childArtifactPath: generation?.path ?? null,
       parentArtifactPath: parentGeneration?.path ?? null,
       kind: "spawn",
@@ -287,6 +294,22 @@ export function stampOrchestratorLineage(
   }
   if (changed) conversation.updatedAt = createdAt;
   return { changed, engine: conversation.engine };
+}
+
+function wouldCreateLineageCycle(
+  file: RegistryFile,
+  childConversationId: ViewerConversationId,
+  parentConversationId: ViewerConversationId,
+): boolean {
+  const visited = new Set<ViewerConversationId>();
+  let cursor: ViewerConversationId | null = parentConversationId;
+  while (cursor) {
+    if (cursor === childConversationId || visited.has(cursor)) return true;
+    visited.add(cursor);
+    const parent: ViewerConversationId | null | undefined = file.lineageEdges[cursor]?.parentConversationId;
+    cursor = parent ? canonicalConversationId(file, parent) : null;
+  }
+  return false;
 }
 
 export function applyIdentityWaveMigration(
