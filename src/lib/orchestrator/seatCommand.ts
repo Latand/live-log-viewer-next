@@ -5,6 +5,7 @@ import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
 import { validExplicitProject } from "@/lib/accounts/migration/contracts";
 import { agentRegistry } from "@/lib/agent/registry";
 import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
+import { defaultModelFor } from "@/lib/agent/models";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { deliverConversationMessage } from "@/lib/delivery";
 import { structuredHostsEnabled } from "@/lib/runtime/flags";
@@ -197,7 +198,7 @@ export const productionSeatCommandDependencies: SeatCommandDependencies = {
       cwd,
       project: canonicalOrchestratorProject(ownedProject),
       engine: conversation.engine,
-      model: generation?.launchProfile.model ?? null,
+      model: generation?.launchProfile.model?.trim() || defaultModelFor(conversation.engine),
     };
   },
   syncLegacyRecord: (input) => {
@@ -243,9 +244,12 @@ export const productionSeatCommandDependencies: SeatCommandDependencies = {
     const conversation = agentRegistry().conversation(conversationId as `conversation_${string}`);
     const incumbent = readOrchestratorRecord();
     const matchingIncumbent = incumbent?.conversationId === conversationId ? incumbent : null;
+    const conversationModel = conversation
+      ? conversation.generations.at(-1)?.launchProfile.model?.trim() || defaultModelFor(conversation.engine)
+      : null;
     return {
       engine: conversation?.engine ?? matchingIncumbent?.engine ?? null,
-      model: conversation?.generations.at(-1)?.launchProfile.model ?? matchingIncumbent?.model ?? null,
+      model: conversationModel ?? matchingIncumbent?.model ?? null,
     };
   },
   now: () => new Date().toISOString(),
