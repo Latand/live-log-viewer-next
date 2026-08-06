@@ -6,6 +6,7 @@ import path from "node:path";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { withoutArchivedPredecessors } from "@/lib/accounts/identity";
 import { agentRegistry, AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
+import { createManualProject, setProjectCrown } from "@/lib/projects/curation";
 import { replaceConversationCatalog } from "@/lib/scanner/conversationCatalog";
 import { projectInfoFromCwd, projectRootForCwd } from "@/lib/scanner/describe";
 import { writeSessionTitle } from "@/lib/session/titleStore";
@@ -2973,5 +2974,36 @@ test("role titles (issue #325): spawned builder/reviewer present task + role ins
     expect(orchestratorEntry?.title).toBe("Codex session");
   } finally {
     boardTasksStore = () => [];
+  }
+});
+
+/* Crown + manual projects (operator sidebar curation): both stores are
+   server-durable and must surface in the same /api/files payload the rail
+   consumes — the created project as a zero-conversation catalog row whose root
+   feeds the spawn cwd, the crown list under the operator's chosen ids. */
+test("crowned and manually created projects flow through the files payload", async () => {
+  const manualRoot = fs.mkdtempSync(path.join(os.tmpdir(), "llv-files-manual-"));
+  try {
+    const created = createManualProject("Fresh Board", manualRoot);
+    if (!created.ok) throw new Error(`expected creation, got ${created.code}`);
+    expect(setProjectCrown(created.entry.project, true)).toBe(true);
+
+    const response = await GET(new Request("http://127.0.0.1/api/files"));
+    const body = await response.json() as {
+      projectCatalog: Array<{ project: string; displayName?: string; projectRoot?: string; conversations: number }>;
+      projectDisplayNames: Record<string, string>;
+      projectCwds?: Record<string, string>;
+      crownedProjects?: string[];
+    };
+    expect(body.projectCatalog.find((entry) => entry.project === created.entry.project)).toMatchObject({
+      displayName: "Fresh Board",
+      projectRoot: created.entry.root,
+      conversations: 0,
+    });
+    expect(body.crownedProjects).toEqual([created.entry.project]);
+    expect(body.projectDisplayNames[created.entry.project]).toBe("Fresh Board");
+    expect(body.projectCwds?.[created.entry.project]).toBe(created.entry.root);
+  } finally {
+    fs.rmSync(manualRoot, { recursive: true, force: true });
   }
 });

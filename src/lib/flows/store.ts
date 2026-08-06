@@ -170,7 +170,40 @@ export function mergeSeededPresets(presets: FlowPreset[], seeds = seededPresetsF
   return [...missingSeeds, ...custom];
 }
 
+let flowsCache: { signature: string; flows: Flow[] } | null = null;
+
+function flowsFileSignature(): string | null {
+  const filename = flowsFile();
+  try {
+    const stat = fs.statSync(filename, { bigint: true });
+    return `${filename}:${stat.mtimeNs}:${stat.size}`;
+  } catch {
+    return null;
+  }
+}
+
+/** Fresh per-call copies of every layer a caller may write (flow and round
+    rows) — the same freshness depth the parse path produces — so the cached
+    records stay pristine while callers mutate and save their copies. Deeper
+    config leaves are shared; nothing mutates their internals in place. */
+function reviveCachedFlows(flows: Flow[]): Flow[] {
+  return flows.map((flow) => ({ ...flow, rounds: flow.rounds.map((round) => ({ ...round })) }));
+}
+
+/** The parse+normalize of the whole flow registry, cached against the file
+    signature: production read it ~54 times a second from tick loops and
+    runtime consumers, re-parsing 1.6 MB of JSON each time. Every writer goes
+    through an atomic rename, which changes the signature and invalidates. */
 export function loadFlows(): Flow[] {
+  const before = flowsFileSignature();
+  if (before !== null && flowsCache?.signature === before) return reviveCachedFlows(flowsCache.flows);
+  const parsed = parseFlowsFromDisk();
+  const after = flowsFileSignature();
+  if (after !== null && before === after) flowsCache = { signature: after, flows: parsed };
+  return reviveCachedFlows(parsed);
+}
+
+function parseFlowsFromDisk(): Flow[] {
   const raw = readJson(flowsFile()) as FlowFile | null;
   const flows = Array.isArray(raw?.flows) ? raw.flows.filter(isFlow) : [];
   return flows.map((flow) => ({

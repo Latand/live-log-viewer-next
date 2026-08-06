@@ -8,6 +8,7 @@ import { createTraversalFence, parseFocusHistoryState, recordFocusNavigation, re
 import { onAccountPanelRequest } from "@/lib/accounts/openPanel";
 import { useAgentChimes } from "@/hooks/useAgentChimes";
 import { useArchivedProjects } from "@/hooks/useArchivedProjects";
+import { useProjectCuration } from "@/hooks/useProjectCuration";
 import { useEffectiveFlows } from "@/components/flows/flowModel";
 import { useFiles } from "@/hooks/useFiles";
 import { publishConversationAvailability } from "@/lib/mcp/availability";
@@ -128,7 +129,22 @@ export function Viewer() {
   const [project, setProject] = useState<string>(OVERVIEW);
   const [pendingHash, setPendingHash] = useState<ConversationHash | null>(null);
   const [catalogPin, dispatchCatalogPin] = useReducer(reduceCatalogPin, null);
-  const { files: allFiles, requestScope, projectCatalog, projectAliases, projectDisplayNames, projectCwds, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, conversationAliases, launchRoutes, loaded, catalogFailures } = useFiles(null, filesRequestPin(pendingHash, catalogPin?.path ?? null));
+  const { files: allFiles, requestScope, projectCatalog: polledProjectCatalog, projectAliases, projectDisplayNames: polledProjectDisplayNames, crownedProjects: serverCrownedProjects, projectCwds, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, conversationAliases, launchRoutes, loaded, catalogFailures } = useFiles(null, filesRequestPin(pendingHash, catalogPin?.path ?? null));
+  /* Crown/create curation (server-durable): the optimistic client seam plus
+     the overlay entries for projects created before the next catalog poll. */
+  const { crownedProjects, toggleCrown, createProject, createdCatalog } = useProjectCuration(serverCrownedProjects, polledProjectCatalog);
+  const projectCatalog = useMemo(
+    () => (createdCatalog.length ? [...polledProjectCatalog, ...createdCatalog] : polledProjectCatalog),
+    [polledProjectCatalog, createdCatalog],
+  );
+  const projectDisplayNames = useMemo(() => {
+    if (!createdCatalog.length) return polledProjectDisplayNames;
+    const merged = { ...polledProjectDisplayNames };
+    for (const entry of createdCatalog) {
+      if (entry.displayName) merged[entry.project] = entry.displayName;
+    }
+    return merged;
+  }, [polledProjectDisplayNames, createdCatalog]);
   /* A committed account migration keeps the archived predecessor entry in the
      payload (for chain history) but it must never render as a second standalone
      card — every surface below sees only current generations. A no-op (same
@@ -775,11 +791,11 @@ export function Viewer() {
   const shell = (
     <div className="flex h-full">
       {isMobile ? null : (
-        <ProjectRail files={files} projectCatalog={projectCatalog} projectDisplayNames={projectDisplayNames} pipelines={pipelines} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} loaded={loaded} catalogFailures={catalogFailures} onSelect={selectProject} />
+        <ProjectRail files={files} projectCatalog={projectCatalog} projectDisplayNames={projectDisplayNames} pipelines={pipelines} workflows={workflows} archivedProjects={archivedProjects} crownedProjects={crownedProjects} selected={project} now={clock} loaded={loaded} catalogFailures={catalogFailures} onSelect={selectProject} onToggleCrown={toggleCrown} onCreateProject={createProject} />
       )}
       {isMobile && drawerOpen ? (
         <div className="fixed inset-0 z-50 flex">
-          <ProjectRail files={files} projectCatalog={projectCatalog} projectDisplayNames={projectDisplayNames} pipelines={pipelines} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} loaded={loaded} catalogFailures={catalogFailures} onSelect={selectProject} />
+          <ProjectRail files={files} projectCatalog={projectCatalog} projectDisplayNames={projectDisplayNames} pipelines={pipelines} workflows={workflows} archivedProjects={archivedProjects} crownedProjects={crownedProjects} selected={project} now={clock} loaded={loaded} catalogFailures={catalogFailures} onSelect={selectProject} onToggleCrown={toggleCrown} onCreateProject={createProject} />
           <button
             type="button"
             className="min-w-0 flex-1 bg-primary/35"

@@ -3,6 +3,7 @@ import { Window } from "happy-dom";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
+import type { CreateProjectOutcome } from "@/hooks/useProjectCuration";
 import { setLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
@@ -79,8 +80,8 @@ function fileEntry(overrides: Partial<FileEntry>): FileEntry {
    one: the scanner resolves both cwds to the parent repo, so the rail sees a
    single canonical key. A second, plain-named project rides along. */
 const files: FileEntry[] = [
-  fileEntry({ path: "/sessions/live-worktree.jsonl", cwd: "/home/u/.agents/tools/live-log-viewer-next/.worktrees/wt-a" }),
-  fileEntry({ path: "/sessions/deleted-worktree.jsonl", cwd: "/home/u/.agents/tools/live-log-viewer-next/.worktrees/wt-gone" }),
+  fileEntry({ path: "/sessions/live-worktree.jsonl", cwd: "/home/user/.agents/tools/live-log-viewer-next/.worktrees/wt-a" }),
+  fileEntry({ path: "/sessions/deleted-worktree.jsonl", cwd: "/home/user/.agents/tools/live-log-viewer-next/.worktrees/wt-gone" }),
   fileEntry({ path: "/sessions/plain.jsonl", project: "CelestiaCompose" }),
 ];
 
@@ -93,7 +94,10 @@ afterEach(() => {
   viewportWidth = 1280;
 });
 
-function renderRail(onSelect: (project: string) => void = () => {}): HTMLElement {
+function renderRail(
+  onSelect: (project: string) => void = () => {},
+  extra: Partial<React.ComponentProps<typeof ProjectRail>> = {},
+): HTMLElement {
   const container = dom.document.createElement("div");
   dom.document.body.appendChild(container);
   root = createRoot(container as unknown as Element);
@@ -109,6 +113,7 @@ function renderRail(onSelect: (project: string) => void = () => {}): HTMLElement
         loaded
         now={2_000}
         onSelect={onSelect}
+        {...extra}
       />,
     ),
   );
@@ -116,8 +121,13 @@ function renderRail(onSelect: (project: string) => void = () => {}): HTMLElement
 }
 
 function railRows(container: HTMLElement): HTMLElement[] {
-  return [...container.querySelectorAll("nav button")] as HTMLElement[];
+  /* Project rows only: the crown toggles are icon-only buttons in the same
+     nav, so anything without visible text is a control, not a row. */
+  return ([...container.querySelectorAll("nav button")] as HTMLElement[])
+    .filter((button) => Boolean(button.textContent?.trim()));
 }
+
+const click = () => new dom.MouseEvent("click", { bubbles: true }) as unknown as Event;
 
 test("desktop rail shows the display name, never the leading-dash key, and selects by canonical key", () => {
   const selections: string[] = [];
@@ -162,6 +172,81 @@ test("390px drawer in English mirrors the Ukrainian structure", () => {
   const viewerRow = railRows(container).find((row) => row.textContent?.includes("live-log-viewer-next"));
   expect(viewerRow).toBeDefined();
   expect(viewerRow!.className).toContain("min-h-11");
+});
+
+/* Crown + pin (operator request): a crowned project floats into the pinned top
+   section with a lit crown marker; the per-row toggle crowns and uncrowns. */
+test("crowned projects pin to the top section with a crown marker and a working toggle", () => {
+  const toggles: Array<[string, boolean]> = [];
+  const container = renderRail(() => {}, {
+    crownedProjects: new Set(["CelestiaCompose"]),
+    onToggleCrown: (project, crowned) => toggles.push([project, crowned]),
+  });
+  const rows = railRows(container);
+  const labels = rows.map((row) => row.textContent ?? "");
+  const pinnedIndex = labels.findIndex((label) => label.includes("CelestiaCompose"));
+  const regularIndex = labels.findIndex((label) => label.includes("live-log-viewer-next"));
+  /* Uncrowned, CelestiaCompose sorts after the viewer project (same recency
+     bucket, lexicographic tie-break); the crown must float it above. */
+  expect(pinnedIndex).toBeGreaterThan(-1);
+  expect(pinnedIndex).toBeLessThan(regularIndex);
+  expect(rows[pinnedIndex]!.querySelector('[data-testid="crown-marker"]')).not.toBeNull();
+  expect(rows[regularIndex]!.querySelector('[data-testid="crown-marker"]')).toBeNull();
+
+  const uncrown = container.querySelector('button[aria-label="Remove crown"]');
+  const crown = container.querySelector('button[aria-label="Crown — pin to top"]');
+  expect(uncrown).not.toBeNull();
+  expect(crown).not.toBeNull();
+  flushSync(() => uncrown!.dispatchEvent(click()));
+  flushSync(() => crown!.dispatchEvent(click()));
+  expect(toggles).toEqual([
+    ["CelestiaCompose", false],
+    ["-agents-tools-live-log-viewer-next", true],
+  ]);
+});
+
+test("create-project flow: submit, duplicate refusal message, then success selects the project", async () => {
+  const selections: string[] = [];
+  const creations: Array<[string, string]> = [];
+  let outcome: CreateProjectOutcome = { ok: false, code: "DUPLICATE_PROJECT" };
+  const container = renderRail((project) => selections.push(project), {
+    onCreateProject: async (name, root) => {
+      creations.push([name, root]);
+      return outcome;
+    },
+  });
+  const open = container.querySelector('button[aria-label="Create project"]');
+  expect(open).not.toBeNull();
+  flushSync(() => open!.dispatchEvent(click()));
+  const form = container.querySelector("form")!;
+  const inputs = [...form.querySelectorAll("input")] as HTMLInputElement[];
+  expect(inputs).toHaveLength(2);
+  const type = (input: HTMLInputElement, value: string) => {
+    const propsKey = Object.keys(input).find((key) => key.startsWith("__reactProps$"))!;
+    (input as unknown as Record<string, { onChange: (event: unknown) => void }>)[propsKey]!
+      .onChange({ target: { value } });
+  };
+  flushSync(() => {
+    type(inputs[0]!, "Fresh Project");
+    type(inputs[1]!, "/data/projects/fresh");
+  });
+  const submit = () =>
+    form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event);
+
+  flushSync(submit);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(creations).toEqual([["Fresh Project", "/data/projects/fresh"]]);
+  expect(container.textContent).toContain("This project already exists");
+  expect(selections).toEqual([]);
+
+  outcome = { ok: true, project: "dir-0123456789abcdef0123456789abcdef" };
+  flushSync(submit);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(selections).toEqual(["dir-0123456789abcdef0123456789abcdef"]);
+  /* Success closes the form; only the filter input remains. */
+  expect(container.querySelector("form")).toBeNull();
 });
 
 /* Restore the real fetch for any later test file sharing this process. */

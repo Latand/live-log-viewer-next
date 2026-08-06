@@ -100,7 +100,7 @@ export async function reconfigureConversation(
   overrides: ReconfigureConversationOverrides = {},
 ): Promise<DeliveryOutcome> {
   if (!filePath || !(overrides.pathAllowed ?? pathAllowed)(filePath)) return failure("the conversation path is required", 400);
-  const entry = (await (overrides.listFiles ?? listFiles)()).find((item) => item.path === filePath);
+  const entry = (await (overrides.listFiles ?? listFiles)({ pin: filePath })).find((item) => item.path === filePath);
   if (!entry || (entry.engine !== "claude" && entry.engine !== "codex")) return failure("conversation is unavailable", 403);
   const registry = overrides.registry ?? agentRegistry();
   const registered = registeredHostForPath(registry.readOnlySnapshot(), filePath);
@@ -360,7 +360,9 @@ export async function resumeConversation(
   } catch (error) {
     return failure(error);
   }
-  const entry = (await (overrides.listFiles ?? listFiles)()).find((item) => item.path === filePath);
+  /* Pinned: the resumable transcript may have aged past the scan's recency
+     cap — a conversation the operator can still open must stay resumable. */
+  const entry = (await (overrides.listFiles ?? listFiles)({ pin: filePath })).find((item) => item.path === filePath);
   if (!entry) return failure("file is unknown to the viewer", 403);
   const profile = registry.launchProfileForPath(entry.path);
   const spec = (overrides.resumeSpecFor ?? resumeSpecFor)(entry.root, entry.path, {
@@ -421,7 +423,7 @@ export async function killConversation(filePath: string, overrides: KillConversa
   if (!filePath || !(overrides.pathAllowed ?? pathAllowed)(filePath)) {
     return failure("the conversation path is required to close", 400);
   }
-  const entry = (await (overrides.listFiles ?? listFiles)()).find((item) => item.path === filePath);
+  const entry = (await (overrides.listFiles ?? listFiles)({ pin: filePath })).find((item) => item.path === filePath);
   /* A branch column shares the root conversation's pane: killing it from a
      branch close would take the whole agent down along with the root card
      that is still on screen. Only a root conversation may kill a pane. */
@@ -644,7 +646,9 @@ export async function deliverConversationMessage(message: ConversationMessage, o
     if (!filePath || !(overrides.pathAllowed ?? pathAllowed)(filePath)) {
       return settle(failure("process is not in a tmux session", 409));
     }
-    const all = await (overrides.listFiles ?? listFiles)();
+    /* Pinned: the reopenable transcript may have aged past the scan's recency
+       cap — a conversation the operator can still message must stay openable. */
+    const all = await (overrides.listFiles ?? listFiles)({ pin: filePath });
     const entry = all.find((item) => item.path === filePath);
     if (!entry) {
       return settle(failure("file is unknown to the viewer", 403));

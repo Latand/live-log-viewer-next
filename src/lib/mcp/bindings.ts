@@ -44,7 +44,7 @@ import { latestOperationalPipelineAttempt } from "@/lib/pipelines/attemptSelecti
 import { requestPipelineTick } from "@/lib/pipelines/controllerSignal";
 import { projectTaskPipelineIds } from "@/lib/pipelines/taskBinding";
 import { PIPELINE_LIST_DEFAULT_LIMIT, projectPipelineListRows } from "@/lib/pipelines/listProjection";
-import { loadPipelinesForList } from "@/lib/pipelines/store";
+import { findPipelineRecord, loadPipelinesForList } from "@/lib/pipelines/store";
 import type { CreatePipelineRequest, PatchPipelineRequest, Pipeline, PipelineAction } from "@/lib/pipelines/types";
 import { listFiles } from "@/lib/scanner";
 import { describe, projectForCwd, reprojectFileDescription } from "@/lib/scanner/describe";
@@ -1327,7 +1327,7 @@ async function rotateOrchestrator(args: McpToolArgs, control: ViewerControlDepen
 
 async function getPipeline(args: McpToolArgs): Promise<McpToolPayload> {
   const pipelineId = required(args, "pipelineId");
-  const pipeline = getPipelines().pipelines.find((candidate) => candidate.id === pipelineId);
+  const pipeline = findPipelineRecord(pipelineId);
   if (!pipeline) throw new Error("pipeline not found");
   return redactPayload({ pipelineId, pipeline });
 }

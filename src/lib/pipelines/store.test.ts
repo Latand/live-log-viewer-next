@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { buildPipeline, loadPipelines, PIPELINES_SCHEMA_VERSION, savePipelines, withPipelineMutation } from "./store";
+import { archiveSettledPipelines, buildPipeline, findPipelineRecord, loadArchivedPipelines, loadPipelines, PIPELINES_SCHEMA_VERSION, savePipelines, withPipelineMutation } from "./store";
 import type { Pipeline, PipelineStage } from "./types";
 
 test("pipelines round-trip through a schema-versioned state file", () => {
@@ -354,5 +354,42 @@ test("an unconfirmed host record survives a round trip and rejects a malformed o
     fs.rmSync(sandbox, { recursive: true, force: true });
     if (previous === undefined) delete process.env.LLV_STATE_DIR;
     else process.env.LLV_STATE_DIR = previous;
+  }
+});
+
+test("settled pipelines archive out of the hot registry and stay readable", async () => {
+  const previous = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipelines-archive-"));
+  process.env.LLV_STATE_DIR = sandbox;
+  try {
+    const stages: PipelineStage[] = [
+      { id: "build", kind: "run", prompt: "build", next: null, effectiveRole: { roleId: null, engine: "codex", model: "gpt-5.6-sol", effort: "medium", access: "read-write", promptScaffold: null } },
+    ];
+    const record = (id: string, overrides: Partial<Pipeline>): Pipeline => ({
+      ...buildPipeline({ id, task: `task ${id}`, project: "viewer", repoDir: "/repo", stages, srcPath: null, srcConversationId: null, now: "2026-07-01T00:00:00.000Z" }),
+      ...overrides,
+    });
+    const nowMs = Date.parse("2026-08-05T12:00:00.000Z");
+    const oldClosed = record("aaaa0001", { state: "closed", closedAt: "2026-07-10T00:00:00.000Z", cursor: null });
+    const freshClosed = record("aaaa0002", { state: "closed", closedAt: "2026-08-05T00:00:00.000Z", cursor: null });
+    const hiddenDraft = record("aaaa0003", { state: "draft", hiddenAt: "2026-07-15T00:00:00.000Z" });
+    const running = record("aaaa0004", { state: "running" });
+    savePipelines([oldClosed, freshClosed, hiddenDraft, running]);
+
+    expect(await archiveSettledPipelines(nowMs)).toBe(2);
+    const hotIds = loadPipelines().map((pipeline) => pipeline.id).sort();
+    expect(hotIds).toEqual(["aaaa0002", "aaaa0004"]);
+    const archivedIds = loadArchivedPipelines().map((pipeline) => pipeline.id).sort();
+    expect(archivedIds).toEqual(["aaaa0001", "aaaa0003"]);
+
+    /* By-id reads still resolve archived records; re-sweeping is idempotent. */
+    expect(findPipelineRecord("aaaa0001")?.task).toBe("task aaaa0001");
+    expect(findPipelineRecord("aaaa0004")?.state).toBe("running");
+    expect(findPipelineRecord("missing0")).toBeNull();
+    expect(await archiveSettledPipelines(nowMs)).toBe(0);
+  } finally {
+    if (previous === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previous;
+    fs.rmSync(sandbox, { recursive: true, force: true });
   }
 });

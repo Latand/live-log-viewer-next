@@ -1720,7 +1720,18 @@ function compactDeliveryOperationOwners(file: RegistryFile, onlyConversationId?:
   }
 }
 
-function compactDeliveryReservations(file: RegistryFile, onlyConversationId?: ViewerConversationId): number {
+/* Terminal deliveries only serve duplicate-send absorption; a week covers every
+   replay window while keeping thousands of dead rows out of the hot snapshot
+   (4.3k terminal rows from a single month froze the Viewer's event loop). */
+const TERMINAL_DELIVERY_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+function terminalDeliveryExpired(delivery: HeldDelivery, nowMs: number | undefined): boolean {
+  if (nowMs === undefined) return false;
+  const settledAt = Date.parse(delivery.deliveredAt ?? delivery.createdAt);
+  return Number.isFinite(settledAt) && nowMs - settledAt > TERMINAL_DELIVERY_RETENTION_MS;
+}
+
+function compactDeliveryReservations(file: RegistryFile, onlyConversationId?: ViewerConversationId, nowMs?: number): number {
   for (const delivery of Object.values(file.heldDeliveries)) {
     if (delivery.command.operationId === delivery.id || !delivery.requestDigest) continue;
     file.deliveryOperationOwners[delivery.command.operationId] ??= {
@@ -1754,6 +1765,20 @@ function compactDeliveryReservations(file: RegistryFile, onlyConversationId?: Vi
     }
   }
   let removed = 0;
+  for (const groups of [deliveredGroups, failedGroups]) {
+    for (const [conversationId, deliveries] of groups) {
+      const kept: HeldDelivery[] = [];
+      for (const delivery of deliveries) {
+        if (terminalDeliveryExpired(delivery, nowMs)) {
+          delete file.heldDeliveries[delivery.id];
+          removed += 1;
+        } else {
+          kept.push(delivery);
+        }
+      }
+      groups.set(conversationId, kept);
+    }
+  }
   for (const deliveries of deliveredGroups.values()) {
     deliveries.sort((left, right) => (right.deliveredAt ?? right.createdAt).localeCompare(left.deliveredAt ?? left.createdAt) || right.id.localeCompare(left.id));
     for (const expired of deliveries.slice(100)) {
@@ -2975,7 +3000,7 @@ export class AgentRegistry {
       }
       throw error;
     }
-    compactDeliveryReservations(file);
+    compactDeliveryReservations(file, undefined, this.now());
     if (serializeRegistry(file) !== original) writeAtomic(this.filename, file);
   }
 
@@ -5987,7 +6012,7 @@ export class AgentRegistry {
         deliveredAt: null,
         error: null,
       };
-      compactDeliveryReservations(file, canonicalId);
+      compactDeliveryReservations(file, canonicalId, this.now());
       const count = Object.values(file.heldDeliveries).filter((item) =>
         item.conversationId === canonicalId
         && ["held", "assigned", "delivery-uncertain"].includes(item.state)).length;
@@ -6051,7 +6076,7 @@ export class AgentRegistry {
   }
 
   compactDeliveryReservations(): number {
-    return this.mutate((file) => compactDeliveryReservations(file));
+    return this.mutate((file) => compactDeliveryReservations(file, undefined, this.now()));
   }
 
   queueSuccessorCleanup(conversationId: ViewerConversationId, receipt: ProviderReceipt): void {
@@ -6130,7 +6155,7 @@ export class AgentRegistry {
       if (state === "failed") failInitialSpawnReceiptForDelivery(file, delivery);
       if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
       const settled = clone(delivery);
-      if (state === "delivered" || state === "failed") compactDeliveryReservations(file, delivery.conversationId);
+      if (state === "delivered" || state === "failed") compactDeliveryReservations(file, delivery.conversationId, this.now());
       return settled;
     });
   }
@@ -6190,7 +6215,7 @@ export class AgentRegistry {
         return clone(delivery);
       });
       for (const compactConversationId of compactConversations) {
-        compactDeliveryReservations(file, compactConversationId);
+        compactDeliveryReservations(file, compactConversationId, this.now());
       }
       return settled;
     });

@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 2,
+  "policy": "synthetic-and-redacted-media-only",
+  "assets": [
+    {
+      "path": "01-rail-baseline.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "381443562519f94ec16a31c26dd1a82326db7a5b71bfdd8fd478e7bcecafc6d2",
+      "sourceDigests": [
+        "0ce4260df8412cfdd0605a1f938dad1e1a077838a7e7d4e89002cc0be807477e"
+      ],
+      "description": "Redacted placeholder for the pre-curation project rail baseline evidence.",
+      "sha256": "4516851f4bf1b49a094489f0600e18e57fd3ca1af16546f554e0cc3d0d70e7ae"
+    },
+    {
+      "path": "02-crown-reveal.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "381443562519f94ec16a31c26dd1a82326db7a5b71bfdd8fd478e7bcecafc6d2",
+      "sourceDigests": [
+        "e9a05fafd10d432fc1168f9bfd7ef2d3ac4eedff4bb0d5235c845fbab96d4889"
+      ],
+      "description": "Redacted placeholder for the per-row crown toggle reveal evidence.",
+      "sha256": "55fa4d070b3a142e2865cfd736a02c0639023bf2c4e6010015749f49aac94b17"
+    },
+    {
+      "path": "03-crown-pinned.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "381443562519f94ec16a31c26dd1a82326db7a5b71bfdd8fd478e7bcecafc6d2",
+      "sourceDigests": [
+        "b0f2e857db03ea1d7c03d3614fee24b08af92396862b626caa1f8c2543b21fce"
+      ],
+      "description": "Redacted placeholder for the crowned projects pinned-section evidence.",
+      "sha256": "7d086135c5f850b5594be2047b37caa23385e19ffe361725a5ac11e5fc5df38d"
+    },
+    {
+      "path": "04-crown-after-reload.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "381443562519f94ec16a31c26dd1a82326db7a5b71bfdd8fd478e7bcecafc6d2",
+      "sourceDigests": [
+        "b15bbe5cefaaf8a725ff671752d90c6fa1f70e340b01dc462290297cfc89d41b"
+      ],
+      "description": "Redacted placeholder for the crown durability after-reload evidence.",
+      "sha256": "0421756b096ff551a27fd2b0e5d208e934ba9ac8eeb3b61ad7e5bcf111bdb481"
+    },
+    {
+      "path": "05-create-form.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "381443562519f94ec16a31c26dd1a82326db7a5b71bfdd8fd478e7bcecafc6d2",
+      "sourceDigests": [
+        "45dee08733c3b30f1c0b33b6ecc286cc3fa62c80010b4b2bace16feb60d2a57f"
+      ],
+      "description": "Redacted placeholder for the rail create-project form evidence.",
+      "sha256": "7d086135c5f850b5594be2047b37caa23385e19ffe361725a5ac11e5fc5df38d"
+    },
+    {
+      "path": "06-created-project.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "381443562519f94ec16a31c26dd1a82326db7a5b71bfdd8fd478e7bcecafc6d2",
+      "sourceDigests": [
+        "574e93ebfd88dde8eb2cedd5e1b46886cc6fa30fe43118fbe8d17a46a2aacd0c"
+      ],
+      "description": "Redacted placeholder for the created-project empty board evidence.",
+      "sha256": "a0238b4b929d30d0e16ad90dc322bee82894c2ed61868f1b7efc9eb6f9473d14"
+    },
+    {
+      "path": "07-create-duplicate.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "381443562519f94ec16a31c26dd1a82326db7a5b71bfdd8fd478e7bcecafc6d2",
+      "sourceDigests": [
+        "e9b0a5fe68accb147434aa54b5603bc2ecc85fd4297921c748aa25569df4f385"
+      ],
+      "description": "Redacted placeholder for the duplicate-project refusal evidence.",
+      "sha256": "2fc5df3276a35d3f6ef2fbe4b28a6874354dd4e81d1315ee46794088cfee6a68"
+    },
+    {
+      "path": "08-create-form-uk.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "381443562519f94ec16a31c26dd1a82326db7a5b71bfdd8fd478e7bcecafc6d2",
+      "sourceDigests": [
+        "5a646dcead75e19c1df1dcc0b36319fe8e31796e30d83ec4d039d14ea0c415ee"
+      ],
+      "description": "Redacted placeholder for the Ukrainian create-project form evidence.",
+      "sha256": "9c5d1d5a1166233c8728c66978f790e1799ddf71f277bc337a39f63ac1835845"
+    }
+  ]
+}

@@ -59,6 +59,14 @@ const placeholders: Placeholder[] = [
   { path: "docs/issue-440/mobile-390x844-0-images.png", width: 390, height: 844, description: "Redacted placeholder for the 390-pixel focused-chat state without staged images." },
   { path: "docs/issue-440/mobile-390x844-1-image.png", width: 390, height: 844, description: "Redacted placeholder for the 390-pixel focused-chat state with one staged image." },
   { path: "docs/issue-440/mobile-390x844-multiple-images.png", width: 390, height: 844, description: "Redacted placeholder for the 390-pixel focused-chat state with multiple staged images." },
+  { path: "docs/acceptance/sidebar-crown-pin/01-rail-baseline.png", width: 1180, height: 760, description: "Redacted placeholder for the pre-curation project rail baseline evidence." },
+  { path: "docs/acceptance/sidebar-crown-pin/02-crown-reveal.png", width: 1180, height: 760, description: "Redacted placeholder for the per-row crown toggle reveal evidence." },
+  { path: "docs/acceptance/sidebar-crown-pin/03-crown-pinned.png", width: 1180, height: 760, description: "Redacted placeholder for the crowned projects pinned-section evidence." },
+  { path: "docs/acceptance/sidebar-crown-pin/04-crown-after-reload.png", width: 1180, height: 760, description: "Redacted placeholder for the crown durability after-reload evidence." },
+  { path: "docs/acceptance/sidebar-crown-pin/05-create-form.png", width: 1180, height: 760, description: "Redacted placeholder for the rail create-project form evidence." },
+  { path: "docs/acceptance/sidebar-crown-pin/06-created-project.png", width: 1180, height: 760, description: "Redacted placeholder for the created-project empty board evidence." },
+  { path: "docs/acceptance/sidebar-crown-pin/07-create-duplicate.png", width: 1180, height: 760, description: "Redacted placeholder for the duplicate-project refusal evidence." },
+  { path: "docs/acceptance/sidebar-crown-pin/08-create-form-uk.png", width: 1180, height: 760, description: "Redacted placeholder for the Ukrainian create-project form evidence." },
 ];
 
 const sourceDigests: Record<string, string> = {
@@ -107,6 +115,14 @@ const sourceDigests: Record<string, string> = {
   "docs/issue-440/mobile-390x844-0-images.png": "8718ea3f40922a6de8fb4b4f23ff99f48afac9528277a8228ffb1536ce6a2271",
   "docs/issue-440/mobile-390x844-1-image.png": "acab37f4364d4f30747f059e172ed03c1a280038babbc6484ecf072b211a18e6",
   "docs/issue-440/mobile-390x844-multiple-images.png": "fe7c6da0ea52de3acf668287b27615f4481c17d1c5b8eaa8854336c792efedea",
+  "docs/acceptance/sidebar-crown-pin/01-rail-baseline.png": "0ce4260df8412cfdd0605a1f938dad1e1a077838a7e7d4e89002cc0be807477e",
+  "docs/acceptance/sidebar-crown-pin/02-crown-reveal.png": "e9a05fafd10d432fc1168f9bfd7ef2d3ac4eedff4bb0d5235c845fbab96d4889",
+  "docs/acceptance/sidebar-crown-pin/03-crown-pinned.png": "b0f2e857db03ea1d7c03d3614fee24b08af92396862b626caa1f8c2543b21fce",
+  "docs/acceptance/sidebar-crown-pin/04-crown-after-reload.png": "b15bbe5cefaaf8a725ff671752d90c6fa1f70e340b01dc462290297cfc89d41b",
+  "docs/acceptance/sidebar-crown-pin/05-create-form.png": "45dee08733c3b30f1c0b33b6ecc286cc3fa62c80010b4b2bace16feb60d2a57f",
+  "docs/acceptance/sidebar-crown-pin/06-created-project.png": "574e93ebfd88dde8eb2cedd5e1b46886cc6fa30fe43118fbe8d17a46a2aacd0c",
+  "docs/acceptance/sidebar-crown-pin/07-create-duplicate.png": "e9b0a5fe68accb147434aa54b5603bc2ecc85fd4297921c748aa25569df4f385",
+  "docs/acceptance/sidebar-crown-pin/08-create-form-uk.png": "5a646dcead75e19c1df1dcc0b36319fe8e31796e30d83ec4d039d14ea0c415ee",
 };
 
 const root = resolve(import.meta.dir, "..");
