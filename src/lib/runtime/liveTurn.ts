@@ -1,6 +1,7 @@
 export const LIVE_TURN_TEXT_LIMIT = 64 * 1024;
 export const LIVE_TURN_ITEM_LIMIT = 32;
 export const LIVE_TURN_OVERFLOW_LIMIT = 512;
+const LIVE_TURN_TOOL_TEXT_FLOOR = 96;
 
 export type RuntimeLiveTurnItemPhase = "streaming" | "awaiting-echo";
 export type RuntimeLiveTurnItemKind = "assistant" | "tool";
@@ -9,6 +10,8 @@ export type RuntimeLiveTurnToolEngine = "claude" | "codex";
 export interface RuntimeLiveTurnItem {
   /** Missing only on legacy snapshots, which normalize to assistant prose. */
   kind?: RuntimeLiveTurnItemKind;
+  /** Durable projection identity used only for row reconciliation. */
+  rowId?: string;
   itemId: string | null;
   /** Assistant prose, or serialized tool arguments for a tool item. */
   text: string;
@@ -53,6 +56,52 @@ function trimUtf8Start(value: string, bytes: number): {
   };
 }
 
+function boundedToolJson(value: string, maxBytes: number): string {
+  if (maxBytes < 2) return "";
+  let source: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return "";
+    source = parsed as Record<string, unknown>;
+  } catch {
+    return "";
+  }
+  if (utf8Length(value) <= maxBytes) return value;
+  const result: Record<string, unknown> = {};
+  for (const [key, candidate] of Object.entries(source)) {
+    const complete = JSON.stringify({ ...result, [key]: candidate });
+    if (utf8Length(complete) <= maxBytes) {
+      result[key] = candidate;
+      continue;
+    }
+    if (typeof candidate !== "string") continue;
+    const points = [...candidate];
+    let low = 0;
+    let high = points.length;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      const trial = JSON.stringify({ ...result, [key]: points.slice(0, middle).join("") });
+      if (utf8Length(trial) <= maxBytes) low = middle;
+      else high = middle - 1;
+    }
+    const trial = JSON.stringify({ ...result, [key]: points.slice(0, low).join("") });
+    if (utf8Length(trial) <= maxBytes) result[key] = points.slice(0, low).join("");
+  }
+  const serialized = JSON.stringify(result);
+  return utf8Length(serialized) <= maxBytes ? serialized : "";
+}
+
+function trimToolText(value: string, maxBytes: number): {
+  omittedChars: number;
+  text: string;
+} {
+  const boundedText = boundedToolJson(value, maxBytes);
+  return {
+    omittedChars: Math.max(0, [...value].length - [...boundedText].length),
+    text: boundedText,
+  };
+}
+
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -81,11 +130,13 @@ function contentText(value: unknown): string {
 
 interface ProjectedItem {
   kind: RuntimeLiveTurnItemKind;
+  rowId?: string;
   itemId: string | null;
   text: string;
   toolName?: string;
   toolEngine?: RuntimeLiveTurnToolEngine;
   lifecycle?: "started" | "completed";
+  omittedChars?: number;
 }
 
 function serializedToolArgs(value: unknown): string {
@@ -112,6 +163,7 @@ function projectedTool(
 ): ProjectedItem {
   return {
     kind: "tool",
+    ...(itemId ? { rowId: `tool:${itemId}` } : {}),
     itemId,
     text: serializedToolArgs(toolArgs(args)),
     toolName: toolName.slice(0, 256) || "tool",
@@ -194,13 +246,21 @@ function itemIdentities(value: unknown): ProjectedItem[] {
     ? item.content
     : Array.isArray(message?.content) ? message.content : null;
   if (assistant && content) {
-    return content.flatMap((value): ProjectedItem[] => {
+    return content.flatMap((value, blockIndex): ProjectedItem[] => {
       const part = record(value);
       if (!part) return [];
       const partType = text(part.type);
       if (partType === "text" || partType === "input_text" || partType === "output_text") {
         const prose = text(part.text);
-        return prose ? [{ kind: "assistant", itemId: parentId, text: prose }] : [];
+        return prose ? [{
+          kind: "assistant",
+          ...(parentId ? { rowId: `assistant:${parentId}:${blockIndex}` } : {}),
+          itemId: parentId,
+          text: prose,
+          ...(typeof part.omittedChars === "number" && part.omittedChars > 0
+            ? { omittedChars: Math.floor(part.omittedChars) }
+            : {}),
+        }] : [];
       }
       if (partType === "tool_use") {
         return [{
@@ -219,6 +279,7 @@ function itemIdentities(value: unknown): ProjectedItem[] {
   if (assistant) {
     return [{
       kind: "assistant",
+      ...(parentId ? { rowId: `assistant:${parentId}` } : {}),
       itemId: parentId,
       text: text(item.text) || contentText(item.content) || contentText(message?.content),
     }];
@@ -229,6 +290,7 @@ function itemIdentities(value: unknown): ProjectedItem[] {
     return part && text(part.type) === "tool_result"
       ? [{
         kind: "tool",
+        ...(text(part.tool_use_id) ? { rowId: `tool:${text(part.tool_use_id)}` } : {}),
         itemId: text(part.tool_use_id) || null,
         text: "",
         toolName: "tool",
@@ -251,6 +313,7 @@ function normalizedList(value: unknown): RuntimeLiveTurnItem[] {
         && (item.kind === "tool" || item.text.length > 0 || (item.omittedChars ?? 0) > 0 || (item.omittedItems ?? 0) > 0))
       .map((item) => ({
         kind: item.kind === "tool" ? "tool" as const : "assistant" as const,
+        ...(typeof item.rowId === "string" && item.rowId ? { rowId: item.rowId } : {}),
         itemId: typeof item.itemId === "string" ? item.itemId : null,
         text: item.text,
         ...(item.kind === "tool"
@@ -296,6 +359,7 @@ function bounded(turnId: string, items: RuntimeLiveTurnItem[]): RuntimeLiveTurn 
   let kept = omitted.length
     ? [{
       kind: "assistant" as const,
+      rowId: `overflow:${turnId}:${omittedCount}`,
       itemId: null,
       text: "",
       phase: "awaiting-echo" as const,
@@ -312,7 +376,12 @@ function bounded(turnId: string, items: RuntimeLiveTurnItem[]): RuntimeLiveTurn 
     kept = kept.map((item) => {
       if (excess <= 0) return item;
       const before = utf8Length(item.text);
-      const trimmed = trimUtf8Start(item.text, excess);
+      const floor = item.kind === "tool" ? Math.min(before, LIVE_TURN_TOOL_TEXT_FLOOR) : 0;
+      const removedBytes = Math.min(excess, Math.max(0, before - floor));
+      const retainedBytes = before - removedBytes;
+      const trimmed = item.kind === "tool"
+        ? trimToolText(item.text, retainedBytes)
+        : trimUtf8Start(item.text, removedBytes);
       excess -= before - utf8Length(trimmed.text);
       return {
         ...item,
@@ -377,6 +446,7 @@ export function appendRuntimeLiveTurnDelta(
     ? [...current.slice(0, -1), { ...latest, kind: "assistant" as const, text: latest.text + fragment }]
     : [...current, {
       kind: "assistant" as const,
+      rowId: `assistant:${turnId}:${current.length}:${occurredAt ?? "live"}`,
       itemId: null,
       text: fragment,
       phase: "streaming" as const,
@@ -418,7 +488,7 @@ export function projectRuntimeLiveTurnItem(
            suffixes and may legitimately rewrite a divergent draft. Tool-result
            records carry no arguments and retain the call summary already shown. */
         text: identity.text || existing.text,
-        ...(identity.text ? { omittedChars: undefined } : {}),
+        ...(identity.text ? { omittedChars: identity.omittedChars } : {}),
         ...(identity.kind === "tool" ? {
           toolName: preserveToolName ? existing.toolName : identity.toolName,
           toolEngine: identity.toolEngine,
@@ -444,7 +514,7 @@ export function projectRuntimeLiveTurnItem(
           kind: "assistant",
           itemId: identity.itemId,
           text: identity.text || latest.text,
-          ...(identity.text ? { omittedChars: undefined } : {}),
+          ...(identity.text ? { omittedChars: identity.omittedChars } : {}),
           phase: "awaiting-echo",
           completedAt: occurredAt,
         },
@@ -455,6 +525,8 @@ export function projectRuntimeLiveTurnItem(
     if (identity.kind === "assistant" && !identity.text) continue;
     current = [...current, {
       ...identity,
+      rowId: identity.rowId
+        ?? `${identity.kind}:${turnId}:${current.length}:${identity.itemId ?? occurredAt ?? "live"}`,
       phase,
       startedAt: occurredAt,
       completedAt: identityLifecycle === "completed" ? occurredAt : null,

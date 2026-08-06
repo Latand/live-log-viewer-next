@@ -135,6 +135,24 @@ function boundedCodexToolItem(source: JsonObject, type: string): unknown | null 
   return null;
 }
 
+function boundedText(value: string, maxBytes: number): { text: string; omittedChars: number } {
+  if (Buffer.byteLength(value) <= maxBytes) return { text: value, omittedChars: 0 };
+  const points = [...value];
+  if (maxBytes < Buffer.byteLength("…")) return { text: "", omittedChars: points.length };
+  let low = 0;
+  let high = points.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    const candidate = `${points.slice(0, middle).join("")}…`;
+    if (Buffer.byteLength(candidate) <= maxBytes) low = middle;
+    else high = middle - 1;
+  }
+  return {
+    text: `${points.slice(0, low).join("")}…`,
+    omittedChars: points.length - low,
+  };
+}
+
 function boundedClaudeToolItem(source: JsonObject): unknown | null {
   const message = record(source.message);
   const content = Array.isArray(source.content)
@@ -144,19 +162,45 @@ function boundedClaudeToolItem(source: JsonObject): unknown | null {
     const type = text(record(candidate).type);
     return type === "tool_use" || type === "tool_result";
   })) return null;
-  const payloadBytes = Math.max(256, Math.floor((40 * 1024) / Math.max(content.length, 1)));
-  const projectedContent = content.flatMap((candidate): JsonObject[] => {
+  const toolCount = content.filter((candidate) => text(record(candidate).type) === "tool_use").length;
+  const toolBytes = toolCount > 0 ? Math.max(64, Math.floor((8 * 1024) / toolCount)) : 0;
+  const projectedToolInputs = content.map((candidate) => {
+    const part = record(candidate);
+    return text(part.type) === "tool_use"
+      ? boundedToolArguments(part.input, toolBytes)
+      : null;
+  });
+  const usedToolBytes = projectedToolInputs.reduce<number>((total, input) =>
+    total + (input === null ? 0 : Buffer.byteLength(JSON.stringify(input))), 0);
+  const textBudget = Math.max(0, 40 * 1024 - usedToolBytes);
+  const totalTextBytes = content.reduce((total, candidate) => {
+    const part = record(candidate);
+    const type = text(part.type);
+    return type === "text" || type === "input_text" || type === "output_text"
+      ? total + Buffer.byteLength(text(part.text) ?? "")
+      : total;
+  }, 0);
+  const projectedContent = content.flatMap((candidate, index): JsonObject[] => {
     const part = record(candidate);
     const type = text(part.type);
     if (type === "text" || type === "input_text" || type === "output_text") {
-      return [{ type, ...(text(part.text) ? { text: clipped(text(part.text)!, payloadBytes) } : {}) }];
+      const prose = text(part.text) ?? "";
+      const payloadBytes = totalTextBytes <= textBudget
+        ? Buffer.byteLength(prose)
+        : Math.floor(textBudget * (Buffer.byteLength(prose) / Math.max(totalTextBytes, 1)));
+      const bounded = boundedText(prose, payloadBytes);
+      return [{
+        type,
+        ...(bounded.text ? { text: bounded.text } : {}),
+        ...(bounded.omittedChars > 0 ? { omittedChars: bounded.omittedChars } : {}),
+      }];
     }
     if (type === "tool_use") {
       return [{
         type,
         ...(text(part.id) ? { id: clipped(text(part.id)!, 256) } : {}),
         ...(text(part.name) ? { name: clipped(text(part.name)!, 256) } : {}),
-        input: boundedToolArguments(part.input, payloadBytes),
+        input: projectedToolInputs[index] ?? {},
       }];
     }
     if (type === "tool_result") {

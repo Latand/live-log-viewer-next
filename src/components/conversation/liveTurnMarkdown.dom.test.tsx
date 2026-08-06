@@ -5,7 +5,12 @@ import { createRoot, type Root } from "react-dom/client";
 import type { ReactNode } from "react";
 
 import { setLocale } from "@/lib/i18n";
-import type { RuntimeLiveTurnItem, RuntimeLiveTurnItemPhase } from "@/lib/runtime/liveTurn";
+import {
+  projectRuntimeLiveTurnItem,
+  runtimeLiveTurnItems,
+  type RuntimeLiveTurnItem,
+  type RuntimeLiveTurnItemPhase,
+} from "@/lib/runtime/liveTurn";
 import { advanceMdStream, createMdStream, mdBlocks, type MdStreamState } from "@/components/feed/markdown";
 
 import { LiveTurnRows } from "./LiveTurnRows";
@@ -127,6 +132,42 @@ test("a live tool row renders its readable summary in response order between ass
   expect(rows[1]?.textContent).not.toContain("workdir");
   expect(rows[1]?.querySelector("svg")).not.toBeNull();
   expect(consoleErrors).not.toContain("same key");
+});
+
+test("aggregate trimming keeps every live tool argument valid and its command head readable", () => {
+  let live = projectRuntimeLiveTurnItem(null, "turn-large-tools", {
+    type: "commandExecution",
+    id: "large-command-one",
+    command: `printf first-live-command ${"x".repeat(48 * 1024)}`,
+  }, "started");
+  live = projectRuntimeLiveTurnItem(live, "turn-large-tools", {
+    type: "commandExecution",
+    id: "large-command-two",
+    command: `printf second-live-command ${"y".repeat(48 * 1024)}`,
+  }, "started");
+  const items = runtimeLiveTurnItems(live);
+  expect(items).toHaveLength(2);
+  for (const liveItem of items) expect(() => JSON.parse(liveItem.text)).not.toThrow();
+  expect(items.reduce((bytes, liveItem) => bytes + new TextEncoder().encode(liveItem.text).length, 0))
+    .toBeLessThanOrEqual(64 * 1024);
+
+  const { host, root } = mount();
+  paint(root, <LiveTurnRows items={items} />);
+  const rows = [...host.querySelectorAll<HTMLElement>("[data-live-turn]")];
+  expect(rows.map((row) => row.textContent)).toEqual([
+    expect.stringContaining("printf first-live-command"),
+    expect.stringContaining("printf second-live-command"),
+  ]);
+});
+
+test("claiming an earlier row preserves the surviving live row DOM node", () => {
+  const first = item("First", "awaiting-echo", { itemId: "shared-response", rowId: "first-block" });
+  const second = item("Second", "awaiting-echo", { itemId: "shared-response", rowId: "second-block" });
+  const { host, root } = mount();
+  paint(root, <LiveTurnRows items={[first, second]} />);
+  const secondNode = host.querySelectorAll("[data-live-turn]")[1];
+  paint(root, <LiveTurnRows items={[second]} />);
+  expect(host.querySelector("[data-live-turn]")).toBe(secondNode);
 });
 
 test("streaming a message delta by delta lands on exactly the settled rendering", () => {

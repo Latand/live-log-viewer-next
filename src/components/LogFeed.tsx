@@ -563,8 +563,8 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   useEffect(() => {
     if (!memoryKey || !file) return;
     adoptCanonicalAssistantClaims(file.path, memoryKey);
-    publishCanonicalAssistantClaims(memoryKey, feed.items);
-  }, [file, memoryKey, feed.items]);
+    publishCanonicalAssistantClaims(memoryKey, feed.items, runtimeLiveTurn);
+  }, [file, memoryKey, feed.items, runtimeLiveTurn]);
   const visibleLiveTurnItems = useMemo(
     () => visibleRuntimeLiveTurnItems(runtimeLiveTurn, feed.items, assistantClaims, runtimeTurn),
     [runtimeLiveTurn, feed.items, assistantClaims, runtimeTurn],

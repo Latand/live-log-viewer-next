@@ -2,7 +2,8 @@ import { beforeEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 
 import type { FeedEntry } from "@/components/feed/parse";
-import type { RuntimeLiveTurn } from "@/lib/runtime/liveTurn";
+import { setLocale } from "@/lib/i18n";
+import type { RuntimeLiveTurn, RuntimeLiveTurnItem } from "@/lib/runtime/liveTurn";
 
 import {
   adoptCanonicalAssistantClaims,
@@ -13,7 +14,8 @@ import {
 } from "./liveTurnHandoff";
 
 const dom = new Window({ url: "http://localhost/" });
-Object.assign(globalThis, { window: dom, sessionStorage: dom.sessionStorage });
+Object.assign(globalThis, { window: dom, navigator: dom.navigator, sessionStorage: dom.sessionStorage });
+setLocale("en");
 
 beforeEach(() => {
   dom.sessionStorage.clear();
@@ -108,13 +110,14 @@ test("issue 626: mixed projections claim one assistant response once", () => {
 });
 
 test("a canonical tool card claims its live tool row during the running turn and after feed eviction", () => {
-  const toolId = "tool-claim-live";
+  const liveToolId = "exec-tool-claim-live";
+  const canonicalToolId = "call_tool_claim_live";
   const live: RuntimeLiveTurn = {
     turnId: "turn-tool-claim",
     text: "",
     items: [{
       kind: "tool",
-      itemId: toolId,
+      itemId: liveToolId,
       text: JSON.stringify({ cmd: "bun test src/components/conversation/liveTurnHandoff.test.ts" }),
       toolName: "exec_command",
       toolEngine: "codex",
@@ -128,7 +131,7 @@ test("a canonical tool card claims its live tool row during the running turn and
     key: "30:0",
     item: {
       kind: "tool",
-      id: toolId,
+      id: canonicalToolId,
       ts: "2026-08-06T09:20:00.100Z",
       srcCall: 30,
       family: "shell",
@@ -144,21 +147,80 @@ test("a canonical tool card claims its live tool row during the running turn and
     },
   }] as FeedEntry[];
 
-  publishCanonicalAssistantClaims("conversation-tool-claim", canonicalFeed);
+  publishCanonicalAssistantClaims("conversation-tool-claim", canonicalFeed, live);
   const persisted = readCanonicalAssistantClaims("conversation-tool-claim");
-  expect([...persisted]).toEqual([toolId]);
+  expect([...persisted]).toEqual([canonicalToolId, liveToolId]);
   expect(visibleRuntimeLiveTurnItems(live, canonicalFeed, persisted, "running")).toEqual([]);
   expect(visibleRuntimeLiveTurnItems(live, [], persisted, "running")).toEqual([]);
 });
 
 test("a canonical command group publishes claims for every grouped tool call", () => {
+  const live: RuntimeLiveTurn = {
+    turnId: "turn-grouped-tools",
+    text: "",
+    items: [
+      {
+        kind: "tool",
+        itemId: "exec-grouped-command",
+        text: JSON.stringify({ cmd: "printf grouped-command" }),
+        toolName: "exec_command",
+        toolEngine: "codex",
+        phase: "awaiting-echo",
+        startedAt: "2026-08-06T09:21:00.000Z",
+        completedAt: null,
+      },
+      {
+        kind: "tool",
+        itemId: "exec-grouped-read",
+        text: JSON.stringify({ file_path: "src/lib/runtime/liveTurn.ts" }),
+        toolName: "Read",
+        toolEngine: "codex",
+        phase: "awaiting-echo",
+        startedAt: "2026-08-06T09:21:01.000Z",
+        completedAt: null,
+      },
+    ],
+  };
   const groupedFeed = [{
     anchorKey: "row:40:0",
     key: "40:0",
     item: {
       kind: "cmd-group",
       ids: ["grouped-command", "grouped-read"],
-      calls: [],
+      calls: [
+        {
+          kind: "tool",
+          id: "grouped-command",
+          ts: "2026-08-06T09:21:00.000Z",
+          srcCall: 40,
+          family: "shell",
+          tool: "exec_command",
+          icon: "shell",
+          summary: "printf grouped-command",
+          chips: [],
+          status: "ok",
+          statusLabel: "Completed",
+          outputPreview: "",
+          outputTruncated: false,
+          open: false,
+        },
+        {
+          kind: "tool",
+          id: "grouped-read",
+          ts: "2026-08-06T09:21:01.000Z",
+          srcCall: 41,
+          family: "read",
+          tool: "Read",
+          icon: "file",
+          summary: "Read liveTurn.ts",
+          chips: [],
+          status: "ok",
+          statusLabel: "Completed",
+          outputPreview: "",
+          outputTruncated: false,
+          open: false,
+        },
+      ],
       t0: "2026-08-06T09:21:00.000Z",
       t1: "2026-08-06T09:21:01.000Z",
       byTool: { exec_command: 1, Read: 1 },
@@ -169,10 +231,12 @@ test("a canonical command group publishes claims for every grouped tool call", (
     },
   }] as FeedEntry[];
 
-  publishCanonicalAssistantClaims("conversation-grouped-tools", groupedFeed);
+  publishCanonicalAssistantClaims("conversation-grouped-tools", groupedFeed, live);
   expect([...readCanonicalAssistantClaims("conversation-grouped-tools")]).toEqual([
     "grouped-command",
     "grouped-read",
+    "exec-grouped-command",
+    "exec-grouped-read",
   ]);
 });
 
@@ -210,4 +274,93 @@ test("a canonical outgoing teammate message claims its live SendMessage tool row
   const persisted = readCanonicalAssistantClaims("conversation-send-message");
   expect([...persisted]).toEqual([toolId]);
   expect(visibleRuntimeLiveTurnItems(live, canonicalFeed, persisted, "running")).toEqual([]);
+});
+
+test("an exact tool id keeps priority over an older semantic alias collision", () => {
+  const command = "printf repeated-command";
+  const tool = (itemId: string): RuntimeLiveTurnItem => ({
+    kind: "tool",
+    itemId,
+    text: JSON.stringify({ cmd: command }),
+    toolName: "exec_command",
+    toolEngine: "codex",
+    phase: "streaming",
+    startedAt: null,
+    completedAt: null,
+  });
+  const live: RuntimeLiveTurn = {
+    turnId: "turn-exact-priority",
+    text: "",
+    items: [tool("exec-older"), tool("call_exact_owner")],
+  };
+  const canonicalFeed = [{
+    anchorKey: "row:60:0",
+    key: "60:0",
+    item: {
+      kind: "tool",
+      id: "call_exact_owner",
+      ts: null,
+      srcCall: 60,
+      family: "shell",
+      tool: "exec_command",
+      icon: "shell",
+      summary: command,
+      chips: [],
+      status: "run",
+      statusLabel: "Executing",
+      outputPreview: "",
+      outputTruncated: false,
+      open: false,
+    },
+  }] as FeedEntry[];
+
+  publishCanonicalAssistantClaims("conversation-exact-priority", canonicalFeed, live);
+  const persisted = readCanonicalAssistantClaims("conversation-exact-priority");
+  expect([...persisted]).toEqual(["call_exact_owner"]);
+  expect(visibleRuntimeLiveTurnItems(live, canonicalFeed, persisted, "running").map((item) => item.itemId))
+    .toEqual(["exec-older"]);
+});
+
+test("an old transcript command cannot claim a newer identical live command", () => {
+  const command = "printf repeated-command";
+  const live: RuntimeLiveTurn = {
+    turnId: "turn-new-command",
+    text: "",
+    items: [{
+      kind: "tool",
+      itemId: "exec-new-command",
+      text: JSON.stringify({ cmd: command }),
+      toolName: "exec_command",
+      toolEngine: "codex",
+      phase: "streaming",
+      startedAt: "2026-08-06T10:00:00.000Z",
+      completedAt: null,
+    }],
+  };
+  const oldFeed = [{
+    anchorKey: "row:70:0",
+    key: "70:0",
+    item: {
+      kind: "tool",
+      id: "call_old_command",
+      ts: "2026-08-06T09:59:55.000Z",
+      srcCall: 70,
+      family: "shell",
+      tool: "exec_command",
+      icon: "shell",
+      summary: command,
+      chips: [],
+      status: "ok",
+      statusLabel: "Completed",
+      outputPreview: "",
+      outputTruncated: false,
+      open: false,
+    },
+  }] as FeedEntry[];
+
+  publishCanonicalAssistantClaims("conversation-new-command", oldFeed, live);
+  const persisted = readCanonicalAssistantClaims("conversation-new-command");
+  expect([...persisted]).toEqual(["call_old_command"]);
+  expect(visibleRuntimeLiveTurnItems(live, oldFeed, persisted, "running").map((item) => item.itemId))
+    .toEqual(["exec-new-command"]);
 });
