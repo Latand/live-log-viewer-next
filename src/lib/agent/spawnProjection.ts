@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import type { RegistryFile, SpawnReceipt } from "./registry";
+import { readOnlyConversationLookupFromSnapshot, type RegistryFile, type SpawnReceipt } from "./registry";
 import { projectRootForCwd } from "@/lib/scanner/describe";
 import { resolveProjectAttribution } from "@/lib/session/projectResolution";
 import type { FileEntry, StructuredSpawnCardState } from "@/lib/types";
@@ -25,10 +25,31 @@ function retiredTerminalReceipt(receipt: SpawnReceipt, nowMs: number): boolean {
   return Number.isFinite(createdMs) && nowMs - createdMs >= PLACEHOLDER_RETIREMENT_MS;
 }
 
+function launchIdentity(snapshot: RegistryFile, receipt: SpawnReceipt): { conversationId: string; generation?: number } {
+  const lookup = readOnlyConversationLookupFromSnapshot(snapshot);
+  const conversationId = lookup.canonicalConversationId(receipt.conversationId);
+  const conversation = lookup.conversation(conversationId);
+  const generationIndex = receipt.key
+    ? conversation?.generations.findIndex((generation) => generation.id === receipt.key?.sessionId) ?? -1
+    : -1;
+  if (generationIndex >= 0) return { conversationId, generation: generationIndex + 1 };
+  /* A fresh launch allocates generation one before the provider gives it a
+     native id. Any receipt that already has a key, or targets a conversation
+     with existing generations, is ambiguous when that key cannot be located and
+     therefore projects no generation for the client join. */
+  if (!receipt.key && (!conversation || conversation.generations.length === 0)) {
+    return { conversationId, generation: 1 };
+  }
+  return { conversationId };
+}
+
 function initialDelivery(snapshot: RegistryFile, receipt: SpawnReceipt) {
+  const launch = launchIdentity(snapshot, receipt);
+  const lookup = readOnlyConversationLookupFromSnapshot(snapshot);
   return Object.values(snapshot.heldDeliveries).find((delivery) =>
-    delivery.conversationId === receipt.conversationId
-      && delivery.clientMessageId === `spawn_${receipt.launchId}`) ?? null;
+    lookup.canonicalConversationId(delivery.conversationId) === launch.conversationId
+      && delivery.clientMessageId === `spawn_${receipt.launchId}`
+      && delivery.command.operationId === `spawn_message_${receipt.launchId}`) ?? null;
 }
 
 /** The launch DISPLAY payload projected as the conversation's first user bubble
@@ -54,6 +75,7 @@ function launchPromptOf(
 
 function cardState(snapshot: RegistryFile, receipt: SpawnReceipt): StructuredSpawnCardState {
   const delivery = initialDelivery(snapshot, receipt);
+  const identity = launchIdentity(snapshot, receipt);
   const failed = receipt.state === "failed" || receipt.state === "conflicted";
   const delivered = delivery?.state === "delivered" || receipt.state === "completed";
   const queued = Boolean(delivery)
@@ -94,7 +116,8 @@ function cardState(snapshot: RegistryFile, receipt: SpawnReceipt): StructuredSpa
     clientAttemptId: receipt.clientAttemptId,
     accountId: receipt.accountId,
     accountPin: receipt.accountPin,
-    conversationId: receipt.conversationId,
+    conversationId: identity.conversationId,
+    ...(identity.generation !== undefined ? { generation: identity.generation } : {}),
     state,
     initialMessage,
     retrySafe: receipt.state === "failed",
@@ -138,7 +161,9 @@ function materializedEntry(
   snapshot: RegistryFile,
   receipt: SpawnReceipt,
 ): FileEntry | null {
-  const generations = snapshot.conversations[receipt.conversationId]?.generations ?? [];
+  const lookup = readOnlyConversationLookupFromSnapshot(snapshot);
+  const conversationId = lookup.canonicalConversationId(receipt.conversationId);
+  const generations = lookup.conversation(conversationId)?.generations ?? [];
   for (let index = generations.length - 1; index >= 0; index -= 1) {
     const candidate = byPath.get(generations[index]!.path);
     if (candidate && !isSpawnPlaceholderPath(candidate.path)) return candidate;
@@ -147,7 +172,7 @@ function materializedEntry(
     const candidate = byPath.get(receipt.artifactPath);
     if (candidate && !isSpawnPlaceholderPath(candidate.path)) return candidate;
   }
-  return files.find((file) => file.conversationId === receipt.conversationId && !isSpawnPlaceholderPath(file.path)) ?? null;
+  return files.find((file) => file.conversationId === conversationId && !isSpawnPlaceholderPath(file.path)) ?? null;
 }
 
 /** A projected launch placeholder path (`spawn:<launchId>`). */
@@ -171,9 +196,10 @@ function allLaunchReceipts(snapshot: RegistryFile): SpawnReceipt[] {
  * never what a deep link RESOLVES to.
  */
 function allLaunchRoutes(snapshot: RegistryFile): Record<string, string> {
+  const lookup = readOnlyConversationLookupFromSnapshot(snapshot);
   const routes: Record<string, string> = {};
   for (const receipt of allLaunchReceipts(snapshot)) {
-    routes[`spawn:${receipt.launchId}`] = receipt.conversationId;
+    routes[`spawn:${receipt.launchId}`] = lookup.canonicalConversationId(receipt.conversationId);
   }
   return routes;
 }
@@ -185,10 +211,12 @@ function allLaunchRoutes(snapshot: RegistryFile): Record<string, string> {
     This governs CARDS and CHIPS only — routing spans every retained receipt via
     {@link allLaunchRoutes}. */
 function newestLaunchReceipts(snapshot: RegistryFile, nowMs: number): SpawnReceipt[] {
+  const lookup = readOnlyConversationLookupFromSnapshot(snapshot);
   const byConversation = new Map<string, SpawnReceipt>();
   for (const receipt of allLaunchReceipts(snapshot)) {
-    const current = byConversation.get(receipt.conversationId);
-    if (!current || current.createdAt < receipt.createdAt) byConversation.set(receipt.conversationId, receipt);
+    const conversationId = lookup.canonicalConversationId(receipt.conversationId);
+    const current = byConversation.get(conversationId);
+    if (!current || current.createdAt < receipt.createdAt) byConversation.set(conversationId, receipt);
   }
   return [...byConversation.values()].filter((receipt) => !retiredTerminalReceipt(receipt, nowMs));
 }
@@ -316,9 +344,10 @@ function spawnCard(
   scannedPaths: ReadonlySet<string>,
   nowMs: number,
 ): FileEntry {
+  const conversationId = spawn.conversationId ?? receipt.conversationId;
   /* Pre-admission cards honor the explicit operator project the moment the
      receipt exists; once admitted, the conversation record is authoritative. */
-  const projectOwnership = snapshot.conversations[receipt.conversationId]?.projectOwnership
+  const projectOwnership = snapshot.conversations[conversationId]?.projectOwnership
     ?? (receipt.explicitProject
       ? { project: receipt.explicitProject, source: "operator" as const, setAt: receipt.createdAt, operationId: receipt.launchId }
       : null);
@@ -328,12 +357,12 @@ function spawnCard(
     launchProfileProject: receipt.launchProfile.project,
     fallbackProject: path.basename(receipt.cwd),
   });
-  const edge = snapshot.lineageEdges[receipt.conversationId];
+  const edge = snapshot.lineageEdges[conversationId];
   const parentConversationId = edge?.parentConversationId ?? receipt.parentConversationId;
   const parentPath = parentConversationId
     ? snapshot.conversations[parentConversationId]?.generations.at(-1)?.path ?? null
     : null;
-  const memberships = snapshot.memberships[receipt.conversationId] ?? [];
+  const memberships = snapshot.memberships[conversationId] ?? [];
   return {
     path: `spawn:${receipt.launchId}`,
     root: receipt.engine === "codex" ? "codex-sessions" : "claude-projects",
@@ -365,7 +394,8 @@ function spawnCard(
     plan: receipt.launchProfile.plan,
     goal: receipt.launchProfile.goal,
     waitingInput: null,
-    conversationId: receipt.conversationId,
+    conversationId,
+    generation: spawn.generation,
     ...(edge || memberships.length ? {
       durableLineage: {
         kind: edge?.kind ?? "spawn",

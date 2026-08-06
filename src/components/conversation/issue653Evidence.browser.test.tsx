@@ -111,6 +111,7 @@ function baseFile(over: Partial<FileEntry>): FileEntry {
     pendingQuestion: null,
     waitingInput: null,
     conversationId: PANE_CONVERSATION,
+    generation: 1,
     ...over,
   } as FileEntry;
 }
@@ -120,6 +121,7 @@ function baseFile(over: Partial<FileEntry>): FileEntry {
 const FOREIGN_LAUNCH: StructuredSpawnCardState = {
   launchId: "launch_653_foreign",
   clientAttemptId: null, accountId: "acct_reviewer", conversationId: FOREIGN_CONVERSATION,
+  generation: 1,
   state: "queued", initialMessage: "queued", retrySafe: false, error: null,
   promptImages: 0, promptAt: PROMPT_AT, prompt: FOREIGN_PROMPT, promptEcho: FOREIGN_PROMPT,
 };
