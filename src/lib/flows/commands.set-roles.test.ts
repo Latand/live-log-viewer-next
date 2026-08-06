@@ -47,6 +47,42 @@ test("set-roles re-configures the reviewer for the next round and persists", () 
   expect(loadFlows()[0]!.roles.reviewer.model).toBe("gpt-5-codex");
 });
 
+test("resuming a known legacy pre-actuation relay failure clears its stale checkpoint", () => {
+  seed({
+    state: "paused",
+    pausedState: "relaying",
+    stateDetail: "structured resume host claim is unavailable",
+    rounds: [{
+      n: 3,
+      reviewerPath: "/reviewer",
+      reviewerConversationId: null,
+      reviewerBindingId: "reviewer-binding-3",
+      findingsPath: "/findings",
+      triggeredBy: "marker",
+      readyNote: null,
+      verdict: "REQUEST_CHANGES",
+      findingsCount: 1,
+      startedAt: "2026-08-05T20:00:00.000Z",
+      relayStartedAt: "2026-08-05T20:47:08.000Z",
+      relayDeliveryTransport: null,
+      relayDelivery: null,
+      reviewedAt: "2026-08-05T20:47:07.961Z",
+      relayedAt: null,
+      error: "structured resume host claim is unavailable",
+    }],
+  });
+
+  const resumed = patchFlow("f1", { action: "resume" }).flow!;
+
+  expect(resumed).toMatchObject({ state: "relaying", pausedState: null, stateDetail: null });
+  expect(resumed.rounds[0]).toMatchObject({
+    relayStartedAt: null,
+    relayDeliveryTransport: null,
+    relayRetryAt: null,
+    relayRetryRequiresIdempotency: false,
+  });
+});
+
 test("set-roles rejects a reviewer config the CLI cannot launch (issue #118 Finding 3)", () => {
   seed();
   /* codex + a claude model must not persist and fail later at spawn. */

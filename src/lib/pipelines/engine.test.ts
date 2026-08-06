@@ -14,7 +14,8 @@ process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-
 const engineModule = await import("./engine");
 const { adoptAttempt, defaultPipelinePorts, ensureTaskPipelineForAssignment, patchPipeline, pipelineAttemptTargetForSource, pipelineClaudePermissionMode, reconcileEmbeddedReviewFlows, reviewNote, tickPipelines } = engineModule;
 const { AgentRegistry, setAgentRegistryForTests } = await import("@/lib/agent/registry");
-const { newRound } = await import("@/lib/flows/engine");
+const { newRound, setRelayDeliveryForTest, tickFlow } = await import("@/lib/flows/engine");
+const { isRecoverableLegacyRelayFailurePause } = await import("@/lib/flows/commands");
 const rawCreatePipelineFromRequest = engineModule.createPipelineFromRequest;
 const createPipelineFromRequest: typeof rawCreatePipelineFromRequest = async (request, ports, options) =>
   await rawCreatePipelineFromRequest({ src: "/codex/creator.jsonl", ...request }, ports, options);
@@ -273,6 +274,13 @@ function harness() {
       if (note) calls.push(`flow-note:${note}`);
       const flow = flows.get(id);
       if (flow && action === "resume" && flow.state === "paused") {
+        const round = flow.rounds.at(-1);
+        if (round && isRecoverableLegacyRelayFailurePause(flow)) {
+          round.relayStartedAt = null;
+          round.relayDeliveryTransport = null;
+          round.relayRetryAt = null;
+          round.relayRetryRequiresIdempotency = false;
+        }
         flow.state = flow.pausedState && flow.pausedState !== "paused" ? flow.pausedState : "waiting_ready";
         flow.pausedState = null;
         flow.stateDetail = null;
@@ -2685,11 +2693,17 @@ test("a bound review flow paused while relaying resumes without operator action"
   await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
 
   const flow = h.flows.get("flow-1")!;
+  const findingsPath = path.join(process.env.LLV_STATE_DIR!, "legacy-relay-failure-findings.md");
+  fs.writeFileSync(findingsPath, "VERDICT: REQUEST_CHANGES\n\nRepair the host claim.\n");
   flow.rounds.push({
     n: 3,
     verdict: "REQUEST_CHANGES",
     reviewHeadSha: ORIGIN_MAIN_SHA,
+    findingsPath,
     relayStartedAt: "2026-08-05T20:47:08.000Z",
+    relayDeliveryTransport: null,
+    relayDelivery: null,
+    relayedAt: null,
     error: "structured resume host claim is unavailable",
     reviewerPath: "/codex/reviewer.jsonl",
     reviewerConversationId: "conversation_reviewer",
@@ -2713,6 +2727,7 @@ test("a bound review flow paused while relaying resumes without operator action"
   await tickPipelines([entry("/codex/reviewer.jsonl")], h.ports);
 
   expect(flow).toMatchObject({ state: "relaying", pausedState: null, stateDetail: null });
+  expect(flow.rounds.at(-1)).toMatchObject({ relayStartedAt: null, relayDeliveryTransport: null });
   expect(h.calls).toContain("flow-patch:flow-1:resume");
   expect(loadPipelines()[0]).toMatchObject({ state: "running", stateDetail: null });
   expect(loadPipelines()[0]!.runs[1]!.attempts[0]).toMatchObject({
@@ -2722,6 +2737,28 @@ test("a bound review flow paused while relaying resumes without operator action"
     agentPath: "/codex/reviewer.jsonl",
     conversationId: "conversation_reviewer",
   });
+
+  const implementer = entry("/codex/stage-1.jsonl");
+  const relayDeliveries: string[] = [];
+  const restoreDelivery = setRelayDeliveryForTest(async (_flow, _entries, text) => {
+    relayDeliveries.push(text);
+    return implementer.path;
+  });
+  try {
+    await tickFlow(flow, [implementer], new Map([[implementer.path, implementer]]), () => {});
+  } finally {
+    restoreDelivery();
+  }
+  await tickPipelines([entry("/codex/reviewer.jsonl")], h.ports);
+
+  expect(relayDeliveries).toHaveLength(1);
+  expect(flow).toMatchObject({ state: "fixing", pausedState: null, stateDetail: null });
+  expect(flow.rounds.at(-1)).toMatchObject({
+    relayDelivery: { path: implementer.path, deliveredAt: expect.any(String) },
+    relayedAt: expect.any(String),
+    error: null,
+  });
+  expect(loadPipelines()[0]).toMatchObject({ state: "running", stateDetail: null });
 });
 
 test("an operator pause during relay stays paused across pipeline reconciliation", async () => {
