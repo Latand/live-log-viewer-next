@@ -296,6 +296,36 @@ export function stampOrchestratorLineage(
   return { changed, engine: conversation.engine };
 }
 
+function stampPendingOrchestratorLineage(
+  file: RegistryFile,
+  seat: IdentityWaveSeat,
+): { changed: boolean; engine: "claude" | "codex" | null } {
+  const conversationId = seat.conversationId
+    ? canonicalConversationId(file, seat.conversationId)
+    : null;
+  if (!conversationId || file.conversations[conversationId]) return { changed: false, engine: null };
+  const receipt = Object.values(file.receipts).find((candidate) => (
+    canonicalConversationId(file, candidate.conversationId) === conversationId
+  ));
+  if (!receipt) return { changed: false, engine: null };
+  const pending: IdentityWaveSeat = {
+    project: seat.project,
+    seatEpoch: seat.seatEpoch,
+    conversationId,
+    predecessorConversationId: seat.predecessorConversationId
+      ? canonicalConversationId(file, seat.predecessorConversationId)
+      : null,
+    designatedAt: seat.designatedAt,
+    activatedAt: seat.activatedAt,
+    path: seat.path ?? null,
+  };
+  if (JSON.stringify(receipt.pendingOrchestratorSeatIdentity) === JSON.stringify(pending)) {
+    return { changed: false, engine: receipt.engine };
+  }
+  receipt.pendingOrchestratorSeatIdentity = pending;
+  return { changed: true, engine: receipt.engine };
+}
+
 function wouldCreateLineageCycle(
   file: RegistryFile,
   childConversationId: ViewerConversationId,
@@ -391,9 +421,12 @@ export function applyIdentityWaveMigration(
 
   for (const seat of input.orchestratorSeats) {
     const stamped = stampOrchestratorLineage(file, seat, seat.activatedAt ?? seat.designatedAt ?? input.now);
-    if (!stamped.changed || !stamped.engine) continue;
+    const pending = stamped.engine ? { changed: false, engine: null } : stampPendingOrchestratorLineage(file, seat);
+    const changed = stamped.changed || pending.changed;
+    const engine = stamped.engine ?? pending.engine;
+    if (!changed || !engine) continue;
     edgesStamped += 1;
-    changedEngines.add(stamped.engine);
+    changedEngines.add(engine);
   }
 
   for (const engine of changedEngines) {
