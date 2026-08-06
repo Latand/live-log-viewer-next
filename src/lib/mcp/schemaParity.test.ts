@@ -154,6 +154,45 @@ test("every harmless bounded MCP numeric clamps, coerces, and defaults before it
   expect([...calls.keys()].sort()).toEqual((Object.keys(MCP_BOUNDED_NUMERIC_ARGS) as McpToolName[]).sort());
 });
 
+test("extreme bounded integers clamp toward the nearest bound", async () => {
+  const bindings = inertBindings({
+    list_conversations: async (args) => ({ applied: args }),
+    spawn_agent: async (args) => ({ applied: args }),
+    lifecycle_events: async (args) => ({ applied: args }),
+  });
+  const cases: Array<{
+    toolName: "list_conversations" | "spawn_agent" | "lifecycle_events";
+    path: readonly string[];
+    input: number | string;
+    expected: number;
+  }> = [
+    { toolName: "list_conversations", path: ["limit"], input: 1e100, expected: 100 },
+    { toolName: "list_conversations", path: ["limit"], input: -1e100, expected: 1 },
+    { toolName: "spawn_agent", path: ["roleParams", "parallelN"], input: "999999999999999999999999999999", expected: 8 },
+    { toolName: "lifecycle_events", path: ["afterSeq"], input: "999999999999999999999999999999", expected: Number.MAX_SAFE_INTEGER },
+  ];
+
+  await withProtocolClient(bindings, async (client) => {
+    for (const [index, candidate] of cases.entries()) {
+      const spec = MCP_BOUNDED_NUMERIC_ARGS[candidate.toolName]!
+        .find((entry) => entry.path.join(".") === candidate.path.join("."))!;
+      const args = boundedArgs(candidate.toolName, spec, `extreme-${index}`);
+      setAtPath(args, candidate.path, candidate.input);
+      const result = await client.callTool({ name: candidate.toolName, arguments: args });
+
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        ok: true,
+        clamped: { [candidate.path.join(".")]: candidate.expected },
+      });
+      expect(valueAtPath(
+        (result.structuredContent as { applied: Record<string, unknown> }).applied,
+        candidate.path,
+      )).toBe(candidate.expected);
+    }
+  });
+});
+
 test("operator mutations and identity-bearing numerics retain exact protocol validation", async () => {
   const calls: string[] = [];
   const bindings = inertBindings({

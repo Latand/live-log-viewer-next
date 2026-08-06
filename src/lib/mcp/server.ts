@@ -183,14 +183,29 @@ export const MCP_BOUNDED_NUMERIC_ARGS: Partial<Record<McpToolName, readonly McpB
   ],
 };
 
+function compareDecimalIntegerToBound(value: string, bound: number): number {
+  const unsigned = value.replace(/^[+-]/, "").replace(/^0+/, "") || "0";
+  const negative = value.startsWith("-") && unsigned !== "0";
+  const boundNegative = bound < 0;
+  if (negative !== boundNegative) return negative ? -1 : 1;
+  const boundUnsigned = String(Math.abs(bound));
+  const magnitude = unsigned.length === boundUnsigned.length
+    ? unsigned === boundUnsigned ? 0 : unsigned < boundUnsigned ? -1 : 1
+    : unsigned.length < boundUnsigned.length ? -1 : 1;
+  return negative ? -magnitude : magnitude;
+}
+
 function boundedNumericValue(value: unknown, spec: McpBoundedNumericArg): number {
-  const numeric = typeof value === "number" && Number.isSafeInteger(value)
-    ? value
-    : typeof value === "string" && /^[+-]?\d+$/.test(value.trim())
-      ? Number(value.trim())
-      : spec.fallback;
-  const unambiguous = Number.isSafeInteger(numeric) ? numeric : spec.fallback;
-  return Math.max(spec.min, Math.min(spec.max, unambiguous));
+  if (typeof value === "number" && Number.isInteger(value)) {
+    return Math.max(spec.min, Math.min(spec.max, value));
+  }
+  if (typeof value === "string" && /^[+-]?\d+$/.test(value.trim())) {
+    const integer = value.trim();
+    if (compareDecimalIntegerToBound(integer, spec.min) < 0) return spec.min;
+    if (compareDecimalIntegerToBound(integer, spec.max) > 0) return spec.max;
+    return Number(integer);
+  }
+  return Math.max(spec.min, Math.min(spec.max, spec.fallback));
 }
 
 function valueAtPath(args: McpToolArgs, pathParts: readonly string[]): unknown {
