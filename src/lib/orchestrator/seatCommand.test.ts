@@ -69,6 +69,12 @@ function dependencies(overrides: Partial<SeatCommandDependencies> = {}): { deps:
     stampRegistryIdentity: (seat) => { recorded.identityStamps.push(seat); },
     projectTasks: () => [],
     launchSettlement: () => ({ kind: "unknown" }),
+    runtimeIdentity: (conversationId) => {
+      const incumbent = readOrchestratorRecord();
+      return incumbent?.conversationId === conversationId
+        ? { engine: incumbent.engine, model: incumbent.model }
+        : { engine: null, model: null };
+    },
     now: () => AT,
     ...overrides,
   };
@@ -83,6 +89,7 @@ function seedPendingLaunchIntent(input: {
   error?: string | null;
   engine?: string | null;
   model?: string | null;
+  legacyRuntimeShape?: boolean;
 }): void {
   fs.writeFileSync(path.join(sandbox, "orchestrator-seats.json"), JSON.stringify({
     schemaVersion: 1,
@@ -94,8 +101,10 @@ function seedPendingLaunchIntent(input: {
         seatEpoch: 1,
         conversationId: null,
         path: null,
-        engine: input.engine ?? null,
-        model: input.model ?? null,
+        ...(input.legacyRuntimeShape ? {} : {
+          engine: input.engine ?? null,
+          model: input.model ?? null,
+        }),
         mandate: "own the board",
         promptVersion: null,
         predecessorConversationId: null,
@@ -105,6 +114,30 @@ function seedPendingLaunchIntent(input: {
         activatedAt: null,
       },
     },
+    revocations: [],
+  }), "utf8");
+}
+
+function seedLegacyActiveSeat(clientRequestId: string): void {
+  fs.writeFileSync(path.join(sandbox, "orchestrator-seats.json"), JSON.stringify({
+    schemaVersion: 1,
+    nextSeatEpoch: 2,
+    seats: {
+      "proj-a": {
+        project: "proj-a",
+        seatEpoch: 1,
+        conversationId: NEW_ID,
+        path: "/tmp/new.jsonl",
+        mandate: "own the board",
+        promptVersion: null,
+        predecessorConversationId: null,
+        state: "active",
+        intent: { clientRequestId, mode: "spawn", launchId: "launch_legacy", error: null },
+        designatedAt: AT,
+        activatedAt: AT,
+      },
+    },
+    pending: {},
     revocations: [],
   }), "utf8");
 }
@@ -270,6 +303,31 @@ test("a completed seat replay preserves the incumbent engine and model from its 
 
   expect(replay).toMatchObject({ status: 200, body: { replayed: true, conversationId: NEW_ID } });
   expect(recorded.spawns).toHaveLength(1);
+  expect(readOrchestratorRecord()).toMatchObject({ engine: "codex", model: "gpt-5.6-sol" });
+});
+
+test("a legacy active seat replay recovers incumbent runtime metadata", async () => {
+  const clientRequestId = "req_legacy_active";
+  seedLegacyActiveSeat(clientRequestId);
+  replaceOrchestratorIncumbent({
+    conversationId: NEW_ID,
+    path: "/tmp/new.jsonl",
+    createdAt: AT,
+    engine: "codex",
+    model: "gpt-5.6-sol",
+  });
+  const { deps } = dependencies({
+    syncLegacyRecord: (input) => { replaceOrchestratorIncumbent({ ...input, createdAt: AT }); },
+  });
+
+  const replay = await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "own the board",
+    clientRequestId,
+    cwd: "/tmp",
+  }, deps);
+
+  expect(replay).toMatchObject({ status: 200, body: { replayed: true, conversationId: NEW_ID } });
   expect(readOrchestratorRecord()).toMatchObject({ engine: "codex", model: "gpt-5.6-sol" });
 });
 
@@ -761,6 +819,36 @@ test("creator-death reconciliation restores manager metadata from the pending se
   }, deps);
 
   expect(replay).toMatchObject({ status: 200, body: { replayed: true, conversationId: NEW_ID } });
+  expect(readOrchestratorRecord()).toMatchObject({ engine: "codex", model: "gpt-5.6-sol" });
+});
+
+test("a legacy pending seat recovers runtime metadata from its launch settlement", async () => {
+  seedPendingLaunchIntent({
+    clientRequestId: "req_legacy_pending",
+    launchId: "launch_legacy_pending",
+    legacyRuntimeShape: true,
+  });
+  const { deps } = dependencies({
+    launchSettlement: () => ({
+      kind: "settled",
+      conversationId: NEW_ID,
+      path: "/tmp/new.jsonl",
+      launchId: "launch_legacy_pending",
+      engine: "codex",
+      model: "gpt-5.6-sol",
+    }),
+    syncLegacyRecord: (input) => { replaceOrchestratorIncumbent({ ...input, createdAt: AT }); },
+  });
+
+  const replay = await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "own the board",
+    clientRequestId: "req_legacy_pending",
+    cwd: "/tmp",
+  }, deps);
+
+  expect(replay).toMatchObject({ status: 200, body: { replayed: true, conversationId: NEW_ID } });
+  expect(orchestratorSeatFor("proj-a").active).toMatchObject({ engine: "codex", model: "gpt-5.6-sol" });
   expect(readOrchestratorRecord()).toMatchObject({ engine: "codex", model: "gpt-5.6-sol" });
 });
 

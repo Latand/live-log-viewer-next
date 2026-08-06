@@ -366,6 +366,8 @@ export function completeOrchestratorSeatIntent(input: {
   conversationId: string;
   path: string | null;
   launchId?: string | null;
+  engine?: string | null;
+  model?: string | null;
   now?: string;
 }): CompleteSeatIntentResult {
   return withAccountMutationLock(() => {
@@ -395,6 +397,8 @@ export function completeOrchestratorSeatIntent(input: {
       ...pending,
       conversationId: input.conversationId,
       path: input.path,
+      engine: pending.engine ?? (input.engine?.trim() || null),
+      model: pending.model ?? (input.model?.trim() || null),
       predecessorConversationId: revoked?.conversationId ?? pending.predecessorConversationId,
       state: "active",
       intent: { ...pending.intent, launchId: input.launchId ?? pending.intent.launchId, error: null },

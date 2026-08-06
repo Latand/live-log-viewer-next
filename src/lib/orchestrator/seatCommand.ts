@@ -20,7 +20,7 @@ import {
   orchestratorSeatFor,
   type OrchestratorSeat,
 } from "./seats";
-import { replaceOrchestratorIncumbent } from "./store";
+import { readOrchestratorRecord, replaceOrchestratorIncumbent } from "./store";
 
 /* The one confirm behind the board draft's Orchestrator role: DESIGNATE this
  * project's orchestrator and INJECT the operator-edited mandate, atomically.
@@ -69,12 +69,21 @@ export interface SeatCommandDependencies {
       from the launch receipt, for reconciling an accepted launch whose
       accepting request died before activation. */
   launchSettlement(input: { launchId: string | null; clientRequestId: string }): LaunchSettlement;
+  /** Durable runtime identity for legacy seats that predate engine/model. */
+  runtimeIdentity(conversationId: string): { engine: string | null; model: string | null };
   now(): string;
 }
 
 export type LaunchSettlement =
   /** The launch durably produced a conversation; the intent can activate on it. */
-  | { kind: "settled"; conversationId: string; path: string | null; launchId: string | null }
+  | {
+      kind: "settled";
+      conversationId: string;
+      path: string | null;
+      launchId: string | null;
+      engine?: string | null;
+      model?: string | null;
+    }
   /** The launch terminally failed; the intent can record the error. */
   | { kind: "failed"; error: string }
   /** No settled receipt to reconcile against — leave the intent alone. */
@@ -191,12 +200,16 @@ export const productionSeatCommandDependencies: SeatCommandDependencies = {
     };
   },
   syncLegacyRecord: (input) => {
+    const current = readOrchestratorRecord();
+    const incumbent = current?.conversationId === input.conversationId ? current : null;
+    const engine = input.engine ?? incumbent?.engine;
+    const model = input.model ?? incumbent?.model;
     replaceOrchestratorIncumbent({
       conversationId: input.conversationId,
       path: input.path,
       createdAt: new Date().toISOString(),
-      ...(input.engine ? { engine: input.engine } : {}),
-      ...(input.model ? { model: input.model } : {}),
+      ...(engine ? { engine } : {}),
+      ...(model ? { model } : {}),
     });
   },
   stampRegistryIdentity: (seat) => {
@@ -221,6 +234,17 @@ export const productionSeatCommandDependencies: SeatCommandDependencies = {
       conversationId: receipt.conversationId,
       path: receipt.artifactLifecycle === "materialized" ? receipt.artifactPath : null,
       launchId: receipt.launchId,
+      engine: receipt.engine,
+      model: receipt.launchProfile.model,
+    };
+  },
+  runtimeIdentity: (conversationId) => {
+    const conversation = agentRegistry().conversation(conversationId as `conversation_${string}`);
+    const incumbent = readOrchestratorRecord();
+    const matchingIncumbent = incumbent?.conversationId === conversationId ? incumbent : null;
+    return {
+      engine: conversation?.engine ?? matchingIncumbent?.engine ?? null,
+      model: conversation?.generations.at(-1)?.launchProfile.model ?? matchingIncumbent?.model ?? null,
     };
   },
   now: () => new Date().toISOString(),
@@ -288,6 +312,8 @@ async function activate(
       conversationId: input.conversationId,
       path: input.path,
       launchId: input.launchId,
+      engine: input.engine,
+      model: input.model,
       now: dependencies.now(),
     });
     if (result.kind !== "missing") reconcileAuthorityProjections(result.seat, input, dependencies);
@@ -303,8 +329,11 @@ function reconcileAuthorityProjections(
   dependencies: SeatCommandDependencies,
 ): void {
   if (!seat.conversationId) throw new Error("active orchestrator seat is missing its conversation identity");
-  const engine = seat.engine ?? input.engine;
-  const model = seat.model ?? input.model;
+  const durableRuntime = seat.engine && seat.model
+    ? { engine: null, model: null }
+    : dependencies.runtimeIdentity(seat.conversationId);
+  const engine = seat.engine ?? durableRuntime.engine ?? input.engine;
+  const model = seat.model ?? durableRuntime.model ?? input.model;
   dependencies.syncLegacyRecord({
     conversationId: seat.conversationId,
     path: seat.path,
@@ -357,6 +386,8 @@ function reconcilePendingSeatIntent(project: string, dependencies: SeatCommandDe
       conversationId: settlement.conversationId,
       path: settlement.path,
       launchId: settlement.launchId ?? pending.intent.launchId,
+      ...(settlement.engine ? { engine: settlement.engine } : {}),
+      ...(settlement.model ? { model: settlement.model } : {}),
     }, dependencies);
   }
   if (settlement.kind === "failed") {
