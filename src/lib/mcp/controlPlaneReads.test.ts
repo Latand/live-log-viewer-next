@@ -300,6 +300,40 @@ test("get_conversation enforces tailLines through the validated transcript-path 
   expect(counts.rawScans).toBe(0);
 });
 
+test("get_conversation returns a held path tail with deadline-partial metadata", async () => {
+  const root = path.dirname(transcriptPath);
+  const pathAllowed = (candidate: string) => {
+    try { return fs.realpathSync(candidate).startsWith(fs.realpathSync(root) + path.sep); } catch { return false; }
+  };
+  const injected = {
+    completedFileScan: async () => { throw new Error("path tails must skip the catalog"); },
+    targetedFileEntry: async (
+      candidate: string,
+      options: { tailLines?: number } = {},
+    ) => {
+      const held = await targetedConversationAtPath(
+        candidate,
+        { tailLines: options.tailLines },
+        { roots: [["codex-sessions", root]], pathAllowed },
+      );
+      await Bun.sleep(20);
+      return held;
+    },
+    listFiles: async () => { throw new Error("path tails must stay on the targeted reader"); },
+  } as never;
+  const bindings = viewerMcpBindings(undefined, undefined, injected);
+
+  const result = await bindings.get_conversation(
+    { clientRequestId: "get-path-tail-deadline-partial", transcriptPath, tailLines: 10 },
+    { deadlineAt: Date.now() + 5 },
+  ) as { truncated: boolean; hint: string; tail: { lines: string[]; truncated: boolean } };
+
+  expect(result.tail.lines).toHaveLength(3);
+  expect(result.tail.truncated).toBe(false);
+  expect(result.truncated).toBe(true);
+  expect(result.hint).toContain("internal read deadline");
+});
+
 test("get_conversation cancels a targeted miss when its caller leaves", async () => {
   const { counts, injected } = dependencies({ completedTranscript: false });
   let started!: () => void;

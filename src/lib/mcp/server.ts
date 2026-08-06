@@ -1598,7 +1598,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   pipeline_action: "Apply a supported action to an existing pipeline.",
   link_task_to_pipeline: "Attach a board task to a conversation owned by a pipeline.",
   list_conversations: "List scanned Viewer conversations with durable ids and transcript paths.",
-  get_conversation: "Read a conversation summary and its recent messages and tools. Accepts the selected-card reference from an operator turn, and with tailLines answers from the bounded identity path alone — no snapshot, no corpus scan.",
+  get_conversation: "Read a conversation summary and its recent messages and tools. With tailLines, conversationId or selectedContext uses the bounded identity path, while transcriptPath uses the validated pinned reader; both return a bounded raw tail without a corpus scan.",
   deploy_exact_sha: "Deploy one full commit SHA. The designated orchestrator decides when to deploy and calls this directly; authority is the server-attributed designated seat, and nobody asks the operator for a confirmation, a phrase, or a SHA. Idempotent by clientRequestId; deployments serialize at the runtime host.",
   get_pipeline: "Read one pipeline by durable id.",
   board_snapshot: "Read a bounded, redacted snapshot of the Viewer board and durable placement.",
@@ -1738,7 +1738,7 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     maxRecords: boundedNumericInput("get_conversation", "maxRecords"),
     selectedContext: selectedContextSchema,
     tailLines: boundedNumericInput("get_conversation", "tailLines")
-      .describe("Read this many trailing transcript lines through the bounded identity path instead of the scanned summary. Needs conversationId or selectedContext; keeps answering while corpus scans are degraded."),
+      .describe("Read this many trailing transcript lines instead of the scanned summary. Use conversationId or selectedContext for the bounded identity path, or transcriptPath for the validated pinned reader; all alternatives keep answering while corpus scans are degraded."),
   }).passthrough(),
   deploy_exact_sha: z.object({
     clientRequestId: clientRequestIdSchema,

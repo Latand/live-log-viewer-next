@@ -1069,6 +1069,10 @@ async function getConversation(
         bytes: targeted.tail.bytes,
         truncated: targeted.tail.truncated,
       },
+      ...(targeted.truncated === true ? {
+        truncated: true,
+        hint: targeted.hint ?? PARTIAL_CONVERSATION_DEADLINE_HINT,
+      } : {}),
       ...selectedContextEcho(selected.target),
     });
   }

@@ -231,6 +231,21 @@ test("spawn_agent listTools publishes every registry role exactly once", async (
   });
 });
 
+test("get_conversation listTools publishes every bounded tail target", async () => {
+  await withProtocolClient(inertBindings(), async (client) => {
+    const listed = await client.listTools();
+    const tool = listed.tools.find((candidate) => candidate.name === "get_conversation");
+    const tailSchema = tool?.inputSchema.properties?.tailLines as { description?: string } | undefined;
+
+    for (const target of ["conversationId", "selectedContext", "transcriptPath"]) {
+      expect(tool?.description).toContain(target);
+      expect(tailSchema?.description).toContain(target);
+    }
+    expect(tool?.description).toContain("validated pinned reader");
+    expect(tailSchema?.description).toContain("validated pinned reader");
+  });
+});
+
 test("spawn_agent rejects unknown roles at the protocol boundary while valid roles and roleParams remain admitted", async () => {
   const roleIds = listRoles().map((role) => role.id);
   let spawnCalls = 0;
