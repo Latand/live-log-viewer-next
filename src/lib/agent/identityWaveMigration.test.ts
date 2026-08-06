@@ -277,6 +277,53 @@ test("the identity wave retitles, rekeys, stamps roots, supports dry-run, and co
   }
 });
 
+test("orchestrator re-seating cannot create an A to B to A lineage cycle", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-wave-lineage-cycle-"));
+  try {
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const conversationA = registry.ensureConversation("codex", path.join(directory, "a.jsonl"), null);
+    const conversationB = registry.ensureConversation("codex", path.join(directory, "b.jsonl"), null);
+
+    expect(registry.runIdentityWaveMigration({
+      now: NOW,
+      transcriptTitle: () => null,
+      sharedPathForLegacy: () => null,
+      orchestratorSeats: [{
+        project: "viewer",
+        seatEpoch: 1,
+        conversationId: conversationA.id,
+        predecessorConversationId: null,
+        designatedAt: NOW,
+        activatedAt: NOW,
+      }, {
+        project: "viewer",
+        seatEpoch: 2,
+        conversationId: conversationB.id,
+        predecessorConversationId: conversationA.id,
+        designatedAt: NOW,
+        activatedAt: NOW,
+      }, {
+        project: "viewer",
+        seatEpoch: 3,
+        conversationId: conversationA.id,
+        predecessorConversationId: conversationB.id,
+        designatedAt: NOW,
+        activatedAt: NOW,
+      }],
+    })).toMatchObject({ edgesStamped: 3 });
+
+    const snapshot = registry.snapshot();
+    expect(snapshot.lineageEdges[conversationB.id]).toMatchObject({ parentConversationId: conversationA.id });
+    expect(snapshot.lineageEdges[conversationA.id]).toBeUndefined();
+    expect(snapshot.memberships[conversationA.id]).toContainEqual(expect.objectContaining({
+      slot: "seat:3",
+      parentConversationId: null,
+    }));
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("resolver failures leave the identity wave unmarked and a retry can complete", () => {
   for (const failingResolver of ["sharedPathForLegacy", "transcriptTitle"] as const) {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-wave-retry-"));
