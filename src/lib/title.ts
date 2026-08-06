@@ -37,7 +37,7 @@ export function isGenericSessionTitle(value: string | null | undefined): boolean
 export function durableSemanticTitle(value: string | null | undefined, maxLength = 160): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
-  if (!trimmed || isGenericSessionTitle(trimmed)) return null;
+  if (!trimmed || !cleanTitle(trimmed, maxLength) || isGenericSessionTitle(trimmed)) return null;
   return trimmed.length > maxLength ? trimmed.slice(0, maxLength - 1).trimEnd() + "…" : trimmed;
 }
 
