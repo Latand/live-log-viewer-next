@@ -11,6 +11,7 @@ import {
   classifySpawnResponse,
   classifyTransportLoss,
   createSpawnAttempt,
+  draftSpawnTitle,
   displayPhase,
   hasRecoverableRequest,
   matchSpawnedFile,
@@ -275,6 +276,16 @@ describe("matchSpawnedFile — adoption evidence, strongest first", () => {
 });
 
 describe("durable request recovery", () => {
+  test("image-only drafts receive a semantic action title", () => {
+    expect(draftSpawnTitle("claude", null, "", 1)).toBe("claude · Analyze attached image");
+  });
+
+  test("legacy persisted requests without a title stay frozen instead of replaying a rejected body", () => {
+    const legacy = JSON.parse(JSON.stringify(baseAttempt)) as SpawnAttempt;
+    delete (legacy.request as Partial<NonNullable<SpawnAttempt["request"]>>).title;
+    expect(hasRecoverableRequest(legacy)).toBe(false);
+  });
+
   test("a semantic title survives serialized reload recovery and is resubmitted exactly", () => {
     const request = {
       ...baseAttempt.request!,
