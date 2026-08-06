@@ -7,6 +7,11 @@ import path from "node:path";
 import type { FileEntry } from "@/lib/types";
 import { procBackend } from "@/lib/proc";
 import { AgentRegistry, agentRegistry } from "@/lib/agent/registry";
+import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
+import type { RuntimeHostClient } from "@/lib/runtime/client";
+import { enqueueStructuredMessage } from "@/lib/runtime/structuredMessageDelivery";
+import { TmuxDeliveryUncertainError } from "@/lib/tmux";
+import { RuntimeJournal } from "@/runtime-host/journal";
 
 import type { Flow } from "./types";
 
@@ -1430,6 +1435,308 @@ test("overlapping relay ticks deliver one review and settle the round once (#529
   }
 });
 
+test("a definitive structured journal rejection retries with a fresh identity and reaches fixing", async () => {
+  const journal = new RuntimeJournal(path.join(process.env.LLV_STATE_DIR!, "relay-retry-runtime.sqlite"), { structuredHosts: true });
+  const registry = agentRegistry();
+  const sessionId = ["079f421e", "02e1", "73e0", "9b77", "bebde063f529"].join("-");
+  const implementer = writeCodexEntry("relay-retry-implementer.jsonl", {
+    id: sessionId,
+    cwd: "/repo",
+  }, Date.now() / 1_000);
+  const conversation = registry.ensureConversation("codex", implementer.path, null);
+  const launchProfile = emptyLaunchProfile({ cwd: "/repo" });
+  registry.upsert({
+    key: { engine: "codex", sessionId },
+    artifactPath: implementer.path,
+    cwd: "/repo",
+    accountId: null,
+    launchProfile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:relay-retry",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 0,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  journal.append({
+    scope: { type: "session", id: conversation.id },
+    kind: "session-status",
+    payload: {
+      conversationId: conversation.id,
+      sessionKey: { engine: "codex", sessionId },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      artifactPath: implementer.path,
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  const commands: Parameters<RuntimeHostClient["command"]>[0][] = [];
+  const client = {
+    snapshot: async () => journal.snapshot(),
+    command: async (command: Parameters<RuntimeHostClient["command"]>[0]) => {
+      expect(loadFlows()[0]!.rounds[0]).toMatchObject({ relayDeliveryTransport: "structured" });
+      commands.push(command);
+      const admitted = journal.executeOperation(command);
+      if (commands.length === 1) {
+        journal.transitionOperation(admitted.operationId, "rejected", { reason: "structured resume host claim is unavailable" });
+        return journal.operationResult(admitted.operationId)!;
+      }
+      return admitted;
+    },
+  } as RuntimeHostClient;
+  const restoreDelivery = setRelayDeliveryForTest(async (flow, entries, text, options) => sendToImplementer(flow, entries, text, {
+    ...options,
+    recover: async () => ({ target: null, path: implementer.path, conversationId: conversation.id, spawned: false }),
+    enqueueStructured: async (request) => enqueueStructuredMessage(request, {
+      enabled: () => true,
+      client: () => client,
+      registry: () => registry,
+      kick: () => {},
+    }),
+  }));
+  const findingsPath = path.join(process.env.LLV_STATE_DIR!, "relay-retry-findings.md");
+  fs.writeFileSync(findingsPath, "VERDICT: REQUEST_CHANGES\n\nRepair the host claim.\n");
+  const round = {
+    ...newRound(raceFlow({ rounds: [] }), "marker", "head ready"),
+    findingsPath,
+    verdict: "REQUEST_CHANGES" as const,
+    findingsCount: 1,
+    reviewedAt: "2026-08-05T20:47:07.961Z",
+    terminalAt: "2026-08-05T20:47:07.961Z",
+  };
+  saveFlows([raceFlow({
+    id: "flow-relay-retry",
+    implementerPath: implementer.path,
+    implementerConversationId: conversation.id,
+    state: "relaying",
+    rounds: [round],
+  })]);
+
+  try {
+    await tickFlows([implementer]);
+    const retrying = loadFlows()[0]!;
+    expect(retrying).toMatchObject({
+      state: "relaying",
+      pausedState: null,
+      stateDetail: expect.stringContaining("retrying automatically (1/3)"),
+      rounds: [{
+        relayRetryCount: 1,
+        relayDeliveryAttempt: 1,
+        relayRetryAt: expect.any(String),
+        relayStartedAt: null,
+        relayedAt: null,
+        error: "structured resume host claim is unavailable",
+      }],
+    });
+    expect(commands).toHaveLength(1);
+
+    Object.assign(retrying.rounds[0]!, { relayRetryAt: "2026-08-05T20:47:08.000Z" });
+    saveFlows([retrying]);
+    await tickFlows([implementer]);
+
+    expect(commands).toHaveLength(2);
+    expect(commands[0]!.idempotencyKey).toMatch(/^flow_relay_[0-9a-f]{32}$/);
+    expect(commands[1]!.idempotencyKey).not.toBe(commands[0]!.idempotencyKey);
+    const firstOperationId = commands[0]!.operationId;
+    const secondOperationId = commands[1]!.operationId;
+    if (!firstOperationId || !secondOperationId) throw new Error("structured journal commands require operation ids");
+    expect(journal.operationResult(firstOperationId)?.receipt.status).toBe("rejected");
+    expect(journal.operationResult(secondOperationId)?.receipt.status).toBe("queued");
+    expect(loadFlows()[0]).toMatchObject({
+      state: "fixing",
+      pausedState: null,
+      stateDetail: null,
+      rounds: [{
+        relayRetryCount: 1,
+        relayDeliveryAttempt: 1,
+        relayRetryAt: null,
+        relayDelivery: { path: implementer.path, deliveredAt: expect.any(String) },
+        relayedAt: expect.any(String),
+        error: null,
+      }],
+    });
+  } finally {
+    restoreDelivery();
+    journal.close();
+  }
+});
+
+test("an ambiguous legacy relay parks without replaying the payload", async () => {
+  let deliveries = 0;
+  const restoreDelivery = setRelayDeliveryForTest(async () => {
+    deliveries += 1;
+    throw new TmuxDeliveryUncertainError(
+      "legacy relay delivery is uncertain after actuation started: tmux pasted the findings before Enter confirmation failed",
+    );
+  });
+  const implementer = writeCodexEntry("relay-uncertain-implementer.jsonl", {
+    id: ["069f421e", "02e1", "73e0", "9b77", "bebde063f529"].join("-"),
+    cwd: "/repo",
+  }, Date.now() / 1_000);
+  const findingsPath = path.join(process.env.LLV_STATE_DIR!, "relay-uncertain-findings.md");
+  fs.writeFileSync(findingsPath, "VERDICT: REQUEST_CHANGES\n\nPreserve this single delivery.\n");
+  saveFlows([raceFlow({
+    id: "flow-relay-uncertain",
+    implementerPath: implementer.path,
+    state: "relaying",
+    rounds: [{
+      ...newRound(raceFlow({ rounds: [] }), "marker", "head ready"),
+      findingsPath,
+      verdict: "REQUEST_CHANGES",
+      findingsCount: 1,
+      reviewedAt: "2026-08-05T20:47:07.961Z",
+      terminalAt: "2026-08-05T20:47:07.961Z",
+    }],
+  })]);
+
+  try {
+    await tickFlows([implementer]);
+    expect(deliveries).toBe(1);
+    expect(loadFlows()[0]).toMatchObject({
+      state: "needs_decision",
+      stateDetail: expect.stringContaining("legacy relay delivery is uncertain after actuation started"),
+      rounds: [{
+        relayRetryCount: 0,
+        relayRetryAt: null,
+        relayedAt: null,
+        error: expect.stringContaining("tmux pasted the findings"),
+      }],
+    });
+
+    await tickFlows([implementer]);
+    expect(deliveries).toBe(1);
+  } finally {
+    restoreDelivery();
+  }
+});
+
+test("a restart-interrupted relay retries through the idempotent structured path", async () => {
+  let deliveries = 0;
+  const restoreDelivery = setRelayDeliveryForTest(async (flow, _entries, _text, options) => {
+    deliveries += 1;
+    expect(options?.requireIdempotentDelivery).toBe(true);
+    return flow.implementerPath;
+  });
+  const implementer = writeCodexEntry("relay-restart-implementer.jsonl", {
+    id: ["059f421e", "02e1", "73e0", "9b77", "bebde063f529"].join("-"),
+    cwd: "/repo",
+  }, Date.now() / 1_000);
+  const findingsPath = path.join(process.env.LLV_STATE_DIR!, "relay-restart-findings.md");
+  fs.writeFileSync(findingsPath, "VERDICT: REQUEST_CHANGES\n\nContinue the interrupted relay.\n");
+  const round = {
+    ...newRound(raceFlow({ rounds: [] }), "marker", "head ready"),
+    findingsPath,
+    verdict: "REQUEST_CHANGES" as const,
+    findingsCount: 1,
+    reviewedAt: "2026-08-05T20:47:07.961Z",
+    terminalAt: "2026-08-05T20:47:07.961Z",
+    relayStartedAt: "2026-08-05T20:47:08.000Z",
+    relayDeliveryTransport: "structured" as const,
+  };
+  saveFlows([raceFlow({
+    id: "flow-relay-restart",
+    implementerPath: implementer.path,
+    state: "relaying",
+    rounds: [round],
+  })]);
+
+  try {
+    await tickFlows([implementer]);
+    const retrying = loadFlows()[0]!;
+    expect(deliveries).toBe(0);
+    expect(retrying).toMatchObject({
+      state: "relaying",
+      stateDetail: expect.stringContaining("retrying automatically (1/3)"),
+      rounds: [{
+        relayRetryCount: 1,
+        relayDeliveryAttempt: 0,
+        relayRetryAt: expect.any(String),
+        relayRetryRequiresIdempotency: true,
+        relayStartedAt: null,
+      }],
+    });
+
+    Object.assign(retrying.rounds[0]!, { relayRetryAt: "2026-08-05T20:47:09.000Z" });
+    saveFlows([retrying]);
+    await tickFlows([implementer]);
+
+    expect(deliveries).toBe(1);
+    expect(loadFlows()[0]).toMatchObject({
+      state: "fixing",
+      stateDetail: null,
+      rounds: [{
+        relayRetryCount: 1,
+        relayDeliveryAttempt: 0,
+        relayRetryAt: null,
+        relayRetryRequiresIdempotency: false,
+        relayedAt: expect.any(String),
+        error: null,
+      }],
+    });
+  } finally {
+    restoreDelivery();
+  }
+});
+
+test("a restart-interrupted legacy relay parks before a newly available structured delivery", async () => {
+  let deliveries = 0;
+  const restoreDelivery = setRelayDeliveryForTest(async (flow) => {
+    deliveries += 1;
+    return flow.implementerPath;
+  });
+  const implementer = writeCodexEntry("relay-restart-legacy-implementer.jsonl", {
+    id: ["089f421e", "02e1", "73e0", "9b77", "bebde063f529"].join("-"),
+    cwd: "/repo",
+  }, Date.now() / 1_000);
+  const findingsPath = path.join(process.env.LLV_STATE_DIR!, "relay-restart-legacy-findings.md");
+  fs.writeFileSync(findingsPath, "VERDICT: REQUEST_CHANGES\n\nDo not duplicate this legacy relay.\n");
+  saveFlows([raceFlow({
+    id: "flow-relay-restart-legacy",
+    implementerPath: implementer.path,
+    state: "relaying",
+    rounds: [{
+      ...newRound(raceFlow({ rounds: [] }), "marker", "head ready"),
+      findingsPath,
+      verdict: "REQUEST_CHANGES",
+      findingsCount: 1,
+      reviewedAt: "2026-08-05T20:47:07.961Z",
+      terminalAt: "2026-08-05T20:47:07.961Z",
+      relayStartedAt: "2026-08-05T20:47:08.000Z",
+      relayDeliveryTransport: "legacy",
+    }],
+  })]);
+
+  try {
+    await tickFlows([implementer]);
+
+    expect(deliveries).toBe(0);
+    expect(loadFlows()[0]).toMatchObject({
+      state: "needs_decision",
+      stateDetail: expect.stringContaining("legacy relay was interrupted before delivery settlement"),
+      rounds: [{
+        relayRetryCount: 0,
+        relayRetryAt: null,
+        relayDeliveryTransport: "legacy",
+        relayedAt: null,
+      }],
+    });
+  } finally {
+    restoreDelivery();
+  }
+});
+
 test("persistTickFlows respects a concurrent close instead of reopening the flow (issue #118 review)", () => {
   /* The tick started with the flow reviewing; the operator closed it during the
      tick's awaited spawn/relay. */
@@ -1747,6 +2054,84 @@ test("a structured relay that cannot be owned surfaces its reason instead of rep
     enqueueStructured: async () => ({ ok: false, structured: true, outcome: "failed", error: "runtime host is unavailable", status: 503 }),
     deliver: async () => ({ ok: true, outcome: "delivered-to-live", target: "%7" }),
   })).rejects.toThrow("runtime host is unavailable");
+});
+
+test("uncertain structured relay retries reuse the current durable client-message identity", async () => {
+  const subject = structuredImplementer("idempotent-relay-implementer");
+  subject.flow.rounds = [{
+    n: 1,
+    reviewerBindingId: "relay-binding",
+    relayDeliveryAttempt: 1,
+  } as Flow["rounds"][number]];
+  const clientMessageIds: Array<string | null | undefined> = [];
+  const overrides: import("./engine").RelayDeliveryOverrides = {
+    recover: async () => ({ target: null, path: subject.implementerPath, conversationId: subject.conversationId, spawned: false }),
+    enqueueStructured: async (request: Parameters<NonNullable<import("./engine").RelayDeliveryOverrides["enqueueStructured"]>>[0]) => {
+      clientMessageIds.push(request.clientMessageId);
+      return { ok: true, structured: true, target: null, outcome: "queued" as const, operationId: "op-relay", receipt: {} as never };
+    },
+    requireIdempotentDelivery: true,
+  };
+
+  await sendToImplementer(subject.flow, subject.entries, "same relay", overrides);
+  Object.assign(subject.flow.rounds[0]!, {
+    relayRetryCount: 3,
+    relayRetryRequiresIdempotency: true,
+  });
+  await sendToImplementer(subject.flow, subject.entries, "same relay", overrides);
+
+  expect(clientMessageIds).toHaveLength(2);
+  expect(clientMessageIds[0]).toMatch(/^flow_relay_[0-9a-f]{32}$/);
+  expect(clientMessageIds[1]).toBe(clientMessageIds[0]);
+});
+
+test("restart-interrupted legacy relay stays terminal because pane delivery has no dedupe receipt", async () => {
+  const subject = structuredImplementer("legacy-interrupted-relay");
+  let legacyAttempted = false;
+
+  await expect(sendToImplementer(subject.flow, subject.entries, "uncertain relay", {
+    recover: async () => null,
+    requireIdempotentDelivery: true,
+    deliver: async () => {
+      legacyAttempted = true;
+      return { ok: true, outcome: "delivered-to-live", target: "%7" };
+    },
+  })).rejects.toThrow("interrupted relay cannot retry safely because the implementer has no idempotent structured delivery");
+
+  expect(legacyAttempted).toBe(false);
+});
+
+test("legacy relay delivery preserves ambiguous tmux actuation", async () => {
+  const previousHome = process.env.LLV_CODEX_HOME;
+  const home = path.join(process.env.LLV_STATE_DIR!, "relay-uncertain-codex-home");
+  process.env.LLV_CODEX_HOME = home;
+  const sessionId = ["079f421e", "02e1", "73e0", "9b77", "bebde063f529"].join("-");
+  const implementerPath = path.join(home, "sessions", "2026", "08", "06", `rollout-${sessionId}.jsonl`);
+  fs.mkdirSync(path.dirname(implementerPath), { recursive: true });
+  fs.writeFileSync(implementerPath, `${JSON.stringify({
+    type: "session_meta",
+    payload: { id: sessionId, cwd: "/repo" },
+  })}\n`);
+  const flow = raceFlow({ implementerPath, implementerConversationId: null });
+
+  try {
+    await expect(sendToImplementer(flow, new Map([[implementerPath, entryFor(implementerPath, 1)]]), "one relay", {
+      deliver: async () => ({
+        ok: false,
+        outcome: "failed",
+        error: "Enter confirmation failed after paste",
+        status: 500,
+        actuation: "started",
+      }),
+    })).rejects.toMatchObject({
+      name: "TmuxDeliveryUncertainError",
+      message: expect.stringContaining("legacy relay delivery is uncertain after actuation started"),
+    });
+  } finally {
+    if (previousHome === undefined) delete process.env.LLV_CODEX_HOME;
+    else process.env.LLV_CODEX_HOME = previousHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("a conversation with no structured host falls through to the legacy transcript host", async () => {

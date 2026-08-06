@@ -16,7 +16,7 @@ import { enqueueStructuredMessage } from "@/lib/runtime/structuredMessageDeliver
 import { recoverDeadStructuredConversation } from "@/lib/runtime/structuredRecovery";
 import { isShellCommand } from "@/lib/status";
 import { cleanTitle, durableSemanticTitle, firstPromptLine, semanticTitle } from "@/lib/title";
-import { killPane, paneInfo, spawnAgentWithPrompt } from "@/lib/tmux";
+import { killPane, paneInfo, spawnAgentWithPrompt, TmuxDeliveryUncertainError } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 
 import {
@@ -36,7 +36,7 @@ import {
 } from "./findings";
 import { relayPrompt, reviewerPrompt } from "./prompts";
 import { atomicWriteText, findingsPathFor, loadFlows, loadPresets, saveFlows } from "./store";
-import type { Flow, FlowPreset, FlowState, RoleConfig, Round } from "./types";
+import type { Flow, FlowPreset, FlowState, RelayDeliveryTransport, RoleConfig, Round } from "./types";
 import { chooseHeadlessReviewer, rateLimitStateDetail } from "./reviewerPolicy";
 
 const TERMINAL_STATES = new Set<FlowState>(["approved", "done_comment", "needs_decision", "closed"]);
@@ -50,6 +50,8 @@ const relayStartedThisProcess = new Set<string>();
 const relayLeases = store.__llvFlowRelayLeases ??= new Map<string, Promise<void>>();
 let sendRelay: typeof sendToImplementer;
 const MAX_HEADLESS_NO_VERDICT_RETRIES = 1;
+const MAX_RELAY_DELIVERY_RETRIES = 3;
+const RELAY_RETRY_BACKOFF_MS = [1_000, 5_000, 30_000] as const;
 const REVIEWER_LAUNCH_LEASE_MS = 60_000;
 const SYNTHETIC_LAUNCH_LOSS_DETAILS = new Set([
   "reviewer tracking was lost before a verdict could be recovered",
@@ -62,6 +64,20 @@ class ReviewerAccountsExhaustedError extends Error {
   constructor(readonly resetsAt: number | null) {
     super("reviewer rate limited; all accounts exhausted");
     this.name = "ReviewerAccountsExhaustedError";
+  }
+}
+
+class UnsafeInterruptedRelayRetryError extends Error {
+  constructor() {
+    super("interrupted relay cannot retry safely because the implementer has no idempotent structured delivery");
+    this.name = "UnsafeInterruptedRelayRetryError";
+  }
+}
+
+class StructuredRelayDeliveryUncertainError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StructuredRelayDeliveryUncertainError";
   }
 }
 
@@ -149,6 +165,11 @@ export function newRound(flow: Flow, triggeredBy: Round["triggeredBy"], readyNot
     launchId: null,
     launchLeaseUntil: null,
     relayStartedAt: null,
+    relayRetryCount: 0,
+    relayDeliveryAttempt: 0,
+    relayDeliveryTransport: null,
+    relayRetryAt: null,
+    relayRetryRequiresIdempotency: false,
     relayDelivery: null,
     reviewedAt: null,
     terminalAt: null,
@@ -288,6 +309,20 @@ export interface RelayDeliveryOverrides {
   recover?: typeof recoverDeadStructuredConversation;
   enqueueStructured?: typeof enqueueStructuredMessage;
   deliver?: typeof deliverToTranscriptHost;
+  /** Restart recovery uses this fence when the prior process may have sent the
+      relay before its durable settlement write. */
+  requireIdempotentDelivery?: boolean;
+  /** Reports the selected transport before either structured or legacy
+      actuation can begin, allowing the caller to checkpoint it. */
+  onTransportSelected?: (transport: RelayDeliveryTransport) => void;
+}
+
+function relayClientMessageId(flow: Flow): string {
+  const round = flow.rounds?.at(-1);
+  const deliveryAttempt = round?.relayDeliveryAttempt ?? 0;
+  const identity = `${flow.id}:${round?.n ?? "legacy"}:${round?.reviewerBindingId ?? "legacy"}`
+    + (deliveryAttempt > 0 ? `:retry:${deliveryAttempt}` : "");
+  return `flow_relay_${crypto.createHash("sha256").update(identity).digest("hex").slice(0, 32)}`;
 }
 
 export async function sendToImplementer(
@@ -316,15 +351,30 @@ export async function sendToImplementer(
       { registry },
     );
     if (recovered) {
+      overrides.onTransportSelected?.("structured");
       const structured = await (overrides.enqueueStructured ?? enqueueStructuredMessage)(
-        { path: recovered.path, conversationId: recovered.conversationId, text },
+        {
+          path: recovered.path,
+          conversationId: recovered.conversationId,
+          clientMessageId: relayClientMessageId(flow),
+          text,
+        },
         { registry: () => registry },
       );
       if (!structured) throw new Error("structured delivery ownership is unavailable");
-      if (!structured.ok) throw new Error(structured.error);
+      if (!structured.ok) {
+        if (structured.transportUncertain || structured.receipt?.status === "uncertain") {
+          throw new StructuredRelayDeliveryUncertainError(structured.error);
+        }
+        throw new Error(structured.error);
+      }
       return recovered.path;
     }
   }
+  /* A restart leaves an uncertain send window. The structured queue dedupes
+     the stable client-message id above; legacy pane delivery has no comparable
+     receipt, so an automatic replay could duplicate the findings. */
+  if (overrides.requireIdempotentDelivery) throw new UnsafeInterruptedRelayRetryError();
   const spec = resumeSpecFor(entry.root, entry.path, {
     model: entry.launchModel ?? entry.model,
     effort: entry.effort,
@@ -333,8 +383,14 @@ export async function sendToImplementer(
     plugins: agentRegistry().launchProfileForPath(entry.path)?.plugins,
   });
   if (!spec) throw new Error("implementer session cannot be resumed");
+  overrides.onTransportSelected?.("legacy");
   const outcome = await (overrides.deliver ?? deliverToTranscriptHost)({ entry, spec, payload: text });
-  if (!outcome.ok) throw new Error(outcome.error);
+  if (!outcome.ok) {
+    if (outcome.actuation === "started") {
+      throw new TmuxDeliveryUncertainError(`legacy relay delivery is uncertain after actuation started: ${outcome.error}`);
+    }
+    throw new Error(outcome.error);
+  }
   return entry.path;
 }
 
@@ -688,6 +744,11 @@ function retryHeadlessRound(flow: Flow, round: Round): void {
     launchId: null,
     launchLeaseUntil: null,
     relayStartedAt: null,
+    relayRetryCount: 0,
+    relayDeliveryAttempt: 0,
+    relayDeliveryTransport: null,
+    relayRetryAt: null,
+    relayRetryRequiresIdempotency: false,
     reviewedAt: null,
     relayedAt: null,
     error: null,
@@ -696,15 +757,52 @@ function retryHeadlessRound(flow: Flow, round: Round): void {
   flow.stateDetail = `reviewer produced no verdict; retrying automatically (${round.autoRetryCount}/${MAX_HEADLESS_NO_VERDICT_RETRIES})`;
 }
 
-async function relayFindings(flow: Flow, entriesByPath: Map<string, FileEntry>, round: Round): Promise<void> {
+async function relayFindings(
+  flow: Flow,
+  entriesByPath: Map<string, FileEntry>,
+  round: Round,
+  options: Pick<RelayDeliveryOverrides, "requireIdempotentDelivery" | "onTransportSelected"> = {},
+): Promise<void> {
   if (!round.findingsPath) throw new Error("round has no findings artifact");
   const findings = fs.readFileSync(round.findingsPath, "utf8");
   flow.state = "relaying";
-  const deliveryPath = await sendRelay(flow, entriesByPath, relayPrompt(round, findings));
+  const deliveryPath = await sendRelay(flow, entriesByPath, relayPrompt(round, findings), options);
   const deliveredAt = isoNow();
   round.relayDelivery = { path: deliveryPath, deliveredAt };
   round.relayedAt = deliveredAt;
+  round.relayRetryAt = null;
+  round.relayRetryRequiresIdempotency = false;
+  round.error = null;
+  flow.stateDetail = null;
   completeRelayTransition(flow, round);
+}
+
+function scheduleRelayRetry(
+  flow: Flow,
+  round: Round,
+  detail: string,
+  requireIdempotentDelivery = round.relayRetryRequiresIdempotency ?? false,
+): boolean {
+  const consumed = round.relayRetryCount ?? 0;
+  if (consumed >= MAX_RELAY_DELIVERY_RETRIES) {
+    round.error = detail;
+    round.relayRetryAt = null;
+    markNeedsDecision(flow, `relay delivery failed after ${consumed} automatic retries: ${detail}`);
+    return false;
+  }
+  const next = consumed + 1;
+  round.relayRetryCount = next;
+  if (!requireIdempotentDelivery) {
+    round.relayDeliveryAttempt = (round.relayDeliveryAttempt ?? 0) + 1;
+  }
+  round.relayRetryAt = new Date(Date.now() + RELAY_RETRY_BACKOFF_MS[next - 1]!).toISOString();
+  round.relayStartedAt = null;
+  round.relayRetryRequiresIdempotency = requireIdempotentDelivery;
+  round.error = detail;
+  flow.state = "relaying";
+  flow.pausedState = null;
+  flow.stateDetail = `relay delivery failed; retrying automatically (${next}/${MAX_RELAY_DELIVERY_RETRIES}): ${detail}`;
+  return true;
 }
 
 function completeRelayTransition(flow: Flow, round: Round): void {
@@ -918,21 +1016,48 @@ export async function tickFlow(
       return JSON.stringify(flow) !== before;
     }
     if (round.relayStartedAt && round.relayedAt === null && !relayStartedThisProcess.has(relayKey)) {
-      markNeedsDecision(flow, "relay was interrupted; it may have been delivered twice");
+      if (round.relayDeliveryTransport === "structured") {
+        scheduleRelayRetry(flow, round, "structured relay was interrupted before delivery settlement", true);
+      } else {
+        const detail = round.relayDeliveryTransport === "legacy"
+          ? "legacy relay was interrupted before delivery settlement; automatic replay is unsafe"
+          : "relay transport was not durably classified before interruption; automatic replay is unsafe";
+        round.error = detail;
+        round.relayRetryAt = null;
+        markNeedsDecision(flow, detail);
+      }
+      return JSON.stringify(flow) !== before;
+    }
+    if (round.relayRetryAt && Date.now() < unixMs(round.relayRetryAt)) {
       return JSON.stringify(flow) !== before;
     }
     const lease = (async () => {
       try {
+        round.relayRetryAt = null;
+        round.relayDeliveryTransport = null;
         round.relayStartedAt = isoNow();
         relayStartedThisProcess.add(relayKey);
         persistCheckpoint();
-        await relayFindings(flow, entriesByPath, round);
+        await relayFindings(flow, entriesByPath, round, {
+          requireIdempotentDelivery: round.relayRetryRequiresIdempotency ?? false,
+          onTransportSelected: (transport) => {
+            round.relayDeliveryTransport = transport;
+            persistCheckpoint();
+          },
+        });
         persistCheckpoint();
       } catch (error) {
-        markRoundError(round, error instanceof Error ? error.message : String(error));
-        flow.state = "paused";
-        flow.pausedState = "relaying";
-        flow.stateDetail = round.error;
+        const detail = error instanceof Error ? error.message : String(error);
+        if (error instanceof UnsafeInterruptedRelayRetryError || error instanceof TmuxDeliveryUncertainError) {
+          round.error = detail;
+          round.relayRetryAt = null;
+          markNeedsDecision(flow, detail);
+        } else if (error instanceof StructuredRelayDeliveryUncertainError) {
+          scheduleRelayRetry(flow, round, detail, true);
+        } else {
+          scheduleRelayRetry(flow, round, detail, false);
+        }
+        relayStartedThisProcess.delete(relayKey);
         persistCheckpoint();
       }
     })();

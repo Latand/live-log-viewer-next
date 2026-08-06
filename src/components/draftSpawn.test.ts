@@ -7,6 +7,8 @@ import {
   SLOW_BOOT_MS,
   type RecoverableSpawnRequest,
   type SpawnAttempt,
+  type SpawnOutcome,
+  admittedSpawn,
   applySpawnOutcome,
   applySpawnFailure,
   classifySpawnResponse,
@@ -16,6 +18,7 @@ import {
   displayPhase,
   hasRecoverableRequest,
   matchSpawnedFile,
+  provisionalSpawnFile,
   sendEnabled,
   spawnRequestBody,
   upgradeLegacySpawnAttempt,
@@ -103,6 +106,9 @@ describe("classifySpawnResponse — server → card outcome", () => {
       path: "/x/rollout.jsonl",
       conversationId: "conversation_9",
       launchId: "launch-1",
+      structured: false,
+      state: "settled",
+      initialMessage: null,
     });
   });
 
@@ -123,6 +129,9 @@ describe("classifySpawnResponse — server → card outcome", () => {
       path: null,
       conversationId: "conversation_9",
       launchId: "launch-1",
+      structured: false,
+      state: "path-pending",
+      initialMessage: null,
     });
   });
 
@@ -429,6 +438,66 @@ describe("duplicate-prevention gate", () => {
   });
 });
 
+describe("receipt-keyed instant attach (issue #919)", () => {
+  const launched = (over: Partial<Extract<SpawnOutcome, { kind: "launched" }>> = {}): Extract<SpawnOutcome, { kind: "launched" }> => ({
+    kind: "launched",
+    durable: "confirming",
+    target: "",
+    path: null,
+    conversationId: "conversation_919",
+    launchId: "launch-919",
+    structured: true,
+    state: "path-pending",
+    initialMessage: "queued",
+    ...over,
+  });
+
+  test("a settled path does not block adoption by the receipt's conversation id", () => {
+    const files = [mkFile({ path: "spawn:launch-919", conversationId: "conversation_919" })];
+    const attempt = { ...baseAttempt, path: "/not-scanned-yet.jsonl", conversationId: "conversation_919" };
+    expect(matchSpawnedFile(attempt, files)?.path).toBe("spawn:launch-919");
+  });
+
+  test("a structured receipt yields the provisional spawn window keyed on the durable ids", () => {
+    const provisional = provisionalSpawnFile(baseAttempt, launched(), "proj");
+    expect(provisional).toMatchObject({
+      path: "spawn:launch-919",
+      project: "proj",
+      engine: "codex",
+      conversationId: "conversation_919",
+      generation: 1,
+      spawnOrigin: "viewer",
+    });
+    expect(provisional?.spawn).toMatchObject({
+      launchId: "launch-919",
+      clientAttemptId: baseAttempt.clientAttemptId,
+      conversationId: "conversation_919",
+      generation: 1,
+      state: "queued",
+      initialMessage: "queued",
+    });
+    /* The board's adoption evidence closes the loop: the provisional card is
+       exactly what the attempt's own watch would match. */
+    expect(matchSpawnedFile({ ...baseAttempt, conversationId: "conversation_919", path: null }, [provisional!])).toBe(provisional);
+  });
+
+  test("no instant attach without a structured transport, durable ids, or with a terminal receipt", () => {
+    expect(provisionalSpawnFile(baseAttempt, launched({ structured: false }), "proj")).toBeNull();
+    expect(provisionalSpawnFile(baseAttempt, launched({ conversationId: null }), "proj")).toBeNull();
+    expect(provisionalSpawnFile(baseAttempt, launched({ launchId: null }), "proj")).toBeNull();
+    expect(provisionalSpawnFile(baseAttempt, launched({ state: "conflict" }), "proj")).toBeNull();
+    expect(provisionalSpawnFile(baseAttempt, launched({ state: "failed" }), "proj")).toBeNull();
+  });
+
+  test("any durable receipt evidence marks the launch admitted; a bare attempt stays unproven", () => {
+    expect(admittedSpawn({ conversationId: "conversation_919", launchId: null, path: null, target: "" })).toBe(true);
+    expect(admittedSpawn({ conversationId: null, launchId: "launch-919", path: null, target: "" })).toBe(true);
+    expect(admittedSpawn({ conversationId: null, launchId: null, path: "/x.jsonl", target: "" })).toBe(true);
+    expect(admittedSpawn({ conversationId: null, launchId: null, path: null, target: "sess:1.0" })).toBe(true);
+    expect(admittedSpawn({ conversationId: null, launchId: null, path: null, target: "" })).toBe(false);
+  });
+});
+
 describe("displayPhase", () => {
   test("no attempt: launching while the POST is in flight, else draft", () => {
     expect(displayPhase(null, false, false)).toBe("draft");
@@ -443,6 +512,10 @@ describe("displayPhase", () => {
   test("confirming and attention render directly from the durable phase", () => {
     expect(displayPhase({ phase: "confirming" }, false, false)).toBe("confirming");
     expect(displayPhase({ phase: "attention" }, false, true)).toBe("attention");
+  });
+
+  test("an admitted confirming launch past its window shows the slow admission, never attention", () => {
+    expect(displayPhase({ phase: "confirming" }, false, true)).toBe("confirming-slow");
   });
 });
 

@@ -14,7 +14,8 @@ process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-
 const engineModule = await import("./engine");
 const { adoptAttempt, defaultPipelinePorts, ensureTaskPipelineForAssignment, patchPipeline, pipelineAttemptTargetForSource, pipelineClaudePermissionMode, reconcileEmbeddedReviewFlows, reviewNote, tickPipelines } = engineModule;
 const { AgentRegistry, setAgentRegistryForTests } = await import("@/lib/agent/registry");
-const { newRound } = await import("@/lib/flows/engine");
+const { newRound, setRelayDeliveryForTest, tickFlow } = await import("@/lib/flows/engine");
+const { isRecoverableLegacyRelayFailurePause } = await import("@/lib/flows/commands");
 const rawCreatePipelineFromRequest = engineModule.createPipelineFromRequest;
 const createPipelineFromRequest: typeof rawCreatePipelineFromRequest = async (request, ports, options) =>
   await rawCreatePipelineFromRequest({ src: "/codex/creator.jsonl", ...request }, ports, options);
@@ -278,6 +279,19 @@ function harness() {
     patchFlow: (id, action, note) => {
       calls.push(`flow-patch:${id}:${action}`);
       if (note) calls.push(`flow-note:${note}`);
+      const flow = flows.get(id);
+      if (flow && action === "resume" && flow.state === "paused") {
+        const round = flow.rounds.at(-1);
+        if (round && isRecoverableLegacyRelayFailurePause(flow)) {
+          round.relayStartedAt = null;
+          round.relayDeliveryTransport = null;
+          round.relayRetryAt = null;
+          round.relayRetryRequiresIdempotency = false;
+        }
+        flow.state = flow.pausedState && flow.pausedState !== "paused" ? flow.pausedState : "waiting_ready";
+        flow.pausedState = null;
+        flow.stateDetail = null;
+      }
       return {};
     },
     closeFlow: async (id) => {
@@ -1017,6 +1031,50 @@ test("creation validates the 1–8 stage conversation graph and optional roles",
     { id: "a", kind: "run", role: { roleId: "builder" }, prompt: "a", next: "b" },
     { id: "b", kind: "run", role: { roleId: "builder", engine: "codex" }, prompt: "b", next: null },
   ] as never }, ports)).error).toContain("role only accepts roleId");
+});
+
+test("review-loop onFail edges are rejected during creation and graph editing", async () => {
+  const h = harness();
+  savePipelines([]);
+  const invalid = await createPipelineFromRequest({
+    task: "Unreachable review fix edge",
+    repoDir: "/repo",
+    autoStart: false,
+    stages: [
+      { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "build", next: "review" },
+      { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null, onFail: { to: "build", maxRounds: 3 } },
+    ],
+  }, h.ports);
+
+  expect(invalid).toEqual({
+    error: "review-loop stage review does not support onFail",
+    status: 400,
+  });
+  expect(loadPipelines()).toEqual([]);
+
+  const valid = await createPipelineFromRequest({
+    task: "Editable review graph",
+    repoDir: "/repo",
+    autoStart: false,
+    stages: [
+      { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "build", next: "review" },
+      { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+    ],
+  }, h.ports);
+  if (!valid.pipeline) throw new Error(valid.error);
+
+  const edited = await patchPipeline(valid.pipeline.id, {
+    action: "set-edge",
+    stageId: "review",
+    edge: "fail",
+    to: "build",
+    maxRounds: 3,
+  }, h.ports);
+  expect(edited).toMatchObject({
+    error: "review-loop stage review does not support onFail",
+    status: 400,
+  });
+  expect(loadPipelines()[0]!.stages.find((stage) => stage.id === "review")!.onFail).toBeNull();
 });
 
 test("auto-start creation persists the fetched origin/main identity before provisioning", async () => {
@@ -2653,6 +2711,128 @@ test("a paused review flow parks its pipeline", async () => {
   expect(loadPipelines()[0]!.stateDetail).toContain("kickoff delivery failed");
 });
 
+test("a bound review flow paused while relaying resumes without operator action", async () => {
+  const h = harness();
+  const stages = [
+    { id: "build", kind: "run", prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as const;
+  await create(h.ports, stages as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const flow = h.flows.get("flow-1")!;
+  const findingsPath = path.join(process.env.LLV_STATE_DIR!, "legacy-relay-failure-findings.md");
+  fs.writeFileSync(findingsPath, "VERDICT: REQUEST_CHANGES\n\nRepair the host claim.\n");
+  flow.rounds.push({
+    n: 3,
+    verdict: "REQUEST_CHANGES",
+    reviewHeadSha: ORIGIN_MAIN_SHA,
+    findingsPath,
+    relayStartedAt: "2026-08-05T20:47:08.000Z",
+    relayDeliveryTransport: null,
+    relayDelivery: null,
+    relayedAt: null,
+    error: "structured resume host claim is unavailable",
+    reviewerPath: "/codex/reviewer.jsonl",
+    reviewerConversationId: "conversation_reviewer",
+  } as never);
+  flow.state = "paused";
+  flow.pausedState = "relaying";
+  flow.stateDetail = "structured resume host claim is unavailable";
+
+  await tickPipelines([entry("/codex/reviewer.jsonl")], h.ports);
+  const parked = loadPipelines()[0]!;
+  expect(parked).toMatchObject({
+    state: "needs_decision",
+    stateDetail: "review flow paused in relaying: structured resume host claim is unavailable",
+  });
+  expect(parked.runs[1]!.attempts[0]).toMatchObject({
+    state: "needs_decision",
+    error: "review flow paused in relaying: structured resume host claim is unavailable",
+    flowId: "flow-1",
+  });
+
+  await tickPipelines([entry("/codex/reviewer.jsonl")], h.ports);
+
+  expect(flow).toMatchObject({ state: "relaying", pausedState: null, stateDetail: null });
+  expect(flow.rounds.at(-1)).toMatchObject({ relayStartedAt: null, relayDeliveryTransport: null });
+  expect(h.calls).toContain("flow-patch:flow-1:resume");
+  expect(loadPipelines()[0]).toMatchObject({ state: "running", stateDetail: null });
+  expect(loadPipelines()[0]!.runs[1]!.attempts[0]).toMatchObject({
+    state: "reviewing",
+    error: null,
+    flowId: "flow-1",
+    agentPath: "/codex/reviewer.jsonl",
+    conversationId: "conversation_reviewer",
+  });
+
+  const implementer = entry("/codex/stage-1.jsonl");
+  const relayDeliveries: string[] = [];
+  const restoreDelivery = setRelayDeliveryForTest(async (_flow, _entries, text) => {
+    relayDeliveries.push(text);
+    return implementer.path;
+  });
+  try {
+    await tickFlow(flow, [implementer], new Map([[implementer.path, implementer]]), () => {});
+  } finally {
+    restoreDelivery();
+  }
+  await tickPipelines([entry("/codex/reviewer.jsonl")], h.ports);
+
+  expect(relayDeliveries).toHaveLength(1);
+  expect(flow).toMatchObject({ state: "fixing", pausedState: null, stateDetail: null });
+  expect(flow.rounds.at(-1)).toMatchObject({
+    relayDelivery: { path: implementer.path, deliveredAt: expect.any(String) },
+    relayedAt: expect.any(String),
+    error: null,
+  });
+  expect(loadPipelines()[0]).toMatchObject({ state: "running", stateDetail: null });
+});
+
+test("an operator pause during relay stays paused across pipeline reconciliation", async () => {
+  const h = harness();
+  const stages = [
+    { id: "build", kind: "run", prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as const;
+  await create(h.ports, stages as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const flow = h.flows.get("flow-1")!;
+  flow.rounds.push({
+    n: 3,
+    verdict: "REQUEST_CHANGES",
+    reviewHeadSha: ORIGIN_MAIN_SHA,
+    relayStartedAt: "2026-08-05T20:47:08.000Z",
+    error: "structured resume host claim is unavailable",
+    reviewerPath: "/codex/reviewer.jsonl",
+    reviewerConversationId: "conversation_reviewer",
+  } as never);
+  flow.state = "paused";
+  flow.pausedState = "relaying";
+  flow.stateDetail = "paused by user";
+
+  await tickPipelines([entry("/codex/reviewer.jsonl")], h.ports);
+  await tickPipelines([entry("/codex/reviewer.jsonl")], h.ports);
+
+  expect(flow).toMatchObject({ state: "paused", pausedState: "relaying", stateDetail: "paused by user" });
+  expect(h.calls).not.toContain("flow-patch:flow-1:resume");
+  expect(loadPipelines()[0]).toMatchObject({
+    state: "needs_decision",
+    stateDetail: "review flow paused in relaying: paused by user",
+  });
+  expect(loadPipelines()[0]!.runs[1]!.attempts[0]).toMatchObject({
+    state: "needs_decision",
+    error: "review flow paused in relaying: paused by user",
+  });
+});
+
 test("a later exact-head approval replaces a stale startup pause and completes after controller restart (#526)", async () => {
   const h = harness();
   const stages = [
@@ -2667,6 +2847,7 @@ test("a later exact-head approval replaces a stale startup pause and completes a
 
   const flow = h.flows.get("flow-1")!;
   flow.state = "paused";
+  flow.pausedState = "reviewing";
   flow.stateDetail = "paused by user";
   await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
   const parked = loadPipelines()[0]!;
@@ -2674,7 +2855,7 @@ test("a later exact-head approval replaces a stale startup pause and completes a
   expect(parked.runs[1]!.attempts[0]).toMatchObject({
     flowId: "flow-1",
     state: "needs_decision",
-    error: "review flow paused during startup: paused by user",
+    error: "review flow paused in reviewing: paused by user",
   });
 
   flow.rounds.push({
@@ -3000,10 +3181,11 @@ for (const terminalState of ["done_comment", "needs_decision"] as const) {
 
     const flow = h.flows.get("flow-1")!;
     flow.state = "paused";
+    flow.pausedState = "spawning";
     flow.stateDetail = "startup transport unavailable";
     await tickPipelines([], h.ports);
     expect(loadPipelines()[0]!.runs[1]!.attempts[0]!.error)
-      .toBe("review flow paused during startup: startup transport unavailable");
+      .toBe("review flow paused in spawning: startup transport unavailable");
 
     flow.rounds.push({
       n: 1,

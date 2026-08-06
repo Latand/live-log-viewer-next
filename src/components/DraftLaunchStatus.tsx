@@ -36,7 +36,7 @@ export const DraftLaunchStatus = forwardRef<HTMLDivElement, { phase: DraftPhase;
       : target
       ? t("draft.attention", { target })
       : t("draft.attentionNoTarget"))
-    : phase === "confirming"
+    : phase === "confirming" || phase === "confirming-slow"
       ? structured
         ? t("draft.confirmingStructured")
         : target
@@ -63,6 +63,14 @@ export const DraftLaunchStatus = forwardRef<HTMLDivElement, { phase: DraftPhase;
         <span>{statusText}</span>
       </div>
       {phase === "booting-slow" ? <div className="text-[11px] text-muted">{structured ? t("draft.slowStructured") : t("draft.slow", { target })}</div> : null}
+      {/* An admitted launch past its window (issue #919): the receipt proved the
+          worker, so the copy admits slowness and keeps watching — the «may
+          already be running» warning stays reserved for receiptless launches. */}
+      {phase === "confirming-slow" ? (
+        <div className="text-[11px] text-muted">
+          {structured || !target ? t("draft.confirmingSlowStructured") : t("draft.confirmingSlow", { target })}
+        </div>
+      ) : null}
     </>
   );
 });

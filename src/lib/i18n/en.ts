@@ -499,6 +499,8 @@ export const en = {
   "draft.confirming": "Launched — confirming the agent in tmux {target}. Don't send again; the panel attaches the conversation as soon as its transcript appears.",
   "draft.confirmingStructured": "Launched — confirming the agent. Don't send again; the panel attaches the conversation as soon as its transcript appears.",
   "draft.confirmingNoTarget": "Confirming whether the agent started. Don't send again — the panel attaches the conversation as soon as its transcript appears.",
+  "draft.confirmingSlow": "Launching slowly — the launch is confirmed in tmux {target}. The panel keeps watching and attaches the conversation itself; don't launch again.",
+  "draft.confirmingSlowStructured": "Launching slowly — the launch is confirmed. The panel keeps watching and attaches the conversation itself; don't launch again.",
   "draft.attention": "The agent may already be running in tmux {target}. Don't launch it again. Dismiss this draft once you've checked; it still attaches automatically if the transcript appears.",
   "draft.attentionStructured": "The agent may already be running. Don't launch it again. Dismiss this draft once you've checked; it still attaches automatically if the transcript appears.",
   "draft.attentionNoTarget": "The agent may already be running — check your tmux windows. Don't launch it again. Dismiss this draft once you've checked; it still attaches automatically if the transcript appears.",

@@ -1,4 +1,4 @@
-import type { FileEntry } from "@/lib/types";
+import type { FileEntry, StructuredSpawnCardState } from "@/lib/types";
 import { derivedSpawnTitle, durableSemanticTitle, SPAWN_TITLE_REQUIRED_ERROR } from "@/lib/title";
 
 /* The draft spawn lifecycle, as a pure module the pane renders from.
@@ -17,7 +17,7 @@ import { derivedSpawnTitle, durableSemanticTitle, SPAWN_TITLE_REQUIRED_ERROR } f
 export type DraftEngine = "claude" | "codex";
 
 /** Display phase of a draft card, derived from the durable attempt + timers. */
-export type DraftPhase = "draft" | "launching" | "booting" | "booting-slow" | "confirming" | "attention";
+export type DraftPhase = "draft" | "launching" | "booting" | "booting-slow" | "confirming" | "confirming-slow" | "attention";
 
 /** Durable phase persisted across reload — every value means a worker may
     already exist, so the send affordance stays disabled until the draft is
@@ -220,14 +220,29 @@ export interface SpawnResponseBody {
   retrySafe?: boolean;
   initialMessage?: "pending" | "queued" | "delivered" | "failed";
   state?: "settled" | "path-pending" | "starting" | "failed" | "conflict";
+  /** The transport the receipt actually launched over (issue #919): a
+      structured receipt is the trigger for the instant receipt-keyed attach. */
+  transport?: "structured" | "tmux";
   error?: string;
 }
 
 /** What the POST outcome means for the draft card. */
 export type SpawnOutcome =
   /** A worker exists (or very likely does). `durable` picks booting when the
-      exact transcript path is known, else confirming. */
-  | { kind: "launched"; durable: "booting" | "confirming"; target: string; path: string | null; conversationId: string | null; launchId: string | null }
+      exact transcript path is known, else confirming. `structured`, `state` and
+      `initialMessage` carry the receipt facts the instant attach (issue #919)
+      projects into the provisional conversation window. */
+  | {
+      kind: "launched";
+      durable: "booting" | "confirming";
+      target: string;
+      path: string | null;
+      conversationId: string | null;
+      launchId: string | null;
+      structured: boolean;
+      state: NonNullable<SpawnResponseBody["state"]> | null;
+      initialMessage: NonNullable<SpawnResponseBody["initialMessage"]> | null;
+    }
   /** Proven retry-safe failure: the server has released worker ownership, so
       the draft re-enables send and shows the reason. */
   | { kind: "failed-preflight"; message: string | null }
@@ -260,8 +275,10 @@ export function upgradeLegacySpawnAttempt(
 }
 
 /* After this long without a matched transcript, a known-path boot admits it is
-   slow (the file will still appear — the path is deterministic), and an
-   unresolved confirming launch escalates to `attention`. */
+   slow (the file will still appear — the path is deterministic), an admitted
+   confirming launch admits the same (issue #919: the receipt proved the worker,
+   so the watch continues indefinitely), and only a confirming launch with NO
+   receipt escalates to `attention`. */
 export const SLOW_BOOT_MS = 90_000;
 export const CONFIRM_ATTENTION_MS = 90_000;
 
@@ -294,6 +311,9 @@ export function classifySpawnResponse(status: number, ok: boolean, body: SpawnRe
       path: deterministic ? path : null,
       conversationId,
       launchId,
+      structured: body.transport === "structured",
+      state: body.state ?? null,
+      initialMessage: body.initialMessage ?? null,
     };
   }
   /* A conflicting attempt (same key, different request) can leave the
@@ -329,7 +349,13 @@ export function matchSpawnedFile(
   attempt: Pick<SpawnAttempt, "path" | "conversationId" | "clientAttemptId">,
   files: readonly FileEntry[],
 ): FileEntry | null {
-  if (attempt.path) return files.find((file) => file.path === attempt.path) ?? null;
+  if (attempt.path) {
+    const byPath = files.find((file) => file.path === attempt.path);
+    if (byPath) return byPath;
+  }
+  /* The durable conversation id from the receipt keys the attach (issue #919):
+     a settled path that has not entered the scan yet must not block adoption of
+     the same conversation's earlier surface (its `spawn:` projection). */
   if (attempt.conversationId) {
     const byId = files.find((file) => file.conversationId === attempt.conversationId);
     if (byId) return byId;
@@ -341,16 +367,101 @@ export function matchSpawnedFile(
   return null;
 }
 
+/** Receipt evidence that the server admitted this launch: any durable identity
+    the response settled. An admitted spawn is a proven worker — the watch shows
+    a launching state forever and never escalates to the «may already be
+    running» attention copy, which is reserved for launches whose receipt was
+    lost (transport drop, opaque 5xx, conflicting attempt). Issue #919. */
+export function admittedSpawn(attempt: Pick<SpawnAttempt, "conversationId" | "launchId" | "path" | "target">): boolean {
+  return Boolean(attempt.conversationId || attempt.launchId || attempt.path || attempt.target);
+}
+
+/**
+ * The provisional conversation window for an admitted STRUCTURED receipt
+ * (issue #919): the receipt already names the durable conversation id and the
+ * launch, which is exactly what the server's own `spawn:<launchId>` projection
+ * keys on — so the client renders the same card immediately instead of waiting
+ * for the files feed to deliver it. The feed's copy later replaces this one by
+ * path/conversation identity (never duplicating it), and the live window it
+ * opens subscribes to the structured host's stream by conversation id on its
+ * own. Null when the receipt cannot prove a structured conversation (tmux
+ * transport, missing identity, terminal failure/conflict) — those keep the
+ * legacy transcript watch.
+ */
+export function provisionalSpawnFile(
+  attempt: SpawnAttempt,
+  outcome: Extract<SpawnOutcome, { kind: "launched" }>,
+  project: string,
+): FileEntry | null {
+  if (!outcome.structured || !outcome.conversationId || !outcome.launchId) return null;
+  if (outcome.state === "failed" || outcome.state === "conflict") return null;
+  const initialMessage = outcome.initialMessage ?? "pending";
+  const state: StructuredSpawnCardState["state"] = initialMessage === "delivered"
+    ? "recovered"
+    : initialMessage === "queued"
+      ? "queued"
+      : outcome.state === "path-pending"
+        ? "binding"
+        : "starting";
+  const spawn: StructuredSpawnCardState = {
+    launchId: outcome.launchId,
+    clientAttemptId: attempt.clientAttemptId,
+    accountId: attempt.request?.accountId || null,
+    conversationId: outcome.conversationId,
+    /* A fresh launch owns generation one, same as the server projection of a
+       receipt with no key yet — required for launch-bubble ownership (#922). */
+    generation: 1,
+    state,
+    initialMessage,
+    retrySafe: false,
+    error: null,
+    ...(attempt.prompt.trim() || attempt.hasImages
+      ? {
+          ["prompt"]: attempt.prompt,
+          promptImages: attempt.request?.images.length ?? 0,
+          promptAt: attempt.at,
+        }
+      : {}),
+  };
+  return {
+    path: `spawn:${outcome.launchId}`,
+    root: attempt.engine === "codex" ? "codex-sessions" : "claude-projects",
+    name: `spawn:${outcome.launchId}`,
+    project,
+    ...(attempt.request?.cwd ? { cwd: attempt.request.cwd } : {}),
+    title: attempt.engine === "codex" ? "Codex" : "Claude",
+    engine: attempt.engine,
+    kind: "session",
+    fmt: attempt.engine,
+    spawnOrigin: "viewer",
+    parent: null,
+    mtime: attempt.at / 1000,
+    size: 0,
+    activity: "live",
+    activityReason: `structured_spawn_${state}`,
+    proc: null,
+    pid: null,
+    model: attempt.request?.model || null,
+    pendingQuestion: null,
+    waitingInput: null,
+    conversationId: outcome.conversationId,
+    generation: 1,
+    spawn,
+  };
+}
+
 /** The send affordance re-enables only in `draft`/`failed-preflight` — i.e.
     exactly when no attempt record exists. This is the duplicate-prevention gate. */
 export function sendEnabled(attempt: SpawnAttempt | null): boolean {
   return attempt === null;
 }
 
-/** Resolve the display phase from the durable attempt and the timer flags. */
+/** Resolve the display phase from the durable attempt and the timer flags. An
+    admitted confirming launch earns only the slow admission after its window
+    (issue #919) — the timer never escalates it to `attention`. */
 export function displayPhase(attempt: Pick<SpawnAttempt, "phase"> | null, launching: boolean, slow: boolean): DraftPhase {
   if (!attempt) return launching ? "launching" : "draft";
   if (attempt.phase === "attention") return "attention";
-  if (attempt.phase === "confirming") return "confirming";
+  if (attempt.phase === "confirming") return slow ? "confirming-slow" : "confirming";
   return slow ? "booting-slow" : "booting";
 }

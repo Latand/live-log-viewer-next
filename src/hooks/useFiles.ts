@@ -104,6 +104,14 @@ export interface FilesClientCache {
   /** Drop a local overlay (a failed optimistic mutation) — the server snapshot
       is authoritative again. */
   revertPipeline(id: string): void;
+  /** Layer a freshly admitted launch conversation (the client-built
+      `spawn:<launchId>` card, issue #919) over the server snapshot without a
+      refetch, so the board renders the live window the moment the spawn receipt
+      arrives. The overlay yields row-for-row to the server once a scan carries
+      the same path or the same conversation, and is retired entirely then — a
+      stale or reconnecting feed can only delay the confirmation, never orphan
+      the launch. */
+  applySpawnedConversation(file: FileEntry): void;
   /** Cancel owned retries and detach subscribers. A disposed cache is inert. */
   dispose(): void;
 }
@@ -208,6 +216,15 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
      roll an applied edit back. `pipeline: null` hides a locally deleted draft. */
   const pipelineOverlays = new Map<string, { pipeline: Pipeline | null; minGeneration: number }>();
   let serverPipelines: readonly Pipeline[] = EMPTY.pipelines;
+  /* Freshly admitted launch conversations (issue #919), keyed by their
+     `spawn:<launchId>` path. Composed under the server rows: any row the server
+     carries for the same path or the same conversation wins, so the transcript
+     merging in later never duplicates the overlay and never reorders around it.
+     An overlay retires once a fetched scan confirms its conversation; until
+     then it survives every stale snapshot, so a dead or reconnecting feed can
+     only delay the confirmation, never orphan the launch. */
+  const spawnedOverlays = new Map<string, FileEntry>();
+  const SPAWNED_OVERLAY_CAP = 8;
   /* Consecutive failed `/api/files` attempts (issue #696). It lives beside the
      snapshot rather than inside it: a failure produces no new representation,
      so it has to be composed onto whatever each scope last certified. */
@@ -236,10 +253,30 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     pipelines: pipelinesWithOverlays(data.pipelines),
   });
 
+  const withSpawnedOverlays = (data: FilesData): FilesData => {
+    if (!spawnedOverlays.size) return data;
+    const extra = [...spawnedOverlays.values()].filter((entry) =>
+      !data.files.some((file) => file.path === entry.path
+        || (entry.conversationId !== undefined && file.conversationId === entry.conversationId)));
+    return extra.length ? { ...data, files: [...data.files, ...extra] } : data;
+  };
+
+  /** Retire every overlay a fetched scan confirms: the server now carries the
+      conversation (its `spawn:` projection, its materialized transcript, or at
+      minimum the durable launch route), so the feed is authoritative again. */
+  const retireConfirmedSpawnOverlays = (data: FilesData) => {
+    for (const [overlayPath, entry] of spawnedOverlays) {
+      const confirmed = data.launchRoutes[overlayPath] !== undefined
+        || data.files.some((file) => file.path === overlayPath
+          || (entry.conversationId !== undefined && file.conversationId === entry.conversationId));
+      if (confirmed) spawnedOverlays.delete(overlayPath);
+    }
+  };
+
   const exactScopeRepresentation = (requestScope: string): FilesData => {
     const representation = representations.get(requestScope)?.data
       ?? (snapshot.requestScope === requestScope ? snapshot : { ...EMPTY, requestScope });
-    return withCatalogFailures(withPipelineOverlays(representation));
+    return withCatalogFailures(withPipelineOverlays(withSpawnedOverlays(representation)));
   };
 
   const exactScopeSnapshot = (pinnedPath?: string | null): FilesData =>
@@ -252,7 +289,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     if (disposed) return;
     for (const [listener, scope] of listeners) {
       if (requestScope !== undefined) {
-        if (requestScope === scope) listener(withCatalogFailures(snapshot), priority);
+        if (requestScope === scope) listener(withCatalogFailures(withSpawnedOverlays(snapshot)), priority);
         continue;
       }
       listener(exactScopeRepresentation(scope), priority);
@@ -410,6 +447,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     if (completionRetry && !ownsCompletionRetry(url, completionRetry)) return snapshot;
     if (generation < appliedGeneration) return snapshot;
     const incoming = parsedFilesData(parsed, url);
+    retireConfirmedSpawnOverlays(incoming);
     /* A restarted server can acknowledge a pinned target generation with its
        global-only stale snapshot before the pin hydration resumes. Keep the
        last URL-scoped completed representation mounted until that generation
@@ -561,6 +599,18 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     publish(undefined, "urgent");
   };
 
+  const applySpawnedConversation = (file: FileEntry) => {
+    if (disposed) return;
+    spawnedOverlays.delete(file.path);
+    spawnedOverlays.set(file.path, file);
+    while (spawnedOverlays.size > SPAWNED_OVERLAY_CAP) {
+      const oldest = spawnedOverlays.keys().next().value as string | undefined;
+      if (!oldest) break;
+      spawnedOverlays.delete(oldest);
+    }
+    publish(undefined, "urgent");
+  };
+
   const subscribe = (
     listener: (data: FilesData, priority?: "background" | "urgent") => void,
     pinnedPath?: string | null,
@@ -582,7 +632,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     listeners.clear();
   };
 
-  return { read: () => withCatalogFailures(snapshot), readScope: exactScopeSnapshot, revalidate, subscribe, applyPipeline, revertPipeline, dispose };
+  return { read: () => withCatalogFailures(withSpawnedOverlays(snapshot)), readScope: exactScopeSnapshot, revalidate, subscribe, applyPipeline, revertPipeline, applySpawnedConversation, dispose };
 }
 
 const defaultFilesFetcher: FilesFetcher = (input, init) => fetch(input, init);
@@ -610,6 +660,17 @@ export function applyPipelineSnapshot(pipeline: Pipeline, confirmed: boolean): v
 export function revertPipelineSnapshot(id: string): void {
   flushSync(() => filesClientCache.revertPipeline(id));
   if (typeof window !== "undefined") window.dispatchEvent(new Event(PIPELINES_PATCHED_EVENT));
+}
+
+/**
+ * Layer a freshly admitted launch conversation straight into the client cache
+ * (issue #919): the spawn receipt already names the durable conversation and
+ * launch ids, so every mounted `useFiles` renders the live `spawn:<launchId>`
+ * window in the same frame — no `/api/files` round-trip gates the attach. The
+ * next confirmed scan replaces the overlay with the server's own projection.
+ */
+export function applySpawnedConversationSnapshot(file: FileEntry): void {
+  flushSync(() => filesClientCache.applySpawnedConversation(file));
 }
 
 function responseGeneration(response: Response, name: string): number | undefined {

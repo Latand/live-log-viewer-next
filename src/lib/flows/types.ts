@@ -35,6 +35,8 @@ export type ViewerFlowDelivery = {
   deliveredAt: string;
 };
 
+export type RelayDeliveryTransport = "structured" | "legacy";
+
 export type FlowBlock = {
   reason: "rate_limited";
   /** Stable address for a future continue-on-account action. */
@@ -107,6 +109,18 @@ export type Round = {
   launchId?: string | null;
   launchLeaseUntil?: string | null;
   relayStartedAt?: string | null; // findings delivery started
+  /** Automatic relay retries already scheduled for this logical round. */
+  relayRetryCount?: number;
+  /** Zero-based structured delivery identity generation. Definitive failures
+      advance it; uncertain or restart-interrupted attempts retain it. */
+  relayDeliveryAttempt?: number;
+  /** Transport durably selected for the current relay attempt before actuation. */
+  relayDeliveryTransport?: RelayDeliveryTransport | null;
+  /** Earliest wall-clock time for the next relay attempt. */
+  relayRetryAt?: string | null;
+  /** A prior process may have delivered this relay; retries must use the
+      structured queue's stable client-message identity. */
+  relayRetryRequiresIdempotency?: boolean;
   /** Exact transcript generation that received Viewer-generated findings. */
   relayDelivery?: ViewerFlowDelivery | null;
   reviewedAt: string | null; // verdict detected

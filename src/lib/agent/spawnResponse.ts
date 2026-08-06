@@ -38,6 +38,11 @@ export interface SpawnResponse {
   retrySafe: boolean;
   initialMessage: "pending" | "queued" | "delivered" | "failed";
   state: "settled" | "path-pending" | "starting" | "failed" | "conflict";
+  /** The transport this receipt launched over. A structured receipt lets the
+      composer draft attach to the conversation instantly by the receipt's
+      durable ids, without waiting for the transcript scan (issue #919). Every
+      live builder emits it; absence (legacy fixtures) reads as not structured. */
+  transport?: "structured" | "tmux";
   error?: string;
 }
 
@@ -89,5 +94,6 @@ export function spawnResponseForReceipt(
     initialMessage: options.initialMessage ?? initialMessageForReceipt(receipt, structured),
     ...(receipt.error ? { error: receipt.error } : {}),
     state: responseStateForReceipt(receipt),
+    transport: structured ? "structured" : "tmux",
   };
 }

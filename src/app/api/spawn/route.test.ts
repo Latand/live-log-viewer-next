@@ -2454,6 +2454,7 @@ test("a terminal structured replay returns its reserved identity and retry-safe 
       retrySafe: true,
       initialMessage: "failed",
       state: "failed",
+      transport: "structured",
       error: "structured host ownership is unavailable",
     });
   } finally {

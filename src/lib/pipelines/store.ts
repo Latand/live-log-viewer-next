@@ -14,10 +14,10 @@ import { MAX_FAIL_EDGE_ROUNDS, MAX_PIPELINE_STAGES } from "./limits";
 import type { EffectivePipelineRole, Pipeline, PipelineCreationIntent, PipelineEdgeActivation, PipelineStage, PipelineTerminalReap, PipelineUnconfirmedHost } from "./types";
 import { stageVerdictFrom } from "./verdict";
 
-export const PIPELINES_SCHEMA_VERSION = 4;
+export const PIPELINES_SCHEMA_VERSION = 5;
 /** Older registries are migrated in memory on load; the file is rewritten in
     the current shape by the next successful mutation, never by a read. */
-const MIGRATABLE_SCHEMA_VERSIONS = new Set([2, 3, PIPELINES_SCHEMA_VERSION]);
+const MIGRATABLE_SCHEMA_VERSIONS = new Set([2, 3, 4, PIPELINES_SCHEMA_VERSION]);
 const pipelinesFile = () => statePath("pipelines.json");
 const artifactsRoot = () => statePath("pipelines");
 
@@ -232,10 +232,11 @@ function isStage(value: unknown): value is PipelineStage {
  * stage has at most one pass edge (`next`) and one fail edge (`onFail`). The
  * pass graph must be acyclic (so every pass path terminates at `null`), edge
  * targets must exist, and every review-loop must be pass-reachable from a run
- * stage (it reviews a run's session). Fail edges may target any stage — cycles
- * live there, terminated by the per-edge round budget. Shared by the store
- * validator, the create-time normalizer, and the set-edge action so no path can
- * persist a graph another path would reject.
+ * stage (it reviews a run's session). Run-stage fail edges may target any stage;
+ * their cycles terminate at the per-edge round budget. Review-loop stages use
+ * their bound flow for verdict recovery and cannot define `onFail`. Shared by
+ * the store validator, the create-time normalizer, and the set-edge action so
+ * every mutation path applies the same graph contract.
  */
 export function pipelineGraphError(
   stages: ReadonlyArray<Pick<PipelineStage, "id" | "kind" | "next"> & { onFail?: Pipeline["stages"][number]["onFail"] }>,
@@ -246,6 +247,7 @@ export function pipelineGraphError(
     if (stage.next !== null && !ids.has(stage.next)) return `stage ${stage.id} next must reference an existing stage`;
     if (stage.next === stage.id) return `stage ${stage.id} pass edge may not target itself`;
     const onFail = stage.onFail ?? null;
+    if (stage.kind === "review-loop" && onFail) return `review-loop stage ${stage.id} does not support onFail`;
     if (onFail && !ids.has(onFail.to)) return `stage ${stage.id} onFail must reference an existing stage`;
     if (onFail && (!Number.isInteger(onFail.maxRounds) || onFail.maxRounds < 1 || onFail.maxRounds > MAX_FAIL_EDGE_ROUNDS)) {
       return `stage ${stage.id} onFail maxRounds must be an integer between 1 and ${MAX_FAIL_EDGE_ROUNDS}`;
@@ -418,6 +420,30 @@ function migrateTaskIds(raw: unknown): unknown {
   return { taskIds: [], ...(raw as Record<string, unknown>) };
 }
 
+/** v4 accepted review-loop fail edges even though the embedded flow owns every
+    review verdict and no engine path could traverse those edges. Clear that
+    unreachable configuration before the v5 graph validator runs. */
+function migrateReviewLoopFailEdges(raw: unknown): unknown {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  const pipeline = raw as Record<string, unknown>;
+  if (!Array.isArray(pipeline.stages)) return raw;
+  return {
+    ...pipeline,
+    stages: pipeline.stages.map((stage) => {
+      if (!stage || typeof stage !== "object" || Array.isArray(stage)) return stage;
+      const record = stage as Record<string, unknown>;
+      return record.kind === "review-loop" ? { ...record, onFail: null } : stage;
+    }),
+  };
+}
+
+function migratePipelineRecord(raw: unknown, schemaVersion: number): unknown {
+  let migrated = schemaVersion === 2 ? migrateV2Pipeline(raw) : raw;
+  if (schemaVersion < 4) migrated = migrateTaskIds(migrated);
+  if (schemaVersion < 5) migrated = migrateReviewLoopFailEdges(migrated);
+  return migrated;
+}
+
 export function loadPipelines(): Pipeline[] {
   const raw = readJson(pipelinesFile());
   if (raw === null) return [];
@@ -427,8 +453,7 @@ export function loadPipelines(): Pipeline[] {
     throw new PipelineStoreError(`unsupported pipeline registry schema: ${String(file.schemaVersion)}`);
   }
   if (!Array.isArray(file.pipelines)) throw new PipelineStoreError("pipeline registry contains malformed records");
-  const legacyRecords = file.schemaVersion === 2 ? file.pipelines.map(migrateV2Pipeline) : file.pipelines;
-  const records = file.schemaVersion < PIPELINES_SCHEMA_VERSION ? legacyRecords.map(migrateTaskIds) : legacyRecords;
+  const records = file.pipelines.map((pipeline) => migratePipelineRecord(pipeline, file.schemaVersion!));
   if (!records.every(isPipeline)) throw new PipelineStoreError("pipeline registry contains malformed records");
   return records.map(reviveLoadedPipeline);
 }
@@ -574,8 +599,7 @@ export function loadArchivedPipelines(): Pipeline[] {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
   const file = raw as Partial<PipelineFile>;
   if (typeof file.schemaVersion !== "number" || !MIGRATABLE_SCHEMA_VERSIONS.has(file.schemaVersion) || !Array.isArray(file.pipelines)) return [];
-  const legacyRecords = file.schemaVersion === 2 ? file.pipelines.map(migrateV2Pipeline) : file.pipelines;
-  const migrated = file.schemaVersion < PIPELINES_SCHEMA_VERSION ? legacyRecords.map(migrateTaskIds) : legacyRecords;
+  const migrated = file.pipelines.map((pipeline) => migratePipelineRecord(pipeline, file.schemaVersion!));
   const records = migrated.filter(isPipeline);
   if (records.length !== migrated.length) {
     console.error(`[pipelines] skipped ${migrated.length - records.length} malformed archived pipeline record(s)`);
