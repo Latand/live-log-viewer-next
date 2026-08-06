@@ -75,7 +75,7 @@ export interface AttachLaunchProfile {
 
 export interface AttachResolverDeps {
   files: FileEntry[];
-  resumeSpecFor: (root: string, path: string, options?: { model?: string | null; effort?: string | null; allowSubagents?: boolean; mcpServers?: readonly string[]; cwd?: string | null; hostTerminal?: boolean }) => ResumeSpec | null;
+  resumeSpecFor: (root: string, path: string, options?: { model?: string | null; effort?: string | null; allowSubagents?: boolean; mcpServers?: readonly string[]; cwd?: string | null; hostTerminal?: boolean; accountId?: string | null }) => ResumeSpec | null;
   accountIdForPath: (path: string) => string;
   accountLabelFor: (engine: AgentEngine, accountId: string) => string;
   /** The conversation's live launch profile (#663). Authoritative for cwd,
@@ -114,6 +114,7 @@ export function resolveAttachCommand(path: string, deps: AttachResolverDeps): At
      falls back to the sniff, exactly as before. */
   const profile = deps.launchProfileForPath?.(target.entry.path) ?? null;
   const effectiveCwd = profile?.cwd || target.entry.cwd || entry.cwd || null;
+  const accountId = deps.accountIdForPath(target.entry.path);
   const spec = deps.resumeSpecFor(target.entry.root, target.entry.path, {
     /* Same precedence for the runtime axes: an applied reconfigure is what the
        conversation runs on now, while `entry.model` is transcript provenance —
@@ -123,13 +124,15 @@ export function resolveAttachCommand(path: string, deps: AttachResolverDeps): At
     allowSubagents: profile?.allowSubagents ?? deps.allowSubagentsForPath?.(target.entry.path),
     mcpServers: profile?.mcpServers ?? deps.mcpServersForPath?.(target.entry.path),
     cwd: effectiveCwd,
+    /* Recorded ownership decides which account home the pasted command runs
+       under: inside the shared transcript store the path names none (#935). */
+    accountId,
     /* The composed string is pasted into the operator's own shell: the CLI
        binary must resolve as the host sees it, never the container shim. */
     hostTerminal: true,
   });
   if (!spec) return { ok: false, error: "this conversation cannot be attached", status: 409 };
 
-  const accountId = deps.accountIdForPath(target.entry.path);
   return {
     ok: true,
     value: attachCommandFromSpec(spec, {

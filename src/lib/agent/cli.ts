@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { accountForSpawn, codexHomeOwningSessionPath, isManagedCodexHome } from "@/lib/accounts/codex";
-import { claudeHomeOwningTranscript, claudeSettingsPath, isManagedClaudeHome, legacyClaudeHome } from "@/lib/accounts/claude";
+import { claudeSettingsPath, claudeTranscriptOwnership, isManagedClaudeHome, legacyClaudeHome } from "@/lib/accounts/claude";
 
 import { claudeTranscriptPath, headCwd } from "./transcript";
 import { grantedMcpServers } from "./mcpAllowlist";
@@ -162,6 +162,11 @@ export interface ResumeSpecOptions {
   /** The command is destined for the operator's own terminal: resolve the CLI
       binary as the HOST sees it, never the in-container nsenter shim. */
   hostTerminal?: boolean;
+  /** Account recorded for this conversation (issue #935). Under the shared
+      transcript store (#891) the path names no owner — every account resolves
+      to the same root — so this durable provenance is what picks the home the
+      resume runs under. Absent ⇒ path layout, then the routed account. */
+  accountId?: string | null;
 }
 
 /* Re-validation on the way out of the durable launch profile (issue #739): a
@@ -379,32 +384,58 @@ export function claudeSuccessorSpecFor(input: {
   };
 }
 
+/** Whether a transcript can be reopened, and — when it cannot — which single
+    condition refused it. A caller that only needs the command uses
+    {@link resumeSpecFor}; a caller that has to tell the operator why nothing
+    happened reads {@link ResumeEligibility.reason}, so diagnosing a refusal
+    never again means reading three files. */
+export type ResumeEligibility =
+  | { ok: true; engine: Extract<AgentEngine, "claude" | "codex">; sessionId: string; home: string; cwd: string }
+  | { ok: false; reason: string };
+
+/**
+ * The gate {@link resumeSpecFor} applies, with its refusal named. Account
+ * ownership comes from recorded provenance first (`options.accountId`), which
+ * is the only thing that answers inside the shared transcript store where
+ * every account resolves to the same root (issue #935).
+ */
+export function resumeEligibility(root: string, pathname: string, options: ResumeSpecOptions = {}): ResumeEligibility {
+  const base = path.basename(pathname);
+  /* One effective cwd, chosen before the spec (and its MCP policy enumeration)
+     is generated: the caller's recorded cwd is authoritative; only when it is
+     absent do we sniff the transcript head (finding 1). */
+  const recordedCwd = options.cwd && options.cwd.trim() ? options.cwd : null;
+  const cwd = () => recordedCwd ?? resumeCwd(pathname);
+  if (root === "claude-projects" && base.endsWith(".jsonl")) {
+    if (pathname.includes(path.sep + "subagents" + path.sep)) {
+      return { ok: false, reason: "a Claude subagent transcript has no session of its own to resume" };
+    }
+    const sid = base.slice(0, -".jsonl".length);
+    if (!/^[0-9a-f-]{36}$/.test(sid)) return { ok: false, reason: "the transcript filename carries no Claude session id" };
+    const ownership = claudeTranscriptOwnership(pathname, options.accountId);
+    if (ownership.kind === "unreadable") return { ok: false, reason: "the conversation transcript cannot be read from disk" };
+    if (ownership.kind === "foreign") return { ok: false, reason: "the transcript is outside every Claude account transcript root the viewer knows" };
+    return { ok: true, engine: "claude", sessionId: sid, home: ownership.home, cwd: cwd() };
+  }
+  if (root === "codex-sessions" && base.endsWith(".jsonl")) {
+    const id = base.match(/([0-9a-f-]{36})\.jsonl$/)?.[1];
+    if (!id) return { ok: false, reason: "the transcript filename carries no Codex session id" };
+    const home = codexHomeOwningSessionPath(pathname);
+    if (!home) return { ok: false, reason: "the transcript is outside every Codex account session root the viewer knows" };
+    return { ok: true, engine: "codex", sessionId: id, home, cwd: cwd() };
+  }
+  return { ok: false, reason: "this transcript belongs to no resumable agent session" };
+}
+
 /**
  * Shell command that reopens a finished conversation interactively so a new
  * prompt can be typed into it. Claude subagent transcripts have no resumable
  * session of their own, so only root session files qualify.
  */
 export function resumeSpecFor(root: string, pathname: string, options: ResumeSpecOptions = {}): ResumeSpec | null {
-  const base = path.basename(pathname);
-  /* One effective cwd, chosen before the spec (and its MCP policy enumeration)
-     is generated: the caller's recorded cwd is authoritative; only when it is
-     absent do we sniff the transcript head (finding 1). */
-  const recordedCwd = options.cwd && options.cwd.trim() ? options.cwd : null;
-  if (root === "claude-projects" && base.endsWith(".jsonl") && !pathname.includes(path.sep + "subagents" + path.sep)) {
-    const sid = base.slice(0, -".jsonl".length);
-    if (!/^[0-9a-f-]{36}$/.test(sid)) return null;
-    const home = claudeHomeOwningTranscript(pathname);
-    if (!home) return null;
-    return resumeSpecForSession("claude", sid, recordedCwd ?? resumeCwd(pathname), home, options);
-  }
-  if (root === "codex-sessions" && base.endsWith(".jsonl")) {
-    const id = base.match(/([0-9a-f-]{36})\.jsonl$/)?.[1];
-    if (!id) return null;
-    const home = codexHomeOwningSessionPath(pathname);
-    if (!home) return null;
-    return resumeSpecForSession("codex", id, recordedCwd ?? resumeCwd(pathname), home, options);
-  }
-  return null;
+  const eligibility = resumeEligibility(root, pathname, options);
+  if (!eligibility.ok) return null;
+  return resumeSpecForSession(eligibility.engine, eligibility.sessionId, eligibility.cwd, eligibility.home, options);
 }
 
 /**

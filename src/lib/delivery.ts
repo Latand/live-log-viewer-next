@@ -1,16 +1,18 @@
-import { resumeSpecFor } from "@/lib/agent/cli";
+import { resumeEligibility, resumeSpecFor } from "@/lib/agent/cli";
 import type { AgentReconfiguration } from "@/lib/agent/reconfigure";
 import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type RegistryConversation, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { accountManager } from "@/lib/accounts/manager";
 import { deliveryFence } from "@/lib/accounts/migration/coordinator";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import { deliverToTranscriptHost, readTranscriptHosts, type HostDeliveryOutcome } from "@/lib/agent/transcriptHost";
+import { admitTranscriptConversation } from "@/lib/conversation/transcriptAdmission";
 import { listFiles } from "@/lib/scanner";
 import { pathAllowed } from "@/lib/scanner/roots";
 import { procBackend } from "@/lib/proc";
 import { recoverDeadStructuredConversation } from "@/lib/runtime/structuredRecovery";
 import type { RuntimeOperationReceipt } from "@/lib/runtime/contracts";
 import { detectBlockingGate, parseScreenMenu, screenAtIdleComposer, screenWaitsForInput } from "@/lib/status";
+import type { FileEntry } from "@/lib/types";
 import {
   buildImagePayload,
   deleteInboxImages,
@@ -131,6 +133,7 @@ export async function reconfigureConversation(
   }
   const buildSpec = (profile: AgentRegistryEntry["launchProfile"]) => (overrides.resumeSpecFor ?? resumeSpecFor)(entry.root, entry.path, {
     ...config,
+    accountId: config.accountId ?? recordedAccountId(registry, entry),
     readOnly: profile?.readOnly ?? null,
     permissionMode: profile?.permissionMode ?? null,
     allowSubagents: profile?.allowSubagents ?? false,
@@ -328,11 +331,32 @@ interface ResumeConversationOverrides {
   pathAllowed?: typeof pathAllowed;
   listFiles?: typeof listFiles;
   resumeSpecFor?: typeof resumeSpecFor;
+  resumeEligibility?: typeof resumeEligibility;
   registry?: AgentRegistry;
   recover?: typeof recoverDeadStructuredConversation;
+  admit?: typeof admitTranscriptConversation;
+  livePaneHost?: typeof livePaneHost;
   deliver?: typeof deliverToTranscriptHost;
 }
 
+/** Provenance the resume spec needs to name the account a Claude session
+    reopens under. Inside the shared transcript store (#891) the path names no
+    owner, so the registry's recorded account is the only answer (#935). */
+function recordedAccountId(registry: AgentRegistry, entry: FileEntry): string | null {
+  if (entry.engine !== "claude" && entry.engine !== "codex") return null;
+  return registry.transcriptAccountId(entry.engine, entry.path);
+}
+
+/**
+ * Reopens a conversation from the viewer, whatever its first host was.
+ *
+ * A registered conversation reaches its pane-less structured host through the
+ * transcript-host bridge. A transcript the registry never inventoried — born
+ * by typing `claude` in a plain terminal, or aged past the scan's recency cap —
+ * is admitted from its own provenance first (issue #935), so birth mode no
+ * longer decides whether continuation exists. Only then does the legacy ladder
+ * run, and a refusal there names the one condition that failed.
+ */
 export async function resumeConversation(
   filePath: string,
   overrides: ResumeConversationOverrides = {},
@@ -341,33 +365,57 @@ export async function resumeConversation(
     return failure("the conversation path is required to open", 400);
   }
   const registry = overrides.registry ?? agentRegistry();
-  const rejected = supersededRejection(registry, registry.conversationForPath(filePath));
+  const known = registry.conversationForPath(filePath);
+  const rejected = supersededRejection(registry, known);
   if (rejected) return rejected;
+  const recover = overrides.recover ?? recoverDeadStructuredConversation;
+  const bridged = (recovered: { spawned: boolean }): DeliveryOutcome => ({
+    ok: true,
+    target: null,
+    outcome: "resumed",
+    spawned: recovered.spawned,
+    structured: true,
+  });
   try {
-    const recovered = await (overrides.recover ?? recoverDeadStructuredConversation)(
-      { path: filePath },
-      { registry },
-    );
-    if (recovered) {
-      return {
-        ok: true,
-        target: null,
-        outcome: "resumed",
-        spawned: recovered.spawned,
-        structured: true,
-      };
-    }
+    const recovered = await recover({ path: filePath }, { registry });
+    if (recovered) return bridged(recovered);
   } catch (error) {
     return failure(error);
   }
   /* Pinned: the resumable transcript may have aged past the scan's recency
      cap — a conversation the operator can still open must stay resumable. */
   const entry = (await (overrides.listFiles ?? listFiles)({ pin: filePath })).find((item) => item.path === filePath);
-  if (!entry) return failure("file is unknown to the viewer", 403);
+  if (!entry) return failure("the viewer knows no transcript at this path", 403);
+  /* #935: a transcript the registry never inventoried — born by typing
+     `claude` in a plain terminal, or aged past the scan's recency cap — holds
+     no identity for the bridge to own, so continuation used to depend on how
+     the first host was born. Admit it from its own provenance and let the
+     bridge take it; a refusal the bridge can name does not consume the legacy
+     ladder's turn, unless something outside the viewer owns the session. */
+  let admissionRefusal: string | null = null;
+  /* A live tmux pane is a host the viewer CAN reach: the ladder below types
+     into it. Only a running process with no pane and no registry host is the
+     foreign terminal admission refuses. */
+  const paneHosted = !known && entry.proc === "running"
+    && await (overrides.livePaneHost ?? livePaneHost)(filePath) !== null;
+  if (!known && !paneHosted) {
+    const admitted = (overrides.admit ?? admitTranscriptConversation)(registry, entry);
+    if (!admitted.ok && admitted.blocking) return failure(admitted.reason, 409);
+    if (!admitted.ok) admissionRefusal = admitted.reason;
+    else {
+      try {
+        const recovered = await recover({ path: filePath, conversationId: admitted.conversationId }, { registry });
+        if (recovered) return bridged(recovered);
+      } catch (error) {
+        return failure(error);
+      }
+    }
+  }
   const profile = registry.launchProfileForPath(entry.path);
-  const spec = (overrides.resumeSpecFor ?? resumeSpecFor)(entry.root, entry.path, {
+  const specOptions = {
     model: entry.launchModel ?? entry.model,
     effort: entry.effort,
+    accountId: recordedAccountId(registry, entry),
     allowSubagents: profile?.allowSubagents,
     plugins: profile?.plugins,
     /* The durable grant travels with the resume (#739). Omitting it silently
@@ -375,8 +423,13 @@ export async function resumeConversation(
        claiming the grant — durable state and running process disagreeing. The
        stored list is already origin-bounded when the registry reads it. */
     mcpServers: profile?.mcpServers,
-  });
-  if (!spec) return failure("this conversation cannot be resumed", 409);
+  };
+  const spec = (overrides.resumeSpecFor ?? resumeSpecFor)(entry.root, entry.path, specOptions);
+  if (!spec) {
+    const eligibility = (overrides.resumeEligibility ?? resumeEligibility)(entry.root, entry.path, specOptions);
+    if (!eligibility.ok) return failure(eligibility.reason, 409);
+    return failure(admissionRefusal ?? "this conversation cannot be resumed", 409);
+  }
   try {
     return await hostOutcome((overrides.deliver ?? deliverToTranscriptHost)({ entry, spec, payload: "" }));
   } catch (error) {
@@ -658,6 +711,7 @@ export async function deliverConversationMessage(message: ConversationMessage, o
       model: message.resumeModel ?? entry.launchModel ?? entry.model,
       effort: message.resumeEffort ?? entry.effort,
       ...(typeof message.resumeFast === "boolean" ? { fast: message.resumeFast } : {}),
+      accountId: recordedAccountId(registry, entry),
       allowSubagents: entryProfile?.allowSubagents,
       plugins: entryProfile?.plugins,
       mcpServers: entryProfile?.mcpServers,
@@ -688,6 +742,7 @@ export async function deliverConversationMessage(message: ConversationMessage, o
     const rootSpec = (overrides.resumeSpecFor ?? resumeSpecFor)(root.root, root.path, {
       model: root.launchModel ?? root.model,
       effort: root.effort,
+      accountId: recordedAccountId(registry, root),
       allowSubagents: rootProfile?.allowSubagents,
       plugins: rootProfile?.plugins,
       mcpServers: rootProfile?.mcpServers,

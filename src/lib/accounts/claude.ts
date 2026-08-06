@@ -173,21 +173,65 @@ export function retiredClaudeProjectRoots(): string[] { return readRegistry().re
 /** Every Claude transcript root the scanner reads: live accounts first, then retained archives. */
 export function claudeProjectRoots(): string[] { return [...new Set([...listClaudeAccounts().map((item) => item.projectsDir), ...retiredClaudeProjectRoots()])]; }
 
-export function claudeHomeOwningTranscript(pathname: string): string | null {
-  let real: string; try { real = fs.realpathSync(pathname); } catch { return null; }
-  /* Inside the shared store the path names no owner — every cut-over account
-     resolves to the same realpath, so a containment match would return
-     whichever account lists first. Ownership there is the registry's job
-     (transcriptAccountId, phase 0); refusing to guess beats a plausible
-     wrong answer. */
-  try {
-    const shared = fs.realpathSync(sharedClaudeProjectsRoot());
-    if (real.startsWith(shared + path.sep)) return null;
-  } catch { /* store not provisioned: per-account layout still authoritative */ }
-  for (const item of listClaudeAccounts()) {
-    try { const root = fs.realpathSync(item.projectsDir); if (real.startsWith(root + path.sep)) return item.home; } catch { /* missing home */ }
+/** Why a transcript names no owning Claude account, or which one it names. */
+export type ClaudeTranscriptOwnership =
+  | { kind: "owned"; accountId: string; home: string; source: "recorded" | "path" | "shared-store" }
+  /** The path does not resolve — deleted, or a broken link. */
+  | { kind: "unreadable" }
+  /** It resolves outside every Claude transcript root the viewer knows. */
+  | { kind: "foreign" };
+
+/**
+ * Which account owns a Claude transcript (issue #935).
+ *
+ * The shared transcript store (#891) removed the path-layout answer for every
+ * transcript on a cut-over machine: each account's `projects` resolves to the
+ * same root, so containment names no single owner and
+ * {@link claudeHomeOwningTranscript} refuses rather than return whichever
+ * account happens to list first. Refusing there left resume with no home at
+ * all, and every Claude conversation on such a machine became unresumable.
+ *
+ * Ownership is resolved in this order:
+ *  1. containment in a home that is NOT cut over to the shared store. There the
+ *     layout is unambiguous AND load-bearing — `claude --resume <id>` reads the
+ *     session out of that home's own projects dir, so the bytes decide;
+ *  2. the account the registry recorded for this conversation. This is what
+ *     answers inside the shared store, where every account reads the same
+ *     transcripts and only the credentials differ;
+ *  3. still inside the shared store with nothing recorded: the account new
+ *     spawns route to, which is the same choice a fresh spawn would make.
+ */
+export function claudeTranscriptOwnership(pathname: string, recordedAccountId?: string | null): ClaudeTranscriptOwnership {
+  let real: string; try { real = fs.realpathSync(pathname); } catch { return { kind: "unreadable" }; }
+  const accounts = listClaudeAccounts();
+  let shared: string | null = null;
+  try { shared = fs.realpathSync(sharedClaudeProjectsRoot()); } catch { /* store not provisioned */ }
+  for (const item of accounts) {
+    try {
+      const root = fs.realpathSync(item.projectsDir);
+      /* A cut-over home shares its root with every other cut-over home, so
+         containment there is evidence of nothing. Skip it and let recorded
+         provenance answer below. */
+      if (shared !== null && root === shared) continue;
+      if (real.startsWith(root + path.sep)) return { kind: "owned", accountId: item.id, home: item.home, source: "path" };
+    } catch { /* missing home */ }
   }
-  return null;
+  const recorded = recordedAccountId ? accounts.find((item) => item.id === recordedAccountId) : undefined;
+  if (recorded) return { kind: "owned", accountId: recorded.id, home: recorded.home, source: "recorded" };
+  if (shared !== null && real.startsWith(shared + path.sep)) {
+    const activeId = activeClaudeAccountId();
+    const active = accounts.find((item) => item.id === activeId) ?? accounts[0];
+    if (active) return { kind: "owned", accountId: active.id, home: active.home, source: "shared-store" };
+  }
+  return { kind: "foreign" };
+}
+
+/** Path-layout ownership only: the home whose transcript root physically
+    contains this path. Null inside the shared store, where the layout names no
+    owner — {@link claudeTranscriptOwnership} resolves that case. */
+export function claudeHomeOwningTranscript(pathname: string): string | null {
+  const ownership = claudeTranscriptOwnership(pathname);
+  return ownership.kind === "owned" && ownership.source === "path" ? ownership.home : null;
 }
 
 function nextId(label: string, used: Set<string>): string {
