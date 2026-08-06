@@ -1,8 +1,8 @@
 import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
-import { semanticTitle } from "@/lib/title";
+import { durableSemanticTitle, semanticTitle } from "@/lib/title";
 
-import type { RegistryFile, SpawnLineageEdge } from "./registry";
+import type { RegistryConversation, RegistryFile, SpawnLineageEdge } from "./registry";
 
 export const IDENTITY_WAVE_MIGRATION = "identity-wave-a-d-913";
 
@@ -73,8 +73,31 @@ type EvidenceResolution<T> =
   | { kind: "failed"; error: unknown };
 
 interface ConversationEvidence {
+  conversationTitle: string | null;
+  needsTitleCleanup: boolean;
   pathRekeys: IdentityWavePathRekey[];
   transcriptTitle: string | null;
+}
+
+function placeholderTitle(value: string | null | undefined): boolean {
+  return typeof value === "string" && semanticTitle(value) === null;
+}
+
+function newestSemanticConversationTitle(conversation: RegistryConversation): string | null {
+  for (let index = conversation.generations.length - 1; index >= 0; index -= 1) {
+    const title = durableSemanticTitle(conversation.generations[index]!.launchProfile.title);
+    if (title) return title;
+  }
+  return null;
+}
+
+function conversationNeedsTitleCleanup(file: RegistryFile, conversation: RegistryConversation): boolean {
+  if (conversation.generations.some((generation) => placeholderTitle(generation.launchProfile.title))) return true;
+  const ownedPaths = new Set(conversation.generations.map((generation) => generation.path));
+  if (Object.values(file.entries).some((entry) => ownedPaths.has(entry.artifactPath)
+    && placeholderTitle(entry.launchProfile?.title))) return true;
+  return Object.values(file.receipts).some((receipt) => canonicalConversationId(file, receipt.conversationId) === conversation.id
+    && placeholderTitle(receipt.launchProfile.title));
 }
 
 function safeSharedPath(input: IdentityWaveMigrationInput, pathname: string): EvidenceResolution<string> {
@@ -115,20 +138,21 @@ function resolveConversationEvidence(
   for (const conversation of Object.values(file.conversations)) {
     const generation = conversation.generations.at(-1);
     if (!generation) continue;
+    const conversationTitle = newestSemanticConversationTitle(conversation);
+    const needsTitleCleanup = conversationNeedsTitleCleanup(file, conversation);
     const pathRekeys = conversation.generations.flatMap((ownedGeneration) => {
       const sharedPath = evidenceValue(safeSharedPath(input, ownedGeneration.path));
       return sharedPath ? [{ legacyPath: ownedGeneration.path, sharedPath }] : [];
     });
     const transcriptPath = pathRekeys.find((rekey) => rekey.legacyPath === generation.path)?.sharedPath
       ?? generation.path;
-    const currentTitle = generation.launchProfile.title;
-    const needsTranscriptTitle = currentTitle !== null
-      && semanticTitle(currentTitle) === null
+    const needsTranscriptTitle = needsTitleCleanup
+      && conversationTitle === null
       && !titlesByReceipt.has(conversation.id);
     const transcriptTitle = needsTranscriptTitle
       ? evidenceValue(safeTranscriptTitle(input, transcriptPath, conversation.engine))
       : null;
-    evidence.set(conversation.id, { pathRekeys, transcriptTitle });
+    evidence.set(conversation.id, { conversationTitle, needsTitleCleanup, pathRekeys, transcriptTitle });
   }
   return evidence;
 }
@@ -385,13 +409,13 @@ export function applyIdentityWaveMigration(
       conversationChanged = true;
     }
 
-    const currentTitle = generation.launchProfile.title;
-    if (currentTitle !== null && semanticTitle(currentTitle) === null) {
-      const replacement = titlesByReceipt.get(conversation.id)
+    if (evidence?.needsTitleCleanup) {
+      const replacement = evidence.conversationTitle
+        ?? titlesByReceipt.get(conversation.id)
         ?? evidence?.transcriptTitle
         ?? null;
       for (const ownedGeneration of conversation.generations) {
-        if (semanticTitle(ownedGeneration.launchProfile.title) === null) {
+        if (placeholderTitle(ownedGeneration.launchProfile.title)) {
           ownedGeneration.launchProfile.title = replacement;
         }
       }
@@ -399,13 +423,13 @@ export function applyIdentityWaveMigration(
       for (const entry of Object.values(file.entries)) {
         if (ownedPaths.has(entry.artifactPath)
           && entry.launchProfile
-          && semanticTitle(entry.launchProfile.title) === null) {
+          && placeholderTitle(entry.launchProfile.title)) {
           entry.launchProfile.title = replacement;
         }
       }
       for (const receipt of Object.values(file.receipts)) {
         if (canonicalConversationId(file, receipt.conversationId) === conversation.id
-          && semanticTitle(receipt.launchProfile.title) === null) {
+          && placeholderTitle(receipt.launchProfile.title)) {
           receipt.launchProfile.title = replacement;
           if (replacement) receipt.identityWaveTitleBackfill = true;
         }
