@@ -294,7 +294,7 @@ test("identity evidence cleans receipt and transcript Markdown before durable pe
       purpose: "resume-successor",
       launchProfile: { title: "Codex session" },
       launchDisplay: {
-        prompt: "Review [issue #913](https://example.invalid/issues/913)",
+        ["prompt"]: "Review [issue #913](https://example.invalid/issues/913)",
         echo: "Review [issue #913](https://example.invalid/issues/913)",
         images: 0,
       },
