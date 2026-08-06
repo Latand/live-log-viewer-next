@@ -14,7 +14,7 @@ import { isNativeCodexSubagentTranscript } from "@/lib/scanner/codexNative";
 import { enqueueStructuredMessage } from "@/lib/runtime/structuredMessageDelivery";
 import { recoverDeadStructuredConversation } from "@/lib/runtime/structuredRecovery";
 import { isShellCommand } from "@/lib/status";
-import { killPane, paneInfo, spawnAgentWithPrompt } from "@/lib/tmux";
+import { killPane, paneInfo, spawnAgentWithPrompt, TmuxDeliveryUncertainError } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 
 import {
@@ -347,7 +347,12 @@ export async function sendToImplementer(
   });
   if (!spec) throw new Error("implementer session cannot be resumed");
   const outcome = await (overrides.deliver ?? deliverToTranscriptHost)({ entry, spec, payload: text });
-  if (!outcome.ok) throw new Error(outcome.error);
+  if (!outcome.ok) {
+    if (outcome.actuation === "started") {
+      throw new TmuxDeliveryUncertainError(`legacy relay delivery is uncertain after actuation started: ${outcome.error}`);
+    }
+    throw new Error(outcome.error);
+  }
   return entry.path;
 }
 
@@ -986,7 +991,7 @@ export async function tickFlow(
         persistCheckpoint();
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
-        if (error instanceof UnsafeInterruptedRelayRetryError) {
+        if (error instanceof UnsafeInterruptedRelayRetryError || error instanceof TmuxDeliveryUncertainError) {
           round.error = detail;
           round.relayRetryAt = null;
           markNeedsDecision(flow, detail);

@@ -7,6 +7,7 @@ import path from "node:path";
 import type { FileEntry } from "@/lib/types";
 import { procBackend } from "@/lib/proc";
 import { AgentRegistry, agentRegistry } from "@/lib/agent/registry";
+import { TmuxDeliveryUncertainError } from "@/lib/tmux";
 
 import type { Flow } from "./types";
 
@@ -1452,6 +1453,55 @@ test("a relay rejection retries after bounded backoff and reaches fixing", async
   }
 });
 
+test("an ambiguous legacy relay parks without replaying the payload", async () => {
+  let deliveries = 0;
+  const restoreDelivery = setRelayDeliveryForTest(async () => {
+    deliveries += 1;
+    throw new TmuxDeliveryUncertainError(
+      "legacy relay delivery is uncertain after actuation started: tmux pasted the findings before Enter confirmation failed",
+    );
+  });
+  const implementer = writeCodexEntry("relay-uncertain-implementer.jsonl", {
+    id: ["069f421e", "02e1", "73e0", "9b77", "bebde063f529"].join("-"),
+    cwd: "/repo",
+  }, Date.now() / 1_000);
+  const findingsPath = path.join(process.env.LLV_STATE_DIR!, "relay-uncertain-findings.md");
+  fs.writeFileSync(findingsPath, "VERDICT: REQUEST_CHANGES\n\nPreserve this single delivery.\n");
+  saveFlows([raceFlow({
+    id: "flow-relay-uncertain",
+    implementerPath: implementer.path,
+    state: "relaying",
+    rounds: [{
+      ...newRound(raceFlow({ rounds: [] }), "marker", "head ready"),
+      findingsPath,
+      verdict: "REQUEST_CHANGES",
+      findingsCount: 1,
+      reviewedAt: "2026-08-05T20:47:07.961Z",
+      terminalAt: "2026-08-05T20:47:07.961Z",
+    }],
+  })]);
+
+  try {
+    await tickFlows([implementer]);
+    expect(deliveries).toBe(1);
+    expect(loadFlows()[0]).toMatchObject({
+      state: "needs_decision",
+      stateDetail: expect.stringContaining("legacy relay delivery is uncertain after actuation started"),
+      rounds: [{
+        relayRetryCount: 0,
+        relayRetryAt: null,
+        relayedAt: null,
+        error: expect.stringContaining("tmux pasted the findings"),
+      }],
+    });
+
+    await tickFlows([implementer]);
+    expect(deliveries).toBe(1);
+  } finally {
+    restoreDelivery();
+  }
+});
+
 test("a restart-interrupted relay retries through the idempotent structured path", async () => {
   let deliveries = 0;
   const restoreDelivery = setRelayDeliveryForTest(async (flow, _entries, _text, options) => {
@@ -1870,6 +1920,39 @@ test("restart-interrupted legacy relay stays terminal because pane delivery has 
   })).rejects.toThrow("interrupted relay cannot retry safely because the implementer has no idempotent structured delivery");
 
   expect(legacyAttempted).toBe(false);
+});
+
+test("legacy relay delivery preserves ambiguous tmux actuation", async () => {
+  const previousHome = process.env.LLV_CODEX_HOME;
+  const home = path.join(process.env.LLV_STATE_DIR!, "relay-uncertain-codex-home");
+  process.env.LLV_CODEX_HOME = home;
+  const sessionId = ["079f421e", "02e1", "73e0", "9b77", "bebde063f529"].join("-");
+  const implementerPath = path.join(home, "sessions", "2026", "08", "06", `rollout-${sessionId}.jsonl`);
+  fs.mkdirSync(path.dirname(implementerPath), { recursive: true });
+  fs.writeFileSync(implementerPath, `${JSON.stringify({
+    type: "session_meta",
+    payload: { id: sessionId, cwd: "/repo" },
+  })}\n`);
+  const flow = raceFlow({ implementerPath, implementerConversationId: null });
+
+  try {
+    await expect(sendToImplementer(flow, new Map([[implementerPath, entryFor(implementerPath, 1)]]), "one relay", {
+      deliver: async () => ({
+        ok: false,
+        outcome: "failed",
+        error: "Enter confirmation failed after paste",
+        status: 500,
+        actuation: "started",
+      }),
+    })).rejects.toMatchObject({
+      name: "TmuxDeliveryUncertainError",
+      message: expect.stringContaining("legacy relay delivery is uncertain after actuation started"),
+    });
+  } finally {
+    if (previousHome === undefined) delete process.env.LLV_CODEX_HOME;
+    else process.env.LLV_CODEX_HOME = previousHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("a conversation with no structured host falls through to the legacy transcript host", async () => {
