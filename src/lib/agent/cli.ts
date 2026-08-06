@@ -118,6 +118,8 @@ export function withSpawnCapability(spec: ResumeSpec, capability: string): Resum
 }
 
 export interface FreshSpecOptions {
+  /** Durable human-readable identity for a viewer-controlled fresh launch. */
+  title?: string | null;
   model?: string | null;
   effort?: string | null;
   /** Codex only: true → `service_tier=priority` ("Fast" in the TUI), false →
@@ -314,7 +316,7 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
            route from the session's origin (issue #687), never by the command
            builder — a fresh spec carries none. */
         plugins: [],
-        title: null,
+        title: options.title?.trim() || null,
         project: null,
         parentConversationId: null,
         role: "worker",
@@ -348,7 +350,7 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
       allowSubagents: options.allowSubagents ?? false,
       mcpServers,
       plugins: [],
-      title: null,
+      title: options.title?.trim() || null,
       project: null,
       parentConversationId: null,
       role: "worker",
