@@ -717,6 +717,11 @@ function attemptKey(pipeline: Pipeline, stage: PipelineStage, attempt: PipelineS
   return `${pipeline.id}:${stage.id}:${attempt.n}`;
 }
 
+function pipelineStageTitle(task: string, stageId: string): string {
+  const suffix = ` · ${stageId}`;
+  return `${cleanTitle(task, 120 - suffix.length)}${suffix}`;
+}
+
 function clientAttemptId(pipeline: Pipeline, stage: PipelineStage, attempt: PipelineStageAttempt): string {
   return `pipeline_${pipeline.id}_${stage.id}_${attempt.n}`.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128);
 }
@@ -1591,7 +1596,7 @@ async function tickRunStage(
       const spawnInput: Parameters<PipelinePorts["spawnAgent"]>[0] = {
         role: attempt.effectiveRole,
         cwd: pipeline.worktreeDir,
-        title: cleanTitle(`${pipeline.task} · ${stage.id}`, 120),
+        title: pipelineStageTitle(pipeline.task, stage.id),
         prompt,
         parentPath: latestCompletedAgentPath(pipeline, stage.id),
         clientAttemptId: clientAttemptId(pipeline, stage, attempt),
