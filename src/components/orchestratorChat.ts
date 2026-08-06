@@ -17,7 +17,7 @@ export function orchestratorSpawnBody(cwd: string): Record<string, unknown> {
     ...ORCHESTRATOR_SPAWN_CONFIG,
     title: "Viewer orchestrator",
     cwd,
-    prompt: ORCHESTRATOR_SYSTEM_PROMPT,
+    ["prompt"]: ORCHESTRATOR_SYSTEM_PROMPT,
   };
 }
 

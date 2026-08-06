@@ -120,11 +120,11 @@ export function createSpawnAttempt(clientAttemptId: string, at: number, request:
 export function draftSpawnTitle(
   engine: DraftEngine,
   role: string | null | undefined,
-  prompt: string,
+  promptText: string,
   imageCount: number,
 ): string {
   const imageFallback = imageCount === 1 ? "Analyze attached image" : "Analyze attached images";
-  return derivedSpawnTitle(role || engine, prompt, imageFallback);
+  return derivedSpawnTitle(role || engine, promptText, imageFallback);
 }
 
 /** Validates records before a reload replays them. Missing or altered fields
