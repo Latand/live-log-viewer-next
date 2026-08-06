@@ -853,6 +853,60 @@ test("a shared-path ownership collision is quarantined and counted, and the wave
   }
 });
 
+test("receipt evidence retitles from the original launch prompt, not a later relay", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-launch-evidence-"));
+  try {
+    const filename = path.join(directory, "agent-registry.json");
+    const transcriptPath = path.join(directory, "transcript.jsonl");
+    const seed = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const conversation = seed.ensureConversation("codex", transcriptPath, null);
+    const launch = seed.beginSpawnRequest({
+      engine: "codex",
+      cwd: directory,
+      conversationId: conversation.id,
+      purpose: "launch",
+      launchProfile: { title: "Seed the launch receipt" },
+      launchDisplay: {
+        ["prompt"]: "Audit the scanner describe path",
+        echo: "Audit the scanner describe path",
+        images: 0,
+      },
+    });
+    const relay = seed.beginSpawnRequest({
+      engine: "codex",
+      cwd: directory,
+      conversationId: conversation.id,
+      purpose: "resume-successor",
+      launchProfile: { title: "Seed the relay receipt" },
+      launchDisplay: {
+        ["prompt"]: "Continue where the predecessor stopped",
+        echo: "Continue where the predecessor stopped",
+        images: 0,
+      },
+    });
+    if (launch.kind !== "created" || relay.kind !== "created") throw new Error("expected both receipts");
+    const seeded = seed.snapshot();
+    seeded.receipts[launch.receipt.launchId]!.createdAt = "2026-08-01T12:00:00.000Z";
+    seeded.receipts[relay.receipt.launchId]!.createdAt = "2026-08-04T12:00:00.000Z";
+    seeded.receipts[launch.receipt.launchId]!.launchProfile.title = "Codex session";
+    seeded.receipts[relay.receipt.launchId]!.launchProfile.title = "Codex session";
+    seeded.conversations[conversation.id]!.generations.at(-1)!.launchProfile.title = "Codex session";
+    fs.writeFileSync(filename, `${JSON.stringify(seeded, null, 2)}\n`);
+
+    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    expect(registry.runIdentityWaveMigration({
+      now: NOW,
+      transcriptTitle: () => null,
+      sharedPathForLegacy: () => null,
+      orchestratorSeats: [],
+    })).toMatchObject({ alreadyCompleted: false, retitled: 1 });
+    expect(registry.conversation(conversation.id)?.generations.at(-1)?.launchProfile.title)
+      .toBe("Audit the scanner describe path");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("a quarantined rekey pair leaves clean rekeys and every retitle intact", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-wave-quarantine-"));
   try {
