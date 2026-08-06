@@ -10,6 +10,7 @@ import {
   outboxHistory,
   OUTBOX_DELIVERED_TTL_MS,
   OUTBOX_LIMIT,
+  OUTBOX_MTIME_GRACE_MS,
   outboxStateForReceiptStatus,
   publishTranscriptEchoes,
   readOutbox,
@@ -112,6 +113,31 @@ test("a delivered bubble whose echo never arrives still retires at the hard TTL"
   const entry: OutboxEntry = { id: "k1", text: "done", images: 0, at, state: "delivered", settledAt: at };
   expect(visibleOutbox([entry], echoes(), at + 3_000)).toHaveLength(1);
   expect(visibleOutbox([entry], echoes(), at + OUTBOX_DELIVERED_TTL_MS + 1)).toHaveLength(0);
+});
+
+test("a delivered bubble retires once the transcript grew past its delivery, even without its echo", () => {
+  const at = 1_000_000;
+  const entry: OutboxEntry = { id: "k1", text: "steer left", images: 0, at, state: "delivered", settledAt: at };
+  /* No transcript evidence yet → the delivered bubble renders at the tail. */
+  expect(visibleOutbox([entry], echoes(), at + 3_000)).toHaveLength(1);
+  /* The newest rendered record still predates the delivery (plus grace): the
+     bubble IS the newest thing in the conversation and keeps rendering. */
+  expect(visibleOutbox([entry], echoes(), at + 3_000, undefined, at + OUTBOX_MTIME_GRACE_MS - 1))
+    .toHaveLength(1);
+  /* A transcript record newer than the delivery landed (a tool call, the
+     reply) while the echo was missed — the bubble must not trail it. */
+  expect(visibleOutbox([entry], echoes(), at + 3_000, undefined, at + OUTBOX_MTIME_GRACE_MS))
+    .toHaveLength(0);
+});
+
+test("transcript growth never retires queued, delivering, or failed bubbles", () => {
+  const at = 1_000_000;
+  const grown = at + OUTBOX_DELIVERED_TTL_MS;
+  const queued: OutboxEntry = { id: "k1", text: "waiting", images: 0, at, state: "queued" };
+  const delivering: OutboxEntry = { id: "k2", text: "in flight", images: 0, at, state: "delivering" };
+  const failed: OutboxEntry = { id: "k3", text: "broken", images: 0, at, state: "failed" };
+  expect(visibleOutbox([queued, delivering, failed], echoes(), at + 3_000, undefined, grown))
+    .toHaveLength(3);
 });
 
 test("queued / delivering / launch-owned bubbles stay until their echo lands, never by TTL", () => {

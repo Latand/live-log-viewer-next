@@ -145,8 +145,11 @@ export function outboxStateForReceiptStatus(status: ReceiptStatus): OutboxState 
 /** Bounded per conversation: the queue is working state plus recent history for
     ArrowUp/ArrowDown, never an archive (the transcript is the archive). */
 export const OUTBOX_LIMIT = 32;
-/** A delivered entry stops rendering once the transcript grew past it — the
-    real bubble has landed. Mirrors DELIVERY_ECHO_MTIME_GRACE_MS. */
+/** A delivered entry stops rendering once the transcript grew past its
+    delivery moment: newer transcript records prove the agent has moved on, so
+    keeping the bubble in the window tail would paint the operator's message
+    BELOW output that came after it. The grace absorbs the echo's own write and
+    small clock skew. Mirrors DELIVERY_ECHO_MTIME_GRACE_MS. */
 export const OUTBOX_MTIME_GRACE_MS = 2_000;
 /** Hard cap so a conversation whose transcript never grows again cannot keep
     optimistic bubbles on screen forever. */
@@ -827,6 +830,34 @@ export function retryOutbox(cardId: string, id: string): void {
   write(cardId, queue.map((item) => (item.id === id ? { ...item, state: "queued", error: undefined } : item)));
 }
 
+/**
+ * Re-bind a queued submission's echo identity to the text the dispatcher will
+ * actually deliver. The composer composes the wire payload at dispatch time —
+ * a viewer-context prelude or a drained bridge turn can scaffold the operator's
+ * draft — and the transcript echoes THAT text, not the raw draft the bubble
+ * displays. Without the re-bind the echo can never match and the delivered
+ * bubble lingers in the tail until the TTL. The submission watermark is
+ * recomputed against the composed key: every current ledger occurrence of the
+ * composed text predates this delivery, so only a LATER echo may retire it.
+ */
+export function rebindOutboxEchoText(cardId: string, id: string, echoText: string): void {
+  const queue = readOutbox(cardId);
+  const entry = queue.find((item) => item.id === id);
+  if (!entry || entry.retiredEchoId) return;
+  const key = echoKey(echoText);
+  if (!key || echoKey(entry.echoText ?? entry.text) === key) return;
+  const baselineIds = readEchoLedger(cardId)
+    .filter((echo) => echo.key === key)
+    .map((echo) => echo.id);
+  write(cardId, queue.map((item) => {
+    if (item.id !== id) return item;
+    const rebound = { ...item, echoText, echoBaseline: baselineIds.length };
+    if (baselineIds.length) rebound.echoBaselineIds = baselineIds;
+    else delete rebound.echoBaselineIds;
+    return rebound;
+  }));
+}
+
 /** Move a whole queue onto a new conversation identity (provisional-id adoption,
     a materialized launch, a migration successor). Records already filed under
     the new identity win, so an adoption is idempotent. */
@@ -1129,6 +1160,16 @@ export function useTranscriptEchoes(cardId: string): TranscriptEchoCounts {
  * A `delivered` bubble whose echo never arrives (a lost poll, a finished pane)
  * still retires at a hard TTL so nothing lingers forever.
  *
+ * A `delivered` bubble also retires the moment the rendered transcript holds a
+ * record NEWER than its delivery (`newestTranscriptAtMs` past `settledAt` plus
+ * {@link OUTBOX_MTIME_GRACE_MS}). The window tail renders outbox bubbles after
+ * every flushed transcript row, so a delivered bubble whose echo was missed —
+ * a scaffolded payload, a tail window attached after the echo, a capped tail —
+ * would otherwise pin the operator's message BELOW the agent's newer tool
+ * calls and reply until the TTL. Delivery is already proven; once the
+ * transcript grew past it the bubble must leave the tail. Pending and failed
+ * entries are untouched: they carry state the transcript cannot show.
+ *
  * `transcriptEchoCounts` maps each trimmed transcript user-text to its occurrence
  * count in the rendered transcript.
  */
@@ -1137,6 +1178,7 @@ export function visibleOutbox(
   transcriptEchoCounts: TranscriptEchoCounts,
   nowMs: number,
   paneOwner?: OutboxOwner | null,
+  newestTranscriptAtMs?: number,
 ): OutboxEntry[] {
   const consumed = new Map<string, number>();
   const visible: OutboxEntry[] = [];
@@ -1170,6 +1212,10 @@ export function visibleOutbox(
     if (entry.state === "delivered") {
       const settledAt = entry.settledAt ?? entry.at;
       if (nowMs - settledAt >= OUTBOX_DELIVERED_TTL_MS) continue;
+      if (
+        newestTranscriptAtMs !== undefined
+        && newestTranscriptAtMs >= settledAt + OUTBOX_MTIME_GRACE_MS
+      ) continue;
     }
     visible.push(entry);
   }

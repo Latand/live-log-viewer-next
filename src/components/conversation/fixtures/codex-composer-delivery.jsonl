@@ -1,0 +1,5 @@
+{"timestamp":"2026-08-06T13:44:25.317Z","type":"response_item","payload":{"type":"message","id":"msg_fixture_0001","role":"user","content":[{"type":"input_text","text":"<!-- llv:structured-user ctx=eyJmaXh0dXJlIjp0cnVlfQ -->\nevery minute or two"}]}}
+{"timestamp":"2026-08-06T13:44:25.320Z","type":"event_msg","payload":{"type":"user_message","client_id":"client-fixture-0001","message":"<!-- llv:structured-user ctx=eyJmaXh0dXJlIjp0cnVlfQ -->\nevery minute or two"}}
+{"timestamp":"2026-08-06T13:44:31.002Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"bash\",\"-lc\",\"rg --files src\"]}","call_id":"call_fixture_0001"}}
+{"timestamp":"2026-08-06T13:44:31.240Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_fixture_0001","output":"src/example.ts"}}
+{"timestamp":"2026-08-06T13:44:33.481Z","type":"event_msg","payload":{"type":"agent_message","message":"Adjusted the check cadence to every minute."}}
