@@ -4587,10 +4587,14 @@ export class AgentRegistry {
          mutation loads rows lazily rather than from an assembled snapshot, so
          the origin decision is applied to this one row here (#739). */
       reboundEntryMcpGrant(file, key, this.mcpGrantPolicy);
+      /* A terminal status is the durable release fence. A wrapper may remain
+         alive after publishing it, so the successor claim supersedes every
+         prior writer fence and can adopt the retained recovery cursor. */
+      const terminal = entry.status === "unhosted" || entry.status === "dead";
       const liveHost = entry.structuredHost.process;
-      if (liveHost && this.ownerAlive(liveHost)) return null;
+      if (!terminal && liveHost && this.ownerAlive(liveHost)) return null;
       const requestedOwner = structuredClaimOwner(owner);
-      if (entry.claimOwner) {
+      if (entry.claimOwner && !terminal) {
         const priorOwner = structuredClaimIdentity(entry.claimOwner);
         const reclaimUnverifiedOwner = options.reclaimUnverifiedOwner === true
           && entry.structuredHost.process === null

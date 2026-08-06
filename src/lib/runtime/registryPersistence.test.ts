@@ -167,8 +167,10 @@ for (const [engine, bind] of binders) {
         eventCursor: 6,
         status: "unhosted",
         endpoint: "stdio:released",
-        pid: null,
-        processStartIdentity: null,
+        /* The wrapper may still be alive when it releases ownership. The
+           terminal registry projection must sever that stale process pointer. */
+        pid: 4242,
+        processStartIdentity: "4242:100",
         activeTurnRef: null,
       });
       expect(registry.writes).toHaveLength(5);

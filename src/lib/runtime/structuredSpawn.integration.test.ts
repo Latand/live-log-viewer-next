@@ -1102,6 +1102,97 @@ test.each(["codex", "claude"] as const)("%s stale-live recovery converges regist
   expect(host.sent).toEqual([]);
 });
 
+test("a resume successor claims a released row whose recorded host process is still alive", async () => {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `released-live-successor-${sessionId}`);
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd });
+  const conversation = registry.ensureConversation("codex", artifactPath, "codex-subscription");
+  const key = { engine: "codex" as const, sessionId };
+  const releasedProcess = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    launchProfile,
+    status: "unhosted",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:released",
+      process: releasedProcess,
+      eventCursor: 531,
+      protocolVersion: "v2",
+      writerClaimEpoch: 4,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 4,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "codex-subscription",
+    conversationId: conversation.id,
+    purpose: "resume-successor",
+    expectedArtifactPath: artifactPath,
+    launchProfile,
+  });
+  if (begun.kind !== "created") throw new Error("resume receipt was unavailable");
+  const successor = new RoundTripHost("codex", artifactPath, sessionId);
+  const successorProcess = { pid: process.pid, startIdentity: "successor-owner" };
+
+  try {
+    await expect(spawnStructuredConversation({
+      engine: "codex",
+      receipt: begun.receipt,
+      spec: { command: "codex", cwd, windowName: "resume", engine: "codex", transcript: artifactPath, launchProfile },
+      account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+      "prompt": "",
+      registry,
+      client,
+    }, {
+      startHost: async () => successor,
+      bindHost: async (targetRegistry, targetKey, runningHost, claimOwner, claimEpoch) => {
+        const state = await runningHost.health();
+        const persisted = targetRegistry.setStructuredHostClaimed(targetKey, {
+          kind: "codex-app-server",
+          endpoint: state.endpoint,
+          process: successorProcess,
+          eventCursor: state.eventCursor,
+          protocolVersion: state.protocolVersion,
+          writerClaimEpoch: claimEpoch,
+          activeTurnRef: state.activeTurnRef,
+          pendingAttention: state.pendingAttention,
+          activeFlags: state.activeFlags,
+        }, "idle", claimOwner, claimEpoch);
+        if (!persisted) throw new Error("successor host persistence failed");
+        return () => {};
+      },
+      publishHost: async () => async () => {},
+      processIdentity: () => successorProcess,
+    })).resolves.toMatchObject({ launched: true, state: "settled", path: artifactPath });
+
+    expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
+      status: "idle",
+      claimEpoch: 5,
+      structuredHost: { process: successorProcess, eventCursor: 0, writerClaimEpoch: 5 },
+    });
+  } finally {
+    journal.close();
+  }
+});
+
 class UnreapableRoundTripHost extends RoundTripHost {
   override async release(): Promise<void> {
     this.releaseCount += 1;
