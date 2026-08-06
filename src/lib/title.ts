@@ -29,6 +29,8 @@ const GENERIC_SESSION_TITLES = new Set([
   "claude",
 ]);
 
+export const SPAWN_TITLE_REQUIRED_ERROR = "title is required for every new spawn";
+
 export function isGenericSessionTitle(value: string | null | undefined): boolean {
   return typeof value === "string" && GENERIC_SESSION_TITLES.has(cleanTitle(value).toLocaleLowerCase());
 }
@@ -37,7 +39,8 @@ export function isGenericSessionTitle(value: string | null | undefined): boolean
 export function durableSemanticTitle(value: string | null | undefined, maxLength = 160): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
-  if (!trimmed || !cleanTitle(trimmed, maxLength) || isGenericSessionTitle(trimmed)) return null;
+  const cleaned = cleanTitle(trimmed, maxLength);
+  if (!trimmed || !/[\p{L}\p{N}]/u.test(cleaned) || isGenericSessionTitle(trimmed)) return null;
   return trimmed.length > maxLength ? trimmed.slice(0, maxLength - 1).trimEnd() + "…" : trimmed;
 }
 

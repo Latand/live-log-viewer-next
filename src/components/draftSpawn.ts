@@ -1,5 +1,5 @@
 import type { FileEntry, StructuredSpawnCardState } from "@/lib/types";
-import { derivedSpawnTitle, durableSemanticTitle } from "@/lib/title";
+import { derivedSpawnTitle, durableSemanticTitle, SPAWN_TITLE_REQUIRED_ERROR } from "@/lib/title";
 
 /* The draft spawn lifecycle, as a pure module the pane renders from.
  *
@@ -58,6 +58,9 @@ export interface RecoverableSpawnRequest {
   confirm?: string;
 }
 
+/** The pre-title client persisted this same body without `title`. */
+export type PersistedSpawnRequest = Omit<RecoverableSpawnRequest, "title"> & { title?: string };
+
 /** The persisted record of an in-flight or unsettled launch. Its presence is
     the single source of truth for "a worker may exist" — send stays disabled,
     the prompt/images stay shown, and the copy discourages relaunch. */
@@ -87,7 +90,7 @@ export interface SpawnAttempt {
   hasImages: boolean;
   /** Exact POST data for idempotent recovery. Legacy records have no request
       payload and remain frozen because their identity cannot be reconstructed. */
-  request: RecoverableSpawnRequest | null;
+  request: PersistedSpawnRequest | null;
   engine: DraftEngine;
   /** Handoff source transcript, or "" for a plain draft. */
   src: string;
@@ -129,13 +132,13 @@ export function draftSpawnTitle(
 
 /** Validates records before a reload replays them. Missing or altered fields
     leave the card frozen until exact recovery data arrives. */
-export function hasRecoverableRequest(attempt: SpawnAttempt): attempt is SpawnAttempt & { request: RecoverableSpawnRequest } {
+export function hasRecoverableRequest(attempt: SpawnAttempt): attempt is SpawnAttempt & { request: PersistedSpawnRequest } {
   const request = attempt.request;
   return Boolean(
     request &&
     (request.engine === "claude" || request.engine === "codex") &&
     request.engine === attempt.engine &&
-    durableSemanticTitle(request.title, 120) !== null &&
+    (request.title === undefined || (typeof request.title === "string" && durableSemanticTitle(request.title, 120) !== null)) &&
     typeof request.model === "string" &&
     typeof request.cwd === "string" && request.cwd.length > 0 &&
     typeof request.effort === "string" &&
@@ -154,10 +157,10 @@ export function hasRecoverableRequest(attempt: SpawnAttempt): attempt is SpawnAt
 }
 
 /** Builds the same request body on the initial POST and on reload recovery. */
-export function spawnRequestBody(attempt: SpawnAttempt & { request: RecoverableSpawnRequest }): Record<string, unknown> {
+export function spawnRequestBody(attempt: SpawnAttempt & { request: PersistedSpawnRequest }): Record<string, unknown> {
   const { request } = attempt;
   return {
-    title: request.title,
+    ...(request.title ? { title: request.title } : {}),
     engine: request.engine,
     ...(request.model ? { model: request.model } : {}),
     cwd: request.cwd,
@@ -248,6 +251,28 @@ export type SpawnOutcome =
   /** The client cannot prove whether a worker exists (transport loss, opaque
       5xx, a conflicting attempt). Treated as worker-may-exist: send stays off. */
   | { kind: "ambiguous" };
+
+/** A titleless request may probe its stable attempt id once. When the server
+    confirms that no receipt exists, add the deterministic semantic title while
+    retaining every original launch field and the same idempotency key. */
+export function upgradeLegacySpawnAttempt(
+  attempt: SpawnAttempt & { request: PersistedSpawnRequest },
+  outcome: Extract<SpawnOutcome, { kind: "failed-preflight" }>,
+): (SpawnAttempt & { request: RecoverableSpawnRequest }) | null {
+  if (attempt.request.title !== undefined || outcome.message !== SPAWN_TITLE_REQUIRED_ERROR) return null;
+  return {
+    ...attempt,
+    request: {
+      ...attempt.request,
+      title: draftSpawnTitle(
+        attempt.request.engine,
+        attempt.request.role,
+        attempt.request.prompt,
+        attempt.request.images.length,
+      ),
+    },
+  };
+}
 
 /* After this long without a matched transcript, a known-path boot admits it is
    slow (the file will still appear — the path is deterministic), an admitted

@@ -20,7 +20,7 @@ test("legacy engine placeholders have no semantic title value", () => {
 });
 
 test("punctuation-only values are not durable semantic titles", () => {
-  for (const value of ["###", "***", "~~~", ">>>"]) {
+  for (const value of ["###", "***", "~~~", ">>>", "---", "...", "!!!", "()", "[]"]) {
     expect(durableSemanticTitle(value)).toBeNull();
     expect(semanticTitle(value)).toBeNull();
   }
