@@ -178,6 +178,30 @@ test("Tab commits the highlighted row instead of dropping what was typed", () =>
   expect(picks).toEqual(["/mnt/scratch/tabbed"]);
 });
 
+test("a filter word that matched nothing is never committed as a directory", () => {
+  const picks: string[] = [];
+  render(REPO, (next) => picks.push(next));
+  click(trigger());
+  /* A bare word is a failed filter, not a path. Committing it would hand the
+     spawn route a relative name it resolves against its own directory — and
+     `src` names a real one there — so Enter must close, not launch elsewhere. */
+  type("src");
+  expect(optionValues()).toEqual([]);
+  press(search(), "Enter");
+  expect(picks).toEqual([]);
+  expect(trigger().getAttribute("data-directory-value")).toBe(REPO);
+  expect(trigger().getAttribute("aria-expanded")).toBe("false");
+
+  /* Tab is the natural way to leave a failed filter, and must not commit it
+     either — the escape hatch stays "type a path", as the no-match row says. */
+  click(trigger());
+  type("bogusword");
+  press(search(), "Tab");
+  expect(picks).toEqual([]);
+  expect(trigger().getAttribute("data-directory-value")).toBe(REPO);
+  expect(trigger().getAttribute("aria-expanded")).toBe("false");
+});
+
 test("a launch freezes the control and cannot leave a popup open over it", () => {
   render(REPO);
   click(trigger());

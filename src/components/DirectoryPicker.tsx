@@ -281,9 +281,15 @@ export function DirectoryPicker({
               } else if (event.key === "Enter" || event.key === "Tab") {
                 /* Tab commits like Enter and hands focus back to the trigger,
                    where the next Tab continues from — a typed path is never
-                   lost by moving on. */
+                   lost by moving on. With no row under the highlight the query
+                   is a filter word that matched nothing, and a bare word is not
+                   a directory: the spawn route would resolve it against ITS own
+                   working directory and launch somewhere nobody named. A missed
+                   filter closes the popup and leaves the directory as it was. */
                 event.preventDefault();
-                commit(rows[activeIndex]?.value ?? query);
+                const row = rows[activeIndex];
+                if (row) commit(row.value);
+                else close();
               } else if (event.key === "Escape") {
                 event.preventDefault();
                 /* The board's own Escape closes panes and disclosures; this one
