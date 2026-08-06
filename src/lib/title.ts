@@ -33,10 +33,17 @@ export function isGenericSessionTitle(value: string | null | undefined): boolean
   return typeof value === "string" && GENERIC_SESSION_TITLES.has(cleanTitle(value).toLocaleLowerCase());
 }
 
-export function semanticTitle(value: string | null | undefined, maxLength = 160): string | null {
+/** Validate a durable title without rewriting its meaningful punctuation. */
+export function durableSemanticTitle(value: string | null | undefined, maxLength = 160): string | null {
   if (typeof value !== "string") return null;
-  const cleaned = cleanTitle(value, maxLength);
-  return cleaned && !isGenericSessionTitle(cleaned) ? cleaned : null;
+  const trimmed = value.trim();
+  if (!trimmed || isGenericSessionTitle(trimmed)) return null;
+  return trimmed.length > maxLength ? trimmed.slice(0, maxLength - 1).trimEnd() + "…" : trimmed;
+}
+
+export function semanticTitle(value: string | null | undefined, maxLength = 160): string | null {
+  const durable = durableSemanticTitle(value, maxLength);
+  return durable ? cleanTitle(durable, maxLength) : null;
 }
 
 export function firstPromptLine(value: string | null | undefined, maxLength = 60): string | null {

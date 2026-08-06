@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { derivedSpawnTitle, isGenericSessionTitle, semanticTitle } from "./title";
+import { derivedSpawnTitle, durableSemanticTitle, isGenericSessionTitle, semanticTitle } from "./title";
 
 test("spawn titles derive from the role and a sixty-character first prompt line", () => {
   const firstLine = "Implement the durable conversation identity migration with exact evidence";
@@ -16,4 +16,5 @@ test("legacy engine placeholders have no semantic title value", () => {
     expect(semanticTitle(placeholder)).toBeNull();
   }
   expect(semanticTitle("Implement registry identity")).toBe("Implement registry identity");
+  expect(durableSemanticTitle("Review issue #913")).toBe("Review issue #913");
 });

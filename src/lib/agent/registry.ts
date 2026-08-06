@@ -5,7 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
-import { semanticTitle } from "@/lib/title";
+import { durableSemanticTitle } from "@/lib/title";
 import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
 import {
   emptyLaunchProfile,
@@ -773,7 +773,7 @@ function mergeResumeLaunchProfile(current: LaunchProfile, requested: LaunchProfi
     /* The plugin grant was decided at spawn from the session's origin; a
        resume replays the durable value and can never widen it (issue #687). */
     plugins: current.plugins ?? [],
-    title: semanticTitle(requested.title) ?? semanticTitle(current.title),
+    title: durableSemanticTitle(requested.title) ?? durableSemanticTitle(current.title),
     project: requested.project ?? current.project,
     parentConversationId: requested.parentConversationId ?? current.parentConversationId,
     role: current.role === "root" || requested.role === "root" ? "root" : "worker",
@@ -3603,7 +3603,7 @@ export class AgentRegistry {
       const requestedProfile = emptyLaunchProfile({
         cwd: input.cwd,
         ...(input.launchProfile ?? {}),
-        title: typeof requestedTitle === "string" && semanticTitle(requestedTitle) ? requestedTitle : null,
+        title: durableSemanticTitle(requestedTitle),
         ...(explicitProject ? { project: explicitProject } : {}),
         parentConversationId,
       });
@@ -3629,8 +3629,8 @@ export class AgentRegistry {
       if (input.clientAttemptId) {
         const existing = Object.values(file.receipts).find((receipt) => receipt.clientAttemptId === input.clientAttemptId);
         if (existing) {
-          const existingTitle = semanticTitle(existing.launchProfile.title);
-          const requestedTitle = semanticTitle(profile.title);
+          const existingTitle = durableSemanticTitle(existing.launchProfile.title);
+          const requestedTitle = durableSemanticTitle(profile.title);
           const titleCompatible = !existingTitle || !requestedTitle || existingTitle === requestedTitle;
           const compatible = existing.requestDigest === (input.requestDigest ?? null)
             && existing.engine === input.engine
@@ -3648,16 +3648,16 @@ export class AgentRegistry {
             if (titledConversation) {
               const ownedPaths = new Set(titledConversation.generations.map((generation) => generation.path));
               for (const generation of titledConversation.generations) {
-                if (!semanticTitle(generation.launchProfile.title)) generation.launchProfile.title = requestedTitle;
+                if (!durableSemanticTitle(generation.launchProfile.title)) generation.launchProfile.title = requestedTitle;
               }
               for (const entry of Object.values(file.entries)) {
-                if (ownedPaths.has(entry.artifactPath) && entry.launchProfile && !semanticTitle(entry.launchProfile.title)) {
+                if (ownedPaths.has(entry.artifactPath) && entry.launchProfile && !durableSemanticTitle(entry.launchProfile.title)) {
                   entry.launchProfile.title = requestedTitle;
                 }
               }
               for (const receipt of Object.values(file.receipts)) {
                 if (resolveConversationAlias(file, receipt.conversationId) === existingConversationId
-                  && !semanticTitle(receipt.launchProfile.title)) {
+                  && !durableSemanticTitle(receipt.launchProfile.title)) {
                   receipt.launchProfile.title = requestedTitle;
                 }
               }
@@ -5003,7 +5003,7 @@ export class AgentRegistry {
               accountId: observation.accountId,
               launchProfile: emptyLaunchProfile({
                 ...observation.launchProfile,
-                title: semanticTitle(observation.launchProfile.title),
+                title: durableSemanticTitle(observation.launchProfile.title),
               }),
               historyHash: null,
               host: null,
@@ -5048,7 +5048,7 @@ export class AgentRegistry {
           permissionMode: generation.launchProfile.permissionMode ?? observation.launchProfile.permissionMode,
           readOnly: generation.launchProfile.readOnly ?? observation.launchProfile.readOnly,
           mcpServers: generation.launchProfile.mcpServers,
-          title: semanticTitle(generation.launchProfile.title) ?? semanticTitle(observation.launchProfile.title),
+          title: durableSemanticTitle(generation.launchProfile.title) ?? durableSemanticTitle(observation.launchProfile.title),
           project: observation.launchProfile.project ?? generation.launchProfile.project,
           parentConversationId: lineage?.source === "viewer-spawn"
             ? lineage.parentConversationId
