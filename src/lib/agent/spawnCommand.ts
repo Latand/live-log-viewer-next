@@ -38,7 +38,7 @@ import { adoptPipelineAttemptFromSource, pipelineAttemptTargetForSource } from "
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { projectDirectoryCandidates } from "@/lib/scanner/projectDirectories";
-import { derivedSpawnTitle, durableSemanticTitle, firstPromptLine } from "@/lib/title";
+import { derivedSpawnTitle, durableSemanticTitle, firstPromptLine, SPAWN_TITLE_REQUIRED_ERROR } from "@/lib/title";
 import { buildImagePayload, collectImagePayloads, deleteInboxImages, spawnAgentWithPrompt, verifyTmuxHostEvidence } from "@/lib/tmux";
 import type { ApiError } from "@/lib/types";
 
@@ -247,13 +247,13 @@ export async function executeSpawnRequest(
   const clientAttemptId = typeof body.clientAttemptId === "string" ? body.clientAttemptId : null;
   const existingAttempt = clientAttemptId ? registry.spawnReceiptForClientAttempt(clientAttemptId) : null;
   if (!explicitTitle && !existingAttempt) {
-    return NextResponse.json({ error: "title is required for every new spawn" }, { status: 400 });
+    return NextResponse.json({ error: SPAWN_TITLE_REQUIRED_ERROR }, { status: 400 });
   }
   const launchTitle = explicitTitle
     ?? derivedTitle
     ?? durableSemanticTitle(existingAttempt?.launchProfile.title, 120);
   if (!launchTitle) {
-    return NextResponse.json({ error: "title is required for every new spawn" }, { status: 400 });
+    return NextResponse.json({ error: SPAWN_TITLE_REQUIRED_ERROR }, { status: 400 });
   }
 
   let authenticatedCaller: AuthenticatedSpawnCaller | null = null;

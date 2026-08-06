@@ -37,6 +37,7 @@ import {
   hasRecoverableRequest,
   matchSpawnedFile,
   spawnRequestBody,
+  upgradeLegacySpawnAttempt,
 } from "./draftSpawn";
 import { ReasoningControls, type SpeedChoice } from "./ReasoningControls";
 import { cleanTitle, engineTintOf } from "./utils";
@@ -724,6 +725,12 @@ export function DraftAgentPane({
       } else if (outcome.kind === "failed-launch") {
         setAttempt(applySpawnFailure(candidate, outcome));
       } else if (outcome.kind === "failed-preflight") {
+        const upgraded = upgradeLegacySpawnAttempt(candidate, outcome);
+        if (upgraded) {
+          replayedAttemptIds.current.delete(candidate.clientAttemptId);
+          setAttempt(upgraded);
+          return;
+        }
         /* The server released worker ownership. Restore the exact durable
            payload so editing and retrying cannot lose an attachment. */
         setAttempt(null);

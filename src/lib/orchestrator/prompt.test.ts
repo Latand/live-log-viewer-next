@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+
 import { expect, test } from "bun:test";
 
 import { BRIDGE_REPORT_CLASSES } from "@/lib/bridge/types";
@@ -20,6 +23,12 @@ test("system prompt encodes the conveyor loop and its bars", () => {
   expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("merge only on an APPROVE verdict");
   expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("REVIEW_READY:");
   expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("src = YOUR transcript path");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("title = a semantic task name");
+});
+
+test("the canonical direct-spawn example includes the mandatory semantic title", () => {
+  const skill = fs.readFileSync(path.join(import.meta.dir, "../../../.claude/skills/live-log-viewer-orchestration/SKILL.md"), "utf8");
+  expect(skill).toContain('"title":"<semantic task title>"');
 });
 
 /* #691 — the half of the load-bearing constraint that only a prompt can carry: the
