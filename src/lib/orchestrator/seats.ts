@@ -60,6 +60,8 @@ export interface OrchestratorSeat {
       completed replays cannot reconstruct it from a changed retry payload. */
   engine?: string | null;
   model?: string | null;
+  /** False only for persisted rows written before runtime identity freezing. */
+  runtimeIdentityFrozen?: boolean;
   /** The mandate text delivered (active) or to be delivered (pending). */
   mandate: string;
   /** Version of the approved default prompt the mandate was based on; null
@@ -146,6 +148,9 @@ function normalizeSeat(value: unknown): OrchestratorSeat | null {
   if (intent.mode !== "spawn" && intent.mode !== "existing") return null;
   if (typeof seat.designatedAt !== "string") return null;
   if (seat.activatedAt !== null && typeof seat.activatedAt !== "string") return null;
+  const runtimeIdentityFrozen = seat.runtimeIdentityFrozen === true
+    || Object.prototype.hasOwnProperty.call(seat, "engine")
+    || Object.prototype.hasOwnProperty.call(seat, "model");
   return {
     project: seat.project,
     seatEpoch: seat.seatEpoch,
@@ -153,6 +158,7 @@ function normalizeSeat(value: unknown): OrchestratorSeat | null {
     path: seat.path ?? null,
     engine: typeof seat.engine === "string" && seat.engine.trim() ? seat.engine : null,
     model: typeof seat.model === "string" && seat.model.trim() ? seat.model : null,
+    runtimeIdentityFrozen,
     mandate: seat.mandate,
     promptVersion: typeof seat.promptVersion === "number" && Number.isInteger(seat.promptVersion) ? seat.promptVersion : null,
     predecessorConversationId: typeof seat.predecessorConversationId === "string" ? seat.predecessorConversationId : null,
@@ -333,6 +339,7 @@ export function beginOrchestratorSeatIntent(input: {
       path: null,
       engine: input.engine?.trim() || null,
       model: input.model?.trim() || null,
+      runtimeIdentityFrozen: true,
       mandate: input.mandate,
       promptVersion: input.promptVersion ?? null,
       predecessorConversationId: null,
@@ -399,6 +406,7 @@ export function completeOrchestratorSeatIntent(input: {
       path: input.path,
       engine: pending.engine ?? (input.engine?.trim() || null),
       model: pending.model ?? (input.model?.trim() || null),
+      runtimeIdentityFrozen: pending.runtimeIdentityFrozen === true || Boolean(input.engine || input.model),
       predecessorConversationId: revoked?.conversationId ?? pending.predecessorConversationId,
       state: "active",
       intent: { ...pending.intent, launchId: input.launchId ?? pending.intent.launchId, error: null },
