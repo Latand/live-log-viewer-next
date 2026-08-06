@@ -107,6 +107,13 @@ export type Round = {
   launchId?: string | null;
   launchLeaseUntil?: string | null;
   relayStartedAt?: string | null; // findings delivery started
+  /** Automatic relay retries already scheduled for this logical round. */
+  relayRetryCount?: number;
+  /** Earliest wall-clock time for the next relay attempt. */
+  relayRetryAt?: string | null;
+  /** A prior process may have delivered this relay; retries must use the
+      structured queue's stable client-message identity. */
+  relayRetryRequiresIdempotency?: boolean;
   /** Exact transcript generation that received Viewer-generated findings. */
   relayDelivery?: ViewerFlowDelivery | null;
   reviewedAt: string | null; // verdict detected

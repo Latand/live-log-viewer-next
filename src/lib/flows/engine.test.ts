@@ -1385,6 +1385,138 @@ test("overlapping relay ticks deliver one review and settle the round once (#529
   }
 });
 
+test("a relay rejection retries after bounded backoff and reaches fixing", async () => {
+  let deliveries = 0;
+  const restoreDelivery = setRelayDeliveryForTest(async (flow) => {
+    deliveries += 1;
+    if (deliveries === 1) throw new Error("structured resume host claim is unavailable");
+    return flow.implementerPath;
+  });
+  const implementer = writeCodexEntry("relay-retry-implementer.jsonl", {
+    id: ["049f421e", "02e1", "73e0", "9b77", "bebde063f529"].join("-"),
+    cwd: "/repo",
+  }, Date.now() / 1_000);
+  const findingsPath = path.join(process.env.LLV_STATE_DIR!, "relay-retry-findings.md");
+  fs.writeFileSync(findingsPath, "VERDICT: REQUEST_CHANGES\n\nRepair the host claim.\n");
+  const round = {
+    ...newRound(raceFlow({ rounds: [] }), "marker", "head ready"),
+    findingsPath,
+    verdict: "REQUEST_CHANGES" as const,
+    findingsCount: 1,
+    reviewedAt: "2026-08-05T20:47:07.961Z",
+    terminalAt: "2026-08-05T20:47:07.961Z",
+  };
+  saveFlows([raceFlow({
+    id: "flow-relay-retry",
+    implementerPath: implementer.path,
+    state: "relaying",
+    rounds: [round],
+  })]);
+
+  try {
+    await tickFlows([implementer]);
+    const retrying = loadFlows()[0]!;
+    expect(retrying).toMatchObject({
+      state: "relaying",
+      pausedState: null,
+      stateDetail: expect.stringContaining("retrying automatically (1/3)"),
+      rounds: [{
+        relayRetryCount: 1,
+        relayRetryAt: expect.any(String),
+        relayStartedAt: null,
+        relayedAt: null,
+        error: "structured resume host claim is unavailable",
+      }],
+    });
+    expect(deliveries).toBe(1);
+
+    Object.assign(retrying.rounds[0]!, { relayRetryAt: "2026-08-05T20:47:08.000Z" });
+    saveFlows([retrying]);
+    await tickFlows([implementer]);
+
+    expect(deliveries).toBe(2);
+    expect(loadFlows()[0]).toMatchObject({
+      state: "fixing",
+      pausedState: null,
+      stateDetail: null,
+      rounds: [{
+        relayRetryCount: 1,
+        relayRetryAt: null,
+        relayDelivery: { path: implementer.path, deliveredAt: expect.any(String) },
+        relayedAt: expect.any(String),
+        error: null,
+      }],
+    });
+  } finally {
+    restoreDelivery();
+  }
+});
+
+test("a restart-interrupted relay retries through the idempotent structured path", async () => {
+  let deliveries = 0;
+  const restoreDelivery = setRelayDeliveryForTest(async (flow, _entries, _text, options) => {
+    deliveries += 1;
+    expect(options?.requireIdempotentDelivery).toBe(true);
+    return flow.implementerPath;
+  });
+  const implementer = writeCodexEntry("relay-restart-implementer.jsonl", {
+    id: ["059f421e", "02e1", "73e0", "9b77", "bebde063f529"].join("-"),
+    cwd: "/repo",
+  }, Date.now() / 1_000);
+  const findingsPath = path.join(process.env.LLV_STATE_DIR!, "relay-restart-findings.md");
+  fs.writeFileSync(findingsPath, "VERDICT: REQUEST_CHANGES\n\nContinue the interrupted relay.\n");
+  const round = {
+    ...newRound(raceFlow({ rounds: [] }), "marker", "head ready"),
+    findingsPath,
+    verdict: "REQUEST_CHANGES" as const,
+    findingsCount: 1,
+    reviewedAt: "2026-08-05T20:47:07.961Z",
+    terminalAt: "2026-08-05T20:47:07.961Z",
+    relayStartedAt: "2026-08-05T20:47:08.000Z",
+  };
+  saveFlows([raceFlow({
+    id: "flow-relay-restart",
+    implementerPath: implementer.path,
+    state: "relaying",
+    rounds: [round],
+  })]);
+
+  try {
+    await tickFlows([implementer]);
+    const retrying = loadFlows()[0]!;
+    expect(deliveries).toBe(0);
+    expect(retrying).toMatchObject({
+      state: "relaying",
+      stateDetail: expect.stringContaining("retrying automatically (1/3)"),
+      rounds: [{
+        relayRetryCount: 1,
+        relayRetryAt: expect.any(String),
+        relayRetryRequiresIdempotency: true,
+        relayStartedAt: null,
+      }],
+    });
+
+    Object.assign(retrying.rounds[0]!, { relayRetryAt: "2026-08-05T20:47:09.000Z" });
+    saveFlows([retrying]);
+    await tickFlows([implementer]);
+
+    expect(deliveries).toBe(1);
+    expect(loadFlows()[0]).toMatchObject({
+      state: "fixing",
+      stateDetail: null,
+      rounds: [{
+        relayRetryCount: 1,
+        relayRetryAt: null,
+        relayRetryRequiresIdempotency: false,
+        relayedAt: expect.any(String),
+        error: null,
+      }],
+    });
+  } finally {
+    restoreDelivery();
+  }
+});
+
 test("persistTickFlows respects a concurrent close instead of reopening the flow (issue #118 review)", () => {
   /* The tick started with the flow reviewing; the operator closed it during the
      tick's awaited spawn/relay. */
@@ -1702,6 +1834,42 @@ test("a structured relay that cannot be owned surfaces its reason instead of rep
     enqueueStructured: async () => ({ ok: false, structured: true, outcome: "failed", error: "runtime host is unavailable", status: 503 }),
     deliver: async () => ({ ok: true, outcome: "delivered-to-live", target: "%7" }),
   })).rejects.toThrow("runtime host is unavailable");
+});
+
+test("structured relay retries reuse one durable client-message identity", async () => {
+  const subject = structuredImplementer("idempotent-relay-implementer");
+  const clientMessageIds: Array<string | null | undefined> = [];
+  const overrides: import("./engine").RelayDeliveryOverrides = {
+    recover: async () => ({ target: null, path: subject.implementerPath, conversationId: subject.conversationId, spawned: false }),
+    enqueueStructured: async (request: Parameters<NonNullable<import("./engine").RelayDeliveryOverrides["enqueueStructured"]>>[0]) => {
+      clientMessageIds.push(request.clientMessageId);
+      return { ok: true, structured: true, target: null, outcome: "queued" as const, operationId: "op-relay", receipt: {} as never };
+    },
+    requireIdempotentDelivery: true,
+  };
+
+  await sendToImplementer(subject.flow, subject.entries, "same relay", overrides);
+  await sendToImplementer(subject.flow, subject.entries, "same relay", overrides);
+
+  expect(clientMessageIds).toHaveLength(2);
+  expect(clientMessageIds[0]).toMatch(/^flow_relay_[0-9a-f]{32}$/);
+  expect(clientMessageIds[1]).toBe(clientMessageIds[0]);
+});
+
+test("restart-interrupted legacy relay stays terminal because pane delivery has no dedupe receipt", async () => {
+  const subject = structuredImplementer("legacy-interrupted-relay");
+  let legacyAttempted = false;
+
+  await expect(sendToImplementer(subject.flow, subject.entries, "uncertain relay", {
+    recover: async () => null,
+    requireIdempotentDelivery: true,
+    deliver: async () => {
+      legacyAttempted = true;
+      return { ok: true, outcome: "delivered-to-live", target: "%7" };
+    },
+  })).rejects.toThrow("interrupted relay cannot retry safely because the implementer has no idempotent structured delivery");
+
+  expect(legacyAttempted).toBe(false);
 });
 
 test("a conversation with no structured host falls through to the legacy transcript host", async () => {
