@@ -276,6 +276,45 @@ test("identity migration rekeys the active seat path idempotently", () => {
   expect(orchestratorSeatFor("proj-a").active?.path).toBe(sharedPath);
 });
 
+test("whole-file rewrites preserve explicit legacy-unfrozen runtime provenance", () => {
+  fs.writeFileSync(path.join(sandbox, "orchestrator-seats.json"), JSON.stringify({
+    schemaVersion: 1,
+    nextSeatEpoch: 2,
+    seats: {
+      "proj-a": {
+        project: "proj-a",
+        seatEpoch: 1,
+        conversationId: "conversation_a",
+        path: null,
+        engine: null,
+        model: null,
+        runtimeIdentityFrozen: false,
+        mandate: "legacy seat",
+        promptVersion: null,
+        predecessorConversationId: null,
+        state: "active",
+        intent: { clientRequestId: "req_legacy_1", mode: "spawn", launchId: null, error: null },
+        designatedAt: AT,
+        activatedAt: AT,
+      },
+    },
+    pending: {},
+    revocations: [],
+  }), "utf8");
+
+  expect(orchestratorSeatFor("proj-a").active?.runtimeIdentityFrozen).toBe(false);
+  beginOrchestratorSeatIntent({
+    project: "proj-b",
+    mandate: "rewrite the seat file",
+    clientRequestId: "req_rewrite_1",
+    mode: "spawn",
+    engine: "claude",
+    model: "opus",
+    now: AT,
+  });
+  expect(orchestratorSeatFor("proj-a").active?.runtimeIdentityFrozen).toBe(false);
+});
+
 test("seats are independent per project", () => {
   beginOrchestratorSeatIntent({ project: "proj-a", mandate: "a", clientRequestId: "req_0000001", mode: "spawn", now: AT });
   completeOrchestratorSeatIntent({ project: "proj-a", clientRequestId: "req_0000001", conversationId: "conversation_a", path: null, now: AT });

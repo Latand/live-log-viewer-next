@@ -277,6 +277,90 @@ test("the identity wave retitles, rekeys, stamps roots, supports dry-run, and co
   }
 });
 
+test("identity evidence preserves meaningful receipt and transcript punctuation", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-punctuation-"));
+  try {
+    const headPath = path.join(directory, "head.jsonl");
+    fs.writeFileSync(headPath, `${JSON.stringify({ type: "ai-title", aiTitle: "Review issue #913\nsecondary detail" })}\n`);
+    expect(titleFromTranscriptHead(headPath, "codex")).toBe("Review issue #913");
+    const filename = path.join(directory, "agent-registry.json");
+    const seed = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const receiptConversation = seed.ensureConversation("codex", path.join(directory, "receipt.jsonl"), null);
+    const transcriptConversation = seed.ensureConversation("codex", path.join(directory, "transcript.jsonl"), null);
+    const receipt = seed.beginSpawnRequest({
+      engine: "codex",
+      cwd: directory,
+      conversationId: receiptConversation.id,
+      purpose: "resume-successor",
+      launchProfile: { title: "Codex session" },
+      launchDisplay: { prompt: "Review issue #913", echo: "Review issue #913", images: 0 },
+    });
+    if (receipt.kind !== "created") throw new Error("expected receipt");
+    const legacy = seed.snapshot();
+    legacy.conversations[receiptConversation.id]!.generations.at(-1)!.launchProfile.title = "Codex session";
+    legacy.conversations[transcriptConversation.id]!.generations.at(-1)!.launchProfile.title = "Codex session";
+    fs.writeFileSync(filename, `${JSON.stringify(legacy, null, 2)}\n`);
+    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+
+    expect(registry.runIdentityWaveMigration({
+      now: NOW,
+      transcriptTitle: (pathname) => pathname.endsWith("transcript.jsonl") ? "Audit *role* #913" : null,
+      sharedPathForLegacy: () => null,
+      orchestratorSeats: [],
+    })).toMatchObject({ retitled: 2 });
+    expect(registry.conversation(receiptConversation.id)?.generations.at(-1)?.launchProfile.title).toBe("Review issue #913");
+    expect(registry.conversation(transcriptConversation.id)?.generations.at(-1)?.launchProfile.title).toBe("Audit *role* #913");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a reserved orchestrator seat stamps lineage when its conversation later settles", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-deferred-seat-"));
+  try {
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const begun = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd: directory,
+      role: "orchestrator",
+      launchProfile: { title: "Own the release board" },
+    });
+    if (begun.kind !== "created") throw new Error("expected receipt");
+    const seat = {
+      project: "viewer",
+      seatEpoch: 7,
+      conversationId: begun.receipt.conversationId,
+      predecessorConversationId: null,
+      designatedAt: NOW,
+      activatedAt: NOW,
+    };
+
+    registry.stampOrchestratorSeatIdentity(seat);
+    expect(registry.snapshot().conversations[begun.receipt.conversationId]).toBeUndefined();
+    const settled = registry.settleSpawn(begun.receipt.launchId, {
+      key: { engine: "codex", sessionId: crypto.randomUUID() },
+      artifactPath: path.join(directory, "settled.jsonl"),
+      cwd: directory,
+      accountId: null,
+      launchProfile: begun.receipt.launchProfile,
+      status: "live",
+      host: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    });
+
+    expect(settled.kind).toBe("settled");
+    expect(registry.snapshot().memberships[begun.receipt.conversationId]).toContainEqual(expect.objectContaining({
+      kind: "orchestrator",
+      containerId: "viewer",
+      slot: "seat:7",
+    }));
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("orchestrator re-seating cannot create an A to B to A lineage cycle", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-wave-lineage-cycle-"));
   try {

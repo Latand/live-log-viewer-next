@@ -175,6 +175,9 @@ export interface SpawnReceipt {
   requestDigest: string | null;
   /** The identity wave replaced this receipt's generic launch title. */
   identityWaveTitleBackfill?: true;
+  /** Active orchestrator identity captured while an accepted launch still has
+      only its reserved conversation id. Settlement consumes it once. */
+  pendingOrchestratorSeatIdentity?: IdentityWaveSeat | null;
   /** Launch transport fixed when the idempotent reservation is created. */
   transport: "tmux" | "structured" | null;
   /** Process that owns pre-host structured admission. A replacement may take
@@ -2506,6 +2509,26 @@ function normalizeQueuedPinnedSpawn(value: unknown, policy?: McpGrantPolicy): Qu
   };
 }
 
+function normalizePendingOrchestratorSeatIdentity(value: unknown): IdentityWaveSeat | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const seat = value as Partial<IdentityWaveSeat>;
+  if (typeof seat.project !== "string" || !seat.project
+    || !Number.isInteger(seat.seatEpoch) || (seat.seatEpoch ?? 0) < 1
+    || typeof seat.conversationId !== "string" || !seat.conversationId.startsWith("conversation_")
+    || (seat.predecessorConversationId !== null && typeof seat.predecessorConversationId !== "string")
+    || typeof seat.designatedAt !== "string"
+    || (seat.activatedAt !== null && typeof seat.activatedAt !== "string")) return null;
+  return {
+    project: seat.project,
+    seatEpoch: seat.seatEpoch!,
+    conversationId: seat.conversationId,
+    predecessorConversationId: seat.predecessorConversationId ?? null,
+    designatedAt: seat.designatedAt,
+    activatedAt: seat.activatedAt ?? null,
+    path: typeof seat.path === "string" ? seat.path : null,
+  };
+}
+
 function normalizeReceipt(value: SpawnReceipt, policy?: McpGrantPolicy): SpawnReceipt {
   const state = value.state === "completed" || value.state === "failed" || value.state === "pane-bound" || value.state === "host-verified" || value.state === "prompt-delivered" || value.state === "path-pending" || value.state === "conflicted"
     ? value.state
@@ -2518,6 +2541,7 @@ function normalizeReceipt(value: SpawnReceipt, policy?: McpGrantPolicy): SpawnRe
     clientAttemptId: typeof value.clientAttemptId === "string" ? value.clientAttemptId : null,
     requestDigest: typeof value.requestDigest === "string" ? value.requestDigest : null,
     ...(value.identityWaveTitleBackfill === true ? { identityWaveTitleBackfill: true as const } : {}),
+    pendingOrchestratorSeatIdentity: normalizePendingOrchestratorSeatIdentity(value.pendingOrchestratorSeatIdentity),
     transport: value.transport === "tmux" || value.transport === "structured" ? value.transport : null,
     admissionOwner: value.admissionOwner
       && Number.isInteger(value.admissionOwner.pid)
@@ -3848,6 +3872,7 @@ export class AgentRegistry {
         launchId: crypto.randomUUID(),
         clientAttemptId: input.clientAttemptId ?? null,
         requestDigest: input.requestDigest ?? null,
+        pendingOrchestratorSeatIdentity: null,
         transport: input.transport ?? null,
         admissionOwner: input.transport === "structured" || input.ownStartingActuation === true
           ? { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) }
@@ -4095,7 +4120,13 @@ export class AgentRegistry {
     return this.mutate((file) => {
       const stamped = stampOrchestratorLineage(file, seat, seat.activatedAt ?? seat.designatedAt);
       if (stamped.changed && stamped.engine) file.conversationRevision[stamped.engine] += 1;
-      return stamped.changed;
+      if (stamped.engine) return stamped.changed;
+      const receipt = Object.values(file.receipts).find((candidate) => candidate.conversationId === seat.conversationId);
+      if (!receipt) return false;
+      const pending = normalizePendingOrchestratorSeatIdentity(seat);
+      if (!pending || isDeepStrictEqual(receipt.pendingOrchestratorSeatIdentity, pending)) return false;
+      receipt.pendingOrchestratorSeatIdentity = pending;
+      return true;
     });
   }
 
@@ -4414,6 +4445,13 @@ export class AgentRegistry {
       file.conversationRevision[conversation.engine] += 1;
       file.engineRouting[conversation.engine].revision += 1;
     }
+    const settledGeneration = conversation.generations.find((generation) => generation.path === entry.artifactPath);
+    const receiptTitle = durableSemanticTitle(receipt.launchProfile.title, 120);
+    if (settledGeneration && receiptTitle && !durableSemanticTitle(settledGeneration.launchProfile.title, 120)) {
+      settledGeneration.launchProfile.title = receiptTitle;
+      file.conversationRevision[conversation.engine] += 1;
+      file.engineRouting[conversation.engine].revision += 1;
+    }
     /* A spawn that began before an account switch remains attributable to its
        birth account. The already-active engine-wide migration intent still
        applies to the new conversation through the existing coordinator
@@ -4453,6 +4491,12 @@ export class AgentRegistry {
     file.entries[sessionKeyId(entry.key)] = full;
     receipt.key = entry.key;
     receipt.artifactPath = entry.artifactPath;
+    if (receipt.pendingOrchestratorSeatIdentity) {
+      const pendingSeat = receipt.pendingOrchestratorSeatIdentity;
+      const stamped = stampOrchestratorLineage(file, pendingSeat, pendingSeat.activatedAt ?? pendingSeat.designatedAt);
+      receipt.pendingOrchestratorSeatIdentity = null;
+      if (stamped.changed && stamped.engine) file.conversationRevision[stamped.engine] += 1;
+    }
     const lineage = file.lineageEdges[receipt.conversationId];
     if (lineage) {
       lineage.childSessionKey = entry.key;

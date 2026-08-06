@@ -4,7 +4,6 @@ import fs from "node:fs";
 import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
 import { validExplicitProject } from "@/lib/accounts/migration/contracts";
 import { agentRegistry } from "@/lib/agent/registry";
-import { validateLaunchModel } from "@/lib/agent/models";
 import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { deliverConversationMessage } from "@/lib/delivery";
@@ -12,6 +11,7 @@ import { structuredHostsEnabled } from "@/lib/runtime/flags";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { resolveSpawnRole } from "@/lib/roles/registry";
 import { derivedSpawnTitle } from "@/lib/title";
+import { resolveSpawnRole } from "@/lib/roles/registry";
 
 import { loadTasks } from "@/lib/tasks/store";
 import { orchestratorMandateForDelivery } from "./prompt";
@@ -244,18 +244,6 @@ export interface SeatCommandResult {
 
 function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
-}
-
-function explicitSeatModelError(rawBody: Record<string, unknown>): string | null {
-  const model = text(rawBody.model);
-  if (!model) return null;
-  const role = resolveSpawnRole({ role: "orchestrator", roleParams: rawBody.roleParams ?? { mode: "standard" } });
-  let engine: "claude" | "codex" | null = null;
-  if (rawBody.engine === "claude" || rawBody.engine === "codex") engine = rawBody.engine;
-  else if (role.ok && role.value) engine = role.value.config.engine;
-  if (!engine) return null;
-  const validation = validateLaunchModel(engine, model);
-  return "error" in validation ? validation.error : null;
 }
 
 function replayedSeatResponse(seat: OrchestratorSeat): SeatCommandResult {
@@ -529,15 +517,23 @@ export async function executeOrchestratorSeatRequest(
       },
     };
   }
-  const modelError = explicitSeatModelError(rawBody);
-  if (modelError) return { status: 400, body: { error: modelError } };
+  const resolvedRuntime = resolveSpawnRole({
+    role: "orchestrator",
+    roleParams: rawBody.roleParams,
+    engine: rawBody.engine,
+    model: rawBody.model,
+    effort: rawBody.effort,
+  });
+  if (!resolvedRuntime.ok || !resolvedRuntime.value) {
+    return { status: 400, body: { error: resolvedRuntime.ok ? "orchestrator runtime is unavailable" : resolvedRuntime.error } };
+  }
   const begun = beginOrchestratorSeatIntent({
     project,
     mandate,
     clientRequestId,
     mode: "spawn",
-    engine: typeof rawBody.engine === "string" ? rawBody.engine : null,
-    model: typeof rawBody.model === "string" ? rawBody.model : null,
+    engine: resolvedRuntime.value.config.engine,
+    model: resolvedRuntime.value.config.model,
     promptVersion,
     now: dependencies.now(),
   });
@@ -571,8 +567,8 @@ export async function executeOrchestratorSeatRequest(
         ...(begun.seat.model ? { model: begun.seat.model } : {}),
       }
     : {
-        ...(rawBody.engine !== undefined ? { engine: rawBody.engine } : {}),
-        ...(rawBody.model !== undefined ? { model: rawBody.model } : {}),
+        engine: resolvedRuntime.value.config.engine,
+        model: resolvedRuntime.value.config.model,
       };
   const cwd = resolveOrchestratorCwd(project, rawBody.cwd);
   if (!cwd) {
@@ -622,6 +618,8 @@ export async function executeOrchestratorSeatRequest(
     conversationId: spawnedConversationId,
     path: typeof spawned.body.path === "string" ? spawned.body.path : null,
     launchId: launchId || null,
+    engine: resolvedRuntime.value.config.engine,
+    model: resolvedRuntime.value.config.model,
   }, dependencies);
   if (!activated) return { status: 409, body: { error: "seat intent was superseded by a newer designation" } };
   return {

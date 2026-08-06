@@ -111,6 +111,38 @@ test("observations and resume successors preserve semantic title punctuation", (
   expect(refreshed.conversations[conversation.id]?.generations.at(-1)?.launchProfile.title).toBe("Own issue #913");
 });
 
+test("same-path settlement publishes a newly inherited semantic title to the durable generation", () => {
+  const { store } = registryAt("same-path-semantic-title");
+  const conversation = store.ensureConversation("codex", "/sessions/recovery-title.jsonl", "terra");
+  expect(conversation.generations.at(-1)?.launchProfile.title).toBeNull();
+  const resumed = store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    conversationId: conversation.id,
+    purpose: "resume-successor",
+    origin: { kind: "successor" },
+    expectedArtifactPath: "/sessions/recovery-title.jsonl",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "recovery · Restore issue #913" }),
+  });
+  if (resumed.kind !== "created") throw new Error("expected create");
+
+  const settled = store.settleSpawn(resumed.receipt.launchId, {
+    key: { engine: "codex", sessionId: conversation.generations.at(-1)!.id },
+    artifactPath: "/sessions/recovery-title.jsonl",
+    cwd: "/repo",
+    accountId: "terra",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    status: "live",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+
+  expect(settled.kind).toBe("settled");
+  expect(store.conversation(conversation.id)?.generations.at(-1)?.launchProfile.title).toBe("recovery · Restore issue #913");
+});
+
 test("a delegated conversation never acquires a Codex plugin grant (#687)", () => {
   const { store } = registryAt("plugin-grant-delegation");
   const parent = store.ensureConversation("codex", "/sessions/plugin-grant-parent.jsonl", "terra");

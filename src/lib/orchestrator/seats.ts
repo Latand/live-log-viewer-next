@@ -148,16 +148,18 @@ function normalizeSeat(value: unknown): OrchestratorSeat | null {
   if (intent.mode !== "spawn" && intent.mode !== "existing") return null;
   if (typeof seat.designatedAt !== "string") return null;
   if (seat.activatedAt !== null && typeof seat.activatedAt !== "string") return null;
-  const runtimeIdentityFrozen = seat.runtimeIdentityFrozen === true
-    || Object.prototype.hasOwnProperty.call(seat, "engine")
-    || Object.prototype.hasOwnProperty.call(seat, "model");
+  const engine = typeof seat.engine === "string" && seat.engine.trim() ? seat.engine : null;
+  const model = typeof seat.model === "string" && seat.model.trim() ? seat.model : null;
+  const runtimeIdentityFrozen = typeof seat.runtimeIdentityFrozen === "boolean"
+    ? seat.runtimeIdentityFrozen
+    : Boolean(engine || model);
   return {
     project: seat.project,
     seatEpoch: seat.seatEpoch,
     conversationId: seat.conversationId ?? null,
     path: seat.path ?? null,
-    engine: typeof seat.engine === "string" && seat.engine.trim() ? seat.engine : null,
-    model: typeof seat.model === "string" && seat.model.trim() ? seat.model : null,
+    engine,
+    model,
     runtimeIdentityFrozen,
     mandate: seat.mandate,
     promptVersion: typeof seat.promptVersion === "number" && Number.isInteger(seat.promptVersion) ? seat.promptVersion : null,
@@ -339,7 +341,7 @@ export function beginOrchestratorSeatIntent(input: {
       path: null,
       engine: input.engine?.trim() || null,
       model: input.model?.trim() || null,
-      runtimeIdentityFrozen: true,
+      runtimeIdentityFrozen: Boolean(input.engine?.trim() && input.model?.trim()),
       mandate: input.mandate,
       promptVersion: input.promptVersion ?? null,
       predecessorConversationId: null,
