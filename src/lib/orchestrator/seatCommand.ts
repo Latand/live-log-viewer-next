@@ -21,6 +21,7 @@ import {
   failOrchestratorSeatIntent,
   canonicalOrchestratorProject,
   orchestratorSeatFor,
+  repairOrchestratorSeatRuntimeIdentity,
   type OrchestratorSeat,
 } from "./seats";
 
@@ -67,12 +68,21 @@ export interface SeatCommandDependencies {
   launchSettlement(input: { launchId: string | null; clientRequestId: string }): LaunchSettlement;
   /** Persist the active seat's role, membership, and rotation lineage. */
   stampRegistryIdentity(seat: OrchestratorSeat): void;
+  /** Durable runtime identity for legacy seats that predate engine/model. */
+  runtimeIdentity(conversationId: string): { engine: string | null; model: string | null };
   now(): string;
 }
 
 export type LaunchSettlement =
   /** The launch durably produced a conversation; the intent can activate on it. */
-  | { kind: "settled"; conversationId: string; path: string | null; launchId: string | null }
+  | {
+      kind: "settled";
+      conversationId: string;
+      path: string | null;
+      launchId: string | null;
+      engine?: string | null;
+      model?: string | null;
+    }
   /** The launch terminally failed; the intent can record the error. */
   | { kind: "failed"; error: string }
   /** No settled receipt to reconcile against — leave the intent alone. */
@@ -207,6 +217,15 @@ export const productionSeatCommandDependencies: SeatCommandDependencies = {
       conversationId: receipt.conversationId,
       path: receipt.artifactLifecycle === "materialized" ? receipt.artifactPath : null,
       launchId: receipt.launchId,
+      engine: receipt.engine,
+      model: receipt.launchProfile.model,
+    };
+  },
+  runtimeIdentity: (conversationId) => {
+    const conversation = agentRegistry().conversation(conversationId as `conversation_${string}`);
+    return {
+      engine: conversation?.engine ?? null,
+      model: conversation?.generations.at(-1)?.launchProfile.model ?? null,
     };
   },
   stampRegistryIdentity: (seat) => {
@@ -279,9 +298,18 @@ function inProgressSeatResponse(seat: OrchestratorSeat): SeatCommandResult {
  * may reach them.
  */
 async function activate(
-  input: { project: string; clientRequestId: string; conversationId: string; path: string | null; launchId?: string | null },
+  input: {
+    project: string;
+    clientRequestId: string;
+    conversationId: string;
+    path: string | null;
+    launchId?: string | null;
+    engine?: string | null;
+    model?: string | null;
+  },
   dependencies: SeatCommandDependencies,
 ): Promise<{ seat: OrchestratorSeat } | null> {
+  let projectedSeat: OrchestratorSeat | null = null;
   const completed = withAccountMutationLock(() => {
     const result = completeOrchestratorSeatIntent({
       project: input.project,
@@ -289,21 +317,33 @@ async function activate(
       conversationId: input.conversationId,
       path: input.path,
       launchId: input.launchId,
+      engine: input.engine,
+      model: input.model,
       now: dependencies.now(),
     });
-    if (result.kind !== "missing") reconcileAuthorityProjections(result.seat, dependencies);
+    if (result.kind !== "missing") projectedSeat = reconcileAuthorityProjections(result.seat, dependencies);
     return result;
   });
   if (completed.kind === "missing") return null;
-  return { seat: completed.seat };
+  return { seat: projectedSeat ?? completed.seat };
 }
 
 function reconcileAuthorityProjections(
   seat: OrchestratorSeat,
   dependencies: SeatCommandDependencies,
-): void {
+): OrchestratorSeat {
   if (!seat.conversationId) throw new Error("active orchestrator seat is missing its conversation identity");
-  dependencies.stampRegistryIdentity(seat);
+  const durableRuntime = seat.engine && seat.model
+    ? { engine: null, model: null }
+    : dependencies.runtimeIdentity(seat.conversationId);
+  const repaired = repairOrchestratorSeatRuntimeIdentity({
+    project: seat.project,
+    conversationId: seat.conversationId,
+    engine: durableRuntime.engine,
+    model: durableRuntime.model,
+  }) ?? seat;
+  dependencies.stampRegistryIdentity(repaired);
+  return repaired;
 }
 
 function reconcileCompletedSeatReplay(
@@ -314,8 +354,7 @@ function reconcileCompletedSeatReplay(
   return withAccountMutationLock(() => {
     const seat = orchestratorSeatFor(project).active;
     if (!seat || seat.intent.clientRequestId !== clientRequestId) return null;
-    reconcileAuthorityProjections(seat, dependencies);
-    return seat;
+    return reconcileAuthorityProjections(seat, dependencies);
   });
 }
 
@@ -348,6 +387,8 @@ function reconcilePendingSeatIntent(project: string, dependencies: SeatCommandDe
       conversationId: settlement.conversationId,
       path: settlement.path,
       launchId: settlement.launchId ?? pending.intent.launchId,
+      ...(settlement.engine ? { engine: settlement.engine } : {}),
+      ...(settlement.model ? { model: settlement.model } : {}),
     }, dependencies);
   }
   if (settlement.kind === "failed") {
