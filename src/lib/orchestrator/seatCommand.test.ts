@@ -168,6 +168,24 @@ test("spawn mode designates and injects together: mandate rides the spawn prompt
   expect(pending).toBeNull();
 });
 
+test("spawn mode freezes omitted runtime fields to the resolved orchestrator defaults", async () => {
+  const { deps, recorded } = dependencies();
+  const result = await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "own the board",
+    clientRequestId: "req_00000003",
+    cwd: "/tmp",
+  }, deps);
+
+  expect(result.status).toBe(200);
+  expect(recorded.spawns[0]).toMatchObject({ engine: "claude", model: "opus" });
+  expect(orchestratorSeatFor("proj-a").active).toMatchObject({
+    engine: "claude",
+    model: "opus",
+    runtimeIdentityFrozen: true,
+  });
+});
+
 test("a seat designated after the identity wave stamps registry role, membership, and rotation lineage", async () => {
   const registry = new AgentRegistry(path.join(sandbox, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
   const oldPath = path.join(sandbox, "old.jsonl");

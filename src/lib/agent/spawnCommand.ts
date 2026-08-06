@@ -258,10 +258,6 @@ export async function executeSpawnRequest(
   const derivedTitle = firstPromptLine(userPrompt, 60)
     ? derivedSpawnTitle(role.value?.role ?? engine, userPrompt)
     : null;
-  if (!explicitTitle && !derivedTitle) {
-    return NextResponse.json({ error: "title is required when prompt has no semantic first line" }, { status: 400 });
-  }
-  const launchTitle = explicitTitle ?? derivedTitle!;
   let transport;
   try {
     transport = spawnTransport();
@@ -292,6 +288,18 @@ export async function executeSpawnRequest(
   }
 
   const registry = dependencies.registry();
+  const clientAttemptId = typeof body.clientAttemptId === "string" ? body.clientAttemptId : null;
+  const existingAttempt = clientAttemptId ? registry.spawnReceiptForClientAttempt(clientAttemptId) : null;
+  if (!explicitTitle && !existingAttempt) {
+    return NextResponse.json({ error: "title is required for every new spawn" }, { status: 400 });
+  }
+  const launchTitle = explicitTitle
+    ?? derivedTitle
+    ?? durableSemanticTitle(existingAttempt?.launchProfile.title, 120);
+  if (!launchTitle) {
+    return NextResponse.json({ error: "title is required for every new spawn" }, { status: 400 });
+  }
+
   let authenticatedCaller: AuthenticatedSpawnCaller | null = null;
   if (agentInitiated) {
     const caller = authenticatedAgentSpawnCaller(req, body.src, registry);
@@ -358,8 +366,6 @@ export async function executeSpawnRequest(
   let imagePaths: string[] = [];
   let launchId: string | null = null;
   try {
-    const clientAttemptId = typeof body.clientAttemptId === "string" ? body.clientAttemptId : null;
-    const existingAttempt = clientAttemptId ? registry.spawnReceiptForClientAttempt(clientAttemptId) : null;
     const deterministicTitleReplay = body.title === undefined || explicitTitle === derivedTitle;
     const identityWaveTitleReplay = existingAttempt?.identityWaveTitleBackfill === true
       && deterministicTitleReplay;

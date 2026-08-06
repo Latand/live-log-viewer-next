@@ -221,6 +221,18 @@ test("createWorkflowFromRequest stamps the scanner project key, basename as fall
   expect(fallback.workflow?.project).toBe("tool-dir");
 });
 
+test("long workflow tasks retain a distinct stage suffix", async () => {
+  const { ports, state } = makeHarness();
+  const workflow = createWf(ports, { task: "Long workflow task ".repeat(20) });
+
+  await tickWorkflows([], ports);
+  await tickWorkflows([], ports);
+
+  expect(load(workflow.id).stageRuns[0]?.paneId).toBe("%1");
+  expect(state.spawnTitles[0]?.length).toBeLessThanOrEqual(120);
+  expect(state.spawnTitles[0]).toEndWith(" · stage 1");
+});
+
 test("happy path: provision → two stages → review flow → PR", async () => {
   const harness = makeHarness();
   const { ports, calls, state } = harness;

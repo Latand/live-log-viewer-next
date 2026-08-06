@@ -1,6 +1,6 @@
 import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
-import { semanticTitle } from "@/lib/title";
+import { durableSemanticTitle, semanticTitle } from "@/lib/title";
 
 import type { RegistryFile, SpawnLineageEdge } from "./registry";
 
@@ -52,7 +52,7 @@ function canonicalConversationId(file: RegistryFile, conversationId: string): Vi
 function semanticEvidence(value: string | null | undefined): string | null {
   if (typeof value !== "string") return null;
   const firstNonEmptyLine = value.split(/\r?\n/).find((line) => line.trim());
-  return semanticTitle(firstNonEmptyLine, 120);
+  return durableSemanticTitle(firstNonEmptyLine, 120);
 }
 
 function receiptTitles(file: RegistryFile): Map<ViewerConversationId, string> {

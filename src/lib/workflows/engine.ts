@@ -126,7 +126,8 @@ function spawnKey(wf: Workflow, run: WorkflowStageRun): string {
 function stageSpawnTitle(wf: Workflow, run: WorkflowStageRun): string {
   const stage = wf.template.stages[run.index];
   const stageLabel = stage?.kind === "review-loop" ? "review fixer" : `stage ${run.index + 1}`;
-  return cleanTitle(`${wf.task} · ${stageLabel}`, 120);
+  const suffix = ` · ${stageLabel}`;
+  return `${cleanTitle(wf.task, 120 - suffix.length)}${suffix}`;
 }
 
 /** Park the workflow for a human decision, remembering the phase to retry. */

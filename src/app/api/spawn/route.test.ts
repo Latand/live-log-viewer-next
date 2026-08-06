@@ -89,7 +89,7 @@ test("spawn admission rejects malformed MCP allowlists", async () => {
   const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
     method: "POST",
     headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
-    body: JSON.stringify({ engine: "codex", cwd: routeSandbox, prompt: "inspect", mcpServers: "viewer" }),
+    body: JSON.stringify({ title: "Test semantic spawn", engine: "codex", cwd: routeSandbox, prompt: "inspect", mcpServers: "viewer" }),
   }), structuredRouteDependencies(routeSandbox));
 
   expect(response.status).toBe(400);
@@ -109,21 +109,22 @@ test("spawn admission rejects an explicit model outside the selected engine cata
   });
 });
 
-test("empty and image-only prompts require an explicit semantic title", async () => {
+test("new semantic, empty, and image-only prompts require an explicit semantic title", async () => {
   const png = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489", "hex").toString("base64");
   const post = async (body: Record<string, unknown>) => POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
     method: "POST",
     headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
-    body: JSON.stringify({ engine: "claude", cwd: routeSandbox, ...body }),
+    body: JSON.stringify({ title: undefined, engine: "claude", cwd: routeSandbox, ...body }),
   }), structuredRouteDependencies(routeSandbox));
 
   for (const body of [
+    { prompt: "inspect the release" },
     { prompt: "" },
     { images: [{ base64: png, mime: "image/png" }] },
   ]) {
     const rejected = await post(body);
     expect(rejected.status).toBe(400);
-    expect(await rejected.json()).toEqual({ error: "title is required when prompt has no semantic first line" });
+    expect(await rejected.json()).toEqual({ error: "title is required for every new spawn" });
   }
 });
 
@@ -157,7 +158,7 @@ test("an explicit spawn account is durably pinned while an omitted account uses 
     const post = async (clientAttemptId: string, accountId?: string, title?: string) => await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
       method: "POST",
       headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
-      body: JSON.stringify({ engine: "claude", model: "sonnet", cwd, prompt: "inspect", clientAttemptId, ...(accountId ? { accountId } : {}), ...(title ? { title } : {}) }),
+      body: JSON.stringify({ title: "Test semantic spawn", engine: "claude", model: "sonnet", cwd, prompt: "inspect", clientAttemptId, ...(accountId ? { accountId } : {}), ...(title ? { title } : {}) }),
     }), dependencies);
 
     const pinnedResponses = await Promise.all([
@@ -168,7 +169,7 @@ test("an explicit spawn account is durably pinned while an omitted account uses 
     expect(store.spawnReceiptForClientAttempt("account_pin_a_20260731")).toMatchObject({
       accountId: "pinned-a",
       accountPin: true,
-      launchProfile: expect.objectContaining({ title: "claude · inspect" }),
+      launchProfile: expect.objectContaining({ title: "Test semantic spawn" }),
     });
     expect(store.spawnReceiptForClientAttempt("account_pin_b_20260731")).toMatchObject({
       accountId: "pinned-b",
@@ -211,7 +212,7 @@ test("derived, custom-title, and migrated generic receipts preserve pre-title re
   process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
   process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
   try {
-    const post = async (activeStore: AgentRegistry, request: { clientAttemptId?: string; title?: string } = {}) => POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+    const post = async (activeStore: AgentRegistry, request: { clientAttemptId?: string; title?: string | null } = {}) => POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
       method: "POST",
       headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
       body: JSON.stringify({
@@ -220,7 +221,7 @@ test("derived, custom-title, and migrated generic receipts preserve pre-title re
         cwd,
         ["prompt"]: "inspect",
         clientAttemptId: request.clientAttemptId ?? "title_digest_replay_20260805",
-        ...(request.title ? { title: request.title } : {}),
+        title: request.title === null ? undefined : request.title ?? "claude · inspect",
       }),
     }), {
       ...structuredRouteDependencies(cwd),
@@ -293,7 +294,7 @@ test("derived, custom-title, and migrated generic receipts preserve pre-title re
     fs.writeFileSync(store.filename, `${JSON.stringify(preTitle, null, 2)}\n`);
 
     const preTitleRestarted = new AgentRegistry(store.filename, undefined, undefined, { sqliteMode: "off" });
-    expect((await post(preTitleRestarted, { clientAttemptId: nullTitleAttemptId })).status).toBe(200);
+    expect((await post(preTitleRestarted, { clientAttemptId: nullTitleAttemptId, title: null })).status).toBe(200);
     expect(preTitleRestarted.spawnReceiptForClientAttempt(nullTitleAttemptId)?.launchProfile.title).toBe("claude · inspect");
     expect(preTitleRestarted.conversation(nullTitleReceipt.conversationId)?.generations.at(-1)?.launchProfile.title)
       .toBe("claude · inspect");
@@ -412,7 +413,7 @@ test("derived, custom-title, and migrated generic receipts preserve pre-title re
       identityWaveTitleBackfill: true,
       launchProfile: expect.objectContaining({ title: "inspect" }),
     });
-    const replay = await post(restarted);
+    const replay = await post(restarted, { title: null });
 
     expect(replay.status).toBe(202);
     expect(await replay.json()).toMatchObject({ launchId: firstBody.launchId, path: sharedPath });
@@ -1176,7 +1177,7 @@ test("a legacy resolver mismatch also degrades the pin to a durable fallback", a
         "sec-fetch-site": "same-origin",
         "x-llv-spawn-capability": capability,
       },
-      body: JSON.stringify({
+      body: JSON.stringify({ title: "Test semantic spawn",
         ...baseRequest,
         ...overrides,
       }),
@@ -1277,6 +1278,7 @@ test("a failed pinned reviewer preserves canonical child and pipeline lineage", 
       }),
     } satisfies SpawnRouteTestDependencies;
     const body = {
+      title: "Review account-pinned lineage",
       engine: "codex",
       model: "gpt-5.6-sol",
       cwd,
@@ -1385,7 +1387,7 @@ test("spawn admission grants MCP servers by session origin and refuses ungranted
            parent and no preset is the operator-root session class. */
         ...(role ? {} : { "sec-fetch-site": "same-origin" }),
       },
-      body: JSON.stringify({ engine: "claude", model: "sonnet", cwd, prompt: "inspect", ...(role ? { role } : {}), clientAttemptId, ...(mcpServers === undefined ? {} : { mcpServers }) }),
+      body: JSON.stringify({ title: "Test semantic spawn", engine: "claude", model: "sonnet", cwd, prompt: "inspect", ...(role ? { role } : {}), clientAttemptId, ...(mcpServers === undefined ? {} : { mcpServers }) }),
     }), dependencies);
 
     const defaultResponse = await post("mcp_default_20260723");
@@ -1464,7 +1466,7 @@ test("spawn admission grants Computer Use to an operator root Codex session only
         "sec-fetch-site": "same-origin",
         "x-llv-spawn-capability": capability,
       },
-      body: JSON.stringify({ engine: "codex", cwd, prompt: "inspect", clientAttemptId, ...extra }),
+      body: JSON.stringify({ title: "Test semantic spawn", engine: "codex", cwd, prompt: "inspect", clientAttemptId, ...extra }),
     }), dependencies);
 
     const rootResponse = await post("plugins_root_20260726", {});
@@ -1572,7 +1574,7 @@ test("a materialized structured child is offered for pipeline attempt adoption",
     const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
       method: "POST",
       headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "x-llv-spawn-capability": capability },
-      body: JSON.stringify({ engine: "claude", model: "sonnet", cwd, prompt: "fallback", src: sourcePath, role: "builder", clientAttemptId: "pipeline_adoption_20260719" }),
+      body: JSON.stringify({ title: "Test semantic spawn", engine: "claude", model: "sonnet", cwd, prompt: "fallback", src: sourcePath, role: "builder", clientAttemptId: "pipeline_adoption_20260719" }),
     }), dependencies);
 
     expect({ status: response.status, body: await response.clone().json() }).toMatchObject({ status: 202 });
@@ -1605,7 +1607,7 @@ test("a materialized structured child is offered for pipeline attempt adoption",
     const replay = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
       method: "POST",
       headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "x-llv-spawn-capability": capability },
-      body: JSON.stringify({ engine: "claude", model: "sonnet", cwd, prompt: "fallback", src: sourcePath, role: "builder", clientAttemptId: "pipeline_adoption_20260719" }),
+      body: JSON.stringify({ title: "Test semantic spawn", engine: "claude", model: "sonnet", cwd, prompt: "fallback", src: sourcePath, role: "builder", clientAttemptId: "pipeline_adoption_20260719" }),
     }), dependencies);
     expect(replay.status).toBe(200);
     expect(structuredLaunches).toBe(1);
@@ -1737,7 +1739,7 @@ test("a fresh process resolves and refreshes a persisted Claude account before o
         "sec-fetch-site": "same-origin",
         "content-type": "application/json",
       },
-      body: JSON.stringify({ engine: "claude", cwd: ${JSON.stringify(cwd)}, prompt: "resume work", accountId: "rebooted" }),
+      body: JSON.stringify({ title: "Test semantic spawn", engine: "claude", cwd: ${JSON.stringify(cwd)}, prompt: "resume work", accountId: "rebooted" }),
     }));
     await Promise.all(deferred.map((work) => work()));
     const body = await response.json();
@@ -1874,7 +1876,7 @@ test("fresh processes rescue one orphaned immediate structured admission exactly
         "sec-fetch-site": "same-origin",
         "content-type": "application/json",
       },
-      body: JSON.stringify({
+      body: JSON.stringify({ title: "Test semantic spawn",
         engine: "claude",
         cwd: ${JSON.stringify(cwd)},
         "prompt": "repair the assigned task",
@@ -2014,7 +2016,7 @@ test("structured spawn runtime fence preserves durable state", async () => {
         "sec-fetch-site": "same-origin",
         "content-type": "application/json",
       },
-      body: JSON.stringify({ engine: "codex", cwd, prompt: "must stay fenced" }),
+      body: JSON.stringify({ title: "Test semantic spawn", engine: "codex", cwd, prompt: "must stay fenced" }),
     }), dependencies);
 
     expect(response.status).toBe(503);
@@ -2060,7 +2062,7 @@ test("spawn rejects malformed, oversized, and mismatched images before durable m
         "sec-fetch-site": "same-origin",
         "content-type": "application/json",
       },
-      body: JSON.stringify({ engine: "claude", cwd, prompt: "inspect", images: candidate.images }),
+      body: JSON.stringify({ title: "Test semantic spawn", engine: "claude", cwd, prompt: "inspect", images: candidate.images }),
     }), structuredRouteDependencies(cwd));
     expect(response.status).toBe(candidate.status);
     expect(Object.keys(store.snapshot().receipts).sort()).toEqual(beforeReceipts);
@@ -2094,7 +2096,7 @@ test("structured spawn maps operational image storage failures to 503", async ()
         "sec-fetch-site": "same-origin",
         "content-type": "application/json",
       },
-      body: JSON.stringify({ engine: "claude", cwd, prompt: "inspect", images: [{ base64: png, mime: "image/png" }] }),
+      body: JSON.stringify({ title: "Test semantic spawn", engine: "claude", cwd, prompt: "inspect", images: [{ base64: png, mime: "image/png" }] }),
     }), dependencies);
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({ error: "runtime image storage quota exceeded" });
@@ -2144,7 +2146,7 @@ test("an oversized structured spawn prompt returns 413 before receipts, blobs, o
         "sec-fetch-site": "same-origin",
         "content-type": "application/json",
       },
-      body: JSON.stringify({
+      body: JSON.stringify({ title: "Test semantic spawn",
         engine: "claude",
         cwd,
         "prompt": "€".repeat(10_667),
@@ -2195,7 +2197,7 @@ test("an orphan replay whose image storage fails releases its admission lease fo
       "sec-fetch-site": "same-origin",
       "content-type": "application/json",
     },
-    body: JSON.stringify({
+    body: JSON.stringify({ title: "Test semantic spawn",
       engine: "claude",
       cwd,
       "prompt": "own the retry",
@@ -2262,7 +2264,7 @@ test("agent-initiated spawn without lineage returns a teaching 400", async () =>
   const response = await POST(new NextRequest("http://127.0.0.1:8898/api/spawn", {
     method: "POST",
     headers: { host: "127.0.0.1:8898", "content-type": "application/json" },
-    body: JSON.stringify({ engine: "codex", cwd: "/repo", prompt: "help" }),
+    body: JSON.stringify({ title: "Test semantic spawn", engine: "codex", cwd: "/repo", prompt: "help" }),
   }));
 
   expect(response.status).toBe(400);
@@ -2392,7 +2394,7 @@ test("operator-authenticated non-browser calls still require lineage", async () 
       "content-type": "application/json",
       "x-llv-spawn-capability": capability,
     },
-    body: JSON.stringify({ engine: "codex", cwd: "/repo", prompt: "help" }),
+    body: JSON.stringify({ title: "Test semantic spawn", engine: "codex", cwd: "/repo", prompt: "help" }),
   }));
 
   expect(response.status).toBe(400);
@@ -2427,7 +2429,7 @@ test("agent callers cannot grant themselves native sub-agent permission", async 
       "content-type": "application/json",
       "x-llv-spawn-capability": capability,
     },
-    body: JSON.stringify({ src: callerPath, role: "orchestrator", prompt: "Delegate orchestration", allowSubagents: true }),
+    body: JSON.stringify({ title: "Test semantic spawn", src: callerPath, role: "orchestrator", prompt: "Delegate orchestration", allowSubagents: true }),
   }));
 
   expect(response.status).toBe(403);
@@ -2443,7 +2445,7 @@ test("operator callers may grant native sub-agent permission", async () => {
       "content-type": "application/json",
       "x-llv-spawn-capability": capability,
     },
-    body: JSON.stringify({ src: "/caller.jsonl", role: "orchestrator", prompt: "Delegate orchestration", allowSubagents: true }),
+    body: JSON.stringify({ title: "Test semantic spawn", src: "/caller.jsonl", role: "orchestrator", prompt: "Delegate orchestration", allowSubagents: true }),
   }));
 
   expect(response.status).toBe(400);
@@ -2479,7 +2481,7 @@ test("operator and agent structured Claude role launches both retain bypass perm
   const request = (capability: string, clientAttemptId = attemptId) => new NextRequest("http://127.0.0.1:8898/api/spawn", {
     method: "POST",
     headers: { host: "127.0.0.1:8898", "content-type": "application/json", "x-llv-spawn-capability": capability },
-    body: JSON.stringify({ engine: "claude", model: "sonnet", cwd, prompt: "build", src: callerPath, role: "builder", clientAttemptId }),
+    body: JSON.stringify({ title: "Test semantic spawn", engine: "claude", model: "sonnet", cwd, prompt: "build", src: callerPath, role: "builder", clientAttemptId }),
   });
   const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
   const previousHosts = process.env.LLV_STRUCTURED_HOSTS;
@@ -2615,7 +2617,7 @@ test("structured replay keeps its admitted account after routing changes", async
       "sec-fetch-site": "same-origin",
       "content-type": "application/json",
     },
-    body: JSON.stringify({
+    body: JSON.stringify({ title: "Test semantic spawn",
       engine: "claude",
       cwd,
       "prompt": "repair release",
@@ -2695,7 +2697,7 @@ test("structured spawn flag reaches the pane-less capability gate", async () => 
         "sec-fetch-site": "same-origin",
         "content-type": "application/json",
       },
-      body: JSON.stringify({ engine: "codex", cwd, prompt: "smoke" }),
+      body: JSON.stringify({ title: "Test semantic spawn", engine: "codex", cwd, prompt: "smoke" }),
     }));
 
     expect(response.status).toBe(409);
@@ -2745,7 +2747,7 @@ test("unknown Codex models reject before image blob and receipt mutation", async
         "sec-fetch-site": "same-origin",
         "content-type": "application/json",
       },
-      body: JSON.stringify({
+      body: JSON.stringify({ title: "Test semantic spawn",
         engine: "codex",
         model: "gpt-5.3-codex-spark",
         cwd,
@@ -2823,7 +2825,7 @@ test("admitted structured spawn returns its reserved card identity while host bi
         "sec-fetch-site": "same-origin",
         "content-type": "application/json",
       },
-      body: JSON.stringify({
+      body: JSON.stringify({ title: "Test semantic spawn",
         engine: "claude",
         cwd,
         "prompt": "Own issue #282",
@@ -2908,7 +2910,7 @@ test("spawn supersedes admission validates the predecessor and stages the settle
       "sec-fetch-site": "same-origin",
       "content-type": "application/json",
     },
-    body: JSON.stringify({ engine: "claude", cwd, prompt: "recover round", ...body }),
+    body: JSON.stringify({ title: "Test semantic spawn", engine: "claude", cwd, prompt: "recover round", ...body }),
   }), dependencies);
 
   try {
@@ -2977,7 +2979,7 @@ test("a terminal structured replay returns its reserved identity and retry-safe 
       "sec-fetch-site": "same-origin",
       "content-type": "application/json",
     },
-    body: JSON.stringify({
+    body: JSON.stringify({ title: "Test semantic spawn",
       engine: "claude",
       cwd,
       "prompt": "Own issue #282",
@@ -3089,7 +3091,7 @@ test("a clientAttemptId replay recovers the reserved card from runtime evidence"
       "sec-fetch-site": "same-origin",
       "content-type": "application/json",
     },
-    body: JSON.stringify({
+    body: JSON.stringify({ title: "Test semantic spawn",
       engine: "claude",
       cwd,
       "prompt": "Own issue #282",
@@ -3483,7 +3485,7 @@ test("the runtime-UI rollback leaves a default spawn on a transport that can sti
         "sec-fetch-site": "same-origin",
         "content-type": "application/json",
       },
-      body: JSON.stringify({ engine: "codex", cwd: missing, prompt: "smoke" }),
+      body: JSON.stringify({ title: "Test semantic spawn", engine: "codex", cwd: missing, prompt: "smoke" }),
     }));
 
     expect(response.status).toBe(400);
@@ -3541,7 +3543,7 @@ test("a structured launch that dies on an unreachable host terminalizes its rece
         "sec-fetch-site": "same-origin",
         "content-type": "application/json",
       },
-      body: JSON.stringify({ engine: "claude", cwd, prompt: "spawn against a dead host" }),
+      body: JSON.stringify({ title: "Test semantic spawn", engine: "claude", cwd, prompt: "spawn against a dead host" }),
     }), dependencies);
 
     expect(response.status).toBe(202);
