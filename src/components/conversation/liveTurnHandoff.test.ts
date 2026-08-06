@@ -175,3 +175,39 @@ test("a canonical command group publishes claims for every grouped tool call", (
     "grouped-read",
   ]);
 });
+
+test("a canonical outgoing teammate message claims its live SendMessage tool row", () => {
+  const toolId = "send-message-live";
+  const live: RuntimeLiveTurn = {
+    turnId: "turn-send-message",
+    text: "",
+    items: [{
+      kind: "tool",
+      itemId: toolId,
+      text: JSON.stringify({ to: "worker-1", message: "check the branch" }),
+      toolName: "SendMessage",
+      toolEngine: "claude",
+      phase: "streaming",
+      startedAt: "2026-08-06T10:00:00.000Z",
+      completedAt: null,
+    }],
+  };
+  const canonicalFeed = [{
+    anchorKey: "row:50:0",
+    key: "50:0",
+    item: {
+      kind: "tmsg",
+      ts: "2026-08-06T10:00:00.100Z",
+      dir: "out",
+      peer: "worker-1",
+      summary: "",
+      text: "check the branch",
+      sourceId: toolId,
+    },
+  }] as FeedEntry[];
+
+  publishCanonicalAssistantClaims("conversation-send-message", canonicalFeed);
+  const persisted = readCanonicalAssistantClaims("conversation-send-message");
+  expect([...persisted]).toEqual([toolId]);
+  expect(visibleRuntimeLiveTurnItems(live, canonicalFeed, persisted, "running")).toEqual([]);
+});

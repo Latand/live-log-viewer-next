@@ -1305,6 +1305,68 @@ describe("ClaudeStreamBrokerHost", () => {
     await host.release();
   });
 
+  test("preserves the tool-result identity emitted by Claude for live turn completion", async () => {
+    const ledger = new RecordingDeliveryLedger();
+    const child = new FakeClaude(ledger);
+    const host = await ClaudeStreamBrokerHost.start({
+      cwd: "/repo",
+      deliveryLedger: ledger,
+      eventStore: new MemoryEventStore(),
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      readTranscript: () => [],
+      spawnProcess: fakeSpawn(child, {}),
+    });
+    const sent = host.send({ id: "tool-result-turn", text: "read the file" });
+    child.emitJson({
+      type: "user",
+      isReplay: true,
+      session_id: host.identity.sessionId,
+      uuid: "tool-result-user",
+      message: { role: "user", content: [{ type: "text", text: "read the file" }] },
+    });
+    await sent;
+    const events = host.attach((await host.health()).eventCursor)[Symbol.asyncIterator]();
+
+    child.emitJson({
+      type: "assistant",
+      session_id: host.identity.sessionId,
+      message: {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "tool-result-call", name: "Read", input: { file_path: "src/lib/runtime/liveTurn.ts" } }],
+      },
+    });
+    expect(await nextEvent(events)).toMatchObject({
+      kind: "item",
+      item: { message: { content: [{ type: "tool_use", id: "tool-result-call" }] } },
+    });
+
+    child.emitJson({
+      type: "user",
+      session_id: host.identity.sessionId,
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "tool-result-call", content: "result body ".repeat(4 * 1024) }],
+      },
+    });
+    const resultEvent = await nextEvent(events);
+    expect(resultEvent).toMatchObject({
+      kind: "item",
+      phase: "completed",
+      item: {
+        type: "user",
+        message: {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "tool-result-call" }],
+        },
+      },
+    });
+    if (resultEvent.kind !== "item") throw new Error("expected a tool-result item");
+    expect((resultEvent.item as { message: { content: unknown[] } }).message.content).toEqual([
+      { type: "tool_result", tool_use_id: "tool-result-call" },
+    ]);
+    await host.release();
+  });
+
   test("requires subscription OAuth before spawning", async () => {
     let spawned = false;
     await expect(ClaudeStreamBrokerHost.start({

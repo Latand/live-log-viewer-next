@@ -29,7 +29,7 @@ export function LiveTurnRows({ items }: { items: readonly RuntimeLiveTurnItem[] 
     <div data-live-turn-group>
       {items.map((item, index) => (
         <div
-          key={item.itemId ?? `${item.startedAt ?? "live"}:${index}`}
+          key={`${item.itemId ?? item.startedAt ?? "live"}:${index}`}
           data-live-turn
           data-live-turn-item-id={item.itemId ?? undefined}
           data-live-turn-tool={item.kind === "tool" ? item.toolName : undefined}

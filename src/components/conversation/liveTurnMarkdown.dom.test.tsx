@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { Window } from "happy-dom";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
@@ -96,9 +96,10 @@ test("a settled live row renders the same markdown as its transcript counterpart
 
 test("a live tool row renders its readable summary in response order between assistant rows", () => {
   const { host, root } = mount();
+  const consoleError = spyOn(console, "error").mockImplementation(() => undefined);
   const command = "bun test src/components/conversation/liveTurnMarkdown.dom.test.tsx";
   paint(root, <LiveTurnRows items={[
-    item("I will run the focused DOM test.", "awaiting-echo", { itemId: "assistant-before" }),
+    item("I will run the focused DOM test.", "awaiting-echo", { itemId: "assistant-message" }),
     {
       kind: "tool",
       itemId: "tool-live-dom",
@@ -109,20 +110,23 @@ test("a live tool row renders its readable summary in response order between ass
       startedAt: "2026-08-06T09:30:00.000Z",
       completedAt: null,
     },
-    item("The test completed.", "awaiting-echo", { itemId: "assistant-after" }),
+    item("The test completed.", "awaiting-echo", { itemId: "assistant-message" }),
   ]} />);
+  const consoleErrors = consoleError.mock.calls.flat().join(" ");
+  consoleError.mockRestore();
 
   const rows = [...host.querySelectorAll<HTMLElement>("[data-live-turn]")];
   expect(rows).toHaveLength(3);
   expect(rows.map((row) => row.dataset.liveTurnItemId)).toEqual([
-    "assistant-before",
+    "assistant-message",
     "tool-live-dom",
-    "assistant-after",
+    "assistant-message",
   ]);
   expect(rows[1]?.dataset.liveTurnTool).toBe("exec_command");
   expect(rows[1]?.textContent).toContain(command);
   expect(rows[1]?.textContent).not.toContain("workdir");
   expect(rows[1]?.querySelector("svg")).not.toBeNull();
+  expect(consoleErrors).not.toContain("same key");
 });
 
 test("streaming a message delta by delta lands on exactly the settled rendering", () => {
