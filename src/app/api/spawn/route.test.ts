@@ -107,6 +107,10 @@ test("new semantic, empty, and image-only prompts require an explicit semantic t
     expect(rejected.status).toBe(400);
     expect(await rejected.json()).toEqual({ error: "title is required for every new spawn" });
   }
+
+  const punctuationOnly = await post({ title: "###", prompt: "inspect the release" });
+  expect(punctuationOnly.status).toBe(400);
+  expect(await punctuationOnly.json()).toEqual({ error: "title must be a semantic, non-placeholder string" });
 });
 
 test("Viewer draft and orchestrator request builders pass public spawn admission", async () => {

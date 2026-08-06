@@ -18,3 +18,10 @@ test("legacy engine placeholders have no semantic title value", () => {
   expect(semanticTitle("Implement registry identity")).toBe("Implement registry identity");
   expect(durableSemanticTitle("Review issue #913")).toBe("Review issue #913");
 });
+
+test("punctuation-only values are not durable semantic titles", () => {
+  for (const value of ["###", "***", "~~~", ">>>"]) {
+    expect(durableSemanticTitle(value)).toBeNull();
+    expect(semanticTitle(value)).toBeNull();
+  }
+});
