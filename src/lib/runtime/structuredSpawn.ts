@@ -994,6 +994,7 @@ export async function spawnStructuredConversation(
         retrySafe: false,
         initialMessage: "queued",
         state: "path-pending",
+        transport: "structured",
       };
     }
     await withRuntimeAdmissionRetry(() => input.client.transitionOperation(operationId, "delivered"));
@@ -1012,6 +1013,7 @@ export async function spawnStructuredConversation(
       retrySafe: false,
       initialMessage: "delivered",
       state: "settled",
+      transport: "structured",
     };
   } catch (error) {
     const failureReason = structuredSpawnFailureReason(error);

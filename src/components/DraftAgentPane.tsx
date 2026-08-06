@@ -12,6 +12,8 @@ import { playCue } from "@/lib/audio/app";
 import { codexModelSupportsImages, defaultModelFor } from "@/lib/agent/models";
 import { useLocale } from "@/lib/i18n";
 import { requestFilesRefresh } from "@/lib/filesEvents";
+import { STREAM_RECONNECTED_EVENT } from "@/hooks/runtimeBus";
+import { applySpawnedConversationSnapshot } from "@/hooks/useFiles";
 import { BUILDER_APPLY_FIXES_CONFIG, BUILDER_FRONTEND_CONFIG } from "@/lib/roles/paramConfig";
 import { defaultRoleParameterValues } from "@/lib/roles/parameters";
 import type { RoleDefinition } from "@/lib/roles/types";
@@ -27,6 +29,7 @@ import {
   SLOW_BOOT_MS,
   type SpawnAttempt,
   type SpawnResponseBody,
+  admittedSpawn,
   applySpawnOutcome,
   applySpawnFailure,
   classifySpawnResponse,
@@ -35,6 +38,7 @@ import {
   displayPhase,
   hasRecoverableRequest,
   matchSpawnedFile,
+  provisionalSpawnFile,
   spawnRequestBody,
 } from "./draftSpawn";
 import { ReasoningControls, type SpeedChoice } from "./ReasoningControls";
@@ -450,6 +454,10 @@ export function DraftAgentPane({
     : { status: "loading", requestKey: spawnImageNegotiationKey };
   const [attempt, setAttemptState] = useState<SpawnAttempt | null>(() => readAttempt(draftId));
   const [slowBoot, setSlowBoot] = useState(false);
+  /* Watch-window base (issue #919): a stream re-subscribe resets it, because a
+     reconnect means everything the tab failed to observe before it may simply
+     have been missed — the timers restart instead of the watch giving up. */
+  const [watchBase, setWatchBase] = useState<number | null>(null);
   const attentionRef = useRef<HTMLDivElement>(null);
   /* Records launched from this mount are already in flight. Reloaded records
      are replayed once with their own idempotency key to fetch the same receipt. */
@@ -645,24 +653,39 @@ export function DraftAgentPane({
   }, [files, attempt, onSpawned]);
 
   /* One bounded timer per attempt: a known-path boot only earns the slow hint
-     (its file is deterministic and will still appear); a path-unknown confirm
-     escalates to `attention` after the bound, where the copy discourages a
-     relaunch. Adoption above can still win afterward. */
+     (its file is deterministic and will still appear), and so does an ADMITTED
+     confirming launch (issue #919: the receipt proved the worker, so the watch
+     keeps going forever and only admits it is slow). Only a confirming attempt
+     with no receipt at all — a genuinely unproven launch — escalates to
+     `attention`, where the copy discourages a relaunch. Adoption above can
+     still win afterward. */
   useEffect(() => {
     if (!attempt || attempt.phase === "attention") return;
     const bound = attempt.phase === "booting" ? SLOW_BOOT_MS : CONFIRM_ATTENTION_MS;
     const escalate = () => {
-      if (attempt.phase === "booting") setSlowBoot(true);
+      if (attempt.phase === "booting" || admittedSpawn(attempt)) setSlowBoot(true);
       else setAttempt({ ...attempt, phase: "attention" });
     };
-    const left = attempt.at + bound - Date.now();
+    const left = (watchBase ?? attempt.at) + bound - Date.now();
     if (left <= 0) {
       escalate();
       return;
     }
     const timer = window.setTimeout(escalate, left);
     return () => window.clearTimeout(timer);
-  }, [attempt, setAttempt]);
+  }, [attempt, setAttempt, watchBase]);
+
+  /* A stream re-subscribe resets the watch window (issue #919): the tab's SSE /
+     files feed reconnected, so the slow admission clears and the timers restart
+     from now — the watch survives reconnects instead of aging through them. */
+  useEffect(() => {
+    const resetWatch = () => {
+      setSlowBoot(false);
+      setWatchBase(Date.now());
+    };
+    window.addEventListener(STREAM_RECONNECTED_EVENT, resetWatch);
+    return () => window.removeEventListener(STREAM_RECONNECTED_EVENT, resetWatch);
+  }, []);
 
   /* When recovery gives up, move focus to the assertive attention notice so a
      keyboard/screen-reader user lands on the "don't relaunch" guidance. */
@@ -720,6 +743,17 @@ export function DraftAgentPane({
           });
         }
         setAttempt(applySpawnOutcome(candidate, outcome));
+        /* Instant receipt-keyed attach (issue #919): a structured receipt names
+           the durable conversation id, which IS the identity the live window
+           keys its stream subscription on — so the panel hands over to the
+           conversation window now. The overlay makes every mounted board render
+           the same `spawn:<launchId>` card the server projects; the files feed
+           later confirms and replaces it, never gates the attach. */
+        const provisional = provisionalSpawnFile(candidate, outcome, project);
+        if (provisional) {
+          applySpawnedConversationSnapshot(provisional);
+          onSpawned(provisional);
+        }
       } else if (outcome.kind === "failed-launch") {
         setAttempt(applySpawnFailure(candidate, outcome));
       } else if (outcome.kind === "failed-preflight") {
@@ -741,7 +775,7 @@ export function DraftAgentPane({
     } finally {
       setBusy(false);
     }
-  }, [attachments, setAttempt, setBusy, setStatus, setText, t]);
+  }, [attachments, onSpawned, project, setAttempt, setBusy, setStatus, setText, t]);
 
   /* A reload during POST has the original payload already in session storage.
      Replaying that exact body returns its server receipt and never starts a
@@ -826,6 +860,8 @@ export function DraftAgentPane({
     /* Persist before POST: a navigation now has the launch id, timestamp, and
        exact recoverable payload needed to reconcile the original request. */
     replayedAttemptIds.current.add(candidate.clientAttemptId);
+    setSlowBoot(false);
+    setWatchBase(null);
     setAttempt(candidate);
     setText("");
     attachments.clear();
