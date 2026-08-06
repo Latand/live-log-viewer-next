@@ -156,18 +156,24 @@ test("every harmless bounded MCP numeric clamps, coerces, and defaults before it
 
 test("extreme bounded integers clamp toward the nearest bound", async () => {
   const bindings = inertBindings({
+    get_conversation: async (args) => ({ applied: args }),
     list_conversations: async (args) => ({ applied: args }),
     spawn_agent: async (args) => ({ applied: args }),
     lifecycle_events: async (args) => ({ applied: args }),
   });
   const cases: Array<{
-    toolName: "list_conversations" | "spawn_agent" | "lifecycle_events";
+    toolName: "get_conversation" | "list_conversations" | "spawn_agent" | "lifecycle_events";
     path: readonly string[];
     input: number | string;
     expected: number;
   }> = [
     { toolName: "list_conversations", path: ["limit"], input: 1e100, expected: 100 },
     { toolName: "list_conversations", path: ["limit"], input: -1e100, expected: 1 },
+    { toolName: "get_conversation", path: ["maxRecords"], input: "8.0", expected: 8 },
+    { toolName: "get_conversation", path: ["maxRecords"], input: "8e0", expected: 8 },
+    { toolName: "get_conversation", path: ["maxRecords"], input: "1e999", expected: 500 },
+    { toolName: "get_conversation", path: ["maxRecords"], input: "-1e999", expected: 1 },
+    { toolName: "get_conversation", path: ["maxRecords"], input: "8.5", expected: 100 },
     { toolName: "spawn_agent", path: ["roleParams", "parallelN"], input: "999999999999999999999999999999", expected: 8 },
     { toolName: "lifecycle_events", path: ["afterSeq"], input: "999999999999999999999999999999", expected: Number.MAX_SAFE_INTEGER },
   ];

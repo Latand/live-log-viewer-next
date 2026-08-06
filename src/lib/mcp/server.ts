@@ -205,6 +205,13 @@ function boundedNumericValue(value: unknown, spec: McpBoundedNumericArg): number
     if (compareDecimalIntegerToBound(integer, spec.max) > 0) return spec.max;
     return Number(integer);
   }
+  if (typeof value === "string"
+    && /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(value.trim())) {
+    const numeric = Number(value.trim());
+    if (numeric === Number.POSITIVE_INFINITY) return spec.max;
+    if (numeric === Number.NEGATIVE_INFINITY) return spec.min;
+    if (Number.isInteger(numeric)) return Math.max(spec.min, Math.min(spec.max, numeric));
+  }
   return Math.max(spec.min, Math.min(spec.max, spec.fallback));
 }
 

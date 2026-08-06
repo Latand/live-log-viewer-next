@@ -81,6 +81,18 @@ test("spawn_agent derives required role params from the prompt and preserves sup
     role: "reviewer",
   });
   await spawn({
+    clientRequestId: "derive-review-branch-punctuation",
+    cwd: "/repo",
+    ["prompt"]: "Review branch feature/topic.",
+    role: "reviewer",
+  });
+  await spawn({
+    clientRequestId: "derive-review-quoted-branch-punctuation",
+    cwd: "/repo",
+    ["prompt"]: "Review branch `feature/quoted`.",
+    role: "reviewer",
+  });
+  await spawn({
     clientRequestId: "derive-review-quoted-range",
     cwd: "/repo",
     ["prompt"]: "Review `origin/main...HEAD`.",
@@ -114,6 +126,8 @@ test("spawn_agent derives required role params from the prompt and preserves sup
   expect(bodies.map((body) => body.roleParams)).toEqual([
     { diffSource: "PR #915", lens: "correctness" },
     { diffSource: "feature/mcp-clamping" },
+    { diffSource: "feature/topic" },
+    { diffSource: "feature/quoted" },
     { diffSource: "origin/main...HEAD" },
     { diffSource: "origin/main" },
     { questions: "Measure stalled delivery latency." },

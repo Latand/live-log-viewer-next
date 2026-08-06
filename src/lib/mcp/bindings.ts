@@ -489,7 +489,7 @@ function diffSourceFromPrompt(prompt: string): string | null {
   if (pullRequest) return pullRequest;
   const range = /(?:^|[\s`'"(])([A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9])?\.\.\.?[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9])?)(?=$|[\s`'".,);:])/m.exec(prompt)?.[1];
   if (range) return range;
-  const branch = /\bbranch\s+[`'"]?([A-Za-z0-9][A-Za-z0-9._/-]*)/i.exec(prompt)?.[1];
+  const branch = /\bbranch\s+[`'"]?([A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9_-])?)[`'"]?(?=$|[\s.,);:])/i.exec(prompt)?.[1];
   if (branch) return branch;
   const namedRef = /\b(?:review|inspect|compare)\s+[`'"]?([A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9])?)[`'"]?(?=$|[\s.,);:])/i.exec(prompt)?.[1];
   return namedRef && (namedRef.includes("/") || /^(?:HEAD|main|master)$/i.test(namedRef)) ? namedRef : null;
