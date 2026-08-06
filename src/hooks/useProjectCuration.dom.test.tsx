@@ -32,19 +32,27 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-async function renderHook(): Promise<() => UseProjectCuration> {
+async function renderHook(initialCrowned: readonly string[] = []): Promise<{
+  current: () => UseProjectCuration;
+  rerender: (serverCrowned: readonly string[]) => Promise<void>;
+}> {
   let current: UseProjectCuration | null = null;
-  function Harness() {
-    current = useProjectCuration([], []);
+  function Harness({ serverCrowned }: { serverCrowned: readonly string[] }) {
+    current = useProjectCuration(serverCrowned, []);
     return null;
   }
   const host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
-  await act(async () => { root!.render(<Harness />); });
-  return () => {
-    if (!current) throw new Error("curation hook is not mounted");
-    return current;
+  await act(async () => { root!.render(<Harness serverCrowned={initialCrowned} />); });
+  return {
+    current: () => {
+      if (!current) throw new Error("curation hook is not mounted");
+      return current;
+    },
+    rerender: async (serverCrowned) => {
+      await act(async () => { root!.render(<Harness serverCrowned={serverCrowned} />); });
+    },
   };
 }
 
@@ -58,13 +66,18 @@ test("rapid crown choices serialize per project and persist in click order", asy
   const hook = await renderHook();
 
   await act(async () => {
-    hook().toggleCrown("viewer", true);
-    hook().toggleCrown("viewer", false);
+    hook.current().toggleCrown("viewer", true);
+    hook.current().toggleCrown("viewer", false);
     await Promise.resolve();
   });
 
   expect(requests).toEqual([{ project: "viewer", crowned: true }]);
-  expect(hook().crownedProjects.has("viewer")).toBe(false);
+  expect(hook.current().crownedProjects.has("viewer")).toBe(false);
+
+  /* A poll matching the latest optimistic choice predates both queued writes;
+     it cannot acknowledge the still-pending uncrown. */
+  await hook.rerender([]);
+  expect(hook.current().crownedProjects.has("viewer")).toBe(false);
 
   await act(async () => {
     responses[0]!.resolve(new Response(null, { status: 200 }));
@@ -76,8 +89,19 @@ test("rapid crown choices serialize per project and persist in click order", asy
     { project: "viewer", crowned: false },
   ]);
 
+  /* The first request is durable while the uncrown remains in flight. The
+     server may report that intermediate crown without changing the UI choice. */
+  await hook.rerender(["viewer"]);
+  expect(hook.current().crownedProjects.has("viewer")).toBe(false);
+
   await act(async () => {
     responses[1]!.resolve(new Response(null, { status: 200 }));
     await responses[1]!.promise;
   });
+
+  await hook.rerender(["viewer"]);
+  expect(hook.current().crownedProjects.has("viewer")).toBe(false);
+  await hook.rerender([]);
+  await hook.rerender(["viewer"]);
+  expect(hook.current().crownedProjects.has("viewer")).toBe(true);
 });

@@ -26,9 +26,9 @@ export interface UseProjectCuration {
  * Client seam over the server-durable crown/create state. The server list in
  * the /api/files payload is authoritative; this hook only bridges the gap
  * between a click and the next poll — an optimistic override per toggled
- * project (dropped as soon as the server agrees, reverted on a failed POST)
- * and a catalog overlay for a just-created project so its rail row exists in
- * the same frame.
+ * project (dropped after its latest POST succeeds and a later poll agrees,
+ * reverted on a failed POST) and a catalog overlay for a just-created project
+ * so its rail row exists in the same frame.
  */
 export function useProjectCuration(
   serverCrowned: readonly string[],
@@ -38,16 +38,26 @@ export function useProjectCuration(
   const [createdCatalog, setCreatedCatalog] = useState<ProjectCatalogEntry[]>([]);
   const crownMutationQueues = useRef(new Map<string, Promise<void>>());
   const crownMutationSequences = useRef(new Map<string, number>());
+  const crownMutationAcknowledgements = useRef(new Map<string, { sequence: number; afterPoll: number }>());
+  const crownPollSequence = useRef(0);
 
   useEffect(() => {
-    /* eslint-disable-next-line react-hooks/set-state-in-effect -- reconciling
-       against the fresh server payload; the same-reference return below makes
-       an already-settled state a render no-op, so nothing cascades. */
+    const pollSequence = crownPollSequence.current + 1;
+    crownPollSequence.current = pollSequence;
+    /* Reconcile against the fresh server payload. The same-reference return
+       below makes an already-settled state a render no-op. */
     setOverrides((previous) => {
       if (!previous.size) return previous;
       const next = new Map(previous);
       for (const [project, crowned] of previous) {
-        if (serverCrowned.includes(project) === crowned) next.delete(project);
+        const acknowledgement = crownMutationAcknowledgements.current.get(project);
+        const latestSequence = crownMutationSequences.current.get(project);
+        if (acknowledgement
+          && acknowledgement.sequence === latestSequence
+          && pollSequence > acknowledgement.afterPoll
+          && serverCrowned.includes(project) === crowned) {
+          next.delete(project);
+        }
       }
       return next.size === previous.size ? previous : next;
     });
@@ -77,6 +87,7 @@ export function useProjectCuration(
     setOverrides((previous) => new Map(previous).set(project, crowned));
     const sequence = (crownMutationSequences.current.get(project) ?? 0) + 1;
     crownMutationSequences.current.set(project, sequence);
+    crownMutationAcknowledgements.current.delete(project);
     const previousMutation = crownMutationQueues.current.get(project) ?? Promise.resolve();
     const mutation = previousMutation.then(async () => {
       let succeeded = false;
@@ -90,7 +101,15 @@ export function useProjectCuration(
       } catch {
         // The still-current optimistic choice is reverted below.
       }
-      if (succeeded || crownMutationSequences.current.get(project) !== sequence) return;
+      if (crownMutationSequences.current.get(project) !== sequence) return;
+      if (succeeded) {
+        crownMutationAcknowledgements.current.set(project, {
+          sequence,
+          afterPoll: crownPollSequence.current,
+        });
+        return;
+      }
+      crownMutationAcknowledgements.current.delete(project);
       setOverrides((previous) => {
         const next = new Map(previous);
         next.delete(project);
@@ -101,7 +120,6 @@ export function useProjectCuration(
     void mutation.finally(() => {
       if (crownMutationQueues.current.get(project) !== mutation) return;
       crownMutationQueues.current.delete(project);
-      crownMutationSequences.current.delete(project);
     });
   }, []);
 
