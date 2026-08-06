@@ -948,11 +948,11 @@ export async function runReaperCycle(options: {
   } catch (error) {
     console.error("[reaper] stale undeliverable held-delivery convergence failed", error);
   }
-  /* Durable ghost-delivery convergence (issue #653): a structured spawn that
-     reached the terminal `failed` state can never deliver its initial message,
-     so its stuck `spawn_<launchId>` reservation is failed here — it stops owing a
-     delivery and stops projecting a "delivering" bubble. Pure registry mutation,
-     independent of the runtime client, byte-stable when there is nothing to do. */
+  /* Durable launch/delivery convergence (#653/#922): reconcile either ordering
+     of a terminal launch and its never-attempted initial delivery, including
+     historical migration cancellations and promote-race assignments. Ambiguous
+     attempted deliveries remain untouched. Pure registry mutation, independent
+     of the runtime client, byte-stable when there is nothing to do. */
   try {
     registry.terminalizeFailedSpawnDeliveries();
   } catch (error) {

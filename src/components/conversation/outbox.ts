@@ -25,6 +25,13 @@ import type { ReceiptStatus } from "@/components/runtime/runtimeModel";
 
 export type OutboxState = "queued" | "delivering" | "delivered" | "failed";
 
+/** Exact server-projected launch ownership. A canonical conversation can span
+    several native generations, so both coordinates are required. */
+export interface OutboxOwner {
+  readonly conversationId: string;
+  readonly generation: number;
+}
+
 export interface OutboxEntry {
   /** Idempotency key of this submission — also the bubble's stable identity. */
   id: string;
@@ -71,13 +78,42 @@ export interface OutboxEntry {
       retirement is monotonic across tail eviction, adoption, and refresh. */
   retiredEchoId?: string;
   retiredAt?: number;
-  /** The durable conversation identity that OWNS this bubble (issue #653). A
-      launch-owned bubble records the launch's own conversation id here, so a pane
-      renders it ONLY inside that conversation — never leaked into an unrelated
-      pane whose structured entry went dead. Absent for ordinary composer sends,
-      which are enqueued into their own pane's queue and so are inherently owned
-      by it; absence therefore renders as before. */
-  owner?: string;
+  /** Exact canonical conversation + native generation that owns this launch
+      bubble (issue #922). Ordinary composer sends omit it because their queue is
+      already scoped to the pane. Legacy launch rows with a missing/string owner
+      fail closed on production render until the server projection upgrades them. */
+  owner?: OutboxOwner;
+}
+
+function isOutboxOwner(value: unknown): value is OutboxOwner {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const raw = value as Record<string, unknown>;
+  return typeof raw.conversationId === "string"
+    && Number.isInteger(raw.generation)
+    && (raw.generation as number) > 0;
+}
+
+function sameOutboxOwner(left: unknown, right: OutboxOwner): boolean {
+  return isOutboxOwner(left)
+    && left.conversationId === right.conversationId
+    && left.generation === right.generation;
+}
+
+function normalizeOutboxOwner(entry: OutboxEntry): OutboxEntry {
+  const owner = (entry as { owner?: unknown }).owner;
+  if (owner === undefined || isOutboxOwner(owner)) return entry;
+  const normalized = { ...entry };
+  delete normalized.owner;
+  return normalized;
+}
+
+function reconciledLaunchState(
+  current: OutboxState,
+  projected: Extract<OutboxState, "delivering" | "delivered" | "failed">,
+): OutboxState {
+  if (projected === "delivered") return "delivered";
+  if (projected === "failed" && (current === "queued" || current === "delivering")) return "failed";
+  return current;
 }
 
 /**
@@ -224,7 +260,8 @@ function persistedQueue(cardId: string): readonly OutboxEntry[] {
   try {
     const raw = JSON.parse(sessionStorage.getItem(storageKey(cardId)) ?? "[]") as unknown;
     if (!Array.isArray(raw)) return EMPTY;
-    return raw.filter(isEntry).slice(-OUTBOX_LIMIT).map((entry) => {
+    return raw.filter(isEntry).slice(-OUTBOX_LIMIT).map((rawEntry) => {
+      const entry = normalizeOutboxOwner(rawEntry);
       const images = typeof entry.images === "number" ? entry.images : 0;
       /* The initial launch prompt is owned by the spawn, not the composer: it
          survives a refresh exactly as it was (never re-dispatched, never
@@ -539,13 +576,24 @@ export function enqueueOutbox(cardId: string, entry: Omit<OutboxEntry, "state">)
 /**
  * Seed the initial launch prompt as the conversation's first optimistic user
  * bubble (round-1 P1#2). Idempotent: a re-render or reload-replay that seeds the
- * same launch id is a no-op, preserving whatever state the entry already
- * reached. The entry is `launchOwned` — delivered by the spawn, so it is never
- * dispatched and never blocks the operator's follow-up messages.
+ * same launch id updates that row with authoritative echo, owner, and receipt
+ * state while preserving stronger delivery/response evidence. The entry is
+ * `launchOwned` — delivered by the spawn, so it is never dispatched and never
+ * blocks the operator's follow-up messages.
  */
 export function seedLaunchOutbox(
   cardId: string,
-  entry: { id: string; text: string; images: number; at: number; echoText?: string; owner?: string },
+  entry: {
+    id: string;
+    text: string;
+    images: number;
+    at: number;
+    echoText?: string;
+    owner?: OutboxOwner;
+    state?: Extract<OutboxState, "delivering" | "delivered" | "failed">;
+    settledAt?: number;
+    error?: string;
+  },
 ): void {
   if (!entry.text.trim() && !entry.images) return;
   const currentLaunch = readCurrentLaunch(cardId);
@@ -563,22 +611,38 @@ export function seedLaunchOutbox(
   const queue = readOutbox(cardId);
   const existing = queue.find((item) => item.id === entry.id);
   if (existing) {
-    recordCurrentLaunchEntry(cardId, existing);
-    if (existing.retiredEchoId) {
+    const projectedState = entry.state ?? "delivering";
+    const nextState = reconciledLaunchState(existing.state, projectedState);
+    const updated: OutboxEntry = {
+      ...existing,
+      ...(entry.echoText && entry.echoText !== existing.echoText ? { echoText: entry.echoText } : {}),
+      ...(entry.owner && !sameOutboxOwner(existing.owner, entry.owner) ? { owner: entry.owner } : {}),
+      ...(nextState !== existing.state ? { state: nextState } : {}),
+      ...(nextState === "delivered" && existing.settledAt === undefined
+        ? { settledAt: entry.settledAt ?? entry.at }
+        : {}),
+      ...(nextState === "failed" && entry.error && entry.error !== existing.error ? { error: entry.error } : {}),
+    };
+    const changed = updated.echoText !== existing.echoText
+      || updated.owner !== existing.owner
+      || updated.state !== existing.state
+      || updated.settledAt !== existing.settledAt
+      || updated.error !== existing.error;
+    if (changed) write(cardId, queue.map((item) => (item.id === entry.id ? updated : item)));
+    recordCurrentLaunchEntry(cardId, updated);
+    if (updated.retiredEchoId) {
       recordCurrentLaunchRetirement(cardId, {
         id: entry.id,
         at: entry.at,
-        retiredEchoId: existing.retiredEchoId,
-        ...(existing.retiredAt !== undefined ? { retiredAt: existing.retiredAt } : {}),
+        retiredEchoId: updated.retiredEchoId,
+        ...(updated.retiredAt !== undefined ? { retiredAt: updated.retiredAt } : {}),
       });
     }
-    /* Reconcile the canonical echo identity onto an already-seeded bubble (issue
-       #615): the composer seeds the RAW draft first, without an echo identity (it
-       never composes the role scaffold); the later server projection supplies it.
-       Attach it while preserving the user-facing raw text and the bubble's current
-       state — one bubble, never a second. Idempotent once attached. */
-    if (entry.echoText && entry.echoText !== existing.echoText) {
-      write(cardId, queue.map((item) => (item.id === entry.id ? { ...item, echoText: entry.echoText } : item)));
+    /* The browser seeds before the server knows canonical ownership, echo text,
+       or terminal receipt state. The projection upgrades that same row in one
+       join, so an ownerless stale copy cannot survive and a settled launch can
+       never be repainted as delivering. */
+    if (updated.echoText !== existing.echoText) {
       reconcileEchoRetirements(cardId, readEchoLedger(cardId));
     }
     return;
@@ -598,16 +662,27 @@ export function seedLaunchOutbox(
     });
     return;
   }
-  recordCurrentLaunch(cardId, { id: entry.id, at: entry.at });
+  const projectedState = entry.state ?? "delivering";
   /* A delivered launch compacted out of the recent queue keeps its settlement
      only in the current-launch slot. A reseed inside the TTL window restores
      that delivered state so the bubble stays visibly delivered and still
      retires at the TTL — never a fresh `delivering` entry that no echo or TTL
      could ever retire. */
-  const settledAt = currentLaunch?.id === entry.id ? currentLaunch.settledAt : undefined;
-  const seeded: OutboxEntry = settledAt === undefined
-    ? { ...entry, state: "delivering", launchOwned: true }
-    : { ...entry, state: "delivered", settledAt, launchOwned: true };
+  const settledAt = currentLaunch?.id === entry.id
+    ? currentLaunch.settledAt ?? entry.settledAt
+    : entry.settledAt;
+  const state: OutboxEntry["state"] = settledAt !== undefined ? "delivered" : projectedState;
+  recordCurrentLaunch(cardId, {
+    id: entry.id,
+    at: entry.at,
+    ...(state === "delivered" ? { settledAt: settledAt ?? entry.at } : {}),
+  });
+  const seeded: OutboxEntry = {
+    ...entry,
+    state,
+    ...(state === "delivered" ? { settledAt: settledAt ?? entry.at } : {}),
+    launchOwned: true,
+  };
   writeBounded(cardId, [...queue, seeded]);
   /* A refreshed surface can see the canonical transcript row before the launch
      projection effect seeds its optimistic bubble. Reconcile the persisted row
@@ -661,7 +736,7 @@ export function markOutboxResponded(cardId: string, id: string, at: number): voi
  */
 export function settleLaunchOutboxDelivered(
   cardId: string,
-  launch: { id: string; at: number; settledAt: number },
+  launch: { id: string; at: number; settledAt: number; owner?: OutboxOwner },
 ): void {
   const current = readCurrentLaunch(cardId);
   if (current && current.id !== launch.id) return;
@@ -676,21 +751,59 @@ export function settleLaunchOutboxDelivered(
   const queue = readOutbox(cardId);
   const existing = queue.find((item) => item.id === launch.id);
   if (!existing || !existing.launchOwned) return;
+  const owned = launch.owner && !sameOutboxOwner(existing.owner, launch.owner)
+    ? { ...existing, owner: launch.owner }
+    : existing;
   if (
-    existing.retiredEchoId
-    || existing.responseStartedAt !== undefined
-    || existing.state === "delivered"
-    || existing.state === "failed"
+    owned.retiredEchoId
+    || owned.responseStartedAt !== undefined
+    || owned.state === "delivered"
   ) {
-    recordCurrentLaunchEntry(cardId, existing);
+    if (owned !== existing) write(cardId, queue.map((item) => (item.id === launch.id ? owned : item)));
+    recordCurrentLaunchEntry(cardId, owned);
     return;
   }
   const next = queue.map((item) => (item.id === launch.id
-    ? { ...item, state: "delivered" as const, settledAt: item.settledAt ?? launch.settledAt }
+    ? {
+        ...owned,
+        state: "delivered" as const,
+        settledAt: owned.settledAt ?? launch.settledAt,
+        error: undefined,
+      }
     : item));
   const updated = next.find((item) => item.id === launch.id);
   if (updated) recordCurrentLaunchEntry(cardId, updated);
   write(cardId, next);
+}
+
+/** Settle a launch that died before its first message could start. This covers
+    pathless promote-race failures as well as a terminalized attempts-zero held
+    delivery. Delivered/response evidence remains monotonic and wins. */
+export function settleLaunchOutboxFailed(
+  cardId: string,
+  launch: { id: string; at: number; error?: string; owner?: OutboxOwner },
+): void {
+  const current = readCurrentLaunch(cardId);
+  if (current && current.id !== launch.id) return;
+  recordCurrentLaunch(cardId, { id: launch.id, at: current?.at ?? launch.at });
+  const queue = readOutbox(cardId);
+  const existing = queue.find((item) => item.id === launch.id);
+  if (!existing || !existing.launchOwned) return;
+  const owned = launch.owner && !sameOutboxOwner(existing.owner, launch.owner)
+    ? { ...existing, owner: launch.owner }
+    : existing;
+  if (owned.retiredEchoId || owned.responseStartedAt !== undefined || owned.state === "delivered") {
+    if (owned !== existing) write(cardId, queue.map((item) => (item.id === launch.id ? owned : item)));
+    recordCurrentLaunchEntry(cardId, owned);
+    return;
+  }
+  const updated: OutboxEntry = {
+    ...owned,
+    state: "failed",
+    ...(launch.error ? { error: launch.error } : {}),
+  };
+  recordCurrentLaunchEntry(cardId, updated);
+  write(cardId, queue.map((item) => (item.id === launch.id ? updated : item)));
 }
 
 /** Remove an entry outright — the operator cancelled a message that never left. */
@@ -1023,18 +1136,18 @@ export function visibleOutbox(
   queue: readonly OutboxEntry[],
   transcriptEchoCounts: TranscriptEchoCounts,
   nowMs: number,
-  paneOwner?: string,
+  paneOwner?: OutboxOwner | null,
 ): OutboxEntry[] {
   const consumed = new Map<string, number>();
   const visible: OutboxEntry[] = [];
   for (const entry of queue) {
-    /* Pane ownership by durable conversation id (issue #653): a bubble that
-       records an owner renders ONLY in that conversation's pane. This keeps a
-       launch bubble keyed to another conversation from leaking into an unrelated
-       pane (e.g. when that pane's own structured entry went dead). An owner-less
-       entry — an ordinary composer send — is inherently owned by the pane whose
-       queue holds it, so it renders as before. */
-    if (paneOwner !== undefined && entry.owner !== undefined && entry.owner !== paneOwner) continue;
+    /* Production passes an exact canonical conversation+generation owner. A
+       launch row with a foreign, legacy string, or missing owner fails closed;
+       the server projection upgrades a legitimate ownerless optimistic seed on
+       its own pane. Ordinary composer rows remain scoped by their queue. */
+    if (paneOwner !== undefined && entry.launchOwned) {
+      if (!paneOwner || !sameOutboxOwner(entry.owner, paneOwner)) continue;
+    }
     /* A bubble retires on ITS canonical transcript echo — the delivered text,
        which for a role launch is the scaffold-plus-draft carried on `echoText`,
        not the raw draft it displays (issue #615). */

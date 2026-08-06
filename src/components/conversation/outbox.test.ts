@@ -16,6 +16,7 @@ import {
   resetOutboxForTests,
   seedLaunchOutbox,
   settleLaunchOutboxDelivered,
+  settleLaunchOutboxFailed,
   transcriptEchoCount,
   updateOutbox,
   visibleOutbox,
@@ -1228,6 +1229,29 @@ describe("seedLaunchOutbox (P1#2)", () => {
     expect(readOutbox(conversation).find((entry) => entry.id === "launch_a")?.state).toBe("delivering");
   });
 
+  test("issue 922: a pathless failed launch settles its optimistic bubble and stamps exact ownership", () => {
+    const conversation = "conversation_922_failed_launch";
+    const owner = { conversationId: conversation, generation: 1 };
+    seedLaunchOutbox(conversation, {
+      id: "launch_922_failed", text: "synthetic kickoff", images: 0, at: 1_000,
+    });
+    settleLaunchOutboxFailed(conversation, {
+      id: "launch_922_failed", at: 1_000, error: "runtime admission timed out", owner,
+    });
+    expect(readOutbox(conversation)[0]).toMatchObject({
+      state: "failed",
+      error: "runtime admission timed out",
+      owner,
+    });
+    expect(visibleOutbox(readOutbox(conversation), echoes(), 2_000, owner)).toHaveLength(1);
+    expect(visibleOutbox(
+      readOutbox(conversation),
+      echoes(),
+      2_000,
+      { conversationId: "conversation_922_other", generation: 1 },
+    )).toEqual([]);
+  });
+
   test("issue 648: an echo match still wins when it lands before the delivered receipt is consumed", () => {
     const provisional = "spawn:launch_648_echo_first";
     const text = "launch prompt that DOES echo as a user row";
@@ -1607,27 +1631,28 @@ describe("seedLaunchOutbox (P1#2)", () => {
 });
 
 describe("issue 653: pane ownership by durable conversation id", () => {
+  const owner = (conversationId: string, generation = 1) => ({ conversationId, generation });
   const withOwner = (over: Partial<OutboxEntry>): OutboxEntry => ({
     id: "ccb088d2", text: "Round 2 review PR #618", images: 0, at: 1_000,
     state: "delivering", launchOwned: true, ...over,
   });
 
   test("a foreign-owned launch bubble is never rendered in an unrelated pane", () => {
-    const queue = [withOwner({ owner: "conversation_A" })];
+    const queue = [withOwner({ owner: owner("conversation_A") })];
     /* Conversation B's pane (dead structured entry): the leaked bubble owned by A
        must not render. */
-    expect(visibleOutbox(queue, echoes(), 5_000, "conversation_B")).toEqual([]);
+    expect(visibleOutbox(queue, echoes(), 5_000, owner("conversation_B"))).toEqual([]);
     /* A's own pane still shows it. */
-    expect(visibleOutbox(queue, echoes(), 5_000, "conversation_A").map((entry) => entry.id)).toEqual(["ccb088d2"]);
+    expect(visibleOutbox(queue, echoes(), 5_000, owner("conversation_A")).map((entry) => entry.id)).toEqual(["ccb088d2"]);
   });
 
   test("owner-less composer sends and same-owner launches still render", () => {
     const composer = { id: "k1", text: "hi", images: 0, at: 1, state: "queued" as const };
-    const own = withOwner({ owner: "conversation_B" });
-    expect(visibleOutbox([composer, own], echoes(), 5_000, "conversation_B").map((entry) => entry.id))
+    const own = withOwner({ owner: owner("conversation_B") });
+    expect(visibleOutbox([composer, own], echoes(), 5_000, owner("conversation_B")).map((entry) => entry.id))
       .toEqual(["k1", "ccb088d2"]);
     /* No pane owner supplied (legacy call sites) → no filtering at all. */
-    expect(visibleOutbox([withOwner({ owner: "conversation_A" })], echoes(), 5_000).map((entry) => entry.id))
+    expect(visibleOutbox([withOwner({ owner: owner("conversation_A") })], echoes(), 5_000).map((entry) => entry.id))
       .toEqual(["ccb088d2"]);
   });
 
@@ -1635,12 +1660,38 @@ describe("issue 653: pane ownership by durable conversation id", () => {
     /* A prior mis-seed (or a payload that carried a foreign launch) left A's
        launch bubble in B's queue. */
     seedLaunchOutbox("conversation_B", {
-      id: "ccb088d2", text: "Round 2 review PR #618", images: 0, at: 1_000, owner: "conversation_A",
+      id: "ccb088d2", text: "Round 2 review PR #618", images: 0, at: 1_000, owner: owner("conversation_A"),
     });
     const queue = readOutbox("conversation_B");
-    expect(queue[0]!.owner).toBe("conversation_A");
+    expect(queue[0]!.owner).toEqual(owner("conversation_A"));
     /* B's pane renders nothing; the entry is durably filtered by owner. */
-    expect(visibleOutbox(queue, echoes(), 5_000, "conversation_B")).toEqual([]);
+    expect(visibleOutbox(queue, echoes(), 5_000, owner("conversation_B"))).toEqual([]);
+  });
+
+  test("issue 922: the render join requires canonical conversation and generation, and upgrades a settled optimistic row", () => {
+    const text = "synthetic kickoff for conversation B";
+    seedLaunchOutbox("conversation_B", {
+      id: "launch_B", text, images: 0, at: 1_000,
+    });
+    /* The browser seed has no canonical owner yet. Production rendering fails
+       closed, so it cannot appear on A or on another generation of B. */
+    expect(visibleOutbox(readOutbox("conversation_B"), echoes(), 1_500, owner("conversation_A"))).toEqual([]);
+    expect(visibleOutbox(readOutbox("conversation_B"), echoes(), 1_500, owner("conversation_B", 2))).toEqual([]);
+
+    /* The server-projected delivered receipt joins the same launch id, stamps
+       exact ownership, and settles it atomically. */
+    seedLaunchOutbox("conversation_B", {
+      id: "launch_B", text, images: 0, at: 1_000,
+      owner: owner("conversation_B", 1), state: "delivered", settledAt: 1_400,
+    });
+    const [settled] = visibleOutbox(readOutbox("conversation_B"), echoes(), 1_500, owner("conversation_B", 1));
+    expect(settled).toMatchObject({
+      id: "launch_B",
+      state: "delivered",
+      settledAt: 1_400,
+      owner: owner("conversation_B", 1),
+    });
+    expect(visibleOutbox(readOutbox("conversation_B"), echoes(), 1_500, owner("conversation_A", 1))).toEqual([]);
   });
 });
 

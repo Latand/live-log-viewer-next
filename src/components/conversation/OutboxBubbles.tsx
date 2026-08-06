@@ -3,6 +3,7 @@
 import { Clock3, RotateCcw, TriangleAlert } from "lucide-react";
 
 import { Loader2, X } from "@/components/icons";
+import { mdBlocks } from "@/components/feed/markdown";
 
 import { type TFunction, useLocale } from "@/lib/i18n";
 
@@ -71,7 +72,10 @@ export function OutboxBubblesView({
           >
             <div className="flex max-w-[75%] flex-col items-end gap-1">
               <div className="w-full whitespace-pre-wrap break-words rounded-surface bg-user px-4 py-2.5 opacity-80">
-                {entry.text}
+                {/* The same markdown grammar the transcript's own user bubble
+                    uses, so nothing changes appearance when it replaces this
+                    one — and a link the operator pasted is a link right away. */}
+                {mdBlocks(entry.text)}
                 {entry.images ? (
                   <span className="mt-1 block text-caption font-semibold text-muted">
                     {t("composer.imagesCount", { count: entry.images })}

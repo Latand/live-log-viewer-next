@@ -133,6 +133,49 @@ test("issue 569: a materialized live conversation retires the duplicate launch c
   }
 });
 
+test("issue 922: launch facts project canonical conversation and exact native generation across a durable alias", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-922-canonical-launch-projection-"));
+  const nativeId = "00000000-0000-0000-0000-000000000000";
+  const artifactPath = path.join(directory, `${nativeId}.jsonl`);
+  try {
+    fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "user", message: "synthetic kickoff" })}\n`);
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const begun = registry.beginSpawnRequest({
+      engine: "codex", cwd: directory, transport: "structured", accountId: "work",
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+      launchDisplay: { prompt: "synthetic kickoff", images: 0, echo: "synthetic kickoff" },
+    });
+    if (begun.kind !== "created") throw new Error("expected structured launch creation");
+    registry.settleSpawn(begun.receipt.launchId, {
+      key: { engine: "codex", sessionId: nativeId },
+      artifactPath, cwd: directory, accountId: "work",
+      launchProfile: emptyLaunchProfile({ cwd: directory }), status: "idle",
+      host: null, claimEpoch: 0, claimOwner: null, pendingAction: null,
+    });
+    const snapshot = registry.snapshot();
+    const provisionalId = begun.receipt.conversationId;
+    const canonicalId = "conversation_canonical_fixture" as typeof provisionalId;
+    const conversation = snapshot.conversations[provisionalId]!;
+    delete snapshot.conversations[provisionalId];
+    snapshot.conversations[canonicalId] = { ...conversation, id: canonicalId };
+    snapshot.conversationAliases[provisionalId] = canonicalId;
+
+    const file = scannedFile(artifactPath);
+    file.conversationId = canonicalId;
+    file.generation = 1;
+    const projection = projectLaunchConversations([file], snapshot, Date.parse(begun.receipt.createdAt) + 1_000);
+    expect(projection.cards).toEqual([]);
+    expect(projection.facts.get(artifactPath)).toMatchObject({
+      launchId: begun.receipt.launchId,
+      conversationId: canonicalId,
+      generation: 1,
+    });
+    expect(projection.routes[`spawn:${begun.receipt.launchId}`]).toBe(canonicalId);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("issue 569: the launch route resolves to the canonical conversation long after the card retires", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-late-success-route-"));
   try {
@@ -224,7 +267,15 @@ test("issue 614: a transcript-less launch projects the queued prompt as the firs
     /* The queued initial delivery the spawn holds for this launch — the durable
        source of the first user bubble on EVERY surface, not only the browser
        that ran the composer. */
-    registry.holdDelivery(begun.receipt.conversationId, "LLV614_CANONICAL_PROBE_20260723", `spawn_${begun.receipt.launchId}`);
+    registry.holdDelivery(
+      begun.receipt.conversationId,
+      "LLV614_CANONICAL_PROBE_20260723",
+      `spawn_${begun.receipt.launchId}`,
+      "text",
+      [],
+      null,
+      { operationId: `spawn_message_${begun.receipt.launchId}`, kind: "send", policy: "queue" },
+    );
 
     const createdMs = Date.parse(begun.receipt.createdAt);
     /* The launch stays transcript-less across several projection polls (the
