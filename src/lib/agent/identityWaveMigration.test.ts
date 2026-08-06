@@ -277,7 +277,7 @@ test("the identity wave retitles, rekeys, stamps roots, supports dry-run, and co
   }
 });
 
-test("identity evidence preserves meaningful receipt and transcript punctuation", () => {
+test("identity evidence cleans receipt and transcript Markdown before durable persistence", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-punctuation-"));
   try {
     const headPath = path.join(directory, "head.jsonl");
@@ -293,7 +293,11 @@ test("identity evidence preserves meaningful receipt and transcript punctuation"
       conversationId: receiptConversation.id,
       purpose: "resume-successor",
       launchProfile: { title: "Codex session" },
-      launchDisplay: { prompt: "Review issue #913", echo: "Review issue #913", images: 0 },
+      launchDisplay: {
+        prompt: "Review [issue #913](https://example.invalid/issues/913)",
+        echo: "Review [issue #913](https://example.invalid/issues/913)",
+        images: 0,
+      },
     });
     if (receipt.kind !== "created") throw new Error("expected receipt");
     const legacy = seed.snapshot();
@@ -304,12 +308,14 @@ test("identity evidence preserves meaningful receipt and transcript punctuation"
 
     expect(registry.runIdentityWaveMigration({
       now: NOW,
-      transcriptTitle: (pathname) => pathname.endsWith("transcript.jsonl") ? "Audit *role* #913" : null,
+      transcriptTitle: (pathname) => pathname.endsWith("transcript.jsonl")
+        ? "Audit *role* [issue #913](https://example.invalid/issues/913)"
+        : null,
       sharedPathForLegacy: () => null,
       orchestratorSeats: [],
     })).toMatchObject({ retitled: 2 });
-    expect(registry.conversation(receiptConversation.id)?.generations.at(-1)?.launchProfile.title).toBe("Review issue #913");
-    expect(registry.conversation(transcriptConversation.id)?.generations.at(-1)?.launchProfile.title).toBe("Audit *role* #913");
+    expect(registry.conversation(receiptConversation.id)?.generations.at(-1)?.launchProfile.title).toBe("Review issue 913");
+    expect(registry.conversation(transcriptConversation.id)?.generations.at(-1)?.launchProfile.title).toBe("Audit role issue 913");
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
