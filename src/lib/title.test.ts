@@ -24,6 +24,12 @@ test("legacy engine placeholders have no semantic title value", () => {
     "Claude/session",
     "Codex · session",
     "Claude: session",
+    "Codex_session",
+    "Claude_session",
+    "Codex*session",
+    "Claude#session",
+    "Codex>session",
+    "Claude~session",
   ]) {
     expect(isGenericSessionTitle(placeholder)).toBeTrue();
     expect(durableSemanticTitle(placeholder)).toBeNull();

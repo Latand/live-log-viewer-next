@@ -32,7 +32,7 @@ const GENERIC_SESSION_TITLES = new Set([
 export const SPAWN_TITLE_REQUIRED_ERROR = "title is required for every new spawn";
 
 function genericSessionTitleKey(value: string): string {
-  return cleanTitle(value)
+  return value
     .toLocaleLowerCase()
     .replace(/[\p{P}\p{S}\s]+/gu, " ")
     .trim();
