@@ -3,6 +3,7 @@ import { grantedMcpServers, type McpGrantPolicy } from "@/lib/agent/mcpAllowlist
 import { grantedPlugins } from "@/lib/agent/pluginAllowlist";
 import type { MessageOrigin } from "@/lib/runtime/messageOrigin";
 import type { StructuredImageRef } from "@/lib/runtime/structuredContent";
+import { derivedSpawnTitle, durableSemanticTitle } from "@/lib/title";
 import type { AgentGoal, AgentPlan, EngineLimits, LimitsProvenance } from "@/lib/types";
 
 export type MigrationEngine = Extract<AgentEngine, "claude" | "codex">;
@@ -104,6 +105,19 @@ export function emptyLaunchProfile(
   };
 }
 
+/** Freeze the one semantic profile shared by provider actuation, host
+    publication, and the committed successor generation. */
+export function migrationSuccessorLaunchProfile(profile: LaunchProfile): LaunchProfile {
+  return emptyLaunchProfile({
+    ...profile,
+    title: durableSemanticTitle(profile.title, 120) ?? derivedSpawnTitle(
+      "migration successor",
+      profile.goal?.objective ?? profile.cwd,
+      "Conversation migration",
+    ),
+  });
+}
+
 export interface GenerationHostEvidence {
   kind: "tmux" | "codex-app-server" | "claude-stream";
   identity: string;
@@ -141,6 +155,8 @@ export interface ConversationMigration {
   errorCode: string | null;
   operationId: string;
   sourceGenerationId: string;
+  /** Semantic successor identity frozen before provider actuation. */
+  successorLaunchProfile?: LaunchProfile | null;
   providerReceipt: ProviderReceipt | null;
   /** Continuity artifacts created by the active succession and awaiting commit. */
   pendingContinuityPaths: string[];

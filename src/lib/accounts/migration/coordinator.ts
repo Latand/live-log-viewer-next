@@ -32,6 +32,7 @@ import { isStructuredDeliveryControllerUnavailable } from "@/lib/runtime/structu
 
 import {
   emptyLaunchProfile,
+  migrationSuccessorLaunchProfile,
   sameGenerationHostEvidence,
   sameProviderReceiptOutcome,
   type HistoryCopyPort,
@@ -773,13 +774,26 @@ export async function advanceConversationMigration(
         ?? conversation.generations.at(-1);
       if (!source) throw new Error("conversation has no source generation");
       if (!completeProviderTurnObservation(conversation, source, successorProvider.virtualSource === true, registry)) return restoreCreationFence(conversation);
+      if (!migration.successorLaunchProfile) {
+        conversation = registry.transitionConversationMigration(
+          conversation.id,
+          migration.revision,
+          ["successor-starting"],
+          { successorLaunchProfile: migrationSuccessorLaunchProfile(source.launchProfile) },
+        );
+        migration = conversation.migration!;
+      }
       const conversationId = conversation.id;
       const creationOwner = { operationId: migration.operationId, revision: migration.revision };
+      const successorSource = {
+        ...source,
+        launchProfile: migration.successorLaunchProfile!,
+      };
       receipt = await successorProvider.create({
         engine: conversation.engine,
         operationId: creationOwner.operationId,
         conversationId,
-        source,
+        source: successorSource,
         targetAccountId: migration.targetId,
         recordContinuityPath(pathname) {
           registry.recordMigrationContinuityPath(conversationId, pathname, creationOwner);
@@ -793,8 +807,10 @@ export async function advanceConversationMigration(
     const source = conversation.generations.find((generation) => generation.id === migration.sourceGenerationId)
       ?? conversation.generations.at(-1);
     if (!source) throw new Error("conversation has no source generation");
+    const successorProfile = migration.successorLaunchProfile
+      ?? migrationSuccessorLaunchProfile(source.launchProfile);
     if (!receipt || receipt.operationId !== migration.operationId) throw new Error("persisted successor receipt operation does not match");
-    await successorProvider.verify(receipt, { engine: conversation.engine, targetAccountId: migration.targetId, launchProfile: source.launchProfile });
+    await successorProvider.verify(receipt, { engine: conversation.engine, targetAccountId: migration.targetId, launchProfile: successorProfile });
     const publicationConversationId = conversation.id;
     const publicationReceipt = receipt;
     const publicationRevision = migration.revision;
@@ -829,7 +845,7 @@ export async function advanceConversationMigration(
       engine: conversation.engine,
       conversationId: publicationConversationId,
       targetAccountId: migration.targetId,
-      launchProfile: source.launchProfile,
+      launchProfile: successorProfile,
       ownsOperation: ownsPublication,
     });
     publishOwner = registry.conversation(publicationConversationId);
@@ -851,7 +867,7 @@ export async function advanceConversationMigration(
       id: publicationReceipt.nativeId,
       path: publicationReceipt.path,
       accountId: migration.targetId,
-      launchProfile: source.launchProfile,
+      launchProfile: successorProfile,
       historyHash: publicationReceipt.historyHash,
       host: publicationReceipt.host,
     }, publicationRevision, publicationOperationId, publicationReceipt);
