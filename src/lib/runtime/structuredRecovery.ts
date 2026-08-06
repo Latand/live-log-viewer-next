@@ -101,9 +101,11 @@ function candidateFor(
     ...(entry?.launchProfile ?? {}),
     cwd: entry?.launchProfile?.cwd || generation.launchProfile.cwd || entry?.cwd,
   });
+  const inheritedTitle = durableSemanticTitle(generation.launchProfile.title, 120)
+    ?? durableSemanticTitle(entry?.launchProfile?.title, 120);
   const profile = emptyLaunchProfile({
     ...inheritedProfile,
-    title: durableSemanticTitle(inheritedProfile.title, 120) ?? derivedSpawnTitle(
+    title: inheritedTitle ?? derivedSpawnTitle(
       "recovery",
       inheritedProfile.goal?.objective ?? inheritedProfile.cwd,
       "Conversation recovery",

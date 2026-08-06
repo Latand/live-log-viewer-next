@@ -268,6 +268,81 @@ test("the recovery reservation converges repeated calls onto one successor spawn
   journal.close();
 });
 
+test("ordinary recovery prefers the durable generation title over stale entry titles", async () => {
+  for (const staleTitle of [null, "Codex session"] as const) {
+    const sessionId = crypto.randomUUID();
+    const directory = path.join(sandbox, `title-precedence-${sessionId}`);
+    const cwd = path.join(directory, "workspace");
+    const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+    fs.mkdirSync(cwd, { recursive: true });
+    fs.writeFileSync(artifactPath, "");
+    const filename = path.join(directory, "registry.json");
+    let registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const profile = emptyLaunchProfile({ cwd, title: "Durable issue #913 title" });
+    const begun = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd,
+      transport: "structured",
+      accountId: "default",
+      expectedArtifactPath: artifactPath,
+      launchProfile: profile,
+    });
+    if (begun.kind !== "created") throw new Error("recovery fixture receipt was unavailable");
+    const settled = registry.settleSpawn(begun.receipt.launchId, {
+      key: { engine: "codex", sessionId },
+      artifactPath,
+      cwd,
+      accountId: "default",
+      launchProfile: profile,
+      status: "dead",
+      host: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    });
+    if (settled.kind !== "settled") throw new Error("recovery fixture did not settle");
+    const snapshot = registry.snapshot();
+    const entry = snapshot.entries[`codex:${sessionId}`];
+    if (!entry?.launchProfile) throw new Error("recovery fixture entry is missing");
+    entry.launchProfile.title = staleTitle;
+    fs.writeFileSync(filename, `${JSON.stringify(snapshot, null, 2)}\n`);
+    registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+
+    const recovered = await recoverDeadStructuredConversation({
+      path: artifactPath,
+      conversationId: begun.receipt.conversationId,
+    }, {
+      registry,
+      client: {} as RuntimeHostClient,
+      transport: () => "structured",
+      resolveAccount: () => ({
+        engine: "codex",
+        accountId: "default",
+        kind: "managed",
+        home: path.join(directory, "account"),
+        transcriptRoot: directory,
+        env: { NODE_ENV: "test" },
+      }),
+      spawn: async (input) => {
+        expect(input.spec.launchProfile?.title).toBe("Durable issue #913 title");
+        return {
+          ok: true,
+          target: null,
+          path: artifactPath,
+          launchId: input.receipt.launchId,
+          conversationId: input.receipt.conversationId,
+          launched: true,
+          retrySafe: false,
+          initialMessage: "delivered" as const,
+          state: "settled" as const,
+        };
+      },
+    });
+
+    expect(recovered).toMatchObject({ path: artifactPath, spawned: true });
+  }
+});
+
 function establishRolledBackTmuxOwner(engine: "codex" | "claude", label: string) {
   const sessionId = crypto.randomUUID();
   const cwd = path.join(sandbox, `${engine}-${label}-${sessionId}`);
