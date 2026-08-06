@@ -26,7 +26,7 @@ import type { RuntimePendingReconfigure, RuntimeSettingsCapability, ViewerDeploy
 import type { RuntimeImageCapability } from "@/lib/runtime/structuredContent";
 import {
   appendRuntimeLiveTurnDelta,
-  completeRuntimeLiveTurnItem,
+  projectRuntimeLiveTurnItem,
   type RuntimeLiveTurn,
 } from "@/lib/runtime/liveTurn";
 import {
@@ -541,16 +541,18 @@ function reduceKnown(store: RuntimeStore, env: RuntimeEnvelope, revision: number
         item?: unknown;
         voiceResponse?: { responseId?: unknown; text?: unknown };
       };
-      if (p.phase !== "completed") break;
+      if (p.phase !== "started" && p.phase !== "completed") break;
+      const lifecycle = p.phase;
       updateSession(store, p.conversationId ?? env.scope.id, revision, (s) => {
         const turnId = p.turnId ?? s.activeTurnId ?? "unknown";
         const voiceResponse = p.voiceResponse;
         return {
           ...s,
-          liveTurn: completeRuntimeLiveTurnItem(
+          liveTurn: projectRuntimeLiveTurnItem(
             s.liveTurn,
             turnId,
             p.item,
+            lifecycle,
             env.occurredAt ?? env.recordedAt ?? null,
           ),
           voiceDeliveries: typeof voiceResponse?.responseId === "string"

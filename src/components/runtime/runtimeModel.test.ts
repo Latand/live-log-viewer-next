@@ -178,6 +178,52 @@ describe("live turn delta buffering", () => {
     expect(store.sessions["conv_a"]?.liveTurn?.text).toBe("streaming");
   });
 
+  test("a Codex tool lifecycle projects one live row from start through completion", () => {
+    let store = installSnapshot(snapshot());
+    store = apply(store, env("turn-started", { type: "session", id: "conv_a" }, 4, {
+      conversationId: "conv_a",
+      turnId: "t1",
+    }));
+    store = apply(store, env("item", { type: "session", id: "conv_a" }, 5, {
+      conversationId: "conv_a",
+      turnId: "t1",
+      phase: "started",
+      item: {
+        type: "commandExecution",
+        id: "command-live",
+        command: "bun test src/components/runtime/runtimeModel.test.ts",
+        cwd: "/repo",
+      },
+    }));
+    expect(store.sessions["conv_a"]?.liveTurn?.items).toEqual([
+      expect.objectContaining({
+        kind: "tool",
+        itemId: "command-live",
+        toolName: "exec_command",
+        phase: "streaming",
+      }),
+    ]);
+
+    store = apply(store, env("item", { type: "session", id: "conv_a" }, 6, {
+      conversationId: "conv_a",
+      turnId: "t1",
+      phase: "completed",
+      item: {
+        type: "commandExecution",
+        id: "command-live",
+        command: "bun test src/components/runtime/runtimeModel.test.ts",
+        cwd: "/repo",
+      },
+    }));
+    expect(store.sessions["conv_a"]?.liveTurn?.items).toEqual([
+      expect.objectContaining({
+        kind: "tool",
+        itemId: "command-live",
+        phase: "awaiting-echo",
+      }),
+    ]);
+  });
+
   test("issue 626: authoritative completion replaces streamed prefixes and divergent drafts while empty completion preserves the stream", () => {
     const completed = (streamed: string, finalText: string, itemId: string) => {
       let store = installSnapshot(snapshot());

@@ -4,6 +4,7 @@ import {
   appendRuntimeLiveTurnDelta,
   completeRuntimeLiveTurnItem,
   normalizeRuntimeLiveTurn,
+  projectRuntimeLiveTurnItem,
   runtimeLiveTurnItems,
 } from "./liveTurn";
 
@@ -125,4 +126,84 @@ test("issue 626: the ultimate summary counts fully text-trimmed unidentified com
     omittedItems: 7,
   });
   expect(items[0]?.omittedChars).toBeGreaterThan(0);
+});
+
+test("live tool items from Claude and Codex survive projection in response order under the text bound", () => {
+  let live = appendRuntimeLiveTurnDelta(
+    null,
+    "turn-tools",
+    "Checking the relevant files.",
+    "2026-08-06T09:00:00.000Z",
+  );
+  live = completeRuntimeLiveTurnItem(live, "turn-tools", {
+    type: "assistant",
+    uuid: "claude-message",
+    message: {
+      role: "assistant",
+      content: [
+        { type: "text", text: "Checking the relevant files." },
+        {
+          type: "tool_use",
+          id: "claude-read",
+          name: "Read",
+          input: { file_path: `src/${"nested/".repeat(12_000)}liveTurn.ts` },
+        },
+      ],
+    },
+  }, "2026-08-06T09:00:01.000Z");
+  live = completeRuntimeLiveTurnItem(live, "turn-tools", {
+    type: "commandExecution",
+    id: "codex-command",
+    command: "bun test src/lib/runtime/liveTurn.test.ts",
+    cwd: "/repo",
+  }, "2026-08-06T09:00:02.000Z");
+
+  const items = runtimeLiveTurnItems(live);
+  expect(items.map(({ kind, itemId, toolName }) => ({ kind, itemId, toolName }))).toEqual([
+    { kind: "assistant", itemId: "claude-message", toolName: undefined },
+    { kind: "tool", itemId: "claude-read", toolName: "Read" },
+    { kind: "tool", itemId: "codex-command", toolName: "exec_command" },
+  ]);
+  expect(items.reduce((total, item) => total + new TextEncoder().encode(item.text).length, 0))
+    .toBeLessThanOrEqual(64 * 1024);
+  expect(items[1]?.omittedChars).toBeGreaterThan(0);
+  expect(items[2]?.text).toContain("bun test src/lib/runtime/liveTurn.test.ts");
+  expect(live?.text).toBe(items.findLast((item) => item.kind === "assistant")?.text);
+  expect(live?.text).not.toContain("bun test src/lib/runtime/liveTurn.test.ts");
+});
+
+test("a Codex tool start appears immediately and completion updates the same live row", () => {
+  const started = projectRuntimeLiveTurnItem(null, "turn-started-tool", {
+    type: "commandExecution",
+    id: "command-live",
+    command: "bun test src/lib/runtime/liveTurn.test.ts",
+    cwd: "/repo",
+  }, "started", "2026-08-06T09:10:00.000Z");
+  expect(runtimeLiveTurnItems(started)).toEqual([
+    expect.objectContaining({
+      kind: "tool",
+      itemId: "command-live",
+      toolName: "exec_command",
+      phase: "streaming",
+      startedAt: "2026-08-06T09:10:00.000Z",
+      completedAt: null,
+    }),
+  ]);
+
+  const completed = projectRuntimeLiveTurnItem(started, "turn-started-tool", {
+    type: "commandExecution",
+    id: "command-live",
+    command: "bun test src/lib/runtime/liveTurn.test.ts",
+    cwd: "/repo",
+    status: "completed",
+  }, "completed", "2026-08-06T09:10:01.000Z");
+  expect(runtimeLiveTurnItems(completed)).toEqual([
+    expect.objectContaining({
+      kind: "tool",
+      itemId: "command-live",
+      phase: "awaiting-echo",
+      startedAt: "2026-08-06T09:10:00.000Z",
+      completedAt: "2026-08-06T09:10:01.000Z",
+    }),
+  ]);
 });
