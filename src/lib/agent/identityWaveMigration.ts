@@ -1,6 +1,6 @@
 import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
-import { durableSemanticTitle, semanticTitle } from "@/lib/title";
+import { semanticTitle } from "@/lib/title";
 
 import type { RegistryFile, SpawnLineageEdge } from "./registry";
 
