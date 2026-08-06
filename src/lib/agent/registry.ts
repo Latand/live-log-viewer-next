@@ -871,6 +871,7 @@ function conversationMigrationForIntent(
     errorCode: null,
     operationId: crypto.randomUUID(),
     sourceGenerationId: source.id,
+    successorLaunchProfile: null,
     providerReceipt: null,
     pendingContinuityPaths,
     boardProject,
@@ -1301,6 +1302,11 @@ function normalizeConversation(value: RegistryConversation, policy?: McpGrantPol
   const current = generations.at(-1);
   const legacyContinuity = (value.migration as (ConversationMigration & { continuityPaths?: unknown }) | null)?.continuityPaths;
   const providerReceipt = normalizeProviderReceipt(value.migration?.providerReceipt);
+  const successorLaunchProfile = value.migration?.successorLaunchProfile
+    && typeof value.migration.successorLaunchProfile === "object"
+    && !Array.isArray(value.migration.successorLaunchProfile)
+    ? emptyLaunchProfile(value.migration.successorLaunchProfile, policy)
+    : null;
   const pendingContinuityPaths = Array.isArray(value.migration?.pendingContinuityPaths)
     ? value.migration.pendingContinuityPaths.filter((pathname): pathname is string => typeof pathname === "string")
     : value.migration?.phase !== "committed" && providerReceipt
@@ -1312,6 +1318,7 @@ function normalizeConversation(value: RegistryConversation, policy?: McpGrantPol
       errorCode: value.migration.errorCode ?? null,
       operationId: value.migration.operationId ?? `${value.migration.intentId}:${value.id}:${value.migration.revision}`,
       sourceGenerationId: value.migration.sourceGenerationId ?? current?.id ?? "",
+      successorLaunchProfile,
       providerReceipt,
       pendingContinuityPaths,
       boardProject: typeof value.migration.boardProject === "string" ? value.migration.boardProject : null,
@@ -4294,6 +4301,7 @@ export class AgentRegistry {
         errorCode: null,
         operationId: crypto.randomUUID(),
         sourceGenerationId: source.id,
+        successorLaunchProfile: null,
         providerReceipt: null,
         pendingContinuityPaths: [],
         boardProject: null,
@@ -5723,6 +5731,7 @@ export class AgentRegistry {
         errorCode: migration.errorCode ?? null,
         operationId: migration.operationId ?? `${migration.intentId}:${canonicalId}:${migration.revision}`,
         sourceGenerationId: migration.sourceGenerationId ?? source?.id ?? "",
+        successorLaunchProfile: migration.successorLaunchProfile ?? null,
         providerReceipt: migration.providerReceipt ?? null,
         pendingContinuityPaths: migration.pendingContinuityPaths ?? [],
         boardProject: migration.boardProject ?? null,
@@ -5738,7 +5747,7 @@ export class AgentRegistry {
     id: ViewerConversationId,
     expectedRevision: number,
     expectedPhases: ConversationMigration["phase"][],
-    patch: Partial<Pick<ConversationMigration, "phase" | "error" | "errorCode" | "providerReceipt" | "targetId" | "revision">>,
+    patch: Partial<Pick<ConversationMigration, "phase" | "error" | "errorCode" | "providerReceipt" | "successorLaunchProfile" | "targetId" | "revision">>,
   ): RegistryConversation {
     return this.mutate((file) => {
       const conversation = file.conversations[resolveConversationAlias(file, id)];
@@ -5883,6 +5892,9 @@ export class AgentRegistry {
           ? current.operationId
           : crypto.randomUUID(),
         sourceGenerationId: source.id,
+        successorLaunchProfile: current.revision === intent.revision
+          ? current.successorLaunchProfile ?? null
+          : null,
         providerReceipt: null,
         pendingContinuityPaths: current.phase === "committed" ? [] : current.pendingContinuityPaths,
         boardProject: current.boardProject,
