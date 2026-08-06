@@ -852,6 +852,31 @@ test("a legacy pending seat recovers runtime metadata from its launch settlement
   expect(readOrchestratorRecord()).toMatchObject({ engine: "codex", model: "gpt-5.6-sol" });
 });
 
+test("an unsettled legacy pending seat fails closed when runtime provenance is unavailable", async () => {
+  seedPendingLaunchIntent({
+    clientRequestId: "req_legacy_unknown",
+    launchId: "launch_legacy_unknown",
+    legacyRuntimeShape: true,
+  });
+  const { deps, recorded } = dependencies();
+
+  const replay = await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "own the board",
+    clientRequestId: "req_legacy_unknown",
+    engine: "codex",
+    model: "gpt-5.6-sol",
+    cwd: "/tmp",
+  }, deps);
+
+  expect(replay).toMatchObject({
+    status: 409,
+    body: { code: "legacy_runtime_identity_unavailable" },
+  });
+  expect(recorded.spawns).toEqual([]);
+  expect(orchestratorSeatFor("proj-a").pending?.intent.error).toContain("runtime identity");
+});
+
 test("a pending intent whose launch terminally failed records the failure and stops blocking a fresh designation", async () => {
   seedPendingLaunchIntent({ clientRequestId: "req_00000050", launchId: "launch_42" });
 

@@ -548,6 +548,18 @@ export async function executeOrchestratorSeatRequest(
     return replayedSeatResponse(repaired);
   }
   if (begun.kind === "in_progress") return inProgressSeatResponse(begun.seat);
+  if (begun.kind === "replay" && begun.seat.runtimeIdentityFrozen !== true) {
+    const error = "legacy pending orchestrator runtime identity is unavailable; retry the designation with a new clientRequestId";
+    failOrchestratorSeatIntent(project, clientRequestId, error);
+    return {
+      status: 409,
+      body: {
+        error,
+        code: "legacy_runtime_identity_unavailable",
+        seat: orchestratorSeatFor(project).pending,
+      },
+    };
+  }
   /* A pending replay spawns the ORIGINAL intent's mandate: the spawn receipt is
      matched by clientAttemptId AND request digest, so a recomposed retry would
      otherwise conflict with its own first attempt. */
