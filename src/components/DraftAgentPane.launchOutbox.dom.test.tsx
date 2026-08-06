@@ -42,10 +42,10 @@ afterEach(() => {
   resetOutboxForTests();
 });
 
-function stubFetch(post: () => Response) {
+function stubFetch(post: (init?: RequestInit) => Response) {
   globalThis.fetch = (async (input: string, init?: RequestInit) => {
     const url = String(input);
-    if (url === "/api/spawn" && init?.method === "POST") return post();
+    if (url === "/api/spawn" && init?.method === "POST") return post(init);
     if (url.startsWith("/api/spawn?")) return { ok: true, json: async () => ({ dirs: ["/repo"] }) } as Response;
     if (url === "/api/accounts") return { ok: true, json: async () => ({ codex: { active: "terra", accounts: [] } }) } as Response;
     if (url === "/api/roles") return { ok: true, json: async () => ({ roles: [] }) } as Response;
@@ -71,14 +71,19 @@ async function launchWithPrompt(prompt: string) {
 }
 
 test("a launched spawn seeds the prompt as the conversation's first launch-owned bubble", async () => {
-  stubFetch(() => ({
-    ok: true,
-    status: 200,
-    json: async () => ({ ok: true, state: "settled", launched: true, path: "/real/rollout.jsonl", launchId: "launch-seed", conversationId: "conversation_seed" }),
-  } as Response));
+  let posted: Record<string, unknown> | null = null;
+  stubFetch((init) => {
+    posted = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, state: "settled", launched: true, path: "/real/rollout.jsonl", launchId: "launch-seed", conversationId: "conversation_seed" }),
+    } as Response;
+  });
 
   const { textarea } = await launchWithPrompt("the operator's first ask");
 
+  expect(posted).toMatchObject({ title: "claude · the operator's first ask" });
   // The composer cleared, and the prompt now lives in the durable outbox under
   // the conversation identity as a launch-owned bubble.
   expect(textarea.value).toBe("");

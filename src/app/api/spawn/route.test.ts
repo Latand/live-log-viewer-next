@@ -5,6 +5,8 @@ import path from "node:path";
 import { afterAll, expect, test } from "bun:test";
 import { NextRequest } from "next/server";
 
+import { createSpawnAttempt, spawnRequestBody } from "@/components/draftSpawn";
+import { orchestratorSpawnBody } from "@/components/orchestratorChat";
 import { agentRegistry, AgentRegistry } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { codexSessionRoots, createManagedCodexAccount } from "@/lib/accounts/codex";
@@ -104,6 +106,62 @@ test("new semantic, empty, and image-only prompts require an explicit semantic t
     const rejected = await post(body);
     expect(rejected.status).toBe(400);
     expect(await rejected.json()).toEqual({ error: "title is required for every new spawn" });
+  }
+});
+
+test("Viewer draft and orchestrator request builders pass public spawn admission", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "viewer-request-admission-"));
+  const store = registry();
+  const previous = {
+    transport: process.env.LLV_SPAWN_TRANSPORT,
+    hosts: process.env.LLV_STRUCTURED_HOSTS,
+    events: process.env.LLV_RUNTIME_EVENTS,
+    socket: process.env.LLV_RUNTIME_HOST_SOCKET,
+    ui: process.env.NEXT_PUBLIC_RUNTIME_UI,
+  };
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  try {
+    const draftBody = spawnRequestBody(createSpawnAttempt("viewer_draft_admission_20260806", Date.now(), {
+      title: "claude · inspect release readiness",
+      engine: "claude",
+      model: "claude-sonnet-4-6",
+      cwd,
+      effort: "low",
+      fast: null,
+      accountId: "",
+      ["prompt"]: "Inspect release readiness",
+      images: [],
+      src: "",
+    }));
+    const dependencies = { ...structuredRouteDependencies(cwd), registry: () => store };
+    for (const body of [draftBody, orchestratorSpawnBody(cwd)]) {
+      const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+        method: "POST",
+        headers: {
+          origin: "http://127.0.0.1",
+          host: "127.0.0.1",
+          "content-type": "application/json",
+          "sec-fetch-site": "same-origin",
+        },
+        body: JSON.stringify(body),
+      }), dependencies);
+      expect(response.status).toBe(202);
+    }
+  } finally {
+    for (const [key, value] of Object.entries({
+      LLV_SPAWN_TRANSPORT: previous.transport,
+      LLV_STRUCTURED_HOSTS: previous.hosts,
+      LLV_RUNTIME_EVENTS: previous.events,
+      LLV_RUNTIME_HOST_SOCKET: previous.socket,
+      NEXT_PUBLIC_RUNTIME_UI: previous.ui,
+    })) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 });
 

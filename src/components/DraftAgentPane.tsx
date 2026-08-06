@@ -32,6 +32,7 @@ import {
   classifySpawnResponse,
   classifyTransportLoss,
   createSpawnAttempt,
+  draftSpawnTitle,
   displayPhase,
   hasRecoverableRequest,
   matchSpawnedFile,
@@ -806,6 +807,7 @@ export function DraftAgentPane({
     }
     if (!payloadText.trim() && !attachments.images.length) return;
     const candidate = createSpawnAttempt(newAttemptId(), Date.now(), {
+      title: draftSpawnTitle(engine, roleId, payloadText, attachments.images.length),
       engine,
       model,
       cwd: cwd.trim(),

@@ -1,4 +1,5 @@
 import type { FileEntry } from "@/lib/types";
+import { derivedSpawnTitle, durableSemanticTitle } from "@/lib/title";
 
 /* The draft spawn lifecycle, as a pure module the pane renders from.
  *
@@ -33,6 +34,8 @@ export interface SpawnImage {
 
 /** Request fields that must survive a reload while POST is in flight. */
 export interface RecoverableSpawnRequest {
+  /** Semantic identity frozen before the POST and replayed byte-for-byte. */
+  title: string;
   engine: DraftEngine;
   model: string;
   cwd: string;
@@ -111,6 +114,19 @@ export function createSpawnAttempt(clientAttemptId: string, at: number, request:
   };
 }
 
+/** Freeze a human-readable title from the role and operator's first line. An
+    image-only draft still names its concrete action without a generic session
+    placeholder. */
+export function draftSpawnTitle(
+  engine: DraftEngine,
+  role: string | null | undefined,
+  prompt: string,
+  imageCount: number,
+): string {
+  const imageFallback = imageCount === 1 ? "Analyze attached image" : "Analyze attached images";
+  return derivedSpawnTitle(role || engine, prompt, imageFallback);
+}
+
 /** Validates records before a reload replays them. Missing or altered fields
     leave the card frozen until exact recovery data arrives. */
 export function hasRecoverableRequest(attempt: SpawnAttempt): attempt is SpawnAttempt & { request: RecoverableSpawnRequest } {
@@ -119,6 +135,7 @@ export function hasRecoverableRequest(attempt: SpawnAttempt): attempt is SpawnAt
     request &&
     (request.engine === "claude" || request.engine === "codex") &&
     request.engine === attempt.engine &&
+    durableSemanticTitle(request.title, 120) !== null &&
     typeof request.model === "string" &&
     typeof request.cwd === "string" && request.cwd.length > 0 &&
     typeof request.effort === "string" &&
@@ -140,6 +157,7 @@ export function hasRecoverableRequest(attempt: SpawnAttempt): attempt is SpawnAt
 export function spawnRequestBody(attempt: SpawnAttempt & { request: RecoverableSpawnRequest }): Record<string, unknown> {
   const { request } = attempt;
   return {
+    title: request.title,
     engine: request.engine,
     ...(request.model ? { model: request.model } : {}),
     cwd: request.cwd,

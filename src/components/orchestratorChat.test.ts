@@ -29,7 +29,14 @@ function fetchStub(handlers: Record<string, (init?: RequestInit) => Response>): 
 
 test("spawn body carries the opus-low orchestrator preset and the system prompt", () => {
   const body = orchestratorSpawnBody("/repo");
-  expect(body).toMatchObject({ engine: "claude", model: "opus", effort: "low", role: "orchestrator", cwd: "/repo" });
+  expect(body).toMatchObject({
+    title: "Viewer orchestrator",
+    engine: "claude",
+    model: "opus",
+    effort: "low",
+    role: "orchestrator",
+    cwd: "/repo",
+  });
   expect(String(body.prompt)).toContain("NEVER auto-start pipelines");
 });
 
@@ -52,7 +59,7 @@ test("an empty slot spawns, adopts, and returns the canonical winner", async () 
   });
   expect(await openOrchestratorConversation(fetch)).toBe("conv-winner");
   const spawnBody = JSON.parse(String(calls[1]!.init?.body)) as Record<string, unknown>;
-  expect(spawnBody).toMatchObject({ role: "orchestrator", cwd: "/repo", effort: "low" });
+  expect(spawnBody).toMatchObject({ title: "Viewer orchestrator", role: "orchestrator", cwd: "/repo", effort: "low" });
   const adoptBody = JSON.parse(String(calls[2]!.init?.body)) as Record<string, unknown>;
   expect(adoptBody).toEqual({ conversationId: "conv-new", path: "/new.jsonl" });
 });
