@@ -266,6 +266,90 @@ test("get_conversation deadlines a targeted miss without orphan work", async () 
   expect(counts.rawScans).toBe(0);
 });
 
+test("get_conversation returns hydrated records when the deadline lands after the partial exists", async () => {
+  const { injected } = dependencies({ completedTranscript: false });
+  const domain = injected as unknown as {
+    targetedFileEntry(pathname: string): Promise<{
+      entry: ReturnType<typeof scanRow>;
+      session: {
+        path: string;
+        engine: "codex";
+        messages: Array<{ kind: "message"; role: "assistant"; ts: null; text: string }>;
+        reasoning: [];
+        tools: [];
+        traces: [];
+      };
+    }>;
+  };
+  domain.targetedFileEntry = async () => {
+    await Bun.sleep(20);
+    return {
+      entry: scanRow(0),
+      session: {
+        path: transcriptPath,
+        engine: "codex",
+        messages: [{ kind: "message", role: "assistant", ts: null, text: "partial answer" }],
+        reasoning: [],
+        tools: [],
+        traces: [],
+      },
+    };
+  };
+  const bindings = viewerMcpBindings(undefined, undefined, injected);
+
+  const result = await bindings.get_conversation(
+    { clientRequestId: "get-deadline-partial", transcriptPath, maxRecords: 8 },
+    { deadlineAt: Date.now() + 5 },
+  ) as { messages: Array<{ text: string }>; truncated: boolean; hint: string };
+
+  expect(result.messages).toEqual([{ kind: "message", role: "assistant", ts: null, text: "partial answer" }]);
+  expect(result.truncated).toBe(true);
+  expect(result.hint).toContain("internal read deadline");
+});
+
+test("get_conversation returns a bounded partial from a synthetic 100 MiB transcript", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-large-conversation-"));
+  sandboxes.push(directory);
+  const root = path.join(directory, "sessions");
+  fs.mkdirSync(root);
+  const pathname = path.join(root, "rollout-large.jsonl");
+  fs.writeFileSync(pathname, "");
+  fs.truncateSync(pathname, 100 * 1024 * 1024);
+  fs.appendFileSync(pathname, `\n${[
+    JSON.stringify({ type: "session_meta", payload: { id: "large-fixture", timestamp: "2026-07-01T09:00:00.000Z", cwd: "/repo/fixture" } }),
+    ...Array.from({ length: 12 }, (_value, index) => JSON.stringify({
+      type: "response_item",
+      payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: `partial-${index}` }] },
+    })),
+  ].join("\n")}\n`);
+  const pathAllowed = (candidate: string) => {
+    try { return fs.realpathSync(candidate).startsWith(fs.realpathSync(root) + path.sep); } catch { return false; }
+  };
+  const injected = {
+    completedFileScan: ({ signal }: { signal?: AbortSignal } = {}) => new Promise((_resolve, reject) => {
+      signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+    }),
+    targetedFileEntry: (candidate: string, context: { signal?: AbortSignal; deadlineAt?: number } = {}) => targetedConversationAtPath(
+      candidate,
+      context,
+      { roots: [["codex-sessions", root]], pathAllowed },
+    ),
+    listFiles: async () => { throw new Error("large reads must stay off the corpus scan path"); },
+  } as never;
+  const bindings = viewerMcpBindings(undefined, undefined, injected);
+  const startedAt = performance.now();
+
+  const result = await bindings.get_conversation(
+    { clientRequestId: "get-large-partial", transcriptPath: pathname, maxRecords: 8 },
+    { deadlineAt: Date.now() + 2_000 },
+  ) as { messages: Array<{ text: string }>; truncated: boolean; hint: string };
+
+  expect(performance.now() - startedAt).toBeLessThan(2_000);
+  expect(result.messages.map((message) => message.text)).toEqual(Array.from({ length: 8 }, (_value, index) => `partial-${index + 4}`));
+  expect(result.truncated).toBe(true);
+  expect(result.hint).toContain("oversized transcript");
+});
+
 test("targeted conversation opens one canonical regular transcript and retains its title", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-targeted-open-"));
   sandboxes.push(directory);

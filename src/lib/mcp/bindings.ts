@@ -676,6 +676,19 @@ function throwIfCallEnded(context: McpToolCallContext): void {
   }
 }
 
+function callDeadlineExceeded(context: McpToolCallContext): boolean {
+  if (context.signal?.aborted) return context.signal.reason instanceof DeadlineExceededError;
+  return context.deadlineAt !== undefined && Date.now() >= context.deadlineAt;
+}
+
+const PARTIAL_CONVERSATION_DEADLINE_HINT = "Returned records parsed before the internal read deadline; use tailLines with conversationId for the cheapest recent transcript view.";
+const PARTIAL_CONVERSATION_OVERSIZE_HINT = "Returned a bounded tail of this oversized transcript; use tailLines with conversationId for a smaller raw tail.";
+const PARTIAL_CONVERSATION_RECORD_HINT = "More parsed records are available; raise maxRecords up to 500 or use tailLines with conversationId.";
+const MCP_CONVERSATION_CATALOG_BUDGET_MS = 250;
+/* readSession intentionally parses at most the final 8 MiB. Keep the response
+   honest when a larger transcript has an omitted prefix. */
+const MCP_CONVERSATION_PARSE_WINDOW_BYTES = 8 * 1024 * 1024;
+
 function contained(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
   return relative !== "" && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
@@ -695,6 +708,8 @@ function rootForTranscript(
 export interface TargetedConversationRead {
   entry: FileEntry;
   session: SessionReadResult;
+  truncated?: true;
+  hint?: string;
 }
 
 export interface TargetedConversationDependencies {
@@ -826,11 +841,16 @@ export async function targetedConversationAtPath(
     overlaySessionTitles([entry]);
     if (entry.engine !== "claude" && entry.engine !== "codex") return undefined;
     const session = { ...readSession(stablePath, entry.engine), path: pathname };
-    throwIfCallEnded(context);
+    const partialAtDeadline = callDeadlineExceeded(context);
+    if (!partialAtDeadline) throwIfCallEnded(context);
     if (!sameOpenedTranscript(pathname, root, stat, dependencies.pathAllowed)) return undefined;
     if (sidecarDescriptor !== null && sidecarPath !== null && sidecarStat !== null
       && !sameOpenedTranscript(sidecarPath, root, sidecarStat, dependencies.pathAllowed)) return undefined;
-    return { entry, session };
+    return {
+      entry,
+      session,
+      ...(partialAtDeadline ? { truncated: true as const, hint: PARTIAL_CONVERSATION_DEADLINE_HINT } : {}),
+    };
   } finally {
     if (stableDirectory !== null) fs.rmSync(stableDirectory, { recursive: true, force: true });
     if (sidecarDescriptor !== null) fs.closeSync(sidecarDescriptor);
@@ -853,34 +873,61 @@ async function entryForPath(
   transcriptPath: string,
   dependencies: Pick<ViewerMcpDomainDependencies, "listFiles" | "completedFileScan" | "targetedFileEntry">,
   context: McpToolCallContext = {},
-): Promise<{ entry: FileEntry; session?: SessionReadResult } | undefined> {
+): Promise<{ entry: FileEntry; session?: SessionReadResult; truncated?: true; hint?: string } | undefined> {
   throwIfCallEnded(context);
-  const timeoutMs = context.deadlineAt === undefined
+  const remainingMs = context.deadlineAt === undefined
     ? Number.POSITIVE_INFINITY
     : Math.max(0, context.deadlineAt - Date.now());
-  const deadline = deadlineSignal(timeoutMs, {
+  const overall = deadlineSignal(remainingMs, {
     signal: context.signal,
     reason: "MCP tool deadline exceeded",
   });
+  const catalog = deadlineSignal(Math.min(MCP_CONVERSATION_CATALOG_BUDGET_MS, remainingMs), {
+    reason: "MCP conversation catalog budget exceeded",
+  });
   try {
-    const completed = (await dependencies.completedFileScan({ signal: deadline.signal })).snapshot.files;
-    const known = completed.find((candidate) => candidate.path === transcriptPath);
-    if (known) return { entry: known };
+    try {
+      let releaseCatalogWait = () => undefined;
+      const catalogWait = new Promise<never>((_resolve, reject) => {
+        const onAbort = () => reject(catalog.signal.reason);
+        catalog.signal.addEventListener("abort", onAbort, { once: true });
+        releaseCatalogWait = () => catalog.signal.removeEventListener("abort", onAbort);
+      });
+      const completedRead = dependencies.completedFileScan({ signal: overall.signal });
+      const completed = (await Promise.race([completedRead, catalogWait]).finally(releaseCatalogWait)).snapshot.files;
+      const known = completed.find((candidate) => candidate.path === transcriptPath);
+      if (known) return { entry: known };
+    } catch (error) {
+      if (overall.signal.aborted) {
+        const reason = overall.signal.reason;
+        throw reason instanceof Error ? reason : error;
+      }
+      if (!catalog.signal.aborted) throw error;
+      /* The completed catalog did not arrive within its small share of the
+         budget. Continue through the path-pinned reader while useful time
+         remains; that read is bounded independently of corpus size. */
+    }
     if (dependencies.targetedFileEntry) {
       const targeted = await dependencies.targetedFileEntry(transcriptPath, {
-        signal: deadline.signal,
+        signal: overall.signal,
         deadlineAt: context.deadlineAt,
       });
       if (!targeted) return undefined;
-      return "entry" in targeted ? targeted : { entry: targeted };
+      if (!("entry" in targeted)) return { entry: targeted };
+      const partialAtDeadline = callDeadlineExceeded({ signal: overall.signal, deadlineAt: context.deadlineAt });
+      if (!partialAtDeadline) throwIfCallEnded({ signal: overall.signal, deadlineAt: context.deadlineAt });
+      return partialAtDeadline
+        ? { ...targeted, truncated: true, hint: PARTIAL_CONVERSATION_DEADLINE_HINT }
+        : targeted;
     }
     /* Compatibility for older injected test adapters. Production always owns
        the targeted seam above. */
-    const pinned = await dependencies.listFiles({ fresh: true, persist: false, pin: transcriptPath, signal: deadline.signal });
+    const pinned = await dependencies.listFiles({ fresh: true, persist: false, pin: transcriptPath, signal: overall.signal });
     const entry = pinned.find((candidate) => candidate.path === transcriptPath);
     return entry ? { entry } : undefined;
   } finally {
-    deadline.release();
+    catalog.release();
+    overall.release();
   }
 }
 
@@ -959,10 +1006,22 @@ async function getConversation(
   const targeted = await entryForPath(transcriptPath, dependencies, context);
   const entry = targeted?.entry;
   if (!entry || (entry.engine !== "claude" && entry.engine !== "codex")) throw new Error("conversation not found");
-  throwIfCallEnded(context);
+  if (!targeted?.session) throwIfCallEnded(context);
   const session = targeted.session ?? readSession(entry.path, entry.engine);
-  throwIfCallEnded(context);
+  const partialAtDeadline = targeted.truncated === true || callDeadlineExceeded(context);
+  if (!partialAtDeadline) throwIfCallEnded(context);
   const maxRecords = Math.max(1, Math.min(500, integer(args.maxRecords, 100)));
+  const recordTruncated = session.messages.length > maxRecords || session.tools.length > maxRecords;
+  const oversized = entry.size > MCP_CONVERSATION_PARSE_WINDOW_BYTES;
+  const truncated = partialAtDeadline || oversized || recordTruncated;
+  const hint = targeted.hint
+    ?? (partialAtDeadline
+      ? PARTIAL_CONVERSATION_DEADLINE_HINT
+      : oversized
+        ? PARTIAL_CONVERSATION_OVERSIZE_HINT
+        : recordTruncated
+          ? PARTIAL_CONVERSATION_RECORD_HINT
+          : undefined);
   return redactPayload({
     conversationId: (conversation?.id ?? entry.conversationId ?? requestedId) || null,
     transcriptPath: entry.path,
@@ -971,6 +1030,8 @@ async function getConversation(
     engine: entry.engine,
     messages: session.messages.slice(-maxRecords),
     tools: session.tools.slice(-maxRecords),
+    truncated,
+    ...(hint ? { hint } : {}),
     ...selectedContextEcho(selected.target),
   });
 }
