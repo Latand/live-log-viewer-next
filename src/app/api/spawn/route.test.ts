@@ -112,7 +112,18 @@ test("new semantic, empty, and image-only prompts require an explicit semantic t
   expect(punctuationOnly.status).toBe(400);
   expect(await punctuationOnly.json()).toEqual({ error: "title must be a semantic, non-placeholder string" });
 
-  for (const title of ["Codex-session", "Claude/session", "Codex · session", "Claude: session"]) {
+  for (const title of [
+    "Codex-session",
+    "Claude/session",
+    "Codex · session",
+    "Claude: session",
+    "Codex_session",
+    "Claude_session",
+    "Codex*session",
+    "Claude#session",
+    "Codex>session",
+    "Claude~session",
+  ]) {
     const placeholder = await post({ title, prompt: "inspect the release" });
     expect(placeholder.status).toBe(400);
     expect(await placeholder.json()).toEqual({ error: "title must be a semantic, non-placeholder string" });

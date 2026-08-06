@@ -776,7 +776,7 @@ function mergeResumeLaunchProfile(current: LaunchProfile, requested: LaunchProfi
     /* The plugin grant was decided at spawn from the session's origin; a
        resume replays the durable value and can never widen it (issue #687). */
     plugins: current.plugins ?? [],
-    title: durableSemanticTitle(requested.title) ?? durableSemanticTitle(current.title),
+    title: durableSemanticTitle(current.title) ?? durableSemanticTitle(requested.title),
     project: requested.project ?? current.project,
     parentConversationId: requested.parentConversationId ?? current.parentConversationId,
     role: current.role === "root" || requested.role === "root" ? "root" : "worker",
