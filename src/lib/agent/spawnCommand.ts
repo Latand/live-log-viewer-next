@@ -39,7 +39,7 @@ import { adoptPipelineAttemptFromSource, pipelineAttemptTargetForSource } from "
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { projectDirectoryCandidates } from "@/lib/scanner/projectDirectories";
-import { derivedSpawnTitle, firstPromptLine, semanticTitle } from "@/lib/title";
+import { derivedSpawnTitle, durableSemanticTitle, firstPromptLine } from "@/lib/title";
 import { buildImagePayload, collectImagePayloads, deleteInboxImages, spawnAgentWithPrompt, verifyTmuxHostEvidence } from "@/lib/tmux";
 import { en } from "@/lib/i18n/en";
 import { uk } from "@/lib/i18n/uk";
@@ -248,7 +248,7 @@ export async function executeSpawnRequest(
   if (imageError) {
     return NextResponse.json({ error: imageError.error }, { status: imageError.status });
   }
-  const explicitTitle = body.title === undefined ? null : semanticTitle(
+  const explicitTitle = body.title === undefined ? null : durableSemanticTitle(
     typeof body.title === "string" ? body.title : null,
     120,
   );
@@ -364,7 +364,7 @@ export async function executeSpawnRequest(
     const identityWaveTitleReplay = existingAttempt?.identityWaveTitleBackfill === true
       && deterministicTitleReplay;
     const requestProfileTitle = identityWaveTitleReplay
-      ? semanticTitle(existingAttempt.launchProfile.title, 120) ?? launchTitle
+      ? durableSemanticTitle(existingAttempt.launchProfile.title, 120) ?? launchTitle
       : launchTitle;
     const lineage = resolveSpawnLineage(spawnLineageSelectorForCaller(authenticatedCaller, {
       ...body,
@@ -457,7 +457,7 @@ export async function executeSpawnRequest(
       if (identityWaveTitleReplay) {
         return existingAttempt.requestDigest === digests.current ? digests.current : digests.withoutTitle;
       }
-      const existingSemanticTitle = semanticTitle(existingAttempt?.launchProfile.title, 120);
+      const existingSemanticTitle = durableSemanticTitle(existingAttempt?.launchProfile.title, 120);
       if (!existingAttempt || !existingSemanticTitle || existingSemanticTitle === launchTitle) {
         return existingAttempt?.requestDigest === digests.current ? digests.current : digests.withoutTitle;
       }

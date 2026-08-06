@@ -259,7 +259,7 @@ test("registry resume receives one conversation-bound capability at central actu
     engine: "codex",
     path: PATHNAME,
     accountId: "terra",
-    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Resume durable identity" }),
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Resume issue #913 identity" }),
     turn: { state: "idle", source: "empty", terminalAt: null },
     observedAt: "2026-08-05T00:00:00.000Z",
   }]);
@@ -280,8 +280,8 @@ test("registry resume receives one conversation-bound capability at central actu
 
   expect(registry.conversationIdForSpawnCapabilityDigest(previousDigest)).toBeNull();
   expect(registry.conversationIdForSpawnCapabilityDigest(digest)).toBe(conversation.id);
-  expect(prepared.receipt.launchProfile.title).toBe("Resume durable identity");
-  expect(prepared.spec.launchProfile?.title).toBe("Resume durable identity");
+  expect(prepared.receipt.launchProfile.title).toBe("Resume issue #913 identity");
+  expect(prepared.spec.launchProfile?.title).toBe("Resume issue #913 identity");
   expect(launchSpec.command.match(/LLV_SPAWN_CAPABILITY=/g)).toHaveLength(1);
   fs.rmSync(directory, { recursive: true, force: true });
 });

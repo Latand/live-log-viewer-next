@@ -6,7 +6,7 @@ import type { ResumeSpec } from "@/lib/agent/cli";
 import { agentRegistry, type AgentRegistry, type ProcessIdentity } from "@/lib/agent/registry";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 import { procBackend } from "@/lib/proc";
-import { derivedSpawnTitle, semanticTitle } from "@/lib/title";
+import { derivedSpawnTitle, durableSemanticTitle } from "@/lib/title";
 
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
 import { reconcileDeadStructuredRegistryHost } from "./registry";
@@ -104,7 +104,7 @@ function candidateFor(
   });
   const profile = emptyLaunchProfile({
     ...inheritedProfile,
-    title: semanticTitle(inheritedProfile.title, 120) ?? derivedSpawnTitle(
+    title: durableSemanticTitle(inheritedProfile.title, 120) ?? derivedSpawnTitle(
       "recovery",
       inheritedProfile.goal?.objective ?? inheritedProfile.cwd,
       "Conversation recovery",

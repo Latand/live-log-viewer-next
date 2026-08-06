@@ -26,7 +26,7 @@ import {
   type SpawnedPane,
 } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
-import { derivedSpawnTitle, semanticTitle } from "@/lib/title";
+import { derivedSpawnTitle, durableSemanticTitle } from "@/lib/title";
 
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 const MAX_ANCESTRY_HOPS = 64;
@@ -783,8 +783,8 @@ export function beginRegistryResume(
     ...(current?.launchProfile ?? {}),
     ...(spec.launchProfile ?? {}),
     cwd: spec.launchProfile?.cwd || current?.launchProfile.cwd || spec.cwd,
-    title: semanticTitle(current?.launchProfile.title, 120)
-      ?? semanticTitle(spec.launchProfile?.title, 120)
+    title: durableSemanticTitle(current?.launchProfile.title, 120)
+      ?? durableSemanticTitle(spec.launchProfile?.title, 120)
       ?? derivedSpawnTitle("resume", current?.launchProfile.goal?.objective ?? spec.cwd, "Conversation resume"),
   });
   const begun = registry.beginSpawnRequest({

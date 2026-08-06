@@ -15,7 +15,7 @@ import { isNativeCodexSubagentTranscript } from "@/lib/scanner/codexNative";
 import { enqueueStructuredMessage } from "@/lib/runtime/structuredMessageDelivery";
 import { recoverDeadStructuredConversation } from "@/lib/runtime/structuredRecovery";
 import { isShellCommand } from "@/lib/status";
-import { cleanTitle, firstPromptLine, semanticTitle } from "@/lib/title";
+import { cleanTitle, durableSemanticTitle, firstPromptLine, semanticTitle } from "@/lib/title";
 import { killPane, paneInfo, spawnAgentWithPrompt, TmuxDeliveryUncertainError } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 
@@ -215,12 +215,12 @@ export function reserveReviewerSpawn(
     .digest("hex")
     .slice(0, 24);
   const clientAttemptId = `flow_${flow.id}_${correlation}`;
-  const reservedTitle = semanticTitle(
+  const reservedTitle = durableSemanticTitle(
     registry.spawnReceiptForClientAttempt(clientAttemptId)?.launchProfile.title,
     120,
   );
   const flowTitle = firstPromptLine(flow.spec ?? "", 80)
-    ?? semanticTitle(owner.generations.at(-1)?.launchProfile.title, 80)
+    ?? durableSemanticTitle(owner.generations.at(-1)?.launchProfile.title, 80)
     ?? semanticTitle(flow.project, 80)
     ?? "Review flow";
   const reviewerTitle = reservedTitle ?? cleanTitle(`${flowTitle} · review round ${round.n}`, 120);
