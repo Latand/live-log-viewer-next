@@ -827,6 +827,34 @@ export function retryOutbox(cardId: string, id: string): void {
   write(cardId, queue.map((item) => (item.id === id ? { ...item, state: "queued", error: undefined } : item)));
 }
 
+/**
+ * Re-bind a queued submission's echo identity to the text the dispatcher will
+ * actually deliver. The composer composes the wire payload at dispatch time —
+ * a viewer-context prelude or a drained bridge turn can scaffold the operator's
+ * draft — and the transcript echoes THAT text, not the raw draft the bubble
+ * displays. Without the re-bind the echo can never match and the delivered
+ * bubble lingers in the tail until the TTL. The submission watermark is
+ * recomputed against the composed key: every current ledger occurrence of the
+ * composed text predates this delivery, so only a LATER echo may retire it.
+ */
+export function rebindOutboxEchoText(cardId: string, id: string, echoText: string): void {
+  const queue = readOutbox(cardId);
+  const entry = queue.find((item) => item.id === id);
+  if (!entry || entry.retiredEchoId) return;
+  const key = echoKey(echoText);
+  if (!key || echoKey(entry.echoText ?? entry.text) === key) return;
+  const baselineIds = readEchoLedger(cardId)
+    .filter((echo) => echo.key === key)
+    .map((echo) => echo.id);
+  write(cardId, queue.map((item) => {
+    if (item.id !== id) return item;
+    const rebound = { ...item, echoText, echoBaseline: baselineIds.length };
+    if (baselineIds.length) rebound.echoBaselineIds = baselineIds;
+    else delete rebound.echoBaselineIds;
+    return rebound;
+  }));
+}
+
 /** Move a whole queue onto a new conversation identity (provisional-id adoption,
     a materialized launch, a migration successor). Records already filed under
     the new identity win, so an adoption is idempotent. */

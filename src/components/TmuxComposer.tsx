@@ -32,6 +32,7 @@ import {
   markOutboxResponded,
   outboxHistory,
   outboxStateForReceiptStatus,
+  rebindOutboxEchoText,
   transcriptEchoCount,
   updateOutbox,
   useOutbox,
@@ -1714,6 +1715,14 @@ export function TmuxComposerCore({
          returns to the queue and the dispatcher retries when it clears. */
       if (outboxId) updateOutbox(cardId, outboxId, { state: "queued" });
       return;
+    }
+    /* The wire payload was scaffolded past the raw draft (viewer prelude,
+       drained bridge turn): the transcript will echo the SCAFFOLDED text, so
+       the queued bubble's echo identity re-binds to it before delivery —
+       otherwise its echo never matches and the delivered bubble lingers in the
+       tail below the agent's newer output. */
+    if (outboxId && payloadText !== requestedText) {
+      rebindOutboxEchoText(cardId, outboxId, payloadText);
     }
     /* A legacy dead host keeps its draft local. Structured ownership admits a
        text-only message durably and uses that request to recover its engine host.
