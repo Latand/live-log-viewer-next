@@ -20,6 +20,10 @@ test("legacy engine placeholders have no semantic title value", () => {
     "Claude session!",
     "(Codex session)",
     "— Claude —",
+    "Codex-session",
+    "Claude/session",
+    "Codex · session",
+    "Claude: session",
   ]) {
     expect(isGenericSessionTitle(placeholder)).toBeTrue();
     expect(durableSemanticTitle(placeholder)).toBeNull();
@@ -27,6 +31,7 @@ test("legacy engine placeholders have no semantic title value", () => {
   }
   expect(semanticTitle("Implement registry identity")).toBe("Implement registry identity");
   expect(durableSemanticTitle("Review issue #913")).toBe("Review issue #913");
+  expect(durableSemanticTitle("Codex session migration")).toBe("Codex session migration");
 });
 
 test("punctuation-only values are not durable semantic titles", () => {
