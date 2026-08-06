@@ -10,9 +10,11 @@ import { z } from "zod";
 
 import { statePath } from "@/lib/configDir";
 import { DeadlineExceededError, deadlineSignal } from "@/lib/deadline";
+import { DEFAULT_STALL_AFTER_MS } from "@/lib/lifecycle/liveness";
+import { PIPELINE_LIST_DEFAULT_LIMIT, PIPELINE_LIST_MAX_LIMIT } from "@/lib/pipelines/listProjection";
 import { PIPELINE_ACTIONS } from "@/lib/pipelines/types";
 import { procBackend } from "@/lib/proc";
-import { ROLE_IDS } from "@/lib/roles/types";
+import { ROLE_IDS, type RoleId } from "@/lib/roles/types";
 import { SELECTED_TAIL_MAX_LINES } from "@/lib/selection/resolve";
 import {
   MAX_SCOPE_PATHS, MAX_SNAPSHOT_CHARS_PER_CONVERSATION, MAX_SNAPSHOT_LAST_MESSAGES, MAX_SNAPSHOT_STRING_LENGTH,
@@ -121,6 +123,137 @@ export interface McpToolCallContext {
 }
 export type McpToolBinding = (args: McpToolArgs, context?: McpToolCallContext) => Promise<McpToolPayload>;
 export type McpToolBindings = Record<McpToolName, McpToolBinding>;
+
+export interface McpBoundedNumericArg {
+  path: readonly string[];
+  min: number;
+  max: number;
+  fallback: number;
+  role?: RoleId;
+}
+
+/**
+ * Agent-facing numeric bounds whose nearest-valid interpretation is harmless.
+ *
+ * Deliberately absent: flow_action.rounds (operator mutation),
+ * operator_snapshot.caller.pid (process identity),
+ * conversation_migration.expectedRevision (concurrency identity), and
+ * bridge_directive.utterance/ref (durable delivery identity). Those values keep
+ * exact validation at the protocol boundary.
+ */
+export const MCP_BOUNDED_NUMERIC_ARGS: Partial<Record<McpToolName, readonly McpBoundedNumericArg[]>> = {
+  spawn_agent: [
+    { path: ["roleParams", "maxWorkers"], min: 1, max: 20, fallback: 3, role: "orchestrator" },
+    { path: ["roleParams", "parallelN"], min: 1, max: 8, fallback: 1, role: "reviewer" },
+  ],
+  list_conversations: [
+    { path: ["limit"], min: 1, max: 100, fallback: 50 },
+  ],
+  get_conversation: [
+    { path: ["maxRecords"], min: 1, max: 500, fallback: 100 },
+    { path: ["tailLines"], min: 1, max: SELECTED_TAIL_MAX_LINES, fallback: 1 },
+  ],
+  board_snapshot: [
+    { path: ["limit"], min: 1, max: 200, fallback: 100 },
+  ],
+  list_flows: [
+    { path: ["limit"], min: 1, max: 200, fallback: 100 },
+  ],
+  list_pipelines: [
+    { path: ["limit"], min: 1, max: PIPELINE_LIST_MAX_LIMIT, fallback: PIPELINE_LIST_DEFAULT_LIMIT },
+  ],
+  operator_snapshot: [
+    { path: ["text", "lastMessages"], min: 1, max: MAX_SNAPSHOT_LAST_MESSAGES, fallback: 6 },
+    { path: ["text", "maxCharsPerConversation"], min: 1, max: MAX_SNAPSHOT_CHARS_PER_CONVERSATION, fallback: 3_000 },
+  ],
+  list_tasks: [
+    { path: ["limit"], min: 1, max: 200, fallback: 100 },
+  ],
+  deployment_status: [
+    { path: ["limit"], min: 1, max: 100, fallback: 25 },
+  ],
+  agent_activity: [
+    { path: ["stallAfterMs"], min: 1_000, max: 6 * 60 * 60_000, fallback: DEFAULT_STALL_AFTER_MS },
+    { path: ["limit"], min: 1, max: 200, fallback: 100 },
+  ],
+  lifecycle_events: [
+    { path: ["afterSeq"], min: 0, max: Number.MAX_SAFE_INTEGER, fallback: 0 },
+    { path: ["limit"], min: 1, max: 200, fallback: 50 },
+    { path: ["maxItems"], min: 1, max: 25, fallback: 10 },
+  ],
+};
+
+function compareDecimalIntegerToBound(value: string, bound: number): number {
+  const unsigned = value.replace(/^[+-]/, "").replace(/^0+/, "") || "0";
+  const negative = value.startsWith("-") && unsigned !== "0";
+  const boundNegative = bound < 0;
+  if (negative !== boundNegative) return negative ? -1 : 1;
+  const boundUnsigned = String(Math.abs(bound));
+  const magnitude = unsigned.length === boundUnsigned.length
+    ? unsigned === boundUnsigned ? 0 : unsigned < boundUnsigned ? -1 : 1
+    : unsigned.length < boundUnsigned.length ? -1 : 1;
+  return negative ? -magnitude : magnitude;
+}
+
+function boundedNumericValue(value: unknown, spec: McpBoundedNumericArg): number {
+  if (typeof value === "number" && Number.isInteger(value)) {
+    return Math.max(spec.min, Math.min(spec.max, value));
+  }
+  if (typeof value === "string" && /^[+-]?\d+$/.test(value.trim())) {
+    const integer = value.trim();
+    if (compareDecimalIntegerToBound(integer, spec.min) < 0) return spec.min;
+    if (compareDecimalIntegerToBound(integer, spec.max) > 0) return spec.max;
+    return Number(integer);
+  }
+  if (typeof value === "string"
+    && /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(value.trim())) {
+    const numeric = Number(value.trim());
+    if (numeric === Number.POSITIVE_INFINITY) return spec.max;
+    if (numeric === Number.NEGATIVE_INFINITY) return spec.min;
+    if (Number.isInteger(numeric)) return Math.max(spec.min, Math.min(spec.max, numeric));
+  }
+  return Math.max(spec.min, Math.min(spec.max, spec.fallback));
+}
+
+function valueAtPath(args: McpToolArgs, pathParts: readonly string[]): unknown {
+  let value: unknown = args;
+  for (const part of pathParts) {
+    if (!isRecord(value)) return undefined;
+    value = value[part];
+  }
+  return value;
+}
+
+function setValueAtPath(args: McpToolArgs, pathParts: readonly string[], value: number): void {
+  let target: Record<string, unknown> = args;
+  for (const part of pathParts.slice(0, -1)) {
+    const nested = isRecord(target[part]) ? { ...target[part] } : {};
+    target[part] = nested;
+    target = nested;
+  }
+  target[pathParts.at(-1)!] = value;
+}
+
+export function normalizeBoundedMcpNumerics(
+  toolName: McpToolName,
+  args: McpToolArgs,
+): { args: McpToolArgs; clamped?: Record<string, number> } {
+  const specs = MCP_BOUNDED_NUMERIC_ARGS[toolName];
+  if (!specs?.length) return { args };
+  const normalized = { ...args };
+  const clamped: Record<string, number> = {};
+  for (const spec of specs) {
+    if (spec.role !== undefined && args.role !== spec.role) continue;
+    const input = valueAtPath(args, spec.path);
+    if (input === undefined) continue;
+    const applied = boundedNumericValue(input, spec);
+    setValueAtPath(normalized, spec.path, applied);
+    if (typeof input !== "number" || !Object.is(input, applied)) {
+      clamped[spec.path.join(".")] = applied;
+    }
+  }
+  return Object.keys(clamped).length ? { args: normalized, clamped } : { args: normalized };
+}
 
 export type McpToolSuccess = McpToolPayload & {
   ok: true;
@@ -1325,6 +1458,8 @@ export function createMcpToolService(
         return failure(toolName, clientRequestId(args), "unknown_tool", `Unknown viewer tool: ${toolName}`, false);
       }
       const typedTool = toolName as McpToolName;
+      const normalized = normalizeBoundedMcpNumerics(typedTool, args);
+      const effectiveArgs = normalized.args;
       const callStartedAt = performance.now();
       const phaseDurations: Partial<Record<McpTimingPhase, number>> = {};
       const deadlineBudgetMs = context.deadlineAt === undefined
@@ -1349,19 +1484,19 @@ export function createMcpToolService(
         return result;
       };
       const retention: ReceiptRetention = MUTATING_MCP_TOOL_NAMES.has(typedTool) ? "durable" : "bounded";
-      const requestId = clientRequestId(args);
+      const requestId = clientRequestId(effectiveArgs);
       if (!requestId) return finish(failure(toolName, null, "invalid_request", "clientRequestId is required", false), "failure");
 
       /* Refused before the receipt is claimed, on purpose. A refusal is a
          property of who is calling, not of the operation, so it must not burn the
          clientRequestId — the same call becomes legitimate the moment the operator
          grants the tool, and a spent receipt would answer it with a stale no. */
-      const verdict = policy?.permit(typedTool, args);
+      const verdict = policy?.permit(typedTool, effectiveArgs);
       if (verdict && !verdict.allowed) {
         return finish(failure(typedTool, requestId, verdict.code, verdict.error, false), "failure");
       }
 
-      const digest = requestDigest(typedTool, args);
+      const digest = requestDigest(typedTool, effectiveArgs);
       const key = `${typedTool}:${requestId}`;
       const active = inFlight.get(key);
       if (active) {
@@ -1398,8 +1533,15 @@ export function createMcpToolService(
         let settled: McpToolResult;
         const bindingStartedAt = performance.now();
         try {
-          const payload = await bindings[typedTool](args, context);
-          settled = { ...payload, ok: true, toolName: typedTool, clientRequestId: requestId, replayed: false };
+          const payload = await bindings[typedTool](effectiveArgs, context);
+          settled = {
+            ...payload,
+            ...(normalized.clamped ? { clamped: normalized.clamped } : {}),
+            ok: true,
+            toolName: typedTool,
+            clientRequestId: requestId,
+            replayed: false,
+          };
           outcome = "success";
         } catch (error) {
           const reason = context.signal?.aborted ? context.signal.reason : error;
@@ -1463,7 +1605,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   pipeline_action: "Apply a supported action to an existing pipeline.",
   link_task_to_pipeline: "Attach a board task to a conversation owned by a pipeline.",
   list_conversations: "List scanned Viewer conversations with durable ids and transcript paths.",
-  get_conversation: "Read a conversation summary and its recent messages and tools. Accepts the selected-card reference from an operator turn, and with tailLines answers from the bounded identity path alone — no snapshot, no corpus scan.",
+  get_conversation: "Read a conversation summary and its recent messages and tools. With tailLines, conversationId or selectedContext uses the bounded identity path, while transcriptPath uses the validated pinned reader; both return a bounded raw tail without a corpus scan.",
   deploy_exact_sha: "Deploy one full commit SHA. The designated orchestrator decides when to deploy and calls this directly; authority is the server-attributed designated seat, and nobody asks the operator for a confirmation, a phrase, or a SHA. Idempotent by clientRequestId; deployments serialize at the runtime host.",
   get_pipeline: "Read one pipeline by durable id.",
   board_snapshot: "Read a bounded, redacted snapshot of the Viewer board and durable placement.",
@@ -1516,6 +1658,14 @@ const snapshotScopeSchema = z.discriminatedUnion("kind", [
   }).strict(),
 ]);
 
+function boundedNumericInput(toolName: McpToolName, fieldPath: string): z.ZodType {
+  const spec = MCP_BOUNDED_NUMERIC_ARGS[toolName]?.find((candidate) => candidate.path.join(".") === fieldPath);
+  if (!spec) throw new Error(`missing bounded numeric MCP specification for ${toolName}.${fieldPath}`);
+  return z.json().optional().describe(
+    `Integer ${spec.min}..${spec.max}. Numeric strings are coerced, out-of-range values clamp to the nearest bound, and other values use ${spec.fallback}.`,
+  );
+}
+
 export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
   spawn_agent: z.object({
     clientRequestId: clientRequestIdSchema,
@@ -1525,7 +1675,8 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     model: z.string().optional(),
     effort: z.string().optional(),
     role: z.enum(ROLE_IDS).optional(),
-    roleParams: z.record(z.string(), z.unknown()).optional(),
+    roleParams: z.record(z.string(), z.unknown()).optional()
+      .describe("Role-specific parameters. Bounded integers accept numeric strings, clamp to their declared role bounds, and report the applied value in clamped."),
     reviews: z.string().optional(),
     parentConversationId: z.string().optional(),
     project: z.string().optional(),
@@ -1585,16 +1736,16 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     clientRequestId: clientRequestIdSchema,
     project: z.string().optional(),
     query: z.string().optional(),
-    limit: z.number().int().min(1).max(100).optional(),
+    limit: boundedNumericInput("list_conversations", "limit"),
   }).passthrough(),
   get_conversation: z.object({
     clientRequestId: clientRequestIdSchema,
     conversationId: z.string().optional(),
     transcriptPath: z.string().optional(),
-    maxRecords: z.number().int().min(1).max(500).optional(),
+    maxRecords: boundedNumericInput("get_conversation", "maxRecords"),
     selectedContext: selectedContextSchema,
-    tailLines: z.number().int().min(1).max(SELECTED_TAIL_MAX_LINES).optional()
-      .describe("Read this many trailing transcript lines through the bounded identity path instead of the scanned summary. Needs conversationId or selectedContext; keeps answering while corpus scans are degraded."),
+    tailLines: boundedNumericInput("get_conversation", "tailLines")
+      .describe("Read this many trailing transcript lines instead of the scanned summary. Use conversationId or selectedContext for the bounded identity path, or transcriptPath for the validated pinned reader; all alternatives keep answering while corpus scans are degraded."),
   }).passthrough(),
   deploy_exact_sha: z.object({
     clientRequestId: clientRequestIdSchema,
@@ -1611,14 +1762,14 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     project: z.string().optional(),
     activity: z.enum(["live", "stalled", "recent", "idle"]).optional(),
     liveOnly: z.boolean().optional(),
-    limit: z.number().int().min(1).max(200).optional(),
+    limit: boundedNumericInput("board_snapshot", "limit"),
   }).passthrough(),
   list_flows: z.object({
     clientRequestId: clientRequestIdSchema,
     project: z.string().optional(),
     state: z.string().optional(),
     includeClosed: z.boolean().optional(),
-    limit: z.number().int().min(1).max(200).optional(),
+    limit: boundedNumericInput("list_flows", "limit"),
   }).passthrough(),
   get_flow: z.object({
     clientRequestId: clientRequestIdSchema,
@@ -1638,7 +1789,7 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     project: z.string().optional(),
     state: z.string().optional(),
     includeClosed: z.boolean().optional(),
-    limit: z.number().int().min(1).max(200).optional(),
+    limit: boundedNumericInput("list_pipelines", "limit"),
   }).passthrough(),
   conversation_action: z.object({
     clientRequestId: clientRequestIdSchema,
@@ -1667,8 +1818,8 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     scope: snapshotScopeSchema.optional(),
     text: z.object({
       include: z.boolean().optional(),
-      lastMessages: z.number().int().min(1).max(MAX_SNAPSHOT_LAST_MESSAGES).optional(),
-      maxCharsPerConversation: z.number().int().min(1).max(MAX_SNAPSHOT_CHARS_PER_CONVERSATION).optional(),
+      lastMessages: boundedNumericInput("operator_snapshot", "text.lastMessages"),
+      maxCharsPerConversation: boundedNumericInput("operator_snapshot", "text.maxCharsPerConversation"),
     }).strict().optional(),
     caller: z.object({
       pid: z.number().int().min(1).optional(),
@@ -1680,7 +1831,7 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     project: z.string().optional(),
     status: z.enum(["inbox", "assigned", "blocked", "done"]).optional(),
     placement: z.enum(["pinned", "unplaced"]).optional(),
-    limit: z.number().int().min(1).max(200).optional(),
+    limit: boundedNumericInput("list_tasks", "limit"),
   }).passthrough(),
   get_task: z.object({
     clientRequestId: clientRequestIdSchema,
@@ -1690,7 +1841,7 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     clientRequestId: clientRequestIdSchema,
     deploymentId: z.string().min(1).optional(),
     operationId: z.string().min(1).optional(),
-    limit: z.number().int().min(1).max(100).optional(),
+    limit: boundedNumericInput("deployment_status", "limit"),
   }).passthrough(),
   resources: z.object({
     clientRequestId: clientRequestIdSchema,
@@ -1709,9 +1860,9 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     transcriptPath: z.string().optional(),
     project: z.string().optional(),
     liveOnly: z.boolean().optional(),
-    stallAfterMs: z.number().int().min(1_000).max(6 * 60 * 60_000).optional()
+    stallAfterMs: boundedNumericInput("agent_activity", "stallAfterMs")
       .describe("Silence under a live host that counts as a stall. A dead host over an open turn is always stalled."),
-    limit: z.number().int().min(1).max(200).optional(),
+    limit: boundedNumericInput("agent_activity", "limit"),
   }).passthrough(),
   lifecycle_events: z.object({
     clientRequestId: clientRequestIdSchema,
@@ -1721,10 +1872,10 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     conversationId: z.string().optional(),
     stageId: z.string().optional(),
     type: z.string().optional(),
-    afterSeq: z.number().int().min(0).optional().describe("Exclusive journal cursor for mode=query."),
-    limit: z.number().int().min(1).max(200).optional(),
+    afterSeq: boundedNumericInput("lifecycle_events", "afterSeq").describe("Exclusive journal cursor for mode=query. Values clamp at zero and invalid values default to zero."),
+    limit: boundedNumericInput("lifecycle_events", "limit"),
     subscriberId: z.string().optional().describe("Durable digest cursor owner; required for mode=digest."),
-    maxItems: z.number().int().min(1).max(25).optional(),
+    maxItems: boundedNumericInput("lifecycle_events", "maxItems"),
     acknowledge: z.boolean().optional().describe("false polls the digest without advancing the cursor."),
   }).passthrough(),
   request_attention: z.object({
