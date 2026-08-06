@@ -52,6 +52,8 @@ import { pathAllowed, scanRootEntries } from "@/lib/scanner/roots";
 import { completedFileScan } from "@/lib/scanner/scanCache";
 import { readResources } from "@/lib/resources";
 import { adoptLiveRootSession, conversationRole, liveRootSession, type RootSessionSource } from "@/lib/root/adopt";
+import { listRoles } from "@/lib/roles/registry";
+import type { RoleParameter } from "@/lib/roles/types";
 import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
 import { ledgerDeployment, ledgerDeployments } from "@/lib/runtime/deploymentLedger";
 import { SELECTED_TAIL_MAX_LINES } from "@/lib/selection/resolve";
@@ -467,6 +469,63 @@ function mcpOperationId(toolName: string, value: string): string {
   return `mcp_${toolName}_${crypto.createHash("sha256").update(value).digest("hex").slice(0, 24)}`;
 }
 
+function firstPromptLine(prompt: string): string | null {
+  const line = prompt.trim().split(/\r?\n/, 1)[0]?.trim() ?? "";
+  return line ? line.slice(0, 2_000) : null;
+}
+
+function diffSourceFromPrompt(prompt: string): string | null {
+  const pullUrl = /https?:\/\/github\.com\/[^\s/]+\/[^\s/]+\/pull\/\d+/i.exec(prompt)?.[0];
+  if (pullUrl) return pullUrl;
+  const pullRequest = /\b(?:PR|pull request)\s*#?\d+\b/i.exec(prompt)?.[0];
+  if (pullRequest) return pullRequest;
+  const range = /(?:^|\s)([A-Za-z0-9][A-Za-z0-9._/-]*\.\.\.?[A-Za-z0-9][A-Za-z0-9._/-]*)(?=$|\s|[),;:])/m.exec(prompt)?.[1];
+  if (range) return range;
+  const branch = /\bbranch\s+[`'"]?([A-Za-z0-9][A-Za-z0-9._/-]*)/i.exec(prompt)?.[1];
+  return branch ?? null;
+}
+
+function requiredRoleParamFromPrompt(parameter: RoleParameter, prompt: string): string | null {
+  if (parameter.key === "diffSource") return diffSourceFromPrompt(prompt);
+  if (parameter.key === "sha") return /\b[0-9a-f]{40}\b/i.exec(prompt)?.[0] ?? null;
+  if (parameter.key === "questions" || parameter.key === "claims") return firstPromptLine(prompt);
+  return null;
+}
+
+function roleParamShape(parameter: RoleParameter): string {
+  if (parameter.kind === "integer") {
+    return `integer ${parameter.min ?? Number.MIN_SAFE_INTEGER}..${parameter.max ?? Number.MAX_SAFE_INTEGER}`;
+  }
+  if (parameter.kind === "select") return `string, one of: ${parameter.options?.join(" | ") || "(no options registered)"}`;
+  return "non-empty string up to 2000 characters";
+}
+
+export function defaultMcpSpawnRoleParams(args: McpToolArgs): Record<string, unknown> | undefined {
+  const role = text(args.role);
+  if (!role) return undefined;
+  const definition = listRoles().find((candidate) => candidate.id === role);
+  if (!definition) return undefined;
+  const raw = args.roleParams;
+  if (raw !== undefined && (!raw || typeof raw !== "object" || Array.isArray(raw))) return undefined;
+  const source = raw as Record<string, unknown> | undefined;
+  const resolved = { ...source };
+  const missing: RoleParameter[] = [];
+  const prompt = typeof args.prompt === "string" ? args.prompt : "";
+  for (const parameter of definition.parameters.filter((candidate) => candidate.required)) {
+    const supplied = resolved[parameter.key];
+    if (supplied !== undefined && supplied !== "") continue;
+    const derived = requiredRoleParamFromPrompt(parameter, prompt);
+    if (derived !== null) resolved[parameter.key] = derived;
+    else missing.push(parameter);
+  }
+  if (missing.length) {
+    throw new Error(
+      `missing required roleParams for ${role}: ${missing.map((parameter) => `${parameter.key}: ${roleParamShape(parameter)}`).join("; ")}`,
+    );
+  }
+  return Object.keys(resolved).length ? resolved : source;
+}
+
 /** The durable identity one `request_attention` call writes on its record —
     exported so tests and evidence can construct the record an interrupted run
     would have left behind. */
@@ -477,7 +536,12 @@ export function requestAttentionOperationKey(clientRequestId: string): string {
 async function spawnAgent(args: McpToolArgs, control: ViewerControlDependencies): Promise<McpToolPayload> {
   const clientAttemptId = spawnAttemptId(requestId(args));
   const body = withoutKeys(args, ["clientRequestId"]);
-  const result = await control.post("/api/spawn", { ...body, clientAttemptId }, {
+  const roleParams = defaultMcpSpawnRoleParams(args);
+  const result = await control.post("/api/spawn", {
+    ...body,
+    ...(roleParams ? { roleParams } : {}),
+    clientAttemptId,
+  }, {
     [VIEWER_SPAWN_CAPABILITY_HEADER]: ensureOperatorSpawnCapability(),
   });
   return {

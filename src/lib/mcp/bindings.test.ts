@@ -50,6 +50,90 @@ test("spawn_agent reaches spawn validation through the operator admission lane",
   expect(fs.readFileSync(path.join(sandbox, "operator-spawn-capability"), "utf8").trim()).toMatch(/^[A-Za-z0-9_-]{43}$/);
 });
 
+test("spawn_agent derives required role params from the prompt and preserves supplied params", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  const spawn = viewerMcpBindings(undefined, {
+    post: async (_pathname, body) => {
+      bodies.push(body);
+      return {
+        conversationId: `conversation_${bodies.length}`,
+        path: `/repo/session-${bodies.length}.jsonl`,
+        launchId: `launch_${bodies.length}`,
+        state: "queued",
+      };
+    },
+  }).spawn_agent;
+  const sha = "a".repeat(40);
+
+  await spawn({
+    clientRequestId: "derive-review-pr",
+    cwd: "/repo",
+    ["prompt"]: "Review PR #915 for correctness.",
+    role: "reviewer",
+    roleParams: { lens: "correctness" },
+  });
+  await spawn({
+    clientRequestId: "derive-review-branch",
+    cwd: "/repo",
+    ["prompt"]: "Review branch feature/mcp-clamping before merge.",
+    role: "reviewer",
+  });
+  await spawn({
+    clientRequestId: "derive-prod-questions",
+    cwd: "/repo",
+    ["prompt"]: "Measure stalled delivery latency.\nUse a bounded UTC window.",
+    role: "prod-auditor",
+  });
+  await spawn({
+    clientRequestId: "derive-verifier-claims",
+    cwd: "/repo",
+    ["prompt"]: "The bounded read returns within its budget.\nUse a synthetic transcript.",
+    role: "verifier",
+  });
+  await spawn({
+    clientRequestId: "derive-deployer-sha",
+    cwd: "/repo",
+    ["prompt"]: `Prepare deployment for ${sha}.`,
+    role: "deployer",
+  });
+
+  expect(bodies.map((body) => body.roleParams)).toEqual([
+    { diffSource: "PR #915", lens: "correctness" },
+    { diffSource: "feature/mcp-clamping" },
+    { questions: "Measure stalled delivery latency." },
+    { claims: "The bounded read returns within its budget." },
+    { sha },
+  ]);
+});
+
+test("spawn_agent reports every underivable required role param with its shape in one error", async () => {
+  let posts = 0;
+  const spawn = viewerMcpBindings(undefined, {
+    post: async () => {
+      posts += 1;
+      return {};
+    },
+  }).spawn_agent;
+  const cases = [
+    { role: "reviewer", prompt: "Review the current work.", param: "diffSource" },
+    { role: "verifier", prompt: "", param: "claims" },
+    { role: "prod-auditor", prompt: "", param: "questions" },
+    { role: "deployer", prompt: "Prepare the current release.", param: "sha" },
+  ] as const;
+
+  for (const candidate of cases) {
+    await expect(spawn({
+      clientRequestId: `missing-${candidate.role}`,
+      cwd: "/repo",
+      ["prompt"]: candidate.prompt,
+      role: candidate.role,
+    })).rejects.toThrow(
+      `missing required roleParams for ${candidate.role}: ${candidate.param}: non-empty string up to 2000 characters`,
+    );
+  }
+  expect(posts).toBe(0);
+});
+
 test("runtime-bound MCP tools use the live Viewer control surface", async () => {
   const requests: Array<{ pathname: string; body: Record<string, unknown> }> = [];
   /* #795: the deploy tool authorizes off the SERVER-ATTRIBUTED caller identity, so
