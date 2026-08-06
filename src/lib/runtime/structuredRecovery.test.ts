@@ -109,7 +109,7 @@ test("the recovery reservation converges repeated calls onto one successor spawn
     effort: "high",
     permissionMode: "bypassPermissions",
     readOnly: false,
-    title: "Recover durable identity",
+    title: "Recover issue #913 identity",
     parentConversationId,
   });
   let registry = new AgentRegistry(registryFilename, undefined, undefined, { sqliteMode: "off" });
@@ -246,7 +246,7 @@ test("the recovery reservation converges repeated calls onto one successor spawn
       expect(input.spec).toMatchObject({
         cwd,
         ["transcript"]: artifactPath,
-        launchProfile: { ...profile, title: "Recover durable identity" },
+        launchProfile: { ...profile, title: "Recover issue #913 identity" },
       });
       expect(structuredResumeSessionId(input)).toBe(sessionId);
       const claimed = registry.claimStructuredHost(key, { pid: process.pid, startIdentity: null }, { allowUnhosted: true });

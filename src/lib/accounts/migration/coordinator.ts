@@ -26,7 +26,7 @@ import { recordTranscriptComposerRelease, transcriptTurnResult, type TranscriptT
 import { nativeCodexForkSourceThreadId } from "@/lib/scanner/codexNative";
 import { writingHolders } from "@/lib/scanner/process";
 import type { FileEntry } from "@/lib/types";
-import { semanticTitle } from "@/lib/title";
+import { durableSemanticTitle } from "@/lib/title";
 import type { BoardProjectStateV1 } from "@/lib/view/types";
 import { isStructuredDeliveryControllerUnavailable } from "@/lib/runtime/structuredDeliveryController";
 
@@ -265,7 +265,7 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
         fast: currentProfile?.fast ?? null,
         permissionMode: currentProfile?.permissionMode ?? null,
         readOnly: currentProfile?.readOnly ?? null,
-        title: semanticTitle(entry.title) ?? semanticTitle(currentProfile?.title),
+        title: durableSemanticTitle(entry.title) ?? durableSemanticTitle(currentProfile?.title),
         project: entry.project || currentProfile?.project || null,
         parentConversationId: parentConversation?.id ?? currentProfile?.parentConversationId ?? null,
         role: configuredRoot && existing?.id === configuredRoot ? "root" : currentProfile?.role ?? "worker",

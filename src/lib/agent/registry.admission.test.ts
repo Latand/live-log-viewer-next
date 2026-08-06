@@ -76,6 +76,41 @@ test("fresh spawn admission normalizes generic placeholder titles", () => {
   expect(semantic.receipt.launchProfile.title).toBe("Review issue #913");
 });
 
+test("observations and resume successors preserve semantic title punctuation", () => {
+  const { store } = registryAt("semantic-title-punctuation");
+  const first = store.reconcileConversations([{
+    engine: "codex",
+    path: "/sessions/semantic-title.jsonl",
+    accountId: "terra",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Own issue #913" }),
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-08-06T00:00:00.000Z",
+  }]);
+  const conversation = Object.values(first.conversations)[0]!;
+  expect(conversation.generations.at(-1)?.launchProfile.title).toBe("Own issue #913");
+
+  const resumed = store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    conversationId: conversation.id,
+    purpose: "resume-successor",
+    origin: { kind: "successor" },
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+  });
+  if (resumed.kind !== "created") throw new Error("expected create");
+  expect(resumed.receipt.launchProfile.title).toBe("Own issue #913");
+
+  const refreshed = store.reconcileConversations([{
+    engine: "codex",
+    path: "/sessions/semantic-title.jsonl",
+    accountId: "terra",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Scanner issue #999" }),
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-08-06T00:01:00.000Z",
+  }]);
+  expect(refreshed.conversations[conversation.id]?.generations.at(-1)?.launchProfile.title).toBe("Own issue #913");
+});
+
 test("a delegated conversation never acquires a Codex plugin grant (#687)", () => {
   const { store } = registryAt("plugin-grant-delegation");
   const parent = store.ensureConversation("codex", "/sessions/plugin-grant-parent.jsonl", "terra");

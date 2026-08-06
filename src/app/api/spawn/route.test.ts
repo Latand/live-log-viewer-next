@@ -300,11 +300,12 @@ test("derived, custom-title, and migrated generic receipts preserve pre-title re
     expect(Object.values(preTitleRestarted.snapshot().entries)
       .find((entry) => entry.artifactPath === nullTitlePath)?.launchProfile?.title).toBe("claude · inspect");
 
-    const customTitle = "Inspect release evidence";
+    const customTitle = "Inspect issue #913 evidence";
     const customAttemptId = "custom_title_digest_replay_20260805";
     const customResponse = await post(store, { clientAttemptId: customAttemptId, title: customTitle });
     expect(customResponse.status).toBe(202);
     const customReceipt = store.spawnReceiptForClientAttempt(customAttemptId)!;
+    expect(customReceipt.launchProfile.title).toBe(customTitle);
     const customDigests = spawnRequestDigests({
       engine: customReceipt.engine,
       cwd: customReceipt.cwd,

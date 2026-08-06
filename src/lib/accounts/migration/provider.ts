@@ -18,7 +18,7 @@ import { StructuredHostAdoptionCleanupError } from "@/lib/runtime/engineHost";
 import { hasStructuredDeliveryHost, publishStructuredDeliveryHost, releaseStructuredDeliveryHost, requireStructuredDeliveryControllerPublication } from "@/lib/runtime/structuredDeliveryController";
 import { bindClaudeHostPersistence, bindCodexHostPersistence, structuredHostsEnabled } from "@/lib/runtime/registry";
 import { cleanupTmuxHostIfMatches, forgetResumePaneIfMatches, spawnAgentWithPrompt, verifyTmuxHostEvidence, type TmuxHostCleanupResult } from "@/lib/tmux";
-import { derivedSpawnTitle, semanticTitle } from "@/lib/title";
+import { derivedSpawnTitle, durableSemanticTitle } from "@/lib/title";
 
 import { emptyLaunchProfile, type LaunchProfile, type ProviderReceipt, type SuccessorProviderPort } from "./contracts";
 import { hashValidatedHistory, HistorySecurityError, MigrationTargetUnavailableError, safeCopyHistory, validateHistorySource } from "./safeHistoryCopy";
@@ -1143,7 +1143,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     const nativeId = candidateUuid(operationId);
     const successorProfile = emptyLaunchProfile({
       ...profile,
-      title: semanticTitle(profile.title, 120) ?? derivedSpawnTitle(
+      title: durableSemanticTitle(profile.title, 120) ?? derivedSpawnTitle(
         "migration successor",
         profile.goal?.objective ?? profile.cwd,
         "Conversation migration",
