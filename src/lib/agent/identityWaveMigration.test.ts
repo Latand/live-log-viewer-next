@@ -302,9 +302,9 @@ test("identity evidence cleans receipt and transcript Markdown before durable pe
     });
     if (receipt.kind !== "created") throw new Error("expected receipt");
     const legacy = seed.snapshot();
-    legacy.receipts[receipt.receipt.launchId]!.launchProfile.title = "Codex session";
-    legacy.conversations[receiptConversation.id]!.generations.at(-1)!.launchProfile.title = "Codex session";
-    legacy.conversations[transcriptConversation.id]!.generations.at(-1)!.launchProfile.title = "Codex session";
+    legacy.receipts[receipt.receipt.launchId]!.launchProfile.title = "Codex-session";
+    legacy.conversations[receiptConversation.id]!.generations.at(-1)!.launchProfile.title = "Claude/session";
+    legacy.conversations[transcriptConversation.id]!.generations.at(-1)!.launchProfile.title = "Codex · session";
     fs.writeFileSync(filename, `${JSON.stringify(legacy, null, 2)}\n`);
     const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
 

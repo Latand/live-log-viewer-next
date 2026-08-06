@@ -63,12 +63,14 @@ function spawnAtDepth(
 
 test("fresh spawn admission rejects missing and generic placeholder titles", () => {
   const { store } = registryAt("placeholder-title");
-  expect(() => store.beginSpawnRequest({
-    engine: "codex",
-    cwd: "/repo",
-    origin: { kind: "operator" },
-    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Codex session" }),
-  })).toThrow("title is required for every new spawn");
+  for (const title of ["Codex session", "Codex-session", "Claude/session", "Codex · session", "Claude: session"]) {
+    expect(() => store.beginSpawnRequest({
+      engine: "codex",
+      cwd: "/repo",
+      origin: { kind: "operator" },
+      launchProfile: emptyLaunchProfile({ cwd: "/repo", title }),
+    })).toThrow("title is required for every new spawn");
+  }
   expect(() => store.beginSpawnRequest({
     engine: "codex",
     cwd: "/repo",

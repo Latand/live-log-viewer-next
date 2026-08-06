@@ -111,6 +111,12 @@ test("new semantic, empty, and image-only prompts require an explicit semantic t
   const punctuationOnly = await post({ title: "###", prompt: "inspect the release" });
   expect(punctuationOnly.status).toBe(400);
   expect(await punctuationOnly.json()).toEqual({ error: "title must be a semantic, non-placeholder string" });
+
+  for (const title of ["Codex-session", "Claude/session", "Codex · session", "Claude: session"]) {
+    const placeholder = await post({ title, prompt: "inspect the release" });
+    expect(placeholder.status).toBe(400);
+    expect(await placeholder.json()).toEqual({ error: "title must be a semantic, non-placeholder string" });
+  }
 });
 
 test("Viewer draft and orchestrator request builders pass public spawn admission", async () => {
