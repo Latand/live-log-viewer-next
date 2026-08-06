@@ -13,12 +13,14 @@ import {
 import { validateSnapshotRequest } from "@/lib/view/validation";
 
 import {
+  MCP_BOUNDED_NUMERIC_ARGS,
   MCP_TOOL_NAMES,
   TOOL_INPUT_SCHEMAS,
   MemoryMcpReceiptStore,
   createMcpToolService,
   createViewerMcpServer,
   type McpToolBindings,
+  type McpToolName,
 } from "./server";
 
 function inertBindings(overrides: Partial<McpToolBindings> = {}): McpToolBindings {
@@ -52,6 +54,108 @@ function requiredRoleParams(role: ReturnType<typeof listRoles>[number]): Record<
     return [parameter.key, "value"];
   }));
 }
+
+function setAtPath(target: Record<string, unknown>, path: readonly string[], value: unknown): void {
+  let parent = target;
+  for (const part of path.slice(0, -1)) {
+    const child: Record<string, unknown> = {};
+    parent[part] = child;
+    parent = child;
+  }
+  parent[path.at(-1)!] = value;
+}
+
+function valueAtPath(target: Record<string, unknown>, path: readonly string[]): unknown {
+  let value: unknown = target;
+  for (const part of path) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    value = (value as Record<string, unknown>)[part];
+  }
+  return value;
+}
+
+test("every harmless bounded MCP numeric clamps, coerces, and defaults before its binding", async () => {
+  const calls = new Map<McpToolName, Record<string, unknown>[]>();
+  const bindings = inertBindings(Object.fromEntries(
+    Object.keys(MCP_BOUNDED_NUMERIC_ARGS).map((toolName) => [toolName, async (args: Record<string, unknown>) => {
+      const typedTool = toolName as McpToolName;
+      const bucket = calls.get(typedTool) ?? [];
+      bucket.push(args);
+      calls.set(typedTool, bucket);
+      return { applied: args };
+    }]),
+  ) as Partial<McpToolBindings>);
+
+  await withProtocolClient(bindings, async (client) => {
+    for (const [toolName, specs] of Object.entries(MCP_BOUNDED_NUMERIC_ARGS) as Array<[
+      McpToolName,
+      NonNullable<(typeof MCP_BOUNDED_NUMERIC_ARGS)[McpToolName]>,
+    ]>) {
+      for (const [index, spec] of specs.entries()) {
+        const highIsSafe = spec.max < Number.MAX_SAFE_INTEGER;
+        const outside = highIsSafe ? spec.max + 1 : spec.min - 1;
+        const boundary = highIsSafe ? spec.max : spec.min;
+        const clampArgs: Record<string, unknown> = { clientRequestId: `${toolName}-${index}-clamp` };
+        setAtPath(clampArgs, spec.path, outside);
+        const clamped = await client.callTool({ name: toolName, arguments: clampArgs });
+        expect(clamped.isError).not.toBe(true);
+        expect(clamped.structuredContent).toMatchObject({
+          ok: true,
+          clamped: { [spec.path.join(".")]: boundary },
+        });
+        expect(valueAtPath((clamped.structuredContent as { applied: Record<string, unknown> }).applied, spec.path)).toBe(boundary);
+
+        const coercionValue = Math.max(spec.min, Math.min(spec.max, spec.fallback));
+        const coercionArgs: Record<string, unknown> = { clientRequestId: `${toolName}-${index}-coerce` };
+        setAtPath(coercionArgs, spec.path, String(coercionValue));
+        const coerced = await client.callTool({ name: toolName, arguments: coercionArgs });
+        expect(coerced.isError).not.toBe(true);
+        expect(coerced.structuredContent).toMatchObject({
+          ok: true,
+          clamped: { [spec.path.join(".")]: coercionValue },
+        });
+        expect(valueAtPath((coerced.structuredContent as { applied: Record<string, unknown> }).applied, spec.path)).toBe(coercionValue);
+
+        const fallbackArgs: Record<string, unknown> = { clientRequestId: `${toolName}-${index}-fallback` };
+        setAtPath(fallbackArgs, spec.path, { ambiguous: true });
+        const defaulted = await client.callTool({ name: toolName, arguments: fallbackArgs });
+        expect(defaulted.isError).not.toBe(true);
+        expect(defaulted.structuredContent).toMatchObject({
+          ok: true,
+          clamped: { [spec.path.join(".")]: spec.fallback },
+        });
+        expect(valueAtPath((defaulted.structuredContent as { applied: Record<string, unknown> }).applied, spec.path)).toBe(spec.fallback);
+      }
+    }
+  });
+
+  expect([...calls.keys()].sort()).toEqual(Object.keys(MCP_BOUNDED_NUMERIC_ARGS).sort());
+});
+
+test("operator mutations and identity-bearing numerics retain exact protocol validation", async () => {
+  const calls: string[] = [];
+  const bindings = inertBindings({
+    flow_action: async () => { calls.push("flow_action"); return {}; },
+    operator_snapshot: async () => { calls.push("operator_snapshot"); return {}; },
+    conversation_migration: async () => { calls.push("conversation_migration"); return {}; },
+    bridge_directive: async () => { calls.push("bridge_directive"); return {}; },
+  });
+  const invalidCalls = [
+    { name: "flow_action", arguments: { clientRequestId: "strict-flow-rounds", flowId: "flow_a", action: "set-round-limit", rounds: 51 } },
+    { name: "operator_snapshot", arguments: { clientRequestId: "strict-snapshot-pid", caller: { pid: "42" } } },
+    { name: "conversation_migration", arguments: { clientRequestId: "strict-migration-revision", conversationId: "conversation_a", action: "retry", expectedRevision: -1 } },
+    { name: "bridge_directive", arguments: { clientRequestId: "strict-directive-utterance", rootTurnId: "turn-a", utterance: -1, instruction: "continue" } },
+    { name: "bridge_directive", arguments: { clientRequestId: "strict-directive-ref", rootTurnId: "turn-b", utterance: 0, instruction: "continue", ref: 0 } },
+  ] as const;
+
+  await withProtocolClient(bindings, async (client) => {
+    for (const request of invalidCalls) {
+      const result = await client.callTool(request);
+      expect(result.isError).toBe(true);
+    }
+  });
+  expect(calls).toEqual([]);
+});
 
 test("spawn_agent listTools publishes every registry role exactly once", async () => {
   const roleIds = listRoles().map((role) => role.id);
