@@ -61,9 +61,13 @@ function semanticEvidence(value: string | null | undefined): string | null {
 
 function receiptTitles(file: RegistryFile): Map<ViewerConversationId, string> {
   const titles = new Map<ViewerConversationId, string>();
-  const receipts = Object.values(file.receipts)
-    .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
-  for (const receipt of receipts) {
+  // The original launch prompt names the work. Resume and migration successors
+  // carry relay prompts ("continue the review", "apply the findings"), so they
+  // only fill in for conversations whose launch left no semantic evidence.
+  const byLaunchFirst = Object.values(file.receipts)
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+    .sort((left, right) => Number(right.purpose === "launch") - Number(left.purpose === "launch"));
+  for (const receipt of byLaunchFirst) {
     const conversationId = canonicalConversationId(file, receipt.conversationId);
     const title = semanticEvidence(receipt.launchDisplay?.prompt);
     if (conversationId && title && !titles.has(conversationId)) titles.set(conversationId, title);
