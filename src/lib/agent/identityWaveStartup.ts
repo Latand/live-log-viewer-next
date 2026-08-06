@@ -93,6 +93,7 @@ export function runIdentityWaveMigrationAtStartup(
     alreadyCompleted: result.alreadyCompleted,
     retitled: result.retitled,
     rekeyed: result.rekeyed,
+    quarantinedRekeys: result.quarantinedRekeys,
     edgesStamped: result.edgesStamped,
   });
   return result;
