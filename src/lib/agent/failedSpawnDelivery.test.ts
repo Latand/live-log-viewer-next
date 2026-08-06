@@ -152,6 +152,127 @@ test("issue 653: failStructuredSpawn terminalizes the initial held delivery in t
   }
 });
 
+test("issue 922: a never-started spawn whose migration-cancelled delivery is already failed terminalizes its receipt", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-never-started-spawn-delivery-"));
+  try {
+    const filename = path.join(dir, "agent-registry.json");
+    const cwd = path.join(dir, "pipeline");
+    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const begun = registry.beginSpawnRequest({
+      engine: "codex", cwd, transport: "structured", accountId: "account-a",
+      launchProfile: emptyLaunchProfile({ cwd }),
+      launchDisplay: { prompt: "synthetic kickoff", images: 0, echo: "synthetic kickoff" },
+    });
+    if (begun.kind !== "created") throw new Error("expected structured launch creation");
+    const { launchId, conversationId } = begun.receipt;
+    const deliveryId = "held-never-started";
+    const snapshot = registry.snapshot();
+    expect(snapshot.conversations[conversationId]).toBeUndefined();
+    snapshot.heldDeliveries[deliveryId] = {
+      id: deliveryId, conversationId, runtimeConversationId: conversationId,
+      text: "synthetic kickoff", createdAt: "2026-08-05T10:00:00.000Z",
+      clientMessageId: `spawn_${launchId}`, payloadKind: "text", runtimeImages: [],
+      contentDigest: null, artifactPaths: [],
+      command: { operationId: `spawn_message_${launchId}`, kind: "send", policy: "queue" },
+      requestDigest: null, state: "failed", generationId: null, attempts: 0,
+      assignedAt: null, deliveredAt: null,
+      error: "delivery cancelled because its owning account migration made no progress; send again",
+    } satisfies HeldDelivery;
+    fs.writeFileSync(filename, JSON.stringify(snapshot));
+
+    const reloaded = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    expect(reloaded.snapshot().receipts[launchId]?.state).not.toBe("failed");
+    expect(reloaded.terminalizeFailedSpawnDeliveries()).toEqual([deliveryId]);
+    expect(reloaded.snapshot().receipts[launchId]).toMatchObject({
+      state: "failed",
+      admissionOwner: null,
+      error: expect.stringContaining("migration made no progress"),
+    });
+    expect(reloaded.snapshot().heldDeliveries[deliveryId]).toMatchObject({ state: "failed", attempts: 0 });
+    expect(reloaded.terminalizeFailedSpawnDeliveries()).toEqual([]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("issue 922: a promote-race spawn failure terminalizes an assigned attempts-zero initial delivery inline", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-promote-race-spawn-delivery-"));
+  try {
+    const filename = path.join(dir, "agent-registry.json");
+    const cwd = path.join(dir, "pipeline");
+    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "dual-write" });
+    const conversation = registry.ensureConversation("codex", path.join(cwd, "session.jsonl"), "account-a");
+    const begun = registry.beginSpawnRequest({
+      engine: "codex", cwd, transport: "structured", accountId: "account-a",
+      conversationId: conversation.id,
+      launchProfile: emptyLaunchProfile({ cwd }),
+    });
+    if (begun.kind !== "created") throw new Error("expected structured launch creation");
+    const delivery = registry.holdDelivery(
+      conversation.id,
+      "synthetic kickoff",
+      `spawn_${begun.receipt.launchId}`,
+      "text",
+      [],
+      null,
+      { operationId: `spawn_message_${begun.receipt.launchId}`, kind: "send", policy: "queue" },
+    );
+    expect(delivery).toMatchObject({ state: "assigned", attempts: 0 });
+
+    registry.failSpawn(begun.receipt.launchId, "runtime host request timed out during release promotion");
+    expect(registry.snapshot().receipts[begun.receipt.launchId]?.state).toBe("failed");
+    expect(registry.snapshot().heldDeliveries[delivery.id]).toMatchObject({
+      state: "failed",
+      attempts: 0,
+      generationId: null,
+      assignedAt: null,
+    });
+    const sqlite = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" }).snapshot();
+    expect(sqlite.receipts[begun.receipt.launchId]).toEqual(registry.snapshot().receipts[begun.receipt.launchId]);
+    expect(sqlite.heldDeliveries[delivery.id]).toEqual(registry.snapshot().heldDeliveries[delivery.id]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("issue 922: a promote-race failure preserves an attempted delivery whose outcome is uncertain", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-promote-race-uncertain-delivery-"));
+  try {
+    const filename = path.join(dir, "agent-registry.json");
+    const cwd = path.join(dir, "pipeline");
+    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const conversation = registry.ensureConversation("codex", path.join(cwd, "session.jsonl"), "account-a");
+    const begun = registry.beginSpawnRequest({
+      engine: "codex", cwd, transport: "structured", accountId: "account-a",
+      conversationId: conversation.id,
+      launchProfile: emptyLaunchProfile({ cwd }),
+    });
+    if (begun.kind !== "created") throw new Error("expected structured launch creation");
+    const delivery = registry.holdDelivery(
+      conversation.id,
+      "synthetic kickoff",
+      `spawn_${begun.receipt.launchId}`,
+      "text",
+      [],
+      null,
+      { operationId: `spawn_message_${begun.receipt.launchId}`, kind: "send", policy: "queue" },
+    );
+    expect(registry.beginDeliveryAttempt(delivery.id, delivery.generationId!)).toMatchObject({
+      state: "delivery-uncertain",
+      attempts: 1,
+    });
+
+    registry.failSpawn(begun.receipt.launchId, "runtime host request timed out during release promotion");
+    expect(registry.snapshot().heldDeliveries[delivery.id]).toMatchObject({
+      state: "delivery-uncertain",
+      attempts: 1,
+    });
+    expect(registry.terminalizeFailedSpawnDeliveries()).toEqual([]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("issue 653: the reaper cycle durably terminalizes a failed spawn's stuck initial held delivery", async () => {
   const fixture = makeFailedSpawnWithHeldDelivery();
   try {

@@ -1510,17 +1510,19 @@ function syncDeliveryOperationOwnerState(file: RegistryFile, delivery: HeldDeliv
   if (owner?.deliveryId === delivery.id) owner.terminalState = terminalDeliveryState(delivery);
 }
 
-/** The launch receipt a spawn's initial `spawn_<launchId>` held delivery belongs
-    to, if that receipt is a launch that reached the terminal `failed` state
-    (issue #653). Such a delivery can never actuate — the spawn is gone — so it
-    is registry rot that must be terminalized. */
-function failedSpawnLaunchIdOf(file: RegistryFile, delivery: HeldDelivery): string | null {
+/** Strict initial-message ownership. The idempotency key, operation id, and
+    canonical conversation must all name the same launch; paths and display
+    aliases never participate in this join. */
+function initialSpawnReceiptOf(file: RegistryFile, delivery: HeldDelivery): SpawnReceipt | null {
   const clientMessageId = delivery.clientMessageId;
   if (!clientMessageId || !clientMessageId.startsWith("spawn_")) return null;
   const launchId = clientMessageId.slice("spawn_".length);
+  if (delivery.command.operationId !== `spawn_message_${launchId}`) return null;
   const receipt = file.receipts[launchId];
-  if (!receipt || receipt.purpose !== "launch" || receipt.state !== "failed") return null;
-  return launchId;
+  if (!receipt
+    || receipt.purpose !== "launch"
+    || resolveConversationAlias(file, receipt.conversationId) !== resolveConversationAlias(file, delivery.conversationId)) return null;
+  return receipt;
 }
 
 /** A terminal first-message delivery failure makes its launch receipt terminal
@@ -1528,40 +1530,41 @@ function failedSpawnLaunchIdOf(file: RegistryFile, delivery: HeldDelivery): stri
     without a retry action even though its only prompt can no longer arrive. */
 function failInitialSpawnReceiptForDelivery(file: RegistryFile, delivery: HeldDelivery): void {
   if (delivery.state !== "failed") return;
-  const clientMessageId = delivery.clientMessageId;
-  if (!clientMessageId?.startsWith("spawn_")) return;
-  const launchId = clientMessageId.slice("spawn_".length);
-  if (delivery.command.operationId !== `spawn_message_${launchId}`) return;
-  const receipt = file.receipts[launchId];
-  if (!receipt
-    || receipt.purpose !== "launch"
-    || resolveConversationAlias(file, receipt.conversationId) !== resolveConversationAlias(file, delivery.conversationId)
-    || ["completed", "failed", "conflicted"].includes(receipt.state)) return;
+  const receipt = initialSpawnReceiptOf(file, delivery);
+  if (!receipt || ["completed", "failed", "conflicted"].includes(receipt.state)) return;
   receipt.state = "failed";
   receipt.error = delivery.error ?? "initial prompt delivery failed";
   receipt.admissionOwner = null;
 }
 
-/** Durably terminalize the `spawn_<launchId>` initial delivery of a FAILED
-    structured spawn (issue #653). Only a still-`held` reservation is touched, so
-    a concurrent `beginDeliveryAttempt` — which claims only an `assigned`
-    reservation — is never clobbered, and an in-flight attempt settles on its own
-    outcome. Returns the ids it failed; idempotent, so a terminal reservation is
-    skipped. */
+/** Converge terminal launch and initial-delivery state in both directions.
+
+    - #653: a terminal failed receipt with a never-attempted `held` delivery.
+    - #922: a never-started delivery already cancelled/failed while its receipt
+      stayed pending, or an attempts-zero `assigned` row after a promote race.
+
+    Only attempts-zero held/assigned rows are failed from receipt evidence. An
+    attempted/uncertain delivery keeps its ambiguity and settles from its own
+    journal outcome. Returns changed delivery ids and is idempotent. */
 function terminalizeFailedSpawnDeliveriesInFile(file: RegistryFile): string[] {
-  const failed: string[] = [];
+  const changed: string[] = [];
   for (const delivery of Object.values(file.heldDeliveries)) {
-    if (delivery.state !== "held") continue;
-    if (!failedSpawnLaunchIdOf(file, delivery)) continue;
-    delivery.state = "failed";
-    delivery.generationId = null;
-    delivery.assignedAt = null;
-    delivery.deliveredAt = null;
-    delivery.error = "spawn failed before its initial message was delivered";
-    syncDeliveryOperationOwnerState(file, delivery);
-    failed.push(delivery.id);
+    const receipt = initialSpawnReceiptOf(file, delivery);
+    if (!receipt) continue;
+    if (delivery.state === "failed" && !["completed", "failed", "conflicted"].includes(receipt.state)) {
+      const previousState = receipt.state;
+      failInitialSpawnReceiptForDelivery(file, delivery);
+      if (receipt.state !== previousState) changed.push(delivery.id);
+      continue;
+    }
+    const receiptFailed = receipt.state === "failed" || receipt.state === "conflicted";
+    const neverAttempted = delivery.attempts === 0
+      && (delivery.state === "held" || delivery.state === "assigned");
+    if (!receiptFailed || !neverAttempted) continue;
+    terminalizeHeldDelivery(file, delivery, "spawn failed before its initial message was delivered");
+    changed.push(delivery.id);
   }
-  return failed;
+  return changed;
 }
 
 interface DeliveryReservationInspection {
@@ -4504,18 +4507,30 @@ export class AgentRegistry {
       receipt.state = receipt.pane ? "conflicted" : "failed";
       receipt.error = error;
       if (receipt.state === "conflicted") receipt.verifiedHost = null;
+      /* A promote/admission race can fail through this pre-identity path with a
+         held or assigned attempts-zero initial delivery. Converge it in the
+         same transaction instead of waiting for the reaper. */
+      terminalizeFailedSpawnDeliveriesInFile(file);
     });
   }
 
-  /** Durably terminalize every FAILED structured spawn's stuck initial held
-      delivery (issue #653). The reaper cycle calls this so a spawn that already
-      failed before this fix shipped still stops owing a delivery and stops
-      projecting the ghost "delivering" bubble. Peeks first so a quiet registry
-      stays byte-stable across polls. Returns the reservation ids it failed. */
+  /** Durably reconcile terminal launches and attempts-zero initial deliveries
+      (#653/#922). The reaper repairs historical rows from either ordering of
+      receipt/delivery failure. Peeks first so a quiet registry stays byte-stable
+      across polls. Returns the reservation ids whose durable state changed. */
   terminalizeFailedSpawnDeliveries(): string[] {
     const snapshot = this.readOnlySnapshot();
     const hasCandidate = Object.values(snapshot.heldDeliveries).some(
-      (delivery) => delivery.state === "held" && failedSpawnLaunchIdOf(snapshot, delivery),
+      (delivery) => {
+        const receipt = initialSpawnReceiptOf(snapshot, delivery);
+        if (!receipt) return false;
+        if (delivery.state === "failed") {
+          return !["completed", "failed", "conflicted"].includes(receipt.state);
+        }
+        return (receipt.state === "failed" || receipt.state === "conflicted")
+          && delivery.attempts === 0
+          && (delivery.state === "held" || delivery.state === "assigned");
+      },
     );
     if (!hasCandidate) return [];
     return this.mutate((file) => terminalizeFailedSpawnDeliveriesInFile(file));
