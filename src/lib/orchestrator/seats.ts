@@ -255,6 +255,109 @@ export function readOrchestratorSeatFile(): OrchestratorSeatFile {
   }
 }
 
+type OrchestratorSeatMigrationEvidence = {
+  raw: Record<string, unknown> | null;
+  normalized: OrchestratorSeatFile;
+};
+
+function migrationEvidenceError(cause?: unknown): Error {
+  return cause === undefined
+    ? new Error("orchestrator seat evidence is malformed")
+    : new Error("orchestrator seat evidence is malformed", { cause });
+}
+
+function recordEvidence(value: unknown, field: string): Record<string, unknown> {
+  if (value === undefined) return {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw migrationEvidenceError(new Error(`${field} is invalid`));
+  return value as Record<string, unknown>;
+}
+
+function arrayEvidence(value: unknown, field: string): unknown[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw migrationEvidenceError(new Error(`${field} is invalid`));
+  return value;
+}
+
+/** Strict, lossless read used only by the one-time identity wave. Runtime
+    authority keeps its fail-closed tolerant reader, while this path refuses to
+    publish a rewritten file when any sibling evidence would be discarded. */
+function readOrchestratorSeatMigrationEvidence(): OrchestratorSeatMigrationEvidence {
+  let rawText: string;
+  try {
+    rawText = fs.readFileSync(seatsFile(), "utf8");
+  } catch (error) {
+    if (error && typeof error === "object" && (error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { raw: null, normalized: emptyFile() };
+    }
+    throw error;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawText);
+  } catch (error) {
+    throw migrationEvidenceError(error);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw migrationEvidenceError();
+  const raw = parsed as Record<string, unknown>;
+  if (raw.schemaVersion !== ORCHESTRATOR_SEATS_SCHEMA_VERSION) throw migrationEvidenceError();
+  if (typeof raw.nextSeatEpoch !== "number" || !Number.isInteger(raw.nextSeatEpoch) || raw.nextSeatEpoch < 1) {
+    throw migrationEvidenceError();
+  }
+
+  const normalized = emptyFile();
+  normalized.nextSeatEpoch = raw.nextSeatEpoch;
+  for (const [project, candidate] of Object.entries(recordEvidence(raw.seats, "seats"))) {
+    const seat = normalizeSeat(candidate);
+    if (!seat || seat.project !== project || seat.state !== "active" || !seat.conversationId) throw migrationEvidenceError();
+    const canonical = canonicalOrchestratorProject(project);
+    if (normalized.seats[canonical]) throw migrationEvidenceError();
+    normalized.seats[canonical] = { ...seat, project: canonical };
+  }
+  for (const [project, candidate] of Object.entries(recordEvidence(raw.pending, "pending"))) {
+    const seat = normalizeSeat(candidate);
+    if (!seat || seat.project !== project || seat.state !== "pending") throw migrationEvidenceError();
+    const canonical = canonicalOrchestratorProject(project);
+    if (normalized.pending[canonical]) throw migrationEvidenceError();
+    normalized.pending[canonical] = { ...seat, project: canonical };
+  }
+  for (const candidate of arrayEvidence(raw.revocations, "revocations")) {
+    const revocation = candidate as Partial<OrchestratorRevocation> | null;
+    if (!revocation || typeof revocation !== "object"
+      || typeof revocation.project !== "string" || !revocation.project
+      || typeof revocation.conversationId !== "string" || !revocation.conversationId
+      || typeof revocation.seatEpoch !== "number" || !Number.isInteger(revocation.seatEpoch) || revocation.seatEpoch < 1
+      || typeof revocation.revokedAt !== "string"
+      || (revocation.successorConversationId !== undefined
+        && revocation.successorConversationId !== null
+        && typeof revocation.successorConversationId !== "string")) {
+      throw migrationEvidenceError();
+    }
+    normalized.revocations.push({
+      project: canonicalOrchestratorProject(revocation.project),
+      conversationId: revocation.conversationId,
+      seatEpoch: revocation.seatEpoch,
+      revokedAt: revocation.revokedAt,
+      successorConversationId: revocation.successorConversationId ?? null,
+    });
+  }
+  for (const candidate of arrayEvidence(raw.history, "history")) {
+    const entry = candidate as Partial<OrchestratorSeatTerminalization> | null;
+    const seat = normalizeSeat(entry?.seat);
+    if (!entry || !seat
+      || (entry.reason !== "terminal_error" && entry.reason !== "superseded_epoch")
+      || typeof entry.terminalizedAt !== "string") {
+      throw migrationEvidenceError();
+    }
+    normalized.history.push({
+      seat: { ...seat, project: canonicalOrchestratorProject(seat.project) },
+      reason: entry.reason,
+      terminalizedAt: entry.terminalizedAt,
+    });
+  }
+  return { raw, normalized };
+}
+
 function writeSeatFile(file: OrchestratorSeatFile): void {
   atomicWriteJson(seatsFile(), file);
 }
@@ -466,40 +569,7 @@ export function activeOrchestratorSeats(): OrchestratorSeat[] {
  * is valid before any designation; unreadable or malformed durable evidence
  * must keep the migration marker open for a later retry. */
 export function activeOrchestratorSeatsForMigration(): OrchestratorSeat[] {
-  let raw: string;
-  try {
-    raw = fs.readFileSync(seatsFile(), "utf8");
-  } catch (error) {
-    if (error && typeof error === "object" && (error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (error) {
-    throw new Error("orchestrator seat evidence is malformed", { cause: error });
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("orchestrator seat evidence is malformed");
-  }
-  const file = parsed as Partial<OrchestratorSeatFile>;
-  if (file.schemaVersion !== ORCHESTRATOR_SEATS_SCHEMA_VERSION
-    || !file.seats
-    || typeof file.seats !== "object"
-    || Array.isArray(file.seats)) {
-    throw new Error("orchestrator seat evidence is malformed");
-  }
-
-  const seats: Record<string, OrchestratorSeat> = {};
-  for (const [project, candidate] of Object.entries(file.seats)) {
-    const seat = normalizeSeat(candidate);
-    if (!seat || seat.project !== project || seat.state !== "active" || !seat.conversationId) {
-      throw new Error("orchestrator seat evidence is malformed");
-    }
-    retainNewestSeat(seats, { ...seat, project: canonicalOrchestratorProject(project) });
-  }
-  return Object.values(seats);
+  return Object.values(readOrchestratorSeatMigrationEvidence().normalized.seats);
 }
 
 /** Converge the active authority paths with registry generation rekeys. The
@@ -508,18 +578,21 @@ export function activeOrchestratorSeatsForMigration(): OrchestratorSeat[] {
 export function rekeyOrchestratorSeatPaths(rekeys: readonly IdentityWavePathRekey[]): void {
   if (rekeys.length === 0) return;
   withAccountMutationLock(() => {
-    const active = activeOrchestratorSeatsForMigration();
-    if (active.length === 0) return;
+    const evidence = readOrchestratorSeatMigrationEvidence();
+    if (!evidence.raw || Object.keys(evidence.normalized.seats).length === 0) return;
     const replacements = new Map(rekeys.map((rekey) => [rekey.legacyPath, rekey.sharedPath]));
-    const changed = active.filter((seat) => seat.path && replacements.has(seat.path));
-    if (changed.length === 0) return;
-
-    const file = readOrchestratorSeatFile();
-    for (const seat of changed) {
-      const stored = file.seats[canonicalOrchestratorProject(seat.project)];
-      if (stored?.path) stored.path = replacements.get(stored.path) ?? stored.path;
+    const seats = recordEvidence(evidence.raw.seats, "seats");
+    let changed = false;
+    for (const candidate of Object.values(seats)) {
+      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+      const row = candidate as Record<string, unknown>;
+      if (typeof row.path !== "string") continue;
+      const replacement = replacements.get(row.path);
+      if (!replacement) continue;
+      row.path = replacement;
+      changed = true;
     }
-    writeSeatFile(file);
+    if (changed) atomicWriteJson(seatsFile(), evidence.raw);
   });
 }
 

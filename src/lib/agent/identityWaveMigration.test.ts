@@ -321,7 +321,7 @@ test("identity evidence cleans receipt and transcript Markdown before durable pe
   }
 });
 
-test("a reserved orchestrator seat stamps lineage when its conversation later settles", () => {
+test("the completed wave preserves an accepted orchestrator seat until its conversation settles", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-deferred-seat-"));
   try {
     const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
@@ -341,8 +341,21 @@ test("a reserved orchestrator seat stamps lineage when its conversation later se
       activatedAt: NOW,
     };
 
-    registry.stampOrchestratorSeatIdentity(seat);
+    expect(registry.runIdentityWaveMigration({
+      now: NOW,
+      transcriptTitle: () => null,
+      sharedPathForLegacy: () => null,
+      orchestratorSeats: [seat],
+    })).toEqual({
+      dryRun: false,
+      alreadyCompleted: false,
+      retitled: 0,
+      rekeyed: 0,
+      edgesStamped: 1,
+    });
     expect(registry.snapshot().conversations[begun.receipt.conversationId]).toBeUndefined();
+    expect(registry.snapshot().receipts[begun.receipt.launchId]?.pendingOrchestratorSeatIdentity).toMatchObject(seat);
+    expect(registry.snapshot().identityMigrations[IDENTITY_WAVE_MIGRATION]?.completedAt).toBe(NOW);
     const settled = registry.settleSpawn(begun.receipt.launchId, {
       key: { engine: "codex", sessionId: crypto.randomUUID() },
       artifactPath: path.join(directory, "settled.jsonl"),
@@ -364,6 +377,67 @@ test("a reserved orchestrator seat stamps lineage when its conversation later se
     }));
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("malformed sibling seat evidence leaves path rekey and the migration marker open", () => {
+  type MutableSeatEvidence = Record<string, unknown> & {
+    pending: Record<string, unknown>;
+    revocations: unknown[];
+    history: unknown[];
+  };
+  const corruptions = [
+    { label: "pending", apply: (file: MutableSeatEvidence) => { file.pending.broken = {}; } },
+    { label: "revocation", apply: (file: MutableSeatEvidence) => { file.revocations.push({}); } },
+    { label: "history", apply: (file: MutableSeatEvidence) => { file.history.push({}); } },
+  ];
+  for (const corruption of corruptions) {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-identity-wave-${corruption.label}-`));
+    const previousStateDir = process.env.LLV_STATE_DIR;
+    try {
+      process.env.LLV_STATE_DIR = directory;
+      const legacyPath = path.join(directory, "legacy.jsonl");
+      const sharedPath = path.join(directory, "shared.jsonl");
+      const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+      const conversation = registry.ensureConversation("claude", legacyPath, null);
+      beginOrchestratorSeatIntent({
+        project: "viewer",
+        mandate: "own identity migration",
+        clientRequestId: `req_${corruption.label}_0001`,
+        mode: "existing",
+        conversationId: conversation.id,
+        now: NOW,
+      });
+      completeOrchestratorSeatIntent({
+        project: "viewer",
+        clientRequestId: `req_${corruption.label}_0001`,
+        conversationId: conversation.id,
+        path: legacyPath,
+        now: NOW,
+      });
+      const seatsPath = path.join(directory, "orchestrator-seats.json");
+      const seatFile = JSON.parse(fs.readFileSync(seatsPath, "utf8")) as MutableSeatEvidence;
+      corruption.apply(seatFile);
+      fs.writeFileSync(seatsPath, `${JSON.stringify(seatFile, null, 2)}\n`, "utf8");
+      const corruptedSeatEvidence = fs.readFileSync(seatsPath, "utf8");
+
+      expect(() => runIdentityWaveMigrationAtStartup({
+        registry,
+        now: () => NOW,
+        transcriptTitle: () => null,
+        sharedPath: (pathname) => pathname === legacyPath ? sharedPath : null,
+        log: () => {},
+        env: {},
+      })).toThrow("orchestrator seat evidence is malformed");
+
+      expect(registry.snapshot().identityMigrations[IDENTITY_WAVE_MIGRATION]).toBeUndefined();
+      expect(registry.conversation(conversation.id)?.generations.at(-1)?.path).toBe(legacyPath);
+      expect(fs.readFileSync(seatsPath, "utf8")).toBe(corruptedSeatEvidence);
+    } finally {
+      if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+      else process.env.LLV_STATE_DIR = previousStateDir;
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   }
 });
 
