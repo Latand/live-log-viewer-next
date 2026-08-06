@@ -4,8 +4,9 @@ import { accountManager } from "@/lib/accounts/manager";
 import { emptyLaunchProfile, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import type { AgentRegistry } from "@/lib/agent/registry";
 import { sessionKeyFromTranscript, sessionKeyId } from "@/lib/agent/sessionKey";
+import { headCwd } from "@/lib/agent/transcript";
 import { isUnderClaudeSubagentsDir } from "@/lib/scanner/claudeNative";
-import { transcriptProcessMayBeRunning } from "@/lib/scanner/transcripts";
+import { transcriptLiveOwnership, type TranscriptLiveOwnership } from "@/lib/scanner/transcripts";
 import type { FileEntry } from "@/lib/types";
 
 /**
@@ -35,8 +36,11 @@ export interface TranscriptAdmissionDependencies {
   readable?: (pathname: string) => boolean;
   resolveAccount?: typeof accountManager.resolveTranscriptOwner;
   /** Injectable so the focused tests decide liveness without touching real
-      processes. Production passes the uncapped destructive-operation guard. */
-  processMayBeRunning?: (entry: FileEntry) => boolean;
+      processes. Production passes the uncapped destructive-operation probe,
+      classified by the evidence behind the match. */
+  liveOwnership?: (entry: FileEntry) => TranscriptLiveOwnership | null;
+  /** The transcript's own head, read only when the scanner recorded no cwd. */
+  headCwd?: (pathname: string) => string | null;
   now?: () => string;
 }
 
@@ -48,10 +52,17 @@ function transcriptReadable(pathname: string): boolean {
   }
 }
 
+/** The same head sniff the scanner's inventory and the legacy resume path use
+    when `entry.cwd` is absent: without it the bridge spawns the host in an
+    undefined directory and the resumed agent's tools run outside the repo. */
+function admissionHeadCwd(pathname: string): string | null {
+  return headCwd(pathname, { maxLines: 40 });
+}
+
 /**
- * A process outside the viewer is writing this transcript right now. Resuming
- * would put a second agent on one session, so the refusal says so instead of
- * forking the operator's live terminal out from under them.
+ * A process outside the viewer may be writing this transcript right now.
+ * Resuming would put a second agent on one session, so the refusal says so
+ * instead of forking the operator's live terminal out from under them.
  *
  * Liveness cannot rest on `entry.proc` alone. That field is the scanner's
  * best-effort UI attribution and it is documented to leave a live owner unset
@@ -59,17 +70,26 @@ function transcriptReadable(pathname: string): boolean {
  * the fd-holder scan is capped by recency, and a plain `claude` typed in a
  * shell carries no session id in its argv. Admitting a session into structured
  * hosting is at least as destructive as deleting its file, so it asks the same
- * uncapped guard every other destructive route asks.
+ * uncapped probe every other destructive route asks — but it reads the
+ * evidence class, because unlike a delete it must also decide whether the whole
+ * request ends here.
+ *
+ * `entry.proc === "running"` is session evidence: the scanner attributes that
+ * pid to this one transcript, and at most one entry per project ever gets it.
+ * The raw cwd-slug fallback is not — one plain `claude` in a repo matches every
+ * transcript of that repo — so it suppresses admission without ending the
+ * request.
  */
-function foreignLiveOwner(
+function foreignLiveOwnership(
   registry: AgentRegistry,
   entry: FileEntry,
   key: { engine: "claude" | "codex"; sessionId: string },
-  mayBeRunning: (entry: FileEntry) => boolean,
-): boolean {
-  if (entry.proc !== "running" && !mayBeRunning(entry)) return false;
+  probe: (entry: FileEntry) => TranscriptLiveOwnership | null,
+): TranscriptLiveOwnership | null {
+  const evidence = entry.proc === "running" ? "session" : probe(entry);
+  if (!evidence) return null;
   const hosted = registry.readOnlySnapshot().entries[sessionKeyId(key)];
-  return !hosted?.host && !hosted?.structuredHost;
+  return hosted?.host || hosted?.structuredHost ? null : evidence;
 }
 
 export function admitTranscriptConversation(
@@ -93,11 +113,24 @@ export function admitTranscriptConversation(
   if (!(dependencies.readable ?? transcriptReadable)(entry.path)) {
     return { ok: false, reason: "the conversation transcript cannot be read from disk" };
   }
-  if (foreignLiveOwner(registry, entry, { engine, sessionId: key.sessionId }, dependencies.processMayBeRunning ?? transcriptProcessMayBeRunning)) {
+  const live = foreignLiveOwnership(registry, entry, { engine, sessionId: key.sessionId }, dependencies.liveOwnership ?? transcriptLiveOwnership);
+  if (live === "session") {
     return {
       ok: false,
       blocking: true,
       reason: "the session is still running in a terminal the viewer does not own; close it there, then continue from here",
+    };
+  }
+  if (live === "cwd") {
+    /* Not blocking: the evidence is a live agent in this conversation's working
+       directory, which may be any other session of that repo. Minting an
+       identity and buying a host on that would risk a second agent on one
+       session, so admission declines — but the request keeps its turn on the
+       legacy ladder instead of ending on a refusal naming a terminal the
+       operator is not holding. */
+    return {
+      ok: false,
+      reason: `another ${engine === "claude" ? "Claude" : "Codex"} process is running in this conversation's working directory, so the viewer cannot tell whether this session is still open there`,
     };
   }
   const owner = (dependencies.resolveAccount ?? accountManager.resolveTranscriptOwner)(engine, entry.path);
@@ -107,7 +140,7 @@ export function admitTranscriptConversation(
     path: entry.path,
     accountId: owner?.accountId ?? null,
     launchProfile: emptyLaunchProfile({
-      cwd: entry.cwd || "",
+      cwd: entry.cwd || (dependencies.headCwd ?? admissionHeadCwd)(entry.path) || "",
       model: entry.launchModel ?? entry.model,
       effort: entry.effort ?? null,
       title: entry.title || null,

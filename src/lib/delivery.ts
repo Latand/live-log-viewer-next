@@ -8,7 +8,7 @@ import { deliverToTranscriptHost, readTranscriptHosts, type HostDeliveryOutcome 
 import { admitTranscriptConversation } from "@/lib/conversation/transcriptAdmission";
 import { listFiles } from "@/lib/scanner";
 import { pathAllowed } from "@/lib/scanner/roots";
-import { transcriptProcessMayBeRunning } from "@/lib/scanner/transcripts";
+import { transcriptLiveOwnership, type TranscriptLiveOwnership } from "@/lib/scanner/transcripts";
 import { procBackend } from "@/lib/proc";
 import { recoverDeadStructuredConversation } from "@/lib/runtime/structuredRecovery";
 import type { RuntimeOperationReceipt } from "@/lib/runtime/contracts";
@@ -337,7 +337,7 @@ interface ResumeConversationOverrides {
   recover?: typeof recoverDeadStructuredConversation;
   admit?: typeof admitTranscriptConversation;
   livePaneHost?: typeof livePaneHost;
-  processMayBeRunning?: (entry: FileEntry) => boolean;
+  liveOwnership?: (entry: FileEntry) => TranscriptLiveOwnership | null;
   deliver?: typeof deliverToTranscriptHost;
 }
 
@@ -395,18 +395,21 @@ export async function resumeConversation(
      bridge take it; a refusal the bridge can name does not consume the legacy
      ladder's turn, unless something outside the viewer owns the session. */
   let admissionRefusal: string | null = null;
-  /* Liveness is decided once, by the uncapped destructive-operation guard the
+  /* Liveness is decided once, by the uncapped destructive-operation probe the
      delete routes use: the scanner's `entry.proc` misses an idle or aged-out
-     terminal owner, which is this population exactly. */
-  const mayBeRunning = !known
-    && (entry.proc === "running" || (overrides.processMayBeRunning ?? transcriptProcessMayBeRunning)(entry));
+     terminal owner, which is this population exactly. The evidence class
+     travels with it — admission refuses differently for a process that names
+     this session than for one merely sitting in its directory. */
+  const ownership = !known
+    ? entry.proc === "running" ? "session" : (overrides.liveOwnership ?? transcriptLiveOwnership)(entry)
+    : null;
   /* A live tmux pane is a host the viewer CAN reach: the ladder below types
      into it. Only a live process with no pane and no registry host is the
      foreign terminal admission refuses. */
-  const paneHosted = mayBeRunning && await (overrides.livePaneHost ?? livePaneHost)(filePath) !== null;
+  const paneHosted = ownership !== null && await (overrides.livePaneHost ?? livePaneHost)(filePath) !== null;
   if (!known && !paneHosted) {
     const admitted = (overrides.admit ?? admitTranscriptConversation)(registry, entry, {
-      processMayBeRunning: () => mayBeRunning,
+      liveOwnership: () => ownership,
     });
     if (!admitted.ok && admitted.blocking) return failure(admitted.reason, 409);
     if (!admitted.ok) admissionRefusal = admitted.reason;

@@ -54,7 +54,7 @@ function terminalBornEntry(pathname: string, overrides: Partial<FileEntry> = {})
 
 /** Liveness is injected everywhere so no case reads the machine's real
     processes: the probe answers for the entry under test alone. */
-const NOTHING_RUNNING = () => false;
+const NOTHING_LIVE = () => null;
 
 test("a terminal-born transcript is admitted and resumes through the transcript-host bridge", async () => {
   const pathname = path.join(SANDBOX, `${SESSION_ID}.jsonl`);
@@ -71,7 +71,7 @@ test("a terminal-born transcript is admitted and resumes through the transcript-
     pathAllowed: () => true,
     registry,
     listFiles: async () => [entry],
-    processMayBeRunning: NOTHING_RUNNING,
+    liveOwnership: NOTHING_LIVE,
     recover: async (request: { path: string; conversationId?: string | null }) => {
       bridgeRequests.push({ path: request.path, conversationId: request.conversationId });
       /* The deployed bridge only owns a conversation the registry holds an
@@ -107,7 +107,7 @@ test("admission records the transcript's own provenance, not a default", () => {
     launchModel: "opus",
     effort: "high",
   } as Partial<FileEntry>), {
-    processMayBeRunning: NOTHING_RUNNING,
+    liveOwnership: NOTHING_LIVE,
     resolveAccount: () => ({
       engine: "claude",
       accountId: "account-b",
@@ -184,7 +184,7 @@ test("a live tmux pane keeps its own delivery: the foreign-terminal refusal is o
 test("an unreadable transcript and a transcript with no session id each name their own refusal", () => {
   const registry = registryFor("named-refusals");
 
-  const dependencies = { processMayBeRunning: NOTHING_RUNNING };
+  const dependencies = { liveOwnership: NOTHING_LIVE };
 
   expect(admitTranscriptConversation(registry, terminalBornEntry(path.join(SANDBOX, `${SESSION_ID}.jsonl`)), dependencies)).toEqual({
     ok: false,
@@ -212,7 +212,7 @@ test("a Codex transcript born in a terminal is admitted the same way", () => {
   const admission = admitTranscriptConversation(registry, terminalBornEntry(pathname, {
     root: "codex-sessions",
     engine: "codex",
-  }), { resolveAccount: () => null, processMayBeRunning: NOTHING_RUNNING });
+  }), { resolveAccount: () => null, liveOwnership: NOTHING_LIVE });
 
   expect(admission).toMatchObject({ ok: true });
   const conversation = registry.conversationForPath(pathname)!;
@@ -244,9 +244,9 @@ test("a live foreign owner the scanner never attributed is still refused by name
     // Idle and unattributed: exactly what the scanner reports for a terminal
     // session parked at its composer for half an hour.
     listFiles: async () => [terminalBornEntry(pathname, { proc: null, pid: null, activity: "idle" })],
-    processMayBeRunning: (entry: FileEntry) => {
+    liveOwnership: (entry: FileEntry) => {
       probed.push(entry.path);
-      return true;
+      return "session" as const;
     },
     livePaneHost: async () => null,
     recover: async () => {
@@ -281,7 +281,7 @@ test("a dead terminal-born session the scanner never attributed still admits and
     pathAllowed: () => true,
     registry,
     listFiles: async () => [terminalBornEntry(pathname, { proc: null, pid: null, activity: "idle" })],
-    processMayBeRunning: NOTHING_RUNNING,
+    liveOwnership: NOTHING_LIVE,
     livePaneHost: async () => null,
     recover: async (request: { path: string; conversationId?: string | null }) => {
       const conversation = registry.conversationForPath(request.path);
@@ -306,7 +306,7 @@ test("a pane the viewer owns still takes its own delivery when the scanner left 
     pathAllowed: () => true,
     registry,
     listFiles: async () => [terminalBornEntry(pathname, { proc: null, pid: null, activity: "idle" })],
-    processMayBeRunning: () => true,
+    liveOwnership: () => "session" as const,
     livePaneHost: async () => ({ paneId: "%3", display: "0:0.0" }),
     recover: async () => null,
     resumeSpecFor: () => ({ command: "resume", launchProfile: null }),
@@ -337,7 +337,7 @@ test("an unregistered Claude subagent leaf keeps its own refusal instead of buyi
     pathAllowed: () => true,
     registry,
     listFiles: async () => [terminalBornEntry(pathname, { kind: "subagent", parent: path.join(SANDBOX, "-repo.jsonl") })],
-    processMayBeRunning: NOTHING_RUNNING,
+    liveOwnership: NOTHING_LIVE,
     livePaneHost: async () => null,
     recover: async (request: { path: string }) => {
       bridgeRequests.push(request.path);
@@ -371,7 +371,7 @@ test("admission names the subagent refusal itself, without consuming the legacy 
   const registry = registryFor("subagent-named");
 
   const admission = admitTranscriptConversation(registry, terminalBornEntry(pathname), {
-    processMayBeRunning: NOTHING_RUNNING,
+    liveOwnership: NOTHING_LIVE,
   });
 
   expect(admission).toEqual({
@@ -379,6 +379,88 @@ test("admission names the subagent refusal itself, without consuming the legacy 
     reason: "a Claude subagent transcript has no session of its own to resume",
   });
   expect(registry.conversationForPath(pathname)).toBeNull();
+});
+
+/*
+ * Round 3. Refusing is only safe when the refusal is proportional to the
+ * evidence. The uncapped probe's weakest signal — a tty-attached agent whose
+ * cwd slug matches the transcript's project — is shared by every transcript of
+ * that repo, so one live terminal `claude` must not end the request for a
+ * different, long-dead conversation in the same directory.
+ */
+
+test("a live agent elsewhere in the same working directory suppresses admission without ending the request", async () => {
+  const pathname = path.join(SANDBOX, `${SESSION_ID}.jsonl`);
+  fs.writeFileSync(pathname, "{}\n");
+  const registry = registryFor("neighbour-live");
+  setAgentRegistryForTests(registry);
+  let legacyDeliveries = 0;
+
+  const outcome = await resumeConversation(pathname, {
+    pathAllowed: () => true,
+    registry,
+    listFiles: async () => [terminalBornEntry(pathname, { proc: null, pid: null, activity: "idle" })],
+    // Cwd-only evidence: a plain `claude` in this repo carries no session id,
+    // so the probe cannot tell whose transcript it is writing.
+    liveOwnership: () => "cwd" as const,
+    livePaneHost: async () => null,
+    recover: async () => null,
+    resumeSpecFor: () => ({ command: "resume", launchProfile: null }),
+    deliver: async () => {
+      legacyDeliveries += 1;
+      return { ok: true, outcome: "resumed", target: "%9" };
+    },
+  } as never);
+
+  /* No 409 naming a terminal the operator is not holding: the request keeps
+     its turn on the legacy ladder. */
+  expect(outcome).toMatchObject({ ok: true, outcome: "resumed", target: "%9" });
+  expect(legacyDeliveries).toBe(1);
+  // Still no identity minted and no host bought on ambiguous evidence.
+  expect(registry.conversationForPath(pathname)).toBeNull();
+});
+
+test("admission grades its refusal by evidence: blocking only when the process names this session", () => {
+  const pathname = path.join(SANDBOX, `${SESSION_ID}.jsonl`);
+  fs.writeFileSync(pathname, "{}\n");
+  const registry = registryFor("evidence-grade");
+
+  const neighbour = admitTranscriptConversation(registry, terminalBornEntry(pathname), {
+    liveOwnership: () => "cwd",
+  });
+  expect(neighbour).toEqual({
+    ok: false,
+    reason: "another Claude process is running in this conversation's working directory, so the viewer cannot tell whether this session is still open there",
+  });
+  expect(registry.conversationForPath(pathname)).toBeNull();
+
+  const owner = admitTranscriptConversation(registry, terminalBornEntry(pathname), {
+    liveOwnership: () => "session",
+  });
+  expect(owner).toEqual({
+    ok: false,
+    blocking: true,
+    reason: "the session is still running in a terminal the viewer does not own; close it there, then continue from here",
+  });
+  expect(registry.conversationForPath(pathname)).toBeNull();
+});
+
+test("admission sniffs the transcript head for a cwd the scanner did not record", () => {
+  const pathname = path.join(SANDBOX, `${SESSION_ID}.jsonl`);
+  const recorded = path.join(SANDBOX, "repo");
+  fs.writeFileSync(pathname, JSON.stringify({ type: "user", cwd: recorded }) + "\n");
+  const registry = registryFor("head-cwd");
+
+  const admission = admitTranscriptConversation(registry, terminalBornEntry(pathname, { cwd: "" }), {
+    liveOwnership: NOTHING_LIVE,
+    resolveAccount: () => null,
+  });
+
+  expect(admission).toMatchObject({ ok: true });
+  /* An empty cwd reaches the broker as `cwd: ""` and the resumed agent's tools
+     then run outside the conversation's repo. */
+  const generation = registry.conversationForPath(pathname)!.generations.at(-1)!;
+  expect(generation.launchProfile.cwd).toBe(recorded);
 });
 
 test("an admitted transcript with a known parent records the lineage edge", () => {
@@ -389,7 +471,7 @@ test("an admitted transcript with a known parent records the lineage edge", () =
   fs.writeFileSync(childPath, "{}\n");
   const registry = registryFor("admitted-lineage");
   const codex = { root: "codex-sessions", engine: "codex" } as Partial<FileEntry>;
-  const dependencies = { resolveAccount: () => null, processMayBeRunning: NOTHING_RUNNING };
+  const dependencies = { resolveAccount: () => null, liveOwnership: NOTHING_LIVE };
 
   expect(admitTranscriptConversation(registry, terminalBornEntry(parentPath, codex), dependencies)).toMatchObject({ ok: true });
   const admitted = admitTranscriptConversation(registry, terminalBornEntry(childPath, { ...codex, parent: parentPath }), dependencies);
