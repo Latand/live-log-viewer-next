@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { emptyLaunchProfile, sameProviderReceiptOutcome, type NativeGeneration, type ProviderReceipt, type SuccessorProviderPort } from "./contracts";
+import { emptyLaunchProfile, migrationSuccessorLaunchProfile, sameProviderReceiptOutcome, type NativeGeneration, type ProviderReceipt, type SuccessorProviderPort } from "./contracts";
 import {
   authorizeCodexForkRetry,
   codexForkArtifacts,
@@ -370,6 +370,7 @@ test("Claude successor provider uses registered homes and shared model normaliza
   fs.mkdirSync(path.dirname(sourcePath), { recursive: true, mode: 0o700 });
   fs.writeFileSync(sourcePath, "{}\n", { mode: 0o600 });
   let command = "";
+  let launchTitle: string | null = null;
   const registry = new AgentRegistry(path.join(base, "provider-registry.json"));
   const dependencies: ProviderDependencies = {
     accounts: {
@@ -380,6 +381,7 @@ test("Claude successor provider uses registered homes and shared model normaliza
     claudeStatus: async () => ({ loggedIn: true }),
     spawnClaude: async (spec) => {
       command = spec.command;
+      launchTitle = spec.launchProfile?.title ?? null;
       fs.mkdirSync(path.dirname(spec.transcript!), { recursive: true, mode: 0o700 });
       fs.writeFileSync(spec.transcript!, JSON.stringify({ sessionId: path.basename(spec.transcript!, ".jsonl") }) + "\n", { mode: 0o600 });
       return { paneId: "%9", panePid: 99, host: claudeHost("%9", 99) };
@@ -394,7 +396,13 @@ test("Claude successor provider uses registered homes and shared model normaliza
     id: "019f423a-d6e9-\x37903-b597-3e676b6ff3d4",
     path: sourcePath,
     accountId: "source",
-    launchProfile: emptyLaunchProfile({ cwd: "/repo", model: "claude-fable-20260701", effort: "high", title: "Migrate issue #913 identity" }),
+    launchProfile: migrationSuccessorLaunchProfile(emptyLaunchProfile({
+      cwd: "/repo",
+      model: "claude-fable-20260701",
+      effort: "high",
+      title: "Claude session",
+      goal: { objective: "Migrate issue #913 identity", status: "active", tokensUsed: null, timeUsedSeconds: null },
+    })),
     historyHash: null,
     host: null,
     createdAt: "2026-07-10T11:00:00.000Z",
@@ -405,9 +413,10 @@ test("Claude successor provider uses registered homes and shared model normaliza
   expect(command).toContain("--model' 'fable'");
   expect(command).not.toContain("claude-fable-");
   expect(command).toContain("--effort' 'high'");
+  expect(launchTitle as string | null).toBe("migration successor · Migrate issue 913 identity");
   expect(receipt.path.startsWith(target.transcriptRoot + path.sep)).toBeTrue();
   expect(Object.values(registry.snapshot().receipts)).toContainEqual(expect.objectContaining({
-    launchProfile: expect.objectContaining({ title: "Migrate issue #913 identity" }),
+    launchProfile: expect.objectContaining({ title: "migration successor · Migrate issue 913 identity" }),
   }));
   await expect(provider.verify(receipt, { engine: "claude", targetAccountId: "target", launchProfile: sourceGeneration.launchProfile })).resolves.toBeUndefined();
 });
@@ -862,6 +871,7 @@ test("Codex successor provider accepts authenticated ChatGPT account responses a
   const calls: string[] = [];
   let resumeOptions: unknown = null;
   let goalOptions: unknown = null;
+  let threadName: string | null = null;
   let targetAuthenticated = false;
   const client = (home: string) => ({
     async readAccount() {
@@ -871,7 +881,7 @@ test("Codex successor provider accepts authenticated ChatGPT account responses a
     async forkThread() { calls.push("source:fork"); fs.writeFileSync(forkPath, codexSessionMeta(forkId, sourceId), { mode: 0o644 }); return { id: forkId, path: forkPath }; },
     async resumeThread(id: string, options: unknown) { calls.push("target:resume"); resumeOptions = options; return { id, path: null }; },
     async readThread(id: string) { calls.push("target:read"); return { id, path: null }; },
-    async setThreadName() { calls.push("target:name"); },
+    async setThreadName(_id: string, title: string) { calls.push("target:name"); threadName = title; },
     async setThreadGoal(_id: string, objective: string, status: string) { calls.push("target:goal"); goalOptions = { objective, status }; },
     close() { calls.push(`${path.basename(home)}:close`); },
   }) as unknown as CodexAppServerClient;
@@ -882,7 +892,7 @@ test("Codex successor provider accepts authenticated ChatGPT account responses a
     spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
     now: () => "2026-07-10T12:00:00.000Z",
   });
-  const profile = emptyLaunchProfile({ cwd: "/repo", model: "gpt-5.6-terra", effort: "high", fast: true, permissionMode: "never", readOnly: true, title: "Migration", goal: { objective: "Ship", status: "active", tokensUsed: null, timeUsedSeconds: null } });
+  const profile = migrationSuccessorLaunchProfile(emptyLaunchProfile({ cwd: "/repo", model: "gpt-5.6-terra", effort: "high", fast: true, permissionMode: "never", readOnly: true, title: "Codex", goal: { objective: "Ship", status: "active", tokensUsed: null, timeUsedSeconds: null } }));
   const recorded: string[] = [];
   const input = {
     engine: "codex",
@@ -906,6 +916,7 @@ test("Codex successor provider accepts authenticated ChatGPT account responses a
   expect(calls).toContain("target:resume");
   expect(calls).toContain("target:name");
   expect(calls).toContain("target:goal");
+  expect(threadName as string | null).toBe("migration successor · Ship");
   expect(resumeOptions).toEqual({ path: receipt.path, cwd: "/repo", model: "gpt-5.6-terra", effort: "high", fast: true, approvalPolicy: "never", sandbox: "read-only" });
   expect(goalOptions).toEqual({ objective: "Ship", status: "active" });
   await provider.verify(receipt, { engine: "codex", targetAccountId: "target", launchProfile: profile });
