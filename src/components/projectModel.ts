@@ -185,6 +185,21 @@ export function buildProjectSummaries(
   });
 }
 
+/**
+ * Crowned projects float in their own pinned section above everything else;
+ * inside each half the rows keep the summaries' own order (attention → live →
+ * bucketed recency), so pinning changes grouping, never the recency rule.
+ */
+export function partitionCrownedSummaries<T extends { project: string }>(
+  rows: readonly T[],
+  crowned: ReadonlySet<string>,
+): { crowned: T[]; rest: T[] } {
+  const pinned: T[] = [];
+  const rest: T[] = [];
+  for (const row of rows) (crowned.has(row.project) ? pinned : rest).push(row);
+  return { crowned: pinned, rest };
+}
+
 export interface BranchColumn {
   file: FileEntry;
   /** Background tasks attached under this column as collapsed rows. */

@@ -48,6 +48,7 @@ const PROJECTION_STATE_FILES = [
   "tasks.json",
   "workflows.json",
   "project-aliases.json",
+  "project-curation.json",
   "worktree-map.json",
   "reaper-state.json",
 ] as const;
