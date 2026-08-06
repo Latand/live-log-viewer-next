@@ -659,6 +659,31 @@ test("a pending replay completes with the ORIGINAL mandate, not a recomposed one
   ]);
 });
 
+test("a pending pre-spawn replay keeps the ORIGINAL engine and model", async () => {
+  let attempts = 0;
+  const { deps, recorded } = dependencies({
+    spawn: async (body) => {
+      recorded.spawns.push(body);
+      attempts += 1;
+      return attempts === 1
+        ? { status: 500, body: { error: "transient" } }
+        : { status: 200, body: { ok: true, conversationId: NEW_ID, path: null } };
+    },
+  });
+  await executeOrchestratorSeatRequest(spawnRequest(), deps);
+  await executeOrchestratorSeatRequest({
+    ...spawnRequest(),
+    engine: "codex",
+    model: "gpt-5.6-sol",
+  }, deps);
+
+  expect(recorded.spawns.map((body) => ({ engine: body.engine, model: body.model }))).toEqual([
+    { engine: "claude", model: "opus" },
+    { engine: "claude", model: "opus" },
+  ]);
+  expect(orchestratorSeatFor("proj-a").active).toMatchObject({ engine: "claude", model: "opus" });
+});
+
 test("rotation preserves the requested effort end to end into the successor spawn body", async () => {
   const { deps, recorded } = dependencies();
   await executeOrchestratorSeatRequest(spawnRequest(), deps);
