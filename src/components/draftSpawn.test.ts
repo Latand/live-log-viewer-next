@@ -67,6 +67,7 @@ const baseAttempt: SpawnAttempt = {
   ["prompt"]: "do the thing",
   hasImages: false,
   request: {
+    title: "codex · do the thing",
     engine: "codex",
     model: "gpt-5.6",
     cwd: "/repo",
@@ -283,6 +284,22 @@ describe("matchSpawnedFile — adoption evidence, strongest first", () => {
 });
 
 describe("durable request recovery", () => {
+  test("a semantic title survives serialized reload recovery and is resubmitted exactly", () => {
+    const request = {
+      ...baseAttempt.request!,
+      title: "codex · inspect release readiness",
+    };
+    const persisted = createSpawnAttempt("attempt_title_reload_1", 2_000_000_000_123, request);
+    const recovered = JSON.parse(JSON.stringify(persisted)) as SpawnAttempt;
+
+    expect(hasRecoverableRequest(recovered)).toBe(true);
+    if (!hasRecoverableRequest(recovered)) throw new Error("expected recoverable titled request");
+    expect(spawnRequestBody(recovered)).toMatchObject({
+      title: "codex · inspect release readiness",
+      clientAttemptId: "attempt_title_reload_1",
+    });
+  });
+
   test("reload during POST retains attempt id, launch timestamp, and exact attachment payload", () => {
     const attempt = createSpawnAttempt("attempt_reload_1", 2_000_000_000_123, {
       ...baseAttempt.request!,
@@ -291,6 +308,7 @@ describe("durable request recovery", () => {
     });
     expect(hasRecoverableRequest(attempt)).toBe(true);
     expect(spawnRequestBody(attempt)).toEqual({
+      title: "codex · do the thing",
       engine: "codex",
       model: "gpt-5.6",
       cwd: "/repo",
