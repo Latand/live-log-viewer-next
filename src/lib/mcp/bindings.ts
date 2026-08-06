@@ -56,7 +56,11 @@ import { listRoles } from "@/lib/roles/registry";
 import type { RoleDefinition, RoleParameter } from "@/lib/roles/types";
 import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
 import { ledgerDeployment, ledgerDeployments } from "@/lib/runtime/deploymentLedger";
-import { SELECTED_TAIL_MAX_LINES } from "@/lib/selection/resolve";
+import {
+  SELECTED_TAIL_MAX_BYTES,
+  SELECTED_TAIL_MAX_LINES,
+  type BoundedTranscriptTail,
+} from "@/lib/selection/resolve";
 import { readSession, type SessionReadResult } from "@/lib/session/reader";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { applyAssignmentPatches, createTask, patchTask, type CreateTaskInput, type PatchTaskInput } from "@/lib/tasks/commands";
@@ -206,9 +210,13 @@ function readViewerControl(
 
 type RegistrySnapshot = ReturnType<ReturnType<typeof agentRegistry>["readOnlySnapshot"]>;
 
+interface TargetedConversationOptions extends McpToolCallContext {
+  tailLines?: number;
+}
+
 export interface ViewerMcpDomainDependencies {
   listFiles(options?: Parameters<typeof listFiles>[0]): Promise<FileEntry[]>;
-  targetedFileEntry?(pathname: string, options?: McpToolCallContext): Promise<TargetedConversationRead | FileEntry | undefined>;
+  targetedFileEntry?(pathname: string, options?: TargetedConversationOptions): Promise<TargetedConversationRead | FileEntry | undefined>;
   /** #844 §6/§7: the bounded selected-card path — one keyed identity lookup and
       an explicit tail read, reaching no scan. Optional so partial test
       harnesses fall back to the production resolver. */
@@ -479,10 +487,12 @@ function diffSourceFromPrompt(prompt: string): string | null {
   if (pullUrl) return pullUrl;
   const pullRequest = /\b(?:PR|pull request)\s*#?\d+\b/i.exec(prompt)?.[0];
   if (pullRequest) return pullRequest;
-  const range = /(?:^|\s)([A-Za-z0-9][A-Za-z0-9._/-]*\.\.\.?[A-Za-z0-9][A-Za-z0-9._/-]*)(?=$|\s|[),;:])/m.exec(prompt)?.[1];
+  const range = /(?:^|[\s`'"(])([A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9])?\.\.\.?[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9])?)(?=$|[\s`'".,);:])/m.exec(prompt)?.[1];
   if (range) return range;
   const branch = /\bbranch\s+[`'"]?([A-Za-z0-9][A-Za-z0-9._/-]*)/i.exec(prompt)?.[1];
-  return branch ?? null;
+  if (branch) return branch;
+  const namedRef = /\b(?:review|inspect|compare)\s+[`'"]?([A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9])?)[`'"]?(?=$|[\s.,);:])/i.exec(prompt)?.[1];
+  return namedRef && (namedRef.includes("/") || /^(?:HEAD|main|master)$/i.test(namedRef)) ? namedRef : null;
 }
 
 function requiredRoleParamFromPrompt(parameter: RoleParameter, prompt: string): string | null {
@@ -710,7 +720,8 @@ function rootForTranscript(
 
 export interface TargetedConversationRead {
   entry: FileEntry;
-  session: SessionReadResult;
+  session?: SessionReadResult;
+  tail?: BoundedTranscriptTail;
   truncated?: true;
   hint?: string;
 }
@@ -747,6 +758,29 @@ function descriptorPath(descriptor: number): string {
   return process.platform === "linux" ? `/proc/self/fd/${descriptor}` : `/dev/fd/${descriptor}`;
 }
 
+function boundedTailFromDescriptor(
+  descriptor: number,
+  pathname: string,
+  stat: fs.Stats,
+  requestedLines: number,
+): BoundedTranscriptTail {
+  const maxLines = Math.max(1, Math.min(SELECTED_TAIL_MAX_LINES, Math.floor(requestedLines) || 1));
+  const window = Math.min(stat.size, SELECTED_TAIL_MAX_BYTES);
+  const buffer = Buffer.allocUnsafe(window);
+  const read = fs.readSync(descriptor, buffer, 0, window, stat.size - window);
+  const precededByMore = window < stat.size;
+  const rows = buffer.subarray(0, read).toString("utf8").split("\n");
+  if (precededByMore && rows.length > 0) rows.shift();
+  while (rows.length > 0 && rows.at(-1) === "") rows.pop();
+  const lines = rows.slice(-maxLines);
+  return {
+    path: pathname,
+    lines,
+    bytes: Buffer.byteLength(lines.join("\n"), "utf8"),
+    truncated: precededByMore || lines.length < rows.length,
+  };
+}
+
 /**
  * Hydrate and parse one known transcript through a pinned descriptor.
  *
@@ -757,7 +791,7 @@ function descriptorPath(descriptor: number): string {
  */
 export async function targetedConversationAtPath(
   pathname: string,
-  context: McpToolCallContext = {},
+  context: TargetedConversationOptions = {},
   injectedDependencies?: TargetedConversationDependencies,
 ): Promise<TargetedConversationRead | undefined> {
   const dependencies = injectedDependencies ?? { roots: scanRootEntries(), pathAllowed };
@@ -843,7 +877,12 @@ export async function targetedConversationAtPath(
     };
     overlaySessionTitles([entry]);
     if (entry.engine !== "claude" && entry.engine !== "codex") return undefined;
-    const session = { ...readSession(stablePath, entry.engine), path: pathname };
+    const session = context.tailLines === undefined
+      ? { ...readSession(stablePath, entry.engine), path: pathname }
+      : undefined;
+    const tail = context.tailLines === undefined
+      ? undefined
+      : boundedTailFromDescriptor(descriptor, pathname, stat, context.tailLines);
     const partialAtDeadline = callDeadlineExceeded(context);
     if (!partialAtDeadline) throwIfCallEnded(context);
     if (!sameOpenedTranscript(pathname, root, stat, dependencies.pathAllowed)) return undefined;
@@ -851,7 +890,8 @@ export async function targetedConversationAtPath(
       && !sameOpenedTranscript(sidecarPath, root, sidecarStat, dependencies.pathAllowed)) return undefined;
     return {
       entry,
-      session,
+      ...(session ? { session } : {}),
+      ...(tail ? { tail } : {}),
       ...(partialAtDeadline ? { truncated: true as const, hint: PARTIAL_CONVERSATION_DEADLINE_HINT } : {}),
     };
   } finally {
@@ -863,7 +903,7 @@ export async function targetedConversationAtPath(
 
 async function targetedFileEntry(
   pathname: string,
-  context: McpToolCallContext = {},
+  context: TargetedConversationOptions = {},
 ): Promise<TargetedConversationRead | undefined> {
   return targetedConversationAtPath(pathname, context);
 }
@@ -875,8 +915,8 @@ async function targetedFileEntry(
 async function entryForPath(
   transcriptPath: string,
   dependencies: Pick<ViewerMcpDomainDependencies, "listFiles" | "completedFileScan" | "targetedFileEntry">,
-  context: McpToolCallContext = {},
-): Promise<{ entry: FileEntry; session?: SessionReadResult; truncated?: true; hint?: string } | undefined> {
+  context: TargetedConversationOptions = {},
+): Promise<{ entry: FileEntry; session?: SessionReadResult; tail?: BoundedTranscriptTail; truncated?: true; hint?: string } | undefined> {
   throwIfCallEnded(context);
   const remainingMs = context.deadlineAt === undefined
     ? Number.POSITIVE_INFINITY
@@ -885,35 +925,41 @@ async function entryForPath(
     signal: context.signal,
     reason: "MCP tool deadline exceeded",
   });
-  const catalog = deadlineSignal(Math.min(MCP_CONVERSATION_CATALOG_BUDGET_MS, remainingMs), {
-    reason: "MCP conversation catalog budget exceeded",
-  });
+  const catalog = context.tailLines === undefined
+    ? deadlineSignal(Math.min(MCP_CONVERSATION_CATALOG_BUDGET_MS, remainingMs), {
+        signal: overall.signal,
+        reason: "MCP conversation catalog budget exceeded",
+      })
+    : null;
   try {
-    try {
-      let releaseCatalogWait: () => void = () => {};
-      const catalogWait = new Promise<never>((_resolve, reject) => {
-        const onAbort = () => reject(catalog.signal.reason);
-        catalog.signal.addEventListener("abort", onAbort, { once: true });
-        releaseCatalogWait = () => catalog.signal.removeEventListener("abort", onAbort);
-      });
-      const completedRead = dependencies.completedFileScan({ signal: overall.signal });
-      const completed = (await Promise.race([completedRead, catalogWait]).finally(releaseCatalogWait)).snapshot.files;
-      const known = completed.find((candidate) => candidate.path === transcriptPath);
-      if (known) return { entry: known };
-    } catch (error) {
-      if (overall.signal.aborted) {
-        const reason = overall.signal.reason;
-        throw reason instanceof Error ? reason : error;
+    if (catalog) {
+      try {
+        let releaseCatalogWait: () => void = () => {};
+        const catalogWait = new Promise<never>((_resolve, reject) => {
+          const onAbort = () => reject(catalog.signal.reason);
+          catalog.signal.addEventListener("abort", onAbort, { once: true });
+          releaseCatalogWait = () => catalog.signal.removeEventListener("abort", onAbort);
+        });
+        const completedRead = dependencies.completedFileScan({ signal: catalog.signal });
+        const completed = (await Promise.race([completedRead, catalogWait]).finally(releaseCatalogWait)).snapshot.files;
+        const known = completed.find((candidate) => candidate.path === transcriptPath);
+        if (known) return { entry: known };
+      } catch (error) {
+        if (overall.signal.aborted) {
+          const reason = overall.signal.reason;
+          throw reason instanceof Error ? reason : error;
+        }
+        if (!catalog.signal.aborted) throw error;
+        /* The completed catalog did not arrive within its small share of the
+           budget. Continue through the path-pinned reader while useful time
+           remains; that read is bounded independently of corpus size. */
       }
-      if (!catalog.signal.aborted) throw error;
-      /* The completed catalog did not arrive within its small share of the
-         budget. Continue through the path-pinned reader while useful time
-         remains; that read is bounded independently of corpus size. */
     }
     if (dependencies.targetedFileEntry) {
       const targeted = await dependencies.targetedFileEntry(transcriptPath, {
         signal: overall.signal,
         deadlineAt: context.deadlineAt,
+        ...(context.tailLines === undefined ? {} : { tailLines: context.tailLines }),
       });
       if (!targeted) return undefined;
       if (!("entry" in targeted)) return { entry: targeted };
@@ -929,7 +975,7 @@ async function entryForPath(
     const entry = pinned.find((candidate) => candidate.path === transcriptPath);
     return entry ? { entry } : undefined;
   } finally {
-    catalog.release();
+    catalog?.release();
     overall.release();
   }
 }
@@ -1000,9 +1046,32 @@ async function getConversation(
     ? agentRegistry().conversation(requestedId as `conversation_${string}`)
     : agentRegistry().conversationForPath(requestedPath);
   const transcriptPath = conversation?.generations.at(-1)?.path ?? requestedPath;
-  const targeted = await entryForPath(transcriptPath, dependencies, context);
+  const pathTailLines = tailLines > 0 && !requestedId
+    ? Math.max(1, Math.min(tailLines, SELECTED_TAIL_MAX_LINES))
+    : undefined;
+  const targeted = await entryForPath(transcriptPath, dependencies, {
+    ...context,
+    ...(pathTailLines === undefined ? {} : { tailLines: pathTailLines }),
+  });
   const entry = targeted?.entry;
   if (!entry || (entry.engine !== "claude" && entry.engine !== "codex")) throw new Error("conversation not found");
+  if (pathTailLines !== undefined) {
+    if (!targeted?.tail) throw new Error("conversation tail is unavailable");
+    return redactPayload({
+      conversationId: (conversation?.id ?? entry.conversationId) || null,
+      transcriptPath: entry.path,
+      project: entry.project,
+      title: entry.title,
+      engine: entry.engine,
+      scanned: false,
+      tail: {
+        lines: targeted.tail.lines,
+        bytes: targeted.tail.bytes,
+        truncated: targeted.tail.truncated,
+      },
+      ...selectedContextEcho(selected.target),
+    });
+  }
   if (!targeted?.session) throwIfCallEnded(context);
   const session = targeted.session ?? readSession(entry.path, entry.engine);
   const partialAtDeadline = targeted.truncated === true || callDeadlineExceeded(context);

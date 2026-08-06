@@ -81,6 +81,18 @@ test("spawn_agent derives required role params from the prompt and preserves sup
     role: "reviewer",
   });
   await spawn({
+    clientRequestId: "derive-review-quoted-range",
+    cwd: "/repo",
+    ["prompt"]: "Review `origin/main...HEAD`.",
+    role: "reviewer",
+  });
+  await spawn({
+    clientRequestId: "derive-review-bare-ref",
+    cwd: "/repo",
+    ["prompt"]: "Review origin/main before merge.",
+    role: "reviewer",
+  });
+  await spawn({
     clientRequestId: "derive-prod-questions",
     cwd: "/repo",
     ["prompt"]: "Measure stalled delivery latency.\nUse a bounded UTC window.",
@@ -102,6 +114,8 @@ test("spawn_agent derives required role params from the prompt and preserves sup
   expect(bodies.map((body) => body.roleParams)).toEqual([
     { diffSource: "PR #915", lens: "correctness" },
     { diffSource: "feature/mcp-clamping" },
+    { diffSource: "origin/main...HEAD" },
+    { diffSource: "origin/main" },
     { questions: "Measure stalled delivery latency." },
     { claims: "The bounded read returns within its budget." },
     { sha },
