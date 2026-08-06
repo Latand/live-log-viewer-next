@@ -85,11 +85,14 @@ interface ProjectedItem {
   text: string;
   toolName?: string;
   toolEngine?: RuntimeLiveTurnToolEngine;
+  lifecycle?: "started" | "completed";
 }
 
 function serializedToolArgs(value: unknown): string {
   try {
-    const serialized = JSON.stringify(value ?? {});
+    const normalized = value ?? {};
+    if (record(normalized) && Object.keys(normalized).length === 0) return "";
+    const serialized = JSON.stringify(normalized);
     return typeof serialized === "string" ? serialized : "";
   } catch {
     return "";
@@ -117,11 +120,13 @@ function projectedTool(
 }
 
 function codexToolIdentity(item: Record<string, unknown>, type: string): ProjectedItem | null {
-  const itemId = text(item.id) || text(item.call_id) || null;
+  const itemId = text(item.call_id) || text(item.id) || null;
   if (type === "commandExecution") {
+    const command = text(item.command);
+    const workdir = text(item.cwd);
     return projectedTool(itemId, "exec_command", {
-      cmd: text(item.command),
-      workdir: text(item.cwd),
+      ...(command ? { cmd: command } : {}),
+      ...(workdir ? { workdir } : {}),
     }, "codex");
   }
   if (type === "fileChange") {
@@ -198,12 +203,15 @@ function itemIdentities(value: unknown): ProjectedItem[] {
         return prose ? [{ kind: "assistant", itemId: parentId, text: prose }] : [];
       }
       if (partType === "tool_use") {
-        return [projectedTool(
-          text(part.id) || null,
-          text(part.name) || "tool",
-          part.input,
-          "claude",
-        )];
+        return [{
+          ...projectedTool(
+            text(part.id) || null,
+            text(part.name) || "tool",
+            part.input,
+            "claude",
+          ),
+          lifecycle: "started",
+        }];
       }
       return [];
     });
@@ -225,6 +233,7 @@ function itemIdentities(value: unknown): ProjectedItem[] {
         text: "",
         toolName: "tool",
         toolEngine: "claude",
+        lifecycle: "completed",
       }]
       : [];
   });
@@ -384,14 +393,19 @@ export function projectRuntimeLiveTurnItem(
   lifecycle: "started" | "completed",
   occurredAt: string | null = null,
 ): RuntimeLiveTurn | null {
-  const identities = itemIdentities(item);
+  const identities = itemIdentities(item).filter((identity) =>
+    lifecycle === "completed" || identity.kind === "tool");
   if (!identities.length) return value ?? null;
-  const phase: RuntimeLiveTurnItemPhase = lifecycle === "started" ? "streaming" : "awaiting-echo";
   let current = itemsForTurn(value, turnId, occurredAt);
+  const matchedIndexes = new Set<number>();
   for (const identity of identities) {
+    const identityLifecycle = identity.lifecycle ?? lifecycle;
+    const phase: RuntimeLiveTurnItemPhase = identityLifecycle === "started" ? "streaming" : "awaiting-echo";
     const existingIndex = identity.itemId
-      ? current.findIndex((candidate) =>
-        candidate.itemId === identity.itemId && (candidate.kind ?? "assistant") === identity.kind)
+      ? current.findIndex((candidate, index) =>
+        !matchedIndexes.has(index)
+        && candidate.itemId === identity.itemId
+        && (candidate.kind ?? "assistant") === identity.kind)
       : -1;
     if (existingIndex >= 0) {
       const existing = current[existingIndex]!;
@@ -411,16 +425,18 @@ export function projectRuntimeLiveTurnItem(
         } : { toolName: undefined, toolEngine: undefined }),
         phase,
         startedAt: existing.startedAt ?? occurredAt,
-        completedAt: lifecycle === "completed" ? occurredAt : existing.completedAt,
+        completedAt: identityLifecycle === "completed" ? occurredAt : null,
       };
       current = items;
+      matchedIndexes.add(existingIndex);
       continue;
     }
     const latest = current.at(-1);
-    if (lifecycle === "completed"
+    if (identityLifecycle === "completed"
       && identity.kind === "assistant"
       && latest?.phase === "streaming"
-      && latest.kind !== "tool") {
+      && latest.kind !== "tool"
+      && !matchedIndexes.has(current.length - 1)) {
       current = [
         ...current.slice(0, -1),
         {
@@ -433,6 +449,7 @@ export function projectRuntimeLiveTurnItem(
           completedAt: occurredAt,
         },
       ];
+      matchedIndexes.add(current.length - 1);
       continue;
     }
     if (identity.kind === "assistant" && !identity.text) continue;
@@ -440,8 +457,9 @@ export function projectRuntimeLiveTurnItem(
       ...identity,
       phase,
       startedAt: occurredAt,
-      completedAt: lifecycle === "completed" ? occurredAt : null,
+      completedAt: identityLifecycle === "completed" ? occurredAt : null,
     }];
+    matchedIndexes.add(current.length - 1);
   }
   return bounded(turnId, current);
 }

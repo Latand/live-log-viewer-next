@@ -1,5 +1,6 @@
 import type { RuntimeAttentionKind, RuntimeAttentionRequest, RuntimeEventInput } from "./contracts";
 import type { RuntimeEvent } from "./engineHost";
+import { LIVE_TURN_TEXT_LIMIT } from "./liveTurn";
 import { terminalVoiceResponse } from "./voiceDelivery";
 
 type JsonObject = Record<string, unknown>;
@@ -28,6 +29,165 @@ function boundedValue(value: unknown, maxBytes = 8 * 1024): unknown {
     ...(text(source.type) ? { type: text(source.type) } : {}),
     ...(text(source.name) ? { name: text(source.name) } : {}),
   };
+}
+
+function boundedToolArguments(value: unknown, maxBytes: number): unknown {
+  let serialized: string;
+  try { serialized = JSON.stringify(value ?? {}); } catch { return {}; }
+  if (Buffer.byteLength(serialized) <= maxBytes) return value ?? {};
+  const source = record(value);
+  const result: JsonObject = { truncated: true };
+  const primaryKeys = [
+    "cmd", "command", "file_path", "path", "input", "query", "url", "pattern",
+    "prompt", "description", "session_id", "cell_id", "chars", "workdir",
+  ];
+  const keys = [...new Set([...primaryKeys, ...Object.keys(source)])];
+  for (const key of keys) {
+    const candidate = source[key];
+    if (candidate === undefined) continue;
+    let projected: unknown;
+    if (typeof candidate === "string") projected = clipped(candidate, Math.min(8 * 1024, Math.max(256, maxBytes - 512)));
+    else if (typeof candidate === "number" || typeof candidate === "boolean" || candidate === null) projected = candidate;
+    else if (Array.isArray(candidate)) projected = candidate.slice(0, 16);
+    else continue;
+    const next = { ...result, [key]: projected };
+    if (Buffer.byteLength(JSON.stringify(next)) <= maxBytes) result[key] = projected;
+  }
+  return result;
+}
+
+function boundedCodexToolItem(source: JsonObject, type: string): unknown | null {
+  const identity = {
+    type,
+    ...(text(source.call_id) ? { call_id: clipped(text(source.call_id)!, 256) } : {}),
+    ...(text(source.id) ? { id: clipped(text(source.id)!, 256) } : {}),
+  };
+  if (type === "commandExecution") {
+    return {
+      ...identity,
+      ...(text(source.command) ? { command: clipped(text(source.command)!, 48 * 1024) } : {}),
+      ...(text(source.cwd) ? { cwd: clipped(text(source.cwd)!, 2 * 1024) } : {}),
+    };
+  }
+  if (type === "fileChange") {
+    const changes = Array.isArray(source.changes) ? source.changes.slice(0, 32).map(record) : [];
+    const diffBytes = Math.max(256, Math.floor((32 * 1024) / Math.max(changes.length, 1)));
+    return {
+      ...identity,
+      changes: changes.map((change) => ({
+        ...(text(change.path) ? { path: clipped(text(change.path)!, 512) } : {}),
+        ...(text(change.diff) ? { diff: clipped(text(change.diff)!, diffBytes) } : {}),
+      })),
+    };
+  }
+  if (type === "mcpToolCall" || type === "dynamicToolCall") {
+    return {
+      ...identity,
+      ...(text(source.server) ? { server: clipped(text(source.server)!, 256) } : {}),
+      ...(text(source.tool) ? { tool: clipped(text(source.tool)!, 256) } : {}),
+      arguments: boundedToolArguments(source.arguments, 48 * 1024),
+    };
+  }
+  if (type === "collabAgentToolCall") {
+    return {
+      ...identity,
+      ...(text(source.tool) ? { tool: clipped(text(source.tool)!, 256) } : {}),
+      ...(text(source.prompt) ? { "prompt": clipped(text(source.prompt)!, 48 * 1024) } : {}),
+      ...(text(source.model) ? { model: clipped(text(source.model)!, 256) } : {}),
+      ...(Array.isArray(source.receiverThreadIds) ? {
+        receiverThreadIds: source.receiverThreadIds
+          .flatMap((candidate) => text(candidate) ? [clipped(text(candidate)!, 256)] : [])
+          .slice(0, 32),
+      } : {}),
+    };
+  }
+  if (type === "webSearch") {
+    return {
+      ...identity,
+      ...(text(source.query) ? { query: clipped(text(source.query)!, 48 * 1024) } : {}),
+      ...(source.action !== undefined ? { action: boundedToolArguments(source.action, 8 * 1024) } : {}),
+    };
+  }
+  if (type === "imageView") return { ...identity, ...(text(source.path) ? { path: clipped(text(source.path)!, 48 * 1024) } : {}) };
+  if (type === "sleep") return { ...identity, ...(typeof source.durationMs === "number" ? { durationMs: source.durationMs } : {}) };
+  if (type === "imageGeneration") {
+    return {
+      ...identity,
+      ...(text(source.revisedPrompt) ? { revisedPrompt: clipped(text(source.revisedPrompt)!, 48 * 1024) } : {}),
+      ...(text(source.savedPath) ? { savedPath: clipped(text(source.savedPath)!, 2 * 1024) } : {}),
+    };
+  }
+  if (type === "function_call") {
+    return {
+      ...identity,
+      ...(text(source.name) ? { name: clipped(text(source.name)!, 256) } : {}),
+      ...(typeof source.arguments === "string" ? { arguments: clipped(source.arguments, 48 * 1024) } : {}),
+    };
+  }
+  if (type === "custom_tool_call") {
+    return {
+      ...identity,
+      ...(text(source.name) ? { name: clipped(text(source.name)!, 256) } : {}),
+      ...(text(source.input) ? { input: clipped(text(source.input)!, 48 * 1024) } : {}),
+    };
+  }
+  if (type === "function_call_output" || type === "custom_tool_call_output") return identity;
+  return null;
+}
+
+function boundedClaudeToolItem(source: JsonObject): unknown | null {
+  const message = record(source.message);
+  const content = Array.isArray(source.content)
+    ? source.content
+    : Array.isArray(message.content) ? message.content : [];
+  if (!content.some((candidate) => {
+    const type = text(record(candidate).type);
+    return type === "tool_use" || type === "tool_result";
+  })) return null;
+  const payloadBytes = Math.max(256, Math.floor((40 * 1024) / Math.max(content.length, 1)));
+  const projectedContent = content.flatMap((candidate): JsonObject[] => {
+    const part = record(candidate);
+    const type = text(part.type);
+    if (type === "text" || type === "input_text" || type === "output_text") {
+      return [{ type, ...(text(part.text) ? { text: clipped(text(part.text)!, payloadBytes) } : {}) }];
+    }
+    if (type === "tool_use") {
+      return [{
+        type,
+        ...(text(part.id) ? { id: clipped(text(part.id)!, 256) } : {}),
+        ...(text(part.name) ? { name: clipped(text(part.name)!, 256) } : {}),
+        input: boundedToolArguments(part.input, payloadBytes),
+      }];
+    }
+    if (type === "tool_result") {
+      return [{
+        type,
+        ...(text(part.tool_use_id) ? { tool_use_id: clipped(text(part.tool_use_id)!, 256) } : {}),
+      }];
+    }
+    return [];
+  });
+  const projectedMessage = {
+    ...(text(source.role, message.role) ? { role: text(source.role, message.role)! } : {}),
+    ...(text(message.id) ? { id: clipped(text(message.id)!, 256) } : {}),
+    content: projectedContent,
+  };
+  return {
+    ...(text(source.type) ? { type: text(source.type)! } : {}),
+    ...(text(source.id) ? { id: clipped(text(source.id)!, 256) } : {}),
+    ...(text(source.uuid) ? { uuid: clipped(text(source.uuid)!, 256) } : {}),
+    ...(Array.isArray(source.content) ? {
+      ...(text(source.role) ? { role: text(source.role)! } : {}),
+      content: projectedContent,
+    } : { message: projectedMessage }),
+  };
+}
+
+function boundedLiveTurnItem(value: unknown): unknown {
+  const source = record(value);
+  const type = text(source.type) ?? "";
+  const descriptor = boundedCodexToolItem(source, type) ?? boundedClaudeToolItem(source);
+  return descriptor ? boundedValue(descriptor, LIVE_TURN_TEXT_LIMIT) : boundedValue(value);
 }
 
 function questionFrom(value: unknown): RuntimeAttentionRequest["question"] | null {
@@ -141,7 +301,7 @@ export function projectEngineHostEvent(
       payload: {
         conversationId,
         turnId: event.turnId,
-        item: boundedValue(event.item),
+        item: boundedLiveTurnItem(event.item),
         phase: event.phase,
         ...(voiceResponse ? { voiceResponse } : {}),
       },
