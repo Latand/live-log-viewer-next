@@ -394,10 +394,11 @@ export type ResumeEligibility =
   | { ok: false; reason: string };
 
 /**
- * The gate {@link resumeSpecFor} applies, with its refusal named. Account
- * ownership comes from recorded provenance first (`options.accountId`), which
- * is the only thing that answers inside the shared transcript store where
- * every account resolves to the same root (issue #935).
+ * The gate {@link resumeSpecFor} applies, with its refusal named. Claude
+ * account ownership resolves through {@link claudeTranscriptOwnership}, where
+ * the recorded account (`options.accountId`) is what answers inside the shared
+ * transcript store — every account resolves to the same root there, so the
+ * path names no owner (issue #935).
  */
 export function resumeEligibility(root: string, pathname: string, options: ResumeSpecOptions = {}): ResumeEligibility {
   const base = path.basename(pathname);
