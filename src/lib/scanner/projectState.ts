@@ -75,8 +75,37 @@ function stateJson(name: string): unknown {
   }
 }
 
+const STATE_KEY_FILES = ["flows.json", "workflows.json", "worktree-map.json", "project-aliases.json"] as const;
+let stateKeyCache: { signature: string; key: string } | null = null;
+
+/** Cheap invalidation signature over the four source files: the full key
+    below parses megabytes and hashes them, and production called it for
+    every described entry — ~75 uncached reads of flows.json per second
+    pinned the event loop in a GC storm. Four stats replace that until a
+    source file actually changes. */
+function stateKeySignature(dir: string): string {
+  const parts = [dir];
+  for (const name of STATE_KEY_FILES) {
+    try {
+      const st = fs.statSync(path.join(dir, name), { bigint: true });
+      parts.push(`${name}:${st.mtimeNs}:${st.size}`);
+    } catch {
+      parts.push(`${name}:missing`);
+    }
+  }
+  return parts.join("|");
+}
+
 export function projectResolutionStateKey(): string {
   const dir = stateDir();
+  const signature = stateKeySignature(dir);
+  if (stateKeyCache?.signature === signature) return stateKeyCache.key;
+  const key = computeProjectResolutionStateKey(dir);
+  stateKeyCache = { signature, key };
+  return key;
+}
+
+function computeProjectResolutionStateKey(dir: string): string {
   const hash = crypto.createHash("sha1");
   hash.update(dir);
   hash.update(`\0resolver-version\0${PROJECT_RESOLUTION_VERSION}`);

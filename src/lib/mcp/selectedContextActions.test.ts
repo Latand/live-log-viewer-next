@@ -313,17 +313,14 @@ test("the tail bound is the server's, however many lines the caller asks for", a
   expect(result.tail.lines.length).toBeLessThanOrEqual(SELECTED_TAIL_MAX_LINES);
 });
 
-test("a bounded tail needs an identity, and says so rather than scanning for one", async () => {
+test("a bounded tail still requires a conversation target", async () => {
   const { injected } = harness();
   const bindings = viewerMcpBindings(undefined, undefined, injected);
 
-  const error = await refusal(bindings.get_conversation({
+  await expect(bindings.get_conversation({
     clientRequestId: "read-3",
-    transcriptPath,
     tailLines: 4,
-  }));
-
-  expect(error.details.code).toBe("selected_tail_requires_identity");
+  })).rejects.toThrow("conversationId, transcriptPath or selectedContext is required");
 });
 
 test("a transcript outside the scanner roots is never tailed", async () => {

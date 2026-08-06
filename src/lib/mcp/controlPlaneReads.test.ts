@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { targetedConversationAtPath, viewerMcpBindings, type TargetedConversationDependencies } from "./bindings";
+import { createMcpToolService, MemoryMcpReceiptStore } from "./server";
 
 /**
  * The control-plane reads consume ONE completed scan and ONE projection (#845).
@@ -211,6 +212,128 @@ test("get_conversation hydrates one known transcript after a completed miss and 
   expect(targetedCalls).toEqual([{ pathname: transcriptPath, signal: controller.signal, deadlineAt }]);
 });
 
+test("get_conversation releases the cold catalog subscriber before targeted fallback returns", async () => {
+  let subscribers = 0;
+  let releases = 0;
+  let catalogSignal: AbortSignal | undefined;
+  const injected = {
+    completedFileScan: ({ signal }: { signal?: AbortSignal } = {}) => {
+      catalogSignal = signal;
+      subscribers += 1;
+      return new Promise((_resolve, reject) => {
+        const onAbort = () => {
+          subscribers -= 1;
+          releases += 1;
+          reject(signal?.reason);
+        };
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
+    },
+    targetedFileEntry: async () => scanRow(0),
+    listFiles: async () => { throw new Error("targeted fallback must stay off the raw scan path"); },
+  } as never;
+  const bindings = viewerMcpBindings(undefined, undefined, injected);
+
+  const result = await bindings.get_conversation(
+    { clientRequestId: "get-catalog-release", transcriptPath },
+    { deadlineAt: Date.now() + 1_000 },
+  ) as { transcriptPath: string };
+
+  expect(result.transcriptPath).toBe(transcriptPath);
+  expect(catalogSignal?.aborted).toBeTrue();
+  expect(subscribers).toBe(0);
+  expect(releases).toBe(1);
+});
+
+test("get_conversation enforces tailLines through the validated transcript-path reader", async () => {
+  fs.writeFileSync(transcriptPath, [
+    JSON.stringify({ type: "session_meta", payload: { id: "sess-tail", timestamp: "2026-07-01T09:00:00.000Z", cwd: "/repo/project-0" } }),
+    ...Array.from({ length: 250 }, (_value, index) => JSON.stringify({
+      type: "response_item",
+      payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: `tail-${index}` }] },
+    })),
+  ].join("\n") + "\n");
+  const { counts, injected } = dependencies({ completedTranscript: false });
+  const root = path.dirname(transcriptPath);
+  const pathAllowed = (candidate: string) => {
+    try { return fs.realpathSync(candidate).startsWith(fs.realpathSync(root) + path.sep); } catch { return false; }
+  };
+  const domain = injected as unknown as {
+    targetedFileEntry(candidate: string, options?: { signal?: AbortSignal; deadlineAt?: number; tailLines?: number }): ReturnType<typeof targetedConversationAtPath>;
+  };
+  domain.targetedFileEntry = (candidate, options = {}) => targetedConversationAtPath(
+    candidate,
+    options,
+    { roots: [["codex-sessions", root]], pathAllowed },
+  );
+  const service = createMcpToolService(
+    viewerMcpBindings(undefined, undefined, injected),
+    new MemoryMcpReceiptStore(),
+  );
+
+  const oneLine = await service.callTool("get_conversation", {
+    clientRequestId: "get-path-tail-one",
+    transcriptPath,
+    tailLines: 1,
+  });
+  const clamped = await service.callTool("get_conversation", {
+    clientRequestId: "get-path-tail-clamped",
+    transcriptPath,
+    tailLines: 999,
+  });
+
+  expect(oneLine).toMatchObject({
+    ok: true,
+    transcriptPath,
+    tail: { truncated: true },
+  });
+  expect((oneLine as unknown as { tail: { lines: string[] } }).tail.lines).toHaveLength(1);
+  expect(oneLine).not.toHaveProperty("messages");
+  expect(clamped).toMatchObject({
+    ok: true,
+    transcriptPath,
+    clamped: { tailLines: 200 },
+    tail: { truncated: true },
+  });
+  expect((clamped as unknown as { tail: { lines: string[] } }).tail.lines).toHaveLength(200);
+  expect(clamped).not.toHaveProperty("messages");
+  expect(counts.rawScans).toBe(0);
+});
+
+test("get_conversation returns a held path tail with deadline-partial metadata", async () => {
+  const root = path.dirname(transcriptPath);
+  const pathAllowed = (candidate: string) => {
+    try { return fs.realpathSync(candidate).startsWith(fs.realpathSync(root) + path.sep); } catch { return false; }
+  };
+  const injected = {
+    completedFileScan: async () => { throw new Error("path tails must skip the catalog"); },
+    targetedFileEntry: async (
+      candidate: string,
+      options: { tailLines?: number } = {},
+    ) => {
+      const held = await targetedConversationAtPath(
+        candidate,
+        { tailLines: options.tailLines },
+        { roots: [["codex-sessions", root]], pathAllowed },
+      );
+      await Bun.sleep(20);
+      return held;
+    },
+    listFiles: async () => { throw new Error("path tails must stay on the targeted reader"); },
+  } as never;
+  const bindings = viewerMcpBindings(undefined, undefined, injected);
+
+  const result = await bindings.get_conversation(
+    { clientRequestId: "get-path-tail-deadline-partial", transcriptPath, tailLines: 10 },
+    { deadlineAt: Date.now() + 5 },
+  ) as { truncated: boolean; hint: string; tail: { lines: string[]; truncated: boolean } };
+
+  expect(result.tail.lines).toHaveLength(3);
+  expect(result.tail.truncated).toBe(false);
+  expect(result.truncated).toBe(true);
+  expect(result.hint).toContain("internal read deadline");
+});
+
 test("get_conversation cancels a targeted miss when its caller leaves", async () => {
   const { counts, injected } = dependencies({ completedTranscript: false });
   let started!: () => void;
@@ -266,6 +389,142 @@ test("get_conversation deadlines a targeted miss without orphan work", async () 
   expect(counts.rawScans).toBe(0);
 });
 
+test("get_conversation returns hydrated records when the deadline lands after the partial exists", async () => {
+  const { injected } = dependencies({ completedTranscript: false });
+  const domain = injected as unknown as {
+    targetedFileEntry(pathname: string): Promise<{
+      entry: ReturnType<typeof scanRow>;
+      session: {
+        path: string;
+        engine: "codex";
+        messages: Array<{ kind: "message"; role: "assistant"; ts: null; text: string }>;
+        reasoning: [];
+        tools: [];
+        traces: [];
+      };
+    }>;
+  };
+  domain.targetedFileEntry = async () => {
+    await Bun.sleep(20);
+    return {
+      entry: scanRow(0),
+      session: {
+        path: transcriptPath,
+        engine: "codex",
+        messages: [{ kind: "message", role: "assistant", ts: null, text: "partial answer" }],
+        reasoning: [],
+        tools: [],
+        traces: [],
+      },
+    };
+  };
+  const bindings = viewerMcpBindings(undefined, undefined, injected);
+
+  const result = await bindings.get_conversation(
+    { clientRequestId: "get-deadline-partial", transcriptPath, maxRecords: 8 },
+    { deadlineAt: Date.now() + 5 },
+  ) as {
+    messages: Array<{ kind: "message"; role: "assistant"; ts: null; text: string }>;
+    truncated: boolean;
+    hint: string;
+  };
+
+  expect(result.messages).toEqual([{ kind: "message", role: "assistant", ts: null, text: "partial answer" }]);
+  expect(result.truncated).toBe(true);
+  expect(result.hint).toContain("internal read deadline");
+});
+
+test("get_conversation returns a bounded partial from a synthetic 100 MiB transcript", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-large-conversation-"));
+  sandboxes.push(directory);
+  const root = path.join(directory, "sessions");
+  fs.mkdirSync(root);
+  const pathname = path.join(root, "rollout-large.jsonl");
+  fs.writeFileSync(pathname, "");
+  fs.truncateSync(pathname, 100 * 1024 * 1024);
+  fs.appendFileSync(pathname, `\n${[
+    JSON.stringify({ type: "session_meta", payload: { id: "large-fixture", timestamp: "2026-07-01T09:00:00.000Z", cwd: "/repo/fixture" } }),
+    ...Array.from({ length: 12 }, (_value, index) => JSON.stringify({
+      type: "response_item",
+      payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: `partial-${index}` }] },
+    })),
+  ].join("\n")}\n`);
+  const pathAllowed = (candidate: string) => {
+    try { return fs.realpathSync(candidate).startsWith(fs.realpathSync(root) + path.sep); } catch { return false; }
+  };
+  const injected = {
+    completedFileScan: ({ signal }: { signal?: AbortSignal } = {}) => new Promise((_resolve, reject) => {
+      signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+    }),
+    targetedFileEntry: (candidate: string, context: { signal?: AbortSignal; deadlineAt?: number } = {}) => targetedConversationAtPath(
+      candidate,
+      context,
+      { roots: [["codex-sessions", root]], pathAllowed },
+    ),
+    listFiles: async () => { throw new Error("large reads must stay off the corpus scan path"); },
+  } as never;
+  const bindings = viewerMcpBindings(undefined, undefined, injected);
+  const startedAt = performance.now();
+
+  const result = await bindings.get_conversation(
+    { clientRequestId: "get-large-partial", transcriptPath: pathname, maxRecords: 8 },
+    { deadlineAt: Date.now() + 2_000 },
+  ) as { messages: Array<{ text: string }>; truncated: boolean; hint: string };
+
+  expect(performance.now() - startedAt).toBeLessThan(2_000);
+  expect(result.messages.map((message) => message.text)).toEqual(Array.from({ length: 8 }, (_value, index) => `partial-${index + 4}`));
+  expect(result.truncated).toBe(true);
+  expect(result.hint).toContain("oversized transcript");
+});
+
+test("get_conversation reopens a warm catalog hit that grew beyond the parse window", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-grown-conversation-"));
+  sandboxes.push(directory);
+  const root = path.join(directory, "sessions");
+  fs.mkdirSync(root);
+  const pathname = path.join(root, "rollout-grown.jsonl");
+  fs.writeFileSync(pathname, `${JSON.stringify({
+    type: "session_meta",
+    payload: { id: "grown-fixture", timestamp: "2026-07-01T09:00:00.000Z", cwd: "/repo/fixture" },
+  })}\n`);
+  const staleEntry = {
+    ...scanRow(0),
+    path: pathname,
+    name: path.basename(pathname),
+    size: fs.statSync(pathname).size,
+  };
+  fs.truncateSync(pathname, 100 * 1024 * 1024);
+  fs.appendFileSync(pathname, `\n${Array.from({ length: 8 }, (_value, index) => JSON.stringify({
+    type: "response_item",
+    payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: `grown-${index}` }] },
+  })).join("\n")}\n`);
+  const pathAllowed = (candidate: string) => {
+    try { return fs.realpathSync(candidate).startsWith(fs.realpathSync(root) + path.sep); } catch { return false; }
+  };
+  let targetedReads = 0;
+  const injected = {
+    completedFileScan: async () => ({ snapshot: { files: [staleEntry], projectCatalog: [], complete: true } }),
+    targetedFileEntry: (candidate: string, context: { signal?: AbortSignal; deadlineAt?: number } = {}) => {
+      targetedReads += 1;
+      return targetedConversationAtPath(candidate, context, { roots: [["codex-sessions", root]], pathAllowed });
+    },
+    listFiles: async () => { throw new Error("warm hits must stay off the raw scan path"); },
+  } as never;
+  const bindings = viewerMcpBindings(undefined, undefined, injected);
+
+  const result = await bindings.get_conversation(
+    { clientRequestId: "get-grown-partial", transcriptPath: pathname, maxRecords: 8 },
+    { deadlineAt: Date.now() + 2_000 },
+  ) as { truncated: boolean; hint: string; messages: Array<{ text: string }> };
+
+  expect(targetedReads).toBe(1);
+  expect(result.messages.map((message) => message.text)).toEqual(
+    Array.from({ length: 8 }, (_value, index) => `grown-${index}`),
+  );
+  expect(result.truncated).toBe(true);
+  expect(result.hint).toContain("oversized transcript");
+});
+
 test("targeted conversation opens one canonical regular transcript and retains its title", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-targeted-open-"));
   sandboxes.push(directory);
@@ -284,7 +543,7 @@ test("targeted conversation opens one canonical regular transcript and retains i
   });
 
   expect(targeted?.entry).toMatchObject({ path: pathname, title: "canonical title", engine: "codex" });
-  expect(targeted?.session.messages.at(-1)?.text).toBe("bounded answer");
+  expect(targeted?.session?.messages.at(-1)?.text).toBe("bounded answer");
 });
 
 test("targeted conversation retains a safely opened Claude subagent sidecar title", async () => {
@@ -337,11 +596,12 @@ test("targeted conversation rejects external symlinks and a path swapped after s
   await expect(viewerMcpBindings(undefined, undefined, injected).get_conversation({
     clientRequestId: "external-symlink",
     transcriptPath: symlinkPath,
+    tailLines: 1,
   })).rejects.toThrow("conversation not found");
 
   const swappedPath = path.join(root, "swapped.jsonl");
   fs.writeFileSync(swappedPath, `${JSON.stringify({ type: "session_meta", payload: { cwd: "/inside" } })}\n`);
-  expect(await targetedConversationAtPath(swappedPath, {}, {
+  expect(await targetedConversationAtPath(swappedPath, { tailLines: 1 }, {
     roots: [["codex-sessions", root]],
     pathAllowed,
     afterOpen: () => {
