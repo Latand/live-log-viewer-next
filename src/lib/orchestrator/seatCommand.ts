@@ -10,6 +10,7 @@ import { deliverConversationMessage } from "@/lib/delivery";
 import { structuredHostsEnabled } from "@/lib/runtime/flags";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { derivedSpawnTitle } from "@/lib/title";
+import { resolveSpawnRole } from "@/lib/roles/registry";
 
 import { loadTasks } from "@/lib/tasks/store";
 import {
@@ -532,13 +533,23 @@ export async function executeOrchestratorSeatRequest(
       },
     };
   }
+  const resolvedRuntime = resolveSpawnRole({
+    role: "orchestrator",
+    roleParams: rawBody.roleParams,
+    engine: rawBody.engine,
+    model: rawBody.model,
+    effort: rawBody.effort,
+  });
+  if (!resolvedRuntime.ok || !resolvedRuntime.value) {
+    return { status: 400, body: { error: resolvedRuntime.ok ? "orchestrator runtime is unavailable" : resolvedRuntime.error } };
+  }
   const begun = beginOrchestratorSeatIntent({
     project,
     mandate,
     clientRequestId,
     mode: "spawn",
-    engine: typeof rawBody.engine === "string" ? rawBody.engine : null,
-    model: typeof rawBody.model === "string" ? rawBody.model : null,
+    engine: resolvedRuntime.value.config.engine,
+    model: resolvedRuntime.value.config.model,
     promptVersion,
     now: dependencies.now(),
   });
@@ -572,8 +583,8 @@ export async function executeOrchestratorSeatRequest(
         ...(begun.seat.model ? { model: begun.seat.model } : {}),
       }
     : {
-        ...(rawBody.engine !== undefined ? { engine: rawBody.engine } : {}),
-        ...(rawBody.model !== undefined ? { model: rawBody.model } : {}),
+        engine: resolvedRuntime.value.config.engine,
+        model: resolvedRuntime.value.config.model,
       };
   const cwd = resolveOrchestratorCwd(project, rawBody.cwd);
   if (!cwd) {
@@ -623,8 +634,8 @@ export async function executeOrchestratorSeatRequest(
     conversationId: spawnedConversationId,
     path: typeof spawned.body.path === "string" ? spawned.body.path : null,
     launchId: launchId || null,
-    ...(typeof rawBody.engine === "string" ? { engine: rawBody.engine } : {}),
-    ...(typeof rawBody.model === "string" ? { model: rawBody.model } : {}),
+    engine: resolvedRuntime.value.config.engine,
+    model: resolvedRuntime.value.config.model,
   }, dependencies);
   if (!activated) return { status: 409, body: { error: "seat intent was superseded by a newer designation" } };
   return {

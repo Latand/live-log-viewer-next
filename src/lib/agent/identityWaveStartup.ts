@@ -6,7 +6,7 @@ import { legacyClaudeHome, sharedClaudeProjectsRoot } from "@/lib/accounts/claud
 import { activeOrchestratorSeatsForMigration, rekeyOrchestratorSeatPaths } from "@/lib/orchestrator/seats";
 import { rekeyOrchestratorRecordPath } from "@/lib/orchestrator/store";
 import { searchTextForTranscript } from "@/lib/scanner/describe";
-import { semanticTitle } from "@/lib/title";
+import { durableSemanticTitle } from "@/lib/title";
 
 import { agentRegistry, type AgentRegistry } from "./registry";
 import type { IdentityWaveMigrationResult, IdentityWavePathRekey, IdentityWaveSeat } from "./identityWaveMigration";
@@ -18,12 +18,18 @@ function evidenceIsAbsent(error: unknown): boolean {
   return code === "ENOENT" || code === "ENOTDIR";
 }
 
+function durableEvidenceHead(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const firstNonEmptyLine = value.split(/\r?\n/).find((line) => line.trim());
+  return durableSemanticTitle(firstNonEmptyLine, 120);
+}
+
 export function titleFromTranscriptHead(pathname: string, engine: "claude" | "codex"): string | null {
   try {
     const stat = fs.statSync(pathname);
     if (!stat.isFile()) return null;
     const text = searchTextForTranscript(pathname, stat.size, engine);
-    return semanticTitle(text.title) ?? semanticTitle(text.firstPrompt);
+    return durableEvidenceHead(text.title) ?? durableEvidenceHead(text.firstPrompt);
   } catch (error) {
     if (evidenceIsAbsent(error)) return null;
     throw error;
