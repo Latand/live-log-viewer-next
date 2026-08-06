@@ -323,6 +323,94 @@ test("identity evidence cleans receipt and transcript Markdown before durable pe
   }
 });
 
+test("the wave cleans older placeholder surfaces when the newest generation is already semantic", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-mixed-generation-"));
+  try {
+    const filename = path.join(directory, "agent-registry.json");
+    const legacyPath = path.join(directory, `${crypto.randomUUID()}.jsonl`);
+    const successorPath = path.join(directory, `${crypto.randomUUID()}.jsonl`);
+    const seed = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const conversation = seed.ensureConversation("codex", legacyPath, null);
+    const key = sessionKeyFromTranscript("codex", legacyPath);
+    if (!key) throw new Error("expected a mixed-generation transcript key");
+    seed.upsert({
+      key,
+      artifactPath: legacyPath,
+      cwd: directory,
+      accountId: null,
+      status: "dead",
+      host: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    });
+    const reserved = seed.beginSpawnRequest({
+      engine: "codex",
+      cwd: directory,
+      conversationId: conversation.id,
+      purpose: "resume-successor",
+      expectedArtifactPath: successorPath,
+      launchProfile: { title: "Seed mixed-generation receipt" },
+      launchDisplay: {
+        ["prompt"]: "Receipt prompt should remain lower priority",
+        echo: "Receipt prompt should remain lower priority",
+        images: 0,
+      },
+    });
+    if (reserved.kind !== "created") throw new Error("expected mixed-generation receipt");
+
+    const seeded = seed.snapshot();
+    const olderGeneration = seeded.conversations[conversation.id]!.generations.at(-1)!;
+    olderGeneration.launchProfile.title = "Codex session";
+    olderGeneration.archivedAt = NOW;
+    seeded.conversations[conversation.id]!.generations.push({
+      ...structuredClone(olderGeneration),
+      id: crypto.randomUUID(),
+      path: successorPath,
+      createdAt: NOW,
+      archivedAt: null,
+      launchProfile: { ...olderGeneration.launchProfile, title: "Review issue #913" },
+    });
+    seeded.entries[key.engine + ":" + key.sessionId]!.launchProfile = {
+      ...olderGeneration.launchProfile,
+      title: "Claude/session",
+    };
+    seeded.receipts[reserved.receipt.launchId]!.launchProfile.title = "Codex · session";
+    fs.writeFileSync(filename, `${JSON.stringify(seeded, null, 2)}\n`);
+
+    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "dual-write" });
+    const input = {
+      now: NOW,
+      transcriptTitle: () => null,
+      sharedPathForLegacy: () => null,
+      orchestratorSeats: [],
+    };
+    expect(registry.runIdentityWaveMigration(input)).toMatchObject({
+      alreadyCompleted: false,
+      retitled: 1,
+    });
+
+    const migrated = registry.snapshot();
+    expect(migrated.conversations[conversation.id]!.generations.map((generation) => generation.launchProfile.title))
+      .toEqual(["Review issue #913", "Review issue #913"]);
+    expect(migrated.entries[key.engine + ":" + key.sessionId]!.launchProfile!.title).toBe("Review issue #913");
+    expect(migrated.receipts[reserved.receipt.launchId]).toMatchObject({
+      identityWaveTitleBackfill: true,
+      launchProfile: expect.objectContaining({ title: "Review issue #913" }),
+    });
+    expect(new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" }).snapshot()).toEqual(migrated);
+    expect(registry.runIdentityWaveMigration(input)).toEqual({
+      dryRun: false,
+      alreadyCompleted: true,
+      retitled: 0,
+      rekeyed: 0,
+      edgesStamped: 0,
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("the completed wave preserves an accepted orchestrator seat until its conversation settles", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-deferred-seat-"));
   try {
