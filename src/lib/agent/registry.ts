@@ -3704,10 +3704,11 @@ export class AgentRegistry {
         if (conversationId === supersedes) throw new Error("a conversation cannot supersede itself");
       }
       const existingConversation = conversationId ? file.conversations[conversationId] : null;
+      const requestedTitle = input.launchProfile?.title;
       const requestedProfile = emptyLaunchProfile({
         cwd: input.cwd,
         ...(input.launchProfile ?? {}),
-        title: semanticTitle(input.launchProfile?.title),
+        title: typeof requestedTitle === "string" && semanticTitle(requestedTitle) ? requestedTitle : null,
         ...(explicitProject ? { project: explicitProject } : {}),
         parentConversationId,
       });
