@@ -5,6 +5,7 @@ import type { FileEntry } from "@/lib/types";
 import {
   CONFIRM_ATTENTION_MS,
   SLOW_BOOT_MS,
+  type RecoverableSpawnRequest,
   type SpawnAttempt,
   type SpawnOutcome,
   admittedSpawn,
@@ -20,6 +21,7 @@ import {
   provisionalSpawnFile,
   sendEnabled,
   spawnRequestBody,
+  upgradeLegacySpawnAttempt,
 } from "./draftSpawn";
 
 function mkFile(partial: Partial<FileEntry> & { path: string }): FileEntry {
@@ -58,6 +60,19 @@ function spawnCard(clientAttemptId: string | null): FileEntry["spawn"] {
   };
 }
 
+const baseRequest: RecoverableSpawnRequest = {
+  title: "codex · do the thing",
+  engine: "codex",
+  model: "gpt-5.6",
+  cwd: "/repo",
+  effort: "high",
+  fast: false,
+  accountId: "terra",
+  ["prompt"]: "do the thing",
+  images: [],
+  src: "",
+};
+
 const baseAttempt: SpawnAttempt = {
   clientAttemptId: "attempt-abc12345",
   at: 2_000_000_000_000, // ms
@@ -67,18 +82,7 @@ const baseAttempt: SpawnAttempt = {
   launchId: "launch-1",
   ["prompt"]: "do the thing",
   hasImages: false,
-  request: {
-    title: "codex · do the thing",
-    engine: "codex",
-    model: "gpt-5.6",
-    cwd: "/repo",
-    effort: "high",
-    fast: false,
-    accountId: "terra",
-    ["prompt"]: "do the thing",
-    images: [],
-    src: "",
-  },
+  request: baseRequest,
   engine: "codex",
   src: "",
   phase: "confirming",
@@ -289,15 +293,47 @@ describe("durable request recovery", () => {
     expect(draftSpawnTitle("claude", null, "", 1)).toBe("claude · Analyze attached image");
   });
 
-  test("legacy persisted requests without a title stay frozen instead of replaying a rejected body", () => {
+  test("legacy persisted requests replay titleless once and retain their exact launch metadata", () => {
     const legacy = JSON.parse(JSON.stringify(baseAttempt)) as SpawnAttempt;
     delete (legacy.request as Partial<NonNullable<SpawnAttempt["request"]>>).title;
-    expect(hasRecoverableRequest(legacy)).toBe(false);
+    Object.assign(legacy.request!, {
+      images: [{ base64: "aGVsbG8=", mime: "image/png" }],
+      role: "reviewer",
+      roleParams: { mode: "strict", rounds: 2 },
+      reviews: "conversation_review_target",
+    });
+
+    expect(hasRecoverableRequest(legacy)).toBe(true);
+    if (!hasRecoverableRequest(legacy)) throw new Error("expected a recoverable legacy request");
+    expect(spawnRequestBody(legacy)).toEqual(expect.objectContaining({
+      clientAttemptId: baseAttempt.clientAttemptId,
+      images: [{ base64: "aGVsbG8=", mime: "image/png" }],
+      role: "reviewer",
+      roleParams: { mode: "strict", rounds: 2 },
+      reviews: "conversation_review_target",
+    }));
+    expect(spawnRequestBody(legacy)).not.toHaveProperty("title");
+
+    const upgraded = upgradeLegacySpawnAttempt(legacy, {
+      kind: "failed-preflight",
+      message: "title is required for every new spawn",
+    });
+    expect(upgraded).not.toBeNull();
+    expect(upgraded).toMatchObject({
+      clientAttemptId: baseAttempt.clientAttemptId,
+      request: {
+        title: "reviewer · do the thing",
+        images: [{ base64: "aGVsbG8=", mime: "image/png" }],
+        role: "reviewer",
+        roleParams: { mode: "strict", rounds: 2 },
+        reviews: "conversation_review_target",
+      },
+    });
   });
 
   test("a semantic title survives serialized reload recovery and is resubmitted exactly", () => {
     const request = {
-      ...baseAttempt.request!,
+      ...baseRequest,
       title: "codex · inspect release readiness",
     };
     const persisted = createSpawnAttempt("attempt_title_reload_1", 2_000_000_000_123, request);
@@ -313,7 +349,7 @@ describe("durable request recovery", () => {
 
   test("reload during POST retains attempt id, launch timestamp, and exact attachment payload", () => {
     const attempt = createSpawnAttempt("attempt_reload_1", 2_000_000_000_123, {
-      ...baseAttempt.request!,
+      ...baseRequest,
       ["prompt"]: "inspect these",
       images: [{ base64: "aGVsbG8=", mime: "image/png" }],
     });
@@ -334,7 +370,7 @@ describe("durable request recovery", () => {
   });
 
   test("transport loss re-POST uses the same id and exact original request", () => {
-    const attempt = createSpawnAttempt("attempt_transport_1", 2_000_000_000_123, baseAttempt.request!);
+    const attempt = createSpawnAttempt("attempt_transport_1", 2_000_000_000_123, baseRequest);
     const before = spawnRequestBody(attempt);
     expect(classifyTransportLoss().kind).toBe("ambiguous");
     const replay = spawnRequestBody(attempt);
@@ -344,7 +380,7 @@ describe("durable request recovery", () => {
 
   test("handoff replay retains stable parent identity after the source generation disappears", () => {
     const attempt = createSpawnAttempt("attempt_handoff_1", 2_000_000_000_123, {
-      ...baseAttempt.request!,
+      ...baseRequest,
       src: "/sessions/deleted-parent-generation.jsonl",
       parentConversationId: "conversation_019f4906-3f67-7b72-9fbc-9ec3b5ad1325",
     });
@@ -361,7 +397,7 @@ describe("durable request recovery", () => {
 
   test("a reviewer selection survives recovery and reaches the spawn route", () => {
     const attempt = createSpawnAttempt("attempt_role_1", 2_000_000_000_123, {
-      ...baseAttempt.request!,
+      ...baseRequest,
       role: "reviewer",
       roleParams: { diffSource: "main...HEAD", lens: "all" },
       reviews: "conversation_019f4906-3f67-7b72-9fbc-9ec3b5ad1325",
@@ -375,7 +411,7 @@ describe("durable request recovery", () => {
   });
 
   test("receipt replay enriches the persisted attempt without changing its recovery data", () => {
-    const attempt = createSpawnAttempt("attempt_receipt_1", 2_000_000_000_123, baseAttempt.request!);
+    const attempt = createSpawnAttempt("attempt_receipt_1", 2_000_000_000_123, baseRequest);
     const outcome = classifySpawnResponse(200, true, {
       ok: true,
       state: "settled",

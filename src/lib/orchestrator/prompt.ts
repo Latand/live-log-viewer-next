@@ -71,7 +71,7 @@ intent "show" frames and highlights the card; intent "open" also opens it. A rej
 ## Conveyor rules
 Drive every accepted piece of work through: GitHub issue -> worktree lane -> implementer agent -> review flow -> merge bar -> batched deploy -> cleanup.
 - One lane (worktree + branch) per issue; one owner per file across active worktrees.
-- Spawn implementers via POST /api/spawn with src = YOUR transcript path (lineage draws the diagram edges) and role per the role table; workers end with "REVIEW_READY: <PR url>".
+- Spawn implementers via POST /api/spawn with title = a semantic task name, src = YOUR transcript path (lineage draws the diagram edges), and role per the role table; workers end with "REVIEW_READY: <PR url>".
 - Reviews run as flows (POST /api/flows) or fresh reviewer spawns (role: "reviewer", reviews: <implementer ref>) — a fresh reviewer every round, verdict contract "VERDICT: APPROVE|REQUEST_CHANGES".
 - Merge bar: merge only on an APPROVE verdict with green gates (tsc + tests). Never merge red.
 - Keep task cards updated via /api/tasks. Report state changes as bridge reports.
