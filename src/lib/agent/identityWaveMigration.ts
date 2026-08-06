@@ -35,6 +35,10 @@ export interface IdentityWaveMigrationResult {
   alreadyCompleted: boolean;
   retitled: number;
   rekeyed: number;
+  /** Rekey pairs skipped because the shared path is already owned elsewhere.
+      Reported, never silently dropped: each one is a duplicate-identity repair
+      the wave cannot make on its own evidence. */
+  quarantinedRekeys: number;
   edgesStamped: number;
 }
 
@@ -157,10 +161,17 @@ function resolveConversationEvidence(
   return evidence;
 }
 
-function assertRekeyOwnership(
+/** Drops the rekey pairs whose shared path is claimed by another conversation
+    (or by a second legacy path) and keeps the rest. A collision is durable data
+    state — two registry rows describing one transcript — so aborting the wave on
+    it would never converge on retry and would strand every clean rekey and every
+    placeholder retitle behind it. Quarantining is per pair, counted, and
+    reported by the caller; evidence *read* failures still abort the whole wave,
+    because those genuinely can succeed on a later startup. */
+function resolveRekeyOwnership(
   file: RegistryFile,
-  evidence: ReadonlyMap<ViewerConversationId, ConversationEvidence>,
-): IdentityWavePathRekey[] {
+  evidence: Map<ViewerConversationId, ConversationEvidence>,
+): { rekeys: IdentityWavePathRekey[]; quarantined: number } {
   const owners = new Map<string, Set<ViewerConversationId>>();
   const generationPaths = new Map<string, Set<ViewerConversationId>>();
   const rememberOwner = (map: Map<string, Set<ViewerConversationId>>, pathname: string, conversationId: ViewerConversationId) => {
@@ -178,7 +189,9 @@ function assertRekeyOwnership(
 
   const targetSources = new Map<string, string>();
   const rekeys: IdentityWavePathRekey[] = [];
+  let quarantined = 0;
   for (const [conversationId, conversationEvidence] of evidence) {
+    const owned: IdentityWavePathRekey[] = [];
     for (const rekey of conversationEvidence.pathRekeys) {
       const pathOwners = owners.get(rekey.sharedPath);
       const sourceOwners = owners.get(rekey.legacyPath);
@@ -188,13 +201,16 @@ function assertRekeyOwnership(
         || (pathOwners && [...pathOwners].some((owner) => owner !== conversationId))
         || (generationOwners && rekey.sharedPath !== rekey.legacyPath)
         || (priorSource && priorSource !== rekey.legacyPath)) {
-        throw new Error("identity wave shared-path ownership collision");
+        quarantined += 1;
+        continue;
       }
       targetSources.set(rekey.sharedPath, rekey.legacyPath);
+      owned.push(rekey);
       rekeys.push(rekey);
     }
+    conversationEvidence.pathRekeys = owned;
   }
-  return rekeys;
+  return { rekeys, quarantined };
 }
 
 function rekeyProviderReceipt(
@@ -373,7 +389,7 @@ export function applyIdentityWaveMigration(
   const dryRun = input.dryRun === true;
   const file = dryRun ? structuredClone(source) : source;
   if (file.identityMigrations[IDENTITY_WAVE_MIGRATION]) {
-    return { dryRun, alreadyCompleted: true, retitled: 0, rekeyed: 0, edgesStamped: 0 };
+    return { dryRun, alreadyCompleted: true, retitled: 0, rekeyed: 0, quarantinedRekeys: 0, edgesStamped: 0 };
   }
 
   const titlesByReceipt = receiptTitles(file);
@@ -381,9 +397,9 @@ export function applyIdentityWaveMigration(
   // read aborts the transaction and leaves the durable completion marker open
   // for a later startup retry.
   const evidenceByConversation = resolveConversationEvidence(file, input, titlesByReceipt);
-  const externalPathRekeys = assertRekeyOwnership(file, evidenceByConversation);
-  if (!dryRun && externalPathRekeys.length > 0) {
-    input.commitExternalPathRekeys?.(externalPathRekeys);
+  const ownership = resolveRekeyOwnership(file, evidenceByConversation);
+  if (!dryRun && ownership.rekeys.length > 0) {
+    input.commitExternalPathRekeys?.(ownership.rekeys);
   }
   const changedEngines = new Set<"claude" | "codex">();
   let retitled = 0;
@@ -464,5 +480,12 @@ export function applyIdentityWaveMigration(
       edgesStamped,
     };
   }
-  return { dryRun, alreadyCompleted: false, retitled, rekeyed, edgesStamped };
+  return {
+    dryRun,
+    alreadyCompleted: false,
+    retitled,
+    rekeyed,
+    quarantinedRekeys: ownership.quarantined,
+    edgesStamped,
+  };
 }
