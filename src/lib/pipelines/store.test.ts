@@ -305,6 +305,14 @@ test("v3 validation: acyclic pass edges, valid fail edges, 1–8 stage bounds (#
       { id: "build", kind: "run", prompt: "build", next: null, effectiveRole: { ...v3Role } },
     ], srcPath: null, srcConversationId: null, now: "now" });
     expect(() => savePipelines([orphanReview])).toThrow("malformed pipeline record");
+
+    /* Review verdict recovery belongs to the bound flow, so a persisted
+       review-loop fail edge is rejected before it can become unreachable. */
+    const reviewFailEdge = buildPipeline({ id: "bad00005", task: "task", project: "viewer", repoDir: "/repo", stages: [
+      { id: "build", kind: "run", prompt: "build", next: "review", effectiveRole: { ...v3Role } },
+      { id: "review", kind: "review-loop", prompt: "review", next: null, onFail: { to: "build", maxRounds: 3 }, effectiveRole: { ...v3Role, access: "read-only" } },
+    ], srcPath: null, srcConversationId: null, now: "now" });
+    expect(() => savePipelines([reviewFailEdge])).toThrow("malformed pipeline record");
   });
 });
 

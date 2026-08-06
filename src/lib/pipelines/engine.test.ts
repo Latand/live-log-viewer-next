@@ -1017,6 +1017,50 @@ test("creation validates the 1–8 stage conversation graph and optional roles",
   ] as never }, ports)).error).toContain("role only accepts roleId");
 });
 
+test("review-loop onFail edges are rejected during creation and graph editing", async () => {
+  const h = harness();
+  savePipelines([]);
+  const invalid = await createPipelineFromRequest({
+    task: "Unreachable review fix edge",
+    repoDir: "/repo",
+    autoStart: false,
+    stages: [
+      { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "build", next: "review" },
+      { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null, onFail: { to: "build", maxRounds: 3 } },
+    ],
+  }, h.ports);
+
+  expect(invalid).toEqual({
+    error: "review-loop stage review does not support onFail",
+    status: 400,
+  });
+  expect(loadPipelines()).toEqual([]);
+
+  const valid = await createPipelineFromRequest({
+    task: "Editable review graph",
+    repoDir: "/repo",
+    autoStart: false,
+    stages: [
+      { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "build", next: "review" },
+      { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+    ],
+  }, h.ports);
+  if (!valid.pipeline) throw new Error(valid.error);
+
+  const edited = await patchPipeline(valid.pipeline.id, {
+    action: "set-edge",
+    stageId: "review",
+    edge: "fail",
+    to: "build",
+    maxRounds: 3,
+  }, h.ports);
+  expect(edited).toMatchObject({
+    error: "review-loop stage review does not support onFail",
+    status: 400,
+  });
+  expect(loadPipelines()[0]!.stages.find((stage) => stage.id === "review")!.onFail).toBeNull();
+});
+
 test("auto-start creation persists the fetched origin/main identity before provisioning", async () => {
   const h = harness();
   savePipelines([]);

@@ -232,10 +232,11 @@ function isStage(value: unknown): value is PipelineStage {
  * stage has at most one pass edge (`next`) and one fail edge (`onFail`). The
  * pass graph must be acyclic (so every pass path terminates at `null`), edge
  * targets must exist, and every review-loop must be pass-reachable from a run
- * stage (it reviews a run's session). Fail edges may target any stage — cycles
- * live there, terminated by the per-edge round budget. Shared by the store
- * validator, the create-time normalizer, and the set-edge action so no path can
- * persist a graph another path would reject.
+ * stage (it reviews a run's session). Run-stage fail edges may target any stage;
+ * their cycles terminate at the per-edge round budget. Review-loop stages use
+ * their bound flow for verdict recovery and cannot define `onFail`. Shared by
+ * the store validator, the create-time normalizer, and the set-edge action so
+ * every mutation path applies the same graph contract.
  */
 export function pipelineGraphError(
   stages: ReadonlyArray<Pick<PipelineStage, "id" | "kind" | "next"> & { onFail?: Pipeline["stages"][number]["onFail"] }>,
@@ -246,6 +247,7 @@ export function pipelineGraphError(
     if (stage.next !== null && !ids.has(stage.next)) return `stage ${stage.id} next must reference an existing stage`;
     if (stage.next === stage.id) return `stage ${stage.id} pass edge may not target itself`;
     const onFail = stage.onFail ?? null;
+    if (stage.kind === "review-loop" && onFail) return `review-loop stage ${stage.id} does not support onFail`;
     if (onFail && !ids.has(onFail.to)) return `stage ${stage.id} onFail must reference an existing stage`;
     if (onFail && (!Number.isInteger(onFail.maxRounds) || onFail.maxRounds < 1 || onFail.maxRounds > MAX_FAIL_EDGE_ROUNDS)) {
       return `stage ${stage.id} onFail maxRounds must be an integer between 1 and ${MAX_FAIL_EDGE_ROUNDS}`;
