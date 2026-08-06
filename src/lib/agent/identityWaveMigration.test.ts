@@ -62,7 +62,7 @@ test("the identity wave retitles, rekeys, stamps roots, supports dry-run, and co
       conversationId: receiptConversation.id,
       purpose: "resume-successor",
       expectedArtifactPath: receiptLegacyPath,
-      launchProfile: { title: "Claude session" },
+      launchProfile: { title: "Seed receipt backfill evidence" },
       launchDisplay: {
         ["prompt"]: "Implement receipt backfill\nAcceptance evidence follows",
         echo: "Implement receipt backfill\nAcceptance evidence follows",
@@ -84,6 +84,7 @@ test("the identity wave retitles, rekeys, stamps roots, supports dry-run, and co
       pendingAction: null,
     });
     const legacy = seed.snapshot();
+    legacy.receipts[reserved.receipt.launchId]!.launchProfile.title = "Claude session";
     const receiptGeneration = legacy.conversations[receiptConversation.id]!.generations.at(-1)!;
     legacy.conversations[receiptConversation.id]!.generations.unshift({
       ...structuredClone(receiptGeneration),
@@ -292,7 +293,7 @@ test("identity evidence cleans receipt and transcript Markdown before durable pe
       cwd: directory,
       conversationId: receiptConversation.id,
       purpose: "resume-successor",
-      launchProfile: { title: "Codex session" },
+      launchProfile: { title: "Seed Markdown receipt evidence" },
       launchDisplay: {
         ["prompt"]: "Review [issue #913](https://example.invalid/issues/913)",
         echo: "Review [issue #913](https://example.invalid/issues/913)",
@@ -301,6 +302,7 @@ test("identity evidence cleans receipt and transcript Markdown before durable pe
     });
     if (receipt.kind !== "created") throw new Error("expected receipt");
     const legacy = seed.snapshot();
+    legacy.receipts[receipt.receipt.launchId]!.launchProfile.title = "Codex session";
     legacy.conversations[receiptConversation.id]!.generations.at(-1)!.launchProfile.title = "Codex session";
     legacy.conversations[transcriptConversation.id]!.generations.at(-1)!.launchProfile.title = "Codex session";
     fs.writeFileSync(filename, `${JSON.stringify(legacy, null, 2)}\n`);
@@ -871,11 +873,12 @@ test("the startup wrapper logs populated counters and persists migrated JSON and
       conversationId: legacyConversation.id,
       purpose: "resume-successor",
       expectedArtifactPath: legacyPath,
-      launchProfile: { title: "Claude session" },
+      launchProfile: { title: "Seed parity migration evidence" },
       launchDisplay: { ["prompt"]: "Parity migration title", echo: "Parity migration title", images: 0 },
     });
     if (reserved.kind !== "created") throw new Error("expected a parity receipt reservation");
     const seeded = seed.snapshot();
+    seeded.receipts[reserved.receipt.launchId]!.launchProfile.title = "Claude session";
     seeded.conversations[legacyConversation.id]!.generations.at(-1)!.launchProfile.title = "Claude session";
     seeded.conversations[legacyConversation.id]!.agentRole = "worker";
     seeded.conversations[legacyConversation.id]!.delegationDepth = 2;
