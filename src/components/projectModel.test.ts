@@ -434,6 +434,51 @@ describe("automatic placement age horizon", () => {
     expect(groups[0]!.finished.map((file) => file.path)).toContain("/old-root/mid/leaf");
   });
 
+  test("an aged root placed by another rule owns its live descendant instead of doubling it", () => {
+    /* Two rules meet on one tree: the operator expanded the aged root, and the
+       child is live. The root is on the canvas, so lifting the child to the
+       "topmost PLACEABLE ancestor" stopped at the child itself and opened a
+       second group for a card the root's group already renders as a column. */
+    const root = entry({ path: "/old-root", activity: "idle", mtime: NOW - 200 * HOUR });
+    const child = entry({ path: "/old-root/agent", parent: "/old-root", kind: "subagent", activity: "live", mtime: NOW - 200 * HOUR });
+    const groups = buildBranchGroups([root, child], "demo", { now: NOW, expandedConversationPaths: new Set(["/old-root"]) });
+    expect(groups.map((group) => group.key)).toEqual(["/old-root"]);
+    expect(groups[0]!.columns.map((column) => column.file.path)).toEqual(["/old-root", "/old-root/agent"]);
+    // Every path the groups render, exactly once.
+    const rendered = groups.flatMap((group) => group.columns.map((column) => column.file.path));
+    expect(rendered).toEqual([...new Set(rendered)]);
+  });
+
+  test("a promoted engine child of an aged root is not emitted twice", () => {
+    const root = entry({ path: "/old-root", activity: "idle", mtime: NOW - 200 * HOUR });
+    const child = entry({ path: "/old-root/agent", parent: "/old-root", kind: "subagent", activity: "idle", mtime: NOW - 200 * HOUR });
+    const groups = buildBranchGroups([root, child], "demo", {
+      now: NOW,
+      expandedConversationPaths: new Set(["/old-root"]),
+      enginePlacement: { promotedEnginePaths: new Set(["/old-root/agent"]) },
+    });
+    const rendered = groups.flatMap((group) => group.columns.map((column) => column.file.path));
+    expect(rendered).toEqual([...new Set(rendered)]);
+    expect(rendered).toContain("/old-root/agent");
+  });
+
+  test("a card below two group roots hangs under the nearer one, once", () => {
+    /* A `recent` conversation mid-chain becomes a root with no lift at all, so
+       it and the tree root above it both assembled over the same subtree and
+       emitted the leaf twice under one key (React: "two children with the same
+       key"). Nearest drawn ancestor wins, matching how the arrows already read. */
+    const spawned = { kind: "spawn", role: null, depth: 0, parentConversationId: "c", reviewsConversationId: null, memberships: [] } as FileEntry["durableLineage"];
+    const top = entry({ path: "/top", root: "codex-sessions", engine: "codex", activity: "live", mtime: NOW - HOUR });
+    const mid = entry({ path: "/mid", parent: "/top", durableLineage: spawned, activity: "recent", mtime: NOW - HOUR });
+    const leaf = entry({ path: "/leaf", parent: "/mid", durableLineage: spawned, activity: "live", mtime: NOW - HOUR });
+    const groups = buildBranchGroups([top, mid, leaf], "demo", { now: NOW });
+    const rendered = groups.flatMap((group) => group.columns.map((column) => column.file.path));
+    expect(rendered).toEqual([...new Set(rendered)]);
+    expect(rendered).toContain("/leaf");
+    const owner = groups.find((group) => group.columns.some((column) => column.file.path === "/leaf"))!;
+    expect(owner.key).toBe("/mid");
+  });
+
   test("a stale child under a live root rests as a chip instead of taking a column", () => {
     const root = entry({ path: "/live-root", activity: "live", mtime: NOW - HOUR });
     const stale = entry({ path: "/live-root/ancient", parent: "/live-root", kind: "subagent", activity: "idle", mtime: NOW - 400 * HOUR });

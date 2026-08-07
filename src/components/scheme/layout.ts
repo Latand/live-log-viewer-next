@@ -22,7 +22,7 @@ import {
 } from "./agentLinks";
 import { PIPELINE_PLACEHOLDER_STATES, latestAttempt, pipelinePlaceholderStages, stageAttempts, stageRowCollapsible } from "@/components/pipelines/pipelineModel";
 import { buildSchemeLineage } from "./lineageModel";
-import { pipelineWithinPlacementHorizon } from "./placementHorizon";
+import { buildTranscriptLookup, pipelineWithinPlacementHorizon, transcriptIdentity } from "./placementHorizon";
 import { linkedPipelineTasks } from "./pipelineAnchor";
 import { TASK_W, isPlacedTask, taskBoxHeight } from "./taskGeometry";
 import { type BranchGroup, descendantsOf, isChildConversation, kidsIndex, projectDescendantsOf, schemeAgeHorizonSeconds } from "@/components/projectModel";
@@ -513,13 +513,20 @@ export function buildSchemeLayout(
        stay drawn around that card rather than leaving it to float. */
     const placementNow = placement.now ?? 0;
     const placementHorizon = placement.ageHorizonSeconds ?? schemeAgeHorizonSeconds();
+    /* Both reads below resolve through the transcript identity. An attempt
+       records whichever root its spawn ran under, which is routinely a
+       different spelling from the one the scan published; a raw-string lookup
+       then silently answers "no such file" and the pipeline loses its liveness
+       exemption and its pin escape at once. */
+    const fileAt = buildTranscriptLookup(files);
+    const prePlacedIdentities = new Set([...prePlacedNodePaths].map(transcriptIdentity));
     const agedOut = (pipeline: Pipeline): boolean => {
-      if (pipelineWithinPlacementHorizon(pipeline, { now: placementNow, ageHorizonSeconds: placementHorizon, fileAt: (path) => byAll.get(path) })) return false;
+      if (pipelineWithinPlacementHorizon(pipeline, { now: placementNow, ageHorizonSeconds: placementHorizon, fileAt })) return false;
       for (const run of pipeline.runs) {
         for (const attempt of run.attempts) {
-          if (attempt.agentPath && prePlacedNodePaths.has(attempt.agentPath)) return false;
+          if (attempt.agentPath && prePlacedIdentities.has(transcriptIdentity(attempt.agentPath))) return false;
           const impl = attempt.flowId ? implOfFlow(attempt.flowId) : null;
-          if (impl && prePlacedNodePaths.has(impl)) return false;
+          if (impl && prePlacedIdentities.has(transcriptIdentity(impl))) return false;
         }
       }
       return true;

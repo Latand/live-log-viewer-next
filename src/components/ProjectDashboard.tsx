@@ -67,8 +67,8 @@ import {
   quietRootsWithActiveDescendants,
   residualItems,
   schemeAgeHorizonSeconds,
-  withinPlacementHorizon,
 } from "./projectModel";
+import { boundFlowExpansions } from "./scheme/placementHorizon";
 import { ArchiveRestore } from "./icons";
 import { KeepAwakeMenuRow } from "./KeepAwakeControl";
 import { ArchiveProjectButton, DeleteProjectButton } from "./ProjectTrash";
@@ -588,19 +588,10 @@ function ProjectDashboardView({
       if (isDirectReviewFlow(flow) && flow.state !== "reviewing") continue;
       paths.add(flow.implementerPath);
     }
-    /* This expansion is automatic — the board opens it, not the operator — so it
-       follows the placement age horizon like every other automatic card. A flow
-       that has sat in an approved state for weeks must not keep dragging its
-       implementer (and, through it, an ancient root) onto the canvas; live and
-       running work stays regardless of age, and the operator's own expansions
-       (`prefs.expanded`, merged below) are never bounded. */
-    const horizon = schemeAgeHorizonSeconds();
-    const byPath = new Map(files.map((file) => [file.path, file] as const));
-    for (const path of [...paths]) {
-      const file = byPath.get(path);
-      if (file && !withinPlacementHorizon(file, nowSeconds, horizon)) paths.delete(path);
-    }
-    return paths;
+    /* These expansions are the board's, not the operator's, so they follow the
+       placement age horizon like every other automatic card (the operator's own
+       `prefs.expanded` are merged below and never bounded). */
+    return boundFlowExpansions(paths, { flows: activeFlows, files, now: nowSeconds, ageHorizonSeconds: schemeAgeHorizonSeconds() });
   }, [files, deckFlows, nowSeconds]);
   /* Flow-driven expansions plus the ones the user opened by hand from a
      collapsed view: a connected conversation the user expanded renders as a

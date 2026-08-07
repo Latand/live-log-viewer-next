@@ -419,6 +419,60 @@ function assembleGroup(
 
 
 /**
+ * One conversation, one node.
+ *
+ * Two group roots can sit on a single lineage: `groupRootFor` lifts a placed
+ * descendant to the topmost ancestor the HORIZON allows, but an ancestor past
+ * the horizon can still be on the canvas through a rule that consults no clock
+ * (an operator expansion, an engine promotion), and a `recent` conversation
+ * mid-chain becomes a root without any lift at all. Each root then assembles
+ * over its WHOLE subtree, so a card below both was emitted twice under one key
+ * — React's "two children with the same key", and a duplicated card on the
+ * board.
+ *
+ * Ownership is resolved the way the drawn hierarchy already reads: a card
+ * belongs to the group whose root is its NEAREST ancestor, so it hangs under
+ * the closest generation still drawn and never under a further one as well. A
+ * group root another group already renders as a column is redundant in full and
+ * drops out; nothing leaves the canvas, because the column that displaced it is
+ * the same card.
+ */
+function singleOwnership(groups: BranchGroup[], byPath: Map<string, FileEntry>): BranchGroup[] {
+  /* Steps from `file` up to `rootPath`, or Infinity when it is no ancestor. */
+  const distanceTo = (file: FileEntry, rootPath: string): number => {
+    let cursor: FileEntry | undefined = file;
+    const seen = new Set<string>();
+    for (let steps = 0; cursor && !seen.has(cursor.path); steps += 1) {
+      if (cursor.path === rootPath) return steps;
+      seen.add(cursor.path);
+      cursor = cursor.parent ? byPath.get(cursor.parent) : undefined;
+    }
+    return Number.POSITIVE_INFINITY;
+  };
+  const columnedElsewhere = new Set<string>();
+  for (const group of groups) {
+    for (const column of group.columns) {
+      if (column.file.path !== group.key) columnedElsewhere.add(column.file.path);
+    }
+  }
+  const kept = groups.filter((group) => !columnedElsewhere.has(group.key));
+  const owner = new Map<string, BranchGroup>();
+  for (const group of kept) {
+    for (const column of group.columns) {
+      const held = owner.get(column.file.path);
+      if (!held || distanceTo(column.file, group.key) < distanceTo(column.file, held.key)) owner.set(column.file.path, group);
+    }
+  }
+  return kept.map((group) => {
+    const columns = group.columns.filter((column) => owner.get(column.file.path) === group);
+    if (columns.length === group.columns.length) return group;
+    /* The freshness sort key follows the columns that stayed. */
+    const smt = Math.max(...columns.map((column) => column.file.mtime), ...columns.flatMap((column) => column.tasks.map((task) => task.mtime)));
+    return { ...group, columns, smt };
+  });
+}
+
+/**
  * One group per active branch tree: the root conversation opens the group,
  * live descendant agents (subagents, codex rollouts) get their own columns.
  * Live background tasks (bash, codex job logs) never take a full column —
@@ -524,7 +578,10 @@ export function buildBranchGroups(files: FileEntry[], project: string, options: 
     }
     if (recentlyActive(file) && isConversation(file)) roots.set(file.path, file);
   }
-  const groups = [...roots.values()].map((root) => assembleGroup(root, kids, expandedConversationPaths, enginePlacement, placeableByAge));
+  const groups = singleOwnership(
+    [...roots.values()].map((root) => assembleGroup(root, kids, expandedConversationPaths, enginePlacement, placeableByAge)),
+    byPath,
+  );
   for (const task of orphanTasks.values()) {
     groups.push({
       key: task.path,
