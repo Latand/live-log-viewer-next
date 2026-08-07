@@ -7,6 +7,7 @@ import { currentConversationFile, currentMemberPath, withoutArchivedPredecessors
 
 import { isConversation } from "@/components/projectModel";
 import { formatRateLimitTime } from "@/components/rateLimit";
+import { resolveTranscriptClaims, transcriptClaimResolver } from "@/components/transcriptClaims";
 
 /** Fired after any successful flow PATCH so pollers refresh immediately. */
 export const FLOWS_CHANGED_EVENT = "llv:flows-changed";
@@ -261,29 +262,40 @@ export function claimedReviewerDescendantPaths(files: FileEntry[], flows: Flow[]
  * collapses to a prompt placeholder (task f6c1a774 / Fix #604). Protected
  * reviewers are never anchors either, so their own children keep their real
  * parent.
+ *
+ * Recorded round paths are resolved onto the projected spelling before every
+ * comparison (#943 follow-up): a flow that ran before its account home was cut
+ * over to the shared transcript store holds the old spelling, which matches no
+ * projected file, so its rounds would each hold a free node. `protectedPaths`
+ * comes from the same durable records, so it is resolved too — resolving only
+ * the round would newly fold a live pipeline stage reviewer off the board.
  */
 export function foldClaimedReviewers(
   files: FileEntry[],
   flows: Flow[],
   protectedPaths: ReadonlySet<string> = EMPTY_PROTECTED,
 ): FileEntry[] {
+  const resolveClaim = transcriptClaimResolver(files);
+  const protectedClaims = resolveTranscriptClaims(protectedPaths, resolveClaim);
   const anchorByReviewer = new Map<string, string>();
   for (const flow of flows) {
+    const implementerPath = resolveClaim(flow.implementerPath);
     for (const round of flow.rounds) {
-      if (round.reviewerPath && !protectedPaths.has(round.reviewerPath)) anchorByReviewer.set(round.reviewerPath, flow.implementerPath);
+      const reviewerPath = round.reviewerPath ? resolveClaim(round.reviewerPath) : null;
+      if (reviewerPath && !protectedClaims.has(reviewerPath)) anchorByReviewer.set(reviewerPath, implementerPath);
     }
   }
   const pathByConversationId = new Map(withoutArchivedPredecessors(files).flatMap((file) =>
     file.conversationId ? [[file.conversationId, file.path] as const] : []));
   for (const file of files) {
-    if (protectedPaths.has(file.path)) continue;
+    if (protectedClaims.has(file.path)) continue;
     const membership = file.durableLineage?.memberships.find((candidate) => candidate.kind === "flow" && candidate.role === "reviewer");
     if (!membership) continue;
     const flow = flows.find((candidate) => candidate.id === membership.containerId);
     const reviewedPath = file.durableLineage?.reviewsConversationId
       ? pathByConversationId.get(file.durableLineage.reviewsConversationId)
       : undefined;
-    const anchor = reviewedPath ?? file.parent ?? flow?.implementerPath;
+    const anchor = reviewedPath ?? file.parent ?? (flow ? resolveClaim(flow.implementerPath) : undefined);
     if (anchor) anchorByReviewer.set(file.path, anchor);
   }
   if (!anchorByReviewer.size) return files;

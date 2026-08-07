@@ -311,6 +311,58 @@ describe("reviewer folding", () => {
   });
 });
 
+describe("reviewer folding across recorded path spellings (#943 follow-up)", () => {
+  /* Durable flow records keep the spelling that was current when the round ran:
+     a legacy home, or an account-local `projects` that symlinks into the shared
+     store. The projection publishes the shared spelling, so a raw string claim
+     misses and every round of a long-closed flow renders as a free node. */
+  const LEGACY = "/store/legacy/projects/enc-project";
+  const SHARED = "/store/shared/projects/enc-project";
+
+  test("a round recorded under the pre-canonical spelling still claims its reviewer", () => {
+    const implementer = entry({ path: `${SHARED}/impl-3f2a.jsonl` });
+    const reviewer = entry({ path: `${SHARED}/rev-9c41.jsonl`, parent: implementer.path });
+    const subtask = entry({ path: `${SHARED}/sub-1b70.jsonl`, parent: reviewer.path });
+    const closed = flow({
+      implementerPath: `${LEGACY}/impl-3f2a.jsonl`,
+      reviewerPath: `${LEGACY}/rev-9c41.jsonl`,
+      state: "closed",
+      closedAt: "2026-07-06T00:00:00Z",
+    });
+
+    expect(foldClaimedReviewers([implementer, reviewer, subtask], [closed]).map((file) => [file.path, file.parent])).toEqual([
+      [implementer.path, null],
+      [subtask.path, implementer.path],
+    ]);
+  });
+
+  test("a reviewer belonging to no flow keeps its node", () => {
+    const implementer = entry({ path: `${SHARED}/impl-3f2a.jsonl` });
+    const stranger = entry({ path: `${SHARED}/rev-0000.jsonl`, parent: implementer.path });
+    const closed = flow({
+      implementerPath: `${LEGACY}/impl-3f2a.jsonl`,
+      reviewerPath: `${LEGACY}/rev-9c41.jsonl`,
+      state: "closed",
+      closedAt: "2026-07-06T00:00:00Z",
+    });
+
+    expect(foldClaimedReviewers([implementer, stranger], [closed]).map((file) => file.path))
+      .toEqual([implementer.path, stranger.path]);
+  });
+
+  test("a protected pipeline reviewer recorded pre-canonically stays a real card", () => {
+    /* The protection set is built from the same durable records, so resolving
+       only the round would fold away the live stage conversation (#560). */
+    const implementer = entry({ path: `${SHARED}/impl-3f2a.jsonl` });
+    const reviewer = entry({ path: `${SHARED}/rev-9c41.jsonl`, parent: implementer.path, activity: "live" });
+    const active = flow({ implementerPath: `${LEGACY}/impl-3f2a.jsonl`, reviewerPath: `${LEGACY}/rev-9c41.jsonl` });
+    const protectedPaths = new Set([`${LEGACY}/rev-9c41.jsonl`]);
+
+    expect(foldClaimedReviewers([implementer, reviewer], [active], protectedPaths).map((file) => file.path))
+      .toEqual([implementer.path, reviewer.path]);
+  });
+});
+
 test("a quota-blocked flow presents the transient block and suppresses its pending action", () => {
   const limited = flow({
     implementerPath: "/implementer",

@@ -4,6 +4,8 @@ import type { Flow, Round } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { FileEntry } from "@/lib/types";
 
+import { transcriptClaimResolver } from "@/components/transcriptClaims";
+
 import {
   classifyWorker,
   collapsibleWorkerFiles,
@@ -357,6 +359,71 @@ describe("pipelineStageAgentPaths", () => {
       },
     ] as unknown as Parameters<typeof pipelineStageAgentPaths>[0];
     expect(pipelineStageAgentPaths(pipelines)).toEqual(new Set(["/a", "/b"]));
+  });
+});
+
+describe("claims across recorded path spellings (#943 follow-up)", () => {
+  /* Flow rounds and pipeline attempts hold whatever spelling was current when
+     they ran; the projection publishes the shared-store one. A raw string claim
+     misses, so a finished reviewer never classifies as worker-class and holds a
+     full node forever. */
+  const LEGACY = "/store/legacy/projects/enc-project";
+  const SHARED = "/store/shared/projects/enc-project";
+  const corpus = (...files: FileEntry[]) => files;
+
+  test("a reviewer round recorded pre-canonically is still flow-reviewer", () => {
+    const reviewer = entry({ path: `${SHARED}/rev-9c41.jsonl` });
+    const flows = [flow({ id: "f1", implementerPath: `${LEGACY}/impl-3f2a.jsonl`, rounds: [round({ reviewerPath: `${LEGACY}/rev-9c41.jsonl` })] })];
+    expect(classifyWorker(reviewer, { ...lineage(flows), resolveClaimPath: transcriptClaimResolver(corpus(reviewer)) })).toBe("flow-reviewer");
+  });
+
+  test("an implementer recorded pre-canonically is still flow-implementer", () => {
+    const impl = entry({ path: `${SHARED}/impl-3f2a.jsonl`, parent: "/orchestrator" });
+    const flows = [flow({ id: "f1", implementerPath: `${LEGACY}/impl-3f2a.jsonl` })];
+    expect(classifyWorker(impl, { ...lineage(flows), resolveClaimPath: transcriptClaimResolver(corpus(impl)) })).toBe("flow-implementer");
+  });
+
+  test("a stage attempt recorded pre-canonically is still pipeline-stage", () => {
+    const stage = entry({ path: `${SHARED}/stage-77bd.jsonl` });
+    const pipelines = [
+      { runs: [{ attempts: [{ agentPath: `${LEGACY}/stage-77bd.jsonl` }] }] },
+    ] as unknown as Parameters<typeof pipelineStageAgentPaths>[0];
+    const paths = pipelineStageAgentPaths(pipelines, transcriptClaimResolver(corpus(stage)));
+    expect(paths.has(stage.path)).toBe(true);
+    expect(classifyWorker(stage, lineage([], paths as Set<string>))).toBe("pipeline-stage");
+  });
+
+  test("a finished round recorded pre-canonically folds, a running one does not", () => {
+    const finished = entry({ path: `${SHARED}/rev-9c41.jsonl` });
+    const running = entry({ path: `${SHARED}/rev-4d10.jsonl`, activity: "live" });
+    const flows = [flow({
+      id: "f1",
+      implementerPath: `${LEGACY}/impl-3f2a.jsonl`,
+      rounds: [
+        round({ n: 1, reviewerPath: `${LEGACY}/rev-9c41.jsonl`, verdict: "APPROVE" }),
+        round({ n: 2, reviewerPath: `${LEGACY}/rev-4d10.jsonl` }),
+      ],
+    })];
+    const files = corpus(finished, running);
+    expect(collapsibleWorkerFiles({ files, project: "demo", flows, pinnedPaths: new Set(), nowMs: NOW }).map((file) => file.path))
+      .toEqual([finished.path]);
+  });
+
+  test("an unresolvable record claims nothing", () => {
+    /* Only a path the corpus actually holds is claimable — a record whose
+       transcript has left the window must not fold an unrelated card. */
+    const other = entry({ path: `${SHARED}/rev-0000.jsonl` });
+    const flows = [flow({ id: "f1", implementerPath: `${LEGACY}/impl-3f2a.jsonl`, rounds: [round({ reviewerPath: `${LEGACY}/rev-9c41.jsonl` })] })];
+    expect(classifyWorker(other, { ...lineage(flows), resolveClaimPath: transcriptClaimResolver(corpus(other)) })).toBeNull();
+  });
+
+  test("an ambiguous tail stays unresolved", () => {
+    /* Two transcripts of the same name under different roots: resolving either
+       way could fold the wrong card, so neither is claimed. */
+    const a = entry({ path: `${SHARED}/rev-9c41.jsonl` });
+    const b = entry({ path: `/store/other/projects/enc-project/rev-9c41.jsonl` });
+    const resolve = transcriptClaimResolver(corpus(a, b));
+    expect(resolve(`${LEGACY}/rev-9c41.jsonl`)).toBe(`${LEGACY}/rev-9c41.jsonl`);
   });
 });
 
