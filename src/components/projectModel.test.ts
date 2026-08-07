@@ -16,6 +16,7 @@ import {
   projectDraftWorkingDirectory,
   residualItems,
   resolveProjectView,
+  schemeAgeHorizonSeconds,
   subtree,
 } from "./projectModel";
 
@@ -368,6 +369,118 @@ describe("buildBranchGroups", () => {
     expect(groups.map((group) => group.key)).toContain("/parent");
     const group = groups.find((candidate) => candidate.key === "/parent")!;
     expect(group.columns.map((column) => column.file.path)).toContain("/parent/attn");
+  });
+});
+
+describe("automatic placement age horizon", () => {
+  const HOUR = 3_600;
+  const NOW = 1_754_500_000;
+
+  test("an idle root active earlier today keeps an automatic card", () => {
+    const root = entry({ path: "/idle-today", activity: "idle", mtime: NOW - 2 * HOUR });
+    expect(buildBranchGroups([root], "demo", { now: NOW }).map((group) => group.key)).toEqual(["/idle-today"]);
+  });
+
+  test("a stalled root from yesterday keeps an automatic card", () => {
+    const root = entry({ path: "/stalled-yesterday", activity: "stalled", mtime: NOW - 13 * HOUR });
+    expect(buildBranchGroups([root], "demo", { now: NOW }).map((group) => group.key)).toEqual(["/stalled-yesterday"]);
+  });
+
+  test("a root beyond the horizon loses its automatic card yet stays in quiet history", () => {
+    const stale = entry({ path: "/stale", activity: "stalled", mtime: NOW - 120 * HOUR });
+    const fresh = entry({ path: "/fresh", activity: "idle", mtime: NOW - HOUR });
+    const files = [stale, fresh];
+    expect(buildBranchGroups(files, "demo", { now: NOW }).map((group) => group.key)).toEqual(["/fresh"]);
+    expect(quietHistoryRows(files, "demo").map((file) => file.path)).toContain("/stale");
+  });
+
+  test("a live or running conversation keeps its card whatever its age", () => {
+    const live = entry({ path: "/live-old", activity: "live", mtime: NOW - 400 * HOUR });
+    const running = entry({ path: "/running-old", activity: "idle", proc: "running", mtime: NOW - 400 * HOUR });
+    expect(buildBranchGroups([live, running], "demo", { now: NOW }).map((group) => group.key).sort())
+      .toEqual(["/live-old", "/running-old"]);
+  });
+
+  test("an explicitly expanded root beyond the horizon still renders", () => {
+    const stale = entry({ path: "/stale-expanded", activity: "idle", mtime: NOW - 200 * HOUR });
+    const groups = buildBranchGroups([stale], "demo", {
+      now: NOW,
+      expandedConversationPaths: new Set(["/stale-expanded"]),
+    });
+    expect(groups.map((group) => group.key)).toEqual(["/stale-expanded"]);
+  });
+
+  test("a recently active child keeps its stale root's card on the canvas", () => {
+    const root = entry({ path: "/old-root", activity: "idle", mtime: NOW - 200 * HOUR });
+    const child = entry({ path: "/old-root/agent", parent: "/old-root", kind: "subagent", activity: "idle", mtime: NOW - 13 * HOUR });
+    expect(buildBranchGroups([root, child], "demo", { now: NOW }).map((group) => group.key)).toEqual(["/old-root"]);
+  });
+
+  test("a cross-project segment follows the horizon once its child is quiet", () => {
+    const projectRoot = entry({ path: "/seg-root", project: "viewer", activity: "idle", mtime: NOW - HOUR });
+    const foreignParent = entry({
+      path: "/foreign",
+      project: "latand",
+      root: "codex-sessions",
+      engine: "codex",
+      fmt: "codex",
+      parent: "/seg-root",
+      activity: "idle",
+      mtime: NOW - 200 * HOUR,
+    });
+    const freshSegment = entry({
+      path: "/seg-fresh",
+      project: "viewer",
+      root: "codex-sessions",
+      engine: "codex",
+      fmt: "codex",
+      parent: "/foreign",
+      activity: "idle",
+      mtime: NOW - 13 * HOUR,
+    });
+    const staleSegment = entry({
+      path: "/seg-stale",
+      project: "viewer",
+      root: "codex-sessions",
+      engine: "codex",
+      fmt: "codex",
+      parent: "/foreign",
+      activity: "stalled",
+      mtime: NOW - 200 * HOUR,
+    });
+    const groups = buildBranchGroups([projectRoot, foreignParent, freshSegment, staleSegment], "viewer", { now: NOW });
+    expect(groups.map((group) => group.key).sort()).toEqual(["/seg-fresh", "/seg-root"]);
+  });
+
+  test("a narrowed horizon governs placement", () => {
+    const groups = buildBranchGroups([
+      entry({ path: "/two-hours", activity: "idle", mtime: NOW - 2 * HOUR }),
+      entry({ path: "/thirteen-hours", activity: "idle", mtime: NOW - 13 * HOUR }),
+    ], "demo", { now: NOW, ageHorizonSeconds: 6 * HOUR });
+    expect(groups.map((group) => group.key)).toEqual(["/two-hours"]);
+  });
+
+  test("without a clock (hydration) placement follows the activity rule unchanged", () => {
+    const idleOld = entry({ path: "/idle", activity: "idle", mtime: 1_000 });
+    const recent = entry({ path: "/recent", activity: "recent", mtime: 1_000 });
+    expect(buildBranchGroups([idleOld, recent], "demo").map((group) => group.key)).toEqual(["/recent"]);
+  });
+
+  test("the horizon reads its hours from the environment and falls back to two days", () => {
+    const previous = process.env.NEXT_PUBLIC_LLV_SCHEME_AGE_HORIZON_HOURS;
+    try {
+      delete process.env.NEXT_PUBLIC_LLV_SCHEME_AGE_HORIZON_HOURS;
+      expect(schemeAgeHorizonSeconds()).toBe(48 * HOUR);
+      process.env.NEXT_PUBLIC_LLV_SCHEME_AGE_HORIZON_HOURS = "6";
+      expect(schemeAgeHorizonSeconds()).toBe(6 * HOUR);
+      process.env.NEXT_PUBLIC_LLV_SCHEME_AGE_HORIZON_HOURS = "nonsense";
+      expect(schemeAgeHorizonSeconds()).toBe(48 * HOUR);
+      process.env.NEXT_PUBLIC_LLV_SCHEME_AGE_HORIZON_HOURS = "0";
+      expect(schemeAgeHorizonSeconds()).toBe(48 * HOUR);
+    } finally {
+      if (previous === undefined) delete process.env.NEXT_PUBLIC_LLV_SCHEME_AGE_HORIZON_HOURS;
+      else process.env.NEXT_PUBLIC_LLV_SCHEME_AGE_HORIZON_HOURS = previous;
+    }
   });
 });
 

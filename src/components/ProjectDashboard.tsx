@@ -700,8 +700,8 @@ function ProjectDashboardView({
      the projection partitions each engine child into a promoted node or a
      folded tray row. The final group build consumes that single authority. */
   const baseGroups = useMemo(
-    () => buildBranchGroups(sceneFiles, project, { expandedConversationPaths: expandedConversations }),
-    [sceneFiles, project, expandedConversations],
+    () => buildBranchGroups(sceneFiles, project, { expandedConversationPaths: expandedConversations, now: nowSeconds }),
+    [sceneFiles, project, expandedConversations, nowSeconds],
   );
   const engineProjection = useMemo(() => {
     const hiddenPaths = new Set(prefs.hidden);
@@ -736,9 +736,10 @@ function ProjectDashboardView({
       ? buildBranchGroups(sceneFiles, project, {
         expandedConversationPaths: expandedConversations,
         enginePlacement: { promotedEnginePaths: engineProjection.promotedPaths, foldedEnginePaths: engineProjection.foldedPaths },
+        now: nowSeconds,
       })
       : baseGroups),
-    [sceneFiles, project, expandedConversations, engineProjection, baseGroups],
+    [sceneFiles, project, expandedConversations, engineProjection, baseGroups, nowSeconds],
   );
   const activeRoots = useMemo(() => new Set(groups.map((group) => group.key)), [groups]);
   const cards = useMemo(() => collapsedTrees(sceneFiles, project, activeRoots), [sceneFiles, project, activeRoots]);
