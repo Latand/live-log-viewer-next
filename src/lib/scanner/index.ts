@@ -22,6 +22,8 @@ import { goalFor, planFor } from "./plan";
 import { pendingQuestionFor } from "./questions";
 import { pendingWakeupFor } from "./wakeup";
 import { assignTranscriptPids } from "./transcripts";
+import { scanRootEntries } from "./roots";
+import { createTranscriptPathCanonicalizer, type TranscriptPathCanonicalizer } from "./transcriptIdentity";
 import { waitingInputProbe } from "./waitingInput";
 
 function applyProcessState(entry: FileEntry, holders: Map<string, number>) {
@@ -198,9 +200,54 @@ export async function listFilesWithProjectCatalog(selectedProject?: string, opti
    continuity path of a conversation except its current one. Mirrors the
    `migratedTo` annotation in the files response — these entries are folded
    into their successor's card, so they rank below live transcripts when the
-   recency cap is applied and leave the cap slots to live conversations. */
+   recency cap is applied and leave the cap slots to live conversations.
+   A path is only a predecessor when it names a DIFFERENT file from some
+   conversation's current generation: an account home that symlinks into the
+   shared transcript store gives one physical transcript two absolute forms,
+   and comparing those as strings filed live conversations as their own
+   archived predecessors — demoted below the whole corpus, off the board and
+   out of the folded list (issue #942). */
 export function archivedTranscriptPaths(): ReadonlySet<string> {
-  return sessionProjectProjection(true).archivedPaths;
+  const archived = sessionProjectProjection(true).archivedPaths;
+  if (!archived.size) return archived;
+  const canonicalize = createTranscriptPathCanonicalizer(scanRootEntries().map(([, root]) => root));
+  const current = currentTranscriptPaths(canonicalize);
+  if (!current.size) return archived;
+  const predecessors = new Set<string>();
+  for (const pathname of archived) {
+    if (!current.has(canonicalize(pathname))) predecessors.add(pathname);
+  }
+  return predecessors;
+}
+
+/** Canonical path of every conversation's current generation. */
+function currentTranscriptPaths(canonicalize: TranscriptPathCanonicalizer): ReadonlySet<string> {
+  const paths = new Set<string>();
+  try {
+    for (const conversation of Object.values(agentRegistry().readOnlySnapshot().conversations)) {
+      const latest = conversation.generations.at(-1)?.path;
+      if (latest) paths.add(canonicalize(latest));
+    }
+  } catch (error) {
+    /* An unreadable registry leaves demotion exactly as the projection saw it. */
+    if (!(error instanceof RegistryReadError)) throw error;
+  }
+  return paths;
+}
+
+/** Transcripts a registered host is running right now (issue #942). The scheme
+    window keeps their cards whatever the caps say. */
+export function hostedTranscriptPaths(): ReadonlySet<string> {
+  const paths = new Set<string>();
+  try {
+    for (const entry of Object.values(agentRegistry().readOnlySnapshot().entries)) {
+      if (entry.status === "dead" || entry.status === "unhosted") continue;
+      if (entry.artifactPath) paths.add(entry.artifactPath);
+    }
+  } catch (error) {
+    if (!(error instanceof RegistryReadError)) throw error;
+  }
+  return paths;
 }
 
 async function listFilesInternal(
@@ -216,6 +263,7 @@ async function listFilesInternal(
     : archivedTranscriptPaths();
   const requestedPins = options.pins ? [...options.pins, ...(options.pin ? [options.pin] : [])] : options.pin;
   const pin = pinnedPathsFor(requestedPins);
+  const hosted = hostedTranscriptPaths();
   const scan = includeProjectCatalog
     ? await discoverFilesWithProjectCatalog(undefined, selectedProject, {
         persist,
@@ -223,10 +271,11 @@ async function listFilesInternal(
         demote,
         loadDemote: stagedResourceScope ? archivedTranscriptPaths : undefined,
         pin,
+        hosted,
         resourceBaseline: options.resourceBaseline,
         onResourceSnapshot: options.onResourceSnapshot,
       })
-    : { files: await discoverFiles(undefined, demote ?? archivedTranscriptPaths(), pin), projectCatalog: [], complete: true };
+    : { files: await discoverFiles(undefined, demote ?? archivedTranscriptPaths(), pin, hosted), projectCatalog: [], complete: true };
   if (options.signal?.aborted) throw new DOMException("file scan cancelled", "AbortError");
   const entries = scan.files;
   if (options.fresh) {

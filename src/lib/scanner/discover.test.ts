@@ -1977,3 +1977,96 @@ test("demoted archived predecessors rank below live transcripts for the recency 
     await rm(base, { recursive: true, force: true });
   }
 });
+
+test("a live conversation keeps its card past the per-project card cap", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-live-cap-"));
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const slug = path.join(roots["claude-projects"], "-repo");
+
+    const startedAt = 1_700_040_000;
+    for (let index = 0; index < DEFAULT_SCHEME_CARDS_PER_PROJECT; index += 1) {
+      await writeFixture(
+        path.join(slug, `flood-${String(index).padStart(3, "0")}.jsonl`),
+        JSON.stringify({ type: "user", message: { content: `Prompt ${index}` } }) + "\n",
+        startedAt + index,
+      );
+    }
+    /* Both conversations are demoted, so they rank below the whole corpus and
+       the card cap would drop them: one has an open turn and is appending right
+       now, the other is owned by a registered host. Liveness outranks the window. */
+    const appendingPath = path.join(slug, "appending.jsonl");
+    await writeFixture(appendingPath, [
+      JSON.stringify({ type: "user", message: { role: "user", content: "Live" } }),
+      "",
+    ].join("\n"), Date.now() / 1000);
+    const hostedPath = path.join(slug, "hosted.jsonl");
+    await writeFixture(hostedPath, JSON.stringify({ type: "user", message: { content: "Hosted" } }) + "\n", startedAt - 10);
+
+    const demote = new Set([appendingPath, hostedPath]);
+    const entries = await discoverFiles(roots, demote, undefined, new Set([hostedPath]));
+    const paths = entries.map((entry) => entry.path);
+
+    expect(paths).toContain(appendingPath);
+    expect(paths).toContain(hostedPath);
+    /* The cap still bounds everything that is not live. */
+    expect(entries.filter((entry) => path.basename(entry.path).startsWith("flood-")))
+      .toHaveLength(DEFAULT_SCHEME_CARDS_PER_PROJECT);
+
+    /* Without the host claim the quiet demoted transcript stays elided. */
+    const quiet = await discoverFiles(roots, demote);
+    expect(quiet.map((entry) => entry.path)).not.toContain(hostedPath);
+    expect(quiet.map((entry) => entry.path)).toContain(appendingPath);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("a transcript reached through a symlinked account home has one identity in the window", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-shared-store-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  const previousClaudeHome = process.env.LLV_CLAUDE_HOME;
+  try {
+    const shared = path.join(base, "shared", "claude", "projects");
+    const accountHome = path.join(base, "account-home");
+    await mkdir(path.join(shared, "-repo"), { recursive: true });
+    await mkdir(accountHome, { recursive: true });
+    fs.symlinkSync(shared, path.join(accountHome, "projects"));
+    process.env.LLV_STATE_DIR = path.join(base, "state");
+    process.env.LLV_CLAUDE_HOME = accountHome;
+
+    const startedAt = 1_700_050_000;
+    for (let index = 0; index < DEFAULT_SCHEME_CARDS_PER_PROJECT; index += 1) {
+      await writeFixture(
+        path.join(shared, "-repo", `flood-${String(index).padStart(3, "0")}.jsonl`),
+        JSON.stringify({ type: "user", message: { content: `Prompt ${index}` } }) + "\n",
+        startedAt + index,
+      );
+    }
+    const sharedForm = path.join(shared, "-repo", "elided.jsonl");
+    const accountForm = path.join(accountHome, "projects", "-repo", "elided.jsonl");
+    await writeFixture(sharedForm, JSON.stringify({ type: "user", message: { content: "Elided" } }) + "\n", startedAt - 10);
+
+    /* The registry recorded this transcript through the account home; the scan
+       walks the shared store. A pin in either form must reach the one row, and
+       the row must appear once. */
+    const scan = await discoverFilesWithProjectCatalog(
+      [["claude-projects", shared]],
+      undefined,
+      { persist: false, pin: new Set([accountForm]) },
+    );
+    const matches = scan.files.filter((entry) => entry.path === sharedForm || entry.path === accountForm);
+    expect(matches.map((entry) => entry.path)).toEqual([sharedForm]);
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    if (previousClaudeHome === undefined) delete process.env.LLV_CLAUDE_HOME;
+    else process.env.LLV_CLAUDE_HOME = previousClaudeHome;
+    await rm(base, { recursive: true, force: true });
+  }
+});
