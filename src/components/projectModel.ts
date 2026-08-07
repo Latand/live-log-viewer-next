@@ -33,6 +33,26 @@ export function schemeAgeHorizonSeconds(): number {
   return (Number.isFinite(hours) && hours > 0 ? hours : DEFAULT_SCHEME_AGE_HORIZON_HOURS) * 3_600;
 }
 
+/**
+ * May this entry occupy the canvas automatically, given its age? The one age
+ * judgment every automatic placement path shares — root cards, child columns,
+ * engine-tray promotions and pipeline slots alike — so a conversation cannot
+ * enter the map through a rule that consults no clock.
+ *
+ * Live and running work is never bounded: a long-running session with an old
+ * transcript keeps its node. Without a clock (`now <= 0` — the server render and
+ * the hydration pass) age is unknowable, so nothing is bounded and both sides
+ * paint the plain activity rule. Bounded entries are never lost: they stay in
+ * «All conversations», quiet history, worker stacks and parent trays.
+ */
+export function withinPlacementHorizon(file: FileEntry, now: number, ageHorizonSeconds: number): boolean {
+  if (file.activity === "live" || file.proc === "running") return true;
+  /* The activity rule stays alongside the clock so a sub-15-minute horizon
+     override can never out-tighten the activity the projection calls recent. */
+  if (file.activity === "recent") return true;
+  return now <= 0 || now - file.mtime <= ageHorizonSeconds;
+}
+
 export function activityBand(file: FileEntry): ActivityBand {
   if (file.activity === "live") return 0;
   if (file.activity === "recent") return 1;
@@ -354,6 +374,7 @@ function assembleGroup(
   kids: Map<string, FileEntry[]>,
   expandedConversationPaths?: ReadonlySet<string>,
   placement?: EnginePlacement,
+  placeableByAge: (file: FileEntry) => boolean = () => true,
 ): BranchGroup {
   /* Stop traversal at the first foreign owner so a later same-project node
      cannot leak through that foreign branch and appear twice. */
@@ -368,9 +389,13 @@ function assembleGroup(
      canvas as full nodes. Under a quiet root a settled child now rests as a
      chip in the group's under-deck, one expand-click away, exactly like every
      other finished technical item. */
+  /* The working root's quiet children are live-relevant context only while they
+     are inside the placement age horizon: an active root touched today must not
+     drag a worker it finished three weeks ago back onto the canvas as a full
+     column. The aged one rests in the under-deck like any other finished item. */
   const rootActive = root.activity === "live" || root.proc === "running";
   const branches = descendants
-    .filter((file) => (rootActive && isChildConversation(file) && !placement?.foldedEnginePaths?.has(file.path))
+    .filter((file) => (rootActive && isChildConversation(file) && placeableByAge(file) && !placement?.foldedEnginePaths?.has(file.path))
       || columnWorthy(file, expandedConversationPaths, placement))
     .sort((a, b) => liveRank(a) - liveRank(b) || tick5(b.mtime) - tick5(a.mtime) || a.path.localeCompare(b.path));
   const liveTasks = descendants
@@ -408,6 +433,13 @@ function assembleGroup(
  * history. Recent child conversations (claude subagents, codex job sessions)
  * keep full columns too, because "done between user messages" must not hide
  * active work.
+ *
+ * The horizon bounds EVERY automatic placement here, whatever the entry's role
+ * in the tree (`withinPlacementHorizon`): a root card, a child column under a
+ * working root, and the root a placed descendant opens its group at. Live and
+ * running work is exempt at any age, an explicit expansion still places, and
+ * everything bounded off the canvas keeps its chip in the group's under-deck,
+ * its row in quiet history and its entry in «All conversations».
  */
 export interface BranchGroupOptions {
   /** Quiet conversations promoted into full scheme nodes. */
@@ -437,6 +469,30 @@ export function buildBranchGroups(files: FileEntry[], project: string, options: 
      never out-tighten the activity the projection already calls recent. */
   const recentlyActive = (file: FileEntry) =>
     file.activity === "recent" || (now > 0 && now - file.mtime <= ageHorizon);
+  /* The same horizon, asked of any entry a rule wants to place. */
+  const placeableByAge = (file: FileEntry) => withinPlacementHorizon(file, now, ageHorizon);
+  /* Which card opens the group a placed descendant belongs to. Its tree root
+     normally does — but a root beyond the horizon is never resurrected by fresh
+     work below it: a worker answering today must not drag a conversation from
+     three weeks ago back onto the canvas. The placed descendant then opens its
+     own group and its aged root stays in quiet history, one click away through
+     the arrow's unresolved parent and «All conversations». */
+  const groupRootFor = (file: FileEntry): FileEntry => {
+    /* The TOPMOST placeable ancestor inside the project, so two placed
+       descendants of one aged root still share a single group instead of
+       rendering the same conversation under two keys. */
+    let best = file;
+    let cursor = file;
+    const seen = new Set<string>([file.path]);
+    while (cursor.parent && !seen.has(cursor.parent)) {
+      const parent = byPath.get(cursor.parent);
+      if (!parent || projectKey(parent) !== projectKey(file)) break;
+      seen.add(parent.path);
+      cursor = parent;
+      if (placeableByAge(parent)) best = parent;
+    }
+    return best;
+  };
   for (const file of files) {
     if (projectKey(file) !== project) continue;
     /* A cross-project child starts an independently owned visual segment. Keep
@@ -461,14 +517,14 @@ export function buildBranchGroups(files: FileEntry[], project: string, options: 
       enginePlacement?.promotedEnginePaths?.has(file.path) === true ||
       (expanded && (isConversation(file) || isChildConversation(file)))
     ) {
-      const root = rootOf(file, byPath);
+      const root = groupRootFor(file);
       if (isAuxTask(root)) orphanTasks.set(root.path, root);
       else roots.set(root.path, root);
       continue;
     }
     if (recentlyActive(file) && isConversation(file)) roots.set(file.path, file);
   }
-  const groups = [...roots.values()].map((root) => assembleGroup(root, kids, expandedConversationPaths, enginePlacement));
+  const groups = [...roots.values()].map((root) => assembleGroup(root, kids, expandedConversationPaths, enginePlacement, placeableByAge));
   for (const task of orphanTasks.values()) {
     groups.push({
       key: task.path,

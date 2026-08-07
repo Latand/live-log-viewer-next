@@ -66,6 +66,8 @@ import {
   quietHistoryRows,
   quietRootsWithActiveDescendants,
   residualItems,
+  schemeAgeHorizonSeconds,
+  withinPlacementHorizon,
 } from "./projectModel";
 import { ArchiveRestore } from "./icons";
 import { KeepAwakeMenuRow } from "./KeepAwakeControl";
@@ -586,8 +588,20 @@ function ProjectDashboardView({
       if (isDirectReviewFlow(flow) && flow.state !== "reviewing") continue;
       paths.add(flow.implementerPath);
     }
+    /* This expansion is automatic — the board opens it, not the operator — so it
+       follows the placement age horizon like every other automatic card. A flow
+       that has sat in an approved state for weeks must not keep dragging its
+       implementer (and, through it, an ancient root) onto the canvas; live and
+       running work stays regardless of age, and the operator's own expansions
+       (`prefs.expanded`, merged below) are never bounded. */
+    const horizon = schemeAgeHorizonSeconds();
+    const byPath = new Map(files.map((file) => [file.path, file] as const));
+    for (const path of [...paths]) {
+      const file = byPath.get(path);
+      if (file && !withinPlacementHorizon(file, nowSeconds, horizon)) paths.delete(path);
+    }
     return paths;
-  }, [files, deckFlows]);
+  }, [files, deckFlows, nowSeconds]);
   /* Flow-driven expansions plus the ones the user opened by hand from a
      collapsed view: a connected conversation the user expanded renders as a
      node wired below its parent, just like an active-group child. */
@@ -1396,7 +1410,7 @@ function ProjectDashboardView({
      exists only for an implementer placed as a board node — the same layout the
      scheme draws. Derive availability from that layout's nodes, so a scanned but
      unplaced (hidden/tombstoned) implementer disables the action (#93 finding). */
-  const pipelineLayout = buildSchemeLayout(hasNodes ? schemeGroups : archiveGroups, hasNodes ? schemeManual : [], files, compactLayoutFlows, hasNodes ? visibleDrafts : [], pipelines, [], new Set(), isolatedCompactHistoryPaths);
+  const pipelineLayout = buildSchemeLayout(hasNodes ? schemeGroups : archiveGroups, hasNodes ? schemeManual : [], files, compactLayoutFlows, hasNodes ? visibleDrafts : [], pipelines, [], new Set(), isolatedCompactHistoryPaths, [], new Set(), { now: nowSeconds });
   /* Worker rows the scheme still draws in a retained form — an active flow's
      reviewer round deck keeps its finished rounds as deck tabs. Those are
      re-admitted here so a folded reviewer is never listed twice (its deck AND a
@@ -1804,6 +1818,7 @@ function ProjectDashboardView({
                 reviewGroups={directReviewGroups}
                 pipelines={pipelines}
                 surfacePipelines={activePipelines}
+                now={nowSeconds}
                 tasks={hasNodes ? boardTasks : []}
                 allTasks={projectTasks}
                 workerStacks={workerStacks}

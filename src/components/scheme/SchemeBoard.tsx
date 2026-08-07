@@ -93,6 +93,10 @@ interface Props {
   workerStacks?: WorkerStack[];
   /** Active project pipelines rendered as world-space desktop containers. */
   surfacePipelines?: Pipeline[];
+  /** The board's wall clock in epoch seconds, shared with the grouping model so
+      one clock bounds every automatic placement. `0` — the server render and the
+      hydration pass — bounds nothing. */
+  now?: number;
   /** Ids of not-yet-spawned conversation drafts drawn as full panes. */
   drafts: string[];
   /** Durable identities the user has crowned (issue #224): their roots lift into
@@ -194,6 +198,7 @@ export function SchemeBoard({
   allTasks = tasks,
   workerStacks = [],
   surfacePipelines = [],
+  now = 0,
   drafts,
   favorites,
   isolatedManualPaths = EMPTY_PATHS,
@@ -301,8 +306,8 @@ export function SchemeBoard({
      task cards (#531), so the pipeline reads as a single region — never a
      detached control card with a duplicate stage graph. */
   const layout = useMemo(
-    () => buildSchemeLayout(groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths, boardTasks, textExpandedIds),
-    [groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths, boardTasks, textExpandedIds],
+    () => buildSchemeLayout(groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths, boardTasks, textExpandedIds, { now }),
+    [groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths, boardTasks, textExpandedIds, now],
   );
 
   /* NO PRUNING HERE (#771). The selection outlives this view, so dropping a path

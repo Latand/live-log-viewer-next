@@ -18,6 +18,7 @@ import {
   resolveProjectView,
   schemeAgeHorizonSeconds,
   subtree,
+  withinPlacementHorizon,
 } from "./projectModel";
 
 function entry(overrides: Partial<FileEntry> & { path: string }): FileEntry {
@@ -410,10 +411,75 @@ describe("automatic placement age horizon", () => {
     expect(groups.map((group) => group.key)).toEqual(["/stale-expanded"]);
   });
 
-  test("a recently active child keeps its stale root's card on the canvas", () => {
+  test("a recently active child never resurrects its stale root's card", () => {
     const root = entry({ path: "/old-root", activity: "idle", mtime: NOW - 200 * HOUR });
     const child = entry({ path: "/old-root/agent", parent: "/old-root", kind: "subagent", activity: "idle", mtime: NOW - 13 * HOUR });
-    expect(buildBranchGroups([root, child], "demo", { now: NOW }).map((group) => group.key)).toEqual(["/old-root"]);
+    const groups = buildBranchGroups([root, child], "demo", { now: NOW });
+    // The fresh child opens its own group; the root it hangs under stays in
+    // quiet history instead of returning to the canvas after weeks of silence.
+    expect(groups.map((group) => group.key)).toEqual(["/old-root/agent"]);
+    expect(quietHistoryRows([root, child], "demo").map((file) => file.path)).toContain("/old-root");
+  });
+
+  test("two fresh children of one stale root share a single group", () => {
+    const root = entry({ path: "/old-root", activity: "idle", mtime: NOW - 200 * HOUR });
+    const mid = entry({ path: "/old-root/mid", parent: "/old-root", kind: "subagent", activity: "idle", mtime: NOW - 13 * HOUR });
+    const leaf = entry({ path: "/old-root/mid/leaf", parent: "/old-root/mid", kind: "subagent", activity: "idle", mtime: NOW - 12 * HOUR });
+    const groups = buildBranchGroups([root, mid, leaf], "demo", { now: NOW });
+    // One group, not two: the deeper placed descendant joins the topmost
+    // placeable ancestor's group (as a settled chip, per the quiet-child rule)
+    // instead of opening a duplicate node for the same tree.
+    expect(groups.map((group) => group.key)).toEqual(["/old-root/mid"]);
+    expect(groups[0]!.columns.map((column) => column.file.path)).toEqual(["/old-root/mid"]);
+    expect(groups[0]!.finished.map((file) => file.path)).toContain("/old-root/mid/leaf");
+  });
+
+  test("a stale child under a live root rests as a chip instead of taking a column", () => {
+    const root = entry({ path: "/live-root", activity: "live", mtime: NOW - HOUR });
+    const stale = entry({ path: "/live-root/ancient", parent: "/live-root", kind: "subagent", activity: "idle", mtime: NOW - 400 * HOUR });
+    const fresh = entry({ path: "/live-root/today", parent: "/live-root", kind: "subagent", activity: "idle", mtime: NOW - 3 * HOUR });
+    const group = buildBranchGroups([root, stale, fresh], "demo", { now: NOW })[0]!;
+    expect(group.columns.map((column) => column.file.path)).toEqual(["/live-root", "/live-root/today"]);
+    // Bounded off the canvas, never lost: it stays a chip in the under-deck.
+    expect(group.finished.map((file) => file.path)).toContain("/live-root/ancient");
+  });
+
+  test("a stale child that is live or running keeps its column under a live root", () => {
+    const root = entry({ path: "/live-root", activity: "live", mtime: NOW - HOUR });
+    const running = entry({ path: "/live-root/long", parent: "/live-root", kind: "subagent", activity: "idle", proc: "running", mtime: NOW - 400 * HOUR });
+    const group = buildBranchGroups([root, running], "demo", { now: NOW })[0]!;
+    expect(group.columns.map((column) => column.file.path)).toEqual(["/live-root", "/live-root/long"]);
+  });
+
+  test("an explicitly expanded stale child places without its stale root", () => {
+    const root = entry({ path: "/old-root", activity: "idle", mtime: NOW - 300 * HOUR });
+    const child = entry({ path: "/old-root/agent", parent: "/old-root", kind: "subagent", activity: "idle", mtime: NOW - 300 * HOUR });
+    const groups = buildBranchGroups([root, child], "demo", {
+      now: NOW,
+      expandedConversationPaths: new Set(["/old-root/agent"]),
+    });
+    expect(groups.map((group) => group.key)).toEqual(["/old-root/agent"]);
+    expect(groups[0]!.columns.map((column) => column.file.path)).toEqual(["/old-root/agent"]);
+  });
+
+  test("without a clock a stale child still opens its root's group", () => {
+    const root = entry({ path: "/old-root", activity: "idle", mtime: 1_000 });
+    const child = entry({ path: "/old-root/agent", parent: "/old-root", kind: "subagent", activity: "recent", mtime: 1_000 });
+    expect(buildBranchGroups([root, child], "demo").map((group) => group.key)).toEqual(["/old-root"]);
+  });
+
+  test("the placement horizon exempts live and running work and bounds the rest", () => {
+    const live = entry({ path: "/live", activity: "live", mtime: NOW - 400 * HOUR });
+    const running = entry({ path: "/running", activity: "idle", proc: "running", mtime: NOW - 400 * HOUR });
+    const recent = entry({ path: "/recent", activity: "recent", mtime: NOW - 400 * HOUR });
+    const stale = entry({ path: "/stale", activity: "idle", mtime: NOW - 400 * HOUR });
+    const fresh = entry({ path: "/fresh", activity: "idle", mtime: NOW - HOUR });
+    for (const file of [live, running, recent, fresh]) {
+      expect(withinPlacementHorizon(file, NOW, 48 * HOUR)).toBe(true);
+    }
+    expect(withinPlacementHorizon(stale, NOW, 48 * HOUR)).toBe(false);
+    // No clock: age is unknowable, so nothing is bounded.
+    expect(withinPlacementHorizon(stale, 0, 48 * HOUR)).toBe(true);
   });
 
   test("a cross-project segment follows the horizon once its child is quiet", () => {

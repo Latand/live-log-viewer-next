@@ -1,4 +1,5 @@
 import { attentionId } from "@/components/attention";
+import { schemeAgeHorizonSeconds, withinPlacementHorizon } from "@/components/projectModel";
 import { conversationIdentity, isArchivedPredecessor } from "@/lib/accounts/identity";
 import type { EpochSeconds, Engine, FileEntry } from "@/lib/types";
 
@@ -60,6 +61,7 @@ export type PresenceReason =
   | "owner"
   | "busy"
   | "quiet"
+  | "aged"
   | "fail-visible";
 
 /** A process of this conversation's own, or a launch still binding one. A
@@ -267,6 +269,9 @@ export interface EngineChildContext {
   pinned: boolean;
   /** The same clock `mtime` and `attentionId` are measured on. */
   now: EpochSeconds;
+  /** Automatic-placement age horizon in seconds; defaults to the env-tunable
+      board value. `now === 0` (server render / hydration) bounds nothing. */
+  ageHorizonSeconds?: number;
 }
 
 export interface EngineChildClassification {
@@ -287,13 +292,22 @@ export interface EngineChildClassification {
  * 5. authoritative terminal or idle → folded P1 immediately (no idle wait,
  *    independent of transcript age).
  * 6. conflicting or incomplete evidence → fail-visible promoted P2.
+ *
+ * Rules 1 and 6 promote on evidence that never expires — a killed host, a
+ * failed spawn, an unanswered question, incomplete evidence — so past the
+ * board's placement age horizon they fold instead (reason `aged`): a stage
+ * killed three weeks ago belongs in its parent's tray, not in a full node held
+ * forever. Owner intent (3) and live/running work (4) are exempt at any age,
+ * and the tray row keeps the folded child one click away.
  */
 export function classifyEngineChild(entry: FileEntry, ctx: EngineChildContext): EngineChildClassification {
-  if (engineChildNeedsAttention(entry, ctx.now)) return { presence: "promoted", reason: "attention" };
+  const aged = !withinPlacementHorizon(entry, ctx.now, ctx.ageHorizonSeconds ?? schemeAgeHorizonSeconds());
+  if (!aged && engineChildNeedsAttention(entry, ctx.now)) return { presence: "promoted", reason: "attention" };
   if (ctx.folded) return { presence: "folded", reason: "hand-fold" };
   if (entry.userAuthored || entry.authorshipUnverified || ctx.pinned) return { presence: "promoted", reason: "owner" };
   if (isBusy(entry)) return { presence: "promoted", reason: "busy" };
   if (isTerminalOrIdle(entry)) return { presence: "folded", reason: "quiet" };
+  if (aged) return { presence: "folded", reason: "aged" };
   return { presence: "promoted", reason: "fail-visible" };
 }
 
@@ -339,6 +353,8 @@ export interface SubagentTrayInput {
   /** Transcript freshness and attention TTLs share this clock with `mtime`;
       the branded type keeps a millisecond clock from landing here silently. */
   now: EpochSeconds;
+  /** Automatic-placement age horizon in seconds; defaults to the board value. */
+  ageHorizonSeconds?: number;
 }
 
 export interface SubagentTrayProjection {
@@ -391,6 +407,7 @@ function memberOrder(left: TrayMember, right: TrayMember, timeById: ReadonlyMap<
  * the minimap, and mobile.
  */
 export function buildSubagentTrays(input: SubagentTrayInput): SubagentTrayProjection {
+  const horizon = input.ageHorizonSeconds ?? schemeAgeHorizonSeconds();
   const byPath = new Map(input.entries.map((entry) => [entry.path, entry]));
   const byId = new Map<string, FileEntry>();
   for (const entry of input.entries) {
@@ -419,15 +436,20 @@ export function buildSubagentTrays(input: SubagentTrayInput): SubagentTrayProjec
     if (!parentId) continue;
     const id = conversationIdentity(entry);
     /* Host ineligible (hidden/deleted/cross-project/deck-claimed/compacted
-       parent): the child stays visible through the existing full-node path. */
+       parent): the child stays visible through the existing full-node path —
+       but only inside the placement age horizon. Past it the projection claims
+       nothing: with no host card there is no tray to fold into, so the child is
+       left to the board's own age rule (which keeps live/running work placed)
+       and otherwise rests in quiet history and «All conversations». */
     if (!input.hostEligibleParentIds.has(parentId)) {
-      promotedPaths.add(entry.path);
+      if (input.pinnedPaths.has(entry.path) || withinPlacementHorizon(entry, input.now, horizon)) promotedPaths.add(entry.path);
       continue;
     }
     const classification = classifyEngineChild(entry, {
       folded: input.foldedEngineChildIds.has(id),
       pinned: input.pinnedPaths.has(entry.path),
       now: input.now,
+      ageHorizonSeconds: horizon,
     });
     if (classification.presence === "promoted") {
       promotedPaths.add(entry.path);

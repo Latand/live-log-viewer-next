@@ -22,9 +22,10 @@ import {
 } from "./agentLinks";
 import { PIPELINE_PLACEHOLDER_STATES, latestAttempt, pipelinePlaceholderStages, stageAttempts, stageRowCollapsible } from "@/components/pipelines/pipelineModel";
 import { buildSchemeLineage } from "./lineageModel";
+import { pipelineWithinPlacementHorizon } from "./placementHorizon";
 import { linkedPipelineTasks } from "./pipelineAnchor";
 import { TASK_W, isPlacedTask, taskBoxHeight } from "./taskGeometry";
-import { type BranchGroup, descendantsOf, isChildConversation, kidsIndex, projectDescendantsOf } from "@/components/projectModel";
+import { type BranchGroup, descendantsOf, isChildConversation, kidsIndex, projectDescendantsOf, schemeAgeHorizonSeconds } from "@/components/projectModel";
 import { cleanTitle, engineColor } from "@/components/utils";
 import { conversationIdentity } from "@/lib/accounts/identity";
 
@@ -339,6 +340,12 @@ export function buildSchemeLayout(
   /** Session-only expanded-text task ids — an expanded card grows taller, and
       the region reserves that footprint so containment holds live. */
   taskTextExpanded: ReadonlySet<string> = new Set(),
+  /** The board clock in epoch seconds and the automatic-placement age horizon.
+      A pipeline past the horizon with no live or running stage grows no stage
+      surfaces. `now` defaults to `0` — no clock, so nothing is bounded, which
+      is what the server render, the hydration pass and every caller that has no
+      clock of its own must keep painting. */
+  placement: { now?: number; ageHorizonSeconds?: number } = {},
 ): SchemeLayout {
   const byAll = new Map(files.map((file) => [file.path, file]));
   /* The board's single parentage authority (issue #828). Resolved once per
@@ -498,6 +505,25 @@ export function buildSchemeLayout(
       seen.add(pipeline.id);
       return true;
     });
+    /* Stage surfaces follow the board's automatic-placement age horizon: a
+       pipeline that finished or stranded weeks ago keeps no slots, no completed
+       stage cards and no region. A pipeline with any live or running stage is
+       exempt at any age, and so is one whose stage transcript the board still
+       places for its own reasons (a manual pin, an expansion) — its chain must
+       stay drawn around that card rather than leaving it to float. */
+    const placementNow = placement.now ?? 0;
+    const placementHorizon = placement.ageHorizonSeconds ?? schemeAgeHorizonSeconds();
+    const agedOut = (pipeline: Pipeline): boolean => {
+      if (pipelineWithinPlacementHorizon(pipeline, { now: placementNow, ageHorizonSeconds: placementHorizon, fileAt: (path) => byAll.get(path) })) return false;
+      for (const run of pipeline.runs) {
+        for (const attempt of run.attempts) {
+          if (attempt.agentPath && prePlacedNodePaths.has(attempt.agentPath)) return false;
+          const impl = attempt.flowId ? implOfFlow(attempt.flowId) : null;
+          if (impl && prePlacedNodePaths.has(impl)) return false;
+        }
+      }
+      return true;
+    };
     /* Each placed task card belongs to at most one pipeline region. */
     const claimedTaskIds = new Set<string>();
     for (const [pipelineIndex, pipeline] of pool.entries()) {
@@ -511,6 +537,9 @@ export function buildSchemeLayout(
           if (path && !stageRankByPath.has(path)) stageRankByPath.set(path, pipelineIndex * 10_000 + stageIndex);
         }
       });
+      /* Ranks first (they place nothing), then the horizon: an aged-out pipeline
+         still orders whatever the board places for other reasons. */
+      if (agedOut(pipeline)) continue;
       const placeholderIds = new Set(pipelinePlaceholderStages(pipeline, prePlacedNodePaths, prePlacedDeckFlowIds).map((stage) => stage.id));
       /* Completed cards only grow on an active pipeline, and never for the cursor
          stage itself: a cursor stage whose only transcript is quiet history
