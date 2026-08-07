@@ -11,7 +11,7 @@ import type { FileEntry } from "@/lib/types";
  * the scheme cap publishes the newest projects only — so most catalog rows have
  * no scan entry, and the pin is the ONLY thing that puts the record in the
  * payload. When the pin answers with the unpinned corpus, the click produces no
- * card and no feedback at all (issue #950).
+ * card and no feedback at all (#950).
  *
  * The fixture is generated, never copied from a real session: a synthetic Codex
  * corpus with more projects than the scheme project cap, whose oldest projects

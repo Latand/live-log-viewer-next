@@ -671,7 +671,7 @@ test("runtime callbacks advance while a large lineage projection is linking", as
 /* The chain-head window bounds how many bytes of a successor are read looking
    for its compact_boundary marker. A transcript whose head outgrew that window
    must degrade to «parent unknown» — it must never lose its entry, because the
-   entry is the conversation's only route onto the board (issue #950). */
+   entry is the conversation's only route onto the board (#950). */
 test("a compact marker beyond the chain-head window leaves the parent unknown, never the conversation absent", async () => {
   const slug = "-repo-chain-head-window";
   const predecessorPath = path.join(SANDBOX, "beyond-window-predecessor.jsonl");

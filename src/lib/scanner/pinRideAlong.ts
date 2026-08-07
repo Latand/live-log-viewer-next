@@ -62,7 +62,7 @@ function discoverable(rootName: RootKey, pathname: string, st: fs.Stats): boolea
 }
 
 /**
- * Identity rows for pinned transcripts the published scan left out (issue #950).
+ * Identity rows for pinned transcripts the published scan left out (#950).
  *
  * The scheme window is a BOARD budget: it bounds how many conversations the
  * unpinned feed carries, ranked by recency, so whole projects sit outside it

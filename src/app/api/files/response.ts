@@ -259,7 +259,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     const launch = launchProjection.facts.get(file.path);
     if (launch) file.launch = launch;
   }
-  /* Ride-along identity for an explicit pin (issue #950). The scheme window is
+  /* Ride-along identity for an explicit pin (#950). The scheme window is
      a board budget, so a conversation outside it — an older project, whatever
      the transcript's size — has no scanned row, and the «All conversations»
      click that asked for it BY PATH would find no card and report nothing. The
