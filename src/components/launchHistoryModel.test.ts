@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 
 import type { FileEntry, StructuredSpawnCardState } from "@/lib/types";
 
-import { isHistoricalLaunchReceipt, LAUNCH_HISTORY_HORIZON_MS, launchHistoryFor, pipelineRetryTarget, retryPipelineLaunch } from "./launchHistoryModel";
+import { isHistoricalLaunchReceipt, LAUNCH_HISTORY_HORIZON_MS, launchHistoryClaimPaths, launchHistoryFor, pipelineRetryTarget, retryPipelineLaunch } from "./launchHistoryModel";
 
 const NOW = Date.parse("2026-07-17T12:00:00.000Z");
 
@@ -71,6 +71,17 @@ test("launchHistoryFor scopes to the project and orders freshest first", () => {
   ];
   const rows = launchHistoryFor(files, "-agents-tools-live-log-viewer-next", NOW);
   expect(rows.map((row) => row.spawn!.launchId)).toEqual(["bbbb", "aaaa"]);
+});
+
+test("only pathless spawn placeholders are claimed off the scene", () => {
+  const rows = [
+    receipt(3_600_000, {}, { launchId: "eeee" }),
+    /* A failed delivery whose record rides on a real scanned transcript path:
+       it stays a shelf row, but claiming the path would hide the conversation. */
+    receipt(3_600_000, { path: "/claude-projects/repo-fixture/conversation.jsonl" }, { launchId: "ffff" }),
+  ];
+  expect(launchHistoryFor(rows, "-agents-tools-live-log-viewer-next", NOW)).toHaveLength(2);
+  expect(launchHistoryClaimPaths(rows)).toEqual(new Set(["spawn:eeee"]));
 });
 
 test("issue 533: a pipeline-owned failed launch retries its durable stage", () => {

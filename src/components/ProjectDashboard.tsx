@@ -37,7 +37,7 @@ import type { SubagentTrayApi } from "./scheme/SubagentTrayView";
 import { conversationIdentity, formatConversationHash } from "@/lib/accounts/identity";
 import { recordFocusNavigation } from "@/lib/navigation/focusHistory";
 import { collapsibleWorkerFiles, groupWorkerStacks, pipelineOriginOf, pipelineStagePipelineIds, protectedReviewerNodes } from "./scheme/workerCollapse";
-import { launchHistoryFor, pipelineRetryTarget, retryPipelineLaunch } from "./launchHistoryModel";
+import { launchHistoryClaimPaths, launchHistoryFor, pipelineRetryTarget, retryPipelineLaunch } from "./launchHistoryModel";
 import { LaunchHistory } from "./LaunchHistory";
 import { isPlacedTask } from "./scheme/taskGeometry";
 import { loadExpandedTasks, partitionTaskStacks, persistExpandedTasks } from "./scheme/taskStacks";
@@ -677,11 +677,14 @@ function ProjectDashboardView({
     [filesByPath],
   );
   /* Terminal spawn receipts past the recent horizon (compact launch history):
-     they leave the board layout and minimap entirely and render in the
-     launch-history strip instead — a pathless receipt has no transcript to
-     mount as a pane. */
+     a pathless `spawn:` receipt has no transcript to mount as a pane, so it
+     leaves the board layout and minimap entirely and renders in the
+     launch-history strip instead. The strip lists every terminal record, but
+     only placeholder paths are CLAIMED off the scene: a failed launch whose
+     record rides on a real scanned transcript path must never hide that
+     conversation — the shelf row stays, the card renders. */
   const launchHistory = useMemo(() => launchHistoryFor(files, project, nowMs), [files, project, nowMs]);
-  const launchHistoryPaths = useMemo(() => new Set(launchHistory.map((file) => file.path)), [launchHistory]);
+  const launchHistoryPaths = useMemo(() => launchHistoryClaimPaths(launchHistory), [launchHistory]);
   /* The board layout's file set with collapsed workers removed. Kept separate
      from `groupFiles` so board-membership reconciliation still sees the full
      catalog and never retires a collapsed worker's durable placement. */

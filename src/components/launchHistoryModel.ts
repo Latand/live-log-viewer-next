@@ -15,8 +15,13 @@ import { projectKey } from "@/components/projectModel";
  * available when the history group is expanded.
  *
  * Receipts whose artifact transcript IS scanned never become synthetic cards
- * at all (spawnProjection suppresses them), so every history row here is a
- * pathless terminal receipt by construction.
+ * at all (spawnProjection suppresses them), so a history row is normally a
+ * pathless terminal receipt. That suppression is not a guarantee this module
+ * may lean on: a terminal launch record can surface on an entry whose path IS
+ * a real scanned transcript (the launch failed its delivery but the
+ * conversation materialized anyway). Such a row may still appear on the shelf,
+ * but it must never CLAIM its path off the scene — that would erase a live
+ * conversation from the board ({@link launchHistoryClaimPaths}).
  */
 
 /** Mirror of spawnProjection's TERMINAL_SPAWN_RECENT_MS (a server-only module
@@ -47,6 +52,25 @@ export function launchHistoryFor(files: readonly FileEntry[], project: string, n
   return files
     .filter((file) => projectKey(file) === project && isHistoricalLaunchReceipt(file, nowMs))
     .sort((a, b) => b.mtime - a.mtime);
+}
+
+/** Mirror of spawnProjection's `isSpawnPlaceholderPath` (a server-only module
+    this client bundle cannot import): the projected placeholder path of a
+    launch that has no transcript. */
+export function isLaunchPlaceholderPath(pathname: string): boolean {
+  return pathname.startsWith("spawn:");
+}
+
+/** The paths launch history CLAIMS off the board scene. Only the pathless
+    `spawn:<launchId>` placeholder qualifies — it has no transcript to mount, so
+    shelving it hides nothing. A terminal launch record keyed on a real scanned
+    transcript path is delivery evidence ON a live conversation: it keeps its
+    shelf row (the failure stays visible and retryable), but claiming the path
+    would erase the conversation itself from the canvas. */
+export function launchHistoryClaimPaths(rows: readonly FileEntry[]): Set<string> {
+  const claims = new Set<string>();
+  for (const row of rows) if (isLaunchPlaceholderPath(row.path)) claims.add(row.path);
+  return claims;
 }
 
 /** Routes retry back through the owning pipeline, whose durable attempt keeps
