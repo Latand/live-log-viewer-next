@@ -15,7 +15,12 @@ ENV NEXT_TELEMETRY_DISABLED=1 \
 RUN npm install -g bun@1.3.3
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-RUN env -u __NEXT_PRIVATE_STANDALONE_CONFIG \
+# The compiler cache lives in a BuildKit cache mount: it survives between
+# image builds (a fresh `COPY . .` layer otherwise discards it), so an
+# incremental diff recompiles incrementally, and it never bloats the image.
+# Deploys serialize at the runtime host, so no two builds share it at once.
+RUN --mount=type=cache,target=/app/.next/cache \
+    env -u __NEXT_PRIVATE_STANDALONE_CONFIG \
         -u __NEXT_PRIVATE_PREBUNDLED_REACT \
         -u __NEXT_PRIVATE_BUILD_WORKER \
         bun run build
