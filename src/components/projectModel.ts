@@ -16,6 +16,23 @@ export const OVERVIEW = "__overview__";
  */
 const tick5 = (t: number) => Math.floor(t / 300);
 
+/** Default age horizon for automatic card placement: a root conversation whose
+    last activity falls inside it keeps an automatic card even while idle; one
+    beyond it leaves the canvas for quiet history / «All conversations». */
+export const DEFAULT_SCHEME_AGE_HORIZON_HOURS = 48;
+
+/**
+ * Operator-tunable placement horizon. `NEXT_PUBLIC_*` is inlined into the
+ * client bundle by Next (the same style `workerCollapseIdleMs` uses), so the
+ * horizon can be retuned without touching this code; a missing or malformed
+ * value falls back to the two-day default.
+ */
+export function schemeAgeHorizonSeconds(): number {
+  const raw = typeof process !== "undefined" ? process.env?.NEXT_PUBLIC_LLV_SCHEME_AGE_HORIZON_HOURS : undefined;
+  const hours = raw ? Number(raw) : Number.NaN;
+  return (Number.isFinite(hours) && hours > 0 ? hours : DEFAULT_SCHEME_AGE_HORIZON_HOURS) * 3_600;
+}
+
 export function activityBand(file: FileEntry): ActivityBand {
   if (file.activity === "live") return 0;
   if (file.activity === "recent") return 1;
@@ -380,16 +397,26 @@ function assembleGroup(
  * they attach to their parent's column as collapsed rows; a parentless one
  * becomes a narrow stub group. Every other descendant of the tree — finished
  * subagents, quiet tasks, compaction-chain predecessor sessions — stays
- * visible as a collapsed chip in the group's `finished` stack. Recent root
- * conversations and recent child conversations (claude subagents, codex
- * job sessions) keep full columns too, because "done between user messages"
- * must not hide active work.
+ * visible as a collapsed chip in the group's `finished` stack. Root
+ * conversations with activity inside the placement age horizon (~48 h,
+ * `NEXT_PUBLIC_LLV_SCHEME_AGE_HORIZON_HOURS`) keep automatic cards even while
+ * idle — the operator's conversation from earlier today belongs on the map —
+ * and roots whose whole tree aged past the horizon leave the canvas for quiet
+ * history. Recent child conversations (claude subagents, codex job sessions)
+ * keep full columns too, because "done between user messages" must not hide
+ * active work.
  */
 export interface BranchGroupOptions {
   /** Quiet conversations promoted into full scheme nodes. */
   expandedConversationPaths?: ReadonlySet<string>;
   /** Engine-native subagent placement from the S2 tray projection (#142). */
   enginePlacement?: EnginePlacement;
+  /** Wall clock in epoch seconds for the placement age horizon. `0` — the
+      server render and the hydration pass — applies no age judgment, so both
+      sides paint the plain activity rule and no hydration skew appears. */
+  now?: number;
+  /** Placement age horizon in seconds; defaults to the env-tunable value. */
+  ageHorizonSeconds?: number;
 }
 
 export function buildBranchGroups(files: FileEntry[], project: string, options: BranchGroupOptions = {}): BranchGroup[] {
@@ -398,20 +425,34 @@ export function buildBranchGroups(files: FileEntry[], project: string, options: 
   const roots = new Map<string, FileEntry>();
   const orphanTasks = new Map<string, FileEntry>();
   const { expandedConversationPaths, enginePlacement } = options;
+  const now = options.now ?? 0;
+  const ageHorizon = options.ageHorizonSeconds ?? schemeAgeHorizonSeconds();
+  /* The automatic-placement age horizon. Without a clock (`now === 0`, the
+     server/hydration render) age is unknowable, so the test degrades to the
+     plain `recent` activity rule rather than inventing an age. The `recent`
+     clause stays alongside the clock so a sub-15-minute horizon override can
+     never out-tighten the activity the projection already calls recent. */
+  const recentlyActive = (file: FileEntry) =>
+    file.activity === "recent" || (now > 0 && now - file.mtime <= ageHorizon);
   for (const file of files) {
     if (projectKey(file) !== project) continue;
     /* A cross-project child starts an independently owned visual segment. Keep
        its root card after the child becomes quiet while the durable parent
-       pointer continues to support explicit cross-project navigation. */
+       pointer continues to support explicit cross-project navigation. The
+       horizon bounds this card like any other root's: once the segment's
+       activity ages out it leaves the canvas (a live or running one never
+       does), and only an explicit expansion below can still place it. */
     if (beginsProjectSegment(file, byPath)) {
-      roots.set(file.path, file);
-      continue;
+      if (now === 0 || file.activity === "live" || file.proc === "running" || recentlyActive(file)) {
+        roots.set(file.path, file);
+        continue;
+      }
     }
     const expanded = expandedConversationPaths?.has(file.path) === true;
     if (
       file.activity === "live" ||
       file.proc === "running" ||
-      (file.activity === "recent" && isChildConversation(file)) ||
+      (recentlyActive(file) && isChildConversation(file)) ||
       /* A promoted engine child (e.g. an idle child holding a pending question)
          must still open its parent's group so it can render as a full node. */
       enginePlacement?.promotedEnginePaths?.has(file.path) === true ||
@@ -422,7 +463,7 @@ export function buildBranchGroups(files: FileEntry[], project: string, options: 
       else roots.set(root.path, root);
       continue;
     }
-    if (file.activity === "recent" && isConversation(file)) roots.set(file.path, file);
+    if (recentlyActive(file) && isConversation(file)) roots.set(file.path, file);
   }
   const groups = [...roots.values()].map((root) => assembleGroup(root, kids, expandedConversationPaths, enginePlacement));
   for (const task of orphanTasks.values()) {
