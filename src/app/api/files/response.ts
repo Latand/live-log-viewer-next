@@ -5,6 +5,7 @@ import path from "node:path";
 import { NextResponse } from "next/server";
 
 import { listFilesWithProjectCatalog, pinnedPathsFor } from "@/lib/scanner";
+import { pinnedIdentityEntries } from "@/lib/scanner/pinRideAlong";
 import { agentRegistry, readOnlyConversationLookupFromSnapshot, supersedenceChainTail } from "@/lib/agent/registry";
 import { projectLaunchConversations } from "@/lib/agent/spawnProjection";
 import { conversationCatalogSnapshot } from "@/lib/scanner/conversationCatalog";
@@ -258,6 +259,18 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     const launch = launchProjection.facts.get(file.path);
     if (launch) file.launch = launch;
   }
+  /* Ride-along identity for an explicit pin (issue #950). The scheme window is
+     a board budget, so a conversation outside it — an older project, whatever
+     the transcript's size — has no scanned row, and the «All conversations»
+     click that asked for it BY PATH would find no card and report nothing. The
+     pin sheds payload detail, never identity: these rows carry path, project,
+     title, engine and activity, and the conversation id is attached with every
+     other row's below. The pinned scan still runs and replaces them. */
+  for (const entry of pinnedIdentityEntries(visibilityPinnedPaths, new Set(files.map((file) => file.path)))) {
+    files.push(entry);
+    responsePinOverlayPaths.add(entry.path);
+  }
+  traceStep("pin-ride-along");
   const conversationLookup = readOnlyConversationLookupFromSnapshot(registrySnapshot);
   traceStep("conversation-lookup");
   const conversationForPath = (pathname: string) => conversationLookup.conversationForPath(pathname);
