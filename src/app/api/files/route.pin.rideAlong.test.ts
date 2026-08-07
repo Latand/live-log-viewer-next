@@ -24,14 +24,24 @@ const previous = {
   codex: process.env.LLV_CODEX_HOME,
   claude: process.env.LLV_CLAUDE_HOME,
   tmp: process.env.TMPDIR,
+  home: process.env.HOME,
 };
 process.env.LLV_STATE_DIR = path.join(sandbox, "state");
 process.env.LLV_CODEX_HOME = path.join(sandbox, "codex");
 process.env.LLV_CLAUDE_HOME = path.join(sandbox, "claude");
 process.env.TMPDIR = fs.mkdtempSync(path.join(sandbox, "tmp-"));
+/* The Claude background-task root is the one root no LLV_* variable redirects:
+   `claudeTasksRoot()` takes `<tmpdir>/claude-<uid>` only when it EXISTS and
+   otherwise falls back to the literal `/tmp/claude-<uid>`, which on a real
+   machine is the operator's own live task tree. Creating it inside the
+   redirected TMPDIR — and pinning HOME, which `ROOTS` reads at import — keeps
+   the corpus this file declares the only corpus it scans. */
+process.env.HOME = fs.mkdtempSync(path.join(sandbox, "home-"));
+fs.mkdirSync(path.join(process.env.TMPDIR, `claude-${process.getuid?.() ?? 1000}`), { recursive: true });
 
 const { GET } = await import("./route");
 const { DEFAULT_SCHEME_PROJECT_CAP } = await import("@/lib/scanner/schemeWindow");
+const { agentRegistry } = await import("@/lib/agent/registry");
 
 const day = path.join(process.env.LLV_CODEX_HOME, "sessions", "2026", "07", "16");
 fs.mkdirSync(day, { recursive: true });
@@ -67,7 +77,7 @@ for (let index = 0; index < DEFAULT_SCHEME_PROJECT_CAP + 2; index += 1) {
 rollout("recent", "/repo/recent", 5_600_000, 0.001);
 
 afterAll(() => {
-  for (const [key, value] of [["LLV_STATE_DIR", previous.state], ["LLV_CODEX_HOME", previous.codex], ["LLV_CLAUDE_HOME", previous.claude], ["TMPDIR", previous.tmp]] as const) {
+  for (const [key, value] of [["LLV_STATE_DIR", previous.state], ["LLV_CODEX_HOME", previous.codex], ["LLV_CLAUDE_HOME", previous.claude], ["TMPDIR", previous.tmp], ["HOME", previous.home]] as const) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
@@ -98,6 +108,36 @@ test("an explicit ?path= pin answers with the record on the first request, whate
   expect(pinned!.size).toBe(fs.statSync(target).size);
   expect(pinned!.activity).toBeTruthy();
   expect(pinned!.engine).toBe("codex");
+});
+
+test("the unpinned baseline carries the generated corpus and nothing of the host", async () => {
+  const published = await files();
+  expect(published.length).toBeGreaterThan(0);
+  for (const file of published) {
+    expect(file.root).toBe("codex-sessions");
+    expect(path.dirname(file.path)).toBe(day);
+  }
+});
+
+test("a pinned conversation with a launch receipt folds it into one card", async () => {
+  const published = new Set((await files()).map((file) => file.path));
+  const target = corpus.filter((pathname) => !published.has(pathname)).at(-1)!;
+  /* The launch read-model folds into a MATERIALIZED row and projects its own
+     `spawn:` card only when none is present. A ride-along row that arrives
+     after that decision leaves the operator with two cards for one
+     conversation — the pinned row without its chips, and a spawn placeholder. */
+  agentRegistry().beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo/project-11",
+    transport: "structured",
+    expectedArtifactPath: target,
+    launchProfile: { cwd: "/repo/project-11" },
+  });
+
+  const rows = await files(target);
+
+  expect(rows.find((file) => file.path === target)?.launch).toBeDefined();
+  expect(rows.filter((file) => file.path.startsWith("spawn:"))).toEqual([]);
 });
 
 test("the oversized elided transcript rides along by identity, not by being small enough to read", async () => {

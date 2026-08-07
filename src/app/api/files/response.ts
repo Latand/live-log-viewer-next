@@ -249,6 +249,23 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   const registry = agentRegistry();
   const registrySnapshot = registry.readOnlySnapshot();
   traceStep("registry-snapshot");
+  /* Ride-along identity for an explicit pin (#950). The scheme window is
+     a board budget, so a conversation outside it — an older project, whatever
+     the transcript's size — has no scanned row, and the «All conversations»
+     click that asked for it BY PATH would find no card and report nothing. The
+     pin sheds payload detail, never identity: these rows carry path, project,
+     title, engine and activity, and the conversation id is attached with every
+     other row's below. The pinned scan still runs and replaces them.
+
+     This runs BEFORE the launch read-model below, so a pinned conversation
+     that also carries a launch receipt is a materialized row by the time the
+     projection asks: the launch folds into it as chips, exactly as it would
+     for a scanned row, instead of projecting a second `spawn:` card beside it. */
+  for (const entry of pinnedIdentityEntries(visibilityPinnedPaths, new Set(files.map((file) => file.path)))) {
+    files.push(entry);
+    responsePinOverlayPaths.add(entry.path);
+  }
+  traceStep("pin-ride-along");
   /* One launch read-model (issue #569): a launch either projects the
      conversation window itself (nothing materialized yet) or folds into the
      live conversation as transient chips — never both. */
@@ -259,18 +276,6 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     const launch = launchProjection.facts.get(file.path);
     if (launch) file.launch = launch;
   }
-  /* Ride-along identity for an explicit pin (#950). The scheme window is
-     a board budget, so a conversation outside it — an older project, whatever
-     the transcript's size — has no scanned row, and the «All conversations»
-     click that asked for it BY PATH would find no card and report nothing. The
-     pin sheds payload detail, never identity: these rows carry path, project,
-     title, engine and activity, and the conversation id is attached with every
-     other row's below. The pinned scan still runs and replaces them. */
-  for (const entry of pinnedIdentityEntries(visibilityPinnedPaths, new Set(files.map((file) => file.path)))) {
-    files.push(entry);
-    responsePinOverlayPaths.add(entry.path);
-  }
-  traceStep("pin-ride-along");
   const conversationLookup = readOnlyConversationLookupFromSnapshot(registrySnapshot);
   traceStep("conversation-lookup");
   const conversationForPath = (pathname: string) => conversationLookup.conversationForPath(pathname);
