@@ -26,7 +26,17 @@ export function activityBand(file: FileEntry): ActivityBand {
 export function isConversation(file: FileEntry): boolean {
   // A claude session with a parent is a compaction-chain predecessor: it
   // belongs to its successor's tree, so it no longer counts as a root.
-  if (file.root === "claude-projects") return file.kind === "session" && !file.parent;
+  if (file.root === "claude-projects") {
+    if (file.kind !== "session") return false;
+    if (!file.parent) return true;
+    /* A viewer-spawned conversation outside any pipeline/flow container is a
+       root in its own project: its `parent` names the spawner's transcript —
+       often a conversation of a different project — never a compaction
+       predecessor of this one. Without this it renders nowhere: not a root,
+       not a child (no handoff), and its parent's tree lives on another board. */
+    const lineage = file.durableLineage;
+    return lineage?.kind === "spawn" && !lineage.memberships.length && !file.handoff;
+  }
   if (file.root === "codex-sessions") return !file.parent;
   return false;
 }

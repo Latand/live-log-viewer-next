@@ -251,6 +251,26 @@ describe("buildBranchGroups", () => {
     expect(isConversation(entry({ path: "/root", parent: "/older" }))).toBe(false);
   });
 
+  test("a standalone viewer-spawned conversation stays a root despite its spawner parent", () => {
+    const lineage = {
+      kind: "spawn" as const,
+      role: "builder",
+      depth: 1,
+      parentConversationId: "conversation_parent",
+      reviewsConversationId: null,
+      memberships: [],
+    };
+    expect(isConversation(entry({ path: "/spawned", parent: "/other-project/orchestrator", durableLineage: lineage }))).toBe(true);
+    /* Pipeline/flow members keep their container placement. */
+    const member = {
+      ...lineage,
+      memberships: [{ kind: "pipeline" as const, containerId: "p1", role: "builder", slot: "s", stageId: null, stageOrder: null, round: null, parentConversationId: null }],
+    };
+    expect(isConversation(entry({ path: "/member", parent: "/other", durableLineage: member }))).toBe(false);
+    /* A handoff branch keeps rendering under its source. */
+    expect(isConversation(entry({ path: "/handoff", parent: "/source", handoff: true, durableLineage: lineage }))).toBe(false);
+  });
+
   test("idle roots with active descendants are marked for quiet history", () => {
     const files = [
       entry({ path: "/idle-root", activity: "idle", mtime: 10 }),
