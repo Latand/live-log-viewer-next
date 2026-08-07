@@ -42,15 +42,21 @@ mock.module("./process", () => ({
   },
 }));
 
-const { assignTranscriptPids, claudeSubagentOwnerPath, transcriptProcessOwnsEntry } = await import("./transcripts");
+const {
+  assignTranscriptPids,
+  claudeSubagentOwnerPath,
+  transcriptLiveOwnership,
+  transcriptProcessMayBeRunning,
+  transcriptProcessOwnsEntry,
+} = await import("./transcripts");
 
 test("a Claude subagent resolves to the top-level session that owns its writer", () => {
-  const root = "/home/u/.claude/projects";
+  const root = "/home/user/.claude/projects";
   expect(claudeSubagentOwnerPath(
-    "/home/u/.claude/projects/project/session-1/subagents/agent-child.jsonl",
+    "/home/user/.claude/projects/project/session-1/subagents/agent-child.jsonl",
     root,
-  )).toBe("/home/u/.claude/projects/project/session-1.jsonl");
-  expect(claudeSubagentOwnerPath("/home/u/.claude/projects/project/session-1.jsonl", root)).toBeNull();
+  )).toBe("/home/user/.claude/projects/project/session-1.jsonl");
+  expect(claudeSubagentOwnerPath("/home/user/.claude/projects/project/session-1.jsonl", root)).toBeNull();
 });
 
 test("destructive checks recognize an idle Claude session through uncapped cwd ownership", () => {
@@ -60,6 +66,37 @@ test("destructive checks recognize an idle Claude session through uncapped cwd o
   processes.push(proc);
 
   expect(transcriptProcessOwnsEntry(file, proc, "claude:-repo")).toBe(true);
+});
+
+/* Issue #935 round 3: a resume refuses the operator's request on the strength
+   of a liveness match, so it needs to know WHICH evidence matched. The cwd
+   fallback is shared by every transcript of a project — one live terminal
+   agent must not read as the owner of all of them. */
+test("live ownership separates a session-naming process from a same-directory neighbour", () => {
+  processes.length = 0;
+  const sessionId = "a6f79fdb-1111-2222-3333-444455556666";
+  const pathname = `/home/user/.codex/sessions/2026/08/07/rollout-2026-08-07T10-00-00-${sessionId}.jsonl`;
+  const file = entry(pathname, { cwd: "/repo" });
+  const neighbour = { pid: 5501, engine: "codex" as const, argv: ["codex"], cwd: "/repo", tty: 1 };
+  processes.push(neighbour);
+
+  // A plain agent in the same working directory: real liveness, but it names
+  // no session, so it is only evidence about the directory.
+  expect(transcriptLiveOwnership(file, processes)).toBe("cwd");
+  // The delete routes keep the coarse answer they have always had.
+  expect(transcriptProcessMayBeRunning(file, processes)).toBe(true);
+
+  processes.push({ pid: 5502, engine: "codex", argv: ["codex", "resume", sessionId], cwd: "/elsewhere", tty: 1 });
+  // Session-naming evidence outranks the directory neighbour whatever the order.
+  expect(transcriptLiveOwnership(file, processes)).toBe("session");
+});
+
+test("live ownership reports nothing when no process matches the transcript at all", () => {
+  processes.length = 0;
+  const pathname = "/home/user/.codex/sessions/2026/08/07/rollout-2026-08-07T10-00-00-a6f79fdb-1111-2222-3333-444455556666.jsonl";
+  processes.push({ pid: 5503, engine: "codex", argv: ["codex"], cwd: "/other-repo", tty: 1 });
+
+  expect(transcriptLiveOwnership(entry(pathname, { cwd: "/repo" }), processes)).toBeNull();
 });
 
 function entry(pathname: string, overrides: Partial<FileEntry> = {}): FileEntry {
@@ -120,8 +157,8 @@ describe("assignTranscriptPids", () => {
   });
 
   test("matches a Claude resume process to its transcript and leaves cwd sibling untouched", () => {
-    const oldPath = "/home/user/.claude/projects/-repo/8bc24ea9-2956-4e74-a1b5-db839d5956b1.jsonl";
-    const resumedId = "199e8e95-0e87-4b4f-84bf-f62b3c0993a3";
+    const oldPath = "/home/user/.claude/projects/-repo/11111111-2222-4333-1444-555566667777.jsonl";
+    const resumedId = "22222222-3333-4444-1555-666677778888";
     const resumedPath = `/home/user/.claude/projects/-repo/${resumedId}.jsonl`;
     processes.push({
       pid: 1841611,
@@ -143,7 +180,7 @@ describe("assignTranscriptPids", () => {
   });
 
   test("matches a Codex resume process by the resume subcommand id", () => {
-    const id = "019f3be9-8edf-7c53-bf70-1f2737957526";
+    const id = "33333333-4444-7555-1666-777788889999";
     const pathname = `/home/user/.codex/sessions/2026/07/07/rollout-2026-07-07T12-29-50-${id}.jsonl`;
     processes.push({
       pid: 1876135,

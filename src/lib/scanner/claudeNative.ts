@@ -85,6 +85,18 @@ export function isClaudeSubagentLeafPath(pathname: string): boolean {
 }
 
 /**
+ * The wider containment test: any transcript nested under a `subagents/`
+ * directory, whatever its basename. A delegated child is written by its
+ * parent's process and has no session of its own to resume, so every gate that
+ * decides continuation shares this one grammar — the resume eligibility check
+ * and transcript admission disagreeing about it let a leaf slip past its own
+ * named refusal into a real launch (issue #935).
+ */
+export function isUnderClaudeSubagentsDir(pathname: string): boolean {
+  return pathname.includes(path.sep + "subagents" + path.sep);
+}
+
+/**
  * Classifies Workflow bookkeeping artifacts that live under a `subagents/`
  * tree but are not conversations: the `journal.jsonl` event log and the
  * `*.meta.json` sidecars. Discovery must never surface these as cards.
