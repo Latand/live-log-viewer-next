@@ -9,19 +9,31 @@ import { taskParts } from "./discover";
 import { projectResolutionStateKey } from "./projectState";
 import { EXTS, ROOTS, scanRootEntries } from "./roots";
 
+type ScanRoot = { rootName: RootKey; root: string; bases: string[] };
+
+/** Every scan root with the path forms it can be addressed by. An account home
+    that symlinks into the shared transcript store gives one root two absolute
+    forms, and a pin may name either. */
+function scanRoots(): ScanRoot[] {
+  return scanRootEntries().map(([rootName, root]) => ({
+    rootName,
+    root,
+    bases: [...new Set([root, realpath(root)].filter((value): value is string => value !== null))],
+  }));
+}
+
 /**
  * Which scan root owns a path, with its root key — the same containment gate
  * `pathAllowed` applies, so a pin can only ever name a transcript the scanner
  * itself would have walked. The longest matching root wins: account homes nest
  * inside one another, and the relative name must be taken from the innermost.
  */
-function rootFor(pathname: string): [RootKey, string] | null {
-  let match: [RootKey, string] | null = null;
-  const candidates = [pathname, realpath(pathname)].filter((value): value is string => value !== null);
-  for (const [rootName, root] of scanRootEntries()) {
-    const roots = [root, realpath(root)].filter((value): value is string => value !== null);
-    const contained = roots.some((base) => candidates.some((candidate) => candidate.startsWith(base + path.sep)));
-    if (contained && (match === null || root.length > match[1].length)) match = [rootName, root];
+function rootFor(pathname: string, roots: readonly ScanRoot[]): ScanRoot | null {
+  let match: ScanRoot | null = null;
+  const candidates = [...new Set([pathname, realpath(pathname)].filter((value): value is string => value !== null))];
+  for (const scanRoot of roots) {
+    const contained = scanRoot.bases.some((base) => candidates.some((candidate) => candidate.startsWith(base + path.sep)));
+    if (contained && (match === null || scanRoot.root.length > match.root.length)) match = scanRoot;
   }
   return match;
 }
@@ -70,13 +82,16 @@ export function pinnedIdentityEntries(
   pinnedPaths: Iterable<string>,
   knownPaths: ReadonlySet<string>,
 ): FileEntry[] {
+  const missing = [...pinnedPaths].filter((pathname) => !knownPaths.has(pathname));
+  if (!missing.length) return [];
+  const roots = scanRoots();
   const stateKey = projectResolutionStateKey();
   const entries: FileEntry[] = [];
   const seen = new Set<string>();
-  for (const pathname of pinnedPaths) {
-    if (knownPaths.has(pathname) || seen.has(pathname)) continue;
+  for (const pathname of missing) {
+    if (seen.has(pathname)) continue;
     seen.add(pathname);
-    const owner = rootFor(pathname);
+    const owner = rootFor(pathname, roots);
     if (!owner) continue;
     let st: fs.Stats;
     try {
@@ -84,7 +99,7 @@ export function pinnedIdentityEntries(
     } catch {
       continue;
     }
-    const [rootName, root] = owner;
+    const { rootName, root } = owner;
     if (!discoverable(rootName, pathname, st)) continue;
     const meta = describe(rootName, root, pathname, st, stateKey);
     const mtime = st.mtimeMs / 1000;
