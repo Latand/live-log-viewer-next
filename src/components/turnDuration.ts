@@ -37,6 +37,14 @@ export function clockDuration(seconds: number): string {
   return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }
 
+/** Whether the card's current turn is open and the agent is live — the exact
+    condition the pinned working spinner paints from. Anything that states
+    something about that turn (the strip's interrupt note) reads it from here, so
+    the two can never end up asserting opposite things about the same turn. */
+export function turnIsRunning(file: Pick<FileEntry, "lastTurn" | "activity">): boolean {
+  return file.activity === "live" && (!file.lastTurn || file.lastTurn.endedAt === null);
+}
+
 /** Seconds spanned by a completed turn, or null when it is still running or the
     boundary is unavailable. */
 export function turnDurationSeconds(file: Pick<FileEntry, "lastTurn">): number | null {

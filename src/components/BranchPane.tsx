@@ -10,7 +10,7 @@ import { type TFunction, useLocale } from "@/lib/i18n";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
-import { cardMigrationState, postConversationMigration } from "@/lib/accounts/migration";
+import { cardMigrationState, migrationTargetName, postConversationMigration } from "@/lib/accounts/migration";
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { accountIdFromPath } from "@/lib/accounts/badge";
 
@@ -476,7 +476,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
         {migState ? (
           <MigrationRibbon
             state={migState}
-            targetLabel={file.migration?.targetLabel ?? file.migration?.targetAccountId ?? ""}
+            targetLabel={migrationTargetName(file.migration) ?? ""}
             currentLabel={file.migration?.sourceLabel}
             error={file.migration?.failure ?? null}
             actionError={recoveryError}

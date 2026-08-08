@@ -141,6 +141,25 @@ export function cardMigrationState(migration: ConversationMigration | null | und
   return PHASE_TO_CARD[migration.phase as SessionMigrationPhase] ?? null;
 }
 
+/**
+ * The display name of a session's migration target, or `null` when the
+ * annotation does not carry one yet.
+ *
+ * Both `targetLabel` and `targetAccountId` can be missing (or blank) through the
+ * whole pending window — the annotation is published before the target identity
+ * reaches the card, and it is dropped entirely once the migration commits. Every
+ * surface that would interpolate the name must ask HERE and fall back to its own
+ * nameless copy: interpolating the blank string told the operator their message
+ * was held for «» (an account with no name), which is the one thing the card may
+ * never say. `??` alone is not enough — an empty string is not nullish.
+ */
+export function migrationTargetName(migration: ConversationMigration | null | undefined): string | null {
+  const label = migration?.targetLabel?.trim();
+  if (label) return label;
+  const accountId = migration?.targetAccountId?.trim();
+  return accountId ? accountId : null;
+}
+
 /** A card in `pending` still delivers to the live predecessor pane, but its
     interrupt/kill controls must survive; `switching` freezes them (a signal
     would race the coordinator). Held-send only applies during `switching`. */
