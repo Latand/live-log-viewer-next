@@ -17,7 +17,7 @@ import type { SelectedContextRef } from "@/lib/selection/selectedContext";
 import { useViewerSelectedContext, viewerSelectedContext } from "@/lib/selection/viewerSelectedContext";
 import { useTmuxTarget } from "@/hooks/useTmuxTarget";
 import { conversationIdentity } from "@/lib/accounts/identity";
-import { cardMigrationState, migrationHoldsSends } from "@/lib/accounts/migration";
+import { cardMigrationState, migrationHoldsDelivery, migrationHoldsSends, migrationTargetName } from "@/lib/accounts/migration";
 import { getLocale, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
@@ -32,6 +32,7 @@ import {
   markOutboxResponded,
   outboxHistory,
   outboxStateForReceiptStatus,
+  rebindOutboxEchoText,
   transcriptEchoCount,
   updateOutbox,
   useOutbox,
@@ -1715,6 +1716,14 @@ export function TmuxComposerCore({
       if (outboxId) updateOutbox(cardId, outboxId, { state: "queued" });
       return;
     }
+    /* The wire payload was scaffolded past the raw draft (viewer prelude,
+       drained bridge turn): the transcript will echo the SCAFFOLDED text, so
+       the queued bubble's echo identity re-binds to it before delivery —
+       otherwise its echo never matches and the delivered bubble lingers in the
+       tail below the agent's newer output. */
+    if (outboxId && payloadText !== requestedText) {
+      rebindOutboxEchoText(cardId, outboxId, payloadText);
+    }
     /* A legacy dead host keeps its draft local. Structured ownership admits a
        text-only message durably and uses that request to recover its engine host.
        A conversation whose delivery route disappeared AFTER a message was queued
@@ -1812,8 +1821,17 @@ export function TmuxComposerCore({
         state: held ? (result.outcome as DeliveryReceiptState) : "sent",
         clientMessageId,
       };
-      const prior = retry ? sent.filter((item) => item.id !== retry.receiptId) : sent;
-      persistSent([...prior, entry].slice(-SENT_LIMIT));
+      /* ONE delivery state per message. A queued submission's own bubble in the
+         feed is its delivery record, so the composer's receipt row and status
+         line belong to a DIRECT send, which has no bubble. Painting both put a
+         held message on the card three times at once — «queued» receipt,
+         «Delivering» bubble, and a «Held for …» line — and left the operator to
+         reconcile them. A direct send keeps both; they are all it has. */
+      const ownsDeliveryState = !outboxId || !held;
+      if (ownsDeliveryState) {
+        const prior = retry ? sent.filter((item) => item.id !== retry.receiptId) : sent;
+        persistSent([...prior, entry].slice(-SENT_LIMIT));
+      }
       const attempt = pendingDeliveries.current.find((candidate) => candidate.key === clientMessageId);
       persistPendingDeliveries(pendingDeliveries.current.filter((candidate) => candidate.key !== clientMessageId));
       setImmediateRuntimeReceipts((current) => current.filter((candidate) =>
@@ -1824,16 +1842,32 @@ export function TmuxComposerCore({
       /* A legacy pane send that reached the pane is delivered; a migration
          hold/queue is still in flight to the successor (round-1 P1#4). */
       settleOutbox(held ? "delivering" : "delivered");
-      setStatus({
-        kind: held ? "info" : "ok",
-        text: held
-          ? t("composer.deliveryHeld", { label: file.migration?.targetLabel ?? file.migration?.targetAccountId ?? "" })
-          : result.outcome === "resumed" || result.spawned
-            ? t("composer.spawned", { target: result.target ?? "" })
-            : result.imagePaths?.length
-              ? t("composer.sentPaths", { count: result.imagePaths.length })
-              : t("common.sent"),
-      });
+      if (ownsDeliveryState) {
+        /* A `held` outcome does NOT imply an account switch: the registry fence
+           also holds a delivery whose generation claim did not land. Only a card
+           that is actually switching may promise the message "delivers after the
+           account switch"; otherwise the hold is said plainly.
+           The target can be nameless for the whole pending window — the
+           annotation is published before the target identity reaches the card.
+           The hold is still true, so it is said without a name rather than held
+           for «» (an account the operator cannot recognize). */
+        const heldForSwitch = migrationHoldsDelivery(cardMigrationState(file.migration));
+        const heldFor = migrationTargetName(file.migration);
+        setStatus({
+          kind: held ? "info" : "ok",
+          text: held
+            ? !heldForSwitch
+              ? t("composer.deliveryHeldWaiting")
+              : heldFor
+                ? t("composer.deliveryHeld", { label: heldFor })
+                : t("composer.deliveryHeldUnnamed")
+            : result.outcome === "resumed" || result.spawned
+              ? t("composer.spawned", { target: result.target ?? "" })
+              : result.imagePaths?.length
+                ? t("composer.sentPaths", { count: result.imagePaths.length })
+                : t("common.sent"),
+        });
+      }
       /* A queued delivery must never steal focus back: the operator may
          already be typing the next message. */
       if (!outboxId) inputRef.current?.focus();

@@ -15,6 +15,12 @@ test("switching names the target and marks the spinner reduced-motion safe", () 
   expect(html).toContain("motion-reduce:animate-none");
 });
 
+test("switching with no published target names the switch, never «»", () => {
+  const html = renderToStaticMarkup(<MigrationRibbon state="switching" targetLabel="" />);
+  expect(html).not.toContain("«»");
+  expect(html).toContain("Switching account");
+});
+
 test("failed shows the error detail plus Retry and Keep actions", () => {
   const html = renderToStaticMarkup(
     <MigrationRibbon state="failed" targetLabel="Work" currentLabel="Main" error="auth expired" onRetry={() => {}} onKeep={() => {}} />,

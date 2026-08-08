@@ -37,7 +37,7 @@ import type { SubagentTrayApi } from "./scheme/SubagentTrayView";
 import { conversationIdentity, formatConversationHash } from "@/lib/accounts/identity";
 import { recordFocusNavigation } from "@/lib/navigation/focusHistory";
 import { collapsibleWorkerFiles, groupWorkerStacks, pipelineOriginOf, pipelineStagePipelineIds, protectedReviewerNodes } from "./scheme/workerCollapse";
-import { launchHistoryFor, pipelineRetryTarget, retryPipelineLaunch } from "./launchHistoryModel";
+import { launchHistoryClaimPaths, launchHistoryFor, pipelineRetryTarget, retryPipelineLaunch } from "./launchHistoryModel";
 import { LaunchHistory } from "./LaunchHistory";
 import { isPlacedTask } from "./scheme/taskGeometry";
 import { loadExpandedTasks, partitionTaskStacks, persistExpandedTasks } from "./scheme/taskStacks";
@@ -66,7 +66,9 @@ import {
   quietHistoryRows,
   quietRootsWithActiveDescendants,
   residualItems,
+  schemeAgeHorizonSeconds,
 } from "./projectModel";
+import { boundFlowExpansions } from "./scheme/placementHorizon";
 import { ArchiveRestore } from "./icons";
 import { KeepAwakeMenuRow } from "./KeepAwakeControl";
 import { ArchiveProjectButton, DeleteProjectButton } from "./ProjectTrash";
@@ -586,8 +588,11 @@ function ProjectDashboardView({
       if (isDirectReviewFlow(flow) && flow.state !== "reviewing") continue;
       paths.add(flow.implementerPath);
     }
-    return paths;
-  }, [files, deckFlows]);
+    /* These expansions are the board's, not the operator's, so they follow the
+       placement age horizon like every other automatic card (the operator's own
+       `prefs.expanded` are merged below and never bounded). */
+    return boundFlowExpansions(paths, { flows: activeFlows, files, now: nowSeconds, ageHorizonSeconds: schemeAgeHorizonSeconds() });
+  }, [files, deckFlows, nowSeconds]);
   /* Flow-driven expansions plus the ones the user opened by hand from a
      collapsed view: a connected conversation the user expanded renders as a
      node wired below its parent, just like an active-group child. */
@@ -677,11 +682,14 @@ function ProjectDashboardView({
     [filesByPath],
   );
   /* Terminal spawn receipts past the recent horizon (compact launch history):
-     they leave the board layout and minimap entirely and render in the
-     launch-history strip instead — a pathless receipt has no transcript to
-     mount as a pane. */
+     a pathless `spawn:` receipt has no transcript to mount as a pane, so it
+     leaves the board layout and minimap entirely and renders in the
+     launch-history strip instead. The strip lists every terminal record, but
+     only placeholder paths are CLAIMED off the scene: a failed launch whose
+     record rides on a real scanned transcript path must never hide that
+     conversation — the shelf row stays, the card renders. */
   const launchHistory = useMemo(() => launchHistoryFor(files, project, nowMs), [files, project, nowMs]);
-  const launchHistoryPaths = useMemo(() => new Set(launchHistory.map((file) => file.path)), [launchHistory]);
+  const launchHistoryPaths = useMemo(() => launchHistoryClaimPaths(launchHistory), [launchHistory]);
   /* The board layout's file set with collapsed workers removed. Kept separate
      from `groupFiles` so board-membership reconciliation still sees the full
      catalog and never retires a collapsed worker's durable placement. */
@@ -700,8 +708,8 @@ function ProjectDashboardView({
      the projection partitions each engine child into a promoted node or a
      folded tray row. The final group build consumes that single authority. */
   const baseGroups = useMemo(
-    () => buildBranchGroups(sceneFiles, project, { expandedConversationPaths: expandedConversations }),
-    [sceneFiles, project, expandedConversations],
+    () => buildBranchGroups(sceneFiles, project, { expandedConversationPaths: expandedConversations, now: nowSeconds }),
+    [sceneFiles, project, expandedConversations, nowSeconds],
   );
   const engineProjection = useMemo(() => {
     const hiddenPaths = new Set(prefs.hidden);
@@ -736,9 +744,10 @@ function ProjectDashboardView({
       ? buildBranchGroups(sceneFiles, project, {
         expandedConversationPaths: expandedConversations,
         enginePlacement: { promotedEnginePaths: engineProjection.promotedPaths, foldedEnginePaths: engineProjection.foldedPaths },
+        now: nowSeconds,
       })
       : baseGroups),
-    [sceneFiles, project, expandedConversations, engineProjection, baseGroups],
+    [sceneFiles, project, expandedConversations, engineProjection, baseGroups, nowSeconds],
   );
   const activeRoots = useMemo(() => new Set(groups.map((group) => group.key)), [groups]);
   const cards = useMemo(() => collapsedTrees(sceneFiles, project, activeRoots), [sceneFiles, project, activeRoots]);
@@ -829,11 +838,11 @@ function ProjectDashboardView({
       ...manualPaths,
       ...extra.map((file) => file.path),
     ]);
-    const protectedNodes = protectedReviewerNodes({ files, flows: deckFlows, renderedNodePaths: placedNodePaths, hiddenPaths: hiddenSet, pinnedPaths })
+    const protectedNodes = protectedReviewerNodes({ files, flows: deckFlows, renderedNodePaths: placedNodePaths, hiddenPaths: hiddenSet, pinnedPaths, now: nowSeconds })
       .filter((file) => projectKey(file) === project && !compactPipelinePaths.has(file.path));
     const extras = [...extra, ...protectedNodes];
     return extras.length ? [...manualNodes, ...extras] : manualNodes;
-  }, [ephemeral, groupFiles, files, compactPipelinePaths, deckFlows, project, autoPaths, hiddenSet, manualNodes, pinnedPaths]);
+  }, [ephemeral, groupFiles, files, compactPipelinePaths, deckFlows, project, autoPaths, hiddenSet, manualNodes, pinnedPaths, nowSeconds]);
   const liveCount = useMemo(
     () =>
       groups.reduce(
@@ -1392,7 +1401,7 @@ function ProjectDashboardView({
      exists only for an implementer placed as a board node — the same layout the
      scheme draws. Derive availability from that layout's nodes, so a scanned but
      unplaced (hidden/tombstoned) implementer disables the action (#93 finding). */
-  const pipelineLayout = buildSchemeLayout(hasNodes ? schemeGroups : archiveGroups, hasNodes ? schemeManual : [], files, compactLayoutFlows, hasNodes ? visibleDrafts : [], pipelines, [], new Set(), isolatedCompactHistoryPaths);
+  const pipelineLayout = buildSchemeLayout(hasNodes ? schemeGroups : archiveGroups, hasNodes ? schemeManual : [], files, compactLayoutFlows, hasNodes ? visibleDrafts : [], pipelines, [], new Set(), isolatedCompactHistoryPaths, [], new Set(), { now: nowSeconds });
   /* Worker rows the scheme still draws in a retained form — an active flow's
      reviewer round deck keeps its finished rounds as deck tabs. Those are
      re-admitted here so a folded reviewer is never listed twice (its deck AND a
@@ -1800,6 +1809,7 @@ function ProjectDashboardView({
                 reviewGroups={directReviewGroups}
                 pipelines={pipelines}
                 surfacePipelines={activePipelines}
+                now={nowSeconds}
                 tasks={hasNodes ? boardTasks : []}
                 allTasks={projectTasks}
                 workerStacks={workerStacks}

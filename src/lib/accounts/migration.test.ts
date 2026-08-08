@@ -8,6 +8,7 @@ import {
   bannerModel,
   cardMigrationState,
   migrationFreezesControls,
+  migrationHoldsDelivery,
   migrationHoldsSends,
   parseAutoBalance,
   parseEffective,
@@ -51,6 +52,19 @@ describe("cardMigrationState", () => {
     expect(migrationHoldsSends("switching")).toBeTrue();
     expect(migrationHoldsSends("failed")).toBeFalse();
     expect(migrationHoldsSends(null)).toBeFalse();
+  });
+
+  test("a delivery is held from pending onwards, mirroring the server fence", () => {
+    /* `deliveryFence` holds every delivery from `waiting-turn` on, so the card
+       may say a queued message waits for the switch from `pending` too — while
+       `pending` still keeps its controls, which is why this is a SEPARATE
+       predicate from the freeze. */
+    expect(migrationHoldsDelivery("pending")).toBeTrue();
+    expect(migrationHoldsDelivery("switching")).toBeTrue();
+    expect(migrationHoldsDelivery("failed")).toBeFalse();
+    expect(migrationHoldsDelivery("done")).toBeFalse();
+    expect(migrationHoldsDelivery("rolled-back")).toBeFalse();
+    expect(migrationHoldsDelivery(null)).toBeFalse();
   });
 });
 

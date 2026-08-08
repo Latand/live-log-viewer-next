@@ -20,7 +20,9 @@ export interface MigrationRibbonProps {
   /** `done`/`rolled-back` render nothing here — the feed divider marks a commit
       and a rollback leaves the intent silently. */
   state: CardMigrationState | null;
-  /** Target account label, shown while switching. */
+  /** Target account label, shown while switching. Empty while the coordinator
+      has not published the target identity yet — the ribbon then names the
+      switch without an account rather than switching to «». */
   targetLabel: string;
   /** Current account label, for the "Keep on «…»" per-session rollback action. */
   currentLabel?: string;
@@ -76,7 +78,11 @@ export function MigrationRibbon({ state, targetLabel, currentLabel, error, actio
       {state === "switching" ? (
         <span className="flex min-w-0 items-center gap-1.5">
           <Loader2 className="h-3 w-3 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden />
-          <span className="min-w-0 truncate">{t("migrate.cardSwitching", { label: targetLabel })}</span>
+          <span className="min-w-0 truncate">
+            {targetLabel.trim()
+              ? t("migrate.cardSwitching", { label: targetLabel })
+              : t("migrate.cardSwitchingUnnamed")}
+          </span>
         </span>
       ) : null}
 

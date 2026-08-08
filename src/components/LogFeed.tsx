@@ -8,6 +8,7 @@ import { useLogTail } from "@/hooks/useLogTail";
 import { useRuntimeSessionForConversation } from "@/hooks/useRuntime";
 import { useToolActivityCues } from "@/hooks/useToolActivityCues";
 import { conversationIdentity } from "@/lib/accounts/identity";
+import { cardMigrationState, migrationHoldsDelivery, migrationTargetName } from "@/lib/accounts/migration";
 import { getLocale, translate, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
@@ -557,9 +558,25 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
       });
     }
   }, [memoryKey, launch?.launchId, launch?.initialMessage, launch?.deliveredAt, launch?.promptAt, launch?.error, launchOwner, launchOwnsThisPane]);
+  /* The newest rendered transcript moment: past a delivered bubble's settle
+     time, it proves the agent's output already moved beyond the delivery and
+     retires the bubble even when its echo was missed (a scaffolded payload, a
+     tail attached after the echo row) — the tail section must never paint the
+     operator's delivered message below newer records. */
+  const newestTranscriptAtMs = useMemo(() => {
+    let newest: number | undefined;
+    for (const { item } of feed.items) {
+      if (!("ts" in item)) continue;
+      const at = typeof item.ts === "number" ? item.ts : Date.parse(String(item.ts ?? ""));
+      if (Number.isFinite(at) && (newest === undefined || at > newest)) newest = at;
+    }
+    return newest;
+  }, [feed.items]);
   /* Launch bubbles fail closed without exact canonical ownership; ordinary
      composer entries still render from this conversation-scoped queue. */
-  const pendingOutbox = file ? visibleOutbox(outbox, transcriptEchoCounts, nowMs(), paneLaunchOwner) : [];
+  const pendingOutbox = file
+    ? visibleOutbox(outbox, transcriptEchoCounts, nowMs(), paneLaunchOwner, newestTranscriptAtMs)
+    : [];
   useEffect(() => {
     if (!memoryKey || !file) return;
     adoptCanonicalAssistantClaims(file.path, memoryKey);
@@ -732,7 +749,15 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
               delta: visibleLiveTurnItems.length > 0,
             }).map((section) => {
               if (section === "launch") return <LaunchChips key="launch" launch={launch!} onRetry={onLaunchRetry} />;
-              if (section === "outbox") return <OutboxBubbles key="outbox" cardId={memoryKey!} entries={pendingOutbox} />;
+              if (section === "outbox") {
+                /* While this card is switching accounts the server holds every
+                   delivery it admits, so the bubble — the message's ONE delivery
+                   state — is what says the message waits for the switch. */
+                const switchHold = migrationHoldsDelivery(cardMigrationState(file.migration))
+                  ? { label: migrationTargetName(file.migration) }
+                  : null;
+                return <OutboxBubbles key="outbox" cardId={memoryKey!} entries={pendingOutbox} switchHold={switchHold} />;
+              }
               return <LiveTurnRows key="delta" items={visibleLiveTurnItems} />;
             })}
             <ConversationAttention file={file} />

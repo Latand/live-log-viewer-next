@@ -13,6 +13,12 @@ import { beginProjectCatalogScan, projectCatalogSnapshotFromRaw, type ParsedFile
 import { projectResolutionStateKey } from "./projectState";
 import { EXTS, ROOTS, scanRootEntries } from "./roots";
 import { selectSchemeWindow } from "./schemeWindow";
+import { cachedTranscriptTurn, transcriptTurnResult } from "./activity";
+import {
+  canonicalizeTranscriptPaths,
+  createTranscriptPathCanonicalizer,
+  type TranscriptPathCanonicalizer,
+} from "./transcriptIdentity";
 
 export function taskParts(root: string, pathname: string): [string, string, string] | null {
   const parts = path.relative(root, pathname).split(path.sep);
@@ -158,6 +164,11 @@ function rootEntries(roots: Roots | RootEntries): RootEntries {
   return Array.isArray(roots) ? roots : Object.entries(roots) as RootEntries;
 }
 
+/** Rewrites foreign root forms of a transcript onto the roots this scan walked. */
+function canonicalizerFor(roots: Roots | RootEntries): TranscriptPathCanonicalizer {
+  return createTranscriptPathCanonicalizer(rootEntries(roots).map(([, root]) => root));
+}
+
 async function discoverRaw(
   roots: Roots | RootEntries,
   limit: Limit,
@@ -194,8 +205,81 @@ async function discoverPathInventory(
   };
 }
 
-function cappedEntries(ranked: RawEntry[], projectByPath: ReadonlyMap<string, string>): RawEntry[] {
-  return selectSchemeWindow(ranked, (entry) => projectByPath.get(entry.path) ?? "other");
+/* How recently a transcript must have been appended for the window to read its
+   tail looking for an open turn. Past it the scanner already calls an open turn
+   stalled. */
+const OPEN_TURN_PROBE_WINDOW_MS = 180_000;
+/* And how many such tails one scan will read. Genuinely just-appended
+   transcripts number a handful; the ceiling keeps a pathological corpus (a
+   restore that stamps a thousand files with the current time) from turning
+   selection into a full-corpus read. */
+const OPEN_TURN_PROBE_LIMIT = 32;
+
+/**
+ * The scheme bucket for one transcript. A resolved project is the bucket; an
+ * unresolved one falls back to the transcript's own directory rather than to a
+ * shared `"other"` key, so a path shape the resolver does not recognise can
+ * never collapse hundreds of distinct projects into a single 80-card window.
+ */
+function schemeBucket(entry: RawEntry, projectByPath: ReadonlyMap<string, string>): string {
+  const project = projectByPath.get(entry.path);
+  if (project && project !== "other") return project;
+  return `unresolved:${path.dirname(entry.path)}`;
+}
+
+/**
+ * Transcripts the operator is working in right now: a registered host owns the
+ * file, or turn evidence already held for this exact file identity says the
+ * turn is still open. Reads no bytes, so the window can ask it for every
+ * discovered transcript.
+ */
+function isLiveEntry(entry: RawEntry, hosted: ReadonlySet<string> | undefined): boolean {
+  if (hosted?.has(entry.path)) return true;
+  if (!entry.path.endsWith(".jsonl")) return false;
+  const turn = cachedTranscriptTurn(entry.path, entry.st.size, entry.st.mtimeMs, entry.rootName === "codex-sessions");
+  return turn?.state === "busy";
+}
+
+/**
+ * Reads the tail of the newest just-appended transcripts the window left out,
+ * so an open turn nobody has evidence for yet still keeps its card. The reads
+ * prime the very cache `isLiveEntry` and the rest of the scan consult, and they
+ * yield between files. Reports whether any of them turned out to be open.
+ */
+async function primeElidedOpenTurns(ranked: readonly RawEntry[], selected: ReadonlySet<string>): Promise<boolean> {
+  const horizon = Date.now() - OPEN_TURN_PROBE_WINDOW_MS;
+  const candidates: RawEntry[] = [];
+  for (const entry of ranked) {
+    if (candidates.length >= OPEN_TURN_PROBE_LIMIT) break;
+    if (selected.has(entry.path) || !entry.path.endsWith(".jsonl") || entry.st.mtimeMs <= horizon) continue;
+    const codex = entry.rootName === "codex-sessions";
+    if (!cachedTranscriptTurn(entry.path, entry.st.size, entry.st.mtimeMs, codex)) candidates.push(entry);
+  }
+  let open = false;
+  await forEachCooperatively(candidates, (entry) => {
+    const turn = transcriptTurnResult(
+      entry.path,
+      entry.st.size,
+      entry.st.mtimeMs,
+      entry.rootName === "codex-sessions",
+      false,
+    );
+    open ||= turn.turn.state === "busy";
+  });
+  return open;
+}
+
+function cappedEntries(
+  ranked: RawEntry[],
+  projectByPath: ReadonlyMap<string, string>,
+  hosted?: ReadonlySet<string>,
+): RawEntry[] {
+  return selectSchemeWindow(
+    ranked,
+    (entry) => schemeBucket(entry, projectByPath),
+    undefined,
+    { protect: (entry) => isLiveEntry(entry, hosted) },
+  );
 }
 
 function resourceActivity(previous: FileEntry | undefined, mtime: number, size: number): Pick<FileEntry, "activity" | "activityReason"> {
@@ -267,11 +351,17 @@ async function canonicalProjectCatalog(
   conversationCatalog: readonly ConversationCatalogEntry[],
   excludedSummaryPaths?: ReadonlySet<string>,
   sourceCatalog: readonly ProjectCatalogEntry[] = [],
+  canonicalizePath: TranscriptPathCanonicalizer = (pathname) => pathname,
 ): Promise<{ projectByPath: Map<string, string>; projectCatalog: ProjectCatalogEntry[] }> {
   const canonicalByPath = new Map(projectByPath);
   const registryProjection = sessionProjectProjection(true);
+  /* The registry records whichever root form was current when a generation was
+     written; discovery walks one canonical form. Without the rewrite the
+     registry's authoritative project attribution silently misses every
+     conversation whose account home symlinks into the shared store. */
   await forEachCooperatively([...registryProjection.projectByPath], ([pathname, project]) => {
-    if (canonicalByPath.has(pathname)) canonicalByPath.set(pathname, project);
+    const canonical = canonicalizePath(pathname);
+    if (canonicalByPath.has(canonical)) canonicalByPath.set(canonical, project);
   });
   const groups = new Map<string, ProjectCatalogEntry>();
   const sourceMetadata = new Map<string, Pick<ProjectCatalogEntry, "projectRoot" | "displayName">>();
@@ -308,11 +398,20 @@ async function canonicalProjectCatalog(
 async function entriesFromRaw(
   raw: RawEntry[],
   projectByPath?: ReadonlyMap<string, string>,
-  demoted?: ReadonlySet<string>,
-  pin?: ReadonlySet<string>,
+  demotedInput?: ReadonlySet<string>,
+  pinInput?: ReadonlySet<string>,
   summaryByPath?: ReadonlyMap<string, ParsedFileSummary>,
+  canonicalizePath: TranscriptPathCanonicalizer = (pathname) => pathname,
+  hosted?: ReadonlySet<string>,
 ): Promise<{ files: FileEntry[]; pinOverlayPaths?: string[] }> {
   const stateKey = projectResolutionStateKey();
+  /* Demotion and pins arrive as registry paths, which may name a discovered
+     transcript through an account home that symlinks into the shared store.
+     Comparing those raw against the walked corpus made a live conversation
+     miss its pin and — far worse — kept its own archived-predecessor demotion,
+     which ranks below every current transcript and drops the card (issue #942). */
+  const demoted = canonicalizeTranscriptPaths(demotedInput, canonicalizePath);
+  const pin = canonicalizeTranscriptPaths(pinInput, canonicalizePath);
   raw.sort((a, b) => b.st.mtimeMs - a.st.mtimeMs);
   const rawByCodexThread = new Map<string, RawEntry>();
   await forEachCooperatively(raw, (entry) => {
@@ -327,7 +426,10 @@ async function entriesFromRaw(
   const ranked = demoted?.size
     ? [...raw.filter((entry) => !demoted.has(entry.path)), ...raw.filter((entry) => demoted.has(entry.path))]
     : raw;
-  const selected = cappedEntries(ranked, projectByPath ?? new Map());
+  let selected = cappedEntries(ranked, projectByPath ?? new Map(), hosted);
+  if (await primeElidedOpenTurns(ranked, new Set(selected.map((entry) => entry.path)))) {
+    selected = cappedEntries(ranked, projectByPath ?? new Map(), hosted);
+  }
   const selectedPaths = new Set(selected.map((entry) => entry.path));
   const globalPaths = pin?.size ? new Set(selectedPaths) : undefined;
   const rawByPath = pin?.size ? new Map(raw.map((entry) => [entry.path, entry] as const)) : null;
@@ -403,6 +505,9 @@ export async function discoverFilesWithProjectCatalog(
     demote?: ReadonlySet<string>;
     loadDemote?: () => ReadonlySet<string>;
     pin?: ReadonlySet<string>;
+    /** Transcripts a live host owns right now; the scheme window never elides
+        them (issue #942). */
+    hosted?: ReadonlySet<string>;
     resourceBaseline?: ResourceScopeSnapshot;
     onResourceSnapshot?: (snapshot: ResourceScopeSnapshot) => void;
   } = {},
@@ -421,7 +526,8 @@ export async function discoverFilesWithProjectCatalog(
       ? (paths) => options.onResourceSnapshot!(resourceScopeFromPaths(paths, options.resourceBaseline))
       : undefined,
   );
-  const demote = options.demote ?? options.loadDemote?.();
+  const canonicalizePath = canonicalizerFor(roots);
+  const demote = canonicalizeTranscriptPaths(options.demote ?? options.loadDemote?.(), canonicalizePath);
   const snapshot = await projectCatalogSnapshotFromRaw(discovery.raw, {
     persist: options.persist,
     persistIndex: options.persistIndex,
@@ -434,8 +540,17 @@ export async function discoverFilesWithProjectCatalog(
     snapshot.conversationCatalog,
     demote,
     snapshot.projectCatalog,
+    canonicalizePath,
   );
-  const entries = await entriesFromRaw(discovery.raw, projectByPath, demote, options.pin, snapshot.summaryByPath);
+  const entries = await entriesFromRaw(
+    discovery.raw,
+    projectByPath,
+    demote,
+    options.pin,
+    snapshot.summaryByPath,
+    canonicalizePath,
+    canonicalizeTranscriptPaths(options.hosted, canonicalizePath),
+  );
   return { ...entries, projectCatalog, complete: snapshot.complete };
 }
 
@@ -443,18 +558,29 @@ export async function discoverFiles(
   roots: Roots | RootEntries = scanRootEntries(),
   demote?: ReadonlySet<string>,
   pin?: ReadonlySet<string>,
+  hosted?: ReadonlySet<string>,
 ): Promise<FileEntry[]> {
   const scanToken = beginProjectCatalogScan(false);
   const limit = createLimiter(48);
   const discovery = await discoverRaw(roots, limit);
+  const canonicalizePath = canonicalizerFor(roots);
   const snapshot = await projectCatalogSnapshotFromRaw(discovery.raw, { persist: false, scanToken, complete: discovery.complete });
   const { projectByPath } = await canonicalProjectCatalog(
     snapshot.projectByPath,
     snapshot.conversationCatalog,
     undefined,
     snapshot.projectCatalog,
+    canonicalizePath,
   );
-  return (await entriesFromRaw(discovery.raw, projectByPath, demote, pin, snapshot.summaryByPath)).files;
+  return (await entriesFromRaw(
+    discovery.raw,
+    projectByPath,
+    demote,
+    pin,
+    snapshot.summaryByPath,
+    canonicalizePath,
+    canonicalizeTranscriptPaths(hosted, canonicalizePath),
+  )).files;
 }
 
 /** Cold-start fallback for the list/search route. It builds only lightweight
