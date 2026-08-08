@@ -145,6 +145,26 @@ test("a NEW running turn retires the note instead of contradicting the spinner",
   await act(async () => root.unmount());
 });
 
+test("a note retired by a new turn stays retired once that turn ends", async () => {
+  stubInterrupt();
+  const { host, root } = await mount(liveRoot({ startedAt: TURN_STARTED, endedAt: null }));
+  await sendEscape(host);
+
+  /* Retirement has to be terminal. Hidden-while-running only would let the note
+     come back the moment this unrelated turn stopped, telling the operator that
+     a turn nobody interrupted was interrupted — and again after every later
+     turn, forever. */
+  const nextTurn = liveRoot({ startedAt: TURN_STARTED + 30_000, endedAt: null });
+  await act(async () => root.render(<AgentControlStrip file={nextTurn} />));
+  expect(noteText(host)).toBe("");
+
+  const nextEnded = liveRoot({ startedAt: TURN_STARTED + 30_000, endedAt: TURN_STARTED + 45_000 }, "idle");
+  await act(async () => root.render(<AgentControlStrip file={nextEnded} />));
+  expect(noteText(host)).toBe("");
+  expect(host.textContent).not.toContain(translate("en", "composer.escapeSent"));
+  await act(async () => root.unmount());
+});
+
 test("a failed interrupt still reports its own error, untouched by the turn state", async () => {
   globalThis.fetch = ((url: string) => {
     if (String(url) === "/api/tmux") {

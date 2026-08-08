@@ -172,6 +172,22 @@ export function migrationHoldsSends(state: CardMigrationState | null): boolean {
   return state === "switching";
 }
 
+/**
+ * Whether a delivery this card admits is being held FOR THE SWITCH — the
+ * card-state mirror of the server's `deliveryFence`, which holds every delivery
+ * from `waiting-turn` (card `pending`) onwards, not just the phases that freeze
+ * the controls.
+ *
+ * Two surfaces need it, and both are display-only. A `held` delivery outcome on
+ * its own proves nothing about a migration: the registry fence returns the same
+ * word when a generation claim does not land. So nothing may say "delivers after
+ * the account switch" without asking here first, and the operator's queued
+ * message may only be labelled as waiting on the switch while one is running.
+ */
+export function migrationHoldsDelivery(state: CardMigrationState | null): boolean {
+  return state === "pending" || state === "switching";
+}
+
 /** What selecting an account should do, given the preview result. Every switch
     surface starts with a preview and continues through a durable migration intent.
     `recoverable-error` keeps preview failures visible for retry. Empty scope uses

@@ -140,13 +140,19 @@ type StripStatus =
   | { kind: "interrupt"; turnStartedAt: number | null };
 
 /**
- * What the interrupt note may truthfully say beside the working spinner:
+ * What the interrupt note may truthfully say beside the working spinner. The
+ * turn the Escape was aimed at decides, and it decides FIRST:
  *
- *  - the same turn is still running → the Escape is on its way, and the card
+ *  - the card has moved on to another turn → the note is about a turn the
+ *    operator can no longer see, so it retires;
+ *  - that same turn is still running → the Escape is on its way, and the card
  *    says exactly that instead of announcing a stop that has not happened;
- *  - that turn is over → the completed interrupt, as before;
- *  - a DIFFERENT turn is running → the note is about a turn the operator can no
- *    longer see, so it leaves rather than sit beside the new turn's spinner.
+ *  - that same turn is over → the completed interrupt, as before.
+ *
+ * Identity, not liveness, is what retires the note — and that makes retirement
+ * terminal. Retiring only while the newer turn RAN left the note to come back
+ * the moment it ended, telling the operator that a turn nobody interrupted was
+ * interrupted, and again after every turn after that.
  */
 function resolvedStatus(
   status: StripStatus | null,
@@ -154,10 +160,10 @@ function resolvedStatus(
   t: TFunction,
 ): { kind: "ok" | "info" | "err"; text: string } | null {
   if (!status || status.kind !== "interrupt") return status;
-  const running = turnIsRunning(file);
-  if (!running) return { kind: "ok", text: t("composer.escapeSent") };
-  const sameTurn = (file.lastTurn?.startedAt ?? null) === status.turnStartedAt;
-  return sameTurn ? { kind: "ok", text: t("composer.escapeSentWaiting") } : null;
+  if ((file.lastTurn?.startedAt ?? null) !== status.turnStartedAt) return null;
+  return turnIsRunning(file)
+    ? { kind: "ok", text: t("composer.escapeSentWaiting") }
+    : { kind: "ok", text: t("composer.escapeSent") };
 }
 
 /**

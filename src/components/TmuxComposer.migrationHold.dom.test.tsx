@@ -160,6 +160,7 @@ function deliveryStatements(host: HTMLElement, locale: "en" | "uk"): string[] {
     "composer.receiptRecovering",
     "composer.deliveryHeld",
     "composer.deliveryHeldUnnamed",
+    "composer.deliveryHeldWaiting",
     "common.sent",
   ] as const)
     .map((key) => translate(locale, key, { label: "" }))
@@ -235,12 +236,44 @@ test("a queued submission held for the switch paints exactly ONE delivery state"
   }
 });
 
-test("a held delivery with no migration annotation at all still says something true", async () => {
+test("a held delivery with no account switch never claims one", async () => {
+  /* `held` does not mean "migration": the registry fence returns it just as
+     readily when a generation claim does not land. Promising delivery "after the
+     account switch" for a card with no annotation invented a switch the operator
+     is not making — and then leaves them waiting for it. */
+  for (const locale of ["en", "uk"] as const) {
+    setLocale(locale);
+    stubHeldSend();
+    sessionStorage.setItem(`llvSent:${CARD}`, JSON.stringify([
+      { id: 1, text: "second try", at: Date.now(), via: "pane", state: "failed", clientMessageId: "key-retry" },
+    ]));
+    const { host, root } = await renderInto(<TmuxComposer file={fileWith(undefined)} />);
+    const retry = host.querySelector(
+      `button[aria-label="${translate(locale, "composer.retrySend")}"]`,
+    ) as HTMLButtonElement;
+    await act(async () => {
+      retry.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await settle();
+
+    expect(host.textContent).not.toContain("«»");
+    /* The hold is still reported — nothing is suppressed — it just says what it
+       is actually waiting for. */
+    expect(host.textContent).toContain(translate(locale, "composer.deliveryHeldWaiting"));
+    expect(host.textContent).not.toContain(translate(locale, "composer.deliveryHeldUnnamed"));
+    await act(async () => root.unmount());
+    sessionStorage.clear();
+    resetOutboxForTests();
+  }
+});
+
+test("a card that IS switching still promises the switch on a direct send", async () => {
   stubHeldSend();
   sessionStorage.setItem(`llvSent:${CARD}`, JSON.stringify([
     { id: 1, text: "second try", at: Date.now(), via: "pane", state: "failed", clientMessageId: "key-retry" },
   ]));
-  const { host, root } = await renderInto(<TmuxComposer file={fileWith(undefined)} />);
+  const { host, root } = await renderInto(<TmuxComposer file={fileWith(pendingWithoutTarget)} />);
   const retry = host.querySelector(
     `button[aria-label="${translate("en", "composer.retrySend")}"]`,
   ) as HTMLButtonElement;
@@ -250,7 +283,7 @@ test("a held delivery with no migration annotation at all still says something t
   });
   await settle();
 
-  expect(host.textContent).not.toContain("«»");
   expect(host.textContent).toContain(translate("en", "composer.deliveryHeldUnnamed"));
+  expect(host.textContent).not.toContain(translate("en", "composer.deliveryHeldWaiting"));
   await act(async () => root.unmount());
 });

@@ -17,7 +17,7 @@ import type { SelectedContextRef } from "@/lib/selection/selectedContext";
 import { useViewerSelectedContext, viewerSelectedContext } from "@/lib/selection/viewerSelectedContext";
 import { useTmuxTarget } from "@/hooks/useTmuxTarget";
 import { conversationIdentity } from "@/lib/accounts/identity";
-import { cardMigrationState, migrationHoldsSends, migrationTargetName } from "@/lib/accounts/migration";
+import { cardMigrationState, migrationHoldsDelivery, migrationHoldsSends, migrationTargetName } from "@/lib/accounts/migration";
 import { getLocale, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
@@ -1843,17 +1843,24 @@ export function TmuxComposerCore({
          hold/queue is still in flight to the successor (round-1 P1#4). */
       settleOutbox(held ? "delivering" : "delivered");
       if (ownsDeliveryState) {
-        /* The target can be nameless for the whole pending window — the
+        /* A `held` outcome does NOT imply an account switch: the registry fence
+           also holds a delivery whose generation claim did not land. Only a card
+           that is actually switching may promise the message "delivers after the
+           account switch"; otherwise the hold is said plainly.
+           The target can be nameless for the whole pending window — the
            annotation is published before the target identity reaches the card.
            The hold is still true, so it is said without a name rather than held
            for «» (an account the operator cannot recognize). */
+        const heldForSwitch = migrationHoldsDelivery(cardMigrationState(file.migration));
         const heldFor = migrationTargetName(file.migration);
         setStatus({
           kind: held ? "info" : "ok",
           text: held
-            ? heldFor
-              ? t("composer.deliveryHeld", { label: heldFor })
-              : t("composer.deliveryHeldUnnamed")
+            ? !heldForSwitch
+              ? t("composer.deliveryHeldWaiting")
+              : heldFor
+                ? t("composer.deliveryHeld", { label: heldFor })
+                : t("composer.deliveryHeldUnnamed")
             : result.outcome === "resumed" || result.spawned
               ? t("composer.spawned", { target: result.target ?? "" })
               : result.imagePaths?.length
