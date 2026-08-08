@@ -34,13 +34,19 @@ test("structured hosts select Bun for a CLI process launched by Node", () => {
 
 test("the packaged helper makes the same structured-runtime choice under Node", () => {
   const helper = path.join(path.dirname(fileURLToPath(import.meta.url)), "server-runtime.mjs");
+  const nodeSearchPath = (process.env.PATH ?? "")
+    .split(path.delimiter)
+    .filter((directory) => !path.basename(directory).startsWith("bun-node-"))
+    .join(path.delimiter);
+  const nodeExecutable = Bun.which("node", { PATH: nodeSearchPath });
+  if (!nodeExecutable) throw new Error("the packaged runtime test requires Node");
   const probe = Bun.spawnSync([
-    "node",
+    nodeExecutable,
     "--input-type=module",
     "--eval",
     `import { viewerServerBunRuntime } from ${JSON.stringify(pathToFileURL(helper).href)}; process.stdout.write(String(viewerServerBunRuntime()));`,
   ], {
-    env: { ...process.env, LLV_STRUCTURED_HOSTS: "1", LLV_BUN_EXECUTABLE: "/verified/bun" },
+    env: { ...process.env, PATH: nodeSearchPath, LLV_STRUCTURED_HOSTS: "1", LLV_BUN_EXECUTABLE: "/verified/bun" },
     stdout: "pipe",
     stderr: "pipe",
   });
