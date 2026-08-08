@@ -112,14 +112,22 @@ export function markStateSqliteCutoverReady(filename: string): void {
   cutoverReadyDatabases.add(path.resolve(filename));
 }
 
+function collectionMarkersMatch(db: Database, seeds: readonly StateCollectionSeed<unknown>[]): boolean {
+  const marker = db.query<{ schema_version: number; migration_id: string }, [string]>(
+    "SELECT schema_version, migration_id FROM state_collections WHERE collection = ?",
+  );
+  return seeds.every((seed) => {
+    const current = marker.get(seed.collection);
+    return current?.schema_version === seed.schemaVersion && current.migration_id === seed.migrationId;
+  });
+}
+
 function collectionsAlreadyInitialized(filename: string, seeds: readonly StateCollectionSeed<unknown>[]): boolean {
   if (!fs.existsSync(filename)) return false;
   let db: Database | null = null;
   try {
     db = connectReadonlyDatabase(filename);
-    return seeds.every((seed) => Boolean(db!.query<{ present: number }, [string]>(
-      "SELECT 1 AS present FROM state_collections WHERE collection = ?",
-    ).get(seed.collection)));
+    return collectionMarkersMatch(db, seeds);
   } catch {
     return false;
   } finally {
@@ -343,7 +351,7 @@ export function initializeStateCollections(
       try {
         db.exec("BEGIN IMMEDIATE");
         assertSqliteInitializationAuthority(filename, allowFencedExisting);
-        if (options.reimportExisting) {
+        if (options.reimportExisting && !collectionMarkersMatch(db, seeds)) {
           const removeLease = db.query("DELETE FROM state_leases WHERE collection = ?");
           const removeCollection = db.query("DELETE FROM state_collections WHERE collection = ?");
           for (const seed of seeds) {

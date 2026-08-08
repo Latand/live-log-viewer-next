@@ -563,6 +563,53 @@ test("the migration dry run leaves the state directory untouched", () => {
   }
 });
 
+test("complete durable markers prevent a later cutover from reimporting stale JSON", async () => {
+  const previous = process.env.LLV_STATE_DIR;
+  const previousPort = process.env.PORT;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-hot-state-marker-guard-"));
+  const revision = "f".repeat(40);
+  process.env.LLV_STATE_DIR = sandbox;
+  process.env.PORT = "19008";
+  try {
+    fs.writeFileSync(path.join(sandbox, "flows.json"), JSON.stringify({ flows: [] }));
+    fs.writeFileSync(path.join(sandbox, "pipelines.json"), JSON.stringify({ schemaVersion: 4, pipelines: [] }));
+    fs.writeFileSync(path.join(sandbox, "pipelines-archive.json"), JSON.stringify({ schemaVersion: 4, pipelines: [] }));
+    fs.writeFileSync(path.join(sandbox, "workflows.json"), JSON.stringify({ workflows: [] }));
+    await initializeHotStateStoresAtStartup();
+    saveFlows([sampleFlow("sqlite-durable", "newer-than-json")]);
+
+    fs.writeFileSync(path.join(sandbox, "flows.json"), JSON.stringify({
+      flows: [sampleFlow("legacy-stale", "stale-json")],
+    }));
+    fs.writeFileSync(path.join(sandbox, "viewer-release.json"), JSON.stringify({
+      endpoint: "http://127.0.0.1:19008",
+      revision,
+      hotStateBackend: HOT_STATE_BACKEND,
+    }));
+    const boundary = await establishHotStateCutoverBoundary(() => true, {
+      pollMs: 0,
+      stablePolls: 1,
+      maxPolls: 2,
+      schedule: (callback) => { callback(); return { unref() {} }; },
+    });
+    expect(boundary.reimportLegacy).toBe(true);
+
+    await initializeHotStateStoresAtStartup(boundary);
+    expect(readStateCollectionRows(path.join(sandbox, "state.sqlite"), "flows")).toEqual([
+      expect.objectContaining({ id: "sqlite-durable", stateDetail: "newer-than-json" }),
+    ]);
+    expect(JSON.parse(fs.readFileSync(path.join(sandbox, "flows.json"), "utf8"))).toMatchObject({
+      flows: [expect.objectContaining({ id: "legacy-stale", stateDetail: "stale-json" })],
+    });
+  } finally {
+    if (previous === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previous;
+    if (previousPort === undefined) delete process.env.PORT;
+    else process.env.PORT = previousPort;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
 test("malformed legacy sources stay unchanged and receive no migration marker", () => {
   const previous = process.env.LLV_STATE_DIR;
   const cases = [
