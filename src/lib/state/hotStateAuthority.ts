@@ -224,6 +224,7 @@ export function restoreHotStateAuthority(
       authority?.releaseRevision ?? null,
       {
         ...(authority?.checkpoint ? { checkpoint: authority.checkpoint } : {}),
+        ...(authority?.activationReadyAt ? { activationReadyAt: authority.activationReadyAt } : {}),
         epoch: current!.epoch + 1,
       },
     );

@@ -21,6 +21,7 @@ import {
   acknowledgeHotStateFence,
   HOT_STATE_BACKEND,
   HOT_STATE_RELEASE_REVISION_ENV,
+  markHotStateActivationReady,
   publishHotStateAuthority,
   readHotStateAuthority,
   restoreHotStateAuthority,
@@ -535,6 +536,26 @@ test("authority rollback uses a monotonic compare-and-set and rejects delayed fe
       .toThrow("epoch cannot regress");
     expect(restoreHotStateAuthority(sandbox, initial, fence)).toBeNull();
     expect(readHotStateAuthority(sandbox)).toEqual(acknowledged);
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("authority rollback preserves the previous SQLite activation readiness", () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-hot-state-authority-ready-"));
+  const revision = "9".repeat(40);
+  try {
+    const initial = publishHotStateAuthority(sandbox, "sqlite", revision);
+    const ready = markHotStateActivationReady(sandbox, initial);
+    const transition = publishHotStateAuthority(sandbox, "fencing", revision);
+
+    const restored = restoreHotStateAuthority(sandbox, ready, transition);
+    expect(restored).toMatchObject({
+      mode: "sqlite",
+      releaseRevision: revision,
+      activationReadyAt: ready.activationReadyAt,
+    });
+    expect(restored!.epoch).toBeGreaterThan(transition.epoch);
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
