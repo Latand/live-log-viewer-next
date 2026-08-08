@@ -6,7 +6,7 @@ import path from "node:path";
 import { AgentRegistry } from "@/lib/agent/registry";
 import { CODEX_SOL_MODEL, CODEX_TERRA_MODEL } from "@/lib/agent/models";
 
-import { configuredReviewerFallback, loadFlows, mergeSeededPresets, reconcileFlowConversationOwnership, reconcileFlowConversationOwnershipCooperatively, saveFlows, seededPresetsFromRoles } from "./store";
+import { configuredReviewerFallback, loadFlows, mergeSeededPresets, patchFlowRows, reconcileFlowConversationOwnership, reconcileFlowConversationOwnershipCooperatively, saveFlows, seededPresetsFromRoles } from "./store";
 import type { Flow, FlowPreset } from "./types";
 
 function commitTestSuccessor(
@@ -154,6 +154,55 @@ test("flow specs persist in SQLite and legacy flow entries import on first boot"
     else process.env.LLV_STATE_DIR = previousState;
     fs.rmSync(sandbox, { recursive: true, force: true });
     if (legacySandbox) fs.rmSync(legacySandbox, { recursive: true, force: true });
+  }
+});
+
+test("flow row patches hold the latest-row merge and commit under one process-shared lease", async () => {
+  const previousState = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-atomic-patch-"));
+  process.env.LLV_STATE_DIR = sandbox;
+  const flow = {
+    id: "atomic-patch-flow",
+    template: "implement-review-loop",
+    project: "repo",
+    cwd: "/repo",
+    implementerPath: "/implementer.jsonl",
+    roles: { implementer: { engine: "codex" as const, model: null, effort: "high" }, reviewer: { engine: "codex" as const, model: null, effort: "xhigh" } },
+    baseRef: "base",
+    baseMode: "head" as const,
+    mode: "auto" as const,
+    reviewerMode: "headless" as const,
+    roundLimit: 5,
+    state: "waiting_ready" as const,
+    stateDetail: null,
+    rounds: [],
+    createdAt: "now",
+    closedAt: null,
+  } satisfies Flow;
+  const resultFile = path.join(sandbox, "writer-result.json");
+  let childExit: Promise<number> | null = null;
+  try {
+    saveFlows([flow]);
+    patchFlowRows([flow.id], (current) => {
+      const child = Bun.spawn({
+        cmd: [process.execPath, path.join(import.meta.dir, "../state/hotStateAuthority.sqliteChild.ts"), resultFile, "write"],
+        cwd: process.cwd(),
+        env: { ...process.env, LLV_STATE_DIR: sandbox },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      childExit = child.exited;
+      Bun.sleepSync(100);
+      expect(fs.existsSync(resultFile)).toBe(false);
+      current[0]!.stateDetail = "atomic-patch";
+      return current;
+    });
+    expect(await childExit).toBe(0);
+    expect(loadFlows()[0]!.stateDetail).toBe("atomic-patch");
+  } finally {
+    if (previousState === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousState;
+    fs.rmSync(sandbox, { recursive: true, force: true });
   }
 });
 

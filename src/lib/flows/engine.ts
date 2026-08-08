@@ -33,7 +33,7 @@ import {
   type ParsedFindings,
 } from "./findings";
 import { relayPrompt, reviewerPrompt } from "./prompts";
-import { atomicWriteText, findingsPathFor, loadFlow, loadFlows, loadFlowsForTick, loadPresets, saveFlowRows, saveFlows } from "./store";
+import { atomicWriteText, findingsPathFor, loadFlows, loadFlowsForTick, loadPresets, patchFlowRows, saveFlows } from "./store";
 import type { Flow, FlowPreset, FlowState, RelayDeliveryTransport, RoleConfig, Round } from "./types";
 import { chooseHeadlessReviewer, rateLimitStateDetail } from "./reviewerPolicy";
 
@@ -1097,73 +1097,71 @@ export function persistTickFlows(
   candidateIds?: ReadonlySet<string>,
 ): void {
   const tickById = new Map(flows.map((flow) => [flow.id, flow] as const));
-  const changed: Flow[] = [];
   const ids = candidateIds ?? new Set(tickById.keys());
-  [...ids].flatMap((id) => {
-    const flow = loadFlow(id);
-    return flow ? [flow] : [];
-  }).map((diskFlow) => {
-    const tick = tickById.get(diskFlow.id);
-    if (!tick) return diskFlow;
-    const start = base.get(diskFlow.id);
-    if (!start) return diskFlow;
-    /* The tick touched nothing on this flow → whatever is on disk now wins. */
-    if (JSON.stringify(tick) === start.snapshot) return diskFlow;
-    const takenOver =
-      diskFlow.state !== start.state ||
-      diskFlow.rounds.length !== start.roundsLen ||
-      diskFlow.closedAt !== start.closedAt;
-    if (takenOver) {
-      if (diskFlow.state !== "paused" && diskFlow.state !== "closed") return diskFlow;
+  patchFlowRows(ids, (diskFlows) => {
+    const changed: Flow[] = [];
+    for (const diskFlow of diskFlows) {
+      const tick = tickById.get(diskFlow.id);
+      if (!tick) continue;
+      const start = base.get(diskFlow.id);
+      if (!start) continue;
+      /* The tick touched nothing on this flow → whatever is on disk now wins. */
+      if (JSON.stringify(tick) === start.snapshot) continue;
+      const takenOver =
+        diskFlow.state !== start.state ||
+        diskFlow.rounds.length !== start.roundsLen ||
+        diskFlow.closedAt !== start.closedAt;
+      if (takenOver) {
+        if (diskFlow.state !== "paused" && diskFlow.state !== "closed") continue;
+        const baseFlow = JSON.parse(start.snapshot) as Flow;
+        const settledByRound = new Map(tick.rounds.flatMap((round) => {
+          const baseRound = baseFlow.rounds.find((item) => item.n === round.n);
+          return baseRound?.relayedAt == null && round.relayDelivery && round.relayedAt
+            ? [[round.n, round] as const]
+            : [];
+        }));
+        if (settledByRound.size === 0) continue;
+        const next = {
+          ...diskFlow,
+          rounds: diskFlow.rounds.map((diskRound) => {
+            const settled = settledByRound.get(diskRound.n);
+            return settled && settled.reviewerBindingId === diskRound.reviewerBindingId ? {
+              ...diskRound,
+              relayStartedAt: settled.relayStartedAt,
+              relayDelivery: settled.relayDelivery,
+              relayedAt: settled.relayedAt,
+            } : diskRound;
+          }),
+        };
+        changed.push(next);
+        continue;
+      }
+      /* Fence an unstarted round's reviewer snapshot to the disk value ONLY when the
+         tick did not itself change it (comparing to the pre-tick base): then a
+         difference on disk is a concurrent set-roles that must survive. When the tick
+         DID change it (e.g. issue #117 retry nulls it to re-pick an account), the
+         tick's value wins. */
       const baseFlow = JSON.parse(start.snapshot) as Flow;
-      const settledByRound = new Map(tick.rounds.flatMap((round) => {
-        const baseRound = baseFlow.rounds.find((item) => item.n === round.n);
-        return baseRound?.relayedAt == null && round.relayDelivery && round.relayedAt
-          ? [[round.n, round] as const]
-          : [];
-      }));
-      if (settledByRound.size === 0) return diskFlow;
+      const rounds = tick.rounds.map((round, index) => {
+        const diskRound = diskFlow.rounds[index];
+        const baseRound = baseFlow.rounds[index];
+        const tickKeptRole = JSON.stringify(round.reviewerRole ?? null) === JSON.stringify(baseRound?.reviewerRole ?? null);
+        return diskRound && round.spawnStartedAt == null && tickKeptRole && diskRound.reviewerRole !== undefined
+          ? { ...round, reviewerRole: diskRound.reviewerRole }
+          : round;
+      });
       const next = {
-        ...diskFlow,
-        rounds: diskFlow.rounds.map((diskRound) => {
-          const settled = settledByRound.get(diskRound.n);
-          return settled && settled.reviewerBindingId === diskRound.reviewerBindingId ? {
-            ...diskRound,
-            relayStartedAt: settled.relayStartedAt,
-            relayDelivery: settled.relayDelivery,
-            relayedAt: settled.relayedAt,
-          } : diskRound;
-        }),
+        ...tick,
+        revision: diskFlow.revision,
+        rounds,
+        roles: diskFlow.roles,
+        roundLimit: diskFlow.roundLimit,
+        mode: diskFlow.mode,
       };
       changed.push(next);
-      return next;
     }
-    /* Fence an unstarted round's reviewer snapshot to the disk value ONLY when the
-       tick did not itself change it (comparing to the pre-tick base): then a
-       difference on disk is a concurrent set-roles that must survive. When the tick
-       DID change it (e.g. issue #117 retry nulls it to re-pick an account), the
-       tick's value wins. */
-    const baseFlow = JSON.parse(start.snapshot) as Flow;
-    const rounds = tick.rounds.map((round, index) => {
-      const diskRound = diskFlow.rounds[index];
-      const baseRound = baseFlow.rounds[index];
-      const tickKeptRole = JSON.stringify(round.reviewerRole ?? null) === JSON.stringify(baseRound?.reviewerRole ?? null);
-      return diskRound && round.spawnStartedAt == null && tickKeptRole && diskRound.reviewerRole !== undefined
-        ? { ...round, reviewerRole: diskRound.reviewerRole }
-        : round;
-    });
-    const next = {
-      ...tick,
-      revision: diskFlow.revision,
-      rounds,
-      roles: diskFlow.roles,
-      roundLimit: diskFlow.roundLimit,
-      mode: diskFlow.mode,
-    };
-    changed.push(next);
-    return next;
+    return changed;
   });
-  saveFlowRows(changed);
 }
 
 export async function tickFlows(entries: FileEntry[]): Promise<TickResult> {

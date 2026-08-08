@@ -529,6 +529,26 @@ export function saveFlowRows(flows: Flow[]): void {
   });
 }
 
+/** Read selected durable rows and prepare their replacements while holding the
+ * process-shared collection lease. */
+export function patchFlowRows(
+  flowIds: Iterable<string>,
+  prepare: (current: Flow[]) => readonly Flow[],
+): void {
+  const ids = [...new Set(flowIds)];
+  if (ids.length === 0) return;
+  const store = flowStore();
+  store.patchSync(() => {
+    const current = ids.flatMap((id) => {
+      const flow = store.get(id);
+      return flow ? [flow] : [];
+    });
+    const records = prepare(current);
+    prepareFlowRevisions(records);
+    return { records };
+  });
+}
+
 /** Re-read and mutate flow state under the process-shared SQLite lease. */
 export async function withFlowMutation<T>(mutate: (flows: Flow[], persist: () => void) => T): Promise<T> {
   return await flowStore().mutate(mutate, ({ dirtyRecords }) => prepareFlowRevisions(dirtyRecords));
