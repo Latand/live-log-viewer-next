@@ -180,7 +180,7 @@ test("flow row patches hold the latest-row merge and commit under one process-sh
     closedAt: null,
   } satisfies Flow;
   const resultFile = path.join(sandbox, "writer-result.json");
-  let childExit: Promise<number> | null = null;
+  const childState: { exit: Promise<number> | null } = { exit: null };
   try {
     saveFlows([flow]);
     patchFlowRows([flow.id], (current) => {
@@ -191,12 +191,14 @@ test("flow row patches hold the latest-row merge and commit under one process-sh
         stdout: "pipe",
         stderr: "pipe",
       });
-      childExit = child.exited;
+      childState.exit = child.exited;
       Bun.sleepSync(100);
       expect(fs.existsSync(resultFile)).toBe(false);
       current[0]!.stateDetail = "atomic-patch";
       return current;
     });
+    const childExit = childState.exit;
+    if (!childExit) throw new Error("cross-process writer did not start");
     expect(await childExit).toBe(0);
     expect(loadFlows()[0]!.stateDetail).toBe("atomic-patch");
   } finally {
