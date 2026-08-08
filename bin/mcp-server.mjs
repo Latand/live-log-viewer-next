@@ -15,6 +15,7 @@ import {
 discardWakatimeEnvironmentCredential();
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+let selectedReleaseRevision = null;
 
 function deployedPackageRoot() {
   const configRoot = process.env.XDG_CONFIG_HOME || join(process.env.HOME || "/home/user", ".config");
@@ -37,6 +38,7 @@ function deployedPackageRoot() {
     || !/^[0-9a-f]{40}$/.test(target.revision)) {
     throw new Error("The active Viewer release target is invalid.");
   }
+  selectedReleaseRevision = target.revision;
   const runtime = target.mcpRuntime;
   if (runtime === undefined) return packageRoot;
   if (!runtime
@@ -73,6 +75,7 @@ function deployedPackageRoot() {
 }
 
 const selectedPackageRoot = deployedPackageRoot();
+if (selectedReleaseRevision) process.env.LLV_HOT_STATE_RELEASE_REVISION = selectedReleaseRevision;
 const bundled = join(selectedPackageRoot, "dist", "mcp-server.mjs");
 const source = join(selectedPackageRoot, "src", "lib", "mcp", "entry.ts");
 
@@ -85,6 +88,10 @@ async function runChild(runtime, entry) {
   }
   const child = spawn(runtime, [entry], viewerChildProcessOptions({
     cwd: selectedPackageRoot,
+    env: {
+      ...process.env,
+      ...(selectedReleaseRevision ? { LLV_HOT_STATE_RELEASE_REVISION: selectedReleaseRevision } : {}),
+    },
     stdio: admissionChannel ? [0, 1, 2, 3] : [0, 1, 2, "ignore"],
   }));
   let childExited = false;

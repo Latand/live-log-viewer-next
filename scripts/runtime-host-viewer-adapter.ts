@@ -13,6 +13,15 @@ import type {
 } from "../src/lib/runtime/contracts";
 import { admittedMcpHealthProbe } from "../src/lib/mcp/healthProbeAdmission";
 import {
+  acknowledgeHotStateFence,
+  HOT_STATE_BACKEND,
+  HOT_STATE_RELEASE_REVISION_ENV,
+  publishHotStateAuthority,
+  readHotStateAuthority,
+  restoreHotStateAuthority,
+  type HotStateAuthority,
+} from "../src/lib/state/hotStateAuthority";
+import {
   obsoleteManagedViewerContainers,
   viewerAuthenticationTokenFromConfig,
   viewerCandidateDockerArgs,
@@ -131,6 +140,7 @@ function release(value: unknown): ViewerReleaseIdentity {
     container: item.container,
     endpoint: item.endpoint,
     revision: item.revision,
+    ...(item.hotStateBackend === HOT_STATE_BACKEND ? { hotStateBackend: item.hotStateBackend } : {}),
     ...(item.mcpRuntime === undefined ? {} : { mcpRuntime: mcpRuntime(item.mcpRuntime) }),
   };
 }
@@ -171,6 +181,9 @@ async function buildCandidate(deploymentId: string, revision: string): Promise<V
   await command(["git", "--git-dir", mirrorDir, "worktree", "add", "--detach", sourceDir, revision]);
   const container = viewerCandidateContainerName(deploymentId);
   const image = viewerCandidateImageName(revision, container);
+  const hotStateBackend = fs.existsSync(path.join(sourceDir, "src", "lib", "state", "hotStateAuthority.ts"))
+    ? HOT_STATE_BACKEND
+    : undefined;
   let mcpRuntime: ViewerMcpRuntimeIdentity | null = null;
   try {
     const composeConfig = await command([
@@ -202,7 +215,14 @@ async function buildCandidate(deploymentId: string, revision: string): Promise<V
       removeComposeSnapshot: () => { fs.rmSync(composeConfigFile(container), { force: true }); },
     });
     if (!mcpRuntime) throw new Error("candidate MCP runtime staging did not complete");
-    return { revision, image, container, endpoint: `http://127.0.0.1:${port}`, mcpRuntime };
+    return {
+      revision,
+      image,
+      container,
+      endpoint: `http://127.0.0.1:${port}`,
+      ...(hotStateBackend ? { hotStateBackend } : {}),
+      mcpRuntime,
+    };
   } catch (error) {
     if (mcpRuntime) mcpRuntimeStore.retire(mcpRuntime);
     throw error;
@@ -439,23 +459,168 @@ function writeReleaseTarget(filename: string, target: ViewerReleaseIdentity): vo
   mcpRuntimeStore.publishReleaseTarget(filename, target);
 }
 
+function removeReleaseTarget(filename: string): void {
+  try { fs.unlinkSync(filename); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return;
+  }
+  const directory = fs.openSync(path.dirname(filename), "r");
+  try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+}
+
 function switchTarget(
   target: ViewerReleaseIdentity,
   action: ViewerMcpRuntimePublicationEvidence["action"],
   fallbackRuntime?: ViewerMcpRuntimeIdentity,
+  fence?: HotStateAuthority | null,
 ): ViewerMcpRuntimePublicationEvidence {
   const runtime = target.mcpRuntime ?? fallbackRuntime;
   if (!runtime) throw new Error("release MCP runtime identity is missing");
   if (runtime.source === "managed" && runtime.revision !== target.revision) {
     throw new Error("release MCP runtime revision does not match the Viewer revision");
   }
-  writeReleaseTarget(targetFile, target);
+  const currentTarget = readCurrentRelease();
+  const sameRelease = currentTarget?.revision === target.revision
+    && currentTarget.endpoint === target.endpoint;
+  const previousAuthority = readHotStateAuthority(stateDir);
+  let transitionAuthority: HotStateAuthority | null = null;
+  try {
+    if (!sameRelease) {
+      if (action === "restore") {
+        transitionAuthority = publishHotStateAuthority(
+          stateDir,
+          target.hotStateBackend === HOT_STATE_BACKEND ? "sqlite" : "legacy",
+          target.revision,
+          fence?.checkpoint ? { checkpoint: fence.checkpoint } : {},
+        );
+      } else if (target.hotStateBackend === HOT_STATE_BACKEND && previousAuthority?.mode !== "sqlite") {
+        transitionAuthority = publishHotStateAuthority(stateDir, "preparing", target.revision);
+      } else if (target.hotStateBackend === HOT_STATE_BACKEND) {
+        transitionAuthority = publishHotStateAuthority(stateDir, "sqlite", target.revision);
+      } else if (target.hotStateBackend !== HOT_STATE_BACKEND) {
+        transitionAuthority = publishHotStateAuthority(
+          stateDir,
+          "legacy",
+          target.revision,
+          fence?.checkpoint ? { checkpoint: fence.checkpoint } : {},
+        );
+      }
+    }
+    if (transitionAuthority
+      && process.env.NODE_ENV === "test"
+      && process.env.LLV_TEST_EXIT_AFTER_HOT_STATE_AUTHORITY === "1") process.exit(86);
+    writeReleaseTarget(targetFile, target);
+  } catch (error) {
+    let restoreError: unknown = null;
+    try {
+      if (currentTarget) writeReleaseTarget(targetFile, currentTarget);
+      else removeReleaseTarget(targetFile);
+    } catch (failure) {
+      restoreError = failure;
+    }
+    try {
+      if (transitionAuthority) restoreHotStateAuthority(stateDir, previousAuthority, transitionAuthority);
+    } catch (failure) {
+      restoreError ??= failure;
+    }
+    if (restoreError) {
+      const message = error instanceof Error ? error.message : "release target publication failed";
+      const restoreMessage = restoreError instanceof Error ? restoreError.message : "handoff restore failed";
+      throw new Error(`${message}; restore failed: ${restoreMessage}`);
+    }
+    throw error;
+  }
   return {
     action,
     ...runtime,
     publishedAt: new Date().toISOString(),
     durable: true,
   };
+}
+
+function authorityMatchesRelease(authority: HotStateAuthority | null, target: ViewerReleaseIdentity): boolean {
+  return authority?.releaseRevision === target.revision
+    && (target.hotStateBackend === HOT_STATE_BACKEND ? authority.mode === "sqlite" : authority.mode === "legacy");
+}
+
+async function checkpointHotStateFence(
+  request: HotStateAuthority,
+  revision: string,
+): Promise<HotStateAuthority> {
+  const previousExplicitRevision = process.env[HOT_STATE_RELEASE_REVISION_ENV];
+  process.env[HOT_STATE_RELEASE_REVISION_ENV] = revision;
+  try {
+    const { checkpointHotStateRollbackMirrorsForDemotion } = await import("../src/lib/viewerInstrumentation");
+    const revisions = await checkpointHotStateRollbackMirrorsForDemotion();
+    const { agentRegistry } = await import("../src/lib/agent/registry");
+    agentRegistry().checkpointRollbackMirrorForDemotion();
+    const current = readHotStateAuthority(stateDir);
+    if (current?.mode === "fencing"
+      && current.epoch === request.epoch
+      && current.releaseRevision === revision
+      && current.checkpoint) return current;
+    try {
+      return acknowledgeHotStateFence(stateDir, request, revisions);
+    } catch (error) {
+      const acknowledged = readHotStateAuthority(stateDir);
+      if (acknowledged?.mode === "fencing"
+        && acknowledged.epoch === request.epoch
+        && acknowledged.releaseRevision === revision
+        && acknowledged.checkpoint) return acknowledged;
+      throw error;
+    }
+  } finally {
+    if (previousExplicitRevision === undefined) delete process.env[HOT_STATE_RELEASE_REVISION_ENV];
+    else process.env[HOT_STATE_RELEASE_REVISION_ENV] = previousExplicitRevision;
+  }
+}
+
+async function fenceCurrentSqliteRelease(
+  revision: string,
+  destination: ViewerReleaseIdentity,
+): Promise<HotStateAuthority | null> {
+  const previous = readHotStateAuthority(stateDir);
+  if (authorityMatchesRelease(previous, destination)) return previous;
+  if (previous?.mode !== "sqlite" && previous?.mode !== "fencing") return null;
+  if (previous.releaseRevision !== revision) {
+    throw new Error("active hot-state authority differs from the rollback source release");
+  }
+  const request = publishHotStateAuthority(stateDir, "fencing", revision);
+  try {
+    return await checkpointHotStateFence(request, revision);
+  } catch (error) {
+    restoreHotStateAuthority(stateDir, previous, request);
+    throw error;
+  }
+}
+
+async function waitForHotStateActivation(candidate: ViewerReleaseIdentity): Promise<void> {
+  if (candidate.hotStateBackend !== HOT_STATE_BACKEND) return;
+  const requestedTimeoutMs = Number(process.env.LLV_HOT_STATE_ACTIVATION_TIMEOUT_MS || 30_000);
+  const requestedPollMs = Number(process.env.LLV_HOT_STATE_ACTIVATION_POLL_MS || 50);
+  const timeoutMs = Number.isFinite(requestedTimeoutMs) ? Math.max(100, requestedTimeoutMs) : 30_000;
+  const pollMs = Number.isFinite(requestedPollMs) ? Math.max(5, requestedPollMs) : 50;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const authority = readHotStateAuthority(stateDir);
+    if (authority?.mode === "sqlite"
+      && authority.releaseRevision === candidate.revision
+      && authority.activationReadyAt) return;
+    await Bun.sleep(pollMs);
+  }
+  throw new Error("timed out waiting for the promoted Viewer to activate hot state");
+}
+
+async function promoteTarget(candidate: ViewerReleaseIdentity): Promise<ViewerMcpRuntimePublicationEvidence> {
+  const current = readCurrentRelease();
+  const fence = current?.hotStateBackend === HOT_STATE_BACKEND
+    && candidate.hotStateBackend !== HOT_STATE_BACKEND
+    ? await fenceCurrentSqliteRelease(current.revision, candidate)
+    : null;
+  const publication = switchTarget(candidate, "activate", undefined, fence);
+  await waitForHotStateActivation(candidate);
+  return publication;
 }
 
 async function currentMcpRuntime(): Promise<ViewerMcpRuntimeIdentity> {
@@ -566,7 +731,9 @@ export async function runBootstrapRelease(
     startCandidate,
     verifyCandidate: (candidate, healthProbeCapability, healthProbeAdmissions) =>
       verify(candidate, candidate.endpoint, { healthProbeCapability, healthProbeAdmissions }),
-    publishTarget: async (candidate) => { switchTarget(candidate, "activate"); },
+    publishTarget: async (candidate) => {
+      await promoteTarget(candidate);
+    },
     targetMatches: (candidate) => releasesEqual(readTarget(), candidate),
     retireCandidate: retireRelease,
   },
@@ -631,7 +798,7 @@ async function main(): Promise<unknown> {
   if (action === "promote") {
     const candidate = release(input.candidate);
     if (candidate.mcpRuntime?.source !== "managed") throw new Error("candidate MCP runtime identity is missing");
-    return switchTarget(candidate, "activate");
+    return promoteTarget(candidate);
   }
   if (action === "verify-promoted") {
     const candidate = release(input.candidate);
@@ -647,7 +814,9 @@ async function main(): Promise<unknown> {
     const evidence = await verifyViewer(previous, previous.endpoint);
     if (!evidence.ok) throw new Error(evidence.detail ?? "rollback release health gate failed");
     const previousMcpRuntime = mcpRuntime(input.previousMcpRuntime);
-    return switchTarget(previous, "restore", previousMcpRuntime);
+    const candidate = release(input.candidate);
+    const fence = await fenceCurrentSqliteRelease(candidate.revision, previous);
+    return switchTarget(previous, "restore", previousMcpRuntime, fence);
   }
   if (action === "stage-host-successor") {
     const candidate = release(input.candidate);

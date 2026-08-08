@@ -6,7 +6,7 @@ import path from "node:path";
 import { AgentRegistry } from "@/lib/agent/registry";
 import { CODEX_SOL_MODEL, CODEX_TERRA_MODEL } from "@/lib/agent/models";
 
-import { configuredReviewerFallback, FLOWS_SCHEMA_VERSION, loadFlows, mergeSeededPresets, reconcileFlowConversationOwnership, reconcileFlowConversationOwnershipCooperatively, saveFlows, seededPresetsFromRoles } from "./store";
+import { configuredReviewerFallback, loadFlows, mergeSeededPresets, reconcileFlowConversationOwnership, reconcileFlowConversationOwnershipCooperatively, saveFlows, seededPresetsFromRoles } from "./store";
 import type { Flow, FlowPreset } from "./types";
 
 function commitTestSuccessor(
@@ -107,7 +107,7 @@ test("an untouched pre-registry flow preset migrates to the current role config"
   });
 });
 
-test("flow specs persist in the versioned state file and legacy flow entries load", () => {
+test("flow specs persist in SQLite and legacy flow entries import on first boot", () => {
   const previousState = process.env.LLV_STATE_DIR;
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-spec-"));
   process.env.LLV_STATE_DIR = sandbox;
@@ -129,14 +129,17 @@ test("flow specs persist in the versioned state file and legacy flow entries loa
     createdAt: "now",
     closedAt: null,
   } satisfies Flow;
+  let legacySandbox: string | null = null;
   try {
     saveFlows([{ ...flow, spec: "Ship the feature\nAC1: Reviewer receives this context" }]);
-    expect(JSON.parse(fs.readFileSync(path.join(sandbox, "flows.json"), "utf8"))).toMatchObject({
-      schemaVersion: FLOWS_SCHEMA_VERSION,
-      flows: [{ spec: "Ship the feature\nAC1: Reviewer receives this context" }],
-    });
+    expect(loadFlows()).toMatchObject([{ spec: "Ship the feature\nAC1: Reviewer receives this context" }]);
+    expect(fs.existsSync(path.join(sandbox, "state.sqlite"))).toBe(true);
+    /* A read or steady-state write does not churn the rollback mirror. */
+    expect(fs.existsSync(path.join(sandbox, "flows.json"))).toBe(false);
 
-    fs.writeFileSync(path.join(sandbox, "flows.json"), JSON.stringify({ flows: [flow] }));
+    legacySandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-legacy-import-"));
+    process.env.LLV_STATE_DIR = legacySandbox;
+    fs.writeFileSync(path.join(legacySandbox, "flows.json"), JSON.stringify({ flows: [flow] }));
     expect(loadFlows()).toEqual([{
       ...flow,
       revision: 0,
@@ -146,6 +149,60 @@ test("flow specs persist in the versioned state file and legacy flow entries loa
       pausedState: null,
       kickoffDelivery: null,
     }]);
+  } finally {
+    if (previousState === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousState;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+    if (legacySandbox) fs.rmSync(legacySandbox, { recursive: true, force: true });
+  }
+});
+
+test("legacy flow rounds import with current relay retry defaults", () => {
+  const previousState = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-relay-defaults-"));
+  process.env.LLV_STATE_DIR = sandbox;
+  try {
+    const legacy = {
+      id: "legacy-relay-defaults",
+      template: "implement-review-loop",
+      project: "repo",
+      cwd: "/repo",
+      implementerPath: "/implementer.jsonl",
+      roles: {
+        implementer: { engine: "codex", model: null, effort: "high" },
+        reviewer: { engine: "codex", model: null, effort: "xhigh" },
+      },
+      baseRef: "base",
+      baseMode: "head",
+      mode: "auto",
+      reviewerMode: "headless",
+      roundLimit: 5,
+      state: "relay_pending",
+      stateDetail: null,
+      rounds: [{
+        n: 1,
+        reviewerPath: "/reviewer.jsonl",
+        findingsPath: "/findings.md",
+        triggeredBy: "marker",
+        readyNote: null,
+        verdict: "REQUEST_CHANGES",
+        findingsCount: 1,
+        startedAt: "2026-08-05T00:00:00.000Z",
+        reviewedAt: "2026-08-05T00:01:00.000Z",
+        relayedAt: null,
+        error: null,
+      }],
+      createdAt: "2026-08-05T00:00:00.000Z",
+      closedAt: null,
+    };
+    fs.writeFileSync(path.join(sandbox, "flows.json"), JSON.stringify({ flows: [legacy] }));
+    expect(loadFlows()[0]!.rounds[0]).toMatchObject({
+      relayRetryCount: 0,
+      relayDeliveryAttempt: 0,
+      relayDeliveryTransport: null,
+      relayRetryAt: null,
+      relayRetryRequiresIdempotency: false,
+    });
   } finally {
     if (previousState === undefined) delete process.env.LLV_STATE_DIR;
     else process.env.LLV_STATE_DIR = previousState;

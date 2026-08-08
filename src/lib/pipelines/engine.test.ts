@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { Database } from "bun:sqlite";
 
 import type { Flow } from "@/lib/flows/types";
 import type { BoardTask } from "@/lib/tasks/types";
@@ -3657,13 +3658,25 @@ test("skip-stage cleans failed work before advancing", async () => {
   expect(h.calls.some((call) => call.includes("clean -fd"))).toBe(true);
 });
 
-test("a corrupt pipelines registry skips the tick without escalating", async () => {
+test("a corrupt SQLite pipeline row skips the tick without escalating", async () => {
   const h = harness();
   await create(h.ports);
-  const file = path.join(process.env.LLV_STATE_DIR!, "pipelines.json");
-  fs.writeFileSync(file, "{", "utf8");
+  const database = new Database(path.join(process.env.LLV_STATE_DIR!, "state.sqlite"), { strict: true });
+  database.exec("BEGIN IMMEDIATE");
+  const revision = database.query<{ revision: number }, []>(
+    "SELECT revision FROM state_collections WHERE collection = 'pipelines'",
+  ).get()!.revision + 1;
+  const key = database.query<{ row_key: string }, []>(
+    "SELECT row_key FROM state_rows WHERE collection = 'pipelines' LIMIT 1",
+  ).get()!.row_key;
+  database.query("UPDATE state_rows SET value_json = '{}', row_revision = ? WHERE collection = 'pipelines' AND row_key = ?")
+    .run(revision, key);
+  database.query("UPDATE state_collections SET revision = ? WHERE collection = 'pipelines'").run(revision);
+  database.query("INSERT INTO state_changes(collection, revision, row_key, operation) VALUES ('pipelines', ?, ?, 'upsert')")
+    .run(revision, key);
+  database.exec("COMMIT");
+  database.close();
   expect(await tickPipelines([], h.ports)).toEqual({ pipelines: [], changed: false });
-  expect(fs.readFileSync(file, "utf8")).toBe("{");
   savePipelines([]);
 });
 

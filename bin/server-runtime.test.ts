@@ -1,9 +1,15 @@
 import path from "node:path";
+import fs from "node:fs";
+import os from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 
+import { loadFlows } from "@/lib/flows/store";
+import { loadArchivedPipelines, loadPipelines } from "@/lib/pipelines/store";
 import { structuredHostsEnabled as structuredHostsEnabledInApp } from "@/lib/runtime/flags";
+import { loadWorkflows } from "@/lib/workflows/store";
 
 import {
   structuredHostsEnabled as structuredHostsEnabledInLauncher,
@@ -73,17 +79,44 @@ test.each([
 ] as const)("the launcher mirror and the app definition agree on %p", (value) => {
   const env = value === undefined ? {} : { LLV_STRUCTURED_HOSTS: value };
   expect(structuredHostsEnabledInLauncher(env)).toBe(structuredHostsEnabledInApp(env));
-  // …and the launcher's Bun selection follows that one answer.
-  expect(viewerServerBunRuntime({ env, versions: { node: "20.9.0" }, execPath: "/usr/bin/node" }) !== null)
-    .toBe(structuredHostsEnabledInApp(env));
+  expect(viewerServerBunRuntime({ env, versions: { node: "20.9.0" }, execPath: "/usr/bin/node" }))
+    .toBe("bun");
 });
 
-test("legacy Node mode stays available when Bun-only features are disabled", () => {
+test("hot SQLite stores select Bun when optional Bun features are disabled", () => {
   expect(viewerServerBunRuntime({
     env: { LLV_AGENT_REGISTRY_SQLITE: "off", LLV_STRUCTURED_HOSTS: "0" },
     versions: { node: "20.9.0" },
     execPath: "/usr/bin/node",
-  })).toBeNull();
+  })).toBe("bun");
+});
+
+test("documented development and production scripts pin Bun and open every hot collection", () => {
+  const packageJson = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8")) as {
+    engines: Record<string, string>;
+    scripts: Record<string, string>;
+  };
+  expect(packageJson.engines.bun).toBeTruthy();
+  expect(packageJson.scripts.dev).toContain("bun --bun");
+  expect(packageJson.scripts.start).toContain("bun --bun");
+
+  const previous = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-bun-startup-"));
+  process.env.LLV_STATE_DIR = sandbox;
+  try {
+    expect(loadFlows()).toEqual([]);
+    expect(loadPipelines()).toEqual([]);
+    expect(loadArchivedPipelines()).toEqual([]);
+    expect(loadWorkflows()).toEqual([]);
+    const db = new Database(path.join(sandbox, "state.sqlite"), { readonly: true, strict: true });
+    const collections = db.query<{ collection: string }, []>("SELECT collection FROM state_collections ORDER BY collection").all();
+    db.close();
+    expect(collections.map((row) => row.collection)).toEqual(["flows", "pipelines", "pipelines_archive", "workflows"]);
+  } finally {
+    if (previous === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previous;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
 });
 
 test("Viewer child processes receive no ambient WakaTime key material", () => {

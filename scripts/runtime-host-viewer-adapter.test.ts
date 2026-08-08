@@ -19,6 +19,18 @@ import {
 import { probeMcpRuntime } from "../src/runtime-host/mcpRuntimeProbe";
 import { RuntimeHostFence } from "../src/runtime-host/runtimeHostFence";
 import { serveRuntimeHost } from "../src/runtime-host/socket";
+import {
+  completeHotStatePreparation,
+  HOT_STATE_BACKEND,
+  HOT_STATE_RELEASE_REVISION_ENV,
+  markHotStateActivationReady,
+  publishHotStateAuthority,
+  readHotStateAuthority,
+} from "../src/lib/state/hotStateAuthority";
+import { flowStateCollectionSeed } from "../src/lib/flows/store";
+import { pipelineStateCollectionSeeds } from "../src/lib/pipelines/store";
+import { workflowStateCollectionSeed } from "../src/lib/workflows/store";
+import { initializeStateCollections } from "../src/lib/state/sqliteStateStore";
 import { mcpProbeEnvironment, runBootstrapRelease } from "./runtime-host-viewer-adapter";
 
 const root = path.resolve(import.meta.dir, "..");
@@ -299,6 +311,8 @@ async function runAction(options: {
   snapshots?: string[];
   handoffIntent?: Record<string, unknown>;
   environment?: Record<string, string>;
+  setupState?: (state: string) => void;
+  observe?: (state: string, child: { exited: Promise<number> }) => Promise<void>;
 }) {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-release-lifecycle-adapter-"));
   const state = path.join(sandbox, "state");
@@ -306,6 +320,7 @@ async function runAction(options: {
   const dockerLog = path.join(sandbox, "docker.log");
   fs.mkdirSync(path.join(state, "deployments", "compose"), { recursive: true });
   fs.mkdirSync(bin, { recursive: true });
+  options.setupState?.(state);
   if (options.handoffIntent) {
     fs.writeFileSync(path.join(state, "runtime-host-handoff-intent.json"), JSON.stringify(options.handoffIntent));
   }
@@ -333,15 +348,42 @@ async function runAction(options: {
   });
   child.stdin.write(`${JSON.stringify(options.input)}\n`);
   child.stdin.end();
+  const observed = options.observe?.(state, child);
   const code = await child.exited;
+  await observed;
   const stdout = await new Response(child.stdout).text();
   const stderr = await new Response(child.stderr).text();
   const dockerCalls = fs.existsSync(dockerLog) ? fs.readFileSync(dockerLog, "utf8").trim().split("\n") : [];
   const targetFile = path.join(state, "viewer-release.json");
   const target = fs.existsSync(targetFile) ? JSON.parse(fs.readFileSync(targetFile, "utf8")) as unknown : null;
+  const authority = readHotStateAuthority(state);
   const handoffIntentExists = fs.existsSync(path.join(state, "runtime-host-handoff-intent.json"));
   fs.rmSync(sandbox, { recursive: true, force: true });
-  return { code, stdout, stderr, dockerCalls, target, handoffIntentExists };
+  return { code, stdout, stderr, dockerCalls, target, authority, handoffIntentExists };
+}
+
+function initializeHotStateFixture(
+  state: string,
+  candidate: typeof release & { hotStateBackend: typeof HOT_STATE_BACKEND },
+): void {
+  const previousState = process.env.LLV_STATE_DIR;
+  const previousRevision = process.env[HOT_STATE_RELEASE_REVISION_ENV];
+  process.env.LLV_STATE_DIR = state;
+  process.env[HOT_STATE_RELEASE_REVISION_ENV] = candidate.revision;
+  try {
+    fs.writeFileSync(path.join(state, "viewer-release.json"), JSON.stringify(candidate));
+    publishHotStateAuthority(state, "sqlite", candidate.revision);
+    initializeStateCollections(path.join(state, "state.sqlite"), [
+      flowStateCollectionSeed(),
+      ...pipelineStateCollectionSeeds(),
+      workflowStateCollectionSeed(),
+    ]);
+  } finally {
+    if (previousState === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousState;
+    if (previousRevision === undefined) delete process.env[HOT_STATE_RELEASE_REVISION_ENV];
+    else process.env[HOT_STATE_RELEASE_REVISION_ENV] = previousRevision;
+  }
 }
 
 test("promotion atomically publishes the matching MCP runtime with durable evidence", async () => {
@@ -369,6 +411,84 @@ test("promotion atomically publishes the matching MCP runtime with durable evide
     ...candidate.mcpRuntime,
     publishedAt: expect.any(String),
     durable: true,
+  });
+});
+
+test("SQLite promotion waits for completed runtime activation", async () => {
+  const candidate = {
+    ...release,
+    revision: "6".repeat(40),
+    hotStateBackend: HOT_STATE_BACKEND,
+    mcpRuntime: {
+      source: "managed" as const,
+      revision: "6".repeat(40),
+      releaseId: "deploy-sqlite-candidate",
+      artifactDigest: "6".repeat(64),
+      stagedAt: "2026-08-06T00:00:00.000Z",
+    },
+  };
+  let observedPreparing = false;
+  const result = await runAction({
+    action: "promote",
+    input: { candidate },
+    environment: { LLV_HOT_STATE_ACTIVATION_TIMEOUT_MS: "2000", LLV_HOT_STATE_ACTIVATION_POLL_MS: "5" },
+    observe: async (state, child) => {
+      const deadline = Date.now() + 1_000;
+      let request = readHotStateAuthority(state);
+      while (Date.now() < deadline && request?.mode !== "preparing") {
+        await Bun.sleep(5);
+        request = readHotStateAuthority(state);
+      }
+      expect(request?.mode).toBe("preparing");
+      observedPreparing = true;
+      const exitedBeforeReady = await Promise.race([
+        child.exited.then(() => true),
+        Bun.sleep(30).then(() => false),
+      ]);
+      expect(exitedBeforeReady).toBe(false);
+      const authoritative = completeHotStatePreparation(state, request!);
+      markHotStateActivationReady(state, authoritative);
+    },
+    dockerScript: "#!/bin/sh\nexit 1\n",
+  });
+
+  expect(observedPreparing).toBe(true);
+  expect({ code: result.code, stderr: result.stderr }).toEqual({ code: 0, stderr: "" });
+  expect(result.authority).toMatchObject({
+    mode: "sqlite",
+    releaseRevision: candidate.revision,
+    activationReadyAt: expect.any(String),
+  });
+});
+
+test("promotion from SQLite to a legacy release checkpoints rollback mirrors first", async () => {
+  const current = { ...release, hotStateBackend: HOT_STATE_BACKEND };
+  const candidate = {
+    ...release,
+    revision: "3".repeat(40),
+    container: "viewer-legacy-promotion",
+    image: "viewer:legacy-promotion",
+    mcpRuntime: {
+      source: "managed" as const,
+      revision: "3".repeat(40),
+      releaseId: "deploy-legacy-candidate",
+      artifactDigest: "3".repeat(64),
+      stagedAt: "2026-08-06T00:00:00.000Z",
+    },
+  };
+  const result = await runAction({
+    action: "promote",
+    input: { candidate },
+    setupState: (state) => { initializeHotStateFixture(state, current); },
+    dockerScript: "#!/bin/sh\nexit 1\n",
+  });
+
+  expect({ code: result.code, stderr: result.stderr }).toEqual({ code: 0, stderr: "" });
+  expect(result.target).toEqual(candidate);
+  expect(result.authority).toMatchObject({
+    mode: "legacy",
+    releaseRevision: candidate.revision,
+    checkpoint: { revisions: { flows: 0, pipelines: 0, pipelinesArchive: 0, workflows: 0 } },
   });
 });
 
@@ -468,7 +588,7 @@ test("the first successor boot publishes and probes the MCP runtime after an old
   const revision = "7".repeat(40);
   const fixture = successorPackage("llv-mcp-successor-reconcile-", { revision });
   const socketPath = path.join(fixture.state, "runtime-host.sock");
-  const journal = new RuntimeJournal(path.join(fixture.state, "runtime.sqlite"));
+  const journal = new RuntimeJournal(path.join(fixture.state, "runtime-events.sqlite"));
   const admissions = new McpHealthProbeAdmissions();
   const server = serveRuntimeHost(socketPath, new RuntimeHost(
     journal,
@@ -785,6 +905,243 @@ exit 1
       publishedAt: expect.any(String),
       durable: true,
     });
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("rollback checkpoints hot state before publishing a legacy target", async () => {
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      const pathname = new URL(request.url).pathname;
+      if (pathname === "/api/runtime/deployments/capabilities/v1") {
+        return Response.json(
+          { capability: "viewer-deployments", version: 1, registryBackendMode: "off" },
+          { headers: { connection: "close" } },
+        );
+      }
+      if (pathname === "/_next/static/app.js") return new Response("self.__viewer=true", { headers: { connection: "close" } });
+      return new Response('<script src="/_next/static/app.js"></script>', {
+        headers: { connection: "close", "content-type": "text/html" },
+      });
+    },
+  });
+  const candidate = { ...release, hotStateBackend: HOT_STATE_BACKEND };
+  const previous = {
+    ...release,
+    revision: "9".repeat(40),
+    container: "viewer-legacy",
+    image: "viewer:legacy",
+    endpoint: `http://127.0.0.1:${server.port}`,
+  };
+  const previousMcpRuntime = {
+    source: "legacy",
+    revision: previous.revision,
+    releaseId: null,
+    artifactDigest: "9".repeat(64),
+    stagedAt: null,
+  };
+  try {
+    const result = await runAction({
+      action: "rollback",
+      input: { previous, candidate, previousMcpRuntime },
+      snapshots: [previous.container],
+      setupState: (state) => {
+        initializeHotStateFixture(state, candidate);
+      },
+      dockerScript: `#!/bin/sh
+set -eu
+if [ "$1 $2" = "container inspect" ]; then exit 0; fi
+if [ "$1" = "inspect" ]; then printf 'running\n'; exit 0; fi
+if [ "$1" = "start" ]; then exit 0; fi
+exit 1
+`,
+    });
+    expect({ code: result.code, stderr: result.stderr }).toEqual({ code: 0, stderr: "" });
+    expect(result.target).toEqual(previous);
+    expect(result.authority).toMatchObject({
+      mode: "legacy",
+      releaseRevision: previous.revision,
+      checkpoint: {
+        revisions: { flows: 0, pipelines: 0, pipelinesArchive: 0, workflows: 0 },
+      },
+    });
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("rollback publishes destination authority before changing the stable target", async () => {
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      const pathname = new URL(request.url).pathname;
+      if (pathname === "/api/runtime/deployments/capabilities/v1") {
+        return Response.json({ capability: "viewer-deployments", version: 1, registryBackendMode: "off" });
+      }
+      if (pathname === "/_next/static/app.js") return new Response("self.__viewer=true");
+      return new Response('<script src="/_next/static/app.js"></script>', { headers: { "content-type": "text/html" } });
+    },
+  });
+  const candidate = { ...release, hotStateBackend: HOT_STATE_BACKEND };
+  const previous = {
+    ...release,
+    revision: "5".repeat(40),
+    container: "viewer-legacy-crash",
+    image: "viewer:legacy-crash",
+    endpoint: `http://127.0.0.1:${server.port}`,
+  };
+  const previousMcpRuntime = {
+    source: "legacy" as const,
+    revision: previous.revision,
+    releaseId: null,
+    artifactDigest: "5".repeat(64),
+    stagedAt: null,
+  };
+  try {
+    const result = await runAction({
+      action: "rollback",
+      input: { previous, candidate, previousMcpRuntime },
+      snapshots: [previous.container],
+      environment: { NODE_ENV: "test", LLV_TEST_EXIT_AFTER_HOT_STATE_AUTHORITY: "1" },
+      setupState: (state) => { initializeHotStateFixture(state, candidate); },
+      dockerScript: `#!/bin/sh
+set -eu
+if [ "$1 $2" = "container inspect" ]; then exit 0; fi
+if [ "$1" = "inspect" ]; then printf 'running\n'; exit 0; fi
+if [ "$1" = "start" ]; then exit 0; fi
+exit 1
+`,
+    });
+    expect(result.code).toBe(86);
+    expect(result.target).toEqual(candidate);
+    expect(result.authority).toMatchObject({
+      mode: "legacy",
+      releaseRevision: previous.revision,
+      checkpoint: { revisions: { flows: 0, pipelines: 0, pipelinesArchive: 0, workflows: 0 } },
+    });
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("rollback resumes after a crash between destination authority and target publication", async () => {
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      const pathname = new URL(request.url).pathname;
+      if (pathname === "/api/runtime/deployments/capabilities/v1") {
+        return Response.json({ capability: "viewer-deployments", version: 1, registryBackendMode: "off" });
+      }
+      if (pathname === "/_next/static/app.js") return new Response("self.__viewer=true");
+      return new Response('<script src="/_next/static/app.js"></script>', { headers: { "content-type": "text/html" } });
+    },
+  });
+  const candidate = { ...release, hotStateBackend: HOT_STATE_BACKEND };
+  const previous = {
+    ...release,
+    revision: "4".repeat(40),
+    container: "viewer-legacy-retry",
+    image: "viewer:legacy-retry",
+    endpoint: `http://127.0.0.1:${server.port}`,
+  };
+  const previousMcpRuntime = {
+    source: "legacy" as const,
+    revision: previous.revision,
+    releaseId: null,
+    artifactDigest: "4".repeat(64),
+    stagedAt: null,
+  };
+  try {
+    const result = await runAction({
+      action: "rollback",
+      input: { previous, candidate, previousMcpRuntime },
+      snapshots: [previous.container],
+      setupState: (state) => {
+        initializeHotStateFixture(state, candidate);
+        publishHotStateAuthority(state, "legacy", previous.revision, {
+          checkpoint: {
+            acknowledgedAt: "2026-08-06T00:00:00.000Z",
+            revisions: { flows: 0, pipelines: 0, pipelinesArchive: 0, workflows: 0 },
+          },
+        });
+      },
+      dockerScript: `#!/bin/sh
+set -eu
+if [ "$1 $2" = "container inspect" ]; then exit 0; fi
+if [ "$1" = "inspect" ]; then printf 'running\n'; exit 0; fi
+if [ "$1" = "start" ]; then exit 0; fi
+exit 1
+`,
+    });
+    expect({ code: result.code, stderr: result.stderr }).toEqual({ code: 0, stderr: "" });
+    expect(result.target).toEqual(previous);
+    expect(result.authority).toMatchObject({ mode: "legacy", releaseRevision: previous.revision });
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("rollback retains the SQLite target when mirror checkpointing fails", async () => {
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      const pathname = new URL(request.url).pathname;
+      if (pathname === "/api/runtime/deployments/capabilities/v1") {
+        return Response.json(
+          { capability: "viewer-deployments", version: 1, registryBackendMode: "off" },
+          { headers: { connection: "close" } },
+        );
+      }
+      if (pathname === "/_next/static/app.js") return new Response("self.__viewer=true", { headers: { connection: "close" } });
+      return new Response('<script src="/_next/static/app.js"></script>', {
+        headers: { connection: "close", "content-type": "text/html" },
+      });
+    },
+  });
+  const candidate = { ...release, hotStateBackend: HOT_STATE_BACKEND };
+  const previous = {
+    ...release,
+    revision: "8".repeat(40),
+    container: "viewer-legacy",
+    image: "viewer:legacy",
+    endpoint: `http://127.0.0.1:${server.port}`,
+  };
+  const previousMcpRuntime = {
+    source: "legacy",
+    revision: previous.revision,
+    releaseId: null,
+    artifactDigest: "8".repeat(64),
+    stagedAt: null,
+  };
+  try {
+    const result = await runAction({
+      action: "rollback",
+      input: { previous, candidate, previousMcpRuntime },
+      snapshots: [previous.container],
+      setupState: (state) => {
+        initializeHotStateFixture(state, candidate);
+        const mirror = path.join(state, "flows.json");
+        fs.rmSync(mirror, { force: true });
+        fs.mkdirSync(mirror);
+      },
+      dockerScript: `#!/bin/sh
+set -eu
+if [ "$1 $2" = "container inspect" ]; then exit 0; fi
+if [ "$1" = "inspect" ]; then printf 'running\n'; exit 0; fi
+if [ "$1" = "start" ]; then exit 0; fi
+exit 1
+`,
+    });
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("flows.json");
+    expect(result.target).toEqual(candidate);
+    expect(result.authority).toMatchObject({ mode: "sqlite", releaseRevision: candidate.revision });
   } finally {
     server.stop(true);
   }

@@ -33,7 +33,7 @@ import {
   type ParsedFindings,
 } from "./findings";
 import { relayPrompt, reviewerPrompt } from "./prompts";
-import { atomicWriteText, findingsPathFor, loadFlows, loadPresets, saveFlows } from "./store";
+import { atomicWriteText, findingsPathFor, loadFlow, loadFlows, loadFlowsForTick, loadPresets, saveFlowRows, saveFlows } from "./store";
 import type { Flow, FlowPreset, FlowState, RelayDeliveryTransport, RoleConfig, Round } from "./types";
 import { chooseHeadlessReviewer, rateLimitStateDetail } from "./reviewerPolicy";
 
@@ -1091,9 +1091,18 @@ export function flowTickBase(flows: Flow[]): Map<string, FlowTickBase> {
  *     set-roles does), so a config change without a lifecycle change survives.
  * Fully synchronous, so no patchFlow can interleave between the read and write.
  */
-export function persistTickFlows(flows: Flow[], base: Map<string, FlowTickBase>): void {
+export function persistTickFlows(
+  flows: Flow[],
+  base: Map<string, FlowTickBase>,
+  candidateIds?: ReadonlySet<string>,
+): void {
   const tickById = new Map(flows.map((flow) => [flow.id, flow] as const));
-  const merged = loadFlows().map((diskFlow) => {
+  const changed: Flow[] = [];
+  const ids = candidateIds ?? new Set(tickById.keys());
+  [...ids].flatMap((id) => {
+    const flow = loadFlow(id);
+    return flow ? [flow] : [];
+  }).map((diskFlow) => {
     const tick = tickById.get(diskFlow.id);
     if (!tick) return diskFlow;
     const start = base.get(diskFlow.id);
@@ -1114,7 +1123,7 @@ export function persistTickFlows(flows: Flow[], base: Map<string, FlowTickBase>)
           : [];
       }));
       if (settledByRound.size === 0) return diskFlow;
-      return {
+      const next = {
         ...diskFlow,
         rounds: diskFlow.rounds.map((diskRound) => {
           const settled = settledByRound.get(diskRound.n);
@@ -1126,6 +1135,8 @@ export function persistTickFlows(flows: Flow[], base: Map<string, FlowTickBase>)
           } : diskRound;
         }),
       };
+      changed.push(next);
+      return next;
     }
     /* Fence an unstarted round's reviewer snapshot to the disk value ONLY when the
        tick did not itself change it (comparing to the pre-tick base): then a
@@ -1141,7 +1152,7 @@ export function persistTickFlows(flows: Flow[], base: Map<string, FlowTickBase>)
         ? { ...round, reviewerRole: diskRound.reviewerRole }
         : round;
     });
-    return {
+    const next = {
       ...tick,
       revision: diskFlow.revision,
       rounds,
@@ -1149,8 +1160,10 @@ export function persistTickFlows(flows: Flow[], base: Map<string, FlowTickBase>)
       roundLimit: diskFlow.roundLimit,
       mode: diskFlow.mode,
     };
+    changed.push(next);
+    return next;
   });
-  saveFlows(merged);
+  saveFlowRows(changed);
 }
 
 export async function tickFlows(entries: FileEntry[]): Promise<TickResult> {
@@ -1160,19 +1173,27 @@ export async function tickFlows(entries: FileEntry[]): Promise<TickResult> {
     return { flows, changed: false };
   }
   store.__llvFlowTick = true;
-  const flows = cloneFlows(loadFlows());
+  const flows = cloneFlows(loadFlowsForTick());
   const base = flowTickBase(flows);
+  const changedIds = new Set<string>();
   try {
     const entriesByPath = new Map(entries.map((entry) => [entry.path, entry]));
     let changed = false;
     for (const flow of flows) {
       if (TERMINAL_STATES.has(flow.state)) continue;
-      if (await tickFlow(flow, entries, entriesByPath, () => persistTickFlows(flows, base))) changed = true;
-      if (changed) persistTickFlows(flows, base);
+      const flowChanged = await tickFlow(flow, entries, entriesByPath, () => {
+        persistTickFlows(flows, base, new Set([...changedIds, flow.id]));
+      });
+      if (flowChanged) {
+        changed = true;
+        changedIds.add(flow.id);
+        persistTickFlows(flows, base, changedIds);
+      }
     }
-    annotateFlowEntries(entries, flows);
-    if (changed) persistTickFlows(flows, base);
-    return { flows, changed };
+    if (changed) persistTickFlows(flows, base, changedIds);
+    const projected = cloneFlows(loadFlows());
+    annotateFlowEntries(entries, projected);
+    return { flows: projected, changed };
   } finally {
     store.__llvFlowTick = false;
   }

@@ -5,7 +5,7 @@ import path from "node:path";
 import { statePath } from "@/lib/configDir";
 import { agentRegistry, type ConversationLookup } from "@/lib/agent/registry";
 import { forEachCooperatively } from "@/lib/cooperative";
-import { withFileTransaction, withFileTransactionSync } from "@/lib/state/fileTransaction";
+import { initializeStateCollections, SqliteStateCollection, type StateCollectionSeed } from "@/lib/state/sqliteStateStore";
 import { ROLE_DEFAULTS } from "@/lib/roles/defaults";
 import { canonicalProject } from "@/lib/projects/aliases";
 import { resolveRole } from "@/lib/roles/registry";
@@ -20,6 +20,7 @@ import type { Flow, FlowPreset, ReviewVerdict, Round } from "./types";
    the path here once let a mis-ordered test clobber the user's real
    flows.json. */
 const flowsFile = () => statePath("flows.json");
+const stateDatabaseFile = () => statePath("state.sqlite");
 const presetsFile = () => statePath("review-loop-presets.json");
 const flowArtifactDir = () => statePath("flows");
 
@@ -122,6 +123,21 @@ function readJson(filePath: string): unknown {
   }
 }
 
+function readFlowStateJson(): unknown | null {
+  let source: string;
+  try {
+    source = fs.readFileSync(flowsFile(), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new Error("could not read legacy flow state", { cause: error });
+  }
+  try {
+    return JSON.parse(source) as unknown;
+  } catch (error) {
+    throw new Error("legacy flow state contains malformed JSON", { cause: error });
+  }
+}
+
 function isFlow(value: unknown): value is Flow {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const flow = value as Partial<Flow>;
@@ -171,15 +187,16 @@ export function mergeSeededPresets(presets: FlowPreset[], seeds = seededPresetsF
 }
 
 let flowsCache: { signature: string; flows: Flow[] } | null = null;
+const flowStores = new Map<string, SqliteStateCollection<Flow>>();
+const flowSnapshots = new WeakMap<Flow[], Map<string, string>>();
 
-function flowsFileSignature(): string | null {
-  const filename = flowsFile();
-  try {
-    const stat = fs.statSync(filename, { bigint: true });
-    return `${filename}:${stat.mtimeNs}:${stat.size}`;
-  } catch {
-    return null;
-  }
+function rememberFlowSnapshot(flows: Flow[]): Flow[] {
+  flowSnapshots.set(flows, new Map(flows.map((flow) => [flow.id, JSON.stringify(flow)])));
+  return flows;
+}
+
+function flowsFileSignature(): string {
+  return flowStore().signature();
 }
 
 /** Fresh per-call copies of every layer a caller may write (flow and round
@@ -190,22 +207,57 @@ function reviveCachedFlows(flows: Flow[]): Flow[] {
   return flows.map((flow) => ({ ...flow, rounds: flow.rounds.map((round) => ({ ...round })) }));
 }
 
-/** The parse+normalize of the whole flow registry, cached against the file
-    signature: production read it ~54 times a second from tick loops and
-    runtime consumers, re-parsing 1.6 MB of JSON each time. Every writer goes
-    through an atomic rename, which changes the signature and invalidates. */
+/** The normalized flow projection keeps the signature cache introduced for
+    the JSON store. Its invalidation source is now the SQLite collection
+    revision, including revisions committed by another process. */
 export function loadFlows(): Flow[] {
   const before = flowsFileSignature();
-  if (before !== null && flowsCache?.signature === before) return reviveCachedFlows(flowsCache.flows);
-  const parsed = parseFlowsFromDisk();
+  if (flowsCache?.signature === before) return rememberFlowSnapshot(reviveCachedFlows(flowsCache.flows));
+  const parsed = flowStore().snapshot();
   const after = flowsFileSignature();
-  if (after !== null && before === after) flowsCache = { signature: after, flows: parsed };
-  return reviveCachedFlows(parsed);
+  if (before === after) flowsCache = { signature: after, flows: parsed };
+  return rememberFlowSnapshot(reviveCachedFlows(parsed));
+}
+
+export function loadFlow(flowId: string): Flow | null {
+  return flowStore().get(flowId);
+}
+
+function flowControllerActive(flow: Flow): boolean {
+  return ![
+    "approved",
+    "done_comment",
+    "needs_decision",
+    "closed",
+  ].includes(flow.state);
+}
+
+export function flowStateCollectionSeed(): StateCollectionSeed<Flow> {
+  return {
+    collection: "flows",
+    schemaVersion: FLOWS_SCHEMA_VERSION,
+    migrationId: "flows-json-v1",
+    loadRecords: parseFlowsFromDisk,
+    key: (flow: Flow) => flow.id,
+    controllerActive: flowControllerActive,
+  };
+}
+
+export function loadFlowsForTick(): Flow[] {
+  return flowStore().snapshotForController();
 }
 
 function parseFlowsFromDisk(): Flow[] {
-  const raw = readJson(flowsFile()) as FlowFile | null;
-  const flows = Array.isArray(raw?.flows) ? raw.flows.filter(isFlow) : [];
+  const raw = readFlowStateJson();
+  if (raw === null) return [];
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("legacy flow state must be an object");
+  }
+  const file = raw as FlowFile;
+  if (!Array.isArray(file.flows) || !file.flows.every(isFlow)) {
+    throw new Error("legacy flow state contains malformed records");
+  }
+  const flows = file.flows;
   return flows.map((flow) => ({
     ...flow,
     project: canonicalProject(flow.project),
@@ -244,6 +296,77 @@ function parseFlowsFromDisk(): Flow[] {
       error: round.error ?? null,
     })),
   }));
+}
+
+export function planFlowStateMigration(): { records: number; keys: string[] } {
+  const records = parseFlowsFromDisk();
+  return { records: records.length, keys: records.map((flow) => flow.id) };
+}
+
+function decodeFlow(value: unknown): Flow | null {
+  if (!isFlow(value)) return null;
+  const flow = value;
+  return {
+    ...flow,
+    project: canonicalProject(flow.project),
+    revision: flow.revision ?? 0,
+    targetSha: flow.targetSha ?? null,
+    implementerConversationId: flow.implementerConversationId ?? null,
+    reviewerFallback: flow.reviewerFallback === undefined && flow.roles.reviewer.engine === "codex"
+      ? configuredReviewerFallback()
+      : flow.reviewerFallback ?? null,
+    pausedState: flow.pausedState ?? null,
+    kickoffDelivery: flow.kickoffDelivery ?? null,
+    rounds: flow.rounds.map((round) => ({
+      ...round,
+      reviewerConversationId: round.reviewerConversationId ?? null,
+      reviewerRole: round.reviewerRole ?? null,
+      attemptedAccounts: round.attemptedAccounts ?? [],
+      autoRetryCount: round.autoRetryCount ?? 0,
+      sessionId: round.sessionId ?? null,
+      reviewerPid: round.reviewerPid ?? null,
+      reviewerIdentity: round.reviewerIdentity ?? null,
+      reviewHeadSha: round.reviewHeadSha ?? null,
+      spawnStartedAt: round.spawnStartedAt ?? null,
+      launchId: round.launchId ?? null,
+      launchLeaseUntil: round.launchLeaseUntil ?? null,
+      relayStartedAt: round.relayStartedAt ?? null,
+      relayRetryCount: round.relayRetryCount ?? 0,
+      relayDeliveryAttempt: round.relayDeliveryAttempt ?? 0,
+      relayDeliveryTransport: round.relayDeliveryTransport ?? null,
+      relayRetryAt: round.relayRetryAt ?? null,
+      relayRetryRequiresIdempotency: round.relayRetryRequiresIdempotency ?? false,
+      relayDelivery: round.relayDelivery ?? null,
+      terminalAt: round.terminalAt ?? null,
+      error: round.error ?? null,
+    })),
+  };
+}
+
+function flowStore(): SqliteStateCollection<Flow> {
+  const filename = stateDatabaseFile();
+  const held = flowStores.get(filename);
+  if (held) return held;
+  initializeStateCollections(filename, [flowStateCollectionSeed()]);
+  const store = new SqliteStateCollection(filename, {
+    collection: "flows",
+    schemaVersion: FLOWS_SCHEMA_VERSION,
+    busyMessage: "flow state is busy",
+    key: (flow) => flow.id,
+    decode: decodeFlow,
+    clone: (flow) => reviveCachedFlows([flow])[0]!,
+    controllerActive: flowControllerActive,
+    strictDecode: true,
+    decodeError: (error) => new Error("flow SQLite state contains a malformed row", { cause: error }),
+  });
+  flowStores.set(filename, store);
+  return store;
+}
+
+export function checkpointFlowRollbackMirrorForDemotion(): number {
+  return flowStore().checkpointMirrorForDemotion((flows, revision) => {
+    atomicWriteJson(flowsFile(), { schemaVersion: FLOWS_SCHEMA_VERSION, _sqliteRevision: revision, flows });
+  });
 }
 
 function reconcileFlowImplementer(flow: Flow, registry: ConversationLookup): boolean {
@@ -363,10 +486,9 @@ function replaceFlow(target: Flow, source: Flow): void {
   Object.assign(target, structuredClone(source));
 }
 
-function saveFlowsUnlocked(flows: Flow[]): void {
-  const storedById = new Map(loadFlows().map((flow) => [flow.id, flow] as const));
+function prepareFlowRevisions(flows: readonly Flow[]): void {
   for (const flow of flows) {
-    const stored = storedById.get(flow.id);
+    const stored = flowStore().get(flow.id) ?? undefined;
     if (stored && flow.revision !== undefined && flow.revision < (stored.revision ?? 0)) {
       replaceFlow(flow, stored);
       continue;
@@ -375,25 +497,47 @@ function saveFlowsUnlocked(flows: Flow[]): void {
       ? stored.revision ?? 0
       : (stored?.revision ?? 0) + 1;
   }
-  atomicWriteJson(flowsFile(), { schemaVersion: FLOWS_SCHEMA_VERSION, flows });
 }
 
 export function saveFlows(flows: Flow[]): void {
-  withFileTransactionSync(flowsFile(), "flow state is busy", () => saveFlowsUnlocked(flows));
+  const baseline = flowSnapshots.get(flows);
+  if (!baseline) {
+    flowStore().replaceSync(flows, { beforePersist: prepareFlowRevisions });
+    rememberFlowSnapshot(flows);
+    return;
+  }
+  const localIds = new Set(flows.map((flow) => flow.id));
+  const changed = flows.filter((flow) => baseline.get(flow.id) !== JSON.stringify(flow));
+  const removed = [...baseline.keys()].filter((id) => !localIds.has(id));
+  flowStore().patchSync(() => {
+    prepareFlowRevisions(changed);
+    const acceptedDeletes = removed.filter((id) => {
+      const current = flowStore().get(id);
+      return current !== null && JSON.stringify(current) === baseline.get(id);
+    });
+    return { records: changed, deleteKeys: acceptedDeletes };
+  });
+  rememberFlowSnapshot(flows);
 }
 
-/** Re-read and mutate flow state under the process-shared state-file lock. */
-export async function withFlowMutation<T>(mutate: (flows: Flow[], persist: () => void) => T): Promise<T> {
-  return await withFileTransaction(flowsFile(), "flow state is busy", () => {
-    const flows = loadFlows();
-    return mutate(flows, () => saveFlowsUnlocked(flows));
+/** Persist a known changed subset while preserving every omitted flow row. */
+export function saveFlowRows(flows: Flow[]): void {
+  if (flows.length === 0) return;
+  flowStore().replaceSync(flows, {
+    mergeOmitted: true,
+    beforePersist: prepareFlowRevisions,
   });
 }
 
-/** Hold the flow registry lock while a cross-store consumer projects one exact
+/** Re-read and mutate flow state under the process-shared SQLite lease. */
+export async function withFlowMutation<T>(mutate: (flows: Flow[], persist: () => void) => T): Promise<T> {
+  return await flowStore().mutate(mutate, ({ dirtyRecords }) => prepareFlowRevisions(dirtyRecords));
+}
+
+/** Hold the flow collection lease while a cross-store consumer projects one exact
     durable generation. The callback cannot mutate flows through this interface. */
 export function withFlowSnapshot<T>(read: (flows: readonly Flow[]) => T): T {
-  return withFileTransactionSync(flowsFile(), "flow state is busy", () => read(loadFlows()));
+  return flowStore().withSnapshotSync(read);
 }
 
 export function loadPresets(): FlowPreset[] {

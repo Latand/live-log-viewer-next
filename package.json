@@ -14,20 +14,21 @@
     "dist"
   ],
   "engines": {
-    "node": ">=20.9.0"
+    "node": ">=20.9.0",
+    "bun": ">=1.2.0"
   },
   "os": [
     "linux",
     "darwin"
   ],
   "scripts": {
-    "dev": "NODE_ENV=development next dev --webpack --hostname 127.0.0.1",
+    "dev": "NODE_ENV=development bun --bun node_modules/.bin/next dev --webpack --hostname 127.0.0.1",
     "build": "next build --webpack && bun run build:mcp",
     "build:mcp": "bun scripts/build-mcp.ts",
     "demo:capture": "bun scripts/demo-capture.ts",
     "deploy:staging": "bun scripts/deploy-staging.ts",
     "demo:motion": "bun scripts/demo-motion.ts",
-    "start": "next start",
+    "start": "bun --bun node_modules/.bin/next start",
     "lint": "eslint",
     "prepack": "node scripts/prepack.mjs",
     "privacy:check": "LLV_PRIVACY_KNOWN_VALUE_FINGERPRINTS_FILE=scripts/privacy-known-value-fingerprints.json LLV_PRIVACY_OCR_LANGUAGES=eng+ukr bun scripts/privacy-publication-gate.ts --require-known-values --check-commits --base origin/main",
