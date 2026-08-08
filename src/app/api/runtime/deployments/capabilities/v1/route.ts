@@ -1,13 +1,36 @@
 import { sqliteModeFromEnvironment } from "@/lib/agent/registry";
+import { statePath } from "@/lib/configDir";
+import { HOT_STATE_BACKEND, readHotStateAuthority, readHotStateReleaseTarget } from "@/lib/state/hotStateAuthority";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/* The deployment readiness gate probes this route with a 5s budget. It must
-   answer from configuration alone: instantiating the agent registry here made
-   the first probe pay a multi-MB JSON parse and time out, failing every
-   deploy with "capability gate failed" while the candidate was healthy. */
+function hotStateActivationReady(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): boolean {
+  const directory = env.LLV_STATE_DIR?.trim() || statePath(".");
+  const target = readHotStateReleaseTarget(directory, env);
+  if (!target) return true;
+  if (target.hotStateBackend !== HOT_STATE_BACKEND) return true;
+  const port = env.PORT?.trim();
+  if (!port || new URL(target.endpoint).port !== port) return true;
+  const authority = readHotStateAuthority(directory);
+  return authority?.mode === "sqlite"
+    && authority.releaseRevision === target.revision
+    && typeof authority.activationReadyAt === "string";
+}
+
+/* The deployment readiness gate probes this route with a 5s budget. It reads
+   two small handoff records and still avoids instantiating the agent registry,
+   whose first probe would otherwise pay a multi-MB parse. Passive candidates
+   stay probeable; the promoted endpoint waits for completed activation. */
 export function GET(): Response {
+  if (!hotStateActivationReady()) {
+    return Response.json(
+      { error: "Viewer hot-state activation is incomplete" },
+      { status: 503, headers: { "cache-control": "no-store" } },
+    );
+  }
   return Response.json(
     { capability: "viewer-deployments", version: 1, registryBackendMode: sqliteModeFromEnvironment() },
     { headers: { "cache-control": "no-store" } },

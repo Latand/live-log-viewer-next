@@ -150,6 +150,7 @@ function release(value: unknown): ViewerReleaseIdentity {
     container: item.container,
     endpoint: item.endpoint,
     revision: item.revision,
+    ...(item.hotStateBackend === "sqlite-v1" ? { hotStateBackend: item.hotStateBackend } : {}),
     ...(item.mcpRuntime === undefined ? {} : { mcpRuntime: mcpRuntime(item.mcpRuntime) }),
   };
 }

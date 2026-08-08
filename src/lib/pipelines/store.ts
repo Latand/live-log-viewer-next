@@ -7,7 +7,7 @@ import { canonicalProject } from "@/lib/projects/aliases";
 import { isEngineEffort } from "@/lib/agent/efforts";
 import { normalizeClaudeLaunchModel } from "@/lib/agent/models";
 import { MAX_SCAFFOLD_LENGTH } from "@/lib/roles/store";
-import { withFileTransaction, withFileTransactionSync } from "@/lib/state/fileTransaction";
+import { initializeStateCollections, SqliteStateCollection, type StateCollectionSeed } from "@/lib/state/sqliteStateStore";
 import type { BoardTask } from "@/lib/tasks/types";
 
 import { MAX_FAIL_EDGE_ROUNDS, MAX_PIPELINE_STAGES } from "./limits";
@@ -19,6 +19,8 @@ export const PIPELINES_SCHEMA_VERSION = 5;
     the current shape by the next successful mutation, never by a read. */
 const MIGRATABLE_SCHEMA_VERSIONS = new Set([2, 3, 4, PIPELINES_SCHEMA_VERSION]);
 const pipelinesFile = () => statePath("pipelines.json");
+const pipelinesArchiveFile = () => statePath("pipelines-archive.json");
+const stateDatabaseFile = () => statePath("state.sqlite");
 const artifactsRoot = () => statePath("pipelines");
 
 type PipelineFile = { schemaVersion: number; pipelines: Pipeline[] };
@@ -445,17 +447,44 @@ function migratePipelineRecord(raw: unknown, schemaVersion: number): unknown {
 }
 
 export function loadPipelines(): Pipeline[] {
-  const raw = readJson(pipelinesFile());
+  return pipelineStore().snapshot();
+}
+
+function parsePipelinesFile(filename: string, lenient: boolean): Pipeline[] {
+  const raw = readJson(filename);
   if (raw === null) return [];
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new PipelineStoreError("pipeline registry must be an object");
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    if (lenient) return [];
+    throw new PipelineStoreError("pipeline registry must be an object");
+  }
   const file = raw as Partial<PipelineFile>;
   if (typeof file.schemaVersion !== "number" || !MIGRATABLE_SCHEMA_VERSIONS.has(file.schemaVersion)) {
+    if (lenient) return [];
     throw new PipelineStoreError(`unsupported pipeline registry schema: ${String(file.schemaVersion)}`);
   }
-  if (!Array.isArray(file.pipelines)) throw new PipelineStoreError("pipeline registry contains malformed records");
+  if (!Array.isArray(file.pipelines)) {
+    if (lenient) return [];
+    throw new PipelineStoreError("pipeline registry contains malformed records");
+  }
   const records = file.pipelines.map((pipeline) => migratePipelineRecord(pipeline, file.schemaVersion!));
-  if (!records.every(isPipeline)) throw new PipelineStoreError("pipeline registry contains malformed records");
-  return records.map(reviveLoadedPipeline);
+  if (!lenient && !records.every(isPipeline)) throw new PipelineStoreError("pipeline registry contains malformed records");
+  const accepted = lenient ? records.filter(isPipeline) : records as Pipeline[];
+  if (lenient && accepted.length !== records.length) {
+    console.error(`[pipelines] skipped ${records.length - accepted.length} malformed archived pipeline record(s)`);
+  }
+  return accepted.map(reviveLoadedPipeline);
+}
+
+export function planPipelineStateMigration(): {
+  pipelines: { records: number; keys: string[] };
+  archive: { records: number; keys: string[] };
+} {
+  const pipelines = parsePipelinesFile(pipelinesFile(), false);
+  const archive = parsePipelinesFile(pipelinesArchiveFile(), true);
+  return {
+    pipelines: { records: pipelines.length, keys: pipelines.map((pipeline) => pipeline.id) },
+    archive: { records: archive.length, keys: archive.map((pipeline) => pipeline.id) },
+  };
 }
 
 /** Fresh per-call copies of every layer a caller may write (pipeline, stage,
@@ -516,31 +545,108 @@ function reviveLoadedPipeline(pipeline: Pipeline): Pipeline {
 }
 
 let projectionCache: { signature: string; pipelines: Pipeline[] } | null = null;
+const pipelineStores = new Map<string, {
+  active: SqliteStateCollection<Pipeline>;
+  archive: SqliteStateCollection<Pipeline>;
+}>();
 
-function pipelinesFileSignature(): string | null {
-  try {
-    const stat = fs.statSync(pipelinesFile(), { bigint: true });
-    return `${stat.mtimeNs}:${stat.size}`;
-  } catch {
-    return null;
-  }
+function decodePipeline(value: unknown): Pipeline | null {
+  if (!isPipeline(value)) throw new PipelineStoreError("pipeline registry contains malformed records");
+  return reviveLoadedPipeline(value);
 }
 
-/** The parse+validation of a large registry, cached against the file signature.
-    Mutating paths keep `withPipelineMutation`, whose persisted rename changes the
-    signature and invalidates this cache. The records are the cache itself — only
-    the exported readers below decide what a caller may do with them. */
+function pipelineControllerActive(pipeline: Pipeline): boolean {
+  if (pipeline.state === "closed") return Boolean(pipeline.unconfirmedHosts?.length);
+  if (pipeline.state === "completed") {
+    return Boolean(pipeline.unconfirmedHosts?.length) || !pipeline.terminalReap?.settledAt;
+  }
+  return true;
+}
+
+export function pipelineStateCollectionSeeds(): [StateCollectionSeed<Pipeline>, StateCollectionSeed<Pipeline>] {
+  return [
+    {
+      collection: "pipelines",
+      schemaVersion: PIPELINES_SCHEMA_VERSION,
+      migrationId: "pipelines-json-v1",
+      loadRecords: () => parsePipelinesFile(pipelinesFile(), false),
+      key: (pipeline: Pipeline) => pipeline.id,
+      controllerActive: pipelineControllerActive,
+    },
+    {
+      collection: "pipelines_archive",
+      schemaVersion: PIPELINES_SCHEMA_VERSION,
+      migrationId: "pipelines-archive-json-v1",
+      loadRecords: () => parsePipelinesFile(pipelinesArchiveFile(), true),
+      key: (pipeline: Pipeline) => pipeline.id,
+      controllerActive: () => false,
+    },
+  ];
+}
+
+function stores(): { active: SqliteStateCollection<Pipeline>; archive: SqliteStateCollection<Pipeline> } {
+  const filename = stateDatabaseFile();
+  const held = pipelineStores.get(filename);
+  if (held) return held;
+  initializeStateCollections(filename, pipelineStateCollectionSeeds());
+  const common = {
+    schemaVersion: PIPELINES_SCHEMA_VERSION,
+    busyMessage: "pipeline state is busy",
+    key: (pipeline: Pipeline) => pipeline.id,
+    decode: decodePipeline,
+    clone: reviveLoadedPipeline,
+    decodeError: (error: unknown) => error instanceof PipelineStoreError
+      ? error
+      : new PipelineStoreError("pipeline registry contains malformed records", { cause: error }),
+    validate: (pipeline: Pipeline) => {
+      if (!isPipeline(pipeline)) {
+        throw new PipelineStoreError("refusing to persist a malformed pipeline record");
+      }
+    },
+  };
+  const active = new SqliteStateCollection<Pipeline>(filename, {
+    ...common,
+    collection: "pipelines",
+    controllerActive: pipelineControllerActive,
+    strictDecode: true,
+  });
+  const archive = new SqliteStateCollection<Pipeline>(filename, {
+    ...common,
+    collection: "pipelines_archive",
+    onDecodeError: (error) => console.error("[pipelines] skipped malformed archived SQLite row", error),
+  });
+  const created = { active, archive };
+  pipelineStores.set(filename, created);
+  return created;
+}
+
+function pipelineStore(): SqliteStateCollection<Pipeline> {
+  return stores().active;
+}
+
+function archiveStore(): SqliteStateCollection<Pipeline> {
+  return stores().archive;
+}
+
+function pipelinesFileSignature(): string {
+  return pipelineStore().signature();
+}
+
+/** The validated pipeline projection keeps the signature cache introduced for
+    the JSON store. SQLite collection revisions invalidate it across processes.
+    The records are the cache itself — only the exported readers below decide
+    what a caller may do with them. */
 function cachedPipelines(): Pipeline[] {
   const before = pipelinesFileSignature();
-  if (before !== null && projectionCache?.signature === before) return projectionCache.pipelines;
-  const pipelines = loadPipelines();
+  if (projectionCache?.signature === before) return projectionCache.pipelines;
+  const pipelines = [...pipelineStore().loadReadonly()];
   const after = pipelinesFileSignature();
-  if (after !== null && before === after) projectionCache = { signature: after, pipelines };
+  if (before === after) projectionCache = { signature: after, pipelines };
   return pipelines;
 }
 
-/** Read-only load for request-path projections (issue #798): no lock, and the
-    parse+validation of a large registry is cached against the file signature.
+/** Read-only load for request-path projections (issue #798): no lease, and the
+    validated registry is cached against the SQLite collection revision.
     Every call still returns independently mutable records via the same revive
     pass `loadPipelines` uses, so a projection overlay can never write into the
     cache. */
@@ -564,29 +670,28 @@ export function loadPipelinesForList(): readonly Pipeline[] {
   return cachedPipelines();
 }
 
-function savePipelinesUnlocked(pipelines: Pipeline[]): void {
-  for (const pipeline of pipelines) {
-    const id = pipeline.id;
-    if (!isPipeline(pipeline)) throw new PipelineStoreError(`refusing to persist a malformed pipeline record: ${id}`);
-  }
-  atomicWriteJson(pipelinesFile(), { schemaVersion: PIPELINES_SCHEMA_VERSION, pipelines });
-}
-
 /** Serialize every production read-modify-write across Viewer and MCP processes. */
 export async function withPipelineMutation<T>(
-  mutate: (pipelines: Pipeline[], persist: () => void) => Promise<T> | T,
+  mutate: (pipelines: Pipeline[], persist: {
+    (): void;
+    (records: readonly Pipeline[]): void;
+  }) => Promise<T> | T,
 ): Promise<T> {
-  return withFileTransaction(pipelinesFile(), "pipeline state is busy", async () => {
-    const pipelines = loadPipelines();
-    return mutate(pipelines, () => savePipelinesUnlocked(pipelines));
-  });
+  return pipelineStore().mutate(mutate);
+}
+
+export async function withPipelineControllerMutation<T>(
+  mutate: (pipelines: Pipeline[], persist: {
+    (): void;
+    (records: readonly Pipeline[]): void;
+  }) => Promise<T> | T,
+): Promise<T> {
+  return pipelineStore().mutate(mutate, undefined, true);
 }
 
 export function savePipelines(pipelines: Pipeline[]): void {
-  withFileTransactionSync(pipelinesFile(), "pipeline state is busy", () => savePipelinesUnlocked(pipelines));
+  pipelineStore().replaceSync(pipelines);
 }
-
-const pipelinesArchiveFile = () => statePath("pipelines-archive.json");
 
 /** Settled records leave the hot registry after this long; the archive keeps
     the full record for the closed list and by-id reads. */
@@ -595,16 +700,7 @@ const SETTLED_PIPELINE_ARCHIVE_AFTER_MS = 3 * 24 * 60 * 60 * 1000;
 /** Lenient read: the archive is cold storage, so a malformed or legacy record
     is skipped with a log line instead of poisoning every closed-list read. */
 export function loadArchivedPipelines(): Pipeline[] {
-  const raw = readJson(pipelinesArchiveFile());
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
-  const file = raw as Partial<PipelineFile>;
-  if (typeof file.schemaVersion !== "number" || !MIGRATABLE_SCHEMA_VERSIONS.has(file.schemaVersion) || !Array.isArray(file.pipelines)) return [];
-  const migrated = file.pipelines.map((pipeline) => migratePipelineRecord(pipeline, file.schemaVersion!));
-  const records = migrated.filter(isPipeline);
-  if (records.length !== migrated.length) {
-    console.error(`[pipelines] skipped ${migrated.length - records.length} malformed archived pipeline record(s)`);
-  }
-  return records.map(reviveLoadedPipeline);
+  return archiveStore().snapshot();
 }
 
 function pipelineSettledForArchive(pipeline: Pipeline, nowMs: number): boolean {
@@ -617,26 +713,29 @@ function pipelineSettledForArchive(pipeline: Pipeline, nowMs: number): boolean {
   return Number.isFinite(parsed) && nowMs - parsed > SETTLED_PIPELINE_ARCHIVE_AFTER_MS;
 }
 
-/** Move settled records out of the hot registry. Every mutation re-parses and
-    rewrites the whole pipelines.json, so hundreds of closed records tax each
-    tick (a 7.2 MB hot registry helped freeze the production Viewer). */
-export async function archiveSettledPipelines(nowMs = Date.now()): Promise<number> {
-  return withPipelineMutation((pipelines, persist) => {
-    const settled = pipelines.filter((pipeline) => pipelineSettledForArchive(pipeline, nowMs));
-    if (settled.length === 0) return 0;
-    const archived = loadArchivedPipelines();
-    const archivedIds = new Set(archived.map((pipeline) => pipeline.id));
-    atomicWriteJson(pipelinesArchiveFile(), {
-      schemaVersion: PIPELINES_SCHEMA_VERSION,
-      pipelines: [...archived, ...settled.filter((pipeline) => !archivedIds.has(pipeline.id))],
-    });
-    const settledIds = new Set(settled.map((pipeline) => pipeline.id));
-    const active = pipelines.filter((pipeline) => !settledIds.has(pipeline.id));
-    pipelines.length = 0;
-    pipelines.push(...active);
-    persist();
-    return settled.length;
+/** Move settled records out of the hot registry. The former JSON path parsed
+    and rewrote every record here; the archive collection now receives only the
+    settled rows before the active collection drops them. */
+export async function archiveSettledPipelines(
+  nowMs = Date.now(),
+  options: { beforeCommit?: () => void } = {},
+): Promise<number> {
+  return pipelineStore().moveMatchingTo(
+    archiveStore(),
+    (pipeline) => pipelineSettledForArchive(pipeline, nowMs),
+    options,
+  );
+}
+
+export function checkpointPipelineRollbackMirrorsForDemotion(): { pipelines: number; pipelinesArchive: number } {
+  const { active, archive } = stores();
+  const pipelines = active.checkpointMirrorForDemotion((pipelines, revision) => {
+    atomicWriteJson(pipelinesFile(), { schemaVersion: PIPELINES_SCHEMA_VERSION, _sqliteRevision: revision, pipelines });
   });
+  const pipelinesArchive = archive.checkpointMirrorForDemotion((pipelines, revision) => {
+    atomicWriteJson(pipelinesArchiveFile(), { schemaVersion: PIPELINES_SCHEMA_VERSION, _sqliteRevision: revision, pipelines });
+  });
+  return { pipelines, pipelinesArchive };
 }
 
 /** Full-record read by id: the hot registry first, then the archive. */

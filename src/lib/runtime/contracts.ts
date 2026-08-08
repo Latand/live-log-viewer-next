@@ -471,6 +471,7 @@ export interface ViewerReleaseIdentity {
   container: string;
   endpoint: string;
   revision: string;
+  hotStateBackend?: "sqlite-v1";
   mcpRuntime?: ViewerMcpRuntimeIdentity;
 }
 

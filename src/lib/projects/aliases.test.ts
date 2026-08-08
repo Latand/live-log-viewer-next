@@ -64,6 +64,7 @@ test("a conflicting legacy alias fails closed without changing the durable map",
 test("current-production durable records provide repository-backed aliases", () => {
   const repository = path.join(SANDBOX, "durable-record-repository");
   fs.mkdirSync(path.join(repository, ".git"), { recursive: true });
+  fs.writeFileSync(path.join(repository, ".git", "HEAD"), "ref: refs/heads/main\n");
   fs.writeFileSync(path.join(repository, ".git", "config"), [
     '[remote "origin"]',
     "\turl = ssh://git@example.invalid/team/shared-repository.git",
@@ -89,6 +90,7 @@ test("one legacy key resolving to two repositories is reported as a conflict", (
   const repositories = ["first", "second"].map((name) => {
     const repository = path.join(SANDBOX, `conflict-${name}`);
     fs.mkdirSync(path.join(repository, ".git"), { recursive: true });
+    fs.writeFileSync(path.join(repository, ".git", "HEAD"), "ref: refs/heads/main\n");
     fs.writeFileSync(path.join(repository, ".git", "config"), [
       '[remote "origin"]',
       `\turl = ssh://git@example.invalid/team/${name}.git`,
@@ -112,6 +114,7 @@ test("one poisoned record cannot block a majority-backed legacy source", () => {
   const poison = path.join(SANDBOX, "majority-poison");
   for (const [repository, name] of [[clean, "shared-repository"], [poison, "unrelated-repository"]] as const) {
     fs.mkdirSync(path.join(repository, ".git"), { recursive: true });
+    fs.writeFileSync(path.join(repository, ".git", "HEAD"), "ref: refs/heads/main\n");
     fs.writeFileSync(path.join(repository, ".git", "config"), [
       '[remote "origin"]',
       `\turl = ssh://git@example.invalid/team/${name}.git`,
@@ -146,6 +149,7 @@ test("a canonical repository id with foreign records never aliases to another re
   const repositories = ["current-repository", "foreign-repository"].map((name) => {
     const repository = path.join(SANDBOX, name);
     fs.mkdirSync(path.join(repository, ".git"), { recursive: true });
+    fs.writeFileSync(path.join(repository, ".git", "HEAD"), "ref: refs/heads/main\n");
     fs.writeFileSync(path.join(repository, ".git", "config"), [
       '[remote "origin"]',
       `\turl = ssh://git@example.invalid/team/${name}.git`,
@@ -172,6 +176,7 @@ test("a canonical repository id with foreign records never aliases to another re
 test("a durable alias from a deleted worktree checkout resolves through the worktree map", () => {
   const repository = path.join(SANDBOX, "deleted-worktree-main");
   fs.mkdirSync(path.join(repository, ".git"), { recursive: true });
+  fs.writeFileSync(path.join(repository, ".git", "HEAD"), "ref: refs/heads/main\n");
   fs.writeFileSync(path.join(repository, ".git", "config"), [
     '[remote "origin"]',
     "\turl = ssh://git@example.invalid/team/shared-repository.git",
@@ -202,6 +207,7 @@ test("id collisions defer only the colliding sources, never the clean batch", ()
   const repositories = ["collision", "clean"].map((name) => {
     const repository = path.join(SANDBOX, `collision-${name}`);
     fs.mkdirSync(path.join(repository, ".git"), { recursive: true });
+    fs.writeFileSync(path.join(repository, ".git", "HEAD"), "ref: refs/heads/main\n");
     fs.writeFileSync(path.join(repository, ".git", "config"), [
       '[remote "origin"]',
       `\turl = ssh://git@example.invalid/team/${name}-repository.git`,

@@ -305,6 +305,23 @@ test("a failed stage spawn parks; retry-stage respawns fresh", async () => {
   expect(cur.state).toBe("implementing");
 });
 
+test("pause during spawn preserves operator state and the spawned pane binding", async () => {
+  const harness = makeHarness();
+  const wf = createWf(harness.ports);
+  await tickWorkflows([], harness.ports); // provision → implementing
+  const spawn = harness.ports.spawnAgent;
+  harness.ports.spawnAgent = async (...args) => {
+    const paused = await patchWorkflow(wf.id, { action: "pause" }, harness.ports);
+    expect(paused.workflow?.state).toBe("paused");
+    return spawn(...args);
+  };
+  await tickWorkflows([], harness.ports);
+  const current = load(wf.id);
+  expect(current.state).toBe("paused");
+  expect(current.pausedState).toBe("implementing");
+  expect(current.stageRuns[0]).toMatchObject({ paneId: "%1", startedAt: expect.any(String) });
+});
+
 test("a stage agent pane dying before STAGE_DONE parks the workflow", async () => {
   const harness = makeHarness();
   const wf = createWf(harness.ports);

@@ -1300,6 +1300,25 @@ function raceFlow(over: Partial<Flow>): Flow {
   } as unknown as Flow;
 }
 
+test("terminal flows remain in tick results and scanner annotations", async () => {
+  const flow = raceFlow({
+    id: "flow-terminal-annotation",
+    implementerPath: "/terminal-implementer.jsonl",
+    state: "closed",
+    closedAt: "2026-08-06T00:00:00.000Z",
+  });
+  saveFlows([flow]);
+  const implementer = {
+    path: flow.implementerPath,
+    flow: { flowId: "stale", flowRole: "reviewer", round: 9 },
+  } as FileEntry;
+
+  const result = await tickFlows([implementer]);
+
+  expect(result.flows.map((record) => record.id)).toContain(flow.id);
+  expect(implementer.flow).toEqual({ flowId: flow.id, flowRole: "implementer", round: null });
+});
+
 test("overlapping relay ticks deliver one review and settle the round once (#529)", async () => {
   relayDeliveries = 0;
   releaseRelayDeliveries = [];

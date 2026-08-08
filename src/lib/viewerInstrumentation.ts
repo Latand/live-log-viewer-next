@@ -4,6 +4,17 @@ import type { ChildProcess } from "node:child_process";
 
 import { statePath } from "@/lib/configDir";
 import { structuredHostsEnabled } from "@/lib/runtime/flags";
+import {
+  acknowledgeHotStateFence,
+  completeHotStatePreparation,
+  hotStateWriterRevision,
+  markHotStateActivationReady,
+  publishHotStateAuthority,
+  readHotStateAuthority,
+  type HotStateAuthority,
+  type HotStateCheckpoint,
+} from "@/lib/state/hotStateAuthority";
+import { initializeStateCollections, markStateSqliteCutoverReady } from "@/lib/state/sqliteStateStore";
 import { markStructuredHostStartupFailed, markStructuredHostStartupReady } from "@/lib/runtime/startupStatus";
 import { StructuredRuntimeRequirementError } from "@/lib/proc/darwinIdentity";
 import {
@@ -22,6 +33,8 @@ import {
  */
 
 const RELEASE_ACTIVATION_POLL_MS = 250;
+const HOT_STATE_CUTOVER_STABLE_POLLS = 3;
+const HOT_STATE_CUTOVER_MAX_POLLS = 12;
 const WAKATIME_WORKER_RESTART_MS = 1_000;
 const wakatimeWorkerStore = globalThis as typeof globalThis & {
   __llvWakatimeWorker?: ChildProcess;
@@ -38,13 +51,29 @@ interface StructuredHostStartupOptions {
   maxRetryMs?: number;
   jitterRatio?: number;
   random?: () => number;
+  waitUntilReady?: boolean;
 }
 
 interface ViewerReleaseActivationOptions {
   pollMs?: number;
   schedule?: (callback: () => void, delayMs: number) => ActivationTimer;
   log?: (...args: unknown[]) => void;
-  onDemoted?: () => void | Promise<void>;
+  fenceRequest?: () => HotStateAuthority | null;
+  onFenceRequested?: (request: HotStateAuthority) => void | Promise<void>;
+  onDemoted?: (context: { fenced: boolean }) => void | Promise<void>;
+}
+
+interface HotStateCutoverOptions {
+  pollMs?: number;
+  stablePolls?: number;
+  maxPolls?: number;
+  schedule?: (callback: () => void, delayMs: number) => ActivationTimer;
+  legacySignature?: () => string;
+}
+
+export interface HotStateCutoverBoundary {
+  authority: HotStateAuthority | null;
+  reimportLegacy: boolean;
 }
 
 interface CurrentReleaseControllerLoaders {
@@ -76,6 +105,73 @@ export function viewerReleaseOwnsTraffic(
   }
 }
 
+function legacyHotStateSignature(): string {
+  return ["flows.json", "pipelines.json", "pipelines-archive.json", "workflows.json"].map((name) => {
+    const filename = statePath(name);
+    try {
+      const stat = fs.statSync(filename, { bigint: true });
+      return `${name}:${stat.mtimeNs}:${stat.size}`;
+    } catch {
+      return `${name}:missing`;
+    }
+  }).join("|");
+}
+
+/** A promoted first-SQLite release waits through the predecessor's demotion
+ * poll and imports only after every legacy hot-state file is stable. */
+export async function establishHotStateCutoverBoundary(
+  isCurrent: () => boolean,
+  options: HotStateCutoverOptions = {},
+): Promise<HotStateCutoverBoundary> {
+  const directory = path.dirname(statePath("state.sqlite"));
+  const releaseRevision = hotStateWriterRevision(directory);
+  const targetExists = releaseRevision !== null || fs.existsSync(statePath("viewer-release.json"));
+  if (targetExists && releaseRevision === null) throw new Error("viewer release cannot publish hot-state authority");
+  if (releaseRevision === null) {
+    markStateSqliteCutoverReady(statePath("state.sqlite"));
+    return { authority: null, reimportLegacy: false };
+  }
+  let authority = readHotStateAuthority(directory);
+  if (authority?.mode === "sqlite" && authority.releaseRevision !== releaseRevision) {
+    authority = publishHotStateAuthority(directory, "sqlite", releaseRevision);
+    markStateSqliteCutoverReady(statePath("state.sqlite"));
+    return { authority, reimportLegacy: false };
+  }
+  if (authority?.mode === "sqlite" && authority.releaseRevision === releaseRevision) {
+    markStateSqliteCutoverReady(statePath("state.sqlite"));
+    return { authority, reimportLegacy: false };
+  }
+  if (authority?.mode === "fencing") throw new Error("hot-state cutover cannot replace an active rollback fence");
+  if (authority?.mode !== "preparing" || authority.releaseRevision !== releaseRevision) {
+    authority = publishHotStateAuthority(directory, "preparing", releaseRevision);
+  }
+  const { hotStateMigrationApplied, hotStateMigrationDryRun } = await import("@/lib/state/hotStateMigration");
+  if (hotStateMigrationApplied()) {
+    markStateSqliteCutoverReady(statePath("state.sqlite"));
+    return { authority, reimportLegacy: false };
+  }
+  const pollMs = options.pollMs ?? RELEASE_ACTIVATION_POLL_MS;
+  const stablePolls = options.stablePolls ?? HOT_STATE_CUTOVER_STABLE_POLLS;
+  const maxPolls = options.maxPolls ?? HOT_STATE_CUTOVER_MAX_POLLS;
+  const schedule = options.schedule ?? ((callback, delayMs) => setTimeout(callback, delayMs));
+  const signature = options.legacySignature ?? legacyHotStateSignature;
+  let previous = signature();
+  let stable = 0;
+  for (let poll = 0; poll < maxPolls; poll += 1) {
+    await new Promise<void>((resolve) => schedule(resolve, pollMs).unref?.());
+    if (!isCurrent()) throw new Error("viewer release lost traffic during hot-state cutover");
+    const current = signature();
+    stable = current === previous ? stable + 1 : 0;
+    previous = current;
+    if (stable >= stablePolls) {
+      hotStateMigrationDryRun();
+      markStateSqliteCutoverReady(statePath("state.sqlite"));
+      return { authority, reimportLegacy: true };
+    }
+  }
+  throw new Error("legacy hot-state files did not quiesce during release cutover");
+}
+
 /** Run stateful startup immediately for the current release. A deployment
  * candidate polls the durable target and activates once promotion appoints it. */
 export async function activateViewerRuntimeWhenCurrent(
@@ -88,22 +184,37 @@ export async function activateViewerRuntimeWhenCurrent(
   const log = options.log ?? console.error;
   let started = false;
   let demoted = false;
+  let fenceInProgress = false;
+  let fencedEpoch: number | null = null;
   const monitor = () => {
     if (demoted) return;
     if (started && !isCurrent()) {
       demoted = true;
-      void Promise.resolve(options.onDemoted?.()).catch((error) => {
+      void Promise.resolve(options.onDemoted?.({ fenced: fencedEpoch !== null })).catch((error) => {
         log("[viewer release] demotion checkpoint failed", error);
       });
       return;
+    }
+    const fence = started ? options.fenceRequest?.() ?? null : null;
+    if (!fence || fence.mode !== "fencing") {
+      if (!fenceInProgress) fencedEpoch = null;
+    } else if (fencedEpoch !== fence.epoch && !fenceInProgress) {
+      fenceInProgress = true;
+      void Promise.resolve(options.onFenceRequested?.(fence)).then(() => {
+        fencedEpoch = fence.epoch;
+      }).catch((error) => {
+        log("[viewer release] hot-state fence checkpoint failed", error);
+      }).finally(() => {
+        fenceInProgress = false;
+      });
     }
     schedule(monitor, pollMs).unref?.();
   };
   const start = async () => {
     if (started) return;
     started = true;
-    await activate();
     schedule(monitor, pollMs).unref?.();
+    await activate();
   };
   if (isCurrent()) {
     await start();
@@ -149,6 +260,50 @@ export async function completeViewerReleaseDemotion(
     log("[viewer release] demotion checkpoint failed", error);
     exit(1);
   }
+}
+
+export async function checkpointHotStateRollbackMirrorsForDemotion(): Promise<HotStateCheckpoint["revisions"]> {
+  const [flows, pipelines, workflows] = await Promise.all([
+    import("@/lib/flows/store"),
+    import("@/lib/pipelines/store"),
+    import("@/lib/workflows/store"),
+  ]);
+  const flowRevision = flows.checkpointFlowRollbackMirrorForDemotion();
+  const pipelineRevisions = pipelines.checkpointPipelineRollbackMirrorsForDemotion();
+  const workflowRevision = workflows.checkpointWorkflowRollbackMirrorForDemotion();
+  return {
+    flows: flowRevision,
+    pipelines: pipelineRevisions.pipelines,
+    pipelinesArchive: pipelineRevisions.pipelinesArchive,
+    workflows: workflowRevision,
+  };
+}
+
+export async function initializeHotStateStoresAtStartup(
+  boundary: HotStateCutoverBoundary = { authority: null, reimportLegacy: false },
+  options: { afterCollectionImport?: (collection: string) => void } = {},
+): Promise<HotStateAuthority | null> {
+  const [flows, pipelines, workflows] = await Promise.all([
+    import("@/lib/flows/store"),
+    import("@/lib/pipelines/store"),
+    import("@/lib/workflows/store"),
+  ]);
+  initializeStateCollections(statePath("state.sqlite"), [
+    flows.flowStateCollectionSeed(),
+    ...pipelines.pipelineStateCollectionSeeds(),
+    workflows.workflowStateCollectionSeed(),
+  ], {
+    reimportExisting: boundary.reimportLegacy,
+    ...(options.afterCollectionImport ? { afterCollectionImport: options.afterCollectionImport } : {}),
+  });
+  flows.loadFlows();
+  pipelines.loadPipelines();
+  pipelines.loadArchivedPipelines();
+  workflows.loadWorkflows();
+  if (boundary.authority?.mode === "preparing") {
+    return completeHotStatePreparation(path.dirname(statePath("state.sqlite")), boundary.authority);
+  }
+  return boundary.authority;
 }
 
 export async function startCurrentReleaseControllers(
@@ -254,17 +409,24 @@ export async function runStructuredHostStartup(
   let retryMs = options.initialRetryMs ?? 100;
   let retryPending = false;
   let attempts = 0;
+  let resolveReady: (() => void) | null = null;
+  let rejectReady: ((error: unknown) => void) | null = null;
+  const ready = options.waitUntilReady
+    ? new Promise<void>((resolve, reject) => { resolveReady = resolve; rejectReady = reject; })
+    : null;
 
   const attempt = async (): Promise<void> => {
     attempts += 1;
     try {
       await adopt();
       markStructuredHostStartupReady();
+      resolveReady?.();
       if (attempts > 1) log("[structured hosts] startup adoption recovered", { attempts });
     } catch (error) {
       markStructuredHostStartupFailed();
       if (error instanceof StructuredRuntimeRequirementError) {
         log("[structured hosts] startup adoption failed", error);
+        rejectReady?.(error);
         throw error;
       }
       if (retryPending) return;
@@ -283,23 +445,53 @@ export async function runStructuredHostStartup(
   };
 
   await attempt();
+  await ready;
 }
 
 /** The full node-runtime startup sequence `src/instrumentation.ts` defers to. */
 export async function registerViewerRuntime(): Promise<void> {
   discardWakatimeEnvironmentCredential();
+  const isCurrent = () => viewerReleaseOwnsTraffic();
+  const hotStateDirectory = path.dirname(statePath("state.sqlite"));
+  const releaseRevision = () => hotStateWriterRevision(hotStateDirectory);
+  let activatedReleaseRevision: string | null = null;
   await activateViewerRuntimeWhenCurrent(async () => {
+    const boundary = await establishHotStateCutoverBoundary(isCurrent);
+    activatedReleaseRevision = boundary.authority?.releaseRevision ?? null;
+    const authority = await initializeHotStateStoresAtStartup(boundary);
     await initializeOperatorSpawnCapabilityAtStartup();
     await startWakatimeIntegrationIfEnabled();
     if (structuredHostsEnabled()) {
       const { adoptStructuredHostsAtStartup } = await import("@/lib/runtime/startup");
-      await runStructuredHostStartup(adoptStructuredHostsAtStartup);
+      await runStructuredHostStartup(adoptStructuredHostsAtStartup, console.error, { waitUntilReady: true });
     }
     await startCurrentReleaseControllers();
-  }, () => viewerReleaseOwnsTraffic(), {
-    onDemoted: () => completeViewerReleaseDemotion(async () => {
-        const { agentRegistry } = await import("@/lib/agent/registry");
-        agentRegistry().checkpointRollbackMirrorForDemotion();
+    if (authority) markHotStateActivationReady(hotStateDirectory, authority);
+  }, isCurrent, {
+    fenceRequest: () => {
+      const revision = releaseRevision();
+      const authority = readHotStateAuthority(hotStateDirectory);
+      return revision !== null
+        && authority?.mode === "fencing"
+        && authority.releaseRevision === revision
+        ? authority
+        : null;
+    },
+    onFenceRequested: async (request) => {
+      const revisions = await checkpointHotStateRollbackMirrorsForDemotion();
+      const { agentRegistry } = await import("@/lib/agent/registry");
+      agentRegistry().checkpointRollbackMirrorForDemotion();
+      acknowledgeHotStateFence(hotStateDirectory, request, revisions);
+    },
+    onDemoted: ({ fenced }) => completeViewerReleaseDemotion(async () => {
+      if (fenced) return;
+      const authority = readHotStateAuthority(hotStateDirectory);
+      if (!activatedReleaseRevision
+        || authority?.releaseRevision !== activatedReleaseRevision
+        || (authority.mode !== "sqlite" && authority.mode !== "fencing")) return;
+      const { agentRegistry } = await import("@/lib/agent/registry");
+      await checkpointHotStateRollbackMirrorsForDemotion();
+      agentRegistry().checkpointRollbackMirrorForDemotion();
     }),
   });
 }
