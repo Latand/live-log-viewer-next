@@ -8,6 +8,7 @@ import { useLogTail } from "@/hooks/useLogTail";
 import { useRuntimeSessionForConversation } from "@/hooks/useRuntime";
 import { useToolActivityCues } from "@/hooks/useToolActivityCues";
 import { conversationIdentity } from "@/lib/accounts/identity";
+import { cardMigrationState, migrationHoldsDelivery, migrationTargetName } from "@/lib/accounts/migration";
 import { getLocale, translate, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
@@ -748,7 +749,15 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
               delta: visibleLiveTurnItems.length > 0,
             }).map((section) => {
               if (section === "launch") return <LaunchChips key="launch" launch={launch!} onRetry={onLaunchRetry} />;
-              if (section === "outbox") return <OutboxBubbles key="outbox" cardId={memoryKey!} entries={pendingOutbox} />;
+              if (section === "outbox") {
+                /* While this card is switching accounts the server holds every
+                   delivery it admits, so the bubble — the message's ONE delivery
+                   state — is what says the message waits for the switch. */
+                const switchHold = migrationHoldsDelivery(cardMigrationState(file.migration))
+                  ? { label: migrationTargetName(file.migration) }
+                  : null;
+                return <OutboxBubbles key="outbox" cardId={memoryKey!} entries={pendingOutbox} switchHold={switchHold} />;
+              }
               return <LiveTurnRows key="delta" items={visibleLiveTurnItems} />;
             })}
             <ConversationAttention file={file} />
