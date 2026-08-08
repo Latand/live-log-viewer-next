@@ -563,7 +563,7 @@ test("the migration dry run leaves the state directory untouched", () => {
   }
 });
 
-test("complete durable markers prevent a later cutover from reimporting stale JSON", async () => {
+test("complete durable markers let a later cutover bypass damaged JSON mirrors", async () => {
   const previous = process.env.LLV_STATE_DIR;
   const previousPort = process.env.PORT;
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-hot-state-marker-guard-"));
@@ -578,9 +578,7 @@ test("complete durable markers prevent a later cutover from reimporting stale JS
     await initializeHotStateStoresAtStartup();
     saveFlows([sampleFlow("sqlite-durable", "newer-than-json")]);
 
-    fs.writeFileSync(path.join(sandbox, "flows.json"), JSON.stringify({
-      flows: [sampleFlow("legacy-stale", "stale-json")],
-    }));
+    fs.writeFileSync(path.join(sandbox, "flows.json"), "{");
     fs.writeFileSync(path.join(sandbox, "viewer-release.json"), JSON.stringify({
       endpoint: "http://127.0.0.1:19008",
       revision,
@@ -592,15 +590,13 @@ test("complete durable markers prevent a later cutover from reimporting stale JS
       maxPolls: 2,
       schedule: (callback) => { callback(); return { unref() {} }; },
     });
-    expect(boundary.reimportLegacy).toBe(true);
+    expect(boundary.reimportLegacy).toBe(false);
 
     await initializeHotStateStoresAtStartup(boundary);
     expect(readStateCollectionRows(path.join(sandbox, "state.sqlite"), "flows")).toEqual([
       expect.objectContaining({ id: "sqlite-durable", stateDetail: "newer-than-json" }),
     ]);
-    expect(JSON.parse(fs.readFileSync(path.join(sandbox, "flows.json"), "utf8"))).toMatchObject({
-      flows: [expect.objectContaining({ id: "legacy-stale", stateDetail: "stale-json" })],
-    });
+    expect(fs.readFileSync(path.join(sandbox, "flows.json"), "utf8")).toBe("{");
   } finally {
     if (previous === undefined) delete process.env.LLV_STATE_DIR;
     else process.env.LLV_STATE_DIR = previous;

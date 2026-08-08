@@ -122,7 +122,7 @@ function collectionMarkersMatch(db: Database, seeds: readonly StateCollectionSee
   });
 }
 
-function collectionsAlreadyInitialized(filename: string, seeds: readonly StateCollectionSeed<unknown>[]): boolean {
+export function stateCollectionsInitialized(filename: string, seeds: readonly StateCollectionSeed<unknown>[]): boolean {
   if (!fs.existsSync(filename)) return false;
   let db: Database | null = null;
   try {
@@ -137,7 +137,7 @@ function collectionsAlreadyInitialized(filename: string, seeds: readonly StateCo
 
 function ensureFirstSqliteCutover(filename: string, seeds: readonly StateCollectionSeed<unknown>[]): void {
   const resolved = path.resolve(filename);
-  if (cutoverReadyDatabases.has(resolved) || collectionsAlreadyInitialized(filename, seeds)) return;
+  if (cutoverReadyDatabases.has(resolved) || stateCollectionsInitialized(filename, seeds)) return;
   const directory = path.dirname(filename);
   if (readHotStateReleaseTarget(directory) === null) {
     cutoverReadyDatabases.add(resolved);
@@ -344,7 +344,7 @@ export function initializeStateCollections(
   } = {},
 ): void {
   ensureFirstSqliteCutover(filename, seeds);
-  const allowFencedExisting = !options.reimportExisting && collectionsAlreadyInitialized(filename, seeds);
+  const allowFencedExisting = !options.reimportExisting && stateCollectionsInitialized(filename, seeds);
   const db = openDatabase(filename);
   try {
     for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt += 1) {

@@ -145,6 +145,11 @@ export async function establishHotStateCutoverBoundary(
   if (authority?.mode !== "preparing" || authority.releaseRevision !== releaseRevision) {
     authority = publishHotStateAuthority(directory, "preparing", releaseRevision);
   }
+  const { hotStateMigrationApplied, hotStateMigrationDryRun } = await import("@/lib/state/hotStateMigration");
+  if (hotStateMigrationApplied()) {
+    markStateSqliteCutoverReady(statePath("state.sqlite"));
+    return { authority, reimportLegacy: false };
+  }
   const pollMs = options.pollMs ?? RELEASE_ACTIVATION_POLL_MS;
   const stablePolls = options.stablePolls ?? HOT_STATE_CUTOVER_STABLE_POLLS;
   const maxPolls = options.maxPolls ?? HOT_STATE_CUTOVER_MAX_POLLS;
@@ -159,7 +164,6 @@ export async function establishHotStateCutoverBoundary(
     stable = current === previous ? stable + 1 : 0;
     previous = current;
     if (stable >= stablePolls) {
-      const { hotStateMigrationDryRun } = await import("@/lib/state/hotStateMigration");
       hotStateMigrationDryRun();
       markStateSqliteCutoverReady(statePath("state.sqlite"));
       return { authority, reimportLegacy: true };
