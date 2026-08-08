@@ -563,6 +563,27 @@ test("the migration dry run leaves the state directory untouched", () => {
   }
 });
 
+test("the migration dry run rejects duplicate row keys before opening SQLite", () => {
+  const previous = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-hot-state-dry-run-duplicate-"));
+  process.env.LLV_STATE_DIR = sandbox;
+  try {
+    fs.writeFileSync(path.join(sandbox, "flows.json"), JSON.stringify({
+      flows: [sampleFlow("duplicate"), sampleFlow("duplicate")],
+    }));
+    fs.writeFileSync(path.join(sandbox, "pipelines.json"), JSON.stringify({ schemaVersion: 4, pipelines: [] }));
+    fs.writeFileSync(path.join(sandbox, "pipelines-archive.json"), JSON.stringify({ schemaVersion: 4, pipelines: [] }));
+    fs.writeFileSync(path.join(sandbox, "workflows.json"), JSON.stringify({ workflows: [] }));
+
+    expect(hotStateMigrationDryRun).toThrow("duplicate or empty flows migration key: duplicate");
+    expect(fs.existsSync(path.join(sandbox, "state.sqlite"))).toBe(false);
+  } finally {
+    if (previous === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previous;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
 test("complete durable markers let a later cutover bypass damaged JSON mirrors", async () => {
   const previous = process.env.LLV_STATE_DIR;
   const previousPort = process.env.PORT;

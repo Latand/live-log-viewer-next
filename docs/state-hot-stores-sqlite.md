@@ -119,14 +119,19 @@ fields returned by an external spawn.
 
 ## First boot and rollback mirror
 
-The promoted release preflights and normalizes all four legacy sources before
-opening the database. It imports `flows`, `pipelines`, `pipelines_archive`, and
-`workflows` in one `BEGIN IMMEDIATE` transaction. A fault after any individual
-import rolls back every row and marker. A restart while authority remains
-`preparing` repeats the complete import from the still-authoritative JSON
-files. The transaction clears any partial markers created by an earlier
-implementation before reseeding, so a mixed database cannot become
-authoritative. Schema and migration ids make later boots idempotent.
+The promoted release first checks the complete schema-version and migration-id
+marker set. Matching markers make SQLite authoritative immediately and bypass
+legacy preflight, so stale or damaged rollback mirrors cannot rerun or block a
+completed migration. With an absent, partial, or mismatched marker set, the
+release preflights and normalizes all four legacy sources before opening the
+database. It imports `flows`, `pipelines`, `pipelines_archive`, and `workflows`
+in one `BEGIN IMMEDIATE` transaction. A fault after any individual import rolls
+back every row and marker. A restart while authority remains `preparing`
+retries an incomplete import from the still-authoritative JSON files. The
+transaction clears any partial markers created by an earlier implementation
+before reseeding, so a mixed database cannot become authoritative. A second
+marker check inside that transaction prevents a concurrent completed import
+from being replaced.
 
 Pipeline migration folds `pipelines.json` into `pipelines` and
 `pipelines-archive.json` into `pipelines_archive` inside that shared cutover
@@ -192,11 +197,12 @@ The application launcher, development script, production script, package
 metadata, and source-install documentation require Bun because these stores
 depend on the built-in SQLite driver.
 
-The migration planner parses and validates every source without opening or
-writing the database. Tests cover the dry run, first import, malformed-source
-failure, repeated boot, exact checkpoint refresh, concurrent first boot, and
-pipeline archive fold-in. A two-release test covers promotion, a final retiring
-JSON write, a later SQLite mutation, demotion checkpointing, and rollback.
+The migration planner parses every source and rejects malformed records, empty
+keys, and duplicate keys without opening or writing the database. Tests cover
+the dry run, complete-marker guard, first import, malformed-source failure,
+repeated boot, exact checkpoint refresh, concurrent first boot, and pipeline
+archive fold-in. A two-release test covers promotion, a final retiring JSON
+write, a later SQLite mutation, demotion checkpointing, and rollback.
 
 Request projections key the hot collections on their authoritative collection
 revisions. Compatibility projections open SQLite read-only and never initialize

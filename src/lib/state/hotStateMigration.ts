@@ -11,6 +11,17 @@ export interface HotStateMigrationPlan {
   workflows: { records: number; keys: string[] };
 }
 
+type CollectionMigrationPlan = { records: number; keys: string[] };
+
+function validateMigrationPlan(collection: string, plan: CollectionMigrationPlan): CollectionMigrationPlan {
+  const seen = new Set<string>();
+  for (const key of plan.keys) {
+    if (!key || seen.has(key)) throw new Error(`duplicate or empty ${collection} migration key: ${key}`);
+    seen.add(key);
+  }
+  return plan;
+}
+
 /** A complete marker set is the durable, idempotent migration guard. */
 export function hotStateMigrationApplied(): boolean {
   return stateCollectionsInitialized(statePath("state.sqlite"), [
@@ -24,9 +35,9 @@ export function hotStateMigrationApplied(): boolean {
 export function hotStateMigrationDryRun(): HotStateMigrationPlan {
   const pipelines = planPipelineStateMigration();
   return {
-    flows: planFlowStateMigration(),
-    pipelines: pipelines.pipelines,
-    pipelinesArchive: pipelines.archive,
-    workflows: planWorkflowStateMigration(),
+    flows: validateMigrationPlan("flows", planFlowStateMigration()),
+    pipelines: validateMigrationPlan("pipelines", pipelines.pipelines),
+    pipelinesArchive: validateMigrationPlan("pipelines_archive", pipelines.archive),
+    workflows: validateMigrationPlan("workflows", planWorkflowStateMigration()),
   };
 }
