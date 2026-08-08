@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { streamingVoiceDelivery } from "./voiceDelivery";
 import { projectEngineHostEvent } from "./engineHostEvents";
+import { completeRuntimeLiveTurnItem, runtimeLiveTurnItems } from "./liveTurn";
 
 describe("projectEngineHostEvent", () => {
   test("projects a Codex user-input request into a question card", () => {
@@ -139,5 +140,98 @@ describe("projectEngineHostEvent", () => {
       seq: 14,
     });
     expect(projected?.payload.voiceResponse).toBeUndefined();
+  });
+
+  test("preserves bounded live tool descriptors when completed engine items carry large result bodies", () => {
+    const command = "bun test src/lib/runtime/engineHostEvents.test.ts";
+    const codex = projectEngineHostEvent("conversation_codex_tool", "codex:thread-tool", {
+      kind: "item",
+      turnId: "turn-codex-tool",
+      item: {
+        type: "commandExecution",
+        id: "codex-tool-item",
+        command,
+        cwd: "$HOME/project",
+        aggregatedOutput: "x".repeat(32 * 1024),
+      },
+      phase: "completed",
+      seq: 15,
+    });
+    expect(codex?.payload.item).toMatchObject({
+      type: "commandExecution",
+      id: "codex-tool-item",
+      command,
+      cwd: "$HOME/project",
+    });
+    expect(JSON.stringify(codex?.payload.item)).not.toContain("aggregatedOutput");
+
+    const claude = projectEngineHostEvent("conversation_claude_tool", "claude:session-tool", {
+      kind: "item",
+      turnId: "turn-claude-tool",
+      item: {
+        type: "assistant",
+        uuid: "claude-tool-message",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "text", text: "p".repeat(30 * 1024) },
+            {
+              type: "tool_use",
+              id: "claude-tool-item",
+              name: "Bash",
+              input: { command: `apply_patch ${"x".repeat(32 * 1024)}` },
+            },
+          ],
+        },
+      },
+      phase: "completed",
+      seq: 16,
+    });
+    expect(claude?.payload.item).toMatchObject({
+      type: "assistant",
+      uuid: "claude-tool-message",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "text", text: "p".repeat(30 * 1024) },
+          {
+            type: "tool_use",
+            id: "claude-tool-item",
+            name: "Bash",
+            input: { command: expect.stringContaining("apply_patch") },
+          },
+        ],
+      },
+    });
+    expect(JSON.stringify(claude?.payload.item).length).toBeLessThan(64 * 1024);
+
+    const oversized = projectEngineHostEvent("conversation_claude_tool", "claude:session-tool", {
+      kind: "item",
+      turnId: "turn-claude-tool",
+      item: {
+        type: "assistant",
+        uuid: "claude-oversized-message",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "text", text: "large prose ".repeat(6 * 1024) },
+            { type: "tool_use", id: "claude-small-tool", name: "Read", input: { file_path: "src/lib/runtime/liveTurn.ts" } },
+          ],
+        },
+      },
+      phase: "completed",
+      seq: 17,
+    });
+    const live = completeRuntimeLiveTurnItem(
+      null,
+      "turn-claude-tool",
+      oversized?.payload.item,
+      "2026-08-06T10:10:00.000Z",
+    );
+    expect(runtimeLiveTurnItems(live)[0]).toMatchObject({
+      kind: "assistant",
+      omittedChars: expect.any(Number),
+    });
+    expect(runtimeLiveTurnItems(live)[0]?.omittedChars).toBeGreaterThan(0);
   });
 });

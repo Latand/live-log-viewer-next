@@ -1,11 +1,16 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { Window } from "happy-dom";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import type { ReactNode } from "react";
 
 import { setLocale } from "@/lib/i18n";
-import type { RuntimeLiveTurnItem, RuntimeLiveTurnItemPhase } from "@/lib/runtime/liveTurn";
+import {
+  projectRuntimeLiveTurnItem,
+  runtimeLiveTurnItems,
+  type RuntimeLiveTurnItem,
+  type RuntimeLiveTurnItemPhase,
+} from "@/lib/runtime/liveTurn";
 import { advanceMdStream, createMdStream, mdBlocks, type MdStreamState } from "@/components/feed/markdown";
 
 import { LiveTurnRows } from "./LiveTurnRows";
@@ -92,6 +97,77 @@ test("a settled live row renders the same markdown as its transcript counterpart
   expect(liveRow(host).querySelector("b")?.textContent).toBe("bold");
   expect(liveRow(host).querySelectorAll("table")).toHaveLength(1);
   expect(liveRow(host).querySelector("pre")?.textContent).toBe("const x = 1;");
+});
+
+test("a live tool row renders its readable summary in response order between assistant rows", () => {
+  const { host, root } = mount();
+  const consoleError = spyOn(console, "error").mockImplementation(() => undefined);
+  const command = "bun test src/components/conversation/liveTurnMarkdown.dom.test.tsx";
+  paint(root, <LiveTurnRows items={[
+    item("I will run the focused DOM test.", "awaiting-echo", { itemId: "assistant-message" }),
+    {
+      kind: "tool",
+      itemId: "tool-live-dom",
+      text: JSON.stringify({ cmd: command, workdir: "/repo" }),
+      toolName: "exec_command",
+      toolEngine: "codex",
+      phase: "streaming",
+      startedAt: "2026-08-06T09:30:00.000Z",
+      completedAt: null,
+    },
+    item("The test completed.", "awaiting-echo", { itemId: "assistant-message" }),
+  ]} />);
+  const consoleErrors = consoleError.mock.calls.flat().join(" ");
+  consoleError.mockRestore();
+
+  const rows = [...host.querySelectorAll<HTMLElement>("[data-live-turn]")];
+  expect(rows).toHaveLength(3);
+  expect(rows.map((row) => row.dataset.liveTurnItemId)).toEqual([
+    "assistant-message",
+    "tool-live-dom",
+    "assistant-message",
+  ]);
+  expect(rows[1]?.dataset.liveTurnTool).toBe("exec_command");
+  expect(rows[1]?.textContent).toContain(command);
+  expect(rows[1]?.textContent).not.toContain("workdir");
+  expect(rows[1]?.querySelector("svg")).not.toBeNull();
+  expect(consoleErrors).not.toContain("same key");
+});
+
+test("aggregate trimming keeps every live tool argument valid and its command head readable", () => {
+  let live = projectRuntimeLiveTurnItem(null, "turn-large-tools", {
+    type: "commandExecution",
+    id: "large-command-one",
+    command: `printf first-live-command ${"x".repeat(48 * 1024)}`,
+  }, "started");
+  live = projectRuntimeLiveTurnItem(live, "turn-large-tools", {
+    type: "commandExecution",
+    id: "large-command-two",
+    command: `printf second-live-command ${"y".repeat(48 * 1024)}`,
+  }, "started");
+  const items = runtimeLiveTurnItems(live);
+  expect(items).toHaveLength(2);
+  for (const liveItem of items) expect(() => JSON.parse(liveItem.text)).not.toThrow();
+  expect(items.reduce((bytes, liveItem) => bytes + new TextEncoder().encode(liveItem.text).length, 0))
+    .toBeLessThanOrEqual(64 * 1024);
+
+  const { host, root } = mount();
+  paint(root, <LiveTurnRows items={items} />);
+  const rows = [...host.querySelectorAll<HTMLElement>("[data-live-turn]")];
+  expect(rows.map((row) => row.textContent)).toEqual([
+    expect.stringContaining("printf first-live-command"),
+    expect.stringContaining("printf second-live-command"),
+  ]);
+});
+
+test("claiming an earlier row preserves the surviving live row DOM node", () => {
+  const first = item("First", "awaiting-echo", { itemId: "shared-response", rowId: "first-block" });
+  const second = item("Second", "awaiting-echo", { itemId: "shared-response", rowId: "second-block" });
+  const { host, root } = mount();
+  paint(root, <LiveTurnRows items={[first, second]} />);
+  const secondNode = host.querySelectorAll("[data-live-turn]")[1];
+  paint(root, <LiveTurnRows items={[second]} />);
+  expect(host.querySelector("[data-live-turn]")).toBe(secondNode);
 });
 
 test("streaming a message delta by delta lands on exactly the settled rendering", () => {

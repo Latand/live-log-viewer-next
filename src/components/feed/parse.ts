@@ -193,6 +193,8 @@ export type Tmsg = {
   /** Outgoing only: delivery state recovered from the tool result. */
   delivery?: "ok" | "err";
   msgId?: string;
+  /** Outgoing SendMessage tool-use identity for live-turn handoff. */
+  sourceId?: string;
 };
 export type CmdGroupItem = {
   kind: "cmd-group";
@@ -1948,6 +1950,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
           if (typeof message === "string") {
             const { cleaned, cites } = splitCitations(message);
             const review = VERDICT_LINE_RE.test(cleaned) ? parseReview(cleaned, ts) : null;
+            const sourceId = textPart(part.id) || undefined;
             const item: Tmsg = {
               kind: "tmsg",
               ts,
@@ -1955,14 +1958,14 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
               peer: String(input.to ?? ""),
               summary: String(input.summary ?? ""),
               text: review ? "" : cleaned,
+              ...(sourceId ? { sourceId } : {}),
             };
             const seq = push(item);
             if (review) push(review);
             for (const cite of cites) push(cite);
-            const key = textPart(part.id);
-            if (key) {
-              tmsgSeqs.set(key, seq);
-              tmsgKeyBySeq.set(seq, key);
+            if (sourceId) {
+              tmsgSeqs.set(sourceId, seq);
+              tmsgKeyBySeq.set(seq, sourceId);
             }
           } else {
             addSvc(`SendMessage → ${String(input.to ?? "")} · ${textPart(rec(message).type) || tr("render.protocol")}`);

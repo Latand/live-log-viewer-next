@@ -397,6 +397,15 @@ function sanitizedUserReplay(
   content: ReturnType<typeof structuredContent> | null,
 ): JsonObject {
   const providerMessage = record(message.message) ?? {};
+  const toolResults = Array.isArray(providerMessage.content)
+    ? providerMessage.content.flatMap((candidate): JsonObject[] => {
+        const block = record(candidate);
+        const toolUseId = stringField(block, "tool_use_id");
+        return block?.type === "tool_result" && toolUseId
+          ? [{ type: "tool_result", tool_use_id: toolUseId }]
+          : [];
+      })
+    : [];
   const sanitizedBlocks: JsonObject[] = content
     ? content.content.images.map((image) => ({
         type: "image",
@@ -408,6 +417,7 @@ function sanitizedUserReplay(
         },
       }))
     : [];
+  sanitizedBlocks.unshift(...toolResults);
   const text = content?.content.text ?? userText(message);
   if (text) sanitizedBlocks.push({ type: "text", text });
   return {
