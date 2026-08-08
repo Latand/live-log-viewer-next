@@ -3,10 +3,18 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { defaultModelFor } from "@/lib/agent/models";
+import { AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
+
 import { setRetireManagerForTests } from "./retire";
-import { executeOrchestratorRotation, executeOrchestratorSeatRequest, type SeatCommandDependencies } from "./seatCommand";
-import { activeOrchestratorSeats, orchestratorRevocations, orchestratorSeatFor } from "./seats";
-import { readOrchestratorRecord } from "./store";
+import {
+  executeOrchestratorRotation,
+  executeOrchestratorSeatRequest,
+  productionSeatCommandDependencies,
+  type SeatCommandDependencies,
+} from "./seatCommand";
+import { activeOrchestratorSeats, orchestratorRevocations, orchestratorSeatFor, type OrchestratorSeat } from "./seats";
+import { readOrchestratorRecord, replaceOrchestratorIncumbent } from "./store";
 
 let sandbox = "";
 let previousStateDir: string | undefined;
@@ -29,6 +37,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setRetireManagerForTests(null);
+  setAgentRegistryForTests(null);
   if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
   else process.env.LLV_STATE_DIR = previousStateDir;
   fs.rmSync(sandbox, { recursive: true, force: true });
@@ -42,10 +51,11 @@ interface Recorded {
   spawns: Record<string, unknown>[];
   deliveries: { conversationId: string; clientMessageId: string; text: string }[];
   legacySyncs: { conversationId: string }[];
+  identityStamps: OrchestratorSeat[];
 }
 
 function dependencies(overrides: Partial<SeatCommandDependencies> = {}): { deps: SeatCommandDependencies; recorded: Recorded } {
-  const recorded: Recorded = { spawns: [], deliveries: [], legacySyncs: [] };
+  const recorded: Recorded = { spawns: [], deliveries: [], legacySyncs: [], identityStamps: [] };
   const deps: SeatCommandDependencies = {
     spawn: async (body) => {
       recorded.spawns.push(body);
@@ -63,8 +73,15 @@ function dependencies(overrides: Partial<SeatCommandDependencies> = {}): { deps:
       project: "proj-a",
     }),
     syncLegacyRecord: (input) => { recorded.legacySyncs.push({ conversationId: input.conversationId }); },
+    stampRegistryIdentity: (seat) => { recorded.identityStamps.push(seat); },
     projectTasks: () => [],
     launchSettlement: () => ({ kind: "unknown" }),
+    runtimeIdentity: (conversationId) => {
+      const incumbent = readOrchestratorRecord();
+      return incumbent?.conversationId === conversationId
+        ? { engine: incumbent.engine, model: incumbent.model }
+        : { engine: null, model: null };
+    },
     now: () => AT,
     ...overrides,
   };
@@ -73,7 +90,14 @@ function dependencies(overrides: Partial<SeatCommandDependencies> = {}): { deps:
 
 /** Durable residue of an accepting request that died between begin and
     activate: a pending spawn intent holding the launch receipt id. */
-function seedPendingLaunchIntent(input: { clientRequestId: string; launchId: string | null; error?: string | null }): void {
+function seedPendingLaunchIntent(input: {
+  clientRequestId: string;
+  launchId: string | null;
+  error?: string | null;
+  engine?: string | null;
+  model?: string | null;
+  legacyRuntimeShape?: boolean;
+}): void {
   fs.writeFileSync(path.join(sandbox, "orchestrator-seats.json"), JSON.stringify({
     schemaVersion: 1,
     nextSeatEpoch: 2,
@@ -84,6 +108,10 @@ function seedPendingLaunchIntent(input: { clientRequestId: string; launchId: str
         seatEpoch: 1,
         conversationId: null,
         path: null,
+        ...(input.legacyRuntimeShape ? {} : {
+          engine: input.engine ?? null,
+          model: input.model ?? null,
+        }),
         mandate: "own the board",
         promptVersion: null,
         predecessorConversationId: null,
@@ -93,6 +121,30 @@ function seedPendingLaunchIntent(input: { clientRequestId: string; launchId: str
         activatedAt: null,
       },
     },
+    revocations: [],
+  }), "utf8");
+}
+
+function seedLegacyActiveSeat(clientRequestId: string): void {
+  fs.writeFileSync(path.join(sandbox, "orchestrator-seats.json"), JSON.stringify({
+    schemaVersion: 1,
+    nextSeatEpoch: 2,
+    seats: {
+      "proj-a": {
+        project: "proj-a",
+        seatEpoch: 1,
+        conversationId: NEW_ID,
+        path: "/tmp/new.jsonl",
+        mandate: "own the board",
+        promptVersion: null,
+        predecessorConversationId: null,
+        state: "active",
+        intent: { clientRequestId, mode: "spawn", launchId: "launch_legacy", error: null },
+        designatedAt: AT,
+        activatedAt: AT,
+      },
+    },
+    pending: {},
     revocations: [],
   }), "utf8");
 }
@@ -116,6 +168,7 @@ test("spawn mode designates and injects together: mandate rides the spawn prompt
     role: "orchestrator",
     project: "proj-a",
     ["prompt"]: "own the board",
+    title: "orchestrator · own the board",
     clientAttemptId: "req_00000001",
   });
   const { active, pending } = orchestratorSeatFor("proj-a");
@@ -123,6 +176,184 @@ test("spawn mode designates and injects together: mandate rides the spawn prompt
   expect(active?.mandate).toBe("own the board");
   expect(pending).toBeNull();
   expect(recorded.legacySyncs).toEqual([{ conversationId: NEW_ID }]);
+});
+
+test("spawn mode freezes omitted runtime fields to the resolved orchestrator defaults", async () => {
+  const { deps, recorded } = dependencies();
+  const result = await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "own the board",
+    clientRequestId: "req_00000003",
+    cwd: "/tmp",
+  }, deps);
+
+  expect(result.status).toBe(200);
+  expect(recorded.spawns[0]).toMatchObject({ engine: "claude", model: "opus" });
+  expect(orchestratorSeatFor("proj-a").active).toMatchObject({
+    engine: "claude",
+    model: "opus",
+    runtimeIdentityFrozen: true,
+  });
+});
+
+test("a seat designated after the identity wave stamps registry role, membership, and rotation lineage", async () => {
+  const registry = new AgentRegistry(path.join(sandbox, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const oldPath = path.join(sandbox, "old.jsonl");
+  const newPath = path.join(sandbox, "new.jsonl");
+  const oldConversation = registry.ensureConversation("claude", oldPath, null);
+  const newConversation = registry.ensureConversation("codex", newPath, null);
+  registry.runIdentityWaveMigration({
+    now: AT,
+    transcriptTitle: () => null,
+    sharedPathForLegacy: () => null,
+    orchestratorSeats: [],
+  });
+  const { deps } = dependencies({
+    conversationTarget: (conversationId) => ({
+      kind: "eligible",
+      conversationId,
+      path: conversationId === oldConversation.id ? oldPath : newPath,
+      cwd: sandbox,
+      project: "proj-a",
+    }),
+    stampRegistryIdentity: (seat) => { registry.stampOrchestratorSeatIdentity(seat); },
+  });
+
+  await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "own the first wave",
+    clientRequestId: "req_00001001",
+    conversationId: oldConversation.id,
+  }, deps);
+  await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "own the next wave",
+    clientRequestId: "req_00001002",
+    conversationId: newConversation.id,
+  }, deps);
+
+  const snapshot = registry.snapshot();
+  expect(snapshot.identityMigrations["identity-wave-a-d-913"]).toBeDefined();
+  expect(snapshot.conversations[oldConversation.id]).toMatchObject({ agentRole: "orchestrator", delegationDepth: 0 });
+  expect(snapshot.conversations[newConversation.id]).toMatchObject({ agentRole: "orchestrator", delegationDepth: 0 });
+  expect(snapshot.memberships[newConversation.id]).toContainEqual(expect.objectContaining({
+    kind: "orchestrator",
+    containerId: "proj-a",
+    parentConversationId: oldConversation.id,
+  }));
+  expect(snapshot.lineageEdges[newConversation.id]).toMatchObject({
+    parentConversationId: oldConversation.id,
+    role: "orchestrator",
+  });
+});
+
+test("a completed seat replay repairs a failed registry stamp without revalidating the target", async () => {
+  let stampAttempts = 0;
+  let targetReads = 0;
+  const { deps, recorded } = dependencies({
+    conversationTarget: (conversationId) => {
+      targetReads += 1;
+      return targetReads === 1
+        ? { kind: "eligible", conversationId, path: path.join(sandbox, "existing.jsonl"), cwd: sandbox, project: "proj-a" }
+        : null;
+    },
+    stampRegistryIdentity: () => {
+      stampAttempts += 1;
+      if (stampAttempts === 1) throw new Error("temporary registry write failure");
+    },
+  });
+  const request = {
+    project: "proj-a",
+    mandate: "own repairs",
+    clientRequestId: "req_00001003",
+    conversationId: OLD_ID,
+  };
+
+  await expect(executeOrchestratorSeatRequest(request, deps)).rejects.toThrow("temporary registry write failure");
+  const replay = await executeOrchestratorSeatRequest(request, deps);
+
+  expect(replay).toMatchObject({ status: 200, body: { replayed: true, conversationId: OLD_ID } });
+  expect(stampAttempts).toBe(2);
+  expect(targetReads).toBe(1);
+  expect(recorded.deliveries).toHaveLength(1);
+});
+
+test("a completed seat replay repairs a failed legacy manager sync before reporting success", async () => {
+  let syncAttempts = 0;
+  const { deps, recorded } = dependencies({
+    syncLegacyRecord: (input) => {
+      syncAttempts += 1;
+      if (syncAttempts === 1) throw new Error("temporary manager sync failure");
+      replaceOrchestratorIncumbent({ ...input, createdAt: AT });
+    },
+  });
+  const request = spawnRequest("req_00001004");
+
+  await expect(executeOrchestratorSeatRequest(request, deps)).rejects.toThrow("temporary manager sync failure");
+  expect(orchestratorSeatFor("proj-a").active?.conversationId).toBe(NEW_ID);
+  expect(readOrchestratorRecord()).toBeNull();
+
+  const replay = await executeOrchestratorSeatRequest(request, deps);
+
+  expect(replay).toMatchObject({ status: 200, body: { replayed: true, conversationId: NEW_ID } });
+  expect(syncAttempts).toBe(2);
+  expect(recorded.spawns).toHaveLength(1);
+  expect(recorded.identityStamps).toHaveLength(1);
+  expect(readOrchestratorRecord()).toMatchObject({ conversationId: NEW_ID, path: "/tmp/new.jsonl" });
+});
+
+test("a completed seat replay preserves the incumbent engine and model from its durable intent", async () => {
+  const { deps, recorded } = dependencies({
+    syncLegacyRecord: (input) => { replaceOrchestratorIncumbent({ ...input, createdAt: AT }); },
+  });
+  const request = {
+    ...spawnRequest("req_00001005"),
+    engine: "codex",
+    model: "gpt-5.6-sol",
+  };
+
+  expect((await executeOrchestratorSeatRequest(request, deps)).status).toBe(200);
+  expect(readOrchestratorRecord()).toMatchObject({
+    conversationId: NEW_ID,
+    engine: "codex",
+    model: "gpt-5.6-sol",
+  });
+
+  const replay = await executeOrchestratorSeatRequest({
+    project: request.project,
+    mandate: request.mandate,
+    clientRequestId: request.clientRequestId,
+    cwd: request.cwd,
+  }, deps);
+
+  expect(replay).toMatchObject({ status: 200, body: { replayed: true, conversationId: NEW_ID } });
+  expect(recorded.spawns).toHaveLength(1);
+  expect(readOrchestratorRecord()).toMatchObject({ engine: "codex", model: "gpt-5.6-sol" });
+});
+
+test("a legacy active seat replay recovers incumbent runtime metadata", async () => {
+  const clientRequestId = "req_legacy_active";
+  seedLegacyActiveSeat(clientRequestId);
+  replaceOrchestratorIncumbent({
+    conversationId: NEW_ID,
+    path: "/tmp/new.jsonl",
+    createdAt: AT,
+    engine: "codex",
+    model: "gpt-5.6-sol",
+  });
+  const { deps } = dependencies({
+    syncLegacyRecord: (input) => { replaceOrchestratorIncumbent({ ...input, createdAt: AT }); },
+  });
+
+  const replay = await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "own the board",
+    clientRequestId,
+    cwd: "/tmp",
+  }, deps);
+
+  expect(replay).toMatchObject({ status: 200, body: { replayed: true, conversationId: NEW_ID } });
+  expect(readOrchestratorRecord()).toMatchObject({ engine: "codex", model: "gpt-5.6-sol" });
 });
 
 test("an admitted asynchronous spawn activates the seat from its durable conversation id", async () => {
@@ -233,6 +464,57 @@ test("selecting an EXISTING conversation delivers the mandate without spawning a
     text: "updated mandate",
   }]);
   expect(orchestratorSeatFor("proj-a").active?.conversationId).toBe(OLD_ID);
+});
+
+test("adopting a model-less Codex conversation records its engine-specific effective model", async () => {
+  const registry = new AgentRegistry(path.join(sandbox, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+  setAgentRegistryForTests(registry);
+  const transcript = path.join(sandbox, "model-less-codex.jsonl");
+  fs.writeFileSync(transcript, "", "utf8");
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd: sandbox,
+    role: "orchestrator",
+    launchProfile: { title: "Adopt model-less Codex conversation" },
+  });
+  if (begun.kind !== "created") throw new Error("expected a spawn receipt");
+  registry.settleSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: "model-less-codex" },
+    artifactPath: transcript,
+    cwd: sandbox,
+    accountId: null,
+    launchProfile: begun.receipt.launchProfile,
+    status: "live",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const target = productionSeatCommandDependencies.conversationTarget(begun.receipt.conversationId);
+  if (!target || target.kind !== "eligible") throw new Error("expected an eligible Codex target");
+  const { deps } = dependencies({
+    conversationTarget: productionSeatCommandDependencies.conversationTarget,
+    runtimeIdentity: productionSeatCommandDependencies.runtimeIdentity,
+    syncLegacyRecord: productionSeatCommandDependencies.syncLegacyRecord,
+  });
+
+  const result = await executeOrchestratorSeatRequest({
+    project: target.project,
+    mandate: "Own the Codex project",
+    clientRequestId: "req_model_less_codex_1",
+    conversationId: begun.receipt.conversationId,
+  }, deps);
+
+  expect(result.status).toBe(200);
+  expect(orchestratorSeatFor(target.project).active).toMatchObject({
+    engine: "codex",
+    model: defaultModelFor("codex"),
+  });
+  expect(readOrchestratorRecord()).toMatchObject({
+    conversationId: begun.receipt.conversationId,
+    engine: "codex",
+    model: defaultModelFor("codex"),
+  });
 });
 
 test("a replayed adoption keeps its original target during an ABA-shaped retry", async () => {
@@ -470,6 +752,35 @@ test("a pending replay completes with the ORIGINAL mandate, not a recomposed one
   /* The retry recomposes a different mandate; the durable intent's text wins. */
   await executeOrchestratorSeatRequest({ ...spawnRequest(), mandate: "recomposed differently" }, deps);
   expect(recorded.spawns.map((body) => body.prompt)).toEqual(["own the board", "own the board"]);
+  expect(recorded.spawns.map((body) => body.title)).toEqual([
+    "orchestrator · own the board",
+    "orchestrator · own the board",
+  ]);
+});
+
+test("a pending pre-spawn replay keeps the ORIGINAL engine and model", async () => {
+  let attempts = 0;
+  const { deps, recorded } = dependencies({
+    spawn: async (body) => {
+      recorded.spawns.push(body);
+      attempts += 1;
+      return attempts === 1
+        ? { status: 500, body: { error: "transient" } }
+        : { status: 200, body: { ok: true, conversationId: NEW_ID, path: null } };
+    },
+  });
+  await executeOrchestratorSeatRequest(spawnRequest(), deps);
+  await executeOrchestratorSeatRequest({
+    ...spawnRequest(),
+    engine: "codex",
+    model: "gpt-5.6-sol",
+  }, deps);
+
+  expect(recorded.spawns.map((body) => ({ engine: body.engine, model: body.model }))).toEqual([
+    { engine: "claude", model: "opus" },
+    { engine: "claude", model: "opus" },
+  ]);
+  expect(orchestratorSeatFor("proj-a").active).toMatchObject({ engine: "claude", model: "opus" });
 });
 
 test("rotation preserves the requested effort end to end into the successor spawn body", async () => {
@@ -559,6 +870,87 @@ test("replaying the accepting request's own key after its launch settled converg
   expect(recorded.spawns).toEqual([]);
   expect(orchestratorSeatFor("proj-a").active?.conversationId).toBe(NEW_ID);
   expect(orchestratorSeatFor("proj-a").pending).toBeNull();
+});
+
+test("creator-death reconciliation restores manager metadata from the pending seat", async () => {
+  seedPendingLaunchIntent({
+    clientRequestId: "req_00000052",
+    launchId: "launch_52",
+    engine: "codex",
+    model: "gpt-5.6-sol",
+  });
+  const { deps } = dependencies({
+    launchSettlement: () => ({ kind: "settled", conversationId: NEW_ID, path: "/tmp/new.jsonl", launchId: "launch_52" }),
+    syncLegacyRecord: (input) => { replaceOrchestratorIncumbent({ ...input, createdAt: AT }); },
+    spawn: async () => {
+      throw new Error("a settled accepted launch must reconcile from durable state, never spawn again");
+    },
+  });
+
+  const replay = await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "own the board",
+    clientRequestId: "req_00000052",
+    cwd: "/tmp",
+  }, deps);
+
+  expect(replay).toMatchObject({ status: 200, body: { replayed: true, conversationId: NEW_ID } });
+  expect(readOrchestratorRecord()).toMatchObject({ engine: "codex", model: "gpt-5.6-sol" });
+});
+
+test("a legacy pending seat recovers runtime metadata from its launch settlement", async () => {
+  seedPendingLaunchIntent({
+    clientRequestId: "req_legacy_pending",
+    launchId: "launch_legacy_pending",
+    legacyRuntimeShape: true,
+  });
+  const { deps } = dependencies({
+    launchSettlement: () => ({
+      kind: "settled",
+      conversationId: NEW_ID,
+      path: "/tmp/new.jsonl",
+      launchId: "launch_legacy_pending",
+      engine: "codex",
+      model: "gpt-5.6-sol",
+    }),
+    syncLegacyRecord: (input) => { replaceOrchestratorIncumbent({ ...input, createdAt: AT }); },
+  });
+
+  const replay = await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "own the board",
+    clientRequestId: "req_legacy_pending",
+    cwd: "/tmp",
+  }, deps);
+
+  expect(replay).toMatchObject({ status: 200, body: { replayed: true, conversationId: NEW_ID } });
+  expect(orchestratorSeatFor("proj-a").active).toMatchObject({ engine: "codex", model: "gpt-5.6-sol" });
+  expect(readOrchestratorRecord()).toMatchObject({ engine: "codex", model: "gpt-5.6-sol" });
+});
+
+test("an unsettled legacy pending seat fails closed when runtime provenance is unavailable", async () => {
+  seedPendingLaunchIntent({
+    clientRequestId: "req_legacy_unknown",
+    launchId: "launch_legacy_unknown",
+    legacyRuntimeShape: true,
+  });
+  const { deps, recorded } = dependencies();
+
+  const replay = await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "own the board",
+    clientRequestId: "req_legacy_unknown",
+    engine: "codex",
+    model: "gpt-5.6-sol",
+    cwd: "/tmp",
+  }, deps);
+
+  expect(replay).toMatchObject({
+    status: 409,
+    body: { code: "legacy_runtime_identity_unavailable" },
+  });
+  expect(recorded.spawns).toEqual([]);
+  expect(orchestratorSeatFor("proj-a").pending?.intent.error).toContain("runtime identity");
 });
 
 test("a pending intent whose launch terminally failed records the failure and stops blocking a fresh designation", async () => {

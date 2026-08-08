@@ -267,8 +267,10 @@ test("runtime-bound MCP tools use the live Viewer control surface", async () => 
     clientRequestId: "spawn-http-control",
     cwd: "/repo",
     ["prompt"]: "implement",
+    title: "Implement durable identity",
     mcpServers: ["viewer", "agent-browser"],
   });
+  expect(requests[0]?.body.title).toBe("Implement durable identity");
   const exactMessage = " \tcontinue\nПривіт 🌍\n ";
   await bindings.send_message({
     clientRequestId: "send-http-control",

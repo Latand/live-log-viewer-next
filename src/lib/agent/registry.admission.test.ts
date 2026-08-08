@@ -50,10 +50,181 @@ function spawnAtDepth(
   origin: Parameters<InstanceType<typeof AgentRegistry>["beginSpawnRequest"]>[0]["origin"],
   role: string | null = null,
 ): { launchId: string; conversationId: ViewerConversationId } {
-  const begun = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", origin, role });
+  const begun = store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    origin,
+    role,
+    launchProfile: { title: `Exercise ${role ?? "root"} admission` },
+  });
   if (begun.kind !== "created") throw new Error("expected create");
   return { launchId: begun.receipt.launchId, conversationId: settleLaunch(store, begun.receipt.launchId) };
 }
+
+test("fresh spawn admission rejects missing and generic placeholder titles", () => {
+  const { store } = registryAt("placeholder-title");
+  for (const title of [
+    "Codex session",
+    "Codex-session",
+    "Claude/session",
+    "Codex · session",
+    "Claude: session",
+    "Codex_session",
+    "Claude_session",
+    "Codex*session",
+    "Claude#session",
+    "Codex>session",
+    "Claude~session",
+  ]) {
+    expect(() => store.beginSpawnRequest({
+      engine: "codex",
+      cwd: "/repo",
+      origin: { kind: "operator" },
+      launchProfile: emptyLaunchProfile({ cwd: "/repo", title }),
+    })).toThrow("title is required for every new spawn");
+  }
+  expect(() => store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    origin: { kind: "operator" },
+  })).toThrow("title is required for every new spawn");
+  expect(Object.keys(store.snapshot().receipts)).toHaveLength(0);
+
+  const semantic = store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    origin: { kind: "operator" },
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Review issue #913" }),
+  });
+  if (semantic.kind !== "created") throw new Error("expected create");
+  expect(semantic.receipt.launchProfile.title).toBe("Review issue #913");
+});
+
+test("observations and resume successors preserve semantic title punctuation", () => {
+  const { store } = registryAt("semantic-title-punctuation");
+  const first = store.reconcileConversations([{
+    engine: "codex",
+    path: "/sessions/semantic-title.jsonl",
+    accountId: "terra",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Own issue #913" }),
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-08-06T00:00:00.000Z",
+  }]);
+  const conversation = Object.values(first.conversations)[0]!;
+  expect(conversation.generations.at(-1)?.launchProfile.title).toBe("Own issue #913");
+
+  const resumed = store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    conversationId: conversation.id,
+    purpose: "resume-successor",
+    origin: { kind: "successor" },
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+  });
+  if (resumed.kind !== "created") throw new Error("expected create");
+  expect(resumed.receipt.launchProfile.title).toBe("Own issue #913");
+
+  const refreshed = store.reconcileConversations([{
+    engine: "codex",
+    path: "/sessions/semantic-title.jsonl",
+    accountId: "terra",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Scanner issue #999" }),
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-08-06T00:01:00.000Z",
+  }]);
+  expect(refreshed.conversations[conversation.id]?.generations.at(-1)?.launchProfile.title).toBe("Own issue #913");
+});
+
+test("resume admission preserves a frozen semantic title through replay and settlement", () => {
+  const filename = path.join(sandbox, "resume-frozen-title.json");
+  const store = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "dual-write" });
+  const sourceSessionId = crypto.randomUUID();
+  const successorSessionId = crypto.randomUUID();
+  const sourcePath = `/sessions/${sourceSessionId}.jsonl`;
+  const successorPath = `/sessions/${successorSessionId}.jsonl`;
+  const first = store.reconcileConversations([{
+    engine: "codex",
+    path: sourcePath,
+    accountId: "terra",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Original issue #913" }),
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-08-06T00:00:00.000Z",
+  }]);
+  const conversation = Object.values(first.conversations)[0]!;
+  const request = {
+    engine: "codex" as const,
+    cwd: "/repo",
+    conversationId: conversation.id,
+    purpose: "resume-successor" as const,
+    origin: { kind: "successor" as const },
+    expectedArtifactPath: successorPath,
+    clientAttemptId: "resume-frozen-title",
+    requestDigest: "resume-frozen-title-digest",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Replacement issue #999" }),
+  };
+
+  const begun = store.beginSpawnRequest(request);
+  if (begun.kind !== "created") throw new Error("expected create");
+  expect(begun.receipt.launchProfile.title).toBe("Original issue #913");
+  const replayed = store.beginSpawnRequest(request);
+  expect(replayed.kind).toBe("replay");
+  expect(replayed.receipt.launchProfile.title).toBe("Original issue #913");
+
+  const entry = () => ({
+    key: { engine: "codex" as const, sessionId: successorSessionId },
+    artifactPath: successorPath,
+    cwd: "/repo",
+    accountId: "terra",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Replacement issue #999" }),
+    status: "live" as const,
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  expect(store.settleSpawn(begun.receipt.launchId, entry()).kind).toBe("settled");
+  expect(store.settleSpawn(begun.receipt.launchId, entry()).kind).toBe("settled");
+
+  const snapshot = store.snapshot();
+  expect(snapshot.receipts[begun.receipt.launchId]?.launchProfile.title).toBe("Original issue #913");
+  expect(snapshot.conversations[conversation.id]?.generations.map((generation) => generation.launchProfile.title))
+    .toEqual(["Original issue #913", "Original issue #913"]);
+  expect(Object.values(snapshot.entries).find((candidate) => candidate.artifactPath === successorPath)?.launchProfile?.title)
+    .toBe("Original issue #913");
+  expect(new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" }).snapshot()).toEqual(snapshot);
+});
+
+test("same-path settlement publishes a newly inherited semantic title to the durable generation", () => {
+  const { store } = registryAt("same-path-semantic-title");
+  const conversation = store.ensureConversation("codex", "/sessions/recovery-title.jsonl", "terra");
+  expect(conversation.generations.at(-1)?.launchProfile.title).toBeNull();
+  const resumed = store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    conversationId: conversation.id,
+    purpose: "resume-successor",
+    origin: { kind: "successor" },
+    expectedArtifactPath: "/sessions/recovery-title.jsonl",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "recovery · Restore issue #913" }),
+  });
+  if (resumed.kind !== "created") throw new Error("expected create");
+
+  const settled = store.settleSpawn(resumed.receipt.launchId, {
+    key: { engine: "codex", sessionId: conversation.generations.at(-1)!.id },
+    artifactPath: "/sessions/recovery-title.jsonl",
+    cwd: "/repo",
+    accountId: "terra",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    status: "live",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+
+  expect(settled.kind).toBe("settled");
+  expect(store.conversation(conversation.id)?.generations.at(-1)?.launchProfile.title).toBe("recovery · Restore issue #913");
+});
 
 test("a delegated conversation never acquires a Codex plugin grant (#687)", () => {
   const { store } = registryAt("plugin-grant-delegation");
@@ -66,7 +237,7 @@ test("a delegated conversation never acquires a Codex plugin grant (#687)", () =
     cwd: "/repo",
     role: "builder",
     origin: { kind: "operator" },
-    launchProfile: emptyLaunchProfile({ cwd: "/repo", ...claimed }),
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Exercise delegated plugin grants", ...claimed }),
   });
   if (roleLaunch.kind !== "created") throw new Error("expected create");
   const roleConversation = settleLaunch(store, roleLaunch.receipt.launchId);
@@ -86,7 +257,7 @@ test("a delegated conversation never acquires a Codex plugin grant (#687)", () =
     cwd: "/repo",
     parentConversationId: parent.id,
     origin: { kind: "agent", conversationId: parent.id },
-    launchProfile: emptyLaunchProfile({ cwd: "/repo", ...claimed }),
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Exercise child plugin grants", ...claimed }),
   });
   if (childLaunch.kind !== "created") throw new Error("expected create");
   expect(childLaunch.receipt.launchProfile.plugins).toEqual([]);
@@ -96,7 +267,7 @@ test("a delegated conversation never acquires a Codex plugin grant (#687)", () =
     engine: "codex",
     cwd: "/repo",
     origin: { kind: "operator" },
-    launchProfile: emptyLaunchProfile({ cwd: "/repo", ...claimed }),
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Exercise root plugin grants", ...claimed }),
   });
   if (rootLaunch.kind !== "created") throw new Error("expected create");
   expect(rootLaunch.receipt.launchProfile.plugins).toEqual(["computer-use"]);
@@ -112,6 +283,7 @@ test("a reviewer-origin launch is terminally rejected with a durable typed recei
     reviewsConversationId: implementer.id,
     parentConversationId: implementer.id,
     origin: { kind: "operator" },
+    launchProfile: { title: "Review admission boundaries" },
   });
   if (reviewerBegun.kind !== "created") throw new Error("expected create");
   expect(reviewerBegun.receipt.agentRole).toBe("reviewer");
@@ -128,6 +300,7 @@ test("a reviewer-origin launch is terminally rejected with a durable typed recei
     clientAttemptId: "reviewer-child-attempt-1",
     requestDigest: "digest-1",
     memberships: [],
+    launchProfile: { title: "Exercise denied reviewer delegation" },
   });
   expect(attempt).toThrow(SpawnAdmissionError);
 
@@ -187,6 +360,7 @@ test("delegation depth records at birth and the ceiling rejects the child that w
       engine: "codex",
       cwd: "/repo",
       origin: { kind: "agent", conversationId: second.conversationId },
+      launchProfile: { title: "Exercise nesting rejection" },
     });
   } catch (error) {
     rejection = error as InstanceType<typeof SpawnAdmissionError>;
@@ -210,6 +384,7 @@ test("the durable nesting policy governs the ceiling", () => {
       engine: "codex",
       cwd: "/repo",
       origin: { kind: "agent", conversationId: first.conversationId },
+      launchProfile: { title: "Exercise nesting policy" },
     })).toThrow("capped at depth 1");
   } finally {
     fs.rmSync(path.join(process.env.LLV_STATE_DIR!, "spawn-nesting.json"), { force: true });
@@ -226,6 +401,7 @@ test("container origin keys on the creator, not the lineage parent, and records 
     reviewsConversationId: implementer.id,
     parentConversationId: implementer.id,
     origin: { kind: "operator" },
+    launchProfile: { title: "Review container admission" },
   });
   if (reviewerBegun.kind !== "created") throw new Error("expected create");
   const reviewerId = settleLaunch(store, reviewerBegun.receipt.launchId);
@@ -237,6 +413,7 @@ test("container origin keys on the creator, not the lineage parent, and records 
     cwd: "/repo",
     parentConversationId: reviewerId,
     role: "builder",
+    launchProfile: { title: "Build container admission fixture" },
     origin: { kind: "container", container: "pipeline", containerId: "pipe1234", creatorConversationId: null },
     memberships: [{
       kind: "pipeline",
@@ -262,6 +439,7 @@ test("container origin keys on the creator, not the lineage parent, and records 
     cwd: "/repo",
     parentConversationId: stage.receipt.conversationId,
     role: "reviewer",
+    launchProfile: { title: "Review container admission fixture" },
     origin: { kind: "container", container: "pipeline", containerId: "pipe1234", creatorConversationId: null },
   });
   if (reviewStage.kind !== "created") throw new Error("expected create");
@@ -273,6 +451,7 @@ test("container origin keys on the creator, not the lineage parent, and records 
     engine: "codex",
     cwd: "/repo",
     origin: { kind: "container", container: "pipeline", containerId: "pipe9999", creatorConversationId: reviewerId },
+    launchProfile: { title: "Exercise reviewer container denial" },
   })).toThrow(SpawnAdmissionError);
 });
 
@@ -286,6 +465,7 @@ test("successor purposes are exempt, carry recorded identity, and force reviewer
     reviewsConversationId: implementer.id,
     parentConversationId: implementer.id,
     origin: { kind: "operator" },
+    launchProfile: { title: "Review successor identity" },
   });
   if (reviewerBegun.kind !== "created") throw new Error("expected create");
   const reviewerId = settleLaunch(store, reviewerBegun.receipt.launchId);
@@ -312,6 +492,7 @@ test("successor purposes are exempt, carry recorded identity, and force reviewer
     conversationId: reviewerId,
     purpose: "migration-successor",
     origin: { kind: "successor" },
+    launchProfile: { title: "Review successor identity" },
   });
   if (migration.kind !== "created") throw new Error("expected create");
   expect(migration.receipt).toMatchObject({ agentRole: "reviewer", delegationDepth: 0, rejection: null });

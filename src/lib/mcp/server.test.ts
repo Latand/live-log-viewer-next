@@ -1574,6 +1574,8 @@ describe("MCP tool service", () => {
       const spawnSchema = listed.tools.find((tool) => tool.name === "spawn_agent")?.inputSchema;
       expect(spawnSchema?.properties).toHaveProperty("cwd");
       expect(spawnSchema?.properties).toHaveProperty("prompt");
+      expect(spawnSchema?.properties).toHaveProperty("title");
+      expect(spawnSchema?.required).toContain("title");
       expect(spawnSchema?.properties).toHaveProperty("mcpServers");
       const createOrchestratorSchema = listed.tools.find((tool) => tool.name === "create_orchestrator")?.inputSchema;
       expect(createOrchestratorSchema?.properties).toHaveProperty("conversationId");

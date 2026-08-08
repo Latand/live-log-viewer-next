@@ -13,7 +13,12 @@ export interface OrchestratorStatusBody {
 
 /** The exact /api/spawn body a fresh orchestrator launches with. */
 export function orchestratorSpawnBody(cwd: string): Record<string, unknown> {
-  return { ...ORCHESTRATOR_SPAWN_CONFIG, cwd, prompt: ORCHESTRATOR_SYSTEM_PROMPT };
+  return {
+    ...ORCHESTRATOR_SPAWN_CONFIG,
+    title: "Viewer orchestrator",
+    cwd,
+    ["prompt"]: ORCHESTRATOR_SYSTEM_PROMPT,
+  };
 }
 
 /** Canonical deep link the Viewer hash router resolves and pins. */

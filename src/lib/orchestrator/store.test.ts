@@ -10,6 +10,7 @@ import {
   ORCHESTRATOR_SCHEMA_VERSION,
   orchestratorRecordExists,
   readOrchestratorRecord,
+  rekeyOrchestratorRecordPath,
   replaceOrchestratorIncumbent,
   type OrchestratorRecord,
 } from "./store";
@@ -147,6 +148,19 @@ test("a deliberate incumbent swap replaces a live record and keeps the designati
     model: "sol",
   });
   expect(readOrchestratorRecord()).toEqual(swapped);
+});
+
+test("identity migration rekeys the legacy manager path idempotently and fails closed on corruption", () => {
+  const legacyPath = path.join(sandbox, "legacy.jsonl");
+  const sharedPath = path.join(sandbox, "shared.jsonl");
+  replaceOrchestratorIncumbent(record("conv-1", legacyPath));
+
+  rekeyOrchestratorRecordPath([{ legacyPath, sharedPath }]);
+  rekeyOrchestratorRecordPath([{ legacyPath, sharedPath }]);
+  expect(readOrchestratorRecord()?.path).toBe(sharedPath);
+
+  fs.writeFileSync(path.join(sandbox, "orchestrator.json"), "{", "utf8");
+  expect(() => rekeyOrchestratorRecordPath([{ legacyPath, sharedPath }])).toThrow("orchestrator record evidence is malformed");
 });
 
 test("an unusable engine or model in the file falls back rather than reading as absent", () => {

@@ -8,7 +8,11 @@ import { PIPELINES_CHANGED_EVENT, PIPELINES_PATCHED_EVENT } from "@/components/p
 import { SESSION_TITLES_CHANGED_EVENT } from "@/components/session/sessionTitleApi";
 import { TASKS_CHANGED_EVENT } from "@/components/tasks/taskApi";
 import { WORKFLOWS_CHANGED_EVENT } from "@/components/workflows/workflowModel";
-import { FILES_CHANGED_EVENT } from "@/lib/filesEvents";
+import {
+  FILES_CHANGED_EVENT,
+  publishFilesRevalidated,
+  publishFilesRevalidationStarted,
+} from "@/lib/filesEvents";
 import type { Flow } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
@@ -385,6 +389,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
       completionRetry.controller = new AbortController();
     }
     const generation = ++requestedGeneration;
+    publishFilesRevalidationStarted(generation);
     const representation = representations.get(url);
     const headers = filesRequestHeaders(representation?.etag ?? "", revision, requiredGeneration);
     const init = headers || completionRetry?.controller
@@ -434,6 +439,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
       } else {
         cancelCompletionRetry(url);
       }
+      publishFilesRevalidated(generation, snapshot.crownedProjects);
       return snapshot;
     }
     if (!response.ok) throw new Error(`files request failed: ${response.status}`);
@@ -469,6 +475,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     } else {
       cancelCompletionRetry(url);
     }
+    publishFilesRevalidated(generation, snapshot.crownedProjects);
     return snapshot;
   };
 

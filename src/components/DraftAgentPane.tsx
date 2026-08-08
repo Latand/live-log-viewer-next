@@ -35,11 +35,13 @@ import {
   classifySpawnResponse,
   classifyTransportLoss,
   createSpawnAttempt,
+  draftSpawnTitle,
   displayPhase,
   hasRecoverableRequest,
   matchSpawnedFile,
   provisionalSpawnFile,
   spawnRequestBody,
+  upgradeLegacySpawnAttempt,
 } from "./draftSpawn";
 import { ReasoningControls, type SpeedChoice } from "./ReasoningControls";
 import { cleanTitle, engineTintOf } from "./utils";
@@ -757,6 +759,12 @@ export function DraftAgentPane({
       } else if (outcome.kind === "failed-launch") {
         setAttempt(applySpawnFailure(candidate, outcome));
       } else if (outcome.kind === "failed-preflight") {
+        const upgraded = upgradeLegacySpawnAttempt(candidate, outcome);
+        if (upgraded) {
+          replayedAttemptIds.current.delete(candidate.clientAttemptId);
+          setAttempt(upgraded);
+          return;
+        }
         /* The server released worker ownership. Restore the exact durable
            payload so editing and retrying cannot lose an attachment. */
         setAttempt(null);
@@ -840,6 +848,7 @@ export function DraftAgentPane({
     }
     if (!payloadText.trim() && !attachments.images.length) return;
     const candidate = createSpawnAttempt(newAttemptId(), Date.now(), {
+      title: draftSpawnTitle(engine, roleId, payloadText, attachments.images.length),
       engine,
       model,
       cwd: cwd.trim(),

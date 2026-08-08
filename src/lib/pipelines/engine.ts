@@ -22,6 +22,7 @@ import { loadTasks } from "@/lib/tasks/store";
 import type { BoardTask } from "@/lib/tasks/types";
 import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
 import { isShellCommand } from "@/lib/status";
+import { cleanTitle } from "@/lib/title";
 import { killTmuxHostIfMatches, paneInfo } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 import { realExec, type ExecPort } from "@/lib/workflows/provision";
@@ -126,6 +127,7 @@ export interface PipelinePorts {
   spawnAgent(input: {
     role: EffectivePipelineRole;
     cwd: string;
+    title: string;
     "prompt": string;
     parentPath: string | null;
     clientAttemptId: string;
@@ -230,6 +232,7 @@ async function spawnPipelineAgent(
     ...(specBase.launchProfile ?? {}),
     cwd: input.cwd,
     parentConversationId: parent.conversationId,
+    title: input.title,
   });
   const registry = agentRegistry();
   /* Stage-retry supersedence (issue #383): the retry names the prior attempt's
@@ -676,6 +679,11 @@ const TERMINAL_ATTEMPT_STATES = new Set<PipelineStageAttempt["state"]>(["passed"
 
 function attemptKey(pipeline: Pipeline, stage: PipelineStage, attempt: PipelineStageAttempt): string {
   return `${pipeline.id}:${stage.id}:${attempt.n}`;
+}
+
+function pipelineStageTitle(task: string, stageId: string): string {
+  const suffix = ` · ${stageId}`;
+  return `${cleanTitle(task, 120 - suffix.length)}${suffix}`;
 }
 
 function clientAttemptId(pipeline: Pipeline, stage: PipelineStage, attempt: PipelineStageAttempt): string {
@@ -1414,6 +1422,7 @@ async function tickRunStage(
       const spawned = await ports.spawnAgent({
         role: attempt.effectiveRole,
         cwd: pipeline.worktreeDir,
+        title: pipelineStageTitle(pipeline.task, stage.id),
         prompt,
         parentPath: latestCompletedAgentPath(pipeline, stage.id),
         clientAttemptId: clientAttemptId(pipeline, stage, attempt),

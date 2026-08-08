@@ -2,7 +2,9 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
 import { statePath } from "@/lib/configDir";
+import type { IdentityWavePathRekey } from "@/lib/agent/identityWaveMigration";
 
 /* The single-instance record for the built-in Orchestrator (issue #182), which
  * #691 promotes to THE MANAGER: the agent that owns the board — tasks,
@@ -127,13 +129,15 @@ export function orchestratorRecordExists(record: OrchestratorRecord): boolean {
  * one-instance invariant lives here, not in the button.
  */
 export function adoptOrchestratorRecord(candidate: OrchestratorRecordInput): { record: OrchestratorRecord; adopted: boolean } {
-  const current = readOrchestratorRecord();
-  if (current && orchestratorRecordExists(current) && current.conversationId !== candidate.conversationId) {
-    return { record: current, adopted: false };
-  }
-  const record = withIncumbent(candidate);
-  atomicWriteJson(orchestratorFile(), { schemaVersion: ORCHESTRATOR_SCHEMA_VERSION, record } satisfies OrchestratorFile);
-  return { record, adopted: true };
+  return withAccountMutationLock(() => {
+    const current = readOrchestratorRecord();
+    if (current && orchestratorRecordExists(current) && current.conversationId !== candidate.conversationId) {
+      return { record: current, adopted: false };
+    }
+    const record = withIncumbent(candidate);
+    atomicWriteJson(orchestratorFile(), { schemaVersion: ORCHESTRATOR_SCHEMA_VERSION, record } satisfies OrchestratorFile);
+    return { record, adopted: true };
+  });
 }
 
 /**
@@ -150,7 +154,45 @@ export function adoptOrchestratorRecord(candidate: OrchestratorRecordInput): { r
  * successor drains the directives its predecessor never read.
  */
 export function replaceOrchestratorIncumbent(candidate: OrchestratorRecordInput): OrchestratorRecord {
-  const record = withIncumbent(candidate);
-  atomicWriteJson(orchestratorFile(), { schemaVersion: ORCHESTRATOR_SCHEMA_VERSION, record } satisfies OrchestratorFile);
-  return record;
+  return withAccountMutationLock(() => {
+    const record = withIncumbent(candidate);
+    atomicWriteJson(orchestratorFile(), { schemaVersion: ORCHESTRATOR_SCHEMA_VERSION, record } satisfies OrchestratorFile);
+    return record;
+  });
+}
+
+/** Rekey the legacy manager pointer as part of the identity wave. Missing
+ * state is valid; unreadable or malformed state keeps the registry marker open
+ * so startup can retry after the evidence becomes available. */
+export function rekeyOrchestratorRecordPath(rekeys: readonly IdentityWavePathRekey[]): void {
+  if (rekeys.length === 0) return;
+  withAccountMutationLock(() => {
+    let raw: string;
+    try {
+      raw = fs.readFileSync(orchestratorFile(), "utf8");
+    } catch (error) {
+      if (error && typeof error === "object" && (error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+
+    let parsed: Partial<OrchestratorFile>;
+    try {
+      parsed = JSON.parse(raw) as Partial<OrchestratorFile>;
+    } catch (error) {
+      throw new Error("orchestrator record evidence is malformed", { cause: error });
+    }
+    const version = parsed.schemaVersion;
+    const record = normalizeRecord(parsed.record);
+    if (typeof version !== "number" || version < 1 || version > ORCHESTRATOR_SCHEMA_VERSION || !record) {
+      throw new Error("orchestrator record evidence is malformed");
+    }
+    const replacement = record.path
+      ? rekeys.find((rekey) => rekey.legacyPath === record.path)?.sharedPath
+      : null;
+    if (!replacement) return;
+    atomicWriteJson(orchestratorFile(), {
+      schemaVersion: ORCHESTRATOR_SCHEMA_VERSION,
+      record: { ...record, path: replacement },
+    } satisfies OrchestratorFile);
+  });
 }
