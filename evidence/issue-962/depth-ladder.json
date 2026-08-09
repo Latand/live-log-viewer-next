@@ -1,7 +1,7 @@
 {
   "issue": 962,
-  "capturedAt": "2026-08-09T21:34:41.553Z",
-  "buildHead": "019a7b83727c0db7655af4451714c6a4ce8bb6e8",
+  "capturedAt": "2026-08-09T21:51:22.314Z",
+  "buildHead": "f299c4d1698a2f3c40e7dbcd6a0f6a8eeafdcf30",
   "runner": "exact-head production build served by `next start` over the isolated demo runtime (fixtures/demo-home); synthetic runtime-generated pipeline/board fixtures; headless host Chrome over raw CDP",
   "screenshots": [
     "desktop-light-beacon-wells.png",
