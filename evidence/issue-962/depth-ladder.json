@@ -1,0 +1,136 @@
+{
+  "issue": 962,
+  "capturedAt": "2026-08-09T21:34:41.553Z",
+  "buildHead": "019a7b83727c0db7655af4451714c6a4ce8bb6e8",
+  "runner": "exact-head production build served by `next start` over the isolated demo runtime (fixtures/demo-home); synthetic runtime-generated pipeline/board fixtures; headless host Chrome over raw CDP",
+  "screenshots": [
+    "desktop-light-beacon-wells.png",
+    "desktop-light-beacon-zoomed-out.png",
+    "desktop-light-beacon-selected.png",
+    "desktop-light-forge-branch-group.png",
+    "desktop-light-atlas-needs-you.png",
+    "desktop-light-empty-project.png",
+    "desktop-dark-beacon-wells.png",
+    "desktop-dark-forge-branch-group.png",
+    "desktop-dark-atlas-needs-you.png",
+    "mobile-light-beacon.png",
+    "mobile-dark-beacon.png"
+  ],
+  "checks": [
+    {
+      "name": "light: a settled pipeline container is a filled well — 1px solid hairline + well-surface fill",
+      "pass": true,
+      "detail": {
+        "borderStyle": "solid",
+        "borderWidth": "1px",
+        "background": "color(srgb 0.921363 0.92553 0.909027)",
+        "inlineStyle": "border-color: color-mix(in srgb, hsl(68 62% 42%) 32%, var(--border-default)); background-color: color-mix(in srgb, hsl(68 62% 42%) 6%, var(--surface-well));"
+      }
+    },
+    {
+      "name": "light: a draft pipeline keeps the dashed 2px halo — dashed stays a draft/drop affordance",
+      "pass": true,
+      "detail": {
+        "borderStyle": "dashed",
+        "borderWidth": "2px",
+        "background": "rgb(255, 244, 221)",
+        "inlineStyle": "border-color: var(--color-warning); background-color: var(--color-warning-soft); background-image: repeating-linear-gradient(135deg, transparent 0 12px, color-mix(in srgb, var(--color-warning) 7%, transparent) 12px 14px);"
+      }
+    },
+    {
+      "name": "light: the dot grid lives on the scheme canvas and the board matches the app canvas (rgb(243, 243, 246))",
+      "pass": true,
+      "detail": {
+        "tile": 20.5137,
+        "boardBg": "rgb(243, 243, 246)",
+        "bodyBg": "rgb(243, 243, 246)"
+      }
+    },
+    {
+      "name": "light: an inactive card takes the quiet surface (rgb(250, 250, 251))",
+      "pass": true,
+      "detail": {
+        "background": "rgb(250, 250, 251)"
+      }
+    },
+    {
+      "name": "the dot grid stays sparse across zoom-out steps (every on-screen tile ≥ 18px)",
+      "pass": true,
+      "detail": [
+        20.5137,
+        32.8219,
+        26.2575,
+        21.006,
+        33.6096,
+        26.8877,
+        23.04
+      ]
+    },
+    {
+      "name": "a selected card keeps its full selection treatment on the dense board",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "light: the branch/flow container renders as the same filled hairline well",
+      "pass": true,
+      "detail": {
+        "borderStyle": "solid",
+        "borderWidth": "1px",
+        "background": "color(srgb 0.92553 0.894282 0.92413)",
+        "inlineStyle": "border-color: color-mix(in srgb, hsl(331 62% 42%) 32%, var(--border-default)); background-color: color-mix(in srgb, hsl(331 62% 42%) 6%, var(--surface-well));"
+      }
+    },
+    {
+      "name": "the NEEDS-YOU card keeps its full attention treatment and never takes the quiet tone",
+      "pass": true,
+      "detail": {
+        "glow": true,
+        "quiet": false
+      }
+    },
+    {
+      "name": "the near-empty project renders the bare scheme canvas + sparse dot grid around a single card",
+      "pass": true,
+      "detail": {
+        "nodes": 1,
+        "grid": true
+      }
+    },
+    {
+      "name": "dark: the scheme canvas (rgb(13, 13, 17)) dips deeper than the app canvas (rgb(16, 16, 20))",
+      "pass": true,
+      "detail": {
+        "tile": 20.5137,
+        "boardBg": "rgb(13, 13, 17)",
+        "bodyBg": "rgb(16, 16, 20)"
+      }
+    },
+    {
+      "name": "dark: the settled pipeline well keeps the 1px hairline + filled treatment",
+      "pass": true,
+      "detail": {
+        "borderStyle": "solid",
+        "borderWidth": "1px",
+        "background": "color(srgb 0.106697 0.110863 0.0980466)",
+        "inlineStyle": "border-color: color-mix(in srgb, hsl(68 62% 42%) 32%, var(--border-default)); background-color: color-mix(in srgb, hsl(68 62% 42%) 6%, var(--surface-well));"
+      }
+    },
+    {
+      "name": "dark: the inactive card takes the dark quiet surface (rgb(20, 20, 25))",
+      "pass": true,
+      "detail": {
+        "background": "rgb(20, 20, 25)"
+      }
+    },
+    {
+      "name": "390px: the mobile shell renders its panes over the new tokens",
+      "pass": true,
+      "detail": {
+        "panes": 1,
+        "body": true
+      }
+    }
+  ],
+  "verdict": "PASS"
+}
