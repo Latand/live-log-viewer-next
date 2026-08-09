@@ -160,6 +160,33 @@ export function migrationTargetName(migration: ConversationMigration | null | un
   return accountId ? accountId : null;
 }
 
+/**
+ * The migration annotation that is still LIVE for a card, or `null` when the
+ * annotation describes a switch the card has already completed.
+ *
+ * A hold annotation (`pending`/`switching`) whose target IS the account the
+ * card currently runs under is a dead record: the switch committed, the
+ * transcript already rotated onto the target account, and the annotation
+ * simply outlived it. Every surface that keys a hold or a banner on the
+ * annotation must ask HERE first, level-wise, instead of trusting a clearing
+ * event that may never re-fire — the live incident kept a card reading
+ * "Account switch pending" and its messages "Held for «B»" forever while the
+ * registry already said the switch was done. A `failed` annotation always
+ * stays live (its retry/keep affordances are real), and `done`/`rolled-back`
+ * render nothing anyway.
+ */
+export function activeCardMigration(
+  migration: ConversationMigration | null | undefined,
+  activeAccountId: string | null | undefined,
+): ConversationMigration | null {
+  if (!migration) return null;
+  const state = cardMigrationState(migration);
+  if (state !== "pending" && state !== "switching") return migration;
+  const target = migration.targetAccountId?.trim();
+  if (!target || !activeAccountId || target !== activeAccountId) return migration;
+  return null;
+}
+
 /** A card in `pending` still delivers to the live predecessor pane, but its
     interrupt/kill controls must survive; `switching` freezes them (a signal
     would race the coordinator). Held-send only applies during `switching`. */

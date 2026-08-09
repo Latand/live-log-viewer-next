@@ -83,6 +83,13 @@ export interface OutboxEntry {
       already scoped to the pane. Legacy launch rows with a missing/string owner
       fail closed on production render until the server projection upgrades them. */
   owner?: OutboxOwner;
+  /** The server admitted this submission but HELD it (the account-switch
+      delivery fence) instead of delivering: the entry is parked `delivering`
+      with nothing on the wire. Its release is level-triggered — see
+      {@link releaseHeldOutbox} — because the event-shaped signals (a successor
+      receipt, the delivered text's transcript echo) can simply never arrive
+      once the server-side hold record is gone. Cleared on requeue. */
+  heldForSwitch?: true;
 }
 
 function isOutboxOwner(value: unknown): value is OutboxOwner {
@@ -807,6 +814,36 @@ export function settleLaunchOutboxFailed(
   };
   recordCurrentLaunchEntry(cardId, updated);
   write(cardId, queue.map((item) => (item.id === launch.id ? updated : item)));
+}
+
+/**
+ * Level-triggered release of switch-held submissions (P1: held messages never
+ * released after the switch completed). Whenever the card's account state no
+ * longer holds deliveries — the migration annotation vanished, or its target
+ * already IS the active account — every entry still parked as held returns to
+ * `queued` under its ORIGINAL id, which is its idempotency key, so the serial
+ * dispatcher replays it: the server dedupes a message that WAS delivered to
+ * the successor and delivers one that never was. Entries with delivery proof
+ * of their own (a transcript echo, a started response) are left to their
+ * normal retirement, and the requeued entry keeps its cancel affordance.
+ * `except` lets the caller damp the level to one replay per hold transition,
+ * so a fence that outlives the annotation cannot start a replay loop.
+ * Returns the ids it requeued.
+ */
+export function releaseHeldOutbox(cardId: string, except?: ReadonlySet<string>): string[] {
+  const queue = readOutbox(cardId);
+  const released: string[] = [];
+  const next = queue.map((entry) => {
+    if (!entry.heldForSwitch || entry.state !== "delivering") return entry;
+    if (entry.retiredEchoId || entry.responseStartedAt !== undefined) return entry;
+    if (except?.has(entry.id)) return entry;
+    released.push(entry.id);
+    const requeued: OutboxEntry = { ...entry, state: "queued" };
+    delete requeued.heldForSwitch;
+    return requeued;
+  });
+  if (released.length) write(cardId, next);
+  return released;
 }
 
 /** Remove an entry outright — the operator cancelled a message that never left. */

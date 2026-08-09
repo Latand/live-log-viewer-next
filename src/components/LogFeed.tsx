@@ -7,8 +7,9 @@ import { ArrowDown, ChevronUp, Sparkle } from "@/components/icons";
 import { useLogTail } from "@/hooks/useLogTail";
 import { useRuntimeSessionForConversation } from "@/hooks/useRuntime";
 import { useToolActivityCues } from "@/hooks/useToolActivityCues";
+import { accountIdFromPath } from "@/lib/accounts/badge";
 import { conversationIdentity } from "@/lib/accounts/identity";
-import { cardMigrationState, migrationHoldsDelivery, migrationTargetName } from "@/lib/accounts/migration";
+import { activeCardMigration, cardMigrationState, migrationHoldsDelivery, migrationTargetName } from "@/lib/accounts/migration";
 import { getLocale, translate, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
@@ -752,9 +753,12 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
               if (section === "outbox") {
                 /* While this card is switching accounts the server holds every
                    delivery it admits, so the bubble — the message's ONE delivery
-                   state — is what says the message waits for the switch. */
-                const switchHold = migrationHoldsDelivery(cardMigrationState(file.migration))
-                  ? { label: migrationTargetName(file.migration) }
+                   state — is what says the message waits for the switch. A hold
+                   annotation the card has already satisfied (its target IS the
+                   active account) says nothing: the switch is over. */
+                const liveMigration = activeCardMigration(file.migration, accountIdFromPath(file.path));
+                const switchHold = migrationHoldsDelivery(cardMigrationState(liveMigration))
+                  ? { label: migrationTargetName(liveMigration) }
                   : null;
                 return <OutboxBubbles key="outbox" cardId={memoryKey!} entries={pendingOutbox} switchHold={switchHold} />;
               }

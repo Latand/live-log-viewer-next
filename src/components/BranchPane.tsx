@@ -10,7 +10,7 @@ import { type TFunction, useLocale } from "@/lib/i18n";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
-import { cardMigrationState, migrationTargetName, postConversationMigration } from "@/lib/accounts/migration";
+import { activeCardMigration, cardMigrationState, migrationTargetName, postConversationMigration } from "@/lib/accounts/migration";
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { accountIdFromPath } from "@/lib/accounts/badge";
 
@@ -162,7 +162,11 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
   const badge = engineBadge(file);
   const state = paneState(file);
   const tone = PANE_TONES[state];
-  const migState = cardMigrationState(file.migration);
+  /* Level rule (P1 held-release): a hold annotation whose target the card
+     ALREADY runs under is a completed switch's leftover — the ribbon must
+     clear on the next snapshot, never wait for a clearing event. */
+  const liveMigration = activeCardMigration(file.migration, accountIdFromPath(file.path));
+  const migState = cardMigrationState(liveMigration);
   /* The phone metadata row scrolls horizontally to stay one line (issue #177
      item 4); this tracks whether more is clipped to the right so a fade
      affordance can show, and the row swallows its own touch gestures so a scroll
@@ -476,9 +480,9 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
         {migState ? (
           <MigrationRibbon
             state={migState}
-            targetLabel={migrationTargetName(file.migration) ?? ""}
-            currentLabel={file.migration?.sourceLabel}
-            error={file.migration?.failure ?? null}
+            targetLabel={migrationTargetName(liveMigration) ?? ""}
+            currentLabel={liveMigration?.sourceLabel}
+            error={liveMigration?.failure ?? null}
             actionError={recoveryError}
             onRetry={recover ? () => void recover("retry") : undefined}
             onKeep={recover ? () => void recover("rollback") : undefined}
