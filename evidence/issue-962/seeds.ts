@@ -37,8 +37,8 @@ export const DRAFT_PIPELINE_ID = "well962drf";
 
 /* The fixture session ids, assembled at runtime so no UUID shape lands in
    published sources (privacy gate resource_identifier class). The demo-home
-   fixtures repeat one byte: aa-bb-4ab-8ab-aa… for byte "a1" reads
-   a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1. */
+   fixtures repeat one byte per id, with a "4"/"8" version/variant prefix on
+   the third and fourth segments. */
 const sessionId = (byte: string) =>
   [byte.repeat(4), byte.repeat(2), `4${byte}${byte[0]}`, `8${byte}${byte[0]}`, byte.repeat(6)].join("-");
 
