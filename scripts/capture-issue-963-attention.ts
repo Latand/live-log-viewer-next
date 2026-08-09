@@ -16,7 +16,11 @@
  * pendingQuestion path lights up with no stubs anywhere. States progress by
  * writing more transcripts into the same polled home mid-run.
  *
- * Shots land in docs/acceptance/attention-island/.
+ * Shots land outside the repository (in <ATTENTION_CAPTURE_DIR>/out) for
+ * direct inspection; the committed evidence under
+ * docs/acceptance/attention-island/ consists of deterministic redacted
+ * placeholders (scripts/generate-privacy-placeholders.ts) that record each
+ * live capture's SHA-256, per the publication policy.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
@@ -31,7 +35,7 @@ const HOME = path.join(BASE, "home");
 const FIXED_ISO = "2100-01-02T12:00:00.000Z";
 
 const repoRoot = path.resolve(import.meta.dir, "..");
-const OUT_DIR = path.join(repoRoot, "docs/acceptance/attention-island");
+const OUT_DIR = path.join(BASE, "out");
 
 /** Claude's own project folder name: the cwd with every separator flattened. */
 const projectSlug = (cwd: string) => cwd.replace(/[^A-Za-z0-9]/g, "-");
@@ -178,9 +182,9 @@ async function waitForServer(url: string, child: ChildProcess): Promise<void> {
 }
 
 /** The freshly polled queue size, straight from the production API. A plain
-    poll rides the 5-minute ordinary-refresh cadence, so pin the just-written
-    transcript: a pinned request forces a scan (#950) and the shared snapshot
-    adopts it — the same mechanism a deep link uses. */
+    poll rides the 5-minute ordinary-refresh cadence, so the wait pins the
+    just-written path: a pinned request forces a scan (#950) and the shared
+    snapshot adopts it — the same mechanism a deep link uses. */
 async function waitForQueueSize(baseUrl: string, expected: number, pinPath: string): Promise<void> {
   const deadline = Date.now() + 60_000;
   let last: unknown = null;

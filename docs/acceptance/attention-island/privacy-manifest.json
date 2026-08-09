@@ -1,0 +1,146 @@
+{
+  "schemaVersion": 2,
+  "policy": "synthetic-and-redacted-media-only",
+  "assets": [
+    {
+      "path": "963-desktop-zero.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1a18920458b45f4df827e4fc178807e8b0c7d6701bb74c915a1d666ec7c1e795",
+      "sourceDigests": [
+        "06b251ad7800dd88b5e89c2d1d84e7f4320be5d40533d7c7dddbfd226f4c2690"
+      ],
+      "description": "Redacted placeholder for the muted zero-state attention island on the desktop overview.",
+      "sha256": "42e773bc777afdc7ad685bc0465f3ac27b96d5d0d28307162ebd814440b4b0c6"
+    },
+    {
+      "path": "963-desktop-one.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1a18920458b45f4df827e4fc178807e8b0c7d6701bb74c915a1d666ec7c1e795",
+      "sourceDigests": [
+        "2f05c3f09ebf38d3c2fb488f3007f3dd940fd02d4a6a8865b17520c08f618d9e"
+      ],
+      "description": "Redacted placeholder for the attention island with one queued item on the desktop overview.",
+      "sha256": "858ca815aaeaa40e97374f2050ad55981252d1226174caecf8f6a397f11bf125"
+    },
+    {
+      "path": "963-desktop-many.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1a18920458b45f4df827e4fc178807e8b0c7d6701bb74c915a1d666ec7c1e795",
+      "sourceDigests": [
+        "6bb4d0fce78d0404f152773232884c81aacb004a8f9c4cbad63f8426b826f82e"
+      ],
+      "description": "Redacted placeholder for the attention island with four queued items across three projects.",
+      "sha256": "2d4d91f0ab437d19e3e002ccc72273363ca08a441cac0b5134f568491ed829be"
+    },
+    {
+      "path": "963-desktop-queue-open.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1a18920458b45f4df827e4fc178807e8b0c7d6701bb74c915a1d666ec7c1e795",
+      "sourceDigests": [
+        "f3d1f0fa08c60a0cd9d96b32722acfd8df6626cf7b7b16899fe476062f0c1c0d"
+      ],
+      "description": "Redacted placeholder for the queue popover opened from the island count.",
+      "sha256": "b6974f09332b4ea663fa6eb0b3b6c1828e78d41f8df3609e8fa8c3ab0d685715"
+    },
+    {
+      "path": "963-desktop-filter.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1a18920458b45f4df827e4fc178807e8b0c7d6701bb74c915a1d666ec7c1e795",
+      "sourceDigests": [
+        "a4fcd5a196287263324b8ff44f69f8d5bc9c5f44c7dca859b48fbd4e9d949b5d"
+      ],
+      "description": "Redacted placeholder for the needs-me filter dimming non-queue cards on the project board.",
+      "sha256": "d4830854d1c93874072d4b5da7b96d571cac636b57118b31f87a35d137f9f166"
+    },
+    {
+      "path": "963-desktop-next-landing.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1a18920458b45f4df827e4fc178807e8b0c7d6701bb74c915a1d666ec7c1e795",
+      "sourceDigests": [
+        "c7834d844b1e76528fd2737933d44bf2aecc89fc6baf14adb51f61e93496df2c"
+      ],
+      "description": "Redacted placeholder for the visible Next landing on an off-viewport blocked card.",
+      "sha256": "a3d9bec7b3be397fabede572e288cd6a418e11fe78f255f54ad27e3c8dbc1451"
+    },
+    {
+      "path": "963-desktop-cross-project.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1a18920458b45f4df827e4fc178807e8b0c7d6701bb74c915a1d666ec7c1e795",
+      "sourceDigests": [
+        "06724475606f60a8b967dfb5e3d6b2cdf0786dd778338c4d476e43fb7ba10f83"
+      ],
+      "description": "Redacted placeholder for the visible Next landing in another project's blocked card.",
+      "sha256": "0b0078a24ae46917628ed1d6f01bfc48dc4ba8e69ed96e0d1cb9c646a68473d9"
+    },
+    {
+      "path": "963-mobile-zero.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1a18920458b45f4df827e4fc178807e8b0c7d6701bb74c915a1d666ec7c1e795",
+      "sourceDigests": [
+        "599def2587dc297add060b6b5c8550554ab425448e406c7afb00451d91e3bcea"
+      ],
+      "description": "Redacted placeholder for the quiet zero-state island in the 390-pixel header.",
+      "sha256": "bf1439d2b7e5a3a1c0dd0cc85c2a1275b8b483f1024dd648a5f43bc86d9bb7c3"
+    },
+    {
+      "path": "963-mobile-many.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1a18920458b45f4df827e4fc178807e8b0c7d6701bb74c915a1d666ec7c1e795",
+      "sourceDigests": [
+        "1d9effb57046057a9a4fa9d752ab38fec2ccadfd1d47a7a56d2ffac56fd80c52"
+      ],
+      "description": "Redacted placeholder for the compact count and Next controls in the 390-pixel header.",
+      "sha256": "0455ebc3b58b3a6f67bcd77869d0fbdaba64a02db72972c89653b906118ea3ce"
+    },
+    {
+      "path": "963-mobile-queue-sheet.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1a18920458b45f4df827e4fc178807e8b0c7d6701bb74c915a1d666ec7c1e795",
+      "sourceDigests": [
+        "38d940b0225d4284f81048f171cb2ec79207d23066911fbb0629b1054e1215b8"
+      ],
+      "description": "Redacted placeholder for the full-width queue sheet under the 390-pixel header.",
+      "sha256": "a970acc7dc4e4578bf1fde849f9faa8f8ff7594e0887061a7e9835b1f4a95387"
+    }
+  ]
+}
