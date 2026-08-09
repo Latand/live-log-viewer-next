@@ -53,6 +53,18 @@ export function viewerDeploymentRegistryBackendMode(
   }
 }
 
+/** Older release capabilities omit this field and already represent complete
+ * startup. SQLite-wave releases expose an explicit false value while their
+ * post-activation controllers and structured hosts are still starting. */
+export function viewerDeploymentReleaseReady(status: number, body: string): boolean {
+  if (!hasViewerDeploymentCapability(status, body)) return false;
+  try {
+    return (JSON.parse(body) as { releaseReady?: unknown }).releaseReady !== false;
+  } catch {
+    return false;
+  }
+}
+
 export interface ViewerReadinessProbe {
   endpoint: string;
   inspect(): Promise<ViewerCandidateContainerState>;

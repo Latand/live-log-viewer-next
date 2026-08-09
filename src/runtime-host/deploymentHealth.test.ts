@@ -8,6 +8,7 @@ import { GET as deploymentCapability } from "@/app/api/runtime/deployments/capab
 import {
   hasViewerDeploymentCapability,
   viewerDeploymentRegistryBackendMode,
+  viewerDeploymentReleaseReady,
   viewerHealthRequestPlan,
   waitForViewerReadiness,
 } from "./deploymentHealth";
@@ -94,4 +95,13 @@ test("deployment capability requires the candidate-owned versioned endpoint", as
     version: 1,
     registryBackendMode: "invalid",
   }))).toBeNull();
+  expect(viewerDeploymentReleaseReady(200, JSON.stringify({
+    capability: "viewer-deployments",
+    version: 1,
+  }))).toBe(true);
+  expect(viewerDeploymentReleaseReady(200, JSON.stringify({
+    capability: "viewer-deployments",
+    version: 1,
+    releaseReady: false,
+  }))).toBe(false);
 });

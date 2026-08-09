@@ -34,17 +34,12 @@ const ACTION_TIMEOUTS: Record<AdapterAction, number> = {
   "reconcile-mcp-runtime": 10 * 60_000,
   "verify-candidate": 90_000,
   promote: 30_000,
-  "verify-promoted": 90_000,
+  "verify-promoted": 120_000,
   rollback: 90_000,
   retire: 60_000,
   "retain-only": 60_000,
   "stage-host-successor": 60_000,
   "complete-host-handoff": 60_000,
-};
-
-const ACTION_TIMEOUT_WAITS: Partial<Record<AdapterAction, string>> = {
-  promote: "hot-state activation",
-  "verify-promoted": "full promoted Viewer readiness",
 };
 
 const MCP_HEALTH_PROBE_ACTIONS: ReadonlySet<AdapterAction> = new Set([
@@ -57,6 +52,11 @@ interface AdapterProcessRecord {
   pid: number;
   startIdentity: string;
   action: AdapterAction;
+}
+
+interface AdapterPhaseRecord {
+  action: AdapterAction;
+  phase: string;
 }
 
 export interface HostCommandViewerDeploymentAdapterOptions {
@@ -97,6 +97,19 @@ function clearProcessRecord(filename: string, expected?: AdapterProcessRecord): 
     if (current && (current.pid !== expected.pid || current.startIdentity !== expected.startIdentity)) return;
   }
   fs.rmSync(filename, { force: true });
+}
+
+function readAdapterPhase(filename: string, action: AdapterAction): string | null {
+  try {
+    const value = JSON.parse(fs.readFileSync(filename, "utf8")) as Partial<AdapterPhaseRecord>;
+    return value.action === action
+      && typeof value.phase === "string"
+      && /^[A-Za-z0-9 -]{1,160}$/.test(value.phase)
+      ? value.phase
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function signalProcessGroup(pid: number, signal: NodeJS.Signals): void {
@@ -275,13 +288,19 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
   static fromExecutable(executable: string, options: HostCommandViewerDeploymentAdapterOptions = {}): HostCommandViewerDeploymentAdapter {
     if (!executable.startsWith("/")) throw new Error("viewer deployment adapter path must be absolute");
     const stateFile = options.stateFile ?? statePath("viewer-deployment-adapter-process.json");
+    const phaseFile = `${stateFile}.phase`;
     const proc = options.proc ?? procBackend;
     const timeouts = { ...ACTION_TIMEOUTS, ...options.timeouts };
     const reconcile = async () => {
       const previous = readProcessRecord(stateFile);
-      if (!previous) { clearProcessRecord(stateFile); return; }
+      if (!previous) {
+        clearProcessRecord(stateFile);
+        fs.rmSync(phaseFile, { force: true });
+        return;
+      }
       await terminateAdapterProcess(previous, proc);
       clearProcessRecord(stateFile, previous);
+      fs.rmSync(phaseFile, { force: true });
     };
     const runAction = async (
       action: AdapterAction,
@@ -296,9 +315,14 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
         : ["pipe", "pipe", "pipe"];
       let child: ReturnType<typeof spawn>;
       try {
+        fs.rmSync(phaseFile, { force: true });
         child = spawn("/usr/bin/setpriv", ["--pdeathsig", "KILL", "--", executable, action], {
           stdio,
-          env: { ...withoutWakatimeCredential(process.env), LLV_DEPLOYMENT_ADAPTER_PROTOCOL: "1" },
+          env: {
+            ...withoutWakatimeCredential(process.env),
+            LLV_DEPLOYMENT_ADAPTER_PROTOCOL: "1",
+            LLV_DEPLOYMENT_ADAPTER_PHASE_FILE: phaseFile,
+          },
           detached: true,
         });
       } catch (error) {
@@ -358,8 +382,8 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
           await terminateAdapterProcess(record, proc);
           await exitPromise;
           await Promise.all([stdoutPromise, stderrPromise]);
-          const waitedOn = ACTION_TIMEOUT_WAITS[action] ?? "the adapter process";
-          throw new Error(`deployment adapter ${action} timed out while waiting for ${waitedOn}`);
+          const phase = readAdapterPhase(phaseFile, action) ?? "waiting for the adapter process";
+          throw new Error(`deployment adapter ${action} timed out while ${phase}`);
         }
         const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
         if (outcome.exitCode !== 0) throw new Error((stderr.trim() || `deployment adapter ${action} failed`).slice(0, 500));
@@ -369,6 +393,7 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
         if (timer) clearTimeout(timer);
         closeHealthAdmission?.();
         clearProcessRecord(stateFile, record);
+        fs.rmSync(phaseFile, { force: true });
       }
     };
     const run: CommandRunner = async (rawAction, input) => {
