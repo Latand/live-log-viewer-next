@@ -4,6 +4,10 @@
  *
  *   bun evidence/issue-962/drive.ts
  *
+ * Deep checkouts overflow the ~108-byte unix-socket path limit for the fixture
+ * tmux socket ("tmux exited with 1" at boot); point LLV_DEMO_TMUX_TMPDIR at a
+ * short dir (e.g. /tmp/e962-tmux), exactly like the issue-866/873 drivers.
+ *
  * PRODUCTION-SHAPED, exactly like the issue-884 driver it extends: builds the
  * EXACT current head (`next build --webpack`), serves it with `next start`
  * over the ISOLATED demo runtime (fixtures/demo-home + its own LLV_STATE_DIR;
