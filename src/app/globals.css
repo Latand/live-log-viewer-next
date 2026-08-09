@@ -106,6 +106,26 @@ body {
   }
 }
 
+/* The status vocabulary's ONE motion treatment (issue #961): a card whose word
+   is "needs you" breathes a soft warning halo. Every other word is static, and
+   reduced-motion stills this one too — the word plus colour already carry the
+   full meaning. */
+@keyframes card-status-breathe {
+  50% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-warning) 22%, transparent);
+  }
+}
+
+.card-status-attention {
+  animation: card-status-breathe 2.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card-status-attention {
+    animation: none;
+  }
+}
+
 /* Syntax highlighting palette (issue #9 §7): highlight.js emits .hljs-* class
    names. The app's light-theme tokens supply their colors and keep every color
    in a single source of truth. */
