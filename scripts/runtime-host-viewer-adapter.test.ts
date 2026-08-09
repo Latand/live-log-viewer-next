@@ -23,7 +23,9 @@ import {
   completeHotStatePreparation,
   HOT_STATE_BACKEND,
   HOT_STATE_RELEASE_REVISION_ENV,
+  hotStateSqliteWriterReady,
   markHotStateActivationReady,
+  markViewerReleaseReady,
   publishHotStateAuthority,
   readHotStateAuthority,
 } from "../src/lib/state/hotStateAuthority";
@@ -313,8 +315,10 @@ async function runAction(options: {
   environment?: Record<string, string>;
   setupState?: (state: string) => void;
   observe?: (state: string, child: { exited: Promise<number> }) => Promise<void>;
+  sandbox?: string;
+  preserveSandbox?: boolean;
 }) {
-  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-release-lifecycle-adapter-"));
+  const sandbox = options.sandbox ?? fs.mkdtempSync(path.join(os.tmpdir(), "llv-release-lifecycle-adapter-"));
   const state = path.join(sandbox, "state");
   const bin = path.join(sandbox, "bin");
   const dockerLog = path.join(sandbox, "docker.log");
@@ -358,8 +362,20 @@ async function runAction(options: {
   const target = fs.existsSync(targetFile) ? JSON.parse(fs.readFileSync(targetFile, "utf8")) as unknown : null;
   const authority = readHotStateAuthority(state);
   const handoffIntentExists = fs.existsSync(path.join(state, "runtime-host-handoff-intent.json"));
-  fs.rmSync(sandbox, { recursive: true, force: true });
-  return { code, stdout, stderr, dockerCalls, target, authority, handoffIntentExists };
+  const releaseSwitchIntentExists = fs.existsSync(path.join(state, "viewer-release-switch-intent.json"));
+  if (!options.preserveSandbox) fs.rmSync(sandbox, { recursive: true, force: true });
+  return {
+    code,
+    stdout,
+    stderr,
+    dockerCalls,
+    target,
+    authority,
+    handoffIntentExists,
+    releaseSwitchIntentExists,
+    sandbox,
+    state,
+  };
 }
 
 function initializeHotStateFixture(
@@ -1083,6 +1099,119 @@ exit 1
     expect(result.authority).toMatchObject({ mode: "legacy", releaseRevision: previous.revision });
   } finally {
     server.stop(true);
+  }
+});
+
+test("SQLite rollback recovers an interrupted promotion before health and keeps the candidate fenced", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-sqlite-promotion-recovery-"));
+  const state = path.join(sandbox, "state");
+  const targetFile = path.join(state, "viewer-release.json");
+  let previousWriterReady = () => false;
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      const pathname = new URL(request.url).pathname;
+      if (pathname === "/api/runtime/deployments/capabilities/v1") {
+        return Response.json(
+          { capability: "viewer-deployments", version: 1, registryBackendMode: "off" },
+          { status: previousWriterReady() ? 200 : 503 },
+        );
+      }
+      if (pathname === "/_next/static/app.js") return new Response("self.__viewer=true");
+      return new Response('<script src="/_next/static/app.js"></script>', {
+        headers: { "content-type": "text/html" },
+      });
+    },
+  });
+  const previous = {
+    ...release,
+    endpoint: server.url.origin,
+    hotStateBackend: HOT_STATE_BACKEND,
+    revision: "2".repeat(40),
+  };
+  const candidate = {
+    ...release,
+    container: "viewer-interrupted-candidate",
+    endpoint: "http://127.0.0.1:19991",
+    image: "viewer:interrupted-candidate",
+    hotStateBackend: HOT_STATE_BACKEND,
+    revision: "3".repeat(40),
+    mcpRuntime: {
+      source: "managed" as const,
+      revision: "3".repeat(40),
+      releaseId: "deploy-interrupted-candidate",
+      artifactDigest: "3".repeat(64),
+      stagedAt: "2026-08-09T00:00:00.000Z",
+    },
+  };
+  const previousMcpRuntime = {
+    source: "managed" as const,
+    revision: previous.revision,
+    releaseId: "deploy-previous",
+    artifactDigest: "2".repeat(64),
+    stagedAt: "2026-08-08T00:00:00.000Z",
+  };
+  const writerReady = (revision: string) => hotStateSqliteWriterReady(state, {
+    LLV_VIEWER_DEPLOY_TARGET: targetFile,
+    [HOT_STATE_RELEASE_REVISION_ENV]: revision,
+  });
+  previousWriterReady = () => writerReady(previous.revision);
+  const dockerScript = `#!/bin/sh
+set -eu
+if [ "$1 $2" = "container inspect" ]; then exit 0; fi
+if [ "$1" = "inspect" ]; then printf 'running\n'; exit 0; fi
+if [ "$1" = "start" ]; then exit 0; fi
+exit 1
+`;
+  try {
+    let originalAuthority: ReturnType<typeof readHotStateAuthority> = null;
+    const crashed = await runAction({
+      action: "promote",
+      input: { candidate },
+      sandbox,
+      preserveSandbox: true,
+      snapshots: [previous.container],
+      environment: { NODE_ENV: "test", LLV_TEST_EXIT_AFTER_HOT_STATE_AUTHORITY: "1" },
+      setupState: (directory) => {
+        initializeHotStateFixture(directory, previous);
+        const authority = readHotStateAuthority(directory)!;
+        originalAuthority = markViewerReleaseReady(
+          directory,
+          markHotStateActivationReady(directory, authority),
+        );
+      },
+      dockerScript,
+    });
+    expect(crashed.code).toBe(86);
+    expect(crashed.target).toEqual(previous);
+    expect(crashed.authority).toMatchObject({ mode: "sqlite", releaseRevision: candidate.revision });
+    expect(crashed.releaseSwitchIntentExists).toBe(true);
+    expect(writerReady(previous.revision)).toBe(false);
+    expect(writerReady(candidate.revision)).toBe(false);
+
+    expect(previousWriterReady()).toBe(false);
+    const recovered = await runAction({
+      action: "rollback",
+      input: { previous, candidate, previousMcpRuntime },
+      sandbox,
+      preserveSandbox: true,
+      dockerScript,
+    });
+    expect({ code: recovered.code, stderr: recovered.stderr }).toEqual({ code: 0, stderr: "" });
+    expect(recovered.target).toEqual(previous);
+    expect(recovered.releaseSwitchIntentExists).toBe(false);
+    expect(recovered.authority).toMatchObject({
+      mode: "sqlite",
+      releaseRevision: previous.revision,
+      activationReadyAt: originalAuthority!.activationReadyAt,
+      releaseReadyAt: originalAuthority!.releaseReadyAt,
+    });
+    expect(previousWriterReady()).toBe(true);
+    expect(writerReady(candidate.revision)).toBe(false);
+  } finally {
+    server.stop(true);
+    fs.rmSync(sandbox, { recursive: true, force: true });
   }
 });
 

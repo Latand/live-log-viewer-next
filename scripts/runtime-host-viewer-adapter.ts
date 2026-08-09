@@ -53,6 +53,7 @@ import { completeRuntimeHostHandoff, stageRuntimeHostSuccessorContainer } from "
 import {
   hasViewerDeploymentCapability,
   viewerDeploymentRegistryBackendMode,
+  viewerDeploymentReleaseReady,
   viewerHealthRequestPlan,
   waitForViewerReadiness,
   type ViewerCandidateContainerState,
@@ -71,6 +72,36 @@ const runtimeHostImageTag = process.env.LLV_RUNTIME_HOST_IMAGE_TAG || "agent-log
 const mcpRuntimeRoot = process.env.LLV_MCP_RUNTIME_ROOT || path.join(process.env.HOME || "/home/user", ".agents", "tools", "llv-mcp-runtime");
 const mcpRuntimeStore = new McpRuntimeReleaseStore({ stateDir, stableRuntimeRoot: mcpRuntimeRoot });
 const deploymentPackageRoot = process.env.LLV_DEPLOYMENT_PACKAGE_ROOT || path.resolve(import.meta.dir, "..");
+const releaseSwitchIntentFile = path.join(stateDir, "viewer-release-switch-intent.json");
+const adapterPhaseFile = process.env.LLV_DEPLOYMENT_ADAPTER_PHASE_FILE?.trim() || null;
+
+function writeDurableJson(filename: string, value: unknown): void {
+  fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
+  const temporary = `${filename}.${process.pid}.${randomUUID()}.tmp`;
+  const descriptor = fs.openSync(temporary, "wx", 0o600);
+  try {
+    fs.writeFileSync(descriptor, JSON.stringify(value));
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  fs.renameSync(temporary, filename);
+  const directory = fs.openSync(path.dirname(filename), "r");
+  try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+}
+
+function removeDurableFile(filename: string): void {
+  fs.rmSync(filename, { force: true });
+  let directory: number;
+  try { directory = fs.openSync(path.dirname(filename), "r"); }
+  catch { return; }
+  try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+}
+
+function reportAdapterPhase(action: string, phase: string): void {
+  if (!adapterPhaseFile) return;
+  writeDurableJson(adapterPhaseFile, { action, phase, updatedAt: new Date().toISOString() });
+}
 
 async function command(argv: string[], options: { cwd?: string } = {}): Promise<string> {
   const child = Bun.spawn(["/usr/bin/setpriv", "--pdeathsig", "KILL", "--", ...argv], {
@@ -330,6 +361,8 @@ async function probeRoutes(candidate: ViewerReleaseIdentity, endpoint: string, e
   );
   const observedRegistryBackendMode = viewerDeploymentRegistryBackendMode(capability.status, capability.text);
   const registryBackendMatches = observedRegistryBackendMode === expectedRegistryBackendMode;
+  const releaseReady = expectedAssetsEndpoint === undefined
+    || viewerDeploymentReleaseReady(capability.status, capability.text);
   const html = authenticated?.status === 200 ? authenticated.text : root.text;
   const paths = referencedAssets(html);
   const assets = await Promise.all(paths.map(async (asset) => ({ path: asset, status: (await fetchStatus(`${endpoint}${asset}`)).status })));
@@ -348,6 +381,7 @@ async function probeRoutes(candidate: ViewerReleaseIdentity, endpoint: string, e
     && assets.every((asset) => asset.status === 200)
     && deploymentCapable
     && registryBackendMatches
+    && releaseReady
     && expectedAssetsMatch;
   return {
     checkedAt: new Date().toISOString(), endpoint, processReady, rootStatus: root.status,
@@ -357,9 +391,11 @@ async function probeRoutes(candidate: ViewerReleaseIdentity, endpoint: string, e
         ? "Viewer deployment capability gate failed"
         : !registryBackendMatches
           ? `Viewer registry backend mode mismatch: expected ${expectedRegistryBackendMode}, observed ${observedRegistryBackendMode ?? "unavailable"}`
-        : expectedAssetsMatch
-          ? "Viewer health or referenced asset gate failed"
-          : "stable listener does not serve the candidate asset set",
+          : !releaseReady
+            ? "Viewer release startup is incomplete"
+            : expectedAssetsMatch
+              ? "Viewer health or referenced asset gate failed"
+              : "stable listener does not serve the candidate asset set",
     }),
   };
 }
@@ -369,6 +405,7 @@ async function verifyViewer(candidate: ViewerReleaseIdentity, endpoint: string, 
     endpoint,
     inspect: () => containerState(candidate.container),
     probe: () => probeRoutes(candidate, endpoint, expectedAssetsEndpoint),
+    ...(expectedAssetsEndpoint ? { maxAttempts: 90 } : {}),
   });
 }
 
@@ -455,6 +492,130 @@ function readCurrentRelease(): ViewerReleaseIdentity | null {
   }
 }
 
+interface ViewerReleaseSwitchIntent {
+  schemaVersion: 1;
+  action: "activate" | "restore";
+  previousTarget: ViewerReleaseIdentity | null;
+  previousAuthority: HotStateAuthority | null;
+  target: ViewerReleaseIdentity;
+  recordedAt: string;
+}
+
+function checkpointFromIntent(value: unknown): HotStateAuthority["checkpoint"] | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Viewer release switch intent is invalid");
+  const checkpoint = value as { acknowledgedAt?: unknown; revisions?: Record<string, unknown> };
+  const revisions = checkpoint.revisions;
+  const numbers = revisions
+    ? [revisions.flows, revisions.pipelines, revisions.pipelinesArchive, revisions.workflows]
+    : [];
+  if (typeof checkpoint.acknowledgedAt !== "string"
+    || numbers.length !== 4
+    || numbers.some((revision) => !Number.isInteger(revision) || (revision as number) < 0)) {
+    throw new Error("Viewer release switch intent is invalid");
+  }
+  return value as HotStateAuthority["checkpoint"];
+}
+
+function authorityFromIntent(value: unknown): HotStateAuthority | null {
+  if (value === null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Viewer release switch intent is invalid");
+  const authority = value as Partial<HotStateAuthority>;
+  if (authority.schemaVersion !== 1
+    || !Number.isInteger(authority.epoch)
+    || (authority.epoch ?? 0) < 1
+    || !["legacy", "preparing", "sqlite", "fencing"].includes(String(authority.mode))
+    || (authority.releaseRevision !== null
+      && (typeof authority.releaseRevision !== "string" || !/^[0-9a-f]{40}$/.test(authority.releaseRevision)))
+    || typeof authority.updatedAt !== "string"
+    || (authority.activationReadyAt !== undefined && typeof authority.activationReadyAt !== "string")
+    || (authority.releaseReadyAt !== undefined && typeof authority.releaseReadyAt !== "string")
+    || (authority.releaseReadyAt !== undefined && authority.activationReadyAt === undefined)) {
+    throw new Error("Viewer release switch intent is invalid");
+  }
+  return {
+    ...(authority as HotStateAuthority),
+    ...(checkpointFromIntent(authority.checkpoint) ? { checkpoint: checkpointFromIntent(authority.checkpoint) } : {}),
+  };
+}
+
+function readReleaseSwitchIntent(): ViewerReleaseSwitchIntent | null {
+  let value: unknown;
+  try { value = JSON.parse(fs.readFileSync(releaseSwitchIntentFile, "utf8")) as unknown; }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new Error("Viewer release switch intent is unreadable", { cause: error });
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Viewer release switch intent is invalid");
+  const intent = value as Record<string, unknown>;
+  if (intent.schemaVersion !== 1
+    || (intent.action !== "activate" && intent.action !== "restore")
+    || typeof intent.recordedAt !== "string") throw new Error("Viewer release switch intent is invalid");
+  return {
+    schemaVersion: 1,
+    action: intent.action,
+    previousTarget: intent.previousTarget === null ? null : release(intent.previousTarget),
+    previousAuthority: authorityFromIntent(intent.previousAuthority),
+    target: release(intent.target),
+    recordedAt: intent.recordedAt,
+  };
+}
+
+function sameAuthority(left: HotStateAuthority | null, right: HotStateAuthority | null): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function targetMatches(left: ViewerReleaseIdentity | null, right: ViewerReleaseIdentity | null): boolean {
+  if (left === null || right === null) return left === right;
+  return releasesEqual(left, right);
+}
+
+function expectedTransitionAuthority(intent: ViewerReleaseSwitchIntent, authority: HotStateAuthority | null): boolean {
+  if (!authority) return false;
+  const expectedMode = intent.action === "restore"
+    ? intent.target.hotStateBackend === HOT_STATE_BACKEND ? "sqlite" : "legacy"
+    : intent.target.hotStateBackend === HOT_STATE_BACKEND
+      ? intent.previousAuthority?.mode === "sqlite" ? "sqlite" : "preparing"
+      : "legacy";
+  return authority.epoch === (intent.previousAuthority?.epoch ?? 0) + 1
+    && authority.mode === expectedMode
+    && authority.releaseRevision === intent.target.revision;
+}
+
+function authorityServesTarget(authority: HotStateAuthority | null, target: ViewerReleaseIdentity): boolean {
+  return authority?.releaseRevision === target.revision
+    && (target.hotStateBackend === HOT_STATE_BACKEND
+      ? authority.mode === "preparing" || authority.mode === "sqlite"
+      : authority.mode === "legacy");
+}
+
+function recoverInterruptedReleaseSwitch(): void {
+  const intent = readReleaseSwitchIntent();
+  if (!intent) return;
+  const currentTarget = readCurrentRelease();
+  const currentAuthority = readHotStateAuthority(stateDir);
+  if (targetMatches(currentTarget, intent.target)) {
+    if (!authorityServesTarget(currentAuthority, intent.target)) {
+      throw new Error("interrupted Viewer release switch target has mismatched hot-state authority");
+    }
+    removeDurableFile(releaseSwitchIntentFile);
+    return;
+  }
+  if (!targetMatches(currentTarget, intent.previousTarget)) {
+    throw new Error("interrupted Viewer release switch conflicts with the durable target");
+  }
+  if (sameAuthority(currentAuthority, intent.previousAuthority)) {
+    removeDurableFile(releaseSwitchIntentFile);
+    return;
+  }
+  if (!expectedTransitionAuthority(intent, currentAuthority)) {
+    throw new Error("interrupted Viewer release switch has unexpected hot-state authority");
+  }
+  const restored = restoreHotStateAuthority(stateDir, intent.previousAuthority, currentAuthority!);
+  if (!restored) throw new Error("interrupted Viewer release switch authority changed during recovery");
+  removeDurableFile(releaseSwitchIntentFile);
+}
+
 function writeReleaseTarget(filename: string, target: ViewerReleaseIdentity): void {
   mcpRuntimeStore.publishReleaseTarget(filename, target);
 }
@@ -474,6 +635,7 @@ function switchTarget(
   action: ViewerMcpRuntimePublicationEvidence["action"],
   fallbackRuntime?: ViewerMcpRuntimeIdentity,
   fence?: HotStateAuthority | null,
+  phase?: (value: string) => void,
 ): ViewerMcpRuntimePublicationEvidence {
   const runtime = target.mcpRuntime ?? fallbackRuntime;
   if (!runtime) throw new Error("release MCP runtime identity is missing");
@@ -485,8 +647,23 @@ function switchTarget(
     && currentTarget.endpoint === target.endpoint;
   const previousAuthority = readHotStateAuthority(stateDir);
   let transitionAuthority: HotStateAuthority | null = null;
+  const intent: ViewerReleaseSwitchIntent | null = sameRelease
+    ? null
+    : {
+        schemaVersion: 1,
+        action,
+        previousTarget: currentTarget,
+        previousAuthority,
+        target,
+        recordedAt: new Date().toISOString(),
+      };
+  if (intent) {
+    phase?.("recording the Viewer release switch intent");
+    writeDurableJson(releaseSwitchIntentFile, intent);
+  }
   try {
     if (!sameRelease) {
+      phase?.("publishing hot-state authority");
       if (action === "restore") {
         transitionAuthority = publishHotStateAuthority(
           stateDir,
@@ -510,7 +687,9 @@ function switchTarget(
     if (transitionAuthority
       && process.env.NODE_ENV === "test"
       && process.env.LLV_TEST_EXIT_AFTER_HOT_STATE_AUTHORITY === "1") process.exit(86);
+    phase?.("publishing the Viewer release target");
     writeReleaseTarget(targetFile, target);
+    if (intent) removeDurableFile(releaseSwitchIntentFile);
   } catch (error) {
     let restoreError: unknown = null;
     try {
@@ -520,9 +699,16 @@ function switchTarget(
       restoreError = failure;
     }
     try {
-      if (transitionAuthority) restoreHotStateAuthority(stateDir, previousAuthority, transitionAuthority);
+      if (transitionAuthority) {
+        const restored = restoreHotStateAuthority(stateDir, previousAuthority, transitionAuthority);
+        if (!restored) throw new Error("hot-state authority changed before target restore");
+      }
     } catch (failure) {
       restoreError ??= failure;
+    }
+    if (!restoreError && intent) {
+      try { removeDurableFile(releaseSwitchIntentFile); }
+      catch (failure) { restoreError = failure; }
     }
     if (restoreError) {
       const message = error instanceof Error ? error.message : "release target publication failed";
@@ -612,13 +798,18 @@ async function waitForHotStateActivation(candidate: ViewerReleaseIdentity): Prom
   throw new Error("timed out waiting for the promoted Viewer to activate hot state");
 }
 
-async function promoteTarget(candidate: ViewerReleaseIdentity): Promise<ViewerMcpRuntimePublicationEvidence> {
+async function promoteTarget(
+  candidate: ViewerReleaseIdentity,
+  phase: (value: string) => void = () => {},
+): Promise<ViewerMcpRuntimePublicationEvidence> {
   const current = readCurrentRelease();
+  phase("fencing the current SQLite release");
   const fence = current?.hotStateBackend === HOT_STATE_BACKEND
     && candidate.hotStateBackend !== HOT_STATE_BACKEND
     ? await fenceCurrentSqliteRelease(current.revision, candidate)
     : null;
-  const publication = switchTarget(candidate, "activate", undefined, fence);
+  const publication = switchTarget(candidate, "activate", undefined, fence, phase);
+  phase("waiting for hot-state activation");
   await waitForHotStateActivation(candidate);
   return publication;
 }
@@ -766,6 +957,8 @@ async function main(): Promise<unknown> {
   if (process.env.LLV_DEPLOYMENT_ADAPTER_PROTOCOL !== "1") throw new Error("deployment adapter protocol is required");
   const action = process.argv[2];
   const input = JSON.parse(await Bun.stdin.text()) as Record<string, unknown>;
+  reportAdapterPhase(String(action ?? "unknown"), "recovering an interrupted Viewer release switch");
+  recoverInterruptedReleaseSwitch();
   if (action === "bootstrap-release") return runBootstrapRelease(input);
   const healthProbeCapability = typeof input.healthProbeCapability === "string"
     ? input.healthProbeCapability
@@ -798,9 +991,10 @@ async function main(): Promise<unknown> {
   if (action === "promote") {
     const candidate = release(input.candidate);
     if (candidate.mcpRuntime?.source !== "managed") throw new Error("candidate MCP runtime identity is missing");
-    return promoteTarget(candidate);
+    return promoteTarget(candidate, (phase) => reportAdapterPhase(action, phase));
   }
   if (action === "verify-promoted") {
+    reportAdapterPhase(action, "waiting for full promoted Viewer readiness");
     const candidate = release(input.candidate);
     const healthProbe = await delegatedHealthProbeAdmission(healthProbeCapability);
     return verify(candidate, stableEndpoint, {
@@ -810,13 +1004,22 @@ async function main(): Promise<unknown> {
   }
   if (action === "rollback") {
     const previous = release(input.previous);
+    reportAdapterPhase(action, "starting the rollback Viewer release");
     await startCandidate(previous);
+    reportAdapterPhase(action, "verifying the rollback Viewer release");
     const evidence = await verifyViewer(previous, previous.endpoint);
     if (!evidence.ok) throw new Error(evidence.detail ?? "rollback release health gate failed");
     const previousMcpRuntime = mcpRuntime(input.previousMcpRuntime);
     const candidate = release(input.candidate);
+    reportAdapterPhase(action, "fencing the promoted SQLite release");
     const fence = await fenceCurrentSqliteRelease(candidate.revision, previous);
-    return switchTarget(previous, "restore", previousMcpRuntime, fence);
+    return switchTarget(
+      previous,
+      "restore",
+      previousMcpRuntime,
+      fence,
+      (phase) => reportAdapterPhase(action, phase),
+    );
   }
   if (action === "stage-host-successor") {
     const candidate = release(input.candidate);

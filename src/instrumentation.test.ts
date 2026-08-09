@@ -8,6 +8,7 @@ import { Database } from "bun:sqlite";
 import {
   accountControllerDelayMs,
   activateViewerRuntimeWhenCurrent,
+  completeViewerRuntimeActivation,
   completeViewerReleaseDemotion,
   establishHotStateCutoverBoundary,
   initializeHotStateStoresAtStartup,
@@ -229,6 +230,30 @@ test("a current release monitors rollback fences while activation is still pendi
   expect(checkpoints).toBe(1);
   rejectActivation(new Error("injected activation failure"));
   await expect(activation).rejects.toThrow("injected activation failure");
+});
+
+test("hot-state activation beats a slow structured-host startup and the promote deadline", async () => {
+  let finishStructuredStartup!: () => void;
+  let publishActivation!: () => void;
+  const structuredStartup = new Promise<void>((resolve) => { finishStructuredStartup = resolve; });
+  const published = new Promise<void>((resolve) => { publishActivation = resolve; });
+  const activation = completeViewerRuntimeActivation({
+    initializeOperatorCapability: async () => undefined,
+    startWakatime: async () => undefined,
+    startStructuredHosts: () => structuredStartup,
+    startControllers: async () => undefined,
+    publishHotStateActivation: publishActivation,
+    publishViewerReleaseReady: () => undefined,
+  });
+
+  const outcome = await Promise.race([
+    published.then(() => "activated"),
+    Bun.sleep(25).then(() => "deployment adapter promote timed out while waiting for hot-state activation"),
+  ]);
+  finishStructuredStartup();
+  await activation;
+
+  expect(outcome).toBe("activated");
 });
 
 test("cutover import faults roll back all four collection markers and retry cleanly", async () => {

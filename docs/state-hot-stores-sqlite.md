@@ -162,14 +162,14 @@ handoff.
 For the first SQLite release, the adapter durably publishes `preparing` before
 moving the stable target. The promoted process waits for three stable
 legacy-file observations, completes the dry run and atomic import, and changes
-the same authority epoch to `sqlite`. It starts operator services, optional
-integrations, structured-host adoption, and controllers before adding
-`activationReadyAt`. Recoverable structured-host startup keeps activation
-pending until adoption succeeds. The capability route returns 503 for the
-promoted endpoint until that timestamp exists, and the deployment adapter
-waits for it before reporting promotion success. The release monitor starts
-before activation work, so rollback fencing remains available during a failed
-or stalled startup.
+the same authority epoch to `sqlite`. It adds `activationReadyAt` after the hot
+stores are initialized, then starts structured-host adoption and controllers
+before adding `releaseReadyAt`. The deployment adapter uses the first timestamp
+to complete target promotion; the capability route remains 503 until the
+second timestamp records full release startup. Slow recoverable adoption stays
+inside the longer post-promotion health gate. The release monitor starts before
+activation work, so rollback fencing remains available during a failed or
+stalled startup.
 
 Every writer proves that its Viewer port or MCP release revision matches both
 the durable target and SQLite authority. Passive candidates, portless MCP

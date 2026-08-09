@@ -27,6 +27,7 @@ export interface HotStateAuthority {
   releaseRevision: string | null;
   updatedAt: string;
   activationReadyAt?: string;
+  releaseReadyAt?: string;
   checkpoint?: HotStateCheckpoint;
 }
 
@@ -66,6 +67,8 @@ function parseAuthority(value: unknown): HotStateAuthority | null {
     || (authority.releaseRevision !== null && !validRevision(authority.releaseRevision))
     || typeof authority.updatedAt !== "string"
     || (authority.activationReadyAt !== undefined && typeof authority.activationReadyAt !== "string")
+    || (authority.releaseReadyAt !== undefined && typeof authority.releaseReadyAt !== "string")
+    || (authority.releaseReadyAt !== undefined && authority.activationReadyAt === undefined)
     || (authority.checkpoint !== undefined && !validCheckpoint(authority.checkpoint))) return null;
   return authority as HotStateAuthority;
 }
@@ -145,18 +148,20 @@ export function hotStateSqliteWriterReady(
   if (!target) return true;
   const authority = readHotStateAuthority(directory);
   /* Fencing covers the handoff window, when a retiring and an arriving release
-     could both write. Once the authority has activated sqlite FOR THE RELEASE
-     CURRENTLY PROMOTED, that window is closed and there is no second writer to
-     protect against. Every local client — the MCP runtime, a CLI, a script —
-     writes through this same store and carries neither PORT nor the revision
-     env, so proving a revision is something only the release server can do.
-     Demanding it after activation fences those clients out of settled state
-     permanently rather than transiently (issue #907 follow-up). */
-  if (authority?.mode === "sqlite"
-    && authority.releaseRevision === target.revision
-    && typeof authority.activationReadyAt === "string") return true;
+     could both write. Unidentified local clients may write after the promoted
+     release activates settled SQLite state. A client carrying PORT or an
+     explicit revision remains bound to that identity, so a retiring server or
+     MCP process stays fenced after the target changes (issue #907 follow-up). */
   const revision = hotStateWriterRevision(directory, env);
-  if (!revision) return false;
+  if (!revision) {
+    const carriesReleaseIdentity = Boolean(
+      env[HOT_STATE_RELEASE_REVISION_ENV]?.trim() || env.PORT?.trim(),
+    );
+    return !carriesReleaseIdentity
+      && authority?.mode === "sqlite"
+      && authority.releaseRevision === target.revision
+      && typeof authority.activationReadyAt === "string";
+  }
   return authority?.mode === "sqlite"
     && authority.releaseRevision === revision
     && target.revision === revision;
@@ -189,8 +194,12 @@ function writeHotStateAuthority(
     checkpoint?: HotStateCheckpoint;
     epoch?: number;
     activationReadyAt?: string;
+    releaseReadyAt?: string;
   } = {},
 ): HotStateAuthority {
+  if (options.releaseReadyAt && !options.activationReadyAt) {
+    throw new Error("Viewer release readiness requires completed hot-state activation");
+  }
   const authority: HotStateAuthority = {
     schemaVersion: 1,
     epoch: options.epoch ?? ((previous?.epoch ?? 0) + 1),
@@ -198,6 +207,7 @@ function writeHotStateAuthority(
     releaseRevision,
     updatedAt: new Date().toISOString(),
     ...(options.activationReadyAt ? { activationReadyAt: options.activationReadyAt } : {}),
+    ...(options.releaseReadyAt ? { releaseReadyAt: options.releaseReadyAt } : {}),
     ...(options.checkpoint ? { checkpoint: options.checkpoint } : {}),
   };
   if (!Number.isInteger(authority.epoch) || authority.epoch < 1) throw new Error("hot-state authority epoch is invalid");
@@ -210,7 +220,7 @@ export function publishHotStateAuthority(
   directory: string,
   mode: HotStateAuthorityMode,
   releaseRevision: string | null,
-  options: { checkpoint?: HotStateCheckpoint; epoch?: number; activationReadyAt?: string } = {},
+  options: { checkpoint?: HotStateCheckpoint; epoch?: number; activationReadyAt?: string; releaseReadyAt?: string } = {},
 ): HotStateAuthority {
   if (releaseRevision !== null && !validRevision(releaseRevision)) throw new Error("hot-state release revision is invalid");
   return withFileTransactionSync(authorityFile(directory), "hot-state authority is busy", () =>
@@ -236,6 +246,7 @@ export function restoreHotStateAuthority(
       {
         ...(authority?.checkpoint ? { checkpoint: authority.checkpoint } : {}),
         ...(authority?.activationReadyAt ? { activationReadyAt: authority.activationReadyAt } : {}),
+        ...(authority?.releaseReadyAt ? { releaseReadyAt: authority.releaseReadyAt } : {}),
         epoch: current!.epoch + 1,
       },
     );
@@ -290,6 +301,26 @@ export function markHotStateActivationReady(
     return writeHotStateAuthority(directory, current, "sqlite", current.releaseRevision, {
       epoch: current.epoch,
       activationReadyAt: new Date().toISOString(),
+    });
+  });
+}
+
+export function markViewerReleaseReady(
+  directory: string,
+  request: HotStateAuthority,
+): HotStateAuthority {
+  return withFileTransactionSync(authorityFile(directory), "hot-state authority is busy", () => {
+    const current = readHotStateAuthority(directory);
+    if (!current
+      || !sameAuthority(current, request)
+      || current.mode !== "sqlite"
+      || typeof current.activationReadyAt !== "string") {
+      throw new Error("hot-state authority changed before Viewer release startup completed");
+    }
+    return writeHotStateAuthority(directory, current, "sqlite", current.releaseRevision, {
+      epoch: current.epoch,
+      activationReadyAt: current.activationReadyAt,
+      releaseReadyAt: new Date().toISOString(),
     });
   });
 }
