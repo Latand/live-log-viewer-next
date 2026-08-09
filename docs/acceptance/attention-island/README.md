@@ -26,9 +26,9 @@ Shots land in `/tmp/llv-issue-963/out`.
 | --- | --- |
 | `963-desktop-zero.png` | The overview with an empty queue: a muted, inert `NEEDS YOU 0` pill below the header row — present, quiet, no pulse, and clear of the Orchestrator button. |
 | `963-desktop-one.png` | One pending question: the island turns warning-toned as `NEEDS YOU 1 \| Next \| filter`, with the arrival toast docked beneath it. |
-| `963-desktop-many.png` | Four items across three projects: `NEEDS YOU 4`, one global count (the corner switchboard pill no longer carries a second waiting counter). |
+| `963-desktop-many.png` | Four items across three projects: `NEEDS YOU 4` — the island's count is exactly the queue's count. |
 | `963-desktop-queue-open.png` | The count opened the existing queue popover: four rows with question snippets, project chips and wait ages, oldest first. |
-| `963-desktop-filter.png` | The island's filter toggled «show only needs me»: the two blocked atlas cards keep full contrast while the other six dim; the toggle renders pressed. |
+| `963-desktop-filter.png` | The island's filter toggled «show only needs me»: the two blocked atlas cards keep full contrast while the other six dim; the toggle renders pressed. Bottom-right, the project board's corner switchboard pill keeps its own `· 2 waiting` counter — a broader count that also carries finished turns and flow-level attention the queue never holds (restored per the #963 review). |
 | `963-desktop-next-landing.png` | Clicking Next at 64% zoom glided the board camera to the off-viewport blocked card and framed it with the focus ring. |
 | `963-desktop-cross-project.png` | The third Next crossed projects: orbit selected in the rail, its blocked conversation focused — the same hand-off a queue-popover jump uses. |
 | `963-mobile-zero.png` | 390 px: the quiet zero count in the board header row. |

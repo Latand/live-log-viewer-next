@@ -9,7 +9,7 @@
       "generator": "../../../scripts/generate-privacy-placeholders.ts",
       "generatorRuntime": "bun-1.3.3",
       "generatorVersion": "privacy-placeholders-v2",
-      "generatorSha256": "1a18920458b45f4df827e4fc178807e8b0c7d6701bb74c915a1d666ec7c1e795",
+      "generatorSha256": "591164768f018f52468611b96a233fe7bb7ad96fa659d4518b45cfeebc8db0b3",
       "sourceDigests": [
         "4bbee6dd05cd6ea991910ccb602e6eebe97160678a987fcbd82906635e9a4ff5"
       ],

@@ -1698,6 +1698,7 @@ export const en = {
   "workerStack.worktree": "Workers",
 
   // CornerStatus
+  "corner.waitingCount": "· {count} waiting",
   "corner.openSwitchboard": "Open the agent switchboard",
 
   // TaskHeader

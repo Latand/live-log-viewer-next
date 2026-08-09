@@ -1643,6 +1643,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "workerStack.origin": "Породжені",
   "workerStack.worktree": "Воркери",
 
+  "corner.waitingCount": "· {count} чекають",
   "corner.openSwitchboard": "Відкрити пульт агентів",
 
   "task.working": ", працює",
