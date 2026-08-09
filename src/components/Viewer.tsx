@@ -1,6 +1,6 @@
 "use client";
 
-import { Crown, Filter, TriangleAlert, X } from "lucide-react";
+import { Crown, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 
 import { formatConversationHash, parseConversationHash, resolveConversationTarget, withoutArchivedPredecessors, type ConversationHash } from "@/lib/accounts/identity";
@@ -21,8 +21,9 @@ import { canonicalClientProject } from "@/lib/projects/clientAliases";
 import { type TFunction, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
-import { attentionId, buildAttentionQueue, nextAttention, STALLED_ATTENTION_TTL, type AttentionItem } from "./attention";
+import { advanceAttentionCycle, attentionId, buildAttentionQueue, STALLED_ATTENTION_TTL, type AttentionItem } from "./attention";
 import { AttentionHost } from "./attention/AttentionHost";
+import { AttentionIsland } from "./attention/AttentionIsland";
 import { purgeLegacyOperatorCredential } from "./operatorCredential";
 import { ArtifactPreviewHost } from "./preview/ArtifactPreviewHost";
 import { VoiceBridgeRelayHost } from "./voice/VoiceBridgeRelayHost";
@@ -616,10 +617,9 @@ export function Viewer() {
       if (typing(event.target)) return;
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (event.key === "n" || event.key === "N") {
-        const next = nextAttention(projectQueue, cycleRef.current, event.shiftKey ? -1 : 1);
+        const next = advanceAttentionCycle(cycleRef, projectQueue, event.shiftKey ? -1 : 1);
         if (!next) return;
         event.preventDefault();
-        cycleRef.current = next.id;
         requestFocus(next.file.path);
       } else if (event.key === "f" || event.key === "F") {
         if (!queue.length) return;
@@ -643,6 +643,21 @@ export function Viewer() {
       requestFocus(item.file.path);
     },
     [project, applyProject, requestFocus],
+  );
+
+  /* The island's visible Next (issue #963): a deliberate act like a popover
+     click, so it advances over the GLOBAL queue and may switch the project —
+     the same hand-off `jumpToItem` performs. It moves the SAME cycle pointer
+     the N/Shift-N keys read (through the one `advanceAttentionCycle` route),
+     so the button and the shortcut always continue one sequence. */
+  const advanceGlobalAttention = useCallback(
+    (dir: 1 | -1) => {
+      const next = advanceAttentionCycle(cycleRef, queue, dir);
+      if (!next) return;
+      if (next.project !== project) applyProject(next.project);
+      requestFocus(next.file.path);
+    },
+    [queue, project, applyProject, requestFocus],
   );
 
   /* A crowned row in the popover focuses its conversation, switching project
@@ -676,49 +691,23 @@ export function Viewer() {
 
   const toastFile = toastPath ? files.find((file) => file.path === toastPath) : null;
 
-  /* Desktop keeps the badge in the fixed top-right anchor; the phone embeds
+  /* Desktop keeps the island in the fixed top-right anchor; the phone embeds
      this same node into the board header row, where it cannot cover the
      header's own buttons. The queue popover then drops as a full-width sheet
-     under the header instead of hanging off the pill. */
-  const attentionBadge = queue.length ? (
+     under the header instead of hanging off the pill. The island renders in
+     the zero state too — muted and inert — so the corner always answers
+     "what needs me?" (issue #963). */
+  const attentionBadge = (
     <div ref={queueRef} className="pointer-events-auto relative">
-      <div className="flex items-center overflow-hidden rounded-full border border-warning/45 bg-warning-soft shadow-1">
-        <button
-          type="button"
-          className={`text-[12px] font-bold text-warning hover:bg-warning/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40 ${
-            isMobile ? "inline-flex min-h-11 items-center px-3.5" : "px-3 py-1"
-          }`}
-          aria-expanded={queueOpen}
-          aria-label={t("attention.badge", { count: queue.length })}
-          title={t("attention.openQueue")}
-          onClick={() => setQueueOpen((value) => !value)}
-        >
-          {isMobile ? (
-            <span className="inline-flex items-center gap-1">
-              <TriangleAlert className="h-3 w-3" aria-hidden /> {queue.length}
-            </span>
-          ) : (
-            t("attention.badge", { count: queue.length })
-          )}
-        </button>
-        {isMobile ? null : (
-          <>
-            <div className="h-4 w-px shrink-0 bg-warning/45" aria-hidden />
-            <button
-              type="button"
-              className={`px-2 py-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40 ${
-                attentionFilter ? "bg-warning/30 text-warning" : "text-warning/70 hover:bg-warning/15 hover:text-warning"
-              }`}
-              aria-pressed={attentionFilter}
-              title={attentionFilter ? t("attention.filterOff") : t("attention.filterOn")}
-              aria-label={attentionFilter ? t("attention.filterOff") : t("attention.filterOn")}
-              onClick={() => setAttentionFilter((value) => !value)}
-            >
-              <Filter className="h-3.5 w-3.5" aria-hidden />
-            </button>
-          </>
-        )}
-      </div>
+      <AttentionIsland
+        count={queue.length}
+        mobile={isMobile}
+        queueOpen={queueOpen}
+        filterActive={attentionFilter}
+        onToggleQueue={() => setQueueOpen((value) => !value)}
+        onNext={advanceGlobalAttention}
+        onToggleFilter={() => setAttentionFilter((value) => !value)}
+      />
       {queueOpen ? (
         <div
           className={`${
@@ -786,7 +775,7 @@ export function Viewer() {
         </div>
       ) : null}
     </div>
-  ) : null;
+  );
 
   const shell = (
     <div className="flex h-full">
@@ -810,7 +799,10 @@ export function Viewer() {
             phone the badge lives in the board header and the toast docks in flow
             below (see the mobile banner), so this fixed anchor is desktop-only. */}
         {isMobile ? null : (
-          <div className="pointer-events-none fixed right-4 top-4 z-50 flex flex-col items-end gap-2">
+          /* top-12 clears the 40px board header row: the island renders in the
+             zero state too now, so parking it at top-4 would permanently cover
+             the header's own right-side buttons (Orchestrator, board views). */
+          <div className="pointer-events-none fixed right-4 top-12 z-50 flex flex-col items-end gap-2">
             {attentionBadge}
             {toastFile ? (
               <div className="pointer-events-auto flex max-w-[360px] gap-2 rounded-[8px] border border-warning/45 bg-warning-soft px-4 py-3 text-[13px] font-semibold text-primary shadow-1">

@@ -1677,6 +1677,9 @@ export const uk: Record<keyof typeof en, Message> = {
   "viewer.closeNotification": "Закрити сповіщення",
 
   "attention.badge": { one: "{count} чекає", few: "{count} чекають", many: "{count} чекають", other: "{count} чекають" },
+  "attention.needsYou": "Чекають",
+  "attention.next": "Далі",
+  "attention.nextHint": "Сфокусувати наступного, хто чекає на тебе (N, Shift-N — назад)",
   "attention.openQueue": "Черга уваги — хто заблокований на тобі (N — наступний)",
   "attention.popoverTitle": "Чекають на тебе",
   "attention.filterOn": "Показати лише тих, хто чекає на тебе (F)",
