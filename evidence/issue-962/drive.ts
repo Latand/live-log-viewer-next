@@ -166,6 +166,17 @@ async function main(): Promise<void> {
 
   /* ── The exact-head PRODUCTION build the server below serves ─────────── */
   const buildHead = execSync("git rev-parse HEAD", { cwd: repoRoot }).toString().trim();
+  /* Attestation guard (#962 review): the stamped buildHead must BE the code
+     this run renders. Anything dirty besides this driver's own regenerated
+     outputs means the stamp would lie about the rendered tree — refuse. */
+  const REGENERATED = /^evidence\/issue-962\/(depth-ladder\.json|[\w-]+\.png)$/;
+  const dirty = execSync("git status --porcelain", { cwd: repoRoot })
+    .toString()
+    .split("\n")
+    .filter((line) => line.trim() !== "" && !REGENERATED.test(line.slice(3)));
+  if (dirty.length > 0) {
+    throw new Error(`worktree differs from ${buildHead.slice(0, 12)} beyond regenerated evidence outputs — commit first so the attestation SHA matches the rendered code:\n${dirty.join("\n")}`);
+  }
   if (process.env.LLV_EVIDENCE_SKIP_BUILD !== "1") {
     console.log(`building production head ${buildHead.slice(0, 12)}…`);
     const buildEnv = { ...process.env, NODE_ENV: "production" as const };
