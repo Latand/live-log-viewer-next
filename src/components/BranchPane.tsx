@@ -16,6 +16,7 @@ import { accountIdFromPath } from "@/lib/accounts/badge";
 
 import { AccountBadge } from "./AccountBadge";
 import { registerLinkTarget } from "./AgentLink";
+import { CardStatusBadge } from "./CardStatusBadge";
 import { DeleteFileButton } from "./DeleteFileButton";
 import { FavoriteCrown, FavoriteCrownMarker } from "./FavoriteCrown";
 import { MigrationDivider, MigrationRibbon } from "./MigrationRibbon";
@@ -293,6 +294,9 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
         >
           <div className="flex min-w-0 items-center gap-1.5">
             <span className={`h-2 w-2 shrink-0 rounded-full ${activityDot(file.activity)}`} title={t(`branch.${state}`)} />
+            {/* The operator-facing status word (issue #961): at most one per
+                card, projected from the authorities the card already trusts. */}
+            <CardStatusBadge file={file} />
             {titleOverride ? (
               /* The owner names this pane (#658). The transcript's own title —
                  the first line of the prompt it opened with — stays in the

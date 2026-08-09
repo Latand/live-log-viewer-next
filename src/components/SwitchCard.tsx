@@ -7,6 +7,7 @@ import { projectDisplayName } from "@/lib/displayNames";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
+import { CardStatusBadge } from "./CardStatusBadge";
 import { EffortPills } from "./EffortPills";
 import { CtxChip } from "./PlanChip";
 import { ProcessStatusControls } from "./TaskHeader";
@@ -102,6 +103,9 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
         <EffortPills file={file} />
         <RateLimitBadge file={file} />
         <WakeupChip key={wakeupChipKey(file.pendingWakeup)} wakeup={file.pendingWakeup} />
+        {/* The operator-facing status word (issue #961): same vocabulary and
+            tones as the board cards, so a switch column reads identically. */}
+        <CardStatusBadge file={file} />
         <span
           className={`ml-auto min-w-0 truncate rounded-full border border-border bg-canvas px-1.5 py-0.5 text-[9.5px] font-semibold ${
             project === currentProject ? "text-muted" : "text-primary"
