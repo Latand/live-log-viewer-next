@@ -21,6 +21,7 @@ import {
   acknowledgeHotStateFence,
   HOT_STATE_BACKEND,
   HOT_STATE_RELEASE_REVISION_ENV,
+  hotStateSqliteWriterReady,
   markHotStateActivationReady,
   publishHotStateAuthority,
   readHotStateAuthority,
@@ -961,6 +962,45 @@ test("first boot imports every store once and folds in the pipeline archive", ()
   } finally {
     if (previous === undefined) delete process.env.LLV_STATE_DIR;
     else process.env.LLV_STATE_DIR = previous;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("a client that cannot prove a revision still writes once the promoted release has activated", () => {
+  /* The MCP runtime, a CLI and any script write through this same store and
+     carry neither PORT nor the revision env — only the release server can prove
+     a revision. Before this, they were fenced permanently after activation
+     rather than only during the handoff window. */
+  const previousDir = process.env.LLV_STATE_DIR;
+  const previousPort = process.env.PORT;
+  const previousRevisionEnv = process.env[HOT_STATE_RELEASE_REVISION_ENV];
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-state-unfenced-client-"));
+  const revision = "c".repeat(40);
+  try {
+    process.env.LLV_STATE_DIR = sandbox;
+    delete process.env.PORT;
+    delete process.env[HOT_STATE_RELEASE_REVISION_ENV];
+    fs.writeFileSync(path.join(sandbox, "viewer-release.json"), JSON.stringify({
+      endpoint: "http://127.0.0.1:19101", revision, hotStateBackend: HOT_STATE_BACKEND,
+    }));
+
+    const published = publishHotStateAuthority(sandbox, "sqlite", revision);
+    expect(hotStateSqliteWriterReady(sandbox)).toBe(false);
+
+    markHotStateActivationReady(sandbox, published);
+    expect(hotStateSqliteWriterReady(sandbox)).toBe(true);
+
+    /* An activation belonging to a DIFFERENT release than the promoted one is
+       still a live handoff, so the fence must hold. */
+    fs.writeFileSync(path.join(sandbox, "viewer-release.json"), JSON.stringify({
+      endpoint: "http://127.0.0.1:19101", revision: "d".repeat(40), hotStateBackend: HOT_STATE_BACKEND,
+    }));
+    expect(hotStateSqliteWriterReady(sandbox)).toBe(false);
+  } finally {
+    if (previousDir === undefined) delete process.env.LLV_STATE_DIR; else process.env.LLV_STATE_DIR = previousDir;
+    if (previousPort === undefined) delete process.env.PORT; else process.env.PORT = previousPort;
+    if (previousRevisionEnv === undefined) delete process.env[HOT_STATE_RELEASE_REVISION_ENV];
+    else process.env[HOT_STATE_RELEASE_REVISION_ENV] = previousRevisionEnv;
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
 });

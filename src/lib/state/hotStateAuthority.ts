@@ -143,9 +143,20 @@ export function hotStateSqliteWriterReady(
 ): boolean {
   const target = readHotStateReleaseTarget(directory, env);
   if (!target) return true;
+  const authority = readHotStateAuthority(directory);
+  /* Fencing covers the handoff window, when a retiring and an arriving release
+     could both write. Once the authority has activated sqlite FOR THE RELEASE
+     CURRENTLY PROMOTED, that window is closed and there is no second writer to
+     protect against. Every local client — the MCP runtime, a CLI, a script —
+     writes through this same store and carries neither PORT nor the revision
+     env, so proving a revision is something only the release server can do.
+     Demanding it after activation fences those clients out of settled state
+     permanently rather than transiently (issue #907 follow-up). */
+  if (authority?.mode === "sqlite"
+    && authority.releaseRevision === target.revision
+    && typeof authority.activationReadyAt === "string") return true;
   const revision = hotStateWriterRevision(directory, env);
   if (!revision) return false;
-  const authority = readHotStateAuthority(directory);
   return authority?.mode === "sqlite"
     && authority.releaseRevision === revision
     && target.revision === revision;
