@@ -1161,6 +1161,7 @@ export function SchemeBoard({
           background every frame. */}
       <div
         aria-hidden
+        data-scheme-grid
         className="pointer-events-none absolute"
         style={{
           inset: -tile,
