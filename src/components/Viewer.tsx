@@ -799,7 +799,10 @@ export function Viewer() {
             phone the badge lives in the board header and the toast docks in flow
             below (see the mobile banner), so this fixed anchor is desktop-only. */}
         {isMobile ? null : (
-          <div className="pointer-events-none fixed right-4 top-4 z-50 flex flex-col items-end gap-2">
+          /* top-12 clears the 40px board header row: the island renders in the
+             zero state too now, so parking it at top-4 would permanently cover
+             the header's own right-side buttons (Orchestrator, board views). */
+          <div className="pointer-events-none fixed right-4 top-12 z-50 flex flex-col items-end gap-2">
             {attentionBadge}
             {toastFile ? (
               <div className="pointer-events-auto flex max-w-[360px] gap-2 rounded-[8px] border border-warning/45 bg-warning-soft px-4 py-3 text-[13px] font-semibold text-primary shadow-1">
