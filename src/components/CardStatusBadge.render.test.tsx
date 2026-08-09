@@ -17,7 +17,7 @@ const NOW_S = NOW_MS / 1000;
 
 function file(overrides: Partial<FileEntry> = {}): FileEntry {
   return {
-    path: "/home/op/.claude/projects/demo/a.jsonl",
+    path: "/home/user/.claude/projects/demo/a.jsonl",
     root: "claude-projects",
     name: "a.jsonl",
     project: "demo",
