@@ -21,7 +21,9 @@
  *  - the scheme canvas is deeper than the app canvas in dark mode only;
  *  - an inactive card takes the quiet surface; the NEEDS-YOU (waiting) card
  *    and a selected card keep their full treatments;
- *  - an empty project renders the bare canvas + grid with zero cards.
+ *  - the near-empty project renders the bare canvas + sparse grid around a
+ *    single card (zero visible conversations render the dashboard's empty
+ *    state, not a canvas, so one card is the sparsest board the app draws).
  *
  * Output: evidence/issue-962/depth-ladder.json (booleans + colors only) and
  * screenshots of the rendered states. No absolute paths, no identities.
@@ -146,6 +148,8 @@ const quietProbe = `(() => {
 async function openProject(tab: Cdp, baseUrl: string, project: string, ready: string, label: string): Promise<void> {
   await tab.send("Page.navigate", { url: `${baseUrl}/#p=${encodeURIComponent(project)}` });
   await poll(tab, ready, label, 120_000);
+  /* Frame everything: shots must show the whole board, not a remembered camera. */
+  await tab.eval(`(() => { const b = document.querySelector('button[title^="Fit all content"]'); b && b.click(); return true; })()`);
   /* Let the camera glide + entry fades settle so shots are stable. */
   await sleep(1_200);
 }
@@ -186,6 +190,27 @@ async function main(): Promise<void> {
        registries migrate into the fresh capture-state SQLite on first read. */
     seedPipelines(home);
     seedEmptyProject(home);
+    /* The 2100-dated fixture clock renders negative "-…s ago" ages against the
+       real clock this run serves under; restamp every transcript a few minutes
+       back so ages read naturally in the shots. Activity states that matter
+       here are content-driven (open turns, the pending question), not
+       mtime-driven, so the board keeps its mixed live/waiting states. */
+    const recent = new Date(Date.now() - 4 * 60 * 1000);
+    const stampTree = (dir: string) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const child = path.join(dir, entry.name);
+        if (entry.isDirectory()) stampTree(child);
+        else fs.utimesSync(child, recent, recent);
+      }
+    };
+    stampTree(path.join(home, ".claude", "projects"));
+    stampTree(path.join(home, ".codex", "sessions"));
+    /* The resources footer renders the fixture's 2100 capture stamp as a
+       negative age; restamp it to the same recent past. */
+    const resourcesFile = path.join(home, ".config", "agent-log-viewer", "state", "resources.json");
+    const resources = JSON.parse(fs.readFileSync(resourcesFile, "utf8")) as { system?: { capturedAt?: string } };
+    if (resources.system) resources.system.capturedAt = recent.toISOString();
+    fs.writeFileSync(resourcesFile, JSON.stringify(resources, null, 2) + "\n");
     /* One inactive beacon conversation: an mtime hours in the past (relative
        to the REAL clock the server runs on) reads as done — the quiet card. */
     const quietPath = renderFixtureTemplate(claudePath("beacon", BEACON_SESSIONS.spare), home);
@@ -211,6 +236,22 @@ async function main(): Promise<void> {
     }
     console.log("production server ready");
     const baseUrl = `http://${devHost}:${prodPort}`;
+
+    /* Resolve each fixture project's ACTUAL viewer key from the scan (the
+       directory-identity `dir-…` keys; flow-bound fixture conversations land
+       under the unresolved-project board on current main) so navigation never
+       hardcodes an identity derivation. */
+    const scanned = (await fetch(`http://127.0.0.1:${prodPort}/api/files`).then((r) => r.json())) as Array<{ project?: string; path?: string }> | { files?: Array<{ project?: string; path?: string }> };
+    const scannedFiles = Array.isArray(scanned) ? scanned : scanned.files ?? [];
+    const keyFor = (marker: string): string => {
+      const hit = scannedFiles.find((file) => typeof file.path === "string" && file.path.includes(marker) && typeof file.project === "string");
+      if (!hit) throw new Error(`no scanned file matches ${marker}`);
+      return hit.project!;
+    };
+    const beaconKey = keyFor("-Projects-beacon/");
+    const emberKey = keyFor("-Projects-ember/");
+    const flowKey = keyFor("-Projects-forge/");
+    const attentionKey = keyFor("-Projects-atlas/");
 
     /* ── Headless host Chrome ─────────────────────────────────────────── */
     const profile = path.join(runtime.root, "chrome-profile");
@@ -256,11 +297,14 @@ async function main(): Promise<void> {
     await setScheme(tab, "light");
 
     /* Beacon: dense board — settled pipeline well + dashed draft halo. */
-    await openProject(tab, baseUrl, "beacon", `!!document.querySelector('${PIPELINE_WELL}') && !!document.querySelector('${DRAFT_HALO}')`, "beacon board with both pipeline halos");
+    await openProject(tab, baseUrl, beaconKey, `!!document.querySelector('${PIPELINE_WELL}') && !!document.querySelector('${DRAFT_HALO}')`, "beacon board with both pipeline halos");
+    /* Chrome serializes a computed color-mix as `color(srgb …)`; an unset fill
+       computes to the transparent `rgba(0, 0, 0, 0)` — filled means neither. */
+    const filled = (background: string) => background !== "" && background !== "rgba(0, 0, 0, 0)";
     const wellLight = await tab.eval<{ borderStyle: string; borderWidth: string; background: string; inlineStyle: string } | null>(regionProbe(PIPELINE_WELL));
     expect("light: a settled pipeline container is a filled well — 1px solid hairline + well-surface fill",
       !!wellLight && wellLight.borderStyle === "solid" && wellLight.borderWidth === "1px"
-        && wellLight.inlineStyle.includes("var(--surface-well)") && wellLight.background.startsWith("rgb"),
+        && wellLight.inlineStyle.includes("var(--surface-well)") && filled(wellLight.background),
       wellLight);
     const draftLight = await tab.eval<{ borderStyle: string; borderWidth: string } | null>(regionProbe(DRAFT_HALO));
     expect("light: a draft pipeline keeps the dashed 2px halo — dashed stays a draft/drop affordance",
@@ -303,7 +347,7 @@ async function main(): Promise<void> {
     await tab.eval(`(() => { const check = document.querySelector('[data-lasso-selected="true"] .scheme-select-check'); check && check.click(); return true; })()`);
 
     /* Forge: the flow (branch-group) container takes the same well. */
-    await openProject(tab, baseUrl, "forge", `!!document.querySelector('${FLOW_WELL}')`, "forge flow group");
+    await openProject(tab, baseUrl, flowKey, `!!document.querySelector('${FLOW_WELL}')`, "flow-group board");
     const flowLight = await tab.eval<{ borderStyle: string; borderWidth: string; inlineStyle: string } | null>(regionProbe(FLOW_WELL));
     expect("light: the branch/flow container renders as the same filled hairline well",
       !!flowLight && flowLight.borderStyle === "solid" && flowLight.borderWidth === "1px" && flowLight.inlineStyle.includes("var(--surface-well)"),
@@ -311,7 +355,7 @@ async function main(): Promise<void> {
     await tab.screenshot("desktop-light-forge-branch-group.png");
 
     /* Atlas: the NEEDS-YOU card (pending question) keeps its attention glow. */
-    await openProject(tab, baseUrl, "atlas", `!!document.querySelector('.pane-attention')`, "atlas NEEDS-YOU card");
+    await openProject(tab, baseUrl, attentionKey, `!!document.querySelector('.pane-attention')`, "NEEDS-YOU card");
     const needsYou = await tab.eval<{ glow: boolean; quiet: boolean }>(`(() => {
       const pane = document.querySelector('.pane-attention');
       return { glow: !!pane, quiet: !!pane.querySelector('section[class*="bg-quiet"]') };
@@ -320,51 +364,60 @@ async function main(): Promise<void> {
       needsYou.glow && !needsYou.quiet, needsYou);
     await tab.screenshot("desktop-light-atlas-needs-you.png");
 
-    /* Ember: an empty project — bare canvas, dot grid, zero cards. */
-    await openProject(tab, baseUrl, "ember", `!!${GRID}`, "ember empty project");
+    /* Ember: the minimal project — one card on the bare canvas. (A project
+       with zero visible conversations renders the dashboard's empty state,
+       not a scheme canvas, so this is the sparsest board the app draws.) */
+    await openProject(tab, baseUrl, emberKey, `!!${GRID}`, "ember empty project");
     const empty = await tab.eval<{ nodes: number; grid: boolean }>(`({
       nodes: document.querySelectorAll('[data-scheme-node]').length,
       grid: !!${GRID},
     })`);
-    expect("an empty project renders the bare scheme canvas with the dot grid and zero cards",
-      empty.nodes === 0 && empty.grid, empty);
+    expect("the near-empty project renders the bare scheme canvas + sparse dot grid around a single card",
+      empty.nodes === 1 && empty.grid, empty);
     await tab.screenshot("desktop-light-empty-project.png");
 
-    /* ── Desktop, DARK ────────────────────────────────────────────────── */
-    await setScheme(tab, "dark");
-    await openProject(tab, baseUrl, "beacon", `!!document.querySelector('${PIPELINE_WELL}')`, "beacon dark");
-    const gridDark = await tab.eval<{ tile: number; boardBg: string; bodyBg: string } | null>(gridProbe);
+    tab.close();
+
+    /* ── Desktop, DARK — a fresh tab, so no remembered camera or session
+       state from the light pass leaks into the framing ─────────────────── */
+    const dark = await newTarget();
+    await dark.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await setScheme(dark, "dark");
+    await openProject(dark, baseUrl, beaconKey, `!!document.querySelector('${PIPELINE_WELL}')`, "beacon dark");
+    const gridDark = await dark.eval<{ tile: number; boardBg: string; bodyBg: string } | null>(gridProbe);
     expect("dark: the scheme canvas (rgb(13, 13, 17)) dips deeper than the app canvas (rgb(16, 16, 20))",
       !!gridDark && gridDark.boardBg === "rgb(13, 13, 17)" && gridDark.bodyBg === "rgb(16, 16, 20)",
       gridDark);
-    const wellDark = await tab.eval<{ borderStyle: string; borderWidth: string; background: string } | null>(regionProbe(PIPELINE_WELL));
+    const wellDark = await dark.eval<{ borderStyle: string; borderWidth: string; background: string } | null>(regionProbe(PIPELINE_WELL));
     expect("dark: the settled pipeline well keeps the 1px hairline + filled treatment",
-      !!wellDark && wellDark.borderStyle === "solid" && wellDark.borderWidth === "1px" && wellDark.background.startsWith("rgb"),
+      !!wellDark && wellDark.borderStyle === "solid" && wellDark.borderWidth === "1px" && filled(wellDark.background),
       wellDark);
-    const quietDark = await tab.eval<{ background: string } | null>(quietProbe);
+    const quietDark = await dark.eval<{ background: string } | null>(quietProbe);
     expect("dark: the inactive card takes the dark quiet surface (rgb(20, 20, 25))",
       !!quietDark && quietDark.background === "rgb(20, 20, 25)",
       quietDark);
-    await tab.screenshot("desktop-dark-beacon-wells.png");
+    await dark.screenshot("desktop-dark-beacon-wells.png");
 
-    await openProject(tab, baseUrl, "forge", `!!document.querySelector('${FLOW_WELL}')`, "forge dark");
-    await tab.screenshot("desktop-dark-forge-branch-group.png");
-    await openProject(tab, baseUrl, "atlas", `!!document.querySelector('.pane-attention')`, "atlas dark");
-    await tab.screenshot("desktop-dark-atlas-needs-you.png");
-    tab.close();
+    await openProject(dark, baseUrl, flowKey, `!!document.querySelector('${FLOW_WELL}')`, "flow-group dark");
+    await dark.screenshot("desktop-dark-forge-branch-group.png");
+    await openProject(dark, baseUrl, attentionKey, `!!document.querySelector('.pane-attention')`, "NEEDS-YOU dark");
+    await dark.screenshot("desktop-dark-atlas-needs-you.png");
+    dark.close();
 
     /* ── 390 px mobile, light + dark ──────────────────────────────────── */
     const mob = await newTarget();
     await mob.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
     await mob.send("Emulation.setTouchEmulationEnabled", { enabled: true });
     await setScheme(mob, "light");
-    await openProject(mob, baseUrl, "beacon", `!!${GRID}`, "beacon 390px light");
-    const mobile = await mob.eval<{ grid: boolean; tile: number }>(`(() => {
-      const grid = ${GRID};
-      const size = grid ? parseFloat((getComputedStyle(grid).backgroundSize.split(" ")[0] || "0").replace("px", "")) : 0;
-      return { grid: !!grid, tile: size };
-    })()`);
-    expect("390px: the scheme canvas keeps the sparse grid", mobile.grid && mobile.tile >= 18, mobile);
+    /* 390px renders the mobile focus view (compact panes), not the desktop
+       canvas — the evidence here is that the depth-ladder token changes leave
+       the mobile shell fully rendered and legible in both themes. */
+    await openProject(mob, baseUrl, beaconKey, `!!document.querySelector('section[data-link-path], [data-scheme-node]')`, "beacon 390px light");
+    const mobile = await mob.eval<{ panes: number; body: boolean }>(`({
+      panes: document.querySelectorAll('section[data-link-path], [data-scheme-node]').length,
+      body: document.querySelectorAll('body *').length > 50,
+    })`);
+    expect("390px: the mobile shell renders its panes over the new tokens", mobile.panes > 0 && mobile.body, mobile);
     await mob.screenshot("mobile-light-beacon.png");
     await setScheme(mob, "dark");
     await sleep(600);

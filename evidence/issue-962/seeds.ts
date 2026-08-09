@@ -16,6 +16,7 @@
  * engine never acts on them: no spawns, no worktrees, no tmux — they are pure
  * board projections.
  */
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -49,6 +50,14 @@ export const BEACON_SESSIONS = {
 
 export const EMBER_SESSION = sessionId("e5");
 
+/** The viewer's directory-identity project key for a fixture cwd (identity.ts:
+    no repository claims `/demo/Projects/<name>`, so the directory itself is
+    the project). Keys the seeded pipelines and board prefs to the same project
+    the scanner will derive. */
+export function directoryProjectKey(cwd: string): string {
+  return `dir-${crypto.createHash("sha256").update(`dir:${path.resolve(cwd)}`).digest("hex").slice(0, 32)}`;
+}
+
 /** worktreeDir/branch must satisfy the store's identity invariant. */
 function identity(id: string, task: string, repoDir: string) {
   const slug = task.toLowerCase().replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 40).replace(/-+$/, "");
@@ -59,8 +68,18 @@ function identity(id: string, task: string, repoDir: string) {
 }
 
 export function seedPipelines(home: string): void {
-  const repoDir = "/demo/Projects/beacon";
-  const at = "2100-01-02T11:40:00.000Z";
+  /* The board projection (filterPipelinesForFileScan) keeps a pipeline only if
+     its repoDir/worktreeDir exists on disk or an attempt transcript is in the
+     scan. The draft has no attempts, so its repoDir must be a real directory —
+     materialized inside the disposable capture home. The PROJECT key still
+     binds both pipelines to the beacon board (the fixture cwd's directory
+     identity), independent of where repoDir lives. */
+  const repoDir = path.join(home, "Projects", "beacon");
+  fs.mkdirSync(repoDir, { recursive: true });
+  const beaconProject = directoryProjectKey("/demo/Projects/beacon");
+  /* Recent-past stamps: the fixture's fixed 2100 clock reads as a negative age
+     against the real clock this evidence run serves under. */
+  const at = new Date(Date.now() - 20 * 60 * 1000).toISOString();
   const implementPath = renderFixtureTemplate(claudePath("beacon", BEACON_SESSIONS.implement), home);
   const verifyPath = renderFixtureTemplate(claudePath("beacon", BEACON_SESSIONS.verify), home);
 
@@ -69,7 +88,7 @@ export function seedPipelines(home: string): void {
     id: RUN_PIPELINE_ID,
     task: runTask,
     taskIds: [],
-    project: "beacon",
+    project: beaconProject,
     repoDir,
     ...identity(RUN_PIPELINE_ID, runTask, repoDir),
     baseBranch: "main",
@@ -138,7 +157,7 @@ export function seedPipelines(home: string): void {
     id: DRAFT_PIPELINE_ID,
     task: draftTask,
     taskIds: [],
-    project: "beacon",
+    project: beaconProject,
     repoDir,
     ...identity(DRAFT_PIPELINE_ID, draftTask, repoDir),
     baseBranch: "",
@@ -165,8 +184,9 @@ export function seedPipelines(home: string): void {
   );
 }
 
-/** An "ember" project whose single conversation is hidden by board prefs: the
-    project exists, its scheme canvas renders empty. Cloned from a beacon
+/** An "ember" project holding a single conversation: the minimal scheme canvas
+    (a truly empty project renders the dashboard's empty state, not a canvas,
+    so one card is the sparsest board the app draws). Cloned from a beacon
     fixture transcript with project name and session id rewritten. */
 export function seedEmptyProject(home: string): string {
   const sourcePath = renderFixtureTemplate(claudePath("beacon", BEACON_SESSIONS.spare), home);
@@ -182,13 +202,13 @@ export function seedEmptyProject(home: string): string {
 
   const boardFile = path.join(home, ".config", "agent-log-viewer", "state", "board.json");
   const board = JSON.parse(fs.readFileSync(boardFile, "utf8")) as { projects: Record<string, unknown> };
-  board.projects.ember = {
+  board.projects[directoryProjectKey("/demo/Projects/ember")] = {
     schemaVersion: 1,
     revision: 1,
     updatedAt: "2100-01-02T11:45:00.000Z",
     pathAliases: {},
     explicitManual: [],
-    prefs: { manual: [], hidden: [emberPath], expanded: [], viewMode: "scheme", taskPanelOpen: false },
+    prefs: { manual: [], hidden: [], expanded: [], viewMode: "scheme", taskPanelOpen: false },
   };
   fs.writeFileSync(boardFile, JSON.stringify(board, null, 2) + "\n");
   return emberPath;
