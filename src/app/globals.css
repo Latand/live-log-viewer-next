@@ -109,7 +109,9 @@ body {
 /* The status vocabulary's ONE motion treatment (issue #961): a card whose word
    is "needs you" breathes a soft warning halo. Every other word is static, and
    reduced-motion stills this one too — the word plus colour already carry the
-   full meaning. */
+   full meaning. The cadence is the board's own: it beats in the 3.4s period of
+   the pane-attention orbit above, so the two attention treatments share one
+   pulse instead of introducing a second rhythm. */
 @keyframes card-status-breathe {
   50% {
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-warning) 22%, transparent);
@@ -117,7 +119,7 @@ body {
 }
 
 .card-status-attention {
-  animation: card-status-breathe 2.6s ease-in-out infinite;
+  animation: card-status-breathe 3.4s ease-in-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -16,7 +16,7 @@ const NOW_S = NOW_MS / 1000;
 
 function file(overrides: Partial<FileEntry> = {}): FileEntry {
   return {
-    path: "/home/user/.claude/projects/demo/a.jsonl",
+    path: "$HOME/.claude/projects/demo/a.jsonl",
     root: "claude-projects",
     name: "a.jsonl",
     project: "demo",
@@ -90,7 +90,7 @@ test("held reads the registry count level-wise: a committed switch's leftover an
   /* The annotation targets the account the transcript ALREADY runs under —
      the activeCardMigration level rule says the switch completed. */
   const leftover = file({
-    path: "/home/user/.config/agent-log-viewer/accounts/claude/acct-b/projects/demo/a.jsonl",
+    path: "$HOME/.config/agent-log-viewer/accounts/claude/acct-b/projects/demo/a.jsonl",
     migration: holdingMigration(3, "acct-b"),
   });
   expect(cardStatus(leftover, NOW_MS)).toBeNull();

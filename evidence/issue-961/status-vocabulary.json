@@ -80,7 +80,7 @@
     }
   ],
   "stack": {
-    "key": "/tmp/llv-issue-961/home/.claude/projects/-tmp-llv-issue-961-home-Projects-atlas/10101010.jsonl::stack",
+    "key": "$HOME/.claude/projects/$HOME-Projects-atlas/10101010.jsonl::stack",
     "badges": [
       "queued"
     ]

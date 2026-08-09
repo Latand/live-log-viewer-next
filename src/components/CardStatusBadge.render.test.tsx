@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import fs from "node:fs";
+import path from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import type { ConversationMigration, FileEntry } from "@/lib/types";
@@ -17,7 +19,7 @@ const NOW_S = NOW_MS / 1000;
 
 function file(overrides: Partial<FileEntry> = {}): FileEntry {
   return {
-    path: "/home/user/.claude/projects/demo/a.jsonl",
+    path: "$HOME/.claude/projects/demo/a.jsonl",
     root: "claude-projects",
     name: "a.jsonl",
     project: "demo",
@@ -77,6 +79,17 @@ test("running: success tone with the elapsed run time", () => {
   expect(html).toContain("working");
   expect(html).toContain("12m");
   expect(html).toContain("text-success");
+});
+
+test("the needs-you breath beats in the board's own attention cadence", () => {
+  /* BUSL fence (#961 review): the breath's timing is derived from LLV's own
+     pane-attention orbit, never lifted from nodeterm's stylesheet. */
+  const css = fs.readFileSync(path.resolve(import.meta.dir, "../app/globals.css"), "utf8");
+  const breathe = /animation:\s*card-status-breathe\s+([\d.]+s)\s+\S+\s+infinite/.exec(css);
+  const orbit = /animation:\s*pane-orbit\s+([\d.]+s)/.exec(css);
+  expect(breathe?.[1]).toBeDefined();
+  expect(breathe?.[1]).toBe(orbit?.[1] ?? "");
+  expect(css).not.toContain("2.6s ease-in-out infinite");
 });
 
 test("queued: muted word from the wakeup authority", () => {

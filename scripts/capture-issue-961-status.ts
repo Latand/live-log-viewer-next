@@ -449,8 +449,13 @@ async function main(): Promise<void> {
     const evidenceDir = path.join(repoRoot, "evidence", "issue-961");
     fs.mkdirSync(evidenceDir, { recursive: true });
     /* The committed summary names cards by their 8-char seed only: a full
-       fixture UUID would trip the privacy gate's resource-identifier class. */
-    const scrubbed = JSON.stringify(summary, null, 2).replaceAll("-1111-4111-8111-111111111111", "");
+       fixture UUID would trip the privacy gate's resource-identifier class.
+       The synthetic capture home is likewise scrubbed — a publication surface
+       carries only $HOME-relative paths, in raw and slug-encoded form. */
+    const scrubbed = JSON.stringify(summary, null, 2)
+      .replaceAll("-1111-4111-8111-111111111111", "")
+      .replaceAll(projectSlug(HOME), "$HOME")
+      .replaceAll(HOME, "$HOME");
     fs.writeFileSync(path.join(evidenceDir, "status-vocabulary.json"), scrubbed + "\n", "utf8");
     console.log(`screenshots: ${OUT_DIR}`);
   } finally {
