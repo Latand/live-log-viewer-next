@@ -9,6 +9,7 @@ import {
   completeHotStatePreparation,
   hotStateWriterRevision,
   markHotStateActivationReady,
+  markViewerReleaseReady,
   publishHotStateAuthority,
   readHotStateAuthority,
   type HotStateAuthority,
@@ -79,6 +80,15 @@ export interface HotStateCutoverBoundary {
 interface CurrentReleaseControllerLoaders {
   loadFlowPipelineController: () => Promise<{ startFlowPipelineController: () => void }>;
   loadAccountMigrationController: () => Promise<{ startAccountMigrationController: () => Promise<void> }>;
+}
+
+interface ViewerRuntimeActivationSteps {
+  initializeOperatorCapability: () => Promise<void>;
+  startWakatime: () => Promise<void>;
+  startStructuredHosts: (() => Promise<void>) | null;
+  startControllers: () => Promise<void>;
+  publishHotStateActivation: () => void;
+  publishViewerReleaseReady: () => void;
 }
 
 /** Candidate containers share production state while their health gate runs.
@@ -448,6 +458,17 @@ export async function runStructuredHostStartup(
   await ready;
 }
 
+export async function completeViewerRuntimeActivation(
+  steps: ViewerRuntimeActivationSteps,
+): Promise<void> {
+  await steps.initializeOperatorCapability();
+  await steps.startWakatime();
+  steps.publishHotStateActivation();
+  if (steps.startStructuredHosts) await steps.startStructuredHosts();
+  await steps.startControllers();
+  steps.publishViewerReleaseReady();
+}
+
 /** The full node-runtime startup sequence `src/instrumentation.ts` defers to. */
 export async function registerViewerRuntime(): Promise<void> {
   discardWakatimeEnvironmentCredential();
@@ -459,14 +480,24 @@ export async function registerViewerRuntime(): Promise<void> {
     const boundary = await establishHotStateCutoverBoundary(isCurrent);
     activatedReleaseRevision = boundary.authority?.releaseRevision ?? null;
     const authority = await initializeHotStateStoresAtStartup(boundary);
-    await initializeOperatorSpawnCapabilityAtStartup();
-    await startWakatimeIntegrationIfEnabled();
-    if (structuredHostsEnabled()) {
-      const { adoptStructuredHostsAtStartup } = await import("@/lib/runtime/startup");
-      await runStructuredHostStartup(adoptStructuredHostsAtStartup, console.error, { waitUntilReady: true });
-    }
-    await startCurrentReleaseControllers();
-    if (authority) markHotStateActivationReady(hotStateDirectory, authority);
+    let activatedAuthority: HotStateAuthority | null = null;
+    await completeViewerRuntimeActivation({
+      initializeOperatorCapability: initializeOperatorSpawnCapabilityAtStartup,
+      startWakatime: startWakatimeIntegrationIfEnabled,
+      startStructuredHosts: structuredHostsEnabled()
+        ? async () => {
+            const { adoptStructuredHostsAtStartup } = await import("@/lib/runtime/startup");
+            await runStructuredHostStartup(adoptStructuredHostsAtStartup, console.error, { waitUntilReady: true });
+          }
+        : null,
+      startControllers: startCurrentReleaseControllers,
+      publishHotStateActivation: () => {
+        if (authority) activatedAuthority = markHotStateActivationReady(hotStateDirectory, authority);
+      },
+      publishViewerReleaseReady: () => {
+        if (activatedAuthority) markViewerReleaseReady(hotStateDirectory, activatedAuthority);
+      },
+    });
   }, isCurrent, {
     fenceRequest: () => {
       const revision = releaseRevision();

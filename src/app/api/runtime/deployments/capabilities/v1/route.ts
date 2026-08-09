@@ -5,7 +5,7 @@ import { HOT_STATE_BACKEND, readHotStateAuthority, readHotStateReleaseTarget } f
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function hotStateActivationReady(
+function viewerReleaseStartupReady(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): boolean {
   const directory = env.LLV_STATE_DIR?.trim() || statePath(".");
@@ -17,17 +17,17 @@ function hotStateActivationReady(
   const authority = readHotStateAuthority(directory);
   return authority?.mode === "sqlite"
     && authority.releaseRevision === target.revision
-    && typeof authority.activationReadyAt === "string";
+    && typeof authority.releaseReadyAt === "string";
 }
 
 /* The deployment readiness gate probes this route with a 5s budget. It reads
    two small handoff records and still avoids instantiating the agent registry,
    whose first probe would otherwise pay a multi-MB parse. Passive candidates
-   stay probeable; the promoted endpoint waits for completed activation. */
+   stay probeable; the promoted endpoint waits for complete release startup. */
 export function GET(): Response {
-  if (!hotStateActivationReady()) {
+  if (!viewerReleaseStartupReady()) {
     return Response.json(
-      { error: "Viewer hot-state activation is incomplete" },
+      { error: "Viewer release startup is incomplete" },
       { status: 503, headers: { "cache-control": "no-store" } },
     );
   }

@@ -23,6 +23,7 @@ import {
   HOT_STATE_RELEASE_REVISION_ENV,
   hotStateSqliteWriterReady,
   markHotStateActivationReady,
+  markViewerReleaseReady,
   publishHotStateAuthority,
   readHotStateAuthority,
   restoreHotStateAuthority,
@@ -542,12 +543,13 @@ test("authority rollback uses a monotonic compare-and-set and rejects delayed fe
   }
 });
 
-test("authority rollback preserves the previous SQLite activation readiness", () => {
+test("authority rollback preserves the previous SQLite release readiness", () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-hot-state-authority-ready-"));
   const revision = "9".repeat(40);
   try {
     const initial = publishHotStateAuthority(sandbox, "sqlite", revision);
-    const ready = markHotStateActivationReady(sandbox, initial);
+    const activated = markHotStateActivationReady(sandbox, initial);
+    const ready = markViewerReleaseReady(sandbox, activated);
     const transition = publishHotStateAuthority(sandbox, "fencing", revision);
 
     const restored = restoreHotStateAuthority(sandbox, ready, transition);
@@ -555,8 +557,20 @@ test("authority rollback preserves the previous SQLite activation readiness", ()
       mode: "sqlite",
       releaseRevision: revision,
       activationReadyAt: ready.activationReadyAt,
+      releaseReadyAt: ready.releaseReadyAt,
     });
     expect(restored!.epoch).toBeGreaterThan(transition.epoch);
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("release readiness cannot precede hot-state activation", () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-hot-state-authority-order-"));
+  try {
+    expect(() => publishHotStateAuthority(sandbox, "sqlite", "7".repeat(40), {
+      releaseReadyAt: "2026-08-09T00:00:00.000Z",
+    })).toThrow("requires completed hot-state activation");
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
@@ -966,11 +980,10 @@ test("first boot imports every store once and folds in the pipeline archive", ()
   }
 });
 
-test("a client that cannot prove a revision still writes once the promoted release has activated", () => {
-  /* The MCP runtime, a CLI and any script write through this same store and
-     carry neither PORT nor the revision env — only the release server can prove
-     a revision. Before this, they were fenced permanently after activation
-     rather than only during the handoff window. */
+test("an unidentified client writes after activation while retired release identities stay fenced", () => {
+  /* A CLI or script may carry no release identity. Servers and managed MCP
+     processes retain PORT or an explicit revision, which keeps the retired
+     generation outside the promoted writer set. */
   const previousDir = process.env.LLV_STATE_DIR;
   const previousPort = process.env.PORT;
   const previousRevisionEnv = process.env[HOT_STATE_RELEASE_REVISION_ENV];
@@ -989,6 +1002,14 @@ test("a client that cannot prove a revision still writes once the promoted relea
 
     markHotStateActivationReady(sandbox, published);
     expect(hotStateSqliteWriterReady(sandbox)).toBe(true);
+    expect(hotStateSqliteWriterReady(sandbox, {
+      [HOT_STATE_RELEASE_REVISION_ENV]: "d".repeat(40),
+    })).toBe(false);
+    expect(hotStateSqliteWriterReady(sandbox, { PORT: "19102" })).toBe(false);
+    expect(hotStateSqliteWriterReady(sandbox, {
+      [HOT_STATE_RELEASE_REVISION_ENV]: revision,
+    })).toBe(true);
+    expect(hotStateSqliteWriterReady(sandbox, { PORT: "19101" })).toBe(true);
 
     /* An activation belonging to a DIFFERENT release than the promoted one is
        still a live handoff, so the fence must hold. */

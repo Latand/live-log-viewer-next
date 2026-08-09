@@ -42,6 +42,11 @@ const ACTION_TIMEOUTS: Record<AdapterAction, number> = {
   "complete-host-handoff": 60_000,
 };
 
+const ACTION_TIMEOUT_WAITS: Partial<Record<AdapterAction, string>> = {
+  promote: "hot-state activation",
+  "verify-promoted": "full promoted Viewer readiness",
+};
+
 const MCP_HEALTH_PROBE_ACTIONS: ReadonlySet<AdapterAction> = new Set([
   "reconcile-mcp-runtime",
   "verify-candidate",
@@ -353,7 +358,8 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
           await terminateAdapterProcess(record, proc);
           await exitPromise;
           await Promise.all([stdoutPromise, stderrPromise]);
-          throw new Error(`deployment adapter ${action} timed out`);
+          const waitedOn = ACTION_TIMEOUT_WAITS[action] ?? "the adapter process";
+          throw new Error(`deployment adapter ${action} timed out while waiting for ${waitedOn}`);
         }
         const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
         if (outcome.exitCode !== 0) throw new Error((stderr.trim() || `deployment adapter ${action} failed`).slice(0, 500));

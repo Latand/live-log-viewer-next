@@ -197,3 +197,21 @@ test("adapter action deadline terminates the process tree and clears durable own
   expect(processGroupAlive(timedOutPid)).toBe(false);
   expect(fs.existsSync(fixture.stateFile)).toBe(false);
 });
+
+test("promotion deadline names the hot-state activation wait", async () => {
+  const fixture = sleepingAdapter();
+  const adapter = HostCommandViewerDeploymentAdapter.fromExecutable(fixture.executable, {
+    stateFile: fixture.stateFile,
+    timeouts: { promote: 20 },
+  });
+  const candidate = {
+    image: "viewer:test",
+    container: "viewer-candidate",
+    endpoint: "http://127.0.0.1:18001",
+    revision: "a".repeat(40),
+  };
+
+  await expect(adapter.promote(candidate)).rejects.toThrow(
+    "deployment adapter promote timed out while waiting for hot-state activation",
+  );
+});

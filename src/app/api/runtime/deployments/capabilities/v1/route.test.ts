@@ -7,12 +7,13 @@ import { expect, test } from "bun:test";
 import {
   HOT_STATE_BACKEND,
   markHotStateActivationReady,
+  markViewerReleaseReady,
   publishHotStateAuthority,
 } from "@/lib/state/hotStateAuthority";
 
 import { GET } from "./route";
 
-test("the promoted capability stays closed until hot-state activation completes", () => {
+test("the promoted capability stays closed until release startup completes", () => {
   const previous = process.env.LLV_STATE_DIR;
   const previousPort = process.env.PORT;
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-hot-state-capability-"));
@@ -37,7 +38,9 @@ test("the promoted capability stays closed until hot-state activation completes"
     expect(GET().status).toBe(503);
     const authority = publishHotStateAuthority(sandbox, "sqlite", revision);
     expect(GET().status).toBe(503);
-    markHotStateActivationReady(sandbox, authority);
+    const activated = markHotStateActivationReady(sandbox, authority);
+    expect(GET().status).toBe(503);
+    markViewerReleaseReady(sandbox, activated);
     expect(GET().status).toBe(200);
   } finally {
     if (previousPort === undefined) delete process.env.PORT;
