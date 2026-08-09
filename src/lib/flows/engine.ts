@@ -5,6 +5,7 @@ import path from "node:path";
 import { freshSpecFor, resumeSpecFor } from "@/lib/agent/cli";
 import { accountManager } from "@/lib/accounts/manager";
 import type { AccountContext } from "@/lib/accounts/contracts";
+import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { deliverToTranscriptHost } from "@/lib/agent/transcriptHost";
 import { agentRegistry, type AgentRegistry, type SpawnBeginResult, type SpawnReceipt, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
@@ -14,6 +15,7 @@ import { isNativeCodexSubagentTranscript } from "@/lib/scanner/codexNative";
 import { enqueueStructuredMessage } from "@/lib/runtime/structuredMessageDelivery";
 import { recoverDeadStructuredConversation } from "@/lib/runtime/structuredRecovery";
 import { isShellCommand } from "@/lib/status";
+import { cleanTitle, durableSemanticTitle, firstPromptLine, semanticTitle } from "@/lib/title";
 import { killPane, paneInfo, spawnAgentWithPrompt, TmuxDeliveryUncertainError } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 
@@ -205,6 +207,16 @@ export function reserveReviewerSpawn(
     .update(`${flow.id}:${round.n}:${reviewerBindingId}`)
     .digest("hex")
     .slice(0, 24);
+  const clientAttemptId = `flow_${flow.id}_${correlation}`;
+  const reservedTitle = durableSemanticTitle(
+    registry.spawnReceiptForClientAttempt(clientAttemptId)?.launchProfile.title,
+    120,
+  );
+  const flowTitle = firstPromptLine(flow.spec ?? "", 80)
+    ?? durableSemanticTitle(owner.generations.at(-1)?.launchProfile.title, 80)
+    ?? semanticTitle(flow.project, 80)
+    ?? "Review flow";
+  const reviewerTitle = reservedTitle ?? cleanTitle(`${flowTitle} · review round ${round.n}`, 120);
   const begun = registry.beginSpawnRequest({
     engine: role.engine,
     cwd: flow.cwd,
@@ -218,6 +230,11 @@ export function reserveReviewerSpawn(
     /* Container origin (#393): the flow controller initiates reviewer rounds,
        not the implementer — the implementer is only the lineage parent. */
     origin: { kind: "container", container: "flow", containerId: flow.id, creatorConversationId: null },
+    launchProfile: emptyLaunchProfile({
+      cwd: flow.cwd,
+      parentConversationId: owner.id,
+      title: reviewerTitle,
+    }),
     memberships: [{
       kind: "flow",
       containerId: flow.id,
@@ -228,7 +245,7 @@ export function reserveReviewerSpawn(
       round: round.n,
       parentConversationId: owner.id,
     }],
-    clientAttemptId: `flow_${flow.id}_${correlation}`,
+    clientAttemptId,
     requestDigest: crypto.createHash("sha256").update(JSON.stringify({
       flowId: flow.id,
       round: round.n,

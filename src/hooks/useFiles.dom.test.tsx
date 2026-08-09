@@ -4,6 +4,7 @@ import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 
 import { FLOWS_CHANGED_EVENT } from "@/components/flows/flowModel";
+import { FILES_CHANGED_EVENT, FILES_REVALIDATED_EVENT, type FilesRevalidatedDetail } from "@/lib/filesEvents";
 
 let revisionListener: ((revision: number) => void) | null = null;
 
@@ -65,6 +66,40 @@ function ScopedProbe({ pinnedPath }: { pinnedPath?: string }) {
 function pipelineRow(task: string) {
   return { id: "p1", task, project: "project-a", state: "draft", stages: [], runs: [], cursor: null, hiddenAt: null };
 }
+
+test("a successful equal-value 304 publishes a crown reconciliation acknowledgement", async () => {
+  let requests = 0;
+  const acknowledged: Array<{ requestId: number; crownedProjects: string[] }> = [];
+  globalThis.fetch = mock(async () => {
+    requests += 1;
+    if (requests > 1) return new Response(null, { status: 304 });
+    return new Response(JSON.stringify({ files: [], crownedProjects: [] }), {
+      headers: { ETag: '"crown-empty"' },
+    });
+  }) as unknown as typeof fetch;
+  const onRevalidated = (event: Event) => {
+    const detail = (event as CustomEvent<FilesRevalidatedDetail>).detail;
+    acknowledged.push({ requestId: detail.requestId, crownedProjects: [...detail.crownedProjects] });
+  };
+  window.addEventListener(FILES_REVALIDATED_EVENT, onRevalidated);
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => { root.render(<Probe />); });
+
+  await Bun.sleep(20);
+  window.dispatchEvent(new Event(FILES_CHANGED_EVENT));
+  await Bun.sleep(20);
+
+  expect(requests).toBe(2);
+  expect(acknowledged).toEqual([
+    { requestId: 1, crownedProjects: [] },
+    { requestId: 2, crownedProjects: [] },
+  ]);
+  window.removeEventListener(FILES_REVALIDATED_EVENT, onRevalidated);
+  flushSync(() => { root.unmount(); });
+  host.remove();
+});
 
 test("concurrent pinned and global hooks keep their scopes through local pipeline apply and revert", async () => {
   const pinnedPath = "/archive/dom-scoped-pin.jsonl";

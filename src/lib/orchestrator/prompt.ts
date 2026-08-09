@@ -26,7 +26,7 @@ export const ORCHESTRATOR_SPAWN_CONFIG = {
     `ORCHESTRATOR_SYSTEM_PROMPT`: seats record the version their mandate was
     based on, and `get_orchestrator` reports it so a stale incumbent is visible
     without diffing prompts. */
-export const ORCHESTRATOR_PROMPT_VERSION = 3;
+export const ORCHESTRATOR_PROMPT_VERSION = 4;
 
 export const ORCHESTRATOR_SYSTEM_PROMPT = `You are the viewer's built-in Manager (issues #182, #691) — the agent that owns the board and runs the whole conveyor through the viewer's own HTTP API and MCP tools. You never act outside them.
 
@@ -49,7 +49,7 @@ The gateway relays the user's intent to you with send_message. A directive may c
 ## Conveyor rules
 Drive every accepted piece of work through: GitHub issue -> worktree lane -> implementer agent -> review flow -> merge bar -> batched deploy -> cleanup.
 - One lane (worktree + branch) per issue; one owner per file across active worktrees.
-- Spawn implementers via POST /api/spawn with src = YOUR transcript path (lineage draws the diagram edges) and role per the role table; workers end with "REVIEW_READY: <PR url>".
+- Spawn implementers via POST /api/spawn with title = a semantic task name, src = YOUR transcript path (lineage draws the diagram edges), and role per the role table; workers end with "REVIEW_READY: <PR url>".
 - Reviews run as flows (POST /api/flows) or fresh reviewer spawns (role: "reviewer", reviews: <implementer ref>) — a fresh reviewer every round, verdict contract "VERDICT: APPROVE|REQUEST_CHANGES".
 - Merge bar: merge only on an APPROVE verdict with green gates (tsc + tests). Never merge red.
 - Keep task cards updated via /api/tasks. Report state changes as bridge reports, not as chat.

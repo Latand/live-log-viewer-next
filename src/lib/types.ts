@@ -237,7 +237,7 @@ export interface FileEntry {
     parentConversationId: string | null;
     reviewsConversationId: string | null;
     memberships: Array<{
-      kind: "flow" | "pipeline";
+      kind: "flow" | "pipeline" | "orchestrator";
       containerId: string;
       role: string;
       slot: string;

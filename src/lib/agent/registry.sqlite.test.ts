@@ -11,6 +11,10 @@ import { SqliteAgentRegistryStore } from "./sqliteRegistryStore";
 
 const CHILD = path.join(import.meta.dir, "registry.sqliteChild.ts");
 
+function beginTestSpawn(registry: AgentRegistry, cwd: string) {
+  return registry.beginSpawn("codex", cwd, { title: `Exercise registry storage ${path.basename(cwd)}` });
+}
+
 function waitFor(pathname: string): void {
   while (!fs.existsSync(pathname)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
 }
@@ -24,7 +28,7 @@ test("a keyed SQLite mutation reads only the targeted row payload", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-keyed-row-"));
   const filename = path.join(directory, "agent-registry.json");
   const seed = new AgentRegistry(filename);
-  const template = seed.beginSpawn("codex", "/row-read-seed");
+  const template = beginTestSpawn(seed, "/row-read-seed");
   const initial = seed.snapshot();
   for (let index = 0; index < 2_000; index += 1) {
     const launchId = `row-read-${String(index).padStart(4, "0")}`;
@@ -52,7 +56,7 @@ test("a compact spawn lookup reads only requested receipts and their alias chain
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-spawn-lookup-"));
   const filename = path.join(directory, "agent-registry.json");
   const seed = new AgentRegistry(filename);
-  const begun = seed.beginSpawn("codex", "/spawn-lookup-seed");
+  const begun = beginTestSpawn(seed, "/spawn-lookup-seed");
   const artifactPath = "/sessions/spawn-lookup.jsonl";
   const settled = seed.settleSpawn(begun.launchId, {
     key: { engine: "codex", sessionId: "spawn-lookup" },
@@ -111,7 +115,7 @@ test("snapshot title lookup reads only named alias chains and conversations", ()
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-title-lookup-"));
   const filename = path.join(directory, "agent-registry.json");
   const seed = new AgentRegistry(filename);
-  const begun = seed.beginSpawn("codex", "/title-lookup-seed");
+  const begun = beginTestSpawn(seed, "/title-lookup-seed");
   const artifactPath = "/sessions/title-lookup.jsonl";
   const settled = seed.settleSpawn(begun.launchId, {
     key: { engine: "codex", sessionId: "title-lookup" },
@@ -182,7 +186,7 @@ test("a committed SQLite mutation patches the read-only snapshot and parsed-row 
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-row-cache-"));
   const filename = path.join(directory, "agent-registry.json");
   const seed = new AgentRegistry(filename);
-  const template = seed.beginSpawn("codex", "/row-cache-seed");
+  const template = beginTestSpawn(seed, "/row-cache-seed");
   const initial = seed.snapshot();
   for (let index = 0; index < 2_000; index += 1) {
     const launchId = `row-cache-${String(index).padStart(4, "0")}`;
@@ -233,7 +237,7 @@ test("SQLite read-only snapshots query the durable revision only after a storage
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-revision-cache-"));
   const filename = path.join(directory, "agent-registry.json");
   const seed = new AgentRegistry(filename);
-  const receipt = seed.beginSpawn("codex", "/revision-cache-seed");
+  const receipt = beginTestSpawn(seed, "/revision-cache-seed");
   const sqliteFilename = path.join(directory, "agent-registry.sqlite");
   let revisionQueries = 0;
   const first = new SqliteAgentRegistryStore(sqliteFilename, {
@@ -273,6 +277,7 @@ test("SQLite first boot imports JSON and preserves membership and capability dig
     engine: "codex",
     cwd: "/repo",
     spawnCapabilityDigest: digest,
+    launchProfile: { title: "Import SQLite membership fixture" },
     memberships: [{
       kind: "flow",
       containerId: "flow-187",
@@ -379,7 +384,14 @@ test("a staged pending supersedence edge round-trips JSON ↔ SQLite with parity
     claimOwner: null,
     pendingAction: null,
   });
-  const begun = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "a", supersedes: predecessor.id, supersedesReason: "stage-retry" });
+  const begun = store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    accountId: "a",
+    supersedes: predecessor.id,
+    supersedesReason: "stage-retry",
+    launchProfile: { title: "Round-trip pending supersedence" },
+  });
   if (begun.kind !== "created") throw new Error("expected create");
   store.settleSpawn(begun.receipt.launchId, {
     key: { engine: "codex", sessionId: successorSessionId },
@@ -408,7 +420,7 @@ test("dual-write keeps JSON authoritative and SQLite reads require parity", () =
   const filename = path.join(directory, "agent-registry.json");
   const sqliteFilename = path.join(directory, "agent-registry.sqlite");
   const dual = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "dual-write" });
-  const receipt = dual.beginSpawn("codex", "/parity");
+  const receipt = beginTestSpawn(dual, "/parity");
 
   expect(new AgentRegistry(filename).snapshot().receipts[receipt.launchId]).toEqual(
     new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" }).snapshot().receipts[receipt.launchId],
@@ -432,7 +444,7 @@ test("authoritative SQLite startup repairs a same-revision mirror mismatch", () 
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-repair-equal-"));
   const filename = path.join(directory, "agent-registry.json");
   const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
-  const receipt = registry.beginSpawn("codex", "/sqlite-authoritative");
+  const receipt = beginTestSpawn(registry, "/sqlite-authoritative");
   registry.checkpointRollbackMirror();
 
   const mirror = JSON.parse(fs.readFileSync(filename, "utf8")) as ReturnType<AgentRegistry["snapshot"]> & { _sqliteRevision: number };
@@ -448,7 +460,7 @@ test("authoritative SQLite startup stamps and repairs a legacy mirror", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-repair-legacy-"));
   const filename = path.join(directory, "agent-registry.json");
   const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
-  const receipt = registry.beginSpawn("codex", "/sqlite-legacy-mirror");
+  const receipt = beginTestSpawn(registry, "/sqlite-legacy-mirror");
   registry.checkpointRollbackMirror();
 
   const mirror = JSON.parse(fs.readFileSync(filename, "utf8")) as ReturnType<AgentRegistry["snapshot"]> & { _sqliteRevision?: number };
@@ -470,7 +482,7 @@ test.each(["malformed", "lower"] as const)(
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-registry-sqlite-repair-${scenario}-`));
     const filename = path.join(directory, "agent-registry.json");
     const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
-    const receipt = registry.beginSpawn("codex", `/sqlite-${scenario}-mirror`);
+    const receipt = beginTestSpawn(registry, `/sqlite-${scenario}-mirror`);
     registry.checkpointRollbackMirror();
 
     const mirror = JSON.parse(fs.readFileSync(filename, "utf8")) as ReturnType<AgentRegistry["snapshot"]> & { _sqliteRevision: unknown };
@@ -746,7 +758,7 @@ for (const sqliteMode of ["read", "sqlite"] as const) {
   test(`${sqliteMode} mode leaves the durable revision unchanged after a missing claim release`, () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-registry-${sqliteMode}-noop-`));
     const filename = path.join(directory, "agent-registry.json");
-    new AgentRegistry(filename).beginSpawn("codex", "/seed");
+    beginTestSpawn(new AgentRegistry(filename), "/seed");
     const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode });
     const before = registry.storageDiagnostics().revision;
 
@@ -1087,11 +1099,11 @@ test("SQLite-only operations avoid JSON rewrites and the read mode prepares roll
 test("SQLite demotion checkpoint publishes every revision without streaming mirror writes", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-demotion-checkpoint-"));
   const filename = path.join(directory, "agent-registry.json");
-  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  beginTestSpawn(new AgentRegistry(filename), "/seed");
   const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
   const externalWriter = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
   const before = JSON.parse(fs.readFileSync(filename, "utf8")) as { _sqliteRevision: number };
-  externalWriter.beginSpawn("codex", "/after-promotion");
+  beginTestSpawn(externalWriter, "/after-promotion");
   const stale = JSON.parse(fs.readFileSync(filename, "utf8")) as { _sqliteRevision: number };
   expect(stale._sqliteRevision).toBe(before._sqliteRevision);
   expect(registry.storageDiagnostics().mirrorDirty).toBeTrue();
@@ -1106,7 +1118,7 @@ test("SQLite demotion checkpoint publishes every revision without streaming mirr
 test("dual-write release demotion leaves the authoritative JSON handoff untouched", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-dual-write-handoff-"));
   const filename = path.join(directory, "agent-registry.json");
-  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  beginTestSpawn(new AgentRegistry(filename), "/seed");
   let rollbackWrites = 0;
   const retiring = new AgentRegistry(filename, undefined, undefined, {
     sqliteMode: "dual-write",
@@ -1115,7 +1127,7 @@ test("dual-write release demotion leaves the authoritative JSON handoff untouche
   const successor = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "dual-write" });
 
   retiring.checkpointRollbackMirror();
-  successor.beginSpawn("codex", "/successor");
+  beginTestSpawn(successor, "/successor");
 
   expect(rollbackWrites).toBe(0);
   expect(new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" }).snapshot())
@@ -1127,7 +1139,7 @@ test("read mode bounds rollback mirror writes and exposes checkpoint diagnostics
   const filename = path.join(directory, "agent-registry.json");
   let now = 1_000;
   const checkpoints: Array<() => void> = [];
-  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  beginTestSpawn(new AgentRegistry(filename), "/seed");
   const registry = new AgentRegistry(filename, undefined, undefined, {
     sqliteMode: "read",
     mirrorCheckpointMs: 5_000,
@@ -1139,8 +1151,8 @@ test("read mode bounds rollback mirror writes and exposes checkpoint diagnostics
   });
   const initialRevision = JSON.parse(fs.readFileSync(filename, "utf8"))._sqliteRevision;
 
-  registry.beginSpawn("codex", "/cursor-1");
-  registry.beginSpawn("codex", "/cursor-2");
+  beginTestSpawn(registry, "/cursor-1");
+  beginTestSpawn(registry, "/cursor-2");
   expect(JSON.parse(fs.readFileSync(filename, "utf8"))._sqliteRevision).toBe(initialRevision);
   expect(registry.storageDiagnostics()).toMatchObject({
     backendMode: "read",
@@ -1160,7 +1172,7 @@ test("read mode schedules only the remaining rollback checkpoint interval", () =
   const filename = path.join(directory, "agent-registry.json");
   let now = 1_000;
   const delays: number[] = [];
-  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  beginTestSpawn(new AgentRegistry(filename), "/seed");
   const registry = new AgentRegistry(filename, undefined, undefined, {
     sqliteMode: "read",
     mirrorCheckpointMs: 5_000,
@@ -1172,7 +1184,7 @@ test("read mode schedules only the remaining rollback checkpoint interval", () =
   });
 
   now += 4_999;
-  registry.beginSpawn("codex", "/boundary");
+  beginTestSpawn(registry, "/boundary");
 
   expect(registry.storageDiagnostics().mirrorAgeMs).toBe(4_999);
   expect(delays).toEqual([1]);
@@ -1181,7 +1193,7 @@ test("read mode schedules only the remaining rollback checkpoint interval", () =
 test("one rollback checkpoint publishes one coherent snapshot under sustained writers", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-bounded-checkpoint-"));
   const filename = path.join(directory, "agent-registry.json");
-  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  beginTestSpawn(new AgentRegistry(filename), "/seed");
   const writer = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
   const scheduled: Array<() => void> = [];
   let concurrentWrites = false;
@@ -1192,10 +1204,10 @@ test("one rollback checkpoint publishes one coherent snapshot under sustained wr
     scheduleMirrorCheckpoint: (callback) => { scheduled.push(callback); return { unref() {} }; },
     afterMirrorWrite: () => {
       mirrorWrites += 1;
-      if (concurrentWrites) writer.beginSpawn("codex", `/concurrent-${mirrorWrites}`);
+      if (concurrentWrites) beginTestSpawn(writer, `/concurrent-${mirrorWrites}`);
     },
   });
-  checkpoint.beginSpawn("codex", "/dirty");
+  beginTestSpawn(checkpoint, "/dirty");
   concurrentWrites = true;
   const startedAt = performance.now();
   checkpoint.checkpointRollbackMirror();
@@ -1211,7 +1223,7 @@ test("one rollback checkpoint publishes one coherent snapshot under sustained wr
 test("release demotion converges a mirror dirtied by one concurrent successor commit", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-demotion-convergence-"));
   const filename = path.join(directory, "agent-registry.json");
-  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  beginTestSpawn(new AgentRegistry(filename), "/seed");
   const successor = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
   let concurrentCommit = false;
   const retiring = new AgentRegistry(filename, undefined, undefined, {
@@ -1219,10 +1231,10 @@ test("release demotion converges a mirror dirtied by one concurrent successor co
     afterMirrorWrite: () => {
       if (!concurrentCommit) return;
       concurrentCommit = false;
-      successor.beginSpawn("codex", "/successor-during-checkpoint");
+      beginTestSpawn(successor, "/successor-during-checkpoint");
     },
   });
-  successor.beginSpawn("codex", "/dirty-before-demotion");
+  beginTestSpawn(successor, "/dirty-before-demotion");
   concurrentCommit = true;
 
   retiring.checkpointRollbackMirrorForDemotion();
@@ -1235,14 +1247,14 @@ test("release demotion converges a mirror dirtied by one concurrent successor co
 test("release demotion fails closed after bounded continuously dirty checkpoints", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-demotion-bounded-"));
   const filename = path.join(directory, "agent-registry.json");
-  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  beginTestSpawn(new AgentRegistry(filename), "/seed");
   const successor = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
   let mirrorWrites = 0;
   const retiring = new AgentRegistry(filename, undefined, undefined, {
     sqliteMode: "sqlite",
     afterMirrorWrite: () => {
       mirrorWrites += 1;
-      successor.beginSpawn("codex", `/successor-${mirrorWrites}`);
+      beginTestSpawn(successor, `/successor-${mirrorWrites}`);
     },
   });
 
@@ -1253,7 +1265,7 @@ test("release demotion fails closed after bounded continuously dirty checkpoints
 test("failed rollback checkpoints retry with bounded backoff until the mirror converges", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-checkpoint-retry-"));
   const filename = path.join(directory, "agent-registry.json");
-  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  beginTestSpawn(new AgentRegistry(filename), "/seed");
   const scheduled: Array<{ callback: () => void; delayMs: number }> = [];
   let failCheckpoint = false;
   const registry = new AgentRegistry(filename, undefined, undefined, {
@@ -1268,7 +1280,7 @@ test("failed rollback checkpoints retry with bounded backoff until the mirror co
       if (failCheckpoint) throw new Error("injected checkpoint failure");
     },
   });
-  registry.beginSpawn("codex", "/dirty");
+  beginTestSpawn(registry, "/dirty");
   expect(scheduled.map(({ delayMs }) => delayMs)).toEqual([5_000]);
 
   failCheckpoint = true;
@@ -1286,7 +1298,7 @@ test("production-sized read burn-in defers full snapshot loading until its check
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-read-no-snapshot-"));
   const filename = path.join(directory, "agent-registry.json");
   const seed = new AgentRegistry(filename);
-  const template = seed.beginSpawn("codex", "/read-seed");
+  const template = beginTestSpawn(seed, "/read-seed");
   const production = seed.snapshot();
   for (let index = 1; index < 18_000; index += 1) {
     const launchId = `read-seed-${String(index).padStart(5, "0")}`;
@@ -1335,7 +1347,7 @@ test("production-sized read burn-in defers full snapshot loading until its check
 test("SQLite snapshot cache follows external revisions and reports writer metrics", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-snapshot-cache-"));
   const filename = path.join(directory, "agent-registry.json");
-  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  beginTestSpawn(new AgentRegistry(filename), "/seed");
   const waits: number[] = [];
   const first = new AgentRegistry(filename, undefined, undefined, {
     sqliteMode: "sqlite",
@@ -1344,11 +1356,11 @@ test("SQLite snapshot cache follows external revisions and reports writer metric
   const second = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
 
   first.readOnlySnapshot();
-  second.beginSpawn("codex", "/external-writer");
+  beginTestSpawn(second, "/external-writer");
   expect(first.readOnlySnapshot().receipts).toEqual(expect.objectContaining(
     Object.fromEntries(Object.entries(second.snapshot().receipts)),
   ));
-  first.beginSpawn("codex", "/metric-writer");
+  beginTestSpawn(first, "/metric-writer");
   expect(waits.length).toBeGreaterThan(0);
   expect(first.storageDiagnostics()).toMatchObject({
     backendMode: "sqlite",
@@ -1447,7 +1459,7 @@ test.each(["off", "dual-write", "read", "sqlite"] as const)(
       mirrorCheckpointMs: 60_000,
     });
     for (let index = 0; index < 650; index += 1) {
-      registry.beginSpawn("codex", `/metric-${index}`);
+      beginTestSpawn(registry, `/metric-${index}`);
       clock += 100;
     }
 
@@ -1518,7 +1530,7 @@ test("production-sized SQLite registry bounds ten-lane writes, concurrent reads,
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-production-ten-lane-"));
     const filename = path.join(directory, "agent-registry.json");
     const seed = new AgentRegistry(filename);
-    const template = seed.beginSpawn("codex", "/benchmark-seed");
+    const template = beginTestSpawn(seed, "/benchmark-seed");
     const productionShape = seed.snapshot();
     for (let index = 1; index < 18_000; index += 1) {
       const launchId = `benchmark-seed-${String(index).padStart(5, "0")}`;

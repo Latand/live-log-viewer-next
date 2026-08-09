@@ -6,6 +6,7 @@ import type { ResumeSpec } from "@/lib/agent/cli";
 import { agentRegistry, type AgentRegistry, type ProcessIdentity } from "@/lib/agent/registry";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 import { procBackend } from "@/lib/proc";
+import { derivedSpawnTitle, durableSemanticTitle } from "@/lib/title";
 
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
 import { spawnStructuredConversation } from "./structuredSpawn";
@@ -91,7 +92,7 @@ function candidateFor(
     && entry?.claimOwner
     && entry.pendingAction === null
     && !terminal);
-  const profile = emptyLaunchProfile(durableProfileWins ? {
+  const inheritedProfile = emptyLaunchProfile(durableProfileWins ? {
     ...(entry?.launchProfile ?? {}),
     ...generation.launchProfile,
     cwd: generation.launchProfile.cwd || entry?.launchProfile?.cwd || entry?.cwd,
@@ -99,6 +100,16 @@ function candidateFor(
     ...generation.launchProfile,
     ...(entry?.launchProfile ?? {}),
     cwd: entry?.launchProfile?.cwd || generation.launchProfile.cwd || entry?.cwd,
+  });
+  const inheritedTitle = durableSemanticTitle(generation.launchProfile.title, 120)
+    ?? durableSemanticTitle(entry?.launchProfile?.title, 120);
+  const profile = emptyLaunchProfile({
+    ...inheritedProfile,
+    title: inheritedTitle ?? derivedSpawnTitle(
+      "recovery",
+      inheritedProfile.goal?.objective ?? inheritedProfile.cwd,
+      "Conversation recovery",
+    ),
   });
   const recordedParent = snapshot.lineageEdges[conversation.id]?.parentConversationId
     ?? profile.parentConversationId;

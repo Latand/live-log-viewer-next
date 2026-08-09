@@ -42,6 +42,7 @@ test("the recovery reservation converges repeated calls onto one successor spawn
     effort: "high",
     permissionMode: "bypassPermissions",
     readOnly: false,
+    title: "Recover issue #913 identity",
     parentConversationId,
   });
   let registry = new AgentRegistry(registryFilename, undefined, undefined, { sqliteMode: "off" });
@@ -178,7 +179,7 @@ test("the recovery reservation converges repeated calls onto one successor spawn
       expect(input.spec).toMatchObject({
         cwd,
         ["transcript"]: artifactPath,
-        launchProfile: profile,
+        launchProfile: { ...profile, title: "Recover issue #913 identity" },
       });
       expect(structuredResumeSessionId(input)).toBe(sessionId);
       const claimed = registry.claimStructuredHost(key, { pid: process.pid, startIdentity: null }, { allowUnhosted: true });
@@ -267,12 +268,92 @@ test("the recovery reservation converges repeated calls onto one successor spawn
   journal.close();
 });
 
+test("ordinary recovery prefers the durable generation title over stale entry titles", async () => {
+  for (const staleTitle of [null, "Codex session"] as const) {
+    const sessionId = crypto.randomUUID();
+    const directory = path.join(sandbox, `title-precedence-${sessionId}`);
+    const cwd = path.join(directory, "workspace");
+    const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+    fs.mkdirSync(cwd, { recursive: true });
+    fs.writeFileSync(artifactPath, "");
+    const filename = path.join(directory, "registry.json");
+    let registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const profile = emptyLaunchProfile({ cwd, title: "Durable issue #913 title" });
+    const begun = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd,
+      transport: "structured",
+      accountId: "default",
+      expectedArtifactPath: artifactPath,
+      launchProfile: profile,
+    });
+    if (begun.kind !== "created") throw new Error("recovery fixture receipt was unavailable");
+    const settled = registry.settleSpawn(begun.receipt.launchId, {
+      key: { engine: "codex", sessionId },
+      artifactPath,
+      cwd,
+      accountId: "default",
+      launchProfile: profile,
+      status: "dead",
+      host: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    });
+    if (settled.kind !== "settled") throw new Error("recovery fixture did not settle");
+    const snapshot = registry.snapshot();
+    const entry = snapshot.entries[`codex:${sessionId}`];
+    if (!entry?.launchProfile) throw new Error("recovery fixture entry is missing");
+    entry.launchProfile.title = staleTitle;
+    fs.writeFileSync(filename, `${JSON.stringify(snapshot, null, 2)}\n`);
+    registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+
+    const recovered = await recoverDeadStructuredConversation({
+      path: artifactPath,
+      conversationId: begun.receipt.conversationId,
+    }, {
+      registry,
+      client: {} as RuntimeHostClient,
+      transport: () => "structured",
+      resolveAccount: () => ({
+        engine: "codex",
+        accountId: "default",
+        kind: "managed",
+        home: path.join(directory, "account"),
+        transcriptRoot: directory,
+        env: { NODE_ENV: "test" },
+      }),
+      spawn: async (input) => {
+        expect(input.spec.launchProfile?.title).toBe("Durable issue #913 title");
+        return {
+          ok: true,
+          target: null,
+          path: artifactPath,
+          launchId: input.receipt.launchId,
+          conversationId: input.receipt.conversationId,
+          launched: true,
+          retrySafe: false,
+          initialMessage: "delivered" as const,
+          state: "settled" as const,
+        };
+      },
+    });
+
+    expect(recovered).toMatchObject({ path: artifactPath, spawned: true });
+  }
+});
+
 function establishRolledBackTmuxOwner(engine: "codex" | "claude", label: string) {
   const sessionId = crypto.randomUUID();
   const cwd = path.join(sandbox, `${engine}-${label}-${sessionId}`);
   const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
   const accountId = `${engine}-${label}-account`;
-  const profile = emptyLaunchProfile({ cwd, model: `${engine}-${label}-model`, effort: "high" });
+  const profile = emptyLaunchProfile({
+    cwd,
+    model: `${engine}-${label}-model`,
+    effort: "high",
+    title: `Recover ${engine} ${label} ownership`,
+  });
   const key = { engine, sessionId } as const;
   fs.mkdirSync(cwd, { recursive: true });
   fs.writeFileSync(artifactPath, "");
@@ -358,6 +439,8 @@ test("dead Codex structured recovery retains ownership and starts a pane-less re
     permissionMode: "never",
     allowSubagents: true,
     parentConversationId: parent.id,
+    title: "recovery · Restore Codex review session",
+    goal: { objective: "Restore Codex review session", status: "active", tokensUsed: null, timeUsedSeconds: null },
   });
   const conversation = registry.ensureConversation("codex", artifactPath, "retained-account");
   const original = registry.beginSpawnRequest({
@@ -433,7 +516,7 @@ test("dead Codex structured recovery retains ownership and starts a pane-less re
         cwd,
         engine: "codex",
         ["transcript"]: artifactPath,
-        launchProfile: profile,
+        launchProfile: { ...profile, title: "recovery · Restore Codex review session" },
       });
       return {
         ok: true,
@@ -488,6 +571,8 @@ test("dead Claude structured recovery retains ownership and starts a pane-less r
     permissionMode: "default",
     allowSubagents: true,
     parentConversationId: reviewed.id,
+    title: "recovery · Restore Claude review session",
+    goal: { objective: "Restore Claude review session", status: "active", tokensUsed: null, timeUsedSeconds: null },
   });
   const conversation = registry.ensureConversation("claude", artifactPath, "retained-claude-account");
   const original = registry.beginSpawnRequest({
@@ -563,7 +648,7 @@ test("dead Claude structured recovery retains ownership and starts a pane-less r
         cwd,
         engine: "claude",
         ["transcript"]: artifactPath,
-        launchProfile: profile,
+        launchProfile: { ...profile, title: "recovery · Restore Claude review session" },
       });
       return {
         ok: true,
@@ -612,7 +697,12 @@ test("Codex and Claude worker and root recovery retain their original lineage sh
       const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
       const parentPath = path.join(cwd, "parent.jsonl");
       const parent = registry.ensureConversation(engine, parentPath, `${engine}-account`);
-      const profile = emptyLaunchProfile({ cwd, parentConversationId: role === "worker" ? parent.id : null, role });
+      const profile = emptyLaunchProfile({
+        cwd,
+        parentConversationId: role === "worker" ? parent.id : null,
+        role,
+        title: `Recover ${engine} ${role} lineage`,
+      });
       const conversation = registry.ensureConversation(engine, artifactPath, `${engine}-account`);
       if (role === "worker") {
         const original = registry.beginSpawnRequest({
@@ -1071,7 +1161,7 @@ test("a registered legacy Codex transcript bridges into the structured app serve
     transport: "tmux",
     conversationId: conversation.id,
     expectedArtifactPath: artifactPath,
-    launchProfile: emptyLaunchProfile({ cwd }),
+    launchProfile: emptyLaunchProfile({ cwd, title: "Recover legacy Codex tmux ownership" }),
   });
   const failedStructuredAttempt = registry.beginSpawnRequest({
     engine: "codex",
@@ -1079,7 +1169,7 @@ test("a registered legacy Codex transcript bridges into the structured app serve
     transport: "structured",
     conversationId: conversation.id,
     expectedArtifactPath: artifactPath,
-    launchProfile: emptyLaunchProfile({ cwd }),
+    launchProfile: emptyLaunchProfile({ cwd, title: "Recover legacy Codex structured ownership" }),
   });
   registry.failSpawn(failedStructuredAttempt.receipt.launchId, "structured launch failed before ownership");
   let spawnCalls = 0;

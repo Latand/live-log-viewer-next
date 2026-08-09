@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import {
+  CODEX_LUNA_MODEL,
   CODEX_SOL_MODEL,
   CODEX_TERRA_MODEL,
   defaultModelFor,
@@ -14,6 +15,7 @@ test("the model catalog exposes Opus 5 as the Claude default", () => {
   expect(ENGINE_MODELS.codex).toEqual([
     { id: CODEX_SOL_MODEL, label: "GPT-5.6-Sol", shortLabel: "5.6-Sol", use: "review" },
     { id: CODEX_TERRA_MODEL, label: "GPT-5.6-Terra", shortLabel: "5.6-Terra", use: "implement" },
+    { id: CODEX_LUNA_MODEL, label: "GPT-5.6-Luna", shortLabel: "5.6-Luna", use: "general" },
   ]);
   expect(defaultModelFor("codex")).toBe(CODEX_SOL_MODEL);
   expect(defaultModelFor("claude")).toBe("opus");

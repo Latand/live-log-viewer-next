@@ -16,6 +16,7 @@ import { isNativeCodexSubagentTranscript } from "@/lib/scanner/codexNative";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { isShellCommand } from "@/lib/status";
 import { paneInfo, spawnAgentWithPrompt } from "@/lib/tmux";
+import { cleanTitle } from "@/lib/title";
 import type { FileEntry } from "@/lib/types";
 
 import { realExec, provisionWorktree, runFinish, setupStatus, startSetup, type ExecPort, type SetupStatus } from "./provision";
@@ -53,7 +54,7 @@ export interface WorkflowPorts {
   exec: ExecPort;
   startSetup(wf: Workflow): { pid: number | null; error?: string };
   setupStatus(wf: Workflow): SetupStatus;
-  spawnAgent(role: RoleConfig, cwd: string, prompt: string, accountId?: string | null): Promise<StageSpawn>;
+  spawnAgent(role: RoleConfig, cwd: string, prompt: string, accountId: string | null | undefined, title: string): Promise<StageSpawn>;
   /** The pane still hosts a non-shell foreground process. */
   paneAgentAlive(paneId: string): Promise<boolean>;
   headCwd(transcriptPath: string): string | null;
@@ -75,9 +76,9 @@ export function defaultPorts(): WorkflowPorts {
     exec: realExec,
     startSetup,
     setupStatus,
-    spawnAgent: async (role, cwd, prompt, accountId) => {
+    spawnAgent: async (role, cwd, prompt, accountId, title) => {
       const account = accountManager.resolveSpawn(role.engine, accountId);
-      const spec = freshSpecFor(role.engine, cwd, { model: role.model, effort: role.effort, codexHome: account.engine === "codex" ? account.home : null, claudeConfigDir: account.engine === "claude" ? account.home : null, claudeProjectsDir: account.engine === "claude" ? account.transcriptRoot : null });
+      const spec = freshSpecFor(role.engine, cwd, { title, model: role.model, effort: role.effort, codexHome: account.engine === "codex" ? account.home : null, claudeConfigDir: account.engine === "claude" ? account.home : null, claudeProjectsDir: account.engine === "claude" ? account.transcriptRoot : null });
       const startedAtMs = Date.now();
       const pane = await spawnAgentWithPrompt(spec, prompt);
       const transcript = await resolveSpawnedTranscriptPath({
@@ -119,6 +120,13 @@ const spawnsThisProcess = new Set<string>();
 
 function spawnKey(wf: Workflow, run: WorkflowStageRun): string {
   return `${wf.id}:${run.index}`;
+}
+
+function stageSpawnTitle(wf: Workflow, run: WorkflowStageRun): string {
+  const stage = wf.template.stages[run.index];
+  const stageLabel = stage?.kind === "review-loop" ? "review fixer" : `stage ${run.index + 1}`;
+  const suffix = ` · ${stageLabel}`;
+  return `${cleanTitle(wf.task, 120 - suffix.length)}${suffix}`;
 }
 
 /** Park the workflow for a human decision, remembering the phase to retry. */
@@ -242,7 +250,7 @@ async function ensureStageAgent(
     spawnsThisProcess.add(spawnKey(wf, run));
     persistCheckpoint();
     try {
-      const spawned = await ports.spawnAgent(role, wf.worktreeDir, stagePrompt, run.accountId);
+      const spawned = await ports.spawnAgent(role, wf.worktreeDir, stagePrompt, run.accountId, stageSpawnTitle(wf, run));
       run.paneId = spawned.paneId;
       if (spawned.transcript) {
         run.agentPath = spawned.transcript;

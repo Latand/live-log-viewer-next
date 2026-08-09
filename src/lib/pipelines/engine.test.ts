@@ -82,6 +82,7 @@ test("a pipeline stage keeps its reserved account through a routing change befor
         promptScaffold: "Builder guidance",
       },
       cwd,
+      title: "Build scoped change · build",
       ["prompt"]: "Build the scoped change",
       parentPath: null,
       clientAttemptId: "pipeline_account_pin_attempt",
@@ -125,7 +126,11 @@ test("a pipeline stage keeps its reserved account through a routing change befor
     });
     if (settled.kind !== "settled") throw new Error("pipeline settlement conflicted");
 
-    expect(settled.receipt).toMatchObject({ accountId: "limited", accountPin: true });
+    expect(settled.receipt).toMatchObject({
+      accountId: "limited",
+      accountPin: true,
+      launchProfile: expect.objectContaining({ title: "Build scoped change · build" }),
+    });
     expect(settled.conversation).toMatchObject({ pinnedAccountId: "limited", migration: null });
   } finally {
     resolveSpawn.mockRestore();
@@ -177,6 +182,7 @@ function entry(pathname: string): FileEntry {
 function harness() {
   const calls: string[] = [];
   const spawnRoles: Array<Parameters<PipelinePorts["spawnAgent"]>[0]["role"]> = [];
+  const spawnTitles: string[] = [];
   const messages = new Map<string, { text: string; ts: number }>();
   const durableTurns = new Map<string, StageTurnEvidence>();
   const flows = new Map<string, Flow>();
@@ -227,9 +233,10 @@ function harness() {
     },
     spawnReceipt: () => null,
     claimSpawnRetry: () => "claimed",
-    spawnAgent: async ({ role, parentPath, clientAttemptId, membership, supersedes }, onReserved) => {
+    spawnAgent: async ({ role, title, parentPath, clientAttemptId, membership, supersedes }, onReserved) => {
       spawn += 1;
       spawnRoles.push(structuredClone(role));
+      spawnTitles.push(title);
       calls.push(`spawn:${clientAttemptId}:parent=${parentPath ?? "root"}:supersedes=${supersedes ?? "none"}`);
       calls.push(`membership:${membership.kind}:${membership.containerId}:${membership.slot}:${membership.role}:${membership.stageOrder}:round=${membership.round}`);
       onReserved({ launchId: `launch-${spawn}`, conversationId: `conversation_stage_${spawn}` });
@@ -310,6 +317,7 @@ function harness() {
     durableTurns,
     flows,
     spawnRoles,
+    spawnTitles,
     finish,
     setBuilderEffort: (effort: string) => { builderEffort = effort; },
     setPaneAlive: (alive: boolean) => { paneAlive = alive; },
@@ -901,7 +909,7 @@ test("a cross-engine historical adoption settles with the child runtime", async 
     cwd: "/repo",
     accountId: "claude-test",
     parentConversationId: "conversation_source_codex",
-    launchProfile: { model: "claude-sonnet-4-6", effort: "high" },
+    launchProfile: { model: "claude-sonnet-4-6", effort: "high", title: "Adopt cross-engine pipeline stage" },
     memberships: [{
       kind: "pipeline",
       containerId: pipeline.id,
@@ -1290,6 +1298,29 @@ test("starting a draft enters the existing provision and stage-spawn path", asyn
   expect(loadPipelines()[0]!.runs[0]!.attempts[0]!.state).toBe("running");
   expect(h.calls.some((call) => call.includes("worktree add"))).toBe(true);
   expect(h.calls.some((call) => call.startsWith("spawn:"))).toBe(true);
+  expect(h.spawnTitles).toEqual(["Start after review · plan"]);
+});
+
+test("long pipeline tasks keep distinct stage identifiers in every spawn title", async () => {
+  const h = harness();
+  savePipelines([]);
+  const created = await createPipelineFromRequest({
+    task: "x".repeat(4_000),
+    repoDir: "/repo",
+    stages: RUN_STAGES as never,
+  }, h.ports);
+  expect(created.pipeline).toBeDefined();
+
+  await tickPipelines([], h.ports); // provision
+  await tickPipelines([], h.ports); // spawn plan
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass", "plan output")], h.ports);
+  await tickPipelines([], h.ports); // spawn build
+
+  expect(h.spawnTitles).toHaveLength(2);
+  expect(h.spawnTitles[0]).toEndWith(" · plan");
+  expect(h.spawnTitles[1]).toEndWith(" · build");
+  expect(h.spawnTitles[0]).not.toBe(h.spawnTitles[1]);
+  expect(h.spawnTitles.every((title) => title.length <= 120)).toBe(true);
 });
 
 test("role params are accepted, persisted on the stage, and type-checked", async () => {
@@ -3516,7 +3547,13 @@ test("issue 533: a cross-process late recovery loses atomically to a claimed ret
   const registryPath = path.join(process.env.LLV_STATE_DIR!, `retry-race-${pipeline.id}.json`);
   const retryRegistry = new AgentRegistry(registryPath, undefined, undefined, { sqliteMode: "off" });
   const competingRegistry = new AgentRegistry(registryPath, undefined, undefined, { sqliteMode: "off" });
-  const begun = retryRegistry.beginSpawnRequest({ engine: "codex", cwd: pipeline.worktreeDir, transport: "structured", accountId: "work" });
+  const begun = retryRegistry.beginSpawnRequest({
+    engine: "codex",
+    cwd: pipeline.worktreeDir,
+    transport: "structured",
+    accountId: "work",
+    launchProfile: { title: "Recover claimed pipeline retry" },
+  });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
   const key = { engine: "codex" as const, sessionId: `retry-race-${pipeline.id}` };
   const artifactPath = path.join(pipeline.worktreeDir, "late-original.jsonl");
