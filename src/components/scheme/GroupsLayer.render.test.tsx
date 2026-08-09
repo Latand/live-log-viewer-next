@@ -61,6 +61,35 @@ test("each group draws a named, hue-tinted halo region (issue #118)", () => {
   expect(html).toContain('data-scheme-group="pipeline"');
 });
 
+/* Issue #962 depth ladder: a settled container is a faint FILLED well with a
+   hairline border, so grouping reads by depth instead of by outline. */
+test("a settled flow/pipeline container renders as a filled well with a hairline border, not a dashed outline", () => {
+  const html = render([flowGroup, pipelineGroup], true);
+  /* The well fill sits on the shared well surface, washed with the group hue. */
+  expect(html).toContain("var(--surface-well)");
+  expect(html).toContain("background-color:color-mix(in srgb, hsl(210 62% 42%) 6%, var(--surface-well))");
+  /* Hairline: the region border derives from the default hairline role. */
+  expect(html).toContain("border-color:color-mix(in srgb, hsl(210 62% 42%) 32%, var(--border-default))");
+  /* No dashed region and no 2px outline anywhere in a settled board. */
+  expect(html).not.toContain("border-dashed");
+});
+
+/* Dashed treatment stays reserved for drafts (and drop targets elsewhere). */
+test("a draft pipeline keeps its dashed warning halo (issue #962: dashed = draft/drop affordance)", () => {
+  const draft = {
+    ...pipelineGroup,
+    key: "group::pipeline::d1",
+    id: "d1",
+    pipeline: { ...planPipeline, id: "d1", state: "draft" } as unknown as Pipeline,
+  };
+  const html = render([draft], true);
+  expect(html).toContain("border-dashed");
+  expect(html).toContain("data-pipeline-draft");
+  expect(html).toContain("var(--color-warning)");
+  /* The draft halo does NOT take the settled well fill. */
+  expect(html).not.toContain("var(--surface-well)");
+});
+
 test("the label chip fully counter-scales so it stays readable at minimum zoom (issue #118 review)", () => {
   const html = render([flowGroup], true);
   /* Uncapped inverse-zoom scaling: constant on-screen size, no min(…) ceiling

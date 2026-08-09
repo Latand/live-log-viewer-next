@@ -39,14 +39,23 @@ import { activityDot, cleanTitle, effortTint, effortTitle, engineBadge, engineEd
 
 const noop = () => undefined;
 
-/* Card treatment per lifecycle state; `glow` also feeds the orbiting border. */
-const PANE_TONES: Record<PaneState, { section: string; header: string; glow?: string }> = {
-  live: { section: "border-success/60 shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-success)_20%,transparent)]", header: "bg-success-soft" },
-  waiting: { section: "border-warning/60 shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-warning)_26%,transparent)]", header: "bg-warning-soft", glow: "var(--color-warning)" },
-  returned: { section: "border-accent/50 shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-accent)_20%,transparent)]", header: "bg-accent-soft", glow: "var(--color-accent)" },
-  stalled: { section: "border-danger/50 shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-danger)_18%,transparent)]", header: "bg-danger-soft", glow: "var(--color-danger)" },
-  done: { section: "border-border", header: "bg-sunken text-muted opacity-80 saturate-50" },
+/* Card treatment per lifecycle state; `glow` also feeds the orbiting border.
+   `surface` is the card body fill: every state with something to say keeps the
+   full card white; only `done` — inactive, no attention — takes the quiet
+   surface so it recedes on the #962 depth ladder. */
+const PANE_TONES: Record<PaneState, { section: string; header: string; surface: string; glow?: string }> = {
+  live: { section: "border-success/60 shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-success)_20%,transparent)]", header: "bg-success-soft", surface: "bg-card" },
+  waiting: { section: "border-warning/60 shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-warning)_26%,transparent)]", header: "bg-warning-soft", surface: "bg-card", glow: "var(--color-warning)" },
+  returned: { section: "border-accent/50 shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-accent)_20%,transparent)]", header: "bg-accent-soft", surface: "bg-card", glow: "var(--color-accent)" },
+  stalled: { section: "border-danger/50 shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-danger)_18%,transparent)]", header: "bg-danger-soft", surface: "bg-card", glow: "var(--color-danger)" },
+  done: { section: "border-border", header: "bg-sunken text-muted opacity-80 saturate-50", surface: "bg-quiet" },
 };
+
+/** The pane body surface for a lifecycle state (issue #962 quiet tone).
+    Exported for the focused test: quiet applies ONLY to `done`. */
+export function paneToneSurface(state: PaneState): string {
+  return PANE_TONES[state].surface;
+}
 
 /** Maps the internal (Cyrillic) file.kind discriminant to a localized label. */
 export function kindLabel(t: TFunction, kind: string): string {
@@ -269,7 +278,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
            presses that start here (wheel pan still covers scrolling). */
         data-pan-ignore
         data-link-path={file.path}
-        className={`relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border bg-card shadow-1 ${tone.section}`}
+        className={`relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border ${tone.surface} shadow-1 ${tone.section}`}
       >
         <span
           aria-hidden

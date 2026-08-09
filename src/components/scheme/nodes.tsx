@@ -458,14 +458,25 @@ export const GroupsLayer = memo(function GroupsLayer({
             className="pointer-events-none absolute"
             style={{ left: group.x, top: group.y, width: group.w, height: group.h, transition: GROUP_MOVE_TRANSITION }}
           >
+            {/* Depth ladder (issue #962): a settled container is a faint FILLED
+                well — hue-washed fill over the well surface, hairline border —
+                so grouping reads by depth. Dashed stays reserved for drafts
+                (and drop targets elsewhere), which keep the warning halo. */}
             <div
               aria-hidden
-              className="absolute inset-0 rounded-[20px] border-2 border-dashed"
-              style={{
-                borderColor: color,
-                backgroundColor: soft,
-                ...(draft ? { backgroundImage: "repeating-linear-gradient(135deg, transparent 0 12px, color-mix(in srgb, var(--color-warning) 7%, transparent) 12px 14px)" } : {}),
-              }}
+              className={`absolute inset-0 rounded-[20px] ${draft ? "border-2 border-dashed" : "border"}`}
+              style={
+                draft
+                  ? {
+                      borderColor: color,
+                      backgroundColor: soft,
+                      backgroundImage: "repeating-linear-gradient(135deg, transparent 0 12px, color-mix(in srgb, var(--color-warning) 7%, transparent) 12px 14px)",
+                    }
+                  : {
+                      borderColor: `color-mix(in srgb, ${color} 32%, var(--border-default))`,
+                      backgroundColor: `color-mix(in srgb, ${color} 6%, var(--surface-well))`,
+                    }
+              }
             />
             {/* One compact header attached to the halo (#353): title, progress,
                 lifecycle, and the disclosure control — no second stage graph and
