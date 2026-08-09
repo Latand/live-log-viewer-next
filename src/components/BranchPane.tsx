@@ -49,6 +49,24 @@ const PANE_TONES: Record<PaneState, { section: string; header: string; glow?: st
   done: { section: "border-border", header: "bg-sunken text-muted opacity-80 saturate-50" },
 };
 
+/* #962 quiet-card tone: the card BODY fill only, kept OUTSIDE PANE_TONES —
+   that table's header/status treatments belong to the #961 lane. Every state
+   with something to say keeps the full card surface; only `done` — inactive,
+   no attention — recedes onto the quiet surface of the depth ladder. */
+const PANE_SURFACES: Record<PaneState, string> = {
+  live: "bg-card",
+  waiting: "bg-card",
+  returned: "bg-card",
+  stalled: "bg-card",
+  done: "bg-quiet",
+};
+
+/** The pane body surface for a lifecycle state (issue #962 quiet tone).
+    Exported for the focused test: quiet applies ONLY to `done`. */
+export function paneToneSurface(state: PaneState): string {
+  return PANE_SURFACES[state];
+}
+
 /** Maps the internal (Cyrillic) file.kind discriminant to a localized label. */
 export function kindLabel(t: TFunction, kind: string): string {
   if (kind === "session") return t("kind.session");
@@ -270,7 +288,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
            presses that start here (wheel pan still covers scrolling). */
         data-pan-ignore
         data-link-path={file.path}
-        className={`relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border bg-card shadow-1 ${tone.section}`}
+        className={`relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border ${paneToneSurface(state)} shadow-1 ${tone.section}`}
       >
         <span
           aria-hidden

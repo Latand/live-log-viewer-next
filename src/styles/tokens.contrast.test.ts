@@ -36,6 +36,12 @@ test("state text roles clear the small-text contrast floor on every surface they
   const canvas = values("surface-canvas");
   const card = values("surface-card");
   const sunken = values("surface-sunken");
+  /* The #962 depth ladder: board canvas, container well, quiet card. State
+     text renders over all three (far labels, well-docked chips, quiet-card
+     meta rows), so they carry the same floor. */
+  const board = values("surface-board");
+  const well = values("surface-well");
+  const quiet = values("surface-quiet");
   const muted = values("color-muted");
   const success = values("color-success");
   const successSoft = values("color-success-soft");
@@ -43,8 +49,8 @@ test("state text roles clear the small-text contrast floor on every surface they
   const warningSoft = values("color-warning-soft");
 
   for (const scheme of [0, 1]) {
-    const surfaces = [canvas[scheme], card[scheme], sunken[scheme]].filter(Boolean);
-    expect(surfaces.length).toBe(3);
+    const surfaces = [canvas[scheme], card[scheme], sunken[scheme], board[scheme], well[scheme], quiet[scheme]].filter(Boolean);
+    expect(surfaces.length).toBe(6);
     for (const surface of surfaces) {
       expect(contrast(muted[scheme], surface)).toBeGreaterThanOrEqual(AA_SMALL_TEXT);
       expect(contrast(success[scheme], surface)).toBeGreaterThanOrEqual(AA_SMALL_TEXT);
@@ -53,6 +59,33 @@ test("state text roles clear the small-text contrast floor on every surface they
     /* Both roles are also used as text on their own -soft fill (chips, cards). */
     expect(contrast(success[scheme], successSoft[scheme])).toBeGreaterThanOrEqual(AA_SMALL_TEXT);
     expect(contrast(warning[scheme], warningSoft[scheme])).toBeGreaterThanOrEqual(AA_SMALL_TEXT);
+  }
+});
+
+/* The depth ladder only works while its three levels stay ordered: a palette
+   tweak that lands the well on the card (or the board on the well) silently
+   flattens every container back into an outline-only group. */
+test("the #962 depth ladder keeps board, well, and card strictly ordered in both schemes", () => {
+  const board = values("surface-board");
+  const well = values("surface-well");
+  const quiet = values("surface-quiet");
+  const card = values("surface-card");
+
+  /* Light: card floats brightest; quiet recedes toward the well; the well sits
+     below the board so a container reads as a recess in the canvas. */
+  expect(relativeLuminance(card[0])).toBeGreaterThan(relativeLuminance(quiet[0]));
+  expect(relativeLuminance(quiet[0])).toBeGreaterThan(relativeLuminance(well[0]));
+  expect(relativeLuminance(board[0])).toBeGreaterThan(relativeLuminance(well[0]));
+
+  /* Dark: the board dips deepest; well and quiet climb toward the card. */
+  expect(relativeLuminance(board[1])).toBeLessThan(relativeLuminance(well[1]));
+  expect(relativeLuminance(well[1])).toBeLessThan(relativeLuminance(card[1]));
+  expect(relativeLuminance(quiet[1])).toBeLessThan(relativeLuminance(card[1]));
+
+  /* Both dark override blocks (media query + data-theme) stay in sync. */
+  for (const token of [board, well, quiet]) {
+    expect(token.length).toBe(3);
+    expect(token[1]).toBe(token[2]);
   }
 });
 

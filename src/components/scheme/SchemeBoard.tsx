@@ -28,6 +28,7 @@ import { compactPipelineLayoutFlows, compactPipelineOpenTarget, pipelineAnnounce
 import { focusHandoffBus } from "@/components/attention/focusHandoffBus";
 import { INSPECT_ZOOM } from "@/components/attention/navigate";
 import { BulkActionBar } from "./BulkActionBar";
+import { gridTilePx } from "./canvasGrid";
 import { buildFocusFrameIndex, stageAnchorAliases } from "./focusFrames";
 import { EdgeChips } from "./EdgeChips";
 import { nodesInRect, selectionBBox } from "./lasso";
@@ -1117,7 +1118,7 @@ export function SchemeBoard({
     setDormant((prev) => (prev ? cam.z < DORMANT_EXIT_Z : cam.z < DORMANT_ENTER_Z));
   }, [cam.z]);
 
-  const tile = 24 * cam.z;
+  const tile = gridTilePx(cam.z);
 
   return (
     <>
@@ -1126,8 +1127,9 @@ export function SchemeBoard({
       /* select-none is scoped to a gesture, never to the transcripts: it covers
          the pan and the live marquee, so a rect crossing cards cannot leave
          highlighted text behind, and lifts the moment the drag commits or
-         cancels (issue #771). */
-      className={`relative min-h-0 flex-1 overflow-clip ${
+         cancels (issue #771). bg-board is the scheme canvas — the depth
+         ladder's base (#962), a notch deeper than the app canvas in dark. */
+      className={`relative min-h-0 flex-1 overflow-clip bg-board ${
         panning ? "cursor-grabbing" : taskTool ? "cursor-crosshair" : handLike ? "cursor-grab" : ""
       } ${panning || marquee ? "select-none" : ""} ${handLike ? "touch-none" : ""}`}
       tabIndex={mapMode ? undefined : 0}
@@ -1159,6 +1161,7 @@ export function SchemeBoard({
           background every frame. */}
       <div
         aria-hidden
+        data-scheme-grid
         className="pointer-events-none absolute"
         style={{
           inset: -tile,
