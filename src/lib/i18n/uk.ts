@@ -49,6 +49,13 @@ export const uk: Record<keyof typeof en, Message> = {
   "turn.lastRun": "останній прогін: {d}",
   "turn.timer": "час роботи",
 
+  // Словник статусів дошки (issue #961) — формулювання з наявних поверхонь
+  // уваги/квитанцій/ходу, одне слово на картку.
+  "cardStatus.needsYou": "потребує вас",
+  "cardStatus.held": "притримано",
+  "cardStatus.running": "працює",
+  "cardStatus.queued": "у черзі",
+
   "kind.session": "сесія",
   "kind.subagent": "субагент",
   "kind.job": "джоба",
@@ -1670,6 +1677,9 @@ export const uk: Record<keyof typeof en, Message> = {
   "viewer.closeNotification": "Закрити сповіщення",
 
   "attention.badge": { one: "{count} чекає", few: "{count} чекають", many: "{count} чекають", other: "{count} чекають" },
+  "attention.needsYou": "Чекають",
+  "attention.next": "Далі",
+  "attention.nextHint": "Сфокусувати наступного, хто чекає на тебе (N, Shift-N — назад)",
   "attention.openQueue": "Черга уваги — хто заблокований на тобі (N — наступний)",
   "attention.popoverTitle": "Чекають на тебе",
   "attention.filterOn": "Показати лише тих, хто чекає на тебе (F)",

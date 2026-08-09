@@ -52,6 +52,13 @@ export const en = {
   "turn.lastRun": "last run: {d}",
   "turn.timer": "elapsed work time",
 
+  // Board status vocabulary (issue #961) — wording reused from the existing
+  // attention/receipt/turn surfaces, one word per card.
+  "cardStatus.needsYou": "needs you",
+  "cardStatus.held": "held",
+  "cardStatus.running": "working",
+  "cardStatus.queued": "queued",
+
   // Conversation kind labels (display of file.kind discriminant)
   "kind.session": "session",
   "kind.subagent": "subagent",
@@ -1729,6 +1736,9 @@ export const en = {
 
   // Viewer attention queue
   "attention.badge": { one: "{count} waiting", other: "{count} waiting" },
+  "attention.needsYou": "Needs you",
+  "attention.next": "Next",
+  "attention.nextHint": "Focus the next one waiting on you (N, Shift-N — back)",
   "attention.openQueue": "Attention queue — who is blocked on you (N — next)",
   "attention.popoverTitle": "Waiting on you",
   "attention.filterOn": "Show only those waiting on you (F)",

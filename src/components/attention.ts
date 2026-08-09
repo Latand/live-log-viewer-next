@@ -122,3 +122,28 @@ export function nextAttention(
   if (index === -1) return dir === 1 ? queue[0]! : queue[queue.length - 1]!;
   return queue[(index + dir + queue.length) % queue.length]!;
 }
+
+/** The one cycle pointer every advancing surface shares — a plain mutable cell
+    (a React ref satisfies it as-is). */
+export interface AttentionCyclePointer {
+  current: string | null;
+}
+
+/**
+ * Advance the shared cycle pointer over a queue and return the item served.
+ * Every advancing surface — the N/Shift-N keys over the project queue, the
+ * island's visible Next over the global queue — moves the SAME pointer through
+ * this one function, so the routes cannot diverge: whichever advanced last,
+ * the next advance continues from that id. Delegates the step itself to
+ * `nextAttention` (the sole authority); an empty queue leaves the pointer
+ * untouched.
+ */
+export function advanceAttentionCycle(
+  pointer: AttentionCyclePointer,
+  queue: AttentionItem[],
+  dir: 1 | -1,
+): AttentionItem | null {
+  const next = nextAttention(queue, pointer.current, dir);
+  if (next) pointer.current = next.id;
+  return next;
+}
