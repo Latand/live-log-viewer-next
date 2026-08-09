@@ -52,6 +52,13 @@ export const en = {
   "turn.lastRun": "last run: {d}",
   "turn.timer": "elapsed work time",
 
+  // Board status vocabulary (issue #961) — wording reused from the existing
+  // attention/receipt/turn surfaces, one word per card.
+  "cardStatus.needsYou": "needs you",
+  "cardStatus.held": "held",
+  "cardStatus.running": "working",
+  "cardStatus.queued": "queued",
+
   // Conversation kind labels (display of file.kind discriminant)
   "kind.session": "session",
   "kind.subagent": "subagent",
