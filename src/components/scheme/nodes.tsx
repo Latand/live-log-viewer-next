@@ -637,6 +637,7 @@ export function FarLabel({ file }: { file: FileEntry }) {
       aria-hidden
     >
       <div
+        data-far-label
         className="flex max-w-[94%] items-center gap-[0.5em] rounded-[0.55em] border border-border bg-card/95 px-[0.75em] py-[0.45em] shadow-2"
         /* Constant on-screen size until ~2.6× (z≈0.38); further out it shrinks
            with the world so neighboring labels never overlap. */

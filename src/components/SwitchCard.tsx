@@ -62,7 +62,10 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
          so the container query costs nothing — small (220px) cards collapse the
          effort meter below the 260px threshold; the tier stays readable in the
          model chip's tooltip. */
-      className={`reasoning-host group relative flex ${large ? "h-[150px] w-[300px]" : "h-[108px] w-[220px]"} shrink-0 flex-col rounded-[8px] border p-3 shadow-1 transition-colors hover:border-accent/45 ${toneClass(tone)}`}
+      /* Small cards hold the same three-row anatomy as large ones, so their
+         fixed height budgets a two-line title + the ops row + the status line
+         without clipping (#964). */
+      className={`reasoning-host group relative flex ${large ? "h-[150px] w-[300px]" : "h-[128px] w-[220px]"} shrink-0 flex-col rounded-[8px] border p-3 shadow-1 transition-colors hover:border-accent/45 ${toneClass(tone)}`}
       role="button"
       tabIndex={0}
       aria-label={t("switchCard.openColumn", { title: cleanTitle(title, 80) })}

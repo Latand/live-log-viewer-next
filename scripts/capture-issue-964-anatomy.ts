@@ -23,8 +23,8 @@
  *   <out>/964-board-dense-dark.png       — full board, ops facts on full cards
  *   <out>/964-far-zoom-dark.png          — far labels: status → title → ops chips
  *   <out>/964-stack-collapsed-dark.png   — collapsed rows: status leads, switch on ops line
- *   <out>/964-mobile-390-switch-dark.png — 390 px switch deck, dark
- *   <out>/964-mobile-390-switch-light.png— 390 px switch deck, light
+ *   <out>/964-mobile-390-switching-*.png — 390 px focus view naming the switch
+ *   <out>/964-mobile-390-focus-*.png     — 390 px focus view, needs-you word
  *
  * A DOM summary (row order, chip row membership, per-state switch chips, card
  * heights) is written to evidence/issue-964/card-anatomy.json.
@@ -449,8 +449,7 @@ async function main(): Promise<void> {
       const farFacts = await page.evaluate(() => {
         const labels = Array.from(document.querySelectorAll("[data-scheme-node]"))
           .map((node) => {
-            const status = node.querySelector("[data-card-status]");
-            const label = status?.closest("div[style]");
+            const label = node.querySelector("[data-far-label]");
             if (!label || !(label instanceof HTMLElement)) return null;
             const children = Array.from(label.children);
             const indexOf = (selector: string) => children.findIndex((child) => child.matches(selector) || child.querySelector(selector));
@@ -486,17 +485,42 @@ async function main(): Promise<void> {
       await page.screenshot({ path: path.join(OUT_DIR, `964-switchboard-${scheme}.png`) });
       await page.close();
 
-      /* ── 390 px phone: the same switch deck, one column ───────────────── */
+      /* ── 390 px phone: the switchboard is desktop-only, so the phone's card
+         surface is the focus view — verify the account switch stays explicit
+         and the status word survives, per state. ─────────────────────────── */
       const phone = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, hasTouch: true, isMobile: true, colorScheme: scheme });
       await phone.addInitScript(seedInit);
       await routeFiles(phone);
       await phone.goto(`${baseUrl}/#p=${projectId}`, { waitUntil: "domcontentloaded", timeout: 90_000 });
       await phone.waitForTimeout(2500);
-      await openSwitchboard(phone);
-      const phoneFacts = await switchboardFacts(phone);
-      verifySwitchboard(phoneFacts);
-      summary[`switchboard-390-${scheme}`] = { cards: phoneFacts.length, verified: true };
-      await phone.screenshot({ path: path.join(OUT_DIR, `964-mobile-390-switch-${scheme}.png`) });
+      /* The phone lands in a focus view; other conversations sit on the header
+         strip as chips titled by their conversation title. */
+      const switchingTarget = phone.locator('button[title^="Rebalance the account pool"]').first();
+      if ((await switchingTarget.count()) === 0) {
+        const visible = await phone.evaluate(() => (document.body.textContent ?? "").replace(/\s+/g, " ").slice(0, 600));
+        throw new Error(`the switching conversation is missing from the 390px strip; visible: ${visible}`);
+      }
+      await switchingTarget.click({ force: true });
+      await phone.waitForTimeout(1500);
+      const phoneRibbon = await phone.evaluate(() => document.body.textContent?.includes("Switching to «Account B»") ?? false);
+      must(phoneRibbon, "the 390px focus view does not name the account switch");
+      summary[`mobile-390-switching-${scheme}`] = { ribbon: "Switching to «Account B»", verified: true };
+      await phone.screenshot({ path: path.join(OUT_DIR, `964-mobile-390-switching-${scheme}.png`) });
+
+      await phone.reload({ waitUntil: "domcontentloaded", timeout: 90_000 });
+      await phone.waitForTimeout(2500);
+      const blockedTarget = phone.locator("text=Gate the release on the review verdict").first();
+      if (await blockedTarget.count()) {
+        await blockedTarget.click({ force: true });
+        await phone.waitForTimeout(1500);
+      }
+      const phoneHeader = await phone.evaluate(() => {
+        const badge = document.querySelector("header [data-card-status], [data-card-status]");
+        return badge ? { status: badge.getAttribute("data-card-status"), word: badge.textContent?.trim() } : null;
+      });
+      must(phoneHeader?.status === "needs-you", "the 390px conversation header does not carry the word");
+      summary[`mobile-390-focus-${scheme}`] = phoneHeader;
+      await phone.screenshot({ path: path.join(OUT_DIR, `964-mobile-390-focus-${scheme}.png`) });
       await phone.close();
     }
 
