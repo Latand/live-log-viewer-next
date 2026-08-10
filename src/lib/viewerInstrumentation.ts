@@ -85,7 +85,7 @@ interface CurrentReleaseControllerLoaders {
 interface ViewerRuntimeActivationSteps {
   initializeOperatorCapability: () => Promise<void>;
   startWakatime: () => Promise<void>;
-  startStructuredHosts: (() => Promise<void>) | null;
+  startStructuredHosts: (() => void) | null;
   startControllers: () => Promise<void>;
   publishHotStateActivation: () => void;
   publishViewerReleaseReady: () => void;
@@ -464,7 +464,7 @@ export async function completeViewerRuntimeActivation(
   await steps.initializeOperatorCapability();
   await steps.startWakatime();
   steps.publishHotStateActivation();
-  if (steps.startStructuredHosts) await steps.startStructuredHosts();
+  steps.startStructuredHosts?.();
   await steps.startControllers();
   steps.publishViewerReleaseReady();
 }
@@ -485,9 +485,12 @@ export async function registerViewerRuntime(): Promise<void> {
       initializeOperatorCapability: initializeOperatorSpawnCapabilityAtStartup,
       startWakatime: startWakatimeIntegrationIfEnabled,
       startStructuredHosts: structuredHostsEnabled()
-        ? async () => {
-            const { adoptStructuredHostsAtStartup } = await import("@/lib/runtime/startup");
-            await runStructuredHostStartup(adoptStructuredHostsAtStartup, console.error, { waitUntilReady: true });
+        ? () => {
+            void (async () => {
+              const { adoptStructuredHostsAtStartup } = await import("@/lib/runtime/startup");
+              await runStructuredHostStartup(adoptStructuredHostsAtStartup, console.error, { waitUntilReady: true });
+            })()
+              .catch((error) => console.error("[structured hosts] background startup aborted", error));
           }
         : null,
       startControllers: startCurrentReleaseControllers,

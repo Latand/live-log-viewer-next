@@ -256,6 +256,39 @@ test("hot-state activation beats a slow structured-host startup and the promote 
   expect(outcome).toBe("activated");
 });
 
+test("promoted serving readiness beats a legitimately slow structured-host adoption window", async () => {
+  let finishStructuredStartup!: () => void;
+  let publishReleaseReady!: () => void;
+  let structuredStartupFinished = false;
+  const structuredStartup = new Promise<void>((resolve) => {
+    finishStructuredStartup = () => {
+      structuredStartupFinished = true;
+      resolve();
+    };
+  });
+  const releaseReady = new Promise<void>((resolve) => { publishReleaseReady = resolve; });
+  const activation = completeViewerRuntimeActivation({
+    initializeOperatorCapability: async () => undefined,
+    startWakatime: async () => undefined,
+    startStructuredHosts: () => structuredStartup,
+    startControllers: async () => undefined,
+    publishHotStateActivation: () => undefined,
+    publishViewerReleaseReady: publishReleaseReady,
+  });
+
+  const outcome = await Promise.race([
+    releaseReady.then(() => "release-ready"),
+    Bun.sleep(25).then(() => "verify-promoted-timeout"),
+  ]);
+  expect({ outcome, structuredStartupFinished }).toEqual({
+    outcome: "release-ready",
+    structuredStartupFinished: false,
+  });
+
+  finishStructuredStartup();
+  await activation;
+});
+
 test("cutover import faults roll back all four collection markers and retry cleanly", async () => {
   const previousState = process.env.LLV_STATE_DIR;
   const previousPort = process.env.PORT;
