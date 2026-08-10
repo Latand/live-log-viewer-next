@@ -288,6 +288,7 @@ export interface AdoptedClaudeHost {
 }
 
 export type StructuredHostAdoptionFilter = (entry: AgentRegistryEntry) => boolean;
+export type StructuredHostAdoptionProgress = (entry: AgentRegistryEntry) => void;
 
 const STRUCTURED_CLAIM_PREFIX = "structured-host:";
 const ORPHAN_TERM_GRACE_MS = 250;
@@ -396,6 +397,7 @@ export async function adoptCodexRegistryHosts(
   optionsFor: (entry: AgentRegistryEntry) => CodexAppServerHostOptions,
   env: NodeJS.ProcessEnv = process.env,
   shouldAdopt: StructuredHostAdoptionFilter = () => true,
+  processed?: StructuredHostAdoptionProgress,
 ): Promise<AdoptedCodexHost[]> {
   if (!structuredHostsEnabled(env)) return [];
   const rows = Object.values(registry.readOnlySnapshot().entries).filter((entry) =>
@@ -444,6 +446,8 @@ export async function adoptCodexRegistryHosts(
       });
     } catch (error) {
       if (!(error instanceof Error) || error.message !== "agent registry is busy") throw error;
+    } finally {
+      processed?.(entry);
     }
   }
   return adopted;
@@ -456,6 +460,7 @@ export async function adoptClaudeRegistryHosts(
   optionsFor: (entry: AgentRegistryEntry) => ClaudeStreamBrokerHostOptions,
   env: NodeJS.ProcessEnv = process.env,
   shouldAdopt: StructuredHostAdoptionFilter = () => true,
+  processed?: StructuredHostAdoptionProgress,
 ): Promise<AdoptedClaudeHost[]> {
   if (!structuredHostsEnabled(env)) return [];
   const rows = Object.values(registry.readOnlySnapshot().entries).filter((entry) =>
@@ -513,6 +518,8 @@ export async function adoptClaudeRegistryHosts(
       });
     } catch (error) {
       if (!(error instanceof Error) || error.message !== "agent registry is busy") throw error;
+    } finally {
+      processed?.(entry);
     }
   }
   return adopted;

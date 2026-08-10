@@ -1,5 +1,6 @@
 import { sqliteModeFromEnvironment } from "@/lib/agent/registry";
 import { statePath } from "@/lib/configDir";
+import { structuredStartupStatus } from "@/lib/runtime/startupStatus";
 import { HOT_STATE_BACKEND, readHotStateAuthority, readHotStateReleaseTarget } from "@/lib/state/hotStateAuthority";
 
 export const runtime = "nodejs";
@@ -27,8 +28,9 @@ function viewerReleaseStartupState(
 /* The deployment readiness gate probes this route with a 5s budget. It reads
    two small handoff records and still avoids instantiating the agent registry,
    whose first probe would otherwise pay a multi-MB parse. The activation gate
-   remains compatible with the deployed predecessor adapter; newer adapters
-   also consume releaseReady while structured-host startup finishes. */
+   remains compatible with the deployed predecessor adapter. Structured-host
+   recovery is reported independently because it may continue after serving
+   readiness. */
 export function GET(): Response {
   const startup = viewerReleaseStartupState();
   if (!startup.activationReady) {
@@ -43,6 +45,7 @@ export function GET(): Response {
       version: 1,
       registryBackendMode: sqliteModeFromEnvironment(),
       releaseReady: startup.releaseReady,
+      structuredHostStartup: structuredStartupStatus(),
     },
     { headers: { "cache-control": "no-store" } },
   );

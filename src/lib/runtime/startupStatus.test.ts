@@ -34,3 +34,61 @@ test("issue 367: the structured startup axis never reports ready before adoption
     else store.__llvStructuredHostStartupFailed = previous;
   }
 });
+
+test("structured startup status retains host adoption progress through failure and recovery", async () => {
+  const status = await import(`./startupStatus?${"progress-copy"}`);
+  const store = process as typeof process & {
+    __llvStructuredHostStartupFailed?: boolean;
+    __llvStructuredHostStartupProgress?: unknown;
+  };
+  const previousFailed = store.__llvStructuredHostStartupFailed;
+  const previousProgress = store.__llvStructuredHostStartupProgress;
+  try {
+    delete store.__llvStructuredHostStartupFailed;
+    delete store.__llvStructuredHostStartupProgress;
+    status.markStructuredHostStartupProgress({
+      phase: "adopting Claude hosts",
+      completedHosts: 7,
+      totalHosts: 19,
+    });
+    expect(status.structuredStartupStatus({ LLV_STRUCTURED_HOSTS: "1" })).toMatchObject({
+      state: "pending",
+      phase: "adopting Claude hosts",
+      completedHosts: 7,
+      totalHosts: 19,
+      updatedAt: expect.any(String),
+    });
+
+    status.markStructuredHostStartupFailed();
+    expect(status.structuredStartupStatus({ LLV_STRUCTURED_HOSTS: "1" })).toMatchObject({
+      state: "failed",
+      phase: "adopting Claude hosts",
+      completedHosts: 7,
+      totalHosts: 19,
+    });
+
+    status.markStructuredHostStartupProgress({
+      phase: "finalizing structured delivery",
+      completedHosts: 19,
+      totalHosts: 19,
+    });
+    expect(status.structuredStartupStatus({ LLV_STRUCTURED_HOSTS: "1" })).toMatchObject({
+      state: "failed",
+      phase: "finalizing structured delivery",
+      completedHosts: 19,
+      totalHosts: 19,
+    });
+    status.markStructuredHostStartupReady();
+    expect(status.structuredStartupStatus({ LLV_STRUCTURED_HOSTS: "1" })).toMatchObject({
+      state: "ready",
+      phase: "ready",
+      completedHosts: 19,
+      totalHosts: 19,
+    });
+  } finally {
+    if (previousFailed === undefined) delete store.__llvStructuredHostStartupFailed;
+    else store.__llvStructuredHostStartupFailed = previousFailed;
+    if (previousProgress === undefined) delete store.__llvStructuredHostStartupProgress;
+    else store.__llvStructuredHostStartupProgress = previousProgress;
+  }
+});
