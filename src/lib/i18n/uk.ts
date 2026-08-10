@@ -49,6 +49,13 @@ export const uk: Record<keyof typeof en, Message> = {
   "turn.lastRun": "останній прогін: {d}",
   "turn.timer": "час роботи",
 
+  // Словник статусів дошки (issue #961) — формулювання з наявних поверхонь
+  // уваги/квитанцій/ходу, одне слово на картку.
+  "cardStatus.needsYou": "потребує вас",
+  "cardStatus.held": "притримано",
+  "cardStatus.running": "працює",
+  "cardStatus.queued": "у черзі",
+
   "kind.session": "сесія",
   "kind.subagent": "субагент",
   "kind.job": "джоба",
@@ -241,6 +248,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "migrate.announceComplete": "Усі сесії {engine} тепер на {label}",
   "migrate.cardPending": "Очікує зміни акаунта — після поточного ходу",
   "migrate.cardSwitching": "Перемикання на «{label}»…",
+  "migrate.cardSwitchingUnnamed": "Змінюємо акаунт…",
   "migrate.cardFailed": "Не вдалося змінити акаунт",
   "migrate.cardRetry": "Повторити",
   "migrate.cardKeep": "Лишити на «{label}»",
@@ -273,6 +281,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "composer.sentPaths": "надіслано {count} шлях(и)",
   "composer.failedInterrupt": "не вдалося перервати",
   "composer.escapeSent": "надіслано Escape — агент перервано",
+  "composer.escapeSentWaiting": "надіслано Escape — чекаємо, поки агент зупиниться",
   "composer.spawnAria": "Запустити агента з промптом",
   "composer.resolvingAria": "Повідомлення наявному агенту — доставка почнеться після відновлення його хоста",
   "composer.sendAria": "Надіслати повідомлення агенту в tmux {target}",
@@ -280,6 +289,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "composer.queueAria": "Черга надісланих повідомлень",
   "composer.removeFromQueue": "Прибрати з черги",
   "composer.deliveryHeld": "Притримано для «{label}» — доставиться після зміни акаунта",
+  "composer.deliveryHeldUnnamed": "Притримано — доставиться після зміни акаунта",
+  "composer.deliveryHeldWaiting": "Притримано — очікує доставки",
   "composer.admissionTimedOut": "Час очікування підтвердження вичерпано. Перевіряємо надійну квитанцію; повідомлення збережено.",
   "composer.deliveryUnconfirmed": "Не вдалося підтвердити доставку. Повідомлення збережено — надішліть ще раз, щоб безпечно повторити; той самий ключ повідомлення буде використано.",
   "composer.runtimePill": "Модель і міркування — застосується до наступного повідомлення",
@@ -366,6 +377,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "outbox.queueAria": "Повідомлення, що очікують доставки",
   "outbox.queued": "У черзі",
   "outbox.delivering": "Доставляється",
+  "outbox.heldForSwitch": "Притримано для «{label}» — доставиться після перемикання",
+  "outbox.heldForSwitchUnnamed": "Притримано — доставиться після зміни акаунта",
   "outbox.delivered": "Доставлено",
   "outbox.failed": "Не доставлено",
   "outbox.cancel": "Скасувати це повідомлення",
@@ -1664,6 +1677,9 @@ export const uk: Record<keyof typeof en, Message> = {
   "viewer.closeNotification": "Закрити сповіщення",
 
   "attention.badge": { one: "{count} чекає", few: "{count} чекають", many: "{count} чекають", other: "{count} чекають" },
+  "attention.needsYou": "Чекають",
+  "attention.next": "Далі",
+  "attention.nextHint": "Сфокусувати наступного, хто чекає на тебе (N, Shift-N — назад)",
   "attention.openQueue": "Черга уваги — хто заблокований на тобі (N — наступний)",
   "attention.popoverTitle": "Чекають на тебе",
   "attention.filterOn": "Показати лише тих, хто чекає на тебе (F)",

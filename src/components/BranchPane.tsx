@@ -10,12 +10,13 @@ import { type TFunction, useLocale } from "@/lib/i18n";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
-import { cardMigrationState, postConversationMigration } from "@/lib/accounts/migration";
+import { activeCardMigration, cardMigrationState, migrationTargetName, postConversationMigration } from "@/lib/accounts/migration";
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { accountIdFromPath } from "@/lib/accounts/badge";
 
 import { AccountBadge } from "./AccountBadge";
 import { registerLinkTarget } from "./AgentLink";
+import { CardStatusBadge } from "./CardStatusBadge";
 import { DeleteFileButton } from "./DeleteFileButton";
 import { FavoriteCrown, FavoriteCrownMarker } from "./FavoriteCrown";
 import { MigrationDivider, MigrationRibbon } from "./MigrationRibbon";
@@ -47,6 +48,24 @@ const PANE_TONES: Record<PaneState, { section: string; header: string; glow?: st
   stalled: { section: "border-danger/50 shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-danger)_18%,transparent)]", header: "bg-danger-soft", glow: "var(--color-danger)" },
   done: { section: "border-border", header: "bg-sunken text-muted opacity-80 saturate-50" },
 };
+
+/* #962 quiet-card tone: the card BODY fill only, kept OUTSIDE PANE_TONES —
+   that table's header/status treatments belong to the #961 lane. Every state
+   with something to say keeps the full card surface; only `done` — inactive,
+   no attention — recedes onto the quiet surface of the depth ladder. */
+const PANE_SURFACES: Record<PaneState, string> = {
+  live: "bg-card",
+  waiting: "bg-card",
+  returned: "bg-card",
+  stalled: "bg-card",
+  done: "bg-quiet",
+};
+
+/** The pane body surface for a lifecycle state (issue #962 quiet tone).
+    Exported for the focused test: quiet applies ONLY to `done`. */
+export function paneToneSurface(state: PaneState): string {
+  return PANE_SURFACES[state];
+}
 
 /** Maps the internal (Cyrillic) file.kind discriminant to a localized label. */
 export function kindLabel(t: TFunction, kind: string): string {
@@ -162,7 +181,11 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
   const badge = engineBadge(file);
   const state = paneState(file);
   const tone = PANE_TONES[state];
-  const migState = cardMigrationState(file.migration);
+  /* Level rule (P1 held-release): a hold annotation whose target the card
+     ALREADY runs under is a completed switch's leftover — the ribbon must
+     clear on the next snapshot, never wait for a clearing event. */
+  const liveMigration = activeCardMigration(file.migration, accountIdFromPath(file.path));
+  const migState = cardMigrationState(liveMigration);
   /* The phone metadata row scrolls horizontally to stay one line (issue #177
      item 4); this tracks whether more is clipped to the right so a fade
      affordance can show, and the row swallows its own touch gestures so a scroll
@@ -265,7 +288,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
            presses that start here (wheel pan still covers scrolling). */
         data-pan-ignore
         data-link-path={file.path}
-        className={`relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border bg-card shadow-1 ${tone.section}`}
+        className={`relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border ${paneToneSurface(state)} shadow-1 ${tone.section}`}
       >
         <span
           aria-hidden
@@ -289,6 +312,9 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
         >
           <div className="flex min-w-0 items-center gap-1.5">
             <span className={`h-2 w-2 shrink-0 rounded-full ${activityDot(file.activity)}`} title={t(`branch.${state}`)} />
+            {/* The operator-facing status word (issue #961): at most one per
+                card, projected from the authorities the card already trusts. */}
+            <CardStatusBadge file={file} />
             {titleOverride ? (
               /* The owner names this pane (#658). The transcript's own title —
                  the first line of the prompt it opened with — stays in the
@@ -476,9 +502,9 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
         {migState ? (
           <MigrationRibbon
             state={migState}
-            targetLabel={file.migration?.targetLabel ?? file.migration?.targetAccountId ?? ""}
-            currentLabel={file.migration?.sourceLabel}
-            error={file.migration?.failure ?? null}
+            targetLabel={migrationTargetName(liveMigration) ?? ""}
+            currentLabel={liveMigration?.sourceLabel}
+            error={liveMigration?.failure ?? null}
             actionError={recoveryError}
             onRetry={recover ? () => void recover("retry") : undefined}
             onKeep={recover ? () => void recover("rollback") : undefined}

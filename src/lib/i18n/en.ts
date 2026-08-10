@@ -52,6 +52,13 @@ export const en = {
   "turn.lastRun": "last run: {d}",
   "turn.timer": "elapsed work time",
 
+  // Board status vocabulary (issue #961) — wording reused from the existing
+  // attention/receipt/turn surfaces, one word per card.
+  "cardStatus.needsYou": "needs you",
+  "cardStatus.held": "held",
+  "cardStatus.running": "working",
+  "cardStatus.queued": "queued",
+
   // Conversation kind labels (display of file.kind discriminant)
   "kind.session": "session",
   "kind.subagent": "subagent",
@@ -247,6 +254,7 @@ export const en = {
   "migrate.announceComplete": "All {engine} sessions now on {label}",
   "migrate.cardPending": "Account switch pending — after current turn",
   "migrate.cardSwitching": "Switching to «{label}»…",
+  "migrate.cardSwitchingUnnamed": "Switching account…",
   "migrate.cardFailed": "Account switch failed",
   "migrate.cardRetry": "Retry",
   "migrate.cardKeep": "Keep on «{label}»",
@@ -281,6 +289,7 @@ export const en = {
   "composer.sentPaths": "sent {count} path(s)",
   "composer.failedInterrupt": "couldn't interrupt",
   "composer.escapeSent": "sent Escape — agent interrupted",
+  "composer.escapeSentWaiting": "sent Escape — waiting for the agent to stop",
   "composer.spawnAria": "Launch an agent with a prompt",
   "composer.resolvingAria": "Message the existing agent — delivery starts after its host is resolved",
   "composer.sendAria": "Send a message to the agent in tmux {target}",
@@ -288,6 +297,8 @@ export const en = {
   "composer.queueAria": "Queue of sent messages",
   "composer.removeFromQueue": "Remove from queue",
   "composer.deliveryHeld": "Held for «{label}» — delivers after the account switch",
+  "composer.deliveryHeldUnnamed": "Held — delivers after the account switch",
+  "composer.deliveryHeldWaiting": "Held — waiting to be delivered",
   "composer.admissionTimedOut": "Delivery confirmation timed out. Checking the durable receipt; your message remains preserved.",
   "composer.deliveryUnconfirmed": "Delivery couldn't be confirmed. Your message is preserved — send again to retry safely; the same message key is reused.",
   "composer.runtimePill": "Model and reasoning — applies to your next message",
@@ -441,6 +452,8 @@ export const en = {
   "outbox.queueAria": "Messages waiting to be delivered",
   "outbox.queued": "Queued",
   "outbox.delivering": "Delivering",
+  "outbox.heldForSwitch": "Held for «{label}» — delivers after the switch",
+  "outbox.heldForSwitchUnnamed": "Held — delivers after the account switch",
   "outbox.delivered": "Delivered",
   "outbox.failed": "Not delivered",
   "outbox.cancel": "Cancel this message",
@@ -1723,6 +1736,9 @@ export const en = {
 
   // Viewer attention queue
   "attention.badge": { one: "{count} waiting", other: "{count} waiting" },
+  "attention.needsYou": "Needs you",
+  "attention.next": "Next",
+  "attention.nextHint": "Focus the next one waiting on you (N, Shift-N — back)",
   "attention.openQueue": "Attention queue — who is blocked on you (N — next)",
   "attention.popoverTitle": "Waiting on you",
   "attention.filterOn": "Show only those waiting on you (F)",

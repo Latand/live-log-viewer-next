@@ -28,6 +28,7 @@ import { compactPipelineLayoutFlows, compactPipelineOpenTarget, pipelineAnnounce
 import { focusHandoffBus } from "@/components/attention/focusHandoffBus";
 import { INSPECT_ZOOM } from "@/components/attention/navigate";
 import { BulkActionBar } from "./BulkActionBar";
+import { gridTilePx } from "./canvasGrid";
 import { buildFocusFrameIndex, stageAnchorAliases } from "./focusFrames";
 import { EdgeChips } from "./EdgeChips";
 import { nodesInRect, selectionBBox } from "./lasso";
@@ -93,6 +94,10 @@ interface Props {
   workerStacks?: WorkerStack[];
   /** Active project pipelines rendered as world-space desktop containers. */
   surfacePipelines?: Pipeline[];
+  /** The board's wall clock in epoch seconds, shared with the grouping model so
+      one clock bounds every automatic placement. `0` — the server render and the
+      hydration pass — bounds nothing. */
+  now?: number;
   /** Ids of not-yet-spawned conversation drafts drawn as full panes. */
   drafts: string[];
   /** Durable identities the user has crowned (issue #224): their roots lift into
@@ -194,6 +199,7 @@ export function SchemeBoard({
   allTasks = tasks,
   workerStacks = [],
   surfacePipelines = [],
+  now = 0,
   drafts,
   favorites,
   isolatedManualPaths = EMPTY_PATHS,
@@ -301,8 +307,8 @@ export function SchemeBoard({
      task cards (#531), so the pipeline reads as a single region — never a
      detached control card with a duplicate stage graph. */
   const layout = useMemo(
-    () => buildSchemeLayout(groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths, boardTasks, textExpandedIds),
-    [groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths, boardTasks, textExpandedIds],
+    () => buildSchemeLayout(groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths, boardTasks, textExpandedIds, { now }),
+    [groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths, boardTasks, textExpandedIds, now],
   );
 
   /* NO PRUNING HERE (#771). The selection outlives this view, so dropping a path
@@ -1112,7 +1118,7 @@ export function SchemeBoard({
     setDormant((prev) => (prev ? cam.z < DORMANT_EXIT_Z : cam.z < DORMANT_ENTER_Z));
   }, [cam.z]);
 
-  const tile = 24 * cam.z;
+  const tile = gridTilePx(cam.z);
 
   return (
     <>
@@ -1121,8 +1127,9 @@ export function SchemeBoard({
       /* select-none is scoped to a gesture, never to the transcripts: it covers
          the pan and the live marquee, so a rect crossing cards cannot leave
          highlighted text behind, and lifts the moment the drag commits or
-         cancels (issue #771). */
-      className={`relative min-h-0 flex-1 overflow-clip ${
+         cancels (issue #771). bg-board is the scheme canvas — the depth
+         ladder's base (#962), a notch deeper than the app canvas in dark. */
+      className={`relative min-h-0 flex-1 overflow-clip bg-board ${
         panning ? "cursor-grabbing" : taskTool ? "cursor-crosshair" : handLike ? "cursor-grab" : ""
       } ${panning || marquee ? "select-none" : ""} ${handLike ? "touch-none" : ""}`}
       tabIndex={mapMode ? undefined : 0}
@@ -1154,6 +1161,7 @@ export function SchemeBoard({
           background every frame. */}
       <div
         aria-hidden
+        data-scheme-grid
         className="pointer-events-none absolute"
         style={{
           inset: -tile,

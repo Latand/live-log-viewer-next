@@ -3,7 +3,7 @@ import type { Pipeline } from "@/lib/pipelines/types";
 import type { FileEntry } from "@/lib/types";
 
 import { reviewerBindingTargetsForRound } from "@/components/flows/flowModel";
-import { activityBand, isChildConversation, kidsIndex, projectKey, subtree } from "@/components/projectModel";
+import { activityBand, isChildConversation, kidsIndex, projectKey, schemeAgeHorizonSeconds, subtree, withinPlacementHorizon } from "@/components/projectModel";
 import { IDENTITY_CLAIM_RESOLVER, transcriptClaimResolver, type TranscriptClaimResolver } from "@/components/transcriptClaims";
 
 /*
@@ -338,6 +338,11 @@ export interface ProtectedReviewerNodesInput {
   /** Durable manual placements/expansions — a reviewer the owner opened out of a
       worker stack must render even though it carries no authorship protection. */
   pinnedPaths: ReadonlySet<string>;
+  /** Board clock in epoch seconds for the automatic-placement age horizon.
+      `0` (the default, and the server render) bounds nothing. */
+  now?: number;
+  /** Placement age horizon in seconds; defaults to the env-tunable board value. */
+  ageHorizonSeconds?: number;
 }
 
 /**
@@ -384,7 +389,15 @@ export function protectedReviewerNodes(input: ProtectedReviewerNodesInput): File
       if (!path || seen.has(path) || decked.has(path)) continue;
       if (input.renderedNodePaths.has(path) || input.hiddenPaths.has(path)) continue;
       const file = byPath.get(path);
-      if (file && (file.userAuthored || file.authorshipUnverified || input.pinnedPaths.has(path))) {
+      if (!file) continue;
+      /* Authorship protection never expires, so past the placement age horizon
+         it would keep a reviewer of a long-closed flow on the canvas forever.
+         An owner PIN is explicit intent and stays unbounded; live and running
+         work is exempt through the horizon itself. A bounded reviewer keeps its
+         row in «All conversations» and quiet history. */
+      const owned = input.pinnedPaths.has(path);
+      if (!owned && !withinPlacementHorizon(file, input.now ?? 0, input.ageHorizonSeconds ?? schemeAgeHorizonSeconds())) continue;
+      if (owned || file.userAuthored || file.authorshipUnverified) {
         out.push(file);
         seen.add(path);
       }

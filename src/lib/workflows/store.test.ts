@@ -243,6 +243,30 @@ test("workflows round-trip through the store", () => {
   expect(loaded).toEqual([wf]);
 });
 
+test("detached workflow snapshots preserve concurrent rows and durable same-row changes", () => {
+  const template = normalizeTemplate({ name: "concurrent", stages: [IMPLEMENT, REVIEW] })!;
+  saveWorkflows([]);
+  const first = loadWorkflows();
+  const second = loadWorkflows();
+  first.push(buildWorkflow({ id: "first-row", name: "concurrent", task: "First", project: "repo", repoDir: "/repo", template, mode: "manual", now: "now" }));
+  second.push(buildWorkflow({ id: "second-row", name: "concurrent", task: "Second", project: "repo", repoDir: "/repo", template, mode: "manual", now: "now" }));
+  saveWorkflows(first);
+  saveWorkflows(second);
+  expect(loadWorkflows().map((workflow) => workflow.id).sort()).toEqual(["first-row", "second-row"]);
+
+  const early = loadWorkflows();
+  const late = loadWorkflows();
+  early[0]!.state = "closed";
+  early[0]!.closedAt = "closed-first";
+  saveWorkflows(early);
+  late[0]!.state = "paused";
+  saveWorkflows(late);
+  expect(loadWorkflows().find((workflow) => workflow.id === early[0]!.id)).toMatchObject({
+    state: "closed",
+    closedAt: "closed-first",
+  });
+});
+
 test("workflow bindings follow the active conversation generation", () => {
   const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "workflow-registry.json"));
   const owner = registry.ensureConversation("codex", "/stage-a.jsonl", "a");

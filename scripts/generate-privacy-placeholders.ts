@@ -67,6 +67,16 @@ const placeholders: Placeholder[] = [
   { path: "docs/acceptance/sidebar-crown-pin/06-created-project.png", width: 1180, height: 760, description: "Redacted placeholder for the created-project empty board evidence." },
   { path: "docs/acceptance/sidebar-crown-pin/07-create-duplicate.png", width: 1180, height: 760, description: "Redacted placeholder for the duplicate-project refusal evidence." },
   { path: "docs/acceptance/sidebar-crown-pin/08-create-form-uk.png", width: 1180, height: 760, description: "Redacted placeholder for the Ukrainian create-project form evidence." },
+  { path: "docs/acceptance/attention-island/963-desktop-zero.png", width: 1280, height: 800, description: "Redacted placeholder for the muted zero-state attention island on the desktop overview." },
+  { path: "docs/acceptance/attention-island/963-desktop-one.png", width: 1280, height: 800, description: "Redacted placeholder for the attention island with one queued item on the desktop overview." },
+  { path: "docs/acceptance/attention-island/963-desktop-many.png", width: 1280, height: 800, description: "Redacted placeholder for the attention island with four queued items across three projects." },
+  { path: "docs/acceptance/attention-island/963-desktop-queue-open.png", width: 1280, height: 800, description: "Redacted placeholder for the queue popover opened from the island count." },
+  { path: "docs/acceptance/attention-island/963-desktop-filter.png", width: 1280, height: 800, description: "Redacted placeholder for the needs-me filter dimming non-queue cards on the project board." },
+  { path: "docs/acceptance/attention-island/963-desktop-next-landing.png", width: 1280, height: 800, description: "Redacted placeholder for the visible Next landing on an off-viewport blocked card." },
+  { path: "docs/acceptance/attention-island/963-desktop-cross-project.png", width: 1280, height: 800, description: "Redacted placeholder for the visible Next landing in another project's blocked card." },
+  { path: "docs/acceptance/attention-island/963-mobile-zero.png", width: 390, height: 844, description: "Redacted placeholder for the quiet zero-state island in the 390-pixel header." },
+  { path: "docs/acceptance/attention-island/963-mobile-many.png", width: 390, height: 844, description: "Redacted placeholder for the compact count and Next controls in the 390-pixel header." },
+  { path: "docs/acceptance/attention-island/963-mobile-queue-sheet.png", width: 390, height: 844, description: "Redacted placeholder for the full-width queue sheet under the 390-pixel header." },
 ];
 
 const sourceDigests: Record<string, string> = {
@@ -123,6 +133,16 @@ const sourceDigests: Record<string, string> = {
   "docs/acceptance/sidebar-crown-pin/06-created-project.png": "574e93ebfd88dde8eb2cedd5e1b46886cc6fa30fe43118fbe8d17a46a2aacd0c",
   "docs/acceptance/sidebar-crown-pin/07-create-duplicate.png": "e9b0a5fe68accb147434aa54b5603bc2ecc85fd4297921c748aa25569df4f385",
   "docs/acceptance/sidebar-crown-pin/08-create-form-uk.png": "5a646dcead75e19c1df1dcc0b36319fe8e31796e30d83ec4d039d14ea0c415ee",
+  "docs/acceptance/attention-island/963-desktop-zero.png": "0d74427f0efcf26dac13245133784824e4ab6887fb994d406f7053ed6ea3fbff",
+  "docs/acceptance/attention-island/963-desktop-one.png": "9f09d6b1da6011cbc89616a888ca289553bef937938cef954eae6a15073b87d2",
+  "docs/acceptance/attention-island/963-desktop-many.png": "39bd78d1d6185de9dc71fb9cb50a06a3f825c98a48de663fa7bc40cda4a849c7",
+  "docs/acceptance/attention-island/963-desktop-queue-open.png": "fa820c20a9553016e97bb5863972b1afca889041b77442b5c2d476e59e3f612c",
+  "docs/acceptance/attention-island/963-desktop-filter.png": "10543b93be9d4d9e308ae39c6c4854340c6f6cd2fcb15f1204430713a24269f0",
+  "docs/acceptance/attention-island/963-desktop-next-landing.png": "67b6dd994cc2a37b61178f1374cf97881fd7eecc43416602845a9a7d541d7a39",
+  "docs/acceptance/attention-island/963-desktop-cross-project.png": "472de74b5247f5f600c28a9b0b84b410b586e18e1e842a0961f192a3048122a2",
+  "docs/acceptance/attention-island/963-mobile-zero.png": "716fd18169424ec6f3cd5c5f231cbb323bdacfde754b5e1be2cf158e8f12e35d",
+  "docs/acceptance/attention-island/963-mobile-many.png": "f25dbbaf665bb78d2158648eafb810fa1fa6121dd7a6ba81baef974fe0e3e5e3",
+  "docs/acceptance/attention-island/963-mobile-queue-sheet.png": "af8996f5bec7451cf0361cbb0da3965d01cd809a2d2798a2c765982ae5f8d2c6",
 };
 
 const root = resolve(import.meta.dir, "..");

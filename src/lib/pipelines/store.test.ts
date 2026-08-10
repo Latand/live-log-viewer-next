@@ -3,8 +3,18 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { archiveSettledPipelines, buildPipeline, findPipelineRecord, loadArchivedPipelines, loadPipelines, PIPELINES_SCHEMA_VERSION, savePipelines, withPipelineMutation } from "./store";
+import { archiveSettledPipelines, buildPipeline, checkpointPipelineRollbackMirrorsForDemotion, findPipelineRecord, loadArchivedPipelines, loadPipelines, PIPELINES_SCHEMA_VERSION, savePipelines, withPipelineMutation } from "./store";
 import type { Pipeline, PipelineStage } from "./types";
+
+const ARCHIVE_CHILD = path.join(import.meta.dir, "archive.sqliteChild.ts");
+
+async function waitForFile(filename: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (!fs.existsSync(filename)) {
+    if (Date.now() > deadline) throw new Error("archive child did not reach its transaction barrier");
+    await Bun.sleep(5);
+  }
+}
 
 test("pipelines round-trip through a schema-versioned state file", () => {
   const previous = process.env.LLV_STATE_DIR;
@@ -29,6 +39,7 @@ test("pipelines round-trip through a schema-versioned state file", () => {
       now: "now",
     });
     savePipelines([pipeline]);
+    checkpointPipelineRollbackMirrorsForDemotion();
     expect(JSON.parse(fs.readFileSync(path.join(sandbox, "pipelines.json"), "utf8"))).toMatchObject({ schemaVersion: PIPELINES_SCHEMA_VERSION });
     expect(loadPipelines()).toEqual([pipeline]);
   } finally {
@@ -115,7 +126,9 @@ test("savePipelines rejects a malformed record instead of poisoning the registry
     pipeline.state = "closed"; // closed with a live cursor is exactly the poison shape
     pipeline.cursor = { stageId: "build", state: "running", input: null, activatedBy: null };
     expect(() => savePipelines([pipeline])).toThrow("malformed pipeline record");
-    expect(fs.existsSync(path.join(sandbox, "pipelines.json"))).toBe(false);
+    expect(loadPipelines()).toEqual([]);
+    checkpointPipelineRollbackMirrorsForDemotion();
+    expect(JSON.parse(fs.readFileSync(path.join(sandbox, "pipelines.json"), "utf8"))).toMatchObject({ pipelines: [] });
   } finally {
     if (previous === undefined) delete process.env.LLV_STATE_DIR;
     else process.env.LLV_STATE_DIR = previous;
@@ -224,9 +237,10 @@ test("a v2 registry migrates in memory preserving all attempt history (#353)", (
     expect(loaded[1]!.stages).toHaveLength(1);
     expect(loaded[1]!.stages[0]).toMatchObject({ kind: "run", prompt: "{{task}}", next: null, onFail: null });
     expect(loaded[1]!.cursor).toMatchObject({ stageId: loaded[1]!.stages[0]!.id, state: "pending" });
-    /* Load is read-only: the file still says v2 until the next mutation. */
+    /* Importing is read-only for the rollback file; demotion checkpoints it. */
     expect(JSON.parse(fs.readFileSync(path.join(sandbox, "pipelines.json"), "utf8")).schemaVersion).toBe(2);
     savePipelines(loaded);
+    checkpointPipelineRollbackMirrorsForDemotion();
     expect(JSON.parse(fs.readFileSync(path.join(sandbox, "pipelines.json"), "utf8")).schemaVersion).toBe(PIPELINES_SCHEMA_VERSION);
     expect(loadPipelines()).toEqual(loaded);
   });
@@ -255,13 +269,14 @@ test("a legacy registry loads pipelines with an empty durable task binding", () 
 
     expect((loaded[0] as Pipeline & { taskIds: string[] }).taskIds).toEqual([]);
     savePipelines(loaded);
+    checkpointPipelineRollbackMirrorsForDemotion();
     expect(JSON.parse(fs.readFileSync(path.join(sandbox, "pipelines.json"), "utf8")).pipelines[0].taskIds).toEqual([]);
 
     fs.writeFileSync(path.join(sandbox, "pipelines.json"), JSON.stringify({
       schemaVersion: PIPELINES_SCHEMA_VERSION,
       pipelines: [legacy],
     }), "utf8");
-    expect(() => loadPipelines()).toThrow("malformed records");
+    expect(loadPipelines()).toEqual(loaded);
   });
 });
 
@@ -296,6 +311,7 @@ test("a v4 review-loop fail edge migrates without poisoning the pipeline registr
     });
 
     savePipelines(loaded);
+    checkpointPipelineRollbackMirrorsForDemotion();
     expect(JSON.parse(fs.readFileSync(path.join(sandbox, "pipelines.json"), "utf8"))).toMatchObject({
       schemaVersion: 5,
       pipelines: [{ stages: [{ id: "build" }, { id: "review", onFail: null }] }],
@@ -433,6 +449,54 @@ test("settled pipelines archive out of the hot registry and stay readable", asyn
     expect(findPipelineRecord("aaaa0004")?.state).toBe("running");
     expect(findPipelineRecord("missing0")).toBeNull();
     expect(await archiveSettledPipelines(nowMs)).toBe(0);
+  } finally {
+    if (previous === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previous;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("pipeline archival rolls back failures and publishes one cross-collection snapshot", async () => {
+  const previous = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipelines-archive-atomic-"));
+  process.env.LLV_STATE_DIR = sandbox;
+  try {
+    const stages: PipelineStage[] = [{
+      id: "build",
+      kind: "run",
+      "prompt": "build",
+      next: null,
+      effectiveRole: { roleId: null, engine: "codex", model: "gpt-5.6-sol", effort: "medium", access: "read-write", promptScaffold: null },
+    }];
+    const settled = buildPipeline({ id: "atomic01", task: "atomic", project: "viewer", repoDir: "/repo", stages, srcPath: null, srcConversationId: null, now: "2026-07-01T00:00:00.000Z" });
+    settled.state = "closed";
+    settled.closedAt = "2026-07-02T00:00:00.000Z";
+    settled.cursor = null;
+    savePipelines([settled]);
+    const now = "2026-08-05T12:00:00.000Z";
+    await expect(archiveSettledPipelines(Date.parse(now), {
+      beforeCommit: () => { throw new Error("injected archive failure"); },
+    })).rejects.toThrow("injected archive failure");
+    expect(loadPipelines().map((pipeline) => pipeline.id)).toEqual([settled.id]);
+    expect(loadArchivedPipelines()).toEqual([]);
+
+    const ready = path.join(sandbox, "archive-ready");
+    const release = path.join(sandbox, "archive-release");
+    const child = Bun.spawn({
+      cmd: [process.execPath, ARCHIVE_CHILD, ready, release, now],
+      cwd: process.cwd(),
+      env: { ...process.env, LLV_STATE_DIR: sandbox },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    await waitForFile(ready);
+    expect(loadPipelines().map((pipeline) => pipeline.id)).toEqual([settled.id]);
+    expect(loadArchivedPipelines()).toEqual([]);
+    fs.writeFileSync(release, "release");
+    const exit = await child.exited;
+    if (exit !== 0) throw new Error(`archive child failed: ${await new Response(child.stderr).text()}`);
+    expect(loadPipelines()).toEqual([]);
+    expect(loadArchivedPipelines().map((pipeline) => pipeline.id)).toEqual([settled.id]);
   } finally {
     if (previous === undefined) delete process.env.LLV_STATE_DIR;
     else process.env.LLV_STATE_DIR = previous;

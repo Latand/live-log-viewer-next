@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
-import { clockDuration, workedCaption } from "./turnDuration";
+import { clockDuration, turnIsRunning, workedCaption } from "./turnDuration";
 
 /** Live elapsed readout for the current turn, ticking once a second. The value
     derives from `startedAt` against the wall clock on every tick, so a new
@@ -50,7 +50,7 @@ interface Props {
 export function TurnStatusBar({ file, workingLabel, workingIcon: Icon, compact = false }: Props) {
   const { t } = useLocale();
   const turn = file.lastTurn ?? null;
-  const running = file.activity === "live" && (!turn || turn.endedAt === null);
+  const running = turnIsRunning(file);
   const pad = compact ? "px-3 py-1" : "px-6 py-1.5";
 
   if (running) {

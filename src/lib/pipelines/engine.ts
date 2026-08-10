@@ -41,7 +41,7 @@ import {
 import { pipelineRepoPreflightError, pipelineRepoPreflightStatus, preflightPipelineRepo } from "./preflight";
 import { renderStagePrompt } from "./prompts";
 import { pipelineRoleLookup, resolvePipelineRole, validatePipelineRoleParams, type PipelineRoleLookup } from "./roles";
-import { buildPipeline, isEffectiveRole, loadPipelines, pipelineGraphError, pipelineIdentity, pipelineTaskLinkError, PipelineStoreError, withPipelineMutation } from "./store";
+import { buildPipeline, isEffectiveRole, loadPipelines, pipelineGraphError, pipelineIdentity, pipelineTaskLinkError, PipelineStoreError, withPipelineControllerMutation, withPipelineMutation } from "./store";
 import { ensurePipelineForTask, isTaskSpawnPipelineParams, type TaskPipelineSpawnParams, type TaskSpawnPipelineParams } from "./taskBinding";
 import type {
   CreatePipelineRequest,
@@ -2160,28 +2160,28 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
   tickStore.__llvPipelineTick = true;
   let followUp = false;
   try {
-    const result = await withPipelineMutation(async (pipelines, persist) => {
+    const result = await withPipelineControllerMutation(async (pipelines, persist) => {
       let changed = false;
       await forEachCooperatively(pipelines, async (pipeline) => {
+        const persistPipeline = () => persist([pipeline]);
         let pipelineChanged = reconcilePipelineEmbeddedFlows(pipeline, ports);
         pipelineChanged = reconcilePendingPipelineAdoptions(pipeline, ports) || pipelineChanged;
         pipelineChanged = await reconcileHistoricalAttempts(pipeline, entries, ports) || pipelineChanged;
         pipelineChanged = rebindPipelineAttemptPaths(pipeline, ports) || pipelineChanged;
-        pipelineChanged = await reconcileExhaustedVerdictRecovery(pipeline, ports, persist) || pipelineChanged;
+        pipelineChanged = await reconcileExhaustedVerdictRecovery(pipeline, ports, persistPipeline) || pipelineChanged;
         pipelineChanged = reconcileParkedVerdictMiss(pipeline, ports) || pipelineChanged;
         pipelineChanged = reconcileParkedStructuredSpawn(pipeline, ports) || pipelineChanged;
         pipelineChanged = reconcileBoundReviewFlow(pipeline, ports) || pipelineChanged;
         pipelineChanged = await reconcileUnconfirmedHosts(pipeline, ports) || pipelineChanged;
         pipelineChanged = await reconcileTerminalStageHosts(pipeline, ports) || pipelineChanged;
         if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused" && pipeline.state !== "needs_decision") {
-          pipelineChanged = await tickPipeline(pipeline, entries, ports, persist) || pipelineChanged;
+          pipelineChanged = await tickPipeline(pipeline, entries, ports, persistPipeline) || pipelineChanged;
         }
         if (pipelineChanged) {
           changed = true;
-          persist();
+          persistPipeline();
         }
       }, { batchSize: 4, timeBudgetMs: 16 });
-      if (changed) persist();
       return { pipelines, changed };
     });
     /* A pass that ends on a pending cursor (a stage just passed and advanced,

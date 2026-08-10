@@ -16,8 +16,9 @@ import { refreshRuntime, sendRuntimeMessage, useRuntimeReceiptsForArtifact, type
 import type { SelectedContextRef } from "@/lib/selection/selectedContext";
 import { useViewerSelectedContext, viewerSelectedContext } from "@/lib/selection/viewerSelectedContext";
 import { useTmuxTarget } from "@/hooks/useTmuxTarget";
+import { accountIdFromPath } from "@/lib/accounts/badge";
 import { conversationIdentity } from "@/lib/accounts/identity";
-import { cardMigrationState, migrationHoldsSends } from "@/lib/accounts/migration";
+import { activeCardMigration, cardMigrationState, migrationHoldsDelivery, migrationHoldsSends, migrationTargetName } from "@/lib/accounts/migration";
 import { getLocale, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
@@ -33,6 +34,7 @@ import {
   outboxHistory,
   outboxStateForReceiptStatus,
   rebindOutboxEchoText,
+  releaseHeldOutbox,
   transcriptEchoCount,
   updateOutbox,
   useOutbox,
@@ -1091,8 +1093,13 @@ export function TmuxComposerCore({
     : undefined;
   /* While a card is switching accounts its next send is held for the successor
      (Sol delivery fence): the composer shows the held affordance instead of
-     pretending the text reached the live predecessor pane. */
-  const holdsSends = migrationHoldsSends(cardMigrationState(file.migration));
+     pretending the text reached the live predecessor pane. Every migration
+     read below goes through `activeCardMigration`, which collapses a hold
+     annotation whose target the card ALREADY runs under — a completed switch's
+     leftover must neither promise a hold nor keep one held. */
+  const liveMigration = activeCardMigration(file.migration, accountIdFromPath(file.path));
+  const holdsSends = migrationHoldsSends(cardMigrationState(liveMigration));
+  const holdsDelivery = migrationHoldsDelivery(cardMigrationState(liveMigration));
   /* An off-screen or far-zoom pane skips the pane-resolution poll; the last
      known target keeps the composer usable the moment it comes back. */
   const target = useTmuxTarget(file.pid, canMessageWithoutPane(file) ? file.path : undefined, !pollPaused);
@@ -1506,6 +1513,32 @@ export function TmuxComposerCore({
     }
   }, [displayedRuntimeReceipts, outbox, cardId]);
 
+  /* Level-triggered release of switch-held submissions (P1: messages held for
+     an account switch were never released after the switch completed). A held
+     entry's event-shaped release signals — the successor's receipt, the
+     delivered text's transcript echo — can simply never arrive once the
+     server-side hold record is gone, so the release is re-derived from the
+     LEVEL on every snapshot: whenever this card no longer holds deliveries,
+     every parked entry returns to the queue and the serial dispatcher replays
+     it under its original idempotency key. The per-hold-cycle set damps the
+     level to one replay per transition, so a fence that momentarily outlives
+     the annotation re-parks the entry as held instead of looping the wire. */
+  const releasedHolds = useRef<{ card: string; ids: Set<string> }>({ card: cardId, ids: new Set() });
+  useEffect(() => {
+    if (releasedHolds.current.card !== cardId) releasedHolds.current = { card: cardId, ids: new Set() };
+    if (holdsDelivery) {
+      releasedHolds.current.ids.clear();
+      return;
+    }
+    for (const id of releaseHeldOutbox(cardId, releasedHolds.current.ids)) {
+      releasedHolds.current.ids.add(id);
+      /* The held attempt already settled this generation once (that is what
+         parked it). The replay is a NEW attempt under the same key: its
+         settlement record resets so the redelivery can settle the bubble. */
+      settledSendKeys.current.delete(id);
+    }
+  }, [holdsDelivery, cardId, outbox]);
+
   /* A link-arrow drop appended to the stored draft; reload it and put the
      caret at the end so the ask can be typed straight away. Goes through the
      stable ref/setter pair rather than setText — the draft is already
@@ -1654,16 +1687,26 @@ export function TmuxComposerCore({
         direct (non-queued) send, which reports through the status line. The
         bubble takes the state the receipt PROVES: a bare admission stays
         `delivering`, only a delivered receipt reads `delivered` (round-1 P1#4). */
-    const settleOutbox = (state: OutboxState, error?: string) => {
+    const settleOutbox = (state: OutboxState, error?: string, held?: boolean) => {
       if (!outboxId) return;
-      updateOutbox(cardId, outboxId, { state, settledAt: nowMs(), ...(error ? { error } : {}) });
+      /* A held settlement stamps the entry so `releaseHeldOutbox` can requeue
+         it level-wise once the switch is over — a parked hold looks exactly
+         like an in-flight delivery otherwise. */
+      updateOutbox(cardId, outboxId, {
+        state,
+        settledAt: nowMs(),
+        ...(error ? { error } : {}),
+        ...(held ? { heldForSwitch: true as const } : {}),
+      });
       if (state === "delivered") outboxImages.current.delete(outboxId);
     };
       const settleOutboxFromReceipt = (receipt: RuntimeReceipt) => {
       /* The late admission: a send that answered `pending` and settled on the receipt
          stream. This is the moment its bridge batch became durable. */
       if (receiptIsAdmitted(receipt.status)) commitBridgeFor(clientMessageId);
-      return settleOutbox(outboxStateForReceiptStatus(receipt.status));
+      /* `queued` is the admitted-and-held state on the structured plane: the
+         server parked the message (the account-switch delivery fence). */
+      return settleOutbox(outboxStateForReceiptStatus(receipt.status), undefined, receipt.status === "queued");
     };
     /* Resolve the key before selecting the payload. A generation retained after
        uncertain admission owns an immutable text/image snapshot; later edits
@@ -1821,8 +1864,17 @@ export function TmuxComposerCore({
         state: held ? (result.outcome as DeliveryReceiptState) : "sent",
         clientMessageId,
       };
-      const prior = retry ? sent.filter((item) => item.id !== retry.receiptId) : sent;
-      persistSent([...prior, entry].slice(-SENT_LIMIT));
+      /* ONE delivery state per message. A queued submission's own bubble in the
+         feed is its delivery record, so the composer's receipt row and status
+         line belong to a DIRECT send, which has no bubble. Painting both put a
+         held message on the card three times at once — «queued» receipt,
+         «Delivering» bubble, and a «Held for …» line — and left the operator to
+         reconcile them. A direct send keeps both; they are all it has. */
+      const ownsDeliveryState = !outboxId || !held;
+      if (ownsDeliveryState) {
+        const prior = retry ? sent.filter((item) => item.id !== retry.receiptId) : sent;
+        persistSent([...prior, entry].slice(-SENT_LIMIT));
+      }
       const attempt = pendingDeliveries.current.find((candidate) => candidate.key === clientMessageId);
       persistPendingDeliveries(pendingDeliveries.current.filter((candidate) => candidate.key !== clientMessageId));
       setImmediateRuntimeReceipts((current) => current.filter((candidate) =>
@@ -1832,17 +1884,33 @@ export function TmuxComposerCore({
       settleGeneration(payloadText, attempt?.images ?? sentImages);
       /* A legacy pane send that reached the pane is delivered; a migration
          hold/queue is still in flight to the successor (round-1 P1#4). */
-      settleOutbox(held ? "delivering" : "delivered");
-      setStatus({
-        kind: held ? "info" : "ok",
-        text: held
-          ? t("composer.deliveryHeld", { label: file.migration?.targetLabel ?? file.migration?.targetAccountId ?? "" })
-          : result.outcome === "resumed" || result.spawned
-            ? t("composer.spawned", { target: result.target ?? "" })
-            : result.imagePaths?.length
-              ? t("composer.sentPaths", { count: result.imagePaths.length })
-              : t("common.sent"),
-      });
+      settleOutbox(held ? "delivering" : "delivered", undefined, held);
+      if (ownsDeliveryState) {
+        /* A `held` outcome does NOT imply an account switch: the registry fence
+           also holds a delivery whose generation claim did not land. Only a card
+           that is actually switching may promise the message "delivers after the
+           account switch"; otherwise the hold is said plainly.
+           The target can be nameless for the whole pending window — the
+           annotation is published before the target identity reaches the card.
+           The hold is still true, so it is said without a name rather than held
+           for «» (an account the operator cannot recognize). */
+        const heldForSwitch = migrationHoldsDelivery(cardMigrationState(liveMigration));
+        const heldFor = migrationTargetName(liveMigration);
+        setStatus({
+          kind: held ? "info" : "ok",
+          text: held
+            ? !heldForSwitch
+              ? t("composer.deliveryHeldWaiting")
+              : heldFor
+                ? t("composer.deliveryHeld", { label: heldFor })
+                : t("composer.deliveryHeldUnnamed")
+            : result.outcome === "resumed" || result.spawned
+              ? t("composer.spawned", { target: result.target ?? "" })
+              : result.imagePaths?.length
+                ? t("composer.sentPaths", { count: result.imagePaths.length })
+                : t("common.sent"),
+        });
+      }
       /* A queued delivery must never steal focus back: the operator may
          already be typing the next message. */
       if (!outboxId) inputRef.current?.focus();

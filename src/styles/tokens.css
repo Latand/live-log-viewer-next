@@ -48,10 +48,23 @@
   --surface-sunken: #f7f7fa; /* code blocks, collapsed strips, canvas bands     */
   --surface-raised: #ffffff; /* menus, popovers, sheets, toasts                 */
 
+  /* ── Depth ladder (issue #962): scheme canvas → container well → card ──────
+     Three fixed levels so a dense board reads by depth, not by outline. The
+     board surface matches the canvas in light mode and dips slightly deeper in
+     dark; a well is the faint filled interior of a pipeline/branch container;
+     quiet is the receded surface of an inactive card. Each value clears the
+     4.5:1 small-text floor for muted/success/warning (tokens.contrast.test). */
+  --surface-board: #f3f3f6; /* scheme canvas behind the dot grid              */
+  --surface-well: #f0f0f4; /*  container-well fill under grouped cards        */
+  --surface-quiet: #fafafb; /* inactive card, no attention: recedes off white */
+
   --color-canvas: var(--surface-canvas);
   --color-card: var(--surface-card);
   --color-sunken: var(--surface-sunken);
   --color-raised: var(--surface-raised);
+  --color-board: var(--surface-board);
+  --color-well: var(--surface-well);
+  --color-quiet: var(--surface-quiet);
 
   --shadow-1: 0 1px 2px rgb(20 20 30 / 0.05); /* card  */
   --shadow-2: 0 8px 32px rgb(20 20 30 / 0.16), 0 1px 2px rgb(20 20 30 / 0.06); /* raised */
@@ -142,6 +155,12 @@
     --surface-sunken: #121216;
     --surface-raised: #1d1d24;
 
+    /* Dark depth ladder: the board dips below the canvas so cards and wells
+       climb from it — board < well < card. */
+    --surface-board: #0d0d11;
+    --surface-well: #131318;
+    --surface-quiet: #141419;
+
     --shadow-1: 0 1px 2px rgb(0 0 0 / 0.4);
     --shadow-2: 0 8px 32px rgb(0 0 0 / 0.55), 0 1px 2px rgb(0 0 0 / 0.4);
 
@@ -190,6 +209,12 @@
   --surface-card: #17171c;
   --surface-sunken: #121216;
   --surface-raised: #1d1d24;
+
+  /* Dark depth ladder: the board dips below the canvas so cards and wells
+     climb from it — board < well < card. */
+  --surface-board: #0d0d11;
+  --surface-well: #131318;
+  --surface-quiet: #141419;
 
   --shadow-1: 0 1px 2px rgb(0 0 0 / 0.4);
   --shadow-2: 0 8px 32px rgb(0 0 0 / 0.55), 0 1px 2px rgb(0 0 0 / 0.4);

@@ -353,11 +353,69 @@ test("buildSubagentTrays folds quiet engine children and promotes working ones u
 
 test("buildSubagentTrays keeps a child visible when its parent cannot host a tray", () => {
   const parent = entry({ path: "/parent", conversationId: "parent" });
-  const quiet = child({ path: "/quiet", conversationId: "quiet", parentId: "parent", parent: parent.path, activity: "idle" });
+  const quiet = child({ path: "/quiet", conversationId: "quiet", parentId: "parent", parent: parent.path, activity: "idle", mtime: NOW - 3_600 });
   const projection = buildSubagentTrays(baseInput([parent, quiet], /* no eligible host */ []));
   expect(projection.promotedPaths).toEqual(new Set(["/quiet"]));
   expect(projection.foldedPaths.size).toBe(0);
   expect(projection.traysByParent.size).toBe(0);
+});
+
+// ── automatic-placement age horizon ─────────────────────────────────────────
+
+test("an aged child folds instead of holding a full node on never-expiring evidence", () => {
+  /* A failed spawn and incomplete evidence promote at any age by rule; past the
+     horizon that promotion is exactly what fills the map with weeks-old cards. */
+  const failedSpawn = entry({
+    path: "/a",
+    conversationId: "a",
+    activity: "stalled",
+    mtime: NOW - 100 * 3_600,
+    spawn: { launchId: "l", clientAttemptId: null, accountId: null, state: "failed", initialMessage: "failed", retrySafe: true, error: "boom" },
+  });
+  expect(classifyEngineChild(failedSpawn, ctx)).toEqual({ presence: "folded", reason: "aged" });
+  const incomplete = entry({ path: "/b", conversationId: "b", activity: "stalled", mtime: NOW - 100 * 3_600 });
+  expect(classifyEngineChild(incomplete, ctx)).toEqual({ presence: "folded", reason: "aged" });
+  // Inside the horizon both still promote.
+  expect(classifyEngineChild({ ...incomplete, mtime: NOW - 3_600 }, ctx)).toEqual({ presence: "promoted", reason: "fail-visible" });
+});
+
+test("age never folds live, running, owned or pinned children", () => {
+  const ancient = { activity: "idle" as const, mtime: NOW - 100 * 3_600 };
+  const live = entry({ path: "/a", conversationId: "a", ...ancient, activity: "live" });
+  expect(classifyEngineChild(live, ctx)).toEqual({ presence: "promoted", reason: "busy" });
+  const running = entry({ path: "/b", conversationId: "b", ...ancient, proc: "running" });
+  expect(classifyEngineChild(running, ctx)).toEqual({ presence: "promoted", reason: "busy" });
+  const owned = entry({ path: "/c", conversationId: "c", ...ancient, userAuthored: true });
+  expect(classifyEngineChild(owned, ctx)).toEqual({ presence: "promoted", reason: "owner" });
+  const pinned = entry({ path: "/d", conversationId: "d", ...ancient, proc: "killed" });
+  expect(classifyEngineChild(pinned, { ...ctx, pinned: true })).toEqual({ presence: "promoted", reason: "owner" });
+});
+
+test("without a clock the age rule bounds nothing", () => {
+  const killed = entry({ path: "/a", conversationId: "a", activity: "stalled", proc: "killed", mtime: 1 });
+  expect(classifyEngineChild(killed, { ...ctx, now: epochSeconds(0) })).toEqual({ presence: "promoted", reason: "attention" });
+});
+
+test("an aged child whose parent cannot host a tray claims no board surface", () => {
+  const parent = entry({ path: "/parent", conversationId: "parent" });
+  const aged = child({ path: "/aged", conversationId: "aged", parentId: "parent", parent: parent.path, activity: "idle", proc: "killed", mtime: NOW - 100 * 3_600 });
+  const projection = buildSubagentTrays(baseInput([parent, aged], /* no eligible host */ []));
+  // No host card means no tray to fold into, so the projection claims nothing
+  // and the board's own age rule decides — it stays in «All conversations».
+  expect(projection.promotedPaths.size).toBe(0);
+  expect(projection.foldedPaths.size).toBe(0);
+  // A pin is owner intent: it survives at any age.
+  const pinned = buildSubagentTrays(baseInput([parent, aged], [], { pinnedPaths: new Set(["/aged"]) }));
+  expect(pinned.promotedPaths).toEqual(new Set(["/aged"]));
+});
+
+test("an aged attention child folds into its parent's tray and stays reachable there", () => {
+  const parent = entry({ path: "/parent", conversationId: "parent", activity: "live" });
+  const aged = child({ path: "/aged", conversationId: "aged", parentId: "parent", parent: parent.path, activity: "idle", proc: "killed", mtime: NOW - 100 * 3_600 });
+  const projection = buildSubagentTrays(baseInput([parent, aged], ["parent"]));
+  expect(projection.promotedPaths.size).toBe(0);
+  expect(projection.foldedPaths).toEqual(new Set(["/aged"]));
+  expect(projection.traysByParent.get("parent")!.members.map((member) => member.id)).toEqual(["aged"]);
 });
 
 test("buildSubagentTrays leaves viewer, hidden and claimed children to their own surfaces", () => {

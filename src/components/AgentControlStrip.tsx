@@ -13,6 +13,7 @@ import { useLocale, type MessageKey, type TFunction } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
 import { humanReceiptReasonKey, mintIdempotencyKey } from "@/components/runtime/runtimeModel";
+import { turnIsRunning } from "./turnDuration";
 import { useAgentCapabilities } from "./useAgentCapabilities";
 import {
   stripHasVisibleControls,
@@ -125,6 +126,45 @@ export interface AgentControlStripViewProps {
 }
 
 const visible = (cap: Capability) => cap.state !== "hidden";
+
+/**
+ * The strip's status line. Most entries are a finished sentence, decided when
+ * the action answered. The interrupt is not: "sent Escape — agent interrupted"
+ * asserts something about the TURN, and the card paints that same turn as a
+ * running spinner right below. So the interrupt keeps the turn it was aimed at
+ * and resolves its wording against the live turn state instead of freezing a
+ * claim that the next poll can contradict.
+ */
+type StripStatus =
+  | { kind: "ok" | "info" | "err"; text: string }
+  | { kind: "interrupt"; turnStartedAt: number | null };
+
+/**
+ * What the interrupt note may truthfully say beside the working spinner. The
+ * turn the Escape was aimed at decides, and it decides FIRST:
+ *
+ *  - the card has moved on to another turn → the note is about a turn the
+ *    operator can no longer see, so it retires;
+ *  - that same turn is still running → the Escape is on its way, and the card
+ *    says exactly that instead of announcing a stop that has not happened;
+ *  - that same turn is over → the completed interrupt, as before.
+ *
+ * Identity, not liveness, is what retires the note — and that makes retirement
+ * terminal. Retiring only while the newer turn RAN left the note to come back
+ * the moment it ended, telling the operator that a turn nobody interrupted was
+ * interrupted, and again after every turn after that.
+ */
+function resolvedStatus(
+  status: StripStatus | null,
+  file: Pick<FileEntry, "lastTurn" | "activity">,
+  t: TFunction,
+): { kind: "ok" | "info" | "err"; text: string } | null {
+  if (!status || status.kind !== "interrupt") return status;
+  if ((file.lastTurn?.startedAt ?? null) !== status.turnStartedAt) return null;
+  return turnIsRunning(file)
+    ? { kind: "ok", text: t("composer.escapeSentWaiting") }
+    : { kind: "ok", text: t("composer.escapeSent") };
+}
 
 /**
  * Operator-facing text for a compact that did not start. Receipt reasons are
@@ -320,7 +360,7 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
   /** The durable operation a confirmed compact gesture owns until it lands. */
   const compactOperationRef = useRef<string | null>(null);
   const [attachOpen, setAttachOpen] = useState(false);
-  const [status, setStatus] = useState<{ kind: "ok" | "info" | "err"; text: string } | null>(null);
+  const [status, setStatus] = useState<StripStatus | null>(null);
 
   /* One click, one command (operator request): the terminal button copies the
      COMPLETE resume command (cd + env + CLI) straight to the clipboard and
@@ -390,7 +430,11 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
             const body = (await response.json()) as { ok?: boolean; error?: string };
             return { ok: response.ok && body.ok === true, error: body.error };
           });
-      setStatus(result.ok ? { kind: "ok", text: t("composer.escapeSent") } : { kind: "err", text: result.error ?? t("composer.failedInterrupt") });
+      setStatus(result.ok
+        /* Keep the turn this Escape was aimed at: the note is about THAT turn,
+           and the spinner beside it is about whichever turn is running now. */
+        ? { kind: "interrupt", turnStartedAt: file.lastTurn?.startedAt ?? null }
+        : { kind: "err", text: result.error ?? t("composer.failedInterrupt") });
     } catch {
       setStatus({ kind: "err", text: t("common.serverUnavailable") });
     } finally {
@@ -480,7 +524,7 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
         onRecheck={() => void recheck()}
         onTerminal={() => void copyAttachCommand()}
         onToggleOverflow={() => setOverflowOpen((open) => !open)}
-        status={status}
+        status={resolvedStatus(status, file, t)}
       />
       {attachOpen ? <AttachTerminalDialog file={file} mode={attachMode} onClose={() => setAttachOpen(false)} /> : null}
     </div>

@@ -38,6 +38,7 @@ import { RoundStateIcon } from "@/components/flows/RoundIcons";
 import { canHandoff, HandoffHandle } from "@/components/HandoffHandle";
 import { isWorkflowDraftId } from "@/components/workflows/workflowModel";
 import { WorkflowDraftPane } from "@/components/workflows/WorkflowDraftPane";
+import { CardStatusBadge } from "@/components/CardStatusBadge";
 import { activityDot, cleanTitle, engineBadge, engineEdge, fmtAge } from "@/components/utils";
 import { recencyTurnInfo } from "@/components/turnDuration";
 
@@ -458,14 +459,25 @@ export const GroupsLayer = memo(function GroupsLayer({
             className="pointer-events-none absolute"
             style={{ left: group.x, top: group.y, width: group.w, height: group.h, transition: GROUP_MOVE_TRANSITION }}
           >
+            {/* Depth ladder (issue #962): a settled container is a faint FILLED
+                well — hue-washed fill over the well surface, hairline border —
+                so grouping reads by depth. Dashed stays reserved for drafts
+                (and drop targets elsewhere), which keep the warning halo. */}
             <div
               aria-hidden
-              className="absolute inset-0 rounded-[20px] border-2 border-dashed"
-              style={{
-                borderColor: color,
-                backgroundColor: soft,
-                ...(draft ? { backgroundImage: "repeating-linear-gradient(135deg, transparent 0 12px, color-mix(in srgb, var(--color-warning) 7%, transparent) 12px 14px)" } : {}),
-              }}
+              className={`absolute inset-0 rounded-[20px] ${draft ? "border-2 border-dashed" : "border"}`}
+              style={
+                draft
+                  ? {
+                      borderColor: color,
+                      backgroundColor: soft,
+                      backgroundImage: "repeating-linear-gradient(135deg, transparent 0 12px, color-mix(in srgb, var(--color-warning) 7%, transparent) 12px 14px)",
+                    }
+                  : {
+                      borderColor: `color-mix(in srgb, ${color} 32%, var(--border-default))`,
+                      backgroundColor: `color-mix(in srgb, ${color} 6%, var(--surface-well))`,
+                    }
+              }
             />
             {/* One compact header attached to the halo (#353): title, progress,
                 lifecycle, and the disclosure control — no second stage graph and
@@ -633,6 +645,10 @@ function FarLabel({ file }: { file: FileEntry }) {
         <span className="shrink-0 rounded-full px-[0.45em] font-bold" style={{ ...badge.style, fontSize: "0.72em" }}>
           {badge.label}
         </span>
+        {/* The status word survives far zoom: sized in em off the label's own
+            counter-scaled font, so it holds ≥10px on screen until the label's
+            2.6× cap — the same floor the rest of the label obeys (#961). */}
+        <CardStatusBadge file={file} fontClassName="text-[0.78em]" />
         <RateLimitBadge rateLimit={file.rateLimit} />
         <WakeupChip key={wakeupChipKey(file.pendingWakeup)} wakeup={file.pendingWakeup} interactive={false} />
         <span className="line-clamp-2 min-w-0 font-bold">{cleanTitle(file.title, 70)}</span>
@@ -694,6 +710,9 @@ function LiteNodeShell({ node, ringed, dimmed, flow }: { node: SchemeNode; ringe
               map's pointer-events-none layer, so its reason disclosure works at
               390px; the chip's own guard keeps the tap from opening the pane. */}
           <WakeupChip key={wakeupChipKey(node.file.pendingWakeup)} wakeup={node.file.pendingWakeup} className="pointer-events-auto" />
+          {/* The operator-facing status word (issue #961), same vocabulary as
+              the full card's header. */}
+          <CardStatusBadge file={node.file} />
           <RecencyChip file={node.file} className="ml-auto text-[11px]" />
         </div>
         <div className="min-w-0 flex-1 px-3 py-2.5 text-[14px] font-semibold leading-snug">
@@ -810,6 +829,9 @@ function MiniStackShell({ stack, dimmed, onSelect }: { stack: MiniStack; dimmed:
                 <span className="min-w-0 flex-1 truncate text-[11.5px] font-semibold">{cleanTitle(file.title, 70)}</span>
               </span>
               <span className="flex items-center gap-2 pl-3 text-[10.5px] text-muted">
+                {/* A collapsed branch keeps the same status word as its full
+                    card, so a held or blocked branch cannot hide in the stack. */}
+                <CardStatusBadge file={file} />
                 <span>{kindLabel(t, file.kind)}</span>
                 <span>{fmtAge(file.mtime)}</span>
                 {branches ? <span>⤷ {branches}</span> : null}

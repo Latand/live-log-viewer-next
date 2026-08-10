@@ -667,6 +667,28 @@ describe("protectedReviewerNodes", () => {
     expect(nodes({ files: [authored], flows, renderedNodePaths: new Set(["/impl"]) })).toEqual([]);
   });
 
+  test("the placement age horizon bounds an authorship-protected reviewer", () => {
+    /* Authorship protection never expires, so without the horizon a reviewer of
+       a flow closed weeks ago keeps a standalone card forever. */
+    const aged = entry({ path: "/rev-aged", userAuthored: true, mtime: NOW_SEC - 400 * 3_600 });
+    const fresh = entry({ path: "/rev-fresh", userAuthored: true, mtime: NOW_SEC - 3_600 });
+    const flows = [
+      closed({ id: "f1", implementerPath: "/i1", rounds: [round({ reviewerPath: "/rev-aged" })] }),
+      closed({ id: "f2", implementerPath: "/i2", rounds: [round({ reviewerPath: "/rev-fresh" })] }),
+    ];
+    expect(nodes({ files: [aged, fresh], flows, now: NOW_SEC })).toEqual(["/rev-fresh"]);
+    // No clock: nothing is bounded.
+    expect(new Set(nodes({ files: [aged, fresh], flows }))).toEqual(new Set(["/rev-aged", "/rev-fresh"]));
+  });
+
+  test("age never bounds a pinned, live or running reviewer", () => {
+    const aged = entry({ path: "/rev", userAuthored: true, mtime: NOW_SEC - 400 * 3_600 });
+    const flows = [closed({ id: "f1", implementerPath: "/i1", rounds: [round({ reviewerPath: "/rev" })] })];
+    expect(nodes({ files: [aged], flows, now: NOW_SEC, pinnedPaths: new Set(["/rev"]) })).toEqual(["/rev"]);
+    expect(nodes({ files: [{ ...aged, activity: "live" }], flows, now: NOW_SEC })).toEqual(["/rev"]);
+    expect(nodes({ files: [{ ...aged, proc: "running" }], flows, now: NOW_SEC })).toEqual(["/rev"]);
+  });
+
   test("skips a reviewer already drawn as a node, or manually closed", () => {
     const authored = entry({ path: "/rev", userAuthored: true });
     const flows = [closed({ id: "f1", implementerPath: "/impl", rounds: [round({ reviewerPath: "/rev" })] })];

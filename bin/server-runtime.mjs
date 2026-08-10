@@ -31,11 +31,10 @@ export function viewerChildProcessOptions(options = {}) {
 /**
  * Mirror of `structuredHostsEnabled` (and its rollback normalisation) from
  * `src/lib/runtime/flags.ts`. `bin/` is plain JS outside the TS build and
- * cannot import that module, so the predicate is duplicated — never diverged:
- * `bin/server-runtime.test.ts` pins the two to one truth table. Structured
- * hosting is on unless explicitly rolled back, and it genuinely requires Bun
- * (the journal runs on `bun:sqlite`; macOS process ownership needs the kernel
- * start token), so the launcher must select Bun on the same answer.
+ * cannot import that module, so `bin/server-runtime.test.ts` pins both readers
+ * to one truth table. Structured hosting and the authoritative hot-state
+ * collections use Bun SQLite. The hot-state requirement applies in every
+ * feature-flag configuration, so the packaged launcher always selects Bun.
  *
  * @param {Readonly<Record<string, string | undefined>>} [env]
  */
@@ -50,8 +49,5 @@ export function viewerServerBunRuntime(options = {}) {
   const env = options.env ?? process.env;
   const versions = options.versions ?? process.versions;
   const execPath = options.execPath ?? process.execPath;
-  const sqliteMode = env.LLV_AGENT_REGISTRY_SQLITE ?? "off";
-  const requiresBun = sqliteMode !== "off" || structuredHostsEnabled(env);
-  if (!requiresBun) return null;
   return versions.bun ? execPath : (env.LLV_BUN_EXECUTABLE || "bun");
 }

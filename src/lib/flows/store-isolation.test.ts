@@ -51,7 +51,7 @@ test("saveFlows honors an LLV_STATE_DIR change made after the store was imported
 
   // The write must land in the CURRENT sandbox (B), never in dir A and never in
   // the real state dir.
-  expect(fs.existsSync(path.join(dirB, "flows.json"))).toBe(true);
-  expect(fs.existsSync(path.join(dirA, "flows.json"))).toBe(false);
+  expect(fs.existsSync(path.join(dirB, "state.sqlite"))).toBe(true);
+  expect(fs.existsSync(path.join(dirA, "state.sqlite"))).toBe(false);
   expect(loadFlows().map((f) => f.id)).toEqual(["iso-test"]);
 });

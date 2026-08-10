@@ -7,6 +7,11 @@ const REVIEW_FENCES = [
   "Every finding carries file:line evidence. Clean work earns a clear NO FINDINGS verdict.",
 ];
 
+// Review rounds otherwise only ratchet scope upward: reviewers find gaps inside a
+// frame, nobody questions the frame. These two rules give the frame itself standing.
+const REVIEW_FRAME_RULES =
+  "Two standing rules. (1) Anchor the frame: when the assignment carries the requester's originating requirement, validate the work against that verbatim requirement, never against the artifact's previous revision — WRONG-PREMISE (\"this does not serve the original requirement\") is an expected verdict and outranks any finding about internal rigour. (2) Over-engineering pass: on every review, flag machinery heavier than the problem it solves (a library plus wrapper where a native primitive does), name the simpler mechanism, and report what to cut — OVER-BUILT is a first-class verdict, and a round that only removes scope is a successful round.";
+
 export const ROLE_DEFAULTS: readonly RoleDefinition[] = [
   {
     id: "orchestrator",
@@ -41,7 +46,7 @@ export const ROLE_DEFAULTS: readonly RoleDefinition[] = [
       { key: "mode", label: "Mode", description: "Reviewer context mode.", kind: "select", options: ["fresh"] },
       { key: "parallelN", label: "Parallel passes", description: "Independent review passes.", kind: "integer", min: 1, max: 8 },
     ],
-    promptScaffold: "You are a fresh-context Reviewer. Inspect {{diffSource}} with lens {{lens}}. Run {{parallelN}} independent pass(es), preserving their axes. Return severity-ranked findings with file:line evidence, or exactly NO FINDINGS when the diff is clean. Every finding is an actionable fix plan: clear problem statement, fix intent, constraints, and acceptance criteria. No copy-paste code unless absolutely necessary.",
+    promptScaffold: `You are a fresh-context Reviewer. Inspect {{diffSource}} with lens {{lens}}. Run {{parallelN}} independent pass(es), preserving their axes. Return severity-ranked findings with file:line evidence, or exactly NO FINDINGS when the diff is clean. Every finding is an actionable fix plan: clear problem statement, fix intent, constraints, and acceptance criteria. No copy-paste code unless absolutely necessary. ${REVIEW_FRAME_RULES}`,
     safetyFences: REVIEW_FENCES,
     capabilities: ["read-only"],
   },
@@ -78,7 +83,7 @@ export const ROLE_DEFAULTS: readonly RoleDefinition[] = [
     parameters: [
       { key: "mode", label: "Mode", description: "Architecture output mode.", kind: "select", options: ["design", "spec", "architecture-audit"] },
     ],
-    promptScaffold: "You are an Architect in {{mode}} mode. Ground the design in current code, state options and trade-offs, then deliver a design document. Product-source edits are prohibited.",
+    promptScaffold: `You are an Architect in {{mode}} mode. Ground the design in current code, state options and trade-offs, then deliver a design document. Product-source edits are prohibited. Open the document with the requester's originating requirement verbatim (with date and source; redact credentials and personal data). The default answer to "should we build this" is no unless that requirement demands it; validate the final design against the quote, and move cut scope into a "Deferred — not currently justified" section instead of deleting it. ${REVIEW_FRAME_RULES}`,
     safetyFences: ["Product-source edits, staging, commits, pushes, and service restarts are prohibited.", "Capture an ADR only for a hard-to-reverse decision with a material trade-off."],
     capabilities: ["read-only"],
   },

@@ -1,0 +1,124 @@
+{
+  "board": [
+    {
+      "card": "10101010.jsonl::stack",
+      "status": "queued",
+      "word": "queued",
+      "fontPx": 10
+    },
+    {
+      "card": "10101010.jsonl",
+      "status": null,
+      "word": null,
+      "fontPx": null
+    },
+    {
+      "card": "11111111.jsonl",
+      "status": "needs-you",
+      "word": "needs you",
+      "fontPx": 10
+    },
+    {
+      "card": "11111111.jsonl",
+      "status": "needs-you",
+      "word": "needs you",
+      "fontPx": 26.364
+    },
+    {
+      "card": "22222222.jsonl",
+      "status": "held",
+      "word": "held×3",
+      "fontPx": 10
+    },
+    {
+      "card": "22222222.jsonl",
+      "status": "held",
+      "word": "held×3",
+      "fontPx": 26.364
+    },
+    {
+      "card": "33333333.jsonl",
+      "status": "running",
+      "word": "working12m 34s",
+      "fontPx": 10
+    },
+    {
+      "card": "33333333.jsonl",
+      "status": "running",
+      "word": "working12m 34s",
+      "fontPx": 26.364
+    },
+    {
+      "card": "44444444.jsonl",
+      "status": "queued",
+      "word": "queued",
+      "fontPx": 10
+    },
+    {
+      "card": "44444444.jsonl",
+      "status": "queued",
+      "word": "queued",
+      "fontPx": 26.364
+    },
+    {
+      "card": "55555555.jsonl",
+      "status": null,
+      "word": null,
+      "fontPx": null
+    },
+    {
+      "card": "99999999.jsonl",
+      "status": "needs-you",
+      "word": "needs you",
+      "fontPx": 10
+    },
+    {
+      "card": "99999999.jsonl",
+      "status": "needs-you",
+      "word": "needs you",
+      "fontPx": 26.364
+    }
+  ],
+  "stack": {
+    "key": "$HOME/.claude/projects/$HOME-Projects-atlas/10101010.jsonl::stack",
+    "badges": [
+      "queued"
+    ]
+  },
+  "switchboard": [
+    {
+      "status": "needs-you",
+      "word": "needs you",
+      "fontPx": 10
+    },
+    {
+      "status": "needs-you",
+      "word": "needs you",
+      "fontPx": 10
+    },
+    {
+      "status": "running",
+      "word": "working12m 34s",
+      "fontPx": 10
+    },
+    {
+      "status": "held",
+      "word": "held×3",
+      "fontPx": 10
+    },
+    {
+      "status": "queued",
+      "word": "queued",
+      "fontPx": 10
+    }
+  ],
+  "mobileFocus": {
+    "status": "needs-you",
+    "word": "needs you",
+    "fontPx": 10
+  },
+  "mobileMap": {
+    "markers": 8,
+    "surface": "marker map (#418), unchanged by #961"
+  }
+}
