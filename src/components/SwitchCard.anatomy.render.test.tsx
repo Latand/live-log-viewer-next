@@ -37,16 +37,16 @@ function file(overrides: Partial<FileEntry> = {}): FileEntry {
   } as unknown as FileEntry;
 }
 
-function card(entry: FileEntry): string {
+function card(entry: FileEntry, size: "large" | "small" = "large", descendants = 0): string {
   return renderToStaticMarkup(
     <SwitchCard
       file={entry}
       title="Session"
       project="demo"
       currentProject="demo"
-      descendants={0}
+      descendants={descendants}
       statusLine="working on the release"
-      size="large"
+      size={size}
       tone="working"
       onOpen={() => {}}
       onArchive={() => {}}
@@ -105,6 +105,49 @@ test("a quiet card's ops row carries no operational chips, only recency facts", 
      after the switch completes. */
   expect(html).toContain('data-card-switch="settled"');
   expect(html).toContain("@ acct-a");
+});
+
+/** The opening tag that carries `marker` (as an attribute), for class checks. */
+function tagWithMarker(html: string, marker: string): string {
+  const at = html.indexOf(marker);
+  expect(at).toBeGreaterThan(-1);
+  return html.slice(html.lastIndexOf("<", at), html.indexOf(">", at) + 1);
+}
+
+function classTokens(tag: string): string[] {
+  return (/class="([^"]*)"/.exec(tag)?.[1] ?? "").split(/\s+/);
+}
+
+/*
+ * #964 review, finding 1: the ops row clips with overflow-hidden, so a
+ * non-shrinking chip pushed past the card edge became unreachable in mixed
+ * states. Every operational chip must participate in flex shrinking (it
+ * truncates under pressure instead of leaving the row) and must carry its
+ * complete fact on title/aria so the truncated face stays reachable. The
+ * rendered-evidence driver asserts the resulting geometry in a real browser
+ * at both card widths; this test pins the shrink contract itself.
+ */
+test("mixed-state ops chips shrink under pressure instead of clipping, at both card widths", () => {
+  for (const size of ["large", "small"] as const) {
+    const html = card(MIXED, size, 2);
+    for (const marker of ['data-card-switch="switching"', "data-rate-limited"]) {
+      const tokens = classTokens(tagWithMarker(html, marker));
+      expect(tokens).toContain("min-w-0");
+      expect(tokens).toContain("shrink");
+      expect(tokens).not.toContain("shrink-0");
+      expect(tagWithMarker(html, marker)).toMatch(/title="[^"]+"/);
+    }
+    /* The wakeup chip's shrink policy lives on its wrapper span, one tag out
+       from the data-wakeup button; the full time + reason ride the button. */
+    const wakeAt = html.indexOf("data-wakeup");
+    expect(wakeAt).toBeGreaterThan(-1);
+    const wrapper = html.slice(html.lastIndexOf("<span", wakeAt), wakeAt);
+    const wrapperTokens = (/class="([^"]*)"/.exec(wrapper)?.[1] ?? "").split(/\s+/);
+    expect(wrapperTokens).toContain("min-w-0");
+    expect(wrapperTokens).toContain("shrink");
+    expect(wrapperTokens).not.toContain("shrink-0");
+    expect(tagWithMarker(html, "data-wakeup")).toMatch(/title="[^"]+"/);
+  }
 });
 
 test("the identity row carries exactly one primary identity treatment", () => {

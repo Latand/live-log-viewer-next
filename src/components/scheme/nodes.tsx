@@ -724,11 +724,11 @@ export function LiteNodeShell({ node, ringed, dimmed, flow }: { node: SchemeNode
             join only when non-default. */}
         <div data-card-row="ops" className="flex shrink-0 items-center gap-1.5 overflow-hidden border-t border-border px-3 py-2 text-[11px] font-semibold text-muted">
           <AccountSwitchChip file={node.file} fontClassName="text-[10px]" />
-          <RateLimitBadge file={node.file} />
+          <RateLimitBadge file={node.file} shrinkable />
           {/* pointer-events-auto re-enables taps for just the chip inside the
               map's pointer-events-none layer, so its reason disclosure works at
               390px; the chip's own guard keeps the tap from opening the pane. */}
-          <WakeupChip key={wakeupChipKey(node.file.pendingWakeup)} wakeup={node.file.pendingWakeup} className="pointer-events-auto" />
+          <WakeupChip key={wakeupChipKey(node.file.pendingWakeup)} wakeup={node.file.pendingWakeup} className="pointer-events-auto" shrinkable />
           {node.under.length ? (
             <span className="shrink-0">
               {node.under.length} {t("scheme.underneath")}

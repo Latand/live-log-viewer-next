@@ -83,7 +83,7 @@ export function AccountSwitchChip({
     return (
       <span
         data-card-switch="settled"
-        className={`inline-flex min-w-0 shrink-0 items-center gap-1 rounded-full border border-border/80 px-1.5 py-0.5 font-mono ${fontClassName} text-muted`}
+        className={`inline-flex min-w-0 shrink items-center gap-1 rounded-full border border-border/80 px-1.5 py-0.5 font-mono ${fontClassName} text-muted`}
         title={t("branch.accountAria", { id: facts.accountId })}
       >
         <span
@@ -115,11 +115,11 @@ export function AccountSwitchChip({
   return (
     <span
       data-card-switch={facts.kind}
-      className={`inline-flex min-w-0 shrink-0 items-center gap-1 rounded-full border px-1.5 py-0.5 font-bold ${fontClassName} ${SWITCH_TONE[facts.kind]}`}
+      className={`inline-flex min-w-0 shrink items-center gap-1 rounded-full border px-1.5 py-0.5 font-bold ${fontClassName} ${SWITCH_TONE[facts.kind]}`}
       title={title}
       aria-label={title}
     >
-      <span aria-hidden>⇄</span>
+      <span aria-hidden className="shrink-0">⇄</span>
       <span className="truncate">{face}</span>
     </span>
   );

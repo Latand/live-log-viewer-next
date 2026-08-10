@@ -113,7 +113,11 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
         <span className={large ? "line-clamp-2" : "line-clamp-2"}>{title}</span>
       </div>
       {/* Ops row: recency always anchors it; account/switch, rate limit and
-          wakeup join only when non-default, so a quiet card's row stays bare. */}
+          wakeup join only when non-default, so a quiet card's row stays bare.
+          The chips are shrink participants: in a fully mixed state each gives
+          up label width (icon + tone + ellipsis stay) rather than pushing the
+          facts after it out of the clipped row — every fact stays visible on
+          the card and complete in its title. */}
       <div data-card-row="ops" className="relative mt-auto flex min-w-0 items-center gap-1.5 overflow-hidden text-[10.5px] font-semibold text-muted">
         <span className="shrink-0">{fmtAge(file.mtime)}</span>
         {file.ctx ? <CtxChip ctx={file.ctx} /> : null}
@@ -123,8 +127,8 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
           </span>
         ) : null}
         <AccountSwitchChip file={file} />
-        <RateLimitBadge file={file} />
-        <WakeupChip key={wakeupChipKey(file.pendingWakeup)} wakeup={file.pendingWakeup} />
+        <RateLimitBadge file={file} shrinkable />
+        <WakeupChip key={wakeupChipKey(file.pendingWakeup)} wakeup={file.pendingWakeup} shrinkable />
       </div>
       {statusLine ? (
         <div

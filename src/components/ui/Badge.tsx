@@ -21,19 +21,25 @@ const TONE: Record<BadgeTone, string> = {
 export function Badge({
   tone = "neutral",
   className = "",
+  shrinkable = false,
   style,
   children,
   ...rest
 }: {
   tone?: BadgeTone;
   className?: string;
+  /** Opt into flex shrinking for clipped single-line rows (the #964 card ops
+      rows): the badge truncates its content instead of pushing later chips out
+      of the row. Hosts wrap their text in `min-w-0 truncate` to pick the
+      ellipsis point. */
+  shrinkable?: boolean;
   /** Inline colors for the engine/model/verdict tints, which are computed, not roles. */
   style?: CSSProperties;
   children: ReactNode;
 } & Omit<ComponentPropsWithoutRef<"span">, "style" | "className" | "children">) {
   return (
     <span
-      className={`inline-flex min-h-5 shrink-0 items-center gap-1 whitespace-nowrap rounded-full px-2 py-0.5 text-caption font-semibold leading-none tabular-nums ${
+      className={`inline-flex min-h-5 ${shrinkable ? "min-w-0 shrink" : "shrink-0"} items-center gap-1 whitespace-nowrap rounded-full px-2 py-0.5 text-caption font-semibold leading-none tabular-nums ${
         style ? "" : TONE[tone]
       } ${className}`}
       style={style}

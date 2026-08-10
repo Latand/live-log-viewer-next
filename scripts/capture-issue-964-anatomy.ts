@@ -18,16 +18,23 @@
  *
  * Shots land outside the repository for direct inspection:
  *
- *   <out>/964-switchboard-dark.png       — the 9-state switch-card matrix, dark
+ *   <out>/964-switchboard-dark.png       — the full switch-card state matrix, dark
  *   <out>/964-switchboard-light.png      — the same matrix, light
  *   <out>/964-board-dense-dark.png       — full board, ops facts on full cards
  *   <out>/964-far-zoom-dark.png          — far labels: status → title → ops chips
  *   <out>/964-stack-collapsed-dark.png   — collapsed rows: status leads, switch on ops line
- *   <out>/964-mobile-390-switching-*.png — 390 px focus view naming the switch
- *   <out>/964-mobile-390-focus-*.png     — 390 px focus view, needs-you word
+ *   <out>/964-mobile-390-<state>-*.png   — 390 px per-state frames, dark + light
+ *
+ * Two switchboard cards carry the fully mixed combination (switch + rate limit
+ * + wakeup on one ops row) — one in each fixed card width — and their chip
+ * geometry is asserted in the live DOM: every chip inside the row, none
+ * clipped away, each fact complete on its title (#964 review, finding 1).
+ * The 390 px pass walks EVERY seeded operational state on the phone's
+ * conversation surface and verifies the state's fact and the title before
+ * framing (#964 review, finding 2).
  *
  * A DOM summary (row order, chip row membership, per-state switch chips, card
- * heights) is written to evidence/issue-964/card-anatomy.json.
+ * heights and chip geometry) is written to evidence/issue-964/card-anatomy.json.
  */
 import { execSync, spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
@@ -59,6 +66,8 @@ type SeededSession = {
     | "switching"
     | "switch-failed"
     | "settled-account"
+    | "mixed-large"
+    | "mixed-small"
     | "quiet";
   /** Child of this session id — becomes a quiet subagent branch in a stack. */
   childOf?: string;
@@ -78,7 +87,21 @@ const SESSIONS: SeededSession[] = [
   { id: "12121212", title: "Rebalance the account pool", agoMinutes: 4, status: "switching" },
   { id: "13131313", title: "Rotate the burndown fixtures", agoMinutes: 40, status: "switch-failed" },
   { id: "14141414", title: "Summarize the incident review", agoMinutes: 90, status: "settled-account" },
+  /* The fully mixed combination — switch + rate limit + wakeup on ONE ops row —
+     in each fixed card width: the rate limit lands this card in the waiting
+     section (large, 300px)… */
+  { id: "15151515", title: "Reconcile the quota ledger", agoMinutes: 8, status: "mixed-large" },
+  /* …while an idle preflight switch + wakeup + a subagent branch lands in the
+     recent section (small, 220px). */
+  { id: "16161616", title: "Refill the fixture pool", agoMinutes: 30, status: "mixed-small" },
+  { id: "17171717", title: "Fold the fixture branches", agoMinutes: 45, status: "quiet", childOf: "16161616" },
 ];
+
+/** The transcript home of the seeded managed account: the settled-account card
+    runs under a REAL `accounts/claude/account-b` root, so the settled ops chip,
+    the pane header's account badge, and the transcript feed all read the same
+    genuine path — no display-only rewrite. */
+const ACCOUNT_B_ID = "account-b";
 
 function must(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
@@ -97,6 +120,19 @@ function seedHome(): void {
   fs.mkdirSync(path.join(HOME, ".codex/sessions"), { recursive: true });
   const folder = path.join(HOME, ".claude/projects", projectSlug(REPO_DIR));
   fs.mkdirSync(folder, { recursive: true });
+  /* A genuine managed account: registry entry + its own transcript tree. The
+     settled-account session lives there, so its path carries the real
+     `accounts/claude/<id>` layout the settled chip and account badge read. */
+  fs.writeFileSync(
+    path.join(HOME, ".config/agent-log-viewer/state/claude-accounts.json"),
+    JSON.stringify({ version: 1, active: "default", accounts: [{ id: ACCOUNT_B_ID, label: "Account B", kind: "managed", createdAt: 0 }], retired: [] }) + "\n",
+    "utf8",
+  );
+  const accountBHome = path.join(HOME, ".config/agent-log-viewer/accounts/claude", ACCOUNT_B_ID);
+  const accountBFolder = path.join(accountBHome, "projects", projectSlug(REPO_DIR));
+  fs.mkdirSync(accountBFolder, { recursive: true });
+  /* The registry only trusts a managed home locked to its owner. */
+  fs.chmodSync(accountBHome, 0o700);
   SESSIONS.forEach((session) => {
     const uuid = sessionUuid(session.id);
     const at = new Date(CAPTURE_MS - session.agoMinutes * 60_000);
@@ -105,7 +141,7 @@ function seedHome(): void {
       { type: "user", uuid: `${uuid}-u`, timestamp: stamp, cwd: REPO_DIR, message: { role: "user", content: `${session.title}.` } },
       { type: "assistant", uuid: `${uuid}-a`, timestamp: stamp, cwd: REPO_DIR, message: { role: "assistant", model: "claude-sonnet-4-5", content: [{ type: "text", text: `${session.title} — on it.` }] } },
     ];
-    const file = path.join(folder, `${uuid}.jsonl`);
+    const file = path.join(session.status === "settled-account" ? accountBFolder : folder, `${uuid}.jsonl`);
     fs.writeFileSync(file, lines.map((line) => JSON.stringify(line)).join("\n") + "\n", "utf8");
     fs.utimesSync(file, at, at);
   });
@@ -230,10 +266,35 @@ function patchFilesPayload(payload: { files?: Array<Record<string, unknown>> }):
         failure: "successor never came up",
       };
     }
-    if (seed.status === "settled-account") {
-      /* A managed-account transcript path: the settled ops row names the
-         account the conversation runs under. Display-only rewrite. */
-      file.path = String(file.path).replace("/.claude/projects/", "/accounts/claude/account-b/.claude/projects/");
+    /* The fully mixed rows (#964 review, finding 1): switch + rate limit +
+       wakeup TOGETHER on one ops row. The rate limit routes the large card
+       into the waiting section; the idle preflight keeps the small card in
+       recent. No display rewrites — every fact is the real authority field. */
+    if (seed.status === "mixed-large") {
+      file.activity = "recent";
+      file.rateLimit = { source: "account", accountId: "default", window: "session", resetAt: (CAPTURE_MS + 45 * 60_000) / 1000 };
+      file.migration = {
+        intentId: "intent-964-mixed",
+        trigger: "quota",
+        phase: "preparing",
+        targetAccountId: "account-b",
+        targetLabel: "Account B",
+        sourceLabel: "Account A",
+        failure: null,
+      };
+      file.pendingWakeup = { fireAt: CAPTURE_MS + 25 * 60_000, reason: "recheck the quota ledger" };
+    }
+    if (seed.status === "mixed-small") {
+      file.migration = {
+        intentId: "intent-964-mixed",
+        trigger: "manual",
+        phase: "waiting-turn",
+        targetAccountId: "account-b",
+        targetLabel: "Account B",
+        sourceLabel: "Account A",
+        failure: null,
+      };
+      file.pendingWakeup = { fireAt: CAPTURE_MS + 40 * 60_000, reason: "refill the fixture pool" };
     }
     if (seed.status === "running") {
       file.activity = "live";
@@ -292,28 +353,42 @@ async function nodeClip(page: Page, suffix: string, pad = 28) {
   return { x, y, width, height };
 }
 
+type OpsChipGeometry = {
+  chip: string;
+  width: number;
+  /** How far the chip's right edge pokes past the visible ops row (px);
+      anything meaningfully positive means the chip is clipped away. */
+  overflowRight: number;
+  titled: boolean;
+};
+
 type SwitchCardFact = {
   title: string;
   rows: string[];
   height: number;
+  width: number;
   status: string | null;
   switchChip: { kind: string; text: string } | null;
   opsChips: string[];
   chipsOutsideOps: string[];
+  opsGeometry: OpsChipGeometry[];
 };
 
 /** Every switchboard card's anatomy, read from the live DOM. */
 async function switchboardFacts(page: Page): Promise<SwitchCardFact[]> {
   return page.evaluate(() => {
     const facts: SwitchCardFact[] = [];
+    type OpsChipGeometry = { chip: string; width: number; overflowRight: number; titled: boolean };
     type SwitchCardFact = {
       title: string;
       rows: string[];
       height: number;
+      width: number;
       status: string | null;
       switchChip: { kind: string; text: string } | null;
       opsChips: string[];
       chipsOutsideOps: string[];
+      opsGeometry: OpsChipGeometry[];
     };
     for (const card of Array.from(document.querySelectorAll("article[role=button]"))) {
       const rows = Array.from(card.querySelectorAll("[data-card-row]")).map((row) => row.getAttribute("data-card-row") ?? "");
@@ -329,17 +404,37 @@ async function switchboardFacts(page: Page): Promise<SwitchCardFact[]> {
           if (!ops?.contains(chip)) outside.push(marker);
         }
       }
+      /* Clipping check (#964 review, finding 1): rects come unclipped even
+         inside overflow-hidden, so a chip pushed past the row's right edge is
+         measurable as overflowRight > 0. */
+      const opsRect = ops?.getBoundingClientRect() ?? null;
+      const opsGeometry: OpsChipGeometry[] = [];
+      if (ops && opsRect) {
+        for (const marker of ["[data-card-switch]", "[data-rate-limited]", "[data-wakeup]"]) {
+          const chip = ops.querySelector(marker);
+          if (!chip) continue;
+          const rect = chip.getBoundingClientRect();
+          opsGeometry.push({
+            chip: marker.replace(/[[\]]/g, ""),
+            width: Math.round(rect.width * 10) / 10,
+            overflowRight: Math.round((rect.right - opsRect.right) * 10) / 10,
+            titled: Boolean(chip.getAttribute("title") || chip.getAttribute("aria-label")),
+          });
+        }
+      }
       const switchChip = card.querySelector("[data-card-switch]");
       facts.push({
         title: (card.querySelector('[data-card-row="content"]')?.textContent ?? "").trim().slice(0, 48),
         rows,
         height: Math.round(card.getBoundingClientRect().height),
+        width: Math.round(card.getBoundingClientRect().width),
         status: card.querySelector("[data-card-status]")?.getAttribute("data-card-status") ?? null,
         switchChip: switchChip
           ? { kind: switchChip.getAttribute("data-card-switch") ?? "", text: (switchChip.textContent ?? "").trim() }
           : null,
         opsChips,
         chipsOutsideOps: outside,
+        opsGeometry,
       });
     }
     return facts;
@@ -367,6 +462,27 @@ function verifySwitchboard(facts: SwitchCardFact[]): void {
   must(by("Poll")?.opsChips.includes("wakeup") === true, "the wakeup left the ops row");
   const quiet = by("Write");
   must(quiet !== undefined && quiet.status === null && quiet.opsChips.length === 0, "the quiet card grew chips");
+
+  /* #964 review, finding 1: with switch + rate limit + wakeup on ONE row, no
+     chip may be clipped out of the visible ops row — each stays ≥16px wide
+     (icon + tone survive) and keeps its complete fact on title/aria. Checked
+     at BOTH fixed card widths. */
+  const mixedGeometry = (title: string, expectedWidth: number, chips: string[]) => {
+    const fact = by(title);
+    must(fact !== undefined, `the mixed card «${title}» is missing from the switchboard`);
+    must(fact!.width === expectedWidth, `«${title}» is not the ${expectedWidth}px card: ${fact!.width}`);
+    for (const chip of chips) {
+      const geometry = fact!.opsGeometry.find((entry) => entry.chip === chip);
+      must(geometry !== undefined, `«${title}» lost its ${chip} chip from the ops row`);
+      must(geometry!.width >= 16, `«${title}»'s ${chip} chip collapsed below visibility: ${geometry!.width}px`);
+      must(geometry!.overflowRight <= 0.5, `«${title}»'s ${chip} chip is clipped past the ops row by ${geometry!.overflowRight}px`);
+      must(geometry!.titled, `«${title}»'s ${chip} chip carries no title/aria fact`);
+    }
+  };
+  mixedGeometry("Reconcile", 300, ["data-card-switch", "data-rate-limited", "data-wakeup"]);
+  mixedGeometry("Refill", 220, ["data-card-switch", "data-wakeup"]);
+  must(by("Reconcile")?.switchChip?.kind === "switching", "the mixed large card lost its switching chip");
+  must(by("Refill")?.switchChip?.kind === "pending", "the mixed small card lost its pending switch chip");
 }
 
 async function openSwitchboard(page: Page): Promise<void> {
@@ -393,6 +509,12 @@ async function main(): Promise<void> {
   const browser = await chromium.launch({ headless: true, ...(executablePath ? { executablePath } : {}) });
   const summary: Record<string, unknown> = {
     buildHead: execSync("git rev-parse HEAD", { cwd: repoRoot }).toString().trim(),
+    /* #964 review, finding 3: the frames are captured against the production
+       build of buildHead. Committing them necessarily creates one commit past
+       buildHead, so the enforceable head-binding invariant is: everything
+       after buildHead is evidence-only. capture-issue-964-evidence.test.ts
+       verifies exactly that. */
+    evidencePolicy: "captured at buildHead; commits after buildHead may touch only evidence/",
   };
   try {
     await waitForServer(baseUrl, server);
@@ -402,12 +524,14 @@ async function main(): Promise<void> {
 
     for (const scheme of ["dark", "light"] as const) {
       /* ── Desktop ──────────────────────────────────────────────────────── */
-      const page = await browser.newPage({ viewport: { width: 1600, height: 1000 }, deviceScaleFactor: 2, colorScheme: scheme });
+      /* 1440px tall: the switchboard matrix (waiting + working + recent, the
+         small mixed card included) must sit inside the framed viewport. */
+      const page = await browser.newPage({ viewport: { width: 1600, height: 1440 }, deviceScaleFactor: 2, colorScheme: scheme });
       await page.addInitScript(seedInit);
       await routeFiles(page);
-      /* Dense board first (the settled card's rewritten path cannot feed a
-         full pane, so it stays out of the board frame). */
-      onlyIds = SESSIONS.filter((session) => session.status !== "settled-account").map((session) => session.id);
+      /* Dense board first — every seeded state, the settled managed-account
+         conversation included (its transcript is genuinely on disk). */
+      onlyIds = SESSIONS.map((session) => session.id);
       await page.goto(`${baseUrl}/#p=${projectId}`, { waitUntil: "networkidle", timeout: 90_000 });
       await page.waitForSelector("[data-scheme-node]", { timeout: 60_000 });
       await page.waitForTimeout(1200);
@@ -486,41 +610,84 @@ async function main(): Promise<void> {
       await page.close();
 
       /* ── 390 px phone: the switchboard is desktop-only, so the phone's card
-         surface is the focus view — verify the account switch stays explicit
-         and the status word survives, per state. ─────────────────────────── */
+         surface is the focused conversation (pane header + strip). Walk EVERY
+         seeded operational state (#964 review, finding 2): open it by its
+         strip chip, verify the state's operational fact and the title in the
+         live DOM, then frame it — dark and light alike. ─────────────────── */
       const phone = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, hasTouch: true, isMobile: true, colorScheme: scheme });
       await phone.addInitScript(seedInit);
       await routeFiles(phone);
       await phone.goto(`${baseUrl}/#p=${projectId}`, { waitUntil: "domcontentloaded", timeout: 90_000 });
       await phone.waitForTimeout(2500);
-      /* The phone lands in a focus view; other conversations sit on the header
-         strip as chips titled by their conversation title. */
-      const switchingTarget = phone.locator('button[title^="Rebalance the account pool"]').first();
-      if ((await switchingTarget.count()) === 0) {
-        const visible = await phone.evaluate(() => (document.body.textContent ?? "").replace(/\s+/g, " ").slice(0, 600));
-        throw new Error(`the switching conversation is missing from the 390px strip; visible: ${visible}`);
-      }
-      await switchingTarget.click({ force: true });
-      await phone.waitForTimeout(1500);
-      const phoneRibbon = await phone.evaluate(() => document.body.textContent?.includes("Switching to «Account B»") ?? false);
-      must(phoneRibbon, "the 390px focus view does not name the account switch");
-      summary[`mobile-390-switching-${scheme}`] = { ribbon: "Switching to «Account B»", verified: true };
-      await phone.screenshot({ path: path.join(OUT_DIR, `964-mobile-390-switching-${scheme}.png`) });
-
-      await phone.reload({ waitUntil: "domcontentloaded", timeout: 90_000 });
-      await phone.waitForTimeout(2500);
-      const blockedTarget = phone.locator("text=Gate the release on the review verdict").first();
-      if (await blockedTarget.count()) {
-        await blockedTarget.click({ force: true });
+      const phoneStates: Array<{ state: string; id: string; verify: string }> = [
+        { state: "needs-you", id: "11111111", verify: "status:needs-you" },
+        { state: "held", id: "22222222", verify: "status:held" },
+        { state: "running", id: "33333333", verify: "status:running" },
+        { state: "queued", id: "44444444", verify: "wakeup" },
+        { state: "quiet", id: "55555555", verify: "quiet" },
+        { state: "rate-limited", id: "99999999", verify: "rate-limit" },
+        { state: "switching", id: "12121212", verify: "text:Switching to «Account B»" },
+        { state: "switch-failed", id: "13131313", verify: "text:Account switch failed" },
+        { state: "settled-account", id: "14141414", verify: "account:account-b" },
+      ];
+      for (const { state, id, verify } of phoneStates) {
+        const seed = SESSIONS.find((session) => session.id === id)!;
+        /* Conversations ride the header strip as chips titled by their
+           conversation title; the focused conversation keeps its chip too. */
+        const chip = phone.locator(`button[title^="${seed.title}"]`).first();
+        if ((await chip.count()) === 0) {
+          const visible = await phone.evaluate(() => (document.body.textContent ?? "").replace(/\s+/g, " ").slice(0, 600));
+          throw new Error(`the ${state} conversation is missing from the 390px strip; visible: ${visible}`);
+        }
+        await chip.click({ force: true });
         await phone.waitForTimeout(1500);
+        /* The phone folds the pane's meta row (ops chips, account badge)
+           behind the details disclosure — reachability on this surface is
+           exactly that one tap, so take it before reading the facts. */
+        const details = phone.locator('button[aria-label="Show conversation details"]').first();
+        if (await details.count()) {
+          await details.click({ force: true });
+          await phone.waitForTimeout(400);
+        }
+        /* Title stability: whatever the operational state, the conversation
+           still answers to its title on the focused surface. */
+        const titleShown = await phone.evaluate(
+          (title) => (document.body.textContent ?? "").includes(title),
+          seed.title.slice(0, 30),
+        );
+        must(titleShown, `the ${state} 390px view lost the conversation title`);
+        const observed = await phone.evaluate((expectation) => {
+          const kindOf = () => document.querySelector("[data-card-status]")?.getAttribute("data-card-status") ?? null;
+          if (expectation.startsWith("status:")) {
+            return { ok: kindOf() === expectation.slice("status:".length), detail: kindOf() };
+          }
+          if (expectation === "wakeup") {
+            const chipNode = document.querySelector("[data-wakeup]");
+            return { ok: Boolean(chipNode), detail: chipNode?.getAttribute("title") ?? chipNode?.getAttribute("aria-label") ?? null };
+          }
+          if (expectation === "rate-limit") {
+            const chipNode = document.querySelector("[data-rate-limited]");
+            return { ok: Boolean(chipNode), detail: chipNode?.getAttribute("title") ?? null };
+          }
+          if (expectation.startsWith("text:")) {
+            const needle = expectation.slice("text:".length);
+            return { ok: (document.body.textContent ?? "").includes(needle), detail: needle };
+          }
+          if (expectation.startsWith("account:")) {
+            /* The 390px account chip is a letter circle; the full account id
+               rides its aria-label ("Open accounts for <id>"). */
+            const badge = document.querySelector("[data-conversation-account-chip]");
+            const face = `${badge?.getAttribute("aria-label") ?? ""} ${(badge?.textContent ?? "").trim()}`;
+            return { ok: face.includes(expectation.slice("account:".length)), detail: face.trim() };
+          }
+          /* quiet: no status word and no operational chips anywhere. */
+          const noisy = document.querySelector("[data-card-status], [data-wakeup], [data-rate-limited], [data-card-switch]");
+          return { ok: !noisy, detail: noisy?.tagName ?? null };
+        }, verify);
+        must(observed.ok, `the ${state} 390px view failed its check (${verify}; saw ${String(observed.detail)})`);
+        summary[`mobile-390-${state}-${scheme}`] = { verify, detail: observed.detail, titleShown: true };
+        await phone.screenshot({ path: path.join(OUT_DIR, `964-mobile-390-${state}-${scheme}.png`) });
       }
-      const phoneHeader = await phone.evaluate(() => {
-        const badge = document.querySelector("header [data-card-status], [data-card-status]");
-        return badge ? { status: badge.getAttribute("data-card-status"), word: badge.textContent?.trim() } : null;
-      });
-      must(phoneHeader?.status === "needs-you", "the 390px conversation header does not carry the word");
-      summary[`mobile-390-focus-${scheme}`] = phoneHeader;
-      await phone.screenshot({ path: path.join(OUT_DIR, `964-mobile-390-focus-${scheme}.png`) });
       await phone.close();
     }
 
