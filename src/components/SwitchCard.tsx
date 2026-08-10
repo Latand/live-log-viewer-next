@@ -7,13 +7,14 @@ import { projectDisplayName } from "@/lib/displayNames";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
+import { AccountSwitchChip, CardIdentityChip } from "./cardAnatomy";
 import { CardStatusBadge } from "./CardStatusBadge";
 import { EffortPills } from "./EffortPills";
 import { CtxChip } from "./PlanChip";
 import { ProcessStatusControls } from "./TaskHeader";
 import { RateLimitBadge } from "./RateLimitBadge";
 import { WakeupChip, wakeupChipKey } from "./WakeupChip";
-import { activityDot, cleanTitle, effortTint, effortTitle, engineBadge, fmtAge } from "./utils";
+import { activityDot, cleanTitle, fmtAge } from "./utils";
 
 export type SwitchCardSize = "large" | "small";
 export type SwitchCardTone = "waiting" | "stalled" | "working" | "quiet";
@@ -54,7 +55,6 @@ function statusToneClass(tone: SwitchCardTone): string {
 
 export function SwitchCard({ file, title, project, currentProject, descendants, statusLine, size, tone, onOpen, onArchive }: Props) {
   const { t } = useLocale();
-  const badge = engineBadge(file);
   const large = size === "large";
   return (
     <article
@@ -85,24 +85,13 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
           <X className="h-3 w-3" aria-hidden />
         </button>
       )}
-      <div className="relative flex min-w-0 items-center gap-1.5">
+      {/* Fixed anatomy (issue #964): identity/status row — activity, ONE
+          identity treatment (model or engine; effort rides beside it and in the
+          tooltip), the #961 status word, and where the card lives. */}
+      <div data-card-row="identity" className="relative flex min-w-0 items-center gap-1.5">
         <span className={`h-2 w-2 shrink-0 rounded-full ${activityDot(file.activity)}`} />
-        {/* One identity chip: the model when known (engine lives in the tint
-            and the tooltip), the engine label as fallback. */}
-        {file.model ? (
-          <span
-            className="min-w-0 truncate rounded-full px-1.5 py-0.5 font-mono text-[9px] font-semibold"
-            style={{ backgroundColor: effortTint(file).soft, color: effortTint(file).color }}
-            title={[badge.label, effortTitle(file)].filter(Boolean).join(" · ")}
-          >
-            {file.model}
-          </span>
-        ) : (
-          <span className="shrink-0 rounded-full px-1.5 py-0.5 text-[9.5px] font-bold" style={badge.style} title={effortTitle(file)}>{badge.label}</span>
-        )}
+        <CardIdentityChip file={file} />
         <EffortPills file={file} />
-        <RateLimitBadge file={file} />
-        <WakeupChip key={wakeupChipKey(file.pendingWakeup)} wakeup={file.pendingWakeup} />
         {/* The operator-facing status word (issue #961): same vocabulary and
             tones as the board cards, so a switch column reads identically. */}
         <CardStatusBadge file={file} />
@@ -115,10 +104,14 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
           {projectDisplayName(project, file.projectName)}
         </span>
       </div>
-      <div className={`relative mt-2 min-w-0 ${large ? "text-[14px]" : "text-[12.5px]"} font-bold leading-snug`} title={title}>
+      {/* Content row: the title keeps its two lines whatever the card's
+          operational state — chips never crowd into this row. */}
+      <div data-card-row="content" className={`relative mt-2 min-w-0 ${large ? "text-[14px]" : "text-[12.5px]"} font-bold leading-snug`} title={title}>
         <span className={large ? "line-clamp-2" : "line-clamp-2"}>{title}</span>
       </div>
-      <div className="relative mt-auto flex min-w-0 items-center gap-2 text-[10.5px] font-semibold text-muted">
+      {/* Ops row: recency always anchors it; account/switch, rate limit and
+          wakeup join only when non-default, so a quiet card's row stays bare. */}
+      <div data-card-row="ops" className="relative mt-auto flex min-w-0 items-center gap-1.5 overflow-hidden text-[10.5px] font-semibold text-muted">
         <span className="shrink-0">{fmtAge(file.mtime)}</span>
         {file.ctx ? <CtxChip ctx={file.ctx} /> : null}
         {descendants ? (
@@ -126,6 +119,9 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
             <CornerDownRight className="h-3 w-3" aria-hidden /> {descendants}
           </span>
         ) : null}
+        <AccountSwitchChip file={file} />
+        <RateLimitBadge file={file} />
+        <WakeupChip key={wakeupChipKey(file.pendingWakeup)} wakeup={file.pendingWakeup} />
       </div>
       {statusLine ? (
         <div

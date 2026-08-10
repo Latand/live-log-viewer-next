@@ -56,6 +56,15 @@ export const uk: Record<keyof typeof en, Message> = {
   "cardStatus.running": "працює",
   "cardStatus.queued": "у черзі",
 
+  // Компактний чип перемикання акаунта в операційному рядку картки (issue #964);
+  // довші тексти migrate.card* лишаються в підказці чипа.
+  "cardSwitch.pending": "очікує перемикання",
+  "cardSwitch.pendingTo": "«{label}» очікує",
+  "cardSwitch.switching": "перемикання…",
+  "cardSwitch.switchingTo": "→ «{label}»",
+  "cardSwitch.failed": "збій перемикання",
+  "cardSwitch.route": "«{from}» → «{to}»",
+
   "kind.session": "сесія",
   "kind.subagent": "субагент",
   "kind.job": "джоба",
