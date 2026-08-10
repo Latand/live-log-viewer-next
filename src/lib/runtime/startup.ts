@@ -29,6 +29,7 @@ import {
 } from "./structuredDeliveryController";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { recoverPendingStructuredSpawns } from "./structuredSpawn";
+import { markStructuredHostStartupProgress, type StructuredHostStartupPhase } from "./startupStatus";
 
 type AdoptedStructuredHost = AdoptedCodexHost | AdoptedClaudeHost;
 let adoptedHosts: AdoptedStructuredHost[] = [];
@@ -383,11 +384,26 @@ export async function adoptStructuredHostsAtStartup(
       deferStartupWork: true,
     });
   }
+  markStructuredHostStartupProgress({
+    phase: "refreshing transcripts",
+    completedHosts: 0,
+    totalHosts: null,
+  });
   await (dependencies.refreshTranscriptState ?? refreshStructuredTranscriptState)(registry);
   let nextAdoptedHosts = await revalidateRetainedStartupHosts(registry, retryAdoptedHosts);
   retryAdoptedHosts = nextAdoptedHosts;
   const signals = await structuredStartupSignals(registry, client);
   const shouldAdopt = structuredStartupAdoptionFilter(registry, signals);
+  const adoptionCandidates = Object.values(registry.readOnlySnapshot().entries).filter((entry) =>
+    entry.structuredHost && shouldAdopt(entry));
+  const codexCandidateCount = adoptionCandidates.filter((entry) => entry.key.engine === "codex").length;
+  const claudeCandidateCount = adoptionCandidates.length - codexCandidateCount;
+  let totalHosts = adoptionCandidates.length;
+  let completedHosts = 0;
+  const reportProgress = (phase: StructuredHostStartupPhase) => {
+    markStructuredHostStartupProgress({ phase, completedHosts, totalHosts });
+  };
+  reportProgress("adopting Codex hosts");
   const resolveCodexOwner = dependencies.resolveCodexOwner ?? ((entry: AgentRegistryEntry) =>
     accountManager.resolveTranscriptOwner("codex", entry.artifactPath));
   const resolveClaudeOwner = dependencies.resolveClaudeOwner ?? ((entry: AgentRegistryEntry) =>
@@ -417,9 +433,16 @@ export async function adoptStructuredHostsAtStartup(
     },
     startupEnvironment,
     shouldAdopt,
+    () => {
+      completedHosts += 1;
+      totalHosts = Math.max(totalHosts, completedHosts);
+      reportProgress("adopting Codex hosts");
+    },
   );
+  completedHosts = Math.max(completedHosts, codexCandidateCount);
   nextAdoptedHosts = retainAdoptedHosts(nextAdoptedHosts, codex);
   retryAdoptedHosts = nextAdoptedHosts;
+  reportProgress("adopting Claude hosts");
   const claude = await (dependencies.adoptClaude ?? adoptClaudeRegistryHosts)(
     registry,
     (entry) => {
@@ -446,9 +469,16 @@ export async function adoptStructuredHostsAtStartup(
     },
     startupEnvironment,
     shouldAdopt,
+    () => {
+      completedHosts += 1;
+      totalHosts = Math.max(totalHosts, completedHosts);
+      reportProgress("adopting Claude hosts");
+    },
   );
+  completedHosts = Math.max(completedHosts, codexCandidateCount + claudeCandidateCount);
   nextAdoptedHosts = retainAdoptedHosts(nextAdoptedHosts, claude);
   retryAdoptedHosts = nextAdoptedHosts;
+  reportProgress("reconciling structured hosts");
   const candidateHostKeys = new Set(nextAdoptedHosts.map((item) => sessionKeyId(item.key)));
   const shouldRetainCandidateOrAdopt: StructuredHostAdoptionFilter = (entry) =>
     candidateHostKeys.has(sessionKeyId(entry.key)) || shouldAdopt(entry);
@@ -475,6 +505,7 @@ export async function adoptStructuredHostsAtStartup(
   const finalCodexHosts = nextAdoptedHosts.filter(
     (item): item is AdoptedCodexHost => item.key.engine === "codex",
   );
+  reportProgress("finalizing structured delivery");
   if (controllerBoundEarly) {
     await completeStructuredDeliveryQueueStartup(nextAdoptedHosts);
   } else {

@@ -52,8 +52,10 @@ import {
 import { completeRuntimeHostHandoff, stageRuntimeHostSuccessorContainer } from "../src/runtime-host/hostSuccessor";
 import {
   hasViewerDeploymentCapability,
+  promotedViewerReadinessPhase,
   viewerDeploymentRegistryBackendMode,
   viewerDeploymentReleaseReady,
+  viewerDeploymentStructuredHostStartup,
   viewerHealthRequestPlan,
   waitForViewerReadiness,
   type ViewerCandidateContainerState,
@@ -348,7 +350,12 @@ async function containerState(container: string): Promise<ViewerCandidateContain
   return await command(["docker", "inspect", "--format", "{{.State.Status}}", container]) === "running" ? "running" : "exited";
 }
 
-async function probeRoutes(candidate: ViewerReleaseIdentity, endpoint: string, expectedAssetsEndpoint?: string): Promise<ViewerHealthEvidence> {
+async function probeRoutes(
+  candidate: ViewerReleaseIdentity,
+  endpoint: string,
+  expectedAssetsEndpoint?: string,
+  reportPhase?: (phase: string) => void,
+): Promise<ViewerHealthEvidence> {
   const token = serviceToken(candidate);
   const requests = viewerHealthRequestPlan(endpoint, token);
   const root = await fetchStatus(requests.root.url, requests.root.headers);
@@ -363,6 +370,11 @@ async function probeRoutes(candidate: ViewerReleaseIdentity, endpoint: string, e
   const registryBackendMatches = observedRegistryBackendMode === expectedRegistryBackendMode;
   const releaseReady = expectedAssetsEndpoint === undefined
     || viewerDeploymentReleaseReady(capability.status, capability.text);
+  if (expectedAssetsEndpoint !== undefined) {
+    reportPhase?.(promotedViewerReadinessPhase(
+      viewerDeploymentStructuredHostStartup(capability.status, capability.text),
+    ));
+  }
   const html = authenticated?.status === 200 ? authenticated.text : root.text;
   const paths = referencedAssets(html);
   const assets = await Promise.all(paths.map(async (asset) => ({ path: asset, status: (await fetchStatus(`${endpoint}${asset}`)).status })));
@@ -400,11 +412,16 @@ async function probeRoutes(candidate: ViewerReleaseIdentity, endpoint: string, e
   };
 }
 
-async function verifyViewer(candidate: ViewerReleaseIdentity, endpoint: string, expectedAssetsEndpoint?: string): Promise<ViewerHealthEvidence> {
+async function verifyViewer(
+  candidate: ViewerReleaseIdentity,
+  endpoint: string,
+  expectedAssetsEndpoint?: string,
+  reportPhase?: (phase: string) => void,
+): Promise<ViewerHealthEvidence> {
   return waitForViewerReadiness({
     endpoint,
     inspect: () => containerState(candidate.container),
-    probe: () => probeRoutes(candidate, endpoint, expectedAssetsEndpoint),
+    probe: () => probeRoutes(candidate, endpoint, expectedAssetsEndpoint, reportPhase),
     ...(expectedAssetsEndpoint ? { maxAttempts: 90 } : {}),
   });
 }
@@ -431,9 +448,10 @@ async function verify(
     expectedAssetsEndpoint?: string;
     healthProbeCapability?: string;
     healthProbeAdmissions?: McpHealthProbeAdmissionConsumer;
+    reportPhase?: (phase: string) => void;
   } = {},
 ): Promise<ViewerHealthEvidence> {
-  const viewer = await verifyViewer(candidate, endpoint, options.expectedAssetsEndpoint);
+  const viewer = await verifyViewer(candidate, endpoint, options.expectedAssetsEndpoint, options.reportPhase);
   if (!viewer.ok) return viewer;
   if (!candidate.mcpRuntime || candidate.mcpRuntime.source !== "managed") {
     return { ...viewer, ok: false, detail: "candidate MCP runtime identity is missing" };
@@ -994,11 +1012,12 @@ async function main(): Promise<unknown> {
     return promoteTarget(candidate, (phase) => reportAdapterPhase(action, phase));
   }
   if (action === "verify-promoted") {
-    reportAdapterPhase(action, "waiting for full promoted Viewer readiness");
+    reportAdapterPhase(action, promotedViewerReadinessPhase(null));
     const candidate = release(input.candidate);
     const healthProbe = await delegatedHealthProbeAdmission(healthProbeCapability);
     return verify(candidate, stableEndpoint, {
       expectedAssetsEndpoint: candidate.endpoint,
+      reportPhase: (phase) => reportAdapterPhase(action, phase),
       ...(healthProbe ?? {}),
     });
   }

@@ -54,8 +54,8 @@ export function viewerDeploymentRegistryBackendMode(
 }
 
 /** Older release capabilities omit this field and already represent complete
- * startup. SQLite-wave releases expose an explicit false value while their
- * post-activation controllers and structured hosts are still starting. */
+ * startup. SQLite-wave releases expose an explicit false value until their
+ * post-activation serving controllers have started. */
 export function viewerDeploymentReleaseReady(status: number, body: string): boolean {
   if (!hasViewerDeploymentCapability(status, body)) return false;
   try {
@@ -63,6 +63,56 @@ export function viewerDeploymentReleaseReady(status: number, body: string): bool
   } catch {
     return false;
   }
+}
+
+export interface ViewerStructuredHostStartupProgress {
+  state: "pending" | "failed" | "ready";
+  phase: string;
+  completedHosts: number;
+  totalHosts: number | null;
+}
+
+export function viewerDeploymentStructuredHostStartup(
+  status: number,
+  body: string,
+): ViewerStructuredHostStartupProgress | null {
+  if (!hasViewerDeploymentCapability(status, body)) return null;
+  try {
+    const progress = (JSON.parse(body) as { structuredHostStartup?: unknown }).structuredHostStartup;
+    if (!progress || typeof progress !== "object" || Array.isArray(progress)) return null;
+    const candidate = progress as Record<string, unknown>;
+    const state = candidate.state;
+    const phase = candidate.phase;
+    const completedHosts = candidate.completedHosts;
+    const totalHosts = candidate.totalHosts;
+    if ((state !== "pending" && state !== "failed" && state !== "ready")
+      || typeof phase !== "string"
+      || !/^[A-Za-z0-9 -]{1,80}$/.test(phase)
+      || !Number.isSafeInteger(completedHosts)
+      || (completedHosts as number) < 0
+      || (totalHosts !== null
+        && (!Number.isSafeInteger(totalHosts)
+          || (totalHosts as number) < (completedHosts as number)))) return null;
+    return {
+      state,
+      phase,
+      completedHosts: completedHosts as number,
+      totalHosts: totalHosts as number | null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function promotedViewerReadinessPhase(
+  progress: ViewerStructuredHostStartupProgress | null,
+): string {
+  if (!progress) {
+    return "waiting for promoted Viewer serving readiness - adoption progress unavailable";
+  }
+  const total = progress.totalHosts === null ? "unknown" : String(progress.totalHosts);
+  const prefix = `waiting for promoted Viewer serving readiness - adoption ${progress.completedHosts} of ${total} - `;
+  return `${prefix}${progress.phase.slice(0, Math.max(0, 160 - prefix.length)).trimEnd()}`;
 }
 
 export interface ViewerReadinessProbe {

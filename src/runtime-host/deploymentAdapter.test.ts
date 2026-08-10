@@ -5,6 +5,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 import { HostCommandViewerDeploymentAdapter } from "./deploymentAdapter";
+import { promotedViewerReadinessPhase } from "./deploymentHealth";
 
 const sandboxes: string[] = [];
 afterEach(() => {
@@ -220,4 +221,28 @@ test("promotion deadline reports the active handoff phase", async () => {
     );
     expect(fs.existsSync(`${fixture.stateFile}.phase`)).toBe(false);
   }
+});
+
+test("post-promotion deadline reports serving readiness and host adoption progress", async () => {
+  const candidate = {
+    image: "viewer:test",
+    container: "viewer-candidate",
+    endpoint: "http://127.0.0.1:18001",
+    revision: "a".repeat(40),
+  };
+  const phase = promotedViewerReadinessPhase({
+    state: "pending",
+    phase: "adopting Claude hosts",
+    completedHosts: 7,
+    totalHosts: 19,
+  });
+  const fixture = sleepingAdapter(phase);
+  const adapter = HostCommandViewerDeploymentAdapter.fromExecutable(fixture.executable, {
+    stateFile: fixture.stateFile,
+    timeouts: { "verify-promoted": 20 },
+  });
+
+  await expect(adapter.verifyPromoted(candidate)).rejects.toThrow(
+    "deployment adapter verify-promoted timed out while waiting for promoted Viewer serving readiness - adoption 7 of 19 - adopting Claude hosts",
+  );
 });

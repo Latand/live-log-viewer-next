@@ -164,10 +164,13 @@ moving the stable target. The promoted process waits for three stable
 legacy-file observations, completes the dry run and atomic import, and changes
 the same authority epoch to `sqlite`. It adds `activationReadyAt` after the hot
 stores are initialized, then starts structured-host adoption and controllers
-before adding `releaseReadyAt`. The deployment adapter uses the first timestamp
-to complete target promotion; the capability route remains 503 until the
-second timestamp records full release startup. Slow recoverable adoption stays
-inside the longer post-promotion health gate. The release monitor starts before
+in parallel before adding `releaseReadyAt` once serving controllers have
+started. The deployment adapter uses the first timestamp to complete target
+promotion and the second timestamp to verify serving readiness, referenced
+assets, and the promoted MCP runtime. Structured-host adoption continues as a
+recoverable background task. The deployment capability publishes its current
+phase and completed/total host counts, while the runtime startup axis exposes
+pending, failed, and recovered states. The release monitor starts before
 activation work, so rollback fencing remains available during a failed or
 stalled startup.
 

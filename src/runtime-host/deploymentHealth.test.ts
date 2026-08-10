@@ -4,11 +4,13 @@ import { NextRequest } from "next/server";
 import type { ViewerHealthEvidence } from "@/lib/runtime/contracts";
 import { proxy } from "@/proxy";
 import { GET as deploymentCapability } from "@/app/api/runtime/deployments/capabilities/v1/route";
+import { markStructuredHostStartupProgress, markStructuredHostStartupReady } from "@/lib/runtime/startupStatus";
 
 import {
   hasViewerDeploymentCapability,
   viewerDeploymentRegistryBackendMode,
   viewerDeploymentReleaseReady,
+  viewerDeploymentStructuredHostStartup,
   viewerHealthRequestPlan,
   waitForViewerReadiness,
 } from "./deploymentHealth";
@@ -104,4 +106,35 @@ test("deployment capability requires the candidate-owned versioned endpoint", as
     version: 1,
     releaseReady: false,
   }))).toBe(false);
+});
+
+test("deployment capability publishes bounded structured-host adoption progress", async () => {
+  try {
+    markStructuredHostStartupProgress({
+      phase: "adopting Claude hosts",
+      completedHosts: 7,
+      totalHosts: 19,
+    });
+    const response = deploymentCapability();
+    const body = await response.text();
+
+    expect(viewerDeploymentStructuredHostStartup(response.status, body)).toMatchObject({
+      state: "pending",
+      phase: "adopting Claude hosts",
+      completedHosts: 7,
+      totalHosts: 19,
+    });
+    expect(viewerDeploymentStructuredHostStartup(200, JSON.stringify({
+      capability: "viewer-deployments",
+      version: 1,
+      structuredHostStartup: {
+        state: "pending",
+        phase: "invalid/control/phase",
+        completedHosts: 20,
+        totalHosts: 19,
+      },
+    }))).toBeNull();
+  } finally {
+    markStructuredHostStartupReady();
+  }
 });

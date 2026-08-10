@@ -15,7 +15,7 @@ import { bindStructuredDeliveryQueue, hasStructuredDeliveryHost, publishStructur
 import { createFakeDeliveryLedger, FakeEngineHost } from "./fixtures/fakeEngineHost";
 import { demoteSkippedStructuredRegistryHosts, type StructuredHostAdoptionFilter } from "./registry";
 import { deliverHeldStructuredMessage, enqueueStructuredMessage } from "./structuredMessageDelivery";
-import { didStructuredHostStartupFail } from "./startupStatus";
+import { didStructuredHostStartupFail, structuredStartupStatus } from "./startupStatus";
 import { adoptStructuredHostsAtStartup, structuredStartupHosts, type StructuredStartupDependencies } from "./startup";
 
 function runtimeClient(journal: RuntimeJournal): RuntimeHostClient {
@@ -1061,6 +1061,73 @@ async function startupAdoptionAttempts(
   });
   return attempts;
 }
+
+test("startup publishes per-host progress across the serial provider adoption loops", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-progress-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  addStructuredRestartConversation(registry, directory, {
+    engine: "codex",
+    sessionId: crypto.randomUUID(),
+    status: "live",
+    turn: "busy",
+  });
+  addStructuredRestartConversation(registry, directory, {
+    engine: "claude",
+    sessionId: crypto.randomUUID(),
+    status: "live",
+    turn: "busy",
+  });
+  const progress: unknown[] = [];
+  const capture = () => {
+    progress.push(structuredStartupStatus({ LLV_STRUCTURED_HOSTS: "1" }));
+  };
+  try {
+    await adoptStructuredHostsAtStartup({
+      registry,
+      client: null,
+      refreshTranscriptState: async () => undefined,
+      adopt: async (received, _optionsFor, _env, shouldAdopt = () => true, processed) => {
+        for (const entry of Object.values(received.snapshot().entries)) {
+          if (entry.key.engine !== "codex" || !shouldAdopt(entry)) continue;
+          processed?.(entry);
+          capture();
+        }
+        return [];
+      },
+      adoptClaude: async (received, _optionsFor, _env, shouldAdopt = () => true, processed) => {
+        for (const entry of Object.values(received.snapshot().entries)) {
+          if (entry.key.engine !== "claude" || !shouldAdopt(entry)) continue;
+          processed?.(entry);
+          capture();
+        }
+        return [];
+      },
+    });
+
+    expect(progress).toEqual([
+      expect.objectContaining({
+        state: "pending",
+        phase: "adopting Codex hosts",
+        completedHosts: 1,
+        totalHosts: 2,
+      }),
+      expect.objectContaining({
+        state: "pending",
+        phase: "adopting Claude hosts",
+        completedHosts: 2,
+        totalHosts: 2,
+      }),
+    ]);
+    expect(structuredStartupStatus({ LLV_STRUCTURED_HOSTS: "1" })).toMatchObject({
+      phase: "finalizing structured delivery",
+      completedHosts: 2,
+      totalHosts: 2,
+    });
+  } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 function claudeTerminalRecord() {
   return {
