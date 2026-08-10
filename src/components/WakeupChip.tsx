@@ -32,7 +32,20 @@ export function wakeupChipKey(wakeup?: PendingWakeup | null): string {
    chip so activating it leaves the surrounding card closed and the conversation
    unopened (issue #161 review). `interactive={false}` renders a passive,
    focus-free visual chip for always-hidden hosts like the far-zoom label. */
-export function WakeupChip({ wakeup, className, interactive = true }: { wakeup?: PendingWakeup | null; className?: string; interactive?: boolean }) {
+export function WakeupChip({
+  wakeup,
+  className,
+  interactive = true,
+  shrinkable = false,
+}: {
+  wakeup?: PendingWakeup | null;
+  className?: string;
+  interactive?: boolean;
+  /** Clipped ops rows (#964): the chip gives up width by truncating its
+      magnitude instead of pushing later facts out of the row; the full time
+      and reason keep riding the title/aria label. */
+  shrinkable?: boolean;
+}) {
   const { locale, t } = useLocale();
   const [now, setNow] = useState(() => Date.now());
   const [open, setOpen] = useState(false);
@@ -49,24 +62,25 @@ export function WakeupChip({ wakeup, className, interactive = true }: { wakeup?:
   const label = t("wakeup.chipTitle", { time: clock, reason: wakeup.reason || t("wakeup.card") });
   const face = (
     <>
-      <AlarmClock className="h-3 w-3" aria-hidden />
-      {magnitude}
+      <AlarmClock className="h-3 w-3 shrink-0" aria-hidden />
+      <span className="min-w-0 truncate">{magnitude}</span>
     </>
   );
-  const chrome = "inline-flex items-center gap-1 rounded-full border border-warning/45 bg-warning-soft px-2 py-0.5 text-[10px] font-bold text-warning";
+  const shrink = shrinkable ? "min-w-0 shrink" : "shrink-0";
+  const chrome = "inline-flex min-w-0 max-w-full items-center gap-1 rounded-full border border-warning/45 bg-warning-soft px-2 py-0.5 text-[10px] font-bold text-warning";
 
   /* A passive chip for always-hidden hosts (far-zoom label): no button, no
      focus, no handlers — a purely visual token. */
   if (!interactive) {
     return (
-      <span data-wakeup className={`${chrome} shrink-0 ${className ?? ""}`} aria-hidden>
+      <span data-wakeup className={`${chrome} ${shrink} ${className ?? ""}`} aria-hidden>
         {face}
       </span>
     );
   }
 
   return (
-    <span className={`relative inline-flex shrink-0 ${className ?? ""}`}>
+    <span className={`relative inline-flex ${shrink} ${className ?? ""}`}>
       <button
         type="button"
         data-wakeup

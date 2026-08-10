@@ -59,6 +59,15 @@ export const en = {
   "cardStatus.running": "working",
   "cardStatus.queued": "queued",
 
+  // Compact account-switch chip on card ops rows (issue #964); the longer
+  // migrate.card* copy stays in the chip title.
+  "cardSwitch.pending": "switch pending",
+  "cardSwitch.pendingTo": "«{label}» pending",
+  "cardSwitch.switching": "switching…",
+  "cardSwitch.switchingTo": "→ «{label}»",
+  "cardSwitch.failed": "switch failed",
+  "cardSwitch.route": "«{from}» → «{to}»",
+
   // Conversation kind labels (display of file.kind discriminant)
   "kind.session": "session",
   "kind.subagent": "subagent",

@@ -1,0 +1,804 @@
+{
+  "buildHead": "892eda22decc6eb41f614655737a173e54fc46c4",
+  "evidencePolicy": "captured at buildHead; commits after buildHead may touch only evidence/",
+  "stack": [
+    {
+      "rows": [
+        "identity",
+        "ops"
+      ],
+      "status": null,
+      "switchChip": null,
+      "switchInOps": null
+    },
+    {
+      "rows": [
+        "identity",
+        "ops"
+      ],
+      "status": null,
+      "switchChip": "switching",
+      "switchInOps": true
+    },
+    {
+      "rows": [
+        "identity",
+        "ops"
+      ],
+      "status": "queued",
+      "switchChip": null,
+      "switchInOps": null
+    },
+    {
+      "rows": [
+        "identity",
+        "ops"
+      ],
+      "status": null,
+      "switchChip": null,
+      "switchInOps": null
+    }
+  ],
+  "farZoom": [
+    {
+      "card": "10101010.jsonl",
+      "statusAt": -1,
+      "titleAt": 2,
+      "switchAt": -1,
+      "rateAt": -1
+    },
+    {
+      "card": "11111111.jsonl",
+      "statusAt": 2,
+      "titleAt": 3,
+      "switchAt": -1,
+      "rateAt": -1
+    },
+    {
+      "card": "12121212.jsonl",
+      "statusAt": -1,
+      "titleAt": 2,
+      "switchAt": 3,
+      "rateAt": -1
+    },
+    {
+      "card": "13131313.jsonl",
+      "statusAt": -1,
+      "titleAt": 2,
+      "switchAt": 3,
+      "rateAt": -1
+    },
+    {
+      "card": "15151515.jsonl",
+      "statusAt": 2,
+      "titleAt": 3,
+      "switchAt": 4,
+      "rateAt": 5
+    },
+    {
+      "card": "16161616.jsonl",
+      "statusAt": 2,
+      "titleAt": 3,
+      "switchAt": 4,
+      "rateAt": -1
+    },
+    {
+      "card": "22222222.jsonl",
+      "statusAt": 2,
+      "titleAt": 3,
+      "switchAt": 4,
+      "rateAt": -1
+    },
+    {
+      "card": "33333333.jsonl",
+      "statusAt": 2,
+      "titleAt": 3,
+      "switchAt": -1,
+      "rateAt": -1
+    },
+    {
+      "card": "44444444.jsonl",
+      "statusAt": 2,
+      "titleAt": 3,
+      "switchAt": -1,
+      "rateAt": -1
+    },
+    {
+      "card": "55555555.jsonl",
+      "statusAt": -1,
+      "titleAt": 2,
+      "switchAt": -1,
+      "rateAt": -1
+    },
+    {
+      "card": "99999999.jsonl",
+      "statusAt": 2,
+      "titleAt": 3,
+      "switchAt": -1,
+      "rateAt": 4
+    },
+    {
+      "card": "14141414.jsonl",
+      "statusAt": -1,
+      "titleAt": 2,
+      "switchAt": -1,
+      "rateAt": -1
+    }
+  ],
+  "switchboard-dark": [
+    {
+      "title": "Gate the release on the review verdict.",
+      "rows": [
+        "identity",
+        "content",
+        "ops"
+      ],
+      "height": 150,
+      "width": 300,
+      "status": "needs-you",
+      "switchChip": null,
+      "opsChips": [],
+      "chipsOutsideOps": [],
+      "opsGeometry": []
+    },
+    {
+      "title": "Reconcile the quota ledger.",
+      "rows": [
+        "identity",
+        "content",
+        "ops"
+      ],
+      "height": 150,
+      "width": 300,
+      "status": "needs-you",
+      "switchChip": {
+        "kind": "switching",
+        "text": "⇄→ «Account B»"
+      },
+      "opsChips": [
+        "switch:switching",
+        "rate-limit",
+        "wakeup"
+      ],
+      "chipsOutsideOps": [],
+      "opsGeometry": [
+        {
+          "chip": "data-card-switch",
+          "width": 74.3,
+          "overflowRight": -158.4,
+          "titled": true
+        },
+        {
+          "chip": "data-rate-limited",
+          "width": 95.6,
+          "overflowRight": -56.8,
+          "titled": true
+        },
+        {
+          "chip": "data-wakeup",
+          "width": 50.8,
+          "overflowRight": 0,
+          "titled": true
+        }
+      ]
+    },
+    {
+      "title": "Compare account quotas.",
+      "rows": [
+        "identity",
+        "content",
+        "ops"
+      ],
+      "height": 150,
+      "width": 300,
+      "status": "needs-you",
+      "switchChip": null,
+      "opsChips": [
+        "rate-limit"
+      ],
+      "chipsOutsideOps": [],
+      "opsGeometry": [
+        {
+          "chip": "data-rate-limited",
+          "width": 117.4,
+          "overflowRight": -109.3,
+          "titled": true
+        }
+      ]
+    },
+    {
+      "title": "Rebuild the board status projection.",
+      "rows": [
+        "identity",
+        "content",
+        "ops"
+      ],
+      "height": 150,
+      "width": 300,
+      "status": "running",
+      "switchChip": null,
+      "opsChips": [],
+      "chipsOutsideOps": [],
+      "opsGeometry": []
+    },
+    {
+      "title": "Rebalance the account pool.",
+      "rows": [
+        "identity",
+        "content",
+        "ops"
+      ],
+      "height": 128,
+      "width": 220,
+      "status": null,
+      "switchChip": {
+        "kind": "switching",
+        "text": "⇄→ «Account B»"
+      },
+      "opsChips": [
+        "switch:switching"
+      ],
+      "chipsOutsideOps": [],
+      "opsGeometry": [
+        {
+          "chip": "data-card-switch",
+          "width": 90.8,
+          "overflowRight": -61.8,
+          "titled": true
+        }
+      ]
+    },
+    {
+      "title": "Move the delivery fence into the registry.",
+      "rows": [
+        "identity",
+        "content",
+        "ops"
+      ],
+      "height": 128,
+      "width": 220,
+      "status": "held",
+      "switchChip": {
+        "kind": "pending",
+        "text": "⇄«Account B» pending"
+      },
+      "opsChips": [
+        "switch:pending"
+      ],
+      "chipsOutsideOps": [],
+      "opsGeometry": [
+        {
+          "chip": "data-card-switch",
+          "width": 115.5,
+          "overflowRight": -37.2,
+          "titled": true
+        }
+      ]
+    },
+    {
+      "title": "Poll the nightly integration run.",
+      "rows": [
+        "identity",
+        "content",
+        "ops"
+      ],
+      "height": 128,
+      "width": 220,
+      "status": "queued",
+      "switchChip": null,
+      "opsChips": [
+        "wakeup"
+      ],
+      "chipsOutsideOps": [],
+      "opsGeometry": [
+        {
+          "chip": "data-wakeup",
+          "width": 64.7,
+          "overflowRight": -82,
+          "titled": true
+        }
+      ]
+    },
+    {
+      "title": "Refill the fixture pool.",
+      "rows": [
+        "identity",
+        "content",
+        "ops"
+      ],
+      "height": 128,
+      "width": 220,
+      "status": "queued",
+      "switchChip": {
+        "kind": "pending",
+        "text": "⇄«Account B» pending"
+      },
+      "opsChips": [
+        "switch:pending",
+        "wakeup"
+      ],
+      "chipsOutsideOps": [],
+      "opsGeometry": [
+        {
+          "chip": "data-card-switch",
+          "width": 91.4,
+          "overflowRight": -55.3,
+          "titled": true
+        },
+        {
+          "chip": "data-wakeup",
+          "width": 49.3,
+          "overflowRight": 0,
+          "titled": true
+        }
+      ]
+    },
+    {
+      "title": "Rotate the burndown fixtures.",
+      "rows": [
+        "identity",
+        "content",
+        "ops"
+      ],
+      "height": 128,
+      "width": 220,
+      "status": null,
+      "switchChip": {
+        "kind": "failed",
+        "text": "⇄switch failed"
+      },
+      "opsChips": [
+        "switch:failed"
+      ],
+      "chipsOutsideOps": [],
+      "opsGeometry": [
+        {
+          "chip": "data-card-switch",
+          "width": 80,
+          "overflowRight": -66.7,
+          "titled": true
+        }
+      ]
+    },
+    {
+      "title": "Summarize the incident review.",
+      "rows": [
+        "identity",
+        "content",
+        "ops"
+      ],
+      "height": 128,
+      "width": 220,
+      "status": null,
+      "switchChip": {
+        "kind": "settled",
+        "text": "@ account-b"
+      },
+      "opsChips": [
+        "switch:settled"
+      ],
+      "chipsOutsideOps": [],
+      "opsGeometry": [
+        {
+          "chip": "data-card-switch",
+          "width": 78.1,
+          "overflowRight": -77.9,
+          "titled": true
+        }
+      ]
+    },
+    {
+      "title": "Write the migration retrospective.",
+      "rows": [
+        "identity",
+        "content",
+        "ops"
+      ],
+      "height": 128,
+      "width": 220,
+      "status": null,
+      "switchChip": null,
+      "opsChips": [],
+      "chipsOutsideOps": [],
+      "opsGeometry": []
+    },
+    {
+      "title": "Draft the deployment notes.",
+      "rows": [
+        "identity",
+        "content",
+        "ops"
+      ],
+      "height": 128,
+      "width": 220,
+      "status": null,
+      "switchChip": null,
+      "opsChips": [],
+      "chipsOutsideOps": [],
+      "opsGeometry": []
+    }
+  ],
+  "mobile-390-needs-you-dark": {
+    "verify": "status:needs-you",
+    "detail": "needs-you",
+    "titleShown": true
+  },
+  "mobile-390-held-dark": {
+    "verify": "status:held",
+    "detail": "held",
+    "titleShown": true
+  },
+  "mobile-390-running-dark": {
+    "verify": "status:running",
+    "detail": "running",
+    "titleShown": true
+  },
+  "mobile-390-queued-dark": {
+    "verify": "wakeup",
+    "detail": "sleeping until 14:12 — poll the nightly integration run",
+    "titleShown": true
+  },
+  "mobile-390-quiet-dark": {
+    "verify": "quiet",
+    "detail": null,
+    "titleShown": true
+  },
+  "mobile-390-rate-limited-dark": {
+    "verify": "rate-limit",
+    "detail": "rate-limited until 15:30",
+    "titleShown": true
+  },
+  "mobile-390-switching-dark": {
+    "verify": "text:Switching to «Account B»",
+    "detail": "Switching to «Account B»",
+    "titleShown": true
+  },
+  "mobile-390-switch-failed-dark": {
+    "verify": "text:Account switch failed",
+    "detail": "Account switch failed",
+    "titleShown": true
+  },
+  "mobile-390-settled-account-dark": {
+    "verify": "account:account-b",
+    "detail": "Open accounts for account-b a",
+    "titleShown": true
+  },
+  "switchboard-light": [
+    {
+      "title": "Gate the release on the review verdict.",
+      "rows": [
+        "identity",
+        "content",
+        "ops"
+      ],
+      "height": 150,
+      "width": 300,
+      "status": "needs-you",
+      "switchChip": null,
+      "opsChips": [],
+      "chipsOutsideOps": [],
+      "opsGeometry": []
+    },
+    {
+      "title": "Reconcile the quota ledger.",
+      "rows": [
+        "identity",
+        "content",
+        "ops"
+      ],
+      "height": 150,
+      "width": 300,
+      "status": "needs-you",
+      "switchChip": {
+        "kind": "switching",
+        "text": "⇄→ «Account B»"
+      },
+      "opsChips": [
+        "switch:switching",
+        "rate-limit",
+        "wakeup"
+      ],
+      "chipsOutsideOps": [],
+      "opsGeometry": [
+        {
+          "chip": "data-card-switch",
+          "width": 74.3,
+          "overflowRight": -158.4,
+          "titled": true
+        },
+        {
+          "chip": "data-rate-limited",
+          "width": 95.6,
+          "overflowRight": -56.8,
+          "titled": true
+        },
+        {
+          "chip": "data-wakeup",
+          "width": 50.8,
+          "overflowRight": 0,
+          "titled": true
+        }
+      ]
+    },
+    {
+      "title": "Compare account quotas.",
+      "rows": [
+        "identity",
+        "content",
+        "ops"
+      ],
+      "height": 150,
+      "width": 300,
+      "status": "needs-you",
+      "switchChip": null,
+      "opsChips": [
+        "rate-limit"
+      ],
+      "chipsOutsideOps": [],
+      "opsGeometry": [
+        {
+          "chip": "data-rate-limited",
+          "width": 117.4,
+          "overflowRight": -109.3,
+          "titled": true
+        }
+      ]
+    },
+    {
+      "title": "Rebuild the board status projection.",
+      "rows": [
+        "identity",
+        "content",
+        "ops"
+      ],
+      "height": 150,
+      "width": 300,
+      "status": "running",
+      "switchChip": null,
+      "opsChips": [],
+      "chipsOutsideOps": [],
+      "opsGeometry": []
+    },
+    {
+      "title": "Rebalance the account pool.",
+      "rows": [
+        "identity",
+        "content",
+        "ops"
+      ],
+      "height": 128,
+      "width": 220,
+      "status": null,
+      "switchChip": {
+        "kind": "switching",
+        "text": "⇄→ «Account B»"
+      },
+      "opsChips": [
+        "switch:switching"
+      ],
+      "chipsOutsideOps": [],
+      "opsGeometry": [
+        {
+          "chip": "data-card-switch",
+          "width": 90.8,
+          "overflowRight": -61.8,
+          "titled": true
+        }
+      ]
+    },
+    {
+      "title": "Move the delivery fence into the registry.",
+      "rows": [
+        "identity",
+        "content",
+        "ops"
+      ],
+      "height": 128,
+      "width": 220,
+      "status": "held",
+      "switchChip": {
+        "kind": "pending",
+        "text": "⇄«Account B» pending"
+      },
+      "opsChips": [
+        "switch:pending"
+      ],
+      "chipsOutsideOps": [],
+      "opsGeometry": [
+        {
+          "chip": "data-card-switch",
+          "width": 115.5,
+          "overflowRight": -37.2,
+          "titled": true
+        }
+      ]
+    },
+    {
+      "title": "Poll the nightly integration run.",
+      "rows": [
+        "identity",
+        "content",
+        "ops"
+      ],
+      "height": 128,
+      "width": 220,
+      "status": "queued",
+      "switchChip": null,
+      "opsChips": [
+        "wakeup"
+      ],
+      "chipsOutsideOps": [],
+      "opsGeometry": [
+        {
+          "chip": "data-wakeup",
+          "width": 64.7,
+          "overflowRight": -82,
+          "titled": true
+        }
+      ]
+    },
+    {
+      "title": "Refill the fixture pool.",
+      "rows": [
+        "identity",
+        "content",
+        "ops"
+      ],
+      "height": 128,
+      "width": 220,
+      "status": "queued",
+      "switchChip": {
+        "kind": "pending",
+        "text": "⇄«Account B» pending"
+      },
+      "opsChips": [
+        "switch:pending",
+        "wakeup"
+      ],
+      "chipsOutsideOps": [],
+      "opsGeometry": [
+        {
+          "chip": "data-card-switch",
+          "width": 91.4,
+          "overflowRight": -55.3,
+          "titled": true
+        },
+        {
+          "chip": "data-wakeup",
+          "width": 49.3,
+          "overflowRight": 0,
+          "titled": true
+        }
+      ]
+    },
+    {
+      "title": "Rotate the burndown fixtures.",
+      "rows": [
+        "identity",
+        "content",
+        "ops"
+      ],
+      "height": 128,
+      "width": 220,
+      "status": null,
+      "switchChip": {
+        "kind": "failed",
+        "text": "⇄switch failed"
+      },
+      "opsChips": [
+        "switch:failed"
+      ],
+      "chipsOutsideOps": [],
+      "opsGeometry": [
+        {
+          "chip": "data-card-switch",
+          "width": 80,
+          "overflowRight": -66.7,
+          "titled": true
+        }
+      ]
+    },
+    {
+      "title": "Summarize the incident review.",
+      "rows": [
+        "identity",
+        "content",
+        "ops"
+      ],
+      "height": 128,
+      "width": 220,
+      "status": null,
+      "switchChip": {
+        "kind": "settled",
+        "text": "@ account-b"
+      },
+      "opsChips": [
+        "switch:settled"
+      ],
+      "chipsOutsideOps": [],
+      "opsGeometry": [
+        {
+          "chip": "data-card-switch",
+          "width": 78.1,
+          "overflowRight": -77.9,
+          "titled": true
+        }
+      ]
+    },
+    {
+      "title": "Write the migration retrospective.",
+      "rows": [
+        "identity",
+        "content",
+        "ops"
+      ],
+      "height": 128,
+      "width": 220,
+      "status": null,
+      "switchChip": null,
+      "opsChips": [],
+      "chipsOutsideOps": [],
+      "opsGeometry": []
+    },
+    {
+      "title": "Draft the deployment notes.",
+      "rows": [
+        "identity",
+        "content",
+        "ops"
+      ],
+      "height": 128,
+      "width": 220,
+      "status": null,
+      "switchChip": null,
+      "opsChips": [],
+      "chipsOutsideOps": [],
+      "opsGeometry": []
+    }
+  ],
+  "mobile-390-needs-you-light": {
+    "verify": "status:needs-you",
+    "detail": "needs-you",
+    "titleShown": true
+  },
+  "mobile-390-held-light": {
+    "verify": "status:held",
+    "detail": "held",
+    "titleShown": true
+  },
+  "mobile-390-running-light": {
+    "verify": "status:running",
+    "detail": "running",
+    "titleShown": true
+  },
+  "mobile-390-queued-light": {
+    "verify": "wakeup",
+    "detail": "sleeping until 14:12 — poll the nightly integration run",
+    "titleShown": true
+  },
+  "mobile-390-quiet-light": {
+    "verify": "quiet",
+    "detail": null,
+    "titleShown": true
+  },
+  "mobile-390-rate-limited-light": {
+    "verify": "rate-limit",
+    "detail": "rate-limited until 15:30",
+    "titleShown": true
+  },
+  "mobile-390-switching-light": {
+    "verify": "text:Switching to «Account B»",
+    "detail": "Switching to «Account B»",
+    "titleShown": true
+  },
+  "mobile-390-switch-failed-light": {
+    "verify": "text:Account switch failed",
+    "detail": "Account switch failed",
+    "titleShown": true
+  },
+  "mobile-390-settled-account-light": {
+    "verify": "account:account-b",
+    "detail": "Open accounts for account-b a",
+    "titleShown": true
+  }
+}

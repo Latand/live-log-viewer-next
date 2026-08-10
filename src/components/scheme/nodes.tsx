@@ -38,6 +38,7 @@ import { RoundStateIcon } from "@/components/flows/RoundIcons";
 import { canHandoff, HandoffHandle } from "@/components/HandoffHandle";
 import { isWorkflowDraftId } from "@/components/workflows/workflowModel";
 import { WorkflowDraftPane } from "@/components/workflows/WorkflowDraftPane";
+import { AccountSwitchChip, CardIdentityChip } from "@/components/cardAnatomy";
 import { CardStatusBadge } from "@/components/CardStatusBadge";
 import { activityDot, cleanTitle, engineBadge, engineEdge, fmtAge } from "@/components/utils";
 import { recencyTurnInfo } from "@/components/turnDuration";
@@ -627,7 +628,7 @@ function UnderRow({ file, onSelect }: { file: FileEntry; onSelect: (file: FileEn
  * takes over. Sized in world-inverse units (CSS vars set on the world div),
  * so it keeps a constant on-screen size at any zoom without re-rendering.
  */
-function FarLabel({ file }: { file: FileEntry }) {
+export function FarLabel({ file }: { file: FileEntry }) {
   const badge = engineBadge(file);
   return (
     <div
@@ -636,6 +637,7 @@ function FarLabel({ file }: { file: FileEntry }) {
       aria-hidden
     >
       <div
+        data-far-label
         className="flex max-w-[94%] items-center gap-[0.5em] rounded-[0.55em] border border-border bg-card/95 px-[0.75em] py-[0.45em] shadow-2"
         /* Constant on-screen size until ~2.6× (z≈0.38); further out it shrinks
            with the world so neighboring labels never overlap. */
@@ -649,9 +651,12 @@ function FarLabel({ file }: { file: FileEntry }) {
             counter-scaled font, so it holds ≥10px on screen until the label's
             2.6× cap — the same floor the rest of the label obeys (#961). */}
         <CardStatusBadge file={file} fontClassName="text-[0.78em]" />
+        {/* Anatomy order (#964): identity → status → content, THEN the
+            operational chips trail the title, mirroring the full card's rows. */}
+        <span className="line-clamp-2 min-w-0 font-bold">{cleanTitle(file.title, 70)}</span>
+        <AccountSwitchChip file={file} showSettled={false} fontClassName="text-[0.72em]" />
         <RateLimitBadge rateLimit={file.rateLimit} />
         <WakeupChip key={wakeupChipKey(file.pendingWakeup)} wakeup={file.pendingWakeup} interactive={false} />
-        <span className="line-clamp-2 min-w-0 font-bold">{cleanTitle(file.title, 70)}</span>
       </div>
     </div>
   );
@@ -673,9 +678,8 @@ const PAIR_W = NODE_W * 2 + LOOP_GAP;
    hold thousands of transcript lines each — multiplied across the project it
    exceeds the mobile tab's memory budget and iOS kills the renderer. The card
    carries what a pick decision needs; the transcript opens after the pick. */
-function LiteNodeShell({ node, ringed, dimmed, flow }: { node: SchemeNode; ringed: boolean; dimmed: boolean; flow: Flow | null }) {
+export function LiteNodeShell({ node, ringed, dimmed, flow }: { node: SchemeNode; ringed: boolean; dimmed: boolean; flow: Flow | null }) {
   const { t } = useLocale();
-  const badge = engineBadge(node.file);
   return (
     <div
       data-scheme-node={node.file.path}
@@ -699,30 +703,39 @@ function LiteNodeShell({ node, ringed, dimmed, flow }: { node: SchemeNode; ringe
         }`}
       >
         <span aria-hidden className="h-1 w-full shrink-0" style={engineEdge(node.file)} />
-        <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2.5">
+        {/* Fixed anatomy (issue #964): identity/status row — activity, ONE
+            identity treatment, and the #961 status word pinned to the right,
+            so the word sits in the same place whatever the card's state. */}
+        <div data-card-row="identity" className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2.5">
           <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${activityDot(node.file.activity)}`} />
-          <span className="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-bold" style={badge.style}>
-            {badge.label}
+          <CardIdentityChip file={node.file} fontClassName="text-[11px]" />
+          <span className="ml-auto inline-flex min-w-0 shrink-0">
+            {/* The operator-facing status word (issue #961), same vocabulary as
+                the full card's header. */}
+            <CardStatusBadge file={node.file} />
           </span>
-          {node.file.model ? <span className="min-w-0 truncate font-mono text-[11px] text-muted">{node.file.model}</span> : null}
-          <RateLimitBadge file={node.file} />
+        </div>
+        {/* Content row: title only — operational chips never crowd it, so its
+            readable height survives every mix of states. */}
+        <div data-card-row="content" className="min-w-0 flex-1 px-3 py-2.5 text-[14px] font-semibold leading-snug">
+          <span className="line-clamp-4">{cleanTitle(node.file.title, 180)}</span>
+        </div>
+        {/* Ops row: recency anchors it; account/switch, rate limit and wakeup
+            join only when non-default. */}
+        <div data-card-row="ops" className="flex shrink-0 items-center gap-1.5 overflow-hidden border-t border-border px-3 py-2 text-[11px] font-semibold text-muted">
+          <AccountSwitchChip file={node.file} fontClassName="text-[10px]" />
+          <RateLimitBadge file={node.file} shrinkable />
           {/* pointer-events-auto re-enables taps for just the chip inside the
               map's pointer-events-none layer, so its reason disclosure works at
               390px; the chip's own guard keeps the tap from opening the pane. */}
-          <WakeupChip key={wakeupChipKey(node.file.pendingWakeup)} wakeup={node.file.pendingWakeup} className="pointer-events-auto" />
-          {/* The operator-facing status word (issue #961), same vocabulary as
-              the full card's header. */}
-          <CardStatusBadge file={node.file} />
+          <WakeupChip key={wakeupChipKey(node.file.pendingWakeup)} wakeup={node.file.pendingWakeup} className="pointer-events-auto" shrinkable />
+          {node.under.length ? (
+            <span className="shrink-0">
+              {node.under.length} {t("scheme.underneath")}
+            </span>
+          ) : null}
           <RecencyChip file={node.file} className="ml-auto text-[11px]" />
         </div>
-        <div className="min-w-0 flex-1 px-3 py-2.5 text-[14px] font-semibold leading-snug">
-          <span className="line-clamp-5">{cleanTitle(node.file.title, 180)}</span>
-        </div>
-        {node.under.length ? (
-          <div className="shrink-0 px-3 pb-2.5 text-[11px] font-semibold text-muted">
-            {node.under.length} {t("scheme.underneath")}
-          </div>
-        ) : null}
       </div>
       {flow ? <RoleTag role="implementer" active={activeLoopRole(flow) === "implementer"} /> : null}
       <FarLabel file={node.file} />
@@ -803,7 +816,7 @@ function LiteDeckShell({ deck, dimmed }: { deck: DeckNode; dimmed: boolean }) {
  * stays readable on the diagram even when nothing in it runs. A click opens
  * the branch as a full node.
  */
-function MiniStackShell({ stack, dimmed, onSelect }: { stack: MiniStack; dimmed: boolean; onSelect: (file: FileEntry) => void }) {
+export function MiniStackShell({ stack, dimmed, onSelect }: { stack: MiniStack; dimmed: boolean; onSelect: (file: FileEntry) => void }) {
   const { t } = useLocale();
   return (
     <div
@@ -821,17 +834,21 @@ function MiniStackShell({ stack, dimmed, onSelect }: { stack: MiniStack; dimmed:
               title={cleanTitle(file.title)}
               onClick={() => onSelect(file)}
             >
-              <span className="flex min-w-0 items-center gap-1.5">
+              {/* Anatomy order (#964) at row density: identity/status leads —
+                  the status word up front so a held or blocked branch cannot
+                  hide in the stack — and the title (content) fills the line. */}
+              <span data-card-row="identity" className="flex min-w-0 items-center gap-1.5">
                 <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${activityDot(file.activity)}`} />
                 <span className="shrink-0 rounded-full px-1.5 text-[9px] font-bold" style={badge.style}>
                   {badge.label}
                 </span>
+                <CardStatusBadge file={file} />
                 <span className="min-w-0 flex-1 truncate text-[11.5px] font-semibold">{cleanTitle(file.title, 70)}</span>
               </span>
-              <span className="flex items-center gap-2 pl-3 text-[10.5px] text-muted">
-                {/* A collapsed branch keeps the same status word as its full
-                    card, so a held or blocked branch cannot hide in the stack. */}
-                <CardStatusBadge file={file} />
+              {/* Ops line: a live account switch shows itself even on a
+                  collapsed branch; the settled account stays with the full card. */}
+              <span data-card-row="ops" className="flex items-center gap-2 pl-3 text-[10.5px] text-muted">
+                <AccountSwitchChip file={file} showSettled={false} />
                 <span>{kindLabel(t, file.kind)}</span>
                 <span>{fmtAge(file.mtime)}</span>
                 {branches ? <span>⤷ {branches}</span> : null}
