@@ -63,8 +63,13 @@ const matchMedia = (query: string) => ({
 Object.assign(globalThis, { matchMedia });
 Object.assign(dom, { matchMedia });
 
-/* The runtime bus is a separate plane; this test is about the catalog fetch. */
+/* The runtime bus is a separate plane; this test is about the catalog fetch.
+   The constants ride along because other modules in the Viewer's import graph
+   read them from the mocked module. */
 mock.module("@/hooks/runtimeBus", () => ({
+  SNAPSHOT_URL: "/api/runtime/snapshot",
+  STREAM_URL: "/api/runtime/stream",
+  STREAM_RECONNECTED_EVENT: "llv:stream-reconnected",
   isRuntimeUiEnabled: () => false,
   getRuntimeBus: () => ({
     getState: () => ({ connection: "offline" }),

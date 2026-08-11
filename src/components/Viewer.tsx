@@ -3,7 +3,7 @@
 import { Crown, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 
-import { formatConversationHash, parseConversationHash, resolveConversationTarget, withoutArchivedPredecessors, type ConversationHash } from "@/lib/accounts/identity";
+import { formatConversationHash, isArchivedPredecessor, parseConversationHash, resolveConversationTarget, withoutArchivedPredecessors, type ConversationHash } from "@/lib/accounts/identity";
 import { createTraversalFence, parseFocusHistoryState, recordFocusNavigation, recordProjectNavigation, retargetRecordedProject } from "@/lib/navigation/focusHistory";
 import { onAccountPanelRequest } from "@/lib/accounts/openPanel";
 import { useAgentChimes } from "@/hooks/useAgentChimes";
@@ -91,13 +91,19 @@ function projectUrl(project: string): string {
   return project !== OVERVIEW ? "#p=" + encodeURIComponent(project) : location.pathname;
 }
 
-/** How long a Back/Forward replay waits for its pinned poll to resolve the
-    target before it reports the entry stale (issue #866): a few poll rounds,
-    then the intent clears so later history actions stay usable. */
+/** How long an unresolved conversation intent — a Back/Forward replay (issue
+    #866) or a pasted `#c=`/`#f=` deep link — waits for its pinned poll to
+    resolve the target before it reports the entry stale: a few poll rounds,
+    then the intent clears so the failure is visible and later history actions
+    stay usable. */
 const STALE_FOCUS_REPLAY_MS = 8_000;
 
-/** How long the stale-entry notice stays up before it dismisses itself. */
-const STALE_FOCUS_NOTICE_MS = 6_000;
+/** How long the unknown-fragment notice stays up before it dismisses itself.
+    The stale-conversation notice never self-dismisses: an unresolved deep link
+    keeps its visible not-found state until the operator navigates, resolves a
+    new target, or dismisses it — a notice that evaporates while the hash stays
+    put lands the tab back on the silent default view this fix exists to kill. */
+const UNKNOWN_FRAGMENT_NOTICE_MS = 6_000;
 
 /** One-line reason a queue item waits: question header, screen tail, or the stalled wording. */
 function attentionSnippet(t: TFunction, item: AttentionItem): string {
@@ -149,8 +155,26 @@ export function Viewer() {
   /* A committed account migration keeps the archived predecessor entry in the
      payload (for chain history) but it must never render as a second standalone
      card — every surface below sees only current generations. A no-op (same
-     array identity) until something actually migrates. */
-  const files = useMemo(() => withoutArchivedPredecessors(allFiles), [allFiles]);
+     array identity) until something actually migrates.
+
+     One carve-out: a `#c=`/`#f=` deep link can resolve to an archived
+     predecessor that is the ONLY generation of its conversation in the payload
+     (the successor transcript sits beyond the capped feed). Folding that row
+     out left the pinned open with nothing to render — the board had no node
+     for the focused path and the link silently opened nothing. Keeping the one
+     pinned row cannot duplicate a card, and the moment a current generation
+     arrives the pin retargets to it (see the catalog-pin files effect) and the
+     predecessor folds away again. */
+  const files = useMemo(() => {
+    const folded = withoutArchivedPredecessors(allFiles);
+    const pinnedPath = catalogPin?.path;
+    if (!pinnedPath || folded.some((file) => file.path === pinnedPath)) return folded;
+    const pinned = allFiles.find((file) => file.path === pinnedPath);
+    if (!pinned || !isArchivedPredecessor(pinned)) return folded;
+    const currentGenerationPresent = Boolean(pinned.conversationId)
+      && folded.some((file) => file.conversationId === pinned.conversationId);
+    return currentGenerationPresent ? folded : [...folded, pinned];
+  }, [allFiles, catalogPin]);
   const dashboardFilesRef = useRef<{ project: string; files: FileEntry[] } | null>(null);
   const dashboardFiles = useMemo(() => {
     if (project === OVERVIEW) return [];
@@ -242,6 +266,9 @@ export function Viewer() {
          focus entry with its full stored identity; deriving a second, weaker
          intent from the bare hash would drop the project and path support. */
       if (traversalFenceRef.current.swallows(location.hash)) return;
+      /* Navigation is one of the two exits a durable not-found notice has
+         (the other is its dismiss button): a new attempt starts clean. */
+      setStaleFocusNotice(false);
       const next = readHash();
       if (next.filePath || next.conversationId) {
         dispatchCatalogPin({ kind: "release" });
@@ -278,6 +305,7 @@ export function Viewer() {
       /* The browser has already applied this traversal's URL, so the fragment
          read here is exactly the hash whose follow-up hashchange must skip. */
       traversalFenceRef.current.arm(location.hash);
+      setStaleFocusNotice(false);
       dispatchCatalogPin({ kind: "release" });
       setFocusRequest(null);
       /* Cross-project entries select the stored project first, then resolve. */
@@ -308,14 +336,8 @@ export function Viewer() {
   }, []);
 
   useEffect(() => {
-    if (!staleFocusNotice) return;
-    const timer = window.setTimeout(() => setStaleFocusNotice(false), STALE_FOCUS_NOTICE_MS);
-    return () => window.clearTimeout(timer);
-  }, [staleFocusNotice]);
-
-  useEffect(() => {
     if (!unknownFragmentNotice) return;
-    const timer = window.setTimeout(() => setUnknownFragmentNotice(false), STALE_FOCUS_NOTICE_MS);
+    const timer = window.setTimeout(() => setUnknownFragmentNotice(false), UNKNOWN_FRAGMENT_NOTICE_MS);
     return () => window.clearTimeout(timer);
   }, [unknownFragmentNotice]);
   /* eslint-enable react-hooks/set-state-in-effect */
@@ -326,7 +348,9 @@ export function Viewer() {
   const applyProject = useCallback((nextProject: string) => {
     setProject(nextProject);
     /* Explicit project navigation replaces the hash without a hashchange
-       event, so any unresolved conversation intent is cancelled here. */
+       event, so any unresolved conversation intent is cancelled here — and a
+       deliberate navigation retires the durable not-found notice. */
+    setStaleFocusNotice(false);
     setPendingHash(null);
     dispatchCatalogPin({ kind: "release" });
     setFocusRequest(null);
@@ -384,6 +408,9 @@ export function Viewer() {
      the node after the transient hash intent resolves. */
   const openPinnedFile = useCallback((file: FileEntry, hydrated = false) => {
     const key = projectKey(file);
+    /* A resolution landing is the third exit for the not-found notice: the
+       viewer is now showing a conversation, so the failure claim is over. */
+    setStaleFocusNotice(false);
     queueColumnOpen(key, file.path, isChildConversation(file));
     dispatchCatalogPin({ kind: hydrated ? "resolve" : "open", path: file.path, conversationId: file.conversationId });
     setProject(key);
@@ -424,6 +451,23 @@ export function Viewer() {
   }, [pendingHash, allFiles, conversationAliases, launchRoutes, openPinnedFile]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
+  /* A deep-link intent no payload resolves (the id is absent from the corpus
+     and from its own pinned request) must FAIL VISIBLY: sitting silently on the
+     default view read as "the page just reloads and nothing opens". Same
+     bounded deadline the Back/Forward replay uses; the countdown starts only
+     once a certified payload exists, and a resolution clearing `pendingHash`
+     cancels it. The popstate path arms its own identity-checked timer — for a
+     replayed entry both reach the same notice. */
+  useEffect(() => {
+    if (!pendingHash || !loaded) return;
+    const timer = window.setTimeout(() => {
+      setPendingHash(null);
+      dispatchCatalogPin({ kind: "release" });
+      setStaleFocusNotice(true);
+    }, STALE_FOCUS_REPLAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [pendingHash, loaded]);
+
   const releaseCatalogFile = useCallback((path: string) => {
     dispatchCatalogPin({ kind: "release", path });
     setFocusRequest((current) => current?.path === path ? null : current);
@@ -432,6 +476,12 @@ export function Viewer() {
 
   useEffect(() => {
     if (!catalogPin?.hydrated || pendingHash) return;
+    /* A scope transition (the pin just moved to a new request URL) serves the
+       EMPTY placeholder until its own fetch lands. That placeholder is not
+       evidence the transcript disappeared — releasing the hydrated pin on it
+       dropped every freshly resolved beyond-cap deep link right after it
+       opened. Only a certified payload may retire the pin. */
+    if (!loaded) return;
     const currentPath = catalogPin.conversationId
       ? files.find((file) => file.conversationId === catalogPin.conversationId)?.path
       : undefined;
@@ -441,7 +491,7 @@ export function Viewer() {
       pending: false,
       currentPath,
     });
-  }, [catalogPin, pendingHash, allFiles, files]);
+  }, [catalogPin, pendingHash, allFiles, files, loaded]);
 
   /* The one queue every counter shows: badge, popover and the tab title all
      read the same list, stalled tail included (D10). The clock advances when
@@ -929,13 +979,25 @@ export function Viewer() {
       {/* Staging instances (#659) announce themselves on every device; prod
           renders nothing. Top-center, clear of both corner anchors. */}
       <StagingBadge />
-      {/* A Back/Forward entry whose conversation no longer resolves (issue
-          #866): says so and self-dismisses; the surrounding history keeps
-          working. Below the staging badge's anchor so the two never overlap. */}
+      {/* A Back/Forward entry or pasted deep link whose conversation never
+          resolves (issues #866, P1 #c= bounce): says so and STAYS — the notice
+          survives until a navigation, a successful resolution, or its dismiss
+          button, because a self-dismissing notice left the unchanged hash
+          sitting silently on the default view. Below the staging badge's
+          anchor so the two never overlap. */}
       {staleFocusNotice ? (
         <div className="pointer-events-none fixed left-1/2 top-10 z-40 -translate-x-1/2" role="status" data-stale-focus-notice>
-          <div className="rounded-full border border-warning/45 bg-warning-soft px-3.5 py-1.5 text-[12px] font-semibold text-warning shadow-1 backdrop-blur">
+          <div className="pointer-events-auto flex items-center gap-2 rounded-full border border-warning/45 bg-warning-soft py-1.5 pl-3.5 pr-2 text-[12px] font-semibold text-warning shadow-1 backdrop-blur">
             {t("viewer.staleFocusEntry")}
+            <button
+              type="button"
+              onClick={() => setStaleFocusNotice(false)}
+              aria-label={t("viewer.closeNotification")}
+              className="rounded-full p-0.5 hover:bg-warning/15"
+              data-stale-focus-dismiss
+            >
+              <X className="h-3.5 w-3.5" aria-hidden />
+            </button>
           </div>
         </div>
       ) : null}
