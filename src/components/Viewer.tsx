@@ -3,7 +3,7 @@
 import { Crown, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 
-import { formatConversationHash, parseConversationHash, resolveConversationTarget, withoutArchivedPredecessors, type ConversationHash } from "@/lib/accounts/identity";
+import { formatConversationHash, isArchivedPredecessor, parseConversationHash, resolveConversationTarget, withoutArchivedPredecessors, type ConversationHash } from "@/lib/accounts/identity";
 import { createTraversalFence, parseFocusHistoryState, recordFocusNavigation, recordProjectNavigation, retargetRecordedProject } from "@/lib/navigation/focusHistory";
 import { onAccountPanelRequest } from "@/lib/accounts/openPanel";
 import { useAgentChimes } from "@/hooks/useAgentChimes";
@@ -91,9 +91,11 @@ function projectUrl(project: string): string {
   return project !== OVERVIEW ? "#p=" + encodeURIComponent(project) : location.pathname;
 }
 
-/** How long a Back/Forward replay waits for its pinned poll to resolve the
-    target before it reports the entry stale (issue #866): a few poll rounds,
-    then the intent clears so later history actions stay usable. */
+/** How long an unresolved conversation intent — a Back/Forward replay (issue
+    #866) or a pasted `#c=`/`#f=` deep link — waits for its pinned poll to
+    resolve the target before it reports the entry stale: a few poll rounds,
+    then the intent clears so the failure is visible and later history actions
+    stay usable. */
 const STALE_FOCUS_REPLAY_MS = 8_000;
 
 /** How long the stale-entry notice stays up before it dismisses itself. */
@@ -149,8 +151,26 @@ export function Viewer() {
   /* A committed account migration keeps the archived predecessor entry in the
      payload (for chain history) but it must never render as a second standalone
      card — every surface below sees only current generations. A no-op (same
-     array identity) until something actually migrates. */
-  const files = useMemo(() => withoutArchivedPredecessors(allFiles), [allFiles]);
+     array identity) until something actually migrates.
+
+     One carve-out: a `#c=`/`#f=` deep link can resolve to an archived
+     predecessor that is the ONLY generation of its conversation in the payload
+     (the successor transcript sits beyond the capped feed). Folding that row
+     out left the pinned open with nothing to render — the board had no node
+     for the focused path and the link silently opened nothing. Keeping the one
+     pinned row cannot duplicate a card, and the moment a current generation
+     arrives the pin retargets to it (see the catalog-pin files effect) and the
+     predecessor folds away again. */
+  const files = useMemo(() => {
+    const folded = withoutArchivedPredecessors(allFiles);
+    const pinnedPath = catalogPin?.path;
+    if (!pinnedPath || folded.some((file) => file.path === pinnedPath)) return folded;
+    const pinned = allFiles.find((file) => file.path === pinnedPath);
+    if (!pinned || !isArchivedPredecessor(pinned)) return folded;
+    const currentGenerationPresent = Boolean(pinned.conversationId)
+      && folded.some((file) => file.conversationId === pinned.conversationId);
+    return currentGenerationPresent ? folded : [...folded, pinned];
+  }, [allFiles, catalogPin]);
   const dashboardFilesRef = useRef<{ project: string; files: FileEntry[] } | null>(null);
   const dashboardFiles = useMemo(() => {
     if (project === OVERVIEW) return [];
@@ -424,6 +444,23 @@ export function Viewer() {
   }, [pendingHash, allFiles, conversationAliases, launchRoutes, openPinnedFile]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
+  /* A deep-link intent no payload resolves (the id is absent from the corpus
+     and from its own pinned request) must FAIL VISIBLY: sitting silently on the
+     default view read as "the page just reloads and nothing opens". Same
+     bounded deadline the Back/Forward replay uses; the countdown starts only
+     once a certified payload exists, and a resolution clearing `pendingHash`
+     cancels it. The popstate path arms its own identity-checked timer — for a
+     replayed entry both reach the same notice. */
+  useEffect(() => {
+    if (!pendingHash || !loaded) return;
+    const timer = window.setTimeout(() => {
+      setPendingHash(null);
+      dispatchCatalogPin({ kind: "release" });
+      setStaleFocusNotice(true);
+    }, STALE_FOCUS_REPLAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [pendingHash, loaded]);
+
   const releaseCatalogFile = useCallback((path: string) => {
     dispatchCatalogPin({ kind: "release", path });
     setFocusRequest((current) => current?.path === path ? null : current);
@@ -432,6 +469,12 @@ export function Viewer() {
 
   useEffect(() => {
     if (!catalogPin?.hydrated || pendingHash) return;
+    /* A scope transition (the pin just moved to a new request URL) serves the
+       EMPTY placeholder until its own fetch lands. That placeholder is not
+       evidence the transcript disappeared — releasing the hydrated pin on it
+       dropped every freshly resolved beyond-cap deep link right after it
+       opened. Only a certified payload may retire the pin. */
+    if (!loaded) return;
     const currentPath = catalogPin.conversationId
       ? files.find((file) => file.conversationId === catalogPin.conversationId)?.path
       : undefined;
@@ -441,7 +484,7 @@ export function Viewer() {
       pending: false,
       currentPath,
     });
-  }, [catalogPin, pendingHash, allFiles, files]);
+  }, [catalogPin, pendingHash, allFiles, files, loaded]);
 
   /* The one queue every counter shows: badge, popover and the tab title all
      read the same list, stalled tail included (D10). The clock advances when
