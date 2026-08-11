@@ -231,6 +231,22 @@ async function waitFor(check: () => boolean, timeoutMs = 3_000): Promise<boolean
   return check();
 }
 
+/** The navigation-loop oracle, applied to EVERY ordering: once the run under
+    test settles, resolution must not have pushed a single history entry (a
+    push loop grows the stack and breaks Back), must write nothing further,
+    and must leave the tab on the same URL. Valid only alongside an assertion
+    about the outcome itself — a quiescence check over a failed open says
+    nothing, which is exactly how the first version of the loop test passed
+    on the defective base. */
+async function expectNavigationQuiescence(): Promise<void> {
+  const settled = historyWrites.length;
+  const hashAtSettle = dom.location.hash;
+  await act(async () => { await Bun.sleep(300); });
+  expect(historyWrites.every((write) => write.startsWith("replace:"))).toBe(true);
+  expect(historyWrites.length).toBe(settled);
+  expect(dom.location.hash).toBe(hashAtSettle);
+}
+
 test("#c= to a conversation whose only present generation is an archived predecessor opens it", async () => {
   dom.location.hash = `#c=${encodeURIComponent(CONVERSATION_ID)}`;
   /* The global scope is capped past the conversation; the pinned scope (by id
@@ -246,21 +262,37 @@ test("#c= to a conversation whose only present generation is an archived predece
   expect(dom.location.hash).toBe(`#c=${encodeURIComponent(CONVERSATION_ID)}`);
   /* No visible failure state: this link RESOLVED. */
   expect(host.querySelector("[data-stale-focus-notice]")).toBeNull();
+  await expectNavigationQuiescence();
 });
 
-test("#c= resolution never navigates in a loop: no pushes, only bounded same-URL retypes", async () => {
+test("#c= resolution OPENS the conversation and never navigates in a loop", async () => {
   dom.location.hash = `#c=${encodeURIComponent(CONVERSATION_ID)}`;
   stubFetch((pin) => (pin === CONVERSATION_ID || pin === TARGET_PATH ? [otherRow, predecessorRow] : [otherRow]));
 
   const host = await mountViewer();
-  await waitFor(() => host.querySelector(`[data-scheme-node="${TARGET_PATH}"]`) !== null);
-  const settled = historyWrites.length;
-  await act(async () => { await Bun.sleep(300); });
-
-  /* A resolver-driven open only ever replaces the entry it stands on. */
-  expect(historyWrites.every((write) => write.startsWith("replace:"))).toBe(true);
-  expect(historyWrites.length).toBe(settled);
+  /* The loop oracle is conditioned on a SUCCESSFUL open: on the defective base
+     the card never materializes and this assertion REDs. The first version of
+     this test ignored the waitFor result and green-lit the base. */
+  expect(await waitFor(() => host.querySelector(`[data-scheme-node="${TARGET_PATH}"]`) !== null)).toBe(true);
+  /* The canonical link survives resolution untouched — the observed prod
+     symptom retyped the same URL four times; here the resolver may retype the
+     entry it stands on at most a bounded number of times, all replaces. */
+  expect(dom.location.hash).toBe(`#c=${encodeURIComponent(CONVERSATION_ID)}`);
   expect(historyWrites.length).toBeLessThanOrEqual(3);
+  await expectNavigationQuiescence();
+});
+
+test("#c= from a tab standing on another project switches to the target's project and opens", async () => {
+  dom.localStorage.setItem("llvProject", "other-project");
+  dom.location.hash = `#c=${encodeURIComponent(CONVERSATION_ID)}`;
+  stubFetch((pin) => (pin === CONVERSATION_ID || pin === TARGET_PATH ? [otherRow, targetRow] : [otherRow]));
+
+  const host = await mountViewer();
+
+  expect(await waitFor(() => host.querySelector(`[data-scheme-node="${TARGET_PATH}"]`) !== null)).toBe(true);
+  expect(dom.localStorage.getItem("llvProject")).toBe(TARGET_PROJECT);
+  expect(host.querySelector("[data-stale-focus-notice]")).toBeNull();
+  await expectNavigationQuiescence();
 });
 
 test("#c= whose row arrives only via the pinned fetch keeps its pin after resolving", async () => {
@@ -280,6 +312,7 @@ test("#c= whose row arrives only via the pinned fetch keeps its pin after resolv
   expect(filesRequests.length).toBeGreaterThan(0);
   expect(filesRequests[filesRequests.length - 1]).toContain("path=");
   expect(host.querySelector(`[data-scheme-node="${TARGET_PATH}"]`)).not.toBeNull();
+  await expectNavigationQuiescence();
 });
 
 test("legacy #f= to an archived predecessor transcript opens it the same way", async () => {
@@ -293,6 +326,7 @@ test("legacy #f= to an archived predecessor transcript opens it the same way", a
 
   expect(await waitFor(() => host.querySelector(`[data-scheme-node="${TARGET_PATH}"]`) !== null)).toBe(true);
   expect(dom.localStorage.getItem("llvProject")).toBe(TARGET_PROJECT);
+  await expectNavigationQuiescence();
 });
 
 test("an id no payload can resolve gets a visible notice, never a silent landing", async () => {
@@ -304,4 +338,35 @@ test("an id no payload can resolve gets a visible notice, never a silent landing
   /* Bounded by the same deadline a Back/Forward replay uses (8s). */
   expect(await waitFor(() => host.querySelector("[data-stale-focus-notice]") !== null, 10_000)).toBe(true);
   expect(host.textContent).toContain(en["viewer.staleFocusEntry"]);
+  /* Failing must not navigate either: the hash the operator pasted stays. */
+  await expectNavigationQuiescence();
 }, 15_000);
+
+test("a true-miss notice is DURABLE: it outlives the old self-dismiss window and clears on navigation", async () => {
+  dom.location.hash = "#c=conversation_nowhere-to-be-found";
+  stubFetch(() => [otherRow]);
+
+  const host = await mountViewer();
+
+  expect(await waitFor(() => host.querySelector("[data-stale-focus-notice]") !== null, 10_000)).toBe(true);
+  /* Pre-fix the notice evaporated 6s after appearing while the dead #c= hash
+     stayed put — the operator was back on the silent default view. */
+  await act(async () => { await Bun.sleep(6_500); });
+  expect(host.querySelector("[data-stale-focus-notice]")).not.toBeNull();
+  /* Navigation is a legitimate exit: moving to a project retires the claim. */
+  await act(async () => { dom.location.hash = "#p=other-project"; });
+  expect(await waitFor(() => host.querySelector("[data-stale-focus-notice]") === null)).toBe(true);
+}, 30_000);
+
+test("the durable not-found notice has an explicit dismiss", async () => {
+  dom.location.hash = "#c=conversation_nowhere-to-be-found";
+  stubFetch(() => [otherRow]);
+
+  const host = await mountViewer();
+
+  expect(await waitFor(() => host.querySelector("[data-stale-focus-notice]") !== null, 10_000)).toBe(true);
+  const dismiss = host.querySelector("[data-stale-focus-dismiss]") as HTMLElement | null;
+  expect(dismiss).not.toBeNull();
+  await act(async () => { dismiss!.click(); });
+  expect(host.querySelector("[data-stale-focus-notice]")).toBeNull();
+}, 20_000);

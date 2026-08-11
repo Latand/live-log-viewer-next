@@ -98,8 +98,12 @@ function projectUrl(project: string): string {
     stay usable. */
 const STALE_FOCUS_REPLAY_MS = 8_000;
 
-/** How long the stale-entry notice stays up before it dismisses itself. */
-const STALE_FOCUS_NOTICE_MS = 6_000;
+/** How long the unknown-fragment notice stays up before it dismisses itself.
+    The stale-conversation notice never self-dismisses: an unresolved deep link
+    keeps its visible not-found state until the operator navigates, resolves a
+    new target, or dismisses it — a notice that evaporates while the hash stays
+    put lands the tab back on the silent default view this fix exists to kill. */
+const UNKNOWN_FRAGMENT_NOTICE_MS = 6_000;
 
 /** One-line reason a queue item waits: question header, screen tail, or the stalled wording. */
 function attentionSnippet(t: TFunction, item: AttentionItem): string {
@@ -262,6 +266,9 @@ export function Viewer() {
          focus entry with its full stored identity; deriving a second, weaker
          intent from the bare hash would drop the project and path support. */
       if (traversalFenceRef.current.swallows(location.hash)) return;
+      /* Navigation is one of the two exits a durable not-found notice has
+         (the other is its dismiss button): a new attempt starts clean. */
+      setStaleFocusNotice(false);
       const next = readHash();
       if (next.filePath || next.conversationId) {
         dispatchCatalogPin({ kind: "release" });
@@ -298,6 +305,7 @@ export function Viewer() {
       /* The browser has already applied this traversal's URL, so the fragment
          read here is exactly the hash whose follow-up hashchange must skip. */
       traversalFenceRef.current.arm(location.hash);
+      setStaleFocusNotice(false);
       dispatchCatalogPin({ kind: "release" });
       setFocusRequest(null);
       /* Cross-project entries select the stored project first, then resolve. */
@@ -328,14 +336,8 @@ export function Viewer() {
   }, []);
 
   useEffect(() => {
-    if (!staleFocusNotice) return;
-    const timer = window.setTimeout(() => setStaleFocusNotice(false), STALE_FOCUS_NOTICE_MS);
-    return () => window.clearTimeout(timer);
-  }, [staleFocusNotice]);
-
-  useEffect(() => {
     if (!unknownFragmentNotice) return;
-    const timer = window.setTimeout(() => setUnknownFragmentNotice(false), STALE_FOCUS_NOTICE_MS);
+    const timer = window.setTimeout(() => setUnknownFragmentNotice(false), UNKNOWN_FRAGMENT_NOTICE_MS);
     return () => window.clearTimeout(timer);
   }, [unknownFragmentNotice]);
   /* eslint-enable react-hooks/set-state-in-effect */
@@ -346,7 +348,9 @@ export function Viewer() {
   const applyProject = useCallback((nextProject: string) => {
     setProject(nextProject);
     /* Explicit project navigation replaces the hash without a hashchange
-       event, so any unresolved conversation intent is cancelled here. */
+       event, so any unresolved conversation intent is cancelled here — and a
+       deliberate navigation retires the durable not-found notice. */
+    setStaleFocusNotice(false);
     setPendingHash(null);
     dispatchCatalogPin({ kind: "release" });
     setFocusRequest(null);
@@ -404,6 +408,9 @@ export function Viewer() {
      the node after the transient hash intent resolves. */
   const openPinnedFile = useCallback((file: FileEntry, hydrated = false) => {
     const key = projectKey(file);
+    /* A resolution landing is the third exit for the not-found notice: the
+       viewer is now showing a conversation, so the failure claim is over. */
+    setStaleFocusNotice(false);
     queueColumnOpen(key, file.path, isChildConversation(file));
     dispatchCatalogPin({ kind: hydrated ? "resolve" : "open", path: file.path, conversationId: file.conversationId });
     setProject(key);
@@ -972,13 +979,25 @@ export function Viewer() {
       {/* Staging instances (#659) announce themselves on every device; prod
           renders nothing. Top-center, clear of both corner anchors. */}
       <StagingBadge />
-      {/* A Back/Forward entry whose conversation no longer resolves (issue
-          #866): says so and self-dismisses; the surrounding history keeps
-          working. Below the staging badge's anchor so the two never overlap. */}
+      {/* A Back/Forward entry or pasted deep link whose conversation never
+          resolves (issues #866, P1 #c= bounce): says so and STAYS — the notice
+          survives until a navigation, a successful resolution, or its dismiss
+          button, because a self-dismissing notice left the unchanged hash
+          sitting silently on the default view. Below the staging badge's
+          anchor so the two never overlap. */}
       {staleFocusNotice ? (
         <div className="pointer-events-none fixed left-1/2 top-10 z-40 -translate-x-1/2" role="status" data-stale-focus-notice>
-          <div className="rounded-full border border-warning/45 bg-warning-soft px-3.5 py-1.5 text-[12px] font-semibold text-warning shadow-1 backdrop-blur">
+          <div className="pointer-events-auto flex items-center gap-2 rounded-full border border-warning/45 bg-warning-soft py-1.5 pl-3.5 pr-2 text-[12px] font-semibold text-warning shadow-1 backdrop-blur">
             {t("viewer.staleFocusEntry")}
+            <button
+              type="button"
+              onClick={() => setStaleFocusNotice(false)}
+              aria-label={t("viewer.closeNotification")}
+              className="rounded-full p-0.5 hover:bg-warning/15"
+              data-stale-focus-dismiss
+            >
+              <X className="h-3.5 w-3.5" aria-hidden />
+            </button>
           </div>
         </div>
       ) : null}
