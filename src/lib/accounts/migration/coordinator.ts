@@ -905,13 +905,20 @@ export async function reconcileMigrations(
       return;
     }
     if (conversation.migration.phase === "rolled-back") {
+      /* A rolled-back migration owns only the deliveries that already existed
+         when it rolled back (#972): the rollback stamped `migration.updatedAt`,
+         so anything created afterwards is a fresh message the settled migration
+         has no claim on. Reconciliation can reach this residue before the
+         hygiene sweep clears it, so the same ownership fence applies here. */
+      const rolledBackAt = Date.parse(conversation.migration.updatedAt);
       for (const item of registry.pendingDeliveries(conversation.id)) {
-        if (item.state === "held" || item.state === "assigned" || item.state === "delivery-uncertain") {
-          registry.terminalizeHeldDelivery(
-            item.id,
-            "delivery cancelled because its owning account migration was rolled back; send again to authorize a fresh delivery action",
-          );
-        }
+        if (item.state !== "held" && item.state !== "assigned" && item.state !== "delivery-uncertain") continue;
+        const createdAt = Date.parse(item.createdAt);
+        if (!Number.isFinite(rolledBackAt) || (Number.isFinite(createdAt) && createdAt > rolledBackAt)) continue;
+        registry.terminalizeHeldDelivery(
+          item.id,
+          "delivery cancelled because its owning account migration was rolled back; send again to authorize a fresh delivery action",
+        );
       }
       return;
     }

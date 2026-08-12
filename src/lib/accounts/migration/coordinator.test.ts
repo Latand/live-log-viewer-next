@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { AgentRegistry, MigrationRevisionError, type ConversationObservation } from "@/lib/agent/registry";
 import { boardFor, mutateBoard, setBoardFileForTests } from "@/lib/board/store";
+import { terminalizeStaleUndeliverableHeldDeliveries } from "@/lib/reaperRuntime";
 import { tailRecordsResult } from "@/lib/scanner/activity";
 import type { FileEntry } from "@/lib/types";
 import { enqueueStructuredMessage } from "@/lib/runtime/structuredMessageDelivery";
@@ -2553,20 +2554,54 @@ describe("durable account migration coordinator", () => {
     });
   });
 
-  test("reconciliation terminalizes an assigned delivery owned by a rolled-back migration", async () => {
+  /** Builds a conversation whose migration rolled back an hour ago (#972),
+      plus one held delivery the rollback owned and one held delivery sent
+      afterwards. The rollback timestamp is backdated on disk because the
+      registry stamps it with the real clock, and the trap under test needs
+      deliveries that are clearly younger than the rollback. */
+  function rolledBackResidue(pathname: string, requestId: string) {
     const store = registry();
-    store.reconcileConversations([observation("/rolled-back-source.jsonl", "a", "idle")]);
-    const conversation = store.conversationForPath("/rolled-back-source.jsonl")!;
+    store.reconcileConversations([observation(pathname, "a", "idle")]);
+    const conversation = store.conversationForPath(pathname)!;
     store.commitMigrationIntent({
       engine: "codex",
       targetId: "b",
       origin: "manual",
-      requestId: "rolled-back-assigned",
+      requestId,
       expectedRevision: store.engineRouting("codex").revision,
     });
     const revision = store.conversation(conversation.id)!.migration!.revision;
     store.rollbackConversationMigration(conversation.id, revision);
-    const assigned = store.holdDelivery(conversation.id, "fixture payload", "rolled-back-assigned");
+    const rolledBackAt = new Date(Date.now() - 60 * 60_000).toISOString();
+    const snapshot = store.snapshot();
+    snapshot.conversations[conversation.id]!.migration!.updatedAt = rolledBackAt;
+    const heldRecord = (id: string, createdAt: string) => ({
+      id,
+      conversationId: conversation.id,
+      text: "fixture payload",
+      createdAt,
+      clientMessageId: id,
+      payloadKind: "text",
+      runtimeImages: [],
+      contentDigest: null,
+      artifactPaths: [],
+      state: "held",
+      generationId: null,
+      attempts: 0,
+      assignedAt: null,
+      deliveredAt: null,
+      error: null,
+    }) as unknown as (typeof snapshot.heldDeliveries)[string];
+    snapshot.heldDeliveries["owned-by-rollback"] =
+      heldRecord("owned-by-rollback", new Date(Date.parse(rolledBackAt) - 60 * 60_000).toISOString());
+    snapshot.heldDeliveries["held-after-rollback"] = heldRecord("held-after-rollback", new Date().toISOString());
+    fs.writeFileSync(store.filename, JSON.stringify(snapshot));
+    return { store: new AgentRegistry(store.filename), conversation };
+  }
+
+  test("reconciliation settles only the deliveries a rolled-back migration owned (issue 972)", async () => {
+    const { store, conversation } = rolledBackResidue("/rolled-back-source.jsonl", "rolled-back-owned");
+    const assigned = store.holdDelivery(conversation.id, "sent after the rollback", "post-rollback-assigned");
     expect(assigned).toMatchObject({ state: "assigned", attempts: 0 });
 
     const delivered: string[] = [];
@@ -2578,13 +2613,48 @@ describe("durable account migration coordinator", () => {
     }, store);
 
     expect(delivered).toEqual([]);
-    expect(store.snapshot().heldDeliveries[assigned.id]).toMatchObject({
+    expect(store.snapshot().heldDeliveries["owned-by-rollback"]).toMatchObject({
       state: "failed",
       attempts: 0,
       generationId: null,
       deliveredAt: null,
       error: expect.stringContaining("rolled back"),
     });
+    expect(store.snapshot().heldDeliveries[assigned.id]).toMatchObject({ state: "assigned", attempts: 0, error: null });
+    expect(store.snapshot().heldDeliveries["held-after-rollback"]).toMatchObject({ state: "held", attempts: 0, error: null });
+  });
+
+  test("a delivery sent after a rollback survives repeated reconciliation and the hygiene sweep (issue 972)", async () => {
+    const { store, conversation } = rolledBackResidue("/rolled-back-repeat.jsonl", "rolled-back-repeat");
+    const assigned = store.holdDelivery(conversation.id, "sent after the rollback", "post-rollback-repeat");
+    const port = { async deliver() { return "delivered" as const; } };
+
+    await reconcileMigrations(provider([]), port, store);
+    await reconcileMigrations(provider([]), port, store);
+    terminalizeStaleUndeliverableHeldDeliveries(store);
+
+    expect(store.conversation(conversation.id)?.migration).toBeNull();
+    expect(store.snapshot().heldDeliveries[assigned.id]).toMatchObject({ state: "assigned", attempts: 0, error: null });
+    expect(store.snapshot().heldDeliveries["held-after-rollback"]).toMatchObject({ state: "held", attempts: 0, error: null });
+  });
+
+  test("reaper-first ordering: reconciliation spares post-rollback deliveries while residue remains (issue 972)", async () => {
+    const { store, conversation } = rolledBackResidue("/rolled-back-reaper-first.jsonl", "rolled-back-reaper-first");
+    const assigned = store.holdDelivery(conversation.id, "sent after the rollback", "post-rollback-reaper-first");
+
+    expect(terminalizeStaleUndeliverableHeldDeliveries(store)).toEqual(["owned-by-rollback"]);
+    expect(store.conversation(conversation.id)?.migration).toMatchObject({ phase: "rolled-back" });
+    const delivered: string[] = [];
+    await reconcileMigrations(provider([]), {
+      async deliver({ clientMessageId }) {
+        delivered.push(clientMessageId);
+        return "delivered";
+      },
+    }, store);
+
+    expect(delivered).toEqual([]);
+    expect(store.snapshot().heldDeliveries[assigned.id]).toMatchObject({ state: "assigned", attempts: 0, error: null });
+    expect(store.snapshot().heldDeliveries["held-after-rollback"]).toMatchObject({ state: "held", attempts: 0, error: null });
   });
 
   test("a fresh explicit delivery after cancellation still requires current generation ownership", () => {
