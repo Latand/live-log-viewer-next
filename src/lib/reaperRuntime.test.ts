@@ -123,11 +123,14 @@ test("the issue 652 convergence pass settles a requested member with no live sou
   }
 });
 
-test("the issue 652 convergence pass terminalizes assigned delivery under a rolled-back migration", () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-rolled-back-delivery-"));
+/** Builds a conversation whose migration rolled back an hour ago (#972). The
+    rollback timestamp is backdated on disk because the registry stamps it with
+    the real clock, and the trap under test needs deliveries that are clearly
+    younger than the rollback. */
+function rolledBackFixture(directory: string, options: { intentState?: "draining" | "stopped" } = {}) {
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
   const conversation = registry.ensureConversation("codex", "/rolled-back-delivery.jsonl", "source");
-  registry.commitMigrationIntent({
+  const intent = registry.commitMigrationIntent({
     engine: "codex",
     targetId: "target",
     origin: "manual",
@@ -136,19 +139,94 @@ test("the issue 652 convergence pass terminalizes assigned delivery under a roll
   });
   const revision = registry.conversation(conversation.id)!.migration!.revision;
   registry.rollbackConversationMigration(conversation.id, revision);
-  const assigned = registry.holdDelivery(conversation.id, "fixture", "rolled-back-delivery");
+  const snapshot = registry.snapshot();
+  const rolledBackAt = new Date(Date.now() - 60 * 60_000).toISOString();
+  snapshot.conversations[conversation.id]!.migration!.updatedAt = rolledBackAt;
+  if (options.intentState) snapshot.migrationIntents[intent.id]!.state = options.intentState;
+  fs.writeFileSync(path.join(directory, "agent-registry.json"), JSON.stringify(snapshot));
+  return {
+    registry: new AgentRegistry(path.join(directory, "agent-registry.json")),
+    conversation,
+    intent,
+    rolledBackAt,
+  };
+}
+
+test("a delivery created after a rollback survives the hygiene sweep (issue 972)", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-post-rollback-delivery-"));
+  const { registry, conversation } = rolledBackFixture(directory);
+  const assigned = registry.holdDelivery(conversation.id, "sent after the rollback", "post-rollback-delivery");
   expect(assigned).toMatchObject({ state: "assigned", attempts: 0 });
 
   try {
     const terminalized = terminalizeStaleUndeliverableHeldDeliveries(registry);
 
-    expect(terminalized).toEqual([assigned.id]);
+    expect(terminalized).toEqual([]);
     expect(registry.snapshot().heldDeliveries[assigned.id]).toMatchObject({
+      state: "assigned",
+      attempts: 0,
+      error: null,
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("the sweep still settles a delivery the rolled-back migration owned (issue 972)", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-owned-rollback-delivery-"));
+  const { registry, conversation, rolledBackAt } = rolledBackFixture(directory);
+  const snapshot = registry.snapshot();
+  snapshot.heldDeliveries["owned-by-rollback"] = {
+    id: "owned-by-rollback",
+    conversationId: conversation.id,
+    text: "queued before the rollback",
+    createdAt: new Date(Date.parse(rolledBackAt) - 60 * 60_000).toISOString(),
+    clientMessageId: "owned-by-rollback",
+    payloadKind: "text",
+    runtimeImages: [],
+    contentDigest: null,
+    artifactPaths: [],
+    state: "held",
+    generationId: null,
+    attempts: 0,
+    assignedAt: null,
+    deliveredAt: null,
+    error: null,
+  } as unknown as (typeof snapshot.heldDeliveries)[string];
+  fs.writeFileSync(registry.filename, JSON.stringify(snapshot));
+  const reopened = new AgentRegistry(registry.filename);
+  const fresh = reopened.holdDelivery(conversation.id, "sent after the rollback", "post-rollback-delivery");
+
+  try {
+    const terminalized = terminalizeStaleUndeliverableHeldDeliveries(reopened);
+
+    expect(terminalized).toEqual(["owned-by-rollback"]);
+    expect(reopened.snapshot().heldDeliveries["owned-by-rollback"]).toMatchObject({
       state: "failed",
       attempts: 0,
       generationId: null,
       deliveredAt: null,
       error: expect.stringContaining("rolled back"),
+    });
+    expect(reopened.snapshot().heldDeliveries[fresh.id]).toMatchObject({ state: "assigned", error: null });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a settled intent's rolled-back residue is cleared after one settling sweep (issue 972)", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-rollback-residue-"));
+  const { registry, conversation } = rolledBackFixture(directory, { intentState: "stopped" });
+  const assigned = registry.holdDelivery(conversation.id, "sent after the rollback", "post-rollback-delivery");
+
+  try {
+    expect(terminalizeStaleUndeliverableHeldDeliveries(registry)).toEqual([]);
+    expect(registry.conversation(conversation.id)?.migration).toBeNull();
+    expect(terminalizeStaleUndeliverableHeldDeliveries(registry)).toEqual([]);
+    expect(registry.snapshot().heldDeliveries[assigned.id]).toMatchObject({
+      state: "assigned",
+      attempts: 0,
+      error: null,
     });
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });

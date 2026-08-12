@@ -1752,6 +1752,7 @@ function compactDeliveryReservations(file: RegistryFile, onlyConversationId?: Vi
   }
   const deliveredGroups = new Map<ViewerConversationId, HeldDelivery[]>();
   const failedGroups = new Map<ViewerConversationId, HeldDelivery[]>();
+  const cancelledFailures: HeldDelivery[] = [];
   for (const delivery of Object.values(file.heldDeliveries)) {
     const canonicalId = resolveConversationAlias(file, delivery.conversationId);
     if (onlyConversationId && canonicalId !== resolveConversationAlias(file, onlyConversationId)) continue;
@@ -1761,13 +1762,27 @@ function compactDeliveryReservations(file: RegistryFile, onlyConversationId?: Vi
       group.push(delivery);
       deliveredGroups.set(canonicalId, group);
     } else if (delivery.state === "failed"
-      && !delivery.error?.startsWith(MIGRATION_DELIVERY_CANCELLATION_PREFIX)) {
+      && delivery.error?.startsWith(MIGRATION_DELIVERY_CANCELLATION_PREFIX)) {
+      /* Migration cancellations arrive in bursts larger than the failed cap,
+         so they skip the per-conversation cap to keep the whole burst
+         auditable — but they age out with the shared retention window (#972);
+         exempting them from the TTL too let the records accumulate forever.
+         Same-operation replay dedup survives their compaction through
+         `deliveryOperationOwners`. */
+      cancelledFailures.push(delivery);
+    } else if (delivery.state === "failed") {
       const group = failedGroups.get(canonicalId) ?? [];
       group.push(delivery);
       failedGroups.set(canonicalId, group);
     }
   }
   let removed = 0;
+  for (const delivery of cancelledFailures) {
+    if (terminalDeliveryExpired(delivery, nowMs)) {
+      delete file.heldDeliveries[delivery.id];
+      removed += 1;
+    }
+  }
   for (const groups of [deliveredGroups, failedGroups]) {
     for (const [conversationId, deliveries] of groups) {
       const kept: HeldDelivery[] = [];
@@ -6338,6 +6353,23 @@ export class AgentRegistry {
       conversation.updatedAt = rolledAt;
       advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
       return clone(conversation);
+    });
+  }
+
+  /** Disarms rolled-back residue (#972). A rolled-back block is settled state:
+      once the hygiene sweep has terminalized the deliveries the dead migration
+      owned, keeping the block makes every later sweep and coordinator drain
+      match the conversation again and cancel messages the migration never
+      owned. Clearing is conditional on the phase and intent still matching so
+      a concurrent re-enrollment is never destroyed. */
+  clearRolledBackConversationMigration(id: ViewerConversationId, intentId: string): void {
+    this.mutate((file) => {
+      const conversation = file.conversations[resolveConversationAlias(file, id)];
+      const migration = conversation?.migration;
+      if (!conversation || !migration || migration.phase !== "rolled-back" || migration.intentId !== intentId) return;
+      conversation.migration = null;
+      conversation.updatedAt = now();
+      file.conversationRevision[conversation.engine] += 1;
     });
   }
 }

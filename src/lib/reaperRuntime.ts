@@ -885,17 +885,38 @@ export function terminalizeStaleUndeliverableHeldDeliveries(
     const owned = Object.values(snapshot.conversations)
       .filter((conversation) => conversation.migration?.intentId === intent.id);
     const ids = unsettledDeliveryIdsForIntent(snapshot, intent.id);
-    const rolledBackConversationIds = new Set(owned
-      .filter((conversation) => conversation.migration?.phase === "rolled-back")
-      .map((conversation) => conversation.id));
+    /* A rolled-back migration owns only the deliveries that already existed
+       when it rolled back (#972): its rollback stamped `migration.updatedAt`,
+       so anything created afterwards is a fresh message the settled migration
+       has no claim on and must never be cancelled by its residue. */
+    const rolledBackAt = new Map<RegistryConversation["id"], number>();
+    for (const conversation of owned) {
+      if (conversation.migration?.phase !== "rolled-back") continue;
+      rolledBackAt.set(conversation.id, Date.parse(conversation.migration.updatedAt));
+    }
     let activeIds = ids.filter((id) => {
       const delivery = snapshot.heldDeliveries[id];
-      if (!delivery || !rolledBackConversationIds.has(delivery.conversationId)) return true;
+      if (!delivery) return true;
+      const cutoff = rolledBackAt.get(delivery.conversationId);
+      if (cutoff === undefined) return true;
+      const createdAt = Date.parse(delivery.createdAt);
+      if (!Number.isFinite(cutoff) || (Number.isFinite(createdAt) && createdAt > cutoff)) return true;
       const settled = registry.terminalizeHeldDelivery(id, ROLLED_BACK_MIGRATION_DELIVERY_REASON);
       if (settled.state === "failed") terminalized.add(id);
       return false;
     });
-    if (intent.state !== "draining") continue;
+    /* Once its intent is settled and its owned deliveries are terminal, the
+       rolled-back block is spent residue: clearing it here disarms every later
+       hygiene pass that would otherwise keep matching this conversation. A
+       still-draining intent keeps the block so the drain's own bookkeeping
+       (progress accounting, per-conversation opt-out) stays intact; the
+       createdAt cutoff above already protects new messages meanwhile. */
+    if (intent.state !== "draining") {
+      for (const conversationId of rolledBackAt.keys()) {
+        registry.clearRolledBackConversationMigration(conversationId, intent.id);
+      }
+      continue;
+    }
     const deliveryConversationIds = new Set(activeIds.map((id) =>
       snapshot.heldDeliveries[id]?.conversationId).filter((id): id is RegistryConversation["id"] => Boolean(id)));
     const noProgress = migrationIntentIsStale(snapshot, intent, now);
