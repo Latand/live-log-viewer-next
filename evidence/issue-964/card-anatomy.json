@@ -1,5 +1,5 @@
 {
-  "buildHead": "892eda22decc6eb41f614655737a173e54fc46c4",
+  "buildHead": "c810b2a4be21b2e31bfd61635808a7e72b6cb756",
   "evidencePolicy": "captured at buildHead; commits after buildHead may touch only evidence/",
   "stack": [
     {
@@ -164,19 +164,19 @@
       "opsGeometry": [
         {
           "chip": "data-card-switch",
-          "width": 74.3,
-          "overflowRight": -158.4,
+          "width": 75.2,
+          "overflowRight": -156,
           "titled": true
         },
         {
           "chip": "data-rate-limited",
-          "width": 95.6,
-          "overflowRight": -56.8,
+          "width": 95.1,
+          "overflowRight": -54.9,
           "titled": true
         },
         {
           "chip": "data-wakeup",
-          "width": 50.8,
+          "width": 48.9,
           "overflowRight": 0,
           "titled": true
         }
@@ -200,8 +200,8 @@
       "opsGeometry": [
         {
           "chip": "data-rate-limited",
-          "width": 117.4,
-          "overflowRight": -109.3,
+          "width": 122.1,
+          "overflowRight": -103.2,
           "titled": true
         }
       ]
@@ -242,8 +242,8 @@
       "opsGeometry": [
         {
           "chip": "data-card-switch",
-          "width": 90.8,
-          "overflowRight": -61.8,
+          "width": 96.2,
+          "overflowRight": -55,
           "titled": true
         }
       ]
@@ -269,8 +269,8 @@
       "opsGeometry": [
         {
           "chip": "data-card-switch",
-          "width": 115.5,
-          "overflowRight": -37.2,
+          "width": 123.6,
+          "overflowRight": -27.6,
           "titled": true
         }
       ]
@@ -293,8 +293,8 @@
       "opsGeometry": [
         {
           "chip": "data-wakeup",
-          "width": 64.7,
-          "overflowRight": -82,
+          "width": 65.7,
+          "overflowRight": -79.7,
           "titled": true
         }
       ]
@@ -321,13 +321,13 @@
       "opsGeometry": [
         {
           "chip": "data-card-switch",
-          "width": 91.4,
-          "overflowRight": -55.3,
+          "width": 92.4,
+          "overflowRight": -53,
           "titled": true
         },
         {
           "chip": "data-wakeup",
-          "width": 49.3,
+          "width": 47,
           "overflowRight": 0,
           "titled": true
         }
@@ -354,8 +354,8 @@
       "opsGeometry": [
         {
           "chip": "data-card-switch",
-          "width": 80,
-          "overflowRight": -66.7,
+          "width": 83,
+          "overflowRight": -62.4,
           "titled": true
         }
       ]
@@ -381,8 +381,8 @@
       "opsGeometry": [
         {
           "chip": "data-card-switch",
-          "width": 78.1,
-          "overflowRight": -77.9,
+          "width": 86.7,
+          "overflowRight": -67.4,
           "titled": true
         }
       ]
@@ -502,19 +502,19 @@
       "opsGeometry": [
         {
           "chip": "data-card-switch",
-          "width": 74.3,
-          "overflowRight": -158.4,
+          "width": 75.2,
+          "overflowRight": -156,
           "titled": true
         },
         {
           "chip": "data-rate-limited",
-          "width": 95.6,
-          "overflowRight": -56.8,
+          "width": 95.1,
+          "overflowRight": -54.9,
           "titled": true
         },
         {
           "chip": "data-wakeup",
-          "width": 50.8,
+          "width": 48.9,
           "overflowRight": 0,
           "titled": true
         }
@@ -538,8 +538,8 @@
       "opsGeometry": [
         {
           "chip": "data-rate-limited",
-          "width": 117.4,
-          "overflowRight": -109.3,
+          "width": 122.1,
+          "overflowRight": -103.2,
           "titled": true
         }
       ]
@@ -580,8 +580,8 @@
       "opsGeometry": [
         {
           "chip": "data-card-switch",
-          "width": 90.8,
-          "overflowRight": -61.8,
+          "width": 96.2,
+          "overflowRight": -55,
           "titled": true
         }
       ]
@@ -607,8 +607,8 @@
       "opsGeometry": [
         {
           "chip": "data-card-switch",
-          "width": 115.5,
-          "overflowRight": -37.2,
+          "width": 123.6,
+          "overflowRight": -27.6,
           "titled": true
         }
       ]
@@ -631,8 +631,8 @@
       "opsGeometry": [
         {
           "chip": "data-wakeup",
-          "width": 64.7,
-          "overflowRight": -82,
+          "width": 65.7,
+          "overflowRight": -79.7,
           "titled": true
         }
       ]
@@ -659,13 +659,13 @@
       "opsGeometry": [
         {
           "chip": "data-card-switch",
-          "width": 91.4,
-          "overflowRight": -55.3,
+          "width": 92.4,
+          "overflowRight": -53,
           "titled": true
         },
         {
           "chip": "data-wakeup",
-          "width": 49.3,
+          "width": 47,
           "overflowRight": 0,
           "titled": true
         }
@@ -692,8 +692,8 @@
       "opsGeometry": [
         {
           "chip": "data-card-switch",
-          "width": 80,
-          "overflowRight": -66.7,
+          "width": 83,
+          "overflowRight": -62.4,
           "titled": true
         }
       ]
@@ -719,8 +719,8 @@
       "opsGeometry": [
         {
           "chip": "data-card-switch",
-          "width": 78.1,
-          "overflowRight": -77.9,
+          "width": 86.7,
+          "overflowRight": -67.4,
           "titled": true
         }
       ]

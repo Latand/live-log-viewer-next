@@ -480,6 +480,35 @@ test("rotation preserves the requested effort end to end into the successor spaw
   expect(recorded.spawns[1]).toMatchObject({ effort: "medium" });
 });
 
+test("rotation preserves the requested Codex speed end to end into the successor spawn body", async () => {
+  const { deps, recorded } = dependencies();
+  await executeOrchestratorSeatRequest(spawnRequest(), deps);
+
+  const rotated = await executeOrchestratorRotation({
+    project: "proj-a",
+    clientRequestId: "req_00000031",
+    fast: true,
+  }, deps);
+
+  expect(rotated.status).toBe(200);
+  expect(recorded.spawns).toHaveLength(2);
+  expect(recorded.spawns[1]).toMatchObject({ fast: true });
+});
+
+test("rotation leaves the successor speed unset when the caller does not request one", async () => {
+  const { deps, recorded } = dependencies();
+  await executeOrchestratorSeatRequest(spawnRequest(), deps);
+
+  const rotated = await executeOrchestratorRotation({
+    project: "proj-a",
+    clientRequestId: "req_00000032",
+  }, deps);
+
+  expect(rotated.status).toBe(200);
+  expect(recorded.spawns).toHaveLength(2);
+  expect(recorded.spawns[1]).not.toHaveProperty("fast");
+});
+
 test("the stuck shape from #878: an errored pending intent no longer blocks rotation and stays readable in history", async () => {
   const { deps } = dependencies();
   await executeOrchestratorSeatRequest(spawnRequest("req_00000041"), deps);
