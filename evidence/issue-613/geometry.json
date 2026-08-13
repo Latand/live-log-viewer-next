@@ -15,16 +15,16 @@
       },
       {
         "label": "Undo — reopen “Closed card” (Ctrl+Z)",
-        "left": 133.3125,
-        "right": 177.3125,
+        "left": 133.171875,
+        "right": 177.171875,
         "width": 44,
         "height": 44
       },
       {
         "label": "3 waiting",
-        "left": 186.3125,
+        "left": 186.171875,
         "right": 237,
-        "width": 50.6875,
+        "width": 50.828125,
         "height": 44
       },
       {
@@ -107,16 +107,16 @@
       },
       {
         "label": "Undo — reopen “Closed card” (Ctrl+Z)",
-        "left": 133.3125,
-        "right": 177.3125,
+        "left": 133.171875,
+        "right": 177.171875,
         "width": 44,
         "height": 44
       },
       {
         "label": "3 waiting",
-        "left": 186.3125,
+        "left": 186.171875,
         "right": 237,
-        "width": 50.6875,
+        "width": 50.828125,
         "height": 44
       },
       {
@@ -156,13 +156,6 @@
       },
       {
         "label": "Mute sound notifications",
-        "left": 277,
-        "right": 321,
-        "width": 44,
-        "height": 44
-      },
-      {
-        "label": "Sound levels",
         "left": 325,
         "right": 369,
         "width": 44,
