@@ -11,9 +11,11 @@
  * any frame), the phone viewport is emulated, and each seat state is driven by
  * answering the seat route in flight. Everything else is the production render.
  *
- * Shots land outside the repository for direct inspection:
+ * Each run allocates its own directory under the temp root (`ORCH_CAPTURE_DIR`
+ * selects the parent, nothing else), so shots land outside the repository and
+ * no run can overwrite another's:
  *
- *   <out>/979-<state>-<scheme>.png
+ *   <tmp>/llv-issue-979-latest/out/979-<state>-<scheme>.png
  *
  * Every shot also CHECKS what it is showing: the row keeps its 44px target and
  * sits left of the first conversation chip, the phone never grows a horizontal
@@ -27,27 +29,21 @@ import { chromium, type Page } from "playwright-core";
 
 import { PERSISTENT_CHROME } from "@/components/mobile/chatBudget";
 
-import { resolveCaptureRoot } from "./capture-issue-963-attention";
+import { createCaptureDirectory } from "./capture-directory";
 import { demoPort } from "./demo-capture";
 
-/**
- * The capture root is deleted WHOLESALE before every run, so the override is
- * validated by the same rule #963's review put behind its own cleanup: a
- * dedicated `llv-`-prefixed child directory that owns nothing else — never the
- * filesystem root, the home directory, a bare temp root, or the repository.
- * A typo'd `ORCH_CAPTURE_DIR` must fail here, before anything is removed.
- */
-export function resolveOrchCaptureRoot(raw: string | undefined, repo?: string): string {
-  const base = path.resolve(raw ?? "/tmp/llv-issue-979");
-  try {
-    resolveCaptureRoot(base, repo);
-  } catch {
-    throw new Error(`ORCH_CAPTURE_DIR must be a dedicated «llv-» child directory that owns nothing else, got ${base}`);
-  }
-  return base;
-}
-
-const BASE = resolveOrchCaptureRoot(process.env.ORCH_CAPTURE_DIR);
+/* One fresh capture-owned directory per run, allocated by the shared module
+   (#996): an override only selects the PARENT, and a typo'd `ORCH_CAPTURE_DIR`
+   is refused by name before anything is written — nothing here ever clears a
+   directory it did not create. The stable `-latest` symlink is what keeps the
+   frames findable now that each run's leaf is randomised. */
+const REPO_ROOT = path.resolve(import.meta.dir, "..");
+const BASE = createCaptureDirectory({
+  envName: "ORCH_CAPTURE_DIR",
+  prefix: "llv-issue-979",
+  raw: process.env.ORCH_CAPTURE_DIR,
+  repoRoot: REPO_ROOT,
+});
 const HOME = path.join(BASE, "home");
 const OUT_DIR = path.join(BASE, "out");
 const REPO_DIR = path.join(HOME, "Projects", "atlas");
@@ -70,7 +66,6 @@ const SESSIONS = [
 ];
 
 function seedHome(): void {
-  fs.rmSync(BASE, { recursive: true, force: true });
   fs.mkdirSync(REPO_DIR, { recursive: true });
   fs.mkdirSync(OUT_DIR, { recursive: true });
   fs.mkdirSync(path.join(BASE, "tmp", `claude-${process.getuid?.() ?? 1000}`), { recursive: true });
@@ -272,13 +267,12 @@ async function checkSheetKeyboardReach(page: Page, state: string): Promise<void>
 async function main(): Promise<void> {
   const port = demoPort(process.env.ORCH_CAPTURE_PORT, 4979, "ORCH_CAPTURE_PORT");
   const baseUrl = `http://127.0.0.1:${port}`;
-  const repoRoot = path.resolve(import.meta.dir, "..");
   seedHome();
   /* `package.json`'s own start command: `bunx next start` hands the server to
      node, where the instrumentation hook dies on "SQLite state stores require
      the Bun runtime" and every request 500s. */
   const server = spawn("bun", ["--bun", "node_modules/.bin/next", "start", "--hostname", "127.0.0.1", "--port", String(port)], {
-    cwd: repoRoot,
+    cwd: REPO_ROOT,
     env: buildEnvironment(port),
     stdio: ["ignore", "inherit", "inherit"],
   });
@@ -287,6 +281,7 @@ async function main(): Promise<void> {
   const browser = await chromium.launch({ headless: true, ...(executablePath ? { executablePath } : {}) });
   try {
     await waitForServer(baseUrl, server);
+    console.log(`screenshots: ${OUT_DIR}`);
     const scanned = await (await fetch(`${baseUrl}/api/files`)).json() as { files?: { project?: string; cwd?: string; path?: string; title?: string }[] };
     const owned = (scanned.files ?? []).filter((file) => file.cwd === REPO_DIR);
     const projectId = owned[0]?.project ?? "";
@@ -389,6 +384,7 @@ async function main(): Promise<void> {
         await context.close();
       }
     }
+    console.log(`screenshots: ${OUT_DIR}`);
   } finally {
     await browser.close();
     server.kill("SIGTERM");
