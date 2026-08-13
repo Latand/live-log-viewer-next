@@ -9,10 +9,15 @@ import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/o
 import type { FileEntry } from "@/lib/types";
 
 /*
- * The per-project orchestrator panel end to end (issue #977 acceptance):
+ * The per-project orchestrator panel end to end (issues #977 and #978):
  * the draft creates through the SEAT route on either engine, a double-click or
  * a retry cannot designate twice, and every state in the map renders — with the
  * stored terminal error always visible and always retryable.
+ *
+ * Slice B adds the incumbent: the header that names who holds the seat and how
+ * full their context window is, the rotation recommendation the server has been
+ * making invisibly, and rotation itself — which happens ONLY when confirmed, and
+ * exactly once per confirmation no matter how the reply goes.
  */
 
 const dom = new HappyWindow();
@@ -61,6 +66,7 @@ mock.module("@/hooks/useLogTail", () => ({
 }));
 
 const { OrchestratorPanel } = await import("./OrchestratorPanel");
+const { SEAT_POLL_MS } = await import("./useOrchestratorSeat");
 
 const accounts = {
   claude: { active: "primary", accounts: [{ id: "primary", label: "primary", authPresent: true }, { id: "spare", label: "spare", authPresent: true }] },
@@ -75,19 +81,34 @@ interface SeatFile {
 
 let seatStatus: SeatFile;
 let seatPosts: Record<string, unknown>[];
+let rotatePosts: Record<string, unknown>[];
 let spawnPosts: number;
 /** Queued answers for the confirm POST, oldest first; the last one repeats. */
 let seatResponses: { status: number; body: Record<string, unknown> | null; throws?: boolean }[];
+let rotateResponses: { status: number; body: Record<string, unknown> | null; throws?: boolean }[];
+/** `GET /api/orchestrator/seat/status`, the incumbent read (#978). */
+let incumbentStatus: Record<string, unknown> | null;
 const realFetch = globalThis.fetch;
+
+function answer(queue: { status: number; body: Record<string, unknown> | null; throws?: boolean }[]): Response {
+  const next = queue.length > 1 ? queue.shift()! : queue[0]!;
+  if (next.throws) throw new Error("network dropped");
+  return { ok: next.status >= 200 && next.status < 300, status: next.status, json: async () => next.body } as Response;
+}
 
 function installFetch(): void {
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     if (url === "/api/orchestrator/seat" && init?.method === "POST") {
       seatPosts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
-      const answer = seatResponses.length > 1 ? seatResponses.shift()! : seatResponses[0]!;
-      if (answer.throws) throw new Error("network dropped");
-      return { ok: answer.status >= 200 && answer.status < 300, status: answer.status, json: async () => answer.body } as Response;
+      return answer(seatResponses);
+    }
+    if (url === "/api/orchestrator/rotate" && init?.method === "POST") {
+      rotatePosts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return answer(rotateResponses);
+    }
+    if (url.startsWith("/api/orchestrator/seat/status")) {
+      return { ok: true, status: 200, json: async () => incumbentStatus } as Response;
     }
     if (url.startsWith("/api/orchestrator/seat?")) {
       return { ok: true, status: 200, json: async () => seatStatus } as Response;
@@ -99,6 +120,25 @@ function installFetch(): void {
     }
     return { ok: true, status: 200, json: async () => ({}), text: async () => "" } as Response;
   }) as typeof fetch;
+}
+
+/** The status route's answer for a live incumbent, as the panel parses it. */
+function incumbent(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    project: "atlas",
+    designated: true,
+    conversationId: "conversation_orch",
+    predecessorConversationId: null,
+    engine: "claude",
+    model: "opus",
+    effort: "high",
+    accountId: "spare",
+    cwd: "/repos/atlas/worktrees/board",
+    transcriptFacts: { bytes: 2_100_000, messageCount: 812, toolCount: 1_930, compactionCount: 0 },
+    context: { tokens: 240_000, limit: 1_000_000, percent: 24, estimated: false, basis: "provider-reported usage from the transcript's newest turn", policy: "claude-opus-1m" },
+    rotation: { recommended: false, level: "none", advisory: null, reasons: [], threshold: null, thresholdUnknown: false },
+    ...overrides,
+  };
 }
 
 function activeSeat(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -153,9 +193,12 @@ const orchestratorFile: FileEntry = {
 const roots = new Set<Root>();
 beforeEach(() => {
   seatStatus = { seat: null, pending: null, exists: true };
+  incumbentStatus = { project: "atlas", designated: false, rotation: null, context: null };
   seatPosts = [];
+  rotatePosts = [];
   spawnPosts = 0;
   seatResponses = [{ status: 202, body: { ok: true, accepted: true, state: "accepted", conversationId: "conversation_orch", launchId: "launch-a", transport: "structured", initialMessage: "pending", seat: activeSeat() } }];
+  rotateResponses = [{ status: 202, body: { ok: true, accepted: true, state: "accepted", conversationId: "conversation_successor", launchId: "launch-b", transport: "structured", initialMessage: "pending", seat: activeSeat({ conversationId: "conversation_successor" }) } }];
   installFetch();
 });
 afterEach(() => {
@@ -490,3 +533,361 @@ test("a durable terminal error releases the key, so the corrected mandate is the
   await settle();
   expect(seatPosts[1]!.clientRequestId).not.toBe(lost);
 });
+
+/* ------------------------------------------------------------------------- *
+ * Slice B (#978): the incumbent header, the rotation advisory, and rotate.
+ * ------------------------------------------------------------------------- */
+
+const rotateButton = (host: HTMLElement) => host.querySelector("[data-orchestrator-rotate]") as HTMLButtonElement;
+const incumbentRow = (host: HTMLElement) => host.querySelector("[data-orchestrator-incumbent]") as HTMLElement | null;
+
+/** Mount on a live incumbent whose status read has already answered. */
+async function mountLive(status: Record<string, unknown> = incumbent()): Promise<HTMLElement> {
+  seatStatus = { seat: activeSeat(), pending: null, exists: true };
+  incumbentStatus = status;
+  const host = mount([{ ...orchestratorFile, proc: "running", pid: 4_242 } as FileEntry]);
+  await settle();
+  flushSync(() => undefined);
+  return host;
+}
+
+test("the header names the incumbent — engine, model, account and context percent", async () => {
+  const host = await mountLive();
+
+  const row = incumbentRow(host)!;
+  expect(row).not.toBeNull();
+  expect(row.textContent).toContain("Claude");
+  expect(row.textContent).toContain("opus");
+  expect(row.textContent).toContain("high");
+  /* The account catalog's own label, resolved from the id the server reports. */
+  expect(row.textContent).toContain("spare");
+  expect(row.querySelector("[data-orchestrator-context]")?.getAttribute("data-orchestrator-context")).toBe("24");
+  expect(row.textContent).toContain("24%");
+});
+
+test("a server recommendation is SHOWN, in the server's own words, and rotates nothing by itself", async () => {
+  const host = await mountLive(incumbent({
+    context: { tokens: 620_000, limit: 1_000_000, percent: 62, estimated: false, basis: "provider-reported usage", policy: "claude-opus-1m" },
+    rotation: {
+      recommended: true,
+      level: "strongly_recommend",
+      advisory: "STRONGLY_RECOMMEND_ROTATION",
+      reasons: ["context usage 620,000 tokens has reached the rotation threshold of 500,000 tokens (claude-opus-1m: 50% of a 1,000,000-token window)"],
+      thresholdUnknown: false,
+    },
+  }));
+
+  const banner = host.querySelector("[data-orchestrator-rotation]")!;
+  expect(banner.getAttribute("data-orchestrator-rotation")).toBe("strongly_recommend");
+  expect(banner.textContent).toContain("Rotation strongly recommended");
+  expect(banner.textContent).toContain("rotation threshold of 500,000 tokens");
+  /* WORDS ONLY: no rotation was posted, and the conversation is untouched. */
+  expect(rotatePosts).toHaveLength(0);
+  expect(host.querySelector('[data-orchestrator-conversation="conversation_orch"]')).not.toBeNull();
+});
+
+test("an estimated context number is marked as one — a guess never reads as a provider count", async () => {
+  const host = await mountLive(incumbent({
+    context: { tokens: 525_000, limit: 1_000_000, percent: 53, estimated: true, basis: "ESTIMATE: transcript bytes / 4 — no provider-reported usage found", policy: "claude-opus-1m" },
+  }));
+  expect(incumbentRow(host)!.textContent).toContain("~53%");
+});
+
+test("Rotate opens the SAME draft, prefilled from the incumbent, over the conversation it replaces", async () => {
+  const host = await mountLive();
+
+  flushSync(() => rotateButton(host).click());
+  await settle();
+
+  expect(host.querySelector("[data-orchestrator-panel]")?.getAttribute("data-orchestrator-mode")).toBe("rotate");
+  expect(host.querySelector('[data-orchestrator-draft="rotate"]')).not.toBeNull();
+  /* The incumbent's own mandate, editable — the handoff is the server's job. */
+  const mandate = host.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement;
+  expect(mandate.value).toBe("run it");
+  expect(host.textContent).not.toContain("Handoff from your predecessor");
+  /* The account picker opens on the account the incumbent is running under. */
+  const account = host.querySelector('select[aria-label*="Claude"]') as HTMLSelectElement;
+  expect(account.value).toBe("spare");
+  /* The successor continues in the predecessor's checkout. */
+  expect(host.textContent).toContain("/repos/atlas/worktrees/board");
+  /* The incumbent is still on the seat, and the panel still says so. */
+  expect(panelState(host)).toBe("live");
+  expect(incumbentRow(host)).not.toBeNull();
+
+  flushSync(() => (host.querySelector("[data-orchestrator-rotate-cancel]") as HTMLButtonElement).click());
+  await settle();
+  expect(host.querySelector('[data-orchestrator-conversation="conversation_orch"]')).not.toBeNull();
+});
+
+test("confirming a rotation posts to the ROTATE route, and never composes the handoff itself", async () => {
+  const host = await mountLive();
+  flushSync(() => rotateButton(host).click());
+  await settle();
+
+  type(host.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement, "You run Atlas now.");
+  await settle();
+  flushSync(() => confirmButton(host).click());
+  await settle();
+
+  expect(seatPosts).toHaveLength(0);
+  expect(spawnPosts).toBe(0);
+  expect(rotatePosts).toHaveLength(1);
+  expect(rotatePosts[0]).toMatchObject({ project: "atlas", mandate: "You run Atlas now.", engine: "claude", model: "opus", effort: "high", accountId: "spare" });
+  expect(String(rotatePosts[0]!.clientRequestId)).toMatch(/^[A-Za-z0-9_-]{8,128}$/);
+  /* No cwd: the server continues the successor in the predecessor's checkout. */
+  expect(rotatePosts[0]!.cwd).toBeUndefined();
+});
+
+test("a double-click rotates ONCE, and a retry after a lost reply replays the same key", async () => {
+  rotateResponses = [{ status: 0, body: null, throws: true }];
+  const host = await mountLive();
+  flushSync(() => rotateButton(host).click());
+  await settle();
+
+  const button = confirmButton(host);
+  flushSync(() => {
+    button.click();
+    button.click();
+  });
+  await settle();
+  expect(rotatePosts).toHaveLength(1);
+
+  /* The reply was lost, so a successor may already exist: the draft says so and
+     stays open over the incumbent, which is still on the seat. */
+  expect(host.querySelector("[data-orchestrator-intent-error]")?.textContent).toContain("connection");
+  expect(panelState(host)).toBe("live");
+
+  rotateResponses = [{ status: 200, body: { ok: true, replayed: true, conversationId: "conversation_successor", seat: activeSeat({ conversationId: "conversation_successor" }) } }];
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  expect(rotatePosts).toHaveLength(2);
+  expect(rotatePosts[1]!.clientRequestId).toBe(rotatePosts[0]!.clientRequestId);
+});
+
+test("a rotation the server refused surfaces in the panel with retry, and the retry carries a FRESH key", async () => {
+  rotateResponses = [{ status: 409, body: { error: "no orchestrator is designated for this project", code: "no_incumbent" } }];
+  const host = await mountLive();
+  flushSync(() => rotateButton(host).click());
+  await settle();
+
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  expect(host.querySelector("[data-orchestrator-intent-error]")?.textContent).toContain("no orchestrator is designated");
+  /* The incumbent's conversation was never taken away by the failure. */
+  expect(panelState(host)).toBe("live");
+  expect(incumbentRow(host)).not.toBeNull();
+
+  rotateResponses = [{ status: 202, body: { ok: true, conversationId: "conversation_successor", launchId: "launch-b", seat: activeSeat({ conversationId: "conversation_successor" }) } }];
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  expect(rotatePosts).toHaveLength(2);
+  expect(rotatePosts[1]!.clientRequestId).not.toBe(rotatePosts[0]!.clientRequestId);
+});
+
+test("a durable terminal error on a pending rotation is never hidden — it renders over the incumbent, with retry", async () => {
+  seatStatus = {
+    seat: activeSeat(),
+    pending: pendingSeat("the successor's spawn was rejected with HTTP status 500"),
+    exists: true,
+  };
+  incumbentStatus = incumbent();
+  const host = mount([{ ...orchestratorFile, proc: "running", pid: 4_242 } as FileEntry]);
+  await settle();
+  flushSync(() => undefined);
+
+  /* Riding ALONGSIDE the live conversation, as slice A designed it… */
+  expect(panelState(host)).toBe("live");
+  expect(host.querySelector("[data-orchestrator-intent-error]")?.textContent).toContain("spawn was rejected with HTTP status 500");
+
+  /* …and the same error, with retry in place, once the rotate draft is open —
+     stated ONCE, on the form that can act on it. */
+  flushSync(() => rotateButton(host).click());
+  await settle();
+  const errors = host.querySelectorAll("[data-orchestrator-intent-error]");
+  expect(errors).toHaveLength(1);
+  expect(host.querySelector('[data-orchestrator-draft="rotate"] [data-orchestrator-intent-error]')?.textContent)
+    .toContain("spawn was rejected with HTTP status 500");
+  /* And it says what is true of a failed ROTATION: the incumbent still holds
+     the seat, so «nothing is running» is never printed here. */
+  expect(errors[0]!.textContent).toContain("still holds the seat");
+  expect(confirmButton(host)).not.toBeNull();
+});
+
+test("once the successor holds the seat the panel shows IT, with the predecessor linked on the board", async () => {
+  const host = await mountLive();
+  flushSync(() => rotateButton(host).click());
+  await settle();
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  expect(rotatePosts).toHaveLength(1);
+
+  /* The seat has advanced, and the rotate draft closes with it — no reload. */
+  seatStatus = {
+    seat: activeSeat({ conversationId: "conversation_successor", path: "/transcripts/successor.jsonl", predecessorConversationId: "conversation_orch" }),
+    pending: null,
+    exists: true,
+  };
+  incumbentStatus = incumbent({ conversationId: "conversation_successor", predecessorConversationId: "conversation_orch" });
+  const successorFile = { ...orchestratorFile, path: "/transcripts/successor.jsonl", conversationId: "conversation_successor", proc: "running", pid: 4_243 } as FileEntry;
+  const successor = remount([successorFile]);
+  await settle();
+  flushSync(() => undefined);
+
+  expect(panelState(successor)).toBe("live");
+  expect(successor.querySelector("[data-orchestrator-panel]")?.getAttribute("data-orchestrator-mode")).toBe("default");
+  expect(successor.querySelector('[data-orchestrator-conversation="conversation_successor"]')).not.toBeNull();
+  const link = successor.querySelector("[data-orchestrator-predecessor]") as HTMLAnchorElement;
+  expect(link.getAttribute("data-orchestrator-predecessor")).toBe("conversation_orch");
+  expect(link.getAttribute("href")).toBe("#c=conversation_orch");
+});
+
+test("closing the seat conversation returns the panel to the draft WITHOUT a reload", async () => {
+  const host = await mountLive();
+  expect(panelState(host)).toBe("live");
+
+  /* The operator closes the card: the transcript is gone, so the seat reads
+     `exists: false` on the very next poll — the panel is already mounted. */
+  seatStatus = { ...seatStatus, exists: false };
+  await settle();
+  await new Promise((resolve) => setTimeout(resolve, SEAT_POLL_MS + 5));
+  await settle();
+  flushSync(() => undefined);
+
+  expect(panelState(host)).toBe("draft");
+  expect(host.querySelector("[data-orchestrator-mandate]")).not.toBeNull();
+  expect(incumbentRow(host)).toBeNull();
+  /* One real seat poll has to elapse for «without a reload» to mean anything. */
+}, SEAT_POLL_MS + 4_000);
+
+test("a rotate draft left open when the seat is closed gives way to the create draft", async () => {
+  const host = await mountLive();
+  flushSync(() => rotateButton(host).click());
+  await settle();
+  expect(host.querySelector('[data-orchestrator-draft="rotate"]')).not.toBeNull();
+
+  seatStatus = { ...seatStatus, exists: false };
+  await settle();
+  await new Promise((resolve) => setTimeout(resolve, SEAT_POLL_MS + 5));
+  await settle();
+  flushSync(() => undefined);
+
+  expect(panelState(host)).toBe("draft");
+  expect(host.querySelector('[data-orchestrator-draft="create"]')).not.toBeNull();
+}, SEAT_POLL_MS + 4_000);
+
+test("Rotate reads the incumbent BEFORE it opens, so the first press is prefilled too", async () => {
+  /* The status read has not answered for this seat yet — the panel is up on
+     what the board alone knows. Opening the draft against THAT would prefill
+     the generic orchestrator defaults, and the launch module reads its defaults
+     once, so the incumbent's real parameters would never arrive. */
+  const host = await mountLive({ project: "atlas", designated: false, rotation: null, context: null });
+  incumbentStatus = incumbent();
+
+  flushSync(() => rotateButton(host).click());
+  await settle();
+
+  expect(host.querySelector('[data-orchestrator-draft="rotate"]')).not.toBeNull();
+  const account = host.querySelector('select[aria-label*="Claude"]') as HTMLSelectElement;
+  expect(account.value).toBe("spare");
+  expect(host.textContent).toContain("/repos/atlas/worktrees/board");
+});
+
+test("a rotation whose reply never came keeps its key: the second Confirm replays it instead of rotating twice", async () => {
+  /* «Accepted» is not «the seat moved». The POST lands, the seat re-read is
+     stale (or lost), and the rotate draft is still open over the incumbent —
+     so the next Confirm must carry the SAME key and converge on the one
+     successor, never mint a fresh one and rotate again. */
+  const host = await mountLive();
+  flushSync(() => rotateButton(host).click());
+  await settle();
+
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  expect(rotatePosts).toHaveLength(1);
+  /* The seat read has not caught up: the panel is still on the predecessor. */
+  expect(panelState(host)).toBe("live");
+  expect(host.querySelector('[data-orchestrator-draft="rotate"]')).not.toBeNull();
+
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  expect(rotatePosts).toHaveLength(2);
+  expect(rotatePosts[1]!.clientRequestId).toBe(rotatePosts[0]!.clientRequestId);
+
+  /* And once the read says where it landed, the key is spent: a genuinely new
+     rotation carries a fresh one rather than replaying a completed intent. */
+  const spent = String(rotatePosts[0]!.clientRequestId);
+  seatStatus = {
+    seat: activeSeat({ conversationId: "conversation_successor", intent: { clientRequestId: spent, mode: "spawn", launchId: "launch-b", error: null } }),
+    pending: null,
+    exists: true,
+  };
+  incumbentStatus = incumbent({ conversationId: "conversation_successor" });
+  const successorFile = { ...orchestratorFile, conversationId: "conversation_successor", proc: "running", pid: 4_243 } as FileEntry;
+  const successor = remount([successorFile]);
+  await settle();
+  flushSync(() => rotateButton(successor).click());
+  await settle();
+  flushSync(() => confirmButton(successor).click());
+  await settle();
+  expect(rotatePosts).toHaveLength(3);
+  expect(rotatePosts[2]!.clientRequestId).not.toBe(spent);
+});
+
+test("a rotation still in the air keeps its draft when the seat's card is closed — retry replays it at the ROTATE route", async () => {
+  /* Closing the card mid-rotation must not strand the flow: the retained key
+     is reachable only from the rotate draft, and the create draft's retry would
+     post a different key at the seat route — which refuses over a seat that is
+     still designated. */
+  rotateResponses = [{ status: 0, body: null, throws: true }];
+  const host = await mountLive();
+  flushSync(() => rotateButton(host).click());
+  await settle();
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  expect(rotatePosts).toHaveLength(1);
+
+  seatStatus = { ...seatStatus, exists: false };
+  await settle();
+  await new Promise((resolve) => setTimeout(resolve, SEAT_POLL_MS + 5));
+  await settle();
+  flushSync(() => undefined);
+
+  expect(host.querySelector('[data-orchestrator-draft="rotate"]')).not.toBeNull();
+  expect(host.querySelector('[data-orchestrator-draft="create"]')).toBeNull();
+  expect(host.textContent).toContain("while this rotation was still in flight");
+  expect(host.querySelector("[data-orchestrator-intent-error]")?.textContent).toContain("connection");
+
+  rotateResponses = [{ status: 200, body: { ok: true, replayed: true, conversationId: "conversation_successor", seat: activeSeat({ conversationId: "conversation_successor" }) } }];
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  expect(seatPosts).toHaveLength(0);
+  expect(rotatePosts).toHaveLength(2);
+  expect(rotatePosts[1]!.clientRequestId).toBe(rotatePosts[0]!.clientRequestId);
+}, SEAT_POLL_MS + 4_000);
+
+test("the draft a closed conversation returns to can actually create — it says it is replacing the seat that outlived its card", async () => {
+  /* The seat record outlives its transcript: a plain spawn over it is refused
+     as an accidental rotation, which would make «the panel returns to draft»
+     (PRD #976 decision 4) a button that always fails. */
+  const host = await mountLive();
+  seatStatus = { ...seatStatus, exists: false };
+  await settle();
+  await new Promise((resolve) => setTimeout(resolve, SEAT_POLL_MS + 5));
+  await settle();
+  flushSync(() => undefined);
+  expect(panelState(host)).toBe("draft");
+
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  expect(seatPosts).toHaveLength(1);
+  expect(seatPosts[0]!.replaceIncumbent).toBe(true);
+
+  /* A first-ever orchestrator claims nothing of the kind. */
+  seatPosts = [];
+  seatStatus = { seat: null, pending: null, exists: true };
+  const fresh = remount();
+  await settle();
+  flushSync(() => confirmButton(fresh).click());
+  await settle();
+  expect(seatPosts[0]!.replaceIncumbent).toBeUndefined();
+}, SEAT_POLL_MS + 4_000);

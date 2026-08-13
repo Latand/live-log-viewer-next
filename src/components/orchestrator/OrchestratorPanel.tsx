@@ -1,65 +1,79 @@
 "use client";
 
-import { Bot, LoaderCircle, RotateCcw, TriangleAlert, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Bot, LoaderCircle, RefreshCw, RotateCcw, TriangleAlert, X } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 
-import { AgentLaunchControls, useAgentLaunchDraft } from "@/components/draft/AgentLaunchControls";
-import { applySpawnedConversationSnapshot } from "@/hooks/useFiles";
-import { requestFilesRefresh } from "@/lib/filesEvents";
+import {
+  AgentLaunchControls,
+  useAgentLaunchDraft,
+  useLaunchAccountCatalog,
+  type LaunchAccountCatalog,
+  type LaunchDraftStorage,
+} from "@/components/draft/AgentLaunchControls";
 import { useLocale, type MessageKey } from "@/lib/i18n";
 import {
   ORCHESTRATOR_PROMPT_VERSION,
   ORCHESTRATOR_SPAWN_CONFIG,
   ORCHESTRATOR_SYSTEM_PROMPT,
 } from "@/lib/orchestrator/prompt";
+import type { OrchestratorSeat } from "@/lib/orchestrator/seats";
 import type { FileEntry } from "@/lib/types";
 
-import {
-  classifySpawnResponse,
-  createSpawnAttempt,
-  provisionalSpawnFile,
-  type SpawnResponseBody,
-} from "../draftSpawn";
+import { IncumbentHeader } from "./IncumbentHeader";
+import type { OrchestratorIncumbent } from "./incumbent";
 import { OrchestratorConversation } from "./OrchestratorConversation";
 import {
-  classifySeatFailure,
   deriveOrchestratorPanelState,
-  newSeatRequestId,
+  deriveRotateDraftState,
   seatRequestSettled,
   type OrchestratorPanelState,
+  type OrchestratorSeatStatus,
   type RotationHint,
   type SeatLiveness,
-  type SeatSubmitFailure,
   type SeatTransition,
 } from "./seatState";
+import { useOrchestratorIncumbent } from "./useOrchestratorIncumbent";
 import { useOrchestratorSeat } from "./useOrchestratorSeat";
+import { useSeatConfirm, type SeatConfirmFlow } from "./useSeatConfirm";
 import { useSeatSurface } from "./useSeatSurface";
 
-const storageKey = (project: string, name: string) => `llvOrchestratorDraft:${project}:${name}`;
+/** Create and rotate keep SEPARATE drafts: they are different decisions about
+    different orchestrators, and a half-written rotation must never overwrite the
+    create draft the operator would need if the seat were vacated. */
+const storageKey = (flow: string, project: string, name: string) => `llvOrchestrator${flow}:${project}:${name}`;
 
-function readDraftField(project: string, name: string): string {
+function readField(flow: string, project: string, name: string): string {
   if (typeof window === "undefined") return "";
   try {
-    return window.sessionStorage.getItem(storageKey(project, name)) ?? "";
+    return window.sessionStorage.getItem(storageKey(flow, project, name)) ?? "";
   } catch {
     return "";
   }
 }
 
-function writeDraftField(project: string, name: string, value: string): void {
+function writeField(flow: string, project: string, name: string, value: string): void {
   if (typeof window === "undefined") return;
   try {
-    if (value) window.sessionStorage.setItem(storageKey(project, name), value);
-    else window.sessionStorage.removeItem(storageKey(project, name));
+    if (value) window.sessionStorage.setItem(storageKey(flow, project, name), value);
+    else window.sessionStorage.removeItem(storageKey(flow, project, name));
   } catch {
     /* private mode */
   }
 }
 
+const readDraftField = (project: string, name: string) => readField("Draft", project, name);
+const writeDraftField = (project: string, name: string, value: string) => writeField("Draft", project, name, value);
+
+/** One flow's persistence, as the shared launch module's own storage seam. */
+const flowStorage = (flow: string, project: string): LaunchDraftStorage => ({
+  read: (name) => readField(flow, project, name),
+  write: (name, value) => writeField(flow, project, name, value),
+});
+
 /**
- * The per-project orchestrator surface (PRD #976 slice A).
+ * The per-project orchestrator surface (PRD #976 slices A and B).
  *
- * ONE panel, SIX states, every one of them designed (`./seatState`):
+ * ONE panel, every state designed (`./seatState`):
  *
  *  - `draft` — the same launch pickers every other draft offers, plus the
  *    default mandate in a textarea the operator edits freely. The edited text
@@ -70,12 +84,19 @@ function writeDraftField(project: string, name: string, value: string): void {
  *    so the operator can read it, fix the mandate, and retry in place. Never
  *    hidden, never a dead end.
  *  - `live` / `stalled/dead` / `rotation-recommended` — the real conversation
- *    (`OrchestratorConversation`), with the liveness and the rotation advisory
- *    stated in its own header row.
+ *    (`OrchestratorConversation`), under a header row that finally names the
+ *    INCUMBENT (`./IncumbentHeader`): engine, model, account, context fullness.
+ *  - `rotate` — the same draft form again, prefilled from the incumbent, over
+ *    the conversation it is replacing. The server composes the handoff; a
+ *    rotation that fails leaves the incumbent exactly where it was.
  *
- * Confirm goes to `POST /api/orchestrator/seat` — designate and inject, one
- * durable intent, idempotent on `clientRequestId` — and never to raw
- * `/api/spawn`, which would mint a worker with no seat behind it.
+ * Confirm goes to `POST /api/orchestrator/seat`, rotation to `POST
+ * /api/orchestrator/rotate` — one durable intent each, idempotent on
+ * `clientRequestId` (`./useSeatConfirm`) — and never to raw `/api/spawn`, which
+ * would mint a worker with no seat behind it.
+ *
+ * NOTHING here rotates on its own. The recommendation is words; the button is
+ * the only rotation in the product.
  */
 export function OrchestratorPanel({
   project,
@@ -92,22 +113,23 @@ export function OrchestratorPanel({
 }) {
   const { t } = useLocale();
   const { status, failed, refresh } = useOrchestratorSeat(project);
-  const [submitting, setSubmitting] = useState(false);
-  /* The guard has to be SYNCHRONOUS: two clicks in one event batch both read
-     the same render's `submitting`, so a state flag alone lets the second one
-     through. The seat route would still converge them onto one designation
-     (same key), but the second reply would land as a spurious in-progress
-     error over a perfectly good create. */
-  const inFlight = useRef(false);
-  const [submitFailure, setSubmitFailure] = useState<SeatSubmitFailure | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [mandate, setMandateState] = useState(() => readDraftField(project, "mandate") || ORCHESTRATOR_SYSTEM_PROMPT);
+  /* The conversation the open rotate draft is replacing. Non-null IS the rotate
+     mode, and matching it against the current seat is what closes the draft the
+     moment the successor lands — no completion callback, no stale flag. */
+  const [rotateFrom, setRotateFrom] = useState<string | null>(null);
+  /* Opening the rotate draft is a read first: see `openRotate`. */
+  const [rotateOpening, setRotateOpening] = useState(false);
 
+  /* ONE account catalog for both drafts: they offer the same accounts, and the
+     rotate draft must not re-fetch `/api/accounts` every time it opens. */
+  const catalog = useLaunchAccountCatalog();
+  const draftStorage = useMemo(() => flowStorage("Draft", project), [project]);
+  const rotateStorage = useMemo(() => flowStorage("Rotate", project), [project]);
   const launch = useAgentLaunchDraft({
-    storage: {
-      read: (name) => readDraftField(project, name),
-      write: (name, value) => writeDraftField(project, name, value),
-    },
+    storage: draftStorage,
+    catalog,
     initialEngine: ORCHESTRATOR_SPAWN_CONFIG.engine,
     initialModel: ORCHESTRATOR_SPAWN_CONFIG.model,
     initialEffort: ORCHESTRATOR_SPAWN_CONFIG.effort,
@@ -121,6 +143,7 @@ export function OrchestratorPanel({
   };
 
   const seatConversationId = status?.seat?.conversationId ?? null;
+  const seated = Boolean(seatConversationId && status?.exists);
   const file = useMemo(
     () => (seatConversationId
       ? files.find((entry) => entry.conversationId === seatConversationId)
@@ -130,117 +153,113 @@ export function OrchestratorPanel({
     [files, seatConversationId, status?.seat?.path],
   );
   const surface = useSeatSurface(file);
-  const state = deriveOrchestratorPanelState({ status, statusFailed: failed, submitting, submitFailure, file, surface });
-
-  /* A key kept through an unknown outcome is released the moment the seat read
-     says where it landed. Held any longer it becomes a trap: the seat command
-     answers a replay of a COMPLETED intent with the old seat, so the next
-     genuinely new draft — the one the operator writes after closing this
-     conversation — would post, succeed, and create nothing. Only an outcome the
-     server itself reports releases it; silence still means «may be in flight»,
-     and the key stays. (The stale banner from that same submission is retired
-     in the derivation, which needs no state of its own.) */
+  /* The incumbent's wear is only a question while there IS an incumbent; a
+     project sitting on its draft asks nothing. */
+  const { incumbent: read, refresh: refreshIncumbent } = useOrchestratorIncumbent(project, seated);
+  /* A reading is only about the conversation it names. Right after a rotation
+     the seat has already advanced to the successor while this slower poll still
+     describes the predecessor — showing that as «the incumbent» would put the
+     retired orchestrator's model and context in the successor's header. */
+  const incumbent = read && read.conversationId === seatConversationId ? read : null;
   useEffect(() => {
-    if (inFlight.current) return;
-    const stored = readDraftField(project, "requestId");
-    if (stored && seatRequestSettled(status, stored)) writeDraftField(project, "requestId", "");
-  }, [project, status]);
+    if (seated) void refreshIncumbent();
+  }, [seatConversationId, seated, refreshIncumbent]);
+
+  const create = useSeatConfirm({ url: "/api/orchestrator/seat", project, storage: draftStorage, field: "requestId", status, refresh });
+  const rotate = useSeatConfirm({ url: "/api/orchestrator/rotate", project, storage: rotateStorage, field: "requestId", status, refresh });
+
+  const state = deriveOrchestratorPanelState({
+    status,
+    statusFailed: failed,
+    /* Only one of the two flows can be in play — the create draft exists only
+       without a seat, the rotate draft only with one — so their outcomes fold
+       into the one derivation without ever masking each other. */
+    submitting: create.submitting || rotate.submitting,
+    submitFailure: create.failure ?? rotate.failure,
+    file,
+    surface,
+    incumbent,
+  });
+  /**
+   * A rotation whose outcome is not yet settled KEEPS the panel, even after the
+   * incumbent's card is closed underneath it (`exists: false`).
+   *
+   * Vacancy is real and the panel does return to the draft (PRD decision 4),
+   * once the rotation in the air has settled. Handing the surface to the
+   * create draft there strands the rotation: its retained key is reachable only
+   * from this flow, and the create draft's retry posts a DIFFERENT key at the
+   * seat route, which refuses over a seat that is still designated. So the
+   * rotate draft stays until its own outcome is known, and then gives way.
+   */
+  const rotateUnsettled = rotate.submitting
+    || (rotate.failure !== null && !seatRequestSettled(status, rotate.failure.clientRequestId));
+  const rotatingLive = state.kind === "live" && rotateFrom !== null && rotateFrom === state.conversationId;
+  const rotatingVacant = state.kind !== "live" && rotateFrom !== null && rotateUnsettled && status?.seat != null;
+  const rotating = rotatingLive || rotatingVacant;
 
   /** `replayRequestId` re-posts an EXISTING durable intent by its own key — the
       seat command then completes that intent with ITS original mandate, so the
       text sent here cannot become a second variant. */
-  const confirm = useCallback(async (replayRequestId?: string | null) => {
-    if (inFlight.current) return;
+  const confirmCreate = (replayRequestId?: string | null) => {
     const text = mandate.trim();
     if (!text) {
       setFormError(t("orchPanel.mandateRequired"));
       return;
     }
-    inFlight.current = true;
     setFormError(null);
-    /* ONE key per draft submission, not per click (issue #977 acceptance): it is
-       minted on the first confirm and persisted, so a double-click, a reload
-       mid-POST and an ambiguous retry all replay onto the same durable intent
-       instead of designating twice. Cleared only once the attempt is terminal —
-       a corrected mandate must arrive under a NEW key, because the seat command
-       completes the ORIGINAL intent when a pending key is replayed. */
-    const stored = replayRequestId || readDraftField(project, "requestId");
-    const clientRequestId = stored || newSeatRequestId();
-    if (readDraftField(project, "requestId") !== clientRequestId) writeDraftField(project, "requestId", clientRequestId);
-    setSubmitting(true);
-    setSubmitFailure(null);
-    const at = Date.now();
+    void create.submit({
+      body: {
+        project,
+        mandate: text,
+        engine: launch.engine,
+        ...(launch.model ? { model: launch.model } : {}),
+        ...(launch.effort ? { effort: launch.effort } : {}),
+        ...(launch.engine === "codex" && launch.speed ? { fast: launch.speed === "fast" } : {}),
+        ...(launch.launchAccountId ? { accountId: launch.launchAccountId } : {}),
+        /* The project's own root, resolved by the shell — the operator never
+           types a directory for their own project's orchestrator. Absent, the
+           seat route resolves the project's newest checkout itself. */
+        ...(projectCwd ? { cwd: projectCwd } : {}),
+        /* Only an UNEDITED mandate is a version of the approved prompt; an
+           edited one is bespoke and records no version. */
+        ...(text === ORCHESTRATOR_SYSTEM_PROMPT.trim() ? { promptVersion: ORCHESTRATOR_PROMPT_VERSION } : {}),
+        /* The seat OUTLIVES its conversation: closing the card leaves the
+           record designated, and a plain spawn over a designated seat is
+           refused as an accidental rotation. That refusal is right in general
+           and wrong here — this draft exists BECAUSE the operator closed that
+           conversation (PRD decision 4), so it says what it means and the
+           «returns to draft» promise is one the button can keep. */
+        ...(state.kind === "draft" && state.vacated ? { replaceIncumbent: true } : {}),
+      },
+      launch: { draft: launch, cwd: projectCwd ?? "", firstMessage: text },
+    }, replayRequestId);
+  };
+
+  /**
+   * Open the rotate draft — on the incumbent's OWN parameters.
+   *
+   * «The same draft, prefilled» (PRD decision 4) is true only if those
+   * parameters are in hand when the form MOUNTS: the shared launch module reads
+   * its defaults once, in its initializers, so a draft opened before the status
+   * read answered prefills the generic orchestrator defaults and never corrects
+   * itself. So the read comes first and the button says it is working.
+   */
+  const openRotate = async (conversationId: string) => {
+    setRotateOpening(true);
     try {
-      const response = await fetch("/api/orchestrator/seat", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          project,
-          mandate: text,
-          clientRequestId,
-          engine: launch.engine,
-          ...(launch.model ? { model: launch.model } : {}),
-          ...(launch.effort ? { effort: launch.effort } : {}),
-          ...(launch.engine === "codex" && launch.speed ? { fast: launch.speed === "fast" } : {}),
-          ...(launch.launchAccountId ? { accountId: launch.launchAccountId } : {}),
-          /* The project's own root, resolved by the shell — the operator never
-             types a directory for their own project's orchestrator. Absent, the
-             seat route resolves the project's newest checkout itself. */
-          ...(projectCwd ? { cwd: projectCwd } : {}),
-          /* Only an UNEDITED mandate is a version of the approved prompt; an
-             edited one is bespoke and records no version. */
-          ...(text === ORCHESTRATOR_SYSTEM_PROMPT.trim() ? { promptVersion: ORCHESTRATOR_PROMPT_VERSION } : {}),
-        }),
-      });
-      const body = (await response.json().catch(() => null)) as (SpawnResponseBody & { code?: string }) | null;
-      if (response.ok && body?.ok !== false) {
-        writeDraftField(project, "requestId", "");
-        /* Instant attach (issue #919's path): the receipt already names the
-           durable conversation, so the panel opens the live window now instead
-           of waiting a poll for the files feed to catch up. */
-        const outcome = classifySpawnResponse(response.status, response.ok, body);
-        if (outcome.kind === "launched") {
-          const provisional = provisionalSpawnFile(
-            createSpawnAttempt(clientRequestId, at, {
-              engine: launch.engine,
-              model: launch.model,
-              cwd: projectCwd ?? "",
-              effort: launch.effort,
-              fast: launch.engine === "codex" && launch.speed ? launch.speed === "fast" : null,
-              accountId: launch.launchAccountId,
-              ["prompt"]: text,
-              images: [],
-              src: "",
-            }),
-            outcome,
-            project,
-          );
-          if (provisional) applySpawnedConversationSnapshot(provisional);
-        }
-        requestFilesRefresh();
-      } else {
-        const failure = classifySeatFailure(response.status, body, clientRequestId);
-        /* A terminal refusal is durably recorded server-side; the next attempt
-           carries a fresh key so an edited mandate is the one delivered. */
-        if (failure?.kind === "terminal") writeDraftField(project, "requestId", "");
-        setSubmitFailure(failure);
-      }
-    } catch {
-      /* Transport loss proves nothing: the seat may well have been designated,
-         so the key is KEPT and the retry replays onto the same receipt. */
-      setSubmitFailure({ kind: "ambiguous", error: t("orchPanel.transportLost"), clientRequestId });
+      await refreshIncumbent();
     } finally {
-      inFlight.current = false;
-      setSubmitting(false);
-      await refresh();
+      setRotateOpening(false);
+      setRotateFrom(conversationId);
     }
-  }, [mandate, project, projectCwd, launch, refresh, t]);
+  };
 
   return (
     <section
       className="flex h-full min-h-0 min-w-0 flex-col bg-card"
       data-orchestrator-panel={project}
       data-orchestrator-state={state.kind}
+      data-orchestrator-mode={rotating ? "rotate" : "default"}
       aria-label={t("orchPanel.regionAria", { project: projectName })}
     >
       <header className="flex h-11 shrink-0 items-center gap-2 border-b border-border px-3">
@@ -275,6 +294,27 @@ export function OrchestratorPanel({
           <p className="max-w-[280px] text-ui text-muted">{t("orchPanel.unavailableHint")}</p>
           <SecondaryButton onClick={() => void refresh()}>{t("orchPanel.recheck")}</SecondaryButton>
         </Centered>
+      ) : rotatingVacant && status?.seat ? (
+        /* The seat's card was closed while this rotation was still in the air.
+           The rotation is the live question, so it keeps the surface — with the
+           vacancy stated above it — until it says where it landed. */
+        <div className="flex min-h-0 flex-1 flex-col">
+          <p className="shrink-0 border-b border-border bg-sunken px-3 py-1.5 text-ui text-secondary" role="status">
+            {t("orchPanel.rotateVacated")}
+          </p>
+          <RotateDraft
+            project={project}
+            projectName={projectName}
+            seat={status.seat}
+            incumbent={incumbent}
+            file={file}
+            projectCwd={projectCwd}
+            catalog={catalog}
+            flow={rotate}
+            status={status}
+            onCancel={() => setRotateFrom(null)}
+          />
+        </div>
       ) : state.kind === "creating" ? (
         <Centered>
           <LoaderCircle className="h-5 w-5 animate-spin text-accent" aria-hidden />
@@ -289,10 +329,10 @@ export function OrchestratorPanel({
               the request that accepted it died, and only a re-post of its OWN
               key converges it. Without this the panel spins forever with no
               action — so the way through is offered, and it cannot duplicate. */}
-          {!submitting && state.clientRequestId ? (
+          {!create.submitting && state.clientRequestId ? (
             <>
               <p className="max-w-[300px] text-ui text-muted">{t("orchPanel.creatingStuck")}</p>
-              <SecondaryButton onClick={() => void confirm(state.clientRequestId)}>
+              <SecondaryButton onClick={() => confirmCreate(state.clientRequestId)}>
                 {t("orchPanel.creatingResume")}
               </SecondaryButton>
             </>
@@ -300,22 +340,53 @@ export function OrchestratorPanel({
         </Centered>
       ) : state.kind === "live" ? (
         <div className="flex min-h-0 flex-1 flex-col">
-          {state.transition ? <TransitionBanner transition={state.transition} /> : null}
+          <IncumbentHeader
+            incumbent={incumbent}
+            file={file}
+            catalog={catalog}
+            predecessorConversationId={state.seat.predecessorConversationId}
+            rotating={rotating}
+            opening={rotateOpening}
+            onRotate={() => void openRotate(state.conversationId)}
+          />
+          {/* The transition banner is how a designation in flight — or one that
+              failed — reaches an operator who is NOT looking at the draft. With
+              the rotate draft open it would say the same thing twice, once with
+              a retry and once without, so the draft's own block is the one. */}
+          {state.transition && !rotating ? <TransitionBanner transition={state.transition} /> : null}
           {state.rotation ? <RotationBanner rotation={state.rotation} /> : null}
-          {state.liveness === "stalled" ? (
-            <p className="shrink-0 border-b border-border bg-warning-soft px-3 py-1.5 text-ui text-warning" role="status">
-              {t("orchPanel.stalled")}
-            </p>
-          ) : null}
-          {/* Finished, and resumable IN PLACE: the composer below picks this same
-              conversation back up (§4 `resume`), so the operator is told to type
-              rather than left reading a green «live» badge on a stopped agent. */}
-          {state.liveness === "resumable" ? (
-            <p className="shrink-0 border-b border-border bg-sunken px-3 py-1.5 text-ui text-secondary" role="status">
-              {t("orchPanel.resumable")}
-            </p>
-          ) : null}
-          {file ? (
+          {rotating ? null : (
+            <>
+              {state.liveness === "stalled" ? (
+                <p className="shrink-0 border-b border-border bg-warning-soft px-3 py-1.5 text-ui text-warning" role="status">
+                  {t("orchPanel.stalled")}
+                </p>
+              ) : null}
+              {/* Finished, and resumable IN PLACE: the composer below picks this
+                  same conversation back up (§4 `resume`), so the operator is told
+                  to type rather than left reading a green «live» badge on a
+                  stopped agent. */}
+              {state.liveness === "resumable" ? (
+                <p className="shrink-0 border-b border-border bg-sunken px-3 py-1.5 text-ui text-secondary" role="status">
+                  {t("orchPanel.resumable")}
+                </p>
+              ) : null}
+            </>
+          )}
+          {rotating ? (
+            <RotateDraft
+              project={project}
+              projectName={projectName}
+              seat={state.seat}
+              incumbent={incumbent}
+              file={file}
+              projectCwd={projectCwd}
+              catalog={catalog}
+              flow={rotate}
+              status={status}
+              onCancel={() => setRotateFrom(null)}
+            />
+          ) : file ? (
             <OrchestratorConversation file={file} />
           ) : (
             <Centered>
@@ -333,17 +404,18 @@ export function OrchestratorPanel({
         </div>
       ) : (
         <OrchestratorDraft
+          mode="create"
           state={state}
           mandate={mandate}
           edited={mandate !== ORCHESTRATOR_SYSTEM_PROMPT}
           formError={formError}
-          submitting={submitting}
+          submitting={create.submitting}
           projectName={projectName}
-          projectCwd={projectCwd}
+          cwd={projectCwd}
           launch={launch}
           onMandate={setMandate}
           onRestore={() => setMandate(ORCHESTRATOR_SYSTEM_PROMPT)}
-          onConfirm={() => void confirm()}
+          onConfirm={() => confirmCreate()}
         />
       )}
     </section>
@@ -351,41 +423,160 @@ export function OrchestratorPanel({
 }
 
 /**
- * The create draft, and the surface an `intent-error` lands ON. Keeping them one
- * column is the point: a failed designation shows what went wrong directly above
- * the mandate that caused it, so «read the error, fix the text, try again» is
- * one place and one gesture instead of a dead-end error screen.
+ * The rotate draft (PRD #976 decision 4): the SAME form, prefilled with the
+ * incumbent's own parameters, over the conversation it would replace.
+ *
+ * Mounted only while it is open, which is what makes «prefilled» true: the
+ * launch draft reads its initial engine/model/effort/account through the
+ * injected storage, so the incumbent's values are the defaults and the
+ * operator's edits are what persist over them.
+ *
+ * The handoff is NOT composed here. `POST /api/orchestrator/rotate` hands the
+ * successor its predecessor's transcript path and the project's open tasks; the
+ * text in this textarea is the MANDATE, and duplicating the handoff into it
+ * would deliver the same instructions twice in two wordings.
+ */
+function RotateDraft({
+  project,
+  projectName,
+  seat,
+  incumbent,
+  file,
+  projectCwd,
+  catalog,
+  flow,
+  status,
+  onCancel,
+}: {
+  project: string;
+  projectName: string;
+  seat: OrchestratorSeat;
+  incumbent: OrchestratorIncumbent | null;
+  file: FileEntry | null;
+  projectCwd?: string;
+  catalog: LaunchAccountCatalog | null;
+  flow: SeatConfirmFlow;
+  status: OrchestratorSeatStatus | null;
+  onCancel: () => void;
+}) {
+  const { t } = useLocale();
+  const [formError, setFormError] = useState<string | null>(null);
+  const [mandate, setMandateState] = useState(() => readField("Rotate", project, "mandate") || seat.mandate);
+  /* «Prefilled» in the operator's words: what the incumbent is ACTUALLY running
+     on, read through the launch module's own storage seam rather than by forking
+     it. Only the initializers call `read`, so switching engine here is never
+     re-defaulted back to the predecessor's account or model. */
+  const inherited: Record<string, string> = {
+    engine: incumbent?.engine ?? (file?.engine === "codex" ? "codex" : file?.engine === "claude" ? "claude" : ""),
+    model: incumbent?.model ?? file?.model ?? "",
+    effort: incumbent?.effort ?? "",
+    accountId: incumbent?.accountId ?? "",
+  };
+  const launch = useAgentLaunchDraft({
+    storage: {
+      read: (name) => readField("Rotate", project, name) || (inherited[name] ?? ""),
+      write: (name, value) => writeField("Rotate", project, name, value),
+    },
+    catalog,
+    initialEngine: ORCHESTRATOR_SPAWN_CONFIG.engine,
+    initialModel: ORCHESTRATOR_SPAWN_CONFIG.model,
+    initialEffort: ORCHESTRATOR_SPAWN_CONFIG.effort,
+  });
+  const state = deriveRotateDraftState({ status, submitFailure: flow.failure });
+  /* The successor inherits the predecessor's checkout unless the operator says
+     otherwise — so the rotate body carries no cwd at all, and the row below
+     states which directory that is (issue #903). */
+  const cwd = (incumbent?.cwd ?? null) ?? projectCwd;
+
+  const confirm = () => {
+    const text = mandate.trim();
+    if (!text) {
+      setFormError(t("orchPanel.mandateRequired"));
+      return;
+    }
+    setFormError(null);
+    void flow.submit({
+      body: {
+        project,
+        mandate: text,
+        engine: launch.engine,
+        ...(launch.model ? { model: launch.model } : {}),
+        ...(launch.effort ? { effort: launch.effort } : {}),
+        ...(launch.engine === "codex" && launch.speed ? { fast: launch.speed === "fast" } : {}),
+        ...(launch.launchAccountId ? { accountId: launch.launchAccountId } : {}),
+      },
+      launch: { draft: launch, cwd: cwd ?? "", firstMessage: text },
+    });
+  };
+
+  return (
+    <OrchestratorDraft
+      mode="rotate"
+      state={state}
+      mandate={mandate}
+      edited={mandate !== seat.mandate}
+      formError={formError}
+      submitting={flow.submitting}
+      projectName={projectName}
+      cwd={cwd}
+      launch={launch}
+      onMandate={(value) => {
+        setMandateState(value);
+        writeField("Rotate", project, "mandate", value === seat.mandate ? "" : value);
+      }}
+      onRestore={() => {
+        setMandateState(seat.mandate);
+        writeField("Rotate", project, "mandate", "");
+      }}
+      onConfirm={confirm}
+      onCancel={onCancel}
+    />
+  );
+}
+
+/**
+ * The create draft, the rotate draft, and the surface an `intent-error` lands
+ * ON. Keeping them one column is the point: a failed designation shows what went
+ * wrong directly above the mandate that caused it, so «read the error, fix the
+ * text, try again» is one place and one gesture instead of a dead-end error
+ * screen — and a rotation that fails behaves exactly like a create that fails.
  */
 function OrchestratorDraft({
+  mode,
   state,
   mandate,
   edited,
   formError,
   submitting,
   projectName,
-  projectCwd,
+  cwd,
   launch,
   onMandate,
   onRestore,
   onConfirm,
+  onCancel,
 }: {
+  mode: "create" | "rotate";
   state: Extract<OrchestratorPanelState, { kind: "draft" } | { kind: "intent-error" }>;
   mandate: string;
   edited: boolean;
   formError: string | null;
   submitting: boolean;
   projectName: string;
-  projectCwd?: string;
+  cwd?: string;
   launch: ReturnType<typeof useAgentLaunchDraft>;
   onMandate: (value: string) => void;
   onRestore: () => void;
   onConfirm: () => void;
+  onCancel?: () => void;
 }) {
   const { t } = useLocale();
   const errored = state.kind === "intent-error";
+  const rotate = mode === "rotate";
   return (
     <form
       className="flex min-h-0 flex-1 flex-col"
+      data-orchestrator-draft={mode}
       onSubmit={(event) => {
         event.preventDefault();
         onConfirm();
@@ -398,22 +589,34 @@ function OrchestratorDraft({
             role="alert"
             data-orchestrator-intent-error
           >
+            {/* A failed ROTATION says something different from a failed create,
+                and the difference matters: the incumbent is still running. «Nothing
+                is running» would be a lie exactly when the operator is deciding
+                whether to try again. */}
             <p className="flex items-center gap-1.5 text-ui font-semibold text-danger">
               <TriangleAlert className="h-4 w-4 shrink-0" aria-hidden />
-              {t(state.retry === "same" ? "orchPanel.errorUnknownTitle" : "orchPanel.errorTitle")}
+              {t(state.retry === "same"
+                ? rotate ? "orchPanel.rotateErrorUnknownTitle" : "orchPanel.errorUnknownTitle"
+                : rotate ? "orchPanel.rotateErrorTitle" : "orchPanel.errorTitle")}
             </p>
             <pre className="mt-1 max-h-24 overflow-y-auto whitespace-pre-wrap break-words font-sans text-ui leading-4 text-secondary">
               {state.error}
             </pre>
             <p className="mt-1 text-caption text-muted">
-              {t(state.retry === "same" ? "orchPanel.errorUnknownHint" : "orchPanel.errorHint")}
+              {t(state.retry === "same"
+                ? rotate ? "orchPanel.rotateErrorUnknownHint" : "orchPanel.errorUnknownHint"
+                : rotate ? "orchPanel.rotateErrorHint" : "orchPanel.errorHint")}
             </p>
           </div>
         ) : (
           <div className="shrink-0">
-            <h2 className="text-title font-semibold text-primary">{t("orchPanel.draftTitle")}</h2>
+            <h2 className="text-title font-semibold text-primary">
+              {t(rotate ? "orchPanel.rotateHeading" : "orchPanel.draftTitle")}
+            </h2>
             <p className="mt-1 text-ui leading-4 text-muted">
-              {t(state.vacated ? "orchPanel.draftHintVacated" : "orchPanel.draftHint", { project: projectName })}
+              {rotate
+                ? t("orchPanel.rotateHint")
+                : t(state.kind === "draft" && state.vacated ? "orchPanel.draftHintVacated" : "orchPanel.draftHint", { project: projectName })}
             </p>
           </div>
         )}
@@ -434,7 +637,7 @@ function OrchestratorDraft({
                 disabled={submitting}
                 className="inline-flex items-center gap-1 rounded-control border border-border bg-canvas px-2 py-0.5 text-caption font-semibold text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
               >
-                <RotateCcw className="h-3 w-3" aria-hidden /> {t("orchPanel.restoreDefault")}
+                <RotateCcw className="h-3 w-3" aria-hidden /> {t(rotate ? "orchPanel.restoreIncumbent" : "orchPanel.restoreDefault")}
               </button>
             ) : null}
             <span className="ml-auto shrink-0 text-caption text-muted">{t("orchPanel.mandateSent")}</span>
@@ -451,9 +654,9 @@ function OrchestratorDraft({
                which is a path. */
             className="min-h-[200px] w-full flex-1 resize-none rounded-surface border border-border bg-sunken px-3 py-2.5 text-ui leading-[1.45] text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
           />
-          {projectCwd ? (
-            <p className="truncate font-mono text-caption text-muted" title={projectCwd}>
-              {t("orchPanel.cwd", { cwd: projectCwd })}
+          {cwd ? (
+            <p className="truncate font-mono text-caption text-muted" title={cwd}>
+              {t(rotate ? "orchPanel.cwdInherited" : "orchPanel.cwd", { cwd })}
             </p>
           ) : null}
         </div>
@@ -463,15 +666,34 @@ function OrchestratorDraft({
         {formError ? (
           <p className="text-ui font-semibold text-danger" role="alert">{formError}</p>
         ) : null}
-        <button
-          type="submit"
-          data-orchestrator-confirm
-          disabled={submitting}
-          className="inline-flex h-9 w-full items-center justify-center gap-1.5 rounded-control border border-accent bg-accent px-3 text-body font-semibold text-white shadow-1 hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
-        >
-          {submitting ? <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden /> : <Bot className="h-4 w-4" aria-hidden />}
-          {t(errored ? "orchPanel.confirmRetry" : "orchPanel.confirm")}
-        </button>
+        <div className="flex items-center gap-2">
+          {onCancel ? (
+            <button
+              type="button"
+              data-orchestrator-rotate-cancel
+              onClick={onCancel}
+              disabled={submitting}
+              className="inline-flex h-9 shrink-0 items-center justify-center rounded-control border border-border bg-card px-3 text-ui font-semibold text-secondary hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+            >
+              {t("orchPanel.rotateCancel")}
+            </button>
+          ) : null}
+          <button
+            type="submit"
+            data-orchestrator-confirm
+            disabled={submitting}
+            className="inline-flex h-9 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-control border border-accent bg-accent px-3 text-body font-semibold text-white shadow-1 hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+          >
+            {submitting
+              ? <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden />
+              : rotate
+                ? <RefreshCw className="h-4 w-4" aria-hidden />
+                : <Bot className="h-4 w-4" aria-hidden />}
+            <span className="truncate">
+              {t(errored ? "orchPanel.confirmRetry" : rotate ? "orchPanel.rotateConfirm" : "orchPanel.confirm")}
+            </span>
+          </button>
+        </div>
       </div>
     </form>
   );
@@ -539,22 +761,33 @@ function TransitionBanner({ transition }: { transition: SeatTransition }) {
   );
 }
 
-/** The advisory, and NOTHING else: rotation happens only when the operator asks
-    for it, and the ask itself lands in slice B (#978). */
+/**
+ * The advisory, and NOTHING else. It says what the server recommends and why;
+ * the Rotate button in the header above is the only thing that acts, and only
+ * when the operator presses it. Reaching a threshold has never rotated anything
+ * and does not start here.
+ */
 function RotationBanner({ rotation }: { rotation: RotationHint }) {
   const { t } = useLocale();
+  const summary = rotation.reasons.map((reason) => (
+    reason === "context"
+      ? t("orchPanel.rotationContext", { percent: String(rotation.contextPercent ?? 0) })
+      : t("orchPanel.rotationDead")
+  )).join(" · ");
   return (
     <div className="shrink-0 border-b border-warning/45 bg-warning-soft px-3 py-1.5" role="status" data-orchestrator-rotation={rotation.level}>
       <p className="text-ui font-semibold text-warning">
         {t(rotation.level === "strongly_recommend" ? "orchPanel.rotationStrong" : "orchPanel.rotation")}
       </p>
-      <p className="mt-0.5 text-caption leading-4 text-secondary">
-        {rotation.reasons.map((reason) => (
-          reason === "context"
-            ? t("orchPanel.rotationContext", { percent: String(rotation.contextPercent ?? 0) })
-            : t("orchPanel.rotationDead")
-        )).join(" · ")}
-      </p>
+      {summary ? <p className="mt-0.5 text-caption leading-4 text-secondary">{summary}</p> : null}
+      {/* The server's own reasons, verbatim: each names the threshold it crossed
+          and whether the number behind it is an estimate. Re-wording them here is
+          how the panel and `get_orchestrator` would start disagreeing. */}
+      {rotation.notes?.length ? (
+        <ul className="mt-0.5 list-disc pl-3.5 text-caption leading-4 text-muted marker:text-muted/60">
+          {rotation.notes.map((note) => <li key={note}>{note}</li>)}
+        </ul>
+      ) : null}
     </div>
   );
 }
