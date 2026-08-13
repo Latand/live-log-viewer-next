@@ -35,15 +35,9 @@ import path from "node:path";
 
 import { chromium, type Page } from "playwright-core";
 
-import { createCaptureDirectory } from "./capture-directory";
 import { demoPort } from "./demo-capture";
 
-const BASE = createCaptureDirectory({
-  envName: "PICKER_CAPTURE_DIR",
-  prefix: "llv-issue-887",
-  raw: process.env.PICKER_CAPTURE_DIR,
-  repoRoot: path.resolve(import.meta.dir, ".."),
-});
+const BASE = process.env.PICKER_CAPTURE_DIR ?? "/tmp/llv-issue-887";
 const HOME = path.join(BASE, "home");
 const OUT_DIR = path.join(BASE, "out");
 const REPO_DIR = path.join(HOME, "Projects", "atlas");
@@ -92,6 +86,7 @@ const git = (cwd: string, ...args: string[]): void => {
 };
 
 function seedHome(): void {
+  fs.rmSync(BASE, { recursive: true, force: true });
   fs.mkdirSync(REPO_DIR, { recursive: true });
   fs.mkdirSync(FREE_TEXT_DIR, { recursive: true });
   fs.mkdirSync(OUT_DIR, { recursive: true });

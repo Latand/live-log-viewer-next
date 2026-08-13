@@ -1,50 +1,38 @@
 import { expect, test } from "bun:test";
-import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { createCaptureDirectory } from "./capture-directory";
+import { resolveCaptureRoot } from "./capture-issue-963-attention";
 
-const REPO_ROOT = path.resolve(import.meta.dir, "..");
-const options = (raw: string | undefined) => ({
-  envName: "ATTENTION_CAPTURE_DIR",
-  prefix: "llv-issue-963" as const,
-  raw,
-  repoRoot: REPO_ROOT,
+/* The capture root is rmSync'd wholesale before every run, so the resolver is
+   the only thing between a typo'd ATTENTION_CAPTURE_DIR and erased data
+   (issue #963 review): broad targets must be rejected before any removal. */
+
+test("the default capture root resolves to the dedicated /tmp child", () => {
+  expect(resolveCaptureRoot(undefined)).toBe("/tmp/llv-issue-963");
 });
 
-test("the default capture root is a fresh script-labelled temp child", () => {
-  const created = createCaptureDirectory(options(undefined));
-  try {
-    expect(path.dirname(created)).toBe(fs.realpathSync(os.tmpdir()));
-    expect(path.basename(created)).toStartWith("llv-issue-963-");
-  } finally {
-    fs.rmSync(created, { recursive: true, force: true });
-  }
-});
-
-test("a dedicated script-labelled temp directory receives a unique run child", () => {
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "llv-issue-963-parent-"));
-  try {
-    const created = createCaptureDirectory(options(parent));
-    expect(path.dirname(created)).toBe(fs.realpathSync(parent));
-    expect(path.basename(created)).toStartWith("llv-issue-963-");
-  } finally {
-    fs.rmSync(parent, { recursive: true, force: true });
-  }
+test("a dedicated llv- child directory is accepted", () => {
+  expect(resolveCaptureRoot("/tmp/llv-963-custom/")).toBe("/tmp/llv-963-custom");
 });
 
 test("the filesystem root, the temp root, and the home directory are rejected", () => {
-  expect(() => createCaptureDirectory(options("/"))).toThrow("refused");
-  expect(() => createCaptureDirectory(options(os.tmpdir()))).toThrow("refused");
-  expect(() => createCaptureDirectory(options(os.homedir()))).toThrow("refused");
+  expect(() => resolveCaptureRoot("/")).toThrow("dedicated child directory");
+  expect(() => resolveCaptureRoot(os.tmpdir())).toThrow("dedicated child directory");
+  expect(() => resolveCaptureRoot(os.homedir())).toThrow("dedicated child directory");
 });
 
-test("a temp directory without the script's own prefix is rejected", () => {
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "unrelated-capture-"));
-  try {
-    expect(() => createCaptureDirectory(options(parent))).toThrow("override leaf must start with llv-issue-963");
-  } finally {
-    fs.rmSync(parent, { recursive: true, force: true });
-  }
+test("an ancestor of a protected directory is rejected even with an llv- name", () => {
+  const parent = path.dirname(os.homedir());
+  expect(() => resolveCaptureRoot(parent)).toThrow("dedicated child directory");
+  expect(() => resolveCaptureRoot("/srv/llv-area", "/srv/llv-area/checkout")).toThrow("dedicated child directory");
+});
+
+test("the repository itself is rejected", () => {
+  const repo = path.resolve(import.meta.dir, "..");
+  expect(() => resolveCaptureRoot(repo)).toThrow("dedicated child directory");
+});
+
+test("a directory without the dedicated llv- basename is rejected", () => {
+  expect(() => resolveCaptureRoot("/tmp/data")).toThrow('start with "llv-"');
 });
