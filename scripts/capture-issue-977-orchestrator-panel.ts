@@ -25,9 +25,15 @@ import path from "node:path";
 
 import { chromium, type Page } from "playwright-core";
 
+import { createCaptureDirectory } from "./capture-directory";
 import { demoPort } from "./demo-capture";
 
-const BASE = process.env.ORCH_CAPTURE_DIR ?? "/tmp/llv-issue-977";
+const BASE = createCaptureDirectory({
+  envName: "ORCH_CAPTURE_DIR",
+  prefix: "llv-issue-977",
+  raw: process.env.ORCH_CAPTURE_DIR,
+  repoRoot: path.resolve(import.meta.dir, ".."),
+});
 const HOME = path.join(BASE, "home");
 const OUT_DIR = path.join(BASE, "out");
 const REPO_DIR = path.join(HOME, "Projects", "atlas");
@@ -46,7 +52,6 @@ const SESSIONS = [
 ];
 
 function seedHome(): void {
-  fs.rmSync(BASE, { recursive: true, force: true });
   fs.mkdirSync(REPO_DIR, { recursive: true });
   fs.mkdirSync(OUT_DIR, { recursive: true });
   fs.mkdirSync(path.join(BASE, "tmp", `claude-${process.getuid?.() ?? 1000}`), { recursive: true });
