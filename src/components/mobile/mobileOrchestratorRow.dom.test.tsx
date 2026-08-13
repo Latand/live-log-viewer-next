@@ -214,7 +214,12 @@ test("the row is pinned first in the conversation strip, outside the scroller th
   expect(openButton(host).className).toContain("h-11");
 });
 
-test("a project with no conversations at all still shows the row", async () => {
+/* A board with no conversation of its own — the project is on screen for a
+   draft, a task or a running pipeline — still gets the pin. The OTHER empty
+   phone leaf, the project shell's own «nothing here yet» branch, never mounts
+   this view at all: `ProjectDashboard` chooses between the focus view, the
+   catalog list and that empty state, and it is outside this lane's files. */
+test("a strip with no conversation chips at all still shows the row", async () => {
   const { host } = await mount([]);
   expect(row(host)).not.toBeNull();
   expect(row(host).getAttribute("data-orchestrator-row-state")).toBe("draft");
@@ -296,6 +301,38 @@ test("a double tap posts once, and a retry after a lost reply replays the SAME k
   const posts = seatPosts();
   expect(posts).toHaveLength(2);
   expect(posts[1]!.body.clientRequestId).toBe(posts[0]!.body.clientRequestId);
+});
+
+test("a truncated 2xx reply is not a confirmation: the key survives it and the retry replays the same intent", async () => {
+  /* The phone's own failure: the request landed, the reply did not survive the
+     ride back. A body that cannot be parsed says NOTHING about whether an
+     orchestrator now exists, so accepting it — and releasing the key — is how
+     the retry designates a second one. */
+  postSeat = async () => new Response('{"ok": tr', { status: 200, headers: { "content-type": "application/json" } });
+  const { host, root } = await mount([conversation({})]);
+  flushSync(() => openButton(host).click());
+  await settle(root, view([conversation({})]), 2);
+  flushSync(() => (sheet(host)!.querySelector("[data-orchestrator-confirm]") as HTMLButtonElement).click());
+  await settle(root, view([conversation({})]), 3);
+
+  const first = seatPosts();
+  expect(first).toHaveLength(1);
+  /* The durable intent is still on record, unchanged. */
+  expect(dom.sessionStorage.getItem("llvOrchestratorDraft:atlas:requestId")).toBe(String(first[0]!.body.clientRequestId));
+  /* And it is READ as unknown, not as a refusal: the sheet offers the retry
+     that replays it rather than a fresh mandate. */
+  expect(row(host).getAttribute("data-orchestrator-row-state")).toBe("intent-error");
+  expect(sheet(host)!.querySelector("[data-orchestrator-intent-error]")!.textContent)
+    .toContain("Trying again replays the same request");
+
+  postSeat = async () => new Response(JSON.stringify({ ok: true, state: "starting" }), { status: 200, headers: { "content-type": "application/json" } });
+  flushSync(() => (sheet(host)!.querySelector("[data-orchestrator-confirm]") as HTMLButtonElement).click());
+  await settle(root, view([conversation({})]), 3);
+  const posts = seatPosts();
+  expect(posts).toHaveLength(2);
+  expect(posts[1]!.body.clientRequestId).toBe(posts[0]!.body.clientRequestId);
+  /* A receipt this client can read is what finally releases it. */
+  expect(dom.sessionStorage.getItem("llvOrchestratorDraft:atlas:requestId")).toBeNull();
 });
 
 test("a refused designation lands on the row and inside the sheet, with the error and a retry, without a reload", async () => {

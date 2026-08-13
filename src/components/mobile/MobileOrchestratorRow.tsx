@@ -152,7 +152,14 @@ export function MobileOrchestratorRow({
         }),
       });
       const body = (await response.json().catch(() => null)) as (SpawnResponseBody & { code?: string }) | null;
-      if (response.ok && body?.ok !== false) {
+      /* Only a READABLE receipt settles the submission. Every 2xx the seat route
+         emits carries `ok: true`; a 2xx that does not is a truncated body, a
+         proxy's own page, or a shape this client does not understand — and none
+         of them say where the intent landed. Treating those as success (and
+         releasing the key on them) is precisely how one create becomes two
+         orchestrators on a phone, which drops its connection mid-reply far more
+         often than mid-request. */
+      if (response.ok && body?.ok === true) {
         writeSeatDraftField(project, "requestId", "");
         /* Instant attach (issue #919's path): the receipt already names the
            durable conversation, so the row goes live — and the sheet hands off
@@ -178,6 +185,16 @@ export function MobileOrchestratorRow({
           if (provisional) applySpawnedConversationSnapshot(provisional);
         }
         requestFilesRefresh();
+      } else if (response.ok) {
+        /* Accepted, unreadable: the same standing as transport loss, so it takes
+           the same route through — the key is KEPT and the retry replays the one
+           durable intent. The seat read retires both the key and this banner as
+           soon as the server says where that submission landed. */
+        setSubmitFailure({
+          kind: "ambiguous",
+          error: typeof body?.error === "string" && body.error ? body.error : t("orchPanel.transportLost"),
+          clientRequestId,
+        });
       } else {
         const failure = classifySeatFailure(response.status, body, clientRequestId);
         /* A terminal refusal is durably recorded server-side; the next attempt

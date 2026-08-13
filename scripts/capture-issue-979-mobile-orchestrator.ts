@@ -25,14 +25,37 @@ import path from "node:path";
 
 import { chromium, type Page } from "playwright-core";
 
+import { PERSISTENT_CHROME } from "@/components/mobile/chatBudget";
+
+import { resolveCaptureRoot } from "./capture-issue-963-attention";
 import { demoPort } from "./demo-capture";
 
-const BASE = process.env.ORCH_CAPTURE_DIR ?? "/tmp/llv-issue-979";
+/**
+ * The capture root is deleted WHOLESALE before every run, so the override is
+ * validated by the same rule #963's review put behind its own cleanup: a
+ * dedicated `llv-`-prefixed child directory that owns nothing else — never the
+ * filesystem root, the home directory, a bare temp root, or the repository.
+ * A typo'd `ORCH_CAPTURE_DIR` must fail here, before anything is removed.
+ */
+export function resolveOrchCaptureRoot(raw: string | undefined, repo?: string): string {
+  const base = path.resolve(raw ?? "/tmp/llv-issue-979");
+  try {
+    resolveCaptureRoot(base, repo);
+  } catch {
+    throw new Error(`ORCH_CAPTURE_DIR must be a dedicated «llv-» child directory that owns nothing else, got ${base}`);
+  }
+  return base;
+}
+
+const BASE = resolveOrchCaptureRoot(process.env.ORCH_CAPTURE_DIR);
 const HOME = path.join(BASE, "home");
 const OUT_DIR = path.join(BASE, "out");
 const REPO_DIR = path.join(HOME, "Projects", "atlas");
 const CAPTURE_MS = Date.parse("2100-01-02T12:00:00.000Z");
 const PHONE = { width: 390, height: 844 };
+/* An iOS keyboard's own share of a 390×844 phone — the layout viewport keeps
+   its full height there and only the VISUAL viewport shrinks (#983). */
+const KEYBOARD_PX = 336;
 
 const projectSlug = (cwd: string) => cwd.replace(/[^A-Za-z0-9]/g, "-");
 
@@ -143,28 +166,40 @@ const seedInit = () => {
 };
 
 /** What the phone must still be true of, whatever state is on screen. */
-async function checkPhoneGeometry(page: Page, state: string): Promise<{ row: number; button: number }> {
+async function checkPhoneGeometry(page: Page, state: string): Promise<{ row: number; strip: number; button: number }> {
   const geometry = await page.evaluate(() => {
     const row = document.querySelector("[data-orchestrator-row]");
     const button = document.querySelector("[data-orchestrator-row-open]");
     const chip = document.querySelector(".overflow-x-auto button");
     const rowRect = row?.getBoundingClientRect();
     const chipRect = chip?.getBoundingClientRect();
+    const stripRect = row?.parentElement?.getBoundingClientRect();
     return {
       row: rowRect ? Math.round(rowRect.height) : 0,
       left: rowRect ? Math.round(rowRect.left) : -1,
+      chips: document.querySelectorAll(".overflow-x-auto button").length,
       chipLeft: chipRect ? Math.round(chipRect.left) : Number.POSITIVE_INFINITY,
+      strip: stripRect ? Math.round(stripRect.height) : 0,
       button: button ? Math.round(button.getBoundingClientRect().height) : 0,
       scrollWidth: document.documentElement.scrollWidth,
       innerWidth: window.innerWidth,
     };
   });
   if (geometry.button < 44) throw new Error(`${state}: the row's tap target is ${geometry.button}px, under the 44px floor`);
+  /* «Before the first chip» means nothing without a chip to be before: a strip
+     that rendered none would otherwise pass this check by default. */
+  if (geometry.chips === 0) throw new Error(`${state}: the strip drew no conversation chips, so the pin's position proves nothing`);
   if (geometry.left >= geometry.chipLeft) throw new Error(`${state}: the pinned row starts at ${geometry.left}px, not before the first chip at ${geometry.chipLeft}px`);
+  /* The chat-first budget (issue #419): the pin rides the strip row that
+     `chatBudget` already counts, so it must not push that row past the height
+     the transcript's 60% share is computed against. */
+  if (geometry.strip > PERSISTENT_CHROME.focusStrip) {
+    throw new Error(`${state}: the strip is ${geometry.strip}px, past the ${PERSISTENT_CHROME.focusStrip}px the chat budget reserves for it`);
+  }
   /* The mobile overflow contract (#353): the document itself never scrolls
      sideways — only the chip strip inside it does. */
   if (geometry.scrollWidth > geometry.innerWidth) throw new Error(`${state}: the document scrolls to ${geometry.scrollWidth}px at ${geometry.innerWidth}px`);
-  return { row: geometry.row, button: geometry.button };
+  return { row: geometry.row, strip: geometry.strip, button: geometry.button };
 }
 
 async function checkSheetReach(page: Page, state: string): Promise<void> {
@@ -179,6 +214,59 @@ async function checkSheetReach(page: Page, state: string): Promise<void> {
   });
   if (reach.height < 44) throw new Error(`${state}: the sheet's primary action is ${reach.height}px tall`);
   if (reach.bottom > reach.viewport) throw new Error(`${state}: the sheet's primary action ends at ${reach.bottom}px, past the ${reach.viewport}px viewport`);
+}
+
+/**
+ * The check that actually settles slice C's keyboard claim: the sheet holds a
+ * large textarea and will be used with the keyboard OPEN, and iOS Safari's
+ * keyboard leaves `window.innerHeight` at the full 844px while shrinking only
+ * `visualViewport` — the exact path #983 repaired for the focus root. So the
+ * mandate field is focused for real and the visual viewport is shrunk through
+ * the very signal `useKeyboardInset` subscribes to (a `resize` on
+ * `visualViewport`), then the confirm control is measured against what the
+ * operator can SEE rather than against the layout viewport it sits behind.
+ *
+ * A sheet that ignored the signal reads bottom 844 against a visible 508 and
+ * fails here; so does one that reached its confirm by scrolling the window.
+ */
+async function checkSheetKeyboardReach(page: Page, state: string): Promise<void> {
+  await page.focus("[data-orchestrator-mandate]");
+  await page.evaluate((keyboard) => {
+    const visual = window.visualViewport!;
+    const full = visual.height;
+    Object.defineProperty(visual, "height", { configurable: true, get: () => full - keyboard });
+    visual.dispatchEvent(new Event("resize"));
+  }, KEYBOARD_PX);
+  await page.waitForTimeout(300);
+  const reach = await page.evaluate(() => {
+    const visual = window.visualViewport!;
+    const sheet = document.querySelector('[data-testid="mobile-orchestrator-sheet"]')!;
+    const confirm = document.querySelector("[data-orchestrator-confirm]")!;
+    const body = sheet.querySelector(".overflow-y-auto")!;
+    const rect = confirm.getBoundingClientRect();
+    return {
+      focused: document.activeElement?.hasAttribute("data-orchestrator-mandate") ?? false,
+      inset: Math.round(parseFloat(getComputedStyle(sheet.parentElement!).paddingBottom) || 0),
+      bottom: Math.round(rect.bottom),
+      visibleBottom: Math.round(visual.offsetTop + visual.height),
+      layout: window.innerHeight,
+      windowScroll: Math.round(window.scrollY),
+      documentHeight: document.documentElement.scrollHeight,
+      bodyScrolls: getComputedStyle(body).overflowY,
+    };
+  });
+  if (!reach.focused) throw new Error(`${state}: the mandate field never took focus, so the keyboard case was not exercised`);
+  if (reach.inset < KEYBOARD_PX - 1) throw new Error(`${state}: the sheet reserved ${reach.inset}px for a ${KEYBOARD_PX}px keyboard`);
+  if (reach.bottom > reach.visibleBottom) {
+    throw new Error(`${state}: with the keyboard open the confirm ends at ${reach.bottom}px, under the keyboard — only ${reach.visibleBottom}px of the ${reach.layout}px viewport is visible`);
+  }
+  /* #983's other half: the browser must never have to scroll the WINDOW to
+     reach the focused field — the sheet's own body is the one scroller. */
+  if (reach.windowScroll !== 0) throw new Error(`${state}: the window scrolled to ${reach.windowScroll}px to reach the field`);
+  if (reach.documentHeight > reach.layout) throw new Error(`${state}: the document grew to ${reach.documentHeight}px past the ${reach.layout}px viewport`);
+  if (reach.bodyScrolls !== "auto" && reach.bodyScrolls !== "scroll") {
+    throw new Error(`${state}: the sheet's body is not the scroller (overflow-y: ${reach.bodyScrolls})`);
+  }
 }
 
 async function main(): Promise<void> {
@@ -278,11 +366,26 @@ async function main(): Promise<void> {
           }
           await page.waitForTimeout(400);
           await checkSheetReach(page, `${state.id}/${scheme}`);
+          /* Every sheet that carries the mandate textarea is a sheet the
+             operator types into, so each one is measured with the keyboard up
+             and keeps its own frame as the evidence. */
+          if (await page.$("[data-orchestrator-mandate]")) {
+            await checkSheetKeyboardReach(page, `${state.id}/${scheme}`);
+            const typing = path.join(OUT_DIR, `979-${state.id}-keyboard-${scheme}.png`);
+            await page.screenshot({ path: typing });
+            console.log(`${typing}  → confirm above a ${KEYBOARD_PX}px keyboard`);
+            await page.evaluate(() => {
+              const visual = window.visualViewport as unknown as Record<string, unknown>;
+              delete visual.height;
+              window.visualViewport!.dispatchEvent(new Event("resize"));
+            });
+            await page.waitForTimeout(200);
+          }
         }
         await page.waitForTimeout(500);
         const shot = path.join(OUT_DIR, `979-${state.id}-${scheme}.png`);
         await page.screenshot({ path: shot });
-        console.log(`${shot}  → ${rowState}  row ${geometry.row}px · target ${geometry.button}px`);
+        console.log(`${shot}  → ${rowState}  row ${geometry.row}px · strip ${geometry.strip}px · target ${geometry.button}px`);
         await context.close();
       }
     }
@@ -292,4 +395,6 @@ async function main(): Promise<void> {
   }
 }
 
-await main();
+/* Guarded so the resolver above can be imported by its own test without
+   launching a browser and erasing the capture root. */
+if (import.meta.main) await main();
