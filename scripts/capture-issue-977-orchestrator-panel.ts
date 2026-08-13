@@ -21,13 +21,51 @@
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import { chromium, type Page } from "playwright-core";
 
 import { demoPort } from "./demo-capture";
 
-const BASE = process.env.ORCH_CAPTURE_DIR ?? "/tmp/llv-issue-977";
+const CAPTURE_PREFIX = "llv-issue-977";
+const REPO_ROOT = path.resolve(import.meta.dir, "..");
+
+function createCaptureRoot(raw: string | undefined): string {
+  const tempRoot = fs.realpathSync(os.tmpdir());
+  const home = fs.existsSync(os.homedir()) ? fs.realpathSync(os.homedir()) : path.resolve(os.homedir());
+  const repo = fs.realpathSync(REPO_ROOT);
+  const overlaps = (candidate: string, protectedPath: string) =>
+    candidate === protectedPath
+    || candidate.startsWith(protectedPath + path.sep)
+    || protectedPath.startsWith(candidate + path.sep);
+
+  if (tempRoot === path.parse(tempRoot).root || [home, repo].some((protectedPath) => overlaps(tempRoot, protectedPath))) {
+    throw new Error(`TMPDIR refused ${tempRoot}: capture temp root overlaps a protected filesystem location`);
+  }
+  if (raw === undefined) return fs.mkdtempSync(path.join(tempRoot, `${CAPTURE_PREFIX}-`));
+
+  const requested = path.resolve(raw);
+  let resolved: string;
+  try {
+    resolved = fs.realpathSync(requested);
+  } catch {
+    throw new Error(`ORCH_CAPTURE_DIR refused ${requested}: override must name an existing directory`);
+  }
+  if (!fs.statSync(resolved).isDirectory()) {
+    throw new Error(`ORCH_CAPTURE_DIR refused ${requested}: override must name a directory`);
+  }
+  if (resolved === tempRoot || !resolved.startsWith(tempRoot + path.sep)) {
+    throw new Error(`ORCH_CAPTURE_DIR refused ${requested} (resolved to ${resolved}): override must be a descendant of ${tempRoot}`);
+  }
+  if (!path.basename(resolved).startsWith(`${CAPTURE_PREFIX}-`)) {
+    throw new Error(`ORCH_CAPTURE_DIR refused ${requested}: override leaf must start with ${CAPTURE_PREFIX}-`);
+  }
+
+  return fs.mkdtempSync(path.join(resolved, `${CAPTURE_PREFIX}-`));
+}
+
+const BASE = createCaptureRoot(process.env.ORCH_CAPTURE_DIR);
 const HOME = path.join(BASE, "home");
 const OUT_DIR = path.join(BASE, "out");
 const REPO_DIR = path.join(HOME, "Projects", "atlas");
@@ -46,7 +84,6 @@ const SESSIONS = [
 ];
 
 function seedHome(): void {
-  fs.rmSync(BASE, { recursive: true, force: true });
   fs.mkdirSync(REPO_DIR, { recursive: true });
   fs.mkdirSync(OUT_DIR, { recursive: true });
   fs.mkdirSync(path.join(BASE, "tmp", `claude-${process.getuid?.() ?? 1000}`), { recursive: true });
