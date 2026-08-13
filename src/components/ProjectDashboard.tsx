@@ -50,6 +50,7 @@ import { dropLegacyWorkflowDrafts, isWorkflowDraftId } from "./workflows/workflo
 import { TaskPanel } from "./tasks/TaskPanel";
 import { pushTaskToast, TaskToastHost } from "./tasks/taskToast";
 import { MobileFocusView } from "./mobile/MobileFocusView";
+import { MobileOrchestratorRow } from "./mobile/MobileOrchestratorRow";
 import { canHandoff, HandoffHandle } from "./HandoffHandle";
 import { SchemeBoard } from "./scheme/SchemeBoard";
 import { CatalogFailureNotice } from "./CatalogFailureNotice";
@@ -1798,15 +1799,38 @@ function ProjectDashboardView({
               taskSheetNonce={taskSheetNonce}
               trayApi={trayApi}
             />
-          ) : listAvailable ? (
-            <ConversationList project={project} enabled={loaded && projectView === "list"} onOpen={openFullCatalogFile} />
           ) : (
-            <div className="flex flex-1 items-center justify-center px-4 py-5 text-center">
-              <div>
-                <div className="text-[13.5px] font-semibold text-muted">{t("dash.emptyTitle")}</div>
-                <div className="mt-0.5 text-[12px] text-muted">{t("dash.emptyHint")}</div>
+            /* The phone has THREE leaves and the pin belongs in all of them
+               (PRD #976 decision 5). The focus view carries it inside its own
+               strip; the catalog list and the empty project get the same row,
+               from the same seat projection, in the same kind of slot — its own
+               strip above the leaf, outside whatever the leaf scrolls. So the
+               catalog's ordering, its search box, and a project with nothing in
+               it yet all keep the orchestrator first and reachable, and an
+               operator who lives in Список is not the one operator who cannot
+               create one. Exactly one row exists at a time: this branch and the
+               focus view above it are alternatives. */
+            <>
+              <div className="flex shrink-0 items-stretch border-b border-border bg-card" data-testid="mobile-orchestrator-slot">
+                <MobileOrchestratorRow
+                  project={project}
+                  projectName={projectName}
+                  files={files}
+                  onOpenConversation={openFullCatalogFile}
+                />
+                <span aria-hidden className="min-w-0 flex-1" />
               </div>
-            </div>
+              {listAvailable ? (
+                <ConversationList project={project} enabled={loaded && projectView === "list"} onOpen={openFullCatalogFile} />
+              ) : (
+                <div className="flex flex-1 items-center justify-center px-4 py-5 text-center">
+                  <div>
+                    <div className="text-[13.5px] font-semibold text-muted">{t("dash.emptyTitle")}</div>
+                    <div className="mt-0.5 text-[12px] text-muted">{t("dash.emptyHint")}</div>
+                  </div>
+                </div>
+              )}
+            </>
           )}
         </>
       ) : (
