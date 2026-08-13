@@ -1,7 +1,7 @@
 "use client";
 
 import { Bot, LoaderCircle, RotateCcw, TriangleAlert, X } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 
 import { AgentLaunchControls, useAgentLaunchDraft } from "@/components/draft/AgentLaunchControls";
 import { applySpawnedConversationSnapshot } from "@/hooks/useFiles";
@@ -91,6 +91,12 @@ export function OrchestratorPanel({
   const { t } = useLocale();
   const { status, failed, refresh } = useOrchestratorSeat(project);
   const [submitting, setSubmitting] = useState(false);
+  /* The guard has to be SYNCHRONOUS: two clicks in one event batch both read
+     the same render's `submitting`, so a state flag alone lets the second one
+     through. The seat route would still converge them onto one designation
+     (same key), but the second reply would land as a spurious in-progress
+     error over a perfectly good create. */
+  const inFlight = useRef(false);
   const [submitFailure, setSubmitFailure] = useState<SeatSubmitFailure | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [mandate, setMandateState] = useState(() => readDraftField(project, "mandate") || ORCHESTRATOR_SYSTEM_PROMPT);
@@ -125,12 +131,13 @@ export function OrchestratorPanel({
   const state = deriveOrchestratorPanelState({ status, statusFailed: failed, submitting, submitFailure, file, hostDead });
 
   const confirm = useCallback(async () => {
-    if (submitting) return;
+    if (inFlight.current) return;
     const text = mandate.trim();
     if (!text) {
       setFormError(t("orchPanel.mandateRequired"));
       return;
     }
+    inFlight.current = true;
     setFormError(null);
     /* ONE key per draft submission, not per click (issue #977 acceptance): it is
        minted on the first confirm and persisted, so a double-click, a reload
@@ -204,10 +211,11 @@ export function OrchestratorPanel({
          so the key is KEPT and the retry replays onto the same receipt. */
       setSubmitFailure({ kind: "ambiguous", error: t("orchPanel.transportLost") });
     } finally {
+      inFlight.current = false;
       setSubmitting(false);
       await refresh();
     }
-  }, [submitting, mandate, project, projectCwd, launch, refresh, t]);
+  }, [mandate, project, projectCwd, launch, refresh, t]);
 
   return (
     <section

@@ -96,10 +96,19 @@ export function OrchestratorDock({
   return (
     <aside
       data-orchestrator-dock
+      /* The operator's chosen width, before the viewport clamp below applies
+         it — the CSS `max()/min()` expression is not readable back out. */
+      data-orchestrator-dock-width={width}
       className="relative flex shrink-0 flex-col border-r border-border bg-card"
       style={{ width: `max(${MIN_WIDTH}px, min(${width}px, calc(100vw - ${RESERVED_BESIDE_DOCK}px)))` }}
     >
+      {/* Keyed by project: the panel's draft — mandate, engine, model, account,
+          and the idempotency key of an unsettled confirm — belongs to ONE
+          project. The dock survives the switch (its width is the operator's,
+          not the project's); the panel is re-seated on the new one and reads
+          that project's own stored draft. */}
       <OrchestratorPanel
+        key={project}
         project={project}
         projectName={projectName}
         projectCwd={projectCwd}
