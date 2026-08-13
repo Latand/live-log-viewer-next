@@ -4,7 +4,8 @@ import { BRIDGE_REPORT_CLASSES } from "@/lib/bridge/types";
 
 import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SPAWN_CONFIG, ORCHESTRATOR_SYSTEM_PROMPT } from "./prompt";
 
-test("the manager spawns as Claude Opus 5 on low effort through the role preset", () => {
+test("the manager draft defaults to Claude Opus 5 on low effort through the role preset", () => {
+  /* OrchestratorPanel seeds its shared launch controls from this live preset. */
   expect(ORCHESTRATOR_SPAWN_CONFIG).toMatchObject({ engine: "claude", model: "opus", effort: "low", role: "orchestrator" });
 });
 

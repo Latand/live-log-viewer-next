@@ -33,7 +33,6 @@ import { isLifecycleEventType } from "@/lib/lifecycle/vocabulary";
 import { recordManagerReport } from "@/lib/bridge/service";
 import { bridgeDirectiveBody, bridgeDirectiveId, type BridgeTrailer } from "@/lib/bridge/directive";
 import { isBridgeReportClass } from "@/lib/bridge/types";
-import { readOrchestratorRecord } from "@/lib/orchestrator/store";
 import { authorizedManagerSeats, type ManagerAuthoritySources } from "@/lib/orchestrator/authority";
 import { activeOrchestratorSeats, canonicalOrchestratorProject, orchestratorRevocations, orchestratorSeatFor, type OrchestratorSeat } from "@/lib/orchestrator/seats";
 import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
@@ -1358,16 +1357,20 @@ async function getOrchestrator(args: McpToolArgs, dependencies: ViewerMcpDomainD
     return redactPayload({ ...base, designated: false, seat: null, health: null, rotation: null });
   }
 
-  const conversation = agentRegistry().conversation(active.conversationId as `conversation_${string}`);
+  const registry = agentRegistry();
+  const conversation = registry.conversation(active.conversationId as `conversation_${string}`);
   const generation = conversation?.generations.at(-1);
   const transcriptPath = generation?.path ?? active.path;
-  /* Engine/model resolve from the registry, falling back to the legacy manager
-     record activation keeps in sync — the boot window in which the registry has
-     not yet settled a generation must not read as "unknown model". */
-  const legacyRecord = readOrchestratorRecord();
-  const legacyMatches = legacyRecord?.conversationId === active.conversationId;
-  const engine = conversation?.engine ?? (legacyMatches ? legacyRecord!.engine : null);
-  const model = generation?.launchProfile?.model ?? (legacyMatches ? legacyRecord!.model : null);
+  /* During the boot window the spawn receipt already exists while the registry
+     conversation still has no settled generation. The seat intent carries the
+     receipt's client key, so the same registry source supplies the launch
+     profile until generation facts take over. */
+  const launchReceipt = active.intent.mode === "spawn"
+    ? registry.spawnReceiptForClientAttempt(active.intent.clientRequestId)
+    : null;
+  const receiptMatches = launchReceipt?.conversationId === active.conversationId;
+  const engine = conversation?.engine ?? (receiptMatches ? launchReceipt.engine : null);
+  const model = generation?.launchProfile?.model ?? (receiptMatches ? launchReceipt.launchProfile.model : null);
   let session: { messages: number; tools: number; compactions: number } | null = null;
   if (transcriptPath && (engine === "claude" || engine === "codex")) {
     try {
@@ -2210,7 +2213,6 @@ function productionManagerAuthoritySources(): ManagerAuthoritySources {
   return {
     activeSeats: activeOrchestratorSeats,
     revocations: orchestratorRevocations,
-    legacyManagerConversationId: () => readOrchestratorRecord()?.conversationId ?? null,
     conversationFacts: (conversationId) => {
       const conversation = registry.conversation(conversationId as `conversation_${string}`);
       if (!conversation) return null;
