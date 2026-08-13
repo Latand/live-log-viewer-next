@@ -286,7 +286,11 @@ export function OrchestratorPanel({
               void refreshIncumbent();
             }}
           />
-          {state.transition ? <TransitionBanner transition={state.transition} /> : null}
+          {/* The transition banner is how a designation in flight — or one that
+              failed — reaches an operator who is NOT looking at the draft. With
+              the rotate draft open it would say the same thing twice, once with
+              a retry and once without, so the draft's own block is the one. */}
+          {state.transition && !rotating ? <TransitionBanner transition={state.transition} /> : null}
           {state.rotation ? <RotationBanner rotation={state.rotation} /> : null}
           {rotating ? null : (
             <>
@@ -522,15 +526,23 @@ function OrchestratorDraft({
             role="alert"
             data-orchestrator-intent-error
           >
+            {/* A failed ROTATION says something different from a failed create,
+                and the difference matters: the incumbent is still running. «Nothing
+                is running» would be a lie exactly when the operator is deciding
+                whether to try again. */}
             <p className="flex items-center gap-1.5 text-ui font-semibold text-danger">
               <TriangleAlert className="h-4 w-4 shrink-0" aria-hidden />
-              {t(state.retry === "same" ? "orchPanel.errorUnknownTitle" : "orchPanel.errorTitle")}
+              {t(state.retry === "same"
+                ? rotate ? "orchPanel.rotateErrorUnknownTitle" : "orchPanel.errorUnknownTitle"
+                : rotate ? "orchPanel.rotateErrorTitle" : "orchPanel.errorTitle")}
             </p>
             <pre className="mt-1 max-h-24 overflow-y-auto whitespace-pre-wrap break-words font-sans text-ui leading-4 text-secondary">
               {state.error}
             </pre>
             <p className="mt-1 text-caption text-muted">
-              {t(state.retry === "same" ? "orchPanel.errorUnknownHint" : "orchPanel.errorHint")}
+              {t(state.retry === "same"
+                ? rotate ? "orchPanel.rotateErrorUnknownHint" : "orchPanel.errorUnknownHint"
+                : rotate ? "orchPanel.rotateErrorHint" : "orchPanel.errorHint")}
             </p>
           </div>
         ) : (
@@ -709,7 +721,7 @@ function RotationBanner({ rotation }: { rotation: RotationHint }) {
           and whether the number behind it is an estimate. Re-wording them here is
           how the panel and `get_orchestrator` would start disagreeing. */}
       {rotation.notes?.length ? (
-        <ul className="mt-0.5 list-inside list-disc text-caption leading-4 text-muted">
+        <ul className="mt-0.5 list-disc pl-3.5 text-caption leading-4 text-muted marker:text-muted/60">
           {rotation.notes.map((note) => <li key={note}>{note}</li>)}
         </ul>
       ) : null}

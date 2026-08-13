@@ -699,11 +699,17 @@ test("a durable terminal error on a pending rotation is never hidden — it rend
   expect(panelState(host)).toBe("live");
   expect(host.querySelector("[data-orchestrator-intent-error]")?.textContent).toContain("spawn was rejected with HTTP status 500");
 
-  /* …and the same error, with retry in place, once the rotate draft is open. */
+  /* …and the same error, with retry in place, once the rotate draft is open —
+     stated ONCE, on the form that can act on it. */
   flushSync(() => rotateButton(host).click());
   await settle();
-  const inDraft = host.querySelector('[data-orchestrator-draft="rotate"] [data-orchestrator-intent-error]');
-  expect(inDraft?.textContent).toContain("spawn was rejected with HTTP status 500");
+  const errors = host.querySelectorAll("[data-orchestrator-intent-error]");
+  expect(errors).toHaveLength(1);
+  expect(host.querySelector('[data-orchestrator-draft="rotate"] [data-orchestrator-intent-error]')?.textContent)
+    .toContain("spawn was rejected with HTTP status 500");
+  /* And it says what is true of a failed ROTATION: the incumbent still holds
+     the seat, so «nothing is running» is never printed here. */
+  expect(errors[0]!.textContent).toContain("still holds the seat");
   expect(confirmButton(host)).not.toBeNull();
 });
 

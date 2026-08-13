@@ -1702,6 +1702,10 @@ export const en = {
   "orchPanel.rotateHint": "The successor starts with the mandate below. Its predecessor's transcript and this project's open tasks are handed over by the server — you don't have to repeat them here. The predecessor's conversation stays on the board, linked to the new one.",
   "orchPanel.rotateConfirm": "Rotate orchestrator",
   "orchPanel.rotateCancel": "Keep this one",
+  "orchPanel.rotateErrorTitle": "The rotation didn't happen",
+  "orchPanel.rotateErrorHint": "Your current orchestrator is untouched and still holds the seat. Fix the mandate or the parameters and try again.",
+  "orchPanel.rotateErrorUnknownTitle": "The last rotation's outcome is unknown",
+  "orchPanel.rotateErrorUnknownHint": "The reply was lost, so a successor may already exist. Trying again replays the same request instead of rotating twice.",
   "orchPanel.restoreIncumbent": "Restore current mandate",
   "orchPanel.cwdInherited": "The successor continues in {cwd}",
 

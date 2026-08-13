@@ -1654,6 +1654,10 @@ export const uk: Record<keyof typeof en, Message> = {
   "orchPanel.rotateHint": "Наступник починає з мандата нижче. Транскрипт попередника й відкриті задачі проєкту передає сервер — тут їх повторювати не треба. Розмова попередника лишається на дошці, зв'язана з новою.",
   "orchPanel.rotateConfirm": "Замінити оркестратора",
   "orchPanel.rotateCancel": "Лишити цього",
+  "orchPanel.rotateErrorTitle": "Заміна не відбулася",
+  "orchPanel.rotateErrorHint": "Поточний оркестратор недоторканий і далі тримає місце. Виправте мандат чи параметри й спробуйте ще раз.",
+  "orchPanel.rotateErrorUnknownTitle": "Результат останньої заміни невідомий",
+  "orchPanel.rotateErrorUnknownHint": "Відповідь загубилася, тож наступник уже може існувати. Повторна спроба відтворює той самий запит, а не замінює двічі.",
   "orchPanel.restoreIncumbent": "Повернути поточний мандат",
   "orchPanel.cwdInherited": "Наступник продовжить у {cwd}",
 
