@@ -2,6 +2,7 @@ import type { OrchestratorSeat } from "@/lib/orchestrator/seats";
 import type { FileEntry } from "@/lib/types";
 
 import type { StripSurface } from "../agentCapabilities";
+import type { OrchestratorIncumbent } from "./incumbent";
 
 /*
  * The orchestrator panel's state machine, as a pure module (PRD #976 slice A).
@@ -88,13 +89,20 @@ export type SeatSubmitFailure = { kind: "terminal" | "ambiguous"; error: string;
 
 /** A rotation ADVISORY and nothing more (`@/lib/orchestrator/health`): reaching
     the threshold changes what the panel says, never what it does. Slice B reads
-    the server's full reading; slice A derives the same rule from the context
-    usage the board already carries, so the state is not merely declared. */
+    the server's own recommendation over HTTP; with no answer yet, slice A's rule
+    over the context usage the board already carries still holds the state up. */
 export interface RotationHint {
   level: "recommend" | "strongly_recommend";
   /** Context usage percent behind a `strongly_recommend`, when it is known. */
   contextPercent: number | null;
   reasons: ("context" | "dead")[];
+  /** Slice B: the SERVER's own reasons, verbatim — each names the threshold it
+      crossed and whether the number behind it is an estimate. Never re-worded
+      here, because re-wording a threshold is how two surfaces start disagreeing
+      about the same seat. Absent on a client-derived hint. */
+  notes?: readonly string[];
+  /** Where the advisory came from. Absent means client-derived (slice A). */
+  source?: "server" | "client";
 }
 
 /** `ROTATION_THRESHOLD_FRACTION` (`@/lib/orchestrator/contextPolicy`) as a
@@ -161,17 +169,15 @@ export function deriveOrchestratorPanelState(input: {
   /** The seat conversation's capability surface (`../agentCapabilities`), or
       null while there is no file to classify. */
   surface: StripSurface | null;
+  /** Slice B: `GET /api/orchestrator/seat/status`, once it has answered. Null
+      keeps the panel on slice A's own derivation, so the advisory never blinks
+      out while the slower read catches up. */
+  incumbent?: OrchestratorIncumbent | null;
 }): OrchestratorPanelState {
   const { status } = input;
   const active = status?.seat && status.exists ? status.seat : null;
   const pending = status?.pending ?? null;
-  /* A client-side failure outranks the durable read only when the read has not
-     caught up with it yet: the server's own record is the truth as soon as it
-     shows the same error — or shows where that submission landed, which retires
-     the failure outright. */
-  const clientError = input.submitFailure && !seatRequestSettled(status, input.submitFailure.clientRequestId)
-    ? { error: input.submitFailure.error, retry: input.submitFailure.kind === "ambiguous" ? "same" as const : "fresh" as const }
-    : null;
+  const clientError = unsettledClientError(status, input.submitFailure);
   const pendingError = pending?.intent.error ?? null;
 
   if (active?.conversationId) {
@@ -181,7 +187,7 @@ export function deriveOrchestratorPanelState(input: {
       seat: active,
       conversationId: active.conversationId,
       liveness,
-      rotation: rotationHintOf(input.file, liveness),
+      rotation: rotationHintOf(input.file, liveness, input.incumbent ?? null),
       transition: input.submitting
         ? { kind: "creating", launchId: pending?.intent.launchId ?? null }
         : pendingError
@@ -221,6 +227,43 @@ export function deriveOrchestratorPanelState(input: {
 }
 
 /**
+ * A client-side failure outranks the durable read only while the read has not
+ * caught up with it: the server's own record is the truth as soon as it shows
+ * the same error — or shows where that submission landed, which retires the
+ * failure outright.
+ */
+function unsettledClientError(
+  status: OrchestratorSeatStatus | null,
+  failure: SeatSubmitFailure | null,
+): { error: string; retry: "fresh" | "same" } | null {
+  if (!failure || seatRequestSettled(status, failure.clientRequestId)) return null;
+  return { error: failure.error, retry: failure.kind === "ambiguous" ? "same" : "fresh" };
+}
+
+/**
+ * The rotate draft's own surface (PRD #976 slice B).
+ *
+ * Rotation is confirmed from the SAME form the create draft renders, so it needs
+ * the same two states — the plain form, and the form with the last attempt's
+ * terminal error above it and retry in place. The panel state stays `live`
+ * throughout: the incumbent keeps running, and a failed rotation must never take
+ * its conversation off the screen.
+ */
+export function deriveRotateDraftState(input: {
+  status: OrchestratorSeatStatus | null;
+  submitFailure: SeatSubmitFailure | null;
+}): Extract<OrchestratorPanelState, { kind: "draft" } | { kind: "intent-error" }> {
+  const pending = input.status?.pending ?? null;
+  const designatedAt = pending?.designatedAt ?? "";
+  /* The server's durable record first: a rotation refused before anything ran
+     is recorded on the pending intent, and it outlives this page. */
+  if (pending?.intent.error) return { kind: "intent-error", error: pending.intent.error, retry: "fresh", designatedAt };
+  const clientError = unsettledClientError(input.status, input.submitFailure);
+  if (clientError) return { kind: "intent-error", ...clientError, designatedAt };
+  return { kind: "draft", vacated: false };
+}
+
+/**
  * The capability surface decides liveness; `activity` only separates a quiet
  * hosted conversation from a working one. Reading `activity` FIRST is what made
  * a finished Claude session and a killed Codex thread both show «live»: they are
@@ -239,18 +282,50 @@ function livenessOf(file: FileEntry | null, surface: StripSurface | null): SeatL
   return file.activity === "stalled" ? "stalled" : "live";
 }
 
-function rotationHintOf(file: FileEntry | null, liveness: SeatLiveness): RotationHint | null {
+/**
+ * The advisory the panel shows, from the best reading available.
+ *
+ * The SERVER's recommendation wins whenever it has answered: it knows the
+ * model's real window policy and the provider-reported token count, which is the
+ * exact reading `get_orchestrator` reports — two surfaces disagreeing about the
+ * same seat is precisely what putting this on HTTP was for. `not recommended`
+ * from the server is equally authoritative, so a client guess cannot re-raise a
+ * banner the server has stood down.
+ *
+ * The one thing the client still contributes is a GONE host: the capability
+ * matrix classifies the seat conversation from the board's own evidence, and it
+ * sees a dead host the liveness plane may not have caught up with yet. That
+ * reason is added, never subtracted.
+ */
+function rotationHintOf(file: FileEntry | null, liveness: SeatLiveness, incumbent: OrchestratorIncumbent | null): RotationHint | null {
+  /* A gone host has nothing to rotate FROM but its mandate; a merely finished
+     one is resumed in place, so it is not an advisory. */
+  const deadHere = liveness === "dead";
+  const server = incumbent?.designated ? incumbent.rotation : null;
+  if (server) {
+    const reasons: RotationHint["reasons"] = [];
+    if (server.level === "strongly_recommend") reasons.push("context");
+    if (deadHere) reasons.push("dead");
+    if (!server.recommended && !reasons.length) return null;
+    return {
+      level: server.level === "strongly_recommend" ? "strongly_recommend" : "recommend",
+      contextPercent: incumbent?.context?.percent ?? null,
+      reasons,
+      notes: server.reasons,
+      source: "server",
+    };
+  }
+
   const reasons: RotationHint["reasons"] = [];
   const percent = typeof file?.ctx?.pct === "number" ? file.ctx.pct : null;
   if (percent !== null && percent >= ROTATION_CONTEXT_PERCENT) reasons.push("context");
-  /* A gone host has nothing to rotate FROM but its mandate; a merely finished
-     one is resumed in place, so it is not an advisory. */
-  if (liveness === "dead") reasons.push("dead");
+  if (deadHere) reasons.push("dead");
   if (!reasons.length) return null;
   return {
     level: reasons.includes("context") ? "strongly_recommend" : "recommend",
     contextPercent: percent,
     reasons,
+    source: "client",
   };
 }
 
