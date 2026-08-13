@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 
 import { BRIDGE_REPORT_CLASSES } from "@/lib/bridge/types";
 
-import { ORCHESTRATOR_SPAWN_CONFIG, ORCHESTRATOR_SYSTEM_PROMPT } from "./prompt";
+import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SPAWN_CONFIG, ORCHESTRATOR_SYSTEM_PROMPT } from "./prompt";
 
 test("the manager spawns as Claude Opus 5 on low effort through the role preset", () => {
   expect(ORCHESTRATOR_SPAWN_CONFIG).toMatchObject({ engine: "claude", model: "opus", effort: "low", role: "orchestrator" });
@@ -15,6 +15,17 @@ test("system prompt carries the draft-only pipeline contract", () => {
   expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("explicitly asked to start it in the same request");
 });
 
+/* #982 — the auto-start exception used to require the request to arrive "relayed
+   through the gateway", which made an explicit start asked in the manager's own
+   conversation carry less authority than the same words spoken to the gateway. Under
+   PRD #976 decision 7 both channels are equal; the draft-by-default rule above is
+   untouched, only the channel qualifier is gone. */
+test("the auto-start exception treats direct chat and the gateway as equal channels", () => {
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("asked in your own conversation or relayed through the gateway");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("both channels carry the same authority");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).not.toContain("same request, relayed through the gateway");
+});
+
 test("system prompt encodes the conveyor loop and its bars", () => {
   expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("GitHub issue -> worktree lane -> implementer agent -> review flow -> merge bar");
   expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("merge only on an APPROVE verdict");
@@ -22,13 +33,43 @@ test("system prompt encodes the conveyor loop and its bars", () => {
   expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("src = YOUR transcript path");
 });
 
-/* #691 — the half of the load-bearing constraint that only a prompt can carry: the
-   manager has no user-facing channel, so it must not try to use one. */
+/* #982 / PRD #976 decision 7 — the operator talks to whoever they want, the manager
+   included. Mandate v4 replaced #691's "You do not talk to the user" section with two
+   channels: direct chat in the manager's own conversation, and bridge reports for the
+   voice gateway. The tests below pin both halves of that contract so the prohibition
+   cannot creep back in silently — in the replaced section or anywhere else. */
 
-test("the manager is told it does not talk to the user", () => {
-  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("You do not talk to the user");
-  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("Never address the user");
+test("direct operator chat is sanctioned as a first-class channel", () => {
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("## Two channels to the operator");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("The operator talks to whoever they want, you included");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("answer them there");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("That channel is sanctioned and first-class");
   expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("gateway");
+});
+
+test("no prohibition on addressing the operator survives anywhere in the mandate", () => {
+  for (const prohibition of [
+    "You do not talk to the user",
+    "Never address the user",
+    "never ask them a question directly",
+    "you have no user-facing channel",
+    "not as chat",
+    "only through your reports",
+  ]) {
+    expect(ORCHESTRATOR_SYSTEM_PROMPT).not.toContain(prohibition);
+  }
+});
+
+test("bridge reports survive as the second channel, for the operator away from the chat", () => {
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("## Bridge reports — the second channel (manager -> gateway)");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("carries what must reach the operator while they are elsewhere");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("Append one report per meaningful outcome, with a stable key");
+});
+
+/* Seats record the mandate version they were spawned on; `get_orchestrator` reports
+   this constant as defaultPromptVersion, so a v3 seat reads as stale without a diff. */
+test("the default mandate is at version 4", () => {
+  expect(ORCHESTRATOR_PROMPT_VERSION).toBe(4);
 });
 
 test("the prompt names every bridge report class and no others", () => {
