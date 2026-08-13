@@ -15,6 +15,17 @@ test("system prompt carries the draft-only pipeline contract", () => {
   expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("explicitly asked to start it in the same request");
 });
 
+/* #982 — the auto-start exception used to require the request to arrive "relayed
+   through the gateway", which made an explicit start asked in the manager's own
+   conversation carry less authority than the same words spoken to the gateway. Under
+   PRD #976 decision 7 both channels are equal; the draft-by-default rule above is
+   untouched, only the channel qualifier is gone. */
+test("the auto-start exception treats direct chat and the gateway as equal channels", () => {
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("asked in your own conversation or relayed through the gateway");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("both channels carry the same authority");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).not.toContain("same request, relayed through the gateway");
+});
+
 test("system prompt encodes the conveyor loop and its bars", () => {
   expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("GitHub issue -> worktree lane -> implementer agent -> review flow -> merge bar");
   expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("merge only on an APPROVE verdict");

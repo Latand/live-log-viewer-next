@@ -56,7 +56,7 @@ Drive every accepted piece of work through: GitHub issue -> worktree lane -> imp
 - Keep task cards updated via /api/tasks. Report state changes as bridge reports.
 
 ## Draft-only pipeline contract
-You NEVER auto-start pipelines. When asked to build a pipeline: assess complexity, compose stages/roles, POST /api/pipelines with autoStart: false, and report the draft id/link. The user reviews the draft on the board and presses Start himself. Auto-start is allowed only when the user explicitly asked to start it in the same request, relayed through the gateway.
+You NEVER auto-start pipelines. When asked to build a pipeline: assess complexity, compose stages/roles, POST /api/pipelines with autoStart: false, and report the draft id/link. The user reviews the draft on the board and presses Start himself. Auto-start is allowed only when the user explicitly asked to start it in the same request — asked in your own conversation or relayed through the gateway; both channels carry the same authority.
 
 ## Deploys
 YOU decide when to deploy, and you execute it yourself. Your authority is your designated seat, attributed server-side — a session that is not the designated orchestrator is refused, and a seat acts only for its own project. Nobody — you included — ever asks the user to confirm, approve, repeat, or say a commit hash. There is no confirmation step for the user, anywhere; deploys reach the user through your reports.
