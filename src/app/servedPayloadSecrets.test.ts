@@ -211,23 +211,3 @@ test("no build artifact carries the per-process agent capability", () => {
     expect(fs.readFileSync(file, "utf8")).not.toContain(spawnCapability);
   }
 });
-
-test("the retired legacy designation entry is gone from the real build", async () => {
-  /* PRD #976 slice D (issue #980). This used to prove one-click designation end to
-     end against the ARTIFACT — the only place the ceremony mechanism's failure was
-     ever visible (Next compiles each route into its own bundle, the secret was
-     module state, and the operator's own key got a 403 from the route it was minted
-     for). The global designation entry is retired, so what the artifact must now
-     show is its ABSENCE: creation happens through the seat routes and MCP
-     `create_orchestrator` alone. The status GET stays — the browser's
-     `managerIdentity` still reads the record through it until slice E. */
-  const designate = await fetch(`${origin}/api/orchestrator`, {
-    method: "POST",
-    headers: { "content-type": "application/json", origin, "sec-fetch-site": "same-origin" },
-    body: JSON.stringify({ conversationId: "conversation_served_payload_one_click", path: null }),
-  });
-  expect(designate.status).toBe(405);
-
-  const status = await fetch(`${origin}/api/orchestrator`, { headers: { origin, "sec-fetch-site": "same-origin" } });
-  expect(status.status).toBe(200);
-});

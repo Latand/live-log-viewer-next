@@ -24,10 +24,9 @@ Everything below is shaped by closing those two holes.
 
 ## Resolving the orchestrator
 
-`GET /api/orchestrator` returns the durable single-instance record
-(`state/orchestrator.json`, issue #182): the orchestrator's **stable viewer
-conversation id**, the transcript path it had settled on, and whether that
-transcript still exists.
+`GET /api/orchestrator/seat?project=…` returns the project's active seat: the
+orchestrator's **stable viewer conversation id**, its settled transcript path,
+and whether that transcript still exists.
 
 The monitor resolves through that record and addresses the orchestrator **by
 conversation id**, never by path. That is what makes a rollover, a restart or a
@@ -48,10 +47,10 @@ audience reports the condition instead of assuming one:
 
 | Resolution | Meaning | Run outcome |
 | --- | --- | --- |
-| `resolved` | record present, transcript on disk, a host demonstrably owns it | `clean`, report delivered |
-| `missing-record` | no orchestrator has ever been adopted | `failed` |
-| `stale-record` | recorded conversation's transcript is gone | `failed` |
-| `unavailable` | the record is unreadable, has no settled path to probe, the probe errored, or nothing hosts the conversation | `failed` |
+| `resolved` | active seat present, transcript on disk, a host demonstrably owns it | `clean`, report delivered |
+| `missing-record` | the project has no active orchestrator seat | `failed` |
+| `stale-record` | the seated conversation's transcript is gone | `failed` |
+| `unavailable` | the seat is unreadable, has no settled path to probe, the probe errored, or nothing hosts the conversation | `failed` |
 
 That includes the two cases an earlier draft waved through: a **path-pending**
 record (a spawn still adopting — nothing to probe, so nothing proven) and a
