@@ -24,6 +24,7 @@ import { createFocusEdgeGate } from "./focusRequestEdge";
 import { TaskStrip } from "./BranchPane";
 import { ConversationList } from "./ConversationList";
 import { clearDraftStorage, draftCwd, draftParentConversationId, draftSrc, resolveSystemDraftCwd, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
+import { OrchestratorPanelToggle } from "./orchestrator/OrchestratorPanelToggle";
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
 import { reviewerCloseMutations } from "./reviewerAutoClose";
 import { directReviewFlows, isDirectReviewFlow } from "./flows/directReviewGroups";
@@ -128,6 +129,12 @@ interface Props {
   /** Mobile shell: the attention badge lives in the header row instead of the
       fixed corner, so it never covers the header's own controls. */
   attention?: React.ReactNode;
+  /** Desktop shell: the per-project orchestrator dock's toggle (PRD #976
+      decision 6). The dock itself is pushed into the Viewer layout beside the
+      board, so the header only owns the switch; absent (phone, or no shell
+      wiring) the button does not render. */
+  orchestratorPanelOpen?: boolean;
+  onToggleOrchestratorPanel?: () => void;
   /** Dashboard-local navigation and focus (switchboard/quiet-list opens,
       drafts, pipeline and task jumps) supersede any unresolved deep-link
       intent held above; the Viewer cancels its pending hash here. */
@@ -338,6 +345,8 @@ function ProjectDashboardView({
   onUnarchive,
   onMenu,
   attention,
+  orchestratorPanelOpen = false,
+  onToggleOrchestratorPanel,
   onUserNavigate,
   onOpenCatalogFile,
   onCloseFile,
@@ -1687,12 +1696,21 @@ function ProjectDashboardView({
               <ArchiveProjectButton files={projectFiles} allowEmpty={catalogKnown} onArchive={() => onArchive(project)} />
             )}
             <DeleteProjectButton project={project} files={projectFiles} available={catalogKnown} />
+            {/* One elastic cell absorbs the slack so the whole control cluster
+                stays right-aligned — the same rule the phone header follows. */}
+            <span aria-hidden className="min-w-0 flex-1" />
+            {/* The orchestrator dock's switch opens the left-hand column: first
+                in the right-aligned control cluster, because the panel it opens
+                is the leftmost thing on screen (PRD #976 decision 6). */}
+            {onToggleOrchestratorPanel ? (
+              <OrchestratorPanelToggle open={orchestratorPanelOpen} onToggle={onToggleOrchestratorPanel} />
+            ) : null}
             <button
               type="button"
               onClick={toggleTaskPanel}
               aria-pressed={taskPanelOpen}
               aria-label={t("tasks.panelToggleAria")}
-              className={`ml-auto flex shrink-0 items-center gap-1 rounded-[8px] border px-2.5 py-1 text-[11.5px] font-bold shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+              className={`flex shrink-0 items-center gap-1 rounded-[8px] border px-2.5 py-1 text-[11.5px] font-bold shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
                 taskPanelOpen ? "border-accent/45 bg-accent/10 text-accent" : "border-border bg-card text-primary hover:border-accent/45 hover:text-accent"
               }`}
             >

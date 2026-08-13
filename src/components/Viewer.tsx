@@ -33,6 +33,7 @@ import { focusHandoffBus } from "./attention/focusHandoffBus";
 import { ConnectionPill } from "./ConnectionPill";
 import { resolveFavoriteRows, type FavoriteRow } from "./favorites/favoriteRows";
 import { KeepAwakeProvider } from "./KeepAwakeControl";
+import { OrchestratorDock, OPEN_KEY as ORCHESTRATOR_OPEN_KEY } from "./orchestrator/OrchestratorDock";
 import { OverviewBoard } from "./OverviewBoard";
 import { ProjectDashboard, queueColumnOpen } from "./ProjectDashboard";
 import { isChildConversation, OVERVIEW, projectKey } from "./projectModel";
@@ -203,6 +204,11 @@ export function Viewer() {
   );
   const isMobile = useIsMobile();
   const [drawerOpen, setDrawerOpen] = useState(false);
+  /* The per-project orchestrator dock (PRD #976 slice A). Its open state is the
+     operator's, persisted like the panel's width; the server render and the
+     first client render agree on «closed», and the mount effect below applies
+     what was stored — the same shape the project restore uses. */
+  const [orchestratorOpen, setOrchestratorOpen] = useState(false);
   const [toastPath, setToastPath] = useState<string | null>(null);
   const seenQuestionsRef = useRef<Set<string> | null>(null);
   /* Reopening a file whose project is already selected does not change
@@ -247,6 +253,7 @@ export function Viewer() {
     if (initial.filePath || initial.conversationId) setPendingHash(initial);
     const savedProject = initial.project ?? localStorage.getItem(PROJECT_KEY);
     if (savedProject) setProject(savedProject);
+    if (localStorage.getItem(ORCHESTRATOR_OPEN_KEY) === "1") setOrchestratorOpen(true);
     if (!recognizedFragment(location.hash)) setUnknownFragmentNotice(true);
   }, []);
 
@@ -362,6 +369,21 @@ export function Viewer() {
     applyProject(nextProject);
     recordProjectNavigation(projectUrl(nextProject));
   }, [applyProject]);
+
+  /* The dock FOLLOWS the selected project rather than belonging to one: the
+     open state is a device preference, and the panel re-seats itself on
+     whichever project the rail is showing. */
+  const toggleOrchestrator = useCallback(() => {
+    setOrchestratorOpen((open) => {
+      const next = !open;
+      try {
+        localStorage.setItem(ORCHESTRATOR_OPEN_KEY, next ? "1" : "0");
+      } catch {
+        /* private mode */
+      }
+      return next;
+    });
+  }, []);
 
   /* The overview board has no project view state to report: presence publishes
      the overview context/slice here, and ProjectDashboard takes over the moment
@@ -843,6 +865,20 @@ export function Viewer() {
           />
         </div>
       ) : null}
+      {/* PUSHED INTO the layout, never over it (PRD #976 decision 1): the dock
+          is a flex sibling between the rail and the board, so the board keeps
+          the rest of the row instead of being covered. Desktop only — the phone
+          reaches the same orchestrator through slice C (#979) — and never on
+          the Overview, which is not a project and so has no seat. */}
+      {!isMobile && orchestratorOpen && project !== OVERVIEW ? (
+        <OrchestratorDock
+          project={project}
+          projectName={projectDisplayName(project, projectDisplayNames[project])}
+          projectCwd={projectCwds[project]}
+          files={files}
+          onClose={toggleOrchestrator}
+        />
+      ) : null}
       <main className="flex min-w-0 flex-1 flex-col">
         {/* Desktop: the corner attention anchor — the badge pill sits where the
             toast appears, so a new toast visually docks into it (D7). On the
@@ -943,6 +979,8 @@ export function Viewer() {
             onUnarchive={unarchiveProject}
             onMenu={isMobile ? () => setDrawerOpen(true) : undefined}
             attention={isMobile ? attentionBadge : undefined}
+            orchestratorPanelOpen={orchestratorOpen}
+            onToggleOrchestratorPanel={isMobile ? undefined : toggleOrchestrator}
             onUserNavigate={cancelPendingIntent}
             onOpenCatalogFile={openCatalogFile}
             onCloseFile={releaseCatalogFile}
