@@ -125,11 +125,10 @@ const VACANT = (project: string): OrchestratorIncumbentBody => ({
 /**
  * The active seat's incumbent, or a vacant reading.
  *
- * Engine and model resolve from the REGISTRY alone. `get_orchestrator` still
- * falls back to the legacy manager record for the boot window in which the
- * registry has not settled a generation; that record is being retired (#981), so
- * an unsettled generation reads here as «unknown» — which the panel renders as
- * «resolving» rather than inventing a model to judge context pressure by.
+ * Engine and model resolve from the REGISTRY alone, which since #981 is the
+ * only place they live. A generation the registry has not settled yet reads
+ * here as «unknown» — which the panel renders as «resolving» rather than
+ * inventing a model to judge context pressure by.
  */
 export async function readOrchestratorIncumbent(
   rawProject: string,
