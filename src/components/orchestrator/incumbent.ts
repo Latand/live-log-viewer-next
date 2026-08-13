@@ -52,7 +52,7 @@ export interface OrchestratorIncumbent {
   accountId: string | null;
   cwd: string | null;
   context: IncumbentContext | null;
-  transcript: IncumbentTranscript | null;
+  transcriptFacts: IncumbentTranscript | null;
   rotation: IncumbentRotation | null;
 }
 
@@ -78,7 +78,7 @@ export function parseIncumbent(body: unknown): OrchestratorIncumbent | null {
     accountId: str(raw.accountId),
     cwd: str(raw.cwd),
     context: contextOf(raw.context),
-    transcript: transcriptOf(raw.transcriptFacts),
+    transcriptFacts: transcriptOf(raw.transcriptFacts),
     rotation: rotationOf(raw.rotation),
   };
 }

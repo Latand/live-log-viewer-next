@@ -33,7 +33,7 @@ test("a well-formed reading keeps every field the header renders from", () => {
   });
   expect(incumbent.context).toMatchObject({ tokens: 620_000, percent: 62, estimated: false });
   expect(incumbent.rotation).toMatchObject({ recommended: true, level: "strongly_recommend", reasons: ["context usage 620,000 tokens"] });
-  expect(incumbent.transcript).toMatchObject({ bytes: 2_100_000, compactionCount: 1 });
+  expect(incumbent.transcriptFacts).toMatchObject({ bytes: 2_100_000, compactionCount: 1 });
 });
 
 test("a body that names no project is not a reading at all", () => {

@@ -194,7 +194,7 @@ describe("the server's own rotation recommendation is what the panel says (#978)
     accountId: "work",
     cwd: "/repos/atlas",
     context: { tokens: 620_000, limit: 1_000_000, percent: 62, estimated: false, basis: "provider-reported usage" },
-    transcript: { bytes: 1024, messageCount: 10, toolCount: 4, compactionCount: 0 },
+    transcriptFacts: { bytes: 1024, messageCount: 10, toolCount: 4, compactionCount: 0 },
     rotation: { recommended: false, level: "none", reasons: [], thresholdUnknown: false },
     ...overrides,
   });

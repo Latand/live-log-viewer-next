@@ -50,7 +50,7 @@ export interface SeatConfirmLaunch {
   draft: AgentLaunchDraft;
   cwd: string;
   /** The text delivered as the first message, for the optimistic bubble. */
-  prompt: string;
+  firstMessage: string;
 }
 
 export interface SeatConfirmFlow {
@@ -122,7 +122,7 @@ export function useSeatConfirm(options: {
            of waiting a poll for the files feed to catch up. */
         const outcome = classifySpawnResponse(response.status, response.ok, body);
         if (outcome.kind === "launched") {
-          const { draft, cwd, prompt } = input.launch;
+          const { draft, cwd, firstMessage } = input.launch;
           const provisional = provisionalSpawnFile(
             createSpawnAttempt(clientRequestId, at, {
               engine: draft.engine,
@@ -131,7 +131,7 @@ export function useSeatConfirm(options: {
               effort: draft.effort,
               fast: draft.engine === "codex" && draft.speed ? draft.speed === "fast" : null,
               accountId: draft.launchAccountId,
-              ["prompt"]: prompt,
+              ["prompt"]: firstMessage,
               images: [],
               src: "",
             }),

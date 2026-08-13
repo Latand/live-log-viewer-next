@@ -206,7 +206,7 @@ export function OrchestratorPanel({
            edited one is bespoke and records no version. */
         ...(text === ORCHESTRATOR_SYSTEM_PROMPT.trim() ? { promptVersion: ORCHESTRATOR_PROMPT_VERSION } : {}),
       },
-      launch: { draft: launch, cwd: projectCwd ?? "", prompt: text },
+      launch: { draft: launch, cwd: projectCwd ?? "", firstMessage: text },
     }, replayRequestId);
   };
 
@@ -442,7 +442,7 @@ function RotateDraft({
         ...(launch.engine === "codex" && launch.speed ? { fast: launch.speed === "fast" } : {}),
         ...(launch.launchAccountId ? { accountId: launch.launchAccountId } : {}),
       },
-      launch: { draft: launch, cwd: cwd ?? "", prompt: text },
+      launch: { draft: launch, cwd: cwd ?? "", firstMessage: text },
     });
   };
 
