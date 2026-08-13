@@ -212,8 +212,8 @@ never reach the journal or stdout.
 ## Running it
 
 ```sh
-bun scripts/conversation-monitor.ts --window-hours 6          # a live run
-bun scripts/conversation-monitor.ts --dry-run --json          # classify only
+bun scripts/conversation-monitor.ts --project <project> --window-hours 6  # a live run
+bun scripts/conversation-monitor.ts --project <project> --dry-run --json  # classify only
 bun scripts/conversation-monitor.ts --status 5                # last five runs
 ```
 
@@ -223,12 +223,16 @@ schedule's own log distinguishes the three without reading the journal.
 Scheduled from the viewer checkout, half-hourly:
 
 ```cron
-*/30 * * * * cd <viewer-checkout> && bun scripts/conversation-monitor.ts --window-hours 6 >> <log-path> 2>&1
+*/30 * * * * cd <viewer-checkout> && bun scripts/conversation-monitor.ts --project <project> --window-hours 6 >> <log-path> 2>&1
 ```
 
 Flags: `--base-url` (defaults to `LLV_VIEWER_CONTROL_URL`, else the loopback
 viewer), `--project`, `--max-conversations`, `--max-cards`, `--stall-hours`,
 `--no-github`, `--deliver-when-empty`.
+
+`--project` is required for live and dry runs. The legacy global designation
+could supply one manager without a scope; project seats require the scope before
+the monitor can resolve an orchestrator.
 
 Without `--deliver-when-empty` a window that produced nothing delivers nothing —
 a quiet half hour should not put a heartbeat in the operator's conversation. The

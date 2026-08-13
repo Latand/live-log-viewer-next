@@ -211,3 +211,17 @@ test("no build artifact carries the per-process agent capability", () => {
     expect(fs.readFileSync(file, "utf8")).not.toContain(spawnCapability);
   }
 });
+
+test("the retired legacy orchestrator route is absent from the real build", async () => {
+  /* PRD #976 decision 6 removes the global entry completely. The production
+     artifact proves that both former verbs now resolve to no route. */
+  const designate = await fetch(`${origin}/api/orchestrator`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin, "sec-fetch-site": "same-origin" },
+    body: JSON.stringify({ conversationId: "conversation_served_payload_legacy", path: null }),
+  });
+  expect(designate.status).toBe(404);
+
+  const status = await fetch(`${origin}/api/orchestrator`, { headers: { origin, "sec-fetch-site": "same-origin" } });
+  expect(status.status).toBe(404);
+});
