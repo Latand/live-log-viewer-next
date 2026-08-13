@@ -243,8 +243,8 @@ export function MobileOrchestratorRow({
         type="button"
         data-orchestrator-row-open
         onClick={() => {
-          if (view.tap === "conversation" && file) {
-            onOpenConversation(file);
+          if (view.tap === "conversation") {
+            openConversation();
             return;
           }
           setSheet({ handoff: state.kind !== "live" });
