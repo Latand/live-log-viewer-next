@@ -22,6 +22,7 @@ export function ReasoningControls({
   effort,
   speed,
   disabled,
+  roomy,
   onModel,
   onEffort,
   onSpeed,
@@ -31,6 +32,9 @@ export function ReasoningControls({
   effort: string;
   speed: SpeedChoice;
   disabled?: boolean;
+  /** Renders the same three selects at the design system's 32px control height,
+      for surfaces that give the draft its own column (issue #977). */
+  roomy?: boolean;
   onModel: (value: string) => void;
   onEffort: (value: string) => void;
   onSpeed: (value: SpeedChoice) => void;
@@ -41,6 +45,7 @@ export function ReasoningControls({
       <Select
         value={model}
         disabled={disabled}
+        roomy={roomy}
         aria-label={t("draft.modelAria")}
         title={t("draft.modelAria")}
         onChange={(event) => onModel(event.target.value)}
@@ -55,6 +60,7 @@ export function ReasoningControls({
       <Select
         value={effort}
         disabled={disabled}
+        roomy={roomy}
         aria-label={t("draft.reasoningAria")}
         title={t("draft.reasoningAria")}
         onChange={(event) => onEffort(event.target.value)}
@@ -70,6 +76,7 @@ export function ReasoningControls({
         <Select
           value={speed}
           disabled={disabled}
+          roomy={roomy}
           aria-label={t("draft.speedAria")}
           title={t("draft.speedTitle")}
           onChange={(event) => onSpeed(event.target.value as SpeedChoice)}
