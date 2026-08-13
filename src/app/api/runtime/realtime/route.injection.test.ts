@@ -6,13 +6,15 @@ import path from "node:path";
 
 import { NextRequest } from "next/server";
 
+import { agentRegistry } from "@/lib/agent/registry";
 import { setCallerConversationResolverForTests } from "@/lib/agent/operatorAuthority";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
-import { adoptOrchestratorRecord } from "@/lib/orchestrator/store";
+import { beginOrchestratorSeatIntent, completeOrchestratorSeatIntent } from "@/lib/orchestrator/seats";
 import {
   designatedManagerConversationId,
   permitRealtimeAction,
   realtimeCallerFromRequest,
+  realtimeConversationProject,
 } from "@/lib/runtime/realtimeInjection";
 
 import { POST } from "./route";
@@ -42,6 +44,11 @@ afterEach(() => {
 
 const WORKER_CAPABILITY = crypto.randomBytes(32).toString("base64url");
 
+function seatProject(project: string, conversationId: string, clientRequestId = `seat_${project}`): void {
+  beginOrchestratorSeatIntent({ project, mandate: "own the board", clientRequestId, mode: "spawn" });
+  completeOrchestratorSeatIntent({ project, clientRequestId, conversationId, path: null });
+}
+
 function realtimeRequest(body: unknown, capability?: string): NextRequest {
   return new NextRequest("http://127.0.0.1/api/runtime/realtime", {
     method: "POST",
@@ -55,8 +62,6 @@ function realtimeRequest(body: unknown, capability?: string): NextRequest {
 }
 
 test("an agent's appendSpeech is refused before any conversation is resolved", async () => {
-  adoptOrchestratorRecord({ conversationId: "conversation_manager", path: null, createdAt: new Date().toISOString() });
-
   const response = await POST(realtimeRequest({
     conversationId: "conversation_root",
     action: "appendSpeech",
@@ -72,8 +77,6 @@ test("an agent's appendSpeech is refused before any conversation is resolved", a
 });
 
 test("an agent's worker-response injection is refused the same way", async () => {
-  adoptOrchestratorRecord({ conversationId: "conversation_manager", path: null, createdAt: new Date().toISOString() });
-
   const response = await POST(realtimeRequest({
     conversationId: "conversation_root",
     action: "deliverWorkerResponse",
@@ -107,7 +110,6 @@ test("no credential at all is anonymous, which authorizes nothing", () => {
 
 test("a worker that simply omits the header is still refused by the route", async () => {
   /* The cheapest attack, end to end: no capability, no session id, just a body. */
-  adoptOrchestratorRecord({ conversationId: "conversation_manager", path: null, createdAt: new Date().toISOString() });
   const response = await POST(realtimeRequest({
     conversationId: "conversation_root",
     action: "appendSpeech",
@@ -122,10 +124,43 @@ test("a session id presented in the body reads as the call's peer", () => {
     .toEqual({ kind: "session", realtimeSessionId: "rt_sess_abc" });
 });
 
-test("the designated manager is read from the record", () => {
-  expect(designatedManagerConversationId()).toBeNull();
-  adoptOrchestratorRecord({ conversationId: "conversation_manager", path: null, createdAt: new Date().toISOString() });
-  expect(designatedManagerConversationId()).toBe("conversation_manager");
+test("the designated manager is read from the relevant project's active seat", () => {
+  seatProject("proj-a", "conversation_manager");
+  expect(designatedManagerConversationId("proj-a")).toBe("conversation_manager");
+});
+
+test("a rotated project resolves the successor seat and leaves the predecessor revoked", () => {
+  seatProject("proj-a", "conversation_predecessor", "seat_proj_a_1");
+  seatProject("proj-a", "conversation_successor", "seat_proj_a_2");
+  expect(designatedManagerConversationId("proj-a")).toBe("conversation_successor");
+});
+
+test("a project with no seat resolves no designated manager", () => {
+  expect(designatedManagerConversationId("proj-a")).toBeNull();
+});
+
+test("the realtime target conversation resolves its durable project before reading the seat", () => {
+  const cwd = path.dirname(process.env.LLV_STATE_DIR!);
+  const begun = agentRegistry().beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    clientAttemptId: "realtime_project_target_1",
+    explicitProject: "proj-a",
+    launchProfile: { project: "proj-a" },
+  });
+  const sessionId = "019f4906-3f67-\x34b72-9fbc-9ec3b5ad1326";
+  agentRegistry().completeSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId },
+    artifactPath: path.join(cwd, `rollout-${sessionId}.jsonl`),
+    cwd,
+    accountId: null,
+    status: "starting",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
+  expect(realtimeConversationProject(begun.receipt.conversationId)).toBe("proj-a");
 });
 
 test("status from an agent is not blocked: it writes nothing", async () => {
@@ -239,7 +274,7 @@ test("the designated manager is refused injection at the route too", async () =>
   /* The manager holds the one designation every other bridge gate keys off. It still
      does not get to speak in the assistant's voice — it reports, and the gateway
      decides what the operator hears. */
-  adoptOrchestratorRecord({ conversationId: "conversation_manager", path: null, createdAt: new Date().toISOString() });
+  seatProject("proj-a", "conversation_manager");
   setCallerConversationResolverForTests(() => "conversation_manager");
 
   const response = await POST(realtimeRequest({

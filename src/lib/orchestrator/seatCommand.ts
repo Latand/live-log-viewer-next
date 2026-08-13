@@ -18,7 +18,6 @@ import {
   orchestratorSeatFor,
   type OrchestratorSeat,
 } from "./seats";
-import { replaceOrchestratorIncumbent } from "./store";
 
 /* The one confirm behind the board draft's Orchestrator role: DESIGNATE this
  * project's orchestrator and INJECT the operator-edited mandate, atomically.
@@ -55,9 +54,6 @@ export interface SeatCommandDependencies {
   deliver(input: { conversationId: string; path: string | null; clientMessageId: string; text: string }): Promise<{ ok: boolean; error?: string; outcome?: string }>;
   /** Registry-backed eligibility of a conversation offered for adoption. */
   conversationTarget(conversationId: string): ExistingConversationTarget | null;
-  /** Keep the legacy single-instance manager record pointing at the newest
-      operator-selected seat, so the bridge follows the selection. */
-  syncLegacyRecord(input: { conversationId: string; path: string | null; engine?: string; model?: string }): void;
   /** Bounded open work for a rotation handoff; empty when unknown. */
   projectTasks(project: string): { id: string; status: string; text: string }[];
   /** Durable outcome of the spawn a pending intent's request attempted, read
@@ -183,15 +179,6 @@ export const productionSeatCommandDependencies: SeatCommandDependencies = {
       project: canonicalOrchestratorProject(ownedProject),
     };
   },
-  syncLegacyRecord: (input) => {
-    replaceOrchestratorIncumbent({
-      conversationId: input.conversationId,
-      path: input.path,
-      createdAt: new Date().toISOString(),
-      ...(input.engine ? { engine: input.engine } : {}),
-      ...(input.model ? { model: input.model } : {}),
-    });
-  },
   projectTasks: (project) => loadTasks()
     .filter((task) => task.project === project && task.status !== "done")
     .map((task) => ({ id: task.id, status: task.status, text: task.text })),
@@ -268,7 +255,7 @@ function inProgressSeatResponse(seat: OrchestratorSeat): SeatCommandResult {
  * may reach them.
  */
 async function activate(
-  input: { project: string; clientRequestId: string; conversationId: string; path: string | null; launchId?: string | null; engine?: string; model?: string },
+  input: { project: string; clientRequestId: string; conversationId: string; path: string | null; launchId?: string | null },
   dependencies: SeatCommandDependencies,
 ): Promise<{ seat: OrchestratorSeat } | null> {
   const completed = completeOrchestratorSeatIntent({
@@ -280,14 +267,6 @@ async function activate(
     now: dependencies.now(),
   });
   if (completed.kind === "missing") return null;
-  if (completed.kind === "activated") {
-    dependencies.syncLegacyRecord({
-      conversationId: input.conversationId,
-      path: input.path,
-      ...(input.engine ? { engine: input.engine } : {}),
-      ...(input.model ? { model: input.model } : {}),
-    });
-  }
   return { seat: completed.seat };
 }
 
@@ -506,8 +485,6 @@ export async function executeOrchestratorSeatRequest(
     conversationId: spawnedConversationId,
     path: typeof spawned.body.path === "string" ? spawned.body.path : null,
     launchId: launchId || null,
-    ...(typeof rawBody.engine === "string" ? { engine: rawBody.engine } : {}),
-    ...(typeof rawBody.model === "string" ? { model: rawBody.model } : {}),
   }, dependencies);
   if (!activated) return { status: 409, body: { error: "seat intent was superseded by a newer designation" } };
   return {
