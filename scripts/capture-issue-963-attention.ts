@@ -40,7 +40,13 @@ const repoRoot = path.resolve(import.meta.dir, "..");
  * of them — and its basename must say what it is (`llv-` prefix), so a typo'd
  * environment variable cannot point the cleanup at unrelated data.
  */
-export function resolveCaptureRoot(raw: string | undefined, repo: string = repoRoot): string {
+export function resolveCaptureRoot(
+  raw: string | undefined,
+  repo: string = repoRoot,
+  /** The environment variable being validated, so every capture script that
+      reuses this guard names ITS OWN override in the refusal. */
+  variable: string = "ATTENTION_CAPTURE_DIR",
+): string {
   const base = path.resolve(raw ?? "/tmp/llv-issue-963");
   const owns = (protectedPath: string) => {
     const resolved = path.resolve(protectedPath);
@@ -48,11 +54,11 @@ export function resolveCaptureRoot(raw: string | undefined, repo: string = repoR
   };
   for (const protectedPath of [path.parse(base).root, os.homedir(), os.tmpdir(), repo]) {
     if (owns(protectedPath)) {
-      throw new Error(`ATTENTION_CAPTURE_DIR must be a dedicated child directory, not ${base} (it contains ${protectedPath})`);
+      throw new Error(`${variable} must be a dedicated child directory, not ${base} (it contains ${protectedPath})`);
     }
   }
   if (!path.basename(base).startsWith("llv-")) {
-    throw new Error(`ATTENTION_CAPTURE_DIR basename must start with "llv-" (a dedicated capture directory), got ${base}`);
+    throw new Error(`${variable} basename must start with "llv-" (a dedicated capture directory), got ${base}`);
   }
   return base;
 }
