@@ -27,9 +27,13 @@ import path from "node:path";
 
 import { chromium, type Page } from "playwright-core";
 
+import { resolveCaptureRoot } from "./capture-issue-963-attention";
 import { demoPort } from "./demo-capture";
 
-const BASE = process.env.ORCH_CAPTURE_DIR ?? "/tmp/llv-issue-978";
+/* The whole root is deleted before every run (`seedHome`), so the override is
+   validated before anything is removed — the same guard, and the same guard
+   tests, that issue #963's capture root already answers to. */
+const BASE = resolveCaptureRoot(process.env.ORCH_CAPTURE_DIR ?? "/tmp/llv-issue-978", undefined, "ORCH_CAPTURE_DIR");
 const HOME = path.join(BASE, "home");
 const OUT_DIR = path.join(BASE, "out");
 const REPO_DIR = path.join(HOME, "Projects", "atlas");

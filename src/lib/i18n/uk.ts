@@ -1658,6 +1658,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "orchPanel.rotateErrorHint": "Поточний оркестратор недоторканий і далі тримає місце. Виправте мандат чи параметри й спробуйте ще раз.",
   "orchPanel.rotateErrorUnknownTitle": "Результат останньої заміни невідомий",
   "orchPanel.rotateErrorUnknownHint": "Відповідь загубилася, тож наступник уже може існувати. Повторна спроба відтворює той самий запит, а не замінює двічі.",
+  "orchPanel.rotateVacated": "Розмову того оркестратора закрили, поки ця заміна ще тривала. Завершіть її тут — повторна спроба відтворює той самий запит, а не замінює двічі.",
   "orchPanel.restoreIncumbent": "Повернути поточний мандат",
   "orchPanel.cwdInherited": "Наступник продовжить у {cwd}",
 

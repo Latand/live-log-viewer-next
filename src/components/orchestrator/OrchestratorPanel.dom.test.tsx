@@ -774,3 +774,120 @@ test("a rotate draft left open when the seat is closed gives way to the create d
   expect(panelState(host)).toBe("draft");
   expect(host.querySelector('[data-orchestrator-draft="create"]')).not.toBeNull();
 }, SEAT_POLL_MS + 4_000);
+
+test("Rotate reads the incumbent BEFORE it opens, so the first press is prefilled too", async () => {
+  /* The status read has not answered for this seat yet — the panel is up on
+     what the board alone knows. Opening the draft against THAT would prefill
+     the generic orchestrator defaults, and the launch module reads its defaults
+     once, so the incumbent's real parameters would never arrive. */
+  const host = await mountLive({ project: "atlas", designated: false, rotation: null, context: null });
+  incumbentStatus = incumbent();
+
+  flushSync(() => rotateButton(host).click());
+  await settle();
+
+  expect(host.querySelector('[data-orchestrator-draft="rotate"]')).not.toBeNull();
+  const account = host.querySelector('select[aria-label*="Claude"]') as HTMLSelectElement;
+  expect(account.value).toBe("spare");
+  expect(host.textContent).toContain("/repos/atlas/worktrees/board");
+});
+
+test("a rotation whose reply never came keeps its key: the second Confirm replays it instead of rotating twice", async () => {
+  /* «Accepted» is not «the seat moved». The POST lands, the seat re-read is
+     stale (or lost), and the rotate draft is still open over the incumbent —
+     so the next Confirm must carry the SAME key and converge on the one
+     successor, never mint a fresh one and rotate again. */
+  const host = await mountLive();
+  flushSync(() => rotateButton(host).click());
+  await settle();
+
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  expect(rotatePosts).toHaveLength(1);
+  /* The seat read has not caught up: the panel is still on the predecessor. */
+  expect(panelState(host)).toBe("live");
+  expect(host.querySelector('[data-orchestrator-draft="rotate"]')).not.toBeNull();
+
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  expect(rotatePosts).toHaveLength(2);
+  expect(rotatePosts[1]!.clientRequestId).toBe(rotatePosts[0]!.clientRequestId);
+
+  /* And once the read says where it landed, the key is spent: a genuinely new
+     rotation carries a fresh one rather than replaying a completed intent. */
+  const spent = String(rotatePosts[0]!.clientRequestId);
+  seatStatus = {
+    seat: activeSeat({ conversationId: "conversation_successor", intent: { clientRequestId: spent, mode: "spawn", launchId: "launch-b", error: null } }),
+    pending: null,
+    exists: true,
+  };
+  incumbentStatus = incumbent({ conversationId: "conversation_successor" });
+  const successorFile = { ...orchestratorFile, conversationId: "conversation_successor", proc: "running", pid: 4_243 } as FileEntry;
+  const successor = remount([successorFile]);
+  await settle();
+  flushSync(() => rotateButton(successor).click());
+  await settle();
+  flushSync(() => confirmButton(successor).click());
+  await settle();
+  expect(rotatePosts).toHaveLength(3);
+  expect(rotatePosts[2]!.clientRequestId).not.toBe(spent);
+});
+
+test("a rotation still in the air keeps its draft when the seat's card is closed — retry replays it at the ROTATE route", async () => {
+  /* Closing the card mid-rotation must not strand the flow: the retained key
+     is reachable only from the rotate draft, and the create draft's retry would
+     post a different key at the seat route — which refuses over a seat that is
+     still designated. */
+  rotateResponses = [{ status: 0, body: null, throws: true }];
+  const host = await mountLive();
+  flushSync(() => rotateButton(host).click());
+  await settle();
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  expect(rotatePosts).toHaveLength(1);
+
+  seatStatus = { ...seatStatus, exists: false };
+  await settle();
+  await new Promise((resolve) => setTimeout(resolve, SEAT_POLL_MS + 5));
+  await settle();
+  flushSync(() => undefined);
+
+  expect(host.querySelector('[data-orchestrator-draft="rotate"]')).not.toBeNull();
+  expect(host.querySelector('[data-orchestrator-draft="create"]')).toBeNull();
+  expect(host.textContent).toContain("while this rotation was still in flight");
+  expect(host.querySelector("[data-orchestrator-intent-error]")?.textContent).toContain("connection");
+
+  rotateResponses = [{ status: 200, body: { ok: true, replayed: true, conversationId: "conversation_successor", seat: activeSeat({ conversationId: "conversation_successor" }) } }];
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  expect(seatPosts).toHaveLength(0);
+  expect(rotatePosts).toHaveLength(2);
+  expect(rotatePosts[1]!.clientRequestId).toBe(rotatePosts[0]!.clientRequestId);
+}, SEAT_POLL_MS + 4_000);
+
+test("the draft a closed conversation returns to can actually create — it says it is replacing the seat that outlived its card", async () => {
+  /* The seat record outlives its transcript: a plain spawn over it is refused
+     as an accidental rotation, which would make «the panel returns to draft»
+     (PRD #976 decision 4) a button that always fails. */
+  const host = await mountLive();
+  seatStatus = { ...seatStatus, exists: false };
+  await settle();
+  await new Promise((resolve) => setTimeout(resolve, SEAT_POLL_MS + 5));
+  await settle();
+  flushSync(() => undefined);
+  expect(panelState(host)).toBe("draft");
+
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  expect(seatPosts).toHaveLength(1);
+  expect(seatPosts[0]!.replaceIncumbent).toBe(true);
+
+  /* A first-ever orchestrator claims nothing of the kind. */
+  seatPosts = [];
+  seatStatus = { seat: null, pending: null, exists: true };
+  const fresh = remount();
+  await settle();
+  flushSync(() => confirmButton(fresh).click());
+  await settle();
+  expect(seatPosts[0]!.replaceIncumbent).toBeUndefined();
+}, SEAT_POLL_MS + 4_000);

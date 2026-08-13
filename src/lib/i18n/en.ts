@@ -1706,6 +1706,7 @@ export const en = {
   "orchPanel.rotateErrorHint": "Your current orchestrator is untouched and still holds the seat. Fix the mandate or the parameters and try again.",
   "orchPanel.rotateErrorUnknownTitle": "The last rotation's outcome is unknown",
   "orchPanel.rotateErrorUnknownHint": "The reply was lost, so a successor may already exist. Trying again replays the same request instead of rotating twice.",
+  "orchPanel.rotateVacated": "That orchestrator's conversation was closed while this rotation was still in flight. Finish it here — trying again replays the same request instead of rotating twice.",
   "orchPanel.restoreIncumbent": "Restore current mandate",
   "orchPanel.cwdInherited": "The successor continues in {cwd}",
 

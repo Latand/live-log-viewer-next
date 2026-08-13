@@ -7,13 +7,18 @@ import { parseIncumbent, type OrchestratorIncumbent } from "./incumbent";
 /**
  * How often the panel re-reads the incumbent's wear (PRD #976 slice B).
  *
- * Deliberately slower than {@link SEAT_POLL_MS}. The seat read decides whether
- * the panel is a draft or a conversation, so it has to be quick and it stays a
- * directory lookup; THIS read parses the transcript and asks the liveness plane
- * to answer «how full is the context window». Context pressure moves over
- * minutes, so paying that cost every six seconds would buy nothing.
+ * Deliberately much slower than {@link SEAT_POLL_MS}. The seat read decides
+ * whether the panel is a draft or a conversation, so it has to be quick and it
+ * stays a directory lookup; THIS read parses the transcript and asks the
+ * liveness plane to answer «how full is the context window».
+ *
+ * That parse is the expensive thing on the panel's account, so the cadence is
+ * set by what the answer is FOR: context pressure and a rotation recommendation
+ * both move over tens of minutes, and nothing here is ever acted on
+ * automatically. The moments that do matter — the seat changing, and opening
+ * the rotate draft — refresh on their own instead of waiting for a tick.
  */
-export const INCUMBENT_POLL_MS = 20_000;
+export const INCUMBENT_POLL_MS = 60_000;
 
 export interface OrchestratorIncumbentRead {
   /** Null until the first answer for THIS project. A later failure keeps the

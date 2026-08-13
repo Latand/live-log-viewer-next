@@ -39,6 +39,9 @@ import {
  *    the corrected one.
  *  - An AMBIGUOUS failure (transport loss, opaque 5xx) KEEPS it: a worker may
  *    exist, so the retry replays and converges.
+ *  - A SUCCESSFUL reply keeps it too. «Accepted» is not «the seat moved»: until
+ *    the durable read shows where it landed, a Confirm pressed again from the
+ *    same still-open draft has to replay, not designate a second time.
  *  - A kept key is released the moment the durable read says where it landed —
  *    held longer it becomes a trap, because a replay of a completed intent is
  *    answered with the old seat and creates nothing at all.
@@ -116,7 +119,14 @@ export function useSeatConfirm(options: {
       });
       const body = (await response.json().catch(() => null)) as (SpawnResponseBody & { code?: string }) | null;
       if (response.ok && body?.ok !== false) {
-        storage.write(field, "");
+        /* The key is NOT released here. A reply that says «done» stops short of
+           saying WHERE it landed; the durable read is what says so, and the
+           effect above releases the key the moment it does. Releasing it here
+           left a window: the refresh below can fail or answer stale, the draft
+           it was submitted from stays open on the old incumbent, and the next
+           Confirm mints a FRESH key — which is a second designation, or a
+           second rotation. Held, that same Confirm replays this key and the
+           seat command converges it onto the one intent. */
         /* Instant attach (issue #919's path): the receipt already names the
            durable conversation, so the panel opens the live window now instead
            of waiting a poll for the files feed to catch up. */

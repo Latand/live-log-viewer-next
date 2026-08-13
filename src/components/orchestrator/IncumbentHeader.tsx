@@ -1,6 +1,6 @@
 "use client";
 
-import { CornerDownRight, RefreshCw } from "lucide-react";
+import { CornerDownRight, LoaderCircle, RefreshCw } from "lucide-react";
 
 import { Badge } from "@/components/ui/Badge";
 import { engineBadgeFor } from "@/components/utils";
@@ -31,6 +31,7 @@ export function IncumbentHeader({
   catalog,
   predecessorConversationId,
   rotating,
+  opening,
   onRotate,
 }: {
   /** The status read, once it has answered. */
@@ -42,6 +43,9 @@ export function IncumbentHeader({
   catalog: LaunchAccountCatalog | null;
   predecessorConversationId: string | null;
   rotating: boolean;
+  /** The press landed and the incumbent's own parameters are being read, so the
+      draft below opens PREFILLED rather than on the generic defaults. */
+  opening: boolean;
   onRotate: () => void;
 }) {
   const { t } = useLocale();
@@ -85,11 +89,13 @@ export function IncumbentHeader({
           type="button"
           data-orchestrator-rotate
           onClick={onRotate}
-          disabled={rotating}
+          disabled={rotating || opening}
           title={t("orchPanel.rotateTitle")}
           className="ml-auto inline-flex h-6 shrink-0 items-center gap-1 rounded-control border border-border bg-card px-2 text-caption font-semibold text-secondary hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
         >
-          <RefreshCw className="h-3 w-3" aria-hidden />
+          {opening
+            ? <LoaderCircle className="h-3 w-3 animate-spin" aria-hidden />
+            : <RefreshCw className="h-3 w-3" aria-hidden />}
           {t("orchPanel.rotate")}
         </button>
       </div>

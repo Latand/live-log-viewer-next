@@ -36,3 +36,12 @@ test("the repository itself is rejected", () => {
 test("a directory without the dedicated llv- basename is rejected", () => {
   expect(() => resolveCaptureRoot("/tmp/data")).toThrow('start with "llv-"');
 });
+
+/* Reused by every capture script whose root is deleted wholesale (#978 review),
+   so the refusal has to name the override the operator actually typed. */
+test("the refusal names the caller's own override variable", () => {
+  expect(() => resolveCaptureRoot(os.tmpdir(), undefined, "ORCH_CAPTURE_DIR"))
+    .toThrow("ORCH_CAPTURE_DIR must be a dedicated child directory");
+  expect(() => resolveCaptureRoot("/tmp/data", undefined, "ORCH_CAPTURE_DIR"))
+    .toThrow('ORCH_CAPTURE_DIR basename must start with "llv-"');
+});

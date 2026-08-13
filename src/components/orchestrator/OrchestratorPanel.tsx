@@ -25,6 +25,7 @@ import { OrchestratorConversation } from "./OrchestratorConversation";
 import {
   deriveOrchestratorPanelState,
   deriveRotateDraftState,
+  seatRequestSettled,
   type OrchestratorPanelState,
   type OrchestratorSeatStatus,
   type RotationHint,
@@ -118,6 +119,8 @@ export function OrchestratorPanel({
      mode, and matching it against the current seat is what closes the draft the
      moment the successor lands — no completion callback, no stale flag. */
   const [rotateFrom, setRotateFrom] = useState<string | null>(null);
+  /* Opening the rotate draft is a read first: see `openRotate`. */
+  const [rotateOpening, setRotateOpening] = useState(false);
 
   /* ONE account catalog for both drafts: they offer the same accounts, and the
      rotate draft must not re-fetch `/api/accounts` every time it opens. */
@@ -177,7 +180,22 @@ export function OrchestratorPanel({
     surface,
     incumbent,
   });
-  const rotating = state.kind === "live" && rotateFrom !== null && rotateFrom === state.conversationId;
+  /**
+   * A rotation whose outcome is not yet settled KEEPS the panel, even after the
+   * incumbent's card is closed underneath it (`exists: false`).
+   *
+   * Vacancy is real and the panel does return to the draft (PRD decision 4),
+   * once the rotation in the air has settled. Handing the surface to the
+   * create draft there strands the rotation: its retained key is reachable only
+   * from this flow, and the create draft's retry posts a DIFFERENT key at the
+   * seat route, which refuses over a seat that is still designated. So the
+   * rotate draft stays until its own outcome is known, and then gives way.
+   */
+  const rotateUnsettled = rotate.submitting
+    || (rotate.failure !== null && !seatRequestSettled(status, rotate.failure.clientRequestId));
+  const rotatingLive = state.kind === "live" && rotateFrom !== null && rotateFrom === state.conversationId;
+  const rotatingVacant = state.kind !== "live" && rotateFrom !== null && rotateUnsettled && status?.seat != null;
+  const rotating = rotatingLive || rotatingVacant;
 
   /** `replayRequestId` re-posts an EXISTING durable intent by its own key — the
       seat command then completes that intent with ITS original mandate, so the
@@ -205,9 +223,35 @@ export function OrchestratorPanel({
         /* Only an UNEDITED mandate is a version of the approved prompt; an
            edited one is bespoke and records no version. */
         ...(text === ORCHESTRATOR_SYSTEM_PROMPT.trim() ? { promptVersion: ORCHESTRATOR_PROMPT_VERSION } : {}),
+        /* The seat OUTLIVES its conversation: closing the card leaves the
+           record designated, and a plain spawn over a designated seat is
+           refused as an accidental rotation. That refusal is right in general
+           and wrong here — this draft exists BECAUSE the operator closed that
+           conversation (PRD decision 4), so it says what it means and the
+           «returns to draft» promise is one the button can keep. */
+        ...(state.kind === "draft" && state.vacated ? { replaceIncumbent: true } : {}),
       },
       launch: { draft: launch, cwd: projectCwd ?? "", firstMessage: text },
     }, replayRequestId);
+  };
+
+  /**
+   * Open the rotate draft — on the incumbent's OWN parameters.
+   *
+   * «The same draft, prefilled» (PRD decision 4) is true only if those
+   * parameters are in hand when the form MOUNTS: the shared launch module reads
+   * its defaults once, in its initializers, so a draft opened before the status
+   * read answered prefills the generic orchestrator defaults and never corrects
+   * itself. So the read comes first and the button says it is working.
+   */
+  const openRotate = async (conversationId: string) => {
+    setRotateOpening(true);
+    try {
+      await refreshIncumbent();
+    } finally {
+      setRotateOpening(false);
+      setRotateFrom(conversationId);
+    }
   };
 
   return (
@@ -250,6 +294,27 @@ export function OrchestratorPanel({
           <p className="max-w-[280px] text-ui text-muted">{t("orchPanel.unavailableHint")}</p>
           <SecondaryButton onClick={() => void refresh()}>{t("orchPanel.recheck")}</SecondaryButton>
         </Centered>
+      ) : rotatingVacant && status?.seat ? (
+        /* The seat's card was closed while this rotation was still in the air.
+           The rotation is the live question, so it keeps the surface — with the
+           vacancy stated above it — until it says where it landed. */
+        <div className="flex min-h-0 flex-1 flex-col">
+          <p className="shrink-0 border-b border-border bg-sunken px-3 py-1.5 text-ui text-secondary" role="status">
+            {t("orchPanel.rotateVacated")}
+          </p>
+          <RotateDraft
+            project={project}
+            projectName={projectName}
+            seat={status.seat}
+            incumbent={incumbent}
+            file={file}
+            projectCwd={projectCwd}
+            catalog={catalog}
+            flow={rotate}
+            status={status}
+            onCancel={() => setRotateFrom(null)}
+          />
+        </div>
       ) : state.kind === "creating" ? (
         <Centered>
           <LoaderCircle className="h-5 w-5 animate-spin text-accent" aria-hidden />
@@ -281,10 +346,8 @@ export function OrchestratorPanel({
             catalog={catalog}
             predecessorConversationId={state.seat.predecessorConversationId}
             rotating={rotating}
-            onRotate={() => {
-              setRotateFrom(state.conversationId);
-              void refreshIncumbent();
-            }}
+            opening={rotateOpening}
+            onRotate={() => void openRotate(state.conversationId)}
           />
           {/* The transition banner is how a designation in flight — or one that
               failed — reaches an operator who is NOT looking at the draft. With
