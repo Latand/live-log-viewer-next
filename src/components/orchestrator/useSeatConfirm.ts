@@ -127,6 +127,7 @@ export function useSeatConfirm(options: {
            Confirm mints a FRESH key — which is a second designation, or a
            second rotation. Held, that same Confirm replays this key and the
            seat command converges it onto the one intent. */
+
         /* Instant attach (issue #919's path): the receipt already names the
            durable conversation, so the panel opens the live window now instead
            of waiting a poll for the files feed to catch up. */
