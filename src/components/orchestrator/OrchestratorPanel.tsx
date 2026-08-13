@@ -1,12 +1,12 @@
 "use client";
 
 import { Bot, LoaderCircle, RotateCcw, TriangleAlert, X } from "lucide-react";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AgentLaunchControls, useAgentLaunchDraft } from "@/components/draft/AgentLaunchControls";
 import { applySpawnedConversationSnapshot } from "@/hooks/useFiles";
 import { requestFilesRefresh } from "@/lib/filesEvents";
-import { useLocale } from "@/lib/i18n";
+import { useLocale, type MessageKey } from "@/lib/i18n";
 import {
   ORCHESTRATOR_PROMPT_VERSION,
   ORCHESTRATOR_SPAWN_CONFIG,
@@ -25,13 +25,15 @@ import {
   classifySeatFailure,
   deriveOrchestratorPanelState,
   newSeatRequestId,
+  seatRequestSettled,
   type OrchestratorPanelState,
   type RotationHint,
+  type SeatLiveness,
   type SeatSubmitFailure,
   type SeatTransition,
 } from "./seatState";
 import { useOrchestratorSeat } from "./useOrchestratorSeat";
-import { useSeatHostDead } from "./useSeatHostDead";
+import { useSeatSurface } from "./useSeatSurface";
 
 const storageKey = (project: string, name: string) => `llvOrchestratorDraft:${project}:${name}`;
 
@@ -127,8 +129,22 @@ export function OrchestratorPanel({
       : null),
     [files, seatConversationId, status?.seat?.path],
   );
-  const hostDead = useSeatHostDead(file);
-  const state = deriveOrchestratorPanelState({ status, statusFailed: failed, submitting, submitFailure, file, hostDead });
+  const surface = useSeatSurface(file);
+  const state = deriveOrchestratorPanelState({ status, statusFailed: failed, submitting, submitFailure, file, surface });
+
+  /* A key kept through an unknown outcome is released the moment the seat read
+     says where it landed. Held any longer it becomes a trap: the seat command
+     answers a replay of a COMPLETED intent with the old seat, so the next
+     genuinely new draft — the one the operator writes after closing this
+     conversation — would post, succeed, and create nothing. Only an outcome the
+     server itself reports releases it; silence still means «may be in flight»,
+     and the key stays. (The stale banner from that same submission is retired
+     in the derivation, which needs no state of its own.) */
+  useEffect(() => {
+    if (inFlight.current) return;
+    const stored = readDraftField(project, "requestId");
+    if (stored && seatRequestSettled(status, stored)) writeDraftField(project, "requestId", "");
+  }, [project, status]);
 
   /** `replayRequestId` re-posts an EXISTING durable intent by its own key — the
       seat command then completes that intent with ITS original mandate, so the
@@ -203,7 +219,7 @@ export function OrchestratorPanel({
         }
         requestFilesRefresh();
       } else {
-        const failure = classifySeatFailure(response.status, body);
+        const failure = classifySeatFailure(response.status, body, clientRequestId);
         /* A terminal refusal is durably recorded server-side; the next attempt
            carries a fresh key so an edited mandate is the one delivered. */
         if (failure?.kind === "terminal") writeDraftField(project, "requestId", "");
@@ -212,7 +228,7 @@ export function OrchestratorPanel({
     } catch {
       /* Transport loss proves nothing: the seat may well have been designated,
          so the key is KEPT and the retry replays onto the same receipt. */
-      setSubmitFailure({ kind: "ambiguous", error: t("orchPanel.transportLost") });
+      setSubmitFailure({ kind: "ambiguous", error: t("orchPanel.transportLost"), clientRequestId });
     } finally {
       inFlight.current = false;
       setSubmitting(false);
@@ -289,6 +305,14 @@ export function OrchestratorPanel({
           {state.liveness === "stalled" ? (
             <p className="shrink-0 border-b border-border bg-warning-soft px-3 py-1.5 text-ui text-warning" role="status">
               {t("orchPanel.stalled")}
+            </p>
+          ) : null}
+          {/* Finished, and resumable IN PLACE: the composer below picks this same
+              conversation back up (§4 `resume`), so the operator is told to type
+              rather than left reading a green «live» badge on a stopped agent. */}
+          {state.liveness === "resumable" ? (
+            <p className="shrink-0 border-b border-border bg-sunken px-3 py-1.5 text-ui text-secondary" role="status">
+              {t("orchPanel.resumable")}
             </p>
           ) : null}
           {file ? (
@@ -453,27 +477,31 @@ function OrchestratorDraft({
   );
 }
 
+const QUIET_BADGE = "border-border bg-canvas text-muted";
+const DANGER_BADGE = "border-danger/40 bg-danger-soft text-danger";
+
+/** One row per liveness, so a tone can never drift from the word beside it —
+    and green is claimed ONLY by a conversation that is actually hosted. */
+const LIVENESS_BADGE: Record<SeatLiveness, { tone: string; key: MessageKey }> = {
+  live: { tone: "border-success/45 bg-success-soft text-success", key: "orchPanel.badgeLive" },
+  stalled: { tone: "border-warning/45 bg-warning-soft text-warning", key: "orchPanel.badgeStalled" },
+  resumable: { tone: QUIET_BADGE, key: "orchPanel.badgeResumable" },
+  dead: { tone: DANGER_BADGE, key: "orchPanel.badgeDead" },
+  resolving: { tone: QUIET_BADGE, key: "orchPanel.badgeResolving" },
+};
+
 function StateBadge({ state }: { state: OrchestratorPanelState }) {
   const { t } = useLocale();
-  const tone = state.kind === "live"
-    ? state.liveness === "dead"
-      ? "border-danger/40 bg-danger-soft text-danger"
-      : state.liveness === "stalled"
-        ? "border-warning/45 bg-warning-soft text-warning"
-        : "border-success/45 bg-success-soft text-success"
+  const live = state.kind === "live" ? LIVENESS_BADGE[state.liveness] : null;
+  const tone = live
+    ? live.tone
     : state.kind === "intent-error"
-      ? "border-danger/40 bg-danger-soft text-danger"
+      ? DANGER_BADGE
       : state.kind === "creating"
         ? "border-accent/45 bg-accent-soft text-accent"
-        : "border-border bg-canvas text-muted";
-  const label = state.kind === "live"
-    ? t(state.liveness === "dead"
-      ? "orchPanel.badgeDead"
-      : state.liveness === "stalled"
-        ? "orchPanel.badgeStalled"
-        : state.liveness === "resolving"
-          ? "orchPanel.badgeResolving"
-          : "orchPanel.badgeLive")
+        : QUIET_BADGE;
+  const label = live
+    ? t(live.key)
     : t(state.kind === "creating"
       ? "orchPanel.badgeCreating"
       : state.kind === "intent-error"

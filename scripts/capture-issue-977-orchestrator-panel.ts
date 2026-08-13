@@ -16,7 +16,8 @@
  *   <out>/977-<state>-<scheme>.png
  *
  * States: draft (empty), draft with the mandate edited, creating, intent-error,
- * live (real feed + composer), and live with the rotation advisory.
+ * live (real feed + composer), live-but-finished (resumable in place), and live
+ * with the rotation advisory.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
@@ -146,7 +147,11 @@ async function main(): Promise<void> {
   const baseUrl = `http://127.0.0.1:${port}`;
   const repoRoot = path.resolve(import.meta.dir, "..");
   seedHome();
-  const server = spawn("bunx", ["next", "start", "--hostname", "127.0.0.1", "--port", String(port)], {
+  /* `package.json`'s own start command. `bunx next start` hands the server to
+     node, where the instrumentation hook dies on "SQLite state stores require
+     the Bun runtime" and every request 500s — see
+     `src/app/servedPayloadSecrets.test.ts`, which documents the same trap. */
+  const server = spawn("bun", ["--bun", "node_modules/.bin/next", "start", "--hostname", "127.0.0.1", "--port", String(port)], {
     cwd: repoRoot,
     env: buildEnvironment(port),
     stdio: ["ignore", "inherit", "inherit"],
@@ -165,9 +170,14 @@ async function main(): Promise<void> {
     const transcriptPath = owned.find((file) => (file.title ?? "").includes("Run the Atlas board"))?.path ?? "";
     if (!projectId || !transcriptPath) throw new Error("the seeded project did not scan");
 
-    /* Each state is one answer from the seat route; `patchCtx` drives the
-       rotation advisory off the same context reading the board carries. */
-    const states: { id: string; answer: SeatAnswer; ctxPercent?: number; edit?: boolean }[] = [
+    /* Each state is one answer from the seat route; `patch` overlays the seat
+       conversation's own scanned entry, which is what the panel reads liveness
+       and the rotation advisory from. A seeded transcript has no process behind
+       it, so a hosted state has to say so — otherwise every capture is the
+       `resumable` one. */
+    const hosted = { proc: "running", pid: 4_977 };
+    const overLimit = { ctx: { usedTokens: 142_000, windowTokens: 200_000, pct: 71, source: "transcript", confidence: "reported", observedAt: "2100-01-02T11:59:00.000Z" } };
+    const states: { id: string; answer: SeatAnswer; patch?: Record<string, unknown>; edit?: boolean }[] = [
       { id: "draft", answer: { seat: null, pending: null, exists: true } },
       { id: "draft-edited", answer: { seat: null, pending: null, exists: true }, edit: true },
       {
@@ -178,8 +188,9 @@ async function main(): Promise<void> {
         id: "intent-error",
         answer: { seat: null, pending: seat(transcriptPath, { conversationId: null, state: "pending", activatedAt: null, intent: { clientRequestId: "seatreq-000003", mode: "spawn", launchId: null, error: "orchestrator cwd could not be resolved — pass cwd explicitly or set LLV_ORCHESTRATOR_CWD" } }), exists: true },
       },
-      { id: "live", answer: { seat: seat(transcriptPath), pending: null, exists: true } },
-      { id: "live-rotation", answer: { seat: seat(transcriptPath), pending: null, exists: true }, ctxPercent: 71 },
+      { id: "live", answer: { seat: seat(transcriptPath), pending: null, exists: true }, patch: hosted },
+      { id: "live-resumable", answer: { seat: seat(transcriptPath), pending: null, exists: true } },
+      { id: "live-rotation", answer: { seat: seat(transcriptPath), pending: null, exists: true }, patch: { ...hosted, ...overLimit } },
     ];
 
     for (const scheme of ["dark", "light"] as const) {
@@ -194,15 +205,13 @@ async function main(): Promise<void> {
         const page: Page = await context.newPage();
         await page.route("**/api/orchestrator/seat*", (route) =>
           route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(state.answer) }));
-        if (state.ctxPercent !== undefined) {
-          const percent = state.ctxPercent;
+        if (state.patch) {
+          const patch = state.patch;
           await page.route("**/api/files*", async (route) => {
             const response = await route.fetch();
             const body = await response.json() as { files?: Record<string, unknown>[] };
             for (const file of body.files ?? []) {
-              if (file.path === transcriptPath) {
-                file.ctx = { usedTokens: 142_000, windowTokens: 200_000, pct: percent, source: "transcript", confidence: "reported", observedAt: "2100-01-02T11:59:00.000Z" };
-              }
+              if (file.path === transcriptPath) Object.assign(file, patch);
             }
             await route.fulfill({ response, body: JSON.stringify(body) });
           });
@@ -216,7 +225,20 @@ async function main(): Promise<void> {
         const shot = path.join(OUT_DIR, `977-${state.id}-${scheme}.png`);
         await page.screenshot({ path: shot });
         const panelState = await page.getAttribute("[data-orchestrator-panel]", "data-orchestrator-state");
-        console.log(`${shot}  → ${panelState}`);
+        /* The dock's width is a CSS `max()/min()/calc()` expression, which only
+           a real engine evaluates — measure what it actually resolved to, and
+           what the board is left with beside it. */
+        const geometry = await page.evaluate(() => {
+          const dock = document.querySelector("[data-orchestrator-dock]");
+          const board = document.querySelector("main");
+          return {
+            dock: dock ? Math.round(dock.getBoundingClientRect().width) : 0,
+            board: board ? Math.round(board.getBoundingClientRect().width) : 0,
+          };
+        });
+        if (geometry.dock !== 440) throw new Error(`the dock resolved to ${geometry.dock}px, not its stored 440`);
+        if (geometry.board < 320) throw new Error(`the board fell to ${geometry.board}px, under its 320px floor`);
+        console.log(`${shot}  → ${panelState}  dock ${geometry.dock}px · board ${geometry.board}px`);
         await context.close();
       }
     }

@@ -1,6 +1,8 @@
 import type { OrchestratorSeat } from "@/lib/orchestrator/seats";
 import type { FileEntry } from "@/lib/types";
 
+import type { StripSurface } from "../agentCapabilities";
+
 /*
  * The orchestrator panel's state machine, as a pure module (PRD #976 slice A).
  *
@@ -77,8 +79,12 @@ function seatOf(value: unknown): OrchestratorSeat | null {
  *
  * AMBIGUOUS: transport loss or an opaque 5xx. A worker may exist, so the retry
  * replays the SAME key and converges onto the one receipt.
+ *
+ * It carries the key it is ABOUT, so the durable read can retire it: an
+ * ambiguous failure whose key the server later reports as landed is history,
+ * and must stop riding along as a banner over the conversation it created.
  */
-export type SeatSubmitFailure = { kind: "terminal" | "ambiguous"; error: string };
+export type SeatSubmitFailure = { kind: "terminal" | "ambiguous"; error: string; clientRequestId: string };
 
 /** A rotation ADVISORY and nothing more (`@/lib/orchestrator/health`): reaching
     the threshold changes what the panel says, never what it does. Slice B reads
@@ -95,7 +101,21 @@ export interface RotationHint {
     percentage — the same line the server's recommendation draws. */
 export const ROTATION_CONTEXT_PERCENT = 50;
 
-export type SeatLiveness = "resolving" | "live" | "stalled" | "dead";
+/**
+ * What the operator can do with the seat's conversation RIGHT NOW, projected
+ * from the §4 capability matrix (`../agentCapabilities`) rather than guessed
+ * from the transcript's activity — a finished root looks exactly as quiet as a
+ * running one from the outside, and calling it «live» is the difference between
+ * «it is working» and «it is waiting for you to resume it».
+ *
+ *  - `resolving` — no file yet, or the runtime plane has not resolved the host.
+ *  - `live` / `stalled` — a hosted conversation, quiet or not.
+ *  - `resumable` — finished or killed, and the composer can pick THIS
+ *    conversation back up (never a second spawn).
+ *  - `dead` — the host is gone, retired or unresumable; recovery is the
+ *    banner's, and rotation is the way forward.
+ */
+export type SeatLiveness = "resolving" | "live" | "stalled" | "resumable" | "dead";
 
 /** A transition riding alongside a live incumbent, so a failed or in-flight
     designation is visible without the conversation disappearing. */
@@ -138,27 +158,30 @@ export function deriveOrchestratorPanelState(input: {
   submitFailure: SeatSubmitFailure | null;
   /** The seat conversation as the files feed knows it, when it does. */
   file: FileEntry | null;
-  /** The runtime plane says this conversation's host is gone. */
-  hostDead: boolean;
+  /** The seat conversation's capability surface (`../agentCapabilities`), or
+      null while there is no file to classify. */
+  surface: StripSurface | null;
 }): OrchestratorPanelState {
   const { status } = input;
   const active = status?.seat && status.exists ? status.seat : null;
   const pending = status?.pending ?? null;
   /* A client-side failure outranks the durable read only when the read has not
      caught up with it yet: the server's own record is the truth as soon as it
-     shows the same error. */
-  const clientError = input.submitFailure
+     shows the same error — or shows where that submission landed, which retires
+     the failure outright. */
+  const clientError = input.submitFailure && !seatRequestSettled(status, input.submitFailure.clientRequestId)
     ? { error: input.submitFailure.error, retry: input.submitFailure.kind === "ambiguous" ? "same" as const : "fresh" as const }
     : null;
   const pendingError = pending?.intent.error ?? null;
 
   if (active?.conversationId) {
+    const liveness = livenessOf(input.file, input.surface);
     return {
       kind: "live",
       seat: active,
       conversationId: active.conversationId,
-      liveness: livenessOf(input.file, input.hostDead),
-      rotation: rotationHintOf(input.file, input.hostDead),
+      liveness,
+      rotation: rotationHintOf(input.file, liveness),
       transition: input.submitting
         ? { kind: "creating", launchId: pending?.intent.launchId ?? null }
         : pendingError
@@ -197,23 +220,64 @@ export function deriveOrchestratorPanelState(input: {
   return { kind: "draft", vacated: Boolean(status.seat) && !status.exists };
 }
 
-function livenessOf(file: FileEntry | null, hostDead: boolean): SeatLiveness {
-  if (hostDead) return "dead";
-  if (!file) return "resolving";
+/**
+ * The capability surface decides liveness; `activity` only separates a quiet
+ * hosted conversation from a working one. Reading `activity` FIRST is what made
+ * a finished Claude session and a killed Codex thread both show «live»: they are
+ * not stalled, so everything else fell through to it. Both engines reach
+ * `resume` through the same matrix — a claude-projects session and a
+ * codex-sessions thread with no live host are resumable in place.
+ */
+function livenessOf(file: FileEntry | null, surface: StripSurface | null): SeatLiveness {
+  if (surface === "resume") return "resumable";
+  /* `inert` is a finished conversation the engines cannot resume, and
+     `superseded` a retired round; neither can be picked back up here. */
+  if (surface === "dead" || surface === "superseded" || surface === "inert" || surface === "shell") return "dead";
+  /* No file, or the plane is authoritative and has not resolved the host yet:
+     say «opening» rather than claim either liveness. */
+  if (!file || surface === null || surface === "unresolved") return "resolving";
   return file.activity === "stalled" ? "stalled" : "live";
 }
 
-function rotationHintOf(file: FileEntry | null, hostDead: boolean): RotationHint | null {
+function rotationHintOf(file: FileEntry | null, liveness: SeatLiveness): RotationHint | null {
   const reasons: RotationHint["reasons"] = [];
   const percent = typeof file?.ctx?.pct === "number" ? file.ctx.pct : null;
   if (percent !== null && percent >= ROTATION_CONTEXT_PERCENT) reasons.push("context");
-  if (hostDead) reasons.push("dead");
+  /* A gone host has nothing to rotate FROM but its mandate; a merely finished
+     one is resumed in place, so it is not an advisory. */
+  if (liveness === "dead") reasons.push("dead");
   if (!reasons.length) return null;
   return {
     level: reasons.includes("context") ? "strongly_recommend" : "recommend",
     contextPercent: percent,
     reasons,
   };
+}
+
+/**
+ * Whether the durable read has SETTLED the fate of a submission key that was
+ * kept because its own reply never came.
+ *
+ * A kept key is a promise to converge onto one designation; once the server's
+ * own record shows where that key landed, the promise is discharged and holding
+ * the key any longer turns it into a trap. The seat command completes an
+ * ALREADY-COMPLETED intent on replay (`beginOrchestratorSeatIntent` →
+ * `completed`), so a genuinely new submission carrying the old key is answered
+ * with the old seat and creates nothing — a Confirm button that does nothing at
+ * all, which is exactly what happens after the seat is later vacated. A pending
+ * intent that errored is the same trap in the other direction: replaying its key
+ * re-delivers the ORIGINAL mandate rather than the corrected one.
+ *
+ * Unknown stays unknown: a key the read cannot find anywhere may still be in
+ * flight server-side, so it is kept and the retry replays it.
+ */
+export function seatRequestSettled(status: OrchestratorSeatStatus | null, clientRequestId: string): boolean {
+  if (!status || !clientRequestId) return false;
+  /* It reached an active seat — including one whose conversation has since been
+     closed (`exists: false`), which is the vacancy the next draft creates into. */
+  if (status.seat?.intent.clientRequestId === clientRequestId) return true;
+  if (status.pending?.intent.clientRequestId === clientRequestId) return status.pending.intent.error !== null;
+  return false;
 }
 
 /** The idempotency key one confirm carries. Minted once per draft submission —
@@ -228,12 +292,16 @@ export function newSeatRequestId(): string {
 /** How a confirm response that is not a success classifies. A 409 «already in
     progress» is neither: the transition another request owns will settle on its
     own, and the seat poll is what reports it. */
-export function classifySeatFailure(status: number, body: { error?: unknown; code?: unknown } | null): SeatSubmitFailure | null {
+export function classifySeatFailure(
+  status: number,
+  body: { error?: unknown; code?: unknown } | null,
+  clientRequestId: string,
+): SeatSubmitFailure | null {
   const error = typeof body?.error === "string" && body.error ? body.error : `the seat route answered HTTP ${status}`;
   if (status === 409 && body?.code === "seat_intent_in_progress") return null;
   /* Every 4xx is a refusal the server recorded (or never started): editing and
      retrying is safe, and must carry a fresh key so the corrected mandate is
      the one delivered. A 5xx or a thrown fetch leaves worker existence unknown. */
-  if (status >= 400 && status < 500) return { kind: "terminal", error };
-  return { kind: "ambiguous", error };
+  if (status >= 400 && status < 500) return { kind: "terminal", error, clientRequestId };
+  return { kind: "ambiguous", error, clientRequestId };
 }

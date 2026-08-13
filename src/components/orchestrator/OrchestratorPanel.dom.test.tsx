@@ -187,6 +187,16 @@ function mount(files: FileEntry[] = []): HTMLElement {
   return host as unknown as HTMLElement;
 }
 
+/** The panel reopened on a later seat read — a reload, or coming back to the
+    project. Draft state (including an unsettled submission's key) lives in
+    sessionStorage, so it survives exactly as it does for the operator. */
+function remount(files: FileEntry[] = []): HTMLElement {
+  for (const root of roots) flushSync(() => root.unmount());
+  roots.clear();
+  dom.document.body.replaceChildren();
+  return mount(files);
+}
+
 function panelState(host: HTMLElement): string | null {
   return host.querySelector("[data-orchestrator-panel]")?.getAttribute("data-orchestrator-state") ?? null;
 }
@@ -370,4 +380,113 @@ test("a seat whose transcript is gone returns the panel to the draft", async () 
   flushSync(() => undefined);
   expect(panelState(host)).toBe("draft");
   expect(host.querySelector("[data-orchestrator-mandate]")).not.toBeNull();
+});
+
+test("a finished seat says so and offers resume in place — never a green live badge", async () => {
+  seatStatus = { seat: activeSeat(), pending: null, exists: true };
+  /* No process behind it: the capability matrix classifies this root as
+     `resume`, so the conversation continues HERE rather than being replaced. */
+  const host = mount([{ ...orchestratorFile, proc: null, activity: "idle" } as FileEntry]);
+  await settle();
+  flushSync(() => undefined);
+
+  expect(panelState(host)).toBe("live");
+  expect(host.textContent).toContain("finished");
+  expect(host.textContent).toContain("resume this same conversation");
+  /* The real composer is still the way through — no second create is offered. */
+  expect(host.querySelector('[data-orchestrator-conversation="conversation_orch"]')).not.toBeNull();
+  expect(confirmButton(host)).toBeNull();
+
+  /* A running one keeps the live badge it earned. */
+  const live = remount([{ ...orchestratorFile, proc: "running", pid: 4_242 } as FileEntry]);
+  await settle();
+  flushSync(() => undefined);
+  expect(live.textContent).not.toContain("resume this same conversation");
+});
+
+test("after a lost reply lands, the next NEW draft carries a fresh key instead of replaying the old one", async () => {
+  /* The sequence the seat route punishes: the reply is lost, the designation
+     actually succeeded, the operator later closes that conversation, and then
+     creates a new orchestrator. Replaying the old key there is answered with
+     the completed intent — the button would appear to work and create nothing. */
+  seatResponses = [{ status: 0, body: null, throws: true }];
+  const host = mount();
+  await settle();
+
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  expect(seatPosts).toHaveLength(1);
+  const lost = String(seatPosts[0]!.clientRequestId);
+  expect(panelState(host)).toBe("intent-error");
+
+  /* The read catches up: that key DID reach an active seat. Live, and the
+     lost-reply banner has retired with it rather than riding along forever. */
+  seatStatus = { seat: activeSeat({ intent: { clientRequestId: lost, mode: "spawn", launchId: "launch-a", error: null } }), pending: null, exists: true };
+  const live = remount([orchestratorFile]);
+  await settle();
+  flushSync(() => undefined);
+  expect(panelState(live)).toBe("live");
+  expect(live.querySelector("[data-orchestrator-intent-error]")).toBeNull();
+
+  /* The operator closes that conversation; the seat is vacant again. */
+  seatStatus = { ...seatStatus, exists: false };
+  const again = remount();
+  await settle();
+  flushSync(() => undefined);
+  expect(panelState(again)).toBe("draft");
+
+  seatResponses = [{ status: 202, body: { ok: true, conversationId: "conversation_orch2", launchId: "launch-b", seat: activeSeat() } }];
+  flushSync(() => confirmButton(again).click());
+  await settle();
+  expect(seatPosts).toHaveLength(2);
+  expect(seatPosts[1]!.clientRequestId).not.toBe(lost);
+});
+
+test("a key whose outcome is still unknown is KEPT — the retry converges instead of designating twice", async () => {
+  seatResponses = [{ status: 0, body: null, throws: true }];
+  const host = mount();
+  await settle();
+
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  const lost = String(seatPosts[0]!.clientRequestId);
+
+  /* The seat read shows nothing about this key: it may still be in flight, so
+     the promise to converge stands and the retry replays it. */
+  seatStatus = { seat: null, pending: null, exists: true };
+  await settle();
+  flushSync(() => undefined);
+  expect(panelState(host)).toBe("intent-error");
+
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  expect(seatPosts[1]!.clientRequestId).toBe(lost);
+});
+
+test("a durable terminal error releases the key, so the corrected mandate is the one delivered", async () => {
+  /* Transport loss, then the server's own record shows that intent FAILED.
+     Replaying its key would re-deliver the original mandate (the seat command
+     completes the ORIGINAL intent), so the corrected retry needs a new one. */
+  seatResponses = [{ status: 0, body: null, throws: true }];
+  const host = mount();
+  await settle();
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  const lost = String(seatPosts[0]!.clientRequestId);
+
+  seatStatus = {
+    seat: null,
+    pending: { ...pendingSeat("orchestrator cwd could not be resolved"), intent: { clientRequestId: lost, mode: "spawn", launchId: null, error: "orchestrator cwd could not be resolved" } },
+    exists: true,
+  };
+  const reopened = remount();
+  await settle();
+  flushSync(() => undefined);
+  expect(panelState(reopened)).toBe("intent-error");
+  expect(reopened.querySelector("[data-orchestrator-intent-error]")?.textContent).toContain("orchestrator cwd could not be resolved");
+
+  seatResponses = [{ status: 202, body: { ok: true, conversationId: "conversation_orch", launchId: "launch-a", seat: activeSeat() } }];
+  flushSync(() => confirmButton(reopened).click());
+  await settle();
+  expect(seatPosts[1]!.clientRequestId).not.toBe(lost);
 });

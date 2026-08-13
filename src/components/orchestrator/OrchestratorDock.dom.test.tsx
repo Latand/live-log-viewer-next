@@ -49,10 +49,25 @@ const {
   MIN_WIDTH,
   MIN_BOARD,
   DEFAULT_WIDTH,
+  RAIL_WIDTH,
   RESERVED_BESIDE_DOCK,
   dockWidthForPointer,
   storedDockWidth,
 } = await import("./OrchestratorDock");
+const { leftShellInset } = await import("../shellLayout");
+
+/** `ArtifactPreviewHost`'s own default, minimum and board floor — the numbers
+    the other half of this geometry is clamped by. */
+const PREVIEW_DEFAULT = 560;
+const PREVIEW_MIN = 380;
+const MIN_CONVERSATION = 320;
+/** The sheet's own clamp, restated here so the two halves are checked as ONE
+    budget rather than each against itself. */
+const sheetWidth = (viewport: number, inset: number) =>
+  Math.max(PREVIEW_MIN, Math.min(PREVIEW_DEFAULT, viewport - MIN_CONVERSATION - inset));
+/** What the operator actually sees of the board, with both surfaces open. */
+const visibleBoard = (viewport: number, dock: number) =>
+  viewport - RAIL_WIDTH - dock - sheetWidth(viewport, RAIL_WIDTH + dock);
 
 const realFetch = globalThis.fetch;
 const roots = new Set<Root>();
@@ -77,17 +92,62 @@ afterAll(() => {
   mock.module("@/hooks/useRuntime", () => actualRuntimeHooks);
 });
 
-test("the drag clamp leaves the board its 320px even with the preview sheet open", () => {
-  /* A wide desktop: the operator can drag far and the board still has room. */
-  expect(dockWidthForPointer(1_000, 2_560)).toBe(1_000 - 248);
-  /* Dragging past the reservation stops at it — 320px of board plus the
-     preview sheet's own minimum stay on the other side. */
-  const wide = dockWidthForPointer(9_999, 1_920);
-  expect(wide).toBe(1_920 - RESERVED_BESIDE_DOCK);
-  expect(1_920 - 248 - wide - 380).toBeGreaterThanOrEqual(MIN_BOARD);
-  /* And it never collapses below the dock's own minimum. */
+test("dock and preview sheet share ONE budget: the board keeps 320px at every desktop width", () => {
+  /* The reviewer's own case: 1440px, both surfaces at their remembered
+     defaults. The sheet is the half that yields — it opens at 560 and the dock
+     is a surface the operator sized — so the board lands exactly on its floor
+     instead of the 192px it used to get. */
+  expect(sheetWidth(1_440, RAIL_WIDTH + DEFAULT_WIDTH)).toBe(432);
+  expect(visibleBoard(1_440, DEFAULT_WIDTH)).toBe(MIN_BOARD);
+
+  /* Wider viewports need no yielding at all: the sheet keeps its full width. */
+  for (const viewport of [1_600, 1_920, 2_560]) {
+    expect(sheetWidth(viewport, RAIL_WIDTH + DEFAULT_WIDTH)).toBe(PREVIEW_DEFAULT);
+    expect(visibleBoard(viewport, DEFAULT_WIDTH)).toBeGreaterThanOrEqual(MIN_BOARD);
+  }
+
+  /* A dock dragged to its own maximum is still inside the budget, because that
+     maximum reserves the sheet's minimum — the two clamps meet exactly. */
+  const widest = dockWidthForPointer(9_999, 1_440);
+  expect(widest).toBe(1_440 - RESERVED_BESIDE_DOCK);
+  expect(sheetWidth(1_440, RAIL_WIDTH + widest)).toBe(PREVIEW_MIN);
+  expect(visibleBoard(1_440, widest)).toBe(MIN_BOARD);
+  for (const viewport of [1_600, 1_920, 2_560]) {
+    expect(visibleBoard(viewport, dockWidthForPointer(9_999, viewport))).toBeGreaterThanOrEqual(MIN_BOARD);
+  }
+
+  /* And the dock never collapses below its own minimum: on a viewport too
+     narrow for every floor at once, both surfaces stay usable and the CSS
+     floors decide the remainder. */
   expect(dockWidthForPointer(0, 1_920)).toBe(MIN_WIDTH);
   expect(dockWidthForPointer(9_999, 900)).toBe(MIN_WIDTH);
+});
+
+test("the dock publishes the row it occupies, live through a drag, and gives it back on unmount", () => {
+  const host = dom.document.createElement("div");
+  dom.document.body.append(host);
+  const root = createRoot(host as unknown as HTMLElement);
+  roots.add(root);
+  flushSync(() => root.render(
+    <OrchestratorDock project="atlas" projectName="Atlas" files={[]} onClose={() => undefined} />,
+  ));
+
+  /* What the sheet reads: rail + dock, so it reserves 320px of BOARD. */
+  expect(leftShellInset()).toBe(RAIL_WIDTH + DEFAULT_WIDTH);
+
+  const handle = host.querySelector("[data-orchestrator-dock-resize]") as unknown as HTMLElement;
+  flushSync(() => handle.dispatchEvent(new dom.MouseEvent("pointerdown", { bubbles: true }) as unknown as Event));
+  Object.defineProperty(dom, "innerWidth", { value: 1_920, configurable: true });
+  flushSync(() => dom.dispatchEvent(Object.assign(new dom.Event("pointermove"), { clientX: 848 })));
+  expect(leftShellInset()).toBe(RAIL_WIDTH + 600);
+  expect(visibleBoard(1_920, 600)).toBeGreaterThanOrEqual(MIN_BOARD);
+  flushSync(() => dom.dispatchEvent(new dom.Event("pointerup")));
+
+  /* Closing the dock hands the row back — no phantom reservation for a panel
+     that is gone. */
+  flushSync(() => root.unmount());
+  roots.delete(root);
+  expect(leftShellInset()).toBe(0);
 });
 
 test("a stored width is honoured; a missing or nonsense one falls back to the default", () => {

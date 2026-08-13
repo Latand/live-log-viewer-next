@@ -1,10 +1,11 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
+import { setLeftShellInset } from "../shellLayout";
 import { OrchestratorPanel } from "./OrchestratorPanel";
 
 const WIDTH_KEY = "llvOrchestratorPanelWidth";
@@ -16,11 +17,13 @@ export const DEFAULT_WIDTH = 440;
     1), so every pixel it takes is a pixel the board loses. */
 export const MIN_BOARD = 320;
 /** The project rail's fixed width (`ProjectRail`), which the dock sits beside. */
-const RAIL_WIDTH = 248;
+export const RAIL_WIDTH = 248;
 /** The document preview sheet's own minimum (`ArtifactPreviewHost.MIN_WIDTH`).
-    Both surfaces may be open at once, and the preview overlays the board from
-    the right — so the dock reserves the sheet's minimum up front and the board
-    keeps {@link MIN_BOARD} with BOTH open, which is the acceptance bar. */
+    The dock bounds itself against the sheet's MINIMUM and no more: the sheet
+    yields the rest, budgeting around this dock's real width through
+    `../shellLayout`, so opening a document never shrinks the panel the operator
+    is working in. Between the two clamps the board keeps {@link MIN_BOARD} with
+    both surfaces open, which is the acceptance bar. */
 const PREVIEW_MIN = 380;
 
 /** Everything the board must keep to the dock's right in the worst case. */
@@ -52,6 +55,11 @@ export function dockWidthForPointer(clientX: number, viewportWidth: number): num
  * cannot express — a window resized after the drag must not let a remembered
  * width squeeze the board below {@link MIN_BOARD} with the preview sheet also
  * open, and `max()` keeps the dock itself usable on a genuinely small desktop.
+ *
+ * The other half of that guarantee lives in the sheet: this dock publishes the
+ * row it occupies (`../shellLayout`) and the sheet budgets around it, so a
+ * document opened at its remembered 560px yields to the dock instead of burying
+ * the board — which is what left only 192px of board on a 1440px screen.
  */
 export function OrchestratorDock({
   project,
@@ -74,6 +82,13 @@ export function OrchestratorDock({
       return null;
     }
   }));
+
+  /* The row this dock occupies, for the preview sheet to budget around —
+     published live through the resize drag, and given back on close. */
+  useEffect(() => {
+    setLeftShellInset(RAIL_WIDTH + width);
+    return () => setLeftShellInset(0);
+  }, [width]);
 
   const resizeFrom = useCallback(() => {
     const move = (event: PointerEvent) => setWidth(dockWidthForPointer(event.clientX, window.innerWidth));
