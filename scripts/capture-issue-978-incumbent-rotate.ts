@@ -27,13 +27,15 @@ import path from "node:path";
 
 import { chromium, type Page } from "playwright-core";
 
-import { resolveCaptureRoot } from "./capture-issue-963-attention";
+import { createCaptureDirectory } from "./capture-directory";
 import { demoPort } from "./demo-capture";
 
-/* The whole root is deleted before every run (`seedHome`), so the override is
-   validated before anything is removed — the same guard, and the same guard
-   tests, that issue #963's capture root already answers to. */
-const BASE = resolveCaptureRoot(process.env.ORCH_CAPTURE_DIR ?? "/tmp/llv-issue-978", undefined, "ORCH_CAPTURE_DIR");
+const BASE = createCaptureDirectory({
+  envName: "ORCH_CAPTURE_DIR",
+  prefix: "llv-issue-978",
+  raw: process.env.ORCH_CAPTURE_DIR,
+  repoRoot: path.resolve(import.meta.dir, ".."),
+});
 const HOME = path.join(BASE, "home");
 const OUT_DIR = path.join(BASE, "out");
 const REPO_DIR = path.join(HOME, "Projects", "atlas");
@@ -59,7 +61,6 @@ const ACCOUNTS = {
 };
 
 function seedHome(): void {
-  fs.rmSync(BASE, { recursive: true, force: true });
   fs.mkdirSync(REPO_DIR, { recursive: true });
   fs.mkdirSync(OUT_DIR, { recursive: true });
   fs.mkdirSync(path.join(BASE, "tmp", `claude-${process.getuid?.() ?? 1000}`), { recursive: true });
@@ -206,6 +207,7 @@ async function main(): Promise<void> {
   const baseUrl = `http://127.0.0.1:${port}`;
   const repoRoot = path.resolve(import.meta.dir, "..");
   seedHome();
+  console.log(`screenshots: ${OUT_DIR}`);
   /* `package.json`'s own start command. `bunx next start` hands the server to
      node, where the instrumentation hook dies on "SQLite state stores require
      the Bun runtime" and every request 500s — see
@@ -369,6 +371,7 @@ async function main(): Promise<void> {
         await context.close();
       }
     }
+    console.log(`screenshots: ${OUT_DIR}`);
   } finally {
     await browser.close();
     server.kill("SIGTERM");

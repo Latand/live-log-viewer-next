@@ -39,9 +39,15 @@ import path from "node:path";
 
 import { chromium, type Page, type Route } from "playwright-core";
 
+import { createCaptureDirectory } from "./capture-directory";
 import { demoPort } from "./demo-capture";
 
-const BASE = process.env.STATUS_CAPTURE_DIR ?? "/tmp/llv-issue-961";
+const BASE = createCaptureDirectory({
+  envName: "STATUS_CAPTURE_DIR",
+  prefix: "llv-issue-961",
+  raw: process.env.STATUS_CAPTURE_DIR,
+  repoRoot: path.resolve(import.meta.dir, ".."),
+});
 const HOME = path.join(BASE, "home");
 const OUT_DIR = path.join(BASE, "out");
 const REPO_DIR = path.join(HOME, "Projects", "atlas");
@@ -81,7 +87,6 @@ const sessionUuid = (id: string) => `${id}-1111-4111-8111-111111111111`;
 const sessionPathSuffix = (id: string) => `${sessionUuid(id)}.jsonl`;
 
 function seedHome(): void {
-  fs.rmSync(BASE, { recursive: true, force: true });
   fs.mkdirSync(REPO_DIR, { recursive: true });
   fs.mkdirSync(OUT_DIR, { recursive: true });
   fs.mkdirSync(path.join(BASE, "tmp", `claude-${process.getuid?.() ?? 1000}`), { recursive: true });
@@ -291,6 +296,7 @@ async function main(): Promise<void> {
   const port = demoPort(process.env.STATUS_CAPTURE_PORT, 3049, "STATUS_CAPTURE_PORT");
   const baseUrl = `http://127.0.0.1:${port}`;
   seedHome();
+  console.log(`screenshots: ${OUT_DIR}`);
 
   const server = spawn("bunx", ["next", "start", "--hostname", "127.0.0.1", "--port", String(port)], {
     cwd: repoRoot,

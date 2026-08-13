@@ -568,6 +568,7 @@ export async function executeOrchestratorRotation(
     ...(rawBody.engine !== undefined ? { engine: rawBody.engine } : {}),
     ...(rawBody.model !== undefined ? { model: rawBody.model } : {}),
     ...(rawBody.effort !== undefined ? { effort: rawBody.effort } : {}),
+    ...(rawBody.fast !== undefined ? { fast: rawBody.fast } : {}),
     /* Issue #903: a rotation without an explicit cwd continues in the
        predecessor's checkout rather than falling through to the generic
        resolver — the successor inherits the incumbent's mandate, so it

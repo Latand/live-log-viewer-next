@@ -16,54 +16,29 @@
  * pendingQuestion path lights up with no stubs anywhere. States progress by
  * writing more transcripts into the same polled home mid-run.
  *
- * Shots land outside the repository (in <ATTENTION_CAPTURE_DIR>/out) for
- * direct inspection; the committed evidence under
+ * Shots land outside the repository (in a fresh
+ * <ATTENTION_CAPTURE_DIR>/<unique-run>/out directory) for direct inspection;
+ * the committed evidence under
  * docs/acceptance/attention-island/ consists of deterministic redacted
  * placeholders (scripts/generate-privacy-placeholders.ts) that record each
  * live capture's SHA-256, per the publication policy.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import { chromium, type Browser, type Page } from "playwright-core";
 
+import { createCaptureDirectory } from "./capture-directory";
 import { demoPort } from "./demo-capture";
 
 const repoRoot = path.resolve(import.meta.dir, "..");
-
-/**
- * The capture root is deleted wholesale on every run, so an override must name
- * a DEDICATED child directory that owns nothing else: never the filesystem
- * root, the home directory, the repository, a bare temp root, or any ancestor
- * of them — and its basename must say what it is (`llv-` prefix), so a typo'd
- * environment variable cannot point the cleanup at unrelated data.
- */
-export function resolveCaptureRoot(
-  raw: string | undefined,
-  repo: string = repoRoot,
-  /** The environment variable being validated, so every capture script that
-      reuses this guard names ITS OWN override in the refusal. */
-  variable: string = "ATTENTION_CAPTURE_DIR",
-): string {
-  const base = path.resolve(raw ?? "/tmp/llv-issue-963");
-  const owns = (protectedPath: string) => {
-    const resolved = path.resolve(protectedPath);
-    return base === resolved || resolved.startsWith(base + path.sep);
-  };
-  for (const protectedPath of [path.parse(base).root, os.homedir(), os.tmpdir(), repo]) {
-    if (owns(protectedPath)) {
-      throw new Error(`${variable} must be a dedicated child directory, not ${base} (it contains ${protectedPath})`);
-    }
-  }
-  if (!path.basename(base).startsWith("llv-")) {
-    throw new Error(`${variable} basename must start with "llv-" (a dedicated capture directory), got ${base}`);
-  }
-  return base;
-}
-
-const BASE = resolveCaptureRoot(process.env.ATTENTION_CAPTURE_DIR);
+const BASE = createCaptureDirectory({
+  envName: "ATTENTION_CAPTURE_DIR",
+  prefix: "llv-issue-963",
+  raw: process.env.ATTENTION_CAPTURE_DIR,
+  repoRoot,
+});
 const HOME = path.join(BASE, "home");
 const FIXED_ISO = "2100-01-02T12:00:00.000Z";
 
@@ -140,7 +115,6 @@ function holdOpen(file: string): void {
 }
 
 function seedHome(): void {
-  fs.rmSync(BASE, { recursive: true, force: true });
   fs.mkdirSync(OUT_DIR, { recursive: true });
   fs.mkdirSync(path.join(BASE, "tmp", `claude-${process.getuid?.() ?? 1000}`), { recursive: true });
   fs.mkdirSync(path.join(HOME, ".config/agent-log-viewer/state"), { recursive: true });
@@ -255,14 +229,16 @@ async function openPage(browser: Browser, baseUrl: string, viewport: { width: nu
 
 const shot = async (page: Page, name: string) => {
   await page.waitForTimeout(700);
-  await page.screenshot({ path: path.join(OUT_DIR, name) });
-  console.log(`captured ${name}`);
+  const file = path.join(OUT_DIR, name);
+  await page.screenshot({ path: file });
+  console.log(`captured ${file}`);
 };
 
 async function main(): Promise<void> {
   const port = demoPort(process.env.ATTENTION_CAPTURE_PORT, 3049, "ATTENTION_CAPTURE_PORT");
   const baseUrl = `http://127.0.0.1:${port}`;
   seedHome();
+  console.log(`screenshots: ${OUT_DIR}`);
 
   const server = spawn("bunx", ["next", "start", "--hostname", "127.0.0.1", "--port", String(port)], {
     cwd: repoRoot,
@@ -355,6 +331,7 @@ async function main(): Promise<void> {
     await page.waitForSelector("text=Waiting on you", { timeout: 15_000 });
     await shot(page, "963-mobile-queue-sheet.png");
     await page.context().close();
+    console.log(`screenshots: ${OUT_DIR}`);
   } finally {
     for (const holder of holders) holder.kill("SIGKILL");
     server.kill("SIGTERM");
