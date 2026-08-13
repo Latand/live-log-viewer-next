@@ -2,7 +2,8 @@ import type { NextRequest } from "next/server";
 
 import { agentRegistry } from "@/lib/agent/registry";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
-import { readOrchestratorRecord } from "@/lib/orchestrator/store";
+import { orchestratorSeatFor } from "@/lib/orchestrator/seats";
+import { resolveProjectAttribution } from "@/lib/session/projectResolution";
 
 import crypto from "node:crypto";
 
@@ -159,7 +160,22 @@ export function realtimeCallerFromRequest(
   return { kind: "anonymous" };
 }
 
-/** The manager's conversation, or null when none is designated. */
-export function designatedManagerConversationId(): string | null {
-  return readOrchestratorRecord()?.conversationId ?? null;
+/** Resolve the realtime target through the registry's canonical project path. */
+export function realtimeConversationProject(conversationId: unknown): string | null {
+  if (typeof conversationId !== "string" || !conversationId.startsWith("conversation_")) return null;
+  const conversation = agentRegistry().conversation(conversationId as `conversation_${string}`);
+  if (!conversation) return null;
+  const profile = conversation.generations.at(-1)?.launchProfile;
+  return resolveProjectAttribution({
+    projectOwnership: conversation.projectOwnership,
+    cwd: profile?.cwd,
+    launchProfileProject: profile?.project,
+  }).project;
+}
+
+/** The relevant project's active manager conversation, or null with no seat. */
+export function designatedManagerConversationId(project: string | null | undefined): string | null {
+  const scopedProject = project?.trim();
+  if (!scopedProject) return null;
+  return orchestratorSeatFor(scopedProject).active?.conversationId ?? null;
 }

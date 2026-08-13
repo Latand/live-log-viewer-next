@@ -44,7 +44,7 @@ afterEach(() => {
 });
 
 function request(headers: Record<string, string>): NextRequest {
-  return new NextRequest("http://127.0.0.1/api/orchestrator", { method: "POST", headers });
+  return new NextRequest("http://127.0.0.1/api/orchestrator/seat", { method: "POST", headers });
 }
 
 /** What an ordinary tab's fetch actually looks like on the wire. */

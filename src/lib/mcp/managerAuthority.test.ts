@@ -70,7 +70,6 @@ function managerSources(overrides: Partial<ManagerAuthoritySources> = {}): Manag
   return {
     activeSeats: () => [activeSeat(MANAGER_ID)],
     revocations: () => [],
-    legacyManagerConversationId: () => MANAGER_ID,
     conversationFacts: (id) => (id === MANAGER_ID ? { superseded: false, hasGeneration: true, project: "proj-a" } : null),
     resolveAlias: (id) => id,
     ...overrides,
@@ -144,7 +143,6 @@ test("a revoked predecessor presenting its still-valid capability holds no manag
   const target = managerTargetFor(managerSources({
     activeSeats: () => [activeSeat(OTHER_ID, 2)],
     revocations: () => [{ project: "proj-a", conversationId: MANAGER_ID, seatEpoch: 1, revokedAt: "2026-07-29T00:00:00.000Z" }],
-    legacyManagerConversationId: () => MANAGER_ID,
     conversationFacts: () => ({ superseded: false, hasGeneration: true, project: "proj-a" }),
   }));
   const identity = mcpCallerIdentity(authority, target);

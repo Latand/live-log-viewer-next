@@ -42,8 +42,6 @@ export interface ManagerConversationFacts {
 export interface ManagerAuthoritySources {
   activeSeats(): readonly OrchestratorSeat[];
   revocations(): readonly OrchestratorRevocation[];
-  /** The legacy single-instance manager record's conversation, when adopted. */
-  legacyManagerConversationId(): string | null;
   /** Null when the registry does not know the conversation at all. */
   conversationFacts(conversationId: string): ManagerConversationFacts | null;
   /** Canonical id after migration aliasing; identity must survive migration. */
@@ -83,9 +81,7 @@ function factsPermit(facts: ManagerConversationFacts | null, seatProject: string
  *    a strictly newer one;
  *  - registry facts must exist, carry a generation, not be superseded, and not
  *    contradict the seat's project;
- *  - the legacy single-instance record keeps its authority under the same
- *    registry checks, but any durable revocation of its conversation wins over
- *    it — the record is a pointer, the revocation is a decision.
+ *  - without an active seat, no manager identity resolves.
  */
 export function authorizedManagerSeats(sources: ManagerAuthoritySources): AuthorizedManagerSeat[] {
   const seats = sources.activeSeats().filter((seat) => seat.state === "active" && seat.conversationId);
@@ -108,18 +104,5 @@ export function authorizedManagerSeats(sources: ManagerAuthoritySources): Author
     authorized.push({ conversationId, path: seat.path, project: seat.project });
   }
 
-  const legacy = sources.legacyManagerConversationId();
-  if (legacy) {
-    const legacyId = sources.resolveAlias(legacy);
-    /* Seat evidence about the same conversation — authorized OR denied — wins
-       over the legacy pointer: re-authorizing here would resurrect exactly the
-       identity a seat rule just refused. Without seat evidence, any durable
-       revocation still kills the pointer. */
-    const seatEvidence = byConversation.has(legacyId);
-    const revoked = revocations.some((revocation) => sources.resolveAlias(revocation.conversationId) === legacyId);
-    if (!seatEvidence && !revoked && factsPermit(sources.conversationFacts(legacyId), null)) {
-      authorized.push({ conversationId: legacyId, path: null, project: null });
-    }
-  }
   return authorized;
 }

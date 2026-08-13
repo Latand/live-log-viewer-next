@@ -1739,12 +1739,12 @@ export function TmuxComposerCore({
        replay, exactly like the bridge prelude above; empty whenever the operator
        is simply looking at this conversation itself.
 
-       SCOPED TO THE MANAGER'S IDENTITY, not to a capability. `voiceEnabled` is
+       SCOPED TO THE MANAGER'S IDENTITY. `voiceEnabled` is
        true of every hosted codex-app-server conversation, so gating on it
        prepended the operator's view to unrelated workers' turns. The one thing
-       that names the manager is the designation record (`managerIdentity`), so
-       that is what is asked, per dispatch and cached. */
-    const viewerPrelude = replayGeneration || !(await isDesignatedManagerConversation(cardId))
+       that names the manager is the project's active seat (`managerIdentity`),
+       queried per dispatch and cached. */
+    const viewerPrelude = replayGeneration || !(await isDesignatedManagerConversation(cardId, file.project))
       ? ""
       : viewerContextPrelude({ path: file.path, project: file.project });
     const composedText = viewerPrelude ? `${viewerPrelude}\n${requestedText}` : requestedText;

@@ -1,28 +1,24 @@
 "use client";
 
 /**
- * WHICH conversation is the manager — asked of the designation record, never of a
- * capability.
+ * WHICH conversation holds the current project's active manager seat.
  *
- * The viewer-context prelude exists for exactly one agent: the Viewer-global
- * orchestrator the operator carries around the board. Every other hosted worker
+ * The viewer-context prelude exists for exactly one agent per project: the
+ * conversation named by that project's active seat. Every other hosted worker
  * gets ordinary turns. The first version keyed that on `voiceEnabled` — "this
- * conversation could hold a voice call" — which is a CAPABILITY every hosted
+ * conversation could hold a voice call" — which is a capability every hosted
  * codex-app-server conversation has, so the operator's current project, focused
  * conversation and selection were prepended to unrelated workers' turns.
  *
- * The only thing that answers "is this the manager" is `orchestrator.json`, the
- * single-instance designation record, read here through its own GET (which
- * authorizes nothing and mutates nothing — designation CHANGE keeps its operator
- * gate on POST, untouched).
+ * The browser reads the same per-project seat route as the orchestrator panel.
+ * This resolver authorizes and mutates nothing; it only scopes the prelude.
  *
- * Cached with a short TTL and a shared in-flight promise, because the question is
- * asked on the send path: a burst of sends is one GET, and a manager swap is
- * picked up within the window without anything having to invalidate this.
+ * Cached per project with a short TTL and one shared in-flight promise per
+ * project. A burst of sends costs one GET, and a rotation is picked up within
+ * the window without an invalidation channel.
  *
- * FAILS CLOSED. An unreachable or unreadable record answers "not the manager", so
- * a viewer that cannot resolve the designation sends plain turns rather than
- * leaking the operator's view into whatever conversation is at hand.
+ * FAILS CLOSED. An unreachable or unreadable seat produces a plain turn, keeping
+ * the operator's view out of any conversation whose designation is uncertain.
  */
 
 /** Long enough that a burst of sends costs one GET; short enough that a manager
@@ -30,60 +26,69 @@
 export const MANAGER_IDENTITY_TTL_MS = 30_000;
 
 interface ManagerStatusBody {
-  record?: { conversationId?: unknown } | null;
+  seat?: { conversationId?: unknown } | null;
   exists?: unknown;
 }
 
-let cachedConversationId: string | null = null;
-let cachedAt = 0;
-let inFlight: Promise<string | null> | null = null;
+interface CachedManagerIdentity {
+  conversationId: string | null;
+  cachedAt: number;
+}
+
+const cachedByProject = new Map<string, CachedManagerIdentity>();
+const inFlightByProject = new Map<string, Promise<string | null>>();
 
 /** The designated manager's conversation id, or null when none is designated (or
-    the record cannot be read right now). */
+    the project seat cannot be read right now). */
 export async function designatedManagerConversationId(
+  project: string,
   fetchFn: typeof fetch = fetch,
   now: () => number = Date.now,
 ): Promise<string | null> {
-  if (cachedAt && now() - cachedAt < MANAGER_IDENTITY_TTL_MS) return cachedConversationId;
-  if (inFlight) return inFlight;
-  inFlight = (async () => {
+  const scopedProject = project.trim();
+  if (!scopedProject) return null;
+  const cached = cachedByProject.get(scopedProject);
+  if (cached && now() - cached.cachedAt < MANAGER_IDENTITY_TTL_MS) return cached.conversationId;
+  const existing = inFlightByProject.get(scopedProject);
+  if (existing) return existing;
+  const request = (async () => {
     try {
-      const response = await fetchFn("/api/orchestrator");
+      const response = await fetchFn("/api/orchestrator/seat?project=" + encodeURIComponent(scopedProject));
       if (!response.ok) return null;
       const body = await response.json() as ManagerStatusBody;
-      /* A record whose transcript is gone names no live manager: the next click
-         on the chat button spawns a successor, and until then nothing here is
-         the manager. */
-      const conversationId = body.exists === true && typeof body.record?.conversationId === "string"
-        ? body.record.conversationId
+      /* A seat whose transcript is gone names no live manager for the composer;
+         the panel returns to its draft state until the operator seats a live
+         conversation. */
+      const conversationId = body.exists === true && typeof body.seat?.conversationId === "string"
+        ? body.seat.conversationId
         : null;
-      cachedConversationId = conversationId;
-      cachedAt = now();
+      cachedByProject.set(scopedProject, { conversationId, cachedAt: now() });
       return conversationId;
     } catch {
       /* Left uncached: a transient network failure must not pin "no manager" for
          the whole TTL. */
       return null;
     } finally {
-      inFlight = null;
+      inFlightByProject.delete(scopedProject);
     }
   })();
-  return inFlight;
+  inFlightByProject.set(scopedProject, request);
+  return request;
 }
 
 /** Whether this conversation identity IS the designated manager's. */
 export async function isDesignatedManagerConversation(
   conversationId: string,
+  project: string,
   fetchFn: typeof fetch = fetch,
   now: () => number = Date.now,
 ): Promise<boolean> {
   if (!conversationId.startsWith("conversation_")) return false;
-  return await designatedManagerConversationId(fetchFn, now) === conversationId;
+  return await designatedManagerConversationId(project, fetchFn, now) === conversationId;
 }
 
 /** Tests only. */
 export function resetManagerIdentityForTest(): void {
-  cachedConversationId = null;
-  cachedAt = 0;
-  inFlight = null;
+  cachedByProject.clear();
+  inFlightByProject.clear();
 }
