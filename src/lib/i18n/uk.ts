@@ -1617,6 +1617,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "orchPanel.creating": "Створюю оркестратора…",
   "orchPanel.creatingHint": "Призначення записано. Мандат буде доставлено рівно один раз, навіть якщо сторінку перезавантажити.",
   "orchPanel.receipt": "Запуск {launchId}",
+  "orchPanel.creatingStuck": "Це призначення очікує ще від часу до завантаження сторінки — запит, який його почав, не завершився.",
+  "orchPanel.creatingResume": "Завершити призначення",
   "orchPanel.errorTitle": "Оркестратора не призначено",
   "orchPanel.errorHint": "Нічого не запущено. Виправте мандат або параметри й спробуйте ще раз.",
   "orchPanel.errorUnknownTitle": "Результат останньої спроби невідомий",

@@ -120,8 +120,11 @@ export type OrchestratorPanelState =
   /** No orchestrator: the create draft. `vacated` distinguishes «the seat's
       conversation was closed» from «there has never been one». */
   | { kind: "draft"; vacated: boolean }
-  /** A designation is in flight or durably pending with no terminal error. */
-  | { kind: "creating"; launchId: string | null; designatedAt: string }
+  /** A designation is in flight or durably pending with no terminal error.
+      `clientRequestId` is the pending intent's own idempotency key: re-posting
+      it is what converges an intent whose accepting request died, so the state
+      carries a way through instead of spinning forever. */
+  | { kind: "creating"; launchId: string | null; clientRequestId: string | null; designatedAt: string }
   /** A durable terminal error on the pending intent, with retry. */
   | { kind: "intent-error"; error: string; retry: "fresh" | "same"; designatedAt: string }
   | OrchestratorLiveState;
@@ -169,7 +172,12 @@ export function deriveOrchestratorPanelState(input: {
   }
 
   if (input.submitting) {
-    return { kind: "creating", launchId: pending?.intent.launchId ?? null, designatedAt: pending?.designatedAt ?? "" };
+    return {
+      kind: "creating",
+      launchId: pending?.intent.launchId ?? null,
+      clientRequestId: pending?.intent.clientRequestId ?? null,
+      designatedAt: pending?.designatedAt ?? "",
+    };
   }
   if (pendingError) {
     return { kind: "intent-error", error: pendingError, retry: "fresh", designatedAt: pending?.designatedAt ?? "" };
@@ -178,7 +186,12 @@ export function deriveOrchestratorPanelState(input: {
     return { kind: "intent-error", error: clientError.error, retry: clientError.retry, designatedAt: pending?.designatedAt ?? "" };
   }
   if (pending) {
-    return { kind: "creating", launchId: pending.intent.launchId, designatedAt: pending.designatedAt };
+    return {
+      kind: "creating",
+      launchId: pending.intent.launchId,
+      clientRequestId: pending.intent.clientRequestId,
+      designatedAt: pending.designatedAt,
+    };
   }
   if (!status) return input.statusFailed ? { kind: "unavailable" } : { kind: "loading" };
   return { kind: "draft", vacated: Boolean(status.seat) && !status.exists };

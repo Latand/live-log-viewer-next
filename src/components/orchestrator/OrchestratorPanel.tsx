@@ -130,7 +130,10 @@ export function OrchestratorPanel({
   const hostDead = useSeatHostDead(file);
   const state = deriveOrchestratorPanelState({ status, statusFailed: failed, submitting, submitFailure, file, hostDead });
 
-  const confirm = useCallback(async () => {
+  /** `replayRequestId` re-posts an EXISTING durable intent by its own key — the
+      seat command then completes that intent with ITS original mandate, so the
+      text sent here cannot become a second variant. */
+  const confirm = useCallback(async (replayRequestId?: string | null) => {
     if (inFlight.current) return;
     const text = mandate.trim();
     if (!text) {
@@ -145,9 +148,9 @@ export function OrchestratorPanel({
        instead of designating twice. Cleared only once the attempt is terminal —
        a corrected mandate must arrive under a NEW key, because the seat command
        completes the ORIGINAL intent when a pending key is replayed. */
-    const stored = readDraftField(project, "requestId");
+    const stored = replayRequestId || readDraftField(project, "requestId");
     const clientRequestId = stored || newSeatRequestId();
-    if (!stored) writeDraftField(project, "requestId", clientRequestId);
+    if (readDraftField(project, "requestId") !== clientRequestId) writeDraftField(project, "requestId", clientRequestId);
     setSubmitting(true);
     setSubmitFailure(null);
     const at = Date.now();
@@ -265,6 +268,18 @@ export function OrchestratorPanel({
             <p className="max-w-full truncate font-mono text-caption text-muted" title={state.launchId}>
               {t("orchPanel.receipt", { launchId: state.launchId })}
             </p>
+          ) : null}
+          {/* A designation is durably pending with nothing of ours on the wire:
+              the request that accepted it died, and only a re-post of its OWN
+              key converges it. Without this the panel spins forever with no
+              action — so the way through is offered, and it cannot duplicate. */}
+          {!submitting && state.clientRequestId ? (
+            <>
+              <p className="max-w-[300px] text-ui text-muted">{t("orchPanel.creatingStuck")}</p>
+              <SecondaryButton onClick={() => void confirm(state.clientRequestId)}>
+                {t("orchPanel.creatingResume")}
+              </SecondaryButton>
+            </>
           ) : null}
         </Centered>
       ) : state.kind === "live" ? (
@@ -407,7 +422,10 @@ function OrchestratorDraft({
             disabled={submitting}
             onChange={(event) => onMandate(event.target.value)}
             spellCheck={false}
-            className="min-h-[200px] w-full flex-1 resize-none rounded-surface border border-border bg-sunken px-3 py-2.5 font-mono text-ui leading-[1.45] text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+            /* The mandate is PROSE the agent reads, so it is sans (design
+               system §1.1 mono rule) — the only mono here is the cwd below,
+               which is a path. */
+            className="min-h-[200px] w-full flex-1 resize-none rounded-surface border border-border bg-sunken px-3 py-2.5 text-ui leading-[1.45] text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
           />
           {projectCwd ? (
             <p className="truncate font-mono text-caption text-muted" title={projectCwd}>

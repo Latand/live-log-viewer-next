@@ -308,6 +308,26 @@ test("a pending intent with no error is the creating state, naming its durable r
   expect(host.textContent).toContain("launch-pending");
 });
 
+test("a designation left pending by a dead request can be finished, by re-posting its own key", async () => {
+  seatStatus = { seat: null, pending: { ...pendingSeat(null), intent: { clientRequestId: "req-bbbbbbbb", mode: "spawn", launchId: "launch-pending", error: null } }, exists: true };
+  const host = mount();
+  await settle();
+  flushSync(() => undefined);
+  expect(panelState(host)).toBe("creating");
+
+  const resume = [...host.querySelectorAll("button")].find((node) => node.textContent?.includes("Finish this designation")) as HTMLButtonElement;
+  expect(resume).toBeDefined();
+
+  seatResponses = [{ status: 200, body: { ok: true, replayed: true, conversationId: "conversation_orch", seat: activeSeat() } }];
+  flushSync(() => resume.click());
+  await settle();
+
+  expect(seatPosts).toHaveLength(1);
+  /* Its OWN key: the seat command completes the original intent instead of
+     beginning a second one. */
+  expect(seatPosts[0]!.clientRequestId).toBe("req-bbbbbbbb");
+});
+
 test("switching to Codex offers the codex account catalog and launches on it", async () => {
   const host = mount();
   await settle();

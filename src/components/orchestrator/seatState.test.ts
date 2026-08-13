@@ -75,7 +75,13 @@ describe("the panel names every state in the map (#977)", () => {
     expect(deriveOrchestratorPanelState({ ...base, status: status(), submitting: true }).kind).toBe("creating");
     const pending = seat({ state: "pending", conversationId: null, path: null, intent: { clientRequestId: "req-22222222", mode: "spawn", launchId: "launch-9", error: null } });
     expect(deriveOrchestratorPanelState({ ...base, status: status({ pending }) }))
-      .toEqual({ kind: "creating", launchId: "launch-9", designatedAt: pending.designatedAt });
+      .toEqual({ kind: "creating", launchId: "launch-9", clientRequestId: "req-22222222", designatedAt: pending.designatedAt });
+  });
+
+  test("a pending intent nothing is driving carries its own key, so the panel can finish it instead of spinning", () => {
+    const pending = seat({ state: "pending", conversationId: null, path: null, intent: { clientRequestId: "req-55555555", mode: "spawn", launchId: "launch-x", error: null } });
+    const state = deriveOrchestratorPanelState({ ...base, status: status({ pending }) });
+    expect(state).toMatchObject({ kind: "creating", clientRequestId: "req-55555555" });
   });
 
   test("a stored terminal error is the intent-error state, with a fresh-key retry", () => {

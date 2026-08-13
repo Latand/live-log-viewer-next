@@ -349,23 +349,21 @@ export function AgentLaunchControls({
           <LaunchAccountSelect draft={draft} disabled={disabled} roomy className="w-full" />
         </Field>
       ) : null}
-      <div className="flex flex-wrap items-end gap-2">
-        <Field className="min-w-32 flex-1" label={t("launch.reasoning")}>
-          <div className="flex flex-wrap items-center gap-2 [&>select]:min-w-28 [&>select]:flex-1">
-            <ReasoningControls
-              engine={draft.engine}
-              model={draft.model}
-              effort={draft.effort}
-              speed={draft.speed}
-              disabled={disabled}
-              roomy
-              onModel={draft.setModel}
-              onEffort={draft.setEffort}
-              onSpeed={draft.setSpeed}
-            />
-          </div>
-        </Field>
-      </div>
+      <Field label={t("launch.reasoning")}>
+        <div className="flex flex-wrap items-center gap-2 [&>select]:min-w-28 [&>select]:flex-1">
+          <ReasoningControls
+            engine={draft.engine}
+            model={draft.model}
+            effort={draft.effort}
+            speed={draft.speed}
+            disabled={disabled}
+            roomy
+            onModel={draft.setModel}
+            onEffort={draft.setEffort}
+            onSpeed={draft.setSpeed}
+          />
+        </div>
+      </Field>
     </div>
   );
 }

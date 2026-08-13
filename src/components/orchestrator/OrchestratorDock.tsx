@@ -121,7 +121,7 @@ export function OrchestratorDock({
         aria-label={t("orchPanel.resize")}
         title={t("orchPanel.resize")}
         data-orchestrator-dock-resize
-        className="absolute inset-y-0 -right-0.5 z-10 w-1.5 cursor-col-resize hover:bg-accent/30"
+        className="absolute inset-y-0 right-0 z-10 w-1.5 cursor-col-resize hover:bg-accent/30"
         onPointerDown={(event) => {
           event.preventDefault();
           resizeFrom();

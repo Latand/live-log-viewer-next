@@ -1666,6 +1666,8 @@ export const en = {
   "orchPanel.creating": "Creating the orchestrator…",
   "orchPanel.creatingHint": "The designation is recorded. The mandate is delivered exactly once, even if this page reloads.",
   "orchPanel.receipt": "Launch {launchId}",
+  "orchPanel.creatingStuck": "This designation has been pending since before this page loaded — the request that started it never finished.",
+  "orchPanel.creatingResume": "Finish this designation",
   "orchPanel.errorTitle": "The orchestrator wasn't designated",
   "orchPanel.errorHint": "Nothing is running. Fix the mandate or the parameters and try again.",
   "orchPanel.errorUnknownTitle": "The last attempt's outcome is unknown",
