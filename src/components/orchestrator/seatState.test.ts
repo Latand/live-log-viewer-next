@@ -3,9 +3,11 @@ import { describe, expect, test } from "bun:test";
 import type { OrchestratorSeat } from "@/lib/orchestrator/seats";
 import type { FileEntry } from "@/lib/types";
 
+import type { OrchestratorIncumbent } from "./incumbent";
 import {
   classifySeatFailure,
   deriveOrchestratorPanelState,
+  deriveRotateDraftState,
   newSeatRequestId,
   parseSeatStatus,
   ROTATION_CONTEXT_PERCENT,
@@ -177,6 +179,102 @@ describe("the panel names every state in the map (#977)", () => {
       kind: "live",
       transition: { kind: "error", error: "spawn did not report an accepted launch" },
     });
+  });
+});
+
+describe("the server's own rotation recommendation is what the panel says (#978)", () => {
+  const incumbent = (overrides: Partial<OrchestratorIncumbent> = {}): OrchestratorIncumbent => ({
+    project: "atlas",
+    designated: true,
+    conversationId: "conversation_orchestrator",
+    predecessorConversationId: null,
+    engine: "claude",
+    model: "opus",
+    effort: null,
+    accountId: "work",
+    cwd: "/repos/atlas",
+    context: { tokens: 620_000, limit: 1_000_000, percent: 62, estimated: false, basis: "provider-reported usage" },
+    transcript: { bytes: 1024, messageCount: 10, toolCount: 4, compactionCount: 0 },
+    rotation: { recommended: false, level: "none", reasons: [], thresholdUnknown: false },
+    ...overrides,
+  });
+  const live = (over: Partial<Parameters<typeof deriveOrchestratorPanelState>[0]>) =>
+    deriveOrchestratorPanelState({ ...base, status: status({ seat: seat() }), file: file(), surface: "live-root", ...over });
+
+  test("its reasons ride along verbatim, with the percentage it measured", () => {
+    const state = live({
+      incumbent: incumbent({
+        rotation: {
+          recommended: true,
+          level: "strongly_recommend",
+          reasons: ["context usage 620,000 tokens has reached the rotation threshold of 500,000 tokens (claude-opus-1m: 50% of a 1,000,000-token window)"],
+          thresholdUnknown: false,
+        },
+      }),
+    });
+    expect(state).toMatchObject({
+      kind: "live",
+      rotation: { level: "strongly_recommend", contextPercent: 62, reasons: ["context"], source: "server" },
+    });
+    expect((state as { rotation: { notes?: readonly string[] } }).rotation.notes?.[0]).toContain("rotation threshold");
+  });
+
+  test("a recommendation the coded reasons cannot express still shows, carried by the server's words", () => {
+    const state = live({
+      incumbent: incumbent({
+        rotation: { recommended: true, level: "recommend", reasons: ["3 compaction(s) recorded in the transcript, threshold 2"], thresholdUnknown: false },
+      }),
+    });
+    expect(state).toMatchObject({ kind: "live", rotation: { level: "recommend", reasons: [], source: "server" } });
+  });
+
+  test("the server standing the advisory down beats a client guess about the same seat", () => {
+    /* The board's own context read says 62% — over slice A's flat threshold —
+       but the model's real window makes that well under the policy line. */
+    const over = file({ ctx: { usedTokens: 620_000, windowTokens: 1_000_000, pct: 62, source: "transcript", confidence: "high", observedAt: "" } as unknown as FileEntry["ctx"] });
+    expect(live({ file: over })).toMatchObject({ rotation: { level: "strongly_recommend", source: "client" } });
+    expect(live({ file: over, incumbent: incumbent() })).toMatchObject({ rotation: null });
+  });
+
+  test("a gone host is ADDED to the server's reading, never subtracted from it", () => {
+    expect(live({ surface: "dead", incumbent: incumbent() }))
+      .toMatchObject({ rotation: { level: "recommend", reasons: ["dead"], source: "server" } });
+  });
+
+  test("a reading about a vacant seat is ignored — the client derivation still holds the state up", () => {
+    const vacantReading = incumbent({ designated: false, rotation: null });
+    expect(live({ surface: "dead", incumbent: vacantReading }))
+      .toMatchObject({ rotation: { level: "recommend", reasons: ["dead"], source: "client" } });
+  });
+});
+
+describe("the rotate draft renders the same two states the create draft does (#978)", () => {
+  test("with nothing wrong it is just the form", () => {
+    expect(deriveRotateDraftState({ status: status({ seat: seat() }), submitFailure: null }))
+      .toEqual({ kind: "draft", vacated: false });
+  });
+
+  test("a rotation the server refused is shown with retry, and the retry needs a fresh key", () => {
+    const pending = seat({
+      state: "pending",
+      conversationId: null,
+      intent: { clientRequestId: "req-99999999", mode: "spawn", launchId: null, error: "spawn was rejected with HTTP status 500" },
+    });
+    expect(deriveRotateDraftState({ status: status({ seat: seat(), pending }), submitFailure: null }))
+      .toMatchObject({ kind: "intent-error", error: "spawn was rejected with HTTP status 500", retry: "fresh" });
+  });
+
+  test("a lost reply is shown as unknown, and its retry replays the SAME key", () => {
+    const failure = { kind: "ambiguous" as const, error: "the reply never arrived", clientRequestId: "req-88888888" };
+    expect(deriveRotateDraftState({ status: status({ seat: seat() }), submitFailure: failure }))
+      .toMatchObject({ kind: "intent-error", retry: "same" });
+  });
+
+  test("once the read shows where that rotation landed, the banner retires with it", () => {
+    const key = "req-88888888";
+    const successor = seat({ conversationId: "conversation_successor", intent: { clientRequestId: key, mode: "spawn", launchId: "launch-2", error: null } });
+    expect(deriveRotateDraftState({ status: status({ seat: successor }), submitFailure: { kind: "ambiguous", error: "lost", clientRequestId: key } }))
+      .toEqual({ kind: "draft", vacated: false });
   });
 });
 
