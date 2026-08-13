@@ -1635,12 +1635,6 @@ export const en = {
   "catalog.retry": "Retry",
   "catalog.attempts": { one: "{count} failed attempt", other: "{count} failed attempts" },
 
-  // OrchestratorChatButton
-  "orch.chat": "Orchestrator",
-  "orch.open": "Open the orchestrator chat",
-  "orch.starting": "Starting…",
-  "orch.error": "Couldn't open the orchestrator — tap to retry",
-
   // BranchPane
   "branch.live": "working",
   "branch.waiting": "finished the turn — waiting for a reply",
