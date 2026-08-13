@@ -5,6 +5,7 @@ import { flushSync } from "react-dom";
 
 import { emptyStore } from "@/components/runtime/runtimeModel";
 import type { BranchGroup } from "@/components/projectModel";
+import { MOBILE_COMPOSER_CHROME_PX } from "@/lib/composerScroll";
 import type { FileEntry } from "@/lib/types";
 
 /*
@@ -74,9 +75,13 @@ const settle = async () => { await new Promise((r) => setTimeout(r, 0)); await n
 beforeAll(() => {
   for (const key of Object.keys(OVERRIDES)) { HAS[key] = key in G; SAVED[key] = G[key]; G[key] = OVERRIDES[key]; }
   (dom.HTMLElement.prototype as unknown as { scrollIntoView: () => void }).scrollIntoView = () => {};
+  /* Text always overflows, so the composer textarea lands exactly on its grow
+     ceiling — the number the integrated geometry tests assert on. */
+  Object.defineProperty(dom.HTMLElement.prototype, "scrollHeight", { configurable: true, get: () => 2000 });
 });
 afterAll(async () => {
   await settle();
+  delete (dom.HTMLElement.prototype as unknown as { scrollHeight?: unknown }).scrollHeight;
   for (const key of Object.keys(OVERRIDES)) { if (HAS[key]) G[key] = SAVED[key]; else delete G[key]; }
   mock.module("@/hooks/useRuntime", () => actualRuntimeHooks);
 });
@@ -164,6 +169,56 @@ test("no visualViewport: the root keeps today's exact layout (#983 fallback)", a
   expect(shell().style.paddingBottom).toBe("");
   expect(shell().className).toContain("h-full");
   expect(shell().className).toContain("max-h-[100dvh]");
+});
+
+/* The reported conditions COMBINED (#983 round 2): a long draft, inside the
+   overflow-clipped shell, with the picker row present, at keyboard-open
+   heights. happy-dom has no layout engine — getBoundingClientRect is all
+   zeros — so rendered control bounds cannot be asserted here; what CAN be is
+   the arithmetic that decides them: the textarea's ceiling plus the mandatory
+   chrome fits the visible height, and the root's height is driven by the
+   visual viewport, so the clipped shell has everything inside it. */
+const LONG_DRAFT = "line\n".repeat(60);
+
+function composerTextarea(): HTMLTextAreaElement {
+  return dom.document.querySelector("textarea") as unknown as HTMLTextAreaElement;
+}
+
+test("integrated, portrait keyboard: long draft caps at 160px and the chrome fits (#983 round 2)", async () => {
+  dom.sessionStorage.setItem("llvDraft:/session", LONG_DRAFT);
+  const vv = makeVisualViewport(400);
+  (dom as unknown as Record<string, unknown>).visualViewport = vv;
+  G.visualViewport = vv;
+  roots.push(mount(view()));
+  await settle();
+
+  /* The root yields the keyboard's 400px overlap, so its content box IS the
+     visible area. */
+  expect(shell().style.paddingBottom).toBe("400px");
+  const textarea = composerTextarea();
+  expect(textarea).not.toBeNull();
+  expect(textarea.value).toBe(LONG_DRAFT);
+  expect(textarea.style.height).toBe("160px");
+  expect(160 + MOBILE_COMPOSER_CHROME_PX).toBeLessThanOrEqual(400);
+});
+
+test("integrated, rotated keyboard: the field yields below 160px so picker and send fit (#983 round 2)", async () => {
+  dom.sessionStorage.setItem("llvDraft:/session", LONG_DRAFT);
+  const vv = makeVisualViewport(280);
+  (dom as unknown as Record<string, unknown>).visualViewport = vv;
+  G.visualViewport = vv;
+  roots.push(mount(view()));
+  await settle();
+
+  expect(shell().style.paddingBottom).toBe("520px");
+  const textarea = composerTextarea();
+  expect(textarea).not.toBeNull();
+  expect(textarea.value).toBe(LONG_DRAFT);
+  expect(textarea.style.height).toBe("124px");
+  expect(124 + MOBILE_COMPOSER_CHROME_PX).toBeLessThanOrEqual(280);
+  /* Past the shrunken ceiling the field scrolls internally (issue #177 item 3
+     preserved), never the window. */
+  expect(textarea.className).toContain("overflow-y-auto");
 });
 
 test("a layout-resizing keyboard (resizes-content honored) needs no inset (#983)", async () => {

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { caretAtEnd, clampHeight, keyboardInset, shouldPin, visibleViewportHeight } from "./composerScroll";
+import { caretAtEnd, clampHeight, keyboardInset, MOBILE_COMPOSER_CHROME_PX, mobileComposerCeiling, shouldPin, visibleViewportHeight } from "./composerScroll";
 
 describe("clampHeight grows to fit then caps", () => {
   test("adds the 2px border allowance below the cap", () => {
@@ -64,6 +64,27 @@ describe("visibleViewportHeight — the keyboard-aware layout budget (#983)", ()
 
   test("rounding noise never exceeds the layout viewport", () => {
     expect(visibleViewportHeight(800, { height: 400.4, scale: 2 })).toBe(800);
+  });
+});
+
+describe("mobileComposerCeiling — the phone grow ceiling against the visible viewport (#983)", () => {
+  test("a full portrait viewport grows to 40%", () => {
+    expect(mobileComposerCeiling(800)).toBe(320);
+  });
+
+  test("a portrait keyboard-open viewport holds the 160px cap — the chrome still fits", () => {
+    expect(mobileComposerCeiling(400)).toBe(160);
+    expect(160 + MOBILE_COMPOSER_CHROME_PX).toBeLessThanOrEqual(400);
+  });
+
+  test("a rotated keyboard-open viewport yields below 160px to keep the chrome visible (round 2)", () => {
+    expect(mobileComposerCeiling(280)).toBe(280 - MOBILE_COMPOSER_CHROME_PX);
+    expect(mobileComposerCeiling(240)).toBe(240 - MOBILE_COMPOSER_CHROME_PX);
+  });
+
+  test("never collapses below one 44px tap-target row", () => {
+    expect(mobileComposerCeiling(150)).toBe(44);
+    expect(mobileComposerCeiling(0)).toBe(44);
   });
 });
 

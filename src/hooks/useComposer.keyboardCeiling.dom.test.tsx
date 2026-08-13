@@ -4,6 +4,7 @@ import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
 import { useComposer } from "@/hooks/useComposer";
+import { MOBILE_COMPOSER_CHROME_PX } from "@/lib/composerScroll";
 
 import { ComposerBar } from "@/components/ComposerBar";
 
@@ -81,7 +82,9 @@ function Harness() {
       placeholder="Prompt"
       textareaAriaLabel="Prompt"
       imageAriaLabel="Add images"
-      leftSlot={null}
+      /* The model-picker stand-in: on the phone ComposerBar renders leftSlot in
+         its always-visible 44px runtime row — the control the operator lost. */
+      leftSlot={<button type="button">model picker</button>}
       sendLabelIdle="Send"
       sendLabelRecording="Stop"
       sendIdleClassName="bg-accent"
@@ -130,6 +133,51 @@ test("pinch zoom is not a keyboard: the scale factor cancels out of the budget (
   G.visualViewport = vv;
   const textarea = mountComposer();
   expect(textarea.style.height).toBe("320px");
+});
+
+test("rotated keyboard: the ceiling shrinks below 160px so the chrome fits the visible area (#983 round 2)", () => {
+  /* Landscape phone, keyboard up: 280px visible. The old 160px floor plus the
+     mandatory chrome (focus strip, conversation header, 44px picker row —
+     MOBILE_COMPOSER_CHROME_PX) needs ~316px, and the overflow-clipped shell
+     hides the overflow — the picker was unreachable. The ceiling must yield
+     the chrome's share first: 280 − 156 = 124px. */
+  const vv = makeVisualViewport(280);
+  (dom as unknown as Record<string, unknown>).visualViewport = vv;
+  G.visualViewport = vv;
+  const textarea = mountComposer();
+  expect(textarea.style.height).toBe("124px");
+  /* The arithmetic that decides visibility inside the clipped shell. */
+  expect(124 + MOBILE_COMPOSER_CHROME_PX).toBeLessThanOrEqual(280);
+  /* The picker row is present with its 44px row contract, and the field still
+     scrolls internally past the shrunken ceiling. */
+  const row = dom.document.querySelector('[data-testid="composer-runtime-row"]') as unknown as HTMLElement;
+  expect(row).not.toBeNull();
+  expect(row.className).toContain("min-h-11");
+  expect(textarea.className).toContain("overflow-y-auto");
+});
+
+test("smaller rotated viewport: send stays visible because the field yields further (#983 round 2)", () => {
+  /* At 240px visible the budget after chrome is 84px — still above the 44px
+     one-row floor, so the field shrinks rather than pushing Send out. */
+  const vv = makeVisualViewport(240);
+  (dom as unknown as Record<string, unknown>).visualViewport = vv;
+  G.visualViewport = vv;
+  const textarea = mountComposer();
+  expect(textarea.style.height).toBe("84px");
+  const send = dom.document.querySelector('button[aria-label="Send"]') as unknown as HTMLElement;
+  expect(send).not.toBeNull();
+  /* The 44px tap-target contract: 32px visual control + the -inset-1.5
+     pseudo-element hit area (design doc §3.5). */
+  expect(send.className).toContain("h-8");
+  expect(send.className).toContain("before:-inset-1.5");
+});
+
+test("an absurdly small visible viewport floors the field at one tap-target row (#983 round 2)", () => {
+  const vv = makeVisualViewport(150);
+  (dom as unknown as Record<string, unknown>).visualViewport = vv;
+  G.visualViewport = vv;
+  const textarea = mountComposer();
+  expect(textarea.style.height).toBe("44px");
 });
 
 test("without visualViewport the layout viewport still drives the ceiling (#177 item 3)", () => {
