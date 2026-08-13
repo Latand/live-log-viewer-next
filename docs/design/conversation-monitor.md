@@ -28,15 +28,15 @@ Everything below is shaped by closing those two holes.
 orchestrator's **stable viewer conversation id**, its settled transcript path,
 and whether that transcript still exists.
 
-The monitor resolves through that record and addresses the orchestrator **by
+The monitor resolves through that seat and addresses the orchestrator **by
 conversation id**, never by path. That is what makes a rollover, a restart or a
 model swap survivable: the conversation id is the identity that follows the
 orchestrator across generations, while a path is a fact about one generation
 that stops being true the moment anything moves.
 
-Resolving the address is not enough — somebody has to be listening. The record
-is followed by a read-only host probe (`GET /api/tmux?path=…`, using the path
-the record itself names, not a path anyone typed). Two reasons this is not
+Resolving the address is not enough — somebody has to be listening. The seat is
+followed by a read-only host probe (`GET /api/tmux?path=…`, using the path
+the seat itself names, not a path anyone typed). Two reasons this is not
 optional: the watchdog this replaces spent a day nudging a conversation with no
 live host, and a send into a hostless conversation would **resume** it, which is
 not the monitor's business.
@@ -53,7 +53,7 @@ audience reports the condition instead of assuming one:
 | `unavailable` | the seat is unreadable, has no settled path to probe, the probe errored, or nothing hosts the conversation | `failed` |
 
 That includes the two cases an earlier draft waved through: a **path-pending**
-record (a spawn still adopting — nothing to probe, so nothing proven) and a
+seat (a spawn still adopting — nothing to probe, so nothing proven) and a
 probe that **errored** (an unprovable host is not a live one, and delivering
 anyway risks the resume this probe exists to avoid).
 
