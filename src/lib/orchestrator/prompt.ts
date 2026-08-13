@@ -1,9 +1,8 @@
-/* The MANAGER's spawn identity and system directive (#182 phase 1, #691 §4/§6).
+/* The MANAGER's draft defaults and versioned system directive (#182, #691 §4/§6).
  *
- * The chat button POSTs /api/spawn with this config; the spawn route prepends the
- * `orchestrator` role scaffold from the #35 registry and this prompt follows as the
- * built-in system directive. Shared by the client button and the API layer, so it must
- * stay a pure-constant module.
+ * The per-project panel initializes its shared launch controls from these defaults
+ * and sends the operator-edited mandate through the seat route. The spawn route
+ * prepends the `orchestrator` role scaffold from the #35 registry.
  *
  * #691 reshaped this agent's role while leaving its tool surface whole: it keeps the
  * full Viewer MCP surface. Mandate v4 (#982, PRD #976) gives it two channels to the
@@ -11,10 +10,8 @@
  * Codex voice gateway drains for everything that must reach the operator when they
  * are not in that chat. */
 
-/** Fixed spawn identity: the resident brain runs on the latest Opus alias (`opus` is
-    Claude Opus 5 — see `src/lib/agent/models.ts`) and escalates by spawning
-    higher-effort workers, never by thinking harder. The model is swappable: the
-    designation record names the incumbent, and the bridge references the record. */
+/** Initial draft values. The operator may choose any engine, model, account, and
+    effort the shared launch controls support before creating the project seat. */
 export const ORCHESTRATOR_SPAWN_CONFIG = {
   engine: "claude",
   model: "opus",

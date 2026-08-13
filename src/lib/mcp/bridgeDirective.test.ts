@@ -13,7 +13,6 @@ import {
   completeOrchestratorSeatIntent,
   orchestratorRevocations,
 } from "@/lib/orchestrator/seats";
-import { adoptOrchestratorRecord } from "@/lib/orchestrator/store";
 
 import { viewerMcpBindings, type ViewerControlDependencies } from "./bindings";
 
@@ -51,7 +50,6 @@ function realSeatAuthority() {
   return authorizedManagerSeats({
     activeSeats: activeOrchestratorSeats,
     revocations: orchestratorRevocations,
-    legacyManagerConversationId: () => null,
     conversationFacts: () => ({ superseded: false, hasGeneration: true, project: null }),
     resolveAlias: (id) => id,
   });
@@ -63,14 +61,8 @@ function sandbox(withManager = true): void {
   process.env.LLV_STATE_DIR = path.join(dir, "state");
   openBridgeChannel("root_directive");
   if (withManager) {
-    /* The caller's own project holds the designated orchestrator; a legacy
-       record is ALSO written and must be irrelevant to routing. */
+    /* The caller's own project holds the designated orchestrator. */
     seatProject("proj-voice", "conversation_manager");
-    adoptOrchestratorRecord({
-      conversationId: "conversation_legacy_pointer",
-      path: null,
-      createdAt: new Date().toISOString(),
-    });
   }
 }
 
@@ -90,7 +82,7 @@ function bindings(callerProject: string | null = "proj-voice") {
   } as never);
 }
 
-test("a directive is addressed to the manager the record names, not to whoever the caller says", async () => {
+test("a directive is addressed to the project's active seat regardless of a caller-supplied target", async () => {
   sandbox();
   const tools = bindings();
   const receipt = await tools.bridge_directive({
@@ -178,10 +170,8 @@ test("a directive refuses input that would break its own id derivation", async (
 
 /* ── MEDIUM 6 (#758 review): per-project directive routing ───────────────── */
 
-/* CHOSEN SEMANTICS: the legacy single-instance record remains the DEFAULT
-   recipient for an un-scoped directive; a directive carrying `project` resolves
-   through the VALIDATED per-project seat authority, so seating project B never
-   redirects project A's directives. */
+/* A directive carrying `project` resolves through validated per-project seat
+   authority, so seating project B never redirects project A's directives. */
 
 function seatedBindings() {
   posted = [];
@@ -214,11 +204,9 @@ test("a project-scoped directive reaches THAT project's orchestrator even after 
 
 test("FIX 2 ACCEPTANCE: seat A, then seat B — an unscoped directive from a voice session in project A reaches A's orchestrator", async () => {
   sandbox(false);
-  /* REAL seat activations, in this order: A first, then B, so B is the most
-     recently seated project AND the one the last-writer legacy record names. */
+  /* REAL seat activations, in this order: A first, then B. */
   seatProject("proj-a", "conversation_a");
   seatProject("proj-b", "conversation_b");
-  adoptOrchestratorRecord({ conversationId: "conversation_b", path: null, createdAt: new Date().toISOString() });
 
   /* The caller is a voice session whose canonical project is A. */
   const tools = bindings("proj-a");

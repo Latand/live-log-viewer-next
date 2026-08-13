@@ -2,7 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { voiceTransportOperator } from "@/lib/agent/operatorAuthority";
 import { executeRealtimeControl } from "@/lib/runtime/realtimeControl";
-import { designatedManagerConversationId, realtimeCallerFromRequest } from "@/lib/runtime/realtimeInjection";
+import {
+  designatedManagerConversationId,
+  realtimeCallerFromRequest,
+  realtimeConversationProject,
+} from "@/lib/runtime/realtimeInjection";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import type { ApiError } from "@/lib/types";
 
@@ -19,13 +23,16 @@ export async function POST(req: NextRequest): Promise<NextResponse<Record<string
   } catch {
     return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
+  const requestBody = body && typeof body === "object" && !Array.isArray(body)
+    ? body as Record<string, unknown>
+    : {};
   /* #691 §6: resolved from the capability the registry issued, never from anything
      in the body — a caller naming itself is not evidence. */
   const result = await executeRealtimeControl(body, undefined, {
-    caller: realtimeCallerFromRequest(req, body && typeof body === "object" && !Array.isArray(body)
-      ? body as Record<string, unknown>
-      : {}),
-    managerConversationId: designatedManagerConversationId(),
+    caller: realtimeCallerFromRequest(req, requestBody),
+    managerConversationId: designatedManagerConversationId(
+      realtimeConversationProject(requestBody.conversationId),
+    ),
     /* Opening and closing the call is the operator's own act, and on this loopback
        single-user app the same-origin browser IS the operator (the cross-origin
        rejection above is the perimeter). The only caller refused transport is an

@@ -4,10 +4,10 @@ import os from "node:os";
 import path from "node:path";
 
 import {
-  adoptOrchestratorRecord,
-  readOrchestratorRecord,
-  replaceOrchestratorIncumbent,
-} from "@/lib/orchestrator/store";
+  beginOrchestratorSeatIntent,
+  completeOrchestratorSeatIntent,
+  orchestratorSeatFor,
+} from "@/lib/orchestrator/seats";
 import { planBridgeReportDelivery } from "@/lib/runtime/bridgeDelivery";
 import { rememberAcknowledgedVoiceDelivery } from "@/lib/runtime/voiceDelivery";
 
@@ -56,22 +56,35 @@ function report(key: string, overrides: Partial<BridgeReportInput> = {}): Bridge
 test("replacing the manager leaves the channel and its cursor untouched (§7.3, AC23)", () => {
   sandbox();
   openBridgeChannel(ROOT_ID);
-  adoptOrchestratorRecord({ conversationId: "conversation_manager_a", path: null, createdAt: NOW.toISOString() });
+  beginOrchestratorSeatIntent({ project: "proj-a", mandate: "v1", clientRequestId: "seat_proj_a_1", mode: "spawn" });
+  completeOrchestratorSeatIntent({
+    project: "proj-a",
+    clientRequestId: "seat_proj_a_1",
+    conversationId: "conversation_manager_a",
+    path: null,
+  });
   appendBridgeReports([report("a"), report("b")]);
   acknowledgeBridgeReports(1);
   const before = readBridgeChannel();
 
-  /* The operator swaps the manager's model wholesale: a different engine, a
-     different conversation, the same seat. */
-  replaceOrchestratorIncumbent({
+  /* The operator rotates the project's manager conversation. */
+  beginOrchestratorSeatIntent({
+    project: "proj-a",
+    mandate: "v2",
+    clientRequestId: "seat_proj_a_2",
+    mode: "spawn",
+  });
+  completeOrchestratorSeatIntent({
+    project: "proj-a",
+    clientRequestId: "seat_proj_a_2",
     conversationId: "conversation_manager_b",
     path: null,
-    createdAt: "2026-07-27T13:00:00.000Z",
-    engine: "codex",
-    model: "sol",
   });
 
-  expect(readOrchestratorRecord()).toMatchObject({ conversationId: "conversation_manager_b", engine: "codex" });
+  expect(orchestratorSeatFor("proj-a").active).toMatchObject({
+    conversationId: "conversation_manager_b",
+    predecessorConversationId: "conversation_manager_a",
+  });
   expect(readBridgeChannel()).toEqual(before!);
   /* AC22 again, now against a channel that has outlived one incumbent. */
   expect(fs.readFileSync(bridgeChannelPath(), "utf8")).not.toContain("conversation_manager");

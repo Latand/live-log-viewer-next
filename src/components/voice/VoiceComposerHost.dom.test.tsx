@@ -138,7 +138,7 @@ beforeEach(() => {
       return json({ ok: true, plan: { kind: "idle" } });
     }
     if (url === "/api/runtime/send") return json({ operationId: "op-1", receipt: { status: "delivering", operationId: "op-1" } });
-    if (url === "/api/orchestrator") return json({ record: null, exists: false, defaultCwd: "/repo" });
+    if (url.startsWith("/api/orchestrator/seat?")) return json({ seat: null, pending: null, exists: false });
     return json({});
   }) as unknown as typeof fetch;
 });

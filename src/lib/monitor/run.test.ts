@@ -14,7 +14,7 @@ fs.mkdirSync(process.env.TMPDIR, { recursive: true });
 const { ORCHESTRATOR_ALERT_REF, monitorRefIn } = await import("./cards");
 const { MONITOR_MARKER } = await import("./requests");
 const { runConversationMonitor } = await import("./run");
-const { ViewerApiError } = await import("./viewerApi");
+const { ViewerApiError, httpViewerApi } = await import("./viewerApi");
 import type { MonitorDeps, MonitorOptions } from "./run";
 import type { MonitorRunRecord } from "./types";
 import type { ConversationSummary, PipelineSummary, TaskSummary, ViewerApi } from "./viewerApi";
@@ -67,7 +67,7 @@ function harness(overrides: {
   ];
 
   const api: ViewerApi = {
-    orchestrator: async () => overrides.orchestrator ?? { record: { conversationId: "conversation_orch", path: "/transcripts/orch.jsonl", createdAt: "2026-07-01T00:00:00Z" }, exists: true, defaultCwd: "/repo" },
+    orchestrator: async () => overrides.orchestrator ?? { record: { conversationId: "conversation_orch", path: "/transcripts/orch.jsonl", createdAt: "2026-07-01T00:00:00Z" }, exists: true },
     hostTarget: async () => {
       if (overrides.hostTarget === undefined) return "%7";
       if (typeof overrides.hostTarget === "function") return overrides.hostTarget();
@@ -121,6 +121,19 @@ function harness(overrides: {
 const OPTIONS: MonitorOptions = { windowHours: 6, project: "viewer" };
 
 describe("conversation monitor run", () => {
+  test("a live run without project scope fails before reading any seat", async () => {
+    const seeded = harness();
+    let seatReads = 0;
+    seeded.api.orchestrator = async () => {
+      seatReads += 1;
+      return { record: null, exists: false };
+    };
+    const report = await runConversationMonitor(seeded.deps, { windowHours: 6 });
+    expect(report.record.outcome).toBe("failed");
+    expect(report.record.detail).toContain("project is required");
+    expect(seatReads).toBe(0);
+  });
+
   test("materializes exactly the untracked request and leaves the tracked one alone", async () => {
     const seeded = harness({
       tasks: [{ id: "task-tracked", project: "viewer", status: "assigned", text: "Flaky websocket reconnect in the log stream", updatedAt: "2026-07-27T11:30:00Z", assignments: [{ state: "delivered" }], pipelineIds: [] }],
@@ -158,7 +171,7 @@ describe("conversation monitor run", () => {
     expect(backup.reason).toContain("board");
   });
 
-  test("resolves the orchestrator through the durable record and delivers there", async () => {
+  test("resolves the orchestrator through the project seat and delivers there", async () => {
     const seeded = harness();
     const report = await runConversationMonitor(seeded.deps, OPTIONS);
     expect(report.record.orchestrator.resolution).toBe("resolved");
@@ -168,8 +181,59 @@ describe("conversation monitor run", () => {
     expect(seeded.delivered[0]!.text).toContain(MONITOR_MARKER);
   });
 
+  test("the HTTP client resolves active, missing and stale seat responses through the run", async () => {
+    const activeSeat = {
+      project: "viewer",
+      seatEpoch: 2,
+      conversationId: "conversation_orch",
+      path: "/transcripts/orch.jsonl",
+      mandate: "own the board",
+      promptVersion: 4,
+      predecessorConversationId: "conversation_old",
+      state: "active",
+      intent: { clientRequestId: "seat-viewer-2", mode: "spawn", launchId: null, error: null },
+      designatedAt: "2026-07-27T10:00:00Z",
+      activatedAt: "2026-07-27T10:01:00Z",
+    };
+    const cases = [
+      { name: "active", payload: { seat: activeSeat, pending: null, exists: true }, resolution: "resolved", outcome: "clean" },
+      { name: "missing", payload: { seat: null, pending: null, exists: false }, resolution: "missing-record", outcome: "failed" },
+      { name: "stale", payload: { seat: activeSeat, pending: null, exists: false }, resolution: "stale-record", outcome: "failed" },
+    ] as const;
+
+    for (const scenario of cases) {
+      const urls: string[] = [];
+      const fetchImpl = (async (input: URL | RequestInfo, init?: RequestInit) => {
+        const url = String(input);
+        urls.push(url);
+        const pathname = new URL(url).pathname;
+        const requestBody = typeof init?.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : {};
+        let payload: unknown = {};
+        if (pathname === "/api/orchestrator/seat") payload = scenario.payload;
+        else if (pathname === "/api/tmux" && (init?.method ?? "GET") === "GET") payload = { target: "%7" };
+        else if (pathname === "/api/conversations") payload = { items: [] };
+        else if (pathname === "/api/tasks" && (init?.method ?? "GET") === "GET") payload = { tasks: [] };
+        else if (pathname === "/api/tasks") payload = { task: { id: `alert-${scenario.name}` } };
+        else if (pathname === "/api/pipelines") payload = { pipelines: [] };
+        else if (pathname === "/api/flows") payload = { flows: [] };
+        else if (pathname === "/api/monitor/lock") payload = requestBody.action === "claim"
+          ? { claimed: true, token: `lock-${scenario.name}` }
+          : { released: true };
+        else if (pathname === "/api/monitor/runs") payload = { ok: true };
+        return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+      }) as unknown as typeof fetch;
+      const api = httpViewerApi({ baseUrl: "http://127.0.0.1:8898", fetchImpl });
+      const report = await runConversationMonitor({ api, now: () => NOW, runId: () => `run-${scenario.name}` }, OPTIONS);
+
+      expect(report.record.orchestrator.resolution, scenario.name).toBe(scenario.resolution);
+      expect(report.record.outcome, scenario.name).toBe(scenario.outcome);
+      expect(urls, scenario.name).toContain("http://127.0.0.1:8898/api/orchestrator/seat?project=viewer");
+      expect(urls.some((url) => new URL(url).pathname === "/api/orchestrator"), scenario.name).toBe(false);
+    }
+  });
+
   test("an unresolvable orchestrator is reported, not silently succeeded", async () => {
-    const seeded = harness({ orchestrator: { record: null, exists: false, defaultCwd: "/repo" } });
+    const seeded = harness({ orchestrator: { record: null, exists: false } });
     const report = await runConversationMonitor(seeded.deps, OPTIONS);
     expect(report.record.outcome).toBe("failed");
     expect(report.record.orchestrator.resolution).toBe("missing-record");
@@ -181,8 +245,8 @@ describe("conversation monitor run", () => {
     expect(seeded.runs.at(-1)!.outcome).toBe("failed");
   });
 
-  test("a record whose transcript is gone is stale, and reported as such once", async () => {
-    const seeded = harness({ orchestrator: { record: { conversationId: "conversation_dead", path: "/transcripts/gone.jsonl", createdAt: "2026-07-01T00:00:00Z" }, exists: false, defaultCwd: "/repo" } });
+  test("a seat whose transcript is gone is stale, and reported as such once", async () => {
+    const seeded = harness({ orchestrator: { record: { conversationId: "conversation_dead", path: "/transcripts/gone.jsonl", createdAt: "2026-07-01T00:00:00Z" }, exists: false } });
     const first = await runConversationMonitor(seeded.deps, OPTIONS);
     expect(first.record.orchestrator.resolution).toBe("stale-record");
     expect(first.record.outcome).toBe("failed");
@@ -295,7 +359,7 @@ describe("conversation monitor run", () => {
     expect(seeded.runs[0]!.window.hours).toBe(6);
   });
 
-  test("a recorded orchestrator with no live host is reported, never nudged", async () => {
+  test("a seated orchestrator with no live host is reported, never nudged", async () => {
     /* The exact failure this monitor exists to end: the previous mechanism
        delivered into a conversation that had had no host for over a day, and
        the send would have resumed it. */
@@ -327,11 +391,11 @@ describe("conversation monitor run", () => {
     expect(seeded.tasks.some((task) => monitorRefIn(task.text) === ORCHESTRATOR_ALERT_REF)).toBe(true);
   });
 
-  test("a path-pending record cannot be confirmed, so it is not resolved", async () => {
+  test("a path-pending seat cannot be confirmed, so it is not resolved", async () => {
     /* A spawn still settling has no transcript to probe. Believing it resolved
        is precisely the assumption that let the old monitor report delivery it
        never made. */
-    const seeded = harness({ orchestrator: { record: { conversationId: "conversation_new", path: null, createdAt: "2026-07-27T11:59:00Z" }, exists: true, defaultCwd: "/repo" } });
+    const seeded = harness({ orchestrator: { record: { conversationId: "conversation_new", path: null, createdAt: "2026-07-27T11:59:00Z" }, exists: true } });
     const report = await runConversationMonitor(seeded.deps, OPTIONS);
     expect(report.record.orchestrator.resolution).toBe("unavailable");
     expect(report.record.outcome).toBe("failed");

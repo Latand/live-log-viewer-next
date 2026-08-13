@@ -46,17 +46,35 @@ function stubFetch(responder: (url: string) => { status?: number; payload?: unkn
 }
 
 describe("viewer api client", () => {
-  test("resolves the orchestrator record and its liveness", async () => {
-    const { impl } = stubFetch(() => ({ payload: { record: { conversationId: "conversation_abc", path: "/x/y.jsonl", createdAt: "2026-07-01T00:00:00Z" }, exists: true, defaultCwd: "/repo" } }));
-    const status = await httpViewerApi({ baseUrl: "http://127.0.0.1:8898", fetchImpl: impl }).orchestrator();
+  test("resolves the project's active orchestrator seat and its liveness", async () => {
+    const { calls, impl } = stubFetch(() => ({ payload: {
+      seat: { conversationId: "conversation_abc", path: "/x/y.jsonl", designatedAt: "2026-07-01T00:00:00Z", activatedAt: "2026-07-01T00:01:00Z" },
+      pending: null,
+      exists: true,
+    } }));
+    const status = await httpViewerApi({ baseUrl: "http://127.0.0.1:8898", fetchImpl: impl }).orchestrator("viewer");
     expect(status.record?.conversationId).toBe("conversation_abc");
+    expect(status.record?.createdAt).toBe("2026-07-01T00:01:00Z");
     expect(status.exists).toBe(true);
+    expect(calls[0]!.url).toBe("http://127.0.0.1:8898/api/orchestrator/seat?project=viewer");
+    expect(calls.some((call) => new URL(call.url).pathname === "/api/orchestrator")).toBe(false);
   });
 
-  test("reads a null record without inventing one", async () => {
-    const { impl } = stubFetch(() => ({ payload: { record: null, exists: false, defaultCwd: "/repo" } }));
-    const status = await httpViewerApi({ baseUrl: "http://127.0.0.1:8898", fetchImpl: impl }).orchestrator();
+  test("reads a project with no seat without inventing one", async () => {
+    const { impl } = stubFetch(() => ({ payload: { seat: null, pending: null, exists: false } }));
+    const status = await httpViewerApi({ baseUrl: "http://127.0.0.1:8898", fetchImpl: impl }).orchestrator("viewer");
     expect(status.record).toBeNull();
+    expect(status.exists).toBe(false);
+  });
+
+  test("keeps a seated conversation when its transcript is stale", async () => {
+    const { impl } = stubFetch(() => ({ payload: {
+      seat: { conversationId: "conversation_stale", path: "/x/gone.jsonl", designatedAt: "2026-07-01T00:00:00Z", activatedAt: "2026-07-01T00:01:00Z" },
+      pending: null,
+      exists: false,
+    } }));
+    const status = await httpViewerApi({ baseUrl: "http://127.0.0.1:8898", fetchImpl: impl }).orchestrator("viewer");
+    expect(status.record?.conversationId).toBe("conversation_stale");
     expect(status.exists).toBe(false);
   });
 
