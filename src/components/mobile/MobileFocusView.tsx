@@ -7,6 +7,7 @@ import { Loader2, X } from "@/components/icons";
 import { TaskSheet, type TaskSheetView } from "@/components/tasks/TaskSheet";
 import { taskRelationsByPath } from "@/components/tasks/taskRelations";
 import { useBoardState } from "@/hooks/useBoardState";
+import { useKeyboardInset } from "@/hooks/useComposer";
 import { selectionInOrder, viewBus } from "@/hooks/viewPresenceBus";
 import { projectDisplayName } from "@/lib/displayNames";
 import type { Flow } from "@/lib/flows/types";
@@ -139,6 +140,17 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
      (#771). Same store the desktop board and the dashboard bind — stores are
      refcounted per project, so this is the same instance, never a copy. */
   const board = useBoardState(project);
+  /* The on-screen keyboard's overlap with this full-height root (#983). iOS
+     Safari ignores interactive-widget=resizes-content, so with the keyboard up
+     this 100dvh column kept its full height and the keyboard covered its
+     bottom — the composer's picker/send controls included. The browser then
+     scrolled the WINDOW to reach the focused field, hiding the header, and
+     re-asserted that scroll against every manual gesture (the snap-back:
+     an overflow-hidden root gives a gesture nothing else to move). Padding
+     the overlap away keeps the whole column inside the visible area, so the
+     browser has no reason to touch the window scroll at all. Zero whenever
+     the layout viewport already matches the visible one. */
+  const kbInset = useKeyboardInset();
   const [focusPath, setFocusPath] = useState<string | null>(null);
   const [mapOpen, setMapOpen] = useState(false);
   const [pipelineSheetOpen, setPipelineSheetOpen] = useState(false);
@@ -427,6 +439,7 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
          least this share of the usable viewport before the keyboard opens. */
       data-chat-min-share={MIN_TRANSCRIPT_SHARE}
       className="relative flex h-full max-h-[100dvh] min-h-0 min-w-0 max-w-[100dvw] flex-1 flex-col overflow-hidden overflow-x-clip"
+      style={kbInset > 0 ? { paddingBottom: kbInset } : undefined}
     >
       {/* Same runtime connection pill as desktop, compact, one thumb away.
           Renders nothing while slice-one is disabled. */}

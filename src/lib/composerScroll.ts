@@ -26,3 +26,31 @@ export function caretAtEnd(selectionStart: number, selectionEnd: number, length:
 export function shouldPin({ pinned, caretAtEnd }: { pinned: boolean; caretAtEnd: boolean }): boolean {
   return pinned || caretAtEnd;
 }
+
+/** The slice of `window.visualViewport` the viewport budget reads. */
+export interface VisualViewportSize {
+  height: number;
+  scale: number;
+}
+
+/** The height actually visible to the user, in layout px (#983). iOS Safari
+    ignores interactive-widget=resizes-content: the on-screen keyboard leaves
+    `window.innerHeight` at the full screen height and shrinks only the visual
+    viewport, so the visible budget must come from there when the browser
+    reports one. Multiplying by `scale` cancels pinch zoom — zoomed in, the
+    visual viewport narrows without any keyboard, and the layout budget must
+    not shrink with it. Clamped to the layout height so rounding noise can
+    never claim MORE than the layout viewport. */
+export function visibleViewportHeight(layoutHeight: number, visual: VisualViewportSize | null | undefined): number {
+  if (!visual) return layoutHeight;
+  return Math.min(layoutHeight, Math.round(visual.height * visual.scale));
+}
+
+/** The on-screen keyboard's overlap with the layout viewport, in px — the
+    bottom slice of a full-height (h-dvh / 100dvh) surface the keyboard covers.
+    Zero with the keyboard closed, when the browser shrinks the layout viewport
+    itself (interactive-widget=resizes-content honored), or with no
+    visualViewport at all. */
+export function keyboardInset(layoutHeight: number, visual: VisualViewportSize | null | undefined): number {
+  return Math.max(0, layoutHeight - visibleViewportHeight(layoutHeight, visual));
+}

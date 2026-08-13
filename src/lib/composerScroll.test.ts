@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { caretAtEnd, clampHeight, shouldPin } from "./composerScroll";
+import { caretAtEnd, clampHeight, keyboardInset, shouldPin, visibleViewportHeight } from "./composerScroll";
 
 describe("clampHeight grows to fit then caps", () => {
   test("adds the 2px border allowance below the cap", () => {
@@ -45,5 +45,40 @@ describe("shouldPin — keep the newest text visible only when appending", () =>
   test("typing pins only when the caret is at the end", () => {
     expect(shouldPin({ pinned: false, caretAtEnd: true })).toBe(true);
     expect(shouldPin({ pinned: false, caretAtEnd: false })).toBe(false);
+  });
+});
+
+describe("visibleViewportHeight — the keyboard-aware layout budget (#983)", () => {
+  test("no visualViewport falls back to the layout viewport", () => {
+    expect(visibleViewportHeight(800, null)).toBe(800);
+    expect(visibleViewportHeight(800, undefined)).toBe(800);
+  });
+
+  test("an open keyboard (iOS: layout viewport unchanged) shrinks the budget", () => {
+    expect(visibleViewportHeight(800, { height: 400, scale: 1 })).toBe(400);
+  });
+
+  test("pinch zoom cancels out: scale restores the layout-px measure", () => {
+    expect(visibleViewportHeight(800, { height: 400, scale: 2 })).toBe(800);
+  });
+
+  test("rounding noise never exceeds the layout viewport", () => {
+    expect(visibleViewportHeight(800, { height: 400.4, scale: 2 })).toBe(800);
+  });
+});
+
+describe("keyboardInset — the keyboard's overlap with a 100dvh surface (#983)", () => {
+  test("the iOS keyboard's slice of the layout viewport", () => {
+    expect(keyboardInset(800, { height: 448, scale: 1 })).toBe(352);
+  });
+
+  test("zero when the viewports agree (keyboard closed, or resizes-content honored)", () => {
+    expect(keyboardInset(800, { height: 800, scale: 1 })).toBe(0);
+    expect(keyboardInset(391, { height: 391, scale: 1 })).toBe(0);
+  });
+
+  test("zero without visualViewport and never negative", () => {
+    expect(keyboardInset(800, null)).toBe(0);
+    expect(keyboardInset(800, { height: 801, scale: 1 })).toBe(0);
   });
 });
