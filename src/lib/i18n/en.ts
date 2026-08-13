@@ -1635,12 +1635,6 @@ export const en = {
   "catalog.retry": "Retry",
   "catalog.attempts": { one: "{count} failed attempt", other: "{count} failed attempts" },
 
-  // OrchestratorChatButton
-  "orch.chat": "Orchestrator",
-  "orch.open": "Open the orchestrator chat",
-  "orch.starting": "Starting…",
-  "orch.error": "Couldn't open the orchestrator — tap to retry",
-
   "launch.account": "Account",
   "launch.reasoning": "Reasoning",
 

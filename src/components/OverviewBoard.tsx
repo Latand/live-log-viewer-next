@@ -11,7 +11,6 @@ import type { Pipeline } from "@/lib/pipelines/types";
 import type { Workflow } from "@/lib/workflows/types";
 
 import { CatalogFailureNotice } from "./CatalogFailureNotice";
-import { OrchestratorChatButton } from "./OrchestratorChatButton";
 import { buildBranchGroups, buildProjectSummaries, projectKey } from "./projectModel";
 import { activityDot, cleanTitle, engineBadge, fmtAge } from "./utils";
 
@@ -99,7 +98,7 @@ export function OverviewBoard({ files, projectCatalog, projectDisplayNames = {},
         <h1 className="min-w-0 shrink truncate text-[13.5px] font-bold">{t("rail.overview")}</h1>
         {/* Issue #701: the subtitle is dropped below 360px instead of wrapping
             into this fixed 40px bar, where it overprinted the title and the
-            Orchestrator button and pushed the board past the viewport. Above
+            header actions and pushed the board past the viewport. Above
             360px it truncates rather than growing the row. */}
         <span
           className={`hidden min-w-0 shrink truncate text-[11.5px] min-[360px]:block ${degraded ? "font-semibold text-danger" : "text-muted"}`}
@@ -115,7 +114,6 @@ export function OverviewBoard({ files, projectCatalog, projectDisplayNames = {},
           {!degraded && archivedCount ? ` ${t("overview.archived", { count: archivedCount })}` : ""}
         </span>
         <span className="ml-auto flex shrink-0 items-center gap-2">
-          <OrchestratorChatButton />
           {attention}
         </span>
       </div>

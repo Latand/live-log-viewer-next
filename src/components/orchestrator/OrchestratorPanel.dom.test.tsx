@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 
 import { emptyStore } from "@/components/runtime/runtimeModel";
 import { setLocale } from "@/lib/i18n";
-import { ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
+import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
 import type { FileEntry } from "@/lib/types";
 
 /*
@@ -240,7 +240,9 @@ test("an unedited mandate records the approved prompt version", async () => {
   await settle();
   flushSync(() => confirmButton(host).click());
   await settle();
-  expect(seatPosts[0]!.promptVersion).toBe(3);
+  /* Whatever the approved prompt currently is — the panel reports the
+     constant, never a number of its own. */
+  expect(seatPosts[0]!.promptVersion).toBe(ORCHESTRATOR_PROMPT_VERSION);
 });
 
 test("a double-click designates ONCE and a retry after a lost reply replays the same key", async () => {

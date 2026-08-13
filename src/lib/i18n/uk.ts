@@ -1587,11 +1587,6 @@ export const uk: Record<keyof typeof en, Message> = {
     other: "{count} невдалих спроб",
   },
 
-  "orch.chat": "Оркестратор",
-  "orch.open": "Відкрити чат оркестратора",
-  "orch.starting": "Запускаю…",
-  "orch.error": "Не вдалося відкрити оркестратора — торкніться, щоб повторити",
-
   "launch.account": "Обліковий запис",
   "launch.reasoning": "Міркування",
 

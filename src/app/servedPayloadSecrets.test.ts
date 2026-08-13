@@ -92,7 +92,11 @@ beforeAll(async () => {
   const stateDir = path.join(sandbox, "state");
   const port = await freePort();
   origin = `http://127.0.0.1:${port}`;
-  server = Bun.spawn(["bunx", "next", "start", "--hostname", "127.0.0.1", "--port", String(port)], {
+  /* The SAME command `package.json` starts the viewer with. `bunx next start`
+     hands the server to node, where the instrumentation hook dies on "SQLite
+     state stores require the Bun runtime" — every request 500s and the
+     assertions below read that error page instead of a served payload. */
+  server = Bun.spawn(["bun", "--bun", "node_modules/.bin/next", "start", "--hostname", "127.0.0.1", "--port", String(port)], {
     cwd: process.cwd(),
     env: {
       ...process.env,
@@ -208,22 +212,22 @@ test("no build artifact carries the per-process agent capability", () => {
   }
 });
 
-test("ONE CLICK, END TO END: a bare same-origin request designates a manager on the real build", async () => {
-  /* The invariant the ceremony removal is for, proven against the ARTIFACT rather
-     than in-process — which is the only place the last mechanism's failure was
-     visible at all (Next compiles each route into its own bundle, the secret was
+test("the retired legacy designation entry is gone from the real build", async () => {
+  /* PRD #976 slice D (issue #980). This used to prove one-click designation end to
+     end against the ARTIFACT — the only place the ceremony mechanism's failure was
+     ever visible (Next compiles each route into its own bundle, the secret was
      module state, and the operator's own key got a 403 from the route it was minted
-     for). Nothing is presented here: no key, no cookie, no capability. */
-  const response = await fetch(`${origin}/api/orchestrator`, {
+     for). The global designation entry is retired, so what the artifact must now
+     show is its ABSENCE: creation happens through the seat routes and MCP
+     `create_orchestrator` alone. The status GET stays — the browser's
+     `managerIdentity` still reads the record through it until slice E. */
+  const designate = await fetch(`${origin}/api/orchestrator`, {
     method: "POST",
     headers: { "content-type": "application/json", origin, "sec-fetch-site": "same-origin" },
     body: JSON.stringify({ conversationId: "conversation_served_payload_one_click", path: null }),
   });
+  expect(designate.status).toBe(405);
 
-  expect(response.status).toBe(200);
-  expect(await response.json()).toMatchObject({
-    ok: true,
-    adopted: true,
-    record: { conversationId: "conversation_served_payload_one_click" },
-  });
+  const status = await fetch(`${origin}/api/orchestrator`, { headers: { origin, "sec-fetch-site": "same-origin" } });
+  expect(status.status).toBe(200);
 });
