@@ -21,51 +21,20 @@
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import { chromium, type Page } from "playwright-core";
 
+import { createCaptureDirectory } from "./capture-directory";
 import { demoPort } from "./demo-capture";
 
-const CAPTURE_PREFIX = "llv-issue-977";
 const REPO_ROOT = path.resolve(import.meta.dir, "..");
-
-function createCaptureRoot(raw: string | undefined): string {
-  const tempRoot = fs.realpathSync(os.tmpdir());
-  const home = fs.existsSync(os.homedir()) ? fs.realpathSync(os.homedir()) : path.resolve(os.homedir());
-  const repo = fs.realpathSync(REPO_ROOT);
-  const overlaps = (candidate: string, protectedPath: string) =>
-    candidate === protectedPath
-    || candidate.startsWith(protectedPath + path.sep)
-    || protectedPath.startsWith(candidate + path.sep);
-
-  if (tempRoot === path.parse(tempRoot).root || [home, repo].some((protectedPath) => overlaps(tempRoot, protectedPath))) {
-    throw new Error(`TMPDIR refused ${tempRoot}: capture temp root overlaps a protected filesystem location`);
-  }
-  if (raw === undefined) return fs.mkdtempSync(path.join(tempRoot, `${CAPTURE_PREFIX}-`));
-
-  const requested = path.resolve(raw);
-  let resolved: string;
-  try {
-    resolved = fs.realpathSync(requested);
-  } catch {
-    throw new Error(`ORCH_CAPTURE_DIR refused ${requested}: override must name an existing directory`);
-  }
-  if (!fs.statSync(resolved).isDirectory()) {
-    throw new Error(`ORCH_CAPTURE_DIR refused ${requested}: override must name a directory`);
-  }
-  if (resolved === tempRoot || !resolved.startsWith(tempRoot + path.sep)) {
-    throw new Error(`ORCH_CAPTURE_DIR refused ${requested} (resolved to ${resolved}): override must be a descendant of ${tempRoot}`);
-  }
-  if (!path.basename(resolved).startsWith(`${CAPTURE_PREFIX}-`)) {
-    throw new Error(`ORCH_CAPTURE_DIR refused ${requested}: override leaf must start with ${CAPTURE_PREFIX}-`);
-  }
-
-  return fs.mkdtempSync(path.join(resolved, `${CAPTURE_PREFIX}-`));
-}
-
-const BASE = createCaptureRoot(process.env.ORCH_CAPTURE_DIR);
+const BASE = createCaptureDirectory({
+  envName: "ORCH_CAPTURE_DIR",
+  prefix: "llv-issue-977",
+  raw: process.env.ORCH_CAPTURE_DIR,
+  repoRoot: REPO_ROOT,
+});
 const HOME = path.join(BASE, "home");
 const OUT_DIR = path.join(BASE, "out");
 const REPO_DIR = path.join(HOME, "Projects", "atlas");
@@ -184,6 +153,7 @@ async function main(): Promise<void> {
   const baseUrl = `http://127.0.0.1:${port}`;
   const repoRoot = path.resolve(import.meta.dir, "..");
   seedHome();
+  console.log(`screenshots: ${OUT_DIR}`);
   /* `package.json`'s own start command. `bunx next start` hands the server to
      node, where the instrumentation hook dies on "SQLite state stores require
      the Bun runtime" and every request 500s — see
@@ -279,6 +249,7 @@ async function main(): Promise<void> {
         await context.close();
       }
     }
+    console.log(`screenshots: ${OUT_DIR}`);
   } finally {
     await browser.close();
     server.kill("SIGTERM");

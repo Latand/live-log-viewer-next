@@ -20,7 +20,10 @@ bun run build
 bun scripts/capture-issue-963-attention.ts
 ```
 
-Shots land in `/tmp/llv-issue-963/out`.
+The run prints its resolved absolute `screenshots:` directory. The stable
+`<system-temp>/llv-issue-963-latest/out` link resolves to the newest run; when
+`ATTENTION_CAPTURE_DIR` selects an accepted parent, that parent contains the
+same `llv-issue-963-latest/out` link.
 
 | Capture | What it showed |
 | --- | --- |

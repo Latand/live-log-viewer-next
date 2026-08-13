@@ -85,10 +85,31 @@ test("an accepted override remains intact and receives a fresh capture-owned chi
     runCapture(sandbox, override);
 
     expect(fs.readFileSync(sentinel, "utf8")).toBe("keep");
-    const runs = fs.readdirSync(override).filter((entry) => entry.startsWith("llv-issue-977-"));
+    const runs = fs.readdirSync(override).filter((entry) =>
+      fs.lstatSync(path.join(override, entry)).isDirectory());
+    const latest = path.join(override, "llv-issue-977-latest");
     expect(runs).toHaveLength(1);
     expect(fs.statSync(path.join(override, runs[0], "home")).isDirectory()).toBe(true);
     expect(fs.statSync(path.join(override, runs[0], "out")).isDirectory()).toBe(true);
+    expect(fs.lstatSync(latest).isSymbolicLink()).toBe(true);
+    expect(fs.realpathSync(latest)).toBe(path.join(override, runs[0]));
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("an empty override behaves as unset and publishes the default latest link", () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-capture-empty-"));
+  const sanctionedTemp = path.join(sandbox, "sanctioned-temp");
+
+  try {
+    runCapture(sandbox, "");
+
+    const latest = path.join(sanctionedTemp, "llv-issue-977-latest");
+    expect(fs.lstatSync(latest).isSymbolicLink()).toBe(true);
+    const run = fs.realpathSync(latest);
+    expect(path.dirname(run)).toBe(fs.realpathSync(sanctionedTemp));
+    expect(fs.statSync(path.join(run, "out")).isDirectory()).toBe(true);
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
