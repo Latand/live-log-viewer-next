@@ -1,25 +1,30 @@
-# Issue #151: Route the delivery queue through structured hosts
+# Issue #1005: Orchestrator context policy registry alignment
 
-Persist structured-session composer messages in the runtime journal before actuation and deliver them through `EngineHost.send`.
+## Task statement
+
+Derive Claude orchestrator context-window policy from the scanner model registry through `normalizeModelKey` and `registryWindow`. Keep the 50% rotation threshold and an operator-readable policy audit name. Models without a registry entry must retain an unknown threshold.
 
 ## Acceptance criteria
 
-AC1: Structured Codex and Claude messages enter the durable runtime journal before engine actuation.
+AC1: `fable-5` resolves to a 1,000,000-token window, and 129,000 reported tokens render as 13% with no rotation recommendation.
 
-AC2: Each conversation drains in FIFO order while independent conversations can progress concurrently.
+AC2: `sonnet-5` resolves to a 1,000,000-token window.
 
-AC3: Codex delivery uses the queue entry ID as its client message ID and preserves idle and active turn fences across races and retries.
+AC3: registered Opus models retain a 1,000,000-token window and a 500,000-token rotation threshold.
 
-AC4: Claude delivery uses its durable replay ledger so recovery cannot duplicate engine writes.
+AC4: `haiku-4-5` resolves to a 200,000-token window and a 100,000-token rotation threshold.
 
-AC5: Migration-held structured messages drain through the runtime journal and remain fenced until durable structured completion.
+AC5: a model absent from the registry resolves to a null policy, and callers report that its threshold is unknown.
 
-AC6: Explicit `tmux-legacy` sessions retain the existing tmux delivery path.
+AC6: the policy audit name identifies the normalized registry key and resolved window so rotation banner wording remains meaningful.
 
-AC7: Queued, delivering, delivered, and failed receipt states remain observable and recoverable after process loss.
+AC7: `ROTATION_THRESHOLD_FRACTION` remains `0.5`.
+
+AC8: the focused orchestrator health tests and TypeScript compilation pass.
 
 ## Validation gates
 
+- `bun test src/lib/orchestrator/health.test.ts`
 - `bunx tsc --noEmit`
-- `bun test`
 - `git diff --check`
+- `bun scripts/privacy-publication-gate.ts --base <captured-base>`
