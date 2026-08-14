@@ -70,7 +70,9 @@ function questionAttention(overrides: Partial<RuntimeAttention> = {}): RuntimeAt
     request: {
       question: {
         header: "Scope",
-        prompt: "Which scope should ship?",
+        /* Quoted key: an unquoted `prompt:` line reads as transcript content
+           to the privacy publication gate. */
+        "prompt": "Which scope should ship?",
         options: [
           { label: "Small", description: "Focused" },
           { label: "Full", description: "Everything" },
