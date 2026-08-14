@@ -1,25 +1,30 @@
-# Issue #151: Route the delivery queue through structured hosts
+# Issue #1006: Recover conversations owned by dead stage hosts
 
-Persist structured-session composer messages in the runtime journal before actuation and deliver them through `EngineHost.send`.
+Restore messaging for a pipeline-stage Codex conversation after its structured host exits without releasing ownership. Reconcile ownership only when the recorded host process is provably gone, then let the existing send and resume path claim a fresh viewer-owned structured host and deliver the queued message.
 
 ## Acceptance criteria
 
-AC1: Structured Codex and Claude messages enter the durable runtime journal before engine actuation.
+AC1: Send admission detects a stale structured-host claim whose recorded process identity is provably dead and releases that claim before recovery.
 
-AC2: Each conversation drains in FIFO order while independent conversations can progress concurrently.
+AC2: A send to a completed pipeline-stage conversation with a dead host proceeds through a fresh structured-host claim and reaches the delivery queue.
 
-AC3: Codex delivery uses the queue entry ID as its client message ID and preserves idle and active turn fences across races and retries.
+AC3: Startup reconciliation releases stale dead-host ownership for terminal or superseded structured conversations.
 
-AC4: Claude delivery uses its durable replay ledger so recovery cannot duplicate engine writes.
+AC4: Periodic runtime reconciliation releases the same stale ownership when the viewer remains running after the stage host disappears.
 
-AC5: Migration-held structured messages drain through the runtime journal and remain fenced until durable structured completion.
+AC5: Live owners and unverifiable process identities remain fenced from takeover.
 
-AC6: Explicit `tmux-legacy` sessions retain the existing tmux delivery path.
+AC6: Recovery uses the existing structured send and resume path without adding a new UI surface or changing explicit legacy delivery.
 
-AC7: Queued, delivering, delivered, and failed receipt states remain observable and recoverable after process loss.
+AC7: Runtime-state tests use isolated temporary state and cover stage completion, unclean host loss, retained ownership, fresh claiming, and successful message enqueueing.
+
+AC8: Focused tests, TypeScript type checking, scoped linting, diff checks, and publication privacy checks pass.
 
 ## Validation gates
 
+- `bun test src/lib/runtime/structuredMessageDelivery.test.ts src/lib/runtime/startup.test.ts src/lib/reaperRuntime.test.ts src/lib/runtime/structuredRecovery.test.ts`
 - `bunx tsc --noEmit`
-- `bun test`
+- Scoped ESLint over changed TypeScript files
 - `git diff --check`
+- `bun scripts/privacy-publication-gate.ts --base origin/main`
+- `bun run privacy:check`
