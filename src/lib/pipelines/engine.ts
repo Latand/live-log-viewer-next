@@ -1219,6 +1219,43 @@ function advancePipeline(pipeline: Pipeline, stage: PipelineStage, ports: Pipeli
   pipeline.pausedState = null;
 }
 
+function keepPassedStageUnpublished(
+  pipeline: Pipeline,
+  attempt: PipelineStageAttempt,
+  detail: string,
+): void {
+  const message = `passed but unpublished: ${detail}`;
+  attempt.error = message;
+  pipeline.state = "running";
+  pipeline.stateDetail = message;
+}
+
+/** A terminal pass cannot close until its accepted revision is remotely
+    durable. The pass receipt stays terminal and the committing cursor becomes
+    a publication retry seam, so later ticks never rerun or reset stage work. */
+function retryTerminalStagePublication(
+  pipeline: Pipeline,
+  stage: PipelineStage,
+  attempt: PipelineStageAttempt,
+  ports: PipelinePorts,
+): void {
+  const published = publishPipelineBranch(pipeline, ports.exec, {
+    acceptedSha: pipeline.lastPassedCommit,
+    publishedSha: pipeline.publishedCommit ?? null,
+  });
+  if (!published.ok) {
+    park(pipeline, `publishing the passed stage: ${published.error}`, attempt);
+    return;
+  }
+  if (published.remote === "unreachable") {
+    keepPassedStageUnpublished(pipeline, attempt, published.detail);
+    return;
+  }
+  pipeline.publishedCommit = published.remote === "published" ? published.sha : null;
+  attempt.error = null;
+  advancePipeline(pipeline, stage, ports, attempt);
+}
+
 /** Attempts of the fail edge's target that this stage's fail edge activated —
     the derived (never stored) loop budget, so counts cannot drift from the
     durable evidence. */
@@ -1279,7 +1316,14 @@ function commitPassedStage(
   pipeline.publishedCommit = published.remote === "published" ? published.sha : null;
   attempt.state = "passed";
   attempt.completedAt = ports.now();
+  if (published.remote === "unreachable" && stage.next === null) {
+    keepPassedStageUnpublished(pipeline, attempt, published.detail);
+    return;
+  }
   advancePipeline(pipeline, stage, ports, attempt);
+  if (published.remote === "unreachable") {
+    keepPassedStageUnpublished(pipeline, attempt, published.detail);
+  }
 }
 
 /** One-shot settlement of a completed stage turn. Semantic contradictions park
@@ -1385,6 +1429,11 @@ async function tickRunStage(
     ? newAttempt(pipeline, stage)
     : prior ?? newAttempt(pipeline, stage);
   if (!attempt || pipeline.state === "needs_decision") return;
+
+  if (attempt.state === "passed" && pipeline.cursor?.state === "committing") {
+    retryTerminalStagePublication(pipeline, stage, attempt, ports);
+    return;
+  }
 
   if (attempt.state === "committing") {
     commitPassedStage(pipeline, stage, attempt, ports);
@@ -1646,25 +1695,44 @@ export function reviewNote(pipeline: Pipeline, stage: PipelineStage, role: Effec
  * null so the remote is genuinely probed, which is what makes a stale or
  * migrated record safe. Publication itself stays fast-forward-only.
  */
-function publishReviewIngressHead(pipeline: Pipeline, attempt: PipelineStageAttempt, ports: PipelinePorts): string | null {
+function publishReviewIngressHead(
+  pipeline: Pipeline,
+  attempt: PipelineStageAttempt,
+  ports: PipelinePorts,
+): { ok: true } | { ok: false; retryable: boolean; detail: string } {
   const expected = attempt.expectedReviewHeadSha;
-  if (!expected) return "review-loop stage requires a verified pipeline commit";
+  if (!expected) return { ok: false, retryable: false, detail: "review-loop stage requires a verified pipeline commit" };
 
   const local = currentPipelineBranchHead(pipeline, ports.exec);
-  if (!local.ok) return `review stage could not verify the pipeline head before publishing: ${local.error}`;
+  if (!local.ok) {
+    return { ok: false, retryable: false, detail: `review stage could not verify the pipeline head before publishing: ${local.error}` };
+  }
   if (local.sha !== expected) {
-    return `review stage head mismatch: the accepted review head is ${expected}, but the pipeline worktree is at ${local.sha}; nothing was published`;
+    return {
+      ok: false,
+      retryable: false,
+      detail: `review stage head mismatch: the accepted review head is ${expected}, but the pipeline worktree is at ${local.sha}; nothing was published`,
+    };
   }
 
   /* `publishedSha` is deliberately omitted: ingress probes the remote for real
      rather than trusting a durable record that may be stale or migrated. */
   const published = publishPipelineBranch(pipeline, ports.exec, { acceptedSha: expected });
-  if (!published.ok) return `review stage could not publish the accepted head ${expected}: ${published.error}`;
+  if (!published.ok) {
+    return { ok: false, retryable: false, detail: `review stage could not publish the accepted head ${expected}: ${published.error}` };
+  }
+  if (published.remote === "unreachable") {
+    return { ok: false, retryable: true, detail: `passed but unpublished: ${published.detail}` };
+  }
   if (published.remote === "unavailable") {
-    return `review stage requires a published pipeline branch, but this repository has no origin remote to publish ${expected} to`;
+    return {
+      ok: false,
+      retryable: false,
+      detail: `review stage requires a published pipeline branch, but this repository has no origin remote to publish ${expected} to`,
+    };
   }
   pipeline.publishedCommit = published.sha;
-  return null;
+  return { ok: true };
 }
 
 async function tickReviewStage(
@@ -1679,6 +1747,10 @@ async function tickReviewStage(
     ? newAttempt(pipeline, stage)
     : prior ?? newAttempt(pipeline, stage);
   if (!attempt || pipeline.state === "needs_decision") return;
+  if (attempt.state === "passed" && pipeline.cursor?.state === "committing") {
+    retryTerminalStagePublication(pipeline, stage, attempt, ports);
+    return;
+  }
   if (attempt.state === "committing") {
     const fenceError = reviewHeadFenceError(pipeline, attempt, ports);
     if (fenceError) {
@@ -1707,11 +1779,19 @@ async function tickReviewStage(
   }
 
   if (!attempt.flowId) {
-    const ingressError = publishReviewIngressHead(pipeline, attempt, ports);
-    if (ingressError) {
-      park(pipeline, ingressError, attempt);
+    const ingress = publishReviewIngressHead(pipeline, attempt, ports);
+    if (!ingress.ok) {
+      if (ingress.retryable) {
+        attempt.error = ingress.detail;
+        pipeline.state = "running";
+        pipeline.stateDetail = ingress.detail;
+        return;
+      }
+      park(pipeline, ingress.detail, attempt);
       return;
     }
+    attempt.error = null;
+    pipeline.stateDetail = null;
     persist();
     const existing = ports.findFlow(implementer.agentPath, implementer.conversationId, pipeline.baseRef, attempt.expectedReviewHeadSha);
     if (existing) {

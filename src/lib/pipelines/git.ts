@@ -142,7 +142,31 @@ export function currentPipelineRemoteBranchHead(pipeline: Pipeline, exec: ExecPo
 
 export type PipelinePublishResult =
   | { ok: true; sha: string; remote: "published" | "unavailable" }
+  | { ok: true; sha: string; remote: "unreachable"; detail: string }
   | { ok: false; error: string };
+
+const REMOTE_READ_TIMEOUT = "5s";
+
+/** A publication tick gets one bounded remote read. The engine tick is already
+    the retry loop, so retrying or sleeping inside this synchronous adapter only
+    multiplies event-loop stalls. `timeout` exists in both the runtime image and
+    the Linux host namespace used by agent shims. */
+function readRemotePipelineBranch(
+  pipeline: Pipeline,
+  exec: ExecPort,
+  step: string,
+): { ok: true; sha: string } | { ok: false; error: string } {
+  const result = exec(
+    "timeout",
+    ["--signal=KILL", REMOTE_READ_TIMEOUT, "git", "ls-remote", "--heads", "origin", `refs/heads/${pipeline.branch}`],
+    pipeline.worktreeDir,
+  );
+  if (result.code === 0) return { ok: true, sha: result.stdout.trim().split(/\s+/)[0] ?? "" };
+  if (result.code === 124 || result.code === 137) {
+    return { ok: false, error: `${step}: git remote read timed out after ${REMOTE_READ_TIMEOUT}` };
+  }
+  return failure(step, result);
+}
 
 export interface PipelinePublishRequest {
   /** The immutable revision the pipeline accepted. This exact object is what
@@ -191,9 +215,9 @@ export function publishPipelineBranch(pipeline: Pipeline, exec: ExecPort, reques
   const origin = exec("git", ["remote", "get-url", "origin"], pipeline.worktreeDir);
   if (origin.code !== 0 || !origin.stdout.trim()) return { ok: true, sha: acceptedSha, remote: "unavailable" };
 
-  const probe = exec("git", ["ls-remote", "--heads", "origin", `refs/heads/${pipeline.branch}`], pipeline.worktreeDir);
-  if (probe.code !== 0) return failure("checking the remote pipeline branch", probe);
-  const remoteSha = probe.stdout.trim().split(/\s+/)[0] ?? "";
+  const probe = readRemotePipelineBranch(pipeline, exec, "checking the remote pipeline branch");
+  if (!probe.ok) return { ok: true, sha: acceptedSha, remote: "unreachable", detail: probe.error };
+  const remoteSha = probe.sha;
   if (remoteSha === acceptedSha) return { ok: true, sha: acceptedSha, remote: "published" };
   if (remoteSha) {
     if (!/^[0-9a-f]{40}$/i.test(remoteSha)) return { ok: false, error: "the remote pipeline branch has no exact commit SHA" };
@@ -223,9 +247,9 @@ export function publishPipelineBranch(pipeline: Pipeline, exec: ExecPort, reques
 
   const push = exec("git", ["push", "origin", `${acceptedSha}:refs/heads/${pipeline.branch}`], pipeline.worktreeDir);
   if (push.code !== 0) return failure("publishing the pipeline branch", push);
-  const confirm = exec("git", ["ls-remote", "--heads", "origin", `refs/heads/${pipeline.branch}`], pipeline.worktreeDir);
-  if (confirm.code !== 0) return failure("confirming the published pipeline branch", confirm);
-  const publishedHead = confirm.stdout.trim().split(/\s+/)[0] ?? "";
+  const confirm = readRemotePipelineBranch(pipeline, exec, "confirming the published pipeline branch");
+  if (!confirm.ok) return { ok: true, sha: acceptedSha, remote: "unreachable", detail: confirm.error };
+  const publishedHead = confirm.sha;
   if (publishedHead !== acceptedSha) {
     return { ok: false, error: `publishing the pipeline branch did not land: origin/${pipeline.branch} is ${publishedHead || "absent"}, expected ${acceptedSha}` };
   }

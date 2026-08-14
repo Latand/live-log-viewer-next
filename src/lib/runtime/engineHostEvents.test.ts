@@ -65,6 +65,32 @@ describe("projectEngineHostEvent", () => {
     });
   });
 
+  test("attention resolutions carry the attentionId every reducer keys on (#765)", () => {
+    /* The journal prunes by `payload.attentionId` and the client store reads
+       the same field; a payload carrying only `id` retired the card nowhere. */
+    expect(projectEngineHostEvent("conversation_four", "claude:session-two", {
+      kind: "attention-resolved",
+      id: "attention-four",
+      resolution: "server-resolved",
+      seq: 13,
+    })).toMatchObject({
+      kind: "attention-resolved",
+      payload: { attentionId: "attention-four", id: "attention-four", conversationId: "conversation_four", state: "resolved" },
+    });
+  });
+
+  test("a turn-ended resolution retires the question as cancelled, not answered (#765)", () => {
+    expect(projectEngineHostEvent("conversation_five", "claude:session-three", {
+      kind: "attention-resolved",
+      id: "attention-five",
+      resolution: "turn-ended",
+      seq: 17,
+    })).toMatchObject({
+      kind: "attention-resolved",
+      payload: { attentionId: "attention-five", state: "cancelled", resolution: "turn-ended" },
+    });
+  });
+
   test("projects the full terminal assistant response separately from the bounded UI item", () => {
     const text = `${"🙂界".repeat(40_000)}\n`;
     const projected = projectEngineHostEvent("conversation_voice", "codex:thread-voice", {

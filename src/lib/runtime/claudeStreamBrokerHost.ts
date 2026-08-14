@@ -1017,6 +1017,22 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       ? "interrupted"
       : message.subtype === "success" ? "completed" : "error";
     this.emit({ kind: "turn-ended", turnId, status });
+    /* Issue #765: a `result` proves the CLI's turn is over, so any control
+       request it left unanswered can never be answered — the await behind it
+       died with the turn. Claude sends no `control_cancel_request` on this
+       path (an interrupt cuts the turn, not the request), which stranded the
+       question card as pinned-forever "awaiting input". Retire the leftovers
+       the same way an explicit cancellation does. */
+    for (const attentionId of this.attentions.keys()) {
+      const pending = this.pendingAnswers.get(attentionId);
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.pendingAnswers.delete(attentionId);
+        pending.reject(new Error("Claude attention expired with its turn before answer confirmation"));
+      }
+      this.emit({ kind: "attention-resolved", id: attentionId, resolution: "turn-ended" });
+    }
+    this.attentions.clear();
     this.activeTurnId = this.turnQueue[0] ?? null;
     if (this.activeTurnId) this.emit({ kind: "turn-started", turnId: this.activeTurnId });
     else this.emit({ kind: "session-status", status: "idle" });

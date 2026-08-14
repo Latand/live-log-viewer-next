@@ -169,7 +169,22 @@ export function projectEngineHostEvent(
     };
   }
   if (event.kind === "attention-resolved") {
-    return { ...base, kind: "attention-resolved", payload: { id: event.id, conversationId, state: "resolved", resolution: event.resolution } };
+    /* `attentionId` is the field every reducer keys on (the journal's own
+       answer path writes it; the client store reads it). Emitting only `id`
+       here meant an engine-originated resolution — a CLI cancellation, an
+       answer typed in the terminal, a turn ending past the question — never
+       retired the card anywhere (#765). `id` stays for older readers. */
+    return {
+      ...base,
+      kind: "attention-resolved",
+      payload: {
+        id: event.id,
+        attentionId: event.id,
+        conversationId,
+        state: event.resolution === "turn-ended" ? "cancelled" : "resolved",
+        resolution: event.resolution,
+      },
+    };
   }
   if (event.kind === "limits") {
     return { ...base, kind: "limits", payload: { conversationId, snapshot: boundedValue(event.snapshot) } };

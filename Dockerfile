@@ -34,10 +34,12 @@ RUN --mount=type=cache,target=/app/.next/cache \
 RUN chmod -R u=rwX,go=rX /app
 
 FROM node:22.16.0-bookworm-slim AS runtime
+ARG LLV_RUNTIME_HOME=/home/user
 WORKDIR /app
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     NEXT_PUBLIC_RUNTIME_UI=1 \
+    HOME=${LLV_RUNTIME_HOME} \
     HOSTNAME=127.0.0.1 \
     PORT=8898 \
     LLV_WHISPER_VENV=/opt/llv-whisper-venv \
@@ -47,6 +49,7 @@ ENV NODE_ENV=production \
 
 RUN <<'EOF'
 set -eu
+/usr/sbin/usermod --home "$LLV_RUNTIME_HOME" node
 apt-get update
 apt-get install -y --no-install-recommends \
   ca-certificates \
