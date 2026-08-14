@@ -3,6 +3,7 @@
 import { AlertTriangle, Check, Loader2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { useLocale } from "@/lib/i18n";
 
 import type { AttentionKind, RuntimeAttention } from "./runtimeModel";
@@ -20,6 +21,9 @@ export interface AttentionCardProps {
   onDeny?: () => void;
   onAnswerQuestion?: (optionIndex: number, questionIndex?: number) => void;
   onAnswerQuestions?: (answers: number[][]) => void;
+  /** Issue #765: hide the card from the live composer region without touching
+      the attention itself — the operator's own skip, never a resolution. */
+  onDismiss?: () => void;
   busy?: boolean;
   /** Dead-host archive (issue #247 §5): the request died with its host, so the
       card stays as history — dimmed, no buttons, no focus trap, one caption. */
@@ -34,8 +38,9 @@ export interface AttentionCardProps {
  * reduced motion. The `autoResolutionMs` countdown is display-only — only an
  * engine-confirmed resolution closes the card (Sol: no client auto-resolve).
  */
-export function AttentionCard({ attention, onApprove, onDeny, onAnswerQuestion, onAnswerQuestions, busy, archived = false }: AttentionCardProps) {
+export function AttentionCard({ attention, onApprove, onDeny, onAnswerQuestion, onAnswerQuestions, onDismiss, busy, archived = false }: AttentionCardProps) {
   const { t } = useLocale();
+  const isMobile = useIsMobile();
   const cardRef = useRef<HTMLDivElement>(null);
   const heuristic = attention.kind === "waiting_heuristic";
   const remaining = useCountdown(attention.autoResolutionMs ?? null);
@@ -60,7 +65,12 @@ export function AttentionCard({ attention, onApprove, onDeny, onAnswerQuestion, 
     const active = document.activeElement;
     const editing = active instanceof HTMLElement
       && (active.tagName === "TEXTAREA" || active.tagName === "INPUT" || active.isContentEditable);
-    if (!editing) focusables()[0]?.focus({ preventScroll: true });
+    /* Initial focus lands on the first control that answers, never on the
+       dismiss X — dismissal is the escape hatch, not the default action. The
+       X stays in the Tab cycle at its DOM position. */
+    const items = focusables();
+    const initial = items.find((el) => !el.hasAttribute("data-attention-dismiss")) ?? items[0];
+    if (!editing) initial?.focus({ preventScroll: true });
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape" && onDeny) {
         event.preventDefault();
@@ -120,6 +130,19 @@ export function AttentionCard({ attention, onApprove, onDeny, onAnswerQuestion, 
           <span className="text-[11px] font-semibold text-muted" role="timer" aria-live="off">
             {t("runtime.attention.expiresIn", { seconds: remaining })}
           </span>
+        ) : null}
+        {onDismiss && !archived ? (
+          <button
+            type="button"
+            data-attention-dismiss
+            aria-label={t("question.dismiss")}
+            className={`ml-auto inline-flex shrink-0 items-center justify-center rounded text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+              isMobile ? "h-11 w-11" : "px-0.5"
+            }`}
+            onClick={onDismiss}
+          >
+            <X className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
+          </button>
         ) : null}
       </div>
 
