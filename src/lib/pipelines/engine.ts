@@ -1280,6 +1280,11 @@ function commitPassedStage(
   attempt.state = "passed";
   attempt.completedAt = ports.now();
   advancePipeline(pipeline, stage, ports, attempt);
+  if (published.remote === "unreachable") {
+    const detail = `passed but unpublished: ${published.detail}`;
+    attempt.error = detail;
+    pipeline.stateDetail = detail;
+  }
 }
 
 /** One-shot settlement of a completed stage turn. Semantic contradictions park
@@ -1646,25 +1651,44 @@ export function reviewNote(pipeline: Pipeline, stage: PipelineStage, role: Effec
  * null so the remote is genuinely probed, which is what makes a stale or
  * migrated record safe. Publication itself stays fast-forward-only.
  */
-function publishReviewIngressHead(pipeline: Pipeline, attempt: PipelineStageAttempt, ports: PipelinePorts): string | null {
+function publishReviewIngressHead(
+  pipeline: Pipeline,
+  attempt: PipelineStageAttempt,
+  ports: PipelinePorts,
+): { ok: true } | { ok: false; retryable: boolean; detail: string } {
   const expected = attempt.expectedReviewHeadSha;
-  if (!expected) return "review-loop stage requires a verified pipeline commit";
+  if (!expected) return { ok: false, retryable: false, detail: "review-loop stage requires a verified pipeline commit" };
 
   const local = currentPipelineBranchHead(pipeline, ports.exec);
-  if (!local.ok) return `review stage could not verify the pipeline head before publishing: ${local.error}`;
+  if (!local.ok) {
+    return { ok: false, retryable: false, detail: `review stage could not verify the pipeline head before publishing: ${local.error}` };
+  }
   if (local.sha !== expected) {
-    return `review stage head mismatch: the accepted review head is ${expected}, but the pipeline worktree is at ${local.sha}; nothing was published`;
+    return {
+      ok: false,
+      retryable: false,
+      detail: `review stage head mismatch: the accepted review head is ${expected}, but the pipeline worktree is at ${local.sha}; nothing was published`,
+    };
   }
 
   /* `publishedSha` is deliberately omitted: ingress probes the remote for real
      rather than trusting a durable record that may be stale or migrated. */
   const published = publishPipelineBranch(pipeline, ports.exec, { acceptedSha: expected });
-  if (!published.ok) return `review stage could not publish the accepted head ${expected}: ${published.error}`;
+  if (!published.ok) {
+    return { ok: false, retryable: false, detail: `review stage could not publish the accepted head ${expected}: ${published.error}` };
+  }
+  if (published.remote === "unreachable") {
+    return { ok: false, retryable: true, detail: `passed but unpublished: ${published.detail}` };
+  }
   if (published.remote === "unavailable") {
-    return `review stage requires a published pipeline branch, but this repository has no origin remote to publish ${expected} to`;
+    return {
+      ok: false,
+      retryable: false,
+      detail: `review stage requires a published pipeline branch, but this repository has no origin remote to publish ${expected} to`,
+    };
   }
   pipeline.publishedCommit = published.sha;
-  return null;
+  return { ok: true };
 }
 
 async function tickReviewStage(
@@ -1707,11 +1731,19 @@ async function tickReviewStage(
   }
 
   if (!attempt.flowId) {
-    const ingressError = publishReviewIngressHead(pipeline, attempt, ports);
-    if (ingressError) {
-      park(pipeline, ingressError, attempt);
+    const ingress = publishReviewIngressHead(pipeline, attempt, ports);
+    if (!ingress.ok) {
+      if (ingress.retryable) {
+        attempt.error = ingress.detail;
+        pipeline.state = "running";
+        pipeline.stateDetail = ingress.detail;
+        return;
+      }
+      park(pipeline, ingress.detail, attempt);
       return;
     }
+    attempt.error = null;
+    pipeline.stateDetail = null;
     persist();
     const existing = ports.findFlow(implementer.agentPath, implementer.conversationId, pipeline.baseRef, attempt.expectedReviewHeadSha);
     if (existing) {

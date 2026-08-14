@@ -5126,7 +5126,7 @@ test("closing a fail-edge target with an older terminal attempt records a fresh 
 
 /* --- #729: the orchestrator publishes the head the review layer fences on --- */
 
-function publishHarness(h: ReturnType<typeof harness>, options: { origin?: boolean; pushFails?: boolean } = {}) {
+function publishHarness(h: ReturnType<typeof harness>, options: { origin?: boolean; pushFails?: boolean; remoteReadFails?: boolean } = {}) {
   const passedSha = "7".repeat(40);
   const order: string[] = [];
   /* Oldest first. `merge-base --is-ancestor` is answered from this, so the
@@ -5136,8 +5136,13 @@ function publishHarness(h: ReturnType<typeof harness>, options: { origin?: boole
   let remoteBranch: string | null = null;
   let dirty = true;
   let pushFails = false;
+  let remoteReadAttempts = 0;
   const baseExec = h.ports.exec;
   h.ports.exec = (command, args, cwd) => {
+    if (command === "sleep") {
+      order.push(`backoff:${args[0]}`);
+      return { code: 0, stdout: "", stderr: "" };
+    }
     if (command !== "git") return baseExec(command, args, cwd);
     const branch = loadPipelines()[0]?.branch ?? "pipeline/test";
     if (args[0] === "status") return { code: 0, stdout: dirty ? " M src/lib/thing.ts\n" : "", stderr: "" };
@@ -5155,6 +5160,10 @@ function publishHarness(h: ReturnType<typeof harness>, options: { origin?: boole
         : { code: 0, stdout: "git@example.invalid:owner/repo.git\n", stderr: "" };
     }
     if (args[0] === "ls-remote") {
+      remoteReadAttempts += 1;
+      if (options.remoteReadFails) {
+        return { code: 128, stdout: "", stderr: "fatal: remote authentication unavailable" };
+      }
       return { code: 0, stdout: remoteBranch ? `${remoteBranch}\trefs/heads/${branch}\n` : "", stderr: "" };
     }
     if (args[0] === "push") {
@@ -5201,6 +5210,7 @@ function publishHarness(h: ReturnType<typeof harness>, options: { origin?: boole
     setRemote: (sha: string | null) => { remoteBranch = sha; },
     setDirty: (value: boolean) => { dirty = value; },
     setPushFails: (value: boolean) => { pushFails = value; },
+    remoteReadAttempts: () => remoteReadAttempts,
     setLocalHead: (sha: string) => { localHead = sha; if (!history.includes(sha)) history.push(sha); },
     /* Records a revision nobody's local checkout contains — a repair pushed
        from another clone, which must never be fast-forwarded away. */
@@ -5232,6 +5242,47 @@ test("a passed run stage publishes its committed head before the review stage cr
   expect(box.order).toEqual(["commit", `push:${box.passedSha}`, "createFlow"]);
   expect(h.flows.get("flow-1")).toMatchObject({ headRef: loadPipelines()[0]!.branch, targetSha: box.passedSha });
   expect(loadPipelines()[0]!.state).toBe("running");
+});
+
+test("an unreachable remote leaves the stage passed and records it as unpublished (#999)", async () => {
+  const h = harness();
+  const box = publishHarness(h, { remoteReadFails: true });
+  await create(h.ports, PUBLISH_STAGES as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+
+  const current = loadPipelines()[0]!;
+  const attempt = current.runs.find((run) => run.stageId === "build")!.attempts[0]!;
+  expect(current).toMatchObject({
+    state: "running",
+    lastPassedCommit: box.passedSha,
+    publishedCommit: null,
+    stateDetail: expect.stringContaining("passed but unpublished"),
+  });
+  expect(attempt).toMatchObject({
+    state: "passed",
+    verdict: { status: "pass" },
+    error: expect.stringContaining("passed but unpublished"),
+  });
+  expect(box.remoteReadAttempts()).toBe(3);
+  expect(box.order).toEqual(["commit", "backoff:0.25", "backoff:0.5"]);
+  expect(h.flows.size).toBe(0);
+
+  /* Review ingress still cannot fence a flow while GitHub is unreachable. It
+     keeps the lane retryable in place instead of turning infrastructure into
+     a second operator decision. */
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  const waiting = loadPipelines()[0]!;
+  expect(waiting.state).toBe("running");
+  expect(waiting.cursor?.stageId).toBe("review");
+  expect(waiting.stateDetail).toContain("passed but unpublished");
+  expect(waiting.runs.find((run) => run.stageId === "build")!.attempts[0]).toMatchObject({
+    state: "passed",
+    verdict: { status: "pass" },
+  });
+  expect(box.remoteReadAttempts()).toBe(6);
+  expect(h.flows.size).toBe(0);
 });
 
 test("a publication that cannot land parks the pass without losing the commit", async () => {
