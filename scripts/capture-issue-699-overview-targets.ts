@@ -13,9 +13,18 @@
  *     page-wide (the invalid button-inside-button markup was the root cause);
  *   - every conversation and project target on a coarse pointer meets the
  *     44px minimum;
- *   - a probe grid over each overview card proves that every point either
- *     hits exactly one explicit target (a conversation row or the project
- *     button) or hits nothing interactive at all — a near miss is a no-op.
+ *   - a probe grid over each overview card assigns every point an expected
+ *     exact destination — the one target whose visible rect contains it, or
+ *     an explicit no-op — and requires the element a tap would actually hit
+ *     to resolve to exactly that destination. A hit on anything whose rect
+ *     does not contain the tap point is a wrong destination, the precise
+ *     #699 defect, and fails the audit.
+ *
+ * The audit then proves it can fail: it widens one conversation row's hit
+ * area over the gap below it (without moving the row's visible rect) and
+ * requires the re-run to go red. A run in which the mutated board still
+ * passes exits non-zero, so the audit can never green-light a board it
+ * cannot actually judge.
  *
  * Shots land outside the repository in a fresh
  * <OVERVIEW_CAPTURE_DIR>/<unique-run>/out directory for direct inspection.
@@ -184,7 +193,8 @@ async function waitForLiveRows(baseUrl: string, expected: number): Promise<void>
 interface AuditResult {
   nestedInteractive: string[];
   undersizedTargets: Array<{ testid: string; width: number; height: number }>;
-  ambiguousProbes: Array<{ x: number; y: number; hit: string }>;
+  wrongDestinationProbes: Array<{ x: number; y: number; expected: string; actual: string }>;
+  overlappingTargetProbes: Array<{ x: number; y: number; targets: string[] }>;
   probeCount: number;
   conversationRows: number;
   projectTargets: number;
@@ -192,19 +202,31 @@ interface AuditResult {
 
 /**
  * The acceptance, measured on the rendered DOM. A probe grid walks every
- * overview card in 4px steps; each point must resolve to at most one explicit
- * destination. `elementFromPoint` sees exactly what a tap would hit.
+ * overview card in 4px steps. Each point's EXPECTED destination is the one
+ * explicit target (conversation row or project button) whose visible rect
+ * contains it, or a no-op when no target does. The ACTUAL destination is
+ * whatever interactive control `elementFromPoint` — exactly what a tap hits —
+ * resolves to. The two must agree per point: a no-op is always acceptable
+ * where nothing visible claims the point, but any interactive hit must be the
+ * exact target the operator can see under their finger. A hit on a different
+ * row, the project, or any unlabelled control is the #699 wrong-destination
+ * defect and is reported point by point.
  */
 function auditOverview(minTarget: number): AuditResult {
   const interactiveSelector = "button, a, [role='button'], [role='link']";
+  const describe = (element: Element | null): string =>
+    element === null
+      ? "no-op"
+      : `${element.tagName}[${element.getAttribute("data-testid") ?? "?"}:${element.getAttribute("aria-label") ?? element.textContent?.slice(0, 40) ?? ""}]`;
+
   const nestedInteractive: AuditResult["nestedInteractive"] = [];
   for (const element of document.querySelectorAll(interactiveSelector)) {
     const ancestor = element.parentElement?.closest(interactiveSelector);
-    if (ancestor) nestedInteractive.push(`${element.tagName}[${element.getAttribute("data-testid") ?? element.getAttribute("aria-label") ?? element.textContent?.slice(0, 40) ?? ""}] inside ${ancestor.tagName}`);
+    if (ancestor) nestedInteractive.push(`${describe(element)} inside ${ancestor.tagName}`);
   }
 
+  const targets = Array.from(document.querySelectorAll("[data-testid='overview-conversation'], [data-testid='overview-project']"));
   const undersizedTargets: AuditResult["undersizedTargets"] = [];
-  const targets = document.querySelectorAll("[data-testid='overview-conversation'], [data-testid='overview-project']");
   for (const target of targets) {
     const rect = target.getBoundingClientRect();
     if (rect.height < minTarget || rect.width < minTarget) {
@@ -212,22 +234,32 @@ function auditOverview(minTarget: number): AuditResult {
     }
   }
 
-  const ambiguousProbes: AuditResult["ambiguousProbes"] = [];
+  const wrongDestinationProbes: AuditResult["wrongDestinationProbes"] = [];
+  const overlappingTargetProbes: AuditResult["overlappingTargetProbes"] = [];
   let probeCount = 0;
   for (const card of document.querySelectorAll("[data-testid='overview-card']")) {
     const rect = card.getBoundingClientRect();
     for (let y = rect.top + 2; y < rect.bottom - 2; y += 4) {
       for (let x = rect.left + 2; x < rect.right - 2; x += 4) {
         probeCount += 1;
+        const containing = targets.filter((target) => {
+          const r = target.getBoundingClientRect();
+          return x >= r.left && x < r.right && y >= r.top && y < r.bottom;
+        });
+        if (containing.length > 1) {
+          /* Two visible targets claim the same point — no single honest
+             destination exists there, whatever a tap resolves to. */
+          overlappingTargetProbes.push({ x: Math.round(x), y: Math.round(y), targets: containing.map(describe) });
+          continue;
+        }
+        const expected = containing[0] ?? null;
         const hit = document.elementFromPoint(x, y);
-        if (!hit) continue;
-        const control = hit.closest(interactiveSelector);
-        if (!control) continue;
-        /* A hit must be one of the two explicit destinations; anything else
-           interactive under a card tap is exactly the #699 ambiguity. */
+        const control = hit?.closest(interactiveSelector) ?? null;
+        if (control === null) continue; // a no-op tap is always safe
         const testid = control.getAttribute("data-testid");
-        if (testid !== "overview-conversation" && testid !== "overview-project") {
-          ambiguousProbes.push({ x: Math.round(x), y: Math.round(y), hit: `${control.tagName}[${testid ?? control.getAttribute("aria-label") ?? ""}]` });
+        const isExplicitTarget = testid === "overview-conversation" || testid === "overview-project";
+        if (!isExplicitTarget || control !== expected) {
+          wrongDestinationProbes.push({ x: Math.round(x), y: Math.round(y), expected: describe(expected), actual: describe(control) });
         }
       }
     }
@@ -236,11 +268,46 @@ function auditOverview(minTarget: number): AuditResult {
   return {
     nestedInteractive,
     undersizedTargets,
-    ambiguousProbes,
+    wrongDestinationProbes,
+    overlappingTargetProbes,
     probeCount,
     conversationRows: document.querySelectorAll("[data-testid='overview-conversation']").length,
     projectTargets: document.querySelectorAll("[data-testid='overview-project']").length,
   };
+}
+
+/**
+ * Widen the first conversation row's hit area 48px past its visible rect —
+ * an invisible child that intercepts taps over the gap and the next row
+ * without moving the row's own bounding box. This is the #699 defect class
+ * reintroduced on purpose; the audit must go red on it or it proves nothing.
+ */
+function widenFirstRowHitArea(): void {
+  const row = document.querySelector<HTMLElement>("[data-testid='overview-conversation']");
+  if (!row) throw new Error("no conversation row to mutate");
+  row.style.position = "relative";
+  const shim = document.createElement("div");
+  shim.setAttribute("data-audit", "wrong-hit-shim");
+  shim.style.cssText = "position:absolute;left:0;right:0;top:100%;height:48px;background:transparent;";
+  row.appendChild(shim);
+}
+
+function auditFailed(audit: AuditResult): boolean {
+  return audit.nestedInteractive.length > 0
+    || audit.undersizedTargets.length > 0
+    || audit.wrongDestinationProbes.length > 0
+    || audit.overlappingTargetProbes.length > 0
+    || audit.conversationRows === 0;
+}
+
+function summarize(audit: AuditResult): string {
+  return JSON.stringify({
+    ...audit,
+    wrongDestinationProbes: audit.wrongDestinationProbes.slice(0, 8),
+    overlappingTargetProbes: audit.overlappingTargetProbes.slice(0, 8),
+    wrongDestinationCount: audit.wrongDestinationProbes.length,
+    overlappingTargetCount: audit.overlappingTargetProbes.length,
+  }, null, 2);
 }
 
 async function openPage(browser: Browser, baseUrl: string, options: { width: number; height: number; mobile: boolean }): Promise<Page> {
@@ -266,19 +333,25 @@ const shot = async (page: Page, name: string) => {
 async function main(): Promise<void> {
   const port = demoPort(process.env.OVERVIEW_CAPTURE_PORT, 3052, "OVERVIEW_CAPTURE_PORT");
   const baseUrl = `http://127.0.0.1:${port}`;
-  seedHome();
-  console.log(`screenshots: ${OUT_DIR}`);
-
-  const server = spawn("bunx", ["next", "start", "--hostname", "127.0.0.1", "--port", String(port)], {
-    cwd: repoRoot,
-    env: buildEnvironment(port),
-    stdio: ["ignore", "inherit", "inherit"],
-  });
-  const executablePath = process.env.CHROME_BIN
-    ?? ["/usr/bin/chromium", "/usr/bin/google-chrome-stable", "/usr/bin/google-chrome"].find((candidate) => fs.existsSync(candidate));
-  const browser = await chromium.launch({ headless: true, ...(executablePath ? { executablePath } : {}) });
+  /* Every resource — transcript holders, the production server, the browser —
+     is acquired inside this try, so a failure at any acquisition step (a
+     missing Chromium most likely) still releases everything before exit. */
+  let server: ChildProcess | null = null;
+  let browser: Browser | null = null;
   let failed = false;
   try {
+    seedHome();
+    console.log(`screenshots: ${OUT_DIR}`);
+
+    server = spawn("bunx", ["next", "start", "--hostname", "127.0.0.1", "--port", String(port)], {
+      cwd: repoRoot,
+      env: buildEnvironment(port),
+      stdio: ["ignore", "inherit", "inherit"],
+    });
+    const executablePath = process.env.CHROME_BIN
+      ?? ["/usr/bin/chromium", "/usr/bin/google-chrome-stable", "/usr/bin/google-chrome"].find((candidate) => fs.existsSync(candidate));
+    browser = await chromium.launch({ headless: true, ...(executablePath ? { executablePath } : {}) });
+
     await waitForServer(baseUrl, server);
     await waitForLiveRows(baseUrl, 4);
 
@@ -289,23 +362,33 @@ async function main(): Promise<void> {
       const page = await openPage(browser, baseUrl, options);
       await shot(page, name);
       const audit = await page.evaluate(auditOverview, minTarget);
-      console.log(`${name} audit:`, JSON.stringify(audit, null, 2));
-      if (audit.nestedInteractive.length || audit.undersizedTargets.length || audit.ambiguousProbes.length || audit.conversationRows === 0) {
+      console.log(`${name} audit:`, summarize(audit));
+      if (auditFailed(audit)) {
         failed = true;
         console.error(`${name}: acceptance audit FAILED`);
+      }
+
+      /* Self-check: the audit must detect a wrong-hit area it is shown. */
+      await page.evaluate(widenFirstRowHitArea);
+      const mutated = await page.evaluate(auditOverview, minTarget);
+      if (mutated.wrongDestinationProbes.length === 0) {
+        failed = true;
+        console.error(`${name}: audit did NOT flag a deliberately widened hit area — it cannot detect the #699 defect`);
+      } else {
+        console.log(`${name}: widened-hit-area self-check went red as required (${mutated.wrongDestinationProbes.length} wrong-destination probes)`);
       }
       await page.context().close();
     }
   } finally {
-    await browser.close();
-    server.kill("SIGTERM");
+    if (browser) await browser.close().catch(() => {});
+    server?.kill("SIGTERM");
     for (const holder of holders) holder.kill("SIGTERM");
   }
   if (failed) {
     process.exitCode = 1;
     console.error("#699 acceptance audit failed — see the frames and audit output above.");
   } else {
-    console.log("#699 acceptance audit passed at both widths.");
+    console.log("#699 acceptance audit passed at both widths, and the self-check proved the audit goes red on a widened hit area.");
   }
 }
 
