@@ -34,6 +34,21 @@ const facts = (overrides: Partial<OrchestratorTranscriptFacts> = {}): Orchestrat
 
 const OPUS = contextWindowPolicyFor("claude", "opus");
 
+test("Fable at 129k tokens uses 13% of its registry window and needs no rotation", () => {
+  const policy = contextWindowPolicyFor("claude", "fable-5");
+  const currentFacts = facts({ reportedContextTokens: 129_000 });
+  const context = contextReading({ policy, facts: currentFacts });
+  const recommendation = rotationRecommendation({ context, facts: currentFacts, activity: "live", policy });
+
+  expect(policy).toEqual({
+    windowTokens: 1_000_000,
+    rotationThresholdTokens: 500_000,
+    policy: "registry:fable-5:1m",
+  });
+  expect(context.percent).toBe(13);
+  expect(recommendation).toMatchObject({ recommended: false, level: "none", advisory: null });
+});
+
 /* ── The named policy: explicit, configurable, one place ─────────────────── */
 
 test("the reference case is explicit policy: Opus-class window 1,000,000 tokens, threshold 500,000", () => {
@@ -43,12 +58,30 @@ test("the reference case is explicit policy: Opus-class window 1,000,000 tokens,
   expect(OPUS!.rotationThresholdTokens).toBe(OPUS!.windowTokens * ROTATION_THRESHOLD_FRACTION);
 });
 
-test("a model with a DIFFERENT window uses ITS OWN threshold — 1M is not hard-coded", () => {
-  const sonnetLike = contextWindowPolicyFor("claude", "sonnet");
-  expect(sonnetLike).toEqual({ windowTokens: 200_000, rotationThresholdTokens: 100_000, policy: "claude-standard-200k" });
+test("supported Claude launch aliases resolve to their current registry windows", () => {
+  expect(contextWindowPolicyFor("claude", "fable")).toMatchObject({ windowTokens: 1_000_000, policy: "claude-fable-1m" });
+  expect(contextWindowPolicyFor("claude", "sonnet")).toMatchObject({ windowTokens: 1_000_000, policy: "claude-sonnet-1m" });
+  expect(contextWindowPolicyFor("claude", "haiku")).toMatchObject({ windowTokens: 200_000, policy: "claude-haiku-200k" });
+});
+
+test("Sonnet 5 keeps its 1M registry window", () => {
+  expect(contextWindowPolicyFor("claude", "sonnet-5")).toEqual({
+    windowTokens: 1_000_000,
+    rotationThresholdTokens: 500_000,
+    policy: "registry:sonnet-5:1m",
+  });
+});
+
+test("Haiku 4.5 keeps its 200k registry window", () => {
+  expect(contextWindowPolicyFor("claude", "haiku-4-5")).toEqual({
+    windowTokens: 200_000,
+    rotationThresholdTokens: 100_000,
+    policy: "registry:haiku-4-5:200k",
+  });
 });
 
 test("an unconfigured model gets NO invented window", () => {
+  expect(contextWindowPolicyFor("claude", "claude-newthing-9")).toBeNull();
   expect(contextWindowPolicyFor("codex", "gpt-5.6-sol")).toBeNull();
   expect(contextWindowPolicyFor(null, null)).toBeNull();
 });
@@ -114,7 +147,7 @@ test("a missing transcript reports absence, never a fabricated number", () => {
 
 /* ── The threshold changes WORDS and nothing else ────────────────────────── */
 
-const recommendationFor = (tokens: number, policyModel = "opus") => {
+const recommendationFor = (tokens: number, policyModel = "opus-4-8") => {
   const policy = contextWindowPolicyFor("claude", policyModel);
   const context = contextReading({ policy, facts: facts({ reportedContextTokens: tokens }) });
   return rotationRecommendation({ context, facts: facts({ reportedContextTokens: tokens }), activity: "live", policy });
@@ -135,25 +168,28 @@ test("usage at EXACTLY the threshold, and above it, is a prominent STRONGLY_RECO
     expect(recommendation.level).toBe("strongly_recommend");
     expect(recommendation.advisory).toBe(STRONGLY_RECOMMEND_ROTATION);
     expect(recommendation.reasons[0]).toContain("500,000");
+    expect(recommendation.reasons[0]).toContain("registry:opus-4-8:1m: 50% of a 1,000,000-token window");
     expect(recommendation.threshold).toEqual({
       windowTokens: 1_000_000,
       thresholdTokens: 500_000,
       fraction: ROTATION_THRESHOLD_FRACTION,
-      policy: "claude-opus-1m",
+      policy: "registry:opus-4-8:1m",
     });
   }
 });
 
 test("the SAME usage that is safe on Opus strongly recommends on a 200k-window model — per-model thresholds", () => {
-  expect(recommendationFor(150_000, "opus").level).toBe("none");
-  const smaller = recommendationFor(150_000, "sonnet");
+  expect(recommendationFor(150_000, "opus-4-8").level).toBe("none");
+  const smaller = recommendationFor(150_000, "haiku-4-5");
   expect(smaller.level).toBe("strongly_recommend");
   expect(smaller.threshold).toMatchObject({ windowTokens: 200_000, thresholdTokens: 100_000 });
 });
 
 test("an unknown window withholds the threshold recommendation and says the threshold is unknown", () => {
-  const context = contextReading({ policy: null, facts: facts({ reportedContextTokens: 900_000 }) });
-  const recommendation = rotationRecommendation({ context, facts: facts({ reportedContextTokens: 900_000 }), activity: "live", policy: null });
+  const policy = contextWindowPolicyFor("claude", "claude-newthing-9");
+  const context = contextReading({ policy, facts: facts({ reportedContextTokens: 900_000 }) });
+  const recommendation = rotationRecommendation({ context, facts: facts({ reportedContextTokens: 900_000 }), activity: "live", policy });
+  expect(policy).toBeNull();
   expect(recommendation.level).toBe("none");
   expect(recommendation.advisory).toBeNull();
   expect(recommendation.threshold).toBeNull();
@@ -161,7 +197,7 @@ test("an unknown window withholds the threshold recommendation and says the thre
 });
 
 test("an ESTIMATED usage over the threshold still recommends, and the reason says it is an estimate", () => {
-  const policy = contextWindowPolicyFor("claude", "opus");
+  const policy = contextWindowPolicyFor("claude", "opus-4-8");
   /* 2.4 MB of transcript ≈ 600k estimated tokens — over the 500k threshold. */
   const estimated = facts({ transcriptBytes: 2_400_000 });
   const context = contextReading({ policy, facts: estimated });
@@ -179,7 +215,7 @@ test("the recommendation is structurally incapable of acting: plain data, bounde
 });
 
 test("secondary wear signals still produce an ordinary (non-strong) recommendation", () => {
-  const policy = contextWindowPolicyFor("claude", "opus");
+  const policy = contextWindowPolicyFor("claude", "opus-4-8");
   const worn = facts({ compactionCount: 3, reportedContextTokens: 10_000 });
   const context = contextReading({ policy, facts: worn });
   const recommendation = rotationRecommendation({ context, facts: worn, activity: "live", policy });
@@ -189,7 +225,7 @@ test("secondary wear signals still produce an ordinary (non-strong) recommendati
 });
 
 test("a healthy incumbent gets no recommendation at all", () => {
-  const policy = contextWindowPolicyFor("claude", "opus");
+  const policy = contextWindowPolicyFor("claude", "opus-4-8");
   const healthy = facts({ transcriptBytes: 100_000 });
   const context = contextReading({ policy, facts: healthy });
   expect(rotationRecommendation({ context, facts: healthy, activity: "live", policy }))
