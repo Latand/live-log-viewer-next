@@ -23,6 +23,7 @@ AC8: Focused tests, TypeScript type checking, scoped linting, diff checks, and p
 ## Validation gates
 
 - `bun test src/lib/runtime/structuredMessageDelivery.test.ts src/lib/runtime/startup.test.ts src/lib/reaperRuntime.test.ts src/lib/runtime/structuredRecovery.test.ts`
+- `LLV_AGENT_REGISTRY_SQLITE=sqlite bun test src/lib/runtime/structuredMessageDelivery.test.ts src/lib/runtime/startup.test.ts src/lib/reaperRuntime.test.ts src/lib/runtime/structuredRecovery.test.ts`
 - `bunx tsc --noEmit`
 - Scoped ESLint over changed TypeScript files
 - `git diff --check`

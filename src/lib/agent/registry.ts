@@ -4530,7 +4530,8 @@ export class AgentRegistry {
         || !conversation.generations.some((generation) => generation.id === key.sessionId)
         || !entry
         || (expected && (!structuredProcess
-          || !isDeepStrictEqual(structuredProcess, expected.process)
+          || structuredProcess.pid !== expected.process.pid
+          || structuredProcess.startIdentity !== expected.process.startIdentity
           || entry.claimEpoch !== expected.claimEpoch
           || entry.structuredHost?.writerClaimEpoch !== expected.claimEpoch))
         || entry.host

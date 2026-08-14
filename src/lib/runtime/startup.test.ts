@@ -1064,9 +1064,11 @@ async function startupAdoptionAttempts(
   return attempts;
 }
 
-test("startup releases a completed stage host claim with pending delivery after its recorded process dies", async () => {
+test("SQLite startup releases a completed stage host claim with pending delivery after its recorded process dies", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-dead-stage-owner-"));
-  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, {
+    sqliteMode: "sqlite",
+  });
   const sessionId = "aaaaaaaa-2222-0222-0222-aaaaaaaaaaaa";
   const { conversation } = addStructuredRestartConversation(registry, directory, {
     sessionId,
