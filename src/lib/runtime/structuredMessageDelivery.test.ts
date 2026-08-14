@@ -959,6 +959,13 @@ test("a reopened synchronization hold rejects changed payload and command reuse"
     outcome: "held",
   });
   const firstReservation = registry.pendingDeliveries(conversation.id)[0]!;
+  const hydratedFirstReservation = {
+    ...firstReservation,
+    contentDigest: structuredContentDigest({
+      text: firstReservation.text,
+      images: firstReservation.runtimeImages,
+    }),
+  };
   const reopened = new AgentRegistry(registry.filename);
   const reopenedDependencies = { ...dependencies, registry: () => reopened };
 
@@ -998,7 +1005,7 @@ test("a reopened synchronization hold rejects changed payload and command reuse"
     outcome: "failed",
     status: 409,
   });
-  expect(reopened.pendingDeliveries(conversation.id)).toEqual([firstReservation]);
+  expect(reopened.pendingDeliveries(conversation.id)).toEqual([hydratedFirstReservation]);
 
   expect(await enqueueStructuredMessage({
     ...original,

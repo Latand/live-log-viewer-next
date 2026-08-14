@@ -321,11 +321,15 @@ export function reconcileDeadStructuredRegistryHost(
   key: SessionKey,
 ): boolean {
   const entry = registry.readOnlySnapshot().entries[sessionKeyId(key)];
-  if (!entry?.structuredHost?.process) return false;
-  return Boolean(registry.terminateInactiveStructuredHost(conversationId, key));
+  const structuredProcess = entry?.structuredHost?.process;
+  if (!entry || !structuredProcess) return false;
+  return Boolean(registry.terminateInactiveStructuredHost(conversationId, key, {
+    process: structuredProcess,
+    claimEpoch: entry.claimEpoch,
+  }));
 }
 
-/** Periodic bounded pass for completed conversation rows. Active conversation
+/** Bounded reconciliation pass for completed conversation rows. Active conversation
     recovery stays demand-driven, while terminal rows cannot retain a dead
     engine process and its writer claim indefinitely. */
 export function reconcileDeadStructuredRegistryHosts(registry: AgentRegistry): void {

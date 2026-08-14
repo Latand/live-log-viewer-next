@@ -1044,7 +1044,9 @@ async function startupAdoptionAttempts(
     shouldAdopt: StructuredHostAdoptionFilter,
   ) => {
     for (const entry of Object.values(received.snapshot().entries)) {
-      if (entry.key.engine === engine && shouldAdopt(entry)) attempts.push(`${entry.key.engine}:${entry.key.sessionId}`);
+      if (entry.key.engine === engine
+        && entry.structuredHost
+        && shouldAdopt(entry)) attempts.push(`${entry.key.engine}:${entry.key.sessionId}`);
     }
   };
   await adoptStructuredHostsAtStartup({
@@ -1062,11 +1064,11 @@ async function startupAdoptionAttempts(
   return attempts;
 }
 
-test("startup releases a completed stage host claim after its recorded process dies", async () => {
+test("startup releases a completed stage host claim with pending delivery after its recorded process dies", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-dead-stage-owner-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
   const sessionId = "aaaaaaaa-2222-0222-0222-aaaaaaaaaaaa";
-  addStructuredRestartConversation(registry, directory, {
+  const { conversation } = addStructuredRestartConversation(registry, directory, {
     sessionId,
     status: "idle",
     turn: "terminal",
@@ -1089,6 +1091,7 @@ test("startup releases a completed stage host claim after its recorded process d
     claimOwner: `structured-host:${JSON.stringify({ pid: process.pid, startIdentity: null })}`,
     pendingAction: stored.pendingAction,
   });
+  const delivery = registry.holdDelivery(conversation.id, "deliver after dead stage recovery", "dead-stage-pending");
 
   expect(await startupAdoptionAttempts(registry)).toEqual([]);
   expect(registry.readOnlySnapshot().entries[`codex:${sessionId}`]).toMatchObject({
@@ -1096,6 +1099,7 @@ test("startup releases a completed stage host claim after its recorded process d
     structuredHost: null,
     claimOwner: null,
   });
+  expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{ id: delivery.id, state: "assigned" }]);
 
   await bindStructuredDeliveryQueue([], { registry, client: null });
   fs.rmSync(directory, { recursive: true, force: true });
