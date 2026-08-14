@@ -31,6 +31,7 @@ import { activityDot, cleanTitle, engineBadge } from "@/components/utils";
 
 import { STAGE_GLYPH, STAGE_TONES, compactPipelineLayoutFlows, compactStageOpenTarget, latestAttempt, partitionPipelineSurfaces, pipelineLinkedTasks, renderableFlowIds, stageChipLabel, stageChipState, stageHasEvidence, stageHasNavigableHistory } from "@/components/pipelines/pipelineModel";
 import { VerdictPopover } from "@/components/pipelines/VerdictPopover";
+import { MobileOrchestratorRow } from "./MobileOrchestratorRow";
 import { MobilePipelineDock } from "./MobilePipelineDock";
 import { MobilePipelineDockSheet, MobilePipelineSummaryButton, MobilePipelineSummaryRow } from "./MobilePipelineDockSheet";
 import { conversationIdentity } from "@/lib/accounts/identity";
@@ -404,6 +405,22 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
     },
   };
 
+  /* The orchestrator seat's own conversation, opened from the pinned row (PRD
+     #976 slice C): a laid-out pane pins directly, and a seat whose conversation
+     is not on the board yet takes the same round trip a map pick does — it
+     becomes a node and arrives back through the highlight. */
+  const openSeatConversation = useCallback(
+    (file: FileEntry) => {
+      setMapOpen(false);
+      if (byKey.has(file.path)) {
+        setFocusPath(file.path);
+        return;
+      }
+      onSelect(file);
+    },
+    [byKey, onSelect],
+  );
+
   /* A map tap on a scheme node pins it; a quiet branch or deck round is not a
      node yet — route it through onSelect so it becomes one and focuses via
      the highlight round-trip. */
@@ -450,6 +467,17 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
           5); the map + tasks controls dock on the right so they never float over
           the transcript (findings 2, 3). No separate third pipeline row. */}
       <div className="flex shrink-0 items-stretch border-b border-border bg-card">
+        {/* The project's orchestrator, PINNED first (PRD #976 slice C): its own
+            slot outside the scrolling chips, so no amount of board order,
+            favourites or scrolling can move it or take it off screen. It rides
+            this same strip row, which `./chatBudget` already counts, so the
+            chat-first budget gains no new persistent chrome. */}
+        <MobileOrchestratorRow
+          project={project}
+          projectName={projectDisplayName(project, projectName)}
+          files={files}
+          onOpenConversation={openSeatConversation}
+        />
         {entries.length > 1 || pipelineFocus ? (
           <div className="relative min-w-0 flex-1">
             <div ref={chipScrollRef} onScroll={syncChipFade} className="no-scrollbar flex items-center gap-1.5 overflow-x-auto px-2 py-1">

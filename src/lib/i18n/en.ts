@@ -1710,6 +1710,19 @@ export const en = {
   "orchPanel.restoreIncumbent": "Restore current mandate",
   "orchPanel.cwdInherited": "The successor continues in {cwd}",
 
+  // Orchestrator on the phone: the pinned row + its fullscreen sheet (#979)
+  "orchMobile.create": "Create orchestrator",
+  "orchMobile.unreadable": "unreadable",
+  "orchMobile.rowCreateAria": "Create this project's orchestrator",
+  "orchMobile.rowLiveAria": "Orchestrator {model} — {state}. Opens its conversation.",
+  "orchMobile.rowStatusAria": "Orchestrator — {state}. Opens the orchestrator sheet.",
+  "orchMobile.pendingAria": "A new designation is settling — open it",
+  "orchMobile.transitionAria": "The last designation failed — open it",
+  "orchMobile.sheetAria": "Orchestrator for {project}",
+  "orchMobile.liveTitle": "This project's orchestrator",
+  "orchMobile.liveHint": "It answers in its own conversation. Opening it lands there, with the composer.",
+  "orchMobile.open": "Open the conversation",
+
   // BranchPane
   "branch.live": "working",
   "branch.waiting": "finished the turn — waiting for a reply",

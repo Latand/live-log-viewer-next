@@ -1662,6 +1662,18 @@ export const uk: Record<keyof typeof en, Message> = {
   "orchPanel.restoreIncumbent": "Повернути поточний мандат",
   "orchPanel.cwdInherited": "Наступник продовжить у {cwd}",
 
+  "orchMobile.create": "Створити оркестратора",
+  "orchMobile.unreadable": "не читається",
+  "orchMobile.rowCreateAria": "Створити оркестратора для цього проєкту",
+  "orchMobile.rowLiveAria": "Оркестратор {model} — {state}. Відкриває його розмову.",
+  "orchMobile.rowStatusAria": "Оркестратор — {state}. Відкриває панель оркестратора.",
+  "orchMobile.pendingAria": "Нове призначення завершується — відкрити",
+  "orchMobile.transitionAria": "Останнє призначення не вдалося — відкрити",
+  "orchMobile.sheetAria": "Оркестратор проєкту {project}",
+  "orchMobile.liveTitle": "Оркестратор цього проєкту",
+  "orchMobile.liveHint": "Він відповідає у власній розмові. Відкрийте її — і ви в ній, разом із полем вводу.",
+  "orchMobile.open": "Відкрити розмову",
+
   "branch.live": "працює",
   "branch.waiting": "закінчив хід — чекає відповіді",
   "branch.returned": "повернувся з результатом",
