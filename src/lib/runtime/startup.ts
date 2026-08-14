@@ -16,6 +16,7 @@ import {
   adoptClaudeRegistryHosts,
   adoptCodexRegistryHosts,
   demoteSkippedStructuredRegistryHosts,
+  reconcileDeadStructuredRegistryHosts,
   type AdoptedClaudeHost,
   type AdoptedCodexHost,
   type StructuredHostAdoptionFilter,
@@ -392,6 +393,10 @@ export async function adoptStructuredHostsAtStartup(
   await (dependencies.refreshTranscriptState ?? refreshStructuredTranscriptState)(registry);
   let nextAdoptedHosts = await revalidateRetainedStartupHosts(registry, retryAdoptedHosts);
   retryAdoptedHosts = nextAdoptedHosts;
+  /* Pending work makes a terminal conversation adoption-eligible. Clear any
+     provably dead wrapper before that decision so its stale writer fence
+     cannot block the startup recovery path. */
+  reconcileDeadStructuredRegistryHosts(registry);
   const signals = await structuredStartupSignals(registry, client);
   const shouldAdopt = structuredStartupAdoptionFilter(registry, signals);
   const adoptionCandidates = Object.values(registry.readOnlySnapshot().entries).filter((entry) =>

@@ -61,6 +61,66 @@ test("runtime cycle enters active mode only for the exact opt-in flag", async ()
   }
 });
 
+test("the periodic reaper releases a completed conversation's dead structured-host claim", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-dead-structured-owner-"));
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "bbbbbbbb-2222-0222-0222-bbbbbbbbbbbb";
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  const profile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "pipeline-account",
+    launchProfile: profile,
+    turn: { state: "terminal", source: "assistant", terminalAt: "2026-08-14T08:00:00.000Z" },
+    observedAt: "2026-08-14T08:00:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(artifactPath)!;
+  registry.upsert({
+    key: { engine: "codex", sessionId },
+    artifactPath,
+    cwd: directory,
+    accountId: "pipeline-account",
+    launchProfile: profile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:dead-stage-host",
+      process: { pid: 2_000_000_000, startIdentity: "dead-stage-host" },
+      eventCursor: 19,
+      protocolVersion: "v2",
+      writerClaimEpoch: 5,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 5,
+    claimOwner: `structured-host:${JSON.stringify({ pid: process.pid, startIdentity: null })}`,
+    pendingAction: null,
+  });
+
+  try {
+    await runReaperCycle({
+      registry,
+      hosts: [],
+      files: [],
+      actuation: { runtimeClient: () => null },
+    });
+
+    expect(registry.conversation(conversation.id)?.turn.state).toBe("terminal");
+    expect(registry.readOnlySnapshot().entries[`codex:${sessionId}`]).toMatchObject({
+      status: "dead",
+      structuredHost: null,
+      claimOwner: null,
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("the issue 652 convergence pass stops a no-progress intent and terminalizes its held delivery", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-stale-migration-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));

@@ -12,6 +12,7 @@ import { MAX_STRUCTURED_IMAGE_ENCODED_BYTES, RuntimeImageStore, runtimeImageCapa
 import { structuredContentDigest, type StructuredImageRef } from "./structuredContent";
 
 import { deliverHeldStructuredMessage, enqueueStructuredMessage } from "./structuredMessageDelivery";
+import { recoverDeadStructuredConversation } from "./structuredRecovery";
 
 const artifactPath = "/sessions/11111111-1111-\x34111-8111-111111111111.jsonl";
 const conversationId = "conversation_11111111-1111-\x34111-8111-111111111111";
@@ -958,6 +959,13 @@ test("a reopened synchronization hold rejects changed payload and command reuse"
     outcome: "held",
   });
   const firstReservation = registry.pendingDeliveries(conversation.id)[0]!;
+  const hydratedFirstReservation = {
+    ...firstReservation,
+    contentDigest: structuredContentDigest({
+      text: firstReservation.text,
+      images: firstReservation.runtimeImages,
+    }),
+  };
   const reopened = new AgentRegistry(registry.filename);
   const reopenedDependencies = { ...dependencies, registry: () => reopened };
 
@@ -997,7 +1005,7 @@ test("a reopened synchronization hold rejects changed payload and command reuse"
     outcome: "failed",
     status: 409,
   });
-  expect(reopened.pendingDeliveries(conversation.id)).toEqual([firstReservation]);
+  expect(reopened.pendingDeliveries(conversation.id)).toEqual([hydratedFirstReservation]);
 
   expect(await enqueueStructuredMessage({
     ...original,
@@ -1428,6 +1436,185 @@ test("dead structured composer send is durable before recovery and delivers afte
     spawned: true,
     outcome: "queued",
     receipt: { idempotencyKey: "recovered-message-one", status: "queued" },
+  });
+});
+
+test("a completed pipeline-stage send replaces dead host ownership and reaches a fresh claim", async () => {
+  const { registry, conversation } = registryWithConversation("pipeline-account");
+  const generation = conversation.generations.at(-1)!;
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: generation.path,
+    accountId: generation.accountId,
+    launchProfile: generation.launchProfile,
+    turn: { state: "terminal", source: "assistant", terminalAt: "2026-08-14T08:00:00.000Z" },
+    observedAt: "2026-08-14T08:00:00.000Z",
+  }]);
+  const key = { engine: "codex" as const, sessionId: generation.id };
+  const staleClaimOwner = `structured-host:${JSON.stringify({ pid: process.pid, startIdentity: null })}`;
+  registry.upsert({
+    key,
+    artifactPath: generation.path,
+    cwd: generation.launchProfile.cwd,
+    accountId: generation.accountId,
+    launchProfile: generation.launchProfile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:dead-stage-host",
+      process: { pid: 2_000_000_000, startIdentity: "dead-stage-host" },
+      eventCursor: 12,
+      protocolVersion: "v2",
+      writerClaimEpoch: 7,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 7,
+    claimOwner: staleClaimOwner,
+    pendingAction: null,
+  });
+  const deadSnapshot = snapshot(conversation.id);
+  deadSnapshot.sessions[0] = {
+    ...deadSnapshot.sessions[0]!,
+    sessionKey: key,
+    host: "dead",
+    turn: "unknown",
+  };
+  const hostedSnapshot = snapshot(conversation.id);
+  hostedSnapshot.sessions[0] = { ...hostedSnapshot.sessions[0]!, sessionKey: key };
+  let currentSnapshot = deadSnapshot;
+  let recoveryCalls = 0;
+  const commands: unknown[] = [];
+  const client = {
+    snapshot: async () => currentSnapshot,
+    command: async (command: {
+      kind: "send";
+      operationId?: string;
+      idempotencyKey: string;
+      conversationId: string;
+    }) => {
+      commands.push(command);
+      return {
+        operationId: command.operationId ?? "pipeline-stage-recovery-send",
+        replayed: false,
+        receipt: {
+          operationId: command.operationId ?? "pipeline-stage-recovery-send",
+          idempotencyKey: command.idempotencyKey,
+          conversationId: command.conversationId,
+          kind: command.kind,
+          status: "queued" as const,
+          queuePosition: 1,
+          at: "2026-08-14T09:00:00.000Z",
+          revision: 1,
+        },
+      };
+    },
+  } as unknown as RuntimeHostClient;
+
+  const result = await enqueueStructuredMessage({
+    path: generation.path,
+    conversationId: conversation.id,
+    clientMessageId: "pipeline-stage-recovery-message",
+    text: "continue after the completed stage host exited",
+    hasImages: false,
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    republish: async () => true,
+    recover: async (request) => {
+      recoveryCalls += 1;
+      return recoverDeadStructuredConversation(request, {
+        registry,
+        client,
+        transport: () => "structured",
+        resolveAccount: () => ({
+          engine: "codex",
+          accountId: "pipeline-account",
+          kind: "managed",
+          home: path.join(sandbox, "pipeline-account"),
+          transcriptRoot: sandbox,
+          env: { NODE_ENV: "test" },
+        }),
+        spawn: async (input) => {
+          const resumeEntry = registry.readOnlySnapshot().entries[`codex:${generation.id}`];
+          if (resumeEntry?.structuredHost) {
+            const adopted = registry.claimStructuredHost(key, {
+              pid: process.pid,
+              startIdentity: "fresh-viewer-owner",
+            }, { allowUnhosted: true });
+            if (!adopted?.claimOwner) throw new Error("structured resume host claim is unavailable");
+          }
+          const staged = registry.stageStructuredSpawn(input.receipt.launchId, {
+            key,
+            artifactPath: generation.path,
+            cwd: generation.launchProfile.cwd,
+            accountId: generation.accountId,
+            launchProfile: generation.launchProfile,
+            status: "unhosted",
+            host: null,
+            structuredHost: {
+              kind: "codex-app-server",
+              endpoint: "stdio:staged-successor",
+              process: null,
+              eventCursor: 12,
+              protocolVersion: "v2",
+              writerClaimEpoch: 0,
+              activeTurnRef: null,
+              pendingAttention: [],
+              activeFlags: [],
+            },
+            claimEpoch: 0,
+            claimOwner: null,
+            pendingAction: "spawn",
+          });
+          if (staged.kind !== "settled") throw new Error("successor staging failed");
+          const claimed = registry.claimStructuredHost(key, {
+            pid: process.pid,
+            startIdentity: "fresh-viewer-owner",
+          }, { allowUnhosted: true });
+          if (!claimed?.claimOwner || !claimed.structuredHost) {
+            throw new Error("structured spawn host claim is unavailable");
+          }
+          registry.setStructuredHostClaimed(key, {
+            ...claimed.structuredHost,
+            endpoint: `stdio:${process.pid}`,
+            process: { pid: process.pid, startIdentity: null },
+            writerClaimEpoch: claimed.claimEpoch,
+          }, "idle", claimed.claimOwner, claimed.claimEpoch);
+          registry.finalizeStructuredSpawn(input.receipt.launchId);
+          currentSnapshot = hostedSnapshot;
+          return {
+            ok: true,
+            target: null,
+            path: generation.path,
+            launchId: input.receipt.launchId,
+            conversationId: conversation.id,
+            launched: true,
+            retrySafe: false,
+            initialMessage: "delivered" as const,
+            state: "settled" as const,
+          };
+        },
+      });
+    },
+    kick: () => {},
+  });
+
+  expect(result).toMatchObject({
+    ok: true,
+    structured: true,
+    spawned: true,
+    outcome: "queued",
+  });
+  expect(recoveryCalls).toBe(1);
+  expect(commands).toHaveLength(1);
+  expect(registry.readOnlySnapshot().entries[`codex:${generation.id}`]).toMatchObject({
+    status: "idle",
+    claimOwner: `structured-host:${JSON.stringify({ pid: process.pid, startIdentity: "fresh-viewer-owner" })}`,
+    structuredHost: { process: { pid: process.pid, startIdentity: null } },
   });
 });
 
