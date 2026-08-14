@@ -196,8 +196,9 @@ function harness() {
   let residentHosts = false;
   let monotonic: () => number = () => Date.now();
   const ports: PipelinePorts = {
-    exec: (command, args) => {
-      calls.push(`${command} ${args.join(" ")}`);
+    exec: (rawCommand, rawArgs) => {
+      calls.push(`${rawCommand} ${rawArgs.join(" ")}`);
+      const args = rawCommand === "timeout" ? rawArgs.slice(rawArgs.indexOf("git") + 1) : rawArgs;
       if (args[0] === "rev-parse" && args[1] === "--git-dir") return { code: 0, stdout: ".git\n", stderr: "" };
       if (args[0] === "rev-parse" && args[1] === "--verify") return { code: 0, stdout: `${ORIGIN_MAIN_SHA}\n`, stderr: "" };
       if (args[0] === "rev-parse" && args[1] === "--abbrev-ref") return { code: 0, stdout: "main\n", stderr: "" };
@@ -1604,7 +1605,8 @@ function countDurableReads(h: ReturnType<typeof harness>): () => number {
 
 function pinStageHead(h: ReturnType<typeof harness>) {
   const baseExec = h.ports.exec;
-  h.ports.exec = (command, args, cwd) => {
+  h.ports.exec = (rawCommand, rawArgs, cwd) => {
+    const args = rawCommand === "timeout" ? rawArgs.slice(rawArgs.indexOf("git") + 1) : rawArgs;
     if (args[0] === "rev-parse" && args[1] === "HEAD") return { code: 0, stdout: `${STAGE_HEAD}\n`, stderr: "" };
     /* The remote carries the same stage commit: these tests are about durable
        turn evidence, not publication, so origin is modelled as already current
@@ -1612,7 +1614,7 @@ function pinStageHead(h: ReturnType<typeof harness>) {
     if (args[0] === "ls-remote") {
       return { code: 0, stdout: `${STAGE_HEAD}\trefs/heads/${loadPipelines()[0]?.branch ?? "pipeline/test"}\n`, stderr: "" };
     }
-    return baseExec(command, args, cwd);
+    return baseExec(rawCommand, rawArgs, cwd);
   };
 }
 
@@ -2404,7 +2406,9 @@ test("retrying a parked review-loop fast-forwards to the pushed repair and recor
   let remoteHead = ORIGIN_MAIN_SHA;
   let fastForwarded = false;
   const baseExec = h.ports.exec;
-  h.ports.exec = (command, args, cwd) => {
+  h.ports.exec = (rawCommand, rawArgs, cwd) => {
+    const command = rawCommand === "timeout" ? "git" : rawCommand;
+    const args = rawCommand === "timeout" ? rawArgs.slice(rawArgs.indexOf("git") + 1) : rawArgs;
     if (command === "git" && args[0] === "status") return { code: 0, stdout: "", stderr: "" };
     if (command === "git" && args[0] === "branch" && args[1] === "--show-current") return { code: 0, stdout: `${loadPipelines()[0]!.branch}\n`, stderr: "" };
     if (command === "git" && args[0] === "ls-remote") return { code: 0, stdout: `${remoteHead}\trefs/heads/${loadPipelines()[0]!.branch}\n`, stderr: "" };
@@ -2417,7 +2421,7 @@ test("retrying a parked review-loop fast-forwards to the pushed repair and recor
       fastForwarded = true;
       return { code: 0, stdout: "", stderr: "" };
     }
-    return baseExec(command, args, cwd);
+    return baseExec(rawCommand, rawArgs, cwd);
   };
 
   const pipeline = await create(h.ports, stages as never);
@@ -2472,10 +2476,12 @@ test("issue 533: an in-loop repair advances expectedReviewHeadSha with reviewHea
      review ingress publishes the exact accepted head, so a fixture whose
      worktree disagreed with its own accepted commit would park instead. */
   const baseExec = h.ports.exec;
-  h.ports.exec = (command, args, cwd) => {
+  h.ports.exec = (rawCommand, rawArgs, cwd) => {
+    const command = rawCommand === "timeout" ? "git" : rawCommand;
+    const args = rawCommand === "timeout" ? rawArgs.slice(rawArgs.indexOf("git") + 1) : rawArgs;
     if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") return { code: 0, stdout: `${beforeRepair}\n`, stderr: "" };
     if (command === "git" && args[0] === "ls-remote") return { code: 0, stdout: `${beforeRepair}\trefs/heads/${loadPipelines()[0]!.branch}\n`, stderr: "" };
-    return baseExec(command, args, cwd);
+    return baseExec(rawCommand, rawArgs, cwd);
   };
   await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
 
@@ -5136,13 +5142,12 @@ function publishHarness(h: ReturnType<typeof harness>, options: { origin?: boole
   let remoteBranch: string | null = null;
   let dirty = true;
   let pushFails = false;
+  let remoteReadFails = options.remoteReadFails ?? false;
   let remoteReadAttempts = 0;
   const baseExec = h.ports.exec;
-  h.ports.exec = (command, args, cwd) => {
-    if (command === "sleep") {
-      order.push(`backoff:${args[0]}`);
-      return { code: 0, stdout: "", stderr: "" };
-    }
+  h.ports.exec = (rawCommand, rawArgs, cwd) => {
+    const command = rawCommand === "timeout" ? "git" : rawCommand;
+    const args = rawCommand === "timeout" ? rawArgs.slice(rawArgs.indexOf("git") + 1) : rawArgs;
     if (command !== "git") return baseExec(command, args, cwd);
     const branch = loadPipelines()[0]?.branch ?? "pipeline/test";
     if (args[0] === "status") return { code: 0, stdout: dirty ? " M src/lib/thing.ts\n" : "", stderr: "" };
@@ -5161,7 +5166,7 @@ function publishHarness(h: ReturnType<typeof harness>, options: { origin?: boole
     }
     if (args[0] === "ls-remote") {
       remoteReadAttempts += 1;
-      if (options.remoteReadFails) {
+      if (remoteReadFails) {
         return { code: 128, stdout: "", stderr: "fatal: remote authentication unavailable" };
       }
       return { code: 0, stdout: remoteBranch ? `${remoteBranch}\trefs/heads/${branch}\n` : "", stderr: "" };
@@ -5210,6 +5215,7 @@ function publishHarness(h: ReturnType<typeof harness>, options: { origin?: boole
     setRemote: (sha: string | null) => { remoteBranch = sha; },
     setDirty: (value: boolean) => { dirty = value; },
     setPushFails: (value: boolean) => { pushFails = value; },
+    setRemoteReadFails: (value: boolean) => { remoteReadFails = value; },
     remoteReadAttempts: () => remoteReadAttempts,
     setLocalHead: (sha: string) => { localHead = sha; if (!history.includes(sha)) history.push(sha); },
     /* Records a revision nobody's local checkout contains — a repair pushed
@@ -5265,8 +5271,8 @@ test("an unreachable remote leaves the stage passed and records it as unpublishe
     verdict: { status: "pass" },
     error: expect.stringContaining("passed but unpublished"),
   });
-  expect(box.remoteReadAttempts()).toBe(3);
-  expect(box.order).toEqual(["commit", "backoff:0.25", "backoff:0.5"]);
+  expect(box.remoteReadAttempts()).toBe(1);
+  expect(box.order).toEqual(["commit"]);
   expect(h.flows.size).toBe(0);
 
   /* Review ingress still cannot fence a flow while GitHub is unreachable. It
@@ -5281,8 +5287,54 @@ test("an unreachable remote leaves the stage passed and records it as unpublishe
     state: "passed",
     verdict: { status: "pass" },
   });
-  expect(box.remoteReadAttempts()).toBe(6);
+  expect(box.remoteReadAttempts()).toBe(2);
   expect(h.flows.size).toBe(0);
+});
+
+test("a final passing stage stays open until its accepted head is published (#999)", async () => {
+  const h = harness();
+  const box = publishHarness(h, { remoteReadFails: true });
+  await create(h.ports, [
+    { id: "build", kind: "run", role: { roleId: "builder" }, ["prompt"]: "build", next: null },
+  ] as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+
+  const waiting = loadPipelines()[0]!;
+  expect(waiting).toMatchObject({
+    state: "running",
+    closedAt: null,
+    lastPassedCommit: box.passedSha,
+    publishedCommit: null,
+    stateDetail: expect.stringContaining("passed but unpublished"),
+  });
+  expect(waiting.runs[0]!.attempts[0]).toMatchObject({
+    state: "passed",
+    verdict: { status: "pass" },
+    error: expect.stringContaining("passed but unpublished"),
+  });
+  expect(box.remoteReadAttempts()).toBe(1);
+
+  box.setRemoteReadFails(false);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const completed = loadPipelines()[0]!;
+  expect(completed).toMatchObject({
+    state: "completed",
+    cursor: null,
+    lastPassedCommit: box.passedSha,
+    publishedCommit: box.passedSha,
+    stateDetail: null,
+  });
+  expect(completed.closedAt).not.toBeNull();
+  expect(completed.runs[0]!.attempts[0]).toMatchObject({
+    state: "passed",
+    verdict: { status: "pass" },
+    error: null,
+  });
+  expect(box.order).toEqual(["commit", `push:${box.passedSha}`]);
+  expect(box.remoteReadAttempts()).toBe(3);
 });
 
 test("a publication that cannot land parks the pass without losing the commit", async () => {

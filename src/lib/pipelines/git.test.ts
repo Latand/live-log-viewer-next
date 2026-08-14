@@ -425,6 +425,31 @@ test("a head already recorded as published costs no remote probe at all", () => 
   expect(calls.some((call) => call.includes("remote get-url"))).toBe(false);
 });
 
+test("an unreachable remote gets one time-bounded read per publication call (#999)", () => {
+  const head = "a".repeat(40);
+  const calls: string[] = [];
+  const exec: ExecPort = (command, args) => {
+    calls.push(`${command} ${args.join(" ")}`);
+    if (command === "git" && args[0] === "status") return { code: 0, stdout: "", stderr: "" };
+    if (command === "git" && args[0] === "branch") return { code: 0, stdout: `${pipeline().branch}\n`, stderr: "" };
+    if (command === "git" && args[0] === "rev-parse") return { code: 0, stdout: `${head}\n`, stderr: "" };
+    if (command === "git" && args[0] === "remote") return { code: 0, stdout: "git@example.invalid:owner/repo.git\n", stderr: "" };
+    if (command === "timeout") return { code: 124, stdout: "", stderr: "" };
+    return { code: 128, stdout: "", stderr: "remote read must be bounded" };
+  };
+
+  expect(publishPipelineBranch(pipeline(), exec, { acceptedSha: head })).toEqual({
+    ok: true,
+    sha: head,
+    remote: "unreachable",
+    detail: "checking the remote pipeline branch: git remote read timed out after 5s",
+  });
+  expect(calls.filter((call) => call.includes("ls-remote"))).toEqual([
+    `timeout --signal=KILL 5s git ls-remote --heads origin refs/heads/${pipeline().branch}`,
+  ]);
+  expect(calls.some((call) => call.startsWith("sleep "))).toBe(false);
+});
+
 test("publication pushes only the immutable accepted revision when the branch advances mid-publish", () => {
   const box = publishSandbox();
   try {
@@ -437,7 +462,7 @@ test("publication pushes only the immutable accepted revision when the branch ad
        this unaccepted commit to origin and leave review fenced on a target that
        never passed; pushing the accepted object cannot. */
     const racing: ExecPort = (command, args, cwd) => {
-      if (command === "git" && args[0] === "ls-remote" && racy === null) {
+      if (command === "timeout" && args.includes("ls-remote") && racy === null) {
         racy = box.commit("racy.txt", "never accepted\n");
       }
       return realExec(command, args, cwd);

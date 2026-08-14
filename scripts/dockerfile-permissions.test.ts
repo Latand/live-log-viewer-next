@@ -90,15 +90,15 @@ describe("runtime-host Docker credentials (#102)", () => {
     expect(wrapper).not.toContain("--setuid");
   });
 
-  test("every engine container resolves git SSH credentials from its runtime HOME (#999)", () => {
-    const wrapper = dockerfile.match(/cat > \/usr\/local\/bin\/llv-git-ssh <<'WRAPPER'([\s\S]*?)WRAPPER/)?.[1];
-    expect(wrapper).toBeDefined();
-    expect(wrapper).toContain('exec ssh -F "$HOME/.ssh/config"');
-    expect(wrapper).toContain('-o UserKnownHostsFile="$HOME/.ssh/known_hosts"');
-    expect(wrapper).toContain('-o IdentityFile="$HOME/.ssh/id_ed25519"');
-    expect(compose.match(/GIT_SSH_COMMAND:/g)).toHaveLength(4);
-    expect(compose).toContain("GIT_SSH_COMMAND: &git-ssh-command /usr/local/bin/llv-git-ssh");
-    expect(compose.match(/GIT_SSH_COMMAND: \*git-ssh-command/g)).toHaveLength(3);
+  test("the runtime passwd home follows the portable Compose HOME for every git caller (#999)", () => {
+    expect(dockerfile).toContain("ARG LLV_RUNTIME_HOME=/home/user");
+    expect(dockerfile).toContain("HOME=${LLV_RUNTIME_HOME}");
+    expect(dockerfile).toContain('/usr/sbin/usermod --home "$LLV_RUNTIME_HOME" node');
+    expect(compose).toContain("LLV_RUNTIME_HOME: ${HOME:-/home/user}");
+    expect(compose.match(/^\s+HOME: \${HOME:-\/home\/user}/gm)).toHaveLength(4);
+    expect(compose).not.toContain("GIT_SSH_COMMAND");
+    expect(dockerfile).not.toContain("llv-git-ssh");
+    expect(dockerfile).not.toContain("IdentityFile");
   });
 });
 
@@ -114,7 +114,6 @@ describe("SQLite registry Viewer runtime (#187)", () => {
   });
 
   test("host CLI shims derive the mounted home from the runtime environment", () => {
-    expect(dockerfile).not.toContain("/home/latand");
     expect(dockerfile).toContain("make_nsenter_shim claude '$HOME/.bun/bin/claude'");
     expect(dockerfile).toContain('"$HOME"|"$HOME"/*');
   });

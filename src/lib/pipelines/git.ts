@@ -145,25 +145,27 @@ export type PipelinePublishResult =
   | { ok: true; sha: string; remote: "unreachable"; detail: string }
   | { ok: false; error: string };
 
-const REMOTE_READ_BACKOFF_SECONDS = ["0.25", "0.5"] as const;
+const REMOTE_READ_TIMEOUT = "5s";
 
-/** A remote read gets three bounded attempts. The synchronous git adapter
-    already blocks for each git process; keeping the two short delays behind
-    that same adapter also keeps tests deterministic and the retry local to the
-    publication module. */
+/** A publication tick gets one bounded remote read. The engine tick is already
+    the retry loop, so retrying or sleeping inside this synchronous adapter only
+    multiplies event-loop stalls. `timeout` exists in both the runtime image and
+    the Linux host namespace used by agent shims. */
 function readRemotePipelineBranch(
   pipeline: Pipeline,
   exec: ExecPort,
   step: string,
 ): { ok: true; sha: string } | { ok: false; error: string } {
-  let last: ExecResult = { code: null, stdout: "", stderr: "remote read was not attempted" };
-  for (let attempt = 0; attempt <= REMOTE_READ_BACKOFF_SECONDS.length; attempt += 1) {
-    last = exec("git", ["ls-remote", "--heads", "origin", `refs/heads/${pipeline.branch}`], pipeline.worktreeDir);
-    if (last.code === 0) return { ok: true, sha: last.stdout.trim().split(/\s+/)[0] ?? "" };
-    const delay = REMOTE_READ_BACKOFF_SECONDS[attempt];
-    if (delay) exec("sleep", [delay], pipeline.worktreeDir);
+  const result = exec(
+    "timeout",
+    ["--signal=KILL", REMOTE_READ_TIMEOUT, "git", "ls-remote", "--heads", "origin", `refs/heads/${pipeline.branch}`],
+    pipeline.worktreeDir,
+  );
+  if (result.code === 0) return { ok: true, sha: result.stdout.trim().split(/\s+/)[0] ?? "" };
+  if (result.code === 124 || result.code === 137) {
+    return { ok: false, error: `${step}: git remote read timed out after ${REMOTE_READ_TIMEOUT}` };
   }
-  return failure(step, last);
+  return failure(step, result);
 }
 
 export interface PipelinePublishRequest {

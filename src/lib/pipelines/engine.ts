@@ -1219,6 +1219,43 @@ function advancePipeline(pipeline: Pipeline, stage: PipelineStage, ports: Pipeli
   pipeline.pausedState = null;
 }
 
+function keepPassedStageUnpublished(
+  pipeline: Pipeline,
+  attempt: PipelineStageAttempt,
+  detail: string,
+): void {
+  const message = `passed but unpublished: ${detail}`;
+  attempt.error = message;
+  pipeline.state = "running";
+  pipeline.stateDetail = message;
+}
+
+/** A terminal pass cannot close until its accepted revision is remotely
+    durable. The pass receipt stays terminal and the committing cursor becomes
+    a publication retry seam, so later ticks never rerun or reset stage work. */
+function retryTerminalStagePublication(
+  pipeline: Pipeline,
+  stage: PipelineStage,
+  attempt: PipelineStageAttempt,
+  ports: PipelinePorts,
+): void {
+  const published = publishPipelineBranch(pipeline, ports.exec, {
+    acceptedSha: pipeline.lastPassedCommit,
+    publishedSha: pipeline.publishedCommit ?? null,
+  });
+  if (!published.ok) {
+    park(pipeline, `publishing the passed stage: ${published.error}`, attempt);
+    return;
+  }
+  if (published.remote === "unreachable") {
+    keepPassedStageUnpublished(pipeline, attempt, published.detail);
+    return;
+  }
+  pipeline.publishedCommit = published.remote === "published" ? published.sha : null;
+  attempt.error = null;
+  advancePipeline(pipeline, stage, ports, attempt);
+}
+
 /** Attempts of the fail edge's target that this stage's fail edge activated —
     the derived (never stored) loop budget, so counts cannot drift from the
     durable evidence. */
@@ -1279,11 +1316,13 @@ function commitPassedStage(
   pipeline.publishedCommit = published.remote === "published" ? published.sha : null;
   attempt.state = "passed";
   attempt.completedAt = ports.now();
+  if (published.remote === "unreachable" && stage.next === null) {
+    keepPassedStageUnpublished(pipeline, attempt, published.detail);
+    return;
+  }
   advancePipeline(pipeline, stage, ports, attempt);
   if (published.remote === "unreachable") {
-    const detail = `passed but unpublished: ${published.detail}`;
-    attempt.error = detail;
-    pipeline.stateDetail = detail;
+    keepPassedStageUnpublished(pipeline, attempt, published.detail);
   }
 }
 
@@ -1390,6 +1429,11 @@ async function tickRunStage(
     ? newAttempt(pipeline, stage)
     : prior ?? newAttempt(pipeline, stage);
   if (!attempt || pipeline.state === "needs_decision") return;
+
+  if (attempt.state === "passed" && pipeline.cursor?.state === "committing") {
+    retryTerminalStagePublication(pipeline, stage, attempt, ports);
+    return;
+  }
 
   if (attempt.state === "committing") {
     commitPassedStage(pipeline, stage, attempt, ports);
@@ -1703,6 +1747,10 @@ async function tickReviewStage(
     ? newAttempt(pipeline, stage)
     : prior ?? newAttempt(pipeline, stage);
   if (!attempt || pipeline.state === "needs_decision") return;
+  if (attempt.state === "passed" && pipeline.cursor?.state === "committing") {
+    retryTerminalStagePublication(pipeline, stage, attempt, ports);
+    return;
+  }
   if (attempt.state === "committing") {
     const fenceError = reviewHeadFenceError(pipeline, attempt, ports);
     if (fenceError) {
