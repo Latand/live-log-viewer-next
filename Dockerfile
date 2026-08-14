@@ -75,6 +75,14 @@ cat > /usr/local/bin/python <<'WRAPPER'
 exec /opt/llv-whisper-venv/bin/python "$@"
 WRAPPER
 chmod +x /usr/local/bin/python
+cat > /usr/local/bin/llv-git-ssh <<'WRAPPER'
+#!/bin/sh
+exec ssh -F "$HOME/.ssh/config" \
+  -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+  -o IdentityFile="$HOME/.ssh/id_ed25519" \
+  "$@"
+WRAPPER
+chmod +x /usr/local/bin/llv-git-ssh
 mkdir -p /usr/local/host-bin
 make_nsenter_shim() {
   name=$1

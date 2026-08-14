@@ -80,7 +80,7 @@ describe("runtime image permission determinism (#76)", () => {
 
 describe("runtime-host Docker credentials (#102)", () => {
   test("runtime UID 1000 retains the host Docker socket group through nsenter", () => {
-    expect(compose).toContain('user: "${LLV_UID:-1000}:${LLV_GID:-1000}"');
+    expect(compose).toContain('"user": "${LLV_UID:-1000}:${LLV_GID:-1000}"');
     expect(compose).toContain('group_add:\n      - "${LLV_DOCKER_GID:-957}"');
     const wrapper = dockerfile.match(/cat > \/usr\/local\/bin\/docker <<'WRAPPER'([\s\S]*?)WRAPPER/)?.[1];
     expect(wrapper).toBeDefined();
@@ -88,6 +88,17 @@ describe("runtime-host Docker credentials (#102)", () => {
     expect(wrapper).toContain('/usr/bin/setpriv --reuid="$uid" --regid="$gid" --groups="$groups" --');
     expect(wrapper).not.toContain("--setgid");
     expect(wrapper).not.toContain("--setuid");
+  });
+
+  test("every engine container resolves git SSH credentials from its runtime HOME (#999)", () => {
+    const wrapper = dockerfile.match(/cat > \/usr\/local\/bin\/llv-git-ssh <<'WRAPPER'([\s\S]*?)WRAPPER/)?.[1];
+    expect(wrapper).toBeDefined();
+    expect(wrapper).toContain('exec ssh -F "$HOME/.ssh/config"');
+    expect(wrapper).toContain('-o UserKnownHostsFile="$HOME/.ssh/known_hosts"');
+    expect(wrapper).toContain('-o IdentityFile="$HOME/.ssh/id_ed25519"');
+    expect(compose.match(/GIT_SSH_COMMAND:/g)).toHaveLength(4);
+    expect(compose).toContain("GIT_SSH_COMMAND: &git-ssh-command /usr/local/bin/llv-git-ssh");
+    expect(compose.match(/GIT_SSH_COMMAND: \*git-ssh-command/g)).toHaveLength(3);
   });
 });
 
