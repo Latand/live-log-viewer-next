@@ -3,6 +3,7 @@ import type {
   AgentRegistry,
   AgentRegistryEntry,
   ProcessIdentity,
+  RegistryConversation,
   StructuredHostColumns,
 } from "@/lib/agent/registry";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
@@ -311,6 +312,34 @@ function verifiedProcessAlive(processIdentity: ProcessIdentity): boolean {
     && procBackend.processIdentity(processIdentity.pid) === processIdentity.startIdentity;
 }
 
+/** Clears one structured ownership claim only when its recorded engine process
+    exists and the registry revalidates its PID plus start identity, when one
+    was captured, as gone. */
+export function reconcileDeadStructuredRegistryHost(
+  registry: AgentRegistry,
+  conversationId: RegistryConversation["id"],
+  key: SessionKey,
+): boolean {
+  const entry = registry.readOnlySnapshot().entries[sessionKeyId(key)];
+  if (!entry?.structuredHost?.process) return false;
+  return Boolean(registry.terminateInactiveStructuredHost(conversationId, key));
+}
+
+/** Periodic bounded pass for completed conversation rows. Active conversation
+    recovery stays demand-driven, while terminal rows cannot retain a dead
+    engine process and its writer claim indefinitely. */
+export function reconcileDeadStructuredRegistryHosts(registry: AgentRegistry): void {
+  const snapshot = registry.readOnlySnapshot();
+  for (const conversation of Object.values(snapshot.conversations)) {
+    if (conversation.turn.state !== "terminal" && !conversation.supersededBy) continue;
+    const generation = conversation.generations.at(-1);
+    if (!generation) continue;
+    const key = { engine: conversation.engine, sessionId: generation.id } as const;
+    if (!snapshot.entries[sessionKeyId(key)]?.structuredHost?.process) continue;
+    reconcileDeadStructuredRegistryHost(registry, conversation.id, key);
+  }
+}
+
 async function waitForVerifiedProcessExit(processIdentity: ProcessIdentity, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (verifiedProcessAlive(processIdentity) && Date.now() < deadline) {
@@ -349,6 +378,9 @@ export async function demoteSkippedStructuredRegistryHosts(
       && host.pendingAttention.length === 0
       && host.activeFlags.length === 0;
     if (alreadyDead) continue;
+    const conversation = registry.conversationForPath(entry.artifactPath);
+    if (conversation
+      && reconcileDeadStructuredRegistryHost(registry, conversation.id, entry.key)) continue;
     const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
     try {
       await registry.withOperationLock(entry.key, owner, async () => {

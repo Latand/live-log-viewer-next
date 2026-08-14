@@ -607,7 +607,6 @@ export async function enqueueStructuredMessage(
         dependencies.republish ?? republishStructuredDeliveryHost,
       );
       session = refreshed.session;
-      if (refreshed.republished && (session.host === "dead" || session.host === "unhosted")) return ownershipUnavailable();
     } catch (error) {
       return deliveryFailure(error);
     }

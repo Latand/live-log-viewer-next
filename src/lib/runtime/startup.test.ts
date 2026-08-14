@@ -1062,6 +1062,45 @@ async function startupAdoptionAttempts(
   return attempts;
 }
 
+test("startup releases a completed stage host claim after its recorded process dies", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-dead-stage-owner-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "aaaaaaaa-2222-0222-0222-aaaaaaaaaaaa";
+  addStructuredRestartConversation(registry, directory, {
+    sessionId,
+    status: "idle",
+    turn: "terminal",
+  });
+  const stored = registry.readOnlySnapshot().entries[`codex:${sessionId}`]!;
+  registry.upsert({
+    key: stored.key,
+    artifactPath: stored.artifactPath,
+    cwd: stored.cwd,
+    accountId: stored.accountId,
+    launchProfile: stored.launchProfile,
+    status: stored.status,
+    host: stored.host,
+    structuredHost: {
+      ...stored.structuredHost!,
+      endpoint: "stdio:dead-stage-host",
+      process: { pid: 2_000_000_000, startIdentity: "dead-stage-host" },
+    },
+    claimEpoch: stored.claimEpoch,
+    claimOwner: `structured-host:${JSON.stringify({ pid: process.pid, startIdentity: null })}`,
+    pendingAction: stored.pendingAction,
+  });
+
+  expect(await startupAdoptionAttempts(registry)).toEqual([]);
+  expect(registry.readOnlySnapshot().entries[`codex:${sessionId}`]).toMatchObject({
+    status: "dead",
+    structuredHost: null,
+    claimOwner: null,
+  });
+
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
 test("startup publishes per-host progress across the serial provider adoption loops", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-progress-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));

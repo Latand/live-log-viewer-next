@@ -8,6 +8,7 @@ import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 import { procBackend } from "@/lib/proc";
 
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
+import { reconcileDeadStructuredRegistryHost } from "./registry";
 import { spawnStructuredConversation } from "./structuredSpawn";
 import { spawnTransport } from "./spawnTransport";
 
@@ -142,6 +143,14 @@ async function recoverCandidate(
     await assertOwnership();
     let current = candidateFor(registry, request, Boolean(ownership));
     if (!current) return null;
+    /* A host wrapper can disappear before its live Viewer writer releases the
+       claim. Retire that claim only through the registry's PID/start-identity
+       check; a live or unverifiable host remains fenced. */
+    if (!current.publishReady) {
+      reconcileDeadStructuredRegistryHost(registry, current.conversationId, current.key);
+      current = candidateFor(registry, request, Boolean(ownership));
+      if (!current) return null;
+    }
     if (current.publishReady) {
       if (!ownership) {
         return {
