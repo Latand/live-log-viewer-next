@@ -1330,6 +1330,36 @@ test("a delivering transition persists its derived turn fence in the outbox", ()
   journal.close();
 });
 
+test("an engine-host resolution keyed only by `id` still retires the attention (#765)", () => {
+  /* Engine-host projections historically carried the attention id as `id`
+     rather than `attentionId`; the reducer fell back to the session scope id,
+     matched no entity, and the question stayed open in every snapshot. */
+  const dir = sandbox("attention-id-fallback");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 100, now: () => 100 });
+  journal.append({
+    scope: runtimeScope("session", "conv-one"),
+    kind: "attention",
+    payload: {
+      id: "attention-one",
+      conversationId: "conv-one",
+      kind: "question",
+      state: "open",
+      unowned: false,
+      createdAt: "2026-07-10T00:00:00.000Z",
+      request: { question: { prompt: "Proceed?" } },
+      turnId: "turn-one",
+    },
+  });
+  journal.append({
+    scope: runtimeScope("session", "conv-one"),
+    kind: "attention-resolved",
+    payload: { id: "attention-one", conversationId: "conv-one", state: "cancelled", resolution: "turn-ended" },
+  });
+  expect(journal.snapshot().attentions[0]?.state).toBe("cancelled");
+  expect(journal.snapshot().sessions[0]?.attentionIds).toEqual([]);
+  journal.close();
+});
+
 test("answer and interrupt operations update projected attention and turn axes", () => {
   const dir = sandbox("answer-interrupt");
   const filename = path.join(dir, "events.sqlite");

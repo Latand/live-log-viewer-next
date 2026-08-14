@@ -1278,6 +1278,46 @@ describe("ClaudeStreamBrokerHost", () => {
     await host.release();
   });
 
+  test("a turn ending retires the question it left unanswered (#765)", async () => {
+    const ledger = new RecordingDeliveryLedger();
+    const child = new FakeClaude(ledger);
+    const host = await ClaudeStreamBrokerHost.start({
+      cwd: "/repo",
+      deliveryLedger: ledger,
+      eventStore: new MemoryEventStore(),
+      requestTimeoutMs: 1_000,
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      spawnProcess: fakeSpawn(child, {}),
+    });
+
+    const receipt = host.send({ id: "turn-one", text: "go" });
+    await Bun.sleep(0);
+    child.emitJson({ type: "user", isReplay: true, session_id: host.identity.sessionId, uuid: "user-one", message: { role: "user", content: [{ type: "text", text: "go" }] } });
+    expect(await receipt).toEqual({ outcome: "turn-started", turnId: "turn-one" });
+
+    child.emitJson({ type: "control_request", request_id: "question-open", request: { subtype: "can_use_tool", tool_name: "AskUserQuestion", input: { questions: [{ question: "Continue?" }] } } });
+    await Bun.sleep(0);
+    expect((await host.health()).pendingAttention).toEqual(["question-open"]);
+
+    const events = host.attach((await host.health()).eventCursor)[Symbol.asyncIterator]();
+    const unconfirmedAnswer = host.answer("question-open", { behavior: "deny" });
+    /* The operator interrupted instead of answering: Claude cuts the turn with
+       a bare `result` and never sends `control_cancel_request` for the
+       question it abandoned. The request died with the turn, so the broker
+       must retire it — this is the card that used to stay pinned forever. */
+    child.emitJson({ type: "result", subtype: "interrupted", session_id: host.identity.sessionId });
+    await expect(unconfirmedAnswer).rejects.toThrow("expired with its turn");
+    expect(await nextEvent(events)).toMatchObject({ kind: "turn-ended", turnId: "turn-one", status: "interrupted" });
+    expect(await nextEvent(events)).toMatchObject({
+      kind: "attention-resolved",
+      id: "question-open",
+      resolution: "turn-ended",
+    });
+    expect((await host.health()).pendingAttention).toEqual([]);
+    expect((await host.health()).status).toBe("idle");
+    await host.release();
+  });
+
   test("does not repeat a completed assistant message after partial deltas", async () => {
     const ledger = new RecordingDeliveryLedger();
     const child = new FakeClaude(ledger);

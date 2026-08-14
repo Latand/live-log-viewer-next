@@ -1854,7 +1854,12 @@ export class RuntimeJournal {
       return;
     }
     if (event.kind === "attention-resolved") {
-      const id = typeof payload.attentionId === "string" ? payload.attentionId : scope.id;
+      /* Engine-host projections historically carried the attention id only as
+         `id` (#765); without this fallback those resolutions matched no
+         entity and the attention stayed open in every later snapshot. */
+      const id = typeof payload.attentionId === "string" ? payload.attentionId
+        : typeof payload.id === "string" ? payload.id
+        : scope.id;
       const attention = this.entity<RuntimeAttention>("attention", id);
       if (attention) {
         const state = payload.state === "expired-confirmed" || payload.state === "cancelled" || payload.state === "resolution-unknown" ? payload.state : "resolved";

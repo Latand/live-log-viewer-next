@@ -442,6 +442,18 @@ describe("attention", () => {
     expect(store.sessions["conv_a"]?.attentionIds).toEqual([]);
     expect(store.attentions["a1"]?.state).toBe("resolved");
   });
+
+  test("an engine-host resolution carrying only `id` still retires the card (#765)", () => {
+    /* projectEngineHostEvent payloads named the attention `id` before #765;
+       already-journaled ledgers replay that shape forever, so the reducer
+       accepts it — otherwise a CLI-cancelled question stays pinned as open. */
+    let store = installSnapshot(snapshot());
+    store = apply(store, env("attention", { type: "session", id: "conv_a" }, 4, attention({ id: "a1", conversationId: "conv_a" })));
+    store = apply(store, env("attention-resolved", { type: "session", id: "conv_a" }, 5, { id: "a1", conversationId: "conv_a", state: "cancelled", resolution: "turn-ended" }));
+    expect(store.sessions["conv_a"]?.attentionIds).toEqual([]);
+    expect(store.attentions["a1"]?.state).toBe("cancelled");
+    expect(openAttentions(store, store.sessions["conv_a"]!)).toEqual([]);
+  });
 });
 
 /* --------------------- receipts --------------------- */
