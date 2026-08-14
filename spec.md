@@ -10,7 +10,7 @@ AC1: `fable-5` resolves to a 1,000,000-token window, and 129,000 reported tokens
 
 AC2: `sonnet-5` resolves to a 1,000,000-token window.
 
-AC3: registered Opus models retain a 1,000,000-token window and a 500,000-token rotation threshold.
+AC3: the persisted `opus` launch alias resolves through the current Opus registry entry and retains a 1,000,000-token window, a 500,000-token rotation threshold, and its established audit label.
 
 AC4: `haiku-4-5` resolves to a 200,000-token window and a 100,000-token rotation threshold.
 

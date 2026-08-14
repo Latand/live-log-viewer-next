@@ -32,7 +32,7 @@ const facts = (overrides: Partial<OrchestratorTranscriptFacts> = {}): Orchestrat
   ...overrides,
 });
 
-const OPUS = contextWindowPolicyFor("claude", "claude-opus-4-8");
+const OPUS = contextWindowPolicyFor("claude", "opus");
 
 test("Fable at 129k tokens uses 13% of its registry window and needs no rotation", () => {
   const policy = contextWindowPolicyFor("claude", "fable-5");
@@ -52,10 +52,16 @@ test("Fable at 129k tokens uses 13% of its registry window and needs no rotation
 /* ── The named policy: explicit, configurable, one place ─────────────────── */
 
 test("the reference case is explicit policy: Opus-class window 1,000,000 tokens, threshold 500,000", () => {
-  expect(OPUS).toEqual({ windowTokens: 1_000_000, rotationThresholdTokens: 500_000, policy: "registry:opus-4-8:1m" });
+  expect(OPUS).toEqual({ windowTokens: 1_000_000, rotationThresholdTokens: 500_000, policy: "claude-opus-1m" });
   /* The threshold is the fraction applied to the window, so a new model entry
      needs only its window and inherits a meaningful threshold. */
   expect(OPUS!.rotationThresholdTokens).toBe(OPUS!.windowTokens * ROTATION_THRESHOLD_FRACTION);
+});
+
+test("supported Claude launch aliases resolve to their current registry windows", () => {
+  expect(contextWindowPolicyFor("claude", "fable")).toMatchObject({ windowTokens: 1_000_000, policy: "claude-fable-1m" });
+  expect(contextWindowPolicyFor("claude", "sonnet")).toMatchObject({ windowTokens: 1_000_000, policy: "claude-sonnet-1m" });
+  expect(contextWindowPolicyFor("claude", "haiku")).toMatchObject({ windowTokens: 200_000, policy: "claude-haiku-200k" });
 });
 
 test("Sonnet 5 keeps its 1M registry window", () => {
@@ -98,7 +104,7 @@ test("provider-reported usage wins and is NOT labelled an estimate, even with a 
     percent: 14,
     estimated: false,
     basis: "provider-reported usage from the transcript's newest turn",
-    policy: "registry:opus-4-8:1m",
+    policy: "claude-opus-1m",
   });
 });
 

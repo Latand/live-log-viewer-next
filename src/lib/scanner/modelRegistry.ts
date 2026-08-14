@@ -26,7 +26,19 @@ const MODEL_REGISTRY: Readonly<Record<string, RegistryEntry>> = {
   "sonnet-4-0": { standard: TWO_HUNDRED_THOUSAND, extended: ONE_MILLION },
 };
 
+const MODEL_REGISTRY_ALIASES: Readonly<Record<string, string>> = {
+  fable: "fable-5",
+  opus: "opus-4-8",
+  sonnet: "sonnet-5",
+  haiku: "haiku-4-5",
+};
+
 export type ModelContextMode = "standard" | "1m";
+
+/** Resolve a supported launch-family alias to the exact current registry key. */
+export function resolveRegistryKey(key: string): string {
+  return MODEL_REGISTRY_ALIASES[key] ?? key;
+}
 
 export function normalizeModelKey(raw: string): { key: string; mode: ModelContextMode } | null {
   let value = raw.toLowerCase().trim();

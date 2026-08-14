@@ -13,7 +13,7 @@
  * nothing else — see `./health`, whose recommendation carries no action.
  */
 
-import { normalizeModelKey, registryWindow } from "../scanner/modelRegistry";
+import { normalizeModelKey, registryWindow, resolveRegistryKey } from "../scanner/modelRegistry";
 
 export const ROTATION_THRESHOLD_FRACTION = 0.5;
 
@@ -38,11 +38,15 @@ export function contextWindowPolicyFor(engine: string | null, model: string | nu
   if (engine !== "claude" || !model) return null;
   const normalized = normalizeModelKey(model);
   if (!normalized) return null;
-  const windowTokens = registryWindow(normalized.key, normalized.mode);
+  const registryKey = resolveRegistryKey(normalized.key);
+  const windowTokens = registryWindow(registryKey, normalized.mode);
   if (windowTokens === null) return null;
+  const windowName = policyWindowName(windowTokens);
   return {
     windowTokens,
     rotationThresholdTokens: Math.round(windowTokens * ROTATION_THRESHOLD_FRACTION),
-    policy: `registry:${normalized.key}:${policyWindowName(windowTokens)}`,
+    policy: normalized.key === registryKey
+      ? `registry:${registryKey}:${windowName}`
+      : `claude-${normalized.key}-${windowName}`,
   };
 }
