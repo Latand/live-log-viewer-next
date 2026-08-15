@@ -135,6 +135,41 @@ test("an explicit empty selection is admitted and readable, distinct from never 
   expect(voiceSelectedContext("conversation_voice")?.reference.state).toBe("none");
 });
 
+test("a live peer records one stable operator event and a recording failure stays retryable", async () => {
+  const spoken: string[] = [];
+  const host = hostFor(spoken);
+  const recorded: unknown[] = [];
+  let fail = true;
+  await start(host, DESK);
+  const body = {
+    action: "selectedContext",
+    conversationId: "conversation_voice",
+    realtimeSessionId: "live-1",
+    operatorEventId: "voice-gesture-one",
+    selectedContext: reference(DESK),
+  };
+  const dependencies = {
+    recordOperatorActivity(input: unknown) {
+      recorded.push(input);
+      if (fail) throw new Error("disk unavailable");
+      return { key: "a".repeat(64), engine: "codex" as const, project: "atlas", atMs: NOW };
+    },
+  };
+
+  const failed = await executeRealtimeControl(body, () => host, PEER, dependencies);
+  fail = false;
+  const retried = await executeRealtimeControl(body, () => host, PEER, dependencies);
+  const anonymous = await executeRealtimeControl(body, () => host, { operator: false }, dependencies);
+
+  expect(failed.status).toBe(503);
+  expect(retried.status).toBe(200);
+  expect(anonymous.status).toBe(403);
+  expect(recorded).toEqual([
+    { conversationId: "conversation_voice", idempotencyKey: "realtime:voice-gesture-one" },
+    { conversationId: "conversation_voice", idempotencyKey: "realtime:voice-gesture-one" },
+  ]);
+});
+
 test("a call opened with no window binding refuses every reference", async () => {
   const spoken: string[] = [];
   const host = hostFor(spoken);

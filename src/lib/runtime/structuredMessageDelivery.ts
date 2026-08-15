@@ -50,6 +50,7 @@ export interface StructuredMessageRequest {
       effect so a replayed key re-delivers naming the SAME card, and the
       transcript record keeps the reference the operator actually submitted. */
   selectedContext?: SelectedContextRef;
+  operatorActionKey?: string;
 }
 
 export type StructuredMessageResult =
@@ -769,6 +770,7 @@ export async function enqueueStructuredMessage(
       ...(request.turnId !== undefined ? { turnId: request.turnId } : {}),
       ...(request.runtime ? { runtime: request.runtime } : {}),
       ...(request.selectedContext ? { selectedContext: request.selectedContext } : {}),
+      ...(request.operatorActionKey ? { operatorActionKey: request.operatorActionKey } : {}),
     });
     const result = commandResult;
     const receipt = result.receipt;

@@ -85,7 +85,7 @@ const snapshot = {
   canonicalFor: (pathname: string) => (pathname === PATHNAME ? host : null),
 };
 
-const completedFiles = [{ path: PATHNAME }];
+let completedFiles: Array<Record<string, unknown>> = [{ path: PATHNAME }];
 
 mock.module("@/lib/agent/transcriptHost", () => ({
   canonicalTranscriptTarget: (observed: typeof snapshot, pathname: string) => observed.canonicalFor(pathname)?.display ?? null,
@@ -240,6 +240,74 @@ test("/api/tmux records a validated direct browser message and refuses an agent 
     });
   } finally {
     setCallerConversationResolverForTests(null);
+  }
+});
+
+test("/api/tmux records an authorized dialog answer once and excludes an agent claim", async () => {
+  const { setCallerConversationResolverForTests } = await import("@/lib/agent/operatorAuthority");
+  const { VIEWER_SPAWN_CAPABILITY_HEADER } = await import("@/lib/agent/spawnPolicy");
+  const agentCapability = "d".repeat(43);
+  operatorActivityRequests = [];
+  setCallerConversationResolverForTests(() => "conversation_agent");
+  try {
+    const body = {
+      path: PATHNAME,
+      action: "dialog-key",
+      key: "1",
+      label: "Proceed",
+      clientMessageId: "dialog-answer-one",
+    };
+    const direct = await POST(post(body));
+    const agent = await POST(post(body, { [VIEWER_SPAWN_CAPABILITY_HEADER]: agentCapability }));
+
+    expect(direct.status).toBe(200);
+    expect(agent.status).toBe(200);
+    expect(operatorActivityRequests).toEqual([expect.objectContaining({
+      path: PATHNAME,
+      idempotencyKey: "dialog-answer-one",
+    })]);
+  } finally {
+    setCallerConversationResolverForTests(null);
+  }
+});
+
+test("/api/tmux gives an id-less retry one stable hash-only activity identity", async () => {
+  operatorActivityRequests = [];
+  const body = { path: PATHNAME, text: "legacy retry payload" };
+
+  const first = await POST(post(body));
+  const retry = await POST(post(body));
+  const distinct = await POST(post({ ...body, text: "another intentional payload" }));
+
+  expect([first.status, retry.status, distinct.status]).toEqual([200, 200, 200]);
+  expect(operatorActivityRequests).toHaveLength(3);
+  expect(operatorActivityRequests[0]).not.toHaveProperty("idempotencyKey");
+  expect(operatorActivityRequests[0]?.compatibilityFingerprint).toMatch(/^[a-f0-9]{64}$/);
+  expect(operatorActivityRequests[1]?.compatibilityFingerprint).toBe(operatorActivityRequests[0]?.compatibilityFingerprint);
+  expect(operatorActivityRequests[2]?.compatibilityFingerprint).not.toBe(operatorActivityRequests[0]?.compatibilityFingerprint);
+  expect(JSON.stringify(operatorActivityRequests)).not.toContain("legacy retry payload");
+});
+
+test("/api/tmux attributes by path before a recycled pid and rejects conflicting strong evidence", async () => {
+  const unrelated = { path: "/sessions/unrelated.jsonl", conversationId: "conversation_unrelated", pid: 77 };
+  const exact = { path: PATHNAME, conversationId: "conversation_exact", pid: 42 };
+  completedFiles = [unrelated, exact];
+  operatorActivityRequests = [];
+  try {
+    const exactResponse = await POST(post({ path: PATHNAME, pid: 77, text: "attribute exactly", clientMessageId: "exact-target" }));
+    const conflictResponse = await POST(post({
+      path: PATHNAME,
+      conversationId: "conversation_unrelated",
+      text: "conflicting target",
+      clientMessageId: "conflicting-target",
+    }));
+
+    expect(exactResponse.status).toBe(200);
+    expect(operatorActivityRequests[0]?.fallbackEntry).toEqual(exact);
+    expect(conflictResponse.status).toBe(409);
+    expect(operatorActivityRequests).toHaveLength(1);
+  } finally {
+    completedFiles = [{ path: PATHNAME }];
   }
 });
 

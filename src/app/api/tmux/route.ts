@@ -84,6 +84,56 @@ async function targetForRequest(pid: number | null, filePath: string): Promise<s
   return pid === null ? null : resolveRequestedTmuxTarget(pid, files);
 }
 
+class OperatorActivityTargetConflictError extends Error {}
+
+function operatorFallbackEntry(
+  files: FileEntry[],
+  target: { pid: number; hasPid: boolean; filePath: string; conversationId: string },
+): FileEntry | undefined {
+  const byPath = target.filePath ? files.find((entry) => entry.path === target.filePath) : undefined;
+  const byConversation = target.conversationId
+    ? files.find((entry) => entry.conversationId === target.conversationId)
+    : undefined;
+  if ((byPath && byConversation && byPath.path !== byConversation.path)
+    || (byPath?.conversationId && target.conversationId && byPath.conversationId !== target.conversationId)
+    || (byConversation && target.filePath && byConversation.path !== target.filePath)) {
+    throw new OperatorActivityTargetConflictError("operator activity target evidence conflicts");
+  }
+  if (byPath) return byPath;
+  if (byConversation) return byConversation;
+  if (target.filePath || target.conversationId || !target.hasPid) return undefined;
+  return files.find((entry) => entry.pid === target.pid);
+}
+
+function compatibilityFingerprint(
+  target: { pid: number; hasPid: boolean; filePath: string; conversationId: string },
+  gesture: Record<string, unknown>,
+): string {
+  return crypto.createHash("sha256").update(JSON.stringify({
+    target: {
+      ...(target.conversationId ? { conversationId: target.conversationId } : {}),
+      ...(target.filePath ? { path: target.filePath } : {}),
+      ...(!target.conversationId && !target.filePath && target.hasPid ? { pid: target.pid } : {}),
+    },
+    gesture,
+  })).digest("hex");
+}
+
+async function recordAuthorizedOperatorActivity(
+  req: NextRequest,
+  target: { pid: number; hasPid: boolean; filePath: string; conversationId: string },
+  identity: { idempotencyKey?: string; compatibilityFingerprint?: string },
+): Promise<ReturnType<typeof recordDirectOperatorWakatimeActivity> | null> {
+  if (!requireOperatorAuthority(req).ok) return null;
+  const fallbackEntry = operatorFallbackEntry((await completedFileScan()).snapshot.files, target);
+  return recordDirectOperatorWakatimeActivity({
+    ...(target.conversationId ? { conversationId: target.conversationId } : {}),
+    ...(target.filePath ? { path: target.filePath } : {}),
+    ...identity,
+    ...(fallbackEntry ? { fallbackEntry } : {}),
+  });
+}
+
 function attachJson(body: AttachResponse | AttachError, status = 200): NextResponse<AttachResponse | AttachError> {
   return NextResponse.json(body, { status, headers: { "Cache-Control": "no-store" } });
 }
@@ -215,6 +265,29 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
 
   const explicitAction = typeof body.action === "string" ? body.action : "";
   if ((CONVERSATION_ACTIONS as readonly string[]).includes(explicitAction)) {
+    if (explicitAction === "dialog-key") {
+      const clientMessageId = typeof body.clientMessageId === "string" ? body.clientMessageId.trim().slice(0, 128) : "";
+      const target = { pid, hasPid, filePath, conversationId };
+      try {
+        await recordAuthorizedOperatorActivity(
+          req,
+          target,
+          clientMessageId
+            ? { idempotencyKey: clientMessageId }
+            : { compatibilityFingerprint: compatibilityFingerprint(target, {
+                action: "dialog-key",
+                key: typeof body.key === "string" ? body.key : "",
+                label: body.label,
+                question: body.question,
+              }) },
+        );
+      } catch (error) {
+        if (error instanceof OperatorActivityTargetConflictError) {
+          return NextResponse.json({ error: error.message }, { status: 409 });
+        }
+        return NextResponse.json({ error: "direct operator activity could not be recorded" }, { status: 503 });
+      }
+    }
     const result = await applyConversationAction({
       conversationId,
       transcriptPath: filePath,
@@ -267,23 +340,27 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     return NextResponse.json({ error: "empty message" }, { status: 400 });
   }
 
-  if (requireOperatorAuthority(req).ok) {
-    const clientMessageId = typeof body.clientMessageId === "string" ? body.clientMessageId.trim().slice(0, 128) : "";
-    try {
-      const fallbackEntry = (await completedFileScan()).snapshot.files.find((entry) =>
-        (filePath && entry.path === filePath)
-        || (conversationId && entry.conversationId === conversationId)
-        || (hasPid && entry.pid === pid)
-      );
-      recordDirectOperatorWakatimeActivity({
-        ...(conversationId ? { conversationId } : {}),
-        ...(filePath ? { path: filePath } : {}),
-        idempotencyKey: clientMessageId || crypto.randomUUID(),
-        ...(fallbackEntry ? { fallbackEntry } : {}),
-      });
-    } catch {
-      return NextResponse.json({ error: "direct operator activity could not be recorded" }, { status: 503 });
+  const clientMessageId = typeof body.clientMessageId === "string" ? body.clientMessageId.trim().slice(0, 128) : "";
+  const operatorTarget = { pid, hasPid, filePath, conversationId };
+  let operatorActionKey: string | undefined;
+  try {
+    const action = await recordAuthorizedOperatorActivity(
+      req,
+      operatorTarget,
+      clientMessageId
+        ? { idempotencyKey: clientMessageId }
+        : { compatibilityFingerprint: compatibilityFingerprint(operatorTarget, {
+            action: "message",
+            text,
+            images,
+          }) },
+    );
+    operatorActionKey = action?.key;
+  } catch (error) {
+    if (error instanceof OperatorActivityTargetConflictError) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
     }
+    return NextResponse.json({ error: "direct operator activity could not be recorded" }, { status: 503 });
   }
 
   if (structuredHostsEnabled()) {
@@ -292,6 +369,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
       path: filePath,
       ...(conversationId ? { conversationId } : {}),
       ...(typeof body.clientMessageId === "string" ? { clientMessageId: body.clientMessageId.slice(0, 128) } : {}),
+      ...(operatorActionKey ? { operatorActionKey } : {}),
       text: text.trim(),
       images,
     });

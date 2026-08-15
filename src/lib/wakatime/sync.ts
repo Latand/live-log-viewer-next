@@ -576,6 +576,7 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
     } catch {
       report("operator_activity_read_failed");
     }
+    const directOperatorKeys = new Set(operatorActions.map((action) => action.key));
     const acknowledgeable: string[] = [];
     for (const action of operatorActions) {
       const existing = current.streams[action.key];
@@ -627,6 +628,22 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
             fallbackProject: entry.project,
           }).project;
           if (!project) continue;
+          for (const action of recent.operatorActions ?? []) {
+            const streamKey = /^[a-f0-9]{64}$/.test(action.key)
+              ? action.key
+              : digest("llv-wakatime-transcript-operator-v1", conversation.id, action.key);
+            if (directOperatorKeys.has(streamKey)) continue;
+            const engagementEndMs = action.atMs + OPERATOR_ENGAGEMENT_MS;
+            const engagementActive = engagementEndMs > now;
+            observations.push({
+              source: { engine: entry.engine, lastActivityAtMs: action.atMs },
+              streamKey,
+              project,
+              window: { startedAt: action.atMs, endedAt: engagementActive ? null : engagementEndMs },
+              openWindowActive: engagementActive,
+              respectEnabledAt: true,
+            });
+          }
           const openWindowActive = openTurnIsActive(entry);
           for (const window of recent.windows) {
             observations.push({
