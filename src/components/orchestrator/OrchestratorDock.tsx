@@ -71,13 +71,14 @@ export function dockWidthForPointer(clientX: number, viewportWidth: number): num
  * the project rail and the board — not an overlay (PRD #976 decision 1). It is
  * a flex sibling, so the board simply gets the rest of the row.
  *
- * Width is the operator's, persisted like the document preview's
- * (`ArtifactPreviewHost`) but PER PROJECT (#1011): drag the right edge, and
- * that project opens at the same width next session while the others keep
- * theirs. The CSS `min()` is the hard floor that the pointer clamp
- * cannot express — a window resized after the drag must not let a remembered
- * width squeeze the board below {@link MIN_BOARD} with the preview sheet also
- * open, and `max()` keeps the dock itself usable on a genuinely small desktop.
+ * Width is the operator's, persisted PER PROJECT (#1011) the way the document
+ * preview persists its own (`ArtifactPreviewHost`): drag the right edge, and
+ * that project opens at the same width next session while every other project
+ * keeps the width it was left at. The CSS `min()` is the hard floor that the
+ * pointer clamp cannot express — a window resized after the drag must not let
+ * a remembered width squeeze the board below {@link MIN_BOARD} with the preview
+ * sheet also open, and `max()` keeps the dock itself usable on a genuinely
+ * small desktop.
  *
  * The other half of that guarantee lives in the sheet: this dock publishes the
  * row it occupies (`../shellLayout`) and the sheet budgets around it, so a
