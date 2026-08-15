@@ -7,7 +7,13 @@ import path from "node:path";
 import { NextRequest } from "next/server";
 
 import { ensureOperatorSpawnCapability } from "./operatorCapability";
-import { requireOperatorAuthority, setCallerConversationResolverForTests, voiceTransportOperator } from "./operatorAuthority";
+import {
+  directOperatorActivityAuthority,
+  internalServiceHeaders,
+  requireOperatorAuthority,
+  setCallerConversationResolverForTests,
+  voiceTransportOperator,
+} from "./operatorAuthority";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "./spawnPolicy";
 
 /**
@@ -120,4 +126,23 @@ test("transport and operator-only actions agree: one rule, asked twice", () => {
   const browser = request(BROWSER);
   expect(voiceTransportOperator(browser)).toBe(true);
   expect(requireOperatorAuthority(browser).ok).toBe(true);
+});
+
+test("direct activity accepts a browser and rejects server-authenticated background producers", () => {
+  expect(directOperatorActivityAuthority(request(BROWSER)).ok).toBe(true);
+
+  for (const service of ["monitor", "mcp", "orchestrator"] as const) {
+    const serviceRequest = request({ ...BROWSER, ...internalServiceHeaders(service) });
+    expect(directOperatorActivityAuthority(serviceRequest).ok).toBe(false);
+    /* Service provenance only classifies WakaTime activity. It does not alter
+       the product's existing operator-authority contract. */
+    expect(requireOperatorAuthority(serviceRequest).ok).toBe(true);
+  }
+});
+
+test("an invalid internal-service claim cannot impersonate authenticated background provenance", () => {
+  expect(directOperatorActivityAuthority(request({
+    ...BROWSER,
+    "x-llv-internal-service": "mcp.invalid",
+  })).ok).toBe(true);
 });

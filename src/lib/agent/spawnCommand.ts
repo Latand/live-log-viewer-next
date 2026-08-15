@@ -15,6 +15,7 @@ import { reasoningFromBody } from "@/lib/agent/efforts";
 import { grantedMcpServers, mcpServersForSession, normalizeSpawnMcpServers, SCHEDULED_REPORT_SESSION_CLASS, type McpSessionClass } from "@/lib/agent/mcpAllowlist";
 import { normalizeSpawnPlugins, pluginAllowlistForSession, SCHEDULED_REPORT_PLUGINS, sessionOriginFor } from "@/lib/agent/pluginAllowlist";
 import { codexModelSupportsImages, modelFromBody, validateLaunchModel } from "@/lib/agent/models";
+import { directOperatorActivityAuthority } from "@/lib/agent/operatorAuthority";
 import { resolveSpawnRole } from "@/lib/roles/registry";
 import { assertDarwinStructuredRuntime } from "@/lib/proc/darwinIdentity";
 import { spawnContentDigest, spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
@@ -39,10 +40,12 @@ import { adoptPipelineAttemptFromSource, pipelineAttemptTargetForSource } from "
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { projectDirectoryCandidates } from "@/lib/scanner/projectDirectories";
+import { UNRESOLVED_PROJECT } from "@/lib/projects/identity";
 import { buildImagePayload, collectImagePayloads, deleteInboxImages, spawnAgentWithPrompt, verifyTmuxHostEvidence } from "@/lib/tmux";
 import { en } from "@/lib/i18n/en";
 import { uk } from "@/lib/i18n/uk";
 import type { ApiError } from "@/lib/types";
+import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorActivity";
 
 import { sourceCwdStatus } from "@/app/api/spawn/sourceCwd";
 import { AGENT_SPAWN_LINEAGE_ERROR, agentSpawnLineageError, authenticatedAgentSpawnCaller, isAgentInitiatedSpawn, spawnLineageSelectorForCaller, type AuthenticatedSpawnCaller } from "@/app/api/spawn/admission";
@@ -99,6 +102,7 @@ export interface SpawnCommandDependencies {
    * through the origin classifier.
    */
   internalGrant?(): { sessionClass: McpSessionClass; mcpServers: readonly string[] } | null;
+  recordOperatorActivity?: typeof recordDirectOperatorWakatimeActivity;
 }
 
 class RuntimeImageStorageError extends Error {}
@@ -116,6 +120,7 @@ export const productionSpawnCommandDependencies: SpawnCommandDependencies = {
   storeImages: (images) => runtimeImageStore().putMany(images),
   adoptPipelineAttemptFromSource,
   pipelineAttemptTargetForSource,
+  recordOperatorActivity: recordDirectOperatorWakatimeActivity,
 };
 
 interface SuggestResponse {
@@ -338,12 +343,26 @@ export async function executeSpawnRequest(
     return NextResponse.json({ error: `not a directory: ${cwd}` }, { status: 400 });
   }
 
+  const clientAttemptId = typeof body.clientAttemptId === "string" ? body.clientAttemptId : null;
+  if (clientAttemptId && directOperatorActivityAuthority(req).ok) {
+    try {
+      dependencies.recordOperatorActivity?.({
+        idempotencyKey: `spawn:${clientAttemptId}`,
+        resolvedAttribution: {
+          engine,
+          project: explicitProject ?? projectForCwd(cwd) ?? UNRESOLVED_PROJECT,
+        },
+      });
+    } catch {
+      return NextResponse.json({ error: "direct operator activity could not be recorded" }, { status: 503 });
+    }
+  }
+
   /* Saved paths stay visible to the catch. A pane-bound receipt keeps them:
      the agent may already have accepted the prompt despite a later failure. */
   let imagePaths: string[] = [];
   let launchId: string | null = null;
   try {
-    const clientAttemptId = typeof body.clientAttemptId === "string" ? body.clientAttemptId : null;
     const existingAttempt = clientAttemptId ? registry.spawnReceiptForClientAttempt(clientAttemptId) : null;
     const lineage = resolveSpawnLineage(spawnLineageSelectorForCaller(authenticatedCaller, {
       ...body,

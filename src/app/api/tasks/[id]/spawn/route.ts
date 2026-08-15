@@ -9,6 +9,7 @@ import { accountManager } from "@/lib/accounts/manager";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import type { AccountContext } from "@/lib/accounts/contracts";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
+import { directOperatorActivityAuthority } from "@/lib/agent/operatorAuthority";
 import { reasoningFromBody } from "@/lib/agent/efforts";
 import { modelFromBody, validateLaunchModel } from "@/lib/agent/models";
 import { agentRegistry, type AgentRegistry, type SpawnReceipt } from "@/lib/agent/registry";
@@ -25,6 +26,7 @@ import { loadTasks, mutateTasks } from "@/lib/tasks/store";
 import type { BoardTask, TaskAssignment } from "@/lib/tasks/types";
 import { spawnAgentWithPrompt, type SpawnedPane } from "@/lib/tmux";
 import type { ApiError } from "@/lib/types";
+import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorActivity";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -56,6 +58,7 @@ interface TaskSpawnDependencies {
   spawnAgentWithPrompt: typeof spawnAgentWithPrompt;
   resolveSpawnedTranscriptPath: typeof resolveSpawnedTranscriptPath;
   ensureTaskPipelineForAssignment?: typeof ensureTaskPipelineForAssignment;
+  recordOperatorActivity?: typeof recordDirectOperatorWakatimeActivity;
 }
 
 const productionDependencies: TaskSpawnDependencies = {
@@ -66,6 +69,7 @@ const productionDependencies: TaskSpawnDependencies = {
   spawnAgentWithPrompt,
   resolveSpawnedTranscriptPath,
   ensureTaskPipelineForAssignment,
+  recordOperatorActivity: recordDirectOperatorWakatimeActivity,
 };
 
 function cwdFromBody(value: unknown): { cwd?: string; error?: string; status?: number } {
@@ -269,6 +273,16 @@ async function postTaskSpawn(
     claudeProjectsDir: engine === "claude" ? account.transcriptRoot : null,
   });
   const project = projectInfoFromCwd(cwdResult.cwd)?.project ?? task.project;
+  if (directOperatorActivityAuthority(req).ok) {
+    try {
+      dependencies.recordOperatorActivity?.({
+        idempotencyKey: `task-spawn:${clientAttemptId}`,
+        resolvedAttribution: { engine, project: task.project },
+      });
+    } catch {
+      return NextResponse.json({ error: "direct operator activity could not be recorded" }, { status: 503 });
+    }
+  }
   const spec = {
     ...specBase,
     launchProfile: emptyLaunchProfile({

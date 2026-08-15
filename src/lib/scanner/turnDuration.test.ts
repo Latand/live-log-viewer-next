@@ -138,6 +138,33 @@ describe("lastTurnFromRecords — Claude", () => {
     expect(result.operatorActions).toEqual([{ key: "claude:human-record-one", atMs: ms(at) }]);
   });
 
+  test("gives a legacy terminal prompt a stable candidate identity and excludes automated Claude lanes", () => {
+    const at = "2026-07-14T07:03:00.000Z";
+    const result = recentTurnActivityFromRecords([{
+      ...claudeUser(at, "typed in a legacy terminal"),
+      uuid: "legacy-terminal-record",
+    }, {
+      ...claudeUser("2026-07-14T07:04:00.000Z", "SDK injection"),
+      uuid: "sdk-record",
+      promptSource: "sdk",
+    }, {
+      ...claudeUser("2026-07-14T07:05:00.000Z", "peer injection"),
+      uuid: "peer-record",
+      isMeta: true,
+      origin: { kind: "peer" },
+    }, {
+      ...claudeUser("2026-07-14T07:06:00.000Z", "coordinator injection"),
+      uuid: "coordinator-record",
+      isMeta: true,
+      origin: { kind: "coordinator" },
+    }], false);
+
+    expect(result.unprovenancedUserActions).toEqual([{
+      key: "claude:legacy-terminal-record",
+      atMs: ms(at),
+    }]);
+  });
+
   test("enumerates every completed turn in chronological order", () => {
     const result = recentTurnWindowsFromRecords(
       [

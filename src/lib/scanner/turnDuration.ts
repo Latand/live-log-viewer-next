@@ -15,6 +15,7 @@ const recentTurnWindowsCache = globalCache<[number, number, RecentTurnWindows]>(
 export interface RecentTurnWindows {
   windows: TurnBoundary[];
   operatorActions?: Array<{ key: string; atMs: number }>;
+  unprovenancedUserActions?: Array<{ key: string; atMs: number }>;
   operatorActionsAtMs?: number[];
   unprovenancedUserActionsAtMs?: number[];
   assistantMessagesAtMs?: number[];
@@ -190,10 +191,11 @@ export function recentTurnWindowsFromRecords(records: RecordLike[], codex: boole
 export function recentTurnActivityFromRecords(
   records: RecordLike[],
   codex: boolean,
-): Pick<RecentTurnWindows, "windows" | "operatorActions" | "operatorActionsAtMs" | "unprovenancedUserActionsAtMs" | "assistantMessagesAtMs"> {
+): Pick<RecentTurnWindows, "windows" | "operatorActions" | "unprovenancedUserActions" | "operatorActionsAtMs" | "unprovenancedUserActionsAtMs" | "assistantMessagesAtMs"> {
   const operatorActions = new Set<number>();
   const provenOperatorActions = new Map<string, number>();
   const unprovenancedUserActions = new Set<number>();
+  const unprovenancedUserActionIdentities = new Map<string, number>();
   const assistantMessages = new Set<number>();
   for (const record of records) {
     const atMs = parseMillis(record.timestamp);
@@ -229,12 +231,25 @@ export function recentTurnActivityFromRecords(
       }
     } else if (!isClaudeProtocolUser(record)) {
       unprovenancedUserActions.add(atMs);
+      const uuid = stringValue(record.uuid);
+      if (uuid) {
+        const key = `claude:${uuid}`;
+        unprovenancedUserActionIdentities.set(
+          key,
+          Math.min(unprovenancedUserActionIdentities.get(key) ?? atMs, atMs),
+        );
+      }
     }
   }
   return {
     windows: recentTurnWindowsFromRecords(records, codex),
     ...(provenOperatorActions.size > 0 ? {
       operatorActions: [...provenOperatorActions]
+        .map(([key, actionAtMs]) => ({ key, atMs: actionAtMs }))
+        .sort((left, right) => left.atMs - right.atMs || left.key.localeCompare(right.key)),
+    } : {}),
+    ...(unprovenancedUserActionIdentities.size > 0 ? {
+      unprovenancedUserActions: [...unprovenancedUserActionIdentities]
         .map(([key, actionAtMs]) => ({ key, atMs: actionAtMs }))
         .sort((left, right) => left.atMs - right.atMs || left.key.localeCompare(right.key)),
     } : {}),

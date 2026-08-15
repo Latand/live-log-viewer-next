@@ -9,13 +9,17 @@ import { NextRequest } from "next/server";
 const realResources = { ...(await import("@/lib/resources")) };
 const previousCodexHome = process.env.LLV_CODEX_HOME;
 const routeCodexHome = fs.mkdtempSync(path.join(os.tmpdir(), "llv-tmux-route-codex-"));
+const previousStateDir = process.env.LLV_STATE_DIR;
 const PATHNAME = path.join(routeCodexHome, "sessions", "rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl");
 fs.mkdirSync(path.dirname(PATHNAME), { recursive: true });
 fs.writeFileSync(PATHNAME, "{}\n");
 process.env.LLV_CODEX_HOME = routeCodexHome;
+process.env.LLV_STATE_DIR = path.join(routeCodexHome, "state");
 afterAll(() => {
   if (previousCodexHome === undefined) delete process.env.LLV_CODEX_HOME;
   else process.env.LLV_CODEX_HOME = previousCodexHome;
+  if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+  else process.env.LLV_STATE_DIR = previousStateDir;
   fs.rmSync(routeCodexHome, { recursive: true, force: true });
   mock.module("@/lib/resources", () => realResources);
 });
@@ -56,6 +60,7 @@ let interruptCalls = 0;
 let structuredMessageCalls = 0;
 let structuredMessageRequest: Record<string, unknown> | null = null;
 let operatorActivityRequests: Record<string, unknown>[] = [];
+let operatorActivityEnabled = true;
 let operatorCompatibilitySettlements: string[] = [];
 let collectedImages: Array<{ base64: string; mime: string }> = [];
 let deletedImagePaths: string[][] = [];
@@ -123,6 +128,7 @@ mock.module("@/lib/runtime/structuredMessageDelivery", () => ({
 }));
 mock.module("@/lib/wakatime/operatorActivity", () => ({
   recordDirectOperatorWakatimeActivity: (request: Record<string, unknown>) => {
+    if (!operatorActivityEnabled) return null;
     operatorActivityRequests.push(request);
     return {
       key: typeof request.compatibilityFingerprint === "string" ? request.compatibilityFingerprint : "a".repeat(64),
@@ -250,6 +256,46 @@ test("/api/tmux records a validated direct browser message and refuses an agent 
     });
   } finally {
     setCallerConversationResolverForTests(null);
+  }
+});
+
+test("/api/tmux excludes authenticated monitor and MCP producers while one browser gesture records once", async () => {
+  const { internalServiceHeaders } = await import("@/lib/agent/operatorAuthority");
+  operatorActivityRequests = [];
+
+  const bodies = [
+    ["browser-message", {}],
+    ["monitor-message", internalServiceHeaders("monitor")],
+    ["mcp-message", internalServiceHeaders("mcp")],
+    ["forged-service-message", { "x-llv-internal-service": "mcp.invalid" }],
+  ] as const;
+  const responses = [];
+  for (const [clientMessageId, headers] of bodies) {
+    responses.push(await POST(post({ path: PATHNAME, text: "same delivery shape", clientMessageId }, headers)));
+  }
+
+  expect(responses.map((response) => response.status)).toEqual([200, 200, 200, 200]);
+  expect(operatorActivityRequests).toEqual([
+    expect.objectContaining({ idempotencyKey: "browser-message" }),
+    expect.objectContaining({ idempotencyKey: "forged-service-message" }),
+  ]);
+});
+
+test("/api/tmux delivery is unaffected when WakaTime recording is disabled", async () => {
+  operatorActivityEnabled = false;
+  operatorActivityRequests = [];
+  let deliveries = 0;
+  delivery = async () => {
+    deliveries += 1;
+    return { ok: true, outcome: "delivered-to-live", target: "agents:4.0" };
+  };
+  try {
+    const response = await POST(post({ path: PATHNAME, text: "continue", clientMessageId: "disabled-message" }));
+    expect(response.status).toBe(200);
+    expect(deliveries).toBe(1);
+    expect(operatorActivityRequests).toEqual([]);
+  } finally {
+    operatorActivityEnabled = true;
   }
 });
 

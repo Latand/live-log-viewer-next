@@ -226,6 +226,24 @@ export async function executeRealtimeControl(
         body: { ok: true, selectedContext: admission.admission.reference, sequence: admission.admission.sequence },
       };
     }
+    if (request.action === "operatorActivity") {
+      const operatorEventId = typeof request.operatorEventId === "string" ? request.operatorEventId.trim() : "";
+      if (!/^[a-f0-9]{64}$/.test(operatorEventId)) {
+        return { status: 400, body: { error: "operatorEventId must be a 64-character lowercase hexadecimal identity" } };
+      }
+      if (caller.kind !== "session" || caller.realtimeSessionId !== host.currentRealtimeSessionId?.()) {
+        return { status: 403, body: { error: "operator activity requires the live realtime peer" } };
+      }
+      try {
+        dependencies.recordOperatorActivity({
+          conversationId,
+          idempotencyKey: `realtime:${operatorEventId}`,
+        });
+      } catch {
+        return { status: 503, body: { error: "direct operator activity could not be recorded" } };
+      }
+      return { status: 200, body: { ok: true, operatorEventId } };
+    }
     if (request.action === "appendSpeech") {
       const text = typeof request.text === "string" ? request.text.trim() : "";
       if (!text || byteLength(text) > MAX_SPEECH_BYTES) {
@@ -286,7 +304,7 @@ export async function executeRealtimeControl(
         },
       };
     }
-    return { status: 400, body: { error: "action must be start, selectedContext, appendSpeech, deliverWorkerResponse, stop, or status" } };
+    return { status: 400, body: { error: "action must be start, operatorActivity, selectedContext, appendSpeech, deliverWorkerResponse, stop, or status" } };
   } catch (error) {
     return { status: 409, body: { error: redactCodexHostDiagnostic(error) } };
   }

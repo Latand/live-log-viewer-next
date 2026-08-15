@@ -4,7 +4,7 @@ import { NextRequest, NextResponse } from "next/server";
 import crypto from "node:crypto";
 
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
-import { requireOperatorAuthority } from "@/lib/agent/operatorAuthority";
+import { directOperatorActivityAuthority } from "@/lib/agent/operatorAuthority";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorActivity";
 
@@ -111,14 +111,14 @@ export async function handleRuntimeCommand(
   try {
     let operatorActionKey: string | undefined;
     if ((command.kind === "send" || command.kind === "steer" || command.kind === "answer")
-      && requireOperatorAuthority(request).ok
+      && directOperatorActivityAuthority(request).ok
       && dependencies.recordOperatorActivity) {
       try {
         const action = dependencies.recordOperatorActivity({
           conversationId: command.conversationId,
           idempotencyKey: command.idempotencyKey,
         });
-        operatorActionKey = action.key;
+        operatorActionKey = action?.key;
       } catch {
         return NextResponse.json({ error: "direct operator activity could not be recorded" }, { status: 503 });
       }

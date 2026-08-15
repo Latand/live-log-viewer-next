@@ -5,6 +5,7 @@ import { validExplicitProject } from "@/lib/accounts/migration/contracts";
 import { agentRegistry } from "@/lib/agent/registry";
 import { validateLaunchModel } from "@/lib/agent/models";
 import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
+import { internalServiceHeaders } from "@/lib/agent/operatorAuthority";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { deliverConversationMessage } from "@/lib/delivery";
 import { structuredHostsEnabled } from "@/lib/runtime/flags";
@@ -115,6 +116,7 @@ async function postSpawnInProcess(body: Record<string, unknown>): Promise<{ stat
   const request = {
     headers: new Headers({
       host: "127.0.0.1",
+      ...internalServiceHeaders("orchestrator"),
       [VIEWER_SPAWN_CAPABILITY_HEADER]: ensureOperatorSpawnCapability(),
     }),
     json: async () => body,

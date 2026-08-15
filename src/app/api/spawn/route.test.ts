@@ -109,6 +109,66 @@ test("spawn admission rejects an explicit model outside the selected engine cata
   });
 });
 
+test("direct spawn records one durable operator gesture while MCP service spawn records none", async () => {
+  const { internalServiceHeaders } = await import("@/lib/agent/operatorAuthority");
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "operator-spawn-activity-"));
+  const store = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const recorded = new Map<string, unknown>();
+  const dependencies = {
+    ...structuredRouteDependencies(cwd),
+    registry: () => store,
+    defer: () => {},
+    recordOperatorActivity: (input: { idempotencyKey?: string }) => {
+      recorded.set(input.idempotencyKey ?? "", input);
+      return { key: "b".repeat(64), engine: "claude" as const, project: "project-fixture", atMs: 1 };
+    },
+  };
+  const post = async (clientAttemptId: string, headers: Record<string, string> = {}) => POST.withDependencies(new NextRequest(
+    "http://127.0.0.1/api/spawn",
+    {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1",
+        origin: "http://127.0.0.1",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+        ...headers,
+      },
+      body: JSON.stringify({ engine: "claude", cwd, prompt: "inspect", clientAttemptId }),
+    },
+  ), dependencies);
+
+  const previous = {
+    transport: process.env.LLV_SPAWN_TRANSPORT,
+    hosts: process.env.LLV_STRUCTURED_HOSTS,
+    events: process.env.LLV_RUNTIME_EVENTS,
+    socket: process.env.LLV_RUNTIME_HOST_SOCKET,
+    ui: process.env.NEXT_PUBLIC_RUNTIME_UI,
+  };
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  try {
+    const direct = await post("operator_spawn_gesture_20260815");
+    const replay = await post("operator_spawn_gesture_20260815");
+    const mcp = await post("mcp_spawn_gesture_20260815", internalServiceHeaders("mcp"));
+
+    expect([direct.status, replay.status, mcp.status]).toEqual([202, 202, 202]);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      const envKey = ({ transport: "LLV_SPAWN_TRANSPORT", hosts: "LLV_STRUCTURED_HOSTS", events: "LLV_RUNTIME_EVENTS", socket: "LLV_RUNTIME_HOST_SOCKET", ui: "NEXT_PUBLIC_RUNTIME_UI" } as const)[key as keyof typeof previous];
+      if (value === undefined) delete process.env[envKey];
+      else process.env[envKey] = value;
+    }
+  }
+  expect([...recorded.values()]).toEqual([expect.objectContaining({
+    idempotencyKey: "spawn:operator_spawn_gesture_20260815",
+    resolvedAttribution: expect.objectContaining({ engine: "claude" }),
+  })]);
+});
+
 test("an explicit spawn account is durably pinned while an omitted account uses the selected fallback", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "account-pin-"));
   const store = registry();
