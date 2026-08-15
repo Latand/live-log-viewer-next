@@ -117,7 +117,9 @@ function localProjectDirectories(): ProjectDirectory[] {
       continue;
     }
     const project = projectForCwd(cwd);
-    const projectRoot = projectRootForCwd(cwd);
+    /* A directory identity is minted from this cwd, which is also its launch
+       root when no repository contains it. */
+    const projectRoot = projectRootForCwd(cwd) ?? (project?.startsWith("dir-") ? cwd : undefined);
     const key = project ? `${project}\0${cwd}` : "";
     if (!project || !projectRoot || seen.has(key)) continue;
     seen.add(key);

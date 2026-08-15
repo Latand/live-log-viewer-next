@@ -11,7 +11,7 @@ import { replaceConversationCatalog } from "@/lib/scanner/conversationCatalog";
 import { projectInfoFromCwd, projectRootForCwd } from "@/lib/scanner/describe";
 import { readStateCollectionRows } from "@/lib/state/sqliteStateStore";
 import { writeSessionTitle } from "@/lib/session/titleStore";
-import type { FileEntry } from "@/lib/types";
+import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 import { createFilesClientCache } from "@/hooks/useFiles";
 
@@ -19,6 +19,7 @@ let scans = 0;
 let scanOptions: unknown;
 let scanProjects: Array<string | undefined> = [];
 let scannedFiles: FileEntry[] = [];
+let scannedProjectCatalog: ProjectCatalogEntry[] = [];
 let scanFileResults: FileEntry[][] = [];
 let scanPinOverlayResults: Array<string[] | undefined> = [];
 let scanCompleteResults: Array<boolean | undefined> = [];
@@ -55,6 +56,7 @@ beforeEach(() => {
   scans = 0;
   scanProjects = [];
   scannedFiles = [];
+  scannedProjectCatalog = [];
   scanFileResults = [];
   scanPinOverlayResults = [];
   scanCompleteResults = [];
@@ -104,7 +106,7 @@ mock.module("@/lib/scanner", () => ({
     scanProjects.push(project);
     scanOptions = options;
     const files = hydrateScannedFiles(scanFileResults.shift() ?? scannedFiles, options);
-    const resourceSnapshot = { files, projectCatalog: [], complete: true };
+    const resourceSnapshot = { files, projectCatalog: scannedProjectCatalog, complete: true };
     (options as { onResourceSnapshot?: (snapshot: typeof resourceSnapshot) => void }).onResourceSnapshot?.(resourceSnapshot);
     const gate = scanGates.shift();
     const signal = (options as { signal?: AbortSignal }).signal;
@@ -123,7 +125,7 @@ mock.module("@/lib/scanner", () => ({
     }
     const pinOverlayPaths = scanPinOverlayResults.shift();
     const complete = scanCompleteResults.shift();
-    return { files, projectCatalog: [], ...(pinOverlayPaths ? { pinOverlayPaths } : {}), complete: complete ?? true };
+    return { files, projectCatalog: scannedProjectCatalog, ...(pinOverlayPaths ? { pinOverlayPaths } : {}), complete: complete ?? true };
   },
 }));
 let pipelinesStore: () => unknown[] = () => [];
@@ -250,6 +252,59 @@ test("a repository checkout recorded as a folder group's projectRoot never renam
   expect(result.projectRemap.get("dir-33333333333333333333333333333333")).toBe("dir-33333333333333333333333333333333");
   const folder = result.projectCatalog.find((entry) => entry.project.startsWith("dir-"))!;
   expect(folder.displayName).toBe("home-operator");
+});
+
+test("project cwd projection rejects repository evidence poisoned into a directory project", async () => {
+  const directoryCwd = path.join(stateDir, "plain-workspace");
+  const repositoryCwd = process.cwd();
+  fs.mkdirSync(directoryCwd, { recursive: true });
+  const directory = projectInfoFromCwd(directoryCwd)!;
+  const repository = projectInfoFromCwd(repositoryCwd)!;
+
+  scannedProjectCatalog = [
+    {
+      project: directory.project,
+      displayName: directory.displayName,
+      projectRoot: repositoryCwd,
+      smt: 20,
+      conversations: 1,
+    },
+    {
+      project: repository.project,
+      displayName: repository.displayName,
+      projectRoot: repositoryCwd,
+      smt: 10,
+      conversations: 1,
+    },
+  ];
+  replaceConversationCatalog(scannedProjectCatalog.map((entry, index) => ({
+    path: path.join(stateDir, `project-cwd-${index}.jsonl`),
+    root: "codex-sessions",
+    name: `project-cwd-${index}.jsonl`,
+    project: entry.project,
+    projectName: entry.displayName,
+    title: "Project cwd fixture",
+    firstPrompt: "",
+    engine: "codex",
+    kind: "session",
+    fmt: "codex",
+    mtime: entry.smt,
+    size: 1,
+  })));
+  fs.writeFileSync(path.join(stateDir, "project-catalog.json"), JSON.stringify({
+    version: 2,
+    files: {
+      directory: { cwd: directoryCwd, projectRoot: repositoryCwd },
+      repository: { cwd: repositoryCwd, projectRoot: repositoryCwd },
+    },
+  }));
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { projectCwds?: Record<string, string> };
+
+  expect(body.projectCwds?.[directory.project]).toBe(directoryCwd);
+  expect(body.projectCwds?.[repository.project]).toBe(repositoryCwd);
+  expect(body.projectCwds?.[directory.project]).not.toBe(body.projectCwds?.[repository.project]);
 });
 
 test("catalog aliases collapse a legacy dashed-path variant before grouping", () => {
