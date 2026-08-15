@@ -1,7 +1,7 @@
 "use client";
 
 import { Bot, LoaderCircle, RotateCcw, TriangleAlert } from "lucide-react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { X } from "@/components/icons";
 import { AgentLaunchControls, useAgentLaunchDraft, type LaunchEngine, type SpeedChoice } from "@/components/draft/AgentLaunchControls";
@@ -85,6 +85,9 @@ export function MobileOrchestratorSheet({
   const { t } = useLocale();
   const kbInset = useKeyboardInset();
   const sheetRef = useRef<HTMLFormElement>(null);
+  const mandateBlockRef = useRef<HTMLDivElement>(null);
+  const revealedRef = useRef(false);
+  const [mandateFocused, setMandateFocused] = useState(false);
   const [mandate, setMandateState] = useState(() => readSeatDraftField(project, "mandate") || ORCHESTRATOR_SYSTEM_PROMPT);
   const [formError, setFormError] = useState<string | null>(null);
   const launch = useAgentLaunchDraft({
@@ -100,6 +103,27 @@ export function MobileOrchestratorSheet({
   /* Full modal semantics through the shared layer stack: focus in on open, Tab
      trapped, Escape closes, body scroll locked, focus back to the row. */
   useModalLayer({ containerRef: sheetRef, onClose });
+
+  /* The keyboard costs the body scroller most of its height, and everything
+     above the mandate — an intent error's card, then engine/account/reasoning —
+     can fill what is left, leaving the operator typing into a field below the
+     scroller's own fold (#1004). So the field is brought to the top of the
+     scroller once the keyboard is actually up: the block, not the textarea, so
+     its label comes along.
+     Both orders arrive here — focus first and the keyboard after (a tap), or
+     the keyboard already up (focus moving in from another field) — because the
+     condition is the state, not either event. It fires ONCE per typing session:
+     after that the scroller is the operator's, and a keyboard that resizes
+     under them never yanks it back. */
+  useEffect(() => {
+    if (!mandateFocused || kbInset <= 0) {
+      revealedRef.current = false;
+      return;
+    }
+    if (revealedRef.current) return;
+    revealedRef.current = true;
+    mandateBlockRef.current?.scrollIntoView({ block: "start" });
+  }, [mandateFocused, kbInset]);
 
   const setMandate = (value: string) => {
     setMandateState(value);
@@ -254,7 +278,7 @@ export function MobileOrchestratorSheet({
                 <AgentLaunchControls draft={launch} disabled={submitting} stacked />
               </div>
 
-              <div className="flex min-h-[180px] flex-1 flex-col gap-1">
+              <div ref={mandateBlockRef} className="flex min-h-[180px] flex-1 flex-col gap-1">
                 <div className="flex min-h-11 items-center gap-2">
                   <label className="text-label font-semibold text-muted" htmlFor="mobile-orchestrator-mandate">
                     {t("orchPanel.mandate")}
@@ -277,6 +301,8 @@ export function MobileOrchestratorSheet({
                   value={mandate}
                   disabled={submitting}
                   onChange={(event) => setMandate(event.target.value)}
+                  onFocus={() => setMandateFocused(true)}
+                  onBlur={() => setMandateFocused(false)}
                   spellCheck={false}
                   /* Prose the agent reads, so sans (design system §1.1); the
                      only mono here is the cwd caption, which is a path. */
