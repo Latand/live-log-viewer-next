@@ -14,13 +14,15 @@ AC3: Two projects hold independent widths: resizing project A leaves project B's
 
 AC4: Switching projects while the dock is open re-reads the new project's width, and the `shellLayout` row the preview sheet budgets around follows the switch. Switching back finds the first project's width unchanged.
 
-AC5: Every clamp is unchanged — `MIN_WIDTH`, `RESERVED_BESIDE_DOCK`, `dockWidthForPointer`, and the CSS `max()/min()` floor — and the dock still publishes `RAIL_WIDTH + width` through `setLeftShellInset`, giving the row back on unmount. The board keeps `MIN_BOARD` with the preview sheet open, exactly as before.
+AC5: A drag owns the project it started on and the width it produced. If the project switches while a drag is still armed — a pointerup released outside the window never reaches the dock's listeners — the dragged width settles on the project the operator sized, the new project's stored width is untouched, and the dead drag stops moving the dock the operator is now looking at. A drag started afterwards on the new project works normally.
 
-AC6: The DOM test file covers the scoped write, the legacy-key fallback seed, independence across two projects, and the project-switch re-read.
+AC6: Every clamp is unchanged — `MIN_WIDTH`, `RESERVED_BESIDE_DOCK`, `dockWidthForPointer`, and the CSS `max()/min()` floor — and the dock still publishes `RAIL_WIDTH + width` through `setLeftShellInset`, giving the row back on unmount. The board keeps `MIN_BOARD` with the preview sheet open, exactly as before.
 
-AC7: Scope holds — only `src/components/orchestrator/OrchestratorDock.tsx` and its DOM test file change (plus this spec). No `src/lib/{flows,agent,runtime}`, no API routes, no mobile surfaces, no new dependency, no new setting, no refactor beyond the fix.
+AC7: The DOM test file covers the scoped write, the legacy-key fallback seed, independence across two projects, the project-switch re-read, and the project switch under an unfinished drag.
 
-AC8: Focused tests, TypeScript type checking, scoped linting and the publication privacy gate pass; no repo suite that sweeps the operator's live runtime/registry state is run.
+AC8: Scope holds — only `src/components/orchestrator/OrchestratorDock.tsx` and its DOM test file change (plus this spec). No `src/lib/{flows,agent,runtime}`, no API routes, no mobile surfaces, no new dependency, no new setting, no refactor beyond the fix.
+
+AC9: Focused tests, TypeScript type checking, scoped linting and the publication privacy gate pass; no repo suite that sweeps the operator's live runtime/registry state is run.
 
 ## Validation gates
 

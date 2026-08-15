@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
@@ -8,9 +8,10 @@ import type { FileEntry } from "@/lib/types";
 import { setLeftShellInset } from "../shellLayout";
 import { OrchestratorPanel } from "./OrchestratorPanel";
 
-/** The width every project shared before #1011. Still READ, never written: it
-    is the seed a project that has never been sized falls back to, so operators
-    coming from the single global preference keep their width everywhere. */
+/** The width every project shared before #1011. Since the split it serves as a
+    seed: a project that has never been sized falls back to it, so operators
+    coming from the single global preference keep their width everywhere.
+    Nothing writes it. */
 const LEGACY_WIDTH_KEY = "llvOrchestratorPanelWidth";
 /** One project's own width (#1011). Projects are isolated surfaces — a dock
     dragged wide for a mandate-heavy project must not resize every other one. */
@@ -100,9 +101,9 @@ export function OrchestratorDock({
   const [width, setWidth] = useState(() => projectDockWidth(project));
 
   /* A project switch re-reads the width, because the width now BELONGS to the
-     project (#1011). Adjusted during render rather than from an effect, so the
-     dock never paints — nor publishes to `../shellLayout` — one frame of the
-     project the operator just left. */
+     project (#1011). The adjustment happens during render, so the dock never
+     paints — nor publishes to `../shellLayout` — a frame of the project the
+     operator just left. */
   const [sizedProject, setSizedProject] = useState(project);
   if (sizedProject !== project) {
     setSizedProject(project);
@@ -116,23 +117,44 @@ export function OrchestratorDock({
     return () => setLeftShellInset(0);
   }, [width]);
 
+  /* The drag in flight, so a project switch can end it. A pointerup released
+     outside the window never reaches these listeners, so a drag can still be
+     armed when the operator moves to another project. */
+  const endDrag = useRef<(() => void) | null>(null);
+
   const resizeFrom = useCallback(() => {
-    const move = (event: PointerEvent) => setWidth(dockWidthForPointer(event.clientX, window.innerWidth));
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-      setWidth((value) => {
-        try {
-          window.localStorage.setItem(widthKey(project), String(value));
-        } catch {
-          /* private mode */
-        }
-        return value;
-      });
+    /* A drag belongs to the project it started on, and carries its own width:
+       both are captured here so a switch mid-drag lands the dragged width on
+       the project the operator sized, leaving the new project's own width
+       alone. Reading the width back out of state at pointerup would write
+       whatever the switch loaded into the wrong project's key. */
+    const owner = project;
+    let dragged: number | null = null;
+    const move = (event: PointerEvent) => {
+      dragged = dockWidthForPointer(event.clientX, window.innerWidth);
+      setWidth(dragged);
     };
+    const end = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      endDrag.current = null;
+      if (dragged === null) return;
+      try {
+        window.localStorage.setItem(widthKey(owner), String(dragged));
+      } catch {
+        /* private mode */
+      }
+    };
+    endDrag.current?.();
+    endDrag.current = end;
     window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+    window.addEventListener("pointerup", end);
   }, [project]);
+
+  /* End an unfinished drag when the project changes under it, or when the dock
+     closes: the width it produced is settled on its owner, and the dock the
+     operator is now looking at stops following the pointer. */
+  useEffect(() => () => endDrag.current?.(), [project]);
 
   return (
     <aside

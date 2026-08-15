@@ -106,17 +106,28 @@ function mountDock(project: string) {
     <OrchestratorDock project={on} projectName={on} files={[]} onClose={() => undefined} />,
   ));
   render(project);
+  /* The gesture in three parts, because a switch can land between them. */
+  const pointerDown = () => {
+    const handle = host.querySelector("[data-orchestrator-dock-resize]") as unknown as HTMLElement;
+    flushSync(() => handle.dispatchEvent(new dom.MouseEvent("pointerdown", { bubbles: true }) as unknown as Event));
+  };
+  /** Move the pointer to where the dock lands on `target` px, on a 2000px
+      desktop wide enough that the pointer clamp does not bite. */
+  const pointerMoveTo = (target: number) => {
+    Object.defineProperty(dom, "innerWidth", { value: 2_000, configurable: true });
+    flushSync(() => dom.dispatchEvent(Object.assign(new dom.Event("pointermove"), { clientX: RAIL_WIDTH + target })));
+  };
+  const pointerUp = () => flushSync(() => dom.dispatchEvent(new dom.Event("pointerup")));
   return {
     render,
     width: () => host.querySelector("[data-orchestrator-dock]")?.getAttribute("data-orchestrator-dock-width"),
-    /** Drag the right edge to land the dock on `target` px, on a 2000px desktop
-        wide enough that the pointer clamp does not bite. */
+    pointerDown,
+    pointerMoveTo,
+    pointerUp,
     dragTo: (target: number) => {
-      const handle = host.querySelector("[data-orchestrator-dock-resize]") as unknown as HTMLElement;
-      flushSync(() => handle.dispatchEvent(new dom.MouseEvent("pointerdown", { bubbles: true }) as unknown as Event));
-      Object.defineProperty(dom, "innerWidth", { value: 2_000, configurable: true });
-      flushSync(() => dom.dispatchEvent(Object.assign(new dom.Event("pointermove"), { clientX: RAIL_WIDTH + target })));
-      flushSync(() => dom.dispatchEvent(new dom.Event("pointerup")));
+      pointerDown();
+      pointerMoveTo(target);
+      pointerUp();
     },
     unmount: () => {
       flushSync(() => root.unmount());
@@ -226,8 +237,8 @@ test("dragging the dock's edge persists the width under the project's own key, a
   expect(dock.width()).toBe(String(DEFAULT_WIDTH));
   dock.dragTo(600);
 
-  /* Scoped to the project (#1011). The legacy global key is left exactly as the
-     operator had it — the drag claims one project's width, not everyone's. */
+  /* Scoped to the project (#1011). The drag claims one project's width and
+     leaves the legacy global key exactly as the operator had it. */
   expect(dom.localStorage.getItem("llvOrchestratorPanelWidth:atlas")).toBe("600");
   expect(dom.localStorage.getItem("llvOrchestratorPanelWidth")).toBeNull();
   expect(dock.width()).toBe("600");
@@ -248,8 +259,8 @@ test("a project with no width of its own seeds from the legacy global one", () =
   /* A width of its own outranks the seed... */
   dom.localStorage.setItem("llvOrchestratorPanelWidth:borealis", "500");
   expect(mountDock("borealis").width()).toBe("500");
-  /* ...and an unusable one falls to the default rather than to the seed: the
-     legacy key answers only for a project that has never been sized. */
+  /* ...and an unusable one falls to the default: the legacy key answers only
+     for a project that has never been sized. */
   dom.localStorage.setItem("llvOrchestratorPanelWidth:borealis", "12");
   expect(mountDock("borealis").width()).toBe(String(DEFAULT_WIDTH));
 });
@@ -286,5 +297,39 @@ test("switching projects while the dock is open re-reads the new project's width
   /* And back: the visit changed nothing about atlas's own width. */
   dock.render("atlas");
   expect(dock.width()).toBe("600");
+  expect(dom.localStorage.getItem("llvOrchestratorPanelWidth:atlas")).toBe("600");
+});
+
+test("a project switch under an unfinished drag settles the width on the project it started on", () => {
+  dom.localStorage.setItem("llvOrchestratorPanelWidth:borealis", "500");
+
+  const dock = mountDock("atlas");
+  dock.pointerDown();
+  dock.pointerMoveTo(600);
+  expect(dock.width()).toBe("600");
+
+  /* The operator switches projects with the drag still armed — a pointerup
+     released outside the window never reaches the dock's listeners, so this is
+     reachable in the real app. */
+  dock.render("borealis");
+  expect(dock.width()).toBe("500");
+
+  /* Atlas keeps the width the operator dragged IT to, and borealis keeps its
+     own: neither project's key holds the other's number. */
+  expect(dom.localStorage.getItem("llvOrchestratorPanelWidth:atlas")).toBe("600");
+  expect(dom.localStorage.getItem("llvOrchestratorPanelWidth:borealis")).toBe("500");
+
+  /* The dead drag is over: the pointer no longer drags borealis's dock, and
+     its pointerup writes nothing. */
+  dock.pointerMoveTo(720);
+  expect(dock.width()).toBe("500");
+  dock.pointerUp();
+  expect(dom.localStorage.getItem("llvOrchestratorPanelWidth:atlas")).toBe("600");
+  expect(dom.localStorage.getItem("llvOrchestratorPanelWidth:borealis")).toBe("500");
+
+  /* Borealis is still resizable by a drag of its own. */
+  dock.dragTo(700);
+  expect(dock.width()).toBe("700");
+  expect(dom.localStorage.getItem("llvOrchestratorPanelWidth:borealis")).toBe("700");
   expect(dom.localStorage.getItem("llvOrchestratorPanelWidth:atlas")).toBe("600");
 });
