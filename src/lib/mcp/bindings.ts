@@ -673,7 +673,7 @@ async function sendMessage(
     /* #1117: an MCP send is inter-agent traffic by definition; the sender role
        is the server's own caller attribution, so the feed can say WHO relayed. */
     origin: mcpSenderOrigin(dependencies),
-  });
+  }, callerCapabilityHeaders());
   /* The registry's OWN lookup over the projection this call already holds (#845),
      rather than a local reimplementation of it. The alias walk is multi-hop and
      cycle-guarded and the path index covers continuity paths, so a send addressed by
@@ -1444,7 +1444,7 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
     /* #1117: a directive relay is inter-agent traffic — the manager's feed
        names the gateway (or attributed caller role), never the operator. */
     origin: mcpSenderOrigin(dependencies),
-  });
+  }, callerCapabilityHeaders());
   return {
     directiveId: deliveryId,
     managerConversationId: manager.conversationId,
@@ -1659,7 +1659,7 @@ async function sendMessageToOrchestrator(
     text: message,
     images: [],
     origin: mcpSenderOrigin(dependencies),
-  });
+  }, callerCapabilityHeaders());
   return redactPayload({
     project,
     conversationId: seat.conversationId,

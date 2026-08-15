@@ -14,6 +14,11 @@ import { resolveProjectAttribution } from "@/lib/session/projectResolution";
 import type { FileEntry, TurnBoundary } from "@/lib/types";
 
 import { acquireWakatimeSchedulerLease, type WakatimeSchedulerLease } from "./lease";
+import {
+  acknowledgeDirectOperatorWakatimeActions,
+  readDirectOperatorWakatimeActions,
+  type DirectOperatorWakatimeAction,
+} from "./operatorActivity";
 
 const ENDPOINT = "https://api.wakatime.com/api/v1/users/current/heartbeats.bulk";
 const SAMPLE_INTERVAL_MS = 120_000;
@@ -101,6 +106,8 @@ export interface WakatimeSyncDependencies {
   scan(): Promise<{ files: FileEntry[]; complete: boolean }>;
   registrySnapshot(): RegistryFile;
   recentTurnWindows(entry: FileEntry): RecentTurnWindows;
+  readOperatorActions?(): Promise<DirectOperatorWakatimeAction[]> | DirectOperatorWakatimeAction[];
+  acknowledgeOperatorActions?(keys: readonly string[]): Promise<void> | void;
   readCredential(): Promise<WakatimeCredential | null> | WakatimeCredential | null;
   readState(): Promise<unknown | null> | unknown | null;
   writeState(state: WakatimeStateV1): Promise<void> | void;
@@ -126,10 +133,6 @@ function digest(...parts: Array<string | number>): string {
 
 function turnDigest(conversationId: string, startedAtMs: number): string {
   return digest("llv-wakatime-v1", conversationId, startedAtMs);
-}
-
-function operatorDigest(conversationId: string, actionAtMs: number): string {
-  return digest("llv-wakatime-operator-v1", conversationId, actionAtMs);
 }
 
 function eventKey(stream: string, sampleTimeMs: number, kind: "activity" | "boundary" = "activity"): string {
@@ -295,7 +298,7 @@ function sampleTimes(start: number, end: number, closed: boolean, last: number |
 
 function addWindow(
   state: WakatimeStateV1,
-  entry: FileEntry,
+  source: { engine: "claude" | "codex"; lastActivityAtMs: number },
   streamKey: string,
   project: string,
   window: TurnBoundary,
@@ -303,17 +306,20 @@ function addWindow(
   existingKeys: Set<string>,
   openWindowActive: boolean,
   emitEndBoundary: boolean,
+  respectEnabledAt: boolean = true,
 ): void {
   if (!validWindow(window)) return;
-  if (window.endedAt !== null && window.endedAt <= state.enabledAtMs) return;
+  if (respectEnabledAt && window.endedAt !== null && window.endedAt <= state.enabledAtMs) return;
   if (window.endedAt !== null && window.endedAt < now - CLOSED_STREAM_RETENTION_MS) return;
-  const start = Math.max(window.startedAt, state.enabledAtMs);
+  const start = respectEnabledAt ? Math.max(window.startedAt, state.enabledAtMs) : window.startedAt;
   const existing = state.streams[streamKey];
   const retired = state.retiredStreams?.[streamKey];
-  if (window.endedAt === null && !openWindowActive && !existing && !retired && entry.mtime * 1_000 <= state.enabledAtMs) return;
+  if (respectEnabledAt
+    && window.endedAt === null && !openWindowActive && !existing && !retired
+    && source.lastActivityAtMs <= state.enabledAtMs) return;
   const lastProvenActivityAt = Math.min(now, Math.max(
     start,
-    entry.mtime * 1_000,
+    source.lastActivityAtMs,
     existing?.lastObservedAtMs ?? retired?.lastObservedAtMs ?? start,
   ));
   const end = window.endedAt ?? (openWindowActive ? now : lastProvenActivityAt);
@@ -322,8 +328,8 @@ function addWindow(
     && end <= retired.lastMaterializedAtMs
     && retired.boundaryFinalizedAtMs === end) return;
   const stream = existing ?? {
-    entity: `agent-log-viewer/${entry.engine}/${streamKey.slice(0, 16)}`,
-    engine: entry.engine as "claude" | "codex",
+    entity: `agent-log-viewer/${source.engine}/${streamKey.slice(0, 16)}`,
+    engine: source.engine,
     project,
     startedAtMs: window.startedAt,
     endedAtMs: window.endedAt,
@@ -553,67 +559,88 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
     }
   };
 
-  const observe = async (current: WakatimeStateV1): Promise<void> => {
-    const scan = await deps.scan();
-    if (!scan.complete) return;
-    const registry = deps.registrySnapshot();
-    const lookup = conversationLookupFromSnapshot(registry);
+  const observe = async (current: WakatimeStateV1): Promise<string[]> => {
     const now = deps.now();
     const existingKeys = new Set(current.pending.map((event) => event.key));
     const observations: Array<{
-      entry: FileEntry;
+      source: { engine: "claude" | "codex"; lastActivityAtMs: number };
       streamKey: string;
       project: string;
       window: TurnBoundary;
       openWindowActive: boolean;
+      respectEnabledAt: boolean;
     }> = [];
-    for (const entry of scan.files) {
-      if ((entry.engine !== "claude" && entry.engine !== "codex")
-        || (entry.root !== "claude-projects" && entry.root !== "codex-sessions")
-        || !entry.path.endsWith(".jsonl") || entry.derivationComplete !== true) continue;
-      const conversation = lookup.conversationForPath(entry.path);
-      const generation = conversation?.generations.at(-1);
-      if (!conversation || !generation || generation.path !== entry.path || conversation.engine !== entry.engine) continue;
-      const recent = deps.recentTurnWindows(entry);
-      if (!recent.complete) continue;
-      if (recent.prefixTruncated && !historyGapPaths.has(entry.path)) {
-        historyGapPaths.add(entry.path);
-        current.counters.historyGaps += 1;
-        report("history_gap", { count: current.counters.historyGaps });
+    let operatorActions: DirectOperatorWakatimeAction[] = [];
+    try {
+      operatorActions = await deps.readOperatorActions?.() ?? [];
+    } catch {
+      report("operator_activity_read_failed");
+    }
+    const acknowledgeable: string[] = [];
+    for (const action of operatorActions) {
+      const existing = current.streams[action.key];
+      if ((existing && existing.startedAtMs !== action.atMs) || current.retiredStreams?.[action.key]) {
+        acknowledgeable.push(action.key);
+        continue;
       }
-      const project = resolveProjectAttribution({
-        projectOwnership: conversation.projectOwnership,
-        cwd: generation.launchProfile.cwd || entry.cwd,
-        launchProfileProject: generation.launchProfile.project,
-        fallbackProject: entry.project,
-      }).project;
-      if (!project) continue;
-      const openWindowActive = openTurnIsActive(entry);
-      for (const window of recent.windows) {
-        observations.push({
-          entry,
-          streamKey: turnDigest(conversation.id, window.startedAt),
-          project,
-          window,
-          openWindowActive,
-        });
-      }
-      const actionTimes = new Set<number>();
-      if (conversation.delegationDepth === 0) {
-        for (const actionAtMs of recent.operatorActionsAtMs ?? []) actionTimes.add(actionAtMs);
-        for (const actionAtMs of recent.unprovenancedUserActionsAtMs ?? []) actionTimes.add(actionAtMs);
-      }
-      for (const actionAtMs of actionTimes) {
-        if (!finite(actionAtMs) || actionAtMs <= 0) continue;
-        const engagementEndMs = actionAtMs + OPERATOR_ENGAGEMENT_MS;
-        const engagementActive = engagementEndMs > now;
-        observations.push({
-          entry,
-          streamKey: operatorDigest(conversation.id, actionAtMs),
-          project,
-          window: { startedAt: actionAtMs, endedAt: engagementActive ? null : engagementEndMs },
-          openWindowActive: engagementActive,
-        });
+      const engagementEndMs = action.atMs + OPERATOR_ENGAGEMENT_MS;
+      const engagementActive = engagementEndMs > now;
+      observations.push({
+        source: { engine: action.engine, lastActivityAtMs: action.atMs },
+        streamKey: action.key,
+        project: action.project,
+        window: { startedAt: action.atMs, endedAt: engagementActive ? null : engagementEndMs },
+        openWindowActive: engagementActive,
+        respectEnabledAt: false,
+      });
+      if (!engagementActive) acknowledgeable.push(action.key);
+    }
+
+    let scan: { files: FileEntry[]; complete: boolean } = { files: [], complete: false };
+    try {
+      scan = await deps.scan();
+    } catch {
+      report("observation_failed");
+    }
+    if (scan.complete) {
+      try {
+        const registry = deps.registrySnapshot();
+        const lookup = conversationLookupFromSnapshot(registry);
+        for (const entry of scan.files) {
+          if ((entry.engine !== "claude" && entry.engine !== "codex")
+            || (entry.root !== "claude-projects" && entry.root !== "codex-sessions")
+            || !entry.path.endsWith(".jsonl") || entry.derivationComplete !== true) continue;
+          const conversation = lookup.conversationForPath(entry.path);
+          const generation = conversation?.generations.at(-1);
+          if (!conversation || !generation || generation.path !== entry.path || conversation.engine !== entry.engine) continue;
+          const recent = deps.recentTurnWindows(entry);
+          if (!recent.complete) continue;
+          if (recent.prefixTruncated && !historyGapPaths.has(entry.path)) {
+            historyGapPaths.add(entry.path);
+            current.counters.historyGaps += 1;
+            report("history_gap", { count: current.counters.historyGaps });
+          }
+          const project = resolveProjectAttribution({
+            projectOwnership: conversation.projectOwnership,
+            cwd: generation.launchProfile.cwd || entry.cwd,
+            launchProfileProject: generation.launchProfile.project,
+            fallbackProject: entry.project,
+          }).project;
+          if (!project) continue;
+          const openWindowActive = openTurnIsActive(entry);
+          for (const window of recent.windows) {
+            observations.push({
+              source: { engine: entry.engine, lastActivityAtMs: entry.mtime * 1_000 },
+              streamKey: turnDigest(conversation.id, window.startedAt),
+              project,
+              window,
+              openWindowActive,
+              respectEnabledAt: true,
+            });
+          }
+        }
+      } catch {
+        report("observation_failed");
       }
     }
     const effectiveEnd = (observation: typeof observations[number]): number => {
@@ -621,7 +648,7 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
       if (observation.openWindowActive) return now;
       return Math.min(now, Math.max(
         observation.window.startedAt,
-        observation.entry.mtime * 1_000,
+        observation.source.lastActivityAtMs,
         current.streams[observation.streamKey]?.lastObservedAtMs ?? observation.window.startedAt,
       ));
     };
@@ -668,7 +695,7 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
       const observation = observations[index]!;
       addWindow(
         current,
-        observation.entry,
+        observation.source,
         observation.streamKey,
         observation.project,
         observation.window,
@@ -676,8 +703,10 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
         existingKeys,
         observation.openWindowActive,
         !coveredBySameProject[index],
+        observation.respectEnabledAt,
       );
     }
+    return acknowledgeable;
   };
 
   const setRetry = (
@@ -823,8 +852,9 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
 
   const run = async (): Promise<void> => {
     const current = await load();
+    let acknowledgeableOperatorActions: string[];
     try {
-      await observe(current);
+      acknowledgeableOperatorActions = await observe(current);
     } catch {
       report("observation_failed");
       return;
@@ -840,6 +870,18 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
       });
     }
     if (!await persist(current)) return;
+    const settledOperatorActions = acknowledgeableOperatorActions.filter((key) => {
+      const stream = current.streams[key];
+      return Boolean(current.retiredStreams?.[key])
+        || (stream !== undefined && stream.endedAtMs !== null && stream.lastMaterializedAtMs >= stream.endedAtMs);
+    });
+    if (settledOperatorActions.length > 0) {
+      try {
+        await deps.acknowledgeOperatorActions?.(settledOperatorActions);
+      } catch {
+        report("operator_activity_ack_failed");
+      }
+    }
     try {
       await deliver(current);
     } catch {
@@ -976,6 +1018,8 @@ function productionDependencies(): WakatimeSyncDependencies {
     scan: () => wakatimeProductionScan(),
     registrySnapshot: () => agentRegistry().readOnlySnapshot(),
     recentTurnWindows: recentTurnWindowsFor,
+    readOperatorActions: readDirectOperatorWakatimeActions,
+    acknowledgeOperatorActions: acknowledgeDirectOperatorWakatimeActions,
     readCredential: readProductionWakatimeCredential,
     readState: readProductionState,
     writeState: writeProductionState,
