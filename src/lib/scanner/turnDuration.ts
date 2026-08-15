@@ -10,10 +10,16 @@ type RecordLike = Record<string, unknown>;
 // v5: meta/command user records no longer open windows (issue #406) — persisted
 // v4 boundaries could start before the real initiating prompt.
 const turnBoundaryCache = globalCache<[number, number, TurnBoundary | null]>("last-turn-v5");
-const recentTurnWindowsCache = globalCache<[number, number, RecentTurnWindows]>("recent-turn-windows-v2");
+const recentTurnWindowsCache = globalCache<[number, number, RecentTurnWindows]>("recent-turn-windows-v4");
+
+export interface OperatorAction {
+  atMs: number;
+  identity: string | null;
+}
 
 export interface RecentTurnWindows {
   windows: TurnBoundary[];
+  operatorActions?: OperatorAction[];
   operatorActionsAtMs?: number[];
   unprovenancedUserActionsAtMs?: number[];
   prefixTruncated: boolean;
@@ -157,17 +163,20 @@ export function recentTurnWindowsFromRecords(records: RecordLike[], codex: boole
   return windows;
 }
 
-/** Direct operator actions are preserved independently from turn windows.
+/** Direct operator actions and durable record identity when available are
+    preserved independently from turn windows.
     A short agent turn can end before the operator's engagement window, and a
-    steering action can occur inside an already-open turn. Codex Viewer input
-    carries the structured-user marker; Claude uses the feed's user/system
-    classification so SDK, peer, coordinator, and automation envelopes remain
-    agent activity without being reclassified as operator input. */
+    steering action can occur inside an already-open turn. Codex composer input
+    carries the structured-user marker plus its `op_` delivery id; Claude uses
+    the feed's user/system classification so SDK, peer, coordinator, and
+    automation envelopes remain agent activity without being reclassified as
+    operator input. */
 export function recentTurnActivityFromRecords(
   records: RecordLike[],
   codex: boolean,
-): Pick<RecentTurnWindows, "windows" | "operatorActionsAtMs" | "unprovenancedUserActionsAtMs"> {
-  const operatorActions = new Set<number>();
+): Pick<RecentTurnWindows, "windows" | "operatorActions" | "operatorActionsAtMs" | "unprovenancedUserActionsAtMs"> {
+  const operatorActions: Array<OperatorAction & { text?: string }> = [];
+  const codexStructuredRecords: Array<{ atMs: number; clientId: string | null; text: string }> = [];
   const unprovenancedUserActions = new Set<number>();
   for (const record of records) {
     const atMs = parseMillis(record.timestamp);
@@ -182,7 +191,10 @@ export function recentTurnActivityFromRecords(
           .map((part) => stringValue(part.text) ?? stringValue(part.input_text) ?? "")
           .join("\n");
       }
-      if (text && decodeCodexStructuredUserText(text).structured) operatorActions.add(atMs);
+      const decoded = decodeCodexStructuredUserText(text);
+      if (!text || !decoded.structured) continue;
+      const clientId = stringValue(payload.client_id) ?? stringValue(payload.clientId);
+      codexStructuredRecords.push({ atMs, clientId, text: decoded.text });
       continue;
     }
     if (!isTurnStart(record, false)) continue;
@@ -190,14 +202,40 @@ export function recentTurnActivityFromRecords(
       ? record.origin
       : stringValue(recordValue(record.origin)?.kind);
     if (originKind === "human" || record.promptSource === "typed") {
-      operatorActions.add(atMs);
+      const recordId = stringValue(record.uuid) ?? stringValue(record.id);
+      const identity = recordId ? `claude-record:${recordId}` : null;
+      if (!operatorActions.some((action) =>
+        (identity !== null && action.identity === identity)
+        || (identity === null && action.identity === null && action.atMs === atMs))) {
+        operatorActions.push({ atMs, identity });
+      }
     } else if (!isClaudeProtocolUser(record)) {
       unprovenancedUserActions.add(atMs);
     }
   }
+  for (const candidate of codexStructuredRecords) {
+    /* The marker proves that Viewer carried the record. Composer submissions
+       additionally carry the `op_` namespace minted by runtimeModel; internal
+       spawn, MCP, bridge, and recovery delivery ids use separate namespaces.
+       This stable ingress identity is what makes a direct steer count at any
+       delegation depth without reclassifying copied agent traffic. */
+    if (!candidate.clientId?.startsWith("op_")) continue;
+    const identity = `codex-client:${candidate.clientId}`;
+    const pairedAtMs = codexStructuredRecords.reduce((earliest, record) =>
+      record.text === candidate.text
+        && Math.abs(record.atMs - candidate.atMs) <= 1_000
+        && (record.clientId === null || record.clientId === candidate.clientId)
+        ? Math.min(earliest, record.atMs)
+        : earliest, candidate.atMs);
+    const duplicate = operatorActions.find((action) => action.identity === identity);
+    if (duplicate) duplicate.atMs = Math.min(duplicate.atMs, pairedAtMs);
+    else operatorActions.push({ atMs: pairedAtMs, identity, text: candidate.text });
+  }
+  operatorActions.sort((left, right) => left.atMs - right.atMs);
   return {
     windows: recentTurnWindowsFromRecords(records, codex),
-    operatorActionsAtMs: [...operatorActions].sort((left, right) => left - right),
+    operatorActions: operatorActions.map(({ atMs, identity }) => ({ atMs, identity })),
+    operatorActionsAtMs: operatorActions.map((action) => action.atMs),
     unprovenancedUserActionsAtMs: [...unprovenancedUserActions].sort((left, right) => left - right),
   };
 }

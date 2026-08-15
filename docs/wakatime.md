@@ -37,7 +37,7 @@ restart.
 
 ## Activity mapping
 
-Each canonical direct operator action becomes a ten-minute WakaTime `app`
+Each proven direct operator action becomes a ten-minute WakaTime `app`
 heartbeat stream:
 
 | WakaTime field | Value |
@@ -55,12 +55,14 @@ working directories, model names, account ids, source contents, and branch
 names stay local.
 
 A direct operator action contributes a ten-minute engagement interval sampled
-at the same 120-second cadence. Viewer-structured Codex input and Claude input
-classified as human are eligible. Legacy bare Claude input is eligible in root
-conversations. Delegated launch input, harness messages, spawn instructions,
+at the same 120-second cadence. Codex composer input carries its stable `op_`
+delivery id; Claude input carries explicit human or typed provenance. These
+proven actions are eligible at every conversation depth. Legacy bare Claude
+input is eligible in root conversations. Delegated launch input,
+harness messages, spawn instructions,
 commands, notifications, SDK traffic, peer messages, and coordinator envelopes
 contribute zero time. Agent execution, tool calls, and transcript churn also
-contribute zero time without a direct root operator action.
+contribute zero time without a proven direct operator action.
 
 The first enabled start creates a forward-only boundary. Engagement ending
 before that timestamp remains local. An engagement interval that crosses the
@@ -70,9 +72,10 @@ markers, keeping each canonical project limited to observed active spans.
 Overlapping engagement intervals in one project contribute their wall-clock
 union. Exclude the reserved project when reading project totals.
 
-Resume and account-path rotation reuse the canonical conversation identity and
-action timestamp. Copied fan-out input belongs to delegated conversations and
-adds zero time. Repeated scans and delivery retries reuse durable event keys.
+Resume, path rotation, account mirrors, delivery retries, and forwarded copies
+that retain the durable operator identity coalesce into one action. Structured
+spawn, MCP, bridge, queue, and fan-out deliveries with their own internal ids
+add zero time. Repeated scans and delivery retries reuse durable event keys.
 If durable project ownership settles after an event was queued, the Viewer
 rewrites that undelivered activity to the authoritative project before sending.
 
@@ -109,10 +112,12 @@ stream-cap eviction, preventing a visible transcript from replaying its
 already delivered history. Finalized boundary state also prevents later tail
 changes from creating delayed boundaries for settled overlaps.
 
-On the first complete scan after upgrading from turn-based accounting, the
+On the first fully classified scan after upgrading from turn-based accounting, the
 Viewer tags operator streams that are still provable from current transcripts
 and retires untagged legacy agent streams and their queued rows before
-delivery. Incomplete scans leave the outbox unchanged.
+delivery. A globally incomplete inventory, incomplete canonical entry
+derivation, or incomplete canonical transcript tail leaves state unchanged and
+performs no credential lookup or delivery.
 
 Blue-green releases coordinate through a process-shared scheduler lease in the
 common state directory. The live owner retains that fence through promotion,
@@ -136,7 +141,7 @@ After restart, inspect server diagnostics for `[wakatime]` startup or failure
 transitions. Repeated failures are rate-limited. Diagnostics contain outcome
 classes, HTTP status values, retry timestamps, and counts.
 
-Send one direct operator message in a root conversation. In the WakaTime
+Send one direct operator message in a root or delegated conversation. In the WakaTime
 dashboard, confirm the canonical project, `AI coding` category, ten-minute
 engagement span, and idle gap after excluding `agent-log-viewer-boundary`.
 Allow an agent tool call to continue beyond that interval and confirm that it
