@@ -241,8 +241,7 @@ function sameQueueEntry(left: QueueEntry, right: QueueEntry): boolean {
   const normalizedRight = normalizeQueueEntry(right);
   return normalizedLeft.id === normalizedRight.id
     && normalizedLeft.contentDigest === normalizedRight.contentDigest
-    && normalizedLeft.expectedTurnId === normalizedRight.expectedTurnId
-    && JSON.stringify(normalizedLeft.operatorEvent ?? null) === JSON.stringify(normalizedRight.operatorEvent ?? null);
+    && normalizedLeft.expectedTurnId === normalizedRight.expectedTurnId;
 }
 
 function deliveryRecord(value: unknown): ClaudeDeliveryRecord | null {

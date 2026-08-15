@@ -1,6 +1,4 @@
 import { parseSelectedContextRef } from "@/lib/selection/selectedContext";
-import { recordOperatorIngress } from "@/lib/worktime/ingress";
-import { parseOperatorEventProvenance } from "@/lib/worktime/provenance";
 
 import { redactCodexHostDiagnostic } from "./codexAppServerHost";
 import { structuredDeliveryHostForConversation } from "./structuredDeliveryController";
@@ -97,7 +95,6 @@ export async function executeRealtimeControl(
      headers), so a call site that omits it has not asked — and an unasked authority
      question must resolve to "no", not to "yes". */
   authority: { caller?: RealtimeCaller; managerConversationId?: string | null; operator: boolean },
-  dependencies: { recordOperatorIngress: typeof recordOperatorIngress } = { recordOperatorIngress },
 ): Promise<RealtimeControlResult> {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     return { status: 400, body: { error: "body must be an object" } };
@@ -188,22 +185,6 @@ export async function executeRealtimeControl(
      * refused `unbound` without a second rule to keep in sync.
      */
     if (request.action === "selectedContext") {
-      const operatorEvent = parseOperatorEventProvenance(request.operatorEvent);
-      if (request.operatorEvent !== undefined && !operatorEvent) {
-        return { status: 400, body: { error: "operatorEvent is invalid" } };
-      }
-      if (operatorEvent) {
-        try {
-          dependencies.recordOperatorIngress({
-            provenance: operatorEvent,
-            conversationId,
-            occurredAtMs: Date.now(),
-            occurrenceId: `${operatorEvent.id}:${conversationId}`,
-          });
-        } catch {
-          console.error("[worktime] operator_ingress_failed");
-        }
-      }
       const admission = admitVoiceSelectedContext({
         conversationId,
         realtimeSessionId: caller.kind === "session" ? caller.realtimeSessionId : "",

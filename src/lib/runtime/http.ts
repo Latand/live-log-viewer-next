@@ -17,7 +17,6 @@ import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { admitRuntimeImagePayload } from "./runtimeImageAdmission";
 import type { RuntimeImageUpload } from "./runtimeImageStore";
 import type { StructuredImageRef } from "./structuredContent";
-import { recordOperatorIngress } from "@/lib/worktime/ingress";
 
 export interface RuntimeHttpDependencies {
   enabled(): boolean;
@@ -26,7 +25,6 @@ export interface RuntimeHttpDependencies {
   registry?(): AgentRegistry;
   enqueue?: typeof enqueueStructuredMessage;
   kick?(): void | Promise<void>;
-  recordOperatorIngress?: typeof recordOperatorIngress;
 }
 
 const DEFAULT_DEPENDENCIES: RuntimeHttpDependencies = {
@@ -105,18 +103,6 @@ export async function handleRuntimeCommand(
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "runtime command is invalid" }, { status: 400 });
   }
-  if ((command.kind === "send" || command.kind === "steer") && command.operatorEvent) {
-    try {
-      (dependencies.recordOperatorIngress ?? recordOperatorIngress)({
-        provenance: command.operatorEvent,
-        conversationId: command.conversationId,
-        occurredAtMs: Date.now(),
-        occurrenceId: `${command.operatorEvent.id}:${command.conversationId}`,
-      });
-    } catch {
-      console.error("[worktime] operator_ingress_failed");
-    }
-  }
   const client = dependencies.client();
   try {
     if ((command.kind === "send" || command.kind === "steer") && dependencies.enqueue) {
@@ -132,7 +118,6 @@ export async function handleRuntimeCommand(
         ...(rawImages ? { images: rawImages } : command.images?.length ? { imageRefs: command.images } : {}),
         ...(command.runtime ? { runtime: command.runtime } : {}),
         ...(command.selectedContext ? { selectedContext: command.selectedContext } : {}),
-        ...(command.operatorEvent ? { operatorEvent: command.operatorEvent } : {}),
       }, {
         enabled: dependencies.structuredEnabled ?? (() => structuredHostsEnabled()),
         client: () => client,

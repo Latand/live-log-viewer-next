@@ -4,17 +4,6 @@ Agent Log Viewer can publish observed Claude and Codex turn activity to your
 WakaTime account. The integration starts only when the Viewer process has
 `LLV_WAKATIME_ENABLED=1`.
 
-The integration has two independent accounting products:
-
-| Product | Purpose | Storage and network behavior |
-| --- | --- | --- |
-| Viewer activity analytics (#473) | Shows observed Claude/Codex execution and Viewer engagement in WakaTime. | Writes `agent-log-viewer/...` heartbeats and uses `wakatime-state.json`. |
-| Operator worktime rollups (#763) | Produces deterministic, project-scoped daily drafts from proven operator input plus real editor evidence. | Reads raw WakaTime heartbeats, stores a local privacy-minimized ledger in `worktime-state.json`, and sends no worktime projection to WakaTime. |
-
-Every `agent-log-viewer/...` entity and the reserved boundary project are
-synthetic Viewer analytics. The worktime calculator excludes them from editor
-evidence, including historical engagement streams created by #473.
-
 ## Setup
 
 The key file is the supported credential source. This keeps the credential out
@@ -85,86 +74,6 @@ Open transcripts advance only while the scanner confirms a live agent process
 and no idle composer or input gate. Abrupt exits, stale transcripts, and idle
 composers freeze at the last proven activity timestamp. A live process remains
 authoritative during silent long-running tool calls.
-
-## Deterministic operator worktime
-
-### Canonical local events
-
-Composer, realtime speech, and API-human ingress attach a stable source event
-ID. Structured runtime commands, held delivery, retry, resume, and Codex
-transcript markers preserve this provenance. A direct occurrence counts once
-at every conversation depth. Forwarded and fan-out occurrences retain the
-source ID with `relation=copy`, so they add evidence while contributing zero
-operator time.
-
-The ledger hashes source IDs, occurrence IDs, lineage, and attribution
-evidence before persistence. It stores the source class, earliest server
-timestamp, project decision, ambiguity, and deduplication counts. Transcript
-text, transcript paths, account identifiers, chat identifiers, and credentials
-stay outside the state file.
-
-Historical import walks an uncapped inventory of every configured Claude/Codex
-account root and accepts explicit human provenance from each stable transcript.
-Native stable IDs take precedence. Records without one use a SHA-256 fallback
-over normalized content and the canonical lineage root, with a 30-second match
-window. SDK, system, command, sidechain, compact-summary, tool-result, and
-unprovenanced agent records are excluded. An incomplete global inventory,
-per-entry derivation, or transcript read causes the whole day to remain
-untouched; that pass performs no state write or credential-backed editor fetch.
-
-### Editor evidence and calculation
-
-For a requested Europe/Kyiv day, the reader fetches raw WakaTime heartbeats for
-the adjacent UTC-date envelope and clips them to the exact local day. Entity
-paths are used transiently for grouping and filtering, then replaced by
-evidence digests. `agent-log-viewer/...` entities and
-`agent-log-viewer-boundary` contribute only to the excluded-synthetic audit
-counter.
-
-The calculator applies these rules deterministically:
-
-1. Deduplicated operator events with adjacent gaps of at most 30 minutes form one episode.
-2. Each episode spans `max(last event - first event, 10 minutes)`.
-3. Project episodes union with real editor intervals.
-4. Cross-project overlap follows `LLV_WORKTIME_PROJECT_PRIORITY`, a comma-separated highest-first list.
-5. Equal-priority overlap enters the ambiguity bucket independent of scan order.
-6. Each project total rounds to the nearest 0.5 hour with a 0.5-hour minimum for positive work.
-
-The rollup exposes raw minutes, rounded hours, canonical interval boundaries,
-evidence counts, deduplication counts, excluded synthetic duration, and
-ambiguous duration. Silent tools, process lifetime, transcript mtime, and
-background execution never extend an operator episode.
-
-### Catch-up, export, and delivery receipts
-
-The WakaTime sidecar also owns a separately leased 15-minute worktime catch-up
-pass. It walks every unprocessed complete Kyiv day in order. A failed day stops
-the pass, and a later healthy pass resumes there. The first enable boundary is
-persisted only after a complete inventory scan.
-
-The model-free local export is:
-
-```text
-GET /api/worktime?day=YYYY-MM-DD
-```
-
-The route applies the loopback same-origin gate and refuses callers presenting
-an agent conversation capability. Its JSON contains `rollup` plus the separate
-`calculated_at`, `drafted_at`, `delivery_attempted_at`, `delivered_at`,
-`destination`, `receipt_id`, `last_error`, and `payload_digest` lifecycle.
-
-The delivery seam defaults to `private-draft`. Completion requires a transport
-receipt whose destination and payload digest are confirmed by read-back.
-Failed attempts retain an empty `delivered_at` and remain retryable; a confirmed
-day is idempotent. This repository currently has no approved private-draft
-transport adapter, so the scheduler calculates and exports drafts while
-`delivered_at` remains empty. Wiring an external destination requires its own
-transport ownership and receipt/read-back implementation. Group publication
-has no implicit path.
-
-Worktime state lives at
-`${XDG_CONFIG_HOME:-~/.config}/agent-log-viewer/state/worktime-state.json` with
-mode `0600` inside the existing `0700` state directory.
 
 ## Delivery and local state
 

@@ -13,7 +13,6 @@ import { requestAccountMigrationTick } from "@/lib/accounts/migration/controller
 import type { HeldDelivery, HeldDeliveryCommand, ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
 import type { SelectedContextRef } from "@/lib/selection/selectedContext";
-import type { OperatorEventProvenance } from "@/lib/worktime/types";
 
 import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "./client";
 import type { RuntimeOperationReceipt, RuntimeOperationResult, RuntimeSendSettings, RuntimeSession } from "./contracts";
@@ -51,7 +50,6 @@ export interface StructuredMessageRequest {
       effect so a replayed key re-delivers naming the SAME card, and the
       transcript record keeps the reference the operator actually submitted. */
   selectedContext?: SelectedContextRef;
-  operatorEvent?: OperatorEventProvenance;
 }
 
 export type StructuredMessageResult =
@@ -191,7 +189,6 @@ function commandInput(request: StructuredMessageRequest) {
     ...(request.kind ? { kind: request.kind } : {}),
     ...(request.policy ? { policy: request.policy } : {}),
     ...(request.turnId !== undefined ? { turnId: request.turnId } : {}),
-    ...(request.operatorEvent ? { operatorEvent: request.operatorEvent } : {}),
   };
 }
 
@@ -478,7 +475,6 @@ export async function deliverHeldStructuredMessage(
       contentDigest: content.contentDigest,
       policy: command.policy,
       ...(command.turnId !== undefined ? { turnId: command.turnId } : {}),
-      ...(command.operatorEvent ? { operatorEvent: command.operatorEvent } : {}),
     });
     try {
       await (dependencies.kick ?? kickStructuredDeliveryQueue)();
@@ -773,7 +769,6 @@ export async function enqueueStructuredMessage(
       ...(request.turnId !== undefined ? { turnId: request.turnId } : {}),
       ...(request.runtime ? { runtime: request.runtime } : {}),
       ...(request.selectedContext ? { selectedContext: request.selectedContext } : {}),
-      ...(request.operatorEvent ? { operatorEvent: request.operatorEvent } : {}),
     });
     const result = commandResult;
     const receipt = result.receipt;

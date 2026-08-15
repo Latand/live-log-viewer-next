@@ -2,7 +2,6 @@ import type { AgentEngine } from "@/lib/agent/cli";
 import { grantedMcpServers, type McpGrantPolicy } from "@/lib/agent/mcpAllowlist";
 import { grantedPlugins } from "@/lib/agent/pluginAllowlist";
 import type { StructuredImageRef } from "@/lib/runtime/structuredContent";
-import type { OperatorEventProvenance } from "@/lib/worktime/types";
 import type { AgentGoal, AgentPlan, EngineLimits, LimitsProvenance } from "@/lib/types";
 
 export type MigrationEngine = Extract<AgentEngine, "claude" | "codex">;
@@ -268,7 +267,6 @@ export interface HeldDeliveryCommand {
   kind: "send" | "steer";
   policy: "queue" | "steer-if-active" | "interrupt-active";
   turnId?: string | null;
-  operatorEvent?: OperatorEventProvenance;
 }
 
 export interface HeldDeliveryCommandInput {
@@ -276,7 +274,6 @@ export interface HeldDeliveryCommandInput {
   kind?: HeldDeliveryCommand["kind"];
   policy?: HeldDeliveryCommand["policy"];
   turnId?: string | null;
-  operatorEvent?: OperatorEventProvenance;
 }
 
 export interface HeldDelivery {

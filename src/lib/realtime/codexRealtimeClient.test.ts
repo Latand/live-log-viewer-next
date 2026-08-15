@@ -8,11 +8,11 @@ test("parses Frameless Bidi transcript, delegation, and error events", () => {
   expect(parseCodexRealtimeEvent({
     type: "input_transcript.added",
     item: { text: "hello" },
-  })).toEqual({ kind: "transcript", role: "user", text: "hello", final: false, eventId: null });
+  })).toEqual({ kind: "transcript", role: "user", text: "hello", final: false });
   expect(parseCodexRealtimeEvent({
     type: "turn.done",
     turn: { role: "assistant", transcript: "done" },
-  })).toEqual({ kind: "transcript", role: "assistant", text: "done", final: true, eventId: null });
+  })).toEqual({ kind: "transcript", role: "assistant", text: "done", final: true });
   expect(parseCodexRealtimeEvent({
     type: "delegation.created",
     item: { id: "delegation-1" },

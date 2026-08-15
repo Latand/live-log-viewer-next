@@ -18,7 +18,6 @@ import {
 
 import type { Flow } from "@/lib/flows/types";
 import type { SelectedContextRef } from "@/lib/selection/selectedContext";
-import type { OperatorEventProvenance } from "@/lib/worktime/types";
 
 import { getRuntimeBus, isRuntimeUiEnabled, type RuntimeBus, type RuntimeBusState } from "./runtimeBus";
 
@@ -291,7 +290,6 @@ export interface SendOptions {
       atomically with the text, so it travels in the SAME request rather than
       being re-read server-side from a view that has since moved. */
   selectedContext?: SelectedContextRef;
-  operatorEvent?: OperatorEventProvenance;
 }
 
 /** Send/steer a message. Replaying the same key returns the original receipt
@@ -305,7 +303,6 @@ export function sendRuntimeMessage(options: SendOptions): Promise<CommandResult>
     policy: options.policy ?? "interrupt-active",
     ...(options.runtime ? { runtime: options.runtime } : {}),
     ...(options.selectedContext ? { selectedContext: options.selectedContext } : {}),
-    ...(options.operatorEvent ? { operatorEvent: options.operatorEvent } : {}),
   });
 }
 

@@ -1,6 +1,4 @@
 import type { SelectedContextRef } from "@/lib/selection/selectedContext";
-import { parseOperatorEventProvenance } from "@/lib/worktime/provenance";
-import type { OperatorEventProvenance } from "@/lib/worktime/types";
 
 import type { RuntimeSendSettings } from "./contracts";
 import type { RuntimeVoiceDelivery, RuntimeVoiceResponse } from "./voiceDelivery";
@@ -27,7 +25,6 @@ export interface QueueEntry {
       submitted. Hosts that can persist it write it onto the canonical
       structured-user record; the rest ignore it, exactly as with `runtime`. */
   selectedContext?: SelectedContextRef;
-  operatorEvent?: OperatorEventProvenance;
 }
 
 export interface NormalizedQueueEntry {
@@ -37,14 +34,11 @@ export interface NormalizedQueueEntry {
   expectedTurnId?: string | null;
   runtime?: RuntimeSendSettings;
   selectedContext?: SelectedContextRef;
-  operatorEvent?: OperatorEventProvenance;
 }
 
 export function normalizeQueueEntry(entry: QueueEntry): NormalizedQueueEntry {
   const envelope = structuredContent(entry.content?.text ?? entry.text ?? "", entry.content?.images ?? entry.images ?? []);
   if (entry.contentDigest && entry.contentDigest !== envelope.contentDigest) throw new Error("queue entry content digest mismatch");
-  const operatorEvent = parseOperatorEventProvenance(entry.operatorEvent);
-  if (entry.operatorEvent !== undefined && !operatorEvent) throw new Error("queue entry operator provenance is invalid");
   return {
     id: entry.id,
     content: envelope.content,
@@ -52,7 +46,6 @@ export function normalizeQueueEntry(entry: QueueEntry): NormalizedQueueEntry {
     ...(entry.expectedTurnId !== undefined ? { expectedTurnId: entry.expectedTurnId } : {}),
     ...(entry.runtime ? { runtime: entry.runtime } : {}),
     ...(entry.selectedContext ? { selectedContext: entry.selectedContext } : {}),
-    ...(operatorEvent ? { operatorEvent } : {}),
   };
 }
 

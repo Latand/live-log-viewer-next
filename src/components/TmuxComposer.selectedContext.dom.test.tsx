@@ -19,7 +19,6 @@ import { createRoot, type Root } from "react-dom/client";
 import type { RuntimeSessionView } from "@/hooks/useRuntime";
 import type { SelectedContextRef } from "@/lib/selection/selectedContext";
 import type { FileEntry } from "@/lib/types";
-import type { OperatorEventProvenance } from "@/lib/worktime/types";
 
 const dom = new Window();
 installActEnv();
@@ -92,7 +91,7 @@ const { viewBus } = await import("@/hooks/viewPresenceBus");
 
 const realFetch = globalThis.fetch;
 let roots: Root[] = [];
-let sent: { text: string; selectedContext?: SelectedContextRef; operatorEvent?: OperatorEventProvenance }[] = [];
+let sent: { text: string; selectedContext?: SelectedContextRef }[] = [];
 /** Runs while the send request is in flight, so a selection change lands
     between capture and admission — the exact race criterion 3 describes. */
 let duringSend: (() => void) | null = null;
@@ -115,8 +114,8 @@ function stubFetch(): void {
       return json({ seat: null, pending: null, exists: false });
     }
     if (url === "/api/runtime/send") {
-      const body = JSON.parse(String(init?.body ?? "{}")) as { text?: string; selectedContext?: SelectedContextRef; operatorEvent?: OperatorEventProvenance };
-      sent.push({ text: body.text ?? "", selectedContext: body.selectedContext, operatorEvent: body.operatorEvent });
+      const body = JSON.parse(String(init?.body ?? "{}")) as { text?: string; selectedContext?: SelectedContextRef };
+      sent.push({ text: body.text ?? "", selectedContext: body.selectedContext });
       duringSend?.();
       return json({ operationId: "op-1", receipt: { status: "delivered", operationId: "op-1" } });
     }
@@ -185,8 +184,6 @@ test("the submitted request names the selected card by its conversation id", asy
 
   expect(sent).toHaveLength(1);
   expect(sent[0]!.text).toBe("look at that one");
-  expect(sent[0]!.operatorEvent).toMatchObject({ origin: "composer", relation: "direct" });
-  expect(sent[0]!.operatorEvent?.id).toMatch(/^[A-Za-z0-9._-]+$/);
   expect(sent[0]!.selectedContext).toMatchObject({
     version: 1,
     state: "selected",

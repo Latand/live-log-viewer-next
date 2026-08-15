@@ -1,6 +1,5 @@
 import { modelFromBody } from "@/lib/agent/models";
 import { parseSelectedContextRef } from "@/lib/selection/selectedContext";
-import { parseOperatorEventProvenance } from "@/lib/worktime/provenance";
 
 import type { RuntimeOperationCommand, RuntimeOperationKind, RuntimeReconfigureCommand, RuntimeSendSettings } from "./contracts";
 import { parseStructuredImageRefs, structuredContent } from "./structuredContent";
@@ -87,8 +86,6 @@ export function parseRuntimeCommand(kind: RuntimeOperationKind, value: unknown):
        and admits the turn anyway — an instruction that arrives without its badge
        is a small loss; one attributed to the wrong conversation is not. */
     const selectedContext = parseSelectedContextRef(body.selectedContext);
-    const operatorEvent = parseOperatorEventProvenance(body.operatorEvent);
-    if (body.operatorEvent !== undefined && !operatorEvent) throw new Error("operatorEvent is invalid");
     return {
       kind,
       conversationId,
@@ -101,7 +98,6 @@ export function parseRuntimeCommand(kind: RuntimeOperationKind, value: unknown):
       ...(turnId !== undefined ? { turnId } : {}),
       ...(runtime ? { runtime } : {}),
       ...(selectedContext ? { selectedContext } : {}),
-      ...(operatorEvent ? { operatorEvent } : {}),
     };
   }
 

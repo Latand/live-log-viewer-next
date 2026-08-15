@@ -58,7 +58,6 @@ import {
 import { SqliteAgentRegistryStore, type SqliteRegistrySnapshot } from "./sqliteRegistryStore";
 import type { ResumePaneRecord } from "@/lib/resumePanesFile";
 import { assertStructuredTextEnvelope, parseStructuredImageRefs, structuredContent, type StructuredImageRef } from "@/lib/runtime/structuredContent";
-import { parseOperatorEventProvenance } from "@/lib/worktime/provenance";
 
 export type AgentHostStatus = "starting" | "live" | "idle" | "handoff" | "unhosted" | "dead";
 
@@ -1370,45 +1369,32 @@ function canonicalHeldDeliveryCommand(
       : "interrupt-active",
   };
   if (value?.turnId === null || typeof value?.turnId === "string") command.turnId = value.turnId;
-  const operatorEvent = parseOperatorEventProvenance(value?.operatorEvent);
-  if (operatorEvent) command.operatorEvent = operatorEvent;
   return command;
 }
 
 function heldDeliveryRequestDigest(
   conversationId: ViewerConversationId,
   text: string,
-  command: Pick<HeldDeliveryCommand, "kind" | "policy" | "turnId" | "operatorEvent">,
+  command: Pick<HeldDeliveryCommand, "kind" | "policy" | "turnId">,
 ): string {
   const turnFence = command.turnId === undefined
     ? ["absent"]
     : ["present", command.turnId];
-  const identity = command.operatorEvent
-    ? [
-        "held-delivery-request-v2",
-        conversationId,
-        text,
-        command.kind,
-        command.policy,
-        turnFence,
-        command.operatorEvent,
-      ]
-    : [
-        "held-delivery-request-v1",
-        conversationId,
-        text,
-        command.kind,
-        command.policy,
-        turnFence,
-      ];
-  return crypto.createHash("sha256").update(JSON.stringify(identity)).digest("hex");
+  return crypto.createHash("sha256").update(JSON.stringify([
+    "held-delivery-request-v1",
+    conversationId,
+    text,
+    command.kind,
+    command.policy,
+    turnFence,
+  ])).digest("hex");
 }
 
 function heldDeliveryRequestDigests(
   file: RegistryFile,
   conversationId: ViewerConversationId,
   text: string,
-  command: Pick<HeldDeliveryCommand, "kind" | "policy" | "turnId" | "operatorEvent">,
+  command: Pick<HeldDeliveryCommand, "kind" | "policy" | "turnId">,
 ): Set<string> {
   const identities = new Set<ViewerConversationId>([conversationId]);
   for (const alias of Object.keys(file.conversationAliases) as ViewerConversationId[]) {

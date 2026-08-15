@@ -42,19 +42,6 @@ type RootEntries = [RootKey, string][];
 type Limit = <T>(work: () => Promise<T>) => Promise<T>;
 type Discovery = { raw: RawEntry[]; complete: boolean };
 type PathDiscovery = { paths: RawPath[]; complete: boolean };
-export interface FullTranscriptInventoryEntry {
-  path: string;
-  root: Extract<RootKey, "claude-projects" | "codex-sessions">;
-  rootPath: string;
-  engine: "claude" | "codex";
-  size: number;
-  mtime: number;
-}
-
-export interface FullTranscriptInventory {
-  files: FullTranscriptInventoryEntry[];
-  complete: boolean;
-}
 type ResourceScopeSnapshot = {
   files: FileEntry[];
   projectCatalog: ProjectCatalogEntry[];
@@ -215,46 +202,6 @@ async function discoverPathInventory(
   return {
     paths: walked.flatMap((result) => result.paths),
     complete: walked.every((result) => result.complete),
-  };
-}
-
-/**
- * Complete transcript inventory for historical operator-event catch-up.
- *
- * This deliberately bypasses the board's project/card window and keeps copies
- * from distinct configured account roots. Canonical ledger identity performs
- * the later deduplication after transcript provenance has been classified.
- */
-export async function discoverFullTranscriptInventory(
-  roots: Roots | RootEntries = scanRootEntries(),
-): Promise<FullTranscriptInventory> {
-  const transcriptRoots = rootEntries(roots).filter(
-    (entry): entry is [Extract<RootKey, "claude-projects" | "codex-sessions">, string] => (
-      entry[0] === "claude-projects" || entry[0] === "codex-sessions"
-    ),
-  );
-  const limit = createLimiter(48);
-  const inventory = await discoverPathInventory(transcriptRoots, limit);
-  const transcriptPaths = inventory.paths.filter((entry) => entry.path.endsWith(".jsonl"));
-  const hydrated = await Promise.all(transcriptPaths.map((entry) => hydrateRawPath(
-    entry,
-    { ...ROOTS, [entry.rootName]: entry.root },
-    limit,
-  )));
-  const files = hydrated
-    .flatMap((result) => result.raw)
-    .map((entry): FullTranscriptInventoryEntry => ({
-      path: entry.path,
-      root: entry.rootName as FullTranscriptInventoryEntry["root"],
-      rootPath: entry.root,
-      engine: entry.rootName === "codex-sessions" ? "codex" : "claude",
-      size: entry.st.size,
-      mtime: entry.st.mtimeMs / 1_000,
-    }))
-    .sort((left, right) => left.path.localeCompare(right.path) || left.rootPath.localeCompare(right.rootPath));
-  return {
-    files,
-    complete: inventory.complete && hydrated.every((result) => result.complete),
   };
 }
 
