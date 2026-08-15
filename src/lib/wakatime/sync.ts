@@ -46,7 +46,6 @@ export interface WakatimeStateV1 {
   enabledAtMs: number;
   credentialGeneration: string | null;
   streams: Record<string, {
-    source?: "operator";
     entity: string;
     engine: "claude" | "codex";
     project: string;
@@ -125,6 +124,10 @@ function digest(...parts: Array<string | number>): string {
   return crypto.createHash("sha256").update(parts.join("\0")).digest("hex");
 }
 
+function turnDigest(conversationId: string, startedAtMs: number): string {
+  return digest("llv-wakatime-v1", conversationId, startedAtMs);
+}
+
 function operatorDigest(conversationId: string, actionAtMs: number): string {
   return digest("llv-wakatime-operator-v1", conversationId, actionAtMs);
 }
@@ -186,7 +189,6 @@ function stateFrom(value: unknown): WakatimeStateV1 | null {
   const streams: WakatimeStateV1["streams"] = {};
   for (const [key, candidate] of Object.entries(value.streams)) {
     if (!/^[a-f0-9]{64}$/.test(key) || !record(candidate)
-      || !(candidate.source === undefined || candidate.source === "operator")
       || typeof candidate.entity !== "string"
       || (candidate.engine !== "claude" && candidate.engine !== "codex")
       || typeof candidate.project !== "string" || candidate.project.length === 0
@@ -200,7 +202,6 @@ function stateFrom(value: unknown): WakatimeStateV1 | null {
       || (candidate.endedAtMs !== null && candidate.endedAtMs <= candidate.startedAtMs)
       || candidate.lastMaterializedAtMs < candidate.startedAtMs - 1) return null;
     streams[key] = {
-      ...(candidate.source === "operator" ? { source: candidate.source } : {}),
       entity: candidate.entity,
       engine: candidate.engine,
       project: candidate.project,
@@ -321,7 +322,6 @@ function addWindow(
     && end <= retired.lastMaterializedAtMs
     && retired.boundaryFinalizedAtMs === end) return;
   const stream = existing ?? {
-    source: "operator" as const,
     entity: `agent-log-viewer/${entry.engine}/${streamKey.slice(0, 16)}`,
     engine: entry.engine as "claude" | "codex",
     project,
@@ -331,15 +331,6 @@ function addWindow(
     lastObservedAtMs: retired?.lastObservedAtMs ?? now,
     boundaryFinalizedAtMs: retired?.boundaryFinalizedAtMs ?? null,
   };
-  stream.source = "operator";
-  if (stream.project !== project) {
-    stream.project = project;
-    for (const pending of state.pending) {
-      if (pending.stream === streamKey && pending.kind === "activity") {
-        pending.heartbeat.project = project;
-      }
-    }
-  }
   if (retired) delete state.retiredStreams?.[streamKey];
   stream.endedAtMs = window.endedAt;
   stream.lastObservedAtMs = window.endedAt ?? (openWindowActive ? now : lastProvenActivityAt);
@@ -369,6 +360,16 @@ function addWindow(
   }
   stream.lastMaterializedAtMs = Math.max(stream.lastMaterializedAtMs, end);
   if (closesObservedInterval) stream.boundaryFinalizedAtMs = end;
+}
+
+function openTurnIsActive(entry: FileEntry): boolean {
+  return entry.proc === "running"
+    && entry.pid !== null
+    && entry.activityReason !== "pane_at_composer"
+    && entry.authoritativeTurn?.state !== "terminal"
+    && entry.authoritativeTurn?.state !== "idle"
+    && entry.pendingQuestion === null
+    && entry.waitingInput === null;
 }
 
 function compactPending(state: WakatimeStateV1): number {
@@ -552,9 +553,9 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
     }
   };
 
-  const observe = async (current: WakatimeStateV1): Promise<boolean> => {
+  const observe = async (current: WakatimeStateV1): Promise<void> => {
     const scan = await deps.scan();
-    if (!scan.complete) return false;
+    if (!scan.complete) return;
     const registry = deps.registrySnapshot();
     const lookup = conversationLookupFromSnapshot(registry);
     const now = deps.now();
@@ -587,6 +588,16 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
         fallbackProject: entry.project,
       }).project;
       if (!project) continue;
+      const openWindowActive = openTurnIsActive(entry);
+      for (const window of recent.windows) {
+        observations.push({
+          entry,
+          streamKey: turnDigest(conversation.id, window.startedAt),
+          project,
+          window,
+          openWindowActive,
+        });
+      }
       const actionTimes = new Set<number>();
       if (conversation.delegationDepth === 0) {
         for (const actionAtMs of recent.operatorActionsAtMs ?? []) actionTimes.add(actionAtMs);
@@ -667,19 +678,6 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
         !coveredBySameProject[index],
       );
     }
-    const legacyStreams = new Set(Object.entries(current.streams)
-      .filter(([, stream]) => stream.source !== "operator")
-      .map(([key]) => key));
-    if (legacyStreams.size > 0) {
-      const before = current.pending.length;
-      current.pending = current.pending.filter((event) => !legacyStreams.has(event.stream));
-      for (const key of legacyStreams) delete current.streams[key];
-      report("legacy_agent_activity_retired", {
-        streams: legacyStreams.size,
-        pending: before - current.pending.length,
-      });
-    }
-    return true;
   };
 
   const setRetry = (
@@ -825,14 +823,12 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
 
   const run = async (): Promise<void> => {
     const current = await load();
-    let observationComplete = false;
     try {
-      observationComplete = await observe(current);
+      await observe(current);
     } catch {
       report("observation_failed");
       return;
     }
-    if (!observationComplete) return;
     const beforeCompacted = current.counters.compacted;
     const beforeDropped = current.counters.dropped;
     enforceBounds(current, deps.now(), maxPending, maxStreams);

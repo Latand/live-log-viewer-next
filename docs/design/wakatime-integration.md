@@ -1,17 +1,15 @@
-# WakaTime operator-engagement integration (issues #473 and #763)
+# WakaTime activity integration (issue #473)
 
-- Status: implemented; accounting corrected under issue #763
-- Corrected base: `origin/main` at `ad45e3445e3aa28ffa097593acc0f89557f97db7`
-- Issues: <https://github.com/Latand/live-log-viewer-next/issues/473>, <https://github.com/Latand/live-log-viewer-next/issues/763>
+- Status: implementation-ready
+- Grounded base: `origin/main` at `7df59ef07f2f9f8c30db24628af20d7ea1ed34fb`
+- Issue: <https://github.com/Latand/live-log-viewer-next/issues/473>
 
 ## Decision
 
 Agent Log Viewer will send API-key-authenticated Heartbeats directly from its
-Node process. A server-owned scheduler extracts scanner-derived direct operator
-actions, materializes deterministic per-action engagement streams into a
-durable local outbox, and drains one bulk request per scheduler tick. Agent
-turn windows remain available to Viewer duration projections and do not become
-WakaTime activity.
+Node process. A server-owned scheduler samples scanner-derived turn windows,
+materializes deterministic per-turn heartbeat streams into a durable local
+outbox, and drains one bulk request per scheduler tick.
 
 The implementation lives in one deep module at `src/lib/wakatime/sync.ts`.
 Production callers learn one interface:
@@ -69,7 +67,7 @@ The implementation must reuse these authorities:
 | concern | current authority | integration use |
 |---|---|---|
 | Completed scanner generation | `currentFileScan()` in `src/lib/scanner/scanCache.ts` | Joins or starts the shared generation; avoids a second independent filesystem scanner. |
-| Operator-action classification | `src/lib/scanner/turnDuration.ts` | Supplies direct human action timestamps while retaining prompt-to-terminal windows for Viewer duration projections. |
+| Turn classification | `src/lib/scanner/turnDuration.ts` | Supplies prompt-to-terminal windows for Claude and Codex, including interrupts, errors, steering, SDK prompts, and metadata exclusions. |
 | Stable conversation identity | `agentRegistry().readOnlySnapshot()` plus `conversationLookupFromSnapshot()` | Resolves a scanned current-generation path to the durable `conversationId`. |
 | Project attribution | `resolveProjectAttribution()` in `src/lib/session/projectResolution.ts` | Preserves explicit ownership, canonical worktree-to-parent grouping, launch-profile hints, and scanner fallback in their current order. |
 | Runtime activation | `registerViewerRuntime()` in `src/lib/viewerInstrumentation.ts` | Starts the singleton only in the traffic-owning Node release. |
@@ -128,12 +126,11 @@ Scan, state, credential, and network failures end the WakaTime tick locally.
 They never propagate into the scanner cache, `/api/files`, an agent host, or a
 request handler.
 
-### Operator-action extraction
+### Multi-turn enumeration
 
-`FileEntry.lastTurn` carries turn-duration state for the Viewer UI. WakaTime
-requires the independently preserved direct-operator timestamps because one
-turn can contain several steering actions and copied transcripts can repeat an
-earlier action.
+`FileEntry.lastTurn` carries only the newest window. A minute can contain
+several short turns, so polling that field alone can erase earlier completed
+work.
 
 Implementation must deepen `src/lib/scanner/turnDuration.ts` with one internal
 scanner interface:
@@ -150,24 +147,26 @@ interface RecentTurnWindows {
 recentTurnWindowsFor(entry: FileEntry): RecentTurnWindows
 ```
 
-The existing record state machine remains a multi-window parser for the UI.
-`lastTurnFromRecords()` returns its final item and preserves issue #268/#406
-semantics. WakaTime reads only the action arrays from the shared result.
+The existing record state machine becomes a multi-window parser. It accumulates
+every initiator-to-terminal window in the existing 128 KiB transcript tail,
+including the final open window. `lastTurnFromRecords()` returns the final item
+from that shared parser, preserving the UI contract and all issue #268/#406
+semantics.
 
 The parser also preserves direct operator action timestamps. Claude uses the
 shared user/system classification, including explicit human and typed
 provenance. Legacy bare Claude input is retained separately and becomes
 operator engagement only for a root conversation; delegated launch input keeps
-zero WakaTime accounting. Codex accepts Viewer-structured user input and
+agent-only accounting. Codex accepts Viewer-structured user input and
 deduplicates its `message` plus `user_message` copies by timestamp. SDK, peer,
 coordinator, spawn, command, notification, and harness envelopes keep their
-existing Viewer semantics and never create operator engagement intervals.
+agent semantics and never create operator engagement intervals.
 
 `prefixTruncated` comes from the tail read offset. A truncated prefix can omit
-older actions after a long outage or an unusually large turn. The sync module
-records a `history_gap` counter and starts with complete visible evidence. It
-never invents timestamps. Continuous one-minute observation and the durable
-per-stream cursor cover the normal runtime and restart path.
+old windows after a long outage or an unusually large turn. The sync module
+records a `history_gap` counter and starts at the first complete visible
+window. It never invents timestamps. Continuous one-minute observation and the
+durable per-stream cursor cover the normal runtime and restart path.
 
 Eligible entries satisfy every condition below:
 
@@ -176,42 +175,42 @@ Eligible entries satisfy every condition below:
 3. scanner derivation completed;
 4. the registry resolves the path to a conversation;
 5. the path equals that conversation's latest generation path;
-6. the conversation has root delegation depth (`0`);
-7. the direct operator action has a finite positive timestamp.
+6. the turn window has a finite positive start and a finite end when closed.
 
 Unregistered, incomplete, shell, task-output, archived-generation, malformed,
-delegated, and unprovenanced actions are skipped. A later tick can pick up an
-entry after registry adoption or complete derivation.
+and zero-length windows are skipped with counters only. A later tick can pick
+up an entry after registry adoption or complete derivation.
 
 ## WakaTime field mapping
 
-Each direct operator action becomes a stable heartbeat stream. Overlapping
-engagement intervals retain independent durable boundaries while WakaTime
-unions them on the account timeline.
+Each scanner turn and each direct operator engagement interval becomes a stable
+heartbeat stream. Separate digest namespaces let overlapping agent and operator
+intervals retain independent durable boundaries while WakaTime unions them on
+the account timeline.
 
 | WakaTime field | value | rule |
 |---|---|---|
-| `entity` | `agent-log-viewer/<engine>/<operatorDigest[0..15]>` | Opaque and stable across restart or transcript path rotation. End boundaries use `agent-log-viewer/boundary/<operatorDigest[0..15]>`. |
-| `type` | `app` | The Viewer observes operator engagement in an agent conversation. It has no focused source file. |
-| `project` | canonical project string | Resolve with conversation ownership, latest launch-profile cwd/project, and `FileEntry.project` fallback through `resolveProjectAttribution()`. A later authoritative attribution rewrites queued activity and updates future samples. |
-| `category` | `ai coding` | Exact documented category for this coding engagement. |
+| `entity` | `agent-log-viewer/<engine>/<turnDigest[0..15]>` | Opaque and stable for active samples across restart or transcript path rotation. End boundaries use `agent-log-viewer/boundary/<turnDigest[0..15]>`. |
+| `type` | `app` | The viewer observes an agent application session. It has no focused source file. |
+| `project` | canonical project string | Resolve with conversation ownership, latest launch-profile cwd/project, and `FileEntry.project` fallback through `resolveProjectAttribution()`. Freeze the result on first stream observation. |
+| `category` | `ai coding` | Exact documented category for agent work. |
 | `language` | omitted | The viewer has no source-file language authority. |
 | `branch` | omitted | `FileEntry.worktree` is a worktree label and carries no branch guarantee. |
 | `time` | sample timestamp divided by 1000 | Fractional Unix seconds from scanner timestamps and the injected clock. |
-| `ai_session` | full `operatorDigest` | Stable opaque action correlation without a transcript path or raw conversation id. |
-| `is_write` | omitted | An operator action does not prove a file save. |
+| `ai_session` | full `turnDigest` | Stable opaque AI-session correlation without a transcript path or raw conversation id. |
+| `is_write` | omitted | A completed agent turn does not prove a file save. |
 
 The digest is:
 
 ```text
-sha256("llv-wakatime-operator-v1\0" + conversationId + "\0" + actionAtMs)
+sha256("llv-wakatime-v1\0" + conversationId + "\0" + startedAtMs)
 ```
 
 The local outbox event key is:
 
 ```text
-sha256("llv-wakatime-heartbeat-v1\0" + operatorDigest + "\0" + sampleTimeMs)
-sha256("llv-wakatime-boundary-v1\0" + operatorDigest + "\0" + boundaryTimeMs)
+sha256("llv-wakatime-heartbeat-v1\0" + turnDigest + "\0" + sampleTimeMs)
+sha256("llv-wakatime-boundary-v1\0" + turnDigest + "\0" + boundaryTimeMs)
 ```
 
 Titles, prompts, transcript paths, cwd values, model names, account ids, and
@@ -222,6 +221,13 @@ file contents never enter a WakaTime payload.
 The first persisted state records `enabledAtMs`. This timestamp is the privacy
 and backfill boundary.
 
+For each turn:
+
+```text
+effectiveStart = max(turn.startedAt, enabledAtMs)
+effectiveEnd   = turn.endedAt ?? now
+```
+
 Each direct operator action contributes a conservative ten-minute engagement
 interval:
 
@@ -230,37 +236,41 @@ engagementStart = max(action.at, enabledAtMs)
 engagementEnd   = action.at + 10 minutes
 ```
 
-The scheduler emits only samples due at the current clock. Operator engagement
-intervals are unioned on the WakaTime timeline. Steering input receives its own
-interval. Agent execution, silent tool calls, delegated work, and transcript
-updates add no samples by themselves.
+The scheduler emits only samples due at the current clock. Agent turn intervals
+and operator engagement intervals are unioned on the WakaTime timeline. Short
+turns retain the operator engagement tail, steering input receives its own
+interval, and agent execution continues through its full observed end,
+including silent tool calls and orchestrated work.
 
 The module materializes heartbeats at:
 
-1. `engagementStart`;
-2. every 120 seconds anchored to `engagementStart`;
-3. the exact `engagementEnd` when it differs from the latest sample.
+1. `effectiveStart`;
+2. every 120 seconds anchored to `effectiveStart` while work remains active;
+3. the exact `endedAt` for a closed turn when it differs from the latest sample.
 
-The 120-second interval matches WakaTime's documented plugin convention. Each
-engagement receives enough interior samples to stay below WakaTime's default
-15-minute join threshold and an exact boundary marker under the reserved
-`agent-log-viewer-boundary` project.
+The 120-second interval matches WakaTime's documented plugin convention. A
+short closed turn receives its active start and exact boundary marker. A long
+turn receives enough interior samples to stay below WakaTime's default
+15-minute join threshold.
+
+An open turn accrues samples through the current clock only while a live process
+and non-idle runtime state remain authoritative. A closed or frozen interval
+receives a marker under the reserved `agent-log-viewer-boundary` project.
 WakaTime's duration algorithm assigns the following sub-timeout gap to that
 reserved project, keeping the canonical project limited to the active span.
-Overlapping engagements in one canonical project suppress interior boundaries
-and contribute their wall-clock union.
+Overlapping turns in one canonical project suppress interior boundaries and
+contribute their wall-clock union.
 
-Engagement ending before `enabledAtMs` stays local and unsent. An engagement
+Completed windows ending before `enabledAtMs` stay local and unsent. A turn
 that crosses the enable boundary starts at `enabledAtMs`. This makes the first
 opt-in forward-looking and prevents surprise history upload.
 
 ## Coalescing and duplicate behavior
 
-The state stores `lastMaterializedAtMs` per operator digest. Repeated scans of
-the same action generate only newly due samples. The digest uses canonical
-conversation identity plus action time, so resume, path rotation, and mirrored
-transcripts coalesce. Delegated fan-out input contributes no stream. Pending
-event keys form a unique set, so repeated ticks coalesce before delivery.
+The state stores `lastMaterializedAtMs` per turn digest. Repeated scans of the
+same open or closed window generate only newly due samples. Pending event keys
+form a unique set, so repeated ticks and registry path rotation coalesce before
+delivery.
 
 After a successful bulk response, the module removes the acknowledged events
 through an atomic state write. Restarted processes resume from stream cursors
@@ -282,7 +292,6 @@ interface WakatimeStateV1 {
   enabledAtMs: number;
   credentialGeneration: string | null;
   streams: Record<string, {
-    source?: "operator";
     entity: string;
     engine: "claude" | "codex";
     project: string;
@@ -326,12 +335,6 @@ source stamp, raw conversation id, transcript path, cwd, title, prompt,
 response body, or file content. Project names are present because they are
 payload data awaiting delivery. The file is written with mode `0600`; its
 parent directory uses `0700`.
-
-`source: "operator"` marks streams proven under the corrected #763 contract.
-After a complete scan, streams without that marker are retained only when the
-current transcript proves the matching operator action and upgrades the marker.
-Remaining legacy turn streams and their queued rows are retired before
-delivery. An incomplete scan performs no migration.
 
 Persistence ordering is strict:
 
@@ -478,7 +481,7 @@ Secret invariants:
 - `bun run privacy:check` remains unchanged and must pass on the PR head.
 
 Operator setup documentation should create the key file with mode `0600` and
-explain that project names, opaque per-action entities, category, engine marker,
+explain that project names, opaque per-turn entities, category, engine marker,
 and timestamps leave the machine after opt-in.
 
 ## Observability
@@ -526,12 +529,14 @@ scans, registry fixtures, timers, logs, and fetch:
 3. canonical project attribution and current-generation registry identity feed
    the exact heartbeat fields;
 4. language, branch, titles, paths, cwd, prompts, and contents stay absent;
-5. a root operator action produces a ten-minute engagement and an exact reserved-project boundary marker;
-6. unattended turns and silent tools produce no samples across lifecycle changes or restart;
-7. overlapping operator engagements use wall-clock union semantics;
-8. resume and path rotation with the same conversation and action reuse the stream digest;
-9. delegated fan-out, repeated ticks, and retries add no logical event;
-10. the first enable boundary suppresses completed engagement and truncates a crossing interval;
+5. a short closed turn produces an active start and an exact project-boundary marker;
+6. a long/open turn produces deterministic 120-second samples and no repeats
+   across ticks;
+7. neighboring turns preserve their idle gap under WakaTime's published duration algorithm, and overlapping turns use wall-clock union semantics;
+8. path rotation with the same conversation and start reuses the stream digest;
+9. several turns between scans all reach the outbox;
+10. the first enable boundary suppresses completed history and truncates a
+    crossing turn;
 11. pending state persists before fetch; a failed state write suppresses fetch;
 12. outer 201/202 responses acknowledge successful items, retain transient items, reject permanent items, and fail closed on malformed or mismatched arrays;
 13. timeout, network, 302, 429, 5xx, 401, and 403 retain the batch and set the
@@ -544,8 +549,8 @@ scans, registry fixtures, timers, logs, and fetch:
 18. the placeholder key appears only in the Authorization header supplied to
     fake fetch and never in logs, state, URL, body, child environments,
     arguments, transcripts, or artifacts;
-19. durable project ownership repairs undelivered generic attribution and
-    legacy queued turn activity is retired before delivery.
+19. open turns freeze across abrupt exit, stale transcript, idle composer, and
+    restart, while a live silent tool call continues accruing.
 
 ### Bootstrap tests
 
@@ -563,15 +568,14 @@ Run on the implementation head:
 
 ```bash
 bun test src/lib/scanner/turnDuration.test.ts src/lib/wakatime/sync.test.ts src/instrumentation.test.ts
+bun test
 bunx tsc --noEmit
-bunx eslint src/lib/wakatime/sync.ts src/lib/wakatime/sync.test.ts
+bun run lint
 bun run privacy:check
 bun run build
 ```
 
 Tests never contact WakaTime and never use a real credential.
-Any broader runtime sweep requires an isolated `LLV_STATE_DIR`; focused file
-paths are the default on an operator workstation.
 
 ## Documentation changes
 
@@ -595,13 +599,12 @@ outbox remains local and dormant while disabled.
 
 1. Land the deep module, scanner enumeration, bootstrap wiring, tests, and
    operator docs behind the disabled default.
-2. After an approved deployment, dogfood with a placeholder-free local key on
-   one operator machine. Confirm one root operator action, one silent tool call
-   extending beyond ten minutes, one delegated fan-out, one restart, and one
-   simulated network outage in the WakaTime dashboard and local count-only
-   diagnostics.
+2. Dogfood with a placeholder-free local key on one operator machine. Confirm
+   one short turn, one turn longer than two minutes, one idle gap, one restart,
+   and one simulated network outage in the WakaTime dashboard and local
+   count-only diagnostics.
 3. Run the full verification stack on the PR head.
-4. Publish a non-draft PR linked to issue #763.
+4. Publish a non-draft PR that closes issue #473.
 5. Run at most two independent review rounds, applying additive repair commits
    when required.
 
@@ -612,8 +615,8 @@ an explicit versioned reader and forward migration inside `sync.ts`.
 
 Included:
 
-- Proven direct operator actions in root Claude and Codex conversations;
-- fixed ten-minute operator-engagement sampling;
+- Claude and Codex conversation turns with stable registry identity;
+- active and completed turn heartbeat sampling;
 - canonical parent-project attribution across worktrees;
 - API-key Basic authentication;
 - durable bounded outbox, batching, backoff, and restart recovery;
@@ -635,27 +638,27 @@ Deferred:
 
 | issue #473 criterion | design closure |
 |---|---|
-| Stable project, entity, language/category, and time semantics | Canonical project attribution, digest-scoped per-action app entities, a reserved boundary project, omitted unsupported language, `ai coding`, deterministic sampling, and same-project overlap union. |
+| Stable project, entity, language/category, and time semantics | Canonical project attribution, digest-scoped per-turn app entities, a reserved boundary project, omitted unsupported language, `ai coding`, deterministic sampling, and same-project overlap union. |
 | Credential privacy | File-only `0600` credential delivery, filtered child and snapshot environments, discard-without-read startup handling, header-only Basic auth, fixed HTTPS endpoint, secret-free state/logs/tests/browser surfaces, and the unchanged privacy gate. |
-| Duplicate, restart, idle, failure, retry, batching, and rate-limit behavior | Canonical action digests, root-only provenance, durable stream cursors and outbox, explicit 25-event crash replay window, itemized bulk acknowledgments, failure matrix, one 25-record batch per tick, and durable jittered backoff. |
+| Duplicate, restart, idle, failure, retry, batching, and rate-limit behavior | Durable stream cursors and outbox, explicit 25-event crash replay window, liveness-frozen open turns, itemized bulk acknowledgments, failure matrix, one 25-record batch per tick, and durable jittered backoff. |
 | Viewer responsiveness during WakaTime failure | Traffic-owned unref'd scheduler, shared scan generations, single-flight ticks, five-second fetch deadline, bounded outbox, and swallowed module-local failures. |
 | Focused behavioral tests and operator documentation | Scanner, sync, bootstrap, privacy, retry, and overflow coverage plus `docs/wakatime.md` and environment-contract updates. |
-| Current architecture and runtime ownership | Exact `ad45e344` grounding, scanner-owned operator provenance, registry-owned identity, project-resolution authority, current-file-scan seam, and viewer-instrumentation startup. |
+| Current architecture and runtime ownership | Exact `7df59ef0` grounding, scanner-owned turn semantics, registry-owned identity, project-resolution authority, current-file-scan seam, and viewer-instrumentation startup. |
 | Non-draft PR and two-round review cap | Rollout requires `Closes #473`, the full gate evidence, a ready PR, and at most two independent review rounds. |
 
 ## Implementation handoff
 
 The implementation stage has these fixed choices:
 
-1. Preserve operator-action timestamps through `recentTurnWindowsFor()` while
-   keeping `FileEntry.lastTurn` behavior byte-compatible.
+1. Refactor `turnDuration.ts` around a shared multi-window parser and expose
+   `recentTurnWindowsFor()`; keep `FileEntry.lastTurn` behavior byte-compatible.
 2. Add `src/lib/wakatime/sync.ts` as the sole WakaTime knowledge owner with
    `startWakatimeSync()` and the injected test factory.
 3. Drive it every 60 seconds through `currentFileScan()`, then join current
    paths to `agentRegistry().readOnlySnapshot()` and resolve projects through
    `resolveProjectAttribution()`.
-4. Map each proven root operator action to a digest-scoped `app` entity, `ai coding`, canonical
-   project, `ai_session`, 120-second samples, and an exact ten-minute reserved-project boundary.
+4. Map each turn to a digest-scoped `app` entity, `ai coding`, canonical
+   project, `ai_session`, 120-second samples, and exact reserved-project boundaries.
 5. Persist before delivery, batch 25, send one request per tick, and use the
    retry table above.
 6. Wire the dynamic opt-in import inside traffic-owned viewer instrumentation.
@@ -664,5 +667,4 @@ The implementation stage has these fixed choices:
 8. Run the listed gates, publish the non-draft `Closes #473` PR, and stop after
    two review rounds.
 
-Issue #763 defines the corrected accounting choice; OpenClaw delivery remains
-outside this module and unchanged.
+No architectural choice remains for implementation.

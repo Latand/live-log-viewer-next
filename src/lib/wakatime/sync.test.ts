@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -130,7 +129,7 @@ function registrySnapshot(pathname = PATH): RegistryFile {
         migrationOptOut: null,
         supersededBy: null,
         agentRole: null,
-        delegationDepth: 0,
+        delegationDepth: null,
         turn: { state: "terminal", source: "lifecycle", terminalAt: new Date(TURN_END).toISOString(), observedAt: new Date(NOW).toISOString() },
         createdAt: new Date(NOW).toISOString(),
         updatedAt: new Date(NOW).toISOString(),
@@ -149,22 +148,6 @@ function projectDurationSeconds(heartbeats: WakatimeStateV1["pending"][number]["
   }, 0);
 }
 
-function fixtureDigest(...parts: Array<string | number>): string {
-  return crypto.createHash("sha256").update(parts.join("\0")).digest("hex");
-}
-
-function initialState(enabledAtMs: number = NOW - 1): WakatimeStateV1 {
-  return {
-    version: 1,
-    enabledAtMs,
-    credentialGeneration: null,
-    streams: {},
-    pending: [],
-    retry: { failures: 0, retryAtMs: 0, reason: null },
-    counters: { accepted: 0, permanentlyRejected: 0, compacted: 0, dropped: 0, historyGaps: 0 },
-  };
-}
-
 function harness(overrides: Partial<WakatimeSyncDependencies> = {}) {
   let stored: WakatimeStateV1 | null = null;
   const writes: WakatimeStateV1[] = [];
@@ -175,13 +158,11 @@ function harness(overrides: Partial<WakatimeSyncDependencies> = {}) {
     registrySnapshot,
     recentTurnWindows: () => ({
       windows: [{ startedAt: TURN_START, endedAt: TURN_END }],
-      operatorActionsAtMs: [NOW],
-      unprovenancedUserActionsAtMs: [],
       prefixTruncated: false,
       complete: true,
     }),
     readCredential: async () => null,
-    readState: async () => stored ?? initialState(),
+    readState: async () => stored,
     writeState: async (state) => {
       stored = structuredClone(state);
       writes.push(structuredClone(state));
@@ -197,7 +178,7 @@ function harness(overrides: Partial<WakatimeSyncDependencies> = {}) {
         }),
       };
     },
-    now: () => NOW + 2 * 60_000,
+    now: () => NOW,
     random: () => 0.5,
     scheduleInterval: () => ({ unref() {} }),
     scheduleTimeout: () => ({ unref() {} }),
@@ -328,8 +309,8 @@ describe("WakaTime activity sync", () => {
     expect(writes.length).toBeGreaterThan(0);
     expect(state()?.pending).toHaveLength(2);
     expect(state()?.pending.map((event) => event.heartbeat.time)).toEqual([
-      NOW / 1_000,
-      (NOW + 2 * 60_000) / 1_000,
+      TURN_START / 1_000,
+      TURN_END / 1_000,
     ]);
     sync.stop();
   });
@@ -353,10 +334,10 @@ describe("WakaTime activity sync", () => {
       type: "app",
       project: "-repo",
       category: "ai coding",
-      time: NOW / 1_000,
+      time: TURN_START / 1_000,
       ai_session: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
-    expect(body[1]?.time).toBe((NOW + 2 * 60_000) / 1_000);
+    expect(body[1]?.time).toBe(TURN_END / 1_000);
     const headers = new Headers(request.init.headers);
     expect(headers.get("authorization")).toBe(`Basic ${Buffer.from(fixtureValue).toString("base64")}`);
     const publicEvidence = JSON.stringify({ writes, logs, url: request.url, body });
@@ -368,183 +349,7 @@ describe("WakaTime activity sync", () => {
     sync.stop();
   });
 
-  test("an unattended root turn emits no project activity", async () => {
-    const snapshot = registrySnapshot();
-    snapshot.conversations.conversation_test!.delegationDepth = 0;
-    const fixture = harness({
-      now: () => NOW + 45 * 60_000,
-      registrySnapshot: () => snapshot,
-      scan: async () => ({
-        complete: true,
-        files: [entry({
-          activity: "stalled",
-          activityReason: "jsonl_turn_stalled",
-          proc: "running",
-          pid: 42,
-          mtime: (NOW + 45 * 60_000) / 1_000,
-        })],
-      }),
-      recentTurnWindows: () => ({
-        windows: [{ startedAt: NOW, endedAt: null }],
-        operatorActionsAtMs: [],
-        unprovenancedUserActionsAtMs: [],
-        prefixTruncated: false,
-        complete: true,
-      }),
-    });
-
-    await fixture.sync.tick();
-
-    expect(fixture.state()?.pending).toHaveLength(0);
-    expect(Object.keys(fixture.state()?.streams ?? {})).toHaveLength(0);
-    fixture.sync.stop();
-  });
-
-  test("a queued legacy unattended heartbeat is retired before delivery", async () => {
-    const stream = fixtureDigest("llv-wakatime-v1", "conversation_test", NOW);
-    const heartbeat = {
-      entity: `agent-log-viewer/codex/${stream.slice(0, 16)}`,
-      type: "app" as const,
-      project: "-repo",
-      category: "ai coding" as const,
-      time: NOW / 1_000,
-      ai_session: stream,
-    };
-    const initialState: WakatimeStateV1 = {
-      version: 1,
-      enabledAtMs: NOW - 1,
-      credentialGeneration: null,
-      streams: {
-        [stream]: {
-          entity: heartbeat.entity,
-          engine: "codex",
-          project: heartbeat.project,
-          startedAtMs: NOW,
-          endedAtMs: null,
-          lastMaterializedAtMs: NOW,
-          lastObservedAtMs: NOW,
-          boundaryFinalizedAtMs: null,
-        },
-      },
-      pending: [{
-        key: fixtureDigest("llv-wakatime-heartbeat-v1", stream, NOW),
-        stream,
-        kind: "activity",
-        createdAtMs: NOW,
-        heartbeat,
-      }],
-      retry: { failures: 0, retryAtMs: 0, reason: null },
-      counters: { accepted: 0, permanentlyRejected: 0, compacted: 0, dropped: 0, historyGaps: 0 },
-    };
-    const fixture = harness({
-      now: () => NOW + 45 * 60_000,
-      readState: async () => initialState,
-      readCredential: async () => ({ value: TEST_CREDENTIAL, sourceStamp: "fixture" }),
-      recentTurnWindows: () => ({
-        windows: [{ startedAt: NOW, endedAt: null }],
-        operatorActionsAtMs: [],
-        unprovenancedUserActionsAtMs: [],
-        prefixTruncated: false,
-        complete: true,
-      }),
-    });
-
-    await fixture.sync.tick();
-
-    expect(fixture.requests).toHaveLength(0);
-    expect(fixture.state()?.pending).toHaveLength(0);
-    expect(Object.keys(fixture.state()?.streams ?? {})).toHaveLength(0);
-    fixture.sync.stop();
-  });
-
-  test("an incomplete scan cannot deliver an unclassified legacy heartbeat", async () => {
-    const stream = fixtureDigest("llv-wakatime-v1", "conversation_test", NOW);
-    const heartbeat = {
-      entity: `agent-log-viewer/codex/${stream.slice(0, 16)}`,
-      type: "app" as const,
-      project: "-repo",
-      category: "ai coding" as const,
-      time: NOW / 1_000,
-      ai_session: stream,
-    };
-    const initial = initialState();
-    initial.streams[stream] = {
-      entity: heartbeat.entity,
-      engine: "codex",
-      project: heartbeat.project,
-      startedAtMs: NOW,
-      endedAtMs: null,
-      lastMaterializedAtMs: NOW,
-      lastObservedAtMs: NOW,
-      boundaryFinalizedAtMs: null,
-    };
-    initial.pending.push({
-      key: fixtureDigest("llv-wakatime-heartbeat-v1", stream, NOW),
-      stream,
-      kind: "activity",
-      createdAtMs: NOW,
-      heartbeat,
-    });
-    const fixture = harness({
-      scan: async () => ({ files: [], complete: false }),
-      readState: async () => initial,
-      readCredential: async () => ({ value: TEST_CREDENTIAL, sourceStamp: "fixture" }),
-    });
-
-    await fixture.sync.tick();
-
-    expect(fixture.requests).toHaveLength(0);
-    expect(fixture.writes).toHaveLength(0);
-    expect(initial.pending).toHaveLength(1);
-    fixture.sync.stop();
-  });
-
-  test("durable project ownership repairs an undelivered generic attribution", async () => {
-    let clock = NOW + 60_000;
-    const snapshot = registrySnapshot();
-    const conversation = snapshot.conversations.conversation_test!;
-    conversation.delegationDepth = 0;
-    conversation.projectOwnership = null;
-    conversation.generations[0]!.launchProfile.cwd = "";
-    conversation.generations[0]!.launchProfile.project = "generic-runner";
-    const fixture = harness({
-      now: () => clock,
-      readState: async () => ({
-        version: 1,
-        enabledAtMs: NOW - 1,
-        credentialGeneration: null,
-        streams: {},
-        pending: [],
-        retry: { failures: 0, retryAtMs: 0, reason: null },
-        counters: { accepted: 0, permanentlyRejected: 0, compacted: 0, dropped: 0, historyGaps: 0 },
-      }),
-      registrySnapshot: () => snapshot,
-      recentTurnWindows: () => ({
-        windows: [{ startedAt: NOW, endedAt: null }],
-        operatorActionsAtMs: [NOW],
-        unprovenancedUserActionsAtMs: [],
-        prefixTruncated: false,
-        complete: true,
-      }),
-    });
-
-    await fixture.sync.tick();
-    expect(new Set(fixture.state()?.pending.map((event) => event.heartbeat.project))).toEqual(new Set(["generic-runner"]));
-
-    conversation.projectOwnership = {
-      project: "sample-project",
-      source: "operator",
-      setAt: new Date(clock).toISOString(),
-      operationId: "fixture-project-selection",
-    };
-    clock += 2 * 60_000;
-    await fixture.sync.tick();
-
-    expect(new Set(fixture.state()?.pending.map((event) => event.heartbeat.project))).toEqual(new Set(["sample-project"]));
-    fixture.sync.stop();
-  });
-
-  test("silent tool churn stays excluded across ticks and restart", async () => {
+  test("a live silent tool accrues deterministic samples without duplicates across ticks or restart", async () => {
     let clock = NOW;
     const first = harness({
       now: () => clock,
@@ -560,7 +365,11 @@ describe("WakaTime activity sync", () => {
     await first.sync.tick();
     await first.sync.tick();
 
-    expect(first.state()?.pending).toHaveLength(0);
+    expect(first.state()?.pending.map((event) => event.heartbeat.time)).toEqual([
+      NOW / 1_000,
+      (NOW + 120_000) / 1_000,
+      (NOW + 240_000) / 1_000,
+    ]);
 
     const persisted = structuredClone(first.state());
     first.sync.stop();
@@ -575,11 +384,11 @@ describe("WakaTime activity sync", () => {
       }),
     });
     await restarted.sync.tick();
-    expect(restarted.state()?.pending).toHaveLength(0);
+    expect(restarted.state()?.pending).toHaveLength(3);
     restarted.sync.stop();
   });
 
-  test("closing an unattended turn after restart emits no boundary", async () => {
+  test("restart durably records a distinct close boundary at an already-materialized 120-second sample", async () => {
     let clock = NOW;
     const first = harness({
       now: () => clock,
@@ -608,7 +417,11 @@ describe("WakaTime activity sync", () => {
     });
     await closed.sync.tick();
 
-    expect(closed.state()?.pending).toHaveLength(0);
+    expect(closed.state()?.pending.map((event) => ({ kind: event.kind, time: event.heartbeat.time }))).toEqual([
+      { kind: "activity", time: NOW / 1_000 },
+      { kind: "activity", time: clock / 1_000 },
+      { kind: "boundary", time: clock / 1_000 },
+    ]);
 
     const persistedClose = structuredClone(closed.state());
     closed.sync.stop();
@@ -628,7 +441,7 @@ describe("WakaTime activity sync", () => {
     restarted.sync.stop();
   });
 
-  test("agent process exit cannot turn an unattended transcript into activity", async () => {
+  test("an open transcript stops accruing when its agent process exits abruptly", async () => {
     let clock = NOW;
     let processRunning = true;
     const fixture = harness({
@@ -654,8 +467,8 @@ describe("WakaTime activity sync", () => {
     clock += 5 * 60_000;
     await fixture.sync.tick();
 
-    expect(fixture.state()?.pending).toHaveLength(0);
-    expect(Object.keys(fixture.state()?.streams ?? {})).toHaveLength(0);
+    expect(fixture.state()?.pending.map((event) => event.heartbeat.time)).toEqual([NOW / 1_000]);
+    expect(Object.values(fixture.state()!.streams)[0]).toMatchObject({ endedAtMs: null, lastObservedAtMs: NOW });
     fixture.sync.stop();
   });
 
@@ -685,7 +498,7 @@ describe("WakaTime activity sync", () => {
     fixture.sync.stop();
   });
 
-  test("composer-idle transitions emit no unattended activity", async () => {
+  test("an idle composer freezes an unterminated transcript at its last activity", async () => {
     let clock = NOW;
     let atComposer = false;
     const fixture = harness({
@@ -708,12 +521,15 @@ describe("WakaTime activity sync", () => {
     clock += 5 * 60_000;
     await fixture.sync.tick();
 
-    expect(fixture.state()?.pending).toHaveLength(0);
-    expect(Object.keys(fixture.state()?.streams ?? {})).toHaveLength(0);
+    expect(fixture.state()?.pending.map((event) => event.heartbeat.time)).toEqual([
+      NOW / 1_000,
+      (NOW + 30_000) / 1_000,
+    ]);
+    expect(Object.values(fixture.state()!.streams)[0]?.lastObservedAtMs).toBe(NOW + 30_000);
     fixture.sync.stop();
   });
 
-  test("restart does not revive an abandoned unattended turn", async () => {
+  test("restart preserves the frozen boundary of an abandoned open turn", async () => {
     let clock = NOW;
     let processRunning = true;
     const scan = async () => ({
@@ -739,12 +555,12 @@ describe("WakaTime activity sync", () => {
     const restarted = harness({ now: () => clock, scan, recentTurnWindows: windows, readState: async () => persisted });
     await restarted.sync.tick();
 
-    expect(restarted.state()?.pending).toHaveLength(0);
-    expect(Object.keys(restarted.state()?.streams ?? {})).toHaveLength(0);
+    expect(restarted.state()?.pending.map((event) => event.heartbeat.time)).toEqual([NOW / 1_000]);
+    expect(Object.values(restarted.state()!.streams)[0]?.lastObservedAtMs).toBe(NOW);
     restarted.sync.stop();
   });
 
-  test("first enable ignores turn windows without operator provenance", async () => {
+  test("first enable is forward-only and preserves separate idle gaps between visible turns", async () => {
     const { sync, state } = harness({
       recentTurnWindows: () => ({
         windows: [
@@ -759,12 +575,19 @@ describe("WakaTime activity sync", () => {
 
     await sync.tick();
 
-    expect(state()?.pending).toHaveLength(0);
-    expect(Object.keys(state()?.streams ?? {})).toHaveLength(0);
+    expect(state()?.pending.map((event) => event.heartbeat.time)).toEqual([
+      NOW / 1_000,
+      (NOW + 30_000) / 1_000,
+      (NOW + 90_000) / 1_000,
+      (NOW + 120_000) / 1_000,
+    ]);
+    expect(new Set(state()?.pending
+      .filter((event) => event.heartbeat.project === "-repo")
+      .map((event) => event.heartbeat.entity)).size).toBe(2);
     sync.stop();
   });
 
-  test("neighboring unattended turns contribute zero project duration", async () => {
+  test("same-project turns exclude a sub-timeout idle gap from project duration", async () => {
     const { sync, state } = harness({
       recentTurnWindows: () => ({
         windows: [
@@ -779,12 +602,15 @@ describe("WakaTime activity sync", () => {
     await sync.tick();
 
     const heartbeats = state()!.pending.map((event) => event.heartbeat);
-    expect(projectDurationSeconds(heartbeats, "-repo")).toBe(0);
-    expect(heartbeats.filter((heartbeat) => heartbeat.project === "-repo")).toHaveLength(0);
+    expect(projectDurationSeconds(heartbeats, "-repo")).toBe(60);
+    expect(heartbeats.filter((heartbeat) => heartbeat.project === "-repo").map((heartbeat) => heartbeat.time)).toEqual([
+      NOW / 1_000,
+      (NOW + 60_000) / 1_000,
+    ]);
     sync.stop();
   });
 
-  test("legacy root input gets engagement while delegated launch input contributes zero", async () => {
+  test("legacy root input gets engagement while delegated launch input remains agent-only", async () => {
     const durationAtDepth = async (delegationDepth: number) => {
       const snapshot = registrySnapshot();
       snapshot.conversations.conversation_test!.delegationDepth = delegationDepth;
@@ -819,10 +645,10 @@ describe("WakaTime activity sync", () => {
     };
 
     expect(await durationAtDepth(0)).toBe(10 * 60);
-    expect(await durationAtDepth(1)).toBe(0);
+    expect(await durationAtDepth(1)).toBe(30);
   });
 
-  test("structured engagement requires root provenance", async () => {
+  test("structured engagement requires root provenance while delegated agent seconds stay unchanged", async () => {
     const durationAtDepth = async (delegationDepth: number, operatorActionsAtMs: number[]) => {
       const snapshot = registrySnapshot();
       snapshot.conversations.conversation_test!.delegationDepth = delegationDepth;
@@ -855,12 +681,13 @@ describe("WakaTime activity sync", () => {
       return duration;
     };
 
-    expect(await durationAtDepth(1, [])).toBe(0);
-    expect(await durationAtDepth(1, [NOW])).toBe(0);
+    const agentOnlySeconds = await durationAtDepth(1, []);
+    expect(agentOnlySeconds).toBe(30);
+    expect(await durationAtDepth(1, [NOW])).toBe(agentOnlySeconds);
     expect(await durationAtDepth(0, [NOW])).toBe(10 * 60);
   });
 
-  test("overlapping unattended turns contribute zero project duration", async () => {
+  test("overlapping same-project turns contribute their wall-clock union", async () => {
     const { sync, state } = harness({
       recentTurnWindows: () => ({
         windows: [
@@ -875,17 +702,17 @@ describe("WakaTime activity sync", () => {
     await sync.tick();
 
     const heartbeats = state()!.pending.map((event) => event.heartbeat);
-    expect(projectDurationSeconds(heartbeats, "-repo")).toBe(0);
-    expect(heartbeats).toHaveLength(0);
+    expect(projectDurationSeconds(heartbeats, "-repo")).toBe(90);
+    expect(heartbeats.filter((heartbeat) => heartbeat.project === "agent-log-viewer-boundary")).toHaveLength(1);
     sync.stop();
   });
 
-  test("production-sized unattended history stays subquadratic", async () => {
+  test("production-sized overlap coverage stays subquadratic", async () => {
     const windows = Array.from({ length: 4_000 }, (_, index) => ({
       startedAt: NOW + index * 1_000,
       endedAt: NOW + (index + 60) * 1_000,
     }));
-    const { sync, state } = harness({
+    const { sync } = harness({
       recentTurnWindows: () => ({
         windows,
         prefixTruncated: false,
@@ -897,11 +724,10 @@ describe("WakaTime activity sync", () => {
     await sync.tick();
 
     expect(performance.now() - startedAt).toBeLessThan(2_000);
-    expect(state()?.pending).toHaveLength(0);
     sync.stop();
   }, 5_000);
 
-  test("changing an unattended tail never mints a boundary", async () => {
+  test("an overlap-finalized stream never mints a stale boundary when the covering tail disappears", async () => {
     let windows = [
       { startedAt: NOW, endedAt: NOW + 60_000 },
       { startedAt: NOW + 30_000, endedAt: NOW + 90_000 },
@@ -920,7 +746,7 @@ describe("WakaTime activity sync", () => {
     sync.stop();
   });
 
-  test("operator engagement ends after ten minutes despite continuing silent execution", async () => {
+  test("operator engagement ending on a live tick never cuts off a continuing silent agent", async () => {
     let clock = NOW;
     const snapshot = registrySnapshot();
     snapshot.conversations.conversation_test!.delegationDepth = 0;
@@ -951,21 +777,19 @@ describe("WakaTime activity sync", () => {
 
     expect(state()?.pending.filter((event) =>
       event.kind === "boundary" && event.heartbeat.time === clock / 1_000
-    )).toHaveLength(1);
+    )).toHaveLength(0);
     expect(state()?.pending.some((event) =>
       event.kind === "activity" && event.heartbeat.time === clock / 1_000
-    )).toBe(false);
-    expect(projectDurationSeconds(state()!.pending.map((event) => event.heartbeat), "-repo")).toBe(10 * 60);
+    )).toBe(true);
     sync.stop();
   });
 
-  test("production-shaped replay deduplicates resume, fan-out, repeated ticks, and retry", async () => {
+  test("production-shaped replay preserves operator engagement, agent overlap, idle gaps, resume, and retry", async () => {
     const secondPath = "/sessions/overlap.jsonl";
     const snapshot = registrySnapshot();
     snapshot.conversations.conversation_test!.delegationDepth = 0;
     snapshot.conversations.conversation_overlap = structuredClone(snapshot.conversations.conversation_test!);
     snapshot.conversations.conversation_overlap!.id = "conversation_overlap";
-    snapshot.conversations.conversation_overlap!.delegationDepth = 1;
     snapshot.conversations.conversation_overlap!.generations[0]!.path = secondPath;
     const structuredUser = (timestamp: number, text: string) => ({
       timestamp: new Date(timestamp).toISOString(),
@@ -1009,9 +833,9 @@ describe("WakaTime activity sync", () => {
       recentTurnWindows: (candidate) => candidate.path === PATH
         ? { ...primaryActivity, prefixTruncated: false, complete: true }
         : {
-          windows: [{ startedAt: NOW + 2 * 60_000, endedAt: NOW + 15 * 60_000 }],
-          operatorActionsAtMs: [NOW],
-          prefixTruncated: false,
+            windows: [{ startedAt: NOW + 2 * 60_000, endedAt: NOW + 15 * 60_000 }],
+            operatorActionsAtMs: [],
+            prefixTruncated: false,
             complete: true,
           },
       fetch: async (_url, init) => {
@@ -1038,10 +862,10 @@ describe("WakaTime activity sync", () => {
 
     expect(attempted).toHaveLength(2);
     expect(attempted[1]).toEqual(attempted[0]);
-    expect(projectDurationSeconds(accepted, "-repo")).toBe(20 * 60);
+    expect(projectDurationSeconds(accepted, "-repo")).toBe(25 * 60);
     expect(accepted.some((heartbeat) =>
       heartbeat.project === "-repo" && heartbeat.time === (NOW + 12 * 60_000) / 1_000
-    )).toBe(false);
+    )).toBe(true);
     expect(fixture.state()?.pending).toHaveLength(0);
     fixture.sync.stop();
   });
@@ -1242,10 +1066,12 @@ describe("WakaTime activity sync", () => {
   });
 
   test("a permanent client rejection drops only the attempted batch", async () => {
-    const operatorActionsAtMs = Array.from({ length: 20 }, (_, index) => NOW + index * 60_000);
+    const windows = Array.from({ length: 20 }, (_, index) => ({
+      startedAt: NOW + index * 60_000,
+      endedAt: NOW + index * 60_000 + 10_000,
+    }));
     const { sync, state } = harness({
-      now: () => NOW + 30 * 60_000,
-      recentTurnWindows: () => ({ windows: [], operatorActionsAtMs, prefixTruncated: false, complete: true }),
+      recentTurnWindows: () => ({ windows, prefixTruncated: false, complete: true }),
       readCredential: async () => ({ value: TEST_CREDENTIAL, sourceStamp: "fixture" }),
       fetch: async () => ({ status: 400, headers: new Headers(), text: async () => "" }),
     });
@@ -1253,15 +1079,17 @@ describe("WakaTime activity sync", () => {
     await sync.tick();
 
     expect(state()?.counters.permanentlyRejected).toBe(25);
-    expect(state()?.pending.length).toBeGreaterThan(25);
+    expect(state()?.pending).toHaveLength(15);
     sync.stop();
   });
 
   test("one successful tick acknowledges only its oldest 25-event batch", async () => {
-    const operatorActionsAtMs = Array.from({ length: 20 }, (_, index) => NOW + index * 60_000);
+    const windows = Array.from({ length: 20 }, (_, index) => ({
+      startedAt: NOW + index * 60_000,
+      endedAt: NOW + index * 60_000 + 10_000,
+    }));
     const { sync, state, requests } = harness({
-      now: () => NOW + 30 * 60_000,
-      recentTurnWindows: () => ({ windows: [], operatorActionsAtMs, prefixTruncated: false, complete: true }),
+      recentTurnWindows: () => ({ windows, prefixTruncated: false, complete: true }),
       readCredential: async () => ({ value: TEST_CREDENTIAL, sourceStamp: "fixture" }),
     });
 
@@ -1270,7 +1098,7 @@ describe("WakaTime activity sync", () => {
     expect(requests).toHaveLength(1);
     expect(JSON.parse(String(requests[0]!.init.body))).toHaveLength(25);
     expect(state()?.counters.accepted).toBe(25);
-    expect(state()?.pending.length).toBeGreaterThan(25);
+    expect(state()?.pending).toHaveLength(15);
     sync.stop();
   });
 
@@ -1294,7 +1122,7 @@ describe("WakaTime activity sync", () => {
 
     expect(state()?.counters.accepted).toBe(1);
     expect(state()?.pending).toHaveLength(1);
-    expect(state()?.pending[0]?.heartbeat.time).toBe((NOW + 2 * 60_000) / 1_000);
+    expect(state()?.pending[0]?.heartbeat.time).toBe(TURN_END / 1_000);
     expect(state()?.retry.reason).toBe("server");
     expect(JSON.stringify({ logs, writes })).not.toContain(responsePlaceholder);
     sync.stop();
@@ -1419,7 +1247,7 @@ describe("WakaTime activity sync", () => {
 
     await sync.tick();
 
-    expect(state()?.enabledAtMs).toBe(NOW + 2 * 60_000);
+    expect(state()?.enabledAtMs).toBe(NOW);
     expect(logs.map((item) => item.event)).toContain("corrupt_state_recovered");
     expect(JSON.stringify({ writes, logs })).not.toContain("should-stay-private");
     sync.stop();
@@ -1445,62 +1273,94 @@ describe("WakaTime activity sync", () => {
   });
 
   test("overflow compaction stays bounded while retaining stream endpoints", async () => {
-    const clock = NOW + 2 * 60 * 60_000;
+    let clock = NOW;
     const { sync, state } = harness({
       now: () => clock,
-      limits: { maxPending: 3 },
+      limits: { maxPending: 20 },
+      scan: async () => ({ files: [entry({ activity: "stalled", activityReason: "jsonl_turn_stalled", proc: "running", pid: 42 })], complete: true }),
       recentTurnWindows: () => ({
-        windows: [],
-        operatorActionsAtMs: [NOW],
+        windows: [{ startedAt: NOW, endedAt: null }],
         prefixTruncated: false,
         complete: true,
       }),
     });
     await sync.tick();
+    clock += 2 * 60 * 60_000;
+    await sync.tick();
 
     const times = state()!.pending.map((event) => event.heartbeat.time * 1_000);
-    expect(times).toEqual([NOW, NOW + 10 * 60_000]);
+    expect(times.length).toBeLessThanOrEqual(20);
+    expect(times[0]).toBe(NOW);
+    expect(times.at(-1)).toBe(clock);
+    expect(times.slice(1).every((time, index) => time - times[index]! <= 10 * 60_000)).toBe(true);
     expect(state()?.counters.compacted).toBeGreaterThan(0);
     sync.stop();
   });
 
   test("stream retention evicts whole oldest streams at the configured bound", async () => {
-    const operatorActionsAtMs = [0, 20 * 60_000, 40 * 60_000].map((offset) => NOW + offset);
+    const windows = [0, 60_000, 120_000].map((offset) => ({
+      startedAt: NOW + offset,
+      endedAt: NOW + offset + 10_000,
+    }));
     const { sync, state } = harness({
-      now: () => NOW + 50 * 60_000,
       limits: { maxStreams: 2 },
-      recentTurnWindows: () => ({ windows: [], operatorActionsAtMs, prefixTruncated: false, complete: true }),
+      recentTurnWindows: () => ({ windows, prefixTruncated: false, complete: true }),
     });
 
     await sync.tick();
 
     expect(Object.keys(state()!.streams)).toHaveLength(2);
-    expect(state()?.pending).toHaveLength(12);
-    expect(state()?.counters.dropped).toBe(6);
+    expect(state()?.pending).toHaveLength(4);
+    expect(state()?.counters.dropped).toBe(2);
     sync.stop();
   });
 
-  test("max-stream eviction preserves the delivered operator watermark", async () => {
+  test("max-stream eviction preserves the delivered watermark when an open stream resumes", async () => {
     let clock = NOW + 10 * 60_000;
-    let operatorActionsAtMs = [NOW];
+    let active = true;
+    let windows = [
+      { startedAt: NOW, endedAt: null },
+      { startedAt: NOW + 9 * 60_000, endedAt: NOW + 10 * 60_000 },
+    ];
+    const openWindow = windows[0]!;
+    const scan = async () => ({
+      files: [entry({
+        activity: active ? "recent" : "idle",
+        activityReason: active ? "jsonl_turn_active" : "pane_at_composer",
+        proc: active ? "running" : "done",
+        pid: active ? 42 : null,
+        mtime: (active ? clock : NOW + 10 * 60_000) / 1_000,
+      })],
+      complete: true,
+    });
     const first = harness({
       now: () => clock,
       limits: { maxStreams: 2 },
-      recentTurnWindows: () => ({ windows: [], operatorActionsAtMs, prefixTruncated: false, complete: true }),
+      scan,
+      recentTurnWindows: () => ({ windows, prefixTruncated: false, complete: true }),
       readCredential: async () => ({ value: TEST_CREDENTIAL, sourceStamp: "fixture" }),
-      readState: async () => initialState(),
+      readState: async () => ({
+        version: 1,
+        enabledAtMs: NOW - 1,
+        credentialGeneration: null,
+        streams: {},
+        pending: [],
+        retry: { failures: 0, retryAtMs: 0, reason: null },
+        counters: { accepted: 0, permanentlyRejected: 0, compacted: 0, dropped: 0, historyGaps: 0 },
+      } satisfies WakatimeStateV1),
     });
     await first.sync.tick();
     const persisted = structuredClone(first.state());
     first.sync.stop();
 
-    clock = NOW + 30 * 60_000;
-    operatorActionsAtMs = [NOW, NOW + 20 * 60_000];
+    active = false;
+    clock += 60_000;
     const resumedBodies: WakatimeStateV1["pending"][number]["heartbeat"][][] = [];
     const resumed = harness({
       now: () => clock,
       limits: { maxStreams: 1 },
-      recentTurnWindows: () => ({ windows: [], operatorActionsAtMs, prefixTruncated: false, complete: true }),
+      scan,
+      recentTurnWindows: () => ({ windows, prefixTruncated: false, complete: true }),
       readCredential: async () => ({ value: TEST_CREDENTIAL, sourceStamp: "fixture" }),
       readState: async () => persisted,
       fetch: async (_url, init) => {
@@ -1515,20 +1375,21 @@ describe("WakaTime activity sync", () => {
         };
       },
     });
+    windows = [windows[1]!];
     await resumed.sync.tick();
 
-    operatorActionsAtMs = [NOW];
+    active = true;
+    windows = [openWindow];
     clock += 60_000;
     await resumed.sync.tick();
 
     expect(resumedBodies).toHaveLength(1);
-    expect(resumedBodies[0]?.at(0)?.time).toBe((NOW + 20 * 60_000) / 1_000);
-    expect(resumedBodies[0]?.at(-1)?.time).toBe((NOW + 30 * 60_000) / 1_000);
+    expect(resumedBodies.at(-1)?.map((heartbeat) => heartbeat.time)).toEqual([clock / 1_000]);
     resumed.sync.stop();
   });
 
   test("a pruned delivered stream cannot be rediscovered from an old transcript tail", async () => {
-    let clock = NOW + 10 * 60_000;
+    let clock = NOW;
     const fixture = harness({
       now: () => clock,
       readCredential: async () => ({ value: TEST_CREDENTIAL, sourceStamp: "fixture" }),

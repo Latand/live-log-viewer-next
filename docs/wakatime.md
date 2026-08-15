@@ -1,8 +1,7 @@
 # WakaTime activity integration
 
-Agent Log Viewer can publish project-scoped operator engagement from Claude
-and Codex conversations to your WakaTime account. The integration starts only
-when the Viewer process has
+Agent Log Viewer can publish observed Claude and Codex turn activity to your
+WakaTime account. The integration starts only when the Viewer process has
 `LLV_WAKATIME_ENABLED=1`.
 
 ## Setup
@@ -37,19 +36,19 @@ restart.
 
 ## Activity mapping
 
-Each canonical direct operator action becomes a ten-minute WakaTime `app`
-heartbeat stream:
+Each observed agent turn and direct operator engagement interval becomes a
+WakaTime `app` heartbeat stream:
 
 | WakaTime field | Value |
 | --- | --- |
 | Project | The Viewer's canonical project attribution, including parent-repository grouping for worktrees. |
-| Entity | An opaque, stable per-action identifier such as `agent-log-viewer/codex/0123abcd…`. |
+| Entity | An opaque, stable per-interval identifier such as `agent-log-viewer/codex/0123abcd…`. |
 | Category | `ai coding`. |
 | Language | Omitted because transcript activity does not identify a source-file language. |
-| Time | Engagement start, 120-second samples, and an exact ten-minute boundary marker. |
-| AI session | An opaque SHA-256 action identifier. |
+| Time | Interval start, 120-second active samples, and an exact interval-boundary marker at the end. |
+| AI session | An opaque SHA-256 interval identifier. |
 
-Project names, engine names, opaque action identifiers, the category, and
+Project names, engine names, opaque turn identifiers, the category, and
 timestamps leave the machine. Titles, prompts, responses, transcript paths,
 working directories, model names, account ids, source contents, and branch
 names stay local.
@@ -57,24 +56,24 @@ names stay local.
 A direct operator action contributes a ten-minute engagement interval sampled
 at the same 120-second cadence. Viewer-structured Codex input and Claude input
 classified as human are eligible. Legacy bare Claude input is eligible in root
-conversations. Delegated launch input, harness messages, spawn instructions,
-commands, notifications, SDK traffic, peer messages, and coordinator envelopes
-contribute zero time. Agent execution, tool calls, and transcript churn also
-contribute zero time without a direct root operator action.
+conversations; delegated launch input remains agent-only. Harness, spawn,
+command, notification, SDK, peer, and coordinator envelopes do not create
+operator intervals. These intervals union with agent turns on the same
+timeline. Short turns retain the engagement tail, while long and silent agent
+turns continue through their full observed execution.
 
-The first enabled start creates a forward-only boundary. Engagement ending
-before that timestamp remains local. An engagement interval that crosses the
-boundary begins at the enable timestamp. The reserved `agent-log-viewer-boundary` project
+The first enabled start creates a forward-only boundary. Completed work from
+before that timestamp remains local. A turn that crosses the boundary begins
+at the enable timestamp. The reserved `agent-log-viewer-boundary` project
 contains interval-boundary markers. WakaTime assigns sub-timeout gaps to those
 markers, keeping each canonical project limited to observed active spans.
-Overlapping engagement intervals in one project contribute their wall-clock
-union. Exclude the reserved project when reading project totals.
+Overlapping turns in one project contribute their wall-clock union. Exclude the
+reserved project when reading project totals.
 
-Resume and account-path rotation reuse the canonical conversation identity and
-action timestamp. Copied fan-out input belongs to delegated conversations and
-adds zero time. Repeated scans and delivery retries reuse durable event keys.
-If durable project ownership settles after an event was queued, the Viewer
-rewrites that undelivered activity to the authoritative project before sending.
+Open transcripts advance only while the scanner confirms a live agent process
+and no idle composer or input gate. Abrupt exits, stale transcripts, and idle
+composers freeze at the last proven activity timestamp. A live process remains
+authoritative during silent long-running tool calls.
 
 ## Delivery and local state
 
@@ -109,11 +108,6 @@ stream-cap eviction, preventing a visible transcript from replaying its
 already delivered history. Finalized boundary state also prevents later tail
 changes from creating delayed boundaries for settled overlaps.
 
-On the first complete scan after upgrading from turn-based accounting, the
-Viewer tags operator streams that are still provable from current transcripts
-and retires untagged legacy agent streams and their queued rows before
-delivery. Incomplete scans leave the outbox unchanged.
-
 Blue-green releases coordinate through a process-shared scheduler lease in the
 common state directory. The live owner retains that fence through promotion,
 rollback, active request shutdown, and final settlement. A successor begins
@@ -136,13 +130,11 @@ After restart, inspect server diagnostics for `[wakatime]` startup or failure
 transitions. Repeated failures are rate-limited. Diagnostics contain outcome
 classes, HTTP status values, retry timestamps, and counts.
 
-Send one direct operator message in a root conversation. In the WakaTime
-dashboard, confirm the canonical project, `AI coding` category, ten-minute
-engagement span, and idle gap after excluding `agent-log-viewer-boundary`.
-Allow an agent tool call to continue beyond that interval and confirm that it
-adds no project time. Stop network access for one tick, restore it, and confirm
-that the queued activity arrives after recovery. Restart the Viewer during
-queued work to exercise durable resume.
+Run one short turn and one turn longer than two minutes. In the WakaTime
+dashboard, confirm the canonical project, `AI coding` category, active span,
+and idle gap after excluding `agent-log-viewer-boundary`. Stop network access for one tick, restore it, and confirm that the
+queued activity arrives after recovery. Restart the Viewer during queued work
+to exercise durable resume.
 
 ## Disablement
 
