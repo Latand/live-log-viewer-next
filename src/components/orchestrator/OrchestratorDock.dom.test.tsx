@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import { Window as HappyWindow } from "happy-dom";
+import { useLayoutEffect } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
@@ -94,16 +95,36 @@ afterAll(() => {
   mock.module("@/hooks/useRuntime", () => actualRuntimeHooks);
 });
 
+/** A witness at the commit boundary. Its layout effect runs inside the SAME
+    commit as the dock's own — after the dock's subtree, before the browser
+    paints and before any passive effect — so what it observes is the frame the
+    operator would actually see. Timing bugs that a passive effect papers over
+    are visible from here and nowhere else. */
+function CommitProbe({ at }: { at: () => void }) {
+  useLayoutEffect(() => {
+    at();
+  });
+  return null;
+}
+
+/** The dock's committed width, as the observer at a commit boundary reads it. */
+type CommitWatcher = (width: string | null | undefined) => void;
+
 /** One dock on a project, as a page load gives it: its own host, its own root,
     and the two gestures the width contract is made of — drag the edge, switch
     the project underneath it. */
-function mountDock(project: string) {
+function mountDock(project: string, atCommit?: CommitWatcher) {
   const host = dom.document.createElement("div");
   dom.document.body.append(host);
   const root = createRoot(host as unknown as HTMLElement);
   roots.add(root);
+  const readWidth = () => host.querySelector("[data-orchestrator-dock]")?.getAttribute("data-orchestrator-dock-width");
+  let commit = atCommit;
   const render = (on: string) => flushSync(() => root.render(
-    <OrchestratorDock project={on} projectName={on} files={[]} onClose={() => undefined} />,
+    <>
+      <OrchestratorDock project={on} projectName={on} files={[]} onClose={() => undefined} />
+      <CommitProbe at={() => commit?.(readWidth())} />
+    </>,
   ));
   render(project);
   /* The gesture in three parts, because a switch can land between them. */
@@ -111,17 +132,24 @@ function mountDock(project: string) {
     const handle = host.querySelector("[data-orchestrator-dock-resize]") as unknown as HTMLElement;
     flushSync(() => handle.dispatchEvent(new dom.MouseEvent("pointerdown", { bubbles: true }) as unknown as Event));
   };
-  /** Move the pointer to where the dock lands on `target` px, on a 2000px
-      desktop wide enough that the pointer clamp does not bite. */
-  const pointerMoveTo = (target: number) => {
+  /** The raw pointer event that lands the dock on `target` px, on a 2000px
+      desktop wide enough that the pointer clamp does not bite. Unflushed, so it
+      can be fired from inside a commit the way a real one arrives. */
+  const dispatchMove = (target: number) => {
     Object.defineProperty(dom, "innerWidth", { value: 2_000, configurable: true });
-    flushSync(() => dom.dispatchEvent(Object.assign(new dom.Event("pointermove"), { clientX: RAIL_WIDTH + target })));
+    dom.dispatchEvent(Object.assign(new dom.Event("pointermove"), { clientX: RAIL_WIDTH + target }));
   };
+  const pointerMoveTo = (target: number) => flushSync(() => dispatchMove(target));
   const pointerUp = () => flushSync(() => dom.dispatchEvent(new dom.Event("pointerup")));
   return {
     render,
-    width: () => host.querySelector("[data-orchestrator-dock]")?.getAttribute("data-orchestrator-dock-width"),
+    width: readWidth,
+    /** What to run at each commit boundary from here on. */
+    onCommit: (fn?: CommitWatcher) => {
+      commit = fn;
+    },
     pointerDown,
+    dispatchMove,
     pointerMoveTo,
     pointerUp,
     dragTo: (target: number) => {
@@ -332,4 +360,52 @@ test("a project switch under an unfinished drag settles the width on the project
   expect(dock.width()).toBe("700");
   expect(dom.localStorage.getItem("llvOrchestratorPanelWidth:borealis")).toBe("700");
   expect(dom.localStorage.getItem("llvOrchestratorPanelWidth:atlas")).toBe("600");
+});
+
+test("the old drag's listeners are gone before the new project is on screen", () => {
+  dom.localStorage.setItem("llvOrchestratorPanelWidth:borealis", "500");
+
+  const dock = mountDock("atlas");
+  dock.pointerDown();
+  dock.pointerMoveTo(600);
+
+  /* A pointermove fired at the commit boundary: the switch to borealis is
+     committed and nothing has been painted yet. This is the window a passive
+     cleanup leaves open, and a real pointer sits in it whenever the drag was
+     left armed — so a listener still attached here would drag BOREALIS's dock
+     with the gesture the operator aimed at atlas. */
+  let fired = false;
+  dock.onCommit(() => {
+    if (fired) return;
+    fired = true;
+    dock.dispatchMove(720);
+  });
+  dock.render("borealis");
+  dock.onCommit(undefined);
+  expect(fired).toBe(true);
+
+  expect(dock.width()).toBe("500");
+  expect(dom.localStorage.getItem("llvOrchestratorPanelWidth:borealis")).toBe("500");
+  expect(dom.localStorage.getItem("llvOrchestratorPanelWidth:atlas")).toBe("600");
+});
+
+test("the published row and the committed width change in the same frame", () => {
+  dom.localStorage.setItem("llvOrchestratorPanelWidth:atlas", "400");
+  dom.localStorage.setItem("llvOrchestratorPanelWidth:borealis", "900");
+
+  const seen: Array<{ width: string | null | undefined; inset: number }> = [];
+  const dock = mountDock("atlas", (width) => seen.push({ width, inset: leftShellInset() }));
+
+  /* Mount: the sheet's budget is right from the first frame. */
+  expect(seen.at(-1)).toEqual({ width: "400", inset: RAIL_WIDTH + 400 });
+
+  dock.render("borealis");
+
+  /* And through the switch that widens the dock by 500px, the two move
+     together. Publishing a frame late would paint 900px of dock against a row
+     reserved for 400 — the sheet takes its full 560 and the board is left with
+     212px, well under its floor. */
+  expect(seen.at(-1)).toEqual({ width: "900", inset: RAIL_WIDTH + 900 });
+  expect(visibleBoard(1_920, 900)).toBeGreaterThanOrEqual(MIN_BOARD);
+  expect(1_920 - RAIL_WIDTH - 900 - sheetWidth(1_920, RAIL_WIDTH + 400)).toBeLessThan(MIN_BOARD);
 });

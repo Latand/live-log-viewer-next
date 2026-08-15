@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
@@ -112,8 +112,13 @@ export function OrchestratorDock({
   }
 
   /* The row this dock occupies, for the preview sheet to budget around —
-     published live through the resize drag, and given back on close. */
-  useEffect(() => {
+     published live through the resize drag, and given back on close.
+
+     LAYOUT phase, so the published row and the committed width are one atomic
+     change: a passive effect publishes a frame late, and a project switch that
+     widens the dock would paint that frame with the sheet still budgeting for
+     the narrower one, taking the board under {@link MIN_BOARD}. */
+  useLayoutEffect(() => {
     setLeftShellInset(RAIL_WIDTH + width);
     return () => setLeftShellInset(0);
   }, [width]);
@@ -154,8 +159,14 @@ export function OrchestratorDock({
 
   /* End an unfinished drag when the project changes under it, or when the dock
      closes: the width it produced is settled on its owner, and the dock the
-     operator is now looking at stops following the pointer. */
-  useEffect(() => () => endDrag.current?.(), [project]);
+     operator is now looking at stops following the pointer.
+
+     LAYOUT phase again, and for the sharper reason: this cleanup runs inside
+     the commit, so the listeners are gone before the switch is observable. A
+     passive cleanup leaves them live until after paint, and any pointermove in
+     that gap — a drag whose pointerup was released outside the window stays
+     armed indefinitely — drags the dock of the project just opened. */
+  useLayoutEffect(() => () => endDrag.current?.(), [project]);
 
   return (
     <aside
