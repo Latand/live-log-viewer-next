@@ -30,7 +30,10 @@ import {
   tmuxEndpointDescriptor,
 } from "@/lib/tmux";
 import type { ApiError, FileEntry } from "@/lib/types";
-import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorActivity";
+import {
+  recordDirectOperatorWakatimeActivity,
+  settleDirectOperatorWakatimeCompatibility,
+} from "@/lib/wakatime/operatorActivity";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -266,11 +269,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
 
   const explicitAction = typeof body.action === "string" ? body.action : "";
   if ((CONVERSATION_ACTIONS as readonly string[]).includes(explicitAction)) {
+    let compatibilityActionKey: string | undefined;
     if (explicitAction === "dialog-key") {
       const clientMessageId = typeof body.clientMessageId === "string" ? body.clientMessageId.trim().slice(0, 128) : "";
       const target = { pid, hasPid, filePath, conversationId };
       try {
-        await recordAuthorizedOperatorActivity(
+        const action = await recordAuthorizedOperatorActivity(
           req,
           target,
           clientMessageId
@@ -282,6 +286,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
                 question: body.question,
               }) },
         );
+        if (!clientMessageId) compatibilityActionKey = action?.key;
       } catch (error) {
         if (error instanceof OperatorActivityTargetConflictError) {
           return NextResponse.json({ error: error.message }, { status: 409 });
@@ -303,6 +308,13 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
       label: body.label,
       question: body.question,
     });
+    if (compatibilityActionKey && result.status < 400) {
+      try {
+        settleDirectOperatorWakatimeCompatibility(compatibilityActionKey);
+      } catch {
+        return NextResponse.json({ error: "direct operator activity could not be settled" }, { status: 503 });
+      }
+    }
     return NextResponse.json(result.body, { status: result.status });
   }
 
@@ -349,6 +361,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
   const clientMessageId = typeof body.clientMessageId === "string" ? body.clientMessageId.trim().slice(0, 128) : "";
   const operatorTarget = { pid, hasPid, filePath, conversationId };
   let operatorActionKey: string | undefined;
+  let compatibilityActionKey: string | undefined;
   try {
     const action = await recordAuthorizedOperatorActivity(
       req,
@@ -362,6 +375,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
           }) },
     );
     operatorActionKey = action?.key;
+    if (!clientMessageId) compatibilityActionKey = action?.key;
   } catch (error) {
     if (error instanceof OperatorActivityTargetConflictError) {
       return NextResponse.json({ error: error.message }, { status: 409 });
@@ -382,11 +396,18 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     });
     if (structured) {
       const { status, ...response } = structured.ok ? { ...structured, status: 200 } : structured;
+      if (compatibilityActionKey && status < 400) {
+        try {
+          settleDirectOperatorWakatimeCompatibility(compatibilityActionKey);
+        } catch {
+          return NextResponse.json({ error: "direct operator activity could not be settled" }, { status: 503 });
+        }
+      }
       return NextResponse.json(response, { status });
     }
   }
 
-  return respond(await deliverConversationMessage({
+  const response = respond(await deliverConversationMessage({
     pid: hasPid ? pid : null,
     path: filePath,
     ...(conversationId ? { conversationId } : {}),
@@ -400,4 +421,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     ...(typeof body.effort === "string" ? { resumeEffort: body.effort } : {}),
     ...(typeof body.fast === "boolean" ? { resumeFast: body.fast } : {}),
   }));
+  if (compatibilityActionKey && response.status < 400) {
+    try {
+      settleDirectOperatorWakatimeCompatibility(compatibilityActionKey);
+    } catch {
+      return NextResponse.json({ error: "direct operator activity could not be settled" }, { status: 503 });
+    }
+  }
+  return response;
 }
