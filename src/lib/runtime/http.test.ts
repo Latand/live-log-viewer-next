@@ -69,6 +69,7 @@ test("runtime command HTTP handling preserves validation, CSRF, status, and conf
 
 test("runtime send records operator activity before delivery failure and excludes self-named agents", async () => {
   const recorded: unknown[] = [];
+  const enqueued: unknown[] = [];
   const agentCapability = "b".repeat(43);
   const dependencies: RuntimeHttpDependencies = {
     enabled: () => true,
@@ -78,7 +79,10 @@ test("runtime send records operator activity before delivery failure and exclude
       recorded.push(input);
       return { key: "b".repeat(64), engine: "codex", project: "fixture", atMs: Date.now() };
     },
-    enqueue: async () => { throw new Error("delivery unavailable"); },
+    enqueue: async (input) => {
+      enqueued.push(input);
+      throw new Error("delivery unavailable");
+    },
   };
   setCallerConversationResolverForTests(() => "conversation_agent");
   try {
@@ -101,6 +105,52 @@ test("runtime send records operator activity before delivery failure and exclude
     expect(recorded).toEqual([{
       conversationId: "conversation_direct",
       idempotencyKey: "direct-runtime-one",
+    }]);
+    expect(enqueued[0]).toMatchObject({ operatorActionKey: "b".repeat(64) });
+    expect(enqueued[1]).not.toHaveProperty("operatorActionKey");
+  } finally {
+    setCallerConversationResolverForTests(null);
+  }
+});
+
+test("runtime answer records authorized operator activity once and excludes self-named agents", async () => {
+  const recorded: unknown[] = [];
+  const commands: unknown[] = [];
+  const agentCapability = "c".repeat(43);
+  const dependencies: RuntimeHttpDependencies = {
+    enabled: () => true,
+    structuredEnabled: () => true,
+    client: () => ({
+      command: async (command: unknown) => {
+        commands.push(command);
+        throw new Error("answer delivery unavailable");
+      },
+    }) as unknown as RuntimeHostClient,
+    recordOperatorActivity: (input) => {
+      recorded.push(input);
+      return { key: "c".repeat(64), engine: "codex", project: "fixture", atMs: Date.now() };
+    },
+  };
+  setCallerConversationResolverForTests(() => "conversation_agent");
+  try {
+    const body = {
+      conversationId: "conversation_direct",
+      attentionId: "attention-one",
+      resolution: { answers: [[0]] },
+      operationId: "answer-gesture-one",
+    };
+    const direct = await handleRuntimeCommand(request(body), "answer", dependencies);
+    const agent = await handleRuntimeCommand(request(body, {
+      host: "127.0.0.1",
+      [VIEWER_SPAWN_CAPABILITY_HEADER]: agentCapability,
+    }), "answer", dependencies);
+
+    expect(direct.status).toBe(503);
+    expect(agent.status).toBe(503);
+    expect(commands).toHaveLength(2);
+    expect(recorded).toEqual([{
+      conversationId: "conversation_direct",
+      idempotencyKey: "answer-gesture-one",
     }]);
   } finally {
     setCallerConversationResolverForTests(null);

@@ -63,6 +63,7 @@ interface SendEffect {
   selectedContext?: SelectedContextRef;
   /** #1117: authorship stamped at admission, replayed from the durable payload. */
   origin?: MessageOrigin;
+  operatorActionKey?: string;
   eventSeq: number;
 }
 
@@ -170,6 +171,10 @@ function sendEffect(effect: StructuredDeliveryEffect): SendEffect | null {
      message must never be stranded by its own provenance. */
   const selectedContext = parseSelectedContextRef(effect.payload.selectedContext);
   const origin = parseMessageOrigin(effect.payload.origin);
+  const operatorActionKey = typeof effect.payload.operatorActionKey === "string"
+    && /^[a-f0-9]{64}$/.test(effect.payload.operatorActionKey)
+    ? effect.payload.operatorActionKey
+    : undefined;
   return {
     operationId,
     conversationId,
@@ -182,6 +187,7 @@ function sendEffect(effect: StructuredDeliveryEffect): SendEffect | null {
     ...(runtime ? { runtime } : {}),
     ...(selectedContext ? { selectedContext } : {}),
     ...(origin ? { origin } : {}),
+    ...(operatorActionKey ? { operatorActionKey } : {}),
   };
 }
 
@@ -511,6 +517,7 @@ export class StructuredDeliveryQueue {
         ...(effect.runtime ? { runtime: effect.runtime } : {}),
         ...(effect.selectedContext ? { selectedContext: effect.selectedContext } : {}),
         ...(effect.origin ? { origin: effect.origin } : {}),
+        ...(effect.operatorActionKey ? { operatorActionKey: effect.operatorActionKey } : {}),
       };
       await this.port.transition(
         effect.operationId,

@@ -707,6 +707,29 @@ describe("WakaTime activity sync", () => {
     fixture.sync.stop();
   });
 
+  test("a proven transcript-only operator action creates one fixed engagement", async () => {
+    let clock = NOW;
+    const actionKey = "7".repeat(64);
+    const fixture = harness({
+      now: () => clock,
+      recentTurnWindows: () => ({
+        windows: [],
+        operatorActions: [{ key: actionKey, atMs: NOW }],
+        operatorActionsAtMs: [NOW],
+        prefixTruncated: false,
+        complete: true,
+      }),
+    });
+    await fixture.sync.tick();
+    clock += 10 * 60_000;
+    await fixture.sync.tick();
+
+    const heartbeats = fixture.state()!.pending.map((event) => event.heartbeat);
+    expect(projectDurationSeconds(heartbeats, "-repo")).toBe(10 * 60);
+    expect(new Set(heartbeats.filter((heartbeat) => heartbeat.project === "-repo").map((heartbeat) => heartbeat.ai_session))).toHaveLength(1);
+    fixture.sync.stop();
+  });
+
   test("a failed WakaTime request retains one direct-action batch across retry and restart", async () => {
     let clock = NOW + 10 * 60_000;
     const action: DirectOperatorWakatimeAction = {

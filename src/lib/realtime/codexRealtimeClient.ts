@@ -437,17 +437,27 @@ class CodexRealtimeClient {
    */
   private publishSelectedContext(): void {
     if (!this.realtimeSessionId) return;
+    const payload = JSON.stringify({
+      action: "selectedContext",
+      conversationId: this.conversationId,
+      realtimeSessionId: this.realtimeSessionId,
+      operatorEventId: crypto.randomUUID(),
+      selectedContext: viewerSelectedContext(),
+    });
+    const publish = async (retry: boolean): Promise<void> => {
+      try {
+        const response = await fetch("/api/runtime/realtime", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: payload,
+        });
+        if (!response.ok && retry) await publish(false);
+      } catch {
+        if (retry) await publish(false);
+      }
+    };
     try {
-      void fetch("/api/runtime/realtime", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          action: "selectedContext",
-          conversationId: this.conversationId,
-          realtimeSessionId: this.realtimeSessionId,
-          selectedContext: viewerSelectedContext(),
-        }),
-      }).catch(() => undefined);
+      void publish(true);
     } catch {
       /* the call keeps going without a selected-card reference */
     }

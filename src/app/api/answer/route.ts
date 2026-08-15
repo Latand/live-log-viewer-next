@@ -3,12 +3,14 @@ import fs from "node:fs";
 import { NextRequest, NextResponse } from "next/server";
 
 import { deliverAnswer, DeliveryError, type AnswerInput, type PaneIo } from "@/lib/answer/driver";
+import { requireOperatorAuthority } from "@/lib/agent/operatorAuthority";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { listFiles } from "@/lib/scanner";
 import { pendingQuestionFor, recordedToolResult } from "@/lib/scanner/questions";
 import { screenTail } from "@/lib/status";
 import { paneScreen, resolveTarget, sendKeys, sendText } from "@/lib/tmux";
 import type { ApiError, FileEntry, PendingQuestion } from "@/lib/types";
+import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorActivity";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -93,7 +95,7 @@ async function confirmAnswered(entry: FileEntry, toolUseId: string): Promise<str
   return null;
 }
 
-async function deliver(body: AnswerBody): Promise<NextResponse<RouteResponse>> {
+async function deliver(body: AnswerBody, req: NextRequest): Promise<NextResponse<RouteResponse>> {
   const transcriptPath = typeof body.transcriptPath === "string" ? body.transcriptPath : "";
   const toolUseId = typeof body.toolUseId === "string" ? body.toolUseId : "";
   if (!transcriptPath || !toolUseId) return NextResponse.json({ error: "transcriptPath and toolUseId are required" }, { status: 400 });
@@ -110,6 +112,17 @@ async function deliver(body: AnswerBody): Promise<NextResponse<RouteResponse>> {
   const pending = state.pending;
   const target = await resolveTarget(state.entry.pid!);
   if (target === null) return NextResponse.json({ error: "no active tmux pane for answering", noPane: true }, { status: 409 });
+  if (requireOperatorAuthority(req).ok) {
+    try {
+      recordDirectOperatorWakatimeActivity({
+        path: transcriptPath,
+        idempotencyKey: `question:${toolUseId}`,
+        fallbackEntry: state.entry,
+      });
+    } catch {
+      return NextResponse.json({ error: "direct operator activity could not be recorded" }, { status: 503 });
+    }
+  }
 
   try {
     const label = await deliverAnswer(paneIo, target, pending, body);
@@ -137,7 +150,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<RouteResponse
   const transcriptPath = typeof body.transcriptPath === "string" ? body.transcriptPath : "";
   const key = transcriptPath || "unknown";
   const previous = locks.get(key) ?? Promise.resolve(NextResponse.json({ ok: true, answer: "" }));
-  const current = previous.catch(() => NextResponse.json({ ok: true, answer: "" })).then(() => deliver(body));
+  const current = previous.catch(() => NextResponse.json({ ok: true, answer: "" })).then(() => deliver(body, req));
   locks.set(key, current);
   try {
     return await current;

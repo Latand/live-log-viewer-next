@@ -109,14 +109,16 @@ export async function handleRuntimeCommand(
   }
   const client = dependencies.client();
   try {
-    if ((command.kind === "send" || command.kind === "steer")
+    let operatorActionKey: string | undefined;
+    if ((command.kind === "send" || command.kind === "steer" || command.kind === "answer")
       && requireOperatorAuthority(request).ok
       && dependencies.recordOperatorActivity) {
       try {
-        dependencies.recordOperatorActivity({
+        const action = dependencies.recordOperatorActivity({
           conversationId: command.conversationId,
           idempotencyKey: command.idempotencyKey,
         });
+        operatorActionKey = action.key;
       } catch {
         return NextResponse.json({ error: "direct operator activity could not be recorded" }, { status: 503 });
       }
@@ -137,6 +139,7 @@ export async function handleRuntimeCommand(
         /* #1117: this route is the operator's own composer surface, so
            authorship is stamped HERE, server-side — never read off the body. */
         origin: { kind: "operator" },
+        ...(operatorActionKey ? { operatorActionKey } : {}),
       }, {
         enabled: dependencies.structuredEnabled ?? (() => structuredHostsEnabled()),
         client: () => client,
@@ -157,7 +160,11 @@ export async function handleRuntimeCommand(
       }
     }
     if (!client) return NextResponse.json({ error: "runtime host socket is unavailable" }, { status: 503 });
-    const result = await client.command(command);
+    const result = await client.command(
+      operatorActionKey && (command.kind === "send" || command.kind === "steer")
+        ? { ...command, operatorActionKey }
+        : command,
+    );
     if (result.receipt.status === "pending" || result.receipt.status === "queued") {
       dependencies.kick?.();
     }

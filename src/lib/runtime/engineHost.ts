@@ -31,6 +31,7 @@ export interface QueueEntry {
       host stamps it onto the structured-user marker. Absent = unknown, and
       the feed keeps its current rendering. */
   origin?: MessageOrigin;
+  operatorActionKey?: string;
 }
 
 export interface NormalizedQueueEntry {
@@ -41,6 +42,7 @@ export interface NormalizedQueueEntry {
   runtime?: RuntimeSendSettings;
   selectedContext?: SelectedContextRef;
   origin?: MessageOrigin;
+  operatorActionKey?: string;
 }
 
 export function normalizeQueueEntry(entry: QueueEntry): NormalizedQueueEntry {
@@ -54,6 +56,7 @@ export function normalizeQueueEntry(entry: QueueEntry): NormalizedQueueEntry {
     ...(entry.runtime ? { runtime: entry.runtime } : {}),
     ...(entry.selectedContext ? { selectedContext: entry.selectedContext } : {}),
     ...(entry.origin ? { origin: entry.origin } : {}),
+    ...(entry.operatorActionKey ? { operatorActionKey: entry.operatorActionKey } : {}),
   };
 }
 

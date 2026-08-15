@@ -88,6 +88,7 @@ interface ControlRequest {
   view?: { viewSessionId: string; deviceId: string };
   realtimeSessionId?: string;
   selectedContext?: SelectedContextRef;
+  operatorEventId?: string;
 }
 
 let requests: ControlRequest[] = [];
@@ -144,6 +145,7 @@ test("a finished utterance reports the selected card against the call's own cred
   const published = requests.filter((request) => request.action === "selectedContext");
   expect(published).toHaveLength(1);
   expect(published[0]!.realtimeSessionId).toBe("live-1");
+  expect(published[0]!.operatorEventId).toMatch(/^[0-9a-f-]{36}$/);
   expect(published[0]!.selectedContext).toMatchObject({
     version: 1,
     state: "selected",
@@ -151,6 +153,24 @@ test("a finished utterance reports the selected card against the call's own cred
     viewSessionId: "vs-synthetic-1",
     deviceId: "dev-synthetic-1",
   });
+});
+
+test("a failed operator-event publication retries once with the same identity", async () => {
+  let selectedAttempts = 0;
+  globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+    const request = JSON.parse(String(init?.body)) as ControlRequest;
+    requests.push(request);
+    if (request.action === "selectedContext" && selectedAttempts++ === 0) throw new Error("offline");
+    return { ok: true, status: 200, json: async () => ({ ok: true, sdp: "v=0\r\nanswer", realtimeSessionId: "live-1" }) } as unknown as Response;
+  }) as typeof fetch;
+  const peer = await liveCall("conversation_voice_retry");
+
+  finished(peer, "user", "retry my event");
+  for (let index = 0; index < 4; index += 1) await Promise.resolve();
+
+  const published = requests.filter((request) => request.action === "selectedContext");
+  expect(published).toHaveLength(2);
+  expect(published[0]!.operatorEventId).toBe(published[1]!.operatorEventId);
 });
 
 test("streaming fragments and the agent's own speech publish nothing", async () => {

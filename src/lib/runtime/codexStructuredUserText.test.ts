@@ -80,6 +80,17 @@ test("the reference and the content digest ride the same marker", () => {
   });
 });
 
+test("a server-issued operator key is explicit while ordinary structured input has none", () => {
+  const operatorActionKey = "b".repeat(64);
+  const direct = decodeCodexStructuredUserText(
+    encodeCodexStructuredUserText("operator turn", undefined, undefined, undefined, operatorActionKey),
+  );
+  const agent = decodeCodexStructuredUserText(encodeCodexStructuredUserText("agent turn"));
+
+  expect(direct.operatorActionKey).toBe(operatorActionKey);
+  expect(agent.operatorActionKey).toBeUndefined();
+});
+
 test("an explicit empty selection persists as an answer, not as an absent field", () => {
   const empty = captureSelectedContext({
     context: { project: "atlas" },
