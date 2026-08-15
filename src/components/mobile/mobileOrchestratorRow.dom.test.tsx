@@ -441,6 +441,62 @@ test("a designation failing ALONGSIDE a live incumbent gets its own control, and
   expect(sheet(host)).not.toBeNull();
 });
 
+/* A minimal visualViewport stand-in — happy-dom has none, and the keyboard is
+   the only thing that shrinks it (#983's signal, `useKeyboardInset`). */
+function makeVisualViewport(height: number) {
+  const listeners = new Set<() => void>();
+  return {
+    height, scale: 1, offsetTop: 0,
+    addEventListener(type: string, cb: () => void) { if (type === "resize") listeners.add(cb); },
+    removeEventListener(type: string, cb: () => void) { if (type === "resize") listeners.delete(cb); },
+    resizeTo(next: number) {
+      this.height = next;
+      for (const cb of [...listeners]) cb();
+    },
+  };
+}
+
+test("the keyboard opening on the focused mandate brings the field into the scroller — once (#1004)", async () => {
+  const vv = makeVisualViewport(844);
+  (dom as unknown as Record<string, unknown>).visualViewport = vv;
+  (globalThis as Record<string, unknown>).visualViewport = vv;
+  try {
+    const files = [conversation({})];
+    const { host, root } = await mount(files);
+    flushSync(() => openButton(host).click());
+    await settle(root, view(files), 2);
+
+    const field = sheet(host)!.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement;
+    /* The block that carries the label, not the bare textarea: happy-dom does
+       no layout, so what is asserted is WHICH element is revealed and how
+       often — the geometry itself is the capture script's gate. */
+    const block = field.parentElement as HTMLElement & { scrollIntoView: (options?: unknown) => void };
+    const reveals: unknown[] = [];
+    block.scrollIntoView = (options?: unknown) => { reveals.push(options); };
+
+    /* Focus alone, keyboard still closed: nothing moves. */
+    flushSync(() => field.focus());
+    await settle(root, view(files), 2);
+    expect(reveals).toHaveLength(0);
+
+    /* The keyboard opens under the already-focused field — the tap order a
+       phone actually produces. */
+    flushSync(() => vv.resizeTo(508));
+    await settle(root, view(files), 2);
+    expect(reveals).toEqual([{ block: "start" }]);
+
+    /* And it stays revealed exactly once: a keyboard that resizes again (an
+       autocorrect bar, a rotation) must not yank a scroller the operator has
+       since moved themselves. */
+    flushSync(() => vv.resizeTo(468));
+    await settle(root, view(files), 2);
+    expect(reveals).toHaveLength(1);
+  } finally {
+    delete (dom as unknown as Record<string, unknown>).visualViewport;
+    delete (globalThis as Record<string, unknown>).visualViewport;
+  }
+});
+
 test("an unreadable seat offers a re-read that recovers the row without a page reload", async () => {
   const failing = new Response("", { status: 500 });
   void failing;

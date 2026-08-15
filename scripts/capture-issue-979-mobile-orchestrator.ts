@@ -223,6 +223,14 @@ async function checkSheetReach(page: Page, state: string): Promise<void> {
  *
  * A sheet that ignored the signal reads bottom 844 against a visible 508 and
  * fails here; so does one that reached its confirm by scrolling the window.
+ *
+ * Reaching the confirm was never the whole claim, though (#1004): the field
+ * being typed INTO has to be on screen too. The body scroller keeps its own
+ * fold — an intent error's card plus engine/account/reasoning can fill it
+ * entirely and clip the mandate away below — so the focused field is measured
+ * against the nearer of the two edges that can hide it, the scroller's bottom
+ * and the keyboard's top, and against the scroller's top edge that a reveal
+ * could overshoot past.
  */
 async function checkSheetKeyboardReach(page: Page, state: string): Promise<void> {
   await page.focus("[data-orchestrator-mandate]");
@@ -238,7 +246,11 @@ async function checkSheetKeyboardReach(page: Page, state: string): Promise<void>
     const sheet = document.querySelector('[data-testid="mobile-orchestrator-sheet"]')!;
     const confirm = document.querySelector("[data-orchestrator-confirm]")!;
     const body = sheet.querySelector(".overflow-y-auto")!;
+    const field = document.querySelector("[data-orchestrator-mandate]")!;
     const rect = confirm.getBoundingClientRect();
+    const fieldRect = field.getBoundingClientRect();
+    const bodyRect = body.getBoundingClientRect();
+    const fieldStyle = getComputedStyle(field);
     return {
       focused: document.activeElement?.hasAttribute("data-orchestrator-mandate") ?? false,
       inset: Math.round(parseFloat(getComputedStyle(sheet.parentElement!).paddingBottom) || 0),
@@ -248,12 +260,26 @@ async function checkSheetKeyboardReach(page: Page, state: string): Promise<void>
       windowScroll: Math.round(window.scrollY),
       documentHeight: document.documentElement.scrollHeight,
       bodyScrolls: getComputedStyle(body).overflowY,
+      fieldTop: Math.round(fieldRect.top),
+      /* Chrome resolves a unitless line-height to px here; the font size is the
+         fallback for a `normal` that does not parse, and still measures a line. */
+      fieldLine: Math.round(parseFloat(fieldStyle.lineHeight) || parseFloat(fieldStyle.fontSize)),
+      scrollerTop: Math.round(bodyRect.top),
+      scrollerBottom: Math.round(bodyRect.bottom),
     };
   });
   if (!reach.focused) throw new Error(`${state}: the mandate field never took focus, so the keyboard case was not exercised`);
   if (reach.inset < KEYBOARD_PX - 1) throw new Error(`${state}: the sheet reserved ${reach.inset}px for a ${KEYBOARD_PX}px keyboard`);
   if (reach.bottom > reach.visibleBottom) {
     throw new Error(`${state}: with the keyboard open the confirm ends at ${reach.bottom}px, under the keyboard — only ${reach.visibleBottom}px of the ${reach.layout}px viewport is visible`);
+  }
+  /* #1004: the focused field's first line, above whichever fold comes first. */
+  const fold = Math.min(reach.scrollerBottom, reach.visibleBottom);
+  if (reach.fieldTop + reach.fieldLine > fold) {
+    throw new Error(`${state}: with the keyboard open the focused mandate field starts at ${reach.fieldTop}px and its first line ends past the ${fold}px fold (scroller ${reach.scrollerBottom}px, keyboard ${reach.visibleBottom}px) — the operator types into a field they cannot see`);
+  }
+  if (reach.fieldTop < reach.scrollerTop) {
+    throw new Error(`${state}: the focused mandate field starts at ${reach.fieldTop}px, above the scroller's own top edge at ${reach.scrollerTop}px, so its first line is clipped`);
   }
   /* #983's other half: the browser must never have to scroll the WINDOW to
      reach the focused field — the sheet's own body is the one scroller. */
