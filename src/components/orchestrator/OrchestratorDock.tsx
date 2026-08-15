@@ -8,7 +8,13 @@ import type { FileEntry } from "@/lib/types";
 import { setLeftShellInset } from "../shellLayout";
 import { OrchestratorPanel } from "./OrchestratorPanel";
 
-const WIDTH_KEY = "llvOrchestratorPanelWidth";
+/** The width every project shared before #1011. Still READ, never written: it
+    is the seed a project that has never been sized falls back to, so operators
+    coming from the single global preference keep their width everywhere. */
+const LEGACY_WIDTH_KEY = "llvOrchestratorPanelWidth";
+/** One project's own width (#1011). Projects are isolated surfaces — a dock
+    dragged wide for a mandate-heavy project must not resize every other one. */
+const widthKey = (project: string) => `${LEGACY_WIDTH_KEY}:${project}`;
 export const OPEN_KEY = "llvOrchestratorPanelOpen";
 
 export const MIN_WIDTH = 360;
@@ -38,6 +44,21 @@ export function storedDockWidth(read: () => string | null): number {
   return DEFAULT_WIDTH;
 }
 
+function readStorage(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+/** The width to open `project` at: its own, else the pre-#1011 global one as a
+    seed, else the default. Only ABSENCE falls through to the seed — a project
+    that has been sized answers for itself, nonsense included. */
+function projectDockWidth(project: string): number {
+  return storedDockWidth(() => readStorage(widthKey(project)) ?? readStorage(LEGACY_WIDTH_KEY));
+}
+
 /** Width the drag lands on for a pointer at `clientX`, given the viewport. */
 export function dockWidthForPointer(clientX: number, viewportWidth: number): number {
   const room = Math.max(MIN_WIDTH, viewportWidth - RESERVED_BESIDE_DOCK);
@@ -50,8 +71,9 @@ export function dockWidthForPointer(clientX: number, viewportWidth: number): num
  * a flex sibling, so the board simply gets the rest of the row.
  *
  * Width is the operator's, persisted like the document preview's
- * (`ArtifactPreviewHost`): drag the right edge, and the next session opens at
- * the same width. The CSS `min()` is the hard floor that the pointer clamp
+ * (`ArtifactPreviewHost`) but PER PROJECT (#1011): drag the right edge, and
+ * that project opens at the same width next session while the others keep
+ * theirs. The CSS `min()` is the hard floor that the pointer clamp
  * cannot express — a window resized after the drag must not let a remembered
  * width squeeze the board below {@link MIN_BOARD} with the preview sheet also
  * open, and `max()` keeps the dock itself usable on a genuinely small desktop.
@@ -75,13 +97,17 @@ export function OrchestratorDock({
   onClose: () => void;
 }) {
   const { t } = useLocale();
-  const [width, setWidth] = useState(() => storedDockWidth(() => {
-    try {
-      return window.localStorage.getItem(WIDTH_KEY);
-    } catch {
-      return null;
-    }
-  }));
+  const [width, setWidth] = useState(() => projectDockWidth(project));
+
+  /* A project switch re-reads the width, because the width now BELONGS to the
+     project (#1011). Adjusted during render rather than from an effect, so the
+     dock never paints — nor publishes to `../shellLayout` — one frame of the
+     project the operator just left. */
+  const [sizedProject, setSizedProject] = useState(project);
+  if (sizedProject !== project) {
+    setSizedProject(project);
+    setWidth(projectDockWidth(project));
+  }
 
   /* The row this dock occupies, for the preview sheet to budget around —
      published live through the resize drag, and given back on close. */
@@ -97,7 +123,7 @@ export function OrchestratorDock({
       window.removeEventListener("pointerup", up);
       setWidth((value) => {
         try {
-          window.localStorage.setItem(WIDTH_KEY, String(value));
+          window.localStorage.setItem(widthKey(project), String(value));
         } catch {
           /* private mode */
         }
@@ -106,7 +132,7 @@ export function OrchestratorDock({
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
-  }, []);
+  }, [project]);
 
   return (
     <aside
@@ -119,9 +145,9 @@ export function OrchestratorDock({
     >
       {/* Keyed by project: the panel's draft — mandate, engine, model, account,
           and the idempotency key of an unsettled confirm — belongs to ONE
-          project. The dock survives the switch (its width is the operator's,
-          not the project's); the panel is re-seated on the new one and reads
-          that project's own stored draft. */}
+          project. The dock survives the switch, resized to the new project's
+          own remembered width; the panel is re-seated on it and reads that
+          project's own stored draft. */}
       <OrchestratorPanel
         key={project}
         project={project}

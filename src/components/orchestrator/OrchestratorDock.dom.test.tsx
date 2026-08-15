@@ -8,7 +8,9 @@ import { emptyStore } from "@/components/runtime/runtimeModel";
 /*
  * The dock's geometry contract (issue #977 acceptance): the width is the
  * operator's and survives reload, and the board keeps at least 320px even with
- * the document preview sheet open on the other side.
+ * the document preview sheet open on the other side. Since #1011 that width is
+ * remembered PER PROJECT, so a mandate-heavy dock in one project leaves every
+ * other project's dock the size the operator left it.
  */
 
 const dom = new HappyWindow();
@@ -91,6 +93,38 @@ afterEach(() => {
 afterAll(() => {
   mock.module("@/hooks/useRuntime", () => actualRuntimeHooks);
 });
+
+/** One dock on a project, as a page load gives it: its own host, its own root,
+    and the two gestures the width contract is made of — drag the edge, switch
+    the project underneath it. */
+function mountDock(project: string) {
+  const host = dom.document.createElement("div");
+  dom.document.body.append(host);
+  const root = createRoot(host as unknown as HTMLElement);
+  roots.add(root);
+  const render = (on: string) => flushSync(() => root.render(
+    <OrchestratorDock project={on} projectName={on} files={[]} onClose={() => undefined} />,
+  ));
+  render(project);
+  return {
+    render,
+    width: () => host.querySelector("[data-orchestrator-dock]")?.getAttribute("data-orchestrator-dock-width"),
+    /** Drag the right edge to land the dock on `target` px, on a 2000px desktop
+        wide enough that the pointer clamp does not bite. */
+    dragTo: (target: number) => {
+      const handle = host.querySelector("[data-orchestrator-dock-resize]") as unknown as HTMLElement;
+      flushSync(() => handle.dispatchEvent(new dom.MouseEvent("pointerdown", { bubbles: true }) as unknown as Event));
+      Object.defineProperty(dom, "innerWidth", { value: 2_000, configurable: true });
+      flushSync(() => dom.dispatchEvent(Object.assign(new dom.Event("pointermove"), { clientX: RAIL_WIDTH + target })));
+      flushSync(() => dom.dispatchEvent(new dom.Event("pointerup")));
+    },
+    unmount: () => {
+      flushSync(() => root.unmount());
+      roots.delete(root);
+      host.remove();
+    },
+  };
+}
 
 test("dock and preview sheet share ONE budget: the board keeps 320px at every desktop width", () => {
   /* The reviewer's own case: 1440px, both surfaces at their remembered
@@ -182,29 +216,75 @@ test("switching projects re-seats the panel on the new project's own draft, keep
 
   expect(host.querySelector("[data-orchestrator-panel]")?.getAttribute("data-orchestrator-panel")).toBe("borealis");
   expect((host.querySelector("[data-orchestrator-mandate]") as unknown as HTMLTextAreaElement).value).not.toBe("Atlas only");
-  /* Width is the operator's preference, not the project's — it rides across. */
+  /* Neither project has a width of its own here, so both open on the default;
+     the width that DOES follow a switch is the case below. */
   expect(host.querySelector("[data-orchestrator-dock]")?.getAttribute("data-orchestrator-dock-width")).toBe(String(DEFAULT_WIDTH));
 });
 
-test("dragging the dock's edge persists the width, and the next mount opens on it", () => {
-  const host = dom.document.createElement("div");
-  dom.document.body.append(host);
-  const root = createRoot(host as unknown as HTMLElement);
-  roots.add(root);
-  flushSync(() => root.render(
-    <OrchestratorDock project="atlas" projectName="Atlas" files={[]} onClose={() => undefined} />,
-  ));
+test("dragging the dock's edge persists the width under the project's own key, and the next mount opens on it", () => {
+  const dock = mountDock("atlas");
+  expect(dock.width()).toBe(String(DEFAULT_WIDTH));
+  dock.dragTo(600);
 
-  const dock = host.querySelector("[data-orchestrator-dock]") as unknown as HTMLElement;
-  expect(dock.getAttribute("data-orchestrator-dock-width")).toBe(String(DEFAULT_WIDTH));
+  /* Scoped to the project (#1011). The legacy global key is left exactly as the
+     operator had it — the drag claims one project's width, not everyone's. */
+  expect(dom.localStorage.getItem("llvOrchestratorPanelWidth:atlas")).toBe("600");
+  expect(dom.localStorage.getItem("llvOrchestratorPanelWidth")).toBeNull();
+  expect(dock.width()).toBe("600");
+  expect(storedDockWidth(() => dom.localStorage.getItem("llvOrchestratorPanelWidth:atlas"))).toBe(600);
 
-  const handle = host.querySelector("[data-orchestrator-dock-resize]") as unknown as HTMLElement;
-  flushSync(() => handle.dispatchEvent(new dom.MouseEvent("pointerdown", { bubbles: true }) as unknown as Event));
-  Object.defineProperty(dom, "innerWidth", { value: 2_000, configurable: true });
-  flushSync(() => dom.dispatchEvent(Object.assign(new dom.Event("pointermove"), { clientX: 848 })));
-  flushSync(() => dom.dispatchEvent(new dom.Event("pointerup")));
+  /* Reload: the same project opens on the width it was left at. */
+  dock.unmount();
+  expect(mountDock("atlas").width()).toBe("600");
+});
 
-  expect(dom.localStorage.getItem("llvOrchestratorPanelWidth")).toBe("600");
-  expect(host.querySelector("[data-orchestrator-dock]")?.getAttribute("data-orchestrator-dock-width")).toBe("600");
-  expect(storedDockWidth(() => dom.localStorage.getItem("llvOrchestratorPanelWidth"))).toBe(600);
+test("a project with no width of its own seeds from the legacy global one", () => {
+  /* What an operator carries in from before #1011: ONE width, shared by every
+     project. It seeds them all, so nobody's dock snaps back to the default. */
+  dom.localStorage.setItem("llvOrchestratorPanelWidth", "620");
+  expect(mountDock("atlas").width()).toBe("620");
+  expect(mountDock("borealis").width()).toBe("620");
+
+  /* A width of its own outranks the seed... */
+  dom.localStorage.setItem("llvOrchestratorPanelWidth:borealis", "500");
+  expect(mountDock("borealis").width()).toBe("500");
+  /* ...and an unusable one falls to the default rather than to the seed: the
+     legacy key answers only for a project that has never been sized. */
+  dom.localStorage.setItem("llvOrchestratorPanelWidth:borealis", "12");
+  expect(mountDock("borealis").width()).toBe(String(DEFAULT_WIDTH));
+});
+
+test("two projects hold independent widths: resizing one leaves the other's alone", () => {
+  const atlas = mountDock("atlas");
+  atlas.dragTo(600);
+  atlas.unmount();
+
+  const borealis = mountDock("borealis");
+  /* Untouched by the drag next door — no seed, so its own default. */
+  expect(borealis.width()).toBe(String(DEFAULT_WIDTH));
+  borealis.dragTo(520);
+  borealis.unmount();
+
+  expect(dom.localStorage.getItem("llvOrchestratorPanelWidth:atlas")).toBe("600");
+  expect(dom.localStorage.getItem("llvOrchestratorPanelWidth:borealis")).toBe("520");
+  expect(mountDock("atlas").width()).toBe("600");
+});
+
+test("switching projects while the dock is open re-reads the new project's width", () => {
+  dom.localStorage.setItem("llvOrchestratorPanelWidth:atlas", "600");
+  dom.localStorage.setItem("llvOrchestratorPanelWidth:borealis", "500");
+
+  const dock = mountDock("atlas");
+  expect(dock.width()).toBe("600");
+  expect(leftShellInset()).toBe(RAIL_WIDTH + 600);
+
+  dock.render("borealis");
+  expect(dock.width()).toBe("500");
+  /* The row the preview sheet budgets around follows the switch too. */
+  expect(leftShellInset()).toBe(RAIL_WIDTH + 500);
+
+  /* And back: the visit changed nothing about atlas's own width. */
+  dock.render("atlas");
+  expect(dock.width()).toBe("600");
+  expect(dom.localStorage.getItem("llvOrchestratorPanelWidth:atlas")).toBe("600");
 });
