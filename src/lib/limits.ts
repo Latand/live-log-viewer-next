@@ -206,7 +206,7 @@ function resolveRead(read: LimitRead, cached: EngineCacheEntry | null, staleSinc
       consecutiveInitializeTimeouts,
     };
   }
-  if (read.rejectedAt !== null && read.rejectedAt !== undefined && cached?.data) {
+  if (read.rejectedAt !== null && read.rejectedAt !== undefined && cached?.data && rejectionWithinWindow(cached.data, read.rejectedAt)) {
     return {
       data: applyTranscriptRejection(cached.data, read.rejectedAt),
       meta: { source: "transcript", reason: read.reason, staleSince: null, retryAt: null },
@@ -428,6 +428,7 @@ export async function readCodexLimits(options: {
     const observedAt = clock() / 1000;
     const live = mapAppServerRateLimits(rateLimits, observedAt);
     const transcriptLimits = transcript.data ?? (transcript.rejectedAt !== null && transcript.rejectedAt !== undefined
+      && rejectionWithinWindow(live, transcript.rejectedAt)
       ? applyTranscriptRejection(live, transcript.rejectedAt)
       : null);
     if (!transcriptLimits) return { data: live, reason: null, source: "live" };
@@ -673,18 +674,37 @@ function lastRateLimits(file: string): { data: EngineLimits | null; rejectedAt: 
   return { data, rejectedAt };
 }
 
+function governingWindow(limits: EngineLimits): { key: "session" | "weekly"; value: LimitWindow } | null {
+  return (["session", "weekly"] as const)
+    .flatMap((key) => limits[key] ? [{ key, value: limits[key]! }] : [])
+    .sort((left, right) => right.value.usedPercent - left.value.usedPercent || left.key.localeCompare(right.key))[0] ?? null;
+}
+
+/** A rejection is evidence about the quota window that was open when the
+    provider issued it, whose interval is `[resetsAt - windowMinutes, resetsAt]`.
+    Projecting one onto a candidate window it predates would synthesize an
+    exhaustion from a cycle that has since reset and override a truthful live
+    reading, so an out-of-interval rejection is stale evidence. Each bound the
+    window does not declare — an unknown reset, or a length absent from a
+    snapshot cached before issue #606 — is one the rejection is not tested
+    against, leaving the existing behavior for that side. */
+function rejectionWithinWindow(limits: EngineLimits, rejectedAt: number): boolean {
+  const window = governingWindow(limits)?.value;
+  if (!window) return false;
+  if (window.resetsAt === null) return true;
+  if (rejectedAt > window.resetsAt) return false;
+  return typeof window.windowMinutes !== "number" || rejectedAt >= window.resetsAt - window.windowMinutes * 60;
+}
+
 function applyTranscriptRejection(limits: EngineLimits, rejectedAt: number): EngineLimits {
-  const candidates = (["session", "weekly"] as const)
-    .flatMap((key) => limits[key] ? [{ key, value: limits[key] }] : [])
-    .sort((left, right) => right.value!.usedPercent - left.value!.usedPercent || left.key.localeCompare(right.key));
-  const governing = candidates[0];
+  const governing = governingWindow(limits);
   if (!governing) return limits;
-  const resetsAt = governing.value!.resetsAt !== null && governing.value!.resetsAt <= rejectedAt
+  const resetsAt = governing.value.resetsAt !== null && governing.value.resetsAt <= rejectedAt
     ? null
-    : governing.value!.resetsAt;
+    : governing.value.resetsAt;
   const data: EngineLimits = {
     ...limits,
-    [governing.key]: { ...governing.value!, usedPercent: 100, resetsAt, observedAt: rejectedAt, source: "transcript" },
+    [governing.key]: { ...governing.value, usedPercent: 100, resetsAt, observedAt: rejectedAt, source: "transcript" },
   };
   const observed = [data.session?.observedAt, data.weekly?.observedAt]
     .filter((value): value is number => value !== null && value !== undefined);

@@ -270,6 +270,69 @@ test("a standalone rejection exhausts a cached window when the live probe fails"
   }
 });
 
+test("a rejection from a previous cycle never exhausts the live window", async () => {
+  const account = createManagedCodexAccount("Previous cycle rejection");
+  const nowS = Math.floor(Date.now() / 1000);
+  // A weekly window resetting in five days opened two days ago; the rejection
+  // predates that start, so the quota it exhausted has already reset.
+  const resetsAt = nowS + 5 * 86_400;
+  const session = path.join(account.sessionsDir, "2026", "08", "12", "previous-cycle-rejection.jsonl");
+  fs.mkdirSync(path.dirname(session), { recursive: true });
+  fs.writeFileSync(session, JSON.stringify({
+    timestamp: new Date((nowS - 3 * 86_400) * 1000).toISOString(),
+    payload: { type: "task_complete", codex_error_info: "usage_limit_exceeded" },
+  }) + "\n");
+
+  const result = await readCodexLimits({
+    account,
+    liveReader: async () => ({
+      primary: { usedPercent: 21, resetsAt, windowDurationMins: 10_080 },
+      secondary: null,
+      planType: "prolite",
+    }),
+  });
+
+  expect(result.data?.weekly).toMatchObject({ usedPercent: 21, resetsAt });
+  expect(result.source).toBe("live");
+});
+
+test("a rejection from a previous cycle leaves a cached window as cached evidence", async () => {
+  resetLimitsCache();
+  const account = createManagedCodexAccount("Cached previous-cycle rejection");
+  setActiveCodexAccount(account.id);
+  const nowMs = Date.parse("2026-08-15T12:00:00.000Z");
+  const resetsAt = nowMs / 1000 + 5 * 86_400;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => claudeUsage()) as unknown as typeof fetch;
+  try {
+    const first = await readLimits({
+      now: () => nowMs,
+      codexLiveReader: async () => ({
+        primary: { usedPercent: 21, resetsAt, windowDurationMins: 10_080 },
+        secondary: null,
+        planType: "prolite",
+      }),
+    });
+    expect(first.codex?.weekly?.usedPercent).toBe(21);
+
+    const session = path.join(account.sessionsDir, "2026", "08", "12", "cached-previous-cycle-rejection.jsonl");
+    fs.mkdirSync(path.dirname(session), { recursive: true });
+    fs.writeFileSync(session, JSON.stringify({
+      timestamp: "2026-08-12T12:00:00.000Z",
+      payload: { type: "task_complete", codex_error_info: "usage_limit_exceeded" },
+    }) + "\n");
+    const rejected = await readLimits({
+      now: () => nowMs + 31_000,
+      codexLiveReader: async () => { throw new Error("offline"); },
+    });
+
+    expect(rejected.codex?.weekly).toMatchObject({ usedPercent: 21, resetsAt });
+    expect(rejected.provenance.codex.source).toBe("cache");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 test("a root-envelope usage_limit_exceeded event is authoritative in one transcript file", async () => {
   const account = createManagedCodexAccount("Root-envelope rejection reconciliation");
   const nowS = Math.floor(Date.now() / 1000);
