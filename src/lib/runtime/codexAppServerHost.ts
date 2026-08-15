@@ -916,6 +916,7 @@ export class CodexAppServerHost implements EngineHost {
       ...(normalized.expectedTurnId !== undefined ? { expectedTurnId: normalized.expectedTurnId } : {}),
       ...(normalized.runtime ? { runtime: normalized.runtime } : {}),
       ...(normalized.selectedContext ? { selectedContext: normalized.selectedContext } : {}),
+      ...(normalized.operatorEvent ? { operatorEvent: normalized.operatorEvent } : {}),
     };
     if (!entry.id) throw new Error("queue entry id is required");
     const confirmed = await this.confirmedDelivery(entry);
@@ -935,6 +936,7 @@ export class CodexAppServerHost implements EngineHost {
              canonical structured-user record, so it survives a restart and a
              re-parse and the transcript row renders the composer badge. */
           normalized.selectedContext,
+          normalized.operatorEvent,
         ),
       },
     ];

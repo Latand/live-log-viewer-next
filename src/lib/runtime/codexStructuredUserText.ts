@@ -3,6 +3,8 @@ import {
   encodeSelectedContextRef,
   type SelectedContextRef,
 } from "@/lib/selection/selectedContext";
+import { parseOperatorEventProvenance } from "@/lib/worktime/provenance";
+import type { OperatorEventProvenance } from "@/lib/worktime/types";
 
 /**
  * The marker line that makes a Codex app-server user record recognisably OURS.
@@ -34,16 +36,23 @@ export interface DecodedCodexStructuredUserText {
   /** The selected-card reference this turn was admitted with, or null. A
       corrupt or forged value decodes as null: the record still reads. */
   selectedContext: SelectedContextRef | null;
+  operatorEvent: OperatorEventProvenance | null;
 }
 
 export function encodeCodexStructuredUserText(
   text: string,
   contentDigest?: string,
   selectedContext?: SelectedContextRef | null,
+  operatorEvent?: OperatorEventProvenance | null,
 ): string {
   const attributes: string[] = [];
   if (contentDigest) attributes.push(`sha256=${contentDigest}`);
   if (selectedContext) attributes.push(`ctx=${encodeSelectedContextRef(selectedContext)}`);
+  if (operatorEvent) {
+    attributes.push(`opid=${operatorEvent.id}`);
+    attributes.push(`oporigin=${operatorEvent.origin}`);
+    attributes.push(`oprelation=${operatorEvent.relation}`);
+  }
   if (attributes.length === 0) return STRUCTURED_USER_MARKER + text;
   return `<!-- llv:structured-user ${attributes.join(" ")} -->\n${text}`;
 }
@@ -53,19 +62,27 @@ export function decodeCodexStructuredUserText(value: string): DecodedCodexStruct
   if (marker) {
     let contentDigest: string | null = null;
     let selectedContext: SelectedContextRef | null = null;
+    const operatorAttributes: Record<string, string> = {};
     for (const [, name, attribute] of marker[1]!.matchAll(ATTRIBUTE)) {
       if (name === "sha256" && SHA256.test(attribute!)) contentDigest = attribute!;
       if (name === "ctx") selectedContext = decodeSelectedContextRef(attribute!);
+      if (name === "opid" || name === "oporigin" || name === "oprelation") operatorAttributes[name] = attribute!;
     }
-    return { text: value.slice(marker[0].length), structured: true, contentDigest, selectedContext };
+    const operatorEvent = parseOperatorEventProvenance({
+      id: operatorAttributes.opid,
+      origin: operatorAttributes.oporigin,
+      relation: operatorAttributes.oprelation,
+    });
+    return { text: value.slice(marker[0].length), structured: true, contentDigest, selectedContext, operatorEvent };
   }
   if (!value.startsWith(STRUCTURED_USER_MARKER)) {
-    return { text: value, structured: false, contentDigest: null, selectedContext: null };
+    return { text: value, structured: false, contentDigest: null, selectedContext: null, operatorEvent: null };
   }
   return {
     text: value.slice(STRUCTURED_USER_MARKER.length),
     structured: true,
     contentDigest: null,
     selectedContext: null,
+    operatorEvent: null,
   };
 }

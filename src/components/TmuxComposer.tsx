@@ -1935,6 +1935,7 @@ export function TmuxComposerCore({
               policy: "interrupt-active",
               ...(runtimeOverride ? { runtime: runtimeOverride } : {}),
               selectedContext,
+              operatorEvent: { id: clientMessageId, origin: "composer", relation: "direct" },
             }).then((result) => ({
               ok: result.ok,
               structured: true,
@@ -1954,6 +1955,7 @@ export function TmuxComposerCore({
               text: payloadText,
               idempotencyKey: clientMessageId,
               clientMessageId,
+              operatorEvent: { id: clientMessageId, origin: "composer", relation: "direct" },
               images: sentImages.map((image) => ({ base64: image.base64, mime: image.mime })),
               /* The "on resume" profile (issue #241 §4): when this send reopens a
                  finished root conversation, boot it with the model/effort the

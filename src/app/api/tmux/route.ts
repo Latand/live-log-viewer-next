@@ -26,6 +26,8 @@ import {
   tmuxEndpointDescriptor,
 } from "@/lib/tmux";
 import type { ApiError, FileEntry } from "@/lib/types";
+import { recordOperatorIngress } from "@/lib/worktime/ingress";
+import { parseOperatorEventProvenance } from "@/lib/worktime/provenance";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -136,7 +138,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
-  let body: { pid?: unknown; path?: unknown; conversationId?: unknown; clientMessageId?: unknown; operationId?: unknown; text?: unknown; image?: unknown; images?: unknown; action?: unknown; key?: unknown; label?: unknown; question?: unknown; target?: unknown; model?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown };
+  let body: { pid?: unknown; path?: unknown; conversationId?: unknown; clientMessageId?: unknown; operationId?: unknown; text?: unknown; image?: unknown; images?: unknown; action?: unknown; key?: unknown; label?: unknown; question?: unknown; target?: unknown; model?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; operatorEvent?: unknown };
   try {
     body = (await req.json()) as {
       pid?: unknown;
@@ -156,6 +158,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
       effort?: unknown;
       fast?: unknown;
       accountId?: unknown;
+      operatorEvent?: unknown;
     };
   } catch {
     return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
@@ -262,6 +265,23 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
   if (!text.trim() && !images.length) {
     return NextResponse.json({ error: "empty message" }, { status: 400 });
   }
+  const operatorEvent = parseOperatorEventProvenance(body.operatorEvent);
+  if (body.operatorEvent !== undefined && !operatorEvent) {
+    return NextResponse.json({ error: "operatorEvent is invalid" }, { status: 400 });
+  }
+  if (operatorEvent) {
+    try {
+      recordOperatorIngress({
+        provenance: operatorEvent,
+        conversationId: conversationId || null,
+        transcriptPath: filePath || null,
+        occurredAtMs: Date.now(),
+        occurrenceId: `${operatorEvent.id}:${conversationId || filePath}`,
+      });
+    } catch {
+      console.error("[worktime] operator_ingress_failed");
+    }
+  }
 
   if (structuredHostsEnabled()) {
     const { enqueueStructuredMessage } = await import("@/lib/runtime/structuredMessageDelivery");
@@ -271,6 +291,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
       ...(typeof body.clientMessageId === "string" ? { clientMessageId: body.clientMessageId.slice(0, 128) } : {}),
       text: text.trim(),
       images,
+      ...(operatorEvent ? { operatorEvent } : {}),
     });
     if (structured) {
       const { status, ...response } = structured.ok ? { ...structured, status: 200 } : structured;

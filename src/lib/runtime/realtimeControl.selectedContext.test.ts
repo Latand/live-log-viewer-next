@@ -149,6 +149,30 @@ test("a call opened with no window binding refuses every reference", async () =>
   expect(spoken).toEqual([]);
 });
 
+test("a proven realtime utterance is recorded even when its selected-card reference is refused", async () => {
+  const spoken: string[] = [];
+  const host = hostFor(spoken);
+  await start(host, DESK);
+  const recorded: unknown[] = [];
+  const result = await executeRealtimeControl(
+    {
+      action: "selectedContext",
+      conversationId: "conversation_voice",
+      realtimeSessionId: "live-1",
+      selectedContext: reference(PHONE),
+      operatorEvent: { id: "realtime-utterance-1", origin: "realtime", relation: "direct" },
+    },
+    () => host,
+    PEER,
+    { recordOperatorIngress: (input) => { recorded.push(input); return {} as never; } },
+  );
+
+  expect(result.status).toBe(409);
+  expect(recorded).toEqual([expect.objectContaining({
+    provenance: { id: "realtime-utterance-1", origin: "realtime", relation: "direct" },
+  })]);
+});
+
 test("hanging up releases the binding, so a later utterance cannot ride the dead call", async () => {
   const spoken: string[] = [];
   const host = hostFor(spoken);

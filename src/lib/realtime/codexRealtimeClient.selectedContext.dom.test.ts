@@ -3,6 +3,7 @@ import { Window } from "happy-dom";
 
 import { viewBus } from "@/hooks/viewPresenceBus";
 import type { SelectedContextRef } from "@/lib/selection/selectedContext";
+import type { OperatorEventProvenance } from "@/lib/worktime/types";
 
 import { codexRealtimeClient } from "./codexRealtimeClient";
 
@@ -88,6 +89,7 @@ interface ControlRequest {
   view?: { viewSessionId: string; deviceId: string };
   realtimeSessionId?: string;
   selectedContext?: SelectedContextRef;
+  operatorEvent?: OperatorEventProvenance;
 }
 
 let requests: ControlRequest[] = [];
@@ -126,7 +128,7 @@ const fragment = (peer: StubPeerConnection, role: "user" | "assistant", text: st
     data: JSON.stringify({ type: role === "user" ? "input_transcript.added" : "output_transcript.added", item: { text } }),
   });
 const finished = (peer: StubPeerConnection, role: "user" | "assistant", text: string) =>
-  peer.channel.onmessage?.({ data: JSON.stringify({ type: "turn.done", role, item: { text } }) });
+  peer.channel.onmessage?.({ data: JSON.stringify({ type: "turn.done", role, item: { id: "voice-item-1", text } }) });
 
 test("the call binds itself to this window when it opens", async () => {
   await liveCall("conversation_voice_bind");
@@ -150,6 +152,11 @@ test("a finished utterance reports the selected card against the call's own cred
     conversationId: "conversation_atlas_a",
     viewSessionId: "vs-synthetic-1",
     deviceId: "dev-synthetic-1",
+  });
+  expect(published[0]!.operatorEvent).toEqual({
+    id: "realtime_voice-item-1",
+    origin: "realtime",
+    relation: "direct",
   });
 });
 

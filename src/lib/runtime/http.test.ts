@@ -65,6 +65,44 @@ test("runtime command HTTP handling preserves validation, CSRF, status, and conf
   expect(conflict.status).toBe(409);
 });
 
+test("operator ledger failure leaves the existing runtime delivery contract intact", async () => {
+  const commands: unknown[] = [];
+  const client = {
+    command: async (command: unknown) => {
+      commands.push(command);
+      return {
+        operationId: "op-ledger-failure",
+        replayed: false,
+        receipt: {
+          operationId: "op-ledger-failure",
+          idempotencyKey: "send-ledger-failure",
+          conversationId: "conversation_ledger_failure",
+          kind: "send" as const,
+          status: "pending" as const,
+          at: "2026-08-14T09:00:00.000Z",
+          revision: 1,
+        },
+      };
+    },
+  } as unknown as RuntimeHostClient;
+  const response = await handleRuntimeCommand(request({
+    conversationId: "conversation_ledger_failure",
+    text: "continue",
+    idempotencyKey: "send-ledger-failure",
+    operatorEvent: { id: "api-human-request-7", origin: "api-human", relation: "direct" },
+  }), "send", {
+    enabled: () => true,
+    structuredEnabled: () => true,
+    client: () => client,
+    recordOperatorIngress: () => { throw new Error("fixture ledger unavailable"); },
+  });
+
+  expect(response.status).toBe(202);
+  expect(commands).toEqual([expect.objectContaining({
+    operatorEvent: { id: "api-human-request-7", origin: "api-human", relation: "direct" },
+  })]);
+});
+
 test("runtime image admission returns typed statuses before commands or delivery reservations", async () => {
   const commands: unknown[] = [];
   const enqueues: unknown[] = [];

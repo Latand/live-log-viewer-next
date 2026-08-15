@@ -968,6 +968,10 @@ describe("ClaudeStreamBrokerHost", () => {
 
     await expect(host.send({ ...original, text: "changed" })).rejects.toThrow("different payload");
     await expect(host.send({ ...original, expectedTurnId: "changed-turn" })).rejects.toThrow("different payload");
+    await expect(host.send({
+      ...original,
+      operatorEvent: { id: "changed-source", origin: "api-human", relation: "direct" },
+    })).rejects.toThrow("different payload");
     expect(await host.send(original)).toEqual({ outcome: "turn-started", turnId: "immutable-entry" });
     expect(child.inputs).toHaveLength(0);
     await host.release();

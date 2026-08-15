@@ -32,6 +32,7 @@ test("a plain structured record still round-trips with no reference", () => {
     structured: true,
     contentDigest: null,
     selectedContext: null,
+    operatorEvent: null,
   });
 });
 
@@ -42,6 +43,7 @@ test("the digest form written before this field still decodes", () => {
     structured: true,
     contentDigest: DIGEST,
     selectedContext: null,
+    operatorEvent: null,
   });
 });
 
@@ -51,6 +53,7 @@ test("unstructured text is untouched", () => {
     structured: false,
     contentDigest: null,
     selectedContext: null,
+    operatorEvent: null,
   });
 });
 
@@ -62,6 +65,7 @@ test("the reference persists on the record and comes back typed", () => {
     structured: true,
     contentDigest: null,
     selectedContext: REFERENCE,
+    operatorEvent: null,
   });
 });
 
@@ -72,6 +76,7 @@ test("the reference and the content digest ride the same marker", () => {
     structured: true,
     contentDigest: DIGEST,
     selectedContext: REFERENCE,
+    operatorEvent: null,
   });
 });
 
@@ -96,6 +101,7 @@ test("a corrupt or forged reference decodes as absent and never breaks the recor
     structured: true,
     contentDigest: null,
     selectedContext: null,
+    operatorEvent: null,
   });
 });
 

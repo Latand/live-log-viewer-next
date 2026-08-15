@@ -6,6 +6,7 @@ import type { Workflow } from "@/lib/workflows/types";
 import type { RuntimeLiveTurn } from "@/lib/runtime/liveTurn";
 import type { RuntimeVoiceDelivery } from "@/lib/runtime/voiceDelivery";
 import type { SelectedContextRef } from "@/lib/selection/selectedContext";
+import type { OperatorEventProvenance } from "@/lib/worktime/types";
 import type { RuntimeImageCapability, StructuredImageRef } from "./structuredContent";
 
 export const RUNTIME_SCHEMA_VERSION = 1;
@@ -239,6 +240,9 @@ export interface RuntimeSendCommand extends RuntimeCommandBase {
       offered none — an EXPLICIT empty selection is the `none` variant, which is
       present. */
   selectedContext?: SelectedContextRef;
+  /** Stable human-ingress identity. Copies retain the id with relation=copy,
+      while retries replay the exact same direct provenance. */
+  operatorEvent?: OperatorEventProvenance;
 }
 
 /**

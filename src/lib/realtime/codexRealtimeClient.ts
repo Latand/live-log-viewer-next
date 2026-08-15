@@ -39,7 +39,7 @@ export interface CodexRealtimeSnapshot {
 }
 
 export type ParsedRealtimeEvent =
-  | { kind: "transcript"; role: "user" | "assistant"; text: string; final: boolean }
+  | { kind: "transcript"; role: "user" | "assistant"; text: string; final: boolean; eventId: string | null }
   | { kind: "delegation"; id: string }
   | { kind: "error"; message: string }
   | { kind: "ignored" };
@@ -90,16 +90,22 @@ export function parseCodexRealtimeEvent(value: unknown): ParsedRealtimeEvent {
   const type = stringAt(event, "type") ?? stringAt(event, "method") ?? "";
   if (type === "input_transcript.added") {
     const text = eventText(event);
-    return text ? { kind: "transcript", role: "user", text, final: false } : { kind: "ignored" };
+    return text ? { kind: "transcript", role: "user", text, final: false, eventId: null } : { kind: "ignored" };
   }
   if (type === "output_transcript.added") {
     const text = eventText(event);
-    return text ? { kind: "transcript", role: "assistant", text, final: false } : { kind: "ignored" };
+    return text ? { kind: "transcript", role: "assistant", text, final: false, eventId: null } : { kind: "ignored" };
   }
   if (type === "turn.done") {
     const text = eventText(event);
     return text
-      ? { kind: "transcript", role: eventRole(event, "assistant"), text, final: true }
+      ? {
+          kind: "transcript",
+          role: eventRole(event, "assistant"),
+          text,
+          final: true,
+          eventId: stringAt(event.item, "id") ?? stringAt(event, "event_id") ?? stringAt(event, "id"),
+        }
       : { kind: "ignored" };
   }
   if (type === "delegation.created") {
@@ -435,7 +441,7 @@ class CodexRealtimeClient {
    * badge for a stutter in the conversation. The typed refusal is recorded by
    * the server and read from the ledger; nothing here retries it.
    */
-  private publishSelectedContext(): void {
+  private publishSelectedContext(sourceEventId: string | null): void {
     if (!this.realtimeSessionId) return;
     try {
       void fetch("/api/runtime/realtime", {
@@ -446,6 +452,11 @@ class CodexRealtimeClient {
           conversationId: this.conversationId,
           realtimeSessionId: this.realtimeSessionId,
           selectedContext: viewerSelectedContext(),
+          operatorEvent: {
+            id: `realtime_${(sourceEventId ?? `${this.realtimeSessionId}_${this.lineSequence}`).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 180)}`,
+            origin: "realtime",
+            relation: "direct",
+          },
         }),
       }).catch(() => undefined);
     } catch {
@@ -472,7 +483,7 @@ class CodexRealtimeClient {
          reads it inside its submit handler: everything the reference will say
          is decided by the state that existed when the operator finished
          speaking. */
-      if (event.role === "user" && event.final) this.publishSelectedContext();
+      if (event.role === "user" && event.final) this.publishSelectedContext(event.eventId);
     } else if (event.kind === "delegation") {
       return;
     } else if (event.kind === "error") {
