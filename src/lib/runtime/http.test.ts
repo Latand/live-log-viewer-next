@@ -9,6 +9,8 @@ import { NextRequest } from "next/server";
 
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { AgentRegistry } from "@/lib/agent/registry";
+import { setCallerConversationResolverForTests } from "@/lib/agent/operatorAuthority";
+import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { RuntimeJournal } from "@/runtime-host/journal";
 
 import { RuntimeHostUnavailableError, type RuntimeHostClient } from "./client";
@@ -63,6 +65,46 @@ test("runtime command HTTP handling preserves validation, CSRF, status, and conf
   const conflictClient = { command: async () => { throw new RuntimeHostUnavailableError("conflict", "idempotency-conflict"); } } as unknown as RuntimeHostClient;
   const conflict = await handleRuntimeCommand(request({ conversationId: "conv-one", text: "continue", idempotencyKey: "send-one" }), "send", { enabled: () => true, structuredEnabled: () => true, client: () => conflictClient });
   expect(conflict.status).toBe(409);
+});
+
+test("runtime send records operator activity before delivery failure and excludes self-named agents", async () => {
+  const recorded: unknown[] = [];
+  const agentCapability = "b".repeat(43);
+  const dependencies: RuntimeHttpDependencies = {
+    enabled: () => true,
+    structuredEnabled: () => true,
+    client: () => null,
+    recordOperatorActivity: (input) => {
+      recorded.push(input);
+      return { key: "b".repeat(64), engine: "codex", project: "fixture", atMs: Date.now() };
+    },
+    enqueue: async () => { throw new Error("delivery unavailable"); },
+  };
+  setCallerConversationResolverForTests(() => "conversation_agent");
+  try {
+    const direct = await handleRuntimeCommand(request({
+      conversationId: "conversation_direct",
+      text: "retain direct activity",
+      idempotencyKey: "direct-runtime-one",
+    }), "send", dependencies);
+    const agent = await handleRuntimeCommand(request({
+      conversationId: "conversation_direct",
+      text: "bridge traffic",
+      idempotencyKey: "bridge-runtime-one",
+    }, {
+      host: "127.0.0.1",
+      [VIEWER_SPAWN_CAPABILITY_HEADER]: agentCapability,
+    }), "send", dependencies);
+
+    expect(direct.status).toBe(503);
+    expect(agent.status).toBe(503);
+    expect(recorded).toEqual([{
+      conversationId: "conversation_direct",
+      idempotencyKey: "direct-runtime-one",
+    }]);
+  } finally {
+    setCallerConversationResolverForTests(null);
+  }
 });
 
 test("runtime image admission returns typed statuses before commands or delivery reservations", async () => {

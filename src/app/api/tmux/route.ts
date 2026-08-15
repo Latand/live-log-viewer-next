@@ -1,3 +1,5 @@
+import crypto from "node:crypto";
+
 import { NextRequest, NextResponse } from "next/server";
 
 import {
@@ -8,6 +10,7 @@ import {
 import { structuredHostsEnabled } from "@/lib/runtime/flags";
 import { applyConversationAction, CONVERSATION_ACTIONS } from "@/lib/conversation/actions";
 import { canonicalTranscriptTarget, readTranscriptHosts } from "@/lib/agent/transcriptHost";
+import { requireOperatorAuthority } from "@/lib/agent/operatorAuthority";
 import { reconfigurationFromBody } from "@/lib/agent/reconfigure";
 import { listFiles } from "@/lib/scanner";
 import { completedFileScan } from "@/lib/scanner/scanCache";
@@ -26,6 +29,7 @@ import {
   tmuxEndpointDescriptor,
 } from "@/lib/tmux";
 import type { ApiError, FileEntry } from "@/lib/types";
+import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorActivity";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -261,6 +265,25 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
   }
   if (!text.trim() && !images.length) {
     return NextResponse.json({ error: "empty message" }, { status: 400 });
+  }
+
+  if (requireOperatorAuthority(req).ok) {
+    const clientMessageId = typeof body.clientMessageId === "string" ? body.clientMessageId.trim().slice(0, 128) : "";
+    try {
+      const fallbackEntry = (await completedFileScan()).snapshot.files.find((entry) =>
+        (filePath && entry.path === filePath)
+        || (conversationId && entry.conversationId === conversationId)
+        || (hasPid && entry.pid === pid)
+      );
+      recordDirectOperatorWakatimeActivity({
+        ...(conversationId ? { conversationId } : {}),
+        ...(filePath ? { path: filePath } : {}),
+        idempotencyKey: clientMessageId || crypto.randomUUID(),
+        ...(fallbackEntry ? { fallbackEntry } : {}),
+      });
+    } catch {
+      return NextResponse.json({ error: "direct operator activity could not be recorded" }, { status: 503 });
+    }
   }
 
   if (structuredHostsEnabled()) {

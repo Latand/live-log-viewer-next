@@ -52,6 +52,7 @@ let structuredControlRequest: Record<string, unknown> | null = null;
 let interruptCalls = 0;
 let structuredMessageCalls = 0;
 let structuredMessageRequest: Record<string, unknown> | null = null;
+let operatorActivityRequests: Record<string, unknown>[] = [];
 let collectedImages: Array<{ base64: string; mime: string }> = [];
 let deletedImagePaths: string[][] = [];
 let structuredMessageResult:
@@ -114,6 +115,12 @@ mock.module("@/lib/runtime/structuredMessageDelivery", () => ({
     structuredMessageCalls += 1;
     structuredMessageRequest = request;
     return structuredMessageResult;
+  },
+}));
+mock.module("@/lib/wakatime/operatorActivity", () => ({
+  recordDirectOperatorWakatimeActivity: (request: Record<string, unknown>) => {
+    operatorActivityRequests.push(request);
+    return { key: "a".repeat(64), engine: "codex", project: "fixture", atMs: Date.now() };
   },
 }));
 mock.module("@/lib/delivery", () => ({
@@ -197,13 +204,44 @@ function get(url: string): NextRequest {
   return new NextRequest(url, { headers: { host: "127.0.0.1" } });
 }
 
-function post(body: unknown): NextRequest {
+function post(body: unknown, headers: Record<string, string> = {}): NextRequest {
   return new NextRequest("http://127.0.0.1/api/tmux", {
     method: "POST",
-    headers: { host: "127.0.0.1", "content-type": "application/json" },
+    headers: { host: "127.0.0.1", "content-type": "application/json", ...headers },
     body: JSON.stringify(body),
   });
 }
+
+test("/api/tmux records a validated direct browser message and refuses an agent claim", async () => {
+  const { setCallerConversationResolverForTests } = await import("@/lib/agent/operatorAuthority");
+  const { VIEWER_SPAWN_CAPABILITY_HEADER } = await import("@/lib/agent/spawnPolicy");
+  const agentCapability = "a".repeat(43);
+  delivery = async () => ({ ok: true, outcome: "delivered-to-live", target: "agents:4.0" });
+  operatorActivityRequests = [];
+  setCallerConversationResolverForTests(() => "conversation_agent");
+  try {
+    const direct = await POST(post({
+      path: PATHNAME,
+      text: "direct operator input",
+      clientMessageId: "direct-message-one",
+    }));
+    const agent = await POST(post({
+      path: PATHNAME,
+      text: "agent bridge input",
+      clientMessageId: "bridge-message-one",
+    }, { [VIEWER_SPAWN_CAPABILITY_HEADER]: agentCapability }));
+
+    expect(direct.status).toBe(200);
+    expect(agent.status).toBe(200);
+    expect(operatorActivityRequests).toHaveLength(1);
+    expect(operatorActivityRequests[0]).toMatchObject({
+      path: PATHNAME,
+      idempotencyKey: "direct-message-one",
+    });
+  } finally {
+    setCallerConversationResolverForTests(null);
+  }
+});
 
 test("/api/tmux GET uses the transcript host when a recycled pid disagrees", async () => {
   transcriptReads = 0;

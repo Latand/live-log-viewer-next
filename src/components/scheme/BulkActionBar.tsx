@@ -216,9 +216,16 @@ export const BulkActionBar = memo(function BulkActionBar({
           }
           return;
         }
+        const clientMessageId = newClientRequestId();
         const items = await execute("message", [...byPath.keys()], (path) => {
           const node = byPath.get(path);
-          return postJson("/api/tmux", { pid: node?.file.pid ?? undefined, path, text, images });
+          return postJson("/api/tmux", {
+            pid: node?.file.pid ?? undefined,
+            path,
+            text,
+            images,
+            clientMessageId,
+          });
         });
         if (items.length && items.every((item) => item.ok)) {
           composer.setText("");

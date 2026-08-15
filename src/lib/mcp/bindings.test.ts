@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
+import { VIEWER_SPAWN_CAPABILITY_ENV, VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { DeadlineExceededError } from "@/lib/deadline";
 import { CORPUS_BODY_MARKERS, pipelineCorpus } from "@/lib/pipelines/fixtures/corpus";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -20,11 +21,14 @@ import { createMcpToolService, MemoryMcpReceiptStore, type McpToolResult } from 
 
 const sandboxes: string[] = [];
 const originalStateDir = process.env.LLV_STATE_DIR;
+const originalSpawnCapability = process.env[VIEWER_SPAWN_CAPABILITY_ENV];
 
 afterEach(() => {
   setAgentRegistryForTests(null);
   if (originalStateDir === undefined) delete process.env.LLV_STATE_DIR;
   else process.env.LLV_STATE_DIR = originalStateDir;
+  if (originalSpawnCapability === undefined) delete process.env[VIEWER_SPAWN_CAPABILITY_ENV];
+  else process.env[VIEWER_SPAWN_CAPABILITY_ENV] = originalSpawnCapability;
   for (const sandbox of sandboxes.splice(0)) fs.rmSync(sandbox, { recursive: true, force: true });
 });
 
@@ -219,7 +223,8 @@ test("spawn_agent reports every underivable required role param with its shape i
 });
 
 test("runtime-bound MCP tools use the live Viewer control surface", async () => {
-  const requests: Array<{ pathname: string; body: Record<string, unknown> }> = [];
+  const requests: Array<{ pathname: string; body: Record<string, unknown>; headers?: Record<string, string> }> = [];
+  process.env[VIEWER_SPAWN_CAPABILITY_ENV] = "c".repeat(43);
   /* #795: the deploy tool authorizes off the SERVER-ATTRIBUTED caller identity, so
      the control-surface check attributes this session as the designated seat of its
      own project. `deployAuthority.test.ts` covers the refusals directly. */
@@ -241,8 +246,8 @@ test("runtime-bound MCP tools use the live Viewer control surface", async () => 
     }),
   } as never;
   const bindings = viewerMcpBindings(undefined, {
-    post: async (pathname, body) => {
-      requests.push({ pathname, body });
+    post: async (pathname, body, headers) => {
+      requests.push({ pathname, body, headers });
       if (pathname === "/api/spawn") return {
         conversationId: "conversation_http_control",
         path: "/repo/session.jsonl",
@@ -294,6 +299,7 @@ test("runtime-bound MCP tools use the live Viewer control surface", async () => 
   expect(requests[0]?.body.mcpServers).toEqual(["viewer", "agent-browser"]);
   expect(requests[1]?.body.clientMessageId).toBe("send-http-control");
   expect(requests[1]?.body.text).toBe(exactMessage);
+  expect(requests[1]?.headers?.[VIEWER_SPAWN_CAPABILITY_HEADER]).toBe("c".repeat(43));
   expect(requests[2]?.body.idempotencyKey).toBe("deploy-http-control");
 });
 

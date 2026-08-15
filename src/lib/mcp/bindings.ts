@@ -582,7 +582,7 @@ async function sendMessage(
     clientMessageId: requestId(args),
     text: message,
     images: [],
-  });
+  }, callerCapabilityHeaders());
   /* The registry's OWN lookup over the projection this call already holds (#845),
      rather than a local reimplementation of it. The alias walk is multi-hop and
      cycle-guarded and the path index covers continuity paths, so a send addressed by
@@ -1287,7 +1287,7 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
     clientMessageId: deliveryId,
     text: body,
     images: [],
-  });
+  }, callerCapabilityHeaders());
   return {
     directiveId: deliveryId,
     managerConversationId: manager.conversationId,
@@ -1496,7 +1496,7 @@ async function sendMessageToOrchestrator(args: McpToolArgs, control: ViewerContr
     clientMessageId: key,
     text: message,
     images: [],
-  });
+  }, callerCapabilityHeaders());
   return redactPayload({
     project,
     conversationId: seat.conversationId,
