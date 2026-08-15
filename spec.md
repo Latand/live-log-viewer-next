@@ -1,35 +1,43 @@
-# Issue #1011: Per-project orchestrator dock width
+# Issue #1018: Reconcile sidebar quota provenance
 
-Each project's orchestrator dock should remember its own width. Today the width is one global preference: `OrchestratorDock` reads it from `localStorage` under a single `WIDTH_KEY` on mount and the pointer-up handler writes that same key, so dragging the dock wide for one mandate-heavy project resizes the dock in every other project. Projects are isolated surfaces and their dock width should be too.
+The sidebar limits strip must present one coherent quota observation for each account and window. The reported failure combined an account-check capacity chip with transcript-derived 5h/Week rows, producing contradictory remaining percentages inside one engine block and inside the Accounts panel. A provider `usage_limit_exceeded` rejection establishes active exhaustion through its reset even when a newer app-server quota probe reports available capacity.
 
-The fix is the one the issue specifies, no alternative: key the stored width by project (`WIDTH_KEY:<project>`), fall back to the legacy global key and then `DEFAULT_WIDTH` when the scoped key is absent so existing operators keep their current width as the seed everywhere, write only the scoped key, and re-read on a project switch. The component already receives `project` as a prop, so the change is contained to it.
+The implementation must reconcile structured account checks and transcript observations per account and window, derive every compact summary from the selected rows, preserve stale-age disclosure, keep reset ETA rounding consistent, and retain the active-account ownership mask. Product changes stay inside the assigned limits surfaces and payload merge helpers. Deployment is outside this task.
 
 ## Acceptance criteria
 
-AC1: The width the drag lands on is written under the project's own key, `llvOrchestratorPanelWidth:<project>`, and nowhere else — the legacy global key is left exactly as the operator had it.
+AC1: For one account and quota window, ordinary conflicting observations select the newer observation using the window observation timestamp. Every rendered consumer receives that selected value and provenance.
 
-AC2: A project that has never been sized opens at the legacy global width when one exists, so an operator arriving from the single shared preference keeps that width in every project; with neither key present it opens at `DEFAULT_WIDTH`. The legacy key answers only for **absence** of the scoped one — a scoped value that is unusable (non-numeric, or below `MIN_WIDTH`) falls to `DEFAULT_WIDTH`, which is `storedDockWidth`'s existing contract.
+AC2: An active exhausted observation (`usedPercent >= 100` with an unknown or future reset) governs a conflicting available-capacity observation through its reset. After the reset, ordinary timestamp ordering resumes.
 
-AC3: Two projects hold independent widths: resizing project A leaves project B's stored width untouched, and each reload restores its own.
+AC3: A newly observed `usage_limit_exceeded` transcript rejection immediately marks the governing transcript window as 100% used and records the rejection time as that window's observation time.
 
-AC4: Switching projects while the dock is open re-reads the new project's width, and the `shellLayout` row the preview sheet budgets around follows the switch. Switching back finds the first project's width unchanged.
+AC4: The meter diagnosis is explicit: the Codex app-server probe reads `account/rateLimits/read`, whose response carries the same 10,080-minute weekly quota horizon and pro-lite tier as the Codex transcript rate-limit event. Credit balance events are a separate event family with no quota windows. The app-server quota observation can therefore conflict with the provider rejection for the same weekly meter.
 
-AC5: A drag owns the project it started on and the width it produced. If the project switches while a drag is still armed — a pointerup released outside the window never reaches the dock's listeners — the dragged width settles on the project the operator sized, the new project's stored width is untouched, and the dead drag stops moving the dock the operator is now looking at. A drag started afterwards on the new project works normally.
+AC5: Each engine header capacity chip is derived from the reconciled window rows. Its rounded percentage equals a percentage visible in the same engine block.
 
-AC6: The drag's listeners are detached inside the commit that switches the project, so a pointermove arriving before the browser paints cannot drag the newly opened project's dock. A passive cleanup leaves that gap open; the fix ends the drag in the layout phase.
+AC6: The Accounts panel derives each account chip from its own rendered window rows. When opened from the limits footer, the active account receives the footer's exact reconciled quota model, preventing the modal from reviving a conflicting account snapshot.
 
-AC7: Every clamp is unchanged — `MIN_WIDTH`, `RESERVED_BESIDE_DOCK`, `dockWidthForPointer`, and the CSS `max()/min()` floor — and the dock still publishes `RAIL_WIDTH + width` through `setLeftShellInset`, giving the row back on unmount. The published row and the committed width change in the SAME frame, at mount and through a project switch, so no painted frame shows a wide dock against a row the sheet budgeted for a narrower one. The board keeps `MIN_BOARD` with the preview sheet open, exactly as before.
+AC7: Any rendered quota observation older than the 20-minute freshness threshold has a visible `as of HH:MM` hint. Cached payloads preserve their original `staleSince` time when `capturedAt` is unavailable. Per-window observation times survive payload serialization.
 
-AC8: The DOM test file covers the scoped write, the legacy-key fallback seed, independence across two projects, the project-switch re-read, the project switch under an unfinished drag, and the two commit-boundary invariants (detached listeners, published row) observed from inside the commit.
+AC8: Reset ETA formatting uses one shared upward-rounding rule in the strip and modal for minute, hour, and day scales.
 
-AC9: Scope holds — only `src/components/orchestrator/OrchestratorDock.tsx` and its DOM test file change (plus this spec). No `src/lib/{flows,agent,runtime}`, no API routes, no mobile surfaces, no new dependency, no new setting, no refactor beyond the fix.
+AC9: Invariant 19 remains intact for Claude and Codex: limits payload values render only when the payload account ID equals the active account ID. A payload for account B cannot override account A at the rendered merge seam.
 
-AC10: Focused tests, TypeScript type checking, scoped linting and the publication privacy gate pass; no repo suite that sweeps the operator's live runtime/registry state is run.
+AC10: Focused regression coverage proves newer-source selection, provider-exhaustion precedence, post-reset behavior, direct rejection handling, chip/row equality, stale hints, reset rounding, and account masking.
+
+AC11: Scope holds to `LimitsFooter.tsx`, `AccountsPanel.tsx`, shared rate-limit formatting/reconciliation, the limits payload types and server read, their focused tests, and this spec. No `src/lib/{flows,agent,runtime}` source, API route behavior, dependency, or deployment changes are included.
+
+AC12: Every touched test file passes independently, TypeScript type checking passes, scoped ESLint passes, and the publication privacy gate passes. No suite that sweeps the operator's live runtime or registry state is run.
 
 ## Validation gates
 
-- `bun test src/components/orchestrator/OrchestratorDock.dom.test.tsx`
-- `bun test src/components/Viewer.orchestratorDock.dom.test.tsx src/components/orchestrator/OrchestratorPanel.dom.test.tsx` (the changed module's consumers)
+- `bun test src/lib/rateLimit.test.ts`
+- `bun test src/lib/limits.test.ts`
+- `bun test src/components/rateLimit.test.ts`
+- `bun test src/components/AccountsPanel.dom.test.tsx`
+- `bun test src/components/LimitsFooter.dom.test.tsx`
+- `bun test src/components/LimitsFooter.test.ts`
 - `bunx tsc --noEmit`
-- `bunx eslint` over the changed TypeScript files
-- `bun scripts/privacy-publication-gate.ts --base origin/main`
+- `bunx eslint` over the touched TypeScript files
+- `bun scripts/privacy-publication-gate.ts --base $(git merge-base HEAD origin/main)`
