@@ -1,28 +1,35 @@
-# Issue #1012: Keep each project cwd within its own project
+# Issue #1011: Per-project orchestrator dock width
 
-The files response currently allows session-derived cwd evidence from one project to populate another project's `projectCwds` entry. The create-orchestrator sheet consumes this projection, so poisoned evidence can launch an orchestrator in an unrelated repository. The scanner/files projection must validate cwd ownership through the existing project resolver and recover repository-less directory projects to their own directory.
+Each project's orchestrator dock should remember its own width. Today the width is one global preference: `OrchestratorDock` reads it from `localStorage` under a single `WIDTH_KEY` on mount and the pointer-up handler writes that same key, so dragging the dock wide for one mandate-heavy project resizes the dock in every other project. Projects are isolated surfaces and their dock width should be too.
+
+The fix is the one the issue specifies, no alternative: key the stored width by project (`WIDTH_KEY:<project>`), fall back to the legacy global key and then `DEFAULT_WIDTH` when the scoped key is absent so existing operators keep their current width as the seed everywhere, write only the scoped key, and re-read on a project switch. The component already receives `project` as a prop, so the change is contained to it.
 
 ## Acceptance criteria
 
-AC1: A canonical `dir-` project's `projectCwds` value is the directory from which that project identity is derived.
+AC1: The width the drag lands on is written under the project's own key, `llvOrchestratorPanelWidth:<project>`, and nowhere else — the legacy global key is left exactly as the operator had it.
 
-AC2: A canonical `repo-` project's cwd candidate is accepted only when `projectInfoFromCwd(candidate)` resolves to that same project.
+AC2: A project that has never been sized opens at the legacy global width when one exists, so an operator arriving from the single shared preference keeps that width in every project; with neither key present it opens at `DEFAULT_WIDTH`. The legacy key answers only for **absence** of the scoped one — a scoped value that is unusable (non-numeric, or below `MIN_WIDTH`) falls to `DEFAULT_WIDTH`, which is `storedDockWidth`'s existing contract.
 
-AC3: Session evidence whose cwd resolves to another project is excluded from the candidate set and cannot collapse distinct projects onto one repository checkout.
+AC3: Two projects hold independent widths: resizing project A leaves project B's stored width untouched, and each reload restores its own.
 
-AC4: Cwd ownership uses the scanner's existing `projectInfoFromCwd` and worktree-grouping resolution. No additional project naming or grouping scheme is introduced.
+AC4: Switching projects while the dock is open re-reads the new project's width, and the `shellLayout` row the preview sheet budgets around follows the switch. Switching back finds the first project's width unchanged.
 
-AC5: A focused poisoned-evidence regression covers distinct directory and repository projects and proves that their `projectCwds` values remain distinct.
+AC5: A drag owns the project it started on and the width it produced. If the project switches while a drag is still armed — a pointerup released outside the window never reaches the dock's listeners — the dragged width settles on the project the operator sized, the new project's stored width is untouched, and the dead drag stops moving the dock the operator is now looking at. A drag started afterwards on the new project works normally.
 
-AC6: Product source changes stay within the scanner/files projection that derives `projectCwds`; no flow, agent, runtime, or UI source changes are made.
+AC6: The drag's listeners are detached inside the commit that switches the project, so a pointermove arriving before the browser paints cannot drag the newly opened project's dock. A passive cleanup leaves that gap open; the fix ends the drag in the layout phase.
 
-AC7: The focused files-route and project-directory tests pass, `bunx tsc --noEmit` passes, and the publication privacy gate passes without running broad runtime or registry suites.
+AC7: Every clamp is unchanged — `MIN_WIDTH`, `RESERVED_BESIDE_DOCK`, `dockWidthForPointer`, and the CSS `max()/min()` floor — and the dock still publishes `RAIL_WIDTH + width` through `setLeftShellInset`, giving the row back on unmount. The published row and the committed width change in the SAME frame, at mount and through a project switch, so no painted frame shows a wide dock against a row the sheet budgeted for a narrower one. The board keeps `MIN_BOARD` with the preview sheet open, exactly as before.
 
-AC8: The fix is delivered in a non-draft pull request titled `fix(files): projectCwds must not leak one project's cwd into another (#1012)` with an identity-free diagnosis.
+AC8: The DOM test file covers the scoped write, the legacy-key fallback seed, independence across two projects, the project-switch re-read, the project switch under an unfinished drag, and the two commit-boundary invariants (detached listeners, published row) observed from inside the commit.
+
+AC9: Scope holds — only `src/components/orchestrator/OrchestratorDock.tsx` and its DOM test file change (plus this spec). No `src/lib/{flows,agent,runtime}`, no API routes, no mobile surfaces, no new dependency, no new setting, no refactor beyond the fix.
+
+AC10: Focused tests, TypeScript type checking, scoped linting and the publication privacy gate pass; no repo suite that sweeps the operator's live runtime/registry state is run.
 
 ## Validation gates
 
-- `bun test src/app/api/files/route.test.ts`
-- `bun test src/lib/scanner/projectDirectories.test.ts`
+- `bun test src/components/orchestrator/OrchestratorDock.dom.test.tsx`
+- `bun test src/components/Viewer.orchestratorDock.dom.test.tsx src/components/orchestrator/OrchestratorPanel.dom.test.tsx` (the changed module's consumers)
 - `bunx tsc --noEmit`
+- `bunx eslint` over the changed TypeScript files
 - `bun scripts/privacy-publication-gate.ts --base origin/main`

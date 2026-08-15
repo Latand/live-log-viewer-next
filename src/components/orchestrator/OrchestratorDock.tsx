@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
@@ -8,7 +8,14 @@ import type { FileEntry } from "@/lib/types";
 import { setLeftShellInset } from "../shellLayout";
 import { OrchestratorPanel } from "./OrchestratorPanel";
 
-const WIDTH_KEY = "llvOrchestratorPanelWidth";
+/** The width every project shared before #1011. Since the split it serves as a
+    seed: a project that has never been sized falls back to it, so operators
+    coming from the single global preference keep their width everywhere.
+    Nothing writes it. */
+const LEGACY_WIDTH_KEY = "llvOrchestratorPanelWidth";
+/** One project's own width (#1011). Projects are isolated surfaces — a dock
+    dragged wide for a mandate-heavy project must not resize every other one. */
+const widthKey = (project: string) => `${LEGACY_WIDTH_KEY}:${project}`;
 export const OPEN_KEY = "llvOrchestratorPanelOpen";
 
 export const MIN_WIDTH = 360;
@@ -38,6 +45,21 @@ export function storedDockWidth(read: () => string | null): number {
   return DEFAULT_WIDTH;
 }
 
+function readStorage(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+/** The width to open `project` at: its own, else the pre-#1011 global one as a
+    seed, else the default. Only ABSENCE falls through to the seed — a project
+    that has been sized answers for itself, nonsense included. */
+function projectDockWidth(project: string): number {
+  return storedDockWidth(() => readStorage(widthKey(project)) ?? readStorage(LEGACY_WIDTH_KEY));
+}
+
 /** Width the drag lands on for a pointer at `clientX`, given the viewport. */
 export function dockWidthForPointer(clientX: number, viewportWidth: number): number {
   const room = Math.max(MIN_WIDTH, viewportWidth - RESERVED_BESIDE_DOCK);
@@ -49,12 +71,14 @@ export function dockWidthForPointer(clientX: number, viewportWidth: number): num
  * the project rail and the board — not an overlay (PRD #976 decision 1). It is
  * a flex sibling, so the board simply gets the rest of the row.
  *
- * Width is the operator's, persisted like the document preview's
- * (`ArtifactPreviewHost`): drag the right edge, and the next session opens at
- * the same width. The CSS `min()` is the hard floor that the pointer clamp
- * cannot express — a window resized after the drag must not let a remembered
- * width squeeze the board below {@link MIN_BOARD} with the preview sheet also
- * open, and `max()` keeps the dock itself usable on a genuinely small desktop.
+ * Width is the operator's, persisted PER PROJECT (#1011) the way the document
+ * preview persists its own (`ArtifactPreviewHost`): drag the right edge, and
+ * that project opens at the same width next session while every other project
+ * keeps the width it was left at. The CSS `min()` is the hard floor that the
+ * pointer clamp cannot express — a window resized after the drag must not let
+ * a remembered width squeeze the board below {@link MIN_BOARD} with the preview
+ * sheet also open, and `max()` keeps the dock itself usable on a genuinely
+ * small desktop.
  *
  * The other half of that guarantee lives in the sheet: this dock publishes the
  * row it occupies (`../shellLayout`) and the sheet budgets around it, so a
@@ -75,38 +99,74 @@ export function OrchestratorDock({
   onClose: () => void;
 }) {
   const { t } = useLocale();
-  const [width, setWidth] = useState(() => storedDockWidth(() => {
-    try {
-      return window.localStorage.getItem(WIDTH_KEY);
-    } catch {
-      return null;
-    }
-  }));
+  const [width, setWidth] = useState(() => projectDockWidth(project));
+
+  /* A project switch re-reads the width, because the width now BELONGS to the
+     project (#1011). The adjustment happens during render, so the dock never
+     paints — nor publishes to `../shellLayout` — a frame of the project the
+     operator just left. */
+  const [sizedProject, setSizedProject] = useState(project);
+  if (sizedProject !== project) {
+    setSizedProject(project);
+    setWidth(projectDockWidth(project));
+  }
 
   /* The row this dock occupies, for the preview sheet to budget around —
-     published live through the resize drag, and given back on close. */
-  useEffect(() => {
+     published live through the resize drag, and given back on close.
+
+     LAYOUT phase, so the published row and the committed width are one atomic
+     change: a passive effect publishes a frame late, and a project switch that
+     widens the dock would paint that frame with the sheet still budgeting for
+     the narrower one, taking the board under {@link MIN_BOARD}. */
+  useLayoutEffect(() => {
     setLeftShellInset(RAIL_WIDTH + width);
     return () => setLeftShellInset(0);
   }, [width]);
 
+  /* The drag in flight, so a project switch can end it. A pointerup released
+     outside the window never reaches these listeners, so a drag can still be
+     armed when the operator moves to another project. */
+  const endDrag = useRef<(() => void) | null>(null);
+
   const resizeFrom = useCallback(() => {
-    const move = (event: PointerEvent) => setWidth(dockWidthForPointer(event.clientX, window.innerWidth));
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-      setWidth((value) => {
-        try {
-          window.localStorage.setItem(WIDTH_KEY, String(value));
-        } catch {
-          /* private mode */
-        }
-        return value;
-      });
+    /* A drag belongs to the project it started on, and carries its own width:
+       both are captured here so a switch mid-drag lands the dragged width on
+       the project the operator sized, leaving the new project's own width
+       alone. Reading the width back out of state at pointerup would write
+       whatever the switch loaded into the wrong project's key. */
+    const owner = project;
+    let dragged: number | null = null;
+    const move = (event: PointerEvent) => {
+      dragged = dockWidthForPointer(event.clientX, window.innerWidth);
+      setWidth(dragged);
     };
+    const end = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      endDrag.current = null;
+      if (dragged === null) return;
+      try {
+        window.localStorage.setItem(widthKey(owner), String(dragged));
+      } catch {
+        /* private mode */
+      }
+    };
+    endDrag.current?.();
+    endDrag.current = end;
     window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-  }, []);
+    window.addEventListener("pointerup", end);
+  }, [project]);
+
+  /* End an unfinished drag when the project changes under it, or when the dock
+     closes: the width it produced is settled on its owner, and the dock the
+     operator is now looking at stops following the pointer.
+
+     LAYOUT phase again, and for the sharper reason: this cleanup runs inside
+     the commit, so the listeners are gone before the switch is observable. A
+     passive cleanup leaves them live until after paint, and any pointermove in
+     that gap — a drag whose pointerup was released outside the window stays
+     armed indefinitely — drags the dock of the project just opened. */
+  useLayoutEffect(() => () => endDrag.current?.(), [project]);
 
   return (
     <aside
@@ -119,9 +179,9 @@ export function OrchestratorDock({
     >
       {/* Keyed by project: the panel's draft — mandate, engine, model, account,
           and the idempotency key of an unsettled confirm — belongs to ONE
-          project. The dock survives the switch (its width is the operator's,
-          not the project's); the panel is re-seated on the new one and reads
-          that project's own stored draft. */}
+          project. The dock survives the switch, resized to the new project's
+          own remembered width; the panel is re-seated on it and reads that
+          project's own stored draft. */}
       <OrchestratorPanel
         key={project}
         project={project}
