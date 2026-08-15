@@ -77,7 +77,6 @@ describe("lastTurnFromRecords — Claude", () => {
         claudeAssistantOpen("2026-07-14T07:00:05.000Z"),
         {
           ...claudeUser("2026-07-14T07:03:00.000Z", "steer"),
-          uuid: "operator-steer",
           promptSource: "typed",
           origin: { kind: "human" },
         },
@@ -91,10 +90,6 @@ describe("lastTurnFromRecords — Claude", () => {
       false,
     );
 
-    expect(result.operatorActions).toEqual([{
-      atMs: ms("2026-07-14T07:03:00.000Z"),
-      identity: "claude-record:operator-steer",
-    }]);
     expect(result.operatorActionsAtMs).toEqual([ms("2026-07-14T07:03:00.000Z")]);
     expect(result.unprovenancedUserActionsAtMs).toEqual([ms("2026-07-14T07:00:00.000Z")]);
     expect(result.windows).toEqual([{
@@ -458,33 +453,6 @@ describe("lastTurnFromRecords — Claude", () => {
 });
 
 describe("lastTurnFromRecords — Codex", () => {
-  test("preserves one stable Viewer delivery identity across paired transcript records", () => {
-    const responseAt = "2026-08-06T13:44:25.317Z";
-    const eventAt = "2026-08-06T13:44:25.320Z";
-    const structured = "<!-- llv:structured-user -->\ncontinue";
-    const result = recentTurnActivityFromRecords(
-      [
-        {
-          type: "response_item",
-          timestamp: responseAt,
-          payload: { type: "message", id: "message-fixture", role: "user", content: [{ type: "input_text", text: structured }] },
-        },
-        {
-          type: "event_msg",
-          timestamp: eventAt,
-          payload: { type: "user_message", client_id: "op_delivery-fixture", message: structured },
-        },
-      ],
-      true,
-    );
-
-    expect(result.operatorActions).toEqual([{
-      atMs: ms(responseAt),
-      identity: "codex-client:op_delivery-fixture",
-    }]);
-    expect(result.operatorActionsAtMs).toEqual([ms(responseAt)]);
-  });
-
   test("deduplicates Viewer operator input and excludes unstructured harness prompts", () => {
     const at = "2026-07-14T10:00:00.000Z";
     const structured = "<!-- llv:structured-user -->\ncontinue";
@@ -495,11 +463,7 @@ describe("lastTurnFromRecords — Codex", () => {
           timestamp: at,
           payload: { type: "message", role: "user", content: [{ type: "input_text", text: structured }] },
         },
-        {
-          type: "event_msg",
-          timestamp: at,
-          payload: { type: "user_message", client_id: "op_composer-fixture", message: structured },
-        },
+        codexUser(at, structured),
         codexTaskStarted("2026-07-14T10:00:01.000Z"),
         codexTaskComplete("2026-07-14T10:01:00.000Z"),
         codexUser("2026-07-14T10:02:00.000Z", "# AGENTS.md instructions for a worker"),
@@ -509,33 +473,6 @@ describe("lastTurnFromRecords — Codex", () => {
 
     expect(result.operatorActionsAtMs).toEqual([ms(at)]);
     expect(result.unprovenancedUserActionsAtMs).toEqual([]);
-  });
-
-  test("structured launch and fan-out deliveries contribute no operator actions", () => {
-    const structured = "<!-- llv:structured-user -->\ncontinue";
-    const result = recentTurnActivityFromRecords(
-      [
-        {
-          type: "event_msg",
-          timestamp: "2026-07-14T10:00:00.000Z",
-          payload: { type: "user_message", client_id: "spawn_launch-fixture", message: structured },
-        },
-        {
-          type: "event_msg",
-          timestamp: "2026-07-14T10:00:01.000Z",
-          payload: { type: "user_message", client_id: "call_fanout-fixture", message: structured },
-        },
-        {
-          type: "event_msg",
-          timestamp: "2026-07-14T10:00:02.000Z",
-          payload: { type: "user_message", client_id: "queue_server-fixture", message: structured },
-        },
-      ],
-      true,
-    );
-
-    expect(result.operatorActions).toEqual([]);
-    expect(result.operatorActionsAtMs).toEqual([]);
   });
 
   test("enumerates completed turns followed by the final open turn", () => {
@@ -659,7 +596,6 @@ test("a truncated transcript prefix reports the gap and never fabricates a turn 
     expect(recentTurnWindowsFor(entry)).toEqual({
       prefixTruncated: true,
       complete: true,
-      operatorActions: [],
       operatorActionsAtMs: [],
       unprovenancedUserActionsAtMs: [ms("2026-07-14T10:00:00.000Z")],
       windows: [{

@@ -69,7 +69,7 @@ The implementation must reuse these authorities:
 | concern | current authority | integration use |
 |---|---|---|
 | Completed scanner generation | `currentFileScan()` in `src/lib/scanner/scanCache.ts` | Joins or starts the shared generation; avoids a second independent filesystem scanner. |
-| Operator-action classification | `src/lib/scanner/turnDuration.ts` | Supplies direct human action timestamps and stable delivery or record identity while retaining prompt-to-terminal windows for Viewer duration projections. |
+| Operator-action classification | `src/lib/scanner/turnDuration.ts` | Supplies direct human action timestamps while retaining prompt-to-terminal windows for Viewer duration projections. |
 | Stable conversation identity | `agentRegistry().readOnlySnapshot()` plus `conversationLookupFromSnapshot()` | Resolves a scanned current-generation path to the durable `conversationId`. |
 | Project attribution | `resolveProjectAttribution()` in `src/lib/session/projectResolution.ts` | Preserves explicit ownership, canonical worktree-to-parent grouping, launch-profile hints, and scanner fallback in their current order. |
 | Runtime activation | `registerViewerRuntime()` in `src/lib/viewerInstrumentation.ts` | Starts the singleton only in the traffic-owning Node release. |
@@ -141,7 +141,6 @@ scanner interface:
 ```ts
 interface RecentTurnWindows {
   windows: TurnBoundary[];
-  operatorActions: Array<{ atMs: number; identity: string | null }>;
   operatorActionsAtMs: number[];
   unprovenancedUserActionsAtMs: number[];
   prefixTruncated: boolean;
@@ -155,22 +154,20 @@ The existing record state machine remains a multi-window parser for the UI.
 `lastTurnFromRecords()` returns its final item and preserves issue #268/#406
 semantics. WakaTime reads only the action arrays from the shared result.
 
-The parser also preserves direct operator action timestamps and stable action
-identity. Claude uses the shared user/system classification plus a durable
-record id when present, including explicit human and typed provenance. Legacy
-bare Claude input is retained separately and becomes operator engagement only
-for a root conversation. Codex accepts composer deliveries in the stable
-`op_` namespace and deduplicates paired `message` plus `user_message` copies
-within their transcript-time tolerance. Other structured delivery namespaces
-belong to spawn, MCP, bridge, queue, or recovery traffic. SDK, peer,
+The parser also preserves direct operator action timestamps. Claude uses the
+shared user/system classification, including explicit human and typed
+provenance. Legacy bare Claude input is retained separately and becomes
+operator engagement only for a root conversation; delegated launch input keeps
+zero WakaTime accounting. Codex accepts Viewer-structured user input and
+deduplicates its `message` plus `user_message` copies by timestamp. SDK, peer,
 coordinator, spawn, command, notification, and harness envelopes keep their
 existing Viewer semantics and never create operator engagement intervals.
 
 `prefixTruncated` comes from the tail read offset. A truncated prefix can omit
-older actions after a long outage or an unusually large turn. Once an action
-creates a durable stream, the persisted start advances through its exact
-ten-minute end even after the source record leaves the bounded tail. Transcript
-mtime, process state, and silent tools never extend that interval.
+older actions after a long outage or an unusually large turn. The sync module
+records a `history_gap` counter and starts with complete visible evidence. It
+never invents timestamps. Continuous one-minute observation and the durable
+per-stream cursor cover the normal runtime and restart path.
 
 Eligible entries satisfy every condition below:
 
@@ -179,16 +176,12 @@ Eligible entries satisfy every condition below:
 3. scanner derivation completed;
 4. the registry resolves the path to a conversation;
 5. the path equals that conversation's latest generation path;
-6. the direct operator action has a finite positive timestamp and preserved
-   operator provenance;
-7. legacy unprovenanced input belongs to a root conversation.
+6. the conversation has root delegation depth (`0`);
+7. the direct operator action has a finite positive timestamp.
 
 Unregistered, incomplete, shell, task-output, archived-generation, malformed,
-and unprovenanced delegated actions are skipped. A direct proven action remains
-eligible at any delegation depth. A globally complete inventory containing an
-incomplete canonical derivation or transcript tail aborts the entire tick
-before state mutation, persistence, credential access, or fetch. A later fully
-classified tick can apply operator tagging and confirmed legacy retirement.
+delegated, and unprovenanced actions are skipped. A later tick can pick up an
+entry after registry adoption or complete derivation.
 
 ## WakaTime field mapping
 
@@ -211,12 +204,8 @@ unions them on the account timeline.
 The digest is:
 
 ```text
-sha256("llv-wakatime-operator-v2\0" + actionIdentity)
+sha256("llv-wakatime-operator-v1\0" + conversationId + "\0" + actionAtMs)
 ```
-
-`actionIdentity` is the namespaced Viewer delivery or transcript-record id.
-Older proven records fall back to engine plus action timestamp. Legacy bare
-root records fall back to canonical conversation identity plus action timestamp.
 
 The local outbox event key is:
 
@@ -246,11 +235,6 @@ intervals are unioned on the WakaTime timeline. Steering input receives its own
 interval. Agent execution, silent tool calls, delegated work, and transcript
 updates add no samples by themselves.
 
-The persisted stream start is authoritative after first observation. Every
-fully classified scan advances it to `min(now, engagementEnd)`, including after restart,
-tail eviction, or delivery backoff. No runtime liveness field participates in
-that calculation.
-
 The module materializes heartbeats at:
 
 1. `engagementStart`;
@@ -273,13 +257,10 @@ opt-in forward-looking and prevents surprise history upload.
 ## Coalescing and duplicate behavior
 
 The state stores `lastMaterializedAtMs` per operator digest. Repeated scans of
-the same action generate only newly due samples. The digest uses the stable
-operator delivery identity, so resume, path rotation, mirrored records, and
-forwarded copies retaining that identity coalesce even across conversation
-depth. Launch and fan-out traffic carrying its own internal delivery id fails
-operator classification and contributes no stream. Legacy unprovenanced
-delegated input also contributes no stream. Pending event keys form a unique
-set, so repeated ticks coalesce before delivery.
+the same action generate only newly due samples. The digest uses canonical
+conversation identity plus action time, so resume, path rotation, and mirrored
+transcripts coalesce. Delegated fan-out input contributes no stream. Pending
+event keys form a unique set, so repeated ticks coalesce before delivery.
 
 After a successful bulk response, the module removes the acknowledged events
 through an atomic state write. Restarted processes resume from stream cursors
@@ -347,11 +328,10 @@ payload data awaiting delivery. The file is written with mode `0600`; its
 parent directory uses `0700`.
 
 `source: "operator"` marks streams proven under the corrected #763 contract.
-After a fully classified scan, streams without that marker are retained only when the
+After a complete scan, streams without that marker are retained only when the
 current transcript proves the matching operator action and upgrades the marker.
 Remaining legacy turn streams and their queued rows are retired before
-delivery. Global inventory, canonical derivation, and canonical tail
-incompleteness perform no migration, persistence, credential lookup, or fetch.
+delivery. An incomplete scan performs no migration.
 
 Persistence ordering is strict:
 
@@ -506,7 +486,7 @@ and timestamps leave the machine after opt-in.
 The MVP has no visual status surface and no manual sync route. Safe operation
 requires these count-only server diagnostics:
 
-- startup enabled with credential presence unknown until delivery needs the key;
+- startup enabled, including credential presence as a boolean;
 - first transition into missing-key, auth, rate-limit, network, or server
   backoff;
 - recovery from a prior failure class;
@@ -546,11 +526,11 @@ scans, registry fixtures, timers, logs, and fetch:
 3. canonical project attribution and current-generation registry identity feed
    the exact heartbeat fields;
 4. language, branch, titles, paths, cwd, prompts, and contents stay absent;
-5. a proven operator action at any depth produces a ten-minute engagement and an exact reserved-project boundary marker;
+5. a root operator action produces a ten-minute engagement and an exact reserved-project boundary marker;
 6. unattended turns and silent tools produce no samples across lifecycle changes or restart;
-7. overlapping operator engagements use exact wall-clock union semantics with one final boundary;
-8. resume, path rotation, mirror or fan-out copies, and retries with one operator id reuse the stream digest;
-9. direct depth-one input counts while copied fan-out and delegated launch traffic add zero;
+7. overlapping operator engagements use wall-clock union semantics;
+8. resume and path rotation with the same conversation and action reuse the stream digest;
+9. delegated fan-out, repeated ticks, and retries add no logical event;
 10. the first enable boundary suppresses completed engagement and truncates a crossing interval;
 11. pending state persists before fetch; a failed state write suppresses fetch;
 12. outer 201/202 responses acknowledge successful items, retain transient items, reject permanent items, and fail closed on malformed or mismatched arrays;
@@ -565,12 +545,7 @@ scans, registry fixtures, timers, logs, and fetch:
     fake fetch and never in logs, state, URL, body, child environments,
     arguments, transcripts, or artifacts;
 19. durable project ownership repairs undelivered generic attribution and
-    legacy queued turn activity is retired before delivery;
-20. incomplete derivation or tail evidence performs no state write, credential
-    access, or fetch, then a fully classified scan may migrate;
-21. durable streams finish at their persisted ten-minute end after tail
-    eviction, restart, and retry;
-22. production-sized fixed intervals stay within the bounded performance budget.
+    legacy queued turn activity is retired before delivery.
 
 ### Bootstrap tests
 
@@ -621,9 +596,8 @@ outbox remains local and dormant while disabled.
 1. Land the deep module, scanner enumeration, bootstrap wiring, tests, and
    operator docs behind the disabled default.
 2. After an approved deployment, dogfood with a placeholder-free local key on
-   one operator machine. Confirm direct operator actions at root and delegated
-   depth, one silent tool call extending beyond ten minutes, one copied
-   fan-out, one restart, and one
+   one operator machine. Confirm one root operator action, one silent tool call
+   extending beyond ten minutes, one delegated fan-out, one restart, and one
    simulated network outage in the WakaTime dashboard and local count-only
    diagnostics.
 3. Run the full verification stack on the PR head.
@@ -638,7 +612,7 @@ an explicit versioned reader and forward migration inside `sync.ts`.
 
 Included:
 
-- Proven direct operator actions at any Claude and Codex conversation depth;
+- Proven direct operator actions in root Claude and Codex conversations;
 - fixed ten-minute operator-engagement sampling;
 - canonical parent-project attribution across worktrees;
 - API-key Basic authentication;
@@ -663,7 +637,7 @@ Deferred:
 |---|---|
 | Stable project, entity, language/category, and time semantics | Canonical project attribution, digest-scoped per-action app entities, a reserved boundary project, omitted unsupported language, `ai coding`, deterministic sampling, and same-project overlap union. |
 | Credential privacy | File-only `0600` credential delivery, filtered child and snapshot environments, discard-without-read startup handling, header-only Basic auth, fixed HTTPS endpoint, secret-free state/logs/tests/browser surfaces, and the unchanged privacy gate. |
-| Duplicate, restart, idle, failure, retry, batching, and rate-limit behavior | Canonical action digests, ingress-proven operator identities, durable stream cursors and outbox, explicit 25-event crash replay window, itemized bulk acknowledgments, failure matrix, one 25-record batch per tick, and durable jittered backoff. |
+| Duplicate, restart, idle, failure, retry, batching, and rate-limit behavior | Canonical action digests, root-only provenance, durable stream cursors and outbox, explicit 25-event crash replay window, itemized bulk acknowledgments, failure matrix, one 25-record batch per tick, and durable jittered backoff. |
 | Viewer responsiveness during WakaTime failure | Traffic-owned unref'd scheduler, shared scan generations, single-flight ticks, five-second fetch deadline, bounded outbox, and swallowed module-local failures. |
 | Focused behavioral tests and operator documentation | Scanner, sync, bootstrap, privacy, retry, and overflow coverage plus `docs/wakatime.md` and environment-contract updates. |
 | Current architecture and runtime ownership | Exact `ad45e344` grounding, scanner-owned operator provenance, registry-owned identity, project-resolution authority, current-file-scan seam, and viewer-instrumentation startup. |
@@ -673,14 +647,14 @@ Deferred:
 
 The implementation stage has these fixed choices:
 
-1. Preserve operator-action timestamps and stable identity through `recentTurnWindowsFor()` while
+1. Preserve operator-action timestamps through `recentTurnWindowsFor()` while
    keeping `FileEntry.lastTurn` behavior byte-compatible.
 2. Add `src/lib/wakatime/sync.ts` as the sole WakaTime knowledge owner with
    `startWakatimeSync()` and the injected test factory.
 3. Drive it every 60 seconds through `currentFileScan()`, then join current
    paths to `agentRegistry().readOnlySnapshot()` and resolve projects through
    `resolveProjectAttribution()`.
-4. Map each proven operator action at any depth to a digest-scoped `app` entity, `ai coding`, canonical
+4. Map each proven root operator action to a digest-scoped `app` entity, `ai coding`, canonical
    project, `ai_session`, 120-second samples, and an exact ten-minute reserved-project boundary.
 5. Persist before delivery, batch 25, send one request per tick, and use the
    retry table above.

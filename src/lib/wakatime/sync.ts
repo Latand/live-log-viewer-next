@@ -10,8 +10,8 @@ import {
   type FileScanSnapshot,
 } from "@/lib/scanner/scanCache";
 import { recentTurnWindowsFor, type RecentTurnWindows } from "@/lib/scanner/turnDuration";
-import { resolveProjectAttribution, type ProjectAttributionSource } from "@/lib/session/projectResolution";
-import type { FileEntry } from "@/lib/types";
+import { resolveProjectAttribution } from "@/lib/session/projectResolution";
+import type { FileEntry, TurnBoundary } from "@/lib/types";
 
 import { acquireWakatimeSchedulerLease, type WakatimeSchedulerLease } from "./lease";
 
@@ -125,18 +125,8 @@ function digest(...parts: Array<string | number>): string {
   return crypto.createHash("sha256").update(parts.join("\0")).digest("hex");
 }
 
-function operatorDigest(actionIdentity: string): string {
-  return digest("llv-wakatime-operator-v2", actionIdentity);
-}
-
-function projectRank(source: ProjectAttributionSource | null): number {
-  switch (source) {
-    case "ownership": return 4;
-    case "cwd": return 3;
-    case "launch-profile": return 2;
-    case "fallback": return 1;
-    default: return 0;
-  }
+function operatorDigest(conversationId: string, actionAtMs: number): string {
+  return digest("llv-wakatime-operator-v1", conversationId, actionAtMs);
 }
 
 function eventKey(stream: string, sampleTimeMs: number, kind: "activity" | "boundary" = "activity"): string {
@@ -284,6 +274,11 @@ function stateFrom(value: unknown): WakatimeStateV1 | null {
   };
 }
 
+function validWindow(window: TurnBoundary): boolean {
+  return finite(window.startedAt) && window.startedAt > 0
+    && (window.endedAt === null || (finite(window.endedAt) && window.endedAt > window.startedAt));
+}
+
 function sampleTimes(start: number, end: number, closed: boolean, last: number | null): number[] {
   const times: number[] = [];
   if (last === null) times.push(start);
@@ -297,45 +292,43 @@ function sampleTimes(start: number, end: number, closed: boolean, last: number |
   return times;
 }
 
-interface FixedOperatorStream {
-  streamKey: string;
-  project: string;
-  engine: "claude" | "codex";
-  startedAtMs: number;
-}
-
-function materializeOperatorStream(
+function addWindow(
   state: WakatimeStateV1,
-  observation: FixedOperatorStream,
+  entry: FileEntry,
+  streamKey: string,
+  project: string,
+  window: TurnBoundary,
   now: number,
   existingKeys: Set<string>,
+  openWindowActive: boolean,
   emitEndBoundary: boolean,
 ): void {
-  const { streamKey, project, engine, startedAtMs } = observation;
-  if (!finite(startedAtMs) || startedAtMs <= 0) return;
-  const engagementEndMs = startedAtMs + OPERATOR_ENGAGEMENT_MS;
-  if (engagementEndMs <= state.enabledAtMs) return;
+  if (!validWindow(window)) return;
+  if (window.endedAt !== null && window.endedAt <= state.enabledAtMs) return;
+  if (window.endedAt !== null && window.endedAt < now - CLOSED_STREAM_RETENTION_MS) return;
+  const start = Math.max(window.startedAt, state.enabledAtMs);
   const existing = state.streams[streamKey];
-  /* Retention rejects newly rediscovered transcript history. A stream already
-     admitted as operator evidence remains durable and must finish its fixed
-     interval after an arbitrarily long restart gap. */
-  if (!existing && engagementEndMs < now - CLOSED_STREAM_RETENTION_MS) return;
-  const start = Math.max(startedAtMs, state.enabledAtMs);
-  const end = Math.min(now, engagementEndMs);
-  if (end < start) return;
   const retired = state.retiredStreams?.[streamKey];
+  if (window.endedAt === null && !openWindowActive && !existing && !retired && entry.mtime * 1_000 <= state.enabledAtMs) return;
+  const lastProvenActivityAt = Math.min(now, Math.max(
+    start,
+    entry.mtime * 1_000,
+    existing?.lastObservedAtMs ?? retired?.lastObservedAtMs ?? start,
+  ));
+  const end = window.endedAt ?? (openWindowActive ? now : lastProvenActivityAt);
+  if (end < start) return;
   if (!existing && retired
     && end <= retired.lastMaterializedAtMs
     && retired.boundaryFinalizedAtMs === end) return;
   const stream = existing ?? {
     source: "operator" as const,
-    entity: `agent-log-viewer/${engine}/${streamKey.slice(0, 16)}`,
-    engine,
+    entity: `agent-log-viewer/${entry.engine}/${streamKey.slice(0, 16)}`,
+    engine: entry.engine as "claude" | "codex",
     project,
-    startedAtMs,
-    endedAtMs: engagementEndMs,
+    startedAtMs: window.startedAt,
+    endedAtMs: window.endedAt,
     lastMaterializedAtMs: Math.max(start - 1, retired?.lastMaterializedAtMs ?? start - 1),
-    lastObservedAtMs: retired?.lastObservedAtMs ?? start,
+    lastObservedAtMs: retired?.lastObservedAtMs ?? now,
     boundaryFinalizedAtMs: retired?.boundaryFinalizedAtMs ?? null,
   };
   stream.source = "operator";
@@ -348,14 +341,14 @@ function materializeOperatorStream(
     }
   }
   if (retired) delete state.retiredStreams?.[streamKey];
-  stream.endedAtMs = engagementEndMs;
-  stream.lastObservedAtMs = end;
+  stream.endedAtMs = window.endedAt;
+  stream.lastObservedAtMs = window.endedAt ?? (openWindowActive ? now : lastProvenActivityAt);
   state.streams[streamKey] = stream;
   const last = stream.lastMaterializedAtMs < start ? null : stream.lastMaterializedAtMs;
-  const closed = end === engagementEndMs;
-  const boundaryAlreadyFinalized = stream.boundaryFinalizedAtMs === engagementEndMs;
-  for (const sampleTimeMs of sampleTimes(start, end, closed && !boundaryAlreadyFinalized, last)) {
-    const kind = closed && sampleTimeMs === engagementEndMs && emitEndBoundary ? "boundary" : "activity";
+  const closesObservedInterval = window.endedAt !== null || !openWindowActive;
+  const boundaryAlreadyFinalized = stream.boundaryFinalizedAtMs === end;
+  for (const sampleTimeMs of sampleTimes(start, end, closesObservedInterval && !boundaryAlreadyFinalized, last)) {
+    const kind = closesObservedInterval && sampleTimeMs === end && emitEndBoundary ? "boundary" : "activity";
     const key = eventKey(streamKey, sampleTimeMs, kind);
     if (existingKeys.has(key)) continue;
     state.pending.push({
@@ -375,36 +368,7 @@ function materializeOperatorStream(
     existingKeys.add(key);
   }
   stream.lastMaterializedAtMs = Math.max(stream.lastMaterializedAtMs, end);
-  if (closed) stream.boundaryFinalizedAtMs = engagementEndMs;
-}
-
-function boundaryStreamsFor(observations: FixedOperatorStream[]): Set<string> {
-  const byProject = new Map<string, FixedOperatorStream[]>();
-  for (const observation of observations) {
-    const project = byProject.get(observation.project) ?? [];
-    project.push(observation);
-    byProject.set(observation.project, project);
-  }
-  const boundaries = new Set<string>();
-  for (const project of byProject.values()) {
-    project.sort((left, right) =>
-      left.startedAtMs - right.startedAtMs || left.streamKey.localeCompare(right.streamKey));
-    let unionEndMs = Number.NEGATIVE_INFINITY;
-    let boundaryStream: string | null = null;
-    for (const observation of project) {
-      const engagementEndMs = observation.startedAtMs + OPERATOR_ENGAGEMENT_MS;
-      if (observation.startedAtMs > unionEndMs) {
-        if (boundaryStream) boundaries.add(boundaryStream);
-        unionEndMs = engagementEndMs;
-        boundaryStream = observation.streamKey;
-      } else if (engagementEndMs > unionEndMs) {
-        unionEndMs = engagementEndMs;
-        boundaryStream = observation.streamKey;
-      }
-    }
-    if (boundaryStream) boundaries.add(boundaryStream);
-  }
-  return boundaries;
+  if (closesObservedInterval) stream.boundaryFinalizedAtMs = end;
 }
 
 function compactPending(state: WakatimeStateV1): number {
@@ -595,95 +559,112 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
     const lookup = conversationLookupFromSnapshot(registry);
     const now = deps.now();
     const existingKeys = new Set(current.pending.map((event) => event.key));
-    const observationsByStream = new Map<string, FixedOperatorStream & { projectRank: number }>();
-    const canonicalEntries: Array<{ entry: FileEntry; recent: RecentTurnWindows }> = [];
+    const observations: Array<{
+      entry: FileEntry;
+      streamKey: string;
+      project: string;
+      window: TurnBoundary;
+      openWindowActive: boolean;
+    }> = [];
     for (const entry of scan.files) {
       if ((entry.engine !== "claude" && entry.engine !== "codex")
         || (entry.root !== "claude-projects" && entry.root !== "codex-sessions")
-        || !entry.path.endsWith(".jsonl")) continue;
-      if (entry.derivationComplete !== true) return false;
+        || !entry.path.endsWith(".jsonl") || entry.derivationComplete !== true) continue;
+      const conversation = lookup.conversationForPath(entry.path);
+      const generation = conversation?.generations.at(-1);
+      if (!conversation || !generation || generation.path !== entry.path || conversation.engine !== entry.engine) continue;
       const recent = deps.recentTurnWindows(entry);
-      if (!recent.complete) return false;
-      const conversation = lookup.conversationForPath(entry.path);
-      const generation = conversation?.generations.at(-1);
-      if (!conversation || !generation || generation.path !== entry.path || conversation.engine !== entry.engine) continue;
-      canonicalEntries.push({ entry, recent });
-    }
-    for (const { entry, recent } of canonicalEntries) {
-      const conversation = lookup.conversationForPath(entry.path);
-      const generation = conversation?.generations.at(-1);
-      if (!conversation || !generation || generation.path !== entry.path || conversation.engine !== entry.engine) continue;
+      if (!recent.complete) continue;
       if (recent.prefixTruncated && !historyGapPaths.has(entry.path)) {
         historyGapPaths.add(entry.path);
         current.counters.historyGaps += 1;
         report("history_gap", { count: current.counters.historyGaps });
       }
-      const attribution = resolveProjectAttribution({
+      const project = resolveProjectAttribution({
         projectOwnership: conversation.projectOwnership,
         cwd: generation.launchProfile.cwd || entry.cwd,
         launchProfileProject: generation.launchProfile.project,
         fallbackProject: entry.project,
-      });
-      const project = attribution.project;
+      }).project;
       if (!project) continue;
-      const attributionRank = projectRank(attribution.source);
-      const provenActions = recent.operatorActions ?? (recent.operatorActionsAtMs ?? []).map((atMs) => ({
-        atMs,
-        identity: null,
-      }));
-      const actions = [
-        ...provenActions.map((action) => ({
-          atMs: action.atMs,
-          streamIdentity: action.identity ?? `proven-fallback:${entry.engine}:${action.atMs}`,
-        })),
-        ...(conversation.delegationDepth === 0 ? (recent.unprovenancedUserActionsAtMs ?? []).map((atMs) => ({
-          atMs,
-          streamIdentity: `unprovenanced:${conversation.id}:${atMs}`,
-        })) : []),
-      ];
-      for (const action of actions) {
-        const actionAtMs = action.atMs;
+      const actionTimes = new Set<number>();
+      if (conversation.delegationDepth === 0) {
+        for (const actionAtMs of recent.operatorActionsAtMs ?? []) actionTimes.add(actionAtMs);
+        for (const actionAtMs of recent.unprovenancedUserActionsAtMs ?? []) actionTimes.add(actionAtMs);
+      }
+      for (const actionAtMs of actionTimes) {
         if (!finite(actionAtMs) || actionAtMs <= 0) continue;
-        const streamKey = operatorDigest(action.streamIdentity);
-        const engagementStartMs = current.streams[streamKey]?.startedAtMs ?? actionAtMs;
-        const observation = {
-          streamKey,
+        const engagementEndMs = actionAtMs + OPERATOR_ENGAGEMENT_MS;
+        const engagementActive = engagementEndMs > now;
+        observations.push({
+          entry,
+          streamKey: operatorDigest(conversation.id, actionAtMs),
           project,
-          projectRank: attributionRank,
-          engine: entry.engine,
-          startedAtMs: engagementStartMs,
-        };
-        const previous = observationsByStream.get(streamKey);
-        if (!previous) {
-          observationsByStream.set(streamKey, observation);
-          continue;
-        }
-        if (engagementStartMs < previous.startedAtMs) previous.startedAtMs = engagementStartMs;
-        if (attributionRank > previous.projectRank) {
-          previous.project = project;
-          previous.projectRank = attributionRank;
-        }
+          window: { startedAt: actionAtMs, endedAt: engagementActive ? null : engagementEndMs },
+          openWindowActive: engagementActive,
+        });
       }
     }
-    for (const [streamKey, stream] of Object.entries(current.streams)) {
-      if (stream.source !== "operator" || observationsByStream.has(streamKey)) continue;
-      observationsByStream.set(streamKey, {
-        streamKey,
-        project: stream.project,
-        projectRank: 0,
-        engine: stream.engine,
-        startedAtMs: stream.startedAtMs,
-      });
+    const effectiveEnd = (observation: typeof observations[number]): number => {
+      if (observation.window.endedAt !== null) return observation.window.endedAt;
+      if (observation.openWindowActive) return now;
+      return Math.min(now, Math.max(
+        observation.window.startedAt,
+        observation.entry.mtime * 1_000,
+        current.streams[observation.streamKey]?.lastObservedAtMs ?? observation.window.startedAt,
+      ));
+    };
+    const effectiveEnds = observations.map(effectiveEnd);
+    const coveredBySameProject = new Array<boolean>(observations.length).fill(false);
+    const observationsByProject = new Map<string, number[]>();
+    for (let index = 0; index < observations.length; index += 1) {
+      const indexes = observationsByProject.get(observations[index]!.project) ?? [];
+      indexes.push(index);
+      observationsByProject.set(observations[index]!.project, indexes);
     }
-    const observations = [...observationsByStream.values()];
-    const boundaryStreams = boundaryStreamsFor(observations);
-    for (const observation of observations) {
-      materializeOperatorStream(
+    for (const indexes of observationsByProject.values()) {
+      const candidates = [...indexes].sort((left, right) =>
+        observations[left]!.window.startedAt - observations[right]!.window.startedAt);
+      const queries = indexes
+        .filter((index) => observations[index]!.window.endedAt !== null || !observations[index]!.openWindowActive)
+        .sort((left, right) => effectiveEnds[left]! - effectiveEnds[right]!);
+      let candidateIndex = 0;
+      let maximumEnd = Number.NEGATIVE_INFINITY;
+      let activeAtMaximumEnd = false;
+      for (const query of queries) {
+        const queryEnd = effectiveEnds[query]!;
+        while (
+          candidateIndex < candidates.length
+          && observations[candidates[candidateIndex]!]!.window.startedAt <= queryEnd
+        ) {
+          const candidate = candidates[candidateIndex]!;
+          const candidateEnd = effectiveEnds[candidate]!;
+          const activeOpen = observations[candidate]!.window.endedAt === null
+            && observations[candidate]!.openWindowActive;
+          if (candidateEnd > maximumEnd) {
+            maximumEnd = candidateEnd;
+            activeAtMaximumEnd = activeOpen;
+          } else if (candidateEnd === maximumEnd && activeOpen) {
+            activeAtMaximumEnd = true;
+          }
+          candidateIndex += 1;
+        }
+        coveredBySameProject[query] = maximumEnd > queryEnd
+          || (maximumEnd === queryEnd && activeAtMaximumEnd);
+      }
+    }
+    for (let index = 0; index < observations.length; index += 1) {
+      const observation = observations[index]!;
+      addWindow(
         current,
-        observation,
+        observation.entry,
+        observation.streamKey,
+        observation.project,
+        observation.window,
         now,
         existingKeys,
-        boundaryStreams.has(observation.streamKey),
+        observation.openWindowActive,
+        !coveredBySameProject[index],
       );
     }
     const legacyStreams = new Set(Object.entries(current.streams)
@@ -903,7 +884,12 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
   initialTimer.unref?.();
   const intervalTimer = deps.scheduleInterval(() => { void tick(); }, TICK_INTERVAL_MS);
   intervalTimer.unref?.();
-  report("enabled", { credentialPresent: null }, true);
+  void Promise.resolve()
+    .then(() => deps.readCredential())
+    .then(
+      (credential) => report("enabled", { credentialPresent: Boolean(credential?.value.trim()) }, true),
+      () => report("enabled", { credentialPresent: false }, true),
+    );
 
   return {
     tick,
