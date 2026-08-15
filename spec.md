@@ -1,31 +1,34 @@
-# Issue #1006: Recover conversations owned by dead stage hosts
+# Issue #1003: Carry the runtime home through production adapter builds
 
-Restore messaging for a pipeline-stage Codex conversation after its structured host exits without releasing ownership. Reconcile ownership only when the recorded host process is provably gone, then let the existing send and resume path claim a fresh viewer-owned structured host and deliver the queued message.
+Fix the production Viewer deployment path so the runtime-host adapter passes its validated `$HOME` into Docker as `LLV_RUNTIME_HOME`. Candidate images must bake the same home into the uid-1000 passwd entry and runtime `HOME`, allowing OpenSSH to resolve the mounted operator credentials during Git-over-SSH operations. Preserve the existing Dockerfile and Compose credential model, and add a regression gate around the adapter build path that production deploys actually use.
 
 ## Acceptance criteria
 
-AC1: Send admission detects a stale structured-host claim whose recorded process identity is provably dead and releases that claim before recovery.
+AC1: The runtime-host adapter validates that its `HOME` value is present and absolute before candidate build work mutates deployment state.
 
-AC2: A send to a completed pipeline-stage conversation with a dead host proceeds through a fresh structured-host claim and reaches the delivery queue.
+AC2: The adapter's candidate `docker build` invocation passes `--build-arg LLV_RUNTIME_HOME=<runtime-host HOME>` as one argument value without shell interpolation.
 
-AC3: Startup reconciliation releases stale dead-host ownership for terminal or superseded structured conversations.
+AC3: The candidate Dockerfile continues to use `LLV_RUNTIME_HOME` for both the runtime `HOME` environment and the uid-1000 passwd home.
 
-AC4: Periodic runtime reconciliation releases the same stale ownership when the viewer remains running after the stage host disappears.
+AC4: The adapter integration test executes the `build-candidate` action, captures its Docker invocation, and asserts the `LLV_RUNTIME_HOME` build argument independently of Compose interpolation.
 
-AC5: Live owners and unverifiable process identities remain fenced from takeover.
+AC5: Product source changes remain within the deployment adapter, Docker configuration, and related-test scope; runtime flows, API routes, and UI remain unchanged.
 
-AC6: Recovery uses the existing structured send and resume path without adding a new UI surface or changing explicit legacy delivery.
+AC6: After the next approved fresh production deploy through `scripts/rebuild.sh`, `getent passwd 1000` reports the same home as `$HOME` inside the serving container.
 
-AC7: Runtime-state tests use isolated temporary state and cover stage completion, unclean host loss, retained ownership, fresh claiming, and successful message enqueueing.
+AC7: After that deploy, `git ls-remote` over SSH to the repository succeeds from the serving container using the mounted operator credentials.
 
-AC8: Focused tests, TypeScript type checking, scoped linting, diff checks, and publication privacy checks pass.
+AC8: Focused adapter tests, TypeScript type checking, diff checks, and publication privacy gates pass without a deployment or container restart during implementation.
 
 ## Validation gates
 
-- `bun test src/lib/runtime/structuredMessageDelivery.test.ts src/lib/runtime/startup.test.ts src/lib/reaperRuntime.test.ts src/lib/runtime/structuredRecovery.test.ts`
-- `LLV_AGENT_REGISTRY_SQLITE=sqlite bun test src/lib/runtime/structuredMessageDelivery.test.ts src/lib/runtime/startup.test.ts src/lib/reaperRuntime.test.ts src/lib/runtime/structuredRecovery.test.ts`
+- `bun run build:mcp` to generate the ignored MCP bundle required by the complete adapter test file in a fresh worktree
+- `bun test scripts/runtime-host-viewer-adapter.test.ts`
 - `bunx tsc --noEmit`
-- Scoped ESLint over changed TypeScript files
 - `git diff --check`
 - `bun scripts/privacy-publication-gate.ts --base origin/main`
 - `bun run privacy:check`
+
+## Deployment boundary
+
+Production deployment and runtime acceptance for AC6 and AC7 remain scheduled for the next operator-approved deploy.

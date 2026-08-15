@@ -205,6 +205,10 @@ function runtimeHostGeneration(value: unknown): { image: string; revision: strin
 }
 
 async function buildCandidate(deploymentId: string, revision: string): Promise<ViewerReleaseIdentity> {
+  const runtimeHome = process.env.HOME?.trim();
+  if (!runtimeHome || !path.isAbsolute(runtimeHome)) {
+    throw new Error("runtime-host HOME must be an absolute path before building a Viewer candidate");
+  }
   await ensureMirror();
   await command(["git", "--git-dir", mirrorDir, "cat-file", "-e", `${revision}^{commit}`]);
   const sourceDir = path.join(deploymentDir, deploymentId, "source");
@@ -224,7 +228,12 @@ async function buildCandidate(deploymentId: string, revision: string): Promise<V
       "--profile", "*", "config", "--format", "json",
     ]);
     writeComposeConfig(container, composeConfig);
-    await command(["docker", "build", "--pull", "--label", `dev.live-log-viewer.revision=${revision}`, "-t", image, sourceDir]);
+    await command([
+      "docker", "build", "--pull",
+      "--build-arg", `LLV_RUNTIME_HOME=${runtimeHome}`,
+      "--label", `dev.live-log-viewer.revision=${revision}`,
+      "-t", image, sourceDir,
+    ]);
     await command([process.execPath, "install", "--frozen-lockfile", "--production"], { cwd: sourceDir });
     await command([process.execPath, "run", "build:mcp"], { cwd: sourceDir });
     mcpRuntime = mcpRuntimeStore.stagePreparedPackage(sourceDir, deploymentId, revision);
