@@ -223,3 +223,22 @@ export function acknowledgeDirectOperatorWakatimeActions(
     writeActionFile(filename, { version: FILE_VERSION, actions: retained });
   });
 }
+
+/** Successful legacy delivery consumes its retry fingerprint. The action
+    remains queued for WakaTime, while a later identical gesture receives a
+    fresh identity immediately. Failed or interrupted deliveries leave the
+    fingerprint in place for one compatibility retry. */
+export function settleDirectOperatorWakatimeCompatibility(
+  key: string,
+  filename: string = directOperatorWakatimeActionFile(),
+): void {
+  withFileTransactionSync(filename, BUSY_MESSAGE, () => {
+    const state = readActionFile(filename);
+    const action = state.actions[key];
+    if (!action?.compatibilityFingerprint) return;
+    const settled = { ...action };
+    delete settled.compatibilityFingerprint;
+    state.actions[key] = settled;
+    writeActionFile(filename, state);
+  });
+}

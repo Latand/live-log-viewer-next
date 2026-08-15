@@ -9,6 +9,7 @@ import {
   acknowledgeDirectOperatorWakatimeActions,
   readDirectOperatorWakatimeActions,
   recordDirectOperatorWakatimeActivity,
+  settleDirectOperatorWakatimeCompatibility,
 } from "./operatorActivity";
 
 const NOW = Date.parse("2026-07-29T12:00:00.000Z");
@@ -118,9 +119,10 @@ test("an id-less retry reuses a privacy-safe fingerprint briefly while a later i
       now: () => NOW + 1_000,
       registrySnapshot: registry,
     });
+    settleDirectOperatorWakatimeCompatibility(first.key, filename);
     const laterGesture = recordDirectOperatorWakatimeActivity(input, {
       filename,
-      now: () => NOW + 6_000,
+      now: () => NOW + 1_001,
       registrySnapshot: registry,
     });
 
@@ -130,6 +132,31 @@ test("an id-less retry reuses a privacy-safe fingerprint briefly while a later i
     const persisted = fs.readFileSync(filename, "utf8");
     expect(persisted).toContain(fingerprint);
     expect(persisted).not.toContain("conversation_direct");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a failed id-less delivery retains its retry identity until the retry succeeds", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wakatime-operator-"));
+  const filename = path.join(directory, "operator-actions.json");
+  const input = { conversationId: "conversation_direct", compatibilityFingerprint: "d".repeat(64) };
+  try {
+    const first = recordDirectOperatorWakatimeActivity(input, { filename, now: () => NOW, registrySnapshot: registry });
+    const failedRetry = recordDirectOperatorWakatimeActivity(input, {
+      filename,
+      now: () => NOW + 2_000,
+      registrySnapshot: registry,
+    });
+    expect(failedRetry.key).toBe(first.key);
+
+    settleDirectOperatorWakatimeCompatibility(failedRetry.key, filename);
+    const nextGesture = recordDirectOperatorWakatimeActivity(input, {
+      filename,
+      now: () => NOW + 2_001,
+      registrySnapshot: registry,
+    });
+    expect(nextGesture.key).not.toBe(first.key);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
