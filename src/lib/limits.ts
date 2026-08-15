@@ -25,6 +25,9 @@ const OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 const TAIL_BYTES = 192 * 1024;
 /** Newest session files to try before giving up (fresh ones may lack limits). */
 const MAX_FILES = 12;
+/** Date buckets inspected for newly created sessions. Recent history supplies
+    active long-running sessions whose start bucket has aged past this bound. */
+const MAX_RECENT_SESSION_DAYS = 8;
 const CACHE_MS = 30_000;
 const FAILURE_COOLDOWN_MS = 60_000;
 const MAX_RATE_LIMIT_BACKOFF_MS = 15 * 60_000;
@@ -44,6 +47,8 @@ export type LimitRead = {
   data: EngineLimits | null;
   reason: string | null;
   source: "live" | "transcript" | "unavailable";
+  /** Newest provider rejection even when the readable tail has no quota event. */
+  rejectedAt?: number | null;
   retryAt?: number;
   backoffReason?: typeof CODEX_INITIALIZE_TIMEOUT_REASON;
 };
@@ -197,6 +202,15 @@ function resolveRead(read: LimitRead, cached: EngineCacheEntry | null, staleSinc
       data: read.data,
       meta: { source: read.source, reason: read.reason, staleSince: read.reason ? staleSince : null, retryAt: retryAt ? new Date(retryAt).toISOString() : null },
       retryAt,
+      consecutive429s: 0,
+      consecutiveInitializeTimeouts,
+    };
+  }
+  if (read.rejectedAt !== null && read.rejectedAt !== undefined && cached?.data) {
+    return {
+      data: applyTranscriptRejection(cached.data, read.rejectedAt),
+      meta: { source: "transcript", reason: read.reason, staleSince: null, retryAt: null },
+      retryAt: null,
       consecutive429s: 0,
       consecutiveInitializeTimeouts,
     };
@@ -411,12 +425,15 @@ export async function readCodexLimits(options: {
   const transcript = readCodexTranscriptLimits(account.sessionsDir);
   try {
     const rateLimits = await (options.liveReader ?? ((candidate) => managedCodexRuntime().readRateLimits(candidate as CodexAccount)))(account);
-    const observedAt = Math.round(clock() / 1000);
+    const observedAt = clock() / 1000;
     const live = mapAppServerRateLimits(rateLimits, observedAt);
-    if (!transcript.data) return { data: live, reason: null, source: "live" };
+    const transcriptLimits = transcript.data ?? (transcript.rejectedAt !== null && transcript.rejectedAt !== undefined
+      ? applyTranscriptRejection(live, transcript.rejectedAt)
+      : null);
+    if (!transcriptLimits) return { data: live, reason: null, source: "live" };
     const reconciled = reconcileQuotaReadings(
       { limits: live, observedAt: live.capturedAt, stale: false, source: "live" },
-      { limits: transcript.data, observedAt: transcript.data.capturedAt, stale: false, source: "transcript" },
+      { limits: transcriptLimits, observedAt: transcriptLimits.capturedAt, stale: false, source: "transcript" },
       observedAt,
     );
     const transcriptWon = quotaUsesSource(reconciled, "transcript");
@@ -435,6 +452,10 @@ export async function readCodexLimits(options: {
       source: "transcript",
       ...(initializeTimedOut ? { backoffReason: CODEX_INITIALIZE_TIMEOUT_REASON } : {}),
     };
+    if (transcript.rejectedAt !== null && transcript.rejectedAt !== undefined) return {
+      ...transcript,
+      ...(initializeTimedOut ? { backoffReason: CODEX_INITIALIZE_TIMEOUT_REASON } : {}),
+    };
     return { data: null, reason: initializeTimedOut ? CODEX_INITIALIZE_TIMEOUT_REASON : "app-server-unavailable", source: "unavailable" };
   }
 }
@@ -442,11 +463,21 @@ export async function readCodexLimits(options: {
 /** Compatibility reader for legacy homes and unavailable app-server children. */
 export function readCodexTranscriptLimits(sessionsDir = accountForSpawn().sessionsDir): LimitRead {
   let scanned = 0;
+  let latest: EngineLimits | null = null;
+  let rejectedAt: number | null = null;
   for (const file of latestSessionFiles(sessionsDir)) {
     scanned += 1;
-    const hit = lastRateLimits(file);
-    if (hit) return { data: hit, reason: null, source: "transcript" };
+    const scan = lastRateLimits(file);
+    if (scan.rejectedAt !== null && (rejectedAt === null || scan.rejectedAt > rejectedAt)) rejectedAt = scan.rejectedAt;
+    if (scan.data && (!latest || latest.capturedAt === null || (scan.data.capturedAt !== null && scan.data.capturedAt > latest.capturedAt))) latest = scan.data;
   }
+  if (latest) {
+    const data = rejectedAt !== null && (latest.capturedAt === null || rejectedAt >= latest.capturedAt)
+      ? applyTranscriptRejection(latest, rejectedAt)
+      : latest;
+    return { data, reason: null, source: "transcript", rejectedAt };
+  }
+  if (rejectedAt !== null) return { data: null, reason: "usage-limit-exceeded", source: "transcript", rejectedAt };
   return { data: null, reason: scanned === 0 ? "no codex session files" : `no rate_limits event in newest ${scanned} session files`, source: "unavailable" };
 }
 
@@ -486,8 +517,98 @@ function* sessionFiles(sessionsDir: string, max: number): Generator<{ p: string;
   }
 }
 
-function* latestSessionFiles(sessionsDir: string): Generator<string> {
-  for (const entry of sessionFiles(sessionsDir, MAX_FILES)) yield entry.p;
+function latestDayDirs(sessionsDir: string, max: number): string[] {
+  const dirs: string[] = [];
+  for (const year of listDesc(sessionsDir)) {
+    for (const month of listDesc(path.join(sessionsDir, year))) {
+      for (const day of listDesc(path.join(sessionsDir, year, month))) {
+        dirs.push(path.join(sessionsDir, year, month, day));
+        if (dirs.length >= max) return dirs;
+      }
+    }
+  }
+  return dirs;
+}
+
+function boundedJsonlNames(dir: string, max: number): string[] {
+  let handle: fs.Dir;
+  try {
+    handle = fs.opendirSync(dir);
+  } catch {
+    return [];
+  }
+  const names: string[] = [];
+  try {
+    for (let entry = handle.readSync(); entry; entry = handle.readSync()) {
+      if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+      const index = names.findIndex((name) => entry.name.localeCompare(name) > 0);
+      if (index === -1) names.push(entry.name);
+      else names.splice(index, 0, entry.name);
+      if (names.length > max) names.pop();
+    }
+  } finally {
+    handle.closeSync();
+  }
+  return names;
+}
+
+function dayDirFromSessionId(sessionsDir: string, sessionId: string): string | null {
+  const match = /^([0-9a-f]{8})-([0-9a-f]{4})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.exec(sessionId);
+  if (!match) return null;
+  const startedAt = Number.parseInt(match[1] + match[2], 16);
+  if (!Number.isFinite(startedAt)) return null;
+  const date = new Date(startedAt);
+  if (Number.isNaN(date.getTime())) return null;
+  return path.join(
+    sessionsDir,
+    String(date.getFullYear()),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  );
+}
+
+/** Recent prompt history is a bounded index of active session ids. It keeps a
+    long-running transcript discoverable after newer start-date buckets exist. */
+function recentHistorySessionFiles(sessionsDir: string): string[] {
+  const text = readTail(path.join(path.dirname(sessionsDir), "history.jsonl"), TAIL_BYTES);
+  if (!text) return [];
+  const files: string[] = [];
+  const seen = new Set<string>();
+  for (const line of text.split("\n").reverse()) {
+    if (!line.includes('"session_id"')) continue;
+    try {
+      const row = JSON.parse(line) as { session_id?: unknown };
+      if (typeof row.session_id !== "string" || seen.has(row.session_id)) continue;
+      seen.add(row.session_id);
+      const dir = dayDirFromSessionId(sessionsDir, row.session_id);
+      if (!dir) continue;
+      const name = listDesc(dir).find((candidate) => candidate.endsWith(`${row.session_id}.jsonl`));
+      if (name) files.push(path.join(dir, name));
+      if (seen.size >= MAX_FILES) break;
+    } catch {
+      /* the first history line can be a partial tail record */
+    }
+  }
+  return files;
+}
+
+function latestSessionFiles(sessionsDir: string): string[] {
+  const candidates = new Set(recentHistorySessionFiles(sessionsDir));
+  for (const dir of latestDayDirs(sessionsDir, MAX_RECENT_SESSION_DAYS)) {
+    for (const name of boundedJsonlNames(dir, MAX_FILES)) candidates.add(path.join(dir, name));
+  }
+  const entries: { p: string; m: number }[] = [];
+  for (const p of candidates) {
+    try {
+      entries.push({ p, m: fs.statSync(p).mtimeMs });
+    } catch {
+      /* vanished mid-scan */
+    }
+  }
+  return entries
+    .sort((a, b) => b.m - a.m || b.p.localeCompare(a.p))
+    .slice(0, MAX_FILES)
+    .map((entry) => entry.p);
 }
 
 function readTail(file: string, bytes: number): string | null {
@@ -510,10 +631,11 @@ function readTail(file: string, bytes: number): string | null {
   }
 }
 
-function lastRateLimits(file: string): EngineLimits | null {
+function lastRateLimits(file: string): { data: EngineLimits | null; rejectedAt: number | null } {
   const text = readTail(file, TAIL_BYTES);
-  if (!text) return null;
+  if (!text) return { data: null, rejectedAt: null };
   const lines = text.split("\n");
+  let data: EngineLimits | null = null;
   let rejectedAt: number | null = null;
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
@@ -521,12 +643,12 @@ function lastRateLimits(file: string): EngineLimits | null {
     try {
       const row = JSON.parse(line) as {
         timestamp?: unknown;
-        payload?: { rate_limits?: CodexRateLimits; error?: { codex_error_info?: unknown } };
+        payload?: { rate_limits?: CodexRateLimits; codex_error_info?: unknown; error?: { codex_error_info?: unknown } };
       };
       const ts = typeof row.timestamp === "string" ? Date.parse(row.timestamp) : NaN;
-      const capturedAt = Number.isFinite(ts) ? Math.round(ts / 1000) : null;
-      if (row.payload?.error?.codex_error_info === "usage_limit_exceeded") {
-        rejectedAt ??= capturedAt;
+      const capturedAt = Number.isFinite(ts) ? ts / 1000 : null;
+      if (row.payload?.codex_error_info === "usage_limit_exceeded" || row.payload?.error?.codex_error_info === "usage_limit_exceeded") {
+        if (capturedAt !== null && (rejectedAt === null || capturedAt > rejectedAt)) rejectedAt = capturedAt;
         continue;
       }
       const rl = row.payload?.rate_limits;
@@ -536,24 +658,37 @@ function lastRateLimits(file: string): EngineLimits | null {
       // limit families, e.g. credit balances). They say nothing about the
       // account's quota, so keep looking back for one that does.
       if (!routed.session && !routed.weekly) continue;
-      if (rejectedAt !== null) {
-        const candidates = (["session", "weekly"] as const)
-          .flatMap((key) => routed[key] ? [{ key, value: routed[key] }] : [])
-          .sort((left, right) => right.value!.usedPercent - left.value!.usedPercent || left.key.localeCompare(right.key));
-        const governing = candidates[0];
-        if (governing) routed[governing.key] = { ...governing.value!, usedPercent: 100, observedAt: rejectedAt };
+      if (!data || data.capturedAt === null || (capturedAt !== null && capturedAt > data.capturedAt)) {
+        data = {
+          session: routed.session,
+          weekly: routed.weekly,
+          plan: typeof rl.plan_type === "string" ? rl.plan_type : null,
+          capturedAt,
+        };
       }
-      return {
-        session: routed.session,
-        weekly: routed.weekly,
-        plan: typeof rl.plan_type === "string" ? rl.plan_type : null,
-        capturedAt: rejectedAt ?? capturedAt,
-      };
     } catch {
       /* first line of the tail chunk is usually cut mid-JSON */
     }
   }
-  return null;
+  return { data, rejectedAt };
+}
+
+function applyTranscriptRejection(limits: EngineLimits, rejectedAt: number): EngineLimits {
+  const candidates = (["session", "weekly"] as const)
+    .flatMap((key) => limits[key] ? [{ key, value: limits[key] }] : [])
+    .sort((left, right) => right.value!.usedPercent - left.value!.usedPercent || left.key.localeCompare(right.key));
+  const governing = candidates[0];
+  if (!governing) return limits;
+  const resetsAt = governing.value!.resetsAt !== null && governing.value!.resetsAt <= rejectedAt
+    ? null
+    : governing.value!.resetsAt;
+  const data: EngineLimits = {
+    ...limits,
+    [governing.key]: { ...governing.value!, usedPercent: 100, resetsAt, observedAt: rejectedAt, source: "transcript" },
+  };
+  const observed = [data.session?.observedAt, data.weekly?.observedAt]
+    .filter((value): value is number => value !== null && value !== undefined);
+  return { ...data, capturedAt: observed.length ? Math.min(...observed) : rejectedAt };
 }
 
 function codexWindow(w: CodexWindow | undefined, capturedAt: number | null): LimitWindow | null {

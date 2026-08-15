@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, setSystemTime, test } from "bun:test";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
@@ -24,6 +24,7 @@ Object.assign(globalThis, {
 const NOW = Math.round(Date.now() / 1000);
 
 let limits: LimitsPayload;
+let limitsUnavailable = false;
 const baseAccount = {
   id: "account-a",
   label: "Account A",
@@ -50,12 +51,12 @@ const accounts = {
 // this stub rather than the real endpoints.
 globalThis.fetch = (async (input: RequestInfo | URL) => {
   const url = String(input);
-  if (url === "/api/limits") return Response.json(limits);
+  if (url === "/api/limits") return limitsUnavailable ? new Response(null, { status: 503 }) : Response.json(limits);
   if (url === "/api/accounts") return Response.json(accounts);
   return new Response(null, { status: 404 });
 }) as unknown as typeof fetch;
 
-const { LimitsFooter } = await import("./LimitsFooter");
+const { LimitsFooter, fmtQuotaStaleHint } = await import("./LimitsFooter");
 
 let root: Root | null = null;
 afterEach(async () => {
@@ -63,6 +64,8 @@ afterEach(async () => {
   root = null;
   document.body.replaceChildren();
   accounts.codex.accounts = [baseAccount];
+  limitsUnavailable = false;
+  setSystemTime();
 });
 
 async function render(): Promise<HTMLElement> {
@@ -167,6 +170,91 @@ test("a stale reconciled number renders a visible as-of hint", async () => {
 
   const host = await render();
   expect(host.textContent).toContain("as of");
+});
+
+test("timestamp-less stale footer rows retain a visible last-known label", () => {
+  expect(fmtQuotaStaleHint(true, null, "en")).toBe("Last known values");
+  expect(fmtQuotaStaleHint(false, null, "en")).toBeNull();
+});
+
+test("failed polls still advance stale age and expired-exhaustion selection", async () => {
+  const realSetInterval = globalThis.setInterval;
+  let poll: (() => Promise<void>) | null = null;
+  globalThis.setInterval = ((handler: TimerHandler) => {
+    poll = handler as () => Promise<void>;
+    return 1 as unknown as ReturnType<typeof setInterval>;
+  }) as unknown as typeof setInterval;
+  setSystemTime(new Date(NOW * 1000));
+  limits = {
+    claude: null,
+    codex: {
+      session: { usedPercent: 50, resetsAt: NOW + 3_600, windowMinutes: 300, observedAt: NOW - 19 * 60 },
+      weekly: { usedPercent: 100, resetsAt: NOW + 30, windowMinutes: 10_080, observedAt: NOW - 19 * 60 },
+      plan: "prolite",
+      capturedAt: NOW - 19 * 60,
+    },
+    claudeAccountId: "claude-a",
+    codexAccountId: "account-a",
+    provenance: {
+      claude: { source: "unavailable", reason: null, staleSince: null },
+      codex: { source: "transcript", reason: "transcript-reconciled", staleSince: null },
+    },
+  };
+
+  try {
+    const host = await render();
+    expect(host.textContent).toContain("0%");
+    expect(host.textContent).not.toContain("as of");
+
+    limitsUnavailable = true;
+    setSystemTime(new Date((NOW + 120) * 1000));
+    await act(async () => { await poll?.(); });
+
+    expect(host.textContent).toContain("79%");
+    expect(host.textContent).toContain("as of");
+  } finally {
+    globalThis.setInterval = realSetInterval;
+  }
+});
+
+test("failed polls retain the original receipt time for timestamp-less Claude windows", async () => {
+  const realSetInterval = globalThis.setInterval;
+  let poll: (() => Promise<void>) | null = null;
+  globalThis.setInterval = ((handler: TimerHandler) => {
+    poll = handler as () => Promise<void>;
+    return 1 as unknown as ReturnType<typeof setInterval>;
+  }) as unknown as typeof setInterval;
+  setSystemTime(new Date(NOW * 1000));
+  limits = {
+    claude: {
+      session: { usedPercent: 50, resetsAt: NOW + 3_600, windowMinutes: 300 },
+      weekly: null,
+      plan: "max",
+      capturedAt: null,
+    },
+    codex: null,
+    claudeAccountId: "claude-a",
+    codexAccountId: "account-a",
+    provenance: {
+      claude: { source: "live", reason: null, staleSince: null },
+      codex: { source: "unavailable", reason: null, staleSince: null },
+    },
+  };
+
+  try {
+    const host = await render();
+    const trigger = [...host.querySelectorAll("button")].find((button) => button.getAttribute("aria-label")?.includes("Claude"));
+    const block = trigger?.closest("div.relative");
+    expect(block?.textContent).not.toContain("as of");
+
+    limitsUnavailable = true;
+    setSystemTime(new Date((NOW + 21 * 60) * 1000));
+    await act(async () => { await poll?.(); });
+
+    expect(block?.textContent).toContain("as of");
+  } finally {
+    globalThis.setInterval = realSetInterval;
+  }
 });
 
 test("an account B limits payload cannot override account A at the rendering seam", async () => {

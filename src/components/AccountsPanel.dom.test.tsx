@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, setSystemTime, test } from "bun:test";
 import { Window } from "happy-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { flushSync } from "react-dom";
@@ -6,6 +6,7 @@ import { flushSync } from "react-dom";
 import type { ClaudeLoginView, EngineAccountsState } from "@/hooks/useEngineAccounts";
 
 import { AccountsPanel } from "./AccountsPanel";
+import { formatQuotaAsOf, formatResetEta } from "./rateLimit";
 
 const dom = new Window();
 Object.assign(globalThis, {
@@ -51,12 +52,12 @@ function state(currentLogin: ClaudeLoginView, over: Partial<EngineAccountsState>
   };
 }
 
-async function mount(initial: EngineAccountsState): Promise<{ host: HTMLDivElement; rerender(next: EngineAccountsState): Promise<void>; unmount(): Promise<void> }> {
+async function mount(initial: EngineAccountsState, placement: "footer" | "header" = "footer"): Promise<{ host: HTMLDivElement; rerender(next: EngineAccountsState): Promise<void>; unmount(): Promise<void> }> {
   const host = document.createElement("div");
   document.body.append(host);
   const root: Root = createRoot(host);
   const render = async (next: EngineAccountsState) => {
-    flushSync(() => { root.render(<AccountsPanel state={next} onClose={() => {}} />); });
+    flushSync(() => { root.render(<AccountsPanel state={next} onClose={() => {}} placement={placement} />); });
     await Promise.resolve();
   };
   await render(initial);
@@ -74,6 +75,7 @@ const mounted: Array<{ unmount(): Promise<void> }> = [];
 afterEach(async () => {
   await Promise.all(mounted.splice(0).map((item) => item.unmount()));
   document.body.replaceChildren();
+  setSystemTime();
 });
 
 function dispatch(target: EventTarget, event: unknown): boolean {
@@ -329,4 +331,89 @@ test("an aged account quota snapshot renders a visible as-of hint", async () => 
   mounted.push(view);
 
   expect(view.host.querySelector('[aria-label="Quota windows for Acc"]')?.textContent).toContain("as of");
+});
+
+test("a header-opened panel ages quota hints and reset ETAs while it remains mounted", async () => {
+  const realSetInterval = globalThis.setInterval;
+  const realClearInterval = globalThis.clearInterval;
+  let tick: (() => void) | null = null;
+  let view: Awaited<ReturnType<typeof mount>> | null = null;
+  // @ts-expect-error deterministic interval test double
+  globalThis.setInterval = (fn: () => void) => {
+    tick = fn;
+    return 1;
+  };
+  globalThis.clearInterval = () => {};
+  try {
+    const now = Date.parse("2026-08-15T09:00:00.000Z") / 1000;
+    const observedAt = now - 19 * 60;
+    const resetsAt = now + 5_401;
+    setSystemTime(new Date(now * 1000));
+    view = await mount(state(login({ phase: "authenticated" }), {
+      accounts: [{
+        id: "acc", label: "Acc", kind: "managed", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null, login: null,
+        limits: {
+          freshness: "fresh",
+          session: null,
+          weekly: { usedPercent: 80, resetsAt, windowMinutes: 10_080, observedAt },
+          checkedAt: new Date(observedAt * 1000).toISOString(),
+        },
+      }],
+    }), "header");
+    const detail = () => view!.host.querySelector('[aria-label="Quota windows for Acc"]')!;
+
+    expect(detail().textContent).not.toContain("as of");
+    expect(detail().textContent).toContain(formatResetEta(resetsAt, now));
+
+    setSystemTime(new Date((now + 2 * 60) * 1000));
+    flushSync(() => tick!());
+
+    expect(detail().textContent).toContain(formatQuotaAsOf(observedAt)!);
+    expect(detail().textContent).toContain(formatResetEta(resetsAt, now + 2 * 60));
+  } finally {
+    await view?.unmount();
+    globalThis.setInterval = realSetInterval;
+    globalThis.clearInterval = realClearInterval;
+  }
+});
+
+test("distinct stale quota windows retain their own as-of hints", async () => {
+  const sessionObservedAt = Date.parse("2020-01-01T09:00:00.000Z") / 1000;
+  const weeklyObservedAt = Date.parse("2020-01-01T09:10:00.000Z") / 1000;
+  const initial = state(login({ phase: "authenticated" }), {
+    accounts: [{
+      id: "acc", label: "Acc", kind: "managed", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null, login: null,
+      limits: {
+        freshness: "fresh",
+        session: { usedPercent: 33, resetsAt: null, windowMinutes: 300, observedAt: sessionObservedAt },
+        weekly: { usedPercent: 80, resetsAt: null, windowMinutes: 10_080, observedAt: weeklyObservedAt },
+        checkedAt: "2020-01-01T09:20:00.000Z",
+      },
+    }],
+  });
+  const view = await mount(initial);
+  mounted.push(view);
+  const detail = view.host.querySelector('[aria-label="Quota windows for Acc"]')!;
+
+  expect(detail.textContent).toContain(formatQuotaAsOf(sessionObservedAt)!);
+  expect(detail.textContent).toContain(formatQuotaAsOf(weeklyObservedAt)!);
+  expect(detail.textContent?.match(/as of/g)).toHaveLength(2);
+});
+
+test("stale quota windows without timestamps retain a visible last-known label", async () => {
+  const initial = state(login({ phase: "authenticated" }), {
+    accounts: [{
+      id: "acc", label: "Acc", kind: "managed", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null, login: null,
+      limits: {
+        freshness: "stale",
+        session: { usedPercent: 33, resetsAt: null, windowMinutes: 300 },
+        weekly: { usedPercent: 80, resetsAt: null, windowMinutes: 10_080 },
+        checkedAt: null,
+      },
+    }],
+  });
+  const view = await mount(initial);
+  mounted.push(view);
+
+  expect(view.host.querySelector('[aria-label="Quota windows for Acc"]')?.textContent).toContain("Last known values");
 });

@@ -82,6 +82,13 @@ function AccountLimitsDetail({ account, engine, quota, now }: { account: Account
   const stale = windows.some((row) => row.window.stale);
   const observed = windows.map((row) => row.window.observedAt).filter((value): value is number => value !== null);
   const observedAt = observed.length ? Math.min(...observed) : null;
+  const staleObserved = windows
+    .filter((row) => row.window.stale)
+    .map((row) => row.window.observedAt)
+    .filter((value): value is number => value !== null);
+  const sharedStaleAt = staleObserved.length > 1 && staleObserved.every((value) => value === staleObserved[0])
+    ? staleObserved[0]
+    : null;
   const tint = engineTintOf(engine);
   return (
     <dl
@@ -94,10 +101,10 @@ function AccountLimitsDetail({ account, engine, quota, now }: { account: Account
           spotty), so historical numbers never read as current. The check time
           renders for fresh reads too — the panel always says when the numbers
           were last observed. */}
-      {stale || observedAt !== null ? (
+      {sharedStaleAt !== null || (!stale && observedAt !== null) ? (
         <div className="text-[9.5px] font-semibold text-secondary">
-          {stale
-            ? formatQuotaAsOf(observedAt) ?? t("accounts.limitsStale")
+          {sharedStaleAt !== null
+            ? formatQuotaAsOf(sharedStaleAt) ?? t("accounts.limitsStale")
             : `${t("accounts.limitsChecked")} · ${formatCheckedClock(new Date(observedAt! * 1000).toISOString())}`}
         </div>
       ) : null}
@@ -105,6 +112,10 @@ function AccountLimitsDetail({ account, engine, quota, now }: { account: Account
         const w = window.value;
         const left = Math.max(0, Math.min(100, 100 - w.usedPercent));
         const color = capacityColor(left, tint.color);
+        const groupedStaleHint = sharedStaleAt !== null && window.observedAt === sharedStaleAt;
+        const staleHint = window.stale && !groupedStaleHint
+          ? formatQuotaAsOf(window.observedAt) ?? t("accounts.limitsStale")
+          : null;
         return (
           <div key={key} className="flex items-center gap-2 text-[10px] leading-snug text-muted">
             <dt className="w-8 shrink-0 font-semibold">{label}</dt>
@@ -117,6 +128,7 @@ function AccountLimitsDetail({ account, engine, quota, now }: { account: Account
               {w.resetsAt ? (
                 <span className="truncate">· {t("limits.reset", { eta: formatResetEta(w.resetsAt, now), at: formatResetClock(w.resetsAt, now) })}</span>
               ) : null}
+              {staleHint ? <span className="truncate">{w.resetsAt ? "· " : ""}{staleHint}</span> : null}
             </dd>
           </div>
         );
@@ -497,8 +509,13 @@ export function AccountsPanel({
   const { t } = useLocale();
   const { accounts, active, status, notice, mutation, engine } = state;
   const [label, setLabel] = useState("");
-  const [openedAt] = useState(() => Math.floor(Date.now() / 1000));
-  const quotaNow = quotaOverride?.now ?? openedAt;
+  const [presentationNow, setPresentationNow] = useState(() => Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    if (quotaOverride) return;
+    const id = setInterval(() => setPresentationNow(Math.floor(Date.now() / 1000)), 30_000);
+    return () => clearInterval(id);
+  }, [quotaOverride]);
+  const quotaNow = quotaOverride?.now ?? presentationNow;
   // While any Claude account has a live login op, the add/sign-in/retry starters
   // stand down so a second login can't race the supervisor (C10).
   const loginBusy = engine === "claude" && accounts.some((account) => account.login != null && NONTERMINAL_CLAUDE_LOGIN_PHASES.has(account.login.phase));

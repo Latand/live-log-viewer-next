@@ -11,6 +11,7 @@ import {
   parseEngineMigration,
 } from "@/lib/accounts/migration";
 import type { TFunction } from "@/lib/i18n";
+import type { LimitWindowSource } from "@/lib/types";
 
 export type Engine = "claude" | "codex";
 
@@ -96,8 +97,11 @@ export function claudeLoginErrKey(code: string | null | undefined): ClaudeLoginE
     Accounts panel: how much is spent and when it resets. `resetsAt` is Unix
     seconds, or null when the engine did not report it. `windowMinutes` is the
     horizon the engine declared for this window, which the row is labelled by
-    (issue #606); null when the engine did not declare one. */
-export type AccountLimitWindow = { usedPercent: number; resetsAt: number | null; windowMinutes: number | null };
+    (issue #606); null when the engine did not declare one. `observedAt` keeps
+    the selected window's Unix timestamp through the client parsing seam. The
+    field remains optional for callers constructing legacy account fixtures;
+    parsed server payloads always normalize it to a timestamp or null. */
+export type AccountLimitWindow = { usedPercent: number; resetsAt: number | null; windowMinutes: number | null; observedAt?: number | null; source?: LimitWindowSource };
 
 /** Per-account quota detail surfaced in the Accounts panel (issue #40): the
     session and weekly windows with reset times, plus how fresh the read is. The
@@ -139,7 +143,11 @@ function parseLimitWindow(raw: unknown): AccountLimitWindow | null {
   if (typeof record.usedPercent !== "number" || !Number.isFinite(record.usedPercent)) return null;
   const resetsAt = typeof record.resetsAt === "number" && Number.isFinite(record.resetsAt) ? record.resetsAt : null;
   const windowMinutes = typeof record.windowMinutes === "number" && Number.isFinite(record.windowMinutes) ? record.windowMinutes : null;
-  return { usedPercent: record.usedPercent, resetsAt, windowMinutes };
+  const observedAt = typeof record.observedAt === "number" && Number.isFinite(record.observedAt) ? record.observedAt : null;
+  const source = record.source === "live" || record.source === "transcript" || record.source === "cache" || record.source === "unavailable" || record.source === "account"
+    ? record.source
+    : undefined;
+  return { usedPercent: record.usedPercent, resetsAt, windowMinutes, observedAt, ...(source ? { source } : {}) };
 }
 
 /** Crash-safe projection of the route's per-account `limits` block. An `unavailable`

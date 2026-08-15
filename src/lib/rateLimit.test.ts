@@ -3,7 +3,7 @@ import { expect, test } from "bun:test";
 import type { Flow } from "@/lib/flows/types";
 import type { EngineLimits, FileEntry } from "@/lib/types";
 
-import { projectRateLimitReadModel, quotaAsEngineLimits, quotaReadingFromEngineLimits, rateLimitFromQuotaObservation, reconcileQuotaReadings } from "./rateLimit";
+import { projectRateLimitReadModel, quotaAsEngineLimits, quotaReadingFromAccountLimits, quotaReadingFromEngineLimits, rateLimitFromQuotaObservation, reconcileQuotaReadings } from "./rateLimit";
 
 const NOW = new Date("2026-07-10T16:00:00.000Z").getTime();
 const RESET = Math.floor(NOW / 1000) + 7_200;
@@ -30,6 +30,61 @@ test("same-account quota conflicts resolve each window to the fresher source", (
     source: "account",
   });
   expect(quotaAsEngineLimits(reconciled)?.weekly).toMatchObject({ observedAt: 2_000 });
+});
+
+test("mixed window provenance survives the EngineLimits serialization seam", () => {
+  const reconciled = reconcileQuotaReadings(
+    {
+      limits: {
+        session: { usedPercent: 10, resetsAt: RESET, windowMinutes: 300 },
+        weekly: null,
+        plan: "pro-lite",
+        capturedAt: 2_000,
+      },
+      observedAt: 2_000,
+      stale: false,
+      source: "live",
+    },
+    {
+      limits: {
+        session: null,
+        weekly: { usedPercent: 100, resetsAt: RESET + 86_400, windowMinutes: 10_080 },
+        plan: "pro-lite",
+        capturedAt: 1_000,
+      },
+      observedAt: 1_000,
+      stale: false,
+      source: "transcript",
+    },
+    2_100,
+  );
+  const serialized = quotaAsEngineLimits(reconciled);
+
+  expect(serialized?.session).toMatchObject({ source: "live" });
+  expect(serialized?.weekly).toMatchObject({ source: "transcript" });
+  const roundTrip = reconcileQuotaReadings(
+    quotaReadingFromEngineLimits(serialized, { source: "transcript", reason: "mixed", staleSince: null }, 2_100),
+    null,
+    2_100,
+  );
+  expect(roundTrip.session?.source).toBe("live");
+  expect(roundTrip.weekly?.source).toBe("transcript");
+});
+
+test("an account window uses its own observation time ahead of snapshot checkedAt", () => {
+  const account = quotaReadingFromAccountLimits({
+    freshness: "fresh",
+    session: null,
+    weekly: { usedPercent: 64, resetsAt: RESET + 86_400, windowMinutes: 10_080, observedAt: 1_000 },
+    checkedAt: "1970-01-01T00:33:20.000Z",
+  });
+  const reconciled = reconcileQuotaReadings(
+    { limits: quota(21, 1_500), observedAt: 1_500, stale: false, source: "transcript" },
+    account,
+    2_100,
+  );
+
+  expect(reconciled.weekly).toMatchObject({ value: { usedPercent: 21 }, observedAt: 1_500, source: "transcript" });
 });
 
 test("an active provider exhaustion overrides a newer non-exhausted probe", () => {

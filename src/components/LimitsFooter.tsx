@@ -22,6 +22,11 @@ export function fmtStaleSince(staleSince: string | null | undefined, locale: Loc
   return formatQuotaAsOf(staleSince, locale);
 }
 
+export function fmtQuotaStaleHint(stale: boolean, observedAt: number | null, locale: Locale): string | null {
+  if (!stale) return null;
+  return formatQuotaAsOf(observedAt, locale) ?? translate(locale, "accounts.limitsStale");
+}
+
 export function fmtLimitsFailureReason(meta: LimitsProvenance, locale: Locale): string | null {
   if (meta.source !== "unavailable" && meta.source !== "cache") return null;
   if (meta.reason === LIMITS_REAUTH_REQUIRED_REASON) return translate(locale, "limits.reauthRequired");
@@ -175,6 +180,7 @@ function EngineLimitsBlock({
   limits,
   payloadAccountId,
   now,
+  receivedAt,
   provenance,
   onSwitched,
 }: {
@@ -183,6 +189,7 @@ function EngineLimitsBlock({
   limits: EngineLimits | null;
   payloadAccountId: string | null;
   now: number;
+  receivedAt: number;
   provenance: LimitsProvenance;
   onSwitched: () => void;
 }) {
@@ -267,7 +274,7 @@ function EngineLimitsBlock({
   const identityPending = Boolean(limits && payloadLimits === null);
   const activeAccount = accounts.accounts.find((account) => account.id === accounts.active);
   const quota = reconcileQuotaReadings(
-    quotaReadingFromEngineLimits(payloadLimits, provenance, now),
+    quotaReadingFromEngineLimits(payloadLimits, provenance, receivedAt),
     quotaReadingFromAccountLimits(activeAccount?.limits),
     now,
   );
@@ -276,7 +283,7 @@ function EngineLimitsBlock({
   const stale = accountLimits?.capturedAt && now - accountLimits.capturedAt > LIMITS_FRESHNESS_S ? fmtAge(accountLimits.capturedAt) : null;
   const activeLabel = activeAccount?.label ?? t("accounts.trigger");
   const effective = effectiveQuota(quota);
-  const effectiveStaleHint = effective?.stale ? formatQuotaAsOf(effective.observedAt, locale) : null;
+  const effectiveStaleHint = fmtQuotaStaleHint(Boolean(effective?.stale), effective?.observedAt ?? null, locale);
   const anyStale = Boolean(quota.session?.stale || quota.weekly?.stale);
   const draining = accounts.migration?.state === "draining";
   const failureReason = fmtLimitsFailureReason(provenance, locale);
@@ -335,8 +342,8 @@ function EngineLimitsBlock({
             }}
             className={`block w-full px-3.5 pt-0.5 text-left hover:bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${visibleFailureReason ? "pb-1.5" : "pb-3"}`}
           >
-            <LimitRow label={windowLabel(t, "session", accountLimits!.session?.windowMinutes)} window={accountLimits!.session} engineColor={tint.color} now={now} staleHint={quota.session?.stale ? formatQuotaAsOf(quota.session.observedAt, locale) : null} />
-            <LimitRow label={windowLabel(t, "weekly", accountLimits!.weekly?.windowMinutes)} window={accountLimits!.weekly} engineColor={tint.color} now={now} staleHint={quota.weekly?.stale ? formatQuotaAsOf(quota.weekly.observedAt, locale) : null} />
+            <LimitRow label={windowLabel(t, "session", accountLimits!.session?.windowMinutes)} window={accountLimits!.session} engineColor={tint.color} now={now} staleHint={fmtQuotaStaleHint(Boolean(quota.session?.stale), quota.session?.observedAt ?? null, locale)} />
+            <LimitRow label={windowLabel(t, "weekly", accountLimits!.weekly?.windowMinutes)} window={accountLimits!.weekly} engineColor={tint.color} now={now} staleHint={fmtQuotaStaleHint(Boolean(quota.weekly?.stale), quota.weekly?.observedAt ?? null, locale)} />
           </button>
         ) : visibleFailureReason ? null : (
           <div className="px-3.5 pb-3 pt-0.5 text-[10px] text-muted">{accounts.status === "loading" || identityPending ? t("limits.accountLoading") : t("limits.noDataYet")}</div>
@@ -353,21 +360,26 @@ function EngineLimitsBlock({
     block is also that engine's account switcher (see {@link EngineLimitsBlock}). */
 export function LimitsFooter() {
   const [snap, setSnap] = useState<{ data: LimitsPayload; at: number } | null>(null);
-  const [mountedAt] = useState(() => Date.now() / 1000);
+  const [now, setNow] = useState(() => Date.now() / 1000);
   /* A switch busts the account-keyed server cache and immediately schedules a
      fresh read through this ref. */
   const loadRef = useRef<() => Promise<void>>(async () => {});
   const invalidateLimits = useCallback(() => void loadRef.current(), []);
 
   useEffect(() => {
+    let active = true;
     const loader = createLatestLimitsLoader(fetch, (json) => {
       setSnap((prev) => ({ data: stickyPayload(prev?.data ?? null, json), at: Date.now() / 1000 }));
     });
-    const load = async () => { await loader.load(); };
+    const load = async () => {
+      await loader.load();
+      if (active) setNow(Date.now() / 1000);
+    };
     loadRef.current = load;
     void load();
     const t = setInterval(load, POLL_MS);
     return () => {
+      active = false;
       clearInterval(t);
       loader.dispose();
       loadRef.current = async () => {};
@@ -376,11 +388,10 @@ export function LimitsFooter() {
 
   // Each engine's account list governs its switcher visibility. Both remain
   // mounted through empty limits, initial loading, and account refresh failures.
-  const now = snap?.at ?? mountedAt;
   return (
     <div className="shrink-0 border-t border-border empty:hidden">
-      <EngineLimitsBlock engine="claude" label="Claude" limits={snap?.data.claude ?? null} payloadAccountId={snap?.data.claudeAccountId ?? null} now={now} provenance={snap?.data.provenance.claude ?? { source: "unavailable", reason: null, staleSince: null }} onSwitched={invalidateLimits} />
-      <EngineLimitsBlock engine="codex" label="Codex" limits={snap?.data.codex ?? null} payloadAccountId={snap?.data.codexAccountId ?? null} now={now} provenance={snap?.data.provenance.codex ?? { source: "unavailable", reason: null, staleSince: null }} onSwitched={invalidateLimits} />
+      <EngineLimitsBlock engine="claude" label="Claude" limits={snap?.data.claude ?? null} payloadAccountId={snap?.data.claudeAccountId ?? null} now={now} receivedAt={snap?.at ?? now} provenance={snap?.data.provenance.claude ?? { source: "unavailable", reason: null, staleSince: null }} onSwitched={invalidateLimits} />
+      <EngineLimitsBlock engine="codex" label="Codex" limits={snap?.data.codex ?? null} payloadAccountId={snap?.data.codexAccountId ?? null} now={now} receivedAt={snap?.at ?? now} provenance={snap?.data.provenance.codex ?? { source: "unavailable", reason: null, staleSince: null }} onSwitched={invalidateLimits} />
     </div>
   );
 }

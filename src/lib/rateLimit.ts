@@ -1,13 +1,13 @@
 import type { DurableQuotaObservation } from "@/lib/accounts/migration/contracts";
 import { effectiveRemaining } from "@/lib/accounts/migration/quotaPolicy";
 import type { Flow } from "@/lib/flows/types";
-import type { Engine, EngineLimits, FileEntry, LimitsProvenance, LimitWindow, RateLimitState } from "@/lib/types";
+import type { Engine, EngineLimits, FileEntry, LimitsProvenance, LimitWindow, LimitWindowSource, RateLimitState } from "@/lib/types";
 
 type HostedEngine = Extract<Engine, "claude" | "codex">;
 
 export const LIMITS_FRESHNESS_S = 20 * 60;
 
-export type QuotaReadingSource = LimitsProvenance["source"] | "account";
+export type QuotaReadingSource = LimitWindowSource;
 
 export interface QuotaReading {
   limits: EngineLimits | null;
@@ -69,7 +69,7 @@ function reconciledWindow(reading: QuotaReading, key: "session" | "weekly", now:
   if (!value) return null;
   const observedAt = value.observedAt ?? reading.observedAt;
   const aged = observedAt !== null && now - observedAt > LIMITS_FRESHNESS_S;
-  return { value, observedAt, stale: reading.stale || aged, source: reading.source };
+  return { value, observedAt, stale: reading.stale || aged, source: value.source ?? reading.source };
 }
 
 function activeExhaustion(window: ReconciledQuotaWindow, now: number): boolean {
@@ -112,8 +112,8 @@ export function quotaAsEngineLimits(quota: ReconciledQuota): EngineLimits | null
   const observed = [quota.session?.observedAt, quota.weekly?.observedAt]
     .filter((value): value is number => value !== null && value !== undefined);
   return {
-    session: quota.session ? { ...quota.session.value, observedAt: quota.session.observedAt } : null,
-    weekly: quota.weekly ? { ...quota.weekly.value, observedAt: quota.weekly.observedAt } : null,
+    session: quota.session ? { ...quota.session.value, observedAt: quota.session.observedAt, source: quota.session.source } : null,
+    weekly: quota.weekly ? { ...quota.weekly.value, observedAt: quota.weekly.observedAt, source: quota.weekly.source } : null,
     plan: quota.plan,
     capturedAt: observed.length ? Math.min(...observed) : null,
   };

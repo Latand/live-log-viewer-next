@@ -1,4 +1,4 @@
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, expect, spyOn, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -14,7 +14,7 @@ fs.mkdirSync(process.env.LLV_CLAUDE_HOME, { recursive: true });
 fs.writeFileSync(path.join(process.env.LLV_CLAUDE_HOME, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "test-token", subscriptionType: "max" } }), { mode: 0o600 });
 
 const { createManagedCodexAccount, setActiveCodexAccount } = await import("@/lib/accounts/codex");
-const { fetchClaudeLimits, mapAppServerRateLimits, readBurndown, readCodexLimits, readLimits } = await import("./limits");
+const { fetchClaudeLimits, mapAppServerRateLimits, readBurndown, readCodexLimits, readCodexTranscriptLimits, readLimits } = await import("./limits");
 const { recordLimitSample } = await import("@/lib/limitsHistoryStore");
 
 afterAll(() => {
@@ -178,6 +178,292 @@ test("usage_limit_exceeded makes the matching transcript window authoritative im
   });
 
   expect(result.data?.weekly).toMatchObject({ usedPercent: 100, resetsAt, observedAt: nowS - 60 });
+});
+
+test("usage_limit_exceeded clears an already-expired quota reset", async () => {
+  const account = createManagedCodexAccount("Expired reset rejection reconciliation");
+  const nowS = Math.floor(Date.now() / 1000);
+  const expiredReset = nowS - 300;
+  const session = path.join(account.sessionsDir, "2026", "08", "15", "expired-reset-rejected.jsonl");
+  fs.mkdirSync(path.dirname(session), { recursive: true });
+  fs.writeFileSync(session, [
+    JSON.stringify({
+      timestamp: new Date((nowS - 120) * 1000).toISOString(),
+      payload: { type: "token_count", rate_limits: { limit_id: "codex", primary: { used_percent: 21, window_minutes: 10_080, resets_at: expiredReset }, secondary: null, plan_type: "prolite" } },
+    }),
+    JSON.stringify({
+      timestamp: new Date((nowS - 60) * 1000).toISOString(),
+      payload: { type: "task_complete", error: { message: "You've hit your usage limit. Try again after reset.", codex_error_info: "usage_limit_exceeded" } },
+    }),
+  ].join("\n") + "\n");
+
+  const result = await readCodexLimits({
+    account,
+    liveReader: async () => ({
+      primary: { usedPercent: 21, resetsAt: nowS + 6 * 86_400, windowDurationMins: 10_080 },
+      secondary: null,
+      planType: "prolite",
+    }),
+  });
+
+  expect(result.data?.weekly).toMatchObject({ usedPercent: 100, resetsAt: null, observedAt: nowS - 60 });
+});
+
+test("a standalone usage_limit_exceeded event exhausts the live governing window", async () => {
+  const account = createManagedCodexAccount("Standalone rejection reconciliation");
+  const nowS = Math.floor(Date.now() / 1000);
+  const resetsAt = nowS + 6 * 86_400;
+  const session = path.join(account.sessionsDir, "2026", "08", "15", "standalone-rejection.jsonl");
+  fs.mkdirSync(path.dirname(session), { recursive: true });
+  fs.writeFileSync(session, JSON.stringify({
+    timestamp: new Date((nowS - 60) * 1000).toISOString(),
+    payload: { type: "task_complete", codex_error_info: "usage_limit_exceeded" },
+  }) + "\n");
+
+  const result = await readCodexLimits({
+    account,
+    liveReader: async () => ({
+      primary: { usedPercent: 21, resetsAt, windowDurationMins: 10_080 },
+      secondary: null,
+      planType: "prolite",
+    }),
+  });
+
+  expect(result.data?.weekly).toMatchObject({ usedPercent: 100, resetsAt, observedAt: nowS - 60 });
+  expect(result.source).toBe("transcript");
+});
+
+test("a standalone rejection exhausts a cached window when the live probe fails", async () => {
+  resetLimitsCache();
+  const account = createManagedCodexAccount("Cached standalone rejection");
+  setActiveCodexAccount(account.id);
+  const nowMs = Date.parse("2026-08-15T12:00:00.000Z");
+  const resetsAt = nowMs / 1000 + 6 * 86_400;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => claudeUsage()) as unknown as typeof fetch;
+  try {
+    const first = await readLimits({
+      now: () => nowMs,
+      codexLiveReader: async () => ({
+        primary: { usedPercent: 21, resetsAt, windowDurationMins: 10_080 },
+        secondary: null,
+        planType: "prolite",
+      }),
+    });
+    expect(first.codex?.weekly?.usedPercent).toBe(21);
+
+    const session = path.join(account.sessionsDir, "2026", "08", "15", "cached-standalone-rejection.jsonl");
+    fs.mkdirSync(path.dirname(session), { recursive: true });
+    fs.writeFileSync(session, JSON.stringify({
+      timestamp: "2026-08-15T12:00:30.000Z",
+      payload: { type: "task_complete", codex_error_info: "usage_limit_exceeded" },
+    }) + "\n");
+    const rejected = await readLimits({
+      now: () => nowMs + 31_000,
+      codexLiveReader: async () => { throw new Error("offline"); },
+    });
+
+    expect(rejected.codex?.weekly).toMatchObject({ usedPercent: 100, observedAt: nowMs / 1000 + 30, source: "transcript" });
+    expect(rejected.provenance.codex.source).toBe("transcript");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("a root-envelope usage_limit_exceeded event is authoritative in one transcript file", async () => {
+  const account = createManagedCodexAccount("Root-envelope rejection reconciliation");
+  const nowS = Math.floor(Date.now() / 1000);
+  const resetsAt = nowS + 6 * 86_400;
+  const session = path.join(account.sessionsDir, "2026", "08", "15", "root-rejected.jsonl");
+  fs.mkdirSync(path.dirname(session), { recursive: true });
+  fs.writeFileSync(session, [
+    JSON.stringify({
+      timestamp: new Date((nowS - 120) * 1000).toISOString(),
+      payload: { type: "token_count", rate_limits: { limit_id: "codex", primary: { used_percent: 21, window_minutes: 10_080, resets_at: resetsAt }, secondary: null, plan_type: "prolite" } },
+    }),
+    JSON.stringify({
+      timestamp: new Date((nowS - 60) * 1000).toISOString(),
+      payload: { type: "task_complete", message: "You've hit your usage limit. Try again after reset.", codex_error_info: "usage_limit_exceeded" },
+    }),
+  ].join("\n") + "\n");
+
+  const result = await readCodexLimits({
+    account,
+    liveReader: async () => ({
+      primary: { usedPercent: 21, resetsAt, windowDurationMins: 10_080 },
+      secondary: null,
+      planType: "prolite",
+    }),
+  });
+
+  expect(result.data?.weekly).toMatchObject({ usedPercent: 100, resetsAt, observedAt: nowS - 60 });
+});
+
+test("usage_limit_exceeded carries from the newest transcript file to an older quota event", async () => {
+  const account = createManagedCodexAccount("Cross-file rejection reconciliation");
+  const nowS = Math.floor(Date.now() / 1000);
+  const resetsAt = nowS + 6 * 86_400;
+  const quotaFile = path.join(account.sessionsDir, "2026", "08", "14", "quota.jsonl");
+  const rejectionFile = path.join(account.sessionsDir, "2026", "08", "15", "rejection.jsonl");
+  fs.mkdirSync(path.dirname(quotaFile), { recursive: true });
+  fs.mkdirSync(path.dirname(rejectionFile), { recursive: true });
+  fs.writeFileSync(quotaFile, JSON.stringify({
+    timestamp: new Date((nowS - 120) * 1000).toISOString(),
+    payload: { type: "token_count", rate_limits: { limit_id: "codex", primary: { used_percent: 21, window_minutes: 10_080, resets_at: resetsAt }, secondary: null, plan_type: "prolite" } },
+  }) + "\n");
+  fs.writeFileSync(rejectionFile, JSON.stringify({
+    timestamp: new Date((nowS - 60) * 1000).toISOString(),
+    payload: { type: "task_complete", message: "You've hit your usage limit. Try again after reset.", codex_error_info: "usage_limit_exceeded" },
+  }) + "\n");
+
+  const result = await readCodexLimits({
+    account,
+    liveReader: async () => ({
+      primary: { usedPercent: 21, resetsAt, windowDurationMins: 10_080 },
+      secondary: null,
+      planType: "prolite",
+    }),
+  });
+
+  expect(result.data?.weekly).toMatchObject({ usedPercent: 100, resetsAt, observedAt: nowS - 60 });
+});
+
+test("transcript reconciliation selects a newer rejection by event time across session directories", async () => {
+  const account = createManagedCodexAccount("Global rejection reconciliation");
+  const nowS = Math.floor(Date.now() / 1000);
+  const resetsAt = nowS + 6 * 86_400;
+  const quotaFile = path.join(account.sessionsDir, "2026", "08", "15", "quota.jsonl");
+  const rejectionFile = path.join(account.sessionsDir, "2026", "08", "14", "long-running.jsonl");
+  fs.mkdirSync(path.dirname(quotaFile), { recursive: true });
+  fs.mkdirSync(path.dirname(rejectionFile), { recursive: true });
+  fs.writeFileSync(quotaFile, JSON.stringify({
+    timestamp: new Date((nowS - 120) * 1000).toISOString(),
+    payload: { type: "token_count", rate_limits: { limit_id: "codex", primary: { used_percent: 21, window_minutes: 10_080, resets_at: resetsAt }, secondary: null, plan_type: "prolite" } },
+  }) + "\n");
+  fs.writeFileSync(rejectionFile, JSON.stringify({
+    timestamp: new Date((nowS - 60) * 1000).toISOString(),
+    payload: { type: "task_complete", error: { message: "You've hit your usage limit. Try again after reset.", codex_error_info: "usage_limit_exceeded" } },
+  }) + "\n");
+
+  const result = await readCodexLimits({
+    account,
+    liveReader: async () => ({
+      primary: { usedPercent: 21, resetsAt, windowDurationMins: 10_080 },
+      secondary: null,
+      planType: "prolite",
+    }),
+  });
+
+  expect(result.data?.weekly).toMatchObject({ usedPercent: 100, resetsAt, observedAt: nowS - 60 });
+});
+
+test("a newer sub-second quota event supersedes an older cross-file rejection", () => {
+  const account = createManagedCodexAccount("Sub-second rejection ordering");
+  const rejectionFile = path.join(account.sessionsDir, "2026", "08", "14", "rejection.jsonl");
+  const quotaFile = path.join(account.sessionsDir, "2026", "08", "15", "quota.jsonl");
+  fs.mkdirSync(path.dirname(rejectionFile), { recursive: true });
+  fs.mkdirSync(path.dirname(quotaFile), { recursive: true });
+  fs.writeFileSync(rejectionFile, JSON.stringify({
+    timestamp: "2026-08-15T12:00:00.100Z",
+    payload: { type: "task_complete", codex_error_info: "usage_limit_exceeded" },
+  }) + "\n");
+  fs.writeFileSync(quotaFile, JSON.stringify({
+    timestamp: "2026-08-15T12:00:00.400Z",
+    payload: { type: "token_count", rate_limits: { limit_id: "codex", primary: { used_percent: 21, window_minutes: 10_080, resets_at: 1_787_000_000 }, secondary: null, plan_type: "prolite" } },
+  }) + "\n");
+
+  expect(readCodexTranscriptLimits(account.sessionsDir).data?.weekly).toMatchObject({
+    usedPercent: 21,
+    observedAt: Date.parse("2026-08-15T12:00:00.400Z") / 1000,
+  });
+});
+
+test("cross-file quota events retain sub-second ordering", () => {
+  const account = createManagedCodexAccount("Sub-second quota ordering");
+  const olderFile = path.join(account.sessionsDir, "2026", "08", "15", "older.jsonl");
+  const newerFile = path.join(account.sessionsDir, "2026", "08", "14", "newer-long-running.jsonl");
+  fs.mkdirSync(path.dirname(olderFile), { recursive: true });
+  fs.mkdirSync(path.dirname(newerFile), { recursive: true });
+  fs.writeFileSync(olderFile, JSON.stringify({
+    timestamp: "2026-08-15T12:00:00.100Z",
+    payload: { type: "token_count", rate_limits: { limit_id: "codex", primary: { used_percent: 37, window_minutes: 10_080, resets_at: 1_787_000_000 }, secondary: null, plan_type: "prolite" } },
+  }) + "\n");
+  fs.writeFileSync(newerFile, JSON.stringify({
+    timestamp: "2026-08-15T12:00:00.400Z",
+    payload: { type: "token_count", rate_limits: { limit_id: "codex", primary: { used_percent: 21, window_minutes: 10_080, resets_at: 1_787_000_000 }, secondary: null, plan_type: "prolite" } },
+  }) + "\n");
+
+  expect(readCodexTranscriptLimits(account.sessionsDir).data?.weekly).toMatchObject({
+    usedPercent: 21,
+    observedAt: Date.parse("2026-08-15T12:00:00.400Z") / 1000,
+  });
+});
+
+test("transcript candidate discovery bounds metadata reads in a large session tree", () => {
+  const account = createManagedCodexAccount("Bounded transcript candidates");
+  for (let day = 1; day <= 40; day += 1) {
+    const dir = path.join(account.sessionsDir, "2026", "07", String(day).padStart(2, "0"));
+    fs.mkdirSync(dir, { recursive: true });
+    for (let file = 0; file < 20; file += 1) {
+      fs.writeFileSync(path.join(dir, `rollout-${String(file).padStart(2, "0")}.jsonl`), "{}\n");
+    }
+  }
+  const current = path.join(account.sessionsDir, "2026", "07", "40", "zz-current.jsonl");
+  fs.writeFileSync(current, JSON.stringify({
+    timestamp: "2026-08-15T12:00:00.400Z",
+    payload: { type: "token_count", rate_limits: { limit_id: "codex", primary: { used_percent: 21, window_minutes: 10_080, resets_at: 1_787_000_000 }, secondary: null, plan_type: "prolite" } },
+  }) + "\n");
+
+  const realStatSync = fs.statSync.bind(fs);
+  let sessionStats = 0;
+  const statSync = spyOn(fs, "statSync").mockImplementation(((target: fs.PathLike, ...args: unknown[]) => {
+    if (String(target).startsWith(account.sessionsDir)) sessionStats += 1;
+    return realStatSync(target, ...args as []);
+  }) as typeof fs.statSync);
+  try {
+    expect(readCodexTranscriptLimits(account.sessionsDir).data?.weekly?.usedPercent).toBe(21);
+    expect(sessionStats).toBeLessThanOrEqual(120);
+  } finally {
+    statSync.mockRestore();
+  }
+});
+
+test("recent history indexes a long-running rejection beyond the day-bucket bound", () => {
+  const account = createManagedCodexAccount("Indexed long-running rejection");
+  const startedAt = Date.parse("2026-06-01T12:00:00.000Z");
+  const prefix = startedAt.toString(16).padStart(12, "0");
+  const sessionId = `${prefix.slice(0, 8)}-${prefix.slice(8)}-7000-8000-000000000001`;
+  const started = new Date(startedAt);
+  const oldDir = path.join(
+    account.sessionsDir,
+    String(started.getFullYear()),
+    String(started.getMonth() + 1).padStart(2, "0"),
+    String(started.getDate()).padStart(2, "0"),
+  );
+  const oldFile = path.join(oldDir, `rollout-2026-06-01T12-00-00-${sessionId}.jsonl`);
+  fs.mkdirSync(oldDir, { recursive: true });
+  fs.writeFileSync(oldFile, JSON.stringify({
+    timestamp: "2026-08-15T12:00:01.000Z",
+    payload: { type: "task_complete", codex_error_info: "usage_limit_exceeded" },
+  }) + "\n");
+  fs.writeFileSync(path.join(account.home, "history.jsonl"), JSON.stringify({
+    session_id: sessionId,
+    ts: Date.parse("2026-08-15T12:00:00.900Z") / 1000,
+    text: "continue",
+  }) + "\n");
+  for (let day = 1; day <= 10; day += 1) {
+    const dir = path.join(account.sessionsDir, "2026", "08", String(day).padStart(2, "0"));
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "quota.jsonl"), JSON.stringify({
+      timestamp: "2026-08-15T12:00:00.400Z",
+      payload: { type: "token_count", rate_limits: { limit_id: "codex", primary: { used_percent: 21, window_minutes: 10_080, resets_at: 1_787_000_000 }, secondary: null, plan_type: "prolite" } },
+    }) + "\n");
+  }
+
+  expect(readCodexTranscriptLimits(account.sessionsDir).data?.weekly).toMatchObject({
+    usedPercent: 100,
+    observedAt: Date.parse("2026-08-15T12:00:01.000Z") / 1000,
+  });
 });
 
 test("a newer windowless rate-limits event does not mask the account's real windows", async () => {
