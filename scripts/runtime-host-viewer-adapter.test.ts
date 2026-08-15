@@ -702,6 +702,8 @@ test("candidate build stages the matching MCP package and stable dispatcher", as
   const bin = path.join(sandbox, "bin");
   const template = path.join(sandbox, "template");
   const stableRuntime = path.join(sandbox, "llv-mcp-runtime");
+  const runtimeHome = path.join(sandbox, "runtime-home");
+  const dockerLog = path.join(sandbox, "docker.log");
   const revision = "7".repeat(40);
   fs.mkdirSync(bin, { recursive: true });
   fs.mkdirSync(path.join(template, "bin"), { recursive: true });
@@ -741,6 +743,7 @@ exit 1
   const docker = path.join(bin, "docker");
   fs.writeFileSync(docker, `#!/bin/sh
 set -eu
+printf '%s\\n' "$*" >> "$FAKE_DOCKER_LOG"
 if [ "$1 $2" = "compose --project-directory" ]; then printf '%s\\n' "$FAKE_COMPOSE"; exit 0; fi
 if [ "$1 $2" = "build --pull" ]; then exit 0; fi
 if [ "$1 $2" = "container ls" ]; then exit 0; fi
@@ -751,8 +754,10 @@ exit 1
     cwd: root,
     env: {
       ...withoutWakatimeCredential(process.env),
+      HOME: runtimeHome,
       PATH: `${bin}:${process.env.PATH ?? ""}`,
       FAKE_COMPOSE: composeSnapshot(),
+      FAKE_DOCKER_LOG: dockerLog,
       FAKE_SOURCE_TEMPLATE: template,
       LLV_DEPLOYMENT_ADAPTER_PROTOCOL: "1",
       LLV_MCP_RUNTIME_ROOT: stableRuntime,
@@ -785,6 +790,10 @@ exit 1
     expect(fs.readFileSync(path.join(releaseRoot, "dist", "mcp-server.mjs"), "utf8")).toContain("exact-runtime");
     expect(fs.readFileSync(path.join(stableRuntime, "bin", "mcp-server.mjs"), "utf8")).toContain("deployedPackageRoot");
     expect(fs.existsSync(path.join(state, "deployments", "deploy-mcp-build", "source"))).toBe(false);
+    const buildCall = fs.readFileSync(dockerLog, "utf8")
+      .split("\n")
+      .find((line) => line.startsWith("build --pull"));
+    expect(buildCall).toContain(`--build-arg LLV_RUNTIME_HOME=${runtimeHome}`);
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
