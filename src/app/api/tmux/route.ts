@@ -10,7 +10,7 @@ import {
 import { structuredHostsEnabled } from "@/lib/runtime/flags";
 import { applyConversationAction, CONVERSATION_ACTIONS } from "@/lib/conversation/actions";
 import { canonicalTranscriptTarget, readTranscriptHosts } from "@/lib/agent/transcriptHost";
-import { requireOperatorAuthority } from "@/lib/agent/operatorAuthority";
+import { directOperatorActivityAuthority } from "@/lib/agent/operatorAuthority";
 import { reconfigurationFromBody } from "@/lib/agent/reconfigure";
 import { listFiles } from "@/lib/scanner";
 import { completedFileScan } from "@/lib/scanner/scanCache";
@@ -127,7 +127,7 @@ async function recordAuthorizedOperatorActivity(
   target: { pid: number; hasPid: boolean; filePath: string; conversationId: string },
   identity: { idempotencyKey?: string; compatibilityFingerprint?: string },
 ): Promise<ReturnType<typeof recordDirectOperatorWakatimeActivity> | null> {
-  if (!requireOperatorAuthority(req).ok) return null;
+  if (!directOperatorActivityAuthority(req).ok) return null;
   const fallbackEntry = operatorFallbackEntry((await completedFileScan()).snapshot.files, target);
   return recordDirectOperatorWakatimeActivity({
     ...(target.conversationId ? { conversationId: target.conversationId } : {}),

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { NextRequest, NextResponse } from "next/server";
 
 import { deliverAnswer, DeliveryError, type AnswerInput, type PaneIo } from "@/lib/answer/driver";
-import { requireOperatorAuthority } from "@/lib/agent/operatorAuthority";
+import { directOperatorActivityAuthority } from "@/lib/agent/operatorAuthority";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { listFiles } from "@/lib/scanner";
 import { pendingQuestionFor, recordedToolResult } from "@/lib/scanner/questions";
@@ -20,6 +20,15 @@ const CONFIRM_POLL_MS = 500;
 
 /** Real pane access for the answer driver; tests inject fixtures instead. */
 const paneIo: PaneIo = { paneScreen, sendKeys, sendText };
+
+interface AnswerRouteDependencies {
+  knownState: typeof knownState;
+  resolveTarget: typeof resolveTarget;
+  recordOperatorActivity: typeof recordDirectOperatorWakatimeActivity;
+  deliverAnswer: typeof deliverAnswer;
+  confirmAnswered: typeof confirmAnswered;
+  paneScreen: typeof paneScreen;
+}
 
 interface AnswerBody extends AnswerInput {
   transcriptPath?: unknown;
@@ -95,12 +104,16 @@ async function confirmAnswered(entry: FileEntry, toolUseId: string): Promise<str
   return null;
 }
 
-async function deliver(body: AnswerBody, req: NextRequest): Promise<NextResponse<RouteResponse>> {
+async function deliver(
+  body: AnswerBody,
+  req: NextRequest,
+  dependencies: AnswerRouteDependencies,
+): Promise<NextResponse<RouteResponse>> {
   const transcriptPath = typeof body.transcriptPath === "string" ? body.transcriptPath : "";
   const toolUseId = typeof body.toolUseId === "string" ? body.toolUseId : "";
   if (!transcriptPath || !toolUseId) return NextResponse.json({ error: "transcriptPath and toolUseId are required" }, { status: 400 });
 
-  const state = await knownState(transcriptPath, toolUseId);
+  const state = await dependencies.knownState(transcriptPath, toolUseId);
   if (!state) return NextResponse.json({ error: "transcript is unknown or the agent is not running" }, { status: 403 });
   if (state.result) {
     return NextResponse.json(
@@ -110,11 +123,11 @@ async function deliver(body: AnswerBody, req: NextRequest): Promise<NextResponse
   }
   if (state.pending === null) return NextResponse.json({ error: "question is no longer active" }, { status: 409 });
   const pending = state.pending;
-  const target = await resolveTarget(state.entry.pid!);
+  const target = await dependencies.resolveTarget(state.entry.pid!);
   if (target === null) return NextResponse.json({ error: "no active tmux pane for answering", noPane: true }, { status: 409 });
-  if (requireOperatorAuthority(req).ok) {
+  if (directOperatorActivityAuthority(req).ok) {
     try {
-      recordDirectOperatorWakatimeActivity({
+      dependencies.recordOperatorActivity({
         path: transcriptPath,
         idempotencyKey: `question:${toolUseId}`,
         fallbackEntry: state.entry,
@@ -125,12 +138,12 @@ async function deliver(body: AnswerBody, req: NextRequest): Promise<NextResponse
   }
 
   try {
-    const label = await deliverAnswer(paneIo, target, pending, body);
-    const recorded = await confirmAnswered(state.entry, toolUseId);
+    const label = await dependencies.deliverAnswer(paneIo, target, pending, body);
+    const recorded = await dependencies.confirmAnswered(state.entry, toolUseId);
     if (recorded) return NextResponse.json({ ok: true, answer: recorded || label });
     /* Enter was pressed and `deliverAnswer` returned: the answer is in the
        pane, only the transcript's confirmation is missing. */
-    return NextResponse.json({ error: `answer was sent, but the transcript did not confirm it: ${screenTail(await paneScreen(target))}`, delivered: true }, { status: 502 });
+    return NextResponse.json({ error: `answer was sent, but the transcript did not confirm it: ${screenTail(await dependencies.paneScreen(target))}`, delivered: true }, { status: 502 });
   } catch (error) {
     /* The driver threw before completing the submit — nothing was answered. */
     if (error instanceof DeliveryError) return NextResponse.json({ error: error.message, delivered: false }, { status: error.status });
@@ -138,7 +151,19 @@ async function deliver(body: AnswerBody, req: NextRequest): Promise<NextResponse
   }
 }
 
-export async function POST(req: NextRequest): Promise<NextResponse<RouteResponse>> {
+const productionDependencies: AnswerRouteDependencies = {
+  knownState,
+  resolveTarget,
+  recordOperatorActivity: recordDirectOperatorWakatimeActivity,
+  deliverAnswer,
+  confirmAnswered,
+  paneScreen,
+};
+
+async function postAnswer(
+  req: NextRequest,
+  dependencies: AnswerRouteDependencies = productionDependencies,
+): Promise<NextResponse<RouteResponse>> {
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
   let body: AnswerBody;
@@ -150,7 +175,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<RouteResponse
   const transcriptPath = typeof body.transcriptPath === "string" ? body.transcriptPath : "";
   const key = transcriptPath || "unknown";
   const previous = locks.get(key) ?? Promise.resolve(NextResponse.json({ ok: true, answer: "" }));
-  const current = previous.catch(() => NextResponse.json({ ok: true, answer: "" })).then(() => deliver(body, req));
+  const current = previous.catch(() => NextResponse.json({ ok: true, answer: "" })).then(() => deliver(body, req, dependencies));
   locks.set(key, current);
   try {
     return await current;
@@ -158,3 +183,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<RouteResponse
     if (locks.get(key) === current) locks.delete(key);
   }
 }
+
+export const POST = Object.assign(
+  async (req: NextRequest): Promise<NextResponse<RouteResponse>> => postAnswer(req),
+  { withDependencies: postAnswer },
+);

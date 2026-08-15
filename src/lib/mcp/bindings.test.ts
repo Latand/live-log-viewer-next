@@ -53,7 +53,32 @@ test("spawn_agent reaches spawn validation through the operator admission lane",
   }
   expect(requests.map((request) => request.pathname)).toEqual(["/api/spawn", "/api/spawn"]);
   expect(requests.every((request) => Boolean(request.headers?.["x-llv-spawn-capability"]))).toBe(true);
+  expect(requests.every((request) => /^mcp\.[a-f0-9]{64}$/.test(request.headers?.["x-llv-internal-service"] ?? ""))).toBe(true);
   expect(fs.readFileSync(path.join(sandbox, "operator-spawn-capability"), "utf8").trim()).toMatch(/^[A-Za-z0-9_-]{43}$/);
+});
+
+test("MCP message delivery always presents authenticated service provenance with or without an agent capability", async () => {
+  const requests: Array<{ headers?: Record<string, string> }> = [];
+  const send = viewerMcpBindings(undefined, {
+    post: async (_pathname, _body, headers) => {
+      requests.push({ headers });
+      return { outcome: "delivered" };
+    },
+  }).send_message;
+  const previous = process.env[VIEWER_SPAWN_CAPABILITY_ENV];
+  try {
+    process.env[VIEWER_SPAWN_CAPABILITY_ENV] = "e".repeat(43);
+    await send({ clientRequestId: "mcp-send-valid", conversationId: "conversation_http_control", text: "one" });
+    delete process.env[VIEWER_SPAWN_CAPABILITY_ENV];
+    await send({ clientRequestId: "mcp-send-missing", conversationId: "conversation_http_control", text: "two" });
+
+    expect(requests[0]!.headers?.[VIEWER_SPAWN_CAPABILITY_HEADER]).toBe("e".repeat(43));
+    expect(requests[1]!.headers?.[VIEWER_SPAWN_CAPABILITY_HEADER]).toBeUndefined();
+    expect(requests.every((request) => /^mcp\.[a-f0-9]{64}$/.test(request.headers?.["x-llv-internal-service"] ?? ""))).toBe(true);
+  } finally {
+    if (previous === undefined) delete process.env[VIEWER_SPAWN_CAPABILITY_ENV];
+    else process.env[VIEWER_SPAWN_CAPABILITY_ENV] = previous;
+  }
 });
 
 test("spawn_agent derives required role params from the prompt and preserves supplied params", async () => {

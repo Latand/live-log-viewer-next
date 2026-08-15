@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { agentRegistry, conversationLookupFromSnapshot, type RegistryFile } from "@/lib/agent/registry";
 import { configFilePath, statePath } from "@/lib/configDir";
+import { FileClaudeDeliveryLedger } from "@/lib/runtime/claudeStreamBrokerHost";
 import {
   currentFileScan,
   persistedFileScanSnapshot,
@@ -14,6 +15,7 @@ import { resolveProjectAttribution } from "@/lib/session/projectResolution";
 import type { FileEntry, TurnBoundary } from "@/lib/types";
 
 import { acquireWakatimeSchedulerLease, type WakatimeSchedulerLease } from "./lease";
+import { wakatimeIntegrationEnabled } from "./activation";
 import {
   acknowledgeDirectOperatorWakatimeActions,
   readDirectOperatorWakatimeActions,
@@ -25,6 +27,7 @@ const SAMPLE_INTERVAL_MS = 120_000;
 const TICK_INTERVAL_MS = 60_000;
 const REQUEST_TIMEOUT_MS = 5_000;
 const MAX_BATCH = 25;
+const MAX_OPERATOR_ACTIONS_PER_TICK = 256;
 const OPERATOR_ENGAGEMENT_MS = 10 * 60_000;
 const DEFAULT_MAX_PENDING = 10_000;
 const DEFAULT_MAX_STREAMS = 5_000;
@@ -108,6 +111,10 @@ export interface WakatimeSyncDependencies {
   recentTurnWindows(entry: FileEntry): RecentTurnWindows;
   readOperatorActions?(): Promise<DirectOperatorWakatimeAction[]> | DirectOperatorWakatimeAction[];
   acknowledgeOperatorActions?(keys: readonly string[]): Promise<void> | void;
+  claudeDeliveryIdentities?(sessionId: string): Array<{
+    engineMessageId: string;
+    operatorActionKey: string | null;
+  }>;
   readCredential(): Promise<WakatimeCredential | null> | WakatimeCredential | null;
   readState(): Promise<unknown | null> | unknown | null;
   writeState(state: WakatimeStateV1): Promise<void> | void;
@@ -307,10 +314,11 @@ function addWindow(
   openWindowActive: boolean,
   emitEndBoundary: boolean,
   respectEnabledAt: boolean = true,
+  allowExpired: boolean = false,
 ): void {
   if (!validWindow(window)) return;
   if (respectEnabledAt && window.endedAt !== null && window.endedAt <= state.enabledAtMs) return;
-  if (window.endedAt !== null && window.endedAt < now - CLOSED_STREAM_RETENTION_MS) return;
+  if (!allowExpired && window.endedAt !== null && window.endedAt < now - CLOSED_STREAM_RETENTION_MS) return;
   const start = respectEnabledAt ? Math.max(window.startedAt, state.enabledAtMs) : window.startedAt;
   const existing = state.streams[streamKey];
   const retired = state.retiredStreams?.[streamKey];
@@ -569,6 +577,7 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
       window: TurnBoundary;
       openWindowActive: boolean;
       respectEnabledAt: boolean;
+      allowExpired: boolean;
     }> = [];
     let operatorActions: DirectOperatorWakatimeAction[] = [];
     try {
@@ -576,8 +585,16 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
     } catch {
       report("operator_activity_read_failed");
     }
+    if (operatorActions.length > MAX_OPERATOR_ACTIONS_PER_TICK) {
+      report("operator_activity_backlog", {
+        total: operatorActions.length,
+        processing: MAX_OPERATOR_ACTIONS_PER_TICK,
+      });
+      operatorActions = operatorActions.slice(0, MAX_OPERATOR_ACTIONS_PER_TICK);
+    }
     const directOperatorKeys = new Set(operatorActions.map((action) => action.key));
     const acknowledgeable: string[] = [];
+    let staleOperatorActions = 0;
     for (const action of operatorActions) {
       const existing = current.streams[action.key];
       if ((existing && existing.startedAtMs !== action.atMs) || current.retiredStreams?.[action.key]) {
@@ -586,6 +603,7 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
       }
       const engagementEndMs = action.atMs + OPERATOR_ENGAGEMENT_MS;
       const engagementActive = engagementEndMs > now;
+      if (engagementEndMs < now - CLOSED_STREAM_RETENTION_MS) staleOperatorActions += 1;
       observations.push({
         source: { engine: action.engine, lastActivityAtMs: action.atMs },
         streamKey: action.key,
@@ -593,8 +611,12 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
         window: { startedAt: action.atMs, endedAt: engagementActive ? null : engagementEndMs },
         openWindowActive: engagementActive,
         respectEnabledAt: false,
+        allowExpired: true,
       });
       if (!engagementActive) acknowledgeable.push(action.key);
+    }
+    if (staleOperatorActions > 0) {
+      report("operator_activity_stale_materialized", { count: staleOperatorActions });
     }
 
     let scan: { files: FileEntry[]; complete: boolean } = { files: [], complete: false };
@@ -628,10 +650,27 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
             fallbackProject: entry.project,
           }).project;
           if (!project) continue;
-          for (const action of recent.operatorActions ?? []) {
-            const streamKey = /^[a-f0-9]{64}$/.test(action.key)
-              ? action.key
-              : digest("llv-wakatime-transcript-operator-v1", conversation.id, action.key);
+          const claudeDeliveryIdentities = entry.engine === "claude"
+            ? new Map((deps.claudeDeliveryIdentities?.(generation.id) ?? [])
+              .map((identity) => [identity.engineMessageId, identity.operatorActionKey] as const))
+            : null;
+          const transcriptActions = [
+            ...(recent.operatorActions ?? []),
+            ...(recent.unprovenancedUserActions ?? []),
+          ];
+          for (const action of transcriptActions) {
+            let sourceKey = action.key;
+            if (entry.engine === "claude" && action.key.startsWith("claude:")) {
+              const engineMessageId = action.key.slice("claude:".length);
+              if (claudeDeliveryIdentities?.has(engineMessageId)) {
+                const operatorActionKey = claudeDeliveryIdentities.get(engineMessageId);
+                if (!operatorActionKey) continue;
+                sourceKey = operatorActionKey;
+              }
+            }
+            const streamKey = /^[a-f0-9]{64}$/.test(sourceKey)
+              ? sourceKey
+              : digest("llv-wakatime-transcript-operator-v1", conversation.id, sourceKey);
             if (directOperatorKeys.has(streamKey)) continue;
             const engagementEndMs = action.atMs + OPERATOR_ENGAGEMENT_MS;
             const engagementActive = engagementEndMs > now;
@@ -642,6 +681,7 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
               window: { startedAt: action.atMs, endedAt: engagementActive ? null : engagementEndMs },
               openWindowActive: engagementActive,
               respectEnabledAt: true,
+              allowExpired: false,
             });
           }
           const openWindowActive = openTurnIsActive(entry);
@@ -653,6 +693,7 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
               window,
               openWindowActive,
               respectEnabledAt: true,
+              allowExpired: false,
             });
           }
         }
@@ -721,6 +762,7 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
         observation.openWindowActive,
         !coveredBySameProject[index],
         observation.respectEnabledAt,
+        observation.allowExpired,
       );
     }
     return acknowledgeable;
@@ -1031,12 +1073,20 @@ export async function wakatimeProductionScan(
 }
 
 function productionDependencies(): WakatimeSyncDependencies {
+  const claudeDeliveryLedger = new FileClaudeDeliveryLedger();
   return {
     scan: () => wakatimeProductionScan(),
     registrySnapshot: () => agentRegistry().readOnlySnapshot(),
     recentTurnWindows: recentTurnWindowsFor,
     readOperatorActions: readDirectOperatorWakatimeActions,
     acknowledgeOperatorActions: acknowledgeDirectOperatorWakatimeActions,
+    claudeDeliveryIdentities: (sessionId) => claudeDeliveryLedger.load(sessionId)
+      .flatMap((state) => state.delivered && typeof state.engineMessageId === "string"
+        ? [{
+            engineMessageId: state.engineMessageId,
+            operatorActionKey: state.entry.operatorActionKey ?? null,
+          }]
+        : []),
     readCredential: readProductionWakatimeCredential,
     readState: readProductionState,
     writeState: writeProductionState,
@@ -1051,8 +1101,9 @@ function productionDependencies(): WakatimeSyncDependencies {
   };
 }
 
-export function startWakatimeSync(dependencies: WakatimeSyncDependencies = productionDependencies()): void {
+export function startWakatimeSync(dependencies?: WakatimeSyncDependencies): void {
   if (singleton.__llvWakatimeSync) return;
-  const sync = createWakatimeSync(dependencies);
+  if (!dependencies && !wakatimeIntegrationEnabled()) return;
+  const sync = createWakatimeSync(dependencies ?? productionDependencies());
   singleton.__llvWakatimeSync = sync;
 }

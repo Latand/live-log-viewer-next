@@ -20,6 +20,7 @@ import { bindStructuredDeliveryQueue, publishStructuredDeliveryHost } from "./st
 import { StructuredDeliveryQueue } from "./structuredDeliveryQueue";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
+import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorActivity";
 
 function request(body: unknown, headers: Record<string, string> = { host: "127.0.0.1" }): NextRequest {
   return new NextRequest("http://127.0.0.1/api/runtime/send", {
@@ -155,6 +156,49 @@ test("runtime answer records authorized operator activity once and excludes self
   } finally {
     setCallerConversationResolverForTests(null);
   }
+});
+
+test("disabled WakaTime leaves runtime answer delivery unchanged and touches no activity state", async () => {
+  let registryReads = 0;
+  const commands: unknown[] = [];
+  const response = await handleRuntimeCommand(request({
+    conversationId: "conversation_direct",
+    attentionId: "attention-disabled",
+    resolution: { answers: [[0]] },
+    operationId: "answer-disabled-gesture",
+  }), "answer", {
+    enabled: () => true,
+    structuredEnabled: () => true,
+    client: () => ({
+      command: async (command: unknown) => {
+        commands.push(command);
+        return {
+          operationId: "answer-disabled-gesture",
+          replayed: false,
+          receipt: {
+            operationId: "answer-disabled-gesture",
+            idempotencyKey: "answer-disabled-gesture",
+            conversationId: "conversation_direct",
+            kind: "answer" as const,
+            status: "delivered" as const,
+            at: "2026-08-15T10:00:00.000Z",
+            revision: 1,
+          },
+        };
+      },
+    }) as unknown as RuntimeHostClient,
+    recordOperatorActivity: (input) => recordDirectOperatorWakatimeActivity(input, {
+      enabled: () => false,
+      registrySnapshot: () => {
+        registryReads += 1;
+        throw new Error("disabled recording touched the registry");
+      },
+    }),
+  });
+
+  expect(response.status).toBe(200);
+  expect(commands).toHaveLength(1);
+  expect(registryReads).toBe(0);
 });
 
 test("runtime image admission returns typed statuses before commands or delivery reservations", async () => {

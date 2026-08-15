@@ -12,6 +12,7 @@ import { UNRESOLVED_PROJECT } from "@/lib/projects/identity";
 import { resolveProjectAttribution } from "@/lib/session/projectResolution";
 import { withFileTransactionSync } from "@/lib/state/fileTransaction";
 import type { FileEntry } from "@/lib/types";
+import { wakatimeIntegrationEnabled } from "./activation";
 
 const FILE_VERSION = 1;
 const BUSY_MESSAGE = "WakaTime operator activity is busy";
@@ -37,11 +38,15 @@ export interface DirectOperatorWakatimeInput {
   /** Hash-only compatibility identity for old clients that supplied no
       message id. Reused solely inside a short retry window. */
   compatibilityFingerprint?: string;
+  /** Attribution resolved at a trusted server ingress before a conversation
+      exists, such as a new-agent spawn or task fan-out. */
+  resolvedAttribution?: { engine: "claude" | "codex"; project: string };
   fallbackEntry?: FileEntry;
 }
 
 interface DirectOperatorWakatimeDependencies {
   filename: string;
+  enabled(): boolean;
   now(): number;
   registrySnapshot(): RegistryFile;
 }
@@ -121,7 +126,9 @@ export function directOperatorWakatimeActionFile(): string {
 
 export function readDirectOperatorWakatimeActions(
   filename: string = directOperatorWakatimeActionFile(),
+  enabled: () => boolean = wakatimeIntegrationEnabled,
 ): DirectOperatorWakatimeAction[] {
+  if (!enabled()) return [];
   return Object.values(readActionFile(filename).actions)
     .sort((left, right) => left.atMs - right.atMs || left.key.localeCompare(right.key));
 }
@@ -129,25 +136,35 @@ export function readDirectOperatorWakatimeActions(
 export function recordDirectOperatorWakatimeActivity(
   input: DirectOperatorWakatimeInput,
   overrides: Partial<DirectOperatorWakatimeDependencies> = {},
-): DirectOperatorWakatimeAction {
+): DirectOperatorWakatimeAction | null {
   const dependencies: DirectOperatorWakatimeDependencies = {
     filename: overrides.filename ?? directOperatorWakatimeActionFile(),
+    enabled: overrides.enabled ?? wakatimeIntegrationEnabled,
     now: overrides.now ?? Date.now,
     registrySnapshot: overrides.registrySnapshot ?? (() => agentRegistry().readOnlySnapshot()),
   };
+  if (!dependencies.enabled()) return null;
   const idempotencyKey = input.idempotencyKey?.trim() ?? "";
   const compatibilityFingerprint = input.compatibilityFingerprint?.trim() ?? "";
   if (!idempotencyKey && !/^[a-f0-9]{64}$/.test(compatibilityFingerprint)) {
     throw new Error("direct operator activity requires an idempotency key or compatibility fingerprint");
   }
 
-  const lookup = readOnlyConversationLookupFromSnapshot(dependencies.registrySnapshot());
+  const resolvedAttribution = input.resolvedAttribution;
+  if (resolvedAttribution
+    && ((resolvedAttribution.engine !== "claude" && resolvedAttribution.engine !== "codex")
+      || !resolvedAttribution.project.trim())) {
+    throw new Error("direct operator activity attribution is invalid");
+  }
+  const lookup = resolvedAttribution
+    ? null
+    : readOnlyConversationLookupFromSnapshot(dependencies.registrySnapshot());
   const suppliedConversationId = input.conversationId?.trim() ?? "";
   const suppliedPath = input.path?.trim() ?? "";
   const byId = suppliedConversationId.startsWith("conversation_")
-    ? lookup.conversation(suppliedConversationId as `conversation_${string}`)
+    ? lookup?.conversation(suppliedConversationId as `conversation_${string}`) ?? null
     : null;
-  const byPath = suppliedPath ? lookup.conversationForPath(suppliedPath) : null;
+  const byPath = suppliedPath ? lookup?.conversationForPath(suppliedPath) ?? null : null;
   const ownedPaths = byId
     ? new Set([
         ...byId.generations.map((generation) => generation.path),
@@ -161,16 +178,16 @@ export function recordDirectOperatorWakatimeActivity(
   }
   const conversation = byId ?? byPath;
   const fallback = input.fallbackEntry;
-  const engine = conversation?.engine
+  const engine = resolvedAttribution?.engine ?? conversation?.engine
     ?? (fallback?.engine === "claude" || fallback?.engine === "codex" ? fallback.engine : null);
   if (!engine) throw new Error("direct operator activity target is unavailable");
   const generation = conversation?.generations.at(-1);
-  const project = resolveProjectAttribution({
+  const project = resolvedAttribution?.project.trim() ?? (resolveProjectAttribution({
     projectOwnership: conversation?.projectOwnership,
     cwd: generation?.launchProfile.cwd || fallback?.cwd,
     launchProfileProject: generation?.launchProfile.project,
     fallbackProject: fallback?.project,
-  }).project ?? UNRESOLVED_PROJECT;
+  }).project ?? UNRESOLVED_PROJECT);
   /* The authorized ingress supplies this identity once per gesture and reuses
      it for retry, resume, and fan-out. Keeping the target out of the digest makes those
      delivery shapes one operator action even when they address several
@@ -211,7 +228,9 @@ export function recordDirectOperatorWakatimeActivity(
 export function acknowledgeDirectOperatorWakatimeActions(
   keys: readonly string[],
   filename: string = directOperatorWakatimeActionFile(),
+  enabled: () => boolean = wakatimeIntegrationEnabled,
 ): void {
+  if (!enabled()) return;
   if (keys.length === 0) return;
   const acknowledged = new Set(keys);
   withFileTransactionSync(filename, BUSY_MESSAGE, () => {
@@ -231,7 +250,9 @@ export function acknowledgeDirectOperatorWakatimeActions(
 export function settleDirectOperatorWakatimeCompatibility(
   key: string,
   filename: string = directOperatorWakatimeActionFile(),
+  enabled: () => boolean = wakatimeIntegrationEnabled,
 ): void {
+  if (!enabled()) return;
   withFileTransactionSync(filename, BUSY_MESSAGE, () => {
     const state = readActionFile(filename);
     const action = state.actions[key];

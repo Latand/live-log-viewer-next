@@ -6,6 +6,7 @@ import path from "node:path";
 import { agentRegistry, readOnlyConversationLookupFromSnapshot } from "@/lib/agent/registry";
 import { procBackend } from "@/lib/proc";
 import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
+import { internalServiceHeaders } from "@/lib/agent/operatorAuthority";
 import { VIEWER_SPAWN_CAPABILITY_ENV, VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { applyConversationMigration } from "@/lib/accounts/migration/conversationCommand";
 import { attentionCallerAuthority, processAncestry, type AttentionCallerAuthority, type AttentionCallerSources } from "@/lib/attention/callerAuthority";
@@ -554,6 +555,7 @@ async function spawnAgent(args: McpToolArgs, control: ViewerControlDependencies)
     ...(roleParams ? { roleParams } : {}),
     clientAttemptId,
   }, {
+    ...internalServiceHeaders("mcp"),
     [VIEWER_SPAWN_CAPABILITY_HEADER]: ensureOperatorSpawnCapability(),
   });
   return {
@@ -1317,7 +1319,10 @@ function derivedRequestId(base: string, suffix: string): string {
  */
 function callerCapabilityHeaders(): Record<string, string> {
   const capability = process.env[VIEWER_SPAWN_CAPABILITY_ENV]?.trim() ?? "";
-  return /^[A-Za-z0-9_-]{43}$/.test(capability) ? { [VIEWER_SPAWN_CAPABILITY_HEADER]: capability } : {};
+  return {
+    ...internalServiceHeaders("mcp"),
+    ...(/^[A-Za-z0-9_-]{43}$/.test(capability) ? { [VIEWER_SPAWN_CAPABILITY_HEADER]: capability } : {}),
+  };
 }
 
 /** Explicitly allowlisted fields for the designation routes. The seat route
