@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 
 import type { EngineLimits, LimitsPayload, LimitsProvenance } from "@/lib/types";
 
-import { codexLimitsForActiveAccount, createLatestLimitsLoader, fmtLimitsFailureReason, fmtStaleSince, stickyPayload } from "./LimitsFooter";
+import { codexLimitsForActiveAccount, createLatestLimitsLoader, fmtLimitsFailureReason, fmtStaleSince, limitsForActiveAccount, stickyPayload } from "./LimitsFooter";
 
 const live: LimitsProvenance = { source: "live", reason: null, staleSince: null };
 const unavailable: LimitsProvenance = {
@@ -107,6 +107,14 @@ test("Codex values stay masked until the current API payload names the active ac
   const current = payload({ codex: engine(11), codexAccountId: "A" });
   expect(codexLimitsForActiveAccount(current, "B")).toBeNull();
   expect(codexLimitsForActiveAccount(current, "A")).toEqual(engine(11));
+});
+
+test("invariant 19 masks either engine until the payload names the active account", () => {
+  const limits = engine(23);
+  for (const engineName of ["claude", "codex"] as const) {
+    expect(limitsForActiveAccount(limits, `${engineName}-account-a`, `${engineName}-account-b`)).toBeNull();
+    expect(limitsForActiveAccount(limits, `${engineName}-account-a`, `${engineName}-account-a`)).toEqual(limits);
+  }
 });
 
 test("the limits channel keeps A to B to A ordering when the oldest A response arrives last", async () => {

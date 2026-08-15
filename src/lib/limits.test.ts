@@ -124,7 +124,60 @@ test("a weekly-only transcript event feeds the weekly window of the fallback rea
   }) + "\n");
   const result = await readCodexLimits({ account: weeklyOnly, liveReader: async () => { throw new Error("offline"); } });
   expect(result.data?.session).toBeNull();
-  expect(result.data?.weekly).toEqual({ usedPercent: 15, resetsAt: 1_784_574_264, windowMinutes: 10_080 });
+  expect(result.data?.weekly).toMatchObject({ usedPercent: 15, resetsAt: 1_784_574_264, windowMinutes: 10_080 });
+});
+
+test("a provider-exhausted transcript window overrides a newer app-server probe", async () => {
+  const account = createManagedCodexAccount("Exhausted reconciliation");
+  const nowS = Math.floor(Date.now() / 1000);
+  const resetsAt = nowS + 6 * 86_400;
+  const session = path.join(account.sessionsDir, "2026", "08", "15", "exhausted.jsonl");
+  fs.mkdirSync(path.dirname(session), { recursive: true });
+  fs.writeFileSync(session, JSON.stringify({
+    timestamp: new Date((nowS - 600) * 1000).toISOString(),
+    payload: { rate_limits: { limit_id: "codex", primary: { used_percent: 100, window_minutes: 10_080, resets_at: resetsAt }, secondary: null, plan_type: "prolite" } },
+  }) + "\n");
+
+  const result = await readCodexLimits({
+    account,
+    liveReader: async () => ({
+      primary: { usedPercent: 21, resetsAt, windowDurationMins: 10_080 },
+      secondary: null,
+      planType: "prolite",
+    }),
+  });
+
+  expect(result.data?.weekly?.usedPercent).toBe(100);
+  expect(result.data?.weekly?.resetsAt).toBe(resetsAt);
+});
+
+test("usage_limit_exceeded makes the matching transcript window authoritative immediately", async () => {
+  const account = createManagedCodexAccount("Rejected reconciliation");
+  const nowS = Math.floor(Date.now() / 1000);
+  const resetsAt = nowS + 6 * 86_400;
+  const session = path.join(account.sessionsDir, "2026", "08", "15", "rejected.jsonl");
+  fs.mkdirSync(path.dirname(session), { recursive: true });
+  fs.writeFileSync(session, [
+    JSON.stringify({
+      timestamp: new Date((nowS - 120) * 1000).toISOString(),
+      payload: { type: "token_count", rate_limits: { limit_id: "codex", primary: { used_percent: 21, window_minutes: 10_080, resets_at: resetsAt }, secondary: null, plan_type: "prolite" } },
+    }),
+    JSON.stringify({
+      timestamp: new Date((nowS - 60) * 1000).toISOString(),
+      payload: { type: "task_complete", error: { message: "You've hit your usage limit. Try again after reset.", codex_error_info: "usage_limit_exceeded" } },
+    }),
+  ].join("\n") + "\n");
+
+  const result = await readCodexLimits({
+    account,
+    liveReader: async () => ({
+      primary: { usedPercent: 21, resetsAt, windowDurationMins: 10_080 },
+      secondary: null,
+      planType: "prolite",
+    }),
+  });
+
+  expect(result.data?.weekly).toMatchObject({ usedPercent: 100, resetsAt, observedAt: nowS - 60 });
 });
 
 test("a newer windowless rate-limits event does not mask the account's real windows", async () => {
@@ -138,7 +191,7 @@ test("a newer windowless rate-limits event does not mask the account's real wind
     JSON.stringify({ timestamp: "2026-07-24T13:05:43.423Z", payload: { rate_limits: { limit_id: "premium", primary: null, secondary: null, plan_type: null } } }),
   ].join("\n") + "\n");
   const result = await readCodexLimits({ account: masked, liveReader: async () => { throw new Error("offline"); } });
-  expect(result.data?.weekly).toEqual({ usedPercent: 15, resetsAt: 1_785_000_000, windowMinutes: 10_080 });
+  expect(result.data?.weekly).toMatchObject({ usedPercent: 15, resetsAt: 1_785_000_000, windowMinutes: 10_080 });
   expect(result.data?.plan).toBe("pro");
 });
 

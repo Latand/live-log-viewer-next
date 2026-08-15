@@ -6,6 +6,16 @@ import type { RateLimitState } from "@/lib/types";
 /** BCP-47 tag for the two supported locales, used by every time formatter here. */
 export const localeBcp47 = (locale: Locale = getLocale()): string => (locale === "uk" ? "uk-UA" : "en-US");
 
+/** Visible age label shared by compact quota surfaces. */
+export function formatQuotaAsOf(observedAt: number | string | null | undefined, locale: Locale = getLocale()): string | null {
+  if (observedAt === null || observedAt === undefined || observedAt === "") return null;
+  const d = typeof observedAt === "number" ? new Date(observedAt * 1000) : new Date(observedAt);
+  if (Number.isNaN(d.getTime())) return null;
+  return translate(locale, "limits.asOf", {
+    time: d.toLocaleTimeString(localeBcp47(locale), { hour: "2-digit", minute: "2-digit", hour12: false }),
+  });
+}
+
 export function formatRateLimitTime(resetAt: number, locale: Locale): string {
   return new Date(resetAt * 1000).toLocaleTimeString(localeBcp47(locale), {
     hour: "2-digit",
@@ -27,9 +37,9 @@ export function formatResetEta(resetsAt: number, now: number): string {
   const locale = getLocale();
   const s = resetsAt - now;
   if (s <= 60) return translate(locale, "limits.now");
-  if (s < 5400) return translate(locale, "limits.inMin", { n: Math.round(s / 60) });
-  if (s < 129600) return translate(locale, "limits.inHour", { n: Math.round(s / 3600) });
-  return translate(locale, "limits.inDay", { n: Math.round(s / 86400) });
+  if (s < 5400) return translate(locale, "limits.inMin", { n: Math.ceil(s / 60) });
+  if (s < 129600) return translate(locale, "limits.inHour", { n: Math.ceil(s / 3600) });
+  return translate(locale, "limits.inDay", { n: Math.ceil(s / 86400) });
 }
 
 /** Label for one quota window, taken from the horizon its data actually carries

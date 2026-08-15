@@ -10,6 +10,7 @@ import { statePath } from "@/lib/configDir";
 import { WINDOW_SECONDS, clampPercent, mergeSamples, type WindowKey } from "@/lib/burndown";
 import { relabelCachedWindows, routeWindowsByHorizon, SESSION_WINDOW_MINUTES, WEEKLY_WINDOW_MINUTES } from "@/lib/limitWindows";
 import { historySamples, historySince, recordLimitSample, RETENTION_S } from "@/lib/limitsHistoryStore";
+import { quotaAsEngineLimits, quotaUsesSource, reconcileQuotaReadings } from "@/lib/rateLimit";
 import { LIMITS_RATE_LIMITED_REASON, LIMITS_REAUTH_REQUIRED_REASON, type BurndownPayload, type BurndownSeries, type EngineBurndown, type EngineLimits, type LimitSample, type LimitsPayload, type LimitsProvenance, type LimitWindow } from "./types";
 
 /** Resolved at call time (not module load) so LLV_STATE_DIR set after this
@@ -278,7 +279,7 @@ export async function readLimits(options: { codexLiveReader?: CodexLiveLimitsRea
   const codexAccount = accountForSpawn();
   const [resolvedClaude, resolvedCodex] = await Promise.all([
     resolveEngineRead("claude", claudeAccount.id, now, clock, () => fetchClaudeLimits(path.join(claudeAccount.home, ".credentials.json"), clock)),
-    resolveEngineRead("codex", codexAccount.id, now, clock, () => readCodexLimits({ account: codexAccount, liveReader: options.codexLiveReader })),
+    resolveEngineRead("codex", codexAccount.id, now, clock, () => readCodexLimits({ account: codexAccount, liveReader: options.codexLiveReader, now: clock })),
   ]);
   return {
     claude: resolvedClaude.data,
@@ -396,25 +397,40 @@ export function mapAppServerRateLimits(rateLimits: AppServerRateLimits, captured
 }
 
 /**
- * Every Codex home receives a fresh structured snapshot from the app-server. The
- * transcript scanner remains a compatibility fallback when that local host is
- * unavailable; its reason keeps old quota data visibly stale.
+ * Every Codex home receives a structured app-server snapshot and a transcript
+ * observation. The two are reconciled per window; an active provider exhaustion
+ * remains authoritative through its reset, while ordinary conflicts use time.
  */
 export async function readCodexLimits(options: {
   account?: Pick<CodexAccount, "id" | "kind" | "home" | "sessionsDir">;
   liveReader?: CodexLiveLimitsReader;
+  now?: () => number;
 } = {}): Promise<LimitRead> {
   const account = options.account ?? accountForSpawn();
+  const clock = options.now ?? Date.now;
+  const transcript = readCodexTranscriptLimits(account.sessionsDir);
   try {
     const rateLimits = await (options.liveReader ?? ((candidate) => managedCodexRuntime().readRateLimits(candidate as CodexAccount)))(account);
-    return { data: mapAppServerRateLimits(rateLimits), reason: null, source: "live" };
+    const observedAt = Math.round(clock() / 1000);
+    const live = mapAppServerRateLimits(rateLimits, observedAt);
+    if (!transcript.data) return { data: live, reason: null, source: "live" };
+    const reconciled = reconcileQuotaReadings(
+      { limits: live, observedAt: live.capturedAt, stale: false, source: "live" },
+      { limits: transcript.data, observedAt: transcript.data.capturedAt, stale: false, source: "transcript" },
+      observedAt,
+    );
+    const transcriptWon = quotaUsesSource(reconciled, "transcript");
+    return {
+      data: quotaAsEngineLimits(reconciled),
+      reason: transcriptWon ? "transcript-reconciled" : null,
+      source: transcriptWon ? "transcript" : "live",
+    };
   } catch (error) {
     const detail = redactAppServerDetail(error instanceof Error ? error.message : String(error));
     const initializeTimedOut = /request timed out:\s*initialize\b/i.test(detail);
     console.warn(`[limits] Codex app-server probe for ${account.id} failed: ${detail}`);
-    const fallback = readCodexTranscriptLimits(account.sessionsDir);
-    if (fallback.data) return {
-      data: fallback.data,
+    if (transcript.data) return {
+      data: transcript.data,
       reason: "transcript-fallback",
       source: "transcript",
       ...(initializeTimedOut ? { backoffReason: CODEX_INITIALIZE_TIMEOUT_REASON } : {}),
@@ -498,25 +514,40 @@ function lastRateLimits(file: string): EngineLimits | null {
   const text = readTail(file, TAIL_BYTES);
   if (!text) return null;
   const lines = text.split("\n");
+  let rejectedAt: number | null = null;
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
-    if (!line.includes('"rate_limits"')) continue;
+    if (!line.includes('"rate_limits"') && !line.includes("usage_limit_exceeded")) continue;
     try {
-      const row = JSON.parse(line) as { timestamp?: unknown; payload?: { rate_limits?: CodexRateLimits } };
-      const rl = row.payload?.rate_limits;
-      if (!rl) continue;
+      const row = JSON.parse(line) as {
+        timestamp?: unknown;
+        payload?: { rate_limits?: CodexRateLimits; error?: { codex_error_info?: unknown } };
+      };
       const ts = typeof row.timestamp === "string" ? Date.parse(row.timestamp) : NaN;
       const capturedAt = Number.isFinite(ts) ? Math.round(ts / 1000) : null;
+      if (row.payload?.error?.codex_error_info === "usage_limit_exceeded") {
+        rejectedAt ??= capturedAt;
+        continue;
+      }
+      const rl = row.payload?.rate_limits;
+      if (!rl) continue;
       const routed = routeWindowsByHorizon(codexWindow(rl.primary, capturedAt), codexWindow(rl.secondary, capturedAt), capturedAt);
       // Codex also emits `rate_limits` events carrying no windows at all (other
       // limit families, e.g. credit balances). They say nothing about the
       // account's quota, so keep looking back for one that does.
       if (!routed.session && !routed.weekly) continue;
+      if (rejectedAt !== null) {
+        const candidates = (["session", "weekly"] as const)
+          .flatMap((key) => routed[key] ? [{ key, value: routed[key] }] : [])
+          .sort((left, right) => right.value!.usedPercent - left.value!.usedPercent || left.key.localeCompare(right.key));
+        const governing = candidates[0];
+        if (governing) routed[governing.key] = { ...governing.value!, usedPercent: 100, observedAt: rejectedAt };
+      }
       return {
         session: routed.session,
         weekly: routed.weekly,
         plan: typeof rl.plan_type === "string" ? rl.plan_type : null,
-        capturedAt,
+        capturedAt: rejectedAt ?? capturedAt,
       };
     } catch {
       /* first line of the tail chunk is usually cut mid-JSON */
@@ -530,7 +561,12 @@ function codexWindow(w: CodexWindow | undefined, capturedAt: number | null): Lim
   let resetsAt: number | null = null;
   if (typeof w.resets_at === "number") resetsAt = w.resets_at;
   else if (typeof w.resets_in_seconds === "number" && capturedAt !== null) resetsAt = capturedAt + w.resets_in_seconds;
-  return { usedPercent: w.used_percent, resetsAt, windowMinutes: typeof w.window_minutes === "number" ? w.window_minutes : null };
+  return {
+    usedPercent: w.used_percent,
+    resetsAt,
+    windowMinutes: typeof w.window_minutes === "number" ? w.window_minutes : null,
+    observedAt: capturedAt,
+  };
 }
 
 /* ----------------------------- Burndown series ----------------------------- */

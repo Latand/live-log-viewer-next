@@ -297,6 +297,7 @@ test("quota windows render as labeled meters with remaining capacity", async () 
   const initial = state(login({ phase: "authenticated" }), {
     accounts: [{
       id: "acc", label: "Acc", kind: "managed", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null, login: null,
+      effective: { percent: 54, window: "session", freshness: "fresh" },
       limits: { freshness: "fresh", session: { usedPercent: 33, resetsAt: null, windowMinutes: 300 }, weekly: { usedPercent: 80, resetsAt: null, windowMinutes: 10_080 } },
     }],
   });
@@ -307,4 +308,25 @@ test("quota windows render as labeled meters with remaining capacity", async () 
   expect(detail.textContent).toContain("Week");
   expect(detail.textContent).toContain("67%");
   expect(detail.textContent).toContain("20%");
+  const activeRow = view.host.querySelector('button[aria-current="true"]')!;
+  expect(activeRow.textContent).toContain("20%");
+  expect(activeRow.textContent).not.toContain("54%");
+});
+
+test("an aged account quota snapshot renders a visible as-of hint", async () => {
+  const initial = state(login({ phase: "authenticated" }), {
+    accounts: [{
+      id: "acc", label: "Acc", kind: "managed", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null, login: null,
+      limits: {
+        freshness: "fresh",
+        session: null,
+        weekly: { usedPercent: 80, resetsAt: null, windowMinutes: 10_080 },
+        checkedAt: "2020-01-01T09:00:00.000Z",
+      },
+    }],
+  });
+  const view = await mount(initial);
+  mounted.push(view);
+
+  expect(view.host.querySelector('[aria-label="Quota windows for Acc"]')?.textContent).toContain("as of");
 });
