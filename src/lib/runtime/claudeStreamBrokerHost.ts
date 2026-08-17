@@ -226,6 +226,8 @@ const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
 export const NATIVE_MULTI_AGENT_DENY_FLAG = `native-multi-agent-deny:${NATIVE_MULTI_AGENT_TOOLS.join(",")}`;
 const MAX_REPLAY_ENVELOPE_BYTES = 256 * 1024;
 const MAX_LINE_BYTES = MAX_STRUCTURED_IMAGE_ENCODED_BYTES + MAX_REPLAY_ENVELOPE_BYTES;
+const MAX_OVERSIZED_FRAME_DIAGNOSTICS = 8;
+const OVERSIZED_FRAME_HEAD_CHARS = 2048;
 
 function record(value: unknown): JsonObject | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : null;
@@ -468,6 +470,8 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private readonly stateListeners = new Set<(state: HostState) => void>();
   private readonly stdoutDecoder = new StringDecoder("utf8");
   private stdoutBuffer = "";
+  private oversizedDiscard: { headText: string; bytes: number } | null = null;
+  private oversizedFrameDiagnostics = 0;
   private cursor: number;
   private activeTurnId: string | null = null;
   private protocolVersion: string | null;
@@ -884,17 +888,70 @@ export class ClaudeStreamBrokerHost implements EngineHost {
 
   private acceptStdout(chunk: string): void {
     if (this.dead || this.released) return;
-    this.stdoutBuffer += chunk;
+    let rest = chunk;
+    if (this.oversizedDiscard) {
+      rest = this.feedOversizedDiscard(rest);
+      if (!rest || this.dead || this.released) return;
+    }
+    this.stdoutBuffer += rest;
     let newline = this.stdoutBuffer.indexOf("\n");
     while (newline >= 0) {
       const line = this.stdoutBuffer.slice(0, newline);
       this.stdoutBuffer = this.stdoutBuffer.slice(newline + 1);
-      if (Buffer.byteLength(line) > MAX_LINE_BYTES) return this.fail(new Error("Claude emitted an oversized JSONL frame"));
-      if (line) this.acceptMessage(line);
+      const lineBytes = Buffer.byteLength(line);
+      /* An oversized frame is skipped with a surfaced diagnostic instead of
+         killing the broker (issue #301): the transcript on disk stays intact,
+         and a degraded but reachable session beats a dead one. */
+      if (lineBytes > MAX_LINE_BYTES) this.reportOversizedFrame(line, lineBytes);
+      else if (line) this.acceptMessage(line);
       if (this.dead) return;
       newline = this.stdoutBuffer.indexOf("\n");
     }
-    if (Buffer.byteLength(this.stdoutBuffer) > MAX_LINE_BYTES) this.fail(new Error("Claude emitted an oversized JSONL frame"));
+    if (Buffer.byteLength(this.stdoutBuffer) > MAX_LINE_BYTES) {
+      this.oversizedDiscard = {
+        headText: this.stdoutBuffer.slice(0, OVERSIZED_FRAME_HEAD_CHARS),
+        bytes: Buffer.byteLength(this.stdoutBuffer),
+      };
+      this.stdoutBuffer = "";
+    }
+  }
+
+  /** Swallows the rest of a skipped oversized frame; returns bytes after its newline. */
+  private feedOversizedDiscard(chunk: string): string {
+    const discard = this.oversizedDiscard!;
+    const newline = chunk.indexOf("\n");
+    if (newline === -1) {
+      discard.bytes += Buffer.byteLength(chunk);
+      return "";
+    }
+    discard.bytes += Buffer.byteLength(chunk.slice(0, newline));
+    this.oversizedDiscard = null;
+    this.reportOversizedFrame(discard.headText, discard.bytes);
+    return chunk.slice(newline + 1);
+  }
+
+  private reportOversizedFrame(headText: string, observedBytes: number): void {
+    const head = headText.slice(0, OVERSIZED_FRAME_HEAD_CHARS);
+    const messageType = /"type"\s*:\s*"([^"]{1,64})"/.exec(head)?.[1] ?? "unknown message type";
+    const diagnostic = `Claude emitted an oversized JSONL frame: observed ${observedBytes} bytes, bound ${MAX_LINE_BYTES} bytes, message type ${messageType}; the frame was skipped and the session may be missing its content`;
+    console.warn("[claude stream broker] skipped an oversized JSONL frame", {
+      sessionId: this.identity.sessionId,
+      observedBytes,
+      boundBytes: MAX_LINE_BYTES,
+      messageType,
+    });
+    if (this.oversizedFrameDiagnostics >= MAX_OVERSIZED_FRAME_DIAGNOSTICS) return;
+    this.oversizedFrameDiagnostics += 1;
+    this.emit({
+      kind: "item",
+      turnId: this.activeTurnId,
+      item: {
+        type: "assistant",
+        isViewerDiagnostic: true,
+        message: { role: "assistant", content: [{ type: "text", text: `[viewer diagnostic] ${diagnostic}` }] },
+      },
+      phase: "completed",
+    });
   }
 
   private acceptMessage(line: string): void {

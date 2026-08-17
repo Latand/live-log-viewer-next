@@ -566,10 +566,25 @@ describe("ClaudeStreamBrokerHost", () => {
       spawnProcess: fakeSpawn(child, {}),
     });
 
-    child.stdout.write("x".repeat(MAX_STRUCTURED_IMAGE_ENCODED_BYTES + 256 * 1024 + 1));
-    await Bun.sleep(0);
-    expect((await host.health()).status).toBe("dead");
-    await host.release();
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      /* The flood outgrows the frame bound without a newline: the buffer is
+         dropped into a byte-counting discard window instead of growing (or
+         killing the broker), and the stream recovers at the next newline. */
+      child.stdout.write("x".repeat(MAX_STRUCTURED_IMAGE_ENCODED_BYTES + 256 * 1024 + 1));
+      await Bun.sleep(0);
+      expect((await host.health()).status).not.toBe("dead");
+      child.stdout.write("\n");
+      await Bun.sleep(0);
+      expect(warn).toHaveBeenCalled();
+
+      const sent = host.send({ id: "post-flood", text: "still alive" });
+      child.emitJson({ type: "user", session_id: host.identity.sessionId, uuid: "post-flood-echo", message: { role: "user", content: [{ type: "text", text: "still alive" }] } });
+      expect(await sent).toEqual({ outcome: "turn-started", turnId: "post-flood" });
+      await host.release();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   test("structured Claude hosts install the deny profile and preserve the explicit escape", async () => {
@@ -731,6 +746,74 @@ describe("ClaudeStreamBrokerHost", () => {
     child.emitJson({ type: "user", session_id: host.identity.sessionId, uuid: "ordinary", message: { role: "user", content: [{ type: "text", text: "match me" }] } });
     expect(await sent).toEqual({ outcome: "turn-started", turnId: "replay-only" });
     await host.release();
+  });
+
+  test("an oversized Claude stream frame is skipped with a diagnostic and the broker survives", async () => {
+    const ledger = new RecordingDeliveryLedger();
+    const child = new FakeClaude(ledger);
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const host = await ClaudeStreamBrokerHost.start({
+        cwd: "/repo",
+        deliveryLedger: ledger,
+        eventStore: new MemoryEventStore(),
+        readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+        spawnProcess: fakeSpawn(child, {}),
+      });
+
+      child.emitJson({
+        type: "assistant",
+        session_id: host.identity.sessionId,
+        message: { role: "assistant", content: [{ type: "text", text: "y".repeat(26 * 1024 * 1024) }] },
+      });
+      await Bun.sleep(20);
+      expect((await host.health()).status).not.toBe("dead");
+      expect(warn).toHaveBeenCalled();
+
+      const sent = host.send({ id: "post-skip", text: "still alive" });
+      child.emitJson({ type: "user", session_id: host.identity.sessionId, uuid: "post-skip-echo", message: { role: "user", content: [{ type: "text", text: "still alive" }] } });
+      expect(await sent).toEqual({ outcome: "turn-started", turnId: "post-skip" });
+      await host.release();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("an unterminated oversized Claude tail buffer is discarded to the next newline and the broker survives", async () => {
+    const ledger = new RecordingDeliveryLedger();
+    const child = new FakeClaude(ledger);
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const host = await ClaudeStreamBrokerHost.start({
+        cwd: "/repo",
+        deliveryLedger: ledger,
+        eventStore: new MemoryEventStore(),
+        readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+        spawnProcess: fakeSpawn(child, {}),
+      });
+
+      const giant = JSON.stringify({
+        type: "assistant",
+        session_id: host.identity.sessionId,
+        message: { role: "assistant", content: [{ type: "text", text: "q".repeat(26 * 1024 * 1024) }] },
+      });
+      for (let offset = 0; offset < giant.length; offset += 4 * 1024 * 1024) {
+        child.stdout.write(giant.slice(offset, offset + 4 * 1024 * 1024));
+        await Bun.sleep(1);
+      }
+      await Bun.sleep(10);
+      expect((await host.health()).status).not.toBe("dead");
+      child.stdout.write("\n");
+      await Bun.sleep(10);
+      expect((await host.health()).status).not.toBe("dead");
+
+      const sent = host.send({ id: "post-tail-skip", text: "still alive" });
+      child.emitJson({ type: "user", session_id: host.identity.sessionId, uuid: "post-tail-echo", message: { role: "user", content: [{ type: "text", text: "still alive" }] } });
+      expect(await sent).toEqual({ outcome: "turn-started", turnId: "post-tail-skip" });
+      await host.release();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   test("confirms image delivery when the provider transcodes the direct user echo", async () => {
@@ -1358,7 +1441,9 @@ describe("ClaudeStreamBrokerHost", () => {
     expect(spawned).toBeFalse();
   });
 
-  test("requires the exact structured-host opt-in before start", async () => {
+  /* Structured hosts default on since 656e60de turned the opt-in gates into
+     rollback switches; only an explicit rollback spelling refuses to start. */
+  test("refuses to start only under an explicit structured-host rollback", async () => {
     const ledger = new RecordingDeliveryLedger();
     const child = new FakeClaude(ledger);
     const options = {
@@ -1369,7 +1454,7 @@ describe("ClaudeStreamBrokerHost", () => {
       readTranscript: () => [],
       spawnProcess: fakeSpawn(child, {}),
     };
-    await expect(startClaudeStructuredHost(options, { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "true" }))
+    await expect(startClaudeStructuredHost(options, { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "0" }))
       .rejects.toThrow("structured hosts are disabled");
     expect(child.sessionId).toBe("");
     const host = await startClaudeStructuredHost(options, { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "1" });

@@ -88,6 +88,9 @@ class CompactAppServer extends EventEmitter {
     if (method === "thread/read") {
       return this.respond(message.id, { thread: { id: this.threadId, path: `/sessions/${this.threadId}.jsonl`, turns: [] } });
     }
+    if (method === "thread/turns/list") {
+      return this.respond(message.id, { data: [], nextCursor: null });
+    }
     if (method === "turn/start") {
       const turnId = `turn-${++this.turn}`;
       this.respond(message.id, { turn: { id: turnId } });

@@ -148,6 +148,11 @@ export class CodexReplayFrameReducer {
   private outputUnits = 0;
   private rawUnits = 0;
   private inString = false;
+
+  /** Raw units fed so far — the observed frame size an overflow diagnostic cites. */
+  get rawUnitsObserved(): number {
+    return this.rawUnits;
+  }
   private stringParts: string[] = [];
   private stringUnits = 0;
   private stringOmitted = 0;
