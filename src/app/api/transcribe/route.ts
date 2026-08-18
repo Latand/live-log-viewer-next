@@ -9,8 +9,9 @@ import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { callTranscribe } from "@/lib/transcribe/chatgpt";
 import { elevenLabsTranscribe } from "@/lib/transcribe/elevenlabs";
 import { localTranscribe } from "@/lib/transcribe/local";
+import { sonioxTranscribe } from "@/lib/transcribe/soniox";
 import type { TranscribeResponse } from "@/lib/transcribe/types";
-import { readElevenLabsApiKey, resolveTranscribeBackend } from "@/lib/transcribeBackend";
+import { readElevenLabsApiKey, readSonioxApiKey, resolveTranscribeBackend } from "@/lib/transcribeBackend";
 import type { ApiError } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -45,18 +46,36 @@ export async function POST(req: NextRequest): Promise<NextResponse<TranscribeRes
   const backend = resolveTranscribeBackend();
 
   if (backend === "elevenlabs") {
-    const apiKey = readElevenLabsApiKey();
-    if (!apiKey) {
+    const key = readElevenLabsApiKey();
+    if (!key) {
       return NextResponse.json(
         { error: "missing ElevenLabs key (~/.config/agent-log-viewer/elevenlabs-api-key or ELEVENLABS_API_KEY)" },
         { status: 503 },
       );
     }
     try {
-      return NextResponse.json(await elevenLabsTranscribe(apiKey, file, language));
+      return NextResponse.json(await elevenLabsTranscribe(key, file, language));
     } catch (error) {
       return NextResponse.json(
         { error: `ElevenLabs STT: ${error instanceof Error ? error.message : String(error)}` },
+        { status: 502 },
+      );
+    }
+  }
+
+  if (backend === "soniox") {
+    const key = readSonioxApiKey();
+    if (!key) {
+      return NextResponse.json(
+        { error: "missing Soniox key (~/.config/agent-log-viewer/soniox-api-key or SONIOX_API_KEY)" },
+        { status: 503 },
+      );
+    }
+    try {
+      return NextResponse.json(await sonioxTranscribe(key, file, language));
+    } catch (error) {
+      return NextResponse.json(
+        { error: `Soniox STT: ${error instanceof Error ? error.message : String(error)}` },
         { status: 502 },
       );
     }

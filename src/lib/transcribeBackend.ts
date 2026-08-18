@@ -6,9 +6,9 @@ import { readCodexAuth } from "@/lib/codexAuth";
 import { configFilePath } from "@/lib/configDir";
 import { localWhisperReady, whisperPythonPath } from "@/lib/transcribe/local";
 
-export type TranscribeBackend = "local" | "chatgpt" | "elevenlabs";
+export type TranscribeBackend = "local" | "chatgpt" | "elevenlabs" | "soniox";
 
-export const TRANSCRIBE_BACKENDS: readonly TranscribeBackend[] = ["local", "chatgpt", "elevenlabs"];
+export const TRANSCRIBE_BACKENDS: readonly TranscribeBackend[] = ["local", "chatgpt", "elevenlabs", "soniox"];
 
 export function isTranscribeBackend(value: unknown): value is TranscribeBackend {
   return typeof value === "string" && (TRANSCRIBE_BACKENDS as readonly string[]).includes(value);
@@ -17,7 +17,7 @@ export function isTranscribeBackend(value: unknown): value is TranscribeBackend 
 /**
  * Which transcription path handles dictation. The default is the fully local
  * faster-whisper engine, which carries no third-party terms. The cloud paths
- * (ChatGPT, ElevenLabs Scribe) turn on via the `LLV_TRANSCRIBE_BACKEND` env
+ * (ChatGPT, ElevenLabs Scribe, Soniox) turn on via the `LLV_TRANSCRIBE_BACKEND` env
  * (highest priority, locks the UI selector) or via the override file the mic
  * right-click menu writes.
  */
@@ -64,6 +64,7 @@ export function transcribeBackendInfo(): TranscribeBackendInfo {
       { id: "local", available: localWhisperReady(), keyPath: whisperPythonPath() },
       { id: "chatgpt", available: readCodexAuth() !== null, keyPath: codexAuthPath() },
       { id: "elevenlabs", available: readElevenLabsApiKey() !== null, keyPath: configFilePath("elevenlabs-api-key") },
+      { id: "soniox", available: readSonioxApiKey() !== null, keyPath: configFilePath("soniox-api-key") },
     ],
   };
 }
@@ -79,6 +80,18 @@ export function readElevenLabsApiKey(): string | null {
   if (env) return env;
   try {
     const fileValue = fs.readFileSync(configFilePath("elevenlabs-api-key"), "utf8").trim();
+    return fileValue || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Same read-at-request-time contract as the ElevenLabs key, one file over. */
+export function readSonioxApiKey(): string | null {
+  const env = process.env.SONIOX_API_KEY?.trim();
+  if (env) return env;
+  try {
+    const fileValue = fs.readFileSync(configFilePath("soniox-api-key"), "utf8").trim();
     return fileValue || null;
   } catch {
     return null;

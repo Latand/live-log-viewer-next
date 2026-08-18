@@ -20,7 +20,7 @@ export interface MicButtonViewProps extends UseDictationResult {
   anchored?: boolean;
 }
 
-type BackendId = "local" | "chatgpt" | "elevenlabs";
+type BackendId = "local" | "chatgpt" | "elevenlabs" | "soniox";
 
 interface BackendInfo {
   backend: BackendId;

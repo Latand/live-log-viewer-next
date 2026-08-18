@@ -50,13 +50,20 @@ export function drawMeter(canvas: HTMLCanvasElement, bins: Uint8Array): void {
   }
 }
 
-export function float32ToBase64Pcm16(float32: Float32Array): string {
+/** Mic samples in the raw little-endian PCM16 every realtime STT socket
+    expects. ElevenLabs takes it base64 inside a JSON frame, Soniox takes the
+    bytes as a binary frame, so the conversion itself is shared. */
+export function float32ToPcm16(float32: Float32Array): Int16Array {
   const int16 = new Int16Array(float32.length);
   for (let i = 0; i < float32.length; i += 1) {
     const s = Math.max(-1, Math.min(1, float32[i] ?? 0));
     int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
   }
-  const bytes = new Uint8Array(int16.buffer);
+  return int16;
+}
+
+export function float32ToBase64Pcm16(float32: Float32Array): string {
+  const bytes = new Uint8Array(float32ToPcm16(float32).buffer);
   let binary = "";
   for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i] ?? 0);
   return btoa(binary);

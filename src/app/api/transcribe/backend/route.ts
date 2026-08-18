@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import {
   isTranscribeBackend,
+  TRANSCRIBE_BACKENDS,
   transcribeBackendInfo,
   writeTranscribeBackend,
   type TranscribeBackendInfo,
@@ -29,7 +30,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<TranscribeBac
     return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
   if (!isTranscribeBackend(body.backend)) {
-    return NextResponse.json({ error: "backend must be local, chatgpt, or elevenlabs" }, { status: 400 });
+    return NextResponse.json({ error: `backend must be one of ${TRANSCRIBE_BACKENDS.join(", ")}` }, { status: 400 });
   }
   const info = transcribeBackendInfo();
   if (info.lockedByEnv) {
