@@ -12,7 +12,14 @@ import { statePath } from "@/lib/configDir";
 import { DeadlineExceededError, deadlineSignal } from "@/lib/deadline";
 import { DEFAULT_STALL_AFTER_MS } from "@/lib/lifecycle/liveness";
 import { PIPELINE_LIST_DEFAULT_LIMIT, PIPELINE_LIST_MAX_LIMIT } from "@/lib/pipelines/listProjection";
-import { PIPELINE_ACTIONS } from "@/lib/pipelines/types";
+import {
+  DEFAULT_FAIL_EDGE_ROUNDS,
+  MAX_FAIL_EDGE_ROUNDS,
+  MAX_PIPELINE_STAGES,
+  MAX_STAGE_PROMPT_LENGTH,
+  MIN_STARTED_PIPELINE_STAGES,
+} from "@/lib/pipelines/limits";
+import { PIPELINE_ACTIONS, PIPELINE_DISALLOWED_ROLE_IDS } from "@/lib/pipelines/types";
 import { procBackend } from "@/lib/proc";
 import { ROLE_IDS, type RoleId } from "@/lib/roles/types";
 import { SELECTED_TAIL_MAX_LINES } from "@/lib/selection/resolve";
@@ -1601,7 +1608,15 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   send_message: "Deliver a message to a Viewer conversation through its registered runtime host.",
   create_task: "Create a durable board task.",
   update_task: "Update a durable board task.",
-  create_pipeline: "Create a Viewer pipeline through the pipeline engine.",
+  create_pipeline: [
+    "Create a Viewer pipeline through the pipeline engine: a stage graph of agent conversations run in one worktree.",
+    "Stages are a graph, not a list: each stage names its pass successor with `next` (a stage id, or null to end the chain), and a run stage may name a fail successor with `onFail`. `next` defaults to null, so a plan whose stages never set it is a set of disconnected stages, not a chain.",
+    "A review-loop stage reviews the session of the run stage that reaches it, so it must be pass-reachable from a run stage through `next` edges — array order alone reaches nothing. review-loop stages are always read-only, may not define `onFail`, and take their engine/model/effort from their role (the registry reviewer preset runs on Codex) unless the stage overrides them.",
+    "Runtime overrides (engine, model, effort, access) belong on the stage; `role` carries only `roleId` and its `params`.",
+    "autoStart:false creates a draft the operator starts from the board; a draft that pins `baseBranch` must also pass `baseRef` (a draft is not provisioned, so the caller resolves the SHA).",
+    "`src` is the creator's transcript path: a native ~/.claude/projects path is normalized to the shared Claude transcript store when the mirrored file exists there.",
+    "An invalid call is answered once with every violated constraint, each naming its field and expected shape.",
+  ].join(" "),
   pipeline_action: "Apply a supported action to an existing pipeline.",
   link_task_to_pipeline: "Attach a board task to a conversation owned by a pipeline.",
   list_conversations: "List scanned Viewer conversations with durable ids and transcript paths.",
@@ -1658,6 +1673,47 @@ const snapshotScopeSchema = z.discriminatedUnion("kind", [
   }).strict(),
 ]);
 
+/* #1026: the stage contract, published rather than discovered. A caller that
+   composed stages from `array of objects` alone learned id, kind, role shape,
+   the runtime-override seam and the `next` edges through seven sequential
+   rejections. Everything the engine's normalizer accepts is declared here; the
+   object stays open (`passthrough`) and the semantic rules — id uniqueness,
+   edge targets, review-loop reachability, role parameter values — stay with the
+   engine, which now answers with all of them at once. */
+const pipelineStageSchema = z.object({
+  /* Bounds here stay exactly as wide as the engine's: it trims before it
+     checks, so a padded id it accepts must not be refused at the door. */
+  id: z.string().regex(/^\s*[A-Za-z0-9_-]{1,64}\s*$/u)
+    .describe("Stage id, unique within the pipeline: 1–64 characters of A–Z a–z 0–9 _ - (surrounding whitespace is trimmed). Referenced by next and onFail."),
+  kind: z.enum(["run", "review-loop"])
+    .describe("run: an agent conversation that does the work. review-loop: a read-only review of the run stage whose next chain reaches it."),
+  "prompt": z.string().min(1)
+    .describe(`Instruction for this stage's agent, appended to its role scaffold. Up to ${MAX_STAGE_PROMPT_LENGTH} characters once trimmed.`),
+  next: z.string().nullable().optional()
+    .describe("Pass successor: the id of the stage this one hands to when it passes, or null to end the chain. DEFAULTS TO null — without it nothing follows this stage, and a review-loop nothing points at is rejected as unreachable."),
+  onFail: z.object({
+    to: z.string().describe("Stage id this stage returns to on a fail verdict."),
+    maxRounds: z.number().int().min(1).max(MAX_FAIL_EDGE_ROUNDS).optional()
+      .describe(`Rounds this fail loop may run before the pipeline parks (default ${DEFAULT_FAIL_EDGE_ROUNDS}).`),
+  }).nullable().optional()
+    .describe("Fail successor for a run stage. A review-loop stage may not define one — it recovers through its own review flow."),
+  role: z.object({
+    roleId: z.enum(ROLE_IDS)
+      .describe(`Role preset from the shared registry; it supplies the stage's prompt scaffold and its default engine/model/effort. ${PIPELINE_DISALLOWED_ROLE_IDS.join(", ")} is refused inside a pipeline (it needs an interactive deploy confirmation).`),
+    params: z.record(z.string(), z.union([z.string(), z.number()])).optional()
+      .describe("Values for the role's declared parameters, substituted into its scaffold. Only the role's own keys, validated against the registry."),
+  }).strict().optional()
+    .describe("Role reference ONLY. Runtime overrides do not go here — put engine/model/effort/access on the stage itself."),
+  engine: z.enum(["claude", "codex"]).optional()
+    .describe("Stage-level engine override; defaults to the role's registry engine."),
+  model: z.string().nullable().optional()
+    .describe("Stage-level model override, or null to inherit the role default. Must be a model the stage engine supports."),
+  effort: z.string().nullable().optional()
+    .describe("Stage-level effort override, or null to inherit the role default. Must be an effort the stage engine supports."),
+  access: z.enum(["read-only", "read-write"]).optional()
+    .describe("Stage-level access override. A review-loop stage is always read-only."),
+}).passthrough();
+
 function boundedNumericInput(toolName: McpToolName, fieldPath: string): z.ZodType {
   const spec = MCP_BOUNDED_NUMERIC_ARGS[toolName]?.find((candidate) => candidate.path.join(".") === fieldPath);
   if (!spec) throw new Error(`missing bounded numeric MCP specification for ${toolName}.${fieldPath}`);
@@ -1712,14 +1768,16 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
   }).passthrough(),
   create_pipeline: z.object({
     clientRequestId: clientRequestIdSchema,
-    task: z.string().min(1),
-    spec: z.string().optional(),
-    repoDir: z.string().min(1),
-    baseBranch: z.string().optional(),
-    baseRef: z.string().optional(),
-    stages: z.array(z.record(z.string(), z.unknown())),
-    src: z.string().optional(),
-    autoStart: z.boolean().optional(),
+    task: z.string().min(1).describe("Board title for the pipeline."),
+    spec: z.string().optional().describe("Acceptance criteria shared by every stage."),
+    repoDir: z.string().min(1).describe("Absolute path of the existing git repository the pipeline worktree is cut from."),
+    baseBranch: z.string().optional().describe("Branch the worktree is based on. A draft that pins this must also pass baseRef."),
+    baseRef: z.string().optional().describe("Commit the pipeline is pinned to. Required when a draft (autoStart:false) pins baseBranch — resolve the SHA yourself."),
+    stages: z.array(pipelineStageSchema).describe(
+      `Stage graph, 0–${MAX_PIPELINE_STAGES} stages (a started pipeline needs at least ${MIN_STARTED_PIPELINE_STAGES}). Stages run in the order the next edges chain them, not array order; every review-loop must be pass-reachable from a run stage.`,
+    ),
+    src: z.string().optional().describe("Creator transcript path (.jsonl) under the shared Claude transcript store or a Codex sessions root; a native ~/.claude/projects path is normalized to its shared-store mirror when that file exists."),
+    autoStart: z.boolean().optional().describe("false creates a draft for the operator to start from the board."),
   }).passthrough(),
   pipeline_action: z.object({
     clientRequestId: clientRequestIdSchema,

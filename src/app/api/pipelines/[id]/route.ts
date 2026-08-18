@@ -44,6 +44,9 @@ export async function PATCH(
     if (!result.pipeline) return NextResponse.json({
       error: result.error ?? "could not update pipeline",
       ...(result.code ? { code: result.code, field: result.field, path: result.path } : {}),
+      /* #1026: a draft stage edit runs the same batched stage validation the
+         create path does, so its caller gets the same field-level list. */
+      ...(result.violations?.length ? { violations: result.violations } : {}),
       ...(result.close ? { close: result.close } : {}),
     }, { status: result.status ?? 400 });
     if (CONTROLLER_ACTIONS.has(body.action)) requestPipelineTick();

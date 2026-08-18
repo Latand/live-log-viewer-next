@@ -69,8 +69,23 @@ test("bridge reports survive as the second channel, for the operator away from t
 
 /* Seats record the mandate version they were spawned on; `get_orchestrator` reports
    this constant as defaultPromptVersion, so a v3 seat reads as stale without a diff. */
-test("the default mandate is at version 4", () => {
-  expect(ORCHESTRATOR_PROMPT_VERSION).toBe(4);
+test("the default mandate is at version 5", () => {
+  expect(ORCHESTRATOR_PROMPT_VERSION).toBe(5);
+});
+
+/* #1026 — a fresh seat composed its first pipeline through seven sequential
+   validation errors because nothing it had read named the stage shape. The
+   mandate now carries that contract, with the two rules the walk actually
+   turned on: runtime overrides live on the stage, and `next` defaults to null
+   so an unwired review-loop is unreachable. */
+test("the mandate carries the pipeline stage contract a first pipeline needs", () => {
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("## Pipeline stage contract");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain('kind: "run" | "review-loop"');
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("role: {roleId, params?}");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("never inside role");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("DEFAULTS TO null");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("pass-reachable from a run stage");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("a draft that pins baseBranch must also pass baseRef");
 });
 
 test("the prompt names every bridge report class and no others", () => {
