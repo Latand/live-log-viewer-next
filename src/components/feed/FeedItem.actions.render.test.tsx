@@ -29,6 +29,17 @@ test("an assistant message keeps its actions out of the text flow", () => {
   expect(html).toMatch(/mb-0\.5 flex min-h-6 items-center gap-1/);
 });
 
+/* #1022: the read-aloud control finds the RENDERED answer through these two
+   anchors, and highlights the spoken word over it. Losing them silently costs
+   the karaoke follow-along and click-to-seek, with nothing else breaking. */
+test("an assistant message exposes the anchors the read-aloud control follows", () => {
+  const html = renderToStaticMarkup(<FeedItem item={prose()} speakText="The first line of the answer." />);
+  expect(html).toContain("data-tts-message");
+  expect(html).toContain("data-tts-body");
+  /* The body wrapper is display:contents, so it adds no box of its own. */
+  expect(html).toMatch(/<div class="contents" data-tts-body="true">/);
+});
+
 test("message actions are visible without a hover and never dimmed onto text", () => {
   for (const item of [prose(), user()]) {
     const html = renderToStaticMarkup(<FeedItem item={item} />);

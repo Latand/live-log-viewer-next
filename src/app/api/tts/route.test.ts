@@ -190,23 +190,90 @@ describe("/api/tts — soniox (#1020)", () => {
     expect(raw).not.toContain(SONIOX_KEY);
   });
 
-  test("selecting soniox leaves the ElevenLabs request shape untouched", async () => {
+  test("selecting soniox leaves the ElevenLabs request body untouched", async () => {
     process.env.LLV_TTS_BACKEND = "elevenlabs";
     process.env.XDG_CONFIG_HOME = "/nonexistent/tts-route-soniox";
     setEnv("ELEVENLABS_API_KEY", "eleven-key");
-    const fetchMock = mock(async () => new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } }));
+    const fetchMock = mock(async () => Response.json(elevenPayload("Read this answer.")));
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     const response = await POST(request(JSON.stringify({ text: "Read this answer." })));
-    await response.arrayBuffer();
+    await response.json();
 
     const [url, init] = fetchMock.mock.calls[0]! as unknown as [string, RequestInit];
-    expect(url).toBe("https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM");
+    expect(url).toBe("https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM/with-timestamps");
     const headers = new Headers(init.headers as HeadersInit);
     expect(headers.get("xi-api-key")).toBe("eleven-key");
-    expect(headers.get("accept")).toBe("audio/mpeg");
     expect(JSON.parse(String(init.body))).toEqual({ model_id: "eleven_multilingual_v2", text: "Read this answer." });
 
+    setEnv("ELEVENLABS_API_KEY", undefined);
+  });
+});
+
+/** An ElevenLabs `/with-timestamps` envelope for `text`, one 0.1s per character. */
+function elevenPayload(text: string, audio = "QUJD") {
+  return {
+    audio_base64: audio,
+    alignment: {
+      characters: [...text],
+      character_start_times_seconds: [...text].map((_, index) => index * 0.1),
+      character_end_times_seconds: [...text].map((_, index) => (index + 1) * 0.1),
+    },
+    normalized_alignment: { characters: [], character_start_times_seconds: [], character_end_times_seconds: [] },
+  };
+}
+
+describe("/api/tts — elevenlabs character alignment (#1022)", () => {
+  test("asks for timestamps and passes the alignment through beside the audio", async () => {
+    process.env.LLV_TTS_BACKEND = "elevenlabs";
+    process.env.XDG_CONFIG_HOME = "/nonexistent/tts-route-eleven";
+    setEnv("ELEVENLABS_API_KEY", "eleven-key");
+    globalThis.fetch = mock(async () => Response.json(elevenPayload("Hi"))) as unknown as typeof fetch;
+
+    const response = await POST(request(JSON.stringify({ text: "Hi" })));
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    expect(await response.json()).toEqual({
+      audio: "QUJD",
+      contentType: "audio/mpeg",
+      alignment: { characters: ["H", "i"], starts: [0, 0.1], ends: [0.1, 0.2] },
+    });
+    setEnv("ELEVENLABS_API_KEY", undefined);
+  });
+
+  test("a payload without a usable alignment still plays, with alignment null", async () => {
+    process.env.LLV_TTS_BACKEND = "elevenlabs";
+    process.env.XDG_CONFIG_HOME = "/nonexistent/tts-route-eleven";
+    setEnv("ELEVENLABS_API_KEY", "eleven-key");
+    globalThis.fetch = mock(async () => Response.json({
+      audio_base64: "QUJD",
+      alignment: { characters: ["H", "i"], character_start_times_seconds: [0], character_end_times_seconds: [0.1] },
+    })) as unknown as typeof fetch;
+
+    const response = await POST(request(JSON.stringify({ text: "Hi" })));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ audio: "QUJD", contentType: "audio/mpeg", alignment: null });
+    setEnv("ELEVENLABS_API_KEY", undefined);
+  });
+
+  test("a malformed envelope is a clean 502 and releases the synthesis slot", async () => {
+    process.env.LLV_TTS_BACKEND = "elevenlabs";
+    process.env.XDG_CONFIG_HOME = "/nonexistent/tts-route-eleven";
+    setEnv("ELEVENLABS_API_KEY", "eleven-key");
+    globalThis.fetch = mock(async () => new Response("<html>gateway</html>", { headers: { "content-type": "text/html" } })) as unknown as typeof fetch;
+
+    const broken = await POST(request(JSON.stringify({ text: "Hi" })));
+    expect(broken.status).toBe(502);
+    expect(await broken.json()).toEqual({ error: "elevenlabs TTS returned invalid audio" });
+
+    /* The slot came back: three more syntheses are admitted right after. */
+    globalThis.fetch = mock(async () => Response.json(elevenPayload("Hi"))) as unknown as typeof fetch;
+    for (const response of await Promise.all([1, 2, 3].map(() => POST(request(JSON.stringify({ text: "Hi" })))))) {
+      expect(response.status).toBe(200);
+      await response.json();
+    }
     setEnv("ELEVENLABS_API_KEY", undefined);
   });
 });
