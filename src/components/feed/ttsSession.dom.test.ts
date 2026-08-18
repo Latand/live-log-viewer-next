@@ -103,7 +103,7 @@ function harness(source = LONG, options: { concurrency?: number } = {}) {
   const chunks = chunkSpeech(source);
   const audio = elements();
   const requested: string[] = [];
-  const resolvers = new Map<string, (value: { blob: Blob; alignment: null }) => void>();
+  const resolvers = new Map<string, (value: { blob: Blob; alignment: null; voice: null }) => void>();
   const rejecters = new Map<string, (error: unknown) => void>();
   const positions: { chunkIndex: number; charIndex: number; elapsed: number; total: number }[] = [];
   const phases: string[] = [];
@@ -132,7 +132,7 @@ function harness(source = LONG, options: { concurrency?: number } = {}) {
     const text = chunks[index]!.text;
     const blob = new Blob([text]);
     Object.assign(blob, { text });
-    resolvers.get(text)!({ blob, alignment: null });
+    resolvers.get(text)!({ blob, alignment: null, voice: null });
     await settle();
   };
   const reject = async (index: number, error: unknown) => {
@@ -358,6 +358,7 @@ describe("TtsSession (#1022)", () => {
           starts: [...text].map((_, index) => index),
           ends: [...text].map((_, index) => index + 1),
         },
+        voice: null,
       }),
       elements: audio as unknown as HTMLAudioElement[],
       onPosition: () => {},
@@ -434,6 +435,38 @@ describe("chunk cache and replay markers (#1022)", () => {
   });
 });
 
+/* #1024: a tab open across a provider switch asks for one voice and is charged
+   another. The audio is filed under the voice that answered, so a later "free
+   replay" is never a replay of audio that provider never produced. */
+describe("TtsSession cache keying (#1024)", () => {
+  test("caches a chunk under the voice the route says it billed", async () => {
+    const chunks = chunkSpeech("One short answer.");
+    const believed = { id: "openai", model: "gpt-4o-mini-tts", voice: "alloy" };
+    const charged = { id: "elevenlabs", model: "eleven_multilingual_v2", voice: "Rachel" };
+    const seen: { id: string }[] = [];
+    const audio = elements();
+    const session = new TtsSession({
+      chunks,
+      key: (text, voice) => voiceKey(voice ?? believed, text),
+      synthesize: async (text) => ({ blob: Object.assign(new Blob([text]), { text }), alignment: null, voice: charged }),
+      elements: audio as unknown as HTMLAudioElement[],
+      onPosition: () => {},
+      onPhase: () => {},
+      onVoice: (voice) => seen.push(voice),
+      onError: () => {},
+      onEnd: () => {},
+    });
+    session.start();
+    await settle();
+    session.stop();
+
+    const texts = chunks.map((chunk) => chunk.text);
+    expect(chunksCached(texts.map((text) => voiceKey(believed, text)))).toBe(false);
+    expect(chunksCached(texts.map((text) => voiceKey(charged, text)))).toBe(true);
+    expect(seen).toEqual(chunks.map(() => charged));
+  });
+});
+
 describe("synthesizeChunk (#1022)", () => {
   test("decodes a timestamped JSON envelope into audio plus alignment", async () => {
     globalThis.fetch = mock(async () => Response.json({
@@ -454,6 +487,23 @@ describe("synthesizeChunk (#1022)", () => {
     const result = await synthesizeChunk("Hi", new AbortController().signal);
     expect(await result.blob.text()).toBe("mp3");
     expect(result.alignment).toBeNull();
+    expect(result.voice).toBeNull();
+  });
+
+  /* #1024: the page's copy of the configuration is a page-load-old singleton,
+     so the answer has to say who was billed rather than the request assuming
+     it. Percent-encoded, because a configured voice name is arbitrary text. */
+  test("reads the billed voice off the response, decoded", async () => {
+    globalThis.fetch = mock(async () => new Response(new Blob(["mp3"]), {
+      headers: {
+        "content-type": "audio/mpeg",
+        "x-tts-backend": "elevenlabs",
+        "x-tts-model": "eleven_multilingual_v2",
+        "x-tts-voice": encodeURIComponent("Расмус · deep"),
+      },
+    })) as unknown as typeof fetch;
+    const result = await synthesizeChunk("Hi", new AbortController().signal);
+    expect(result.voice).toEqual({ id: "elevenlabs", model: "eleven_multilingual_v2", voice: "Расмус · deep" });
   });
 
   test("waits out the route's busy answer, then surfaces a real failure verbatim", async () => {
