@@ -3217,7 +3217,9 @@ describe("durable account migration coordinator", () => {
       async cleanup(receipt) { cleaned.push(receipt.nativeId); },
     };
 
-    const staleAdvance = advanceConversationMigration(conversation.id, store, staleProvider);
+    /* Both advances stand in for the reconfigure executor that owns the
+       switch; a caller that is not the owner defers to it (#1028). */
+    const staleAdvance = advanceConversationMigration(conversation.id, store, staleProvider, { reconfigureOperationId: "rebind-old" });
     await creating;
     store.claimConversationReconfigure(conversation.id, {
       operationId: "rebind-new",
@@ -3255,7 +3257,7 @@ describe("durable account migration coordinator", () => {
       },
       async verify() {},
     };
-    const committed = await advanceConversationMigration(conversation.id, store, winningProvider);
+    const committed = await advanceConversationMigration(conversation.id, store, winningProvider, { reconfigureOperationId: "rebind-new" });
 
     expect(committed.migration).toMatchObject({ phase: "committed" });
     expect(committed.migration?.pendingContinuityPaths).toEqual(["/winning-rebind-c.jsonl"]);
@@ -3403,6 +3405,7 @@ describe("durable account migration coordinator", () => {
 
     const oldAdvance = advanceConversationMigration(conversation.id, store, provider, {
       ownsOperation: async () => activeOperation === "same-target-old",
+      reconfigureOperationId: "same-target-old",
     });
     await verifying;
     store.claimConversationReconfigure(conversation.id, {
@@ -3418,6 +3421,7 @@ describe("durable account migration coordinator", () => {
     store.requestConversationReseat(conversation.id, "b", { operationId: "same-target-new", revision: 81 });
     const committed = await advanceConversationMigration(conversation.id, store, provider, {
       ownsOperation: async () => activeOperation === "same-target-new",
+      reconfigureOperationId: "same-target-new",
     });
 
     expect(committed.migration).toMatchObject({ phase: "committed" });
