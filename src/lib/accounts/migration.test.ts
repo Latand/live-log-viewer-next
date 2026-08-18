@@ -12,7 +12,6 @@ import {
   migrationHoldsDelivery,
   migrationHoldsSends,
   parseAutoBalance,
-  parseEffective,
   parseEngineMigration,
   parseMigrationPreview,
   postConversationMigration,
@@ -192,12 +191,6 @@ describe("tolerant parsers", () => {
     expect(parseAutoBalance({ enabled: false })).toMatchObject({ enabled: false, state: "disabled", thresholdPercent: 25 });
     expect(parseAutoBalance({ enabled: true, state: "cooldown", cooldownUntil: "2026-07-10T15:00:00.000Z" })).toMatchObject({ enabled: true, state: "cooldown" });
     expect(parseAutoBalance({ enabled: true, state: "bogus" })?.state).toBe("idle");
-  });
-
-  test("parseEffective validates the percent and window", () => {
-    expect(parseEffective({ window: "session" })).toBeNull();
-    expect(parseEffective({ percent: 42, window: "weekly", freshness: "fresh" })).toEqual({ percent: 42, window: "weekly", freshness: "fresh" });
-    expect(parseEffective({ percent: 42, window: "nonsense", freshness: "nonsense" })).toEqual({ percent: 42, window: "session", freshness: "unavailable" });
   });
 
   test("parseMigrationPreview reads targetId from top level or nested intent", () => {

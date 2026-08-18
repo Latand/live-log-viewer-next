@@ -61,6 +61,9 @@ function accountProjection(observation: DurableQuotaObservation | undefined, aut
       weekly: observation?.limits?.weekly ?? null,
       checkedAt: observation?.observedAt ?? null,
     },
+    // No client parses this block any more — every capacity chip is reconciled
+    // from the window rows above. Dropping it from the wire is a route change
+    // this lane is scoped away from (issue #1018 follow-up).
     effective: effective ? { ...effective, freshness: eligible ? "fresh" : "stale" } : null,
   };
 }

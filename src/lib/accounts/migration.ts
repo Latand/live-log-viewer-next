@@ -105,13 +105,6 @@ export interface AutoBalance {
   lastOutcome: AutoBalanceOutcome | null;
 }
 
-/** Per-account effective remaining capacity (the min across quota windows). */
-export interface AccountEffective {
-  percent: number;
-  window: QuotaWindow;
-  freshness: "fresh" | "stale" | "unavailable";
-}
-
 /** Preview returned by POST …/active with `mode:"preview"` before any mutation. */
 export interface MigrationPreview {
   targetId: string;
@@ -416,16 +409,6 @@ export function parseAutoBalance(raw: unknown): AutoBalance | null {
     lastCheckAt: str(record.lastCheckAt),
     lastOutcome: parseOutcome(record.lastOutcome),
   };
-}
-
-/** Parses a per-account `effective` capacity block; `null` when unknown. */
-export function parseEffective(raw: unknown): AccountEffective | null {
-  const record = asRecord(raw);
-  if (!record) return null;
-  if (typeof record.percent !== "number" || !Number.isFinite(record.percent)) return null;
-  const window = record.window === "weekly" ? "weekly" : "session";
-  const freshness = record.freshness === "fresh" ? "fresh" : record.freshness === "stale" ? "stale" : "unavailable";
-  return { percent: record.percent, window, freshness };
 }
 
 /** The canonical result of a per-card recovery call: whether the coordinator

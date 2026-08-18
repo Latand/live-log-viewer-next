@@ -5,27 +5,26 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { accountEntryPointVisible, type Engine, useEngineAccounts } from "@/hooks/useEngineAccounts";
 import { consumePendingAccountPanel, onAccountPanelRequest } from "@/lib/accounts/openPanel";
 import { type Locale, translate, useLocale } from "@/lib/i18n";
+import { effectiveQuota, LIMITS_FRESHNESS_S, quotaAsEngineLimits, quotaReadingFromAccountLimits, quotaReadingFromEngineLimits, reconcileQuotaReadings } from "@/lib/rateLimit";
 import { LIMITS_RATE_LIMITED_REASON, LIMITS_REAUTH_REQUIRED_REASON, type EngineLimits, type LimitsPayload, type LimitsProvenance, type LimitWindow } from "@/lib/types";
 
 import { AccountsPanel } from "./AccountsPanel";
 import { BurndownPanel } from "./BurndownPanel";
 import { ChevronDown, Loader2 } from "./icons";
-import { formatResetClock as fmtResetAt, formatResetEta as fmtEta, localeBcp47 as bcp47, windowLabel } from "./rateLimit";
+import { formatQuotaAsOf, formatResetClock as fmtResetAt, formatResetEta as fmtEta, localeBcp47 as bcp47, windowLabel } from "./rateLimit";
 import { engineTintOf, fmtAge } from "./utils";
 
 const POLL_MS = 60_000;
-/** Codex numbers come from the last transcript event; flag them past this age. */
-const STALE_S = 20 * 60;
 
 /** Human "as of HH:MM" hint for a stale snapshot. The Codex block renders this
     text alongside the dimming, giving that state a readable reason. */
 export function fmtStaleSince(staleSince: string | null | undefined, locale: Locale): string | null {
-  if (!staleSince) return null;
-  const d = new Date(staleSince);
-  if (Number.isNaN(d.getTime())) return null;
-  return translate(locale, "limits.asOf", {
-    time: d.toLocaleTimeString(bcp47(locale), { hour: "2-digit", minute: "2-digit", hour12: false }),
-  });
+  return formatQuotaAsOf(staleSince, locale);
+}
+
+export function fmtQuotaStaleHint(stale: boolean, observedAt: number | null, locale: Locale): string | null {
+  if (!stale) return null;
+  return formatQuotaAsOf(observedAt, locale) ?? translate(locale, "accounts.limitsStale");
 }
 
 export function fmtLimitsFailureReason(meta: LimitsProvenance, locale: Locale): string | null {
@@ -51,11 +50,13 @@ function LimitRow({
   window: w,
   engineColor,
   now,
+  staleHint,
 }: {
   label: string;
   window: LimitWindow | null;
   engineColor: string;
   now: number;
+  staleHint?: string | null;
 }) {
   const { t } = useLocale();
   if (!w) return null;
@@ -75,9 +76,11 @@ function LimitRow({
           style={{ width: Math.max(left, 1.5) + "%", backgroundColor: color }}
         />
       </div>
-      {w.resetsAt ? (
+      {w.resetsAt || staleHint ? (
         <div className="mt-[3px] text-[10px] leading-none text-muted">
-          {t("limits.reset", { eta: fmtEta(w.resetsAt, now), at: fmtResetAt(w.resetsAt, now) })}
+          {w.resetsAt ? t("limits.reset", { eta: fmtEta(w.resetsAt, now), at: fmtResetAt(w.resetsAt, now) }) : null}
+          {w.resetsAt && staleHint ? " · " : null}
+          {staleHint}
         </div>
       ) : null}
     </div>
@@ -167,7 +170,7 @@ export function createLatestLimitsLoader(fetcher: Fetcher, onPayload: (payload: 
 
 /** One engine's limits block, doubling as its account switcher: the whole block
     is a button opening the unified {@link AccountsPanel} for that engine, and
-    the header carries the active-account chip (with a live capacity chip) so
+    the header carries the active-account chip from the reconciled windows so
     "which account am I on, and how much is left" reads without a click. Renders
     even with no numbers (a freshly switched account) so the entry point never
     disappears — symmetric for Claude and Codex (Fable P9). */
@@ -177,7 +180,7 @@ function EngineLimitsBlock({
   limits,
   payloadAccountId,
   now,
-  staleHint,
+  receivedAt,
   provenance,
   onSwitched,
 }: {
@@ -186,7 +189,7 @@ function EngineLimitsBlock({
   limits: EngineLimits | null;
   payloadAccountId: string | null;
   now: number;
-  staleHint: string | null;
+  receivedAt: number;
   provenance: LimitsProvenance;
   onSwitched: () => void;
 }) {
@@ -267,20 +270,28 @@ function EngineLimitsBlock({
   if (!accountEntryPointVisible(Boolean(limits), accounts.status)) return null;
 
   const tint = engineTintOf(engine);
-  const accountLimits = limitsForActiveAccount(limits, payloadAccountId, accounts.active);
-  const identityPending = Boolean(limits && accountLimits === null);
-  const hasWindows = Boolean(accountLimits && (accountLimits.session || accountLimits.weekly));
-  const stale = accountLimits?.capturedAt && now - accountLimits.capturedAt > STALE_S ? fmtAge(accountLimits.capturedAt) : null;
+  const payloadLimits = limitsForActiveAccount(limits, payloadAccountId, accounts.active);
+  const identityPending = Boolean(limits && payloadLimits === null);
   const activeAccount = accounts.accounts.find((account) => account.id === accounts.active);
+  const quota = reconcileQuotaReadings(
+    quotaReadingFromEngineLimits(payloadLimits, provenance, receivedAt),
+    quotaReadingFromAccountLimits(activeAccount?.limits),
+    now,
+  );
+  const accountLimits = quotaAsEngineLimits(quota);
+  const hasWindows = Boolean(accountLimits && (accountLimits.session || accountLimits.weekly));
+  const stale = accountLimits?.capturedAt && now - accountLimits.capturedAt > LIMITS_FRESHNESS_S ? fmtAge(accountLimits.capturedAt) : null;
   const activeLabel = activeAccount?.label ?? t("accounts.trigger");
-  const effective = activeAccount?.effective;
+  const effective = effectiveQuota(quota);
+  const effectiveStaleHint = fmtQuotaStaleHint(Boolean(effective?.stale), effective?.observedAt ?? null, locale);
+  const anyStale = Boolean(quota.session?.stale || quota.weekly?.stale);
   const draining = accounts.migration?.state === "draining";
   const failureReason = fmtLimitsFailureReason(provenance, locale);
   const visibleFailureReason = accounts.status === "loading" || identityPending ? null : failureReason;
 
   return (
     <div ref={containerRef} className="relative">
-      <div className={staleHint ? "opacity-60" : ""}>
+      <div className={anyStale ? "opacity-60" : ""}>
         <button
           ref={triggerRef}
           type="button"
@@ -296,12 +307,12 @@ function EngineLimitsBlock({
           <div className="flex items-center gap-1.5">
             <span className="text-[11.5px] font-bold" style={{ color: tint.color }}>{label}</span>
             {accountLimits?.plan ? <span className="truncate text-[10px] text-muted">{accountLimits.plan}</span> : null}
-            {staleHint ? <span className="truncate text-[10px] text-muted">{staleHint}</span> : null}
+            {effectiveStaleHint ? <span className="truncate text-[10px] text-muted">{effectiveStaleHint}</span> : null}
             {stale ? <span className="h-1.5 w-1.5 shrink-0 self-center rounded-full bg-warning" title={t("limits.stale", { stale })} /> : null}
             <span className="ml-auto flex shrink-0 items-center gap-1">
-              {effective && effective.freshness !== "unavailable" ? (
+              {effective ? (
                 <span
-                  className={`rounded-full border border-border bg-canvas px-1.5 py-0.5 text-[9.5px] font-bold tabular-nums ${effective.freshness === "stale" ? "opacity-55" : ""}`}
+                  className={`rounded-full border border-border bg-canvas px-1.5 py-0.5 text-[9.5px] font-bold tabular-nums ${effective.stale ? "opacity-55" : ""}`}
                   style={{ color: barColor(effective.percent, tint.color) }}
                 >
                   {t("accounts.effective", { pct: Math.round(effective.percent) })}
@@ -331,15 +342,15 @@ function EngineLimitsBlock({
             }}
             className={`block w-full px-3.5 pt-0.5 text-left hover:bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${visibleFailureReason ? "pb-1.5" : "pb-3"}`}
           >
-            <LimitRow label={windowLabel(t, "session", accountLimits!.session?.windowMinutes)} window={accountLimits!.session} engineColor={tint.color} now={now} />
-            <LimitRow label={windowLabel(t, "weekly", accountLimits!.weekly?.windowMinutes)} window={accountLimits!.weekly} engineColor={tint.color} now={now} />
+            <LimitRow label={windowLabel(t, "session", accountLimits!.session?.windowMinutes)} window={accountLimits!.session} engineColor={tint.color} now={now} staleHint={fmtQuotaStaleHint(Boolean(quota.session?.stale), quota.session?.observedAt ?? null, locale)} />
+            <LimitRow label={windowLabel(t, "weekly", accountLimits!.weekly?.windowMinutes)} window={accountLimits!.weekly} engineColor={tint.color} now={now} staleHint={fmtQuotaStaleHint(Boolean(quota.weekly?.stale), quota.weekly?.observedAt ?? null, locale)} />
           </button>
         ) : visibleFailureReason ? null : (
           <div className="px-3.5 pb-3 pt-0.5 text-[10px] text-muted">{accounts.status === "loading" || identityPending ? t("limits.accountLoading") : t("limits.noDataYet")}</div>
         )}
         {visibleFailureReason ? <div className="px-3.5 pb-3 pt-0.5 text-[10px] text-muted">{visibleFailureReason}</div> : null}
       </div>
-      {open ? <AccountsPanel state={accounts} onClose={close} focusAccountId={focusAccountId} /> : null}
+      {open ? <AccountsPanel state={accounts} onClose={close} focusAccountId={focusAccountId} quotaOverride={{ accountId: accounts.active, quota, now }} /> : null}
       {chartOpen ? <BurndownPanel key={accounts.active} engine={engine} label={label} plan={accountLimits?.plan ?? null} activeAccountId={accounts.active} onClose={closeChart} /> : null}
     </div>
   );
@@ -348,22 +359,27 @@ function EngineLimitsBlock({
 /** Sidebar footer: Claude and Codex plan limits (5h session + weekly). Each
     block is also that engine's account switcher (see {@link EngineLimitsBlock}). */
 export function LimitsFooter() {
-  const { locale } = useLocale();
   const [snap, setSnap] = useState<{ data: LimitsPayload; at: number } | null>(null);
+  const [now, setNow] = useState(() => Date.now() / 1000);
   /* A switch busts the account-keyed server cache and immediately schedules a
      fresh read through this ref. */
   const loadRef = useRef<() => Promise<void>>(async () => {});
   const invalidateLimits = useCallback(() => void loadRef.current(), []);
 
   useEffect(() => {
+    let active = true;
     const loader = createLatestLimitsLoader(fetch, (json) => {
       setSnap((prev) => ({ data: stickyPayload(prev?.data ?? null, json), at: Date.now() / 1000 }));
     });
-    const load = async () => { await loader.load(); };
+    const load = async () => {
+      await loader.load();
+      if (active) setNow(Date.now() / 1000);
+    };
     loadRef.current = load;
     void load();
     const t = setInterval(load, POLL_MS);
     return () => {
+      active = false;
       clearInterval(t);
       loader.dispose();
       loadRef.current = async () => {};
@@ -372,13 +388,10 @@ export function LimitsFooter() {
 
   // Each engine's account list governs its switcher visibility. Both remain
   // mounted through empty limits, initial loading, and account refresh failures.
-  const claudeStaleHint = snap ? fmtStaleSince(snap.data.provenance.claude.staleSince, locale) : null;
-  const codexStaleHint = snap ? fmtStaleSince(snap.data.provenance.codex.staleSince, locale) : null;
-  const now = snap?.at ?? 0;
   return (
     <div className="shrink-0 border-t border-border empty:hidden">
-      <EngineLimitsBlock engine="claude" label="Claude" limits={snap?.data.claude ?? null} payloadAccountId={snap?.data.claudeAccountId ?? null} now={now} staleHint={claudeStaleHint} provenance={snap?.data.provenance.claude ?? { source: "unavailable", reason: null, staleSince: null }} onSwitched={invalidateLimits} />
-      <EngineLimitsBlock engine="codex" label="Codex" limits={snap?.data.codex ?? null} payloadAccountId={snap?.data.codexAccountId ?? null} now={now} staleHint={codexStaleHint} provenance={snap?.data.provenance.codex ?? { source: "unavailable", reason: null, staleSince: null }} onSwitched={invalidateLimits} />
+      <EngineLimitsBlock engine="claude" label="Claude" limits={snap?.data.claude ?? null} payloadAccountId={snap?.data.claudeAccountId ?? null} now={now} receivedAt={snap?.at ?? now} provenance={snap?.data.provenance.claude ?? { source: "unavailable", reason: null, staleSince: null }} onSwitched={invalidateLimits} />
+      <EngineLimitsBlock engine="codex" label="Codex" limits={snap?.data.codex ?? null} payloadAccountId={snap?.data.codexAccountId ?? null} now={now} receivedAt={snap?.at ?? now} provenance={snap?.data.provenance.codex ?? { source: "unavailable", reason: null, staleSince: null }} onSwitched={invalidateLimits} />
     </div>
   );
 }

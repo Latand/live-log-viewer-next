@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, setSystemTime, test } from "bun:test";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
@@ -24,8 +24,26 @@ Object.assign(globalThis, {
 const NOW = Math.round(Date.now() / 1000);
 
 let limits: LimitsPayload;
+let limitsUnavailable = false;
+const baseAccount = {
+  id: "account-a",
+  label: "Account A",
+  kind: "managed",
+  authPresent: true,
+  auth: { state: "authenticated" },
+  loginPending: false,
+  loginState: "authenticated",
+  deviceAuth: null,
+  effective: { percent: 79, window: "weekly", freshness: "fresh" },
+  limits: {
+    state: "fresh",
+    session: null,
+    weekly: { usedPercent: 21, resetsAt: NOW + 6 * 86_400, windowMinutes: 10_080 },
+    checkedAt: new Date((NOW - 60) * 1000).toISOString(),
+  },
+};
 const accounts = {
-  codex: { active: "account-a", accounts: [{ id: "account-a", label: "Account A", kind: "managed", authPresent: true, auth: { state: "authenticated" }, loginPending: false, loginState: "authenticated", deviceAuth: null }] },
+  codex: { active: "account-a", accounts: [baseAccount] },
   claude: { active: "claude-a", accounts: [] },
 };
 
@@ -33,18 +51,21 @@ const accounts = {
 // this stub rather than the real endpoints.
 globalThis.fetch = (async (input: RequestInfo | URL) => {
   const url = String(input);
-  if (url === "/api/limits") return Response.json(limits);
+  if (url === "/api/limits") return limitsUnavailable ? new Response(null, { status: 503 }) : Response.json(limits);
   if (url === "/api/accounts") return Response.json(accounts);
   return new Response(null, { status: 404 });
 }) as unknown as typeof fetch;
 
-const { LimitsFooter } = await import("./LimitsFooter");
+const { LimitsFooter, fmtQuotaStaleHint } = await import("./LimitsFooter");
 
 let root: Root | null = null;
 afterEach(async () => {
   if (root) await act(async () => { root?.unmount(); });
   root = null;
   document.body.replaceChildren();
+  accounts.codex.accounts = [baseAccount];
+  limitsUnavailable = false;
+  setSystemTime();
 });
 
 async function render(): Promise<HTMLElement> {
@@ -97,4 +118,159 @@ test("a genuine 5-hour window keeps the 5h label", async () => {
   const text = host.textContent ?? "";
   expect(text).toContain("5h");
   expect(text).toContain("Week");
+});
+
+test("provider exhaustion reconciles the header chip and weekly row to zero", async () => {
+  accounts.codex.accounts = [{
+    ...baseAccount,
+    effective: { percent: 79, window: "weekly", freshness: "fresh" },
+    limits: {
+      state: "fresh",
+      session: null,
+      weekly: { usedPercent: 21, resetsAt: NOW + 6 * 86_400, windowMinutes: 10_080 },
+      checkedAt: new Date((NOW - 60) * 1000).toISOString(),
+    },
+  }];
+  limits = {
+    claude: null,
+    codex: { session: null, weekly: { usedPercent: 100, resetsAt: NOW + 6 * 86_400, windowMinutes: 10_080 }, plan: "prolite", capturedAt: NOW - 600 },
+    claudeAccountId: "claude-a",
+    codexAccountId: "account-a",
+    provenance: {
+      claude: { source: "unavailable", reason: null, staleSince: null },
+      codex: { source: "transcript", reason: "transcript-reconciled", staleSince: null },
+    },
+  };
+
+  const host = await render();
+  const text = host.textContent ?? "";
+  expect(text).not.toContain("79%");
+  expect(text.match(/0%/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+
+  const trigger = [...host.querySelectorAll("button")].find((button) => button.getAttribute("aria-label")?.includes("Codex"));
+  expect(trigger).toBeDefined();
+  await act(async () => { trigger?.click(); });
+  const dialog = host.querySelector('[role="dialog"][aria-label*="Codex"]');
+  expect(dialog).not.toBeNull();
+  expect(dialog?.textContent).not.toContain("79%");
+  expect(dialog?.textContent).toContain("0%");
+});
+
+test("a stale reconciled number renders a visible as-of hint", async () => {
+  limits = {
+    claude: null,
+    codex: { session: null, weekly: { usedPercent: 100, resetsAt: NOW + 6 * 86_400, windowMinutes: 10_080 }, plan: "prolite", capturedAt: NOW - 30 * 60 },
+    claudeAccountId: "claude-a",
+    codexAccountId: "account-a",
+    provenance: {
+      claude: { source: "unavailable", reason: null, staleSince: null },
+      codex: { source: "transcript", reason: "transcript-reconciled", staleSince: null },
+    },
+  };
+
+  const host = await render();
+  expect(host.textContent).toContain("as of");
+});
+
+test("timestamp-less stale footer rows retain a visible last-known label", () => {
+  expect(fmtQuotaStaleHint(true, null, "en")).toBe("Last known values");
+  expect(fmtQuotaStaleHint(false, null, "en")).toBeNull();
+});
+
+test("failed polls still advance stale age and expired-exhaustion selection", async () => {
+  const realSetInterval = globalThis.setInterval;
+  let poll: (() => Promise<void>) | null = null;
+  globalThis.setInterval = ((handler: TimerHandler) => {
+    poll = handler as () => Promise<void>;
+    return 1 as unknown as ReturnType<typeof setInterval>;
+  }) as unknown as typeof setInterval;
+  setSystemTime(new Date(NOW * 1000));
+  limits = {
+    claude: null,
+    codex: {
+      session: { usedPercent: 50, resetsAt: NOW + 3_600, windowMinutes: 300, observedAt: NOW - 19 * 60 },
+      weekly: { usedPercent: 100, resetsAt: NOW + 30, windowMinutes: 10_080, observedAt: NOW - 19 * 60 },
+      plan: "prolite",
+      capturedAt: NOW - 19 * 60,
+    },
+    claudeAccountId: "claude-a",
+    codexAccountId: "account-a",
+    provenance: {
+      claude: { source: "unavailable", reason: null, staleSince: null },
+      codex: { source: "transcript", reason: "transcript-reconciled", staleSince: null },
+    },
+  };
+
+  try {
+    const host = await render();
+    expect(host.textContent).toContain("0%");
+    expect(host.textContent).not.toContain("as of");
+
+    limitsUnavailable = true;
+    setSystemTime(new Date((NOW + 120) * 1000));
+    await act(async () => { await poll?.(); });
+
+    expect(host.textContent).toContain("79%");
+    expect(host.textContent).toContain("as of");
+  } finally {
+    globalThis.setInterval = realSetInterval;
+  }
+});
+
+test("failed polls retain the original receipt time for timestamp-less Claude windows", async () => {
+  const realSetInterval = globalThis.setInterval;
+  let poll: (() => Promise<void>) | null = null;
+  globalThis.setInterval = ((handler: TimerHandler) => {
+    poll = handler as () => Promise<void>;
+    return 1 as unknown as ReturnType<typeof setInterval>;
+  }) as unknown as typeof setInterval;
+  setSystemTime(new Date(NOW * 1000));
+  limits = {
+    claude: {
+      session: { usedPercent: 50, resetsAt: NOW + 3_600, windowMinutes: 300 },
+      weekly: null,
+      plan: "max",
+      capturedAt: null,
+    },
+    codex: null,
+    claudeAccountId: "claude-a",
+    codexAccountId: "account-a",
+    provenance: {
+      claude: { source: "live", reason: null, staleSince: null },
+      codex: { source: "unavailable", reason: null, staleSince: null },
+    },
+  };
+
+  try {
+    const host = await render();
+    const trigger = [...host.querySelectorAll("button")].find((button) => button.getAttribute("aria-label")?.includes("Claude"));
+    const block = trigger?.closest("div.relative");
+    expect(block?.textContent).not.toContain("as of");
+
+    limitsUnavailable = true;
+    setSystemTime(new Date((NOW + 21 * 60) * 1000));
+    await act(async () => { await poll?.(); });
+
+    expect(block?.textContent).toContain("as of");
+  } finally {
+    globalThis.setInterval = realSetInterval;
+  }
+});
+
+test("an account B limits payload cannot override account A at the rendering seam", async () => {
+  limits = {
+    claude: null,
+    codex: { session: null, weekly: { usedPercent: 100, resetsAt: NOW + 6 * 86_400, windowMinutes: 10_080 }, plan: "prolite", capturedAt: NOW - 60 },
+    claudeAccountId: "claude-a",
+    codexAccountId: "account-b",
+    provenance: {
+      claude: { source: "unavailable", reason: null, staleSince: null },
+      codex: { source: "transcript", reason: "transcript-reconciled", staleSince: null },
+    },
+  };
+
+  const host = await render();
+  const text = host.textContent ?? "";
+  expect(text).toContain("79%");
+  expect(text).not.toContain("0%");
 });

@@ -526,9 +526,16 @@ export interface ApiError {
   successorConversationId?: string;
 }
 
+export type LimitsSource = "live" | "transcript" | "cache" | "unavailable";
+export type LimitWindowSource = LimitsSource | "account";
+
 /** One rate-limit window (5h session or weekly) of an engine subscription. */
 export interface LimitWindow {
   usedPercent: number;
+  /** Unix seconds of this window's selected observation after reconciliation. */
+  observedAt?: number | null;
+  /** Selected origin for this window after per-window reconciliation. */
+  source?: LimitWindowSource;
   /** Unix seconds when the window resets, or null when unknown. */
   resetsAt: number | null;
   /** The window's own length in minutes as the provider declared it (Codex
@@ -543,15 +550,15 @@ export interface EngineLimits {
   session: LimitWindow | null;
   weekly: LimitWindow | null;
   plan: string | null;
-  /** Unix seconds when the numbers were captured. Codex limits come from the
-      newest session transcript, so they can lag behind; null = fetched live. */
+  /** Unix seconds of the oldest selected window observation. Null means the
+      provider supplied no observation clock. */
   capturedAt: number | null;
 }
 
 /** Origin and freshness are independent for each engine. Reasons are safe for
     display/logging and never contain credential material. */
 export interface LimitsProvenance {
-  source: "live" | "transcript" | "cache" | "unavailable";
+  source: LimitsSource;
   reason: string | null;
   staleSince: string | null;
   /** ISO timestamp for the next provider refresh after a failed read. */
