@@ -734,11 +734,17 @@ function rejectionReading(limits: EngineLimits, rejectedAt: number | null | unde
     rejection erased it. A projection past that is history, not the account's
     current state, and must not be presented as a live transcript reading. */
 function exhaustionRunning(limits: EngineLimits, nowSeconds: number): boolean {
-  const window = governingWindow(limits)?.value;
-  if (!window || window.usedPercent < 100) return false;
+  const governing = governingWindow(limits);
+  if (!governing || governing.value.usedPercent < 100) return false;
+  const window = governing.value;
   if (window.resetsAt !== null) return window.resetsAt > nowSeconds;
-  if (window.observedAt === null || window.observedAt === undefined || typeof window.windowMinutes !== "number") return true;
-  return nowSeconds - window.observedAt < window.windowMinutes * 60;
+  if (window.observedAt === null || window.observedAt === undefined) return true;
+  // A window that declares no length still has the horizon of the key it is
+  // filed under, which is the longest an exhaustion observed in it can run.
+  const windowMinutes = typeof window.windowMinutes === "number"
+    ? window.windowMinutes
+    : governing.key === "weekly" ? WEEKLY_WINDOW_MINUTES : SESSION_WINDOW_MINUTES;
+  return nowSeconds - window.observedAt < windowMinutes * 60;
 }
 
 function applyTranscriptRejection(limits: EngineLimits, rejectedAt: number): EngineLimits {

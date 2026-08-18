@@ -597,6 +597,43 @@ test("a rejection reconciled during a live poll leaves the live reading in the c
   }
 });
 
+test("a rejection on a window declaring no bounds expires at its canonical horizon", async () => {
+  const account = createManagedCodexAccount("Boundless window rejection");
+  const nowS = Math.floor(Date.now() / 1000);
+  // A legacy transcript event: a used percentage with neither a reset nor a
+  // length, so the rejection that follows it has nothing of its own to expire
+  // against beyond the 5h horizon the window is filed under.
+  const capturedAt = nowS - 400 * 86_400;
+  const rejectedAt = capturedAt + 60;
+  const session = path.join(account.sessionsDir, "2026", "07", "10", "boundless.jsonl");
+  fs.mkdirSync(path.dirname(session), { recursive: true });
+  fs.writeFileSync(session, [
+    JSON.stringify({ timestamp: new Date(capturedAt * 1000).toISOString(), payload: { rate_limits: { primary: { used_percent: 22 } } } }),
+    JSON.stringify({ timestamp: new Date(rejectedAt * 1000).toISOString(), payload: { type: "task_complete", codex_error_info: "usage_limit_exceeded" } }),
+  ].join("\n") + "\n");
+
+  const offline = async () => { throw new Error("offline"); };
+  const healthy = async () => ({
+    primary: { usedPercent: 7, resetsAt: null, windowDurationMins: 300 },
+    secondary: null,
+    planType: "prolite",
+  });
+  const inCycle = () => (rejectedAt + 120) * 1000;
+  const expired = () => (rejectedAt + 300 * 60) * 1000;
+
+  // Inside the horizon the exhaustion governs on both paths, as it must.
+  expect((await readCodexLimits({ account, now: inCycle, liveReader: offline })).data?.session).toMatchObject({ usedPercent: 100 });
+  expect((await readCodexLimits({ account, now: inCycle, liveReader: healthy })).data?.session).toMatchObject({ usedPercent: 100 });
+
+  const stale = await readCodexLimits({ account, now: expired, liveReader: offline });
+  expect(stale.data?.session).toMatchObject({ usedPercent: 22 });
+  expect(stale.reason).toBe("transcript-fallback");
+
+  const live = await readCodexLimits({ account, now: expired, liveReader: healthy });
+  expect(live.data?.session).toMatchObject({ usedPercent: 7 });
+  expect(live.source).toBe("live");
+});
+
 test("a rejection from a previous cycle leaves a cached window as cached evidence", async () => {
   resetLimitsCache();
   const account = createManagedCodexAccount("Cached previous-cycle rejection");

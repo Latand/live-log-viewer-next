@@ -1,6 +1,7 @@
 import type { DurableQuotaObservation } from "@/lib/accounts/migration/contracts";
 import { effectiveRemaining } from "@/lib/accounts/migration/quotaPolicy";
 import type { Flow } from "@/lib/flows/types";
+import { SESSION_WINDOW_MINUTES, WEEKLY_WINDOW_MINUTES } from "@/lib/limitWindows";
 import type { Engine, EngineLimits, FileEntry, LimitsProvenance, LimitWindow, LimitWindowSource, RateLimitState } from "@/lib/types";
 
 type HostedEngine = Extract<Engine, "claude" | "codex">;
@@ -83,22 +84,26 @@ function cycleOpenedAfter(window: ReconciledQuotaWindow | null, observedAt: numb
 
 /** An exhaustion with a known reset governs until it. One whose reset the
     provider never named can only speak for the cycle it was observed in, so it
-    expires a window length after that observation — and loses sooner to a rival
-    whose own cycle opened after it, which is proof that cycle has rolled. */
-function activeExhaustion(window: ReconciledQuotaWindow, rival: ReconciledQuotaWindow | null, now: number): boolean {
+    expires a window length after that observation — the horizon of the key it
+    is filed under when the window declares no length of its own — and loses
+    sooner to a rival whose own cycle opened after it, which is proof that cycle
+    has rolled. */
+function activeExhaustion(window: ReconciledQuotaWindow, rival: ReconciledQuotaWindow | null, key: "session" | "weekly", now: number): boolean {
   if (window.value.usedPercent < 100) return false;
   if (window.value.resetsAt !== null) return window.value.resetsAt > now;
-  const windowMinutes = window.value.windowMinutes;
-  if (window.observedAt === null || typeof windowMinutes !== "number") return true;
+  if (window.observedAt === null) return true;
+  const windowMinutes = typeof window.value.windowMinutes === "number"
+    ? window.value.windowMinutes
+    : key === "weekly" ? WEEKLY_WINDOW_MINUTES : SESSION_WINDOW_MINUTES;
   if (now - window.observedAt >= windowMinutes * 60) return false;
   return !cycleOpenedAfter(rival, window.observedAt);
 }
 
-function newerWindow(left: ReconciledQuotaWindow | null, right: ReconciledQuotaWindow | null, now: number): ReconciledQuotaWindow | null {
+function newerWindow(left: ReconciledQuotaWindow | null, right: ReconciledQuotaWindow | null, key: "session" | "weekly", now: number): ReconciledQuotaWindow | null {
   if (!left) return right;
   if (!right) return left;
-  const leftExhausted = activeExhaustion(left, right, now);
-  const rightExhausted = activeExhaustion(right, left, now);
+  const leftExhausted = activeExhaustion(left, right, key, now);
+  const rightExhausted = activeExhaustion(right, left, key, now);
   if (leftExhausted !== rightExhausted) return leftExhausted ? left : right;
   if (left.observedAt === null) return right.observedAt === null ? left : right;
   if (right.observedAt === null) return left;
@@ -109,8 +114,8 @@ function newerWindow(left: ReconciledQuotaWindow | null, right: ReconciledQuotaW
     own newest observation so a caller cannot combine a chip from one snapshot
     with rows from another. */
 export function reconcileQuotaReadings(left: QuotaReading | null, right: QuotaReading | null, now: number): ReconciledQuota {
-  const session = newerWindow(left ? reconciledWindow(left, "session", now) : null, right ? reconciledWindow(right, "session", now) : null, now);
-  const weekly = newerWindow(left ? reconciledWindow(left, "weekly", now) : null, right ? reconciledWindow(right, "weekly", now) : null, now);
+  const session = newerWindow(left ? reconciledWindow(left, "session", now) : null, right ? reconciledWindow(right, "session", now) : null, "session", now);
+  const weekly = newerWindow(left ? reconciledWindow(left, "weekly", now) : null, right ? reconciledWindow(right, "weekly", now) : null, "weekly", now);
   const readings = [left, right]
     .filter((reading): reading is QuotaReading => Boolean(reading?.limits?.plan))
     .sort((a, b) => (b.observedAt ?? Number.NEGATIVE_INFINITY) - (a.observedAt ?? Number.NEGATIVE_INFINITY));
