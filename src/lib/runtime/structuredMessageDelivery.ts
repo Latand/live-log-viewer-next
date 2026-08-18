@@ -8,7 +8,7 @@ import {
 } from "@/lib/agent/registry";
 import { structuredHostsEnabled } from "./flags";
 import { withAccountMutationLockAsync } from "@/lib/accounts/accountMutation";
-import { deliveryFence } from "@/lib/accounts/migration/coordinator";
+import { advanceConversationMigration, deliveryFence } from "@/lib/accounts/migration/coordinator";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import type { HeldDelivery, HeldDeliveryCommand, ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
@@ -28,6 +28,7 @@ import {
 } from "./structuredContent";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { markStructuredHostStartupReady } from "./startupStatus";
+import { releaseStructuredTurnForPendingSwitch } from "./structuredTurnRelease";
 
 export interface StructuredMessageRequest {
   path: string;
@@ -73,6 +74,8 @@ export interface StructuredMessageDependencies {
   previewImageRefs?: (images: readonly RuntimeImageUpload[]) => StructuredImageRef[];
   /** Cross-process fence spanning image publication and durable reservation. */
   withImageAdmissionLock?: <T>(operation: () => Promise<T>) => Promise<T>;
+  releaseSwitchTurn?: typeof releaseStructuredTurnForPendingSwitch;
+  executeSwitch?: (conversationId: ViewerConversationId, registry: AgentRegistry) => Promise<RegistryConversation>;
 }
 
 /** Serializes preflight → publication → reservation per (conversation,
@@ -364,6 +367,24 @@ function requiresDeadConversationRecovery(
     && entry.structuredHost?.process === null;
 }
 
+/** The runtime session that owns the conversation once a forced switch has
+    settled (issue #1028): the successor when its host is published, the
+    unchanged source when the switch failed and left it in place. */
+async function sessionAfterSwitch(
+  client: RuntimeHostClient,
+  conversation: RegistryConversation,
+): Promise<RuntimeSession | null> {
+  const current = conversation.generations.at(-1);
+  try {
+    const refreshed = await client.snapshot();
+    return refreshed.sessions.find((candidate) => candidate.conversationId === conversation.id
+      && (!current || candidate.artifactPath === current.path))
+      ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function requestMigrationProgress(
   registry: AgentRegistry,
   conversationId: ViewerConversationId,
@@ -598,7 +619,45 @@ export async function enqueueStructuredMessage(
       return deliveryFailure(error);
     }
   }
-  const migrationOwnsSend = deliveryFence(conversation) === "held";
+  let migrationOwnsSend = deliveryFence(conversation) === "held";
+  /* Belt and braces for issue #1028: a send arriving while a switch is pending
+     FORCES it. "After current turn" is only an honest promise while a turn is
+     actually running — an idle host has nothing left to wait for, and parking
+     the operator's message behind that wait is how a queued send becomes
+     permanently stranded, whatever the coordinator missed earlier. The
+     switch runs to its end HERE, in the send, so this message is admitted
+     against the successor and delivered as its first input rather than queued
+     against a predecessor the switch is about to retire. A switch that cannot
+     execute settles as a recoverable failure the card can act on, and its
+     delivery goes to the source host that is still there.
+
+     Only an idle host forces it. A running turn keeps the promise the banner
+     made, and an unknown turn axis — recovering, degraded, gone — is not
+     evidence that anything finished, so those sends keep waiting rather than
+     tear down a session that may still be working. */
+  if (migrationOwnsSend && session.turn === "idle") {
+    (dependencies.releaseSwitchTurn ?? releaseStructuredTurnForPendingSwitch)(conversation.id, { registry });
+    try {
+      conversation = await (dependencies.executeSwitch ?? advanceConversationMigration)(conversation.id, registry);
+    } catch {
+      conversation = registry.conversation(conversation.id) ?? conversation;
+    }
+    migrationOwnsSend = deliveryFence(conversation) === "held";
+    if (!migrationOwnsSend) {
+      const switched = await sessionAfterSwitch(client, conversation);
+      /* The successor owns the conversation but has not published its host
+         yet. Durable admission keeps the message — the coordinator drains it
+         onto the successor — instead of aiming a command at nothing. */
+      if (!switched) {
+        return holdDuringRuntimeSynchronization(
+          request,
+          registry,
+          dependencies.requestMigrationTick ?? requestAccountMigrationTick,
+        );
+      }
+      session = switched;
+    }
+  }
   if (!migrationOwnsSend) {
     try {
       const refreshed = await refreshRepublishedSession(

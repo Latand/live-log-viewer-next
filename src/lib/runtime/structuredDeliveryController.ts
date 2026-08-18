@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 
+import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import { agentRegistry, type AgentRegistry, type AgentRegistryEntry } from "@/lib/agent/registry";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 
@@ -11,6 +12,7 @@ import { applyStructuredReconfigure } from "./structuredReconfigure";
 import { projectEngineHostEvent } from "./engineHostEvents";
 import { publishFilesRevision } from "./filesRevision";
 import { setStructuredDeliveryKick } from "./structuredDeliverySignal";
+import { releaseStructuredTurnForPendingSwitch } from "./structuredTurnRelease";
 import { runtimeImageCapability } from "./runtimeImageStore";
 import { STRUCTURED_IMAGE_CAPABILITY } from "./structuredContent";
 
@@ -186,6 +188,14 @@ async function publishHostState(
   if (!conversationId) return;
   const host = state.status === "dead" ? "dead" : state.status === "unhosted" ? "unhosted" : "hosted";
   const turn = state.activeTurnRef ? "running" : "idle";
+  /* A host with no active turn IS the turn-end evidence an account switch
+     waiting on this conversation has been promised (issue #1028). Nothing else
+     will ever produce it for a pane-less structured session, so record it and
+     wake the coordinator here, where every host lifecycle change already
+     lands. */
+  if (turn === "idle" && releaseStructuredTurnForPendingSwitch(conversationId, { registry })) {
+    requestAccountMigrationTick();
+  }
   await publishStructuredHostProjection(client, {
     scope: { type: "session", id: conversationId },
     kind: "session-status",

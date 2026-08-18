@@ -132,12 +132,29 @@ function hostFencedTurn(observed: TranscriptTurnResult, hasActiveHost: boolean):
     : observed.turn;
 }
 
+/** A structured host's own turn-end evidence, recorded while an account switch
+    waited on it (issue #1028). A pane-less host has no composer for the
+    scanner to observe, and Claude's CLI never writes a `result` record into
+    the transcript, so re-deriving the turn from those bytes reads a finished
+    structured turn as busy forever. A `terminal`/`lifecycle` observation taken
+    at or after the transcript's newest write outranks that derivation; any
+    later write moves the mtime past the release and the transcript takes the
+    projection back. */
+function structuredLifecycleRelease(conversation: RegistryConversation, mtimeMs: number): boolean {
+  if (conversation.turn.state !== "terminal" || conversation.turn.source !== "lifecycle") return false;
+  const releasedAt = conversation.turn.observedAt ? Date.parse(conversation.turn.observedAt) : Number.NaN;
+  return Number.isFinite(releasedAt) && releasedAt >= mtimeMs;
+}
+
 function projectedInventoryTurn(
   entry: FileEntry,
   parsed: ConversationObservation["turn"] | null,
   existing: RegistryConversation | null,
   hasActiveRegisteredHost: boolean,
 ): ConversationObservation["turn"] {
+  if (existing && structuredLifecycleRelease(existing, entry.mtime * 1000)) {
+    return { state: existing.turn.state, source: existing.turn.source, terminalAt: existing.turn.terminalAt };
+  }
   if (!parsed) {
     if (existing && (existing.turn.state === "busy" || existing.turn.state === "unknown")) {
       return { state: existing.turn.state, source: existing.turn.source, terminalAt: existing.turn.terminalAt };
@@ -472,6 +489,11 @@ function completeProviderTurnObservation(
      tail's turn (issue #516), so its release must not reach the provider. */
   if (observed.recoveryReleased && hasActiveRegisteredHost(registry, source.path)) return false;
   if (observed.turn.state === "terminal") return true;
+  /* The structured host's own terminal event, for a source the transcript can
+     never release on its own (issue #1028). Same fence as the inventory
+     projection: the release only counts while it is newer than every byte in
+     the file, so a turn that started again re-imposes the busy derivation. */
+  if (structuredLifecycleRelease(conversation, after.mtimeMs)) return true;
 
   /* A crashed Codex rollout can retain its final task_started record forever.
      An inventory release plus a stable file with no writable holder proves

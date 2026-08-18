@@ -20,6 +20,20 @@ export class HistorySecurityError extends Error {
   }
 }
 
+/** The target account cannot receive this conversation — it is not signed in,
+    or its home failed the safety checks a successor is spawned under. It is
+    the one provider failure the operator can act on directly, so it keeps a
+    stable named code and a message the card can show (issue #1028), instead of
+    collapsing into the generic preflight failure alongside internals. */
+export class MigrationTargetUnavailableError extends Error {
+  readonly code = "target-account-unavailable";
+
+  constructor(readonly detail: "not-authenticated" | "unsafe-home", message: string) {
+    super(message);
+    this.name = "MigrationTargetUnavailableError";
+  }
+}
+
 function currentUid(): number | null {
   return process.getuid?.() ?? null;
 }
@@ -342,6 +356,14 @@ export function sanitizeProviderError(error: unknown): { code: string; message: 
       "history-integrity": "successor history failed integrity verification",
     };
     return { code: error.code, message: messages[error.code] };
+  }
+  if (error instanceof MigrationTargetUnavailableError) {
+    return {
+      code: error.code,
+      message: error.detail === "not-authenticated"
+        ? "target account is not signed in; sign it in or switch to another account"
+        : "target account home failed safety checks; repair it or switch to another account",
+    };
   }
   return { code: "provider-failed", message: "successor provider failed a recoverable preflight" };
 }
