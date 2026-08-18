@@ -112,7 +112,16 @@ test("an unattributed caller must pass src when creating a pipeline", async () =
     stages: [],
   }));
   expect(external.status).toBe(400);
-  expect(await external.json()).toEqual({ error: "pipeline creator lineage is required; pass src" });
+  /* #1026: the HTTP surface carries the same field-level violation list the MCP
+     tool returns, so both callers read one contract. */
+  expect(await external.json()).toEqual({
+    error: "pipeline creator lineage is required; pass src",
+    violations: [{
+      field: "src",
+      message: "pipeline creator lineage is required; pass src",
+      expected: expect.stringContaining("shared/claude/projects"),
+    }],
+  });
 });
 
 test("a capability header that does not authenticate is rejected before pipeline creation", async () => {

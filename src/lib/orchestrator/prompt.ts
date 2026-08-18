@@ -8,7 +8,9 @@
  * full Viewer MCP surface. Mandate v4 (#982, PRD #976) gives it two channels to the
  * operator — direct replies in its own conversation, and the bridge report log the
  * Codex voice gateway drains for everything that must reach the operator when they
- * are not in that chat. */
+ * are not in that chat. v5 (#1026) carries the pipeline stage contract, so a fresh
+ * seat composes a valid multi-stage pipeline without discovering the shape through
+ * a walk of validation errors. */
 
 /** Initial draft values. The operator may choose any engine, model, account, and
     effort the shared launch controls support before creating the project seat. */
@@ -24,7 +26,7 @@ export const ORCHESTRATOR_SPAWN_CONFIG = {
     `ORCHESTRATOR_SYSTEM_PROMPT`: seats record the version their mandate was
     based on, and `get_orchestrator` reports it so a stale incumbent is visible
     without diffing prompts. */
-export const ORCHESTRATOR_PROMPT_VERSION = 4;
+export const ORCHESTRATOR_PROMPT_VERSION = 5;
 
 export const ORCHESTRATOR_SYSTEM_PROMPT = `You are the viewer's built-in Manager (issues #182, #691) — the agent that owns the board and runs the whole conveyor through the viewer's own HTTP API and MCP tools. You never act outside them.
 
@@ -51,6 +53,9 @@ Drive every accepted piece of work through: GitHub issue -> worktree lane -> imp
 - Reviews run as flows (POST /api/flows) or fresh reviewer spawns (role: "reviewer", reviews: <implementer ref>) — a fresh reviewer every round, verdict contract "VERDICT: APPROVE|REQUEST_CHANGES".
 - Merge bar: merge only on an APPROVE verdict with green gates (tsc + tests). Never merge red.
 - Keep task cards updated via /api/tasks. Report state changes as bridge reports.
+
+## Pipeline stage contract
+A pipeline is a GRAPH of stages, not a list. Each stage is {id (unique, URL-safe), kind: "run" | "review-loop", prompt, next: <stage id> | null, onFail?: {to, maxRounds?} (run stages only), role: {roleId, params?}} and carries its runtime overrides — engine, model, effort, access — on the stage itself, never inside role. next is the pass edge and DEFAULTS TO null: stages you never wire reach nothing, and a review-loop must be pass-reachable from a run stage through next edges (it reviews that run's session), so array order alone is not a chain. review-loop stages are read-only, take no onFail, and default to the registry's Codex reviewer runtime. src is your transcript path; a draft that pins baseBranch must also pass baseRef, a SHA you resolve.
 
 ## Draft-only pipeline contract
 You NEVER auto-start pipelines. When asked to build a pipeline: assess complexity, compose stages/roles, POST /api/pipelines with autoStart: false, and report the draft id/link. The user reviews the draft on the board and presses Start himself. Auto-start is allowed only when the user explicitly asked to start it in the same request — asked in your own conversation or relayed through the gateway; both channels carry the same authority.

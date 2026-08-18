@@ -362,9 +362,10 @@ test("new pipelines require an allowed creator transcript with an existing conve
     autoStart: false,
     stages: [],
   }, h.ports);
-  expect(missing).toEqual({
+  expect(missing).toMatchObject({
     error: "pipeline creator lineage is required; pass src",
     status: 400,
+    violations: [{ field: "src", message: "pipeline creator lineage is required; pass src" }],
   });
 
   const invalidPath = await createPipelineFromRequest({
@@ -374,7 +375,13 @@ test("new pipelines require an allowed creator transcript with an existing conve
     autoStart: false,
     stages: [],
   }, h.ports);
-  expect(invalidPath).toEqual({ error: "src path is not an allowed conversation transcript", status: 400 });
+  /* #1026: the rejection names the roots that ARE accepted, so a caller holding
+     a native Claude path is not left guessing which address the viewer records. */
+  expect(invalidPath.status).toBe(400);
+  expect(invalidPath.error).toStartWith("src path is not an allowed conversation transcript.");
+  expect(invalidPath.error).toContain("shared/claude/projects");
+  expect(invalidPath.error).toContain("~/.codex/sessions");
+  expect(invalidPath.violations).toEqual([expect.objectContaining({ field: "src" })]);
 
   const unknownConversation = await createPipelineFromRequest({
     task: "Unknown creator",
@@ -383,7 +390,9 @@ test("new pipelines require an allowed creator transcript with an existing conve
     autoStart: false,
     stages: [],
   }, h.ports);
-  expect(unknownConversation).toEqual({ error: "src conversation does not exist", status: 400 });
+  expect(unknownConversation.status).toBe(400);
+  expect(unknownConversation.error).toStartWith("src conversation does not exist.");
+  expect(unknownConversation.error).toContain("~/.claude/projects");
 
   const created = await createPipelineFromRequest({
     task: "Known creator",
@@ -396,6 +405,113 @@ test("new pipelines require an allowed creator transcript with an existing conve
     srcPath: "/codex/creator.jsonl",
     srcConversationId: "conversation_creator",
   });
+});
+
+/* #1026 — a Claude-engine caller knows its own native ~/.claude/projects path;
+   every viewer record addresses the shared transcript store the home's projects
+   dir links into. The two name one file, so the native address resolves — but
+   only when that file really is mirrored, since inventing a shared path would
+   mint a phantom conversation identity. */
+test("a native Claude src path resolves through its shared-store mirror, and says so when there is none", async () => {
+  const h = harness();
+  savePipelines([]);
+  const claudeHome = path.join(process.env.LLV_STATE_DIR!, "native-claude-home");
+  const encoded = "-home-agent-repo";
+  const mirrored = path.join(path.dirname(process.env.LLV_STATE_DIR!), "shared", "claude", "projects", encoded, "creator.jsonl");
+  fs.mkdirSync(path.dirname(mirrored), { recursive: true });
+  fs.writeFileSync(mirrored, "{}\n");
+  const native = path.join(claudeHome, "projects", encoded, "creator.jsonl");
+  const unmirrored = path.join(claudeHome, "projects", encoded, "stranger.jsonl");
+  const ports: PipelinePorts = {
+    ...h.ports,
+    sourcePathAllowed: (pathname) => pathname === mirrored,
+    conversationIdForPath: (pathname) => (pathname === mirrored ? "conversation_creator" : null),
+  };
+  const previousHome = process.env.LLV_CLAUDE_HOME;
+  process.env.LLV_CLAUDE_HOME = claudeHome;
+  try {
+    const normalizedSrc = await rawCreatePipelineFromRequest({
+      task: "Native creator path",
+      repoDir: "/repo",
+      autoStart: false,
+      stages: [],
+      src: native,
+    }, ports);
+    expect(normalizedSrc.pipeline).toMatchObject({ srcPath: mirrored, srcConversationId: "conversation_creator" });
+
+    const nothingMirrored = await rawCreatePipelineFromRequest({
+      task: "Native creator path without a mirror",
+      repoDir: "/repo",
+      autoStart: false,
+      stages: [],
+      src: unmirrored,
+    }, ports);
+    expect(nothingMirrored.pipeline).toBeUndefined();
+    expect(nothingMirrored.status).toBe(400);
+    expect(nothingMirrored.error).toContain("shared/claude/projects");
+    expect(nothingMirrored.error).toContain("~/.codex/sessions");
+  } finally {
+    if (previousHome === undefined) delete process.env.LLV_CLAUDE_HOME; else process.env.LLV_CLAUDE_HOME = previousHome;
+  }
+});
+
+/* #1026 — the reported walk cost seven calls because each answer carried one
+   constraint. Every constraint the request violates is now collected in one
+   response, each naming its field and the shape that field expects. */
+test("an invalid create answers with every violated constraint at once", async () => {
+  const h = harness();
+  savePipelines([]);
+  const rejected = await createPipelineFromRequest({
+    task: "Batched validation",
+    repoDir: "/repo",
+    autoStart: false,
+    baseBranch: "main",
+    stages: [
+      { id: "not a url safe id", kind: "implement", prompt: "build", role: "builder" },
+      { id: "review", kind: "review-loop", prompt: "", role: { roleId: "reviewer", engine: "codex" } },
+    ],
+  } as never, h.ports);
+
+  expect(rejected.pipeline).toBeUndefined();
+  expect(rejected.status).toBe(400);
+  expect(rejected.violations?.map((violation) => violation.field)).toEqual([
+    "stages[0].id",
+    "stages[0].kind",
+    "stages[0].role",
+    "stages[1].prompt",
+    "stages[1].role",
+    "baseRef",
+  ]);
+  for (const violation of rejected.violations ?? []) expect(violation.expected).not.toBe("");
+  /* One response, and it reads as one: the count, then field, message and
+     expected shape for each violated constraint. */
+  expect(rejected.error).toStartWith("6 validation errors — ");
+  expect(rejected.error).toContain('stages[0].kind: stage kind must be run or review-loop (expected "run" | "review-loop")');
+  expect(rejected.error).toContain("place runtime overrides on the stage");
+  expect(rejected.error).toContain("baseRef: a draft baseBranch requires an explicit baseRef");
+  expect(loadPipelines()).toEqual([]);
+});
+
+/* #1026 ask 3 — "review-loop stage requires a preceding run stage" read as an
+   ordering rule and sent the caller reordering an array that was already in the
+   right order. The defect is the missing pass edge. */
+test("an unreachable review-loop names the stage and the next edge that would reach it", async () => {
+  const h = harness();
+  savePipelines([]);
+  const rejected = await createPipelineFromRequest({
+    task: "Unwired review loop",
+    repoDir: "/repo",
+    autoStart: false,
+    stages: [
+      { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "build", next: null },
+      { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+    ],
+  }, h.ports);
+
+  expect(rejected.pipeline).toBeUndefined();
+  expect(rejected.error).toBe('review-loop stage review is unreachable: no run stage\'s next chain reaches it — set next: "review" on run stage build');
+  expect(rejected.violations).toEqual([expect.objectContaining({ field: "stages[].next" })]);
+  expect(rejected.error).not.toContain("requires a preceding run stage");
 });
 
 test("set-src repairs closed history and requires overwrite for existing lineage", async () => {
@@ -412,7 +528,8 @@ test("set-src repairs closed history and requires overwrite for existing lineage
     action: "set-src",
     srcPath: "/outside/creator.jsonl",
   } as never, h.ports);
-  expect(invalid).toEqual({ error: "src path is not an allowed conversation transcript", status: 400 });
+  expect(invalid.status).toBe(400);
+  expect(invalid.error).toStartWith("src path is not an allowed conversation transcript.");
 
   const repaired = await patchPipeline(pipeline.id, {
     action: "set-src",
@@ -1040,9 +1157,10 @@ test("review-loop onFail edges are rejected during creation and graph editing", 
     ],
   }, h.ports);
 
-  expect(invalid).toEqual({
+  expect(invalid).toMatchObject({
     error: "review-loop stage review does not support onFail",
     status: 400,
+    violations: [{ field: "stages[].next", message: "review-loop stage review does not support onFail" }],
   });
   expect(loadPipelines()).toEqual([]);
 

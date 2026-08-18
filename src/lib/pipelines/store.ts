@@ -275,7 +275,19 @@ export function pipelineGraphError(
       }
       return false;
     });
-    if (!reachable) return "review-loop stage requires a preceding run stage";
+    /* #1026: this used to say "review-loop stage requires a preceding run
+       stage", which reads as an ordering rule and sent a caller reordering an
+       array that was already in the right order. The defect is a missing pass
+       edge: stages default to `next: null`, so nothing reaches the review-loop.
+       Name the unreachable stage and the edge that would reach it. */
+    if (!reachable) {
+      const runStages = stages.filter((candidate) => candidate.kind === "run");
+      if (runStages.length === 0) {
+        return `review-loop stage ${stage.id} is unreachable: the pipeline has no run stage, and a review-loop reviews the session of a run stage that reaches it`;
+      }
+      const source = runStages.findLast((candidate) => candidate.next === null) ?? runStages.at(-1)!;
+      return `review-loop stage ${stage.id} is unreachable: no run stage's next chain reaches it — set next: "${stage.id}" on run stage ${source.id}`;
+    }
   }
   return null;
 }

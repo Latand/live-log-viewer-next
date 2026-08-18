@@ -631,7 +631,13 @@ async function updateBoardTask(args: McpToolArgs): Promise<McpToolPayload> {
 async function createPipeline(args: McpToolArgs): Promise<McpToolPayload> {
   const request = withoutKeys(args, ["clientRequestId"]);
   const result = await createPipelineFromRequest(request as CreatePipelineRequest);
-  if (!result.pipeline) throw new Error(result.error ?? "could not create pipeline");
+  if (!result.pipeline) {
+    const message = result.error ?? "could not create pipeline";
+    /* #1026: a rejected create carries every violated constraint with its field
+       and expected shape, so an agent composing its first pipeline reads the
+       whole contract from one answer — the same list an HTTP caller receives. */
+    throw result.violations?.length ? new McpToolRefusal(message, { violations: result.violations }) : new Error(message);
+  }
   if (result.pipeline.state !== "draft") requestPipelineTick();
   return { pipelineId: result.pipeline.id, pipeline: result.pipeline };
 }
