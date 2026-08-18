@@ -12,6 +12,7 @@ import {
   type RegistryConversation,
   type RegistryFile,
 } from "@/lib/agent/registry";
+import { sessionKeyId } from "@/lib/agent/sessionKey";
 import { headCwd, headSessionStartedAt } from "@/lib/agent/transcript";
 import {
   boardFor,
@@ -19,6 +20,7 @@ import {
   transferBoardPathPlacements as transferDurableBoardPathPlacements,
 } from "@/lib/board/store";
 import { forEachCooperatively, yieldToRuntime } from "@/lib/cooperative";
+import { procBackend } from "@/lib/proc";
 import { listFiles } from "@/lib/scanner";
 import { recordTranscriptComposerRelease, transcriptTurnResult, type TranscriptTurnResult } from "@/lib/scanner/activity";
 import { nativeCodexForkSourceThreadId } from "@/lib/scanner/codexNative";
@@ -132,18 +134,44 @@ function hostFencedTurn(observed: TranscriptTurnResult, hasActiveHost: boolean):
     : observed.turn;
 }
 
-/** A structured host's own turn-end evidence, recorded while an account switch
-    waited on it (issue #1028). A pane-less host has no composer for the
-    scanner to observe, and Claude's CLI never writes a `result` record into
-    the transcript, so re-deriving the turn from those bytes reads a finished
-    structured turn as busy forever. A `terminal`/`lifecycle` observation taken
-    at or after the transcript's newest write outranks that derivation; any
-    later write moves the mtime past the release and the transcript takes the
-    projection back. */
-function structuredLifecycleRelease(conversation: RegistryConversation, mtimeMs: number): boolean {
-  if (conversation.turn.state !== "terminal" || conversation.turn.source !== "lifecycle") return false;
-  const releasedAt = conversation.turn.observedAt ? Date.parse(conversation.turn.observedAt) : Number.NaN;
-  return Number.isFinite(releasedAt) && releasedAt >= mtimeMs;
+/** A registered structured host owns its own turn lifecycle (issue #1028).
+    A pane-less host has no composer for the scanner to observe, and Claude's
+    CLI never writes a `result` record into its transcript, so re-deriving the
+    turn from those bytes projects a FINISHED structured turn as busy forever
+    and the switch waiting on it never leaves `waiting-turn`.
+
+    The host's own durable `activeTurnRef` says it plainly, and says it live:
+    it is persisted on every material host state change, it is re-read on each
+    check, and it flips back the instant a turn starts — so unlike a recorded
+    release it cannot outlive the state it describes. A dead or unhosted row is
+    NOT evidence: its columns are cleared on release, and a source with no live
+    host is exactly the case the transcript projection already governs. */
+function structuredHostTurnReleased(
+  registry: AgentRegistry,
+  engine: MigrationEngine,
+  generation: { id: string; path: string },
+): boolean {
+  const entry = registry.readOnlySnapshot().entries[sessionKeyId({ engine, sessionId: generation.id })];
+  const host = entry?.structuredHost;
+  if (!host || entry!.artifactPath !== generation.path) return false;
+  if (entry!.status !== "live" && entry!.status !== "idle") return false;
+  /* Only a row a live engine process still backs is evidence. A released or
+     restart-orphaned row keeps `activeTurnRef: null` because nothing recorded
+     a turn on it, not because a turn ended — reading that as a release would
+     hand the successor a source whose host may be mid-turn. Verified identity,
+     not a bare pid: a recycled pid must not resurrect a dead row. */
+  return host.process !== null
+    && host.process.startIdentity !== null
+    && procBackend.processIdentity(host.process.pid) === host.process.startIdentity
+    && host.activeTurnRef === null;
+}
+
+/** The generation an in-flight migration is moving off, matching the source
+    `advanceConversationMigration` resolves for the provider. */
+function migrationSourceGeneration(conversation: RegistryConversation) {
+  const sourceGenerationId = conversation.migration?.sourceGenerationId;
+  return conversation.generations.find((generation) => generation.id === sourceGenerationId)
+    ?? conversation.generations.at(-1);
 }
 
 function projectedInventoryTurn(
@@ -152,9 +180,6 @@ function projectedInventoryTurn(
   existing: RegistryConversation | null,
   hasActiveRegisteredHost: boolean,
 ): ConversationObservation["turn"] {
-  if (existing && structuredLifecycleRelease(existing, entry.mtime * 1000)) {
-    return { state: existing.turn.state, source: existing.turn.source, terminalAt: existing.turn.terminalAt };
-  }
   if (!parsed) {
     if (existing && (existing.turn.state === "busy" || existing.turn.state === "unknown")) {
       return { state: existing.turn.state, source: existing.turn.source, terminalAt: existing.turn.terminalAt };
@@ -456,7 +481,12 @@ function successorCreationReady(conversation: RegistryConversation, registry: Ag
     && conversation.turn.source === "empty"
     && Boolean(sourcePath)
     && !fs.existsSync(sourcePath!);
-  if (conversation.turn.state !== "terminal" && conversation.turn.state !== "idle" && !unmaterializedEmptyTurn) return false;
+  const source = migrationSourceGeneration(conversation);
+  const hostReleased = source !== undefined && structuredHostTurnReleased(registry, conversation.engine, source);
+  if (conversation.turn.state !== "terminal"
+    && conversation.turn.state !== "idle"
+    && !unmaterializedEmptyTurn
+    && !hostReleased) return false;
   return !registry.pendingDeliveries(conversation.id).some((delivery) => delivery.state === "delivery-uncertain");
 }
 
@@ -485,15 +515,16 @@ function completeProviderTurnObservation(
      the recovery-tail host fence: a live-but-idle host at the composer must
      not hold the reseat hostage. */
   if (observed.composerReleased) return true;
+  /* The same statement, from the one host that can make it about itself: a
+     live structured host with no active turn is at its composer, and its own
+     lifecycle outranks a transcript projection that cannot release (#1028).
+     It supersedes the coarse "a host is registered" fence below, which exists
+     because a registered host MIGHT still write — this one says it is not. */
+  if (structuredHostTurnReleased(registry, conversation.engine, source)) return true;
   /* A host registered between inventory and creation still owns a recovery
      tail's turn (issue #516), so its release must not reach the provider. */
   if (observed.recoveryReleased && hasActiveRegisteredHost(registry, source.path)) return false;
   if (observed.turn.state === "terminal") return true;
-  /* The structured host's own terminal event, for a source the transcript can
-     never release on its own (issue #1028). Same fence as the inventory
-     projection: the release only counts while it is newer than every byte in
-     the file, so a turn that started again re-imposes the busy derivation. */
-  if (structuredLifecycleRelease(conversation, after.mtimeMs)) return true;
 
   /* A crashed Codex rollout can retain its final task_started record forever.
      An inventory release plus a stable file with no writable holder proves
@@ -509,6 +540,10 @@ function completeProviderTurnObservation(
 }
 
 export interface MigrationCoordinatorOptions {
+  /** The reconfigure operation executing this switch, when the caller IS that
+      executor (issue #1028). Every other caller defers to it — see
+      {@link reconfigureOwnsMigration}. */
+  reconfigureOperationId?: string;
   remapBoardPaths?: typeof remapDurableBoardPaths;
   transferBoardPathPlacements?: typeof transferDurableBoardPathPlacements;
   deferBoardRepair?: boolean;
@@ -638,6 +673,27 @@ async function cleanupDiscardedSuccessor(
   }
 }
 
+/**
+ * Whether an in-flight reconfigure owns this switch, so this caller must not
+ * execute it (issue #1028).
+ *
+ * Committing is only half of an account switch: the predecessor's structured
+ * host is still claimed, still running on the source account, and the ONLY
+ * code that retires it is the reconfigure executor, which releases and
+ * terminates the source session key straight after its own commit. A tick, a
+ * send, or a route that commits behind that executor therefore leaves a live
+ * host on the old account and hands the reconfigure a switch it did not make —
+ * two writers for one transition. So exactly one of them proceeds: the owner.
+ *
+ * The owner re-runs on its own queue (re-queued at a turn boundary, re-fired
+ * whenever the host's turn state changes), so deferring here delays nothing.
+ */
+function reconfigureOwnsMigration(conversation: RegistryConversation, executingOperationId?: string): boolean {
+  const reconfigure = conversation.reconfigure;
+  if (reconfigure?.status !== "applying" || reconfigure.accountId !== conversation.migration?.targetId) return false;
+  return reconfigure.operationId !== executingOperationId;
+}
+
 function sameTargetReconfigureCanReuseSuccessor(
   conversation: RegistryConversation,
   receipt: ProviderReceipt,
@@ -659,6 +715,7 @@ export async function advanceConversationMigration(
 ): Promise<RegistryConversation> {
   let conversation = registry.conversation(conversationId);
   if (!conversation?.migration) throw new Error("conversation has no migration");
+  if (reconfigureOwnsMigration(conversation, options.reconfigureOperationId)) return conversation;
   let migration = conversation.migration;
   if (migration.phase === "waiting-turn") {
     if (!successorCreationReady(conversation, registry)) return conversation;

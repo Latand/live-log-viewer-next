@@ -34,6 +34,7 @@ interface StructuredReconfigureDependencies {
     targetAccountId: string,
     registry: AgentRegistry,
     ownsOperation: () => Promise<boolean>,
+    reconfigureOperationId?: string,
   ) => Promise<RegistryConversation>;
 }
 
@@ -47,6 +48,7 @@ async function migrateConversation(
   targetAccountId: string,
   registry: AgentRegistry,
   ownsOperation: () => Promise<boolean>,
+  reconfigureOperationId?: string,
 ): Promise<RegistryConversation> {
   /* The established provider keeps one Viewer conversation identity while it
      creates an account-owned resume artifact. Codex forks the rollout under
@@ -57,7 +59,7 @@ async function migrateConversation(
     conversationId,
     registry,
     new RegisteredSuccessorProvider(),
-    { ownsOperation },
+    { ownsOperation, reconfigureOperationId },
   );
 }
 
@@ -230,6 +232,7 @@ export async function applyStructuredReconfigure(
         targetAccountId!,
         registry,
         ownsOperation,
+        effect.operationId,
       );
       const owner = registry.conversation(conversationId)?.reconfigure;
       if (!await ownsOperation()
