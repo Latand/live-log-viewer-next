@@ -726,6 +726,9 @@ export const en = {
   "stt.elevenlabs.name": "ElevenLabs Scribe",
   "stt.elevenlabs.desc": "Paid ElevenLabs API — the most accurate option.",
   "stt.elevenlabs.fix": "Put your ElevenLabs API key (a single line) into this file:",
+  "stt.soniox.name": "Soniox",
+  "stt.soniox.desc": "Paid Soniox API — the fastest live transcription.",
+  "stt.soniox.fix": "Put your Soniox API key (a single line) into this file:",
 
   // DeleteFileButton
   "delFile.confirm": "Delete from disk?",

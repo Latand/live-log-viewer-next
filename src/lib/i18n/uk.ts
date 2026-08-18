@@ -698,6 +698,9 @@ export const uk: Record<keyof typeof en, Message> = {
   "stt.elevenlabs.name": "ElevenLabs Scribe",
   "stt.elevenlabs.desc": "Платний API ElevenLabs — найточніший варіант.",
   "stt.elevenlabs.fix": "Поклади свій API-ключ ElevenLabs (одним рядком) у цей файл:",
+  "stt.soniox.name": "Soniox",
+  "stt.soniox.desc": "Платний API Soniox — найшвидша жива транскрипція.",
+  "stt.soniox.fix": "Поклади свій API-ключ Soniox (одним рядком) у цей файл:",
 
   "delFile.confirm": "Видалити з диска?",
   "delFile.aria": "Видалити розмову з диска",

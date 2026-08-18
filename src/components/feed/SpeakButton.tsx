@@ -8,7 +8,7 @@ import { translate, useLocale } from "@/lib/i18n";
 import { MAX_TTS_TEXT_LENGTH } from "@/lib/tts";
 
 let activeStop: (() => void) | null = null;
-type BackendId = "openai" | "elevenlabs";
+type BackendId = "openai" | "elevenlabs" | "soniox";
 interface BackendInfo {
   backend: BackendId;
   lockedByEnv: boolean;
