@@ -524,6 +524,79 @@ test("a cached rejection stops being current once the window it exhausted resets
   }
 });
 
+test("an elapsed rejection stops governing the offline transcript fallback", async () => {
+  const account = createManagedCodexAccount("Elapsed rejection transcript fallback");
+  const nowS = Math.floor(Date.now() / 1000);
+  // The weekly window reset thirty days ago and the rejection landed an hour
+  // after it, so the exhaustion's own week-long lifetime is long over.
+  const resetsAt = nowS - 30 * 86_400;
+  const session = path.join(account.sessionsDir, "2026", "07", "19", "elapsed-fallback.jsonl");
+  fs.mkdirSync(path.dirname(session), { recursive: true });
+  fs.writeFileSync(session, [
+    JSON.stringify({
+      timestamp: new Date((resetsAt - 3_600) * 1000).toISOString(),
+      payload: { type: "token_count", rate_limits: { limit_id: "codex", primary: { used_percent: 21, window_minutes: 10_080, resets_at: resetsAt }, secondary: null, plan_type: "prolite" } },
+    }),
+    JSON.stringify({
+      timestamp: new Date((resetsAt + 3_600) * 1000).toISOString(),
+      payload: { type: "task_complete", codex_error_info: "usage_limit_exceeded" },
+    }),
+  ].join("\n") + "\n");
+
+  const offline = async () => { throw new Error("offline"); };
+  const elapsed = await readCodexLimits({ account, liveReader: offline });
+
+  expect(elapsed.data?.weekly).toMatchObject({ usedPercent: 21, resetsAt });
+  expect(elapsed.reason).toBe("transcript-fallback");
+
+  // Read while that exhaustion was still running and it governs, as it must.
+  const running = await readCodexLimits({ account, now: () => (resetsAt + 7_200) * 1000, liveReader: offline });
+
+  expect(running.data?.weekly).toMatchObject({ usedPercent: 100, resetsAt: null, observedAt: resetsAt + 3_600 });
+  expect(running.reason).toBe("transcript-fallback");
+});
+
+test("a rejection reconciled during a live poll leaves the live reading in the cache", async () => {
+  resetLimitsCache();
+  const account = createManagedCodexAccount("Reconciled rejection cache base");
+  setActiveCodexAccount(account.id);
+  const nowMs = Date.parse("2026-08-19T12:00:00.000Z");
+  const resetsAt = nowMs / 1000 + 600;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => claudeUsage()) as unknown as typeof fetch;
+  try {
+    const session = path.join(account.sessionsDir, "2026", "08", "19", "reconciled-rejection.jsonl");
+    fs.mkdirSync(path.dirname(session), { recursive: true });
+    fs.writeFileSync(session, JSON.stringify({
+      timestamp: "2026-08-19T11:59:30.000Z",
+      payload: { type: "task_complete", codex_error_info: "usage_limit_exceeded" },
+    }) + "\n");
+
+    const exhausted = await readLimits({
+      now: () => nowMs,
+      codexLiveReader: async () => ({
+        primary: { usedPercent: 21, resetsAt, windowDurationMins: 10_080 },
+        secondary: null,
+        planType: "prolite",
+      }),
+    });
+    expect(exhausted.codex?.weekly).toMatchObject({ usedPercent: 100, resetsAt });
+    expect(exhausted.provenance.codex.source).toBe("transcript");
+
+    // Past that reset with the probe down: the live 21% the projection overrode
+    // is still the account's last real reading.
+    const later = await readLimits({
+      now: () => nowMs + 20 * 60_000,
+      codexLiveReader: async () => { throw new Error("offline"); },
+    });
+
+    expect(later.codex?.weekly).toMatchObject({ usedPercent: 21, resetsAt });
+    expect(later.provenance.codex.source).toBe("cache");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 test("a rejection from a previous cycle leaves a cached window as cached evidence", async () => {
   resetLimitsCache();
   const account = createManagedCodexAccount("Cached previous-cycle rejection");
@@ -757,7 +830,13 @@ test("recent history indexes a long-running rejection beyond the day-bucket boun
   expect(transcript.rejectedAt).toBe(Date.parse("2026-08-15T12:00:01.000Z") / 1000);
   expect(transcript.data?.weekly).toMatchObject({ usedPercent: 21 });
 
-  const result = await readCodexLimits({ account, liveReader: async () => { throw new Error("offline"); } });
+  // Read a minute after the rejection, inside the window it exhausted, so the
+  // fixture's fixed timestamps decide the outcome rather than the wall clock.
+  const result = await readCodexLimits({
+    account,
+    now: () => Date.parse("2026-08-15T12:01:00.000Z"),
+    liveReader: async () => { throw new Error("offline"); },
+  });
   expect(result.data?.weekly).toMatchObject({
     usedPercent: 100,
     observedAt: Date.parse("2026-08-15T12:00:01.000Z") / 1000,

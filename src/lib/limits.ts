@@ -49,6 +49,9 @@ type EngineCacheEntry = {
 type LimitsCache = { version: 2; engines: Record<EngineName, Record<string, EngineCacheEntry>> };
 export type LimitRead = {
   data: EngineLimits | null;
+  /** The reading `data` would have been without a rejection projected onto it,
+      so what the cache keeps is never itself rejection-derived. */
+  baseData?: EngineLimits | null;
   reason: string | null;
   source: "live" | "transcript" | "unavailable";
   /** Newest provider rejection even when the readable tail has no quota event. */
@@ -210,6 +213,7 @@ function resolveRead(read: LimitRead, cached: EngineCacheEntry | null, staleSinc
     const retryAt = initializeTimedOut ? now + initializeBackoffMs : null;
     return {
       data: read.data,
+      ...(read.baseData ? { baseData: read.baseData } : {}),
       meta: { source: read.source, reason: read.reason, staleSince: read.reason ? staleSince : null, retryAt: retryAt ? new Date(retryAt).toISOString() : null },
       retryAt,
       consecutive429s: 0,
@@ -453,14 +457,20 @@ export async function readCodexLimits(options: {
       ?? rejectionReading(live, transcript.rejectedAt);
     const transcriptLimits = projected ?? transcript.data;
     if (!transcriptLimits) return { data: live, reason: null, source: "live" };
-    const reconciled = reconcileQuotaReadings(
+    const reconcile = (limits: EngineLimits) => reconcileQuotaReadings(
       { limits: live, observedAt: live.capturedAt, stale: false, source: "live" },
-      { limits: transcriptLimits, observedAt: transcriptLimits.capturedAt, stale: false, source: "transcript" },
+      { limits, observedAt: limits.capturedAt, stale: false, source: "transcript" },
       observedAt,
     );
+    const reconciled = reconcile(transcriptLimits);
     const transcriptWon = quotaUsesSource(reconciled, "transcript");
+    // What this read would have been without the rejection, so the cache keeps
+    // a reading no projection shaped and the number an expired exhaustion
+    // overrode comes back when it expires.
+    const unprojected = projected ? (transcript.data ? quotaAsEngineLimits(reconcile(transcript.data)) : live) : null;
     return {
       data: quotaAsEngineLimits(reconciled),
+      ...(unprojected ? { baseData: unprojected } : {}),
       reason: transcriptWon ? "transcript-reconciled" : null,
       source: transcriptWon ? "transcript" : "live",
     };
@@ -468,12 +478,20 @@ export async function readCodexLimits(options: {
     const detail = redactAppServerDetail(error instanceof Error ? error.message : String(error));
     const initializeTimedOut = /request timed out:\s*initialize\b/i.test(detail);
     console.warn(`[limits] Codex app-server probe for ${account.id} failed: ${detail}`);
-    if (transcript.data) return {
-      data: rejectionReading(transcript.data, transcript.rejectedAt) ?? transcript.data,
-      reason: "transcript-fallback",
-      source: "transcript",
-      ...(initializeTimedOut ? { backoffReason: CODEX_INITIALIZE_TIMEOUT_REASON } : {}),
-    };
+    if (transcript.data) {
+      // With no probe to reconcile against, nothing downstream would retire the
+      // projection, so it is served only while the exhaustion it describes is
+      // still running; past that the transcript's own reading is the truth.
+      const projection = rejectionReading(transcript.data, transcript.rejectedAt);
+      const data = projection && exhaustionRunning(projection, clock() / 1000) ? projection : transcript.data;
+      return {
+        data,
+        ...(data === projection ? { baseData: transcript.data } : {}),
+        reason: "transcript-fallback",
+        source: "transcript",
+        ...(initializeTimedOut ? { backoffReason: CODEX_INITIALIZE_TIMEOUT_REASON } : {}),
+      };
+    }
     if (transcript.rejectedAt !== null && transcript.rejectedAt !== undefined) return {
       ...transcript,
       ...(initializeTimedOut ? { backoffReason: CODEX_INITIALIZE_TIMEOUT_REASON } : {}),
@@ -554,28 +572,6 @@ function latestDayDirs(sessionsDir: string, max: number): string[] {
   return dirs;
 }
 
-function boundedJsonlNames(dir: string, max: number): string[] {
-  let handle: fs.Dir;
-  try {
-    handle = fs.opendirSync(dir);
-  } catch {
-    return [];
-  }
-  const names: string[] = [];
-  try {
-    for (let entry = handle.readSync(); entry; entry = handle.readSync()) {
-      if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
-      const index = names.findIndex((name) => entry.name.localeCompare(name) > 0);
-      if (index === -1) names.push(entry.name);
-      else names.splice(index, 0, entry.name);
-      if (names.length > max) names.pop();
-    }
-  } finally {
-    handle.closeSync();
-  }
-  return names;
-}
-
 function dayDirFromSessionId(sessionsDir: string, sessionId: string): string | null {
   const match = /^([0-9a-f]{8})-([0-9a-f]{4})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.exec(sessionId);
   if (!match) return null;
@@ -619,7 +615,7 @@ function recentHistorySessionFiles(sessionsDir: string): string[] {
 function latestSessionFiles(sessionsDir: string): string[] {
   const candidates = new Set(recentHistorySessionFiles(sessionsDir));
   for (const dir of latestDayDirs(sessionsDir, MAX_RECENT_SESSION_DAYS)) {
-    for (const name of boundedJsonlNames(dir, MAX_FILES)) candidates.add(path.join(dir, name));
+    for (const name of listDesc(dir).filter((file) => file.endsWith(".jsonl")).slice(0, MAX_FILES)) candidates.add(path.join(dir, name));
   }
   const entries: { p: string; m: number }[] = [];
   for (const p of candidates) {
