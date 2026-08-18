@@ -206,9 +206,10 @@ function resolveRead(read: LimitRead, cached: EngineCacheEntry | null, staleSinc
       consecutiveInitializeTimeouts,
     };
   }
-  if (read.rejectedAt !== null && read.rejectedAt !== undefined && cached?.data && rejectionWithinWindow(cached.data, read.rejectedAt)) {
+  const cachedRejection = cached?.data ? rejectionReading(cached.data, read.rejectedAt) : null;
+  if (cachedRejection) {
     return {
-      data: applyTranscriptRejection(cached.data, read.rejectedAt),
+      data: cachedRejection,
       meta: { source: "transcript", reason: read.reason, staleSince: null, retryAt: null },
       retryAt: null,
       consecutive429s: 0,
@@ -427,10 +428,12 @@ export async function readCodexLimits(options: {
     const rateLimits = await (options.liveReader ?? ((candidate) => managedCodexRuntime().readRateLimits(candidate as CodexAccount)))(account);
     const observedAt = clock() / 1000;
     const live = mapAppServerRateLimits(rateLimits, observedAt);
-    const transcriptLimits = transcript.data ?? (transcript.rejectedAt !== null && transcript.rejectedAt !== undefined
-      && rejectionWithinWindow(live, transcript.rejectedAt)
-      ? applyTranscriptRejection(live, transcript.rejectedAt)
-      : null);
+    // One validated projection, onto the candidate the rejection is about: the
+    // transcript snapshot when it covers the rejection, otherwise the live
+    // window a newer rejection belongs to.
+    const projected = (transcript.data ? rejectionReading(transcript.data, transcript.rejectedAt) : null)
+      ?? rejectionReading(live, transcript.rejectedAt);
+    const transcriptLimits = projected ?? transcript.data;
     if (!transcriptLimits) return { data: live, reason: null, source: "live" };
     const reconciled = reconcileQuotaReadings(
       { limits: live, observedAt: live.capturedAt, stale: false, source: "live" },
@@ -448,7 +451,7 @@ export async function readCodexLimits(options: {
     const initializeTimedOut = /request timed out:\s*initialize\b/i.test(detail);
     console.warn(`[limits] Codex app-server probe for ${account.id} failed: ${detail}`);
     if (transcript.data) return {
-      data: transcript.data,
+      data: rejectionReading(transcript.data, transcript.rejectedAt) ?? transcript.data,
       reason: "transcript-fallback",
       source: "transcript",
       ...(initializeTimedOut ? { backoffReason: CODEX_INITIALIZE_TIMEOUT_REASON } : {}),
@@ -473,10 +476,12 @@ export function readCodexTranscriptLimits(sessionsDir = accountForSpawn().sessio
     if (scan.data && (!latest || latest.capturedAt === null || (scan.data.capturedAt !== null && scan.data.capturedAt > latest.capturedAt))) latest = scan.data;
   }
   if (latest) {
-    const data = rejectedAt !== null && (latest.capturedAt === null || rejectedAt >= latest.capturedAt)
-      ? applyTranscriptRejection(latest, rejectedAt)
-      : latest;
-    return { data, reason: null, source: "transcript", rejectedAt };
+    // The rejection travels to whichever consumer projects it, so the snapshot
+    // leaves here exactly as the transcript recorded it. A quota event captured
+    // after the rejection is the provider's later word on the same account, so
+    // the rejection stops travelling at that point.
+    const newest = rejectedAt !== null && (latest.capturedAt === null || rejectedAt >= latest.capturedAt) ? rejectedAt : null;
+    return { data: latest, reason: null, source: "transcript", rejectedAt: newest };
   }
   if (rejectedAt !== null) return { data: null, reason: "usage-limit-exceeded", source: "transcript", rejectedAt };
   return { data: null, reason: scanned === 0 ? "no codex session files" : `no rate_limits event in newest ${scanned} session files`, source: "unavailable" };
@@ -684,16 +689,30 @@ function governingWindow(limits: EngineLimits): { key: "session" | "weekly"; val
     provider issued it, whose interval is `[resetsAt - windowMinutes, resetsAt]`.
     Projecting one onto a candidate window it predates would synthesize an
     exhaustion from a cycle that has since reset and override a truthful live
-    reading, so an out-of-interval rejection is stale evidence. Each bound the
-    window does not declare — an unknown reset, or a length absent from a
-    snapshot cached before issue #606 — is one the rejection is not tested
-    against, leaving the existing behavior for that side. */
+    reading, so an out-of-interval rejection is stale evidence. A rejection
+    issued after the candidate's reset belongs to the cycle that opened there —
+    the candidate is simply the older word — and stays usable through that
+    successor's length, with its reset unknown. Each bound the window does not
+    declare — an unknown reset, or a length absent from a snapshot cached before
+    issue #606 — is one the rejection is not tested against, leaving the
+    existing behavior for that side. */
 function rejectionWithinWindow(limits: EngineLimits, rejectedAt: number): boolean {
   const window = governingWindow(limits)?.value;
   if (!window) return false;
   if (window.resetsAt === null) return true;
-  if (rejectedAt > window.resetsAt) return false;
-  return typeof window.windowMinutes !== "number" || rejectedAt >= window.resetsAt - window.windowMinutes * 60;
+  if (typeof window.windowMinutes !== "number") return rejectedAt <= window.resetsAt;
+  const windowSeconds = window.windowMinutes * 60;
+  return rejectedAt >= window.resetsAt - windowSeconds && rejectedAt < window.resetsAt + windowSeconds;
+}
+
+/** The one place a provider rejection becomes a quota reading. Every consumer
+    projects through here, so a rejection is validated against the window it is
+    about exactly once; `null` means this rejection says nothing about the
+    candidate and the candidate stands as read. */
+function rejectionReading(limits: EngineLimits, rejectedAt: number | null | undefined): EngineLimits | null {
+  if (rejectedAt === null || rejectedAt === undefined) return null;
+  if (!rejectionWithinWindow(limits, rejectedAt)) return null;
+  return applyTranscriptRejection(limits, rejectedAt);
 }
 
 function applyTranscriptRejection(limits: EngineLimits, rejectedAt: number): EngineLimits {

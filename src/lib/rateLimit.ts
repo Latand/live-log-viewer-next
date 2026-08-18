@@ -72,8 +72,16 @@ function reconciledWindow(reading: QuotaReading, key: "session" | "weekly", now:
   return { value, observedAt, stale: reading.stale || aged, source: value.source ?? reading.source };
 }
 
+/** An exhaustion with a known reset governs until it. One whose reset the
+    provider never named can only speak for the cycle it was observed in, so it
+    expires a window length after that observation; past there the cycle has
+    certainly rolled and ordinary timestamp ordering decides. */
 function activeExhaustion(window: ReconciledQuotaWindow, now: number): boolean {
-  return window.value.usedPercent >= 100 && (window.value.resetsAt === null || window.value.resetsAt > now);
+  if (window.value.usedPercent < 100) return false;
+  if (window.value.resetsAt !== null) return window.value.resetsAt > now;
+  const windowMinutes = window.value.windowMinutes;
+  if (window.observedAt === null || typeof windowMinutes !== "number") return true;
+  return now - window.observedAt < windowMinutes * 60;
 }
 
 function newerWindow(left: ReconciledQuotaWindow | null, right: ReconciledQuotaWindow | null, now: number): ReconciledQuotaWindow | null {

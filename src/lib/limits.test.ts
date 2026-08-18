@@ -209,6 +209,42 @@ test("usage_limit_exceeded clears an already-expired quota reset", async () => {
   expect(result.data?.weekly).toMatchObject({ usedPercent: 100, resetsAt: null, observedAt: nowS - 60 });
 });
 
+test("a cleared-reset exhaustion stops governing once its window length has passed", async () => {
+  const account = createManagedCodexAccount("Expired reset rejection lifetime");
+  const nowS = Math.floor(Date.now() / 1000);
+  const expiredReset = nowS - 300;
+  const session = path.join(account.sessionsDir, "2026", "08", "15", "expired-reset-lifetime.jsonl");
+  fs.mkdirSync(path.dirname(session), { recursive: true });
+  fs.writeFileSync(session, [
+    JSON.stringify({
+      timestamp: new Date((nowS - 120) * 1000).toISOString(),
+      payload: { type: "token_count", rate_limits: { limit_id: "codex", primary: { used_percent: 21, window_minutes: 10_080, resets_at: expiredReset }, secondary: null, plan_type: "prolite" } },
+    }),
+    JSON.stringify({
+      timestamp: new Date((nowS - 60) * 1000).toISOString(),
+      payload: { type: "task_complete", error: { message: "You've hit your usage limit. Try again after reset.", codex_error_info: "usage_limit_exceeded" } },
+    }),
+  ].join("\n") + "\n");
+
+  // Read a whole weekly window later: the rejection cleared the reset, so the
+  // exhaustion it established has no stated end and must not outlive the cycle
+  // it was observed in.
+  const laterS = nowS + 7 * 86_400;
+  const resetsAt = laterS + 6 * 86_400;
+  const result = await readCodexLimits({
+    account,
+    now: () => laterS * 1000,
+    liveReader: async () => ({
+      primary: { usedPercent: 21, resetsAt, windowDurationMins: 10_080 },
+      secondary: null,
+      planType: "prolite",
+    }),
+  });
+
+  expect(result.data?.weekly).toMatchObject({ usedPercent: 21, resetsAt });
+  expect(result.source).toBe("live");
+});
+
 test("a standalone usage_limit_exceeded event exhausts the live governing window", async () => {
   const account = createManagedCodexAccount("Standalone rejection reconciliation");
   const nowS = Math.floor(Date.now() / 1000);
@@ -294,6 +330,75 @@ test("a rejection from a previous cycle never exhausts the live window", async (
 
   expect(result.data?.weekly).toMatchObject({ usedPercent: 21, resetsAt });
   expect(result.source).toBe("live");
+});
+
+test("a rejection past the transcript window's cycle never exhausts the live probe", async () => {
+  const account = createManagedCodexAccount("Rolled-over transcript cycle rejection");
+  const nowS = Math.floor(Date.now() / 1000);
+  // A 5h window captured four days ago, and a rejection that landed a day after
+  // that window's reset — two cycles back — in the same transcript file.
+  const capturedAt = nowS - 4 * 86_400;
+  const session = path.join(account.sessionsDir, "2026", "08", "11", "rolled-over-cycle.jsonl");
+  fs.mkdirSync(path.dirname(session), { recursive: true });
+  fs.writeFileSync(session, [
+    JSON.stringify({
+      timestamp: new Date(capturedAt * 1000).toISOString(),
+      payload: { type: "token_count", rate_limits: { limit_id: "codex", primary: { used_percent: 40, window_minutes: 300, resets_at: capturedAt + 5 * 3_600 }, secondary: null, plan_type: "prolite" } },
+    }),
+    JSON.stringify({
+      timestamp: new Date((nowS - 3 * 86_400) * 1000).toISOString(),
+      payload: { type: "task_complete", codex_error_info: "usage_limit_exceeded" },
+    }),
+  ].join("\n") + "\n");
+
+  const resetsAt = nowS + 3 * 3_600;
+  const live = async () => ({
+    primary: { usedPercent: 21, resetsAt, windowDurationMins: 300 },
+    secondary: null,
+    planType: "prolite",
+  });
+  const result = await readCodexLimits({ account, liveReader: live });
+
+  expect(result.data?.session).toMatchObject({ usedPercent: 21, resetsAt });
+  expect(result.source).toBe("live");
+
+  // The same fixture with no probe to reconcile against: the transcript snapshot
+  // stands as recorded rather than as an exhaustion synthesized from a rolled
+  // cycle.
+  const offline = await readCodexLimits({ account, liveReader: async () => { throw new Error("offline"); } });
+
+  expect(offline.data?.session).toMatchObject({ usedPercent: 40, resetsAt: capturedAt + 5 * 3_600 });
+});
+
+test("a fresh rejection exhausts the live window when the transcript snapshot is from a rolled cycle", async () => {
+  const account = createManagedCodexAccount("Fresh rejection stale transcript");
+  const nowS = Math.floor(Date.now() / 1000);
+  const capturedAt = nowS - 10 * 86_400;
+  const session = path.join(account.sessionsDir, "2026", "08", "05", "stale-snapshot-fresh-rejection.jsonl");
+  fs.mkdirSync(path.dirname(session), { recursive: true });
+  fs.writeFileSync(session, [
+    JSON.stringify({
+      timestamp: new Date(capturedAt * 1000).toISOString(),
+      payload: { type: "token_count", rate_limits: { limit_id: "codex", primary: { used_percent: 21, window_minutes: 10_080, resets_at: capturedAt + 86_400 }, secondary: null, plan_type: "prolite" } },
+    }),
+    JSON.stringify({
+      timestamp: new Date((nowS - 60) * 1000).toISOString(),
+      payload: { type: "task_complete", codex_error_info: "usage_limit_exceeded" },
+    }),
+  ].join("\n") + "\n");
+
+  const resetsAt = nowS + 6 * 86_400;
+  const result = await readCodexLimits({
+    account,
+    liveReader: async () => ({
+      primary: { usedPercent: 21, resetsAt, windowDurationMins: 10_080 },
+      secondary: null,
+      planType: "prolite",
+    }),
+  });
+
+  expect(result.data?.weekly).toMatchObject({ usedPercent: 100, resetsAt, observedAt: nowS - 60 });
+  expect(result.source).toBe("transcript");
 });
 
 test("a rejection from a previous cycle leaves a cached window as cached evidence", async () => {
@@ -491,7 +596,7 @@ test("transcript candidate discovery bounds metadata reads in a large session tr
   }
 });
 
-test("recent history indexes a long-running rejection beyond the day-bucket bound", () => {
+test("recent history indexes a long-running rejection beyond the day-bucket bound", async () => {
   const account = createManagedCodexAccount("Indexed long-running rejection");
   const startedAt = Date.parse("2026-06-01T12:00:00.000Z");
   const prefix = startedAt.toString(16).padStart(12, "0");
@@ -523,7 +628,14 @@ test("recent history indexes a long-running rejection beyond the day-bucket boun
     }) + "\n");
   }
 
-  expect(readCodexTranscriptLimits(account.sessionsDir).data?.weekly).toMatchObject({
+  // The indexed rejection travels on the read, and the consumer that projects
+  // it turns the newest quota event into the exhaustion it reports.
+  const transcript = readCodexTranscriptLimits(account.sessionsDir);
+  expect(transcript.rejectedAt).toBe(Date.parse("2026-08-15T12:00:01.000Z") / 1000);
+  expect(transcript.data?.weekly).toMatchObject({ usedPercent: 21 });
+
+  const result = await readCodexLimits({ account, liveReader: async () => { throw new Error("offline"); } });
+  expect(result.data?.weekly).toMatchObject({
     usedPercent: 100,
     observedAt: Date.parse("2026-08-15T12:00:01.000Z") / 1000,
   });
