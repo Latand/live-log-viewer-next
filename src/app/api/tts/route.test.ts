@@ -68,6 +68,12 @@ describe("/api/tts", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("audio/mpeg");
+    /* #1024: the client's copy of the configuration is a page-load-old
+       singleton, so the audio says who was billed for it and is cached under
+       that rather than under whatever the tab believed when it asked. */
+    expect(response.headers.get("x-tts-backend")).toBe("openai");
+    expect(response.headers.get("x-tts-model")).toBe("gpt-4o-mini-tts");
+    expect(response.headers.get("x-tts-voice")).toBe("alloy");
     expect(new Uint8Array(await response.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]));
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [, init] = fetchMock.mock.calls[0]!;
@@ -234,6 +240,9 @@ describe("/api/tts — elevenlabs character alignment (#1022)", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("application/json");
+    expect(response.headers.get("x-tts-backend")).toBe("elevenlabs");
+    expect(response.headers.get("x-tts-model")).toBe("eleven_multilingual_v2");
+    expect(response.headers.get("x-tts-voice")).toBe("21m00Tcm4TlvDq8ikWAM");
     expect(await response.json()).toEqual({
       audio: "QUJD",
       contentType: "audio/mpeg",

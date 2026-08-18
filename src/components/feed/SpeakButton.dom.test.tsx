@@ -4,10 +4,10 @@ import { createRoot, type Root } from "react-dom/client";
 import { flushSync } from "react-dom";
 
 import { MAX_TTS_MESSAGE_LENGTH } from "@/lib/tts";
-import { MAX_CHUNK_CHARS } from "@/lib/ttsChunks";
+import { chunkSpeech, MAX_CHUNK_CHARS } from "@/lib/ttsChunks";
 
 import { SpeakButton } from "./SpeakButton";
-import { clearTtsCache, evictTtsAudio } from "./ttsSession";
+import { chunksCached, clearTtsCache, evictTtsAudio, voiceKey } from "./ttsSession";
 
 const dom = new Window();
 Object.assign(globalThis, {
@@ -153,6 +153,14 @@ function menuOpen(): boolean {
   return document.querySelector("[data-tts-menu]") !== null;
 }
 
+/* The refusal/error popover. Portalled to the body like the menu (#1024): an
+   inline `absolute` alert is clipped by the message row's paint containment
+   and painted over by the next message, and since the left click speaks it is
+   the only feedback a refused click gives. */
+function alertNode(): HTMLElement | null {
+  return document.querySelector("[data-tts-alert]") as HTMLElement | null;
+}
+
 /* The TTS configuration is one module-level singleton shared by every control
    on the page (one fetch, all controls in step), and only a right-click menu
    re-reads it. So the two tests that change the active provider come LAST in
@@ -274,7 +282,7 @@ test("a long answer is chunked, synthesized in parallel and played from the firs
   /* Nothing was truncated: the chunks reassemble the whole answer. */
   expect(sent.join(" ")).toBe(LONG);
   expect(sent.length).toBeGreaterThan(2);
-  expect(view.host.querySelector('[role="alert"]')).toBeNull();
+  expect(alertNode()).toBeNull();
   flushSync(() => { view.button.click(); view.root.unmount(); });
   view.host.remove();
 });
@@ -308,7 +316,7 @@ test("a message read to the end replays free, and an evicted one says it costs a
   await speak(view);
   expect(posts).toBe(synthesized);
   expect(view.button.getAttribute("aria-label")).toContain("Stop");
-  expect(view.host.querySelector('[role="alert"]')).toBeNull();
+  expect(alertNode()).toBeNull();
   await speak(view);
 
   /* Evicted between the render that promised a free replay and the click that
@@ -317,7 +325,7 @@ test("a message read to the end replays free, and an evicted one says it costs a
   evictTtsAudio();
   await speak(view);
   expect(posts).toBeGreaterThan(synthesized);
-  expect(view.host.querySelector('[role="alert"]')!.textContent).toBe("Cached audio expired — this replay is a paid synthesis.");
+  expect(alertNode()!.textContent).toBe("Cached audio expired — this replay is a paid synthesis.");
   flushSync(() => { view.button.click(); view.root.unmount(); });
   view.host.remove();
 });
@@ -362,6 +370,50 @@ test("a message stopped after the first chunk never advertises a free replay", a
   view.host.remove();
 });
 
+/* The menu is where the paid/cached truth lives since #1024, so it may not
+   state what the next click costs from a snapshot taken before playback began
+   or before another card evicted these chunks. */
+test("the menu's cost line follows playback and cache eviction while it is open", async () => {
+  globalThis.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
+    if (!init?.method) return Response.json(backendInfo);
+    return new Response(new Blob(["audio"]));
+  }) as unknown as typeof fetch;
+  URL.createObjectURL = () => "blob:tts";
+  URL.revokeObjectURL = mock(() => {});
+  useFakeAudio();
+
+  const view = await mount(LONG);
+  await speak(view);
+  await playToEnd();
+
+  const cached = await openMenu(view);
+  expect(cached.textContent).toContain("Next click: free replay from the cache");
+
+  /* Evicted from under an OPEN menu — nothing re-renders the control, so the
+     menu has to hear it from the cache itself. */
+  flushSync(() => { evictTtsAudio(); });
+  await drainUpdates();
+  expect(cached.textContent).toContain("Next click: paid synthesis of this answer");
+  expect(cached.textContent).not.toContain("free replay");
+
+  flushSync(() => {
+    document.body.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }) as unknown as Event);
+  });
+  await drainUpdates();
+
+  /* Right-click while it is reading: the next left click stops, and costs
+     nothing either way. */
+  await speak(view);
+  expect(playing()).toBeDefined();
+  const reading = await openMenu(view);
+  expect(reading.textContent).toContain("Next click: stop reading this answer");
+  expect(reading.textContent).not.toContain("paid synthesis");
+  expect(reading.textContent).not.toContain("free replay");
+
+  flushSync(() => { view.button.click(); view.root.unmount(); });
+  view.host.remove();
+});
+
 test("a message past the ceiling refuses out loud instead of being cut short", async () => {
   let posts = 0;
   globalThis.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
@@ -374,10 +426,18 @@ test("a message past the ceiling refuses out loud instead of being cut short", a
   const view = await mount("word ".repeat(MAX_TTS_MESSAGE_LENGTH / 4));
   await speak(view);
 
-  const alert = view.host.querySelector('[role="alert"]')!;
+  const alert = alertNode()!;
   expect(alert.textContent).toContain(`Too long to read aloud (${MAX_TTS_MESSAGE_LENGTH.toLocaleString()} character limit)`);
   expect(posts).toBe(0);
   expect(playing()).toBeUndefined();
+  /* And it is a popover on the body, not a box inside the message: the feed row
+     carries `content-visibility: auto`, whose paint containment clips an inline
+     `absolute` alert and lets the next message paint over what survives. A key
+     path still breaks anywhere, the way the removed dialog wrapped it. */
+  expect(alert.parentElement).toBe(document.body as unknown as HTMLElement);
+  expect(view.host.contains(alert)).toBe(false);
+  expect(alert.className).toContain("fixed");
+  expect(alert.className).toContain("break-all");
   flushSync(() => { view.root.unmount(); });
   view.host.remove();
 });
@@ -396,7 +456,7 @@ test("a chunk failure mid-sequence surfaces the provider error and stops cleanly
   const view = await mount(LONG);
   await speak(view);
 
-  const alert = view.host.querySelector('[role="alert"]')!;
+  const alert = alertNode()!;
   expect(alert.textContent).toBe("openai TTS failed (HTTP 401)");
   expect(view.button.getAttribute("aria-label")).not.toContain("Stop");
   expect(FakeAudio.instances.every((element) => element.paused)).toBe(true);
@@ -422,7 +482,7 @@ test("audio the browser refuses to play reports that, not a provider failure", a
   const view = await mount("A short answer to read.");
   await speak(view);
 
-  expect(view.host.querySelector('[role="alert"]')!.textContent).toBe("The browser blocked audio playback. Try again.");
+  expect(alertNode()!.textContent).toBe("The browser blocked audio playback. Try again.");
   expect(view.button.getAttribute("aria-label")).not.toContain("Stop");
   flushSync(() => { view.root.unmount(); });
   view.host.remove();
@@ -599,7 +659,68 @@ test("a provider with no key refuses out loud and names the file to drop it into
   await speak(view);
 
   expect(posts).toBe(0);
-  expect(view.host.querySelector('[role="alert"]')!.textContent).toBe("Add the elevenlabs API key at /keys/elevenlabs");
+  expect(alertNode()!.textContent).toBe("Add the elevenlabs API key at /keys/elevenlabs");
+  flushSync(() => { view.root.unmount(); });
+  view.host.remove();
+});
+
+/* Declared LAST: it leaves `elevenlabs` behind in the module-level singleton.
+
+   The tab's copy of the configuration is fetched once per page load, so an
+   operator who switches provider in a second tab leaves this one asking for a
+   provider the server no longer uses. The route says who it actually billed,
+   and the answer — not the belief — decides the cache key and the name on the
+   surface (#1024). */
+test("a provider switched under a stale tab is keyed and named by what the route billed", async () => {
+  const TEXT = "Billed somewhere else entirely.";
+  const elevenActive = {
+    ...backendInfo,
+    backend: "elevenlabs",
+    options: backendInfo.options.map((option) => (option.id === "elevenlabs" ? { ...option, available: true } : option)),
+  };
+  let served = backendInfo;
+  let posts = 0;
+  globalThis.fetch = mock(async (input: string | URL | Request) => {
+    if (String(input) === "/api/tts/backend") return Response.json(served);
+    posts += 1;
+    /* The server is on ElevenLabs now, whatever this tab believes. */
+    return new Response(new Blob(["audio"]), {
+      headers: { "x-tts-backend": "elevenlabs", "x-tts-model": "eleven_multilingual_v2", "x-tts-voice": "Rachel" },
+    });
+  }) as unknown as typeof fetch;
+  URL.createObjectURL = () => "blob:tts";
+  useFakeAudio();
+
+  const view = await mount(TEXT);
+  /* This tab last read the configuration while openai was active. */
+  const before = await openMenu(view);
+  expect(before.textContent).toContain("openai · gpt-4o-mini-tts · alloy");
+  flushSync(() => {
+    document.body.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }) as unknown as Event);
+  });
+  await drainUpdates();
+
+  served = elevenActive;
+  await speak(view);
+  await playToEnd();
+  expect(posts).toBeGreaterThan(0);
+
+  /* Nothing was filed under the voice this tab named on its way out... */
+  const texts = chunkSpeech(TEXT).map((chunk) => chunk.text);
+  expect(chunksCached(texts.map((text) => voiceKey({ id: "openai", model: "gpt-4o-mini-tts", voice: "alloy" }, text)))).toBe(false);
+  /* ...and everything under the one that answered. */
+  expect(chunksCached(texts.map((text) => voiceKey({ id: "elevenlabs", model: "eleven_multilingual_v2", voice: "Rachel" }, text)))).toBe(true);
+
+  /* And the surface names the provider that was charged, without the click
+     having waited on /api/tts/backend to find out. */
+  expect(alertNode()!.textContent).toBe("The voice provider changed — this read is billed to elevenlabs.");
+  const after = await openMenu(view);
+  expect(after.textContent).toContain("elevenlabs · eleven_multilingual_v2 · Rachel");
+  expect(after.textContent).toContain("Billed to your elevenlabs account per character");
+  /* The replay it now offers is a replay of the audio that was actually paid
+     for, so it is genuinely free. */
+  expect(after.textContent).toContain("Next click: free replay from the cache");
+
   flushSync(() => { view.root.unmount(); });
   view.host.remove();
 });

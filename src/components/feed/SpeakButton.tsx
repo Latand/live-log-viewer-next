@@ -9,7 +9,7 @@ import { MAX_TTS_MESSAGE_LENGTH } from "@/lib/tts";
 import { wordSpanAt } from "@/lib/ttsAlignment";
 import { chunkSpeech } from "@/lib/ttsChunks";
 
-import { SpeakMenu, type BackendId, type BackendInfo } from "./SpeakMenu";
+import { SpeakAlert, SpeakMenu, type BackendId, type BackendInfo } from "./SpeakMenu";
 import { createKaraoke, karaokeRoots, type Karaoke } from "./ttsKaraoke";
 import {
   chunksCached,
@@ -20,6 +20,7 @@ import {
   TtsRequestError,
   TtsSession,
   voiceKey,
+  type VoiceKey,
 } from "./ttsSession";
 
 let activeStop: (() => void) | null = null;
@@ -155,6 +156,13 @@ export function SpeakButton({ text }: { text: string }) {
     const roots = triggerRef.current ? karaokeRoots(triggerRef.current) : [];
     const karaoke: Karaoke | null = roots.length ? createKaraoke(roots, text) : null;
 
+    /* Who the route says it actually billed, once it has answered. The page's
+       copy of the configuration is a page-load-old singleton, so a tab open
+       across a provider switch asks for one provider and is charged another —
+       and everything downstream of this session (the cache key, the record
+       that the message was voiced, the provider the surface names) follows the
+       answer rather than the belief. */
+    let billed: VoiceKey | null = null;
     let stopped = false;
     const stop = (announce = true) => {
       if (stopped) return;
@@ -185,13 +193,26 @@ export function SpeakButton({ text }: { text: string }) {
 
     const session = new TtsSession({
       chunks,
-      key: (chunkText) => voiceKey(option, chunkText),
+      key: (chunkText, voice) => voiceKey(voice ?? option, chunkText),
       synthesize: synthesizeChunk,
       elements,
       onPhase: (next) => {
         if (!alive()) return;
         setPhase(next);
         setAnnouncement(next === "loading" ? t("tts.generating") : t("tts.playing"));
+      },
+      onVoice: (voice) => {
+        if (voice.id === option.id && voice.model === option.model && voice.voice === option.voice) return;
+        billed = voice;
+        if (alive()) {
+          const notice = t("tts.backendChanged", { provider: voice.id });
+          setError(notice);
+          setAnnouncement(notice);
+        }
+        /* Re-reads the configuration and broadcasts it to every control on the
+           page, so the tooltip and the menu name the provider that was charged
+           — off the play path, which is where that wait belongs. */
+        void loadBackendInfo(true).catch(() => undefined);
       },
       onPosition: ({ chunkIndex, charIndex, elapsed, total }) => {
         const word = wordSpanAt(text, charIndex);
@@ -215,7 +236,7 @@ export function SpeakButton({ text }: { text: string }) {
       onEnd: () => {
         /* Read to the end: from here the control may offer a replay — for as
            long as the chunks it would replay are still cached. */
-        markSpoken(key);
+        markSpoken(billed ? voiceKey(billed, text) : key);
         if (alive()) {
           setSpokenTick((tick) => tick + 1);
           setAnnouncement(t("tts.finished"));
@@ -338,13 +359,15 @@ export function SpeakButton({ text }: { text: string }) {
           info={info}
           option={option}
           chars={text.length}
-          freeReplay={replayable}
+          notice={error}
+          freeReplay={freeReplay}
+          active={active}
           tooLong={tooLong}
           onPick={pickBackend}
           onClose={closeMenu}
         />
       ) : null}
-      {error ? <span role="alert" className="absolute right-0 top-7 z-[60] w-56 rounded bg-card p-2 text-[11px] text-danger shadow">{error}</span> : null}
+      {error && !menuOpen ? <SpeakAlert anchorRef={triggerRef}>{error}</SpeakAlert> : null}
     </span>
   );
 }

@@ -1,12 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 
 import { Check, Loader2 } from "@/components/icons";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useLocale } from "@/lib/i18n";
 import { MAX_TTS_MESSAGE_LENGTH } from "@/lib/tts";
+
+import { subscribeTtsCache } from "./ttsSession";
 
 export type BackendId = "openai" | "elevenlabs" | "soniox";
 
@@ -27,6 +29,7 @@ export interface BackendInfo {
 
 const MARGIN = 8;
 const MENU_WIDTH = 300;
+const ALERT_WIDTH = 224;
 
 /**
  * Pure placement math for the read-aloud menu (kept out of the effect so it is
@@ -54,6 +57,85 @@ export function speakMenuPlacement(
   return { left, top: Math.max(margin, Math.min(anchor.bottom + margin, viewport.height - margin - content.height)) };
 }
 
+/**
+ * Keeps an anchored popover placed against the viewport: measures it after
+ * every render (its height changes with what it has to say, and measuring once
+ * at mount is how a popover ends up half off the screen) and again on scroll
+ * and resize. Returns the style for its `fixed` root — off-screen and
+ * transparent until the first measurement, transparent rather than
+ * `visibility: hidden` because a hidden element cannot take the focus the
+ * keyboard path moves into it on the very same commit.
+ *
+ * Shared by the menu and the refusal alert, which are the same popover anchored
+ * to the same trigger: an inline `absolute` alert is clipped by the message row
+ * (`.feed-cv` carries `content-visibility: auto`, hence paint containment) and
+ * painted over by the next message, which is what #1024 condemned.
+ */
+export function useAnchoredBox(
+  anchorRef: RefObject<HTMLElement | null>,
+  rootRef: RefObject<HTMLElement | null>,
+  fallbackWidth = MENU_WIDTH,
+): CSSProperties {
+  const [box, setBox] = useState<{ left: number; top: number } | null>(null);
+
+  const measure = useCallback(() => {
+    const anchor = anchorRef.current;
+    const root = rootRef.current;
+    if (!anchor || !root) return;
+    const rect = anchor.getBoundingClientRect();
+    const next = speakMenuPlacement(
+      { top: rect.top, bottom: rect.bottom, right: rect.right },
+      { width: root.offsetWidth || fallbackWidth, height: root.offsetHeight },
+      { width: window.innerWidth, height: window.innerHeight },
+    );
+    /* Replaced only when it actually moved, so a re-measure that agrees with
+       the current placement does not schedule another render. */
+    setBox((previous) => (previous && previous.left === next.left && previous.top === next.top ? previous : next));
+  }, [anchorRef, rootRef, fallbackWidth]);
+
+  useLayoutEffect(measure);
+
+  useEffect(() => {
+    window.addEventListener("scroll", measure, true);
+    window.addEventListener("resize", measure);
+    return () => {
+      window.removeEventListener("scroll", measure, true);
+      window.removeEventListener("resize", measure);
+    };
+  }, [measure]);
+
+  return box ? { left: box.left, top: box.top } : { left: -9999, top: 0, opacity: 0 };
+}
+
+/**
+ * Everything the left click refuses or fails at: a message past the ceiling, a
+ * provider with no key, an expired replay, a provider or playback error. Since
+ * #1024 this is the only feedback a refused left click gives, so it goes
+ * through the same portal as the menu instead of being clipped inside the
+ * message row. Key paths break anywhere, the way the old dialog wrapped them.
+ *
+ * Only ever shown while the menu is CLOSED — both hang off the same trigger at
+ * the same coordinates, so an open menu carries the same text in its own
+ * notice slot rather than being painted over by it.
+ */
+export function SpeakAlert({ anchorRef, children }: { anchorRef: RefObject<HTMLElement | null>; children: ReactNode }) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const style = useAnchoredBox(anchorRef, rootRef, ALERT_WIDTH);
+  if (typeof document === "undefined") return null;
+  return createPortal(
+    <div
+      ref={rootRef}
+      role="alert"
+      data-tts-alert
+      style={style}
+      className="fixed z-[80] w-56 max-w-[calc(100vw-16px)] break-all rounded-[10px] border border-border bg-card p-2 text-[11px] text-danger shadow-2"
+    >
+      {children}
+    </div>,
+    document.body,
+  );
+}
+
 export interface SpeakMenuProps {
   /** The Speak control the menu hangs off; also the one place a pointerdown
       does NOT dismiss, so a second right-click toggles it shut. */
@@ -62,8 +144,16 @@ export interface SpeakMenuProps {
   option: BackendOption;
   /** Characters this message would bill — the whole answer, never a slice. */
   chars: number;
-  /** Whether the NEXT left click replays cached audio instead of paying. */
-  freeReplay: boolean;
+  /** A refusal or failure raised while this menu is open — the alert popover
+      would land on top of it, so the menu says it instead. */
+  notice: string | null;
+  /** Whether the NEXT left click would replay cached audio instead of paying.
+      A callback, not a snapshot: another card's long answer can evict these
+      chunks while this menu is open, and the line has to follow. */
+  freeReplay: () => boolean;
+  /** Whether this control is reading right now — then the next left click is a
+      stop, and costs nothing either way. */
+  active: boolean;
   tooLong: boolean;
   onPick: (backend: BackendId) => Promise<boolean>;
   onClose: (restoreFocus?: boolean) => void;
@@ -79,42 +169,18 @@ export interface SpeakMenuProps {
  * `absolute` popover was clipped by the message it belonged to and painted
  * under the next message in the feed.
  */
-export function SpeakMenu({ anchorRef, info, option, chars, freeReplay, tooLong, onPick, onClose }: SpeakMenuProps) {
+export function SpeakMenu({ anchorRef, info, option, chars, notice, freeReplay, active, tooLong, onPick, onClose }: SpeakMenuProps) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
   const rootRef = useRef<HTMLDivElement>(null);
-  const [box, setBox] = useState<{ left: number; top: number } | null>(null);
+  const style = useAnchoredBox(anchorRef, rootRef);
   const [saving, setSaving] = useState<BackendId | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  const measure = useCallback(() => {
-    const anchor = anchorRef.current;
-    const root = rootRef.current;
-    if (!anchor || !root) return;
-    const rect = anchor.getBoundingClientRect();
-    const next = speakMenuPlacement(
-      { top: rect.top, bottom: rect.bottom, right: rect.right },
-      { width: root.offsetWidth || MENU_WIDTH, height: root.offsetHeight },
-      { width: window.innerWidth, height: window.innerHeight },
-    );
-    /* Replaced only when it actually moved, so a re-measure that agrees with
-       the current placement does not schedule another render. */
-    setBox((previous) => (previous && previous.left === next.left && previous.top === next.top ? previous : next));
-  }, [anchorRef]);
-
-  /* After EVERY render, with no dependency list: the menu's height changes with
-     what it has to say (a key warning, a save error), and measuring it once at
-     mount is how a popover ends up half off the screen. */
-  useLayoutEffect(measure);
-
-  useEffect(() => {
-    window.addEventListener("scroll", measure, true);
-    window.addEventListener("resize", measure);
-    return () => {
-      window.removeEventListener("scroll", measure, true);
-      window.removeEventListener("resize", measure);
-    };
-  }, [measure]);
+  /* Only a re-render trigger: the cost line is answered by the tts cache, and
+     an open menu has to stop advertising a free replay the moment the chunks
+     behind it are evicted. */
+  const [, setCacheTick] = useState(0);
+  useEffect(() => subscribeTtsCache(() => setCacheTick((tick) => tick + 1)), []);
 
   /* Click-away and Escape both dismiss; a pointerdown on the trigger is left
      alone so its own contextmenu handler can toggle the menu shut. */
@@ -165,17 +231,17 @@ export function SpeakMenu({ anchorRef, info, option, chars, freeReplay, tooLong,
       tabIndex={-1}
       data-tts-menu
       aria-label={t("tts.menuTitle")}
-      /* Off-screen and transparent until it has been measured — transparent
-         rather than `visibility: hidden`, because a hidden element cannot take
-         the focus the keyboard path moves into it on the very same commit. */
-      style={box ? { left: box.left, top: box.top } : { left: -9999, top: 0, opacity: 0 }}
+      style={style}
       className="fixed z-[80] max-h-[calc(100vh-16px)] w-[300px] max-w-[calc(100vw-16px)] overflow-y-auto rounded-[12px] border border-border bg-card p-1.5 text-left shadow-2 focus-visible:outline-none"
     >
       <div className="px-2 pb-1 pt-1.5 text-label font-semibold text-secondary">{t("tts.menuTitle")}</div>
       {/* The honesty line the confirm dialog used to carry: what the next left
-          click costs, answered from the cache at render time. */}
-      <div className={`px-2 text-[11.5px] font-semibold ${freeReplay ? "text-success" : "text-primary"}`}>
-        {freeReplay ? t("tts.nextFree") : t("tts.nextPaid")}
+          click actually does. While this control is reading, that click is a
+          stop — saying "paid synthesis" there is the same lie the dialog was
+          removed for. Otherwise it is a replay or a purchase, asked of the
+          cache on every render this menu is subscribed to. */}
+      <div className={`px-2 text-[11.5px] font-semibold ${active ? "text-secondary" : freeReplay() ? "text-success" : "text-primary"}`}>
+        {active ? t("tts.nextStop") : freeReplay() ? t("tts.nextFree") : t("tts.nextPaid")}
       </div>
       <div className="px-2 pt-1 text-[10.5px] text-muted">{option.id} · {option.model} · {option.voice}</div>
       <div className="px-2 text-[10.5px] text-muted">{t("tts.characters", { count: chars.toLocaleString() })}</div>
@@ -234,7 +300,7 @@ export function SpeakMenu({ anchorRef, info, option, chars, freeReplay, tooLong,
           );
         })}
       </div>
-      {error ? <div className="px-2 py-1 text-[10.5px] font-semibold text-danger">{error}</div> : null}
+      {error ?? notice ? <div className="break-all px-2 py-1 text-[10.5px] font-semibold text-danger">{error ?? notice}</div> : null}
     </div>,
     document.body,
   );

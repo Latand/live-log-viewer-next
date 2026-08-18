@@ -18,6 +18,14 @@ export interface VoiceKey {
   voice: string;
 }
 
+/** One synthesis as it came back: the audio, its alignment, and — when the
+    route said so — the voice that was actually billed for it. */
+export interface SynthesizedSpeech {
+  blob: Blob;
+  alignment: ProviderAlignment | null;
+  voice: VoiceKey | null;
+}
+
 /** Speech rate assumed for chunks whose audio has not been measured yet. */
 export const ASSUMED_CHARS_PER_SECOND = 15;
 /** The fattest audio the route lets through: 128 kbps mp3, ElevenLabs' default. */
@@ -48,6 +56,21 @@ let cachedBytes = 0;
    otherwise advertise a free replay that silently buys the other twenty-four. */
 const MAX_SPOKEN_KEYS = 200;
 const spokenMessages = new Set<string>();
+
+/* Whoever is showing what the next click costs. A menu left open while another
+   card's long answer evicts these chunks would otherwise keep advertising a
+   free replay that is no longer free (#1024). */
+const cacheListeners = new Set<() => void>();
+
+/** Notified whenever a chunk enters or leaves the cache. Returns its removal. */
+export function subscribeTtsCache(listener: () => void): () => void {
+  cacheListeners.add(listener);
+  return () => { cacheListeners.delete(listener); };
+}
+
+function announceCacheChange(): void {
+  for (const listener of [...cacheListeners]) listener();
+}
 
 export function voiceKey(voice: VoiceKey, text: string): string {
   return `${voice.id}\0${voice.model}\0${voice.voice}\0${text}`;
@@ -84,6 +107,7 @@ export function cacheChunk(key: string, blob: Blob, alignment: ProviderAlignment
     cachedBytes -= oldest[1].bytes;
     URL.revokeObjectURL(oldest[1].url);
   }
+  announceCacheChange();
   return entry;
 }
 
@@ -96,6 +120,7 @@ export function markSpoken(key: string): void {
     if (oldest === undefined) break;
     spokenMessages.delete(oldest);
   }
+  announceCacheChange();
 }
 
 export function hasBeenSpoken(key: string): boolean {
@@ -108,6 +133,7 @@ export function evictTtsAudio(): void {
   for (const entry of chunkCache.values()) URL.revokeObjectURL(entry.url);
   chunkCache.clear();
   cachedBytes = 0;
+  announceCacheChange();
 }
 
 /** Test seam: back to a page that has never spoken anything. */
@@ -155,15 +181,31 @@ async function providerError(response: Response): Promise<string | null> {
   }
 }
 
+/** The voice the route says it billed, when it says so — see `billedBy` in
+    `/api/tts`. Absent on a response from a viewer that predates it. */
+function billedVoice(response: Response): VoiceKey | null {
+  const id = response.headers.get("x-tts-backend");
+  const model = response.headers.get("x-tts-model");
+  const voice = response.headers.get("x-tts-voice");
+  if (!id || !model || !voice) return null;
+  try {
+    return { id, model: decodeURIComponent(model), voice: decodeURIComponent(voice) };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * One chunk through `/api/tts`. Providers with character timestamps answer
  * with a JSON envelope (audio plus alignment); the rest stream audio bytes.
+ * Either way the response names the voice that spoke it, which is what the
+ * chunk is cached under.
  */
 export async function synthesizeChunk(
   text: string,
   signal: AbortSignal,
   sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-): Promise<{ blob: Blob; alignment: ProviderAlignment | null }> {
+): Promise<SynthesizedSpeech> {
   for (let attempt = 0; ; attempt += 1) {
     const response = await fetch("/api/tts", {
       method: "POST",
@@ -178,13 +220,14 @@ export async function synthesizeChunk(
       continue;
     }
     if (!response.ok) throw new TtsRequestError(response.status, await providerError(response));
+    const voice = billedVoice(response);
     const contentType = response.headers.get("content-type") ?? "";
     if (contentType.includes("application/json")) {
       const payload = (await response.json()) as { audio?: string; contentType?: string; alignment?: ProviderAlignment | null };
       if (!payload.audio) throw new TtsRequestError(response.status, null);
-      return { blob: base64ToBlob(payload.audio, payload.contentType || "audio/mpeg"), alignment: payload.alignment ?? null };
+      return { blob: base64ToBlob(payload.audio, payload.contentType || "audio/mpeg"), alignment: payload.alignment ?? null, voice };
     }
-    return { blob: await response.blob(), alignment: null };
+    return { blob: await response.blob(), alignment: null, voice };
   }
 }
 
@@ -199,14 +242,18 @@ export interface SessionPosition {
 
 export interface TtsSessionOptions {
   chunks: SpeechChunk[];
-  /** Cache key for a chunk's text under the active provider/model/voice. */
-  key: (text: string) => string;
-  synthesize: (text: string, signal: AbortSignal) => Promise<{ blob: Blob; alignment: ProviderAlignment | null }>;
+  /** Cache key for a chunk's text. Called with the voice the route says it
+      billed once that is known, and with null before the answer comes back —
+      audio is never filed under a provider that did not produce it. */
+  key: (text: string, voice: VoiceKey | null) => string;
+  synthesize: (text: string, signal: AbortSignal) => Promise<SynthesizedSpeech>;
   /** Pre-unlocked audio elements, alternated so a chunk hand-off has no gap. */
   elements: HTMLAudioElement[];
   concurrency?: number;
   onPosition: (position: SessionPosition) => void;
   onPhase: (phase: "loading" | "playing") => void;
+  /** Who the route actually billed, reported on every synthesis that says. */
+  onVoice?: (voice: VoiceKey) => void;
   onError: (error: unknown) => void;
   onEnd: () => void;
 }
@@ -303,8 +350,7 @@ export class TtsSession {
 
   private load(index: number): void {
     const chunk = this.options.chunks[index]!;
-    const key = this.options.key(chunk.text);
-    const hit = cachedChunk(key);
+    const hit = cachedChunk(this.options.key(chunk.text, null));
     if (hit) {
       this.accept(index, hit);
       return;
@@ -312,10 +358,13 @@ export class TtsSession {
     this.pending.add(index);
     this.options
       .synthesize(chunk.text, this.controller.signal)
-      .then(({ blob, alignment }) => {
+      .then(({ blob, alignment, voice }) => {
         this.pending.delete(index);
         if (this.stopped) return;
-        this.accept(index, cacheChunk(key, blob, alignment));
+        if (voice) this.options.onVoice?.(voice);
+        /* Filed under the voice that answered, not the one this page believed
+           when the request went out (#1024). */
+        this.accept(index, cacheChunk(this.options.key(chunk.text, voice), blob, alignment));
         this.pump();
       })
       .catch((error: unknown) => {

@@ -110,6 +110,25 @@ function synthesisRequest(
   };
 }
 
+/**
+ * What the route ACTUALLY billed, on every synthesis it answers.
+ *
+ * The client's copy of the configuration is fetched once per page load, so a
+ * tab left open across a provider switch (another tab, or a restart under a new
+ * `LLV_TTS_BACKEND`) believes a backend the server no longer uses — and would
+ * cache the returned audio under a voice identity that never spoke it (#1024).
+ * The response says who spoke, and the client keys the cache and names the
+ * provider from that. Percent-encoded, because a configured voice name is
+ * arbitrary text and a header value is not.
+ */
+function billedBy(backend: TtsBackend, option: TtsBackendOption): Record<string, string> {
+  return {
+    "x-tts-backend": backend,
+    "x-tts-model": encodeURIComponent(option.model),
+    "x-tts-voice": encodeURIComponent(option.voice),
+  };
+}
+
 /** Reads a whole upstream body under the same ceiling the audio stream keeps. */
 async function readBounded(body: ReadableStream<Uint8Array>, limit: number): Promise<string | null> {
   const reader = body.getReader();
@@ -234,7 +253,7 @@ export async function POST(req: NextRequest): Promise<Response> {
         contentType: "audio/mpeg",
         alignment: alignmentOf((envelope as { alignment?: unknown }).alignment),
       },
-      { headers: { "cache-control": "no-store" } },
+      { headers: { "cache-control": "no-store", ...billedBy(backend, option) } },
     );
   }
   if (!contentType.startsWith("audio/")) {
@@ -254,6 +273,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     headers: {
       "content-type": contentType,
       "cache-control": "no-store",
+      ...billedBy(backend, option),
     },
   });
 }
