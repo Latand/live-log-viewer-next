@@ -123,6 +123,17 @@ async function mountInFeed(text: string): Promise<{ button: HTMLButtonElement; r
   return { button: slot.querySelector("button")!, root, host, body };
 }
 
+/** Ends every chunk in turn, the way the browser would, until nothing plays. */
+async function playToEnd(): Promise<void> {
+  for (let guard = 0; guard < 200; guard += 1) {
+    const element = playing();
+    if (!element) return;
+    element.finish();
+    await drainUpdates();
+  }
+  throw new Error("playback never finished");
+}
+
 async function confirm(view: { host: HTMLElement; button: HTMLButtonElement }): Promise<void> {
   flushSync(() => { view.button.click(); });
   await drainUpdates();
@@ -224,7 +235,7 @@ test("a long answer is chunked, synthesized in parallel and played from the firs
   view.host.remove();
 });
 
-test("replay costs nothing while the chunks are cached and re-synthesizes only what was evicted", async () => {
+test("a message read to the end replays free, and an evicted one asks again before paying", async () => {
   let posts = 0;
   globalThis.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
     if (!init?.method) return Response.json(backendInfo);
@@ -238,13 +249,12 @@ test("replay costs nothing while the chunks are cached and re-synthesizes only w
 
   const view = await mount(LONG);
   await confirm(view);
+  await playToEnd();
   const synthesized = posts;
   expect(synthesized).toBeGreaterThan(1);
 
-  /* Stopping leaves the message replayable, and the replay is free. */
-  flushSync(() => { view.button.click(); });
-  await drainUpdates();
-  expect(view.button.getAttribute("aria-label")).toContain("Replay");
+  /* Read to the end with every chunk cached: the replay is genuinely free. */
+  expect(view.button.getAttribute("title")).toBe("Replay aloud (free)");
   flushSync(() => { view.button.click(); });
   await drainUpdates();
   expect(posts).toBe(synthesized);
@@ -252,11 +262,58 @@ test("replay costs nothing while the chunks are cached and re-synthesizes only w
   flushSync(() => { view.button.click(); });
   await drainUpdates();
 
-  /* After eviction the replay control still works — it just pays again. */
+  /* Evicted: replaying costs again, so it goes back through the paid dialog. */
   evictTtsAudio();
   flushSync(() => { view.button.click(); });
   await drainUpdates();
+  expect(posts).toBe(synthesized);
+  expect(view.host.querySelector('[role="dialog"]')).not.toBeNull();
+  const speak = [...view.host.querySelectorAll("button")].find((button) => button.textContent === "Speak")!;
+  flushSync(() => { speak.click(); });
+  await drainUpdates();
   expect(posts).toBeGreaterThan(synthesized);
+  flushSync(() => { view.button.click(); view.root.unmount(); });
+  view.host.remove();
+});
+
+/* The operator confirmed ONE read-aloud. Stopping it after the first of two
+   dozen chunks must not turn the control into a free-replay button that
+   silently buys the other twenty-three. */
+test("a message stopped after the first chunk never advertises a free replay", async () => {
+  let posts = 0;
+  const pending = new Map<string, (response: Response) => void>();
+  globalThis.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
+    if (!init?.method) return Response.json(backendInfo);
+    posts += 1;
+    const text = (JSON.parse(String(init.body)) as { text: string }).text;
+    return new Promise<Response>((resolve) => pending.set(text, resolve));
+  }) as unknown as typeof fetch;
+  URL.createObjectURL = () => "blob:tts";
+  useFakeAudio();
+
+  const view = await mount(LONG);
+  await confirm(view);
+  const [first] = [...pending.keys()];
+  pending.get(first!)!(new Response(new Blob(["audio"])));
+  await drainUpdates();
+  expect(playing()).toBeDefined();
+
+  flushSync(() => { view.button.click(); });
+  await drainUpdates();
+  const paidForFirstChunk = posts;
+
+  expect(view.button.getAttribute("title")).toBe("Read aloud (paid)");
+  expect(view.button.getAttribute("aria-label")).toBe("Read answer aloud");
+
+  /* Clicking asks first and buys nothing until the operator confirms. */
+  flushSync(() => { view.button.click(); });
+  await drainUpdates();
+  expect(posts).toBe(paidForFirstChunk);
+  expect(view.host.textContent).toContain("Confirm paid read-aloud");
+  const speak = [...view.host.querySelectorAll("button")].find((button) => button.textContent === "Speak")!;
+  flushSync(() => { speak.click(); });
+  await drainUpdates();
+  expect(posts).toBeGreaterThan(paidForFirstChunk);
   flushSync(() => { view.button.click(); view.root.unmount(); });
   view.host.remove();
 });

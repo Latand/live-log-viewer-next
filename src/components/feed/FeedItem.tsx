@@ -47,9 +47,12 @@ export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item
         {/* `data-tts-message` / `data-tts-body`: the anchors the read-aloud
             control uses to find the RENDERED text of this answer, so the
             karaoke highlight and click-to-seek of #1022 ride over the markdown
-            already on screen instead of re-parsing it. The body wrapper is
+            already on screen instead of re-parsing it. The value is the answer's
+            identity — the engine/timestamp pair `speakableAnswer` groups on —
+            so a control on the first block of a multi-block answer can claim
+            the rest of it and stop at the next answer. The body wrapper is
             `display: contents`, so it changes no layout. */}
-        <div className="min-w-0 flex-1 whitespace-pre-wrap break-words" data-tts-message>
+        <div className="min-w-0 flex-1 whitespace-pre-wrap break-words" data-tts-message={`${item.engine}:${item.ts}`}>
           {/* Issue #698: this cluster used to be `absolute right-0 top-0` over a
               body with no reserved gutter — on a coarse pointer the 44px buttons
               sat permanently at 60% opacity on the first lines of the message,

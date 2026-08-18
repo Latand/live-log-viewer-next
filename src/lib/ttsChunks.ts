@@ -5,6 +5,10 @@ import { MAX_TTS_TEXT_LENGTH } from "@/lib/tts";
  * substring of the source — `source.slice(start, end) === text` — so the
  * playback queue can map an audio position back onto the message text for
  * karaoke highlighting and click-to-seek.
+ *
+ * The input is always `spokenAnswerText` output, which has already dropped
+ * fenced and indented code, inline code, tables and every `http(s)://…` run, so
+ * this splits prose and nothing else.
  */
 export interface SpeechChunk {
   index: number;
@@ -20,43 +24,15 @@ export const MAX_CHUNK_CHARS = 800;
 
 /* A sentence ends at .!?… (plus any closing quote/bracket) FOLLOWED BY
    whitespace. The trailing-whitespace requirement is what keeps `example.com`,
-   `v1.2.3` and every dotted URL path in one piece — a URL never contains a
+   `v1.2.3` and every dotted host in one piece — a host name never contains a
    space, so it can never straddle this boundary. */
 const SENTENCE_END = /[.!?…]["'”’)\]]*(?=\s)/g;
-const FENCE_OPEN = /^[ \t]*(`{3,}|~{3,})/;
-const FENCE_CLOSE = /^[ \t]*(`{3,}|~{3,})[ \t]*$/;
 
 interface Unit {
   start: number;
   end: number;
-  /** A fenced code block: kept whole, never split on a sentence boundary. */
-  atomic: boolean;
   /** Preceded by a blank line — the split point a chunk prefers. */
   paragraph: boolean;
-}
-
-/** Source ranges for the fenced code blocks, which survive chunking whole. */
-function fencedRanges(source: string): { start: number; end: number }[] {
-  const ranges: { start: number; end: number }[] = [];
-  let offset = 0;
-  let open: { start: number; char: string; length: number } | null = null;
-  for (const line of source.split("\n")) {
-    const next = offset + line.length + 1;
-    if (open) {
-      const closer = line.match(FENCE_CLOSE)?.[1];
-      if (closer?.[0] === open.char && closer.length >= open.length) {
-        ranges.push({ start: open.start, end: Math.min(next, source.length) });
-        open = null;
-      }
-    } else {
-      const opener = line.match(FENCE_OPEN)?.[1];
-      if (opener) open = { start: offset, char: opener[0]!, length: opener.length };
-    }
-    offset = next;
-  }
-  /* An unterminated fence runs to the end of the message. */
-  if (open) ranges.push({ start: open.start, end: source.length });
-  return ranges;
 }
 
 function trimmedRange(source: string, start: number, end: number): { start: number; end: number } | null {
@@ -67,26 +43,24 @@ function trimmedRange(source: string, start: number, end: number): { start: numb
   return to > from ? { start: from, end: to } : null;
 }
 
-/** Sentence-sized units of a prose run, each carrying whether a blank line opened it. */
-function proseUnits(source: string, start: number, end: number): Unit[] {
+/** Sentence-sized units, each carrying whether a blank line opened it. */
+function sentenceUnits(source: string): Unit[] {
   const units: Unit[] = [];
-  const text = source.slice(start, end);
   const bounds: number[] = [];
   SENTENCE_END.lastIndex = 0;
-  for (let match = SENTENCE_END.exec(text); match; match = SENTENCE_END.exec(text)) {
+  for (let match = SENTENCE_END.exec(source); match; match = SENTENCE_END.exec(source)) {
     bounds.push(match.index + match[0].length);
   }
   /* A blank line ends a unit too: list items and headings carry no full stop. */
-  for (const match of text.matchAll(/\n[ \t]*\n/g)) bounds.push(match.index + match[0].length);
+  for (const match of source.matchAll(/\n[ \t]*\n/g)) bounds.push(match.index + match[0].length);
   bounds.sort((a, b) => a - b);
 
   let cursor = 0;
-  for (const bound of [...bounds, text.length]) {
+  for (const bound of [...bounds, source.length]) {
     if (bound <= cursor) continue;
-    const range = trimmedRange(source, start + cursor, start + bound);
+    const range = trimmedRange(source, cursor, bound);
     if (range) {
-      const before = source.slice(0, range.start);
-      units.push({ ...range, atomic: false, paragraph: units.length > 0 && /\n[ \t]*\n\s*$/.test(before) });
+      units.push({ ...range, paragraph: units.length > 0 && /\n[ \t]*\n\s*$/.test(source.slice(0, range.start)) });
     }
     cursor = bound;
   }
@@ -94,9 +68,9 @@ function proseUnits(source: string, start: number, end: number): Unit[] {
 }
 
 /**
- * Splits a unit that is longer than `limit` on whitespace, never inside a word.
- * A single unbreakable token (a long URL, a base64 blob) stays whole even when
- * it overshoots — cutting it would make the synthesizer read nonsense.
+ * Splits a unit longer than `limit` on whitespace, never inside a word. A
+ * single unbreakable token stays whole even when it overshoots — cutting a word
+ * would make the synthesizer read nonsense.
  */
 function splitOnWhitespace(source: string, start: number, end: number, limit: number): { start: number; end: number }[] {
   const pieces: { start: number; end: number }[] = [];
@@ -108,7 +82,7 @@ function splitOnWhitespace(source: string, start: number, end: number, limit: nu
     }
     if (cut < 0) {
       /* No whitespace inside the window: take the whole token up to the next
-         space so the word (or URL) survives intact. */
+         space so the word survives intact. */
       const next = source.slice(from).search(/\s/);
       cut = next < 0 ? end : from + next;
     }
@@ -127,49 +101,31 @@ function splitOnWhitespace(source: string, start: number, end: number, limit: nu
  * A message that already fits in one chunk comes back as exactly one chunk, so
  * short answers keep the single-request behaviour they have always had.
  */
-export function chunkSpeech(
-  source: string,
-  options: { min?: number; max?: number; hardMax?: number } = {},
-): SpeechChunk[] {
-  const min = options.min ?? MIN_CHUNK_CHARS;
-  const max = options.max ?? MAX_CHUNK_CHARS;
-  const hardMax = options.hardMax ?? MAX_TTS_TEXT_LENGTH;
+export function chunkSpeech(source: string): SpeechChunk[] {
   const whole = trimmedRange(source, 0, source.length);
   if (!whole) return [];
-  if (whole.end - whole.start <= max) {
+  if (whole.end - whole.start <= MAX_CHUNK_CHARS) {
     return [{ index: 0, text: source.slice(whole.start, whole.end), start: whole.start, end: whole.end }];
   }
 
-  const units: Unit[] = [];
-  let cursor = 0;
-  for (const fence of fencedRanges(source)) {
-    if (fence.start > cursor) units.push(...proseUnits(source, cursor, fence.start));
-    const range = trimmedRange(source, fence.start, fence.end);
-    if (range) units.push({ ...range, atomic: true, paragraph: true });
-    cursor = fence.end;
-  }
-  if (cursor < source.length) units.push(...proseUnits(source, cursor, source.length));
-
-  /* Oversized units are cut down first, so packing never has to break one. A
-     code block is only cut when it alone would blow the per-request limit. */
+  /* Oversized units are cut down first, so packing never has to break one. */
   const sized: Unit[] = [];
-  for (const unit of units) {
-    const limit = unit.atomic ? hardMax : max;
-    if (unit.end - unit.start <= limit) { sized.push(unit); continue; }
-    const pieces = splitOnWhitespace(source, unit.start, unit.end, limit);
-    pieces.forEach((piece, index) => {
+  for (const unit of sentenceUnits(source)) {
+    if (unit.end - unit.start <= MAX_CHUNK_CHARS) { sized.push(unit); continue; }
+    for (const [index, piece] of splitOnWhitespace(source, unit.start, unit.end, MAX_CHUNK_CHARS).entries()) {
       const paragraph = unit.paragraph && index === 0;
-      if (piece.end - piece.start <= hardMax) {
-        sized.push({ ...piece, atomic: unit.atomic, paragraph });
-        return;
+      if (piece.end - piece.start <= MAX_TTS_TEXT_LENGTH) {
+        sized.push({ ...piece, paragraph });
+        continue;
       }
-      /* An unbroken run longer than a whole request — a hash, a base64 blob.
-         There is no word here to keep whole, and the alternative is a request
-         the route is bound to refuse. */
-      for (let at = piece.start; at < piece.end; at += hardMax) {
-        sized.push({ start: at, end: Math.min(at + hardMax, piece.end), atomic: unit.atomic, paragraph: paragraph && at === piece.start });
+      /* An unbroken run longer than a whole request. A bare token — a hash, a
+         base64 blob, a URL written without a scheme — survives
+         `spokenAnswerText`, and there is no word inside it to keep whole; the
+         alternative is a request the route is bound to refuse with a 413. */
+      for (let at = piece.start; at < piece.end; at += MAX_TTS_TEXT_LENGTH) {
+        sized.push({ start: at, end: Math.min(at + MAX_TTS_TEXT_LENGTH, piece.end), paragraph: paragraph && at === piece.start });
       }
-    });
+    }
   }
 
   const chunks: SpeechChunk[] = [];
@@ -181,17 +137,9 @@ export function chunkSpeech(
   };
   for (const unit of sized) {
     const length = unit.end - unit.start;
-    if (open) {
-      const packed = unit.end - open.start;
-      const openLength = open.end - open.start;
-      /* A code block never shares a chunk: its own boundaries are the split.
-         An atomic unit always flushes right after it is added, so the open
-         chunk here only ever holds prose. */
-      if (packed > max || unit.atomic || (unit.paragraph && openLength >= min)) flush();
-    }
-    if (open) open = { start: open.start, end: unit.end };
-    else open = { start: unit.start, end: unit.end };
-    if (unit.atomic || length >= max) flush();
+    if (open && (unit.end - open.start > MAX_CHUNK_CHARS || (unit.paragraph && open.end - open.start >= MIN_CHUNK_CHARS))) flush();
+    open = open ? { start: open.start, end: unit.end } : { start: unit.start, end: unit.end };
+    if (length >= MAX_CHUNK_CHARS) flush();
   }
   flush();
   return chunks;

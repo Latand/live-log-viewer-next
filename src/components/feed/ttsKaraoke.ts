@@ -215,18 +215,26 @@ interface CaretHost {
   caretRangeFromPoint?: (x: number, y: number) => { startContainer: Node; startOffset: number } | null;
 }
 
-/** The rendered bodies covered by one Speak control: the message it sits on,
-    plus the follow-on prose blocks of the same answer, which carry no control
-    of their own. */
+/**
+ * The rendered bodies covered by one Speak control: the message it sits on,
+ * plus the follow-on blocks of the SAME answer, which carry no control of their
+ * own. `data-tts-message` holds that answer's identity (engine and timestamp,
+ * the pair `speakableAnswer` groups on), and the walk stops the moment it
+ * changes — carrying no control is not the same as belonging to this answer. A
+ * neighbouring answer whose whole content is code or a bare URL renders no
+ * control either, and highlighting or seeking inside it would be a lie.
+ */
 export function karaokeRoots(trigger: Element): HTMLElement[] {
   const message = trigger.closest("[data-tts-message]");
   const own = message?.querySelector<HTMLElement>("[data-tts-body]");
   if (!own) return [];
   const roots = [own];
+  const answer = message!.getAttribute("data-tts-message");
+  if (!answer) return roots;
   let wrapper = message!.closest('[data-feed-kind="prose"]')?.nextElementSibling ?? null;
   while (wrapper?.getAttribute("data-feed-kind") === "prose") {
     const nextMessage = wrapper.querySelector<HTMLElement>("[data-tts-message]");
-    if (!nextMessage || nextMessage.querySelector("[data-tts-trigger]")) break;
+    if (nextMessage?.getAttribute("data-tts-message") !== answer) break;
     const body = nextMessage.querySelector<HTMLElement>("[data-tts-body]");
     if (body) roots.push(body);
     wrapper = wrapper.nextElementSibling;

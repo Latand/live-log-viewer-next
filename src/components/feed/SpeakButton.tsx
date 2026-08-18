@@ -1,7 +1,7 @@
 "use client";
 
 import { RotateCw, Square, Volume2 } from "lucide-react";
-import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { translate, useLocale } from "@/lib/i18n";
@@ -11,6 +11,7 @@ import { chunkSpeech } from "@/lib/ttsChunks";
 
 import { createKaraoke, karaokeRoots, type Karaoke } from "./ttsKaraoke";
 import {
+  chunksCached,
   hasBeenSpoken,
   markSpoken,
   synthesizeChunk,
@@ -100,9 +101,11 @@ export function SpeakButton({ text }: { text: string }) {
   const [phase, setPhase] = useState<"idle" | "loading" | "playing">("idle");
   const [announcement, setAnnouncement] = useState("");
   const [progress, setProgress] = useState({ elapsed: 0, total: 0, chunk: 0, chunks: 0 });
-  /* Only a re-render trigger: the replay marker itself lives in the tts cache
-     module, so a message stays replayable across mounts and cache eviction. */
+  /* Only a re-render trigger: whether a replay is free is answered by the tts
+     cache module, so a completed message keeps its replay control across
+     mounts — and loses it when its chunks are evicted. */
   const [, setSpokenTick] = useState(0);
+  const chunks = useMemo(() => chunkSpeech(text), [text]);
   const generation = useRef(0);
   const mounted = useRef(true);
   const ownedStop = useRef<(() => void) | null>(null);
@@ -136,7 +139,14 @@ export function SpeakButton({ text }: { text: string }) {
   const option = info.options.find((candidate) => candidate.id === info.backend);
   if (!option) return null;
   const key = messageKey(info, text);
-  const replayable = hasBeenSpoken(key);
+  /* "Replay aloud (free)" has to be TRUE when it is shown, so it takes both: a
+     message read to the end, and every one of its chunks still in the cache.
+     Anything else — stopped after the first of twenty-five chunks, or evicted
+     since — is a paid synthesis, and goes back through the confirm dialog like
+     any other paid synthesis. Asked again at click time, because another card's
+     long answer can evict these chunks without re-rendering this one. */
+  const freeReplay = () => hasBeenSpoken(key) && chunksCached(chunks.map((chunk) => voiceKey(option, chunk.text)));
+  const replayable = freeReplay();
   const tooLong = text.length > MAX_TTS_MESSAGE_LENGTH;
 
   const closeConfirm = () => {
@@ -150,10 +160,9 @@ export function SpeakButton({ text }: { text: string }) {
    * lets a click in that text jump the audio there.
    */
   const begin = (elements: HTMLAudioElement[], playbackUnlock: Promise<unknown>, fromChar = 0) => {
+    if (!chunks.length) return;
     stopActive();
     const currentGeneration = ++generation.current;
-    const chunks = chunkSpeech(text);
-    if (!chunks.length) return;
     const alive = () => mounted.current && generation.current === currentGeneration;
     const roots = triggerRef.current ? karaokeRoots(triggerRef.current) : [];
     const karaoke: Karaoke | null = roots.length ? createKaraoke(roots, text) : null;
@@ -192,14 +201,8 @@ export function SpeakButton({ text }: { text: string }) {
       synthesize: synthesizeChunk,
       elements,
       onPhase: (next) => {
-        /* Audio is playing, which means a chunk was paid for and cached: the
-           message is replayable from here on, even if the operator stops it
-           halfway or the rest of the sequence fails. */
-        const firstSound = next === "playing" && !hasBeenSpoken(key);
-        if (firstSound) markSpoken(key);
         if (!alive()) return;
         setPhase(next);
-        if (firstSound) setSpokenTick((tick) => tick + 1);
         setAnnouncement(next === "loading" ? t("tts.generating") : t("tts.playing"));
       },
       onPosition: ({ chunkIndex, charIndex, elapsed, total }) => {
@@ -222,6 +225,8 @@ export function SpeakButton({ text }: { text: string }) {
         stop(false);
       },
       onEnd: () => {
+        /* Read to the end: from here the control may offer a replay — for as
+           long as the chunks it would replay are still cached. */
         markSpoken(key);
         if (alive()) {
           setSpokenTick((tick) => tick + 1);
@@ -279,7 +284,7 @@ export function SpeakButton({ text }: { text: string }) {
       return;
     }
     setError(null);
-    if (replayable) replay();
+    if (freeReplay()) replay();
     else {
       void loadBackendInfo(true)
         .then((fresh) => {

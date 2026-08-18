@@ -248,11 +248,13 @@ providers.
 ### Long answers, replay, and following along
 
 A long answer is split client-side into chunks of roughly 400–800 characters on
-paragraph and sentence boundaries (code blocks and URLs stay whole, and a word
-is never cut). Two chunks are synthesized at a time — the route admits three
-syntheses at once, so a slot is left for another card — and playback starts as
-soon as the FIRST chunk is ready, while the rest are still being made. Chunks
-play back to back on two alternating audio elements, so the joins are inaudible.
+paragraph and sentence boundaries, and a word is never cut. (What reaches the
+splitter is the spoken text, which has already had code blocks, inline code,
+tables and `http(s)://…` runs stripped out of it.) Two chunks are synthesized at
+a time — the route admits three syntheses at once, so a slot is left for another
+card — and playback starts as soon as the FIRST chunk is ready, while the rest
+are still being made. Chunks play back to back on two alternating audio
+elements, so the joins are inaudible.
 
 A message under ~800 characters is one chunk, exactly as before. Nothing is ever
 truncated: the old "speak the first 4,000 characters" slice is gone, and a
@@ -261,9 +263,13 @@ dialog instead of being quietly cut.
 
 Chunks are cached per provider/model/voice/chunk text, so:
 
-- **Replay** — after an answer has been voiced the speaker button becomes a
-  replay control. It replays from the cache at no cost; anything the cache has
-  evicted is re-synthesized transparently.
+- **Replay** — once an answer has been read to the END, and while all of its
+  chunks are still cached, the speaker button becomes a replay control that
+  replays at no cost. Any other state — stopped part-way, or evicted since — is
+  a paid synthesis, so the control says so and goes back through the same
+  confirm dialog. The cache is sized to hold one whole message at the length
+  ceiling (~22 MB of audio at the worst case), so a replay of the answer just
+  read is free.
 - **Karaoke** — while a message is being read, the word being spoken is
   highlighted in the rendered answer. The highlight uses the CSS Custom
   Highlight API over the markdown already on screen: nothing is re-parsed or

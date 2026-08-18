@@ -155,13 +155,13 @@ describe("createKaraoke (#1022)", () => {
 describe("karaokeRoots (#1022)", () => {
   test("collects the follow-on blocks of the same answer and stops at the next one", () => {
     const feed = render(`
-      <div data-feed-kind="prose"><div data-tts-message>
+      <div data-feed-kind="prose"><div data-tts-message="claude:1700">
         <button data-tts-trigger></button><div data-tts-body id="a">First block.</div>
       </div></div>
-      <div data-feed-kind="prose"><div data-tts-message>
+      <div data-feed-kind="prose"><div data-tts-message="claude:1700">
         <div data-tts-body id="b">Same answer, second block.</div>
       </div></div>
-      <div data-feed-kind="prose"><div data-tts-message>
+      <div data-feed-kind="prose"><div data-tts-message="claude:1800">
         <button data-tts-trigger></button><div data-tts-body id="c">A different answer.</div>
       </div></div>
     `);
@@ -170,8 +170,25 @@ describe("karaokeRoots (#1022)", () => {
     expect(karaokeRoots(trigger).map((root) => root.id)).toEqual(["a", "b"]);
   });
 
+  /* An answer whose whole content is a code block or a bare URL speaks as the
+     empty string, so it renders no control of its own — which must not make it
+     part of the answer above it. */
+  test("a neighbouring answer with no control of its own is not absorbed", () => {
+    const feed = render(`
+      <div data-feed-kind="prose"><div data-tts-message="claude:1700">
+        <button data-tts-trigger></button><div data-tts-body id="a">First block.</div>
+      </div></div>
+      <div data-feed-kind="prose"><div data-tts-message="codex:1900">
+        <div data-tts-body id="d">A different, unspeakable answer.</div>
+      </div></div>
+    `);
+    const trigger = feed.querySelector("[data-tts-trigger]")!;
+
+    expect(karaokeRoots(trigger).map((root) => root.id)).toEqual(["a"]);
+  });
+
   test("a control with no rendered body of its own maps nothing", () => {
-    const feed = render(`<div data-feed-kind="prose"><div data-tts-message><button data-tts-trigger></button></div></div>`);
+    const feed = render(`<div data-feed-kind="prose"><div data-tts-message="claude:1700"><button data-tts-trigger></button></div></div>`);
     expect(karaokeRoots(feed.querySelector("[data-tts-trigger]")!)).toEqual([]);
   });
 });

@@ -1,14 +1,18 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 
-import { chunkSpeech } from "@/lib/ttsChunks";
+import { MAX_TTS_MESSAGE_LENGTH } from "@/lib/tts";
+import { chunkSpeech, MIN_CHUNK_CHARS } from "@/lib/ttsChunks";
 
 import {
+  ASSUMED_CHARS_PER_SECOND,
   cacheChunk,
   cachedChunk,
+  chunksCached,
   clearTtsCache,
   hasBeenSpoken,
   markSpoken,
   synthesizeChunk,
+  TTS_AUDIO_BYTES_PER_SECOND,
   TtsRequestError,
   TtsSession,
   voiceKey,
@@ -18,9 +22,14 @@ const originalFetch = globalThis.fetch;
 const originalCreateObjectURL = URL.createObjectURL;
 const originalRevokeObjectURL = URL.revokeObjectURL;
 
-/** A stand-in for HTMLAudioElement: playback is driven by the test, not a clock. */
+/**
+ * A stand-in for HTMLAudioElement: playback is driven by the test, not a clock.
+ * Metadata arrives when a source is assigned, as it does in a browser — which
+ * is why a chunk preloaded onto an unwired element reports its duration to
+ * nobody, and why `play()` alone cannot stand in for that event.
+ */
 class FakeAudio {
-  src = "";
+  private source = "";
   currentTime = 0;
   duration = 4;
   muted = false;
@@ -31,12 +40,18 @@ class FakeAudio {
   ontimeupdate: (() => void) | null = null;
   onended: (() => void) | null = null;
   onerror: (() => void) | null = null;
+  get src() { return this.source; }
+  set src(value: string) {
+    if (value === this.source) return;
+    this.source = value;
+    this.currentTime = 0;
+    this.onloadedmetadata?.();
+  }
   load() { this.loads += 1; }
   pause() { this.paused = true; }
   async play() {
     this.plays += 1;
     this.paused = false;
-    this.onloadedmetadata?.();
   }
   /** Runs this chunk to its end, the way the browser would. */
   finish() {
@@ -66,6 +81,10 @@ async function settle(): Promise<void> {
 }
 
 const LONG = Array.from({ length: 60 }, (_, index) => `This is spoken sentence number ${index} of the answer.`).join(" ");
+/* The most chunks a message can have: every chunk but the last is at least
+   MIN_CHUNK_CHARS, so the longest message the control reads splits into this
+   many at worst. */
+const LONGEST_MESSAGE_CHUNKS = Math.ceil(MAX_TTS_MESSAGE_LENGTH / MIN_CHUNK_CHARS);
 
 beforeEach(() => {
   clearTtsCache();
@@ -263,6 +282,29 @@ describe("TtsSession (#1022)", () => {
     evicted.session.stop();
   });
 
+  test("a seek in the first moments of a preloaded chunk still moves the play head", async () => {
+    const view = harness();
+    view.session.start();
+    await settle();
+    await view.deliver(0);
+    /* Chunk 1 is preloaded on the idle element, which is unwired: it reports
+       its metadata to nobody, and after the hand-off no event will repeat it. */
+    await view.deliver(1);
+    view.audio[0]!.finish();
+    await settle();
+    const element = view.audio[1]!;
+    expect(element.paused).toBe(false);
+    expect(element.currentTime).toBe(0);
+
+    /* A click before the first timeupdate of the new chunk. */
+    const chunk = view.chunks[1]!;
+    view.session.seekToChar(chunk.start + Math.floor(chunk.text.length / 2));
+
+    expect(element.currentTime).toBeGreaterThan(1.5);
+    expect(element.currentTime).toBeLessThan(2.5);
+    view.session.stop();
+  });
+
   test("seeking inside a synthesized chunk moves the play head proportionally", async () => {
     const view = harness();
     view.session.start();
@@ -367,12 +409,28 @@ describe("chunk cache and replay markers (#1022)", () => {
   test("eviction revokes the object URL it drops", () => {
     const revoke = mock(() => {});
     URL.revokeObjectURL = revoke;
-    for (let index = 0; index < 70; index += 1) {
+    const over = LONGEST_MESSAGE_CHUNKS * 2;
+    for (let index = 0; index < over; index += 1) {
       cacheChunk(voiceKey({ id: "openai", model: "m", voice: "v" }, `chunk ${index}`), new Blob([`audio ${index}`]), null);
     }
     expect(revoke.mock.calls.length).toBeGreaterThan(0);
     expect(cachedChunk(voiceKey({ id: "openai", model: "m", voice: "v" }, "chunk 0"))).toBeNull();
-    expect(cachedChunk(voiceKey({ id: "openai", model: "m", voice: "v" }, "chunk 69"))).not.toBeNull();
+    expect(cachedChunk(voiceKey({ id: "openai", model: "m", voice: "v" }, `chunk ${over - 1}`))).not.toBeNull();
+  });
+
+  /* The cache exists so a replay is free. That only holds if a whole message at
+     the ceiling fits it — at the fattest audio the route accepts, which is the
+     bitrate the byte cap is derived from. */
+  test("a message at the length ceiling fits whole: its head is still cached when its tail lands", () => {
+    const bytesPerChunk = Math.ceil((MIN_CHUNK_CHARS / ASSUMED_CHARS_PER_SECOND) * TTS_AUDIO_BYTES_PER_SECOND);
+    const key = (index: number) => voiceKey({ id: "elevenlabs", model: "m", voice: "v" }, `chunk ${index}`);
+    for (let index = 0; index < LONGEST_MESSAGE_CHUNKS; index += 1) {
+      cacheChunk(key(index), new Blob([new Uint8Array(bytesPerChunk)]), null);
+    }
+
+    expect(cachedChunk(key(0))).not.toBeNull();
+    expect(cachedChunk(key(LONGEST_MESSAGE_CHUNKS - 1))).not.toBeNull();
+    expect(chunksCached(Array.from({ length: LONGEST_MESSAGE_CHUNKS }, (_, index) => key(index)))).toBe(true);
   });
 });
 

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import { MAX_TTS_TEXT_LENGTH } from "./tts";
 import { chunkSpeech, MAX_CHUNK_CHARS, MIN_CHUNK_CHARS } from "./ttsChunks";
 
 function sentences(count: number, word = "sentence"): string {
@@ -54,25 +55,6 @@ describe("chunkSpeech (#1022)", () => {
     expect(crossing).toEqual([]);
   });
 
-  test("a fenced code block stays whole in its own chunk", () => {
-    const code = ["```ts", ...Array.from({ length: 30 }, (_, index) => `const value${index} = compute(${index});`), "```"].join("\n");
-    const source = `${sentences(10, "intro")}\n\n${code}\n\n${sentences(10, "outro")}`;
-    const chunks = chunkSpeech(source);
-    const withCode = chunks.filter((chunk) => chunk.text.includes("```"));
-    expect(withCode).toHaveLength(1);
-    expect(withCode[0]!.text).toBe(code);
-    expect(withCode[0]!.text).not.toContain("intro");
-    expect(withCode[0]!.text).not.toContain("outro");
-  });
-
-  test("an unterminated fence keeps its tail whole", () => {
-    const source = `${sentences(10, "lead")}\n\n\`\`\`sh\n${"echo hello\n".repeat(20)}`;
-    const chunks = chunkSpeech(source);
-    const fenced = chunks.filter((chunk) => chunk.text.includes("```sh"));
-    expect(fenced).toHaveLength(1);
-    expect(fenced[0]!.text.endsWith("echo hello")).toBe(true);
-  });
-
   test("a URL is never cut, not even by the dots inside it", () => {
     const url = "https://example.com/docs/v1.2.3/guide.html?query=a.b.c#section.4";
     const source = `${sentences(20, "before")} ${url} ${sentences(20, "after")}`;
@@ -101,18 +83,13 @@ describe("chunkSpeech (#1022)", () => {
   });
 
   test("no chunk can exceed what one request may carry, whatever the text is", () => {
-    /* An unbreakable run has no word boundary to respect; the per-request
-       ceiling still holds, or the route would refuse the chunk outright. */
-    const blob = "A".repeat(9_000);
-    const chunks = chunkSpeech(`Here is the payload. ${blob} That was it.`, { hardMax: 1_000 });
-    for (const chunk of chunks) expect(chunk.text.length).toBeLessThanOrEqual(1_000);
+    /* A bare blob (no scheme, no backticks) reaches the chunker intact. It has
+       no word boundary to respect, and the per-request ceiling still has to
+       hold or the route refuses the chunk with a 413. */
+    const blob = "A".repeat(MAX_TTS_TEXT_LENGTH * 2 + 137);
+    const chunks = chunkSpeech(`Here is the payload. ${blob} That was it.`);
+    for (const chunk of chunks) expect(chunk.text.length).toBeLessThanOrEqual(MAX_TTS_TEXT_LENGTH);
     expect(chunks.map((chunk) => chunk.text).join("")).toContain(blob);
   });
 
-  test("a code block over the per-request ceiling is split rather than rejected", () => {
-    const code = ["```ts", `${"const value = compute(index);\n".repeat(400)}`, "```"].join("\n");
-    const chunks = chunkSpeech(code, { hardMax: 1000 });
-    expect(chunks.length).toBeGreaterThan(1);
-    for (const chunk of chunks) expect(chunk.text.length).toBeLessThanOrEqual(1000);
-  });
 });

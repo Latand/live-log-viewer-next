@@ -34,8 +34,9 @@ test("an assistant message keeps its actions out of the text flow", () => {
    the karaoke follow-along and click-to-seek, with nothing else breaking. */
 test("an assistant message exposes the anchors the read-aloud control follows", () => {
   const html = renderToStaticMarkup(<FeedItem item={prose()} speakText="The first line of the answer." />);
-  expect(html).toContain("data-tts-message");
-  expect(html).toContain("data-tts-body");
+  /* The anchor carries the answer's identity, so a control on the first block
+     of a multi-block answer claims the rest of it and stops at the next one. */
+  expect(html).toContain('data-tts-message="claude:1753000000"');
   /* The body wrapper is display:contents, so it adds no box of its own. */
   expect(html).toMatch(/<div class="contents" data-tts-body="true">/);
 });

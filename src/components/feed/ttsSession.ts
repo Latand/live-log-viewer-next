@@ -1,7 +1,8 @@
 "use client";
 
+import { MAX_TTS_MESSAGE_LENGTH } from "@/lib/tts";
 import { charTimesFor, timeForChar, charForTime, type CharTimes, type ProviderAlignment } from "@/lib/ttsAlignment";
-import type { SpeechChunk } from "@/lib/ttsChunks";
+import { MIN_CHUNK_CHARS, type SpeechChunk } from "@/lib/ttsChunks";
 
 /** One synthesized chunk: an object URL, its size, and the provider alignment. */
 export interface SynthesizedChunk {
@@ -17,24 +18,48 @@ export interface VoiceKey {
   voice: string;
 }
 
+/** Speech rate assumed for chunks whose audio has not been measured yet. */
+export const ASSUMED_CHARS_PER_SECOND = 15;
+/** The fattest audio the route lets through: 128 kbps mp3, ElevenLabs' default. */
+export const TTS_AUDIO_BYTES_PER_SECOND = 16 * 1024;
+
 /* Per-CHUNK cache, so a replay of a long answer costs nothing and a repeated
-   paragraph is reused across messages. Sized to hold a whole long message
-   (~25 chunks at the 800-char ceiling) plus room for a second one, because a
-   cache that evicted mid-message would make replay re-buy what it just paid
-   for. */
-const MAX_CACHE_ENTRIES = 64;
-const MAX_CACHE_BYTES = 16 * 1024 * 1024;
+   paragraph is reused across messages. Both caps are derived from the longest
+   message the control will read, because a cache that evicts mid-message makes
+   the replay re-buy what it just paid for — the one thing this cache exists to
+   prevent. A chunk is at least MIN_CHUNK_CHARS except at the end of a message,
+   which bounds the entry count; the byte cap is that message's whole audio at
+   the highest bitrate a provider hands back, plus one chunk of slack for
+   rounding.
+
+   Worst-case resident footprint, therefore: one 20,000-character message is
+   ~22 minutes of speech (at ~15 chars/s) and ~22 MB of object URLs. That is the
+   ceiling for the WHOLE cache, not per message — a second long message evicts
+   the first, which is the trade this cache is sized for. */
+const MAX_CACHE_ENTRIES = Math.ceil(MAX_TTS_MESSAGE_LENGTH / MIN_CHUNK_CHARS) + 1;
+export const MAX_CACHE_BYTES =
+  Math.ceil((MAX_TTS_MESSAGE_LENGTH + MIN_CHUNK_CHARS) / ASSUMED_CHARS_PER_SECOND) * TTS_AUDIO_BYTES_PER_SECOND;
 const chunkCache = new Map<string, SynthesizedChunk>();
 let cachedBytes = 0;
 
-/* The messages this page has voiced at least once. Replay is offered from this
-   set rather than from the audio cache, so an evicted message still replays —
-   it just re-synthesizes the chunks that are gone. */
+/* The messages this page has voiced to the END. A replay control is only
+   offered for one of these, and only while its chunks are all still cached
+   (`chunksCached`): a message the operator stopped after one chunk would
+   otherwise advertise a free replay that silently buys the other twenty-four. */
 const MAX_SPOKEN_KEYS = 200;
 const spokenMessages = new Set<string>();
 
 export function voiceKey(voice: VoiceKey, text: string): string {
   return `${voice.id}\0${voice.model}\0${voice.voice}\0${text}`;
+}
+
+/**
+ * Whether every chunk of a message is still cached — the only state in which a
+ * replay is genuinely free, and so the only state in which the control may say
+ * so and skip the paid confirmation. Reads without touching the LRU order.
+ */
+export function chunksCached(keys: readonly string[]): boolean {
+  return keys.length > 0 && keys.every((key) => chunkCache.has(key));
 }
 
 export function cachedChunk(key: string): SynthesizedChunk | null {
@@ -62,6 +87,7 @@ export function cacheChunk(key: string, blob: Blob, alignment: ProviderAlignment
   return entry;
 }
 
+/** Records a message as read to the end. */
 export function markSpoken(key: string): void {
   spokenMessages.delete(key);
   spokenMessages.add(key);
@@ -184,9 +210,6 @@ export interface TtsSessionOptions {
   onError: (error: unknown) => void;
   onEnd: () => void;
 }
-
-/** Speech rate assumed for chunks whose audio has not been measured yet. */
-const ASSUMED_CHARS_PER_SECOND = 15;
 
 /**
  * Plays a chunked message: chunks are synthesized a couple at a time, ahead of
@@ -375,6 +398,13 @@ export class TtsSession {
        (a repeated paragraph), and a stale currentTime would end it instantly. */
     element.currentTime = 0;
     element.muted = false;
+    /* A preloaded element loaded its metadata while it was unwired and will
+       fire no event for it now, so take the duration here. Without it, a click
+       landing in the first moments of a chunk — before any timeupdate — has
+       nothing to interpolate against and the seek is dropped. */
+    if (this.durations[index] === null && Number.isFinite(element.duration) && element.duration > 0) {
+      this.durations[index] = element.duration;
+    }
     this.applySeek();
     this.options.onPhase("playing");
     void Promise.resolve(element.play()).catch((error: unknown) => {
