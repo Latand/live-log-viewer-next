@@ -2,7 +2,7 @@
 
 Agent Log Viewer can turn speech into text in any composer, so you can dictate a
 message to an agent instead of typing it. Transcription runs through a pluggable
-backend: the default keeps everything on your machine, and two cloud providers
+backend: the default keeps everything on your machine, and three cloud providers
 are available as an explicit per-machine opt-in.
 
 ## What it does in the UI
@@ -24,11 +24,12 @@ How the recognised text reaches the draft depends on the active backend:
   again (or press Enter) to stop. The audio is uploaded, transcribed, and the
   resulting text is inserted into the draft. The button shows the "busy"
   spinner while the server works.
-- **Live path** (ElevenLabs backend only): the transcript streams in while you
-  speak. Each phrase the voice-activity detector finalises is appended to the
-  draft right away, and the not-yet-final tail is overlaid on the input so you
-  see words appear as you say them. Stopping is instant because there is
-  nothing left to wait for.
+- **Live path** (ElevenLabs and Soniox backends): the transcript streams in
+  while you speak. Each phrase the provider finalises — an ElevenLabs
+  voice-activity commit, a Soniox endpoint — is appended to the draft right
+  away, and the not-yet-final tail is overlaid on the input so you see words
+  appear as you say them. Stopping is instant because there is nothing left to
+  wait for.
 
 While recording, pressing **Enter** (or clicking send) does "stop and send":
 it stops the recording, waits for the final transcript, and sends the message
@@ -43,11 +44,11 @@ The backend is resolved on the server for every transcription request, in this
 order:
 
 1. **Environment variable `LLV_TRANSCRIBE_BACKEND`** — accepts `local`,
-   `chatgpt`, or `elevenlabs` (case-insensitive). If set to a valid value, it
-   wins.
+   `chatgpt`, `elevenlabs`, or `soniox` (case-insensitive). If set to a valid
+   value, it wins.
 2. **Override file `~/.config/agent-log-viewer/transcribe-backend`** — accepts
-   `chatgpt` or `elevenlabs` (case-insensitive). Use this to switch to a cloud
-   backend without setting an env var. A value of `local` in this file is not
+   `chatgpt`, `elevenlabs`, or `soniox` (case-insensitive). Use this to switch
+   to a cloud backend without setting an env var. A value of `local` in this file is not
    needed — local is already the default. Create the file with just the backend
    name as its contents, e.g. `echo elevenlabs > ~/.config/agent-log-viewer/transcribe-backend`.
 3. **Default: `local`.**
@@ -59,8 +60,9 @@ order:
 > resolved legacy config or cache file, so existing setups continue unchanged.
 
 The cloud backends stay off the UI on purpose. There is no in-app toggle to
-enable ChatGPT or ElevenLabs transcription; each one turns on only when you set
-the environment variable or write the override file on that specific machine.
+enable ChatGPT, ElevenLabs, or Soniox transcription; each one turns on only when
+you set the environment variable or write the override file on that specific
+machine.
 This keeps the on-by-default behaviour fully local and makes any audio leaving
 the machine a deliberate, per-machine choice.
 
@@ -131,8 +133,9 @@ and never appears on the command line.
 
 ### ElevenLabs — Scribe
 
-The only backend with live, streaming transcription. Recording a long draft
-shows words appearing as you speak; short drafts still work as one-shot batch.
+One of the two backends with live, streaming transcription. Recording a long
+draft shows words appearing as you speak; short drafts still work as one-shot
+batch.
 
 **Requirements:** an ElevenLabs API key.
 
@@ -166,6 +169,82 @@ mints a short-lived single-use token and only that token reaches the browser.
 
 **Privacy:** audio is streamed/uploaded to ElevenLabs.
 
+### Soniox
+
+The other live, streaming backend. Soniox streams sub-word tokens as you speak,
+so the tail of a sentence keeps rewriting itself in the input until the provider
+marks the utterance finished.
+
+**Requirements:** a Soniox API key.
+
+**Key location** (read at request time, env first):
+
+1. Environment variable `SONIOX_API_KEY`, or
+2. File `~/.config/agent-log-viewer/soniox-api-key` (the key as the file's only
+   contents).
+
+**Setup:**
+
+```bash
+echo 'YOUR_SONIOX_KEY' > ~/.config/agent-log-viewer/soniox-api-key
+echo soniox > ~/.config/agent-log-viewer/transcribe-backend
+```
+
+How it works:
+
+- **Live streaming:** on each dictation start the client asks the server for a
+  credential, and the server mints a *temporary API key*
+  (`https://api.soniox.com/v1/auth/temporary-api-key`, `usage_type:
+  transcribe_websocket`, single-use, minutes-long expiry). The browser opens a
+  WebSocket to `wss://stt-rt.soniox.com/transcribe-websocket`, sends one JSON
+  start request (model `stt-rt-v5`, `audio_format: pcm_s16le`, the context's
+  sample rate, endpoint detection on) carrying that temporary key, then streams
+  raw PCM as binary frames. Answers arrive as `tokens[]` with `is_final`; the
+  final tokens of an utterance are followed by an `<end>` token, which is where
+  a segment is committed to the draft. An empty frame ends the stream.
+- **Batch fallback:** if no temporary key is available, the recording goes
+  through the async REST API — upload to `https://api.soniox.com/v1/files`,
+  create a transcription (model `stt-async-v5`, overridable with
+  `LLV_SONIOX_STT_MODEL`), poll until it completes, read the transcript. Both
+  the uploaded file and the transcription are deleted afterwards.
+
+Your API key stays on the server: batch requests are made server-side, and live
+mode hands the browser only the temporary key, never the account key.
+
+**Privacy:** audio is streamed/uploaded to Soniox.
+
+## Read-aloud (text-to-speech)
+
+The speaker button on an assistant answer reads it out. Its provider is chosen
+the same way, one selector over:
+
+1. **Environment variable `LLV_TTS_BACKEND`** — accepts `openai`, `elevenlabs`,
+   or `soniox`. When set it wins and locks the in-app picker.
+2. **Override file `~/.config/agent-log-viewer/tts-backend`**, written by that
+   picker or by hand.
+3. **Default: `openai`.**
+
+Each provider reads the key file it already uses for transcription, so a Soniox
+key set up above needs nothing more:
+
+```bash
+echo 'YOUR_SONIOX_KEY' > ~/.config/agent-log-viewer/soniox-api-key
+echo soniox > ~/.config/agent-log-viewer/tts-backend
+```
+
+The server posts the answer text to `https://tts-rt.soniox.com/tts` (model
+`tts-rt-v2`, voice `Adrian`, language `en`, mp3) and streams the audio straight
+back to the browser; the key never leaves the server. Model, voice and language
+follow the same per-provider override pattern as the other backends —
+`LLV_TTS_SONIOX_MODEL` / `LLV_TTS_SONIOX_VOICE` / `LLV_TTS_SONIOX_LANGUAGE`, or
+the files `tts-model-soniox`, `tts-voice-soniox`, `tts-language-soniox`. The
+language is the language of the text being read; Soniox requires it on every
+request, so set it if your agents answer in something other than English.
+
+Without a readable key the button reports text-to-speech as unavailable and
+names the file to drop the key into — the same degradation as the other
+providers.
+
 ## Troubleshooting
 
 | Symptom (message in the UI)                              | Cause                                                            | Fix                                                                 |
@@ -179,8 +258,11 @@ mints a short-lived single-use token and only that token reaches the browser.
 | "no Codex ChatGPT token (~/.codex/auth.json)…"           | ChatGPT backend selected but no Codex login found.              | Log in with Codex, then retry.                                      |
 | "ChatGPT token expired…"                                 | The stored Codex token is stale.                                | Open Codex so it refreshes the token, then retry.                   |
 | "no ElevenLabs key…"                                     | ElevenLabs backend selected but no key found.                   | Set `ELEVENLABS_API_KEY` or write the key file (see above).         |
-| "live transcription is only available with the elevenlabs backend" | Live token requested while another backend is active. | Expected — the client falls back to batch automatically.            |
+| "missing Soniox key…"                                    | Soniox backend selected but no key found.                       | Set `SONIOX_API_KEY` or write the key file (see above).             |
+| "Soniox token: HTTP 401"                                 | The key was rejected when minting the temporary key.            | Check the key; live mode stays off and dictation falls back to batch. |
+| "live transcription is only available with the elevenlabs or soniox backend" | Live token requested while another backend is active. | Expected — the client falls back to batch automatically.            |
 
 Cloud backends surface upstream HTTP errors verbatim (for example
-`ElevenLabs STT: HTTP 401 …` or `transcription backend: HTTP 5xx`), which usually
-point to an invalid key, an expired token, or a quota limit.
+`ElevenLabs STT: HTTP 401 …`, `Soniox STT: upload: HTTP 402 …`, or
+`transcription backend: HTTP 5xx`), which usually point to an invalid key, an
+expired token, or a quota limit.

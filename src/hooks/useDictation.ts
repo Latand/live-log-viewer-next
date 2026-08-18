@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   drawMeter,
   float32ToBase64Pcm16,
+  float32ToPcm16,
   fmtElapsed,
   METER_BARS,
   METER_HEIGHT,
@@ -13,6 +14,13 @@ import {
 import { chime } from "@/lib/chime";
 import { CAP_SECONDS, dictationCues, remaining as remainingSeconds } from "@/lib/dictationTimer";
 import { useLocale } from "@/lib/i18n";
+import {
+  applySonioxFrame,
+  sonioxLiveInitialState,
+  sonioxStartRequest,
+  SONIOX_LIVE_WS_URL,
+  type SonioxLiveState,
+} from "@/lib/transcribe/sonioxLive";
 
 /* Re-exported so existing importers (MicButton and friends) keep resolving
    these through the hook module after the pure helpers moved to lib/audio. */
@@ -34,8 +42,9 @@ const CAP_HOLD_MS = 5_000;
 /* Sub-2KB blobs are a misclick, not speech — dropped without a server call. */
 const MIN_BLOB_BYTES = 2_000;
 
-/* Realtime Scribe wants raw 16kHz PCM; VAD commits a segment after this much
-   silence, which is what turns speech into committed text mid-recording. */
+/* Both realtime providers want raw 16kHz PCM. ElevenLabs commits a segment
+   after this much VAD silence; Soniox marks the same boundary with its
+   endpoint token. Either way speech becomes committed text mid-recording. */
 const LIVE_SAMPLE_RATE = 16_000;
 const LIVE_VAD_SILENCE_SECS = "1.2";
 const LIVE_WS_URL = "wss://api.elevenlabs.io/v1/speech-to-text/realtime";
@@ -50,17 +59,26 @@ const TOKEN_FRESH_MS = 45_000;
    briefly keeps hover-driven prewarms from re-asking the server every time. */
 const TOKEN_NULL_MS = 15_000;
 
-let tokenCache: { token: string | null; expiresAt: number } | null = null;
-let tokenInflight: Promise<string | null> | null = null;
+/** Which realtime provider the minted token belongs to — the socket URL, the
+    handshake and the frame format all follow from it. */
+type LiveProvider = "elevenlabs" | "soniox";
+interface LiveToken {
+  token: string;
+  provider: LiveProvider;
+}
+
+let tokenCache: { token: LiveToken | null; expiresAt: number } | null = null;
+let tokenInflight: Promise<LiveToken | null> | null = null;
 
 /* A non-200 from the token route means live mode is off (other backend, no
    key) — the caller falls back to batch without surfacing anything. */
-const mintLiveToken = async (): Promise<string | null> => {
+const mintLiveToken = async (): Promise<LiveToken | null> => {
   try {
     const res = await fetch("/api/transcribe/token", { method: "POST" });
     if (!res.ok) return null;
-    const json = (await res.json()) as { token?: string };
-    return typeof json.token === "string" && json.token ? json.token : null;
+    const json = (await res.json()) as { token?: string; provider?: string };
+    if (typeof json.token !== "string" || !json.token) return null;
+    return { token: json.token, provider: json.provider === "soniox" ? "soniox" : "elevenlabs" };
   } catch {
     return null;
   }
@@ -82,7 +100,7 @@ export function prewarmLiveToken(): void {
 /* Consume the prewarmed token (they are single-use, so a real one leaves the
    cache with its taker); a cached null is left in place — "no live mode" is
    an answer, not a spendable resource. Cold cache mints inline. */
-const takeLiveToken = async (): Promise<string | null> => {
+const takeLiveToken = async (): Promise<LiveToken | null> => {
   const inflight = tokenInflight;
   if (inflight) {
     const token = await inflight;
@@ -104,9 +122,14 @@ interface LiveSession {
   processor: ScriptProcessorNode;
   stream: MediaStream;
   /* Audio captured before the socket opens; flushed on open so the first
-     words of an eager speaker are not lost to the connection handshake. */
-  preOpenQueue: string[];
+     words of an eager speaker are not lost to the connection handshake. Each
+     entry is already in its provider's wire form — an ElevenLabs JSON frame,
+     a raw Soniox PCM buffer — so the flush only has to send it. */
+  preOpenQueue: (string | ArrayBuffer)[];
   partial: string;
+  /* Sent right before the socket closes when the provider documents a
+     graceful end of input — Soniox ends a stream with an empty frame. */
+  closeFrame?: string;
 }
 
 export interface UseDictationOptions {
@@ -115,9 +138,10 @@ export interface UseDictationOptions {
       fires with no pending resolver; without this handler that recording's
       text would be silently dropped. */
   onUnclaimedText: (text: string) => void;
-  /** Realtime mode delivers each VAD-committed segment here the moment it
-      arrives, mid-recording — the composer appends it to the draft right
-      away, so stop() only ever returns the short uncommitted tail. */
+  /** Realtime mode delivers each finished segment here the moment it arrives
+      (an ElevenLabs VAD commit, a Soniox endpoint) — the composer appends it
+      to the draft right away, so stop() only ever returns the short
+      uncommitted tail. */
   onLiveCommit: (segment: string) => void;
 }
 
@@ -157,9 +181,10 @@ export interface UseDictationResult {
 /**
  * Recording + transcription state machine shared by every dictation control.
  * Two paths behind one interface:
- *  - realtime: raw PCM streams to ElevenLabs Scribe over WebSocket and the
- *    transcript arrives live via `liveText` (picked when /api/transcribe/token
- *    hands out a session token, i.e. the elevenlabs backend is selected);
+ *  - realtime: raw PCM streams to ElevenLabs Scribe or Soniox over WebSocket
+ *    and the transcript arrives live via `liveText` (picked when
+ *    /api/transcribe/token hands out a session token, i.e. one of those two
+ *    backends is selected — the answer names the provider);
  *  - batch: MediaRecorder (webm/opus) posted to /api/transcribe on stop —
  *    the fallback whenever no token is available.
  * Lifted out of MicButton so a composer can orchestrate its own send button
@@ -263,6 +288,11 @@ export function useDictation({ onError, onUnclaimedText, onLiveCommit }: UseDict
       /* already disconnected */
     }
     try {
+      if (live.closeFrame !== undefined && live.ws.readyState === WebSocket.OPEN) live.ws.send(live.closeFrame);
+    } catch {
+      /* the close below ends the stream anyway */
+    }
+    try {
       live.ws.close();
     } catch {
       /* already closed */
@@ -347,7 +377,72 @@ export function useDictation({ onError, onUnclaimedText, onLiveCommit }: UseDict
     }
   };
 
-  const startLive = (stream: MediaStream, token: string): boolean => {
+  /* Soniox: one JSON start request on open, then raw PCM binary frames. Tokens
+     stream back sub-word, so a draft segment is cut at the endpoint token and
+     the still-rewritten tail rides in liveText until then. */
+  const startSonioxLive = (stream: MediaStream, token: string): boolean => {
+    let ctx: AudioContext;
+    try {
+      ctx = new AudioContext({ sampleRate: LIVE_SAMPLE_RATE });
+    } catch {
+      return false;
+    }
+    const ws = new WebSocket(SONIOX_LIVE_WS_URL);
+    ws.binaryType = "arraybuffer";
+    const processor = ctx.createScriptProcessor(4096, 1, 1);
+    const live: LiveSession = { ws, ctx, processor, stream, preOpenQueue: [], partial: "", closeFrame: "" };
+    liveRef.current = live;
+    let state: SonioxLiveState = sonioxLiveInitialState();
+
+    const source = ctx.createMediaStreamSource(stream);
+    processor.onaudioprocess = (event) => {
+      if (liveRef.current !== live) return;
+      const chunk = float32ToPcm16(event.inputBuffer.getChannelData(0)).buffer as ArrayBuffer;
+      if (ws.readyState === WebSocket.OPEN) ws.send(chunk);
+      else if (ws.readyState === WebSocket.CONNECTING) live.preOpenQueue.push(chunk);
+    };
+    source.connect(processor);
+    processor.connect(ctx.destination);
+
+    ws.addEventListener("open", () => {
+      if (liveRef.current !== live) return;
+      /* The handshake carries the temporary key; the real account key never
+         reaches this side. ctx.sampleRate over the request, because a browser
+         may hand back a context at its own rate. */
+      ws.send(JSON.stringify(sonioxStartRequest({ token, sampleRate: ctx.sampleRate })));
+      for (const chunk of live.preOpenQueue) ws.send(chunk);
+      live.preOpenQueue = [];
+    });
+
+    ws.addEventListener("message", (event) => {
+      if (liveRef.current !== live) return;
+      const update = applySonioxFrame(state, event.data);
+      if (!update) return;
+      state = update.state;
+      if (update.error) {
+        onError(update.error);
+        finishLive(live);
+        return;
+      }
+      /* Straight into the draft, mid-recording. */
+      if (update.commit) onLiveCommit(update.commit);
+      live.partial = update.liveText;
+      setLiveText(live.partial);
+      /* The server closed on its own (session cap): keep what arrived. */
+      if (update.finished) finishLive(live);
+    });
+
+    ws.addEventListener("close", () => {
+      if (liveRef.current === live && !pendingRef.current) {
+        onError(t("dictation.connectionLost"));
+        finishLive(live);
+      }
+    });
+
+    return true;
+  };
+
+  const startElevenLabsLive = (stream: MediaStream, token: string): boolean => {
     let ctx: AudioContext;
     try {
       ctx = new AudioContext({ sampleRate: LIVE_SAMPLE_RATE });
@@ -369,21 +464,21 @@ export function useDictation({ onError, onUnclaimedText, onLiveCommit }: UseDict
     const source = ctx.createMediaStreamSource(stream);
     processor.onaudioprocess = (event) => {
       if (liveRef.current !== live) return;
-      const chunk = float32ToBase64Pcm16(event.inputBuffer.getChannelData(0));
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ message_type: "input_audio_chunk", audio_base_64: chunk }));
-      } else if (ws.readyState === WebSocket.CONNECTING) {
-        live.preOpenQueue.push(chunk);
-      }
+      const open = ws.readyState === WebSocket.OPEN;
+      if (!open && ws.readyState !== WebSocket.CONNECTING) return;
+      const frame = JSON.stringify({
+        message_type: "input_audio_chunk",
+        audio_base_64: float32ToBase64Pcm16(event.inputBuffer.getChannelData(0)),
+      });
+      if (open) ws.send(frame);
+      else live.preOpenQueue.push(frame);
     };
     source.connect(processor);
     processor.connect(ctx.destination);
 
     ws.addEventListener("open", () => {
       if (liveRef.current !== live) return;
-      for (const chunk of live.preOpenQueue) {
-        ws.send(JSON.stringify({ message_type: "input_audio_chunk", audio_base_64: chunk }));
-      }
+      for (const chunk of live.preOpenQueue) ws.send(chunk);
       live.preOpenQueue = [];
     });
 
@@ -426,6 +521,10 @@ export function useDictation({ onError, onUnclaimedText, onLiveCommit }: UseDict
 
     return true;
   };
+
+  /** Picks the socket that matches the token the server handed out. */
+  const startLive = (stream: MediaStream, minted: LiveToken): boolean =>
+    minted.provider === "soniox" ? startSonioxLive(stream, minted.token) : startElevenLabsLive(stream, minted.token);
 
   const start = async () => {
     /* getUserMedia can hang on a permission prompt; a second tap during that

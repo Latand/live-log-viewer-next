@@ -2,10 +2,10 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { configFilePath } from "@/lib/configDir";
-import { readElevenLabsApiKey } from "@/lib/transcribeBackend";
+import { readElevenLabsApiKey, readSonioxApiKey } from "@/lib/transcribeBackend";
 
-export type TtsBackend = "openai" | "elevenlabs";
-export const TTS_BACKENDS: readonly TtsBackend[] = ["openai", "elevenlabs"];
+export type TtsBackend = "openai" | "elevenlabs" | "soniox";
+export const TTS_BACKENDS: readonly TtsBackend[] = ["openai", "elevenlabs", "soniox"];
 
 export interface TtsBackendOption {
   id: TtsBackend;
@@ -14,6 +14,9 @@ export interface TtsBackendOption {
   model: string;
   voice: string;
   cap: number;
+  /** Soniox requires the language of the input text on every request; the
+      other providers infer it from the text. */
+  language?: string;
 }
 
 export interface TtsBackendInfo {
@@ -71,6 +74,15 @@ export function ttsBackendInfo(): TtsBackendInfo {
         keyPath: configFilePath("elevenlabs-api-key"),
         model: process.env.LLV_TTS_ELEVENLABS_MODEL?.trim() || readFile("tts-model-elevenlabs") || "eleven_multilingual_v2",
         voice: process.env.LLV_TTS_ELEVENLABS_VOICE?.trim() || readFile("tts-voice-elevenlabs") || "21m00Tcm4TlvDq8ikWAM",
+        cap: 4000,
+      },
+      {
+        id: "soniox",
+        available: readSonioxApiKey() !== null,
+        keyPath: configFilePath("soniox-api-key"),
+        model: process.env.LLV_TTS_SONIOX_MODEL?.trim() || readFile("tts-model-soniox") || "tts-rt-v2",
+        voice: process.env.LLV_TTS_SONIOX_VOICE?.trim() || readFile("tts-voice-soniox") || "Adrian",
+        language: process.env.LLV_TTS_SONIOX_LANGUAGE?.trim() || readFile("tts-language-soniox") || "en",
         cap: 4000,
       },
     ],

@@ -3,13 +3,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { redactSecrets } from "@/lib/review";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { MAX_TTS_TEXT_LENGTH } from "@/lib/tts";
-import { activeTtsOption, readOpenAiApiKey, resolveTtsBackend, ttsBackendInfo } from "@/lib/ttsBackend";
-import { readElevenLabsApiKey } from "@/lib/transcribeBackend";
+import { activeTtsOption, readOpenAiApiKey, resolveTtsBackend, ttsBackendInfo, type TtsBackend, type TtsBackendOption } from "@/lib/ttsBackend";
+import { readElevenLabsApiKey, readSonioxApiKey } from "@/lib/transcribeBackend";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const OPENAI_SPEECH_URL = "https://api.openai.com/v1/audio/speech";
+const SONIOX_SPEECH_URL = "https://tts-rt.soniox.com/tts";
 const MAX_AUDIO_BYTES = 32 * 1024 * 1024;
 const UPSTREAM_TIMEOUT_MS = 60_000;
 const MAX_CONCURRENT_SYNTHESES = 3;
@@ -60,6 +61,47 @@ function boundedAudioStream(body: ReadableStream<Uint8Array>, release: () => voi
     },
   });
 }
+
+/**
+ * The upstream synthesis call per provider. Each returns audio bytes straight
+ * on the response body, so the route proxies one shape no matter who answers:
+ * OpenAI mp3, ElevenLabs mp3, Soniox mp3 off their REST /tts endpoint (their
+ * realtime socket delivers base64 JSON frames, which the audio-element
+ * playback in SpeakButton would have to reassemble anyway).
+ */
+function synthesisRequest(
+  backend: TtsBackend,
+  option: TtsBackendOption,
+  apiKey: string,
+  text: string,
+): { url: string; headers: Record<string, string>; body: string } {
+  if (backend === "openai") {
+    return {
+      url: OPENAI_SPEECH_URL,
+      headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: option.model, voice: option.voice, input: text, response_format: "mp3" }),
+    };
+  }
+  if (backend === "soniox") {
+    return {
+      url: SONIOX_SPEECH_URL,
+      headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        model: option.model,
+        voice: option.voice,
+        language: option.language ?? "en",
+        audio_format: "mp3",
+        text,
+      }),
+    };
+  }
+  return {
+    url: `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(option.voice)}`,
+    headers: { "xi-api-key": apiKey, "content-type": "application/json", accept: "audio/mpeg" },
+    body: JSON.stringify({ model_id: option.model, text }),
+  };
+}
+
 export async function GET(): Promise<NextResponse<{ available: boolean }>> {
   const info = ttsBackendInfo();
   return NextResponse.json({ available: info.options.find((option) => option.id === info.backend)?.available === true });
@@ -71,7 +113,8 @@ export async function POST(req: NextRequest): Promise<Response> {
 
   const backend = resolveTtsBackend();
   const option = activeTtsOption();
-  const apiKey = backend === "openai" ? readOpenAiApiKey() : readElevenLabsApiKey();
+  const apiKey =
+    backend === "openai" ? readOpenAiApiKey() : backend === "soniox" ? readSonioxApiKey() : readElevenLabsApiKey();
   if (!apiKey) {
     return NextResponse.json({ error: "text-to-speech is unavailable", keyPath: option.keyPath }, { status: 503 });
   }
@@ -99,17 +142,11 @@ export async function POST(req: NextRequest): Promise<Response> {
   let upstream: Response;
   try {
     const signal = AbortSignal.any([req.signal, AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)]);
-    const openAi = backend === "openai";
-    upstream = await fetch(openAi ? OPENAI_SPEECH_URL : `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(option.voice)}`, {
+    const request = synthesisRequest(backend, option, apiKey, text);
+    upstream = await fetch(request.url, {
       method: "POST",
-      headers: openAi
-        ? { authorization: `Bearer ${apiKey}`, "content-type": "application/json" }
-        : { "xi-api-key": apiKey, "content-type": "application/json", accept: "audio/mpeg" },
-      body: JSON.stringify(
-        openAi
-          ? { model: option.model, voice: option.voice, input: text, response_format: "mp3" }
-          : { model_id: option.model, text },
-      ),
+      headers: request.headers,
+      body: request.body,
       signal,
     });
   } catch {
