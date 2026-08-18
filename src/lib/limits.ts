@@ -37,6 +37,10 @@ type EngineName = "claude" | "codex";
 type EngineCacheEntry = {
   at: number;
   data: EngineLimits | null;
+  /** The last reading not derived from a provider rejection. Projections are
+      served from `data`, so polls stay stable, while this keeps the number the
+      projection was computed from recoverable once it expires. */
+  baseData?: EngineLimits | null;
   provenance: LimitsProvenance;
   retryAt?: number | null;
   consecutive429s?: number;
@@ -85,6 +89,7 @@ function safeCacheEntry(value: unknown): EngineCacheEntry | null {
       (typeof provenance.reason !== "string" && provenance.reason !== null) ||
       (typeof provenance.staleSince !== "string" && provenance.staleSince !== null) ||
       (provenance.retryAt !== undefined && typeof provenance.retryAt !== "string" && provenance.retryAt !== null) ||
+      (entry.baseData !== undefined && entry.baseData !== null && typeof entry.baseData !== "object") ||
       (entry.retryAt !== undefined && entry.retryAt !== null && typeof entry.retryAt !== "number") ||
       (entry.consecutive429s !== undefined && (!Number.isInteger(entry.consecutive429s) || entry.consecutive429s < 0)) ||
       (entry.consecutiveInitializeTimeouts !== undefined && (!Number.isInteger(entry.consecutiveInitializeTimeouts) || entry.consecutiveInitializeTimeouts < 0))) return null;
@@ -104,7 +109,9 @@ function readDiskCache(): LimitsCache {
           // Snapshots written before the horizon fix can carry a weekly window
           // under `session`; relabel on read so a degraded account still shows
           // its number under the horizon that number actually has.
-          if (valid) cache.engines[engine][id] = engine === "codex" ? { ...valid, data: relabelCachedWindows(valid.data) } : valid;
+          if (valid) cache.engines[engine][id] = engine === "codex"
+            ? { ...valid, data: relabelCachedWindows(valid.data), ...(valid.baseData === undefined ? {} : { baseData: relabelCachedWindows(valid.baseData) }) }
+            : valid;
         }
       }
       return cache;
@@ -159,6 +166,8 @@ function lastCache(engine: EngineName, accountId: string): EngineCacheEntry | nu
 
 type ResolvedRead = {
   data: EngineLimits | null;
+  /** What the cache should keep when it differs from what this read serves. */
+  baseData?: EngineLimits | null;
   meta: LimitsProvenance;
   retryAt: number | null;
   consecutive429s: number;
@@ -169,6 +178,7 @@ function remember(engine: EngineName, accountId: string, resolved: ResolvedRead,
   cache().engines[engine][accountId] = {
     at: now,
     data: resolved.data,
+    baseData: resolved.baseData !== undefined ? resolved.baseData : resolved.data,
     provenance: resolved.meta,
     retryAt: resolved.retryAt,
     consecutive429s: resolved.consecutive429s,
@@ -206,16 +216,6 @@ function resolveRead(read: LimitRead, cached: EngineCacheEntry | null, staleSinc
       consecutiveInitializeTimeouts,
     };
   }
-  const cachedRejection = cached?.data ? rejectionReading(cached.data, read.rejectedAt) : null;
-  if (cachedRejection) {
-    return {
-      data: cachedRejection,
-      meta: { source: "transcript", reason: read.reason, staleSince: null, retryAt: null },
-      retryAt: null,
-      consecutive429s: 0,
-      consecutiveInitializeTimeouts,
-    };
-  }
   const consecutive429s = read.reason === LIMITS_RATE_LIMITED_REASON ? (cached?.consecutive429s ?? 0) + 1 : 0;
   const exponentialMs = consecutiveInitializeTimeouts > 0
     ? initializeBackoffMs
@@ -223,13 +223,31 @@ function resolveRead(read: LimitRead, cached: EngineCacheEntry | null, staleSinc
     ? Math.min(FAILURE_COOLDOWN_MS * (2 ** (consecutive429s - 1)), MAX_RATE_LIMIT_BACKOFF_MS)
     : FAILURE_COOLDOWN_MS;
   const retryAt = Math.max(now + exponentialMs, read.retryAt ?? 0);
+  // Project from — and fall back to — the last reading that was not itself
+  // derived from a rejection, so a projection never becomes the evidence the
+  // next poll projects from or the number that outlives it.
+  const base = cached?.baseData !== undefined ? cached.baseData : cached?.data ?? null;
+  const cachedRejection = base ? rejectionReading(base, read.rejectedAt) : null;
+  // A rejection projected onto cache does not make the failed probe succeed:
+  // the read keeps the backoff it earned, and the projection is presented only
+  // while the exhaustion it describes is still running.
+  if (cachedRejection && exhaustionRunning(cachedRejection, now / 1000)) {
+    return {
+      data: cachedRejection,
+      meta: { source: "transcript", reason: read.reason, staleSince: null, retryAt: new Date(retryAt).toISOString() },
+      retryAt,
+      consecutive429s,
+      consecutiveInitializeTimeouts,
+      baseData: base,
+    };
+  }
   const meta: LimitsProvenance = {
-    source: cached?.data ? "cache" : "unavailable",
+    source: base ? "cache" : "unavailable",
     reason: read.reason,
     staleSince: cached?.provenance.staleSince ?? staleSince,
     retryAt: new Date(retryAt).toISOString(),
   };
-  return { data: cached?.data ?? null, meta, retryAt, consecutive429s, consecutiveInitializeTimeouts };
+  return { data: base, meta, retryAt, consecutive429s, consecutiveInitializeTimeouts };
 }
 
 function cachedRead(entry: EngineCacheEntry): ResolvedRead {
@@ -713,6 +731,18 @@ function rejectionReading(limits: EngineLimits, rejectedAt: number | null | unde
   if (rejectedAt === null || rejectedAt === undefined) return null;
   if (!rejectionWithinWindow(limits, rejectedAt)) return null;
   return applyTranscriptRejection(limits, rejectedAt);
+}
+
+/** Whether a projection still describes a running exhaustion at `nowSeconds`:
+    through a reset the provider named, or for one window length when the
+    rejection erased it. A projection past that is history, not the account's
+    current state, and must not be presented as a live transcript reading. */
+function exhaustionRunning(limits: EngineLimits, nowSeconds: number): boolean {
+  const window = governingWindow(limits)?.value;
+  if (!window || window.usedPercent < 100) return false;
+  if (window.resetsAt !== null) return window.resetsAt > nowSeconds;
+  if (window.observedAt === null || window.observedAt === undefined || typeof window.windowMinutes !== "number") return true;
+  return nowSeconds - window.observedAt < window.windowMinutes * 60;
 }
 
 function applyTranscriptRejection(limits: EngineLimits, rejectedAt: number): EngineLimits {

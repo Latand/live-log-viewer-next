@@ -72,23 +72,33 @@ function reconciledWindow(reading: QuotaReading, key: "session" | "weekly", now:
   return { value, observedAt, stale: reading.stale || aged, source: value.source ?? reading.source };
 }
 
+/** A window that declares its own cycle start is direct evidence about which
+    cycle is open: one that opened after an observation belongs to a later cycle
+    than that observation does. */
+function cycleOpenedAfter(window: ReconciledQuotaWindow | null, observedAt: number): boolean {
+  const value = window?.value;
+  if (!value || value.resetsAt === null || typeof value.windowMinutes !== "number") return false;
+  return value.resetsAt - value.windowMinutes * 60 > observedAt;
+}
+
 /** An exhaustion with a known reset governs until it. One whose reset the
     provider never named can only speak for the cycle it was observed in, so it
-    expires a window length after that observation; past there the cycle has
-    certainly rolled and ordinary timestamp ordering decides. */
-function activeExhaustion(window: ReconciledQuotaWindow, now: number): boolean {
+    expires a window length after that observation — and loses sooner to a rival
+    whose own cycle opened after it, which is proof that cycle has rolled. */
+function activeExhaustion(window: ReconciledQuotaWindow, rival: ReconciledQuotaWindow | null, now: number): boolean {
   if (window.value.usedPercent < 100) return false;
   if (window.value.resetsAt !== null) return window.value.resetsAt > now;
   const windowMinutes = window.value.windowMinutes;
   if (window.observedAt === null || typeof windowMinutes !== "number") return true;
-  return now - window.observedAt < windowMinutes * 60;
+  if (now - window.observedAt >= windowMinutes * 60) return false;
+  return !cycleOpenedAfter(rival, window.observedAt);
 }
 
 function newerWindow(left: ReconciledQuotaWindow | null, right: ReconciledQuotaWindow | null, now: number): ReconciledQuotaWindow | null {
   if (!left) return right;
   if (!right) return left;
-  const leftExhausted = activeExhaustion(left, now);
-  const rightExhausted = activeExhaustion(right, now);
+  const leftExhausted = activeExhaustion(left, right, now);
+  const rightExhausted = activeExhaustion(right, left, now);
   if (leftExhausted !== rightExhausted) return leftExhausted ? left : right;
   if (left.observedAt === null) return right.observedAt === null ? left : right;
   if (right.observedAt === null) return left;

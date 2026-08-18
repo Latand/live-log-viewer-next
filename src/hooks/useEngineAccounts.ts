@@ -3,11 +3,9 @@
 import { useSyncExternalStore } from "react";
 
 import {
-  type AccountEffective,
   type AutoBalance,
   type EngineMigration,
   parseAutoBalance,
-  parseEffective,
   parseEngineMigration,
 } from "@/lib/accounts/migration";
 import type { TFunction } from "@/lib/i18n";
@@ -104,8 +102,8 @@ export function claudeLoginErrKey(code: string | null | undefined): ClaudeLoginE
 export type AccountLimitWindow = { usedPercent: number; resetsAt: number | null; windowMinutes: number | null; observedAt?: number | null; source?: LimitWindowSource };
 
 /** Per-account quota detail surfaced in the Accounts panel (issue #40): the
-    session and weekly windows with reset times, plus how fresh the read is. The
-    combined {@link AccountEffective} chip is the collapsed summary of this. */
+    session and weekly windows with reset times, plus how fresh the read is.
+    Every capacity chip is reconciled from these windows. */
 export type AccountLimits = {
   freshness: "fresh" | "stale";
   session: AccountLimitWindow | null;
@@ -129,8 +127,6 @@ export type AccountOption = {
   deviceAuth: DeviceAuth | null;
   /** Typed Claude login operation for this account, when one exists (issue #61). */
   login?: ClaudeLoginView | null;
-  /** Effective remaining capacity chip (min across quota windows), when known. */
-  effective?: AccountEffective | null;
   /** Session/weekly quota windows with reset times, when a read exists (issue #40). */
   limits?: AccountLimits | null;
 };
@@ -298,7 +294,7 @@ function accountResponse(body: unknown, engine: Engine): EngineResponse {
   const section = (body as Record<string, unknown> | null)?.[engine] as { active?: unknown; accounts?: unknown; migration?: unknown; autoBalance?: unknown } | undefined;
   if (typeof section?.active !== "string" || !Array.isArray(section.accounts)) throw new Error("accounts response invalid");
   const accounts = section.accounts.map((raw): AccountOption => {
-    const account = raw as AccountOption & { auth?: unknown; effective?: unknown; login?: unknown; limits?: unknown };
+    const account = raw as AccountOption & { auth?: unknown; login?: unknown; limits?: unknown };
     const login = engine === "claude" ? parseClaudeLogin(account.login) : null;
     // The phase is authoritative for pending state (C3): a nonterminal login
     // keeps the row pending even when the server's raw `loginPending` lags.
@@ -309,7 +305,7 @@ function accountResponse(body: unknown, engine: Engine): EngineResponse {
     const authHealth: AccountAuthHealth = authState === "authenticated" || authState === "signed_out" || authState === "unknown" || authState === "error"
       ? authState
       : account.authPresent ? "unknown" : "signed_out";
-    return { ...account, authHealth, login, loginPending, effective: parseEffective(account.effective), limits: parseAccountLimits(account.limits) };
+    return { ...account, authHealth, login, loginPending, limits: parseAccountLimits(account.limits) };
   });
   return {
     active: section.active,

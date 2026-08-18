@@ -48,7 +48,6 @@ test("a claude store reads body.claude, its engine endpoints, and parses migrati
   await advance();
   expect(calls[0].url).toBe("/api/accounts");
   expect(store.active).toBe("main");
-  expect(store.accounts[0]?.effective).toEqual({ percent: 12, window: "session", freshness: "fresh" });
   expect(store.accounts.map((account) => account.authHealth)).toEqual(["authenticated", "unknown"]);
   expect(store.migration).toMatchObject({ intentId: "i1", origin: "auto", state: "draining", counts: { done: 1, total: 3 } });
   expect(store.autoBalance).toMatchObject({ enabled: true, state: "draining" });
