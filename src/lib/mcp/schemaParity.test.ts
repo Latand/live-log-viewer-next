@@ -4,6 +4,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { listRoles, resolveRole } from "@/lib/roles/registry";
+import { ROLE_IDS } from "@/lib/roles/types";
 import {
   MAX_SCOPE_PATHS,
   MAX_SNAPSHOT_CHARS_PER_CONVERSATION,
@@ -475,4 +476,77 @@ test("every generated operator_snapshot schema combination is admitted by reques
     });
   }
   expect(accepted).toBeGreaterThan(1_000);
+});
+
+/* #1026 — `stages: array of objects` with no field documentation cost a fresh
+   caller seven sequential rejections to learn the stage contract. The published
+   tool definition now carries that contract: every field the engine accepts,
+   and the rules a JSONSchema cannot express in the description. */
+test("create_pipeline publishes the stage contract in its tool definition", async () => {
+  await withProtocolClient(inertBindings(), async (client) => {
+    const listed = await client.listTools();
+    const tool = listed.tools.find((candidate) => candidate.name === "create_pipeline");
+    const stages = tool?.inputSchema.properties?.stages as {
+      items?: { properties?: Record<string, { description?: string; enum?: string[]; properties?: Record<string, { enum?: string[] }> }> };
+    } | undefined;
+    const stage = stages?.items?.properties;
+
+    expect(Object.keys(stage ?? {}).sort()).toEqual([
+      "access", "effort", "engine", "id", "kind", "model", "next", "onFail", "prompt", "role",
+    ]);
+    expect(stage?.kind?.enum).toEqual(["run", "review-loop"]);
+    expect(stage?.engine?.enum).toEqual(["claude", "codex"]);
+    expect(stage?.role?.properties?.roleId?.enum).toEqual([...ROLE_IDS]);
+    /* The two rules the reported walk actually turned on. */
+    expect(stage?.next?.description).toContain("DEFAULTS TO null");
+    expect(stage?.role?.description).toContain("Runtime overrides do not go here");
+    for (const [field, expected] of [
+      ["id", "unique within the pipeline"],
+      ["prompt", "role scaffold"],
+      ["onFail", "may not define one"],
+      ["model", "inherit the role default"],
+      ["access", "always read-only"],
+    ] as const) {
+      expect(stage?.[field]?.description).toContain(expected);
+    }
+
+    /* Reachability, the draft baseRef rule and the review-loop runtime default
+       are graph-level facts no per-field schema can carry. */
+    expect(tool?.description).toContain("pass-reachable from a run stage");
+    expect(tool?.description).toContain("`next` defaults to null");
+    expect(tool?.description).toContain("must also pass `baseRef`");
+    expect(tool?.description).toContain("always read-only");
+    expect(tool?.description).toContain("Codex");
+    expect(tool?.description).toContain("every violated constraint");
+    expect(tool?.description).toContain("normalized to the shared Claude transcript store");
+  });
+});
+
+/* The published schema must never be stricter than the engine: a stage shape
+   the engine accepts has to survive the protocol boundary unchanged. */
+test("create_pipeline admits the stage shapes the engine accepts", () => {
+  const schema = TOOL_INPUT_SCHEMAS.create_pipeline;
+  const accepted = [
+    { id: "build", kind: "run", "prompt": "Implement." },
+    { id: "build", kind: "run", "prompt": "Implement.", next: null, onFail: null, role: { roleId: "builder" } },
+    {
+      id: "review-1", kind: "review-loop", "prompt": "Review.", next: null,
+      role: { roleId: "reviewer", params: { diffSource: "branch", rounds: 3 } },
+      engine: "codex", model: null, effort: null, access: "read-only",
+    },
+    { id: "build", kind: "run", "prompt": "Implement.", next: "review-1", onFail: { to: "build", maxRounds: 3 }, engine: "claude", model: "opus", effort: "high" },
+    /* The engine trims before it checks, so padding it accepts must not be
+       refused at the protocol boundary. */
+    { id: " build ", kind: "run", "prompt": " Implement. " },
+  ];
+  for (const stage of accepted) {
+    const parsed = schema.safeParse({ clientRequestId: "stage-shape", task: "t", repoDir: "/repo", stages: [stage] });
+    expect(parsed.success).toBe(true);
+    expect((parsed.data as { stages: unknown[] } | undefined)?.stages[0]).toEqual(stage);
+  }
+  /* Runtime overrides inside role are refused by the engine and by the schema. */
+  expect(schema.safeParse({
+    clientRequestId: "stage-shape-role-override", task: "t", repoDir: "/repo",
+    stages: [{ id: "build", kind: "run", "prompt": "Implement.", role: { roleId: "builder", engine: "codex" } }],
+  }).success).toBe(false);
 });

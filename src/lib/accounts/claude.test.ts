@@ -250,3 +250,24 @@ test("a home with a real projects directory keeps its local root", () => {
   fs.writeFileSync(transcript, "{}\n", { mode: 0o600 });
   expect(mod.claudeHomeOwningTranscript(transcript)).toBe(home);
 });
+
+/* #1026 — a Claude-engine agent hands over the native `<home>/projects/...`
+   path its own CLI writes, while every viewer record addresses the shared
+   store. Translating is safe exactly when the mirrored file is really there. */
+test("a native projects path maps to its shared-store mirror only when that file exists", () => {
+  const shared = mod.sharedClaudeProjectsRoot();
+  const home = process.env.LLV_CLAUDE_HOME!;
+  const project = "-home-agent-repo";
+  fs.mkdirSync(path.join(home, "projects", project), { recursive: true, mode: 0o700 });
+  fs.mkdirSync(path.join(shared, project), { recursive: true, mode: 0o700 });
+  const mirrored = path.join(shared, project, "session.jsonl");
+  fs.writeFileSync(mirrored, "{}\n", { mode: 0o600 });
+
+  expect(mod.mirroredClaudeTranscriptPath(path.join(home, "projects", project, "session.jsonl"))).toBe(mirrored);
+  /* Nothing mirrored: a rejection the caller can act on beats a phantom path. */
+  expect(mod.mirroredClaudeTranscriptPath(path.join(home, "projects", project, "stranger.jsonl"))).toBeNull();
+  /* Already canonical, and paths outside every account's projects root. */
+  expect(mod.mirroredClaudeTranscriptPath(mirrored)).toBeNull();
+  expect(mod.mirroredClaudeTranscriptPath(path.join(home, "elsewhere", "session.jsonl"))).toBeNull();
+  expect(mod.mirroredClaudeTranscriptPath("/codex/sessions/session.jsonl")).toBeNull();
+});

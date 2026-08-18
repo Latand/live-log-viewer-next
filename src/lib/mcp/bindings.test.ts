@@ -1059,3 +1059,29 @@ test("lifecycle_events queries the journal by lineage and polls the bounded dige
   await expect(bindings.lifecycle_events({ clientRequestId: "bad-type", type: "not_a_type" }))
     .rejects.toThrow("unknown lifecycle event type: not_a_type");
 });
+
+/* #1026 — an agent driving the board must not get less than an HTTP caller: a
+   rejected create carries every violated constraint, with its field and the
+   shape that field expects, as structured refusal details. */
+test("create_pipeline refuses with every violated constraint attached", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-binding-pipeline-"));
+  sandboxes.push(sandbox);
+  process.env.LLV_STATE_DIR = sandbox;
+  const bindings = viewerMcpBindings();
+
+  const refusal = await bindings.create_pipeline({
+    clientRequestId: "create-pipeline-invalid",
+    task: "Batched contract",
+    repoDir: path.join(sandbox, "repo"),
+    src: path.join(sandbox, "creator.jsonl"),
+    stages: [{ id: "build", kind: "implement", prompt: "build" }],
+  }, { signal: undefined, deadlineAt: Date.now() + 30_000 } as never).then(
+    () => null,
+    (error: unknown) => error as Error & { details?: { violations?: Array<{ field: string; expected: string }> } },
+  );
+
+  expect(refusal?.name).toBe("McpToolRefusal");
+  expect(refusal?.details?.violations?.map((violation) => violation.field)).toEqual(["src", "stages[0].kind"]);
+  for (const violation of refusal?.details?.violations ?? []) expect(violation.expected.length).toBeGreaterThan(0);
+  expect(refusal?.message).toContain("stages[0].kind: stage kind must be run or review-loop");
+});
