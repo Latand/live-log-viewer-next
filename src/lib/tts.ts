@@ -2,7 +2,16 @@ import { redactSecrets } from "@/lib/review";
 
 const INDENTED_CODE_BLOCK = /(?:^|\n)(?:(?: {4}|\t)[^\n]*(?:\n|$))+/g;
 
+/** Per-request ceiling: one synthesis chunk never exceeds this. */
 export const MAX_TTS_TEXT_LENGTH = 4000;
+
+/**
+ * Ceiling for a whole read-aloud (issue #1022). Chunking replaced the old
+ * "speak the first 4000 characters" slice, so a long message is now read in
+ * full; this is only the point at which the control refuses out loud rather
+ * than quietly eating the tail.
+ */
+export const MAX_TTS_MESSAGE_LENGTH = 20_000;
 
 function stripFencedCodeBlocks(markdown: string): string {
   const kept: string[] = [];

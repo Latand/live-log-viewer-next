@@ -435,3 +435,21 @@ body {
     0 0 0 3px color-mix(in srgb, var(--color-info) 25%, transparent),
     var(--shadow-1) !important;
 }
+
+/* Karaoke follow-along while an answer is read aloud (issue #1022). The word
+   under the voice is painted with the CSS Custom Highlight API: it colours the
+   text nodes React already rendered, so the markdown is never re-parsed, no
+   wrapper element is injected into the message, and text selection still works
+   over the top of it. Highlight pseudo-elements accept colour only — they
+   cannot animate or transition — so the follow-along carries no motion for
+   reduced-motion mode to still. */
+::highlight(tts-karaoke) {
+  background-color: color-mix(in srgb, var(--color-accent) 26%, transparent);
+  color: var(--color-primary);
+}
+
+/* While that message is speaking, its text is also the transport: a click
+   inside it seeks the audio to that word. */
+[data-tts-seekable] {
+  cursor: pointer;
+}

@@ -245,6 +245,49 @@ Without a readable key the button reports text-to-speech as unavailable and
 names the file to drop the key into — the same degradation as the other
 providers.
 
+### Long answers, replay, and following along
+
+A long answer is split client-side into chunks of roughly 400–800 characters on
+paragraph and sentence boundaries, and a word is never cut. (What reaches the
+splitter is the spoken text, which has already had code blocks, inline code,
+tables and `http(s)://…` runs stripped out of it.) Two chunks are synthesized at
+a time — the route admits three syntheses at once, so a slot is left for another
+card — and playback starts as soon as the FIRST chunk is ready, while the rest
+are still being made. Chunks play back to back on two alternating audio
+elements, so the joins are inaudible.
+
+A message under ~800 characters is one chunk, exactly as before. Nothing is ever
+truncated: the old "speak the first 4,000 characters" slice is gone, and a
+message past the 20,000-character ceiling is refused out loud in the confirm
+dialog instead of being quietly cut.
+
+Chunks are cached per provider/model/voice/chunk text, so:
+
+- **Replay** — once an answer has been read to the END, and while all of its
+  chunks are still cached, the speaker button becomes a replay control that
+  replays at no cost. Any other state — stopped part-way, or evicted since — is
+  a paid synthesis, so the control says so and goes back through the same
+  confirm dialog. The cache is sized to hold one whole message at the length
+  ceiling (~22 MB of audio at the worst case), so a replay of the answer just
+  read is free.
+- **Karaoke** — while a message is being read, the word being spoken is
+  highlighted in the rendered answer. The highlight uses the CSS Custom
+  Highlight API over the markdown already on screen: nothing is re-parsed or
+  rewritten, and selecting text still works. With ElevenLabs the position is
+  word-exact (the route asks its `/with-timestamps` endpoint, which returns a
+  start and end second per character, and passes that alignment through beside
+  the audio). OpenAI returns no timestamps and Soniox's REST `/tts` returns raw
+  audio only — their character timestamps are WebSocket-only — so for both the
+  position is interpolated inside the chunk and snapped to word boundaries.
+- **Click-to-seek** — while an answer is playing, clicking anywhere in its text
+  jumps the audio there: exactly with an alignment, proportionally without one.
+  Clicking in a part that has not been synthesized yet queues that chunk next
+  and starts from it. Selecting text, or clicking a link or a copy chip inside
+  the message, never seeks.
+
+Stop still halts the whole sequence, and only one answer plays at a time across
+the whole board.
+
 ## Troubleshooting
 
 | Symptom (message in the UI)                              | Cause                                                            | Fix                                                                 |

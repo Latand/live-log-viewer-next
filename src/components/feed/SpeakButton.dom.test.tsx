@@ -1,11 +1,13 @@
-import { afterEach, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, expect, mock, test } from "bun:test";
 import { Window } from "happy-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { flushSync } from "react-dom";
 
-import { MAX_TTS_TEXT_LENGTH } from "@/lib/tts";
+import { MAX_TTS_MESSAGE_LENGTH } from "@/lib/tts";
+import { MAX_CHUNK_CHARS } from "@/lib/ttsChunks";
 
 import { SpeakButton } from "./SpeakButton";
+import { clearTtsCache, evictTtsAudio } from "./ttsSession";
 
 const dom = new Window();
 Object.assign(globalThis, {
@@ -13,11 +15,22 @@ Object.assign(globalThis, {
   document: dom.document,
   navigator: dom.navigator,
   Node: dom.Node,
+  Text: dom.Text,
+  Range: dom.Range,
   HTMLElement: dom.HTMLElement,
   Event: dom.Event,
   KeyboardEvent: dom.KeyboardEvent,
   MouseEvent: dom.MouseEvent,
 });
+
+/** The CSS Custom Highlight API, which happy-dom does not ship. */
+class FakeHighlight {
+  ranges: Range[] = [];
+  add(range: Range) { this.ranges.push(range); }
+  clear() { this.ranges = []; }
+}
+const highlights = new Map<string, FakeHighlight>();
+Object.assign(globalThis, { Highlight: FakeHighlight, CSS: { highlights } });
 
 const originalFetch = globalThis.fetch;
 const originalAudio = globalThis.Audio;
@@ -27,13 +40,56 @@ const backendInfo = {
   backend: "openai",
   lockedByEnv: false,
   options: [
-    { id: "openai", available: true, keyPath: "/keys/openai", model: "gpt-4o-mini-tts", voice: "alloy", cap: MAX_TTS_TEXT_LENGTH },
-    { id: "elevenlabs", available: false, keyPath: "/keys/elevenlabs", model: "eleven_multilingual_v2", voice: "Rachel", cap: MAX_TTS_TEXT_LENGTH },
+    { id: "openai", available: true, keyPath: "/keys/openai", model: "gpt-4o-mini-tts", voice: "alloy", cap: 4000 },
+    { id: "elevenlabs", available: false, keyPath: "/keys/elevenlabs", model: "eleven_multilingual_v2", voice: "Rachel", cap: 4000 },
   ],
 };
 
+/**
+ * Audio that refuses to play until a muted silent clip has carried the user
+ * gesture into it — the autoplay policy the Speak control works around, now
+ * across a whole sequence of chunks instead of one clip.
+ */
+class FakeAudio {
+  static instances: FakeAudio[] = [];
+  muted = false;
+  src = "";
+  currentTime = 0;
+  duration = 10;
+  paused = true;
+  private unlocked = false;
+  onloadedmetadata: (() => void) | null = null;
+  ontimeupdate: (() => void) | null = null;
+  onended: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  constructor(src = "") {
+    this.src = src;
+    FakeAudio.instances.push(this);
+  }
+  load() {}
+  pause() { this.paused = true; }
+  async play() {
+    if (this.muted && this.src.startsWith("data:audio/wav")) this.unlocked = true;
+    if (!this.unlocked) throw new DOMException("blocked", "NotAllowedError");
+    this.paused = false;
+    this.onloadedmetadata?.();
+  }
+  tick(time: number) { this.currentTime = time; this.ontimeupdate?.(); }
+  finish() { this.currentTime = this.duration; this.paused = true; this.onended?.(); }
+}
+
+function useFakeAudio(): void {
+  FakeAudio.instances = [];
+  globalThis.Audio = FakeAudio as unknown as typeof Audio;
+}
+
+/** The element a chunk is playing on, if any. */
+function playing(): FakeAudio | undefined {
+  return FakeAudio.instances.find((element) => !element.paused && element.src.startsWith("blob:"));
+}
+
 async function drainUpdates(): Promise<void> {
-  for (let index = 0; index < 3; index += 1) {
+  for (let index = 0; index < 6; index += 1) {
     await Promise.resolve();
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
   }
@@ -47,6 +103,51 @@ async function mount(text: string): Promise<{ button: HTMLButtonElement; root: R
   await drainUpdates();
   return { button: host.querySelector("button")!, root, host };
 }
+
+/** The Speak control inside the feed markup that carries the rendered answer. */
+async function mountInFeed(text: string): Promise<{ button: HTMLButtonElement; root: Root; host: HTMLDivElement; body: HTMLElement }> {
+  const host = document.createElement("div");
+  host.setAttribute("data-feed-kind", "prose");
+  document.body.append(host);
+  const controls = document.createElement("div");
+  controls.setAttribute("data-tts-message", "");
+  const slot = document.createElement("span");
+  const body = document.createElement("div");
+  body.setAttribute("data-tts-body", "");
+  body.append(document.createTextNode(text));
+  controls.append(slot, body);
+  host.append(controls);
+  const root = createRoot(slot);
+  flushSync(() => { root.render(<SpeakButton text={text} />); });
+  await drainUpdates();
+  return { button: slot.querySelector("button")!, root, host, body };
+}
+
+/** Ends every chunk in turn, the way the browser would, until nothing plays. */
+async function playToEnd(): Promise<void> {
+  for (let guard = 0; guard < 200; guard += 1) {
+    const element = playing();
+    if (!element) return;
+    element.finish();
+    await drainUpdates();
+  }
+  throw new Error("playback never finished");
+}
+
+async function confirm(view: { host: HTMLElement; button: HTMLButtonElement }): Promise<void> {
+  flushSync(() => { view.button.click(); });
+  await drainUpdates();
+  const speak = [...view.host.querySelectorAll("button")].find((button) => button.textContent === "Speak")!;
+  flushSync(() => { speak.click(); });
+  await drainUpdates();
+}
+
+const LONG = Array.from({ length: 40 }, (_, index) => `Sentence number ${index} of a long agent answer that must be voiced in full.`).join(" ");
+
+beforeEach(() => {
+  clearTtsCache();
+  highlights.clear();
+});
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
@@ -67,19 +168,7 @@ test("a second click cancels pending synthesis and ignores its stale response", 
   }) as unknown as typeof fetch;
   const createObjectURL = mock(() => "blob:tts");
   URL.createObjectURL = createObjectURL;
-  globalThis.Audio = class {
-    muted = false;
-    src = "";
-    currentTime = 0;
-    duration = 0;
-    onloadedmetadata: (() => void) | null = null;
-    ontimeupdate: (() => void) | null = null;
-    onended: (() => void) | null = null;
-    onerror: (() => void) | null = null;
-    constructor(src = "") { this.src = src; }
-    pause() {}
-    async play() {}
-  } as unknown as typeof Audio;
+  useFakeAudio();
 
   const view = await mount("Read me");
   const other = await mount("Another answer");
@@ -89,8 +178,8 @@ test("a second click cancels pending synthesis and ignores its stale response", 
   expect(view.host.textContent).toContain("Billed to your openai account per character");
   expect(view.host.textContent).toContain("AI-generated voice");
   expect(postSignal).toBeUndefined();
-  const confirm = [...view.host.querySelectorAll("button")].find((button) => button.textContent === "Speak")!;
-  flushSync(() => { confirm.click(); });
+  const speak = [...view.host.querySelectorAll("button")].find((button) => button.textContent === "Speak")!;
+  flushSync(() => { speak.click(); });
   await drainUpdates();
   expect(view.button.getAttribute("aria-label")).toContain("Stop");
   flushSync(() => { view.button.click(); });
@@ -106,53 +195,245 @@ test("a second click cancels pending synthesis and ignores its stale response", 
   other.host.remove();
 });
 
-test("long answers require consent and cached replay makes no paid request", async () => {
-  let sentText = "";
-  let postRequests = 0;
+test("a long answer is chunked, synthesized in parallel and played from the first chunk", async () => {
+  const sent: string[] = [];
+  const pending = new Map<string, (response: Response) => void>();
   globalThis.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
     if (!init?.method) return Response.json(backendInfo);
-    postRequests += 1;
-    sentText = (JSON.parse(String(init.body)) as { text: string }).text;
+    const text = (JSON.parse(String(init.body)) as { text: string }).text;
+    sent.push(text);
+    return new Promise<Response>((resolve) => pending.set(text, resolve));
+  }) as unknown as typeof fetch;
+  URL.createObjectURL = mock((blob: Blob) => `blob:${(blob as Blob & { id?: string }).id ?? "chunk"}`);
+  useFakeAudio();
+
+  const view = await mount(LONG);
+  await confirm(view);
+
+  /* Two chunks are in flight at once, and neither covers the whole message. */
+  expect(sent.length).toBe(2);
+  for (const text of sent) expect(text.length).toBeLessThanOrEqual(MAX_CHUNK_CHARS);
+  expect(playing()).toBeUndefined();
+
+  /* The first chunk alone starts the voice; the rest are still synthesizing. */
+  pending.get(sent[0]!)!(new Response(new Blob(["audio-0"])));
+  await drainUpdates();
+  expect(playing()).toBeDefined();
+  expect(view.button.getAttribute("aria-label")).toContain("Stop");
+  expect(pending.has(sent[1]!)).toBe(true);
+
+  for (const [text, resolve] of [...pending]) {
+    resolve(new Response(new Blob([`audio-${text.length}`])));
+    await drainUpdates();
+  }
+
+  /* Nothing was truncated: the chunks reassemble the whole answer. */
+  expect(sent.join(" ")).toBe(LONG);
+  expect(sent.length).toBeGreaterThan(2);
+  expect(view.host.querySelector('[role="alert"]')).toBeNull();
+  flushSync(() => { view.button.click(); view.root.unmount(); });
+  view.host.remove();
+});
+
+test("a message read to the end replays free, and an evicted one asks again before paying", async () => {
+  let posts = 0;
+  globalThis.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
+    if (!init?.method) return Response.json(backendInfo);
+    posts += 1;
     return new Response(new Blob(["audio"]));
   }) as unknown as typeof fetch;
   URL.createObjectURL = () => "blob:tts";
   const revokeObjectURL = mock(() => {});
   URL.revokeObjectURL = revokeObjectURL;
-  globalThis.Audio = class {
-    muted = false;
-    src = "";
-    currentTime = 0;
-    duration = 10;
-    private authorized = false;
-    onloadedmetadata: (() => void) | null = null;
-    ontimeupdate: (() => void) | null = null;
-    onended: (() => void) | null = null;
-    onerror: (() => void) | null = null;
-    constructor(src = "") { this.src = src; }
-    pause() {}
-    async play() {
-      if (this.muted && this.src.startsWith("data:audio/wav")) this.authorized = true;
-      if (!this.authorized && !this.src.startsWith("blob:")) throw new DOMException("blocked", "NotAllowedError");
+  useFakeAudio();
+
+  const view = await mount(LONG);
+  await confirm(view);
+  await playToEnd();
+  const synthesized = posts;
+  expect(synthesized).toBeGreaterThan(1);
+
+  /* Read to the end with every chunk cached: the replay is genuinely free. */
+  expect(view.button.getAttribute("title")).toBe("Replay aloud (free)");
+  flushSync(() => { view.button.click(); });
+  await drainUpdates();
+  expect(posts).toBe(synthesized);
+  expect(view.button.getAttribute("aria-label")).toContain("Stop");
+  flushSync(() => { view.button.click(); });
+  await drainUpdates();
+
+  /* Evicted: replaying costs again, so it goes back through the paid dialog. */
+  evictTtsAudio();
+  flushSync(() => { view.button.click(); });
+  await drainUpdates();
+  expect(posts).toBe(synthesized);
+  expect(view.host.querySelector('[role="dialog"]')).not.toBeNull();
+  const speak = [...view.host.querySelectorAll("button")].find((button) => button.textContent === "Speak")!;
+  flushSync(() => { speak.click(); });
+  await drainUpdates();
+  expect(posts).toBeGreaterThan(synthesized);
+  flushSync(() => { view.button.click(); view.root.unmount(); });
+  view.host.remove();
+});
+
+/* The operator confirmed ONE read-aloud. Stopping it after the first of two
+   dozen chunks must not turn the control into a free-replay button that
+   silently buys the other twenty-three. */
+test("a message stopped after the first chunk never advertises a free replay", async () => {
+  let posts = 0;
+  const pending = new Map<string, (response: Response) => void>();
+  globalThis.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
+    if (!init?.method) return Response.json(backendInfo);
+    posts += 1;
+    const text = (JSON.parse(String(init.body)) as { text: string }).text;
+    return new Promise<Response>((resolve) => pending.set(text, resolve));
+  }) as unknown as typeof fetch;
+  URL.createObjectURL = () => "blob:tts";
+  useFakeAudio();
+
+  const view = await mount(LONG);
+  await confirm(view);
+  const [first] = [...pending.keys()];
+  pending.get(first!)!(new Response(new Blob(["audio"])));
+  await drainUpdates();
+  expect(playing()).toBeDefined();
+
+  flushSync(() => { view.button.click(); });
+  await drainUpdates();
+  const paidForFirstChunk = posts;
+
+  expect(view.button.getAttribute("title")).toBe("Read aloud (paid)");
+  expect(view.button.getAttribute("aria-label")).toBe("Read answer aloud");
+
+  /* Clicking asks first and buys nothing until the operator confirms. */
+  flushSync(() => { view.button.click(); });
+  await drainUpdates();
+  expect(posts).toBe(paidForFirstChunk);
+  expect(view.host.textContent).toContain("Confirm paid read-aloud");
+  const speak = [...view.host.querySelectorAll("button")].find((button) => button.textContent === "Speak")!;
+  flushSync(() => { speak.click(); });
+  await drainUpdates();
+  expect(posts).toBeGreaterThan(paidForFirstChunk);
+  flushSync(() => { view.button.click(); view.root.unmount(); });
+  view.host.remove();
+});
+
+test("a message past the ceiling refuses out loud instead of being cut short", async () => {
+  let posts = 0;
+  globalThis.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
+    if (!init?.method) return Response.json(backendInfo);
+    posts += 1;
+    return new Response(new Blob(["audio"]));
+  }) as unknown as typeof fetch;
+  useFakeAudio();
+
+  const view = await mount("word ".repeat(MAX_TTS_MESSAGE_LENGTH / 4));
+  flushSync(() => { view.button.click(); });
+  await drainUpdates();
+
+  expect(view.host.textContent).toContain(`Too long to read aloud (${MAX_TTS_MESSAGE_LENGTH.toLocaleString()} character limit)`);
+  expect(view.host.textContent).not.toContain("Speak the first");
+  const speak = [...view.host.querySelectorAll("button")].find((button) => button.textContent === "Speak")!;
+  expect(speak.disabled).toBe(true);
+  flushSync(() => { speak.click(); });
+  await drainUpdates();
+  expect(posts).toBe(0);
+  flushSync(() => { view.root.unmount(); });
+  view.host.remove();
+});
+
+test("a chunk failure mid-sequence surfaces the provider error and stops cleanly", async () => {
+  let posts = 0;
+  globalThis.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
+    if (!init?.method) return Response.json(backendInfo);
+    posts += 1;
+    if (posts === 1) return new Response(new Blob(["audio"]));
+    return Response.json({ error: "openai TTS failed (HTTP 401)" }, { status: 502 });
+  }) as unknown as typeof fetch;
+  URL.createObjectURL = () => "blob:tts";
+  useFakeAudio();
+
+  const view = await mount(LONG);
+  await confirm(view);
+
+  const alert = view.host.querySelector('[role="alert"]')!;
+  expect(alert.textContent).toBe("openai TTS failed (HTTP 401)");
+  expect(view.button.getAttribute("aria-label")).not.toContain("Stop");
+  expect(FakeAudio.instances.every((element) => element.paused)).toBe(true);
+  flushSync(() => { view.root.unmount(); });
+  view.host.remove();
+});
+
+test("audio the browser refuses to play reports that, not a provider failure", async () => {
+  globalThis.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
+    if (!init?.method) return Response.json(backendInfo);
+    return new Response(new Blob(["audio"]));
+  }) as unknown as typeof fetch;
+  URL.createObjectURL = () => "blob:tts";
+  FakeAudio.instances = [];
+  globalThis.Audio = class extends FakeAudio {
+    override async play() {
+      await super.play();
+      /* Unlocked on the silent clip, blocked on the real one. */
+      if (this.src.startsWith("blob:")) throw new DOMException("blocked", "NotAllowedError");
     }
   } as unknown as typeof Audio;
 
-  const view = await mount("x".repeat(MAX_TTS_TEXT_LENGTH + 100));
+  const view = await mount("A short answer to read.");
+  await confirm(view);
+
+  expect(view.host.querySelector('[role="alert"]')!.textContent).toBe("The browser blocked audio playback. Try again.");
+  expect(view.button.getAttribute("aria-label")).not.toContain("Stop");
+  flushSync(() => { view.root.unmount(); });
+  view.host.remove();
+});
+
+test("the spoken word is highlighted in the rendered answer and a click in it seeks", async () => {
+  const sent: string[] = [];
+  const pending = new Map<string, (response: Response) => void>();
+  globalThis.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
+    if (!init?.method) return Response.json(backendInfo);
+    const text = (JSON.parse(String(init.body)) as { text: string }).text;
+    sent.push(text);
+    if (sent.length === 1) return new Response(new Blob(["audio"]));
+    return new Promise<Response>((resolve) => pending.set(text, resolve));
+  }) as unknown as typeof fetch;
+  URL.createObjectURL = () => "blob:tts";
+  useFakeAudio();
+
+  const view = await mountInFeed(LONG);
+  await confirm(view);
+  const element = playing()!;
+  expect(element).toBeDefined();
+
+  /* Halfway through the first chunk's audio, halfway through its words. */
+  element.tick(5);
+  await drainUpdates();
+  const paint = highlights.get("tts-karaoke")!;
+  expect(paint.ranges).toHaveLength(1);
+  const spoken = paint.ranges[0]!.toString();
+  expect(spoken.trim()).not.toBe("");
+  expect(LONG.slice(0, sent[0]!.length)).toContain(spoken);
+
+  /* A click deep in the answer seeks there — that chunk is queued for it. */
+  const node = view.body.firstChild!;
+  const target = LONG.lastIndexOf("Sentence number 39");
+  Object.assign(document, { caretPositionFromPoint: () => ({ offsetNode: node, offset: target }) });
+  flushSync(() => {
+    view.body.dispatchEvent(new dom.MouseEvent("click", { bubbles: true, cancelable: true }) as unknown as MouseEvent);
+  });
+  await drainUpdates();
+  const seeked = sent.at(-1)!;
+  expect(seeked).toContain("Sentence number 39");
+  expect(element.paused).toBe(true);
+
+  /* Stopping takes the highlight and the seek affordance away again. */
   flushSync(() => { view.button.click(); });
   await drainUpdates();
-  expect(view.host.textContent).toContain(`Speak the first ${MAX_TTS_TEXT_LENGTH.toLocaleString()} characters?`);
-  const confirm = [...view.host.querySelectorAll("button")].find((button) => button.textContent === "Speak")!;
-  flushSync(() => { confirm.click(); });
-  await drainUpdates();
-  expect(sentText).toHaveLength(MAX_TTS_TEXT_LENGTH);
-  expect(postRequests).toBe(1);
-  expect(view.host.querySelector('[role="alert"]')).toBeNull();
-  flushSync(() => { view.button.click(); });
-  expect(view.button.getAttribute("aria-label")).toContain("Replay");
-  flushSync(() => { view.button.click(); });
-  expect(postRequests).toBe(1);
-  expect(view.button.getAttribute("aria-label")).toContain("Stop");
-  flushSync(() => { view.button.click(); view.root.unmount(); });
-  expect(revokeObjectURL).not.toHaveBeenCalled();
+  expect(highlights.has("tts-karaoke")).toBe(false);
+  expect(view.body.hasAttribute("data-tts-seekable")).toBe(false);
+  Object.assign(document, { caretPositionFromPoint: undefined });
+  flushSync(() => { view.root.unmount(); });
   view.host.remove();
 });
 
@@ -164,19 +445,7 @@ test("the confirmation dialog supports Escape, focus restoration, and Enter", as
     return new Response(new Blob(["audio"]));
   }) as unknown as typeof fetch;
   URL.createObjectURL = () => "blob:keyboard";
-  globalThis.Audio = class {
-    muted = false;
-    src = "";
-    currentTime = 0;
-    duration = 1;
-    onloadedmetadata: (() => void) | null = null;
-    ontimeupdate: (() => void) | null = null;
-    onended: (() => void) | null = null;
-    onerror: (() => void) | null = null;
-    constructor(src = "") { this.src = src; }
-    pause() {}
-    async play() {}
-  } as unknown as typeof Audio;
+  useFakeAudio();
 
   const view = await mount("Keyboard answer");
   flushSync(() => { view.button.click(); });
