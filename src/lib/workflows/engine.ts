@@ -20,7 +20,7 @@ import type { FileEntry } from "@/lib/types";
 
 import { realExec, provisionWorktree, runFinish, setupStatus, startSetup, type ExecPort, type SetupStatus } from "./provision";
 import { fixerKickoff, prBody, stageKickoff } from "./prompts";
-import { buildWorkflow, loadTemplates, loadWorkflows, normalizeStages, saveWorkflows, setupExitPath } from "./store";
+import { buildWorkflow, loadTemplates, loadWorkflows, normalizeStages, saveWorkflows, setupExitPath, validateWorkflowLaunchModels } from "./store";
 import type {
   CreateWorkflowRequest,
   PatchWorkflowRequest,
@@ -610,6 +610,8 @@ export function createWorkflowFromRequest(
       ...(typeof req.verify === "string" && req.verify.trim() ? { verify: req.verify.trim() } : {}),
     };
   }
+  const modelValidation = validateWorkflowLaunchModels(template.stages);
+  if ("error" in modelValidation) return { error: modelValidation.error, status: 400 };
 
   const wf = buildWorkflow({
     id: crypto.randomUUID().slice(0, 8),

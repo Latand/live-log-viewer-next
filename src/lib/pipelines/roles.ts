@@ -1,7 +1,7 @@
 import { configForParams, listRoles, roleFenceBlock, roleScaffoldBody, validateRoleParams } from "@/lib/roles/registry";
 import { MAX_SCAFFOLD_LENGTH } from "@/lib/roles/store";
 import { isEngineEffort } from "@/lib/agent/efforts";
-import { isCodexLaunchModel, normalizeClaudeLaunchModel } from "@/lib/agent/models";
+import { validateLaunchModel } from "@/lib/agent/models";
 import { defaultRoleParameterValue } from "@/lib/roles/parameters";
 
 import { PIPELINE_DISALLOWED_ROLE_IDS, type EffectivePipelineRole, type PipelineRoleId, type PipelineStage, type PipelineStageKind } from "./types";
@@ -87,7 +87,7 @@ export function resolvePipelineRole(
   stage: Pick<PipelineStage, "role" | "engine" | "model" | "effort" | "access">,
   kind: PipelineStageKind,
   lookup?: PipelineRoleLookup | null,
-): { role?: EffectivePipelineRole; error?: string } {
+): { role?: EffectivePipelineRole; error?: string; field?: "model" } {
   const ref = stage.role;
   if (ref !== undefined && (!ref || typeof ref !== "object" || Array.isArray(ref))) {
     return { error: "stage role must be an object" };
@@ -121,13 +121,9 @@ export function resolvePipelineRole(
   const engine = stage.engine ?? registered?.engine ?? builder.engine;
   const model = value(stage.model, registered?.model ?? builder.model);
   const effort = value(stage.effort, registered?.effort ?? builder.effort);
-  if (model && engine === "claude" && !normalizeClaudeLaunchModel(model)) {
-    return { error: "stage model is not supported by claude; provide a compatible model override" };
-  }
-  /* Mirrors the store's isEffectiveRole bounds so a bad override fails the
-     create with a 400 instead of surfacing as a persist-time 500. */
-  if (model && engine === "codex" && !isCodexLaunchModel(model)) {
-    return { error: "stage model is not supported by codex; provide a compatible model override" };
+  if (model) {
+    const validation = validateLaunchModel(engine, model);
+    if ("error" in validation) return { error: validation.error, field: "model" };
   }
   if (effort && !isEngineEffort(engine, effort)) {
     return { error: `stage effort is not supported by ${engine}` };

@@ -52,6 +52,37 @@ test("spawn_agent reaches spawn validation through the operator admission lane",
   expect(fs.readFileSync(path.join(sandbox, "operator-spawn-capability"), "utf8").trim()).toMatch(/^[A-Za-z0-9_-]{43}$/);
 });
 
+test("spawn_agent rejects an explicit model outside the engine catalog before control-plane admission", async () => {
+  const requests: Record<string, unknown>[] = [];
+  const spawnAgent = viewerMcpBindings(undefined, {
+    post: async (_pathname, body) => {
+      requests.push(body);
+      return {};
+    },
+  }).spawn_agent;
+
+  const refusal = await spawnAgent({
+    clientRequestId: "mcp-invalid-model",
+    engine: "codex",
+    model: "gpt-5.6-codex",
+    cwd: "/repo",
+    ["prompt"]: "probe",
+  }).then(
+    () => null,
+    (error: unknown) => error as Error & { details?: { violations?: Array<{ field: string; message: string; expected: string }> } },
+  );
+
+  const message = "invalid codex model id \"gpt-5.6-codex\"; valid codex model ids: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna";
+  expect(refusal?.name).toBe("McpToolRefusal");
+  expect(refusal?.message).toBe(message);
+  expect(refusal?.details?.violations).toEqual([{
+    field: "model",
+    message,
+    expected: "one of: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna",
+  }]);
+  expect(requests).toEqual([]);
+});
+
 test("spawn_agent derives required role params from the prompt and preserves supplied params", async () => {
   const bodies: Record<string, unknown>[] = [];
   const spawn = viewerMcpBindings(undefined, {
@@ -1084,4 +1115,34 @@ test("create_pipeline refuses with every violated constraint attached", async ()
   expect(refusal?.details?.violations?.map((violation) => violation.field)).toEqual(["src", "stages[0].kind"]);
   for (const violation of refusal?.details?.violations ?? []) expect(violation.expected.length).toBeGreaterThan(0);
   expect(refusal?.message).toContain("stages[0].kind: stage kind must be run or review-loop");
+});
+
+test("create_pipeline batches every invalid stage model with each engine catalog", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-binding-pipeline-models-"));
+  sandboxes.push(sandbox);
+  process.env.LLV_STATE_DIR = sandbox;
+  const bindings = viewerMcpBindings();
+
+  const refusal = await bindings.create_pipeline({
+    clientRequestId: "create-pipeline-invalid-models",
+    task: "Validate model catalog",
+    repoDir: path.join(sandbox, "repo"),
+    src: path.join(sandbox, "creator.jsonl"),
+    stages: [
+      { id: "build", kind: "run", engine: "codex", model: "gpt-5.6-codex", prompt: "build", next: "review" },
+      { id: "review", kind: "review-loop", engine: "claude", model: "claude-fable-5", prompt: "review", next: null },
+    ],
+  }, { signal: undefined, deadlineAt: Date.now() + 30_000 } as never).then(
+    () => null,
+    (error: unknown) => error as Error & { details?: { violations?: Array<{ field: string; message: string }> } },
+  );
+
+  expect(refusal?.name).toBe("McpToolRefusal");
+  expect(refusal?.details?.violations?.map((violation) => violation.field)).toEqual([
+    "src",
+    "stages[0].model",
+    "stages[1].model",
+  ]);
+  expect(refusal?.message).toContain("valid codex model ids: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna");
+  expect(refusal?.message).toContain("valid claude model ids: opus, fable, sonnet, haiku");
 });

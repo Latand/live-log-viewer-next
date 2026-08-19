@@ -87,11 +87,18 @@ test("stage runtime fields override registry and global defaults", () => {
 
 test("cross-engine overrides require a compatible model", () => {
   expect(resolvePipelineRole({ role: { roleId: "reviewer" }, engine: "claude" }, "review-loop", REGISTRY_LOOKUP).error)
-    .toContain("model is not supported by claude");
+    .toContain("valid claude model ids: opus, fable, sonnet, haiku");
   expect(resolvePipelineRole({ engine: "claude" }, "run", REGISTRY_LOOKUP).error)
-    .toContain("model is not supported by claude");
+    .toContain("valid claude model ids: opus, fable, sonnet, haiku");
   expect(resolvePipelineRole({ engine: "claude", model: "opus", effort: "high" }, "run", REGISTRY_LOOKUP).role)
     .toMatchObject({ engine: "claude", model: "opus", effort: "high" });
+});
+
+test("stage model overrides enumerate the selected engine catalog when invalid", () => {
+  expect(resolvePipelineRole({ engine: "codex", model: "gpt-5.6-codex" }, "run", REGISTRY_LOOKUP).error)
+    .toBe("invalid codex model id \"gpt-5.6-codex\"; valid codex model ids: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna");
+  expect(resolvePipelineRole({ engine: "claude", model: "claude-fable-5" }, "run", REGISTRY_LOOKUP).error)
+    .toBe("invalid claude model id \"claude-fable-5\"; valid claude model ids: opus, fable, sonnet, haiku");
 });
 
 test("review-loop roles default to read-only access", () => {
@@ -191,9 +198,9 @@ test("Builder domain=frontend keeps the canonical frontend scaffold guidance (pa
   expect(pipelineRoleLookup("builder", {})?.promptScaffold).not.toContain("UI/frontend implementation guidance");
 });
 
-test("codex model overrides mirror the store bounds at create time", () => {
+test("codex model overrides use the curated launch catalog at create time", () => {
   expect(resolvePipelineRole({ model: `gpt-${"x".repeat(200)}` }, "run", REGISTRY_LOOKUP).error)
-    .toContain("not supported by codex");
+    .toContain("valid codex model ids: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna");
   expect(resolvePipelineRole({ model: "gpt-5.6\u0000sol" }, "run", REGISTRY_LOOKUP).error)
-    .toContain("not supported by codex");
+    .toContain("valid codex model ids: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna");
 });

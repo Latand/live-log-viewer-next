@@ -3,11 +3,13 @@ import fs from "node:fs";
 
 import { validExplicitProject } from "@/lib/accounts/migration/contracts";
 import { agentRegistry } from "@/lib/agent/registry";
+import { validateLaunchModel } from "@/lib/agent/models";
 import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { deliverConversationMessage } from "@/lib/delivery";
 import { structuredHostsEnabled } from "@/lib/runtime/flags";
 import { projectForCwd } from "@/lib/scanner/describe";
+import { resolveSpawnRole } from "@/lib/roles/registry";
 
 import { loadTasks } from "@/lib/tasks/store";
 import {
@@ -213,6 +215,18 @@ export interface SeatCommandResult {
 
 function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function explicitSeatModelError(rawBody: Record<string, unknown>): string | null {
+  const model = text(rawBody.model);
+  if (!model) return null;
+  const role = resolveSpawnRole({ role: "orchestrator", roleParams: rawBody.roleParams ?? { mode: "standard" } });
+  let engine: "claude" | "codex" | null = null;
+  if (rawBody.engine === "claude" || rawBody.engine === "codex") engine = rawBody.engine;
+  else if (role.ok && role.value) engine = role.value.config.engine;
+  if (!engine) return null;
+  const validation = validateLaunchModel(engine, model);
+  return "error" in validation ? validation.error : null;
 }
 
 function replayedSeatResponse(seat: OrchestratorSeat): SeatCommandResult {
@@ -430,6 +444,8 @@ export async function executeOrchestratorSeatRequest(
       },
     };
   }
+  const modelError = explicitSeatModelError(rawBody);
+  if (modelError) return { status: 400, body: { error: modelError } };
   const begun = beginOrchestratorSeatIntent({ project, mandate, clientRequestId, mode: "spawn", promptVersion, now: dependencies.now() });
   if (begun.kind === "completed") return replayedSeatResponse(begun.seat);
   if (begun.kind === "in_progress") return inProgressSeatResponse(begun.seat);

@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
 
+import { CODEX_SOL_MODEL } from "@/lib/agent/models";
+
 import { applyRoleOverride, normalizeFlowSpec } from "./commands";
 import type { RoleConfig } from "./types";
 
@@ -16,7 +18,7 @@ const base: RoleConfig = { engine: "codex", model: "gpt-5.6", effort: "high" };
 
 test("applyRoleOverride merges only the provided fields and blanks to null (issue #118)", () => {
   /* A partial override touches just the reviewer model, keeping engine/effort. */
-  expect(applyRoleOverride(base, { model: "gpt-5-codex" })).toEqual({ engine: "codex", model: "gpt-5-codex", effort: "high" });
+  expect(applyRoleOverride(base, { model: CODEX_SOL_MODEL })).toEqual({ engine: "codex", model: CODEX_SOL_MODEL, effort: "high" });
   /* An explicit blank model/effort resolves to the engine default (null). */
   expect(applyRoleOverride(base, { model: "  ", effort: "" })).toEqual({ engine: "codex", model: null, effort: null });
   /* Reseating the engine with a compatible model is allowed. */

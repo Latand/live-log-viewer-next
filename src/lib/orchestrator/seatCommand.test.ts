@@ -624,6 +624,22 @@ test("validation refuses a missing project, empty mandate, and malformed request
   expect((await executeOrchestratorSeatRequest({ project: "proj-a", mandate: "m", clientRequestId: "no" }, deps)).status).toBe(400);
 });
 
+test("spawn-mode seat creation rejects an explicit model outside the engine catalog before intent or spawn", async () => {
+  const { deps, recorded } = dependencies();
+  const result = await executeOrchestratorSeatRequest({
+    ...spawnRequest(),
+    engine: "codex",
+    model: "gpt-5.6-codex",
+  }, deps);
+
+  expect(result).toEqual({
+    status: 400,
+    body: { error: "invalid codex model id \"gpt-5.6-codex\"; valid codex model ids: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna" },
+  });
+  expect(recorded.spawns).toEqual([]);
+  expect(orchestratorSeatFor("proj-a")).toMatchObject({ active: null, pending: null });
+});
+
 /* Issue #903: a spawn falling back to the server's own working directory
    minted seats in /app — outside every scanner root — that held authority
    while permanently inert. */
@@ -679,4 +695,21 @@ test("rotation without a cwd continues in the predecessor's checkout", async () 
     if (previous === undefined) delete process.env.LLV_ORCHESTRATOR_CWD;
     else process.env.LLV_ORCHESTRATOR_CWD = previous;
   }
+});
+
+test("rotation rejects an explicit successor model outside the engine catalog before spawning", async () => {
+  const { deps, recorded } = dependencies();
+  expect((await executeOrchestratorSeatRequest(spawnRequest("req_00000205"), deps)).status).toBe(200);
+
+  const rotated = await executeOrchestratorRotation({
+    project: "proj-a",
+    clientRequestId: "req_00000206",
+    engine: "claude",
+    model: "claude-fable-5",
+  }, deps);
+
+  expect(rotated.status).toBe(400);
+  expect(rotated.body.error).toBe("invalid claude model id \"claude-fable-5\"; valid claude model ids: opus, fable, sonnet, haiku");
+  expect(recorded.spawns).toHaveLength(1);
+  expect(orchestratorSeatFor("proj-a")).toMatchObject({ active: { conversationId: NEW_ID }, pending: null });
 });

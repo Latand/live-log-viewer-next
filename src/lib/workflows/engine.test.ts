@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { ENGINE_MODELS } from "@/lib/agent/models";
 import type { Flow } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
 
@@ -173,6 +174,37 @@ test("createWorkflowFromRequest validates task, repo and stages", () => {
   const { ports: failing, state } = makeHarness();
   state.execFail = "--git-dir";
   expect(createWorkflowFromRequest({ task: "t", repoDir: "/r", stages: STAGES as never }, failing).status).toBe(400);
+});
+
+test("createWorkflowFromRequest rejects unknown implementer, reviewer, and fixer models before persistence", () => {
+  const { ports } = makeHarness();
+  const expected = `invalid codex model id "gpt-fabricated"; valid codex model ids: ${ENGINE_MODELS.codex.map((option) => option.id).join(", ")}`;
+  const cases = [
+    [
+      { ...STAGES[0], agent: { ...STAGES[0].agent, model: "gpt-fabricated" } },
+      STAGES[1],
+      STAGES[2],
+    ],
+    [
+      STAGES[0],
+      STAGES[1],
+      { ...STAGES[2], reviewer: { ...STAGES[2].reviewer, model: "gpt-fabricated" } },
+    ],
+    [
+      STAGES[0],
+      STAGES[1],
+      { ...STAGES[2], fixer: { ...STAGES[2].fixer, model: "gpt-fabricated" } },
+    ],
+  ];
+
+  for (const stages of cases) {
+    saveWorkflows([]);
+    expect(createWorkflowFromRequest({ task: "t", repoDir: "/r", stages: stages as never }, ports)).toEqual({
+      error: expected,
+      status: 400,
+    });
+    expect(loadWorkflows()).toEqual([]);
+  }
 });
 
 test("createWorkflowFromRequest stamps the scanner project key, basename as fallback", () => {
