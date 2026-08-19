@@ -116,6 +116,18 @@ test("spawn role resolution injects the scaffold and requires deploy confirmatio
   expect(spawn.value.scaffold).toContain("Builder in tdd mode");
 });
 
+test("spawn role resolution enumerates the selected engine catalog for an invalid explicit model", () => {
+  expect(resolveSpawnRole({
+    role: "builder",
+    roleParams: { mode: "plain" },
+    engine: "claude",
+    model: "mythos-1",
+  })).toEqual({
+    ok: false,
+    error: "invalid claude model id \"mythos-1\"; valid claude model ids: opus, fable, sonnet, haiku",
+  });
+});
+
 test("orchestrator spawn defaults omitted maxWorkers to three and preserves explicit one", () => {
   const omitted = resolveSpawnRole({ role: "orchestrator" });
   if (!omitted.ok || !omitted.value) throw new Error("expected resolved orchestrator role");

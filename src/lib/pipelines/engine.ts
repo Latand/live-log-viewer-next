@@ -2469,10 +2469,11 @@ function normalizeStages(
     };
     const resolved = preservedStage ? { role: preservedStage.effectiveRole } : resolvePipelineRole(input, stage.kind as PipelineStage["kind"], lookup);
     if (!resolved.role) {
+      const field = "field" in resolved && resolved.field === "model" ? "model" : "role";
       violations.push({
-        field: at("role"),
+        field: at(field),
         message: "error" in resolved && resolved.error ? resolved.error : "invalid stage role",
-        expected: STAGE_RUNTIME_SHAPE,
+        expected: field === "model" ? "model id from the selected engine's curated catalog" : STAGE_RUNTIME_SHAPE,
       });
       continue;
     }

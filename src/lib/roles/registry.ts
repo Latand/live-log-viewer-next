@@ -1,5 +1,5 @@
 import { isEngineEffort } from "@/lib/agent/efforts";
-import { normalizeClaudeLaunchModel } from "@/lib/agent/models";
+import { validateLaunchModel } from "@/lib/agent/models";
 
 import { BUILDER_APPLY_FIXES_CONFIG, BUILDER_FRONTEND_CONFIG } from "./paramConfig";
 import { defaultRoleParameterValue } from "./parameters";
@@ -99,9 +99,9 @@ export function configForParams(definition: RoleDefinition, params: RoleParamVal
 function resolveConfig(definition: RoleDefinition, params: RoleParamValues, explicit: ExplicitRoleConfig): { ok: true; value: RoleConfig } | { ok: false; error: string } {
   const config = { ...configForParams(definition, params), ...explicit };
   if (config.engine !== "claude" && config.engine !== "codex") return { ok: false, error: "engine must be claude or codex" };
-  if (!config.model || config.model.length > 128) return { ok: false, error: "model must be a printable id up to 128 characters" };
-  if (config.engine === "claude" && !normalizeClaudeLaunchModel(config.model)) return { ok: false, error: "model is not supported by claude" };
-  if (config.engine === "codex" && !config.model.startsWith("gpt-")) return { ok: false, error: "model is not supported by codex" };
+  const model = validateLaunchModel(config.engine, config.model);
+  if ("error" in model) return { ok: false, error: model.error };
+  config.model = model.model;
   if (!isEngineEffort(config.engine, config.effort)) return { ok: false, error: `effort for ${config.engine} must be one of: ${config.engine === "codex" ? "low, medium, high, xhigh" : "low, medium, high, xhigh, max"}` };
   return { ok: true, value: config };
 }

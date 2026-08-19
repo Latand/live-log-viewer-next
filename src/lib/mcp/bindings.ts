@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { agentRegistry, readOnlyConversationLookupFromSnapshot } from "@/lib/agent/registry";
+import { ENGINE_MODELS, validateLaunchModel } from "@/lib/agent/models";
 import { procBackend } from "@/lib/proc";
 import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { VIEWER_SPAWN_CAPABILITY_ENV, VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
@@ -58,7 +59,7 @@ import { pathAllowed, scanRootEntries } from "@/lib/scanner/roots";
 import { completedFileScan } from "@/lib/scanner/scanCache";
 import { readResources } from "@/lib/resources";
 import { adoptLiveRootSession, conversationRole, liveRootSession, type RootSessionSource } from "@/lib/root/adopt";
-import { listRoles } from "@/lib/roles/registry";
+import { listRoles, resolveSpawnRole } from "@/lib/roles/registry";
 import type { RoleDefinition, RoleParameter } from "@/lib/roles/types";
 import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
 import { ledgerDeployment, ledgerDeployments } from "@/lib/runtime/deploymentLedger";
@@ -448,6 +449,27 @@ function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function validateExplicitMcpLaunchModel(args: McpToolArgs, fallbackRole?: string): void {
+  const model = text(args.model);
+  if (!model) return;
+  if (args.engine !== undefined && args.engine !== "claude" && args.engine !== "codex") return;
+  const roleId = text(args.role) || fallbackRole;
+  const role = roleId ? resolveSpawnRole({ role: roleId, roleParams: args.roleParams }) : null;
+  let engine: "claude" | "codex" | null = null;
+  if (args.engine === "claude" || args.engine === "codex") engine = args.engine;
+  else if (role?.ok && role.value) engine = role.value.config.engine;
+  if (!engine) return;
+  const validation = validateLaunchModel(engine, model);
+  if (!("error" in validation)) return;
+  throw new McpToolRefusal(validation.error, {
+    violations: [{
+      field: "model",
+      message: validation.error,
+      expected: `one of: ${ENGINE_MODELS[engine].map((option) => option.id).join(", ")}`,
+    }],
+  });
+}
+
 function objectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -557,6 +579,7 @@ export function requestAttentionOperationKey(clientRequestId: string): string {
 }
 
 async function spawnAgent(args: McpToolArgs, control: ViewerControlDependencies): Promise<McpToolPayload> {
+  validateExplicitMcpLaunchModel(args);
   const clientAttemptId = spawnAttemptId(requestId(args));
   const body = withoutKeys(args, ["clientRequestId"]);
   const roleParams = defaultMcpSpawnRoleParams(args);
@@ -1486,6 +1509,7 @@ async function getOrchestrator(args: McpToolArgs, dependencies: ViewerMcpDomainD
     approved versioned default mandate (or the caller's edited text based on
     it). The seat route owns the durable intent, so a retry replays. */
 async function createOrchestrator(args: McpToolArgs, control: ViewerControlDependencies): Promise<McpToolPayload> {
+  if (!text(args.conversationId)) validateExplicitMcpLaunchModel(args, "orchestrator");
   const project = canonicalOrchestratorProject(required(args, "project"));
   const result = await control.post("/api/orchestrator/seat", {
     project,

@@ -80,12 +80,25 @@ function structuredRouteDependencies(cwd: string): SpawnRouteTestDependencies {
 test("spawn admission rejects malformed MCP allowlists", async () => {
   const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
     method: "POST",
-    headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json" },
+    headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
     body: JSON.stringify({ engine: "codex", cwd: routeSandbox, prompt: "inspect", mcpServers: "viewer" }),
   }), structuredRouteDependencies(routeSandbox));
 
   expect(response.status).toBe(400);
   expect(await response.json()).toEqual({ error: "mcpServers must be an array of non-empty server names" });
+});
+
+test("spawn admission rejects an explicit model outside the selected engine catalog", async () => {
+  const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+    method: "POST",
+    headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
+    body: JSON.stringify({ engine: "codex", model: "gpt-5.6-codex", cwd: routeSandbox, prompt: "inspect" }),
+  }), structuredRouteDependencies(routeSandbox));
+
+  expect(response.status).toBe(400);
+  expect(await response.json()).toEqual({
+    error: "invalid codex model id \"gpt-5.6-codex\"; valid codex model ids: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna",
+  });
 });
 
 test("an explicit spawn account is durably pinned while an omitted account uses the selected fallback", async () => {
@@ -118,7 +131,7 @@ test("an explicit spawn account is durably pinned while an omitted account uses 
     const post = async (clientAttemptId: string, accountId?: string) => await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
       method: "POST",
       headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
-      body: JSON.stringify({ engine: "claude", model: "claude-sonnet-4-6", cwd, prompt: "inspect", clientAttemptId, ...(accountId ? { accountId } : {}) }),
+      body: JSON.stringify({ engine: "claude", model: "sonnet", cwd, prompt: "inspect", clientAttemptId, ...(accountId ? { accountId } : {}) }),
     }), dependencies);
 
     const pinnedResponses = await Promise.all([
@@ -185,7 +198,7 @@ test("an unusable explicit account creates a terminal retryable pinned receipt a
     const capability = rotateOperatorSpawnCapability();
     const baseRequest = {
       engine: "claude",
-      model: "claude-sonnet-4-6",
+      model: "sonnet",
       cwd,
       ["prompt"]: "inspect",
       accountId: "unusable-pin",
@@ -414,7 +427,7 @@ test("spawn admission grants MCP servers by session origin and refuses ungranted
            parent and no preset is the operator-root session class. */
         ...(role ? {} : { "sec-fetch-site": "same-origin" }),
       },
-      body: JSON.stringify({ engine: "claude", model: "claude-sonnet-4-6", cwd, prompt: "inspect", ...(role ? { role } : {}), clientAttemptId, ...(mcpServers === undefined ? {} : { mcpServers }) }),
+      body: JSON.stringify({ engine: "claude", model: "sonnet", cwd, prompt: "inspect", ...(role ? { role } : {}), clientAttemptId, ...(mcpServers === undefined ? {} : { mcpServers }) }),
     }), dependencies);
 
     const defaultResponse = await post("mcp_default_20260723");
@@ -601,7 +614,7 @@ test("a materialized structured child is offered for pipeline attempt adoption",
     const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
       method: "POST",
       headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "x-llv-spawn-capability": capability },
-      body: JSON.stringify({ engine: "claude", model: "claude-sonnet-4-6", cwd, prompt: "fallback", src: sourcePath, role: "builder", clientAttemptId: "pipeline_adoption_20260719" }),
+      body: JSON.stringify({ engine: "claude", model: "sonnet", cwd, prompt: "fallback", src: sourcePath, role: "builder", clientAttemptId: "pipeline_adoption_20260719" }),
     }), dependencies);
 
     expect({ status: response.status, body: await response.clone().json() }).toMatchObject({ status: 202 });
@@ -616,7 +629,7 @@ test("a materialized structured child is offered for pipeline attempt adoption",
         round: null,
         runtime: {
           engine: "claude",
-          model: "claude-sonnet-4-6",
+          model: "sonnet",
           effort: expect.any(String),
         },
       }),
@@ -625,7 +638,7 @@ test("a materialized structured child is offered for pipeline attempt adoption",
       expect.objectContaining({
         runtime: {
           engine: "claude",
-          model: "claude-sonnet-4-6",
+          model: "sonnet",
           effort: expect.any(String),
         },
       }),
@@ -634,7 +647,7 @@ test("a materialized structured child is offered for pipeline attempt adoption",
     const replay = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
       method: "POST",
       headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "x-llv-spawn-capability": capability },
-      body: JSON.stringify({ engine: "claude", model: "claude-sonnet-4-6", cwd, prompt: "fallback", src: sourcePath, role: "builder", clientAttemptId: "pipeline_adoption_20260719" }),
+      body: JSON.stringify({ engine: "claude", model: "sonnet", cwd, prompt: "fallback", src: sourcePath, role: "builder", clientAttemptId: "pipeline_adoption_20260719" }),
     }), dependencies);
     expect(replay.status).toBe(200);
     expect(structuredLaunches).toBe(1);
@@ -646,7 +659,7 @@ test("a materialized structured child is offered for pipeline attempt adoption",
         agentPath: childPath,
         runtime: {
           engine: "claude",
-          model: "claude-sonnet-4-6",
+          model: "sonnet",
           effort: expect.any(String),
         },
       }),
@@ -658,7 +671,7 @@ test("a materialized structured child is offered for pipeline attempt adoption",
         agentPath: childPath,
         runtime: {
           engine: "claude",
-          model: "claude-sonnet-4-6",
+          model: "sonnet",
           effort: expect.any(String),
         },
       }),
@@ -1508,7 +1521,7 @@ test("operator and agent structured Claude role launches both retain bypass perm
   const request = (capability: string, clientAttemptId = attemptId) => new NextRequest("http://127.0.0.1:8898/api/spawn", {
     method: "POST",
     headers: { host: "127.0.0.1:8898", "content-type": "application/json", "x-llv-spawn-capability": capability },
-    body: JSON.stringify({ engine: "claude", model: "claude-sonnet-4-6", cwd, prompt: "build", src: callerPath, role: "builder", clientAttemptId }),
+    body: JSON.stringify({ engine: "claude", model: "sonnet", cwd, prompt: "build", src: callerPath, role: "builder", clientAttemptId }),
   });
   const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
   const previousHosts = process.env.LLV_STRUCTURED_HOSTS;
@@ -1741,7 +1754,7 @@ async function runDeferred(work: (() => Promise<void>) | null): Promise<void> {
   if (work) await work();
 }
 
-test("text-only Codex models reject images before blob and receipt mutation", async () => {
+test("unknown Codex models reject before image blob and receipt mutation", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "codex-text-only-image-"));
   const previous = {
     transport: process.env.LLV_SPAWN_TRANSPORT,
@@ -1782,9 +1795,9 @@ test("text-only Codex models reject images before blob and receipt mutation", as
         images: [{ base64: png, mime: "image/png" }],
       }),
     }), dependencies);
-    expect(response.status).toBe(409);
+    expect(response.status).toBe(400);
     expect(await response.json()).toEqual({
-      error: "The selected Codex model does not advertise image input through app-server.",
+      error: "invalid codex model id \"gpt-5.3-codex-spark\"; valid codex model ids: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna",
     });
     expect(storageCalled).toBeFalse();
     expect(Object.keys(agentRegistry().snapshot().receipts).sort()).toEqual(beforeReceipts);

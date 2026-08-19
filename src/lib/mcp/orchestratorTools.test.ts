@@ -196,6 +196,19 @@ test("create_orchestrator posts the versioned approved default mandate through t
   expect(result).toMatchObject({ conversationId: SEATED_ID, transcriptPath: "/tmp/o.jsonl" });
 });
 
+test("create_orchestrator rejects an explicit fresh-launch model outside the engine catalog before posting", async () => {
+  const { posts, control } = controlStub();
+
+  await expect(bindingsWith(control).create_orchestrator({
+    clientRequestId: "create-invalid-model",
+    project: "proj-a",
+    engine: "claude",
+    model: "claude-fable-5",
+  })).rejects.toThrow("invalid claude model id \"claude-fable-5\"; valid claude model ids: opus, fable, sonnet, haiku");
+
+  expect(posts).toEqual([]);
+});
+
 test("create_orchestrator adopts an eligible existing conversation through the seat route", async () => {
   const { posts, control } = controlStub({
     "/api/orchestrator/seat": { ok: true, conversationId: SEATED_ID, path: "/tmp/o.jsonl", seat: { conversationId: SEATED_ID }, state: "settled" },
@@ -205,6 +218,7 @@ test("create_orchestrator adopts an eligible existing conversation through the s
     clientRequestId: "adopt-01",
     project: "proj-a",
     conversationId: SEATED_ID,
+    model: "historical-provider-model",
   });
 
   expect(posts).toHaveLength(1);
@@ -212,6 +226,7 @@ test("create_orchestrator adopts an eligible existing conversation through the s
   expect(posts[0]!.body).toMatchObject({
     project: "proj-a",
     conversationId: SEATED_ID,
+    model: "historical-provider-model",
     clientRequestId: "adopt-01",
   });
   expect(result).toMatchObject({ conversationId: SEATED_ID, transcriptPath: "/tmp/o.jsonl" });

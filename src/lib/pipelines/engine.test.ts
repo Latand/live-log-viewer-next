@@ -4753,6 +4753,11 @@ test("override-stage rejects an unknown/disallowed role and an incompatible role
   /* architect resolves to claude; a codex-only model must fail canonical bounds. */
   const bad = await patchPipeline(created.id, { action: "override-stage", stageId: "build", role: { roleId: "architect" }, model: "gpt-5.6-sol" }, ports);
   expect(bad.status).toBe(400);
+  const unknown = await patchPipeline(created.id, { action: "override-stage", stageId: "build", engine: "codex", model: "gpt-5.6-codex" }, ports);
+  expect(unknown).toMatchObject({
+    status: 400,
+    error: "invalid codex model id \"gpt-5.6-codex\"; valid codex model ids: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna",
+  });
 });
 
 test("override-stage rejects non-string model/effort instead of silently ignoring them (issue #118 review F3)", async () => {

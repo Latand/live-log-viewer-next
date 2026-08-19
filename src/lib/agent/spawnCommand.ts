@@ -13,7 +13,7 @@ import { agentRegistry, SpawnChildLimitError, type SpawnRequest } from "@/lib/ag
 import { reasoningFromBody } from "@/lib/agent/efforts";
 import { mcpServersForSession, normalizeSpawnMcpServers } from "@/lib/agent/mcpAllowlist";
 import { normalizeSpawnPlugins, pluginAllowlistForSession, sessionOriginFor } from "@/lib/agent/pluginAllowlist";
-import { codexModelSupportsImages, modelFromBody } from "@/lib/agent/models";
+import { codexModelSupportsImages, modelFromBody, validateLaunchModel } from "@/lib/agent/models";
 import { resolveSpawnRole } from "@/lib/roles/registry";
 import { assertDarwinStructuredRuntime } from "@/lib/proc/darwinIdentity";
 import { spawnContentDigest, spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
@@ -196,6 +196,10 @@ export async function executeSpawnRequest(
   if (reasoning.error) return NextResponse.json({ error: reasoning.error }, { status: 400 });
   const selectedModel = modelFromBody({ model: body.model === undefined ? role.value?.config.model : body.model });
   if (selectedModel.error) return NextResponse.json({ error: selectedModel.error }, { status: 400 });
+  if (body.model !== undefined && body.model !== null && selectedModel.model) {
+    const validation = validateLaunchModel(engine, selectedModel.model);
+    if ("error" in validation) return NextResponse.json({ error: validation.error }, { status: 400 });
+  }
 
   const userPrompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
   const prompt = role.value ? [role.value.scaffold, userPrompt].filter(Boolean).join("\n\n") : userPrompt;
