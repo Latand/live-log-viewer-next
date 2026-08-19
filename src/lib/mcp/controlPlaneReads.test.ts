@@ -173,58 +173,71 @@ function dependencies(options: { scans?: number; projections?: number; completed
   };
 }
 
-function filesControl(
-  snapshot: { files: unknown[]; projectCatalog: unknown[] },
+function viewerControl(
+  response: Record<string, unknown>,
   onRead: (pathname: string) => void | Promise<void> = () => {},
 ): ViewerControlDependencies {
   return {
     get: async (pathname) => {
       await onRead(pathname);
-      return snapshot;
+      return response;
     },
     post: async () => ({}),
   };
 }
 
-test("list_conversations reads the Viewer's completed generation and starts no caller-local scan", async () => {
+test("list_conversations reads the Viewer's uncapped catalog and starts no caller-local scan", async () => {
   const { counts, injected, snapshot } = dependencies();
   const controlReads: string[] = [];
-  const bindings = viewerMcpBindings(undefined, filesControl(snapshot, (pathname) => { controlReads.push(pathname); }), injected);
+  const page = { items: snapshot.files, nextCursor: null, total: snapshot.files.length };
+  const bindings = viewerMcpBindings(undefined, viewerControl(page, (pathname) => { controlReads.push(pathname); }), injected);
 
   const result = await bindings.list_conversations({ clientRequestId: "list-1", limit: 50 }) as { count: number };
 
   expect(result.count).toBe(50);
-  expect(controlReads).toEqual(["/api/files"]);
+  expect(controlReads).toEqual(["/api/conversations?limit=50"]);
   expect(counts.scanCalls).toBe(0);
   expect(counts.scans).toBe(0);
   expect(counts.rawScans).toBe(0);
 });
 
-test("list_conversations returns the same Viewer rows when the caller-local completed generations disagree", async () => {
-  const viewerSnapshot = {
-    files: [{
-      ...scanRow(1),
-      path: "/sessions/project-worker.jsonl",
-      project: "repo-fixture",
-      conversationId: "conversation_project_worker",
-    }],
-    projectCatalog: [{
-      project: "repo-fixture",
-      displayName: "fixture",
-      conversations: 1,
-      smt: 1_780_000_001,
-    }],
+test("list_conversations reaches a project outside the scheme cap for an unattributed own seat", async () => {
+  const target = {
+    ...scanRow(100),
+    path: "/sessions/project-worker.jsonl",
+    project: "repo-fixture",
+    conversationId: "conversation_project_worker",
+  };
+  const schemeFiles = Array.from({ length: 10 }, (_value, index) => ({
+    ...scanRow(index + 1),
+    project: `repo-visible-${index}`,
+  }));
+  const schemeSnapshot = {
+    files: schemeFiles,
+    projectCatalog: [
+      ...schemeFiles.map((entry) => ({ project: entry.project, displayName: entry.project, conversations: 1, smt: entry.mtime })),
+      { project: "repo-fixture", displayName: "fixture", conversations: 1, smt: target.mtime },
+    ],
     complete: true,
+  };
+  const catalogPage = { items: [target], nextCursor: null, total: 1 };
+  const controlReads: string[] = [];
+  const control: ViewerControlDependencies = {
+    get: async (pathname) => {
+      controlReads.push(pathname);
+      return pathname.startsWith("/api/conversations") ? catalogPage : schemeSnapshot;
+    },
+    post: async () => ({}),
   };
   let callerLocalReads = 0;
   const bindingsFor = (
     conversationId: string,
     callerProject: string,
-    localFiles: typeof viewerSnapshot.files,
-  ) => viewerMcpBindings(undefined, filesControl(viewerSnapshot), {
+    localFiles: typeof schemeFiles,
+  ) => viewerMcpBindings(undefined, control, {
     completedFileScan: async () => {
       callerLocalReads += 1;
-      return { snapshot: { ...viewerSnapshot, files: localFiles } };
+      return { snapshot: { ...schemeSnapshot, files: localFiles } };
     },
     callerAttribution: () => ({ kind: "manager", conversationId, role: null }),
     callerProject: () => callerProject,
@@ -232,27 +245,22 @@ test("list_conversations returns the same Viewer rows when the caller-local comp
 
   const ownSeat = await bindingsFor("conversation_missing_own_transcript", "repo-fixture", [])
     .list_conversations({ clientRequestId: "list-own-seat", project: "repo-fixture" });
-  const foreignSeat = await bindingsFor("conversation_foreign_seat", "repo-foreign", viewerSnapshot.files)
+  const foreignSeat = await bindingsFor("conversation_foreign_seat", "repo-foreign", schemeFiles)
     .list_conversations({ clientRequestId: "list-foreign-seat", project: "repo-fixture" });
 
   expect(ownSeat).toEqual(foreignSeat);
   expect(ownSeat).toMatchObject({ count: 1, conversations: [{ project: "repo-fixture" }] });
+  expect(controlReads).toEqual([
+    "/api/conversations?project=repo-fixture&limit=50",
+    "/api/conversations?project=repo-fixture&limit=50",
+  ]);
   expect(callerLocalReads).toBe(0);
 });
 
 test("list_conversations identifies an unknown project instead of returning a silent zero", async () => {
-  const snapshot = {
-    files: [{ ...scanRow(1), project: "repo-fixture" }],
-    projectCatalog: [{
-      project: "repo-fixture",
-      displayName: "fixture",
-      conversations: 1,
-      smt: 1_780_000_001,
-    }],
-    complete: true,
-  };
-  const bindings = viewerMcpBindings(undefined, filesControl(snapshot), {
-    completedFileScan: async () => ({ snapshot }),
+  const page = { items: [], nextCursor: null, total: 0 };
+  const bindings = viewerMcpBindings(undefined, viewerControl(page), {
+    completedFileScan: async () => ({ snapshot: { files: [], projectCatalog: [], complete: true } }),
   } as never);
 
   const result = await bindings.list_conversations({
@@ -266,6 +274,31 @@ test("list_conversations identifies an unknown project instead of returning a si
     code: "UNKNOWN_PROJECT",
     hint: expect.stringContaining("canonical project key"),
   });
+});
+
+test("list_conversations keeps an empty query result distinct from an unknown project", async () => {
+  const controlReads: string[] = [];
+  const bindings = viewerMcpBindings(undefined, {
+    get: async (pathname) => {
+      controlReads.push(pathname);
+      return pathname.includes("q=missing")
+        ? { items: [], nextCursor: null, total: 0 }
+        : { items: [scanRow(1)], nextCursor: null, total: 1 };
+    },
+    post: async () => ({}),
+  });
+
+  const result = await bindings.list_conversations({
+    clientRequestId: "list-known-project-empty-query",
+    project: "repo-fixture",
+    query: "missing",
+  });
+
+  expect(result).toEqual({ count: 0, conversations: [] });
+  expect(controlReads).toEqual([
+    "/api/conversations?project=repo-fixture&q=missing&limit=50",
+    "/api/conversations?project=repo-fixture&limit=1",
+  ]);
 });
 
 test("get_conversation reads the completed generation when it already carries the transcript", async () => {
@@ -725,11 +758,11 @@ test("twenty concurrent control reads join one scan and one projection", async (
   /* A single-flight completed scan, as the real one is: the assertion is that the
      READS join it rather than each reserving their own generation. */
   const { counts, completedFileScan, injected } = dependencies({ scans: 1, projections: 1 });
-  const controlSnapshot: { files: unknown[]; projectCatalog: unknown[] } = { files: [], projectCatalog: [] };
-  const control = filesControl(controlSnapshot, async () => {
+  const controlPage: { items: unknown[]; nextCursor: null; total: number } = { items: [], nextCursor: null, total: 0 };
+  const control = viewerControl(controlPage, async () => {
     const completed = await completedFileScan();
-    controlSnapshot.files = completed.snapshot.files;
-    controlSnapshot.projectCatalog = completed.snapshot.projectCatalog;
+    controlPage.items = completed.snapshot.files;
+    controlPage.total = completed.snapshot.files.length;
   });
   const bindings = viewerMcpBindings(undefined, control, injected);
 

@@ -999,36 +999,44 @@ async function listConversations(
   control: ViewerControlDependencies,
 ): Promise<McpToolPayload> {
   const project = text(args.project);
-  const query = text(args.query).toLocaleLowerCase();
+  const query = text(args.query).trim();
   const limit = Math.max(1, Math.min(100, integer(args.limit, 50)));
-  /* MCP servers are caller processes, so their module-local completed scan can
-     differ by launch time. Read the Viewer's one completed generation instead:
-     /api/files is centrally cached and does not start a caller-local corpus
-     walk, while the project hint keeps its bounded scheme window relevant. */
-  const source = await readViewerControl(
-    control,
-    project ? `/api/files?project=${encodeURIComponent(project)}` : "/api/files",
-  );
-  if (!Array.isArray(source.files) || !Array.isArray(source.projectCatalog)) {
-    throw new ViewerControlResponseError("Viewer control returned a malformed completed file generation");
+  const params = new URLSearchParams();
+  if (project) params.set("project", project);
+  if (query) params.set("q", query);
+  params.set("limit", String(limit));
+  /* The Viewer's conversation endpoint projects the uncapped catalog published
+     by the scanner worker. Its scheme feed can omit projects beyond the board's
+     recent-project window even while their catalog rows remain current. */
+  const source = await readViewerControl(control, `/api/conversations?${params}`);
+  if (!Array.isArray(source.items) || typeof source.total !== "number") {
+    throw new ViewerControlResponseError("Viewer control returned a malformed conversation catalog page");
   }
-  const files = source.files.filter(objectRecord) as unknown as FileEntry[];
-  if (project) {
-    const knownProject = source.projectCatalog.some((entry) => objectRecord(entry) && text(entry.project) === project)
-      || files.some((entry) => entry.project === project);
+  if (project && source.total === 0) {
+    let knownProject = false;
+    if (query) {
+      const validation = await readViewerControl(
+        control,
+        `/api/conversations?project=${encodeURIComponent(project)}&limit=1`,
+      );
+      if (!Array.isArray(validation.items) || typeof validation.total !== "number") {
+        throw new ViewerControlResponseError("Viewer control returned a malformed conversation catalog page");
+      }
+      knownProject = validation.total > 0;
+    }
     if (!knownProject) {
       return redactPayload({
         count: 0,
         conversations: [],
         code: "UNKNOWN_PROJECT",
-        hint: "The requested project does not match a canonical project key in the completed scan.",
+        hint: "The requested project does not match a canonical project key in the conversation catalog.",
       });
     }
   }
-  const conversations = files
+  const conversations = source.items
+    .filter(objectRecord) as unknown as FileEntry[];
+  const rows = conversations
     .filter((entry) => entry.engine === "claude" || entry.engine === "codex")
-    .filter((entry) => !project || entry.project === project)
-    .filter((entry) => !query || `${entry.title}\n${entry.project}\n${entry.path}`.toLocaleLowerCase().includes(query))
     .slice(0, limit)
     .map((entry) => ({
       conversationId: entry.conversationId ?? null,
@@ -1038,7 +1046,7 @@ async function listConversations(
       engine: entry.engine,
       activity: entry.activity,
     }));
-  return redactPayload({ count: conversations.length, conversations });
+  return redactPayload({ count: rows.length, conversations: rows });
 }
 
 async function getConversation(
