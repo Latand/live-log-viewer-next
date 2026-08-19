@@ -22,6 +22,7 @@ import {
   discardWakatimeEnvironmentCredential,
   withoutWakatimeCredential,
 } from "@/lib/wakatime/credential";
+import { wakatimeIntegrationEnabled } from "@/lib/wakatime/activation";
 
 /*
  * The Viewer's node-side startup runtime. This module (and everything it pulls
@@ -356,7 +357,7 @@ export async function startWakatimeIntegrationIfEnabled(
   start: () => Promise<void> = startWakatimeWorker,
   log: (event: string, fields: Readonly<Record<string, never>>) => void = (event, fields) => console.error(event, fields),
 ): Promise<void> {
-  if (env.LLV_WAKATIME_ENABLED !== "1") return;
+  if (!wakatimeIntegrationEnabled(env)) return;
   try {
     await start();
   } catch {

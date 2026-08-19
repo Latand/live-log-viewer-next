@@ -11,6 +11,7 @@ import {
   parseVoiceViewBinding,
   releaseVoiceSession,
 } from "./voiceViewBinding";
+import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorActivity";
 
 const MAX_SDP_BYTES = 512 * 1024;
 const MAX_SPEECH_BYTES = 8 * 1024;
@@ -39,6 +40,14 @@ interface RealtimeHost {
 export type RealtimeControlResult = {
   status: number;
   body: Record<string, unknown>;
+};
+
+interface RealtimeControlDependencies {
+  recordOperatorActivity: typeof recordDirectOperatorWakatimeActivity;
+}
+
+const REALTIME_CONTROL_DEPENDENCIES: RealtimeControlDependencies = {
+  recordOperatorActivity: recordDirectOperatorWakatimeActivity,
 };
 
 function realtimeHost(value: unknown): RealtimeHost | null {
@@ -95,6 +104,7 @@ export async function executeRealtimeControl(
      headers), so a call site that omits it has not asked — and an unasked authority
      question must resolve to "no", not to "yes". */
   authority: { caller?: RealtimeCaller; managerConversationId?: string | null; operator: boolean },
+  dependencies: RealtimeControlDependencies = REALTIME_CONTROL_DEPENDENCIES,
 ): Promise<RealtimeControlResult> {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     return { status: 400, body: { error: "body must be an object" } };
@@ -185,6 +195,23 @@ export async function executeRealtimeControl(
      * refused `unbound` without a second rule to keep in sync.
      */
     if (request.action === "selectedContext") {
+      const operatorEventId = typeof request.operatorEventId === "string" ? request.operatorEventId.trim() : "";
+      if (operatorEventId && (operatorEventId.length > 128 || !/^[A-Za-z0-9_-]+$/.test(operatorEventId))) {
+        return { status: 400, body: { error: "operatorEventId is invalid" } };
+      }
+      if (operatorEventId) {
+        if (caller.kind !== "session" || caller.realtimeSessionId !== host.currentRealtimeSessionId?.()) {
+          return { status: 403, body: { error: "operator activity requires the live realtime peer" } };
+        }
+        try {
+          dependencies.recordOperatorActivity({
+            conversationId,
+            idempotencyKey: `realtime:${operatorEventId}`,
+          });
+        } catch {
+          return { status: 503, body: { error: "direct operator activity could not be recorded" } };
+        }
+      }
       const admission = admitVoiceSelectedContext({
         conversationId,
         realtimeSessionId: caller.kind === "session" ? caller.realtimeSessionId : "",
@@ -198,6 +225,24 @@ export async function executeRealtimeControl(
         status: 200,
         body: { ok: true, selectedContext: admission.admission.reference, sequence: admission.admission.sequence },
       };
+    }
+    if (request.action === "operatorActivity") {
+      const operatorEventId = typeof request.operatorEventId === "string" ? request.operatorEventId.trim() : "";
+      if (!/^[a-f0-9]{64}$/.test(operatorEventId)) {
+        return { status: 400, body: { error: "operatorEventId must be a 64-character lowercase hexadecimal identity" } };
+      }
+      if (caller.kind !== "session" || caller.realtimeSessionId !== host.currentRealtimeSessionId?.()) {
+        return { status: 403, body: { error: "operator activity requires the live realtime peer" } };
+      }
+      try {
+        dependencies.recordOperatorActivity({
+          conversationId,
+          idempotencyKey: `realtime:${operatorEventId}`,
+        });
+      } catch {
+        return { status: 503, body: { error: "direct operator activity could not be recorded" } };
+      }
+      return { status: 200, body: { ok: true, operatorEventId } };
     }
     if (request.action === "appendSpeech") {
       const text = typeof request.text === "string" ? request.text.trim() : "";
@@ -259,7 +304,7 @@ export async function executeRealtimeControl(
         },
       };
     }
-    return { status: 400, body: { error: "action must be start, selectedContext, appendSpeech, deliverWorkerResponse, stop, or status" } };
+    return { status: 400, body: { error: "action must be start, operatorActivity, selectedContext, appendSpeech, deliverWorkerResponse, stop, or status" } };
   } catch (error) {
     return { status: 409, body: { error: redactCodexHostDiagnostic(error) } };
   }

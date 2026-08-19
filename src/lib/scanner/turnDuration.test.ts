@@ -98,6 +98,50 @@ describe("lastTurnFromRecords — Claude", () => {
     }]);
   });
 
+  test("gives a terminal-authored human record a stable transcript identity", () => {
+    const at = "2026-07-14T07:03:00.000Z";
+    const result = recentTurnActivityFromRecords([{
+      ...claudeUser(at, "typed at the terminal"),
+      uuid: "human-record-one",
+      promptSource: "typed",
+      origin: { kind: "human" },
+    }, {
+      ...claudeUser("2026-07-14T07:04:00.000Z", "coordinator relay"),
+      uuid: "relay-record-one",
+      isMeta: true,
+      origin: { kind: "coordinator" },
+    }], false);
+
+    expect(result.operatorActions).toEqual([{ key: "claude:human-record-one", atMs: ms(at) }]);
+  });
+
+  test("gives a legacy terminal prompt a stable candidate identity and excludes automated Claude lanes", () => {
+    const at = "2026-07-14T07:03:00.000Z";
+    const result = recentTurnActivityFromRecords([{
+      ...claudeUser(at, "typed in a legacy terminal"),
+      uuid: "legacy-terminal-record",
+    }, {
+      ...claudeUser("2026-07-14T07:04:00.000Z", "SDK injection"),
+      uuid: "sdk-record",
+      promptSource: "sdk",
+    }, {
+      ...claudeUser("2026-07-14T07:05:00.000Z", "peer injection"),
+      uuid: "peer-record",
+      isMeta: true,
+      origin: { kind: "peer" },
+    }, {
+      ...claudeUser("2026-07-14T07:06:00.000Z", "coordinator injection"),
+      uuid: "coordinator-record",
+      isMeta: true,
+      origin: { kind: "coordinator" },
+    }], false);
+
+    expect(result.unprovenancedUserActions).toEqual([{
+      key: "claude:legacy-terminal-record",
+      atMs: ms(at),
+    }]);
+  });
+
   test("enumerates every completed turn in chronological order", () => {
     const result = recentTurnWindowsFromRecords(
       [
@@ -455,7 +499,8 @@ describe("lastTurnFromRecords — Claude", () => {
 describe("lastTurnFromRecords — Codex", () => {
   test("deduplicates Viewer operator input and excludes unstructured harness prompts", () => {
     const at = "2026-07-14T10:00:00.000Z";
-    const structured = "<!-- llv:structured-user -->\ncontinue";
+    const actionKey = "c".repeat(64);
+    const structured = `<!-- llv:structured-user op=${actionKey} -->\ncontinue`;
     const result = recentTurnActivityFromRecords(
       [
         {
@@ -472,7 +517,17 @@ describe("lastTurnFromRecords — Codex", () => {
     );
 
     expect(result.operatorActionsAtMs).toEqual([ms(at)]);
+    expect(result.operatorActions).toEqual([{ key: actionKey, atMs: ms(at) }]);
     expect(result.unprovenancedUserActionsAtMs).toEqual([]);
+  });
+
+  test("an agent structured marker cannot claim direct operator provenance", () => {
+    const result = recentTurnActivityFromRecords([
+      codexUser("2026-07-14T10:00:00.000Z", "<!-- llv:structured-user -->\nagent relay"),
+    ], true);
+
+    expect(result.operatorActionsAtMs).toEqual([]);
+    expect(result.operatorActions).toBeUndefined();
   });
 
   test("enumerates completed turns followed by the final open turn", () => {

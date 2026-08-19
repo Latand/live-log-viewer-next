@@ -25,6 +25,7 @@ export interface QueueEntry {
       submitted. Hosts that can persist it write it onto the canonical
       structured-user record; the rest ignore it, exactly as with `runtime`. */
   selectedContext?: SelectedContextRef;
+  operatorActionKey?: string;
 }
 
 export interface NormalizedQueueEntry {
@@ -34,6 +35,7 @@ export interface NormalizedQueueEntry {
   expectedTurnId?: string | null;
   runtime?: RuntimeSendSettings;
   selectedContext?: SelectedContextRef;
+  operatorActionKey?: string;
 }
 
 export function normalizeQueueEntry(entry: QueueEntry): NormalizedQueueEntry {
@@ -46,6 +48,7 @@ export function normalizeQueueEntry(entry: QueueEntry): NormalizedQueueEntry {
     ...(entry.expectedTurnId !== undefined ? { expectedTurnId: entry.expectedTurnId } : {}),
     ...(entry.runtime ? { runtime: entry.runtime } : {}),
     ...(entry.selectedContext ? { selectedContext: entry.selectedContext } : {}),
+    ...(entry.operatorActionKey ? { operatorActionKey: entry.operatorActionKey } : {}),
   };
 }
 

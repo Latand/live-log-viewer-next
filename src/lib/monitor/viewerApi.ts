@@ -1,5 +1,6 @@
 import type { MonitorSessionRecord } from "./requests";
 import type { MonitorRunRecord } from "./types";
+import { internalServiceHeaders } from "@/lib/agent/operatorAuthority";
 
 /**
  * The monitor's only door into the machine (issue #741).
@@ -166,6 +167,7 @@ export function httpViewerApi(options: HttpViewerApiOptions): ViewerApi {
         headers: {
           accept: "application/json",
           ...(init.body ? { "content-type": "application/json", origin: base, "sec-fetch-site": "same-origin" } : {}),
+          ...internalServiceHeaders("monitor"),
           ...(init.headers ?? {}),
         },
       });

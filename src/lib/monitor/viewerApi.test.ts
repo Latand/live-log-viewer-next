@@ -104,6 +104,7 @@ describe("viewer api client", () => {
     expect(result.outcome).toBe("delivered");
     expect(calls[0]!.url).toContain("/api/tmux");
     expect(calls[0]!.body).toMatchObject({ conversationId: "conversation_abc", path: "" });
+    expect(calls[0]!.headers["x-llv-internal-service"]).toMatch(/^monitor\.[a-f0-9]{64}$/);
   });
 
   test("derives a pipeline's last movement from its stage attempts, not its birthday", async () => {

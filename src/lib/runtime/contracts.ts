@@ -239,6 +239,8 @@ export interface RuntimeSendCommand extends RuntimeCommandBase {
       offered none — an EXPLICIT empty selection is the `none` variant, which is
       present. */
   selectedContext?: SelectedContextRef;
+  /** Server-issued hash identifying one authorized operator gesture. */
+  operatorActionKey?: string;
 }
 
 /**

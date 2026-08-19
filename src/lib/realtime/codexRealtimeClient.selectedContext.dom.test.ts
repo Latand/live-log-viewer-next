@@ -88,6 +88,7 @@ interface ControlRequest {
   view?: { viewSessionId: string; deviceId: string };
   realtimeSessionId?: string;
   selectedContext?: SelectedContextRef;
+  operatorEventId?: string;
 }
 
 let requests: ControlRequest[] = [];
@@ -96,6 +97,7 @@ const PATH = "fixtures/projects/atlas/worker-a.jsonl";
 
 beforeEach(() => {
   requests = [];
+  dom.localStorage.clear();
   globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
     requests.push(JSON.parse(String(init?.body)) as ControlRequest);
     return { ok: true, status: 200, json: async () => ({ ok: true, sdp: "v=0\r\nanswer", realtimeSessionId: "live-1" }) } as unknown as Response;
@@ -141,16 +143,72 @@ test("a finished utterance reports the selected card against the call's own cred
   finished(peer, "user", "look at that one");
   await Promise.resolve();
 
-  const published = requests.filter((request) => request.action === "selectedContext");
-  expect(published).toHaveLength(1);
-  expect(published[0]!.realtimeSessionId).toBe("live-1");
-  expect(published[0]!.selectedContext).toMatchObject({
+  const operatorActivity = requests.filter((request) => request.action === "operatorActivity");
+  expect(operatorActivity).toHaveLength(1);
+  expect(operatorActivity[0]!.realtimeSessionId).toBe("live-1");
+  expect(operatorActivity[0]!.operatorEventId).toMatch(/^[a-f0-9]{64}$/);
+  const selectedContext = requests.filter((request) => request.action === "selectedContext");
+  expect(selectedContext).toHaveLength(1);
+  expect(selectedContext[0]!.selectedContext).toMatchObject({
     version: 1,
     state: "selected",
     conversationId: "conversation_atlas_a",
     viewSessionId: "vs-synthetic-1",
     deviceId: "dev-synthetic-1",
   });
+});
+
+test("arbitrary transient operator-event failures retain one hash-only identity until acknowledgement", async () => {
+  let operatorAttempts = 0;
+  globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+    const request = JSON.parse(String(init?.body)) as ControlRequest;
+    requests.push(request);
+    if (request.action === "operatorActivity" && operatorAttempts++ < 4) throw new Error("offline");
+    return { ok: true, status: 200, json: async () => ({ ok: true, sdp: "v=0\r\nanswer", realtimeSessionId: "live-1" }) } as unknown as Response;
+  }) as typeof fetch;
+  const peer = await liveCall("conversation_voice_retry");
+
+  finished(peer, "user", "retry my event");
+  for (let index = 0; index < 4; index += 1) {
+    for (let microtask = 0; microtask < 4; microtask += 1) await Promise.resolve();
+    peer.channel.onopen?.();
+  }
+  for (let microtask = 0; microtask < 4; microtask += 1) await Promise.resolve();
+
+  const published = requests.filter((request) => request.action === "operatorActivity");
+  expect(published).toHaveLength(5);
+  expect(new Set(published.map((request) => request.operatorEventId)).size).toBe(1);
+  expect(dom.localStorage.length).toBe(0);
+
+  peer.channel.onopen?.();
+  await Promise.resolve();
+  expect(requests.filter((request) => request.action === "operatorActivity")).toHaveLength(5);
+});
+
+test("call teardown keeps an unacknowledged hash identity for the next live peer without storing speech", async () => {
+  let failActivity = true;
+  globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+    const request = JSON.parse(String(init?.body)) as ControlRequest;
+    requests.push(request);
+    if (request.action === "operatorActivity" && failActivity) throw new Error("offline");
+    return { ok: true, status: 200, json: async () => ({ ok: true, sdp: "v=0\r\nanswer", realtimeSessionId: "live-1" }) } as unknown as Response;
+  }) as typeof fetch;
+  const conversationId = "conversation_voice_teardown";
+  const client = codexRealtimeClient(conversationId);
+  const peer = await liveCall(conversationId);
+  finished(peer, "user", "private spoken fixture");
+  for (let index = 0; index < 4; index += 1) await Promise.resolve();
+
+  await client.stop();
+  const stored = Array.from({ length: dom.localStorage.length }, (_, index) => dom.localStorage.getItem(dom.localStorage.key(index)!)).join("\n");
+  expect(stored).toMatch(/^[\[\]",a-f0-9]+$/);
+  expect(stored).not.toContain("private spoken fixture");
+
+  failActivity = false;
+  const restartedPeer = await liveCall(conversationId);
+  restartedPeer.channel.onopen?.();
+  for (let index = 0; index < 4; index += 1) await Promise.resolve();
+  expect(dom.localStorage.length).toBe(0);
 });
 
 test("streaming fragments and the agent's own speech publish nothing", async () => {
@@ -160,7 +218,7 @@ test("streaming fragments and the agent's own speech publish nothing", async () 
   finished(peer, "assistant", "The build is green.");
   await Promise.resolve();
 
-  expect(requests.filter((request) => request.action === "selectedContext")).toHaveLength(0);
+  expect(requests.filter((request) => request.action === "selectedContext" || request.action === "operatorActivity")).toHaveLength(0);
 });
 
 test("each finished utterance reports again, so a mid-call re-selection is honoured", async () => {
@@ -168,10 +226,11 @@ test("each finished utterance reports again, so a mid-call re-selection is honou
   finished(peer, "user", "look at that one");
   viewBus.reportSlice({ mode: "list", focusedPath: null, selectedPaths: [], visiblePaths: [], camera: null });
   finished(peer, "user", "never mind, general status");
-  await Promise.resolve();
+  for (let index = 0; index < 4; index += 1) await Promise.resolve();
 
   const published = requests.filter((request) => request.action === "selectedContext");
   expect(published).toHaveLength(2);
   expect(published[0]!.selectedContext).toMatchObject({ state: "selected" });
   expect(published[1]!.selectedContext).toMatchObject({ state: "none" });
+  expect(requests.filter((request) => request.action === "operatorActivity")).toHaveLength(2);
 });

@@ -10,10 +10,12 @@ type RecordLike = Record<string, unknown>;
 // v5: meta/command user records no longer open windows (issue #406) — persisted
 // v4 boundaries could start before the real initiating prompt.
 const turnBoundaryCache = globalCache<[number, number, TurnBoundary | null]>("last-turn-v5");
-const recentTurnWindowsCache = globalCache<[number, number, RecentTurnWindows]>("recent-turn-windows-v2");
+const recentTurnWindowsCache = globalCache<[number, number, RecentTurnWindows]>("recent-turn-windows-v3");
 
 export interface RecentTurnWindows {
   windows: TurnBoundary[];
+  operatorActions?: Array<{ key: string; atMs: number }>;
+  unprovenancedUserActions?: Array<{ key: string; atMs: number }>;
   operatorActionsAtMs?: number[];
   unprovenancedUserActionsAtMs?: number[];
   prefixTruncated: boolean;
@@ -159,16 +161,18 @@ export function recentTurnWindowsFromRecords(records: RecordLike[], codex: boole
 
 /** Direct operator actions are preserved independently from turn windows.
     A short agent turn can end before the operator's engagement window, and a
-    steering action can occur inside an already-open turn. Codex Viewer input
-    carries the structured-user marker; Claude uses the feed's user/system
-    classification so SDK, peer, coordinator, and automation envelopes remain
-    agent activity without being reclassified as operator input. */
+    steering action can occur inside an already-open turn. Codex requires the
+    server-issued operator key inside its structured marker. Claude requires a
+    provider record id plus explicit human/typed provenance, keeping SDK, peer,
+    coordinator, and automation envelopes in the agent lane. */
 export function recentTurnActivityFromRecords(
   records: RecordLike[],
   codex: boolean,
-): Pick<RecentTurnWindows, "windows" | "operatorActionsAtMs" | "unprovenancedUserActionsAtMs"> {
+): Pick<RecentTurnWindows, "windows" | "operatorActions" | "unprovenancedUserActions" | "operatorActionsAtMs" | "unprovenancedUserActionsAtMs"> {
   const operatorActions = new Set<number>();
+  const provenOperatorActions = new Map<string, number>();
   const unprovenancedUserActions = new Set<number>();
+  const unprovenancedUserActionIdentities = new Map<string, number>();
   for (const record of records) {
     const atMs = parseMillis(record.timestamp);
     if (atMs === null) continue;
@@ -182,7 +186,11 @@ export function recentTurnActivityFromRecords(
           .map((part) => stringValue(part.text) ?? stringValue(part.input_text) ?? "")
           .join("\n");
       }
-      if (text && decodeCodexStructuredUserText(text).structured) operatorActions.add(atMs);
+      const operatorActionKey = text ? decodeCodexStructuredUserText(text).operatorActionKey : undefined;
+      if (operatorActionKey) {
+        operatorActions.add(atMs);
+        provenOperatorActions.set(operatorActionKey, Math.min(provenOperatorActions.get(operatorActionKey) ?? atMs, atMs));
+      }
       continue;
     }
     if (!isTurnStart(record, false)) continue;
@@ -191,12 +199,35 @@ export function recentTurnActivityFromRecords(
       : stringValue(recordValue(record.origin)?.kind);
     if (originKind === "human" || record.promptSource === "typed") {
       operatorActions.add(atMs);
+      const uuid = stringValue(record.uuid);
+      if (uuid) {
+        const key = `claude:${uuid}`;
+        provenOperatorActions.set(key, Math.min(provenOperatorActions.get(key) ?? atMs, atMs));
+      }
     } else if (!isClaudeProtocolUser(record)) {
       unprovenancedUserActions.add(atMs);
+      const uuid = stringValue(record.uuid);
+      if (uuid) {
+        const key = `claude:${uuid}`;
+        unprovenancedUserActionIdentities.set(
+          key,
+          Math.min(unprovenancedUserActionIdentities.get(key) ?? atMs, atMs),
+        );
+      }
     }
   }
   return {
     windows: recentTurnWindowsFromRecords(records, codex),
+    ...(provenOperatorActions.size > 0 ? {
+      operatorActions: [...provenOperatorActions]
+        .map(([key, actionAtMs]) => ({ key, atMs: actionAtMs }))
+        .sort((left, right) => left.atMs - right.atMs || left.key.localeCompare(right.key)),
+    } : {}),
+    ...(unprovenancedUserActionIdentities.size > 0 ? {
+      unprovenancedUserActions: [...unprovenancedUserActionIdentities]
+        .map(([key, actionAtMs]) => ({ key, atMs: actionAtMs }))
+        .sort((left, right) => left.atMs - right.atMs || left.key.localeCompare(right.key)),
+    } : {}),
     operatorActionsAtMs: [...operatorActions].sort((left, right) => left - right),
     unprovenancedUserActionsAtMs: [...unprovenancedUserActions].sort((left, right) => left - right),
   };

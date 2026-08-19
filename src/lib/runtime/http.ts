@@ -4,7 +4,9 @@ import { NextRequest, NextResponse } from "next/server";
 import crypto from "node:crypto";
 
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
+import { directOperatorActivityAuthority } from "@/lib/agent/operatorAuthority";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
+import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorActivity";
 
 import { RuntimeHostUnavailableError, runtimeHostClient, type RuntimeHostClient } from "./client";
 import { parseRuntimeCommand } from "./commands";
@@ -24,6 +26,7 @@ export interface RuntimeHttpDependencies {
   structuredEnabled?(): boolean;
   registry?(): AgentRegistry;
   enqueue?: typeof enqueueStructuredMessage;
+  recordOperatorActivity?: typeof recordDirectOperatorWakatimeActivity;
   kick?(): void | Promise<void>;
 }
 
@@ -33,6 +36,7 @@ const DEFAULT_DEPENDENCIES: RuntimeHttpDependencies = {
   structuredEnabled: () => structuredHostsEnabled(),
   registry: agentRegistry,
   enqueue: enqueueStructuredMessage,
+  recordOperatorActivity: recordDirectOperatorWakatimeActivity,
   kick: kickStructuredDeliveryQueue,
 };
 
@@ -105,6 +109,20 @@ export async function handleRuntimeCommand(
   }
   const client = dependencies.client();
   try {
+    let operatorActionKey: string | undefined;
+    if ((command.kind === "send" || command.kind === "steer" || command.kind === "answer")
+      && directOperatorActivityAuthority(request).ok
+      && dependencies.recordOperatorActivity) {
+      try {
+        const action = dependencies.recordOperatorActivity({
+          conversationId: command.conversationId,
+          idempotencyKey: command.idempotencyKey,
+        });
+        operatorActionKey = action?.key;
+      } catch {
+        return NextResponse.json({ error: "direct operator activity could not be recorded" }, { status: 503 });
+      }
+    }
     if ((command.kind === "send" || command.kind === "steer") && dependencies.enqueue) {
       const admitted = await dependencies.enqueue({
         path: "",
@@ -118,6 +136,7 @@ export async function handleRuntimeCommand(
         ...(rawImages ? { images: rawImages } : command.images?.length ? { imageRefs: command.images } : {}),
         ...(command.runtime ? { runtime: command.runtime } : {}),
         ...(command.selectedContext ? { selectedContext: command.selectedContext } : {}),
+        ...(operatorActionKey ? { operatorActionKey } : {}),
       }, {
         enabled: dependencies.structuredEnabled ?? (() => structuredHostsEnabled()),
         client: () => client,
@@ -138,7 +157,11 @@ export async function handleRuntimeCommand(
       }
     }
     if (!client) return NextResponse.json({ error: "runtime host socket is unavailable" }, { status: 503 });
-    const result = await client.command(command);
+    const result = await client.command(
+      operatorActionKey && (command.kind === "send" || command.kind === "steer")
+        ? { ...command, operatorActionKey }
+        : command,
+    );
     if (result.receipt.status === "pending" || result.receipt.status === "queued") {
       dependencies.kick?.();
     }

@@ -60,6 +60,7 @@ interface SendEffect {
   /** #844: the selected-card reference the operator submitted with. Replayed
       from the durable payload, never re-read from a live view. */
   selectedContext?: SelectedContextRef;
+  operatorActionKey?: string;
   eventSeq: number;
 }
 
@@ -166,6 +167,10 @@ function sendEffect(effect: StructuredDeliveryEffect): SendEffect | null {
   /* A malformed reference drops the same way malformed settings do: the
      message must never be stranded by its own provenance. */
   const selectedContext = parseSelectedContextRef(effect.payload.selectedContext);
+  const operatorActionKey = typeof effect.payload.operatorActionKey === "string"
+    && /^[a-f0-9]{64}$/.test(effect.payload.operatorActionKey)
+    ? effect.payload.operatorActionKey
+    : undefined;
   return {
     operationId,
     conversationId,
@@ -177,6 +182,7 @@ function sendEffect(effect: StructuredDeliveryEffect): SendEffect | null {
     ...(policy ? { policy } : {}),
     ...(runtime ? { runtime } : {}),
     ...(selectedContext ? { selectedContext } : {}),
+    ...(operatorActionKey ? { operatorActionKey } : {}),
   };
 }
 
@@ -505,6 +511,7 @@ export class StructuredDeliveryQueue {
         expectedTurnId: effect.policy === "interrupt-active" ? null : deliveryFence,
         ...(effect.runtime ? { runtime: effect.runtime } : {}),
         ...(effect.selectedContext ? { selectedContext: effect.selectedContext } : {}),
+        ...(effect.operatorActionKey ? { operatorActionKey: effect.operatorActionKey } : {}),
       };
       await this.port.transition(
         effect.operationId,

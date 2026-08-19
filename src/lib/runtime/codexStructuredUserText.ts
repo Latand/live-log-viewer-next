@@ -34,16 +34,20 @@ export interface DecodedCodexStructuredUserText {
   /** The selected-card reference this turn was admitted with, or null. A
       corrupt or forged value decodes as null: the record still reads. */
   selectedContext: SelectedContextRef | null;
+  /** Hash-only identity minted after server-side operator authorization. */
+  operatorActionKey?: string;
 }
 
 export function encodeCodexStructuredUserText(
   text: string,
   contentDigest?: string,
   selectedContext?: SelectedContextRef | null,
+  operatorActionKey?: string,
 ): string {
   const attributes: string[] = [];
   if (contentDigest) attributes.push(`sha256=${contentDigest}`);
   if (selectedContext) attributes.push(`ctx=${encodeSelectedContextRef(selectedContext)}`);
+  if (operatorActionKey && SHA256.test(operatorActionKey)) attributes.push(`op=${operatorActionKey}`);
   if (attributes.length === 0) return STRUCTURED_USER_MARKER + text;
   return `<!-- llv:structured-user ${attributes.join(" ")} -->\n${text}`;
 }
@@ -53,11 +57,19 @@ export function decodeCodexStructuredUserText(value: string): DecodedCodexStruct
   if (marker) {
     let contentDigest: string | null = null;
     let selectedContext: SelectedContextRef | null = null;
+    let operatorActionKey: string | undefined;
     for (const [, name, attribute] of marker[1]!.matchAll(ATTRIBUTE)) {
       if (name === "sha256" && SHA256.test(attribute!)) contentDigest = attribute!;
       if (name === "ctx") selectedContext = decodeSelectedContextRef(attribute!);
+      if (name === "op" && SHA256.test(attribute!)) operatorActionKey = attribute!;
     }
-    return { text: value.slice(marker[0].length), structured: true, contentDigest, selectedContext };
+    return {
+      text: value.slice(marker[0].length),
+      structured: true,
+      contentDigest,
+      selectedContext,
+      ...(operatorActionKey ? { operatorActionKey } : {}),
+    };
   }
   if (!value.startsWith(STRUCTURED_USER_MARKER)) {
     return { text: value, structured: false, contentDigest: null, selectedContext: null };
