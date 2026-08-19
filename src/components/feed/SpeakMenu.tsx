@@ -53,8 +53,23 @@ export function speakMenuPlacement(
   const roomBelow = viewport.height - anchor.bottom - margin;
   const roomAbove = anchor.top - margin;
   const flip = content.height > roomBelow && roomAbove > roomBelow;
-  if (flip) return { left, top: Math.max(margin, anchor.top - margin - content.height) };
-  return { left, top: Math.max(margin, Math.min(anchor.bottom + margin, viewport.height - margin - content.height)) };
+  /* One clamp for both branches: the flipped side used to carry only the lower
+     bound, so an anchor scrolled far below the fold placed the menu below the
+     fold with it. */
+  const wanted = flip ? anchor.top - margin - content.height : anchor.bottom + margin;
+  return { left, top: Math.max(margin, Math.min(wanted, viewport.height - margin - content.height)) };
+}
+
+/**
+ * Whether the trigger is still on screen at all. A popover anchored to a
+ * scrolled-away trigger has nothing to point at, and `speakMenuPlacement`
+ * clamps rather than following it off the edge — so the caller that must
+ * disappear with its message (the alert) asks this instead of being pinned to
+ * the viewport edge for the rest of the session (#1030). Touching an edge still
+ * counts as on screen, so a degenerate zero rect never hides anything.
+ */
+function anchorOnScreen(rect: { top: number; bottom: number; left: number; right: number }, viewport: { width: number; height: number }): boolean {
+  return rect.bottom >= 0 && rect.top <= viewport.height && rect.right >= 0 && rect.left <= viewport.width;
 }
 
 /**
@@ -70,23 +85,32 @@ export function speakMenuPlacement(
  * to the same trigger: an inline `absolute` alert is clipped by the message row
  * (`.feed-cv` carries `content-visibility: auto`, hence paint containment) and
  * painted over by the next message, which is what #1024 condemned.
+ *
+ * Also reports whether the trigger is still on screen, which is measured even
+ * while the caller renders nothing — a caller that hides itself when the
+ * trigger scrolls away has to be able to come back when it scrolls in again.
  */
 export function useAnchoredBox(
   anchorRef: RefObject<HTMLElement | null>,
   rootRef: RefObject<HTMLElement | null>,
   fallbackWidth = MENU_WIDTH,
-): CSSProperties {
+): { style: CSSProperties; onScreen: boolean } {
   const [box, setBox] = useState<{ left: number; top: number } | null>(null);
+  const [onScreen, setOnScreen] = useState(true);
 
   const measure = useCallback(() => {
     const anchor = anchorRef.current;
-    const root = rootRef.current;
-    if (!anchor || !root) return;
+    if (!anchor) return;
     const rect = anchor.getBoundingClientRect();
+    const viewport = { width: window.innerWidth, height: window.innerHeight };
+    setOnScreen(anchorOnScreen(rect, viewport));
+    /* Nothing rendered to place — the visibility above is what brings it back. */
+    const root = rootRef.current;
+    if (!root) return;
     const next = speakMenuPlacement(
       { top: rect.top, bottom: rect.bottom, right: rect.right },
       { width: root.offsetWidth || fallbackWidth, height: root.offsetHeight },
-      { width: window.innerWidth, height: window.innerHeight },
+      viewport,
     );
     /* Replaced only when it actually moved, so a re-measure that agrees with
        the current placement does not schedule another render. */
@@ -104,7 +128,7 @@ export function useAnchoredBox(
     };
   }, [measure]);
 
-  return box ? { left: box.left, top: box.top } : { left: -9999, top: 0, opacity: 0 };
+  return { style: box ? { left: box.left, top: box.top } : { left: -9999, top: 0, opacity: 0 }, onScreen };
 }
 
 /**
@@ -117,11 +141,50 @@ export function useAnchoredBox(
  * Only ever shown while the menu is CLOSED — both hang off the same trigger at
  * the same coordinates, so an open menu carries the same text in its own
  * notice slot rather than being painted over by it.
+ *
+ * It also has to END (#1030). Portalling it to `fixed` coordinates took away
+ * the exit the inline alert had — scrolling out of sight with the message it
+ * belongs to — and the placement math clamps a scrolled-away anchor back onto
+ * the screen, so a refusal that nothing clears parked itself at the viewport
+ * edge over the rest of the session. Two ends, both borrowed from the menu
+ * rather than invented: it goes away with its trigger (`onScreen`), and an
+ * outside pointerdown or Escape dismisses it. Neither can fire while the menu
+ * owns those keys and clicks, because this is unmounted for as long as the menu
+ * is open. Pointerdowns inside the alert are left alone so the key path it
+ * names can be selected and copied, and the trigger keeps its own click.
  */
-export function SpeakAlert({ anchorRef, children }: { anchorRef: RefObject<HTMLElement | null>; children: ReactNode }) {
+export function SpeakAlert({
+  anchorRef,
+  onDismiss,
+  children,
+}: {
+  anchorRef: RefObject<HTMLElement | null>;
+  onDismiss: () => void;
+  children: ReactNode;
+}) {
   const rootRef = useRef<HTMLDivElement>(null);
-  const style = useAnchoredBox(anchorRef, rootRef, ALERT_WIDTH);
-  if (typeof document === "undefined") return null;
+  const { style, onScreen } = useAnchoredBox(anchorRef, rootRef, ALERT_WIDTH);
+
+  useEffect(() => {
+    const away = (event: Event) => {
+      const target = event.target as Node | null;
+      if (rootRef.current?.contains(target ?? null) || anchorRef.current?.contains(target ?? null)) return;
+      onDismiss();
+    };
+    const key = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      onDismiss();
+    };
+    window.addEventListener("pointerdown", away);
+    window.addEventListener("keydown", key);
+    return () => {
+      window.removeEventListener("pointerdown", away);
+      window.removeEventListener("keydown", key);
+    };
+  }, [anchorRef, onDismiss]);
+
+  if (typeof document === "undefined" || !onScreen) return null;
   return createPortal(
     <div
       ref={rootRef}
@@ -173,7 +236,7 @@ export function SpeakMenu({ anchorRef, info, option, chars, notice, freeReplay, 
   const { t } = useLocale();
   const isMobile = useIsMobile();
   const rootRef = useRef<HTMLDivElement>(null);
-  const style = useAnchoredBox(anchorRef, rootRef);
+  const { style } = useAnchoredBox(anchorRef, rootRef);
   const [saving, setSaving] = useState<BackendId | null>(null);
   const [error, setError] = useState<string | null>(null);
   /* Only a re-render trigger: the cost line is answered by the tts cache, and
