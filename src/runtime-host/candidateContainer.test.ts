@@ -223,9 +223,7 @@ test("actual Viewer Compose keys remain covered by the candidate generator", () 
     tmuxTmpdir: "/run/user/1000/agent-log-viewer",
   });
   const environment = environmentFromArgs(args);
-  // BOOTSTRAP (#1042 phase 1): the viewer service carries no group_add until
-  // a deployer that covers the key is live; phase 2 restores ["957"] here.
-  expect(service.group_add).toEqual([]);
+  expect(service.group_add).toEqual(["957"]);
   expect(valuesAfter(args, "--group-add")).toEqual(service.group_add);
   expect(Object.keys(environment).sort()).toEqual([
     ...new Set([
@@ -267,9 +265,7 @@ test("runtime-host propagates every Viewer Compose interpolation input", () => {
     LLV_ENV_FILE: expect.any(String),
   });
   expect(config.services.viewer.user).toBe("1201:1202");
-  // BOOTSTRAP (#1042 phase 1): group_add is runtime-host-only; phase 2
-  // restores ["1203"] on the viewer service.
-  expect(config.services["runtime-host"].group_add).toEqual(["1203"]);
+  expect(config.services.viewer.group_add).toEqual(["1203"]);
   expect(config.services.viewer.environment.TMUX_TMPDIR).toBe("/run/user/1201/agent-log-viewer");
   expect(config.services.viewer.volumes.map((volume) => volume.source)).toContain("/tmp/tmux-1201");
 });
