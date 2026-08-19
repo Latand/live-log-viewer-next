@@ -282,7 +282,7 @@ test("query results keep the registry-overlaid durable conversation id (#1040 re
     observedAt: "2026-07-13T00:00:00.000Z",
   }]);
 
-  const unfiltered = await GET(new Request("http://127.0.0.1/api/conversations?project=" + encodeURIComponent(projectForCwd(sandbox))));
+  const unfiltered = await GET(new Request("http://127.0.0.1/api/conversations?project=" + encodeURIComponent(projectForCwd(sandbox) ?? "")));
   const unfilteredBody = await unfiltered.json() as { items: Array<{ path: string; conversationId: string | null }> };
   const filtered = await GET(new Request("http://127.0.0.1/api/conversations?q=cinnabar%20quay"));
   const filteredBody = await filtered.json() as { items: Array<{ path: string; conversationId: string | null }> };
@@ -291,5 +291,5 @@ test("query results keep the registry-overlaid durable conversation id (#1040 re
   const unfilteredRow = unfilteredBody.items.find((item) => item.path === transcript);
   const filteredRow = filteredBody.items.find((item) => item.path === transcript);
   expect(unfilteredRow?.conversationId).toStartWith("conversation_");
-  expect(filteredRow?.conversationId).toBe(unfilteredRow?.conversationId ?? null);
+  expect(filteredRow?.conversationId ?? null).toEqual(unfilteredRow?.conversationId ?? null);
 });
