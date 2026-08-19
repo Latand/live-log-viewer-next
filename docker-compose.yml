@@ -11,8 +11,6 @@ x-viewer-common: &viewer-common
   pid: host
   privileged: true
   "user": "${LLV_UID:-1000}:${LLV_GID:-1000}"
-  group_add:
-    - "${LLV_DOCKER_GID:-957}"
   working_dir: /app
   env_file:
     - ${LLV_ENV_FILE:-${HOME:-/home/user}/.config/agent-log-viewer/service.env}
@@ -40,6 +38,10 @@ services:
   # lifecycle after the listener migration.
   runtime-host:
     <<: *viewer-common
+    # BOOTSTRAP (#1042 phase 1): group_add stays runtime-host-only until a
+    # deployer that knows the key is live; phase 2 moves it back to the anchor.
+    group_add:
+      - "${LLV_DOCKER_GID:-957}"
     restart: unless-stopped
     profiles:
       - runtime-host
