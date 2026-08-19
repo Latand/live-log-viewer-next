@@ -1001,7 +1001,20 @@ async function listConversations(
      it reads what the process already knows, the same corpus `board_snapshot`
      reads. Forcing a full fresh scan per call meant every agent asking "what is
      running" started another full-corpus walk beside the coordinator's own. */
-  const files = (await dependencies.completedFileScan()).snapshot.files;
+  const snapshot = (await dependencies.completedFileScan()).snapshot;
+  const files = snapshot.files;
+  if (project) {
+    const knownProject = snapshot.projectCatalog.some((entry) => entry.project === project)
+      || files.some((entry) => entry.project === project);
+    if (!knownProject) {
+      return redactPayload({
+        count: 0,
+        conversations: [],
+        code: "UNKNOWN_PROJECT",
+        hint: "The requested project does not match a canonical project key in the completed scan.",
+      });
+    }
+  }
   const conversations = files
     .filter((entry) => entry.engine === "claude" || entry.engine === "codex")
     .filter((entry) => !project || entry.project === project)

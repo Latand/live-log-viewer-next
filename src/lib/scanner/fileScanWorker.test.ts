@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { conversationCatalogSnapshot, replaceConversationCatalog } from "./conversationCatalog";
 import { collectFileScanInWorker, fileScanWorkerEnabled } from "./fileScanWorker";
 
 const directories: string[] = [];
@@ -63,6 +64,63 @@ test("worker scan streams the resource scope, keeps the caller event loop live, 
   } finally {
     clearInterval(timer);
   }
+});
+
+test("worker scans publish a Claude transcript that appears in a previously sessionless project directory", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-file-scan-worker-late-session-"));
+  directories.push(directory);
+  const home = path.join(directory, "home");
+  const stateDir = path.join(directory, "state");
+  const temporaryDir = path.join(directory, "tmp");
+  const repository = path.join(directory, "late-session-repository");
+  const encodedCwd = repository.replaceAll(path.sep, "-");
+  const projectDirectory = path.join(home, ".claude", "projects", encodedCwd);
+  fs.mkdirSync(path.join(repository, ".git"), { recursive: true });
+  fs.writeFileSync(path.join(repository, ".git", "HEAD"), "ref: refs/heads/main\n");
+  fs.writeFileSync(path.join(repository, ".git", "config"), [
+    '[remote "origin"]',
+    "\turl = https://example.invalid/team/late-session-repository.git",
+    "",
+  ].join("\n"));
+  fs.mkdirSync(projectDirectory, { recursive: true });
+  fs.mkdirSync(temporaryDir, { recursive: true });
+  fs.mkdirSync(path.join(temporaryDir, `claude-${process.getuid?.() ?? 1000}`));
+  fs.writeFileSync(path.join(projectDirectory, "historical.jsonl.wakatime"), "{}\n");
+  replaceConversationCatalog([]);
+  const runtime = {
+    launch: {
+      executable: process.execPath,
+      workerPath: path.resolve(import.meta.dir, "../fileScanner.worker.ts"),
+    },
+    cwd: path.resolve(import.meta.dir, "../../.."),
+    env: {
+      ...process.env,
+      HOME: home,
+      XDG_CONFIG_HOME: path.join(directory, "config"),
+      LLV_STATE_DIR: stateDir,
+      TMPDIR: temporaryDir,
+      NODE_ENV: "production" as const,
+      LLV_AGENT_REGISTRY_SQLITE: "off",
+    },
+    timeoutMs: 10_000,
+  };
+
+  const before = await collectFileScanInWorker({ persist: false, persistIndex: true }, undefined, runtime);
+  expect(before.files).toEqual([]);
+
+  const transcript = path.join(projectDirectory, "late-session.jsonl");
+  fs.writeFileSync(
+    transcript,
+    `${JSON.stringify({ type: "user", cwd: repository, message: { content: "late session" } })}\n`,
+  );
+  const after = await collectFileScanInWorker({ persist: false, persistIndex: true }, undefined, runtime);
+
+  expect(after.complete).toBe(true);
+  expect(after.files.some((entry) => entry.path === transcript)).toBe(true);
+  expect(conversationCatalogSnapshot()).toContainEqual(expect.objectContaining({
+    path: transcript,
+    project: expect.stringMatching(/^repo-[0-9a-f]{32}$/),
+  }));
 });
 
 test("aborting a worker scan kills the child and releases its timer and listener", async () => {

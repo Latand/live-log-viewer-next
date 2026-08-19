@@ -181,6 +181,65 @@ test("list_conversations reads the completed generation and starts no raw scan",
   expect(counts.rawScans).toBe(0);
 });
 
+test("list_conversations returns the same project rows when the caller's own transcript is absent", async () => {
+  const snapshot = {
+    files: [{
+      ...scanRow(1),
+      path: "/sessions/project-worker.jsonl",
+      project: "repo-fixture",
+      conversationId: "conversation_project_worker",
+    }],
+    projectCatalog: [{
+      project: "repo-fixture",
+      displayName: "fixture",
+      conversations: 1,
+      smt: 1_780_000_001,
+    }],
+    complete: true,
+  };
+  const bindingsFor = (conversationId: string, callerProject: string) => viewerMcpBindings(undefined, undefined, {
+    completedFileScan: async () => ({ snapshot }),
+    callerAttribution: () => ({ kind: "manager", conversationId, role: null }),
+    callerProject: () => callerProject,
+  } as never);
+
+  const ownSeat = await bindingsFor("conversation_missing_own_transcript", "repo-fixture")
+    .list_conversations({ clientRequestId: "list-own-seat", project: "repo-fixture" });
+  const foreignSeat = await bindingsFor("conversation_foreign_seat", "repo-foreign")
+    .list_conversations({ clientRequestId: "list-foreign-seat", project: "repo-fixture" });
+
+  expect(ownSeat).toEqual(foreignSeat);
+  expect(ownSeat).toMatchObject({ count: 1, conversations: [{ project: "repo-fixture" }] });
+});
+
+test("list_conversations identifies an unknown project instead of returning a silent zero", async () => {
+  const snapshot = {
+    files: [{ ...scanRow(1), project: "repo-fixture" }],
+    projectCatalog: [{
+      project: "repo-fixture",
+      displayName: "fixture",
+      conversations: 1,
+      smt: 1_780_000_001,
+    }],
+    complete: true,
+  };
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    completedFileScan: async () => ({ snapshot }),
+  } as never);
+
+  const result = await bindings.list_conversations({
+    clientRequestId: "list-unknown-project",
+    project: "fixture",
+  });
+
+  expect(result).toMatchObject({
+    count: 0,
+    conversations: [],
+    code: "UNKNOWN_PROJECT",
+    hint: expect.stringContaining("canonical project key"),
+  });
+});
+
 test("get_conversation reads the completed generation when it already carries the transcript", async () => {
   const { counts, injected } = dependencies();
   const bindings = viewerMcpBindings(undefined, undefined, injected);
