@@ -79,7 +79,7 @@ class FakeDeploymentAdapter implements ViewerDeploymentAdapter {
     this.calls.push(`resolve:${revision}`);
     await this.resolveGate;
     if (this.resolveFailures > 0) { this.resolveFailures -= 1; throw new Error("revision resolution timed out"); }
-    return revision === "origin/main" ? "a".repeat(40) : revision;
+    return revision === "origin/main" || revision.startsWith("refs/heads/") ? "a".repeat(40) : revision;
   }
   async buildCandidate(deploymentId: string, revision: string): Promise<ViewerReleaseIdentity> {
     this.calls.push(`build:${revision}`);
@@ -181,6 +181,40 @@ test("deployment admission is serialized and idempotent", async () => {
   releaseBuild();
   await coordinator.waitForDeployment(first.deploymentId);
   expect(adapter.calls.some((call) => call.startsWith("retain-only:"))).toBe(true);
+  store.close();
+});
+
+test("issue 1033: a branch ref is resolved by the host and the ledger records the exact commit", async () => {
+  const store = journal("ref-admission");
+  const adapter = new FakeDeploymentAdapter();
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" });
+
+  const receipt = await coordinator.requestViewerDeployment({ ref: "refs/heads/main", idempotencyKey: "deploy-ref" });
+
+  expect(receipt).toMatchObject({ state: "accepted", revision: "a".repeat(40) });
+  if (receipt.state !== "accepted") throw new Error("deployment was not accepted");
+  expect(adapter.calls.filter((call) => call.startsWith("resolve:"))).toEqual(["resolve:refs/heads/main"]);
+  await coordinator.waitForDeployment(receipt.deploymentId);
+  /* The exactness the ledger keeps is the RESOLVED commit; the ref is kept
+     beside it as what the caller asked for. */
+  expect(coordinator.readViewerDeployment(receipt.deploymentId)).toMatchObject({
+    requestedRevision: "refs/heads/main",
+    revision: "a".repeat(40),
+    phase: "succeeded",
+    candidate: { revision: "a".repeat(40) },
+  });
+  store.close();
+});
+
+test("issue 1033: a ref outside the canonical repository's branches is refused before resolution", async () => {
+  const store = journal("ref-refusal");
+  const adapter = new FakeDeploymentAdapter();
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" });
+
+  await expect(coordinator.requestViewerDeployment({ ref: "refs/tags/v1", idempotencyKey: "deploy-tag" }))
+    .rejects.toThrow("deployment revision must be origin/main, a canonical branch ref, or a full commit SHA");
+
+  expect(adapter.calls).toEqual([]);
   store.close();
 });
 
