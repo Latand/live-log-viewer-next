@@ -81,13 +81,29 @@ describe("runtime image permission determinism (#76)", () => {
 describe("runtime-host Docker credentials (#102)", () => {
   test("runtime UID 1000 retains the host Docker socket group through nsenter", () => {
     expect(compose).toContain('"user": "${LLV_UID:-1000}:${LLV_GID:-1000}"');
-    expect(compose).toContain('group_add:\n      - "${LLV_DOCKER_GID:-957}"');
+    expect(compose).toContain('group_add:\n    - "${LLV_DOCKER_GID:-957}"');
     const wrapper = dockerfile.match(/cat > \/usr\/local\/bin\/docker <<'WRAPPER'([\s\S]*?)WRAPPER/)?.[1];
     expect(wrapper).toBeDefined();
     expect(wrapper).toContain("nsenter -t 1 -m -p --");
     expect(wrapper).toContain('/usr/bin/setpriv --reuid="$uid" --regid="$gid" --groups="$groups" --');
     expect(wrapper).not.toContain("--setgid");
     expect(wrapper).not.toContain("--setuid");
+  });
+
+  test("host CLI and tmux shims retain every supplementary group", () => {
+    const cliShim = dockerfile.match(/make_nsenter_shim\(\) \{([\s\S]*?)\n\}/)?.[1];
+    expect(cliShim).toBeDefined();
+    expect(cliShim).toContain("groups=\\$(id -G | tr ' ' ',')");
+    expect(cliShim).toContain('/usr/bin/setpriv --reuid="\\$uid" --regid="\\$gid" --groups="\\$groups" --');
+    expect(cliShim).not.toContain("--setgid");
+    expect(cliShim).not.toContain("--setuid");
+
+    const tmuxWrapper = dockerfile.match(/cat > \/usr\/local\/bin\/tmux <<'WRAPPER'([\s\S]*?)WRAPPER/)?.[1];
+    expect(tmuxWrapper).toBeDefined();
+    expect(tmuxWrapper).toContain("groups=$(id -G | tr ' ' ',')");
+    expect(tmuxWrapper).toContain('/usr/bin/setpriv --reuid="$uid" --regid="$gid" --groups="$groups" --');
+    expect(tmuxWrapper).not.toContain("--setgid");
+    expect(tmuxWrapper).not.toContain("--setuid");
   });
 
   test("the runtime passwd home follows the portable Compose HOME for every git caller (#999)", () => {
