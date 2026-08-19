@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
+import { FOCUS_TARGET_SHAPES } from "@/lib/attention/targets";
 import { listRoles, resolveRole } from "@/lib/roles/registry";
 import { ROLE_IDS } from "@/lib/roles/types";
 import {
@@ -549,4 +550,74 @@ test("create_pipeline admits the stage shapes the engine accepts", () => {
     clientRequestId: "stage-shape-role-override", task: "t", repoDir: "/repo",
     stages: [{ id: "build", kind: "run", "prompt": "Implement.", role: { roleId: "builder", engine: "codex" } }],
   }).success).toBe(false);
+});
+
+/* #1016 — `target` was a free-form record with a prose list of kind names, so
+   the discriminator and every per-kind field lived only in the TypeScript type:
+   five plausible guesses in a row were rejected by one undifferentiated
+   sentence. The tool definition now publishes the union itself. */
+test("request_attention publishes the per-kind target schema in its tool definition", async () => {
+  await withProtocolClient(inertBindings(), async (client) => {
+    const listed = await client.listTools();
+    const tool = listed.tools.find((candidate) => candidate.name === "request_attention");
+    const target = tool?.inputSchema.properties?.target as {
+      oneOf?: { properties?: Record<string, { const?: string; description?: string }>; required?: string[] }[];
+    } | undefined;
+    const branches = new Map((target?.oneOf ?? []).map(
+      (branch) => [branch.properties?.kind?.const, branch] as const,
+    ));
+
+    /* One branch per kind, in the table's own order — a real oneOf, not a hint. */
+    expect([...branches.keys()]).toEqual(FOCUS_TARGET_SHAPES.map((shape) => shape.kind));
+    for (const [kind, required] of [
+      ["conversation", ["kind"]],
+      ["pipeline", ["kind", "pipelineId"]],
+      ["stage", ["kind", "pipelineId", "stageId"]],
+      ["flowRound", ["kind", "flowId", "round"]],
+      ["task", ["kind", "taskId"]],
+      ["draft", ["kind", "draftId"]],
+      ["region", ["kind", "project", "rect"]],
+      ["point", ["kind", "project", "x", "y"]],
+    ] as const) {
+      expect([kind, branches.get(kind)?.required?.slice().sort()]).toEqual([kind, [...required].sort()]);
+    }
+    /* The conversation branch carries BOTH accepted input forms: the durable id
+       the rest of this surface speaks, and the transcript path the record
+       stores. Neither is required alone, which is why the binding — not the
+       protocol boundary — answers a conversation target naming neither. */
+    const conversation = branches.get("conversation")?.properties;
+    expect(conversation?.conversationId?.description).toContain("survives resume and migration");
+    expect(conversation?.path?.description).toContain("supply at least one");
+
+    /* One pasteable example per kind, on the definition a caller reads first. */
+    for (const shape of FOCUS_TARGET_SHAPES) expect(tool?.description).toContain(shape.example);
+    expect(tool?.description).toContain("A rejected target names the kind it read and the fields that kind expects");
+  });
+});
+
+/* The published union must never be stricter than the record's own validator,
+   or a target the server would have accepted dies at the protocol boundary
+   without ever reaching the error that explains targets. */
+test("request_attention admits every target shape the attention record accepts", () => {
+  const schema = TOOL_INPUT_SCHEMAS.request_attention;
+  const accepted = [
+    ...FOCUS_TARGET_SHAPES.map((shape) => JSON.parse(shape.example) as Record<string, unknown>),
+    { kind: "conversation", path: "/tmp/session.jsonl" },
+    /* Both forms together, and the extra keys `isFocusTarget` has always
+       tolerated: every call that works today keeps working. */
+    { kind: "conversation", path: "/tmp/session.jsonl", conversationId: "conversation_9f2c", note: "kept" },
+    { kind: "flowRound", flowId: "flow_9f2c", round: 0 },
+    { kind: "region", project: "demo", rect: { x: -10, y: -10, w: 0, h: 0 } },
+    { kind: "point", project: "demo", x: -1.5, y: 2.5, zoom: 0.25 },
+  ];
+  for (const target of accepted) {
+    const parsed = schema.safeParse({ clientRequestId: "target-shape", target, reason: "Look at this." });
+    expect([target.kind, parsed.success]).toEqual([target.kind, true]);
+    expect((parsed.data as { target: unknown } | undefined)?.target).toEqual(target);
+  }
+  /* An unknown kind never resolves to a branch, so the discriminator is the one
+     thing the boundary does refuse — naming the kinds it knows. */
+  const refused = schema.safeParse({ clientRequestId: "target-shape", target: { kind: "elsewhere" }, reason: "Look." });
+  expect(refused.success).toBe(false);
+  expect(JSON.stringify(refused.error?.issues)).toContain("conversation");
 });
