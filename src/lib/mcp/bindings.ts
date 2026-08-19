@@ -441,6 +441,10 @@ function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function objectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function integer(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isInteger(value) ? value : fallback;
 }
@@ -992,19 +996,25 @@ async function entryForPath(
 
 async function listConversations(
   args: McpToolArgs,
-  dependencies: Pick<ViewerMcpDomainDependencies, "completedFileScan">,
+  control: ViewerControlDependencies,
 ): Promise<McpToolPayload> {
   const project = text(args.project);
   const query = text(args.query).toLocaleLowerCase();
   const limit = Math.max(1, Math.min(100, integer(args.limit, 50)));
-  /* The COMPLETED generation, not a private fresh scan (#845). This is a listing:
-     it reads what the process already knows, the same corpus `board_snapshot`
-     reads. Forcing a full fresh scan per call meant every agent asking "what is
-     running" started another full-corpus walk beside the coordinator's own. */
-  const snapshot = (await dependencies.completedFileScan()).snapshot;
-  const files = snapshot.files;
+  /* MCP servers are caller processes, so their module-local completed scan can
+     differ by launch time. Read the Viewer's one completed generation instead:
+     /api/files is centrally cached and does not start a caller-local corpus
+     walk, while the project hint keeps its bounded scheme window relevant. */
+  const source = await readViewerControl(
+    control,
+    project ? `/api/files?project=${encodeURIComponent(project)}` : "/api/files",
+  );
+  if (!Array.isArray(source.files) || !Array.isArray(source.projectCatalog)) {
+    throw new ViewerControlResponseError("Viewer control returned a malformed completed file generation");
+  }
+  const files = source.files.filter(objectRecord) as unknown as FileEntry[];
   if (project) {
-    const knownProject = snapshot.projectCatalog.some((entry) => entry.project === project)
+    const knownProject = source.projectCatalog.some((entry) => objectRecord(entry) && text(entry.project) === project)
       || files.some((entry) => entry.project === project);
     if (!knownProject) {
       return redactPayload({
@@ -2280,7 +2290,7 @@ export function viewerMcpBindings(
     create_pipeline: createPipeline,
     pipeline_action: (args) => pipelineAction(args, domainDependencies),
     link_task_to_pipeline: (args) => linkTaskToPipeline(args, linkTaskDependencies),
-    list_conversations: (args) => listConversations(args, domainDependencies),
+    list_conversations: (args) => listConversations(args, controlDependencies),
     get_conversation: (args, context) => getConversation(args, domainDependencies, context),
     deploy_exact_sha: (args) => deployExactSha(args, controlDependencies, domainDependencies),
     get_pipeline: getPipeline,

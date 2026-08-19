@@ -88,10 +88,6 @@ test("worker scans publish a Claude transcript that appears in a previously sess
   fs.writeFileSync(path.join(projectDirectory, "historical.jsonl.wakatime"), "{}\n");
   replaceConversationCatalog([]);
   const runtime = {
-    launch: {
-      executable: process.execPath,
-      workerPath: path.resolve(import.meta.dir, "../fileScanner.worker.ts"),
-    },
     cwd: path.resolve(import.meta.dir, "../../.."),
     env: {
       ...process.env,
@@ -121,6 +117,48 @@ test("worker scans publish a Claude transcript that appears in a previously sess
     path: transcript,
     project: expect.stringMatching(/^repo-[0-9a-f]{32}$/),
   }));
+});
+
+test("a completion frame followed by worker failure preserves the published conversation catalog", async () => {
+  const retained = {
+    path: "/sessions/retained.jsonl",
+    root: "codex-sessions" as const,
+    name: "retained.jsonl",
+    project: "repo-retained",
+    title: "retained",
+    firstPrompt: "",
+    engine: "codex" as const,
+    kind: "session",
+    fmt: "codex" as const,
+    mtime: 1_780_000_000,
+    size: 100,
+  };
+  const replacement = { ...retained, path: "/sessions/replacement.jsonl", name: "replacement.jsonl", title: "replacement" };
+  const completion = JSON.stringify({
+    type: "complete",
+    snapshot: { files: [], projectCatalog: [], conversationCatalog: [replacement], complete: true },
+  });
+  const { directory, workerPath } = fixtureWorker(`
+    process.stdin.resume();
+    process.stdin.on("end", () => {
+      process.stdout.write(${JSON.stringify(`${completion}\n`)}, () => {
+        process.exitCode = 1;
+      });
+    });
+  `);
+  replaceConversationCatalog([retained]);
+
+  await expect(collectFileScanInWorker(
+    { persist: false, persistIndex: false },
+    undefined,
+    {
+      launch: { executable: process.execPath, workerPath },
+      cwd: directory,
+      timeoutMs: 2_000,
+    },
+  )).rejects.toThrow("file scanner worker exited before completion");
+
+  expect(conversationCatalogSnapshot()).toEqual([retained]);
 });
 
 test("aborting a worker scan kills the child and releases its timer and listener", async () => {

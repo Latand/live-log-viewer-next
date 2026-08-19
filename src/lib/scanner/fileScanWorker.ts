@@ -100,6 +100,7 @@ export function collectFileScanInWorker(
     let stderr = "";
     let outputBytes = 0;
     let completed: FileCatalogScan | null = null;
+    let completedConversationCatalog: FileCatalogScan["conversationCatalog"];
     let terminationError: Error | null = null;
     let timer: unknown;
     const finish = (error?: Error, snapshot?: FileCatalogScan) => {
@@ -152,8 +153,8 @@ export function collectFileScanInWorker(
           /* The full scanner runs in a child process. Its process-global
              publication cannot update the parent that serves /api/conversations,
              so carry the completed uncapped catalog over the existing worker
-             response and publish it here. */
-          if (conversationCatalog) publishConversationCatalogForScan(conversationCatalog, catalogScanToken, snapshot.complete);
+             response. Publication waits for successful worker exit below. */
+          completedConversationCatalog = conversationCatalog;
           completed = snapshot;
         }
       }
@@ -191,6 +192,9 @@ export function collectFileScanInWorker(
         const detail = stderr.trim();
         finish(new Error(`file scanner worker exited before completion (${signal ?? code ?? "unknown"})${detail ? `: ${detail}` : ""}`));
         return;
+      }
+      if (completedConversationCatalog) {
+        publishConversationCatalogForScan(completedConversationCatalog, catalogScanToken, completed.complete);
       }
       finish(undefined, completed);
     });

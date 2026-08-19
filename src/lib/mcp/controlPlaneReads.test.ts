@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { targetedConversationAtPath, viewerMcpBindings, type TargetedConversationDependencies } from "./bindings";
+import { targetedConversationAtPath, viewerMcpBindings, type TargetedConversationDependencies, type ViewerControlDependencies } from "./bindings";
 import { createMcpToolService, MemoryMcpReceiptStore } from "./server";
 
 /**
@@ -122,20 +122,23 @@ function dependencies(options: { scans?: number; projections?: number; completed
   const targetedCalls: Array<{ pathname: string; signal: AbortSignal | undefined; deadlineAt: number | undefined }> = [];
   let inflight: Promise<{ snapshot: typeof snapshot }> | null = null;
   let materialised: ReturnType<typeof projection> | null = null;
+  const completedFileScan = () => {
+    counts.scanCalls += 1;
+    if (inflight) return inflight;
+    counts.scans += 1;
+    if (counts.scans > allowedScans) throw new Error(`a second completed scan generation was started (${counts.scans})`);
+    inflight = Promise.resolve({ snapshot });
+    /* Released a turn later, so genuinely concurrent callers join and a LATER
+       read still gets a fresh generation — exactly the real cache's shape. */
+    void inflight.then(() => { queueMicrotask(() => { inflight = null; }); });
+    return inflight;
+  };
   return {
     counts,
+    snapshot,
+    completedFileScan,
     injected: {
-      completedFileScan: () => {
-        counts.scanCalls += 1;
-        if (inflight) return inflight;
-        counts.scans += 1;
-        if (counts.scans > allowedScans) throw new Error(`a second completed scan generation was started (${counts.scans})`);
-        inflight = Promise.resolve({ snapshot });
-        /* Released a turn later, so genuinely concurrent callers join and a LATER
-           read still gets a fresh generation — exactly the real cache's shape. */
-        void inflight.then(() => { queueMicrotask(() => { inflight = null; }); });
-        return inflight;
-      },
+      completedFileScan,
       registrySnapshot: () => {
         counts.projectionCalls += 1;
         if (materialised) return materialised;
@@ -170,19 +173,35 @@ function dependencies(options: { scans?: number; projections?: number; completed
   };
 }
 
-test("list_conversations reads the completed generation and starts no raw scan", async () => {
-  const { counts, injected } = dependencies();
-  const bindings = viewerMcpBindings(undefined, undefined, injected);
+function filesControl(
+  snapshot: { files: unknown[]; projectCatalog: unknown[] },
+  onRead: (pathname: string) => void | Promise<void> = () => {},
+): ViewerControlDependencies {
+  return {
+    get: async (pathname) => {
+      await onRead(pathname);
+      return snapshot;
+    },
+    post: async () => ({}),
+  };
+}
+
+test("list_conversations reads the Viewer's completed generation and starts no caller-local scan", async () => {
+  const { counts, injected, snapshot } = dependencies();
+  const controlReads: string[] = [];
+  const bindings = viewerMcpBindings(undefined, filesControl(snapshot, (pathname) => { controlReads.push(pathname); }), injected);
 
   const result = await bindings.list_conversations({ clientRequestId: "list-1", limit: 50 }) as { count: number };
 
   expect(result.count).toBe(50);
-  expect(counts.scans).toBe(1);
+  expect(controlReads).toEqual(["/api/files"]);
+  expect(counts.scanCalls).toBe(0);
+  expect(counts.scans).toBe(0);
   expect(counts.rawScans).toBe(0);
 });
 
-test("list_conversations returns the same project rows when the caller's own transcript is absent", async () => {
-  const snapshot = {
+test("list_conversations returns the same Viewer rows when the caller-local completed generations disagree", async () => {
+  const viewerSnapshot = {
     files: [{
       ...scanRow(1),
       path: "/sessions/project-worker.jsonl",
@@ -197,19 +216,28 @@ test("list_conversations returns the same project rows when the caller's own tra
     }],
     complete: true,
   };
-  const bindingsFor = (conversationId: string, callerProject: string) => viewerMcpBindings(undefined, undefined, {
-    completedFileScan: async () => ({ snapshot }),
+  let callerLocalReads = 0;
+  const bindingsFor = (
+    conversationId: string,
+    callerProject: string,
+    localFiles: typeof viewerSnapshot.files,
+  ) => viewerMcpBindings(undefined, filesControl(viewerSnapshot), {
+    completedFileScan: async () => {
+      callerLocalReads += 1;
+      return { snapshot: { ...viewerSnapshot, files: localFiles } };
+    },
     callerAttribution: () => ({ kind: "manager", conversationId, role: null }),
     callerProject: () => callerProject,
   } as never);
 
-  const ownSeat = await bindingsFor("conversation_missing_own_transcript", "repo-fixture")
+  const ownSeat = await bindingsFor("conversation_missing_own_transcript", "repo-fixture", [])
     .list_conversations({ clientRequestId: "list-own-seat", project: "repo-fixture" });
-  const foreignSeat = await bindingsFor("conversation_foreign_seat", "repo-foreign")
+  const foreignSeat = await bindingsFor("conversation_foreign_seat", "repo-foreign", viewerSnapshot.files)
     .list_conversations({ clientRequestId: "list-foreign-seat", project: "repo-fixture" });
 
   expect(ownSeat).toEqual(foreignSeat);
   expect(ownSeat).toMatchObject({ count: 1, conversations: [{ project: "repo-fixture" }] });
+  expect(callerLocalReads).toBe(0);
 });
 
 test("list_conversations identifies an unknown project instead of returning a silent zero", async () => {
@@ -223,7 +251,7 @@ test("list_conversations identifies an unknown project instead of returning a si
     }],
     complete: true,
   };
-  const bindings = viewerMcpBindings(undefined, undefined, {
+  const bindings = viewerMcpBindings(undefined, filesControl(snapshot), {
     completedFileScan: async () => ({ snapshot }),
   } as never);
 
@@ -696,8 +724,14 @@ test("operator_snapshot keeps the transcript-only registry projection lazy", asy
 test("twenty concurrent control reads join one scan and one projection", async () => {
   /* A single-flight completed scan, as the real one is: the assertion is that the
      READS join it rather than each reserving their own generation. */
-  const { counts, injected } = dependencies({ scans: 1, projections: 1 });
-  const bindings = viewerMcpBindings(undefined, undefined, injected);
+  const { counts, completedFileScan, injected } = dependencies({ scans: 1, projections: 1 });
+  const controlSnapshot: { files: unknown[]; projectCatalog: unknown[] } = { files: [], projectCatalog: [] };
+  const control = filesControl(controlSnapshot, async () => {
+    const completed = await completedFileScan();
+    controlSnapshot.files = completed.snapshot.files;
+    controlSnapshot.projectCatalog = completed.snapshot.projectCatalog;
+  });
+  const bindings = viewerMcpBindings(undefined, control, injected);
 
   const results = await Promise.all(Array.from({ length: CONCURRENCY }, (_value, index) => {
     const read = index % 3 === 0
