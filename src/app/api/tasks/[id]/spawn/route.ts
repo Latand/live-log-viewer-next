@@ -10,7 +10,7 @@ import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import type { AccountContext } from "@/lib/accounts/contracts";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
 import { reasoningFromBody } from "@/lib/agent/efforts";
-import { modelFromBody } from "@/lib/agent/models";
+import { modelFromBody, validateLaunchModel } from "@/lib/agent/models";
 import { agentRegistry, type AgentRegistry, type SpawnReceipt } from "@/lib/agent/registry";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
 import { spawnResponseForReceipt, type SpawnResponse as AgentSpawnResponse } from "@/lib/agent/spawnResponse";
@@ -231,6 +231,12 @@ async function postTaskSpawn(
     ? { ...(retryOf.launchProfile.model != null ? { model: retryOf.launchProfile.model } : {}) }
     : body);
   if (selectedModel.error) return NextResponse.json({ error: selectedModel.error }, { status: 400 });
+  let launchModel = selectedModel.model;
+  if (!retryOf && launchModel) {
+    const validation = validateLaunchModel(engine, launchModel);
+    if ("error" in validation) return NextResponse.json({ error: validation.error }, { status: 400 });
+    launchModel = validation.model;
+  }
   const cwdResult = cwdFromBody(retryOf ? retryOf.cwd : body.cwd);
   if (!cwdResult.cwd) return NextResponse.json({ error: cwdResult.error ?? "invalid working directory" }, { status: cwdResult.status ?? 400 });
 
@@ -244,7 +250,7 @@ async function postTaskSpawn(
   const shape = {
     engine,
     cwd: cwdResult.cwd,
-    model: selectedModel.model,
+    model: launchModel,
     effort: reasoning.effort,
     fast: reasoning.fast,
     accountId: account.accountId,
@@ -255,7 +261,7 @@ async function postTaskSpawn(
   const accountPin = registry.spawnReceiptForClientAttempt(clientAttemptId)?.accountPin
     ?? (previous !== null);
   const specBase = freshSpecFor(engine, cwdResult.cwd, {
-    model: selectedModel.model,
+    model: launchModel,
     effort: reasoning.effort,
     fast: reasoning.fast,
     codexHome: engine === "codex" ? account.home : null,
@@ -292,7 +298,7 @@ async function postTaskSpawn(
   const pipelineSpawnParams = (srcPath: string | null) => ({
     repoDir: cwdResult.cwd!,
     engine,
-    model: selectedModel.model,
+    model: launchModel,
     effort: reasoning.effort,
     launchId: launchReceipt.launchId,
     conversationId: launchReceipt.conversationId,

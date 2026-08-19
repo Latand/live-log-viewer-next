@@ -5,11 +5,139 @@ import path from "node:path";
 import { expect, test } from "bun:test";
 import { NextRequest } from "next/server";
 
+import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
+import { ENGINE_MODELS } from "@/lib/agent/models";
 import { AgentRegistry, type SpawnReceipt } from "@/lib/agent/registry";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
 
 import { POST } from "./route";
+
+test("task spawn rejects an explicit unknown model before receipt or assignment mutation", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "llv-task-model-admission-"));
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const tasks: BoardTask[] = [{
+    id: "10410000-89c5-0064-9118-51661c4f1041",
+    project: "live-log-viewer-next",
+    status: "inbox",
+    text: "Reject an unknown task-spawn model",
+    placement: "pinned",
+    pos: { x: 0, y: 0 },
+    assignments: [],
+    createdAt: "2026-08-19T12:00:00.000Z",
+    updatedAt: "2026-08-19T12:00:00.000Z",
+  }];
+  let writes = 0;
+  let spawnCalls = 0;
+  const dependencies = {
+    registry: () => registry,
+    loadTasks: () => tasks,
+    mutateTasks: () => {
+      writes += 1;
+      throw new Error("assignment mutation must stay unreachable");
+    },
+    resolveSpawnAccount: () => ({
+      engine: "codex" as const,
+      accountId: "codex-test",
+      kind: "managed" as const,
+      home: cwd,
+      transcriptRoot: cwd,
+      env: { NODE_ENV: "test" },
+    }),
+    resolveSpawnedTranscriptPath: async () => null,
+    spawnAgentWithPrompt: async () => {
+      spawnCalls += 1;
+      throw new Error("spawn must stay unreachable");
+    },
+  } as Parameters<typeof POST.withDependencies>[2];
+  const response = await POST.withDependencies(new NextRequest(
+    `http://127.0.0.1/api/tasks/${tasks[0]!.id}/spawn`,
+    {
+      method: "POST",
+      headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json" },
+      body: JSON.stringify({ engine: "codex", model: "gpt-5.6-codex", cwd }),
+    },
+  ), { params: Promise.resolve({ id: tasks[0]!.id }) }, dependencies);
+
+  expect(response.status).toBe(400);
+  expect(await response.json()).toEqual({
+    error: `invalid codex model id "gpt-5.6-codex"; valid codex model ids: ${ENGINE_MODELS.codex.map((option) => option.id).join(", ")}`,
+  });
+  expect(Object.keys(registry.snapshot().receipts)).toHaveLength(0);
+  expect(writes).toBe(0);
+  expect(spawnCalls).toBe(0);
+});
+
+test("task retry preserves a failed receipt's historical model without fresh-launch validation", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "llv-task-model-retry-"));
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const historicalModel = "claude-opus-4-8-20260630";
+  const begun = registry.beginSpawnRequest({
+    engine: "claude",
+    cwd,
+    accountId: "claude-test",
+    origin: { kind: "operator" },
+    launchProfile: emptyLaunchProfile({ cwd, model: historicalModel, effort: "high" }),
+  });
+  if (begun.kind !== "created") throw new Error("expected historical task launch receipt");
+  registry.failSpawn(begun.receipt.launchId, "historical launch failed before pane creation");
+  let tasks: BoardTask[] = [{
+    id: "10410001-89c5-0064-9118-51661c4f1041",
+    project: "live-log-viewer-next",
+    status: "inbox",
+    text: "Retry a historical task-spawn model",
+    placement: "pinned",
+    pos: { x: 0, y: 0 },
+    assignments: [{
+      launchId: begun.receipt.launchId,
+      clientAttemptId: begun.receipt.clientAttemptId,
+      conversationId: begun.receipt.conversationId,
+      path: null,
+      panePid: null,
+      state: "failed",
+      error: "historical launch failed before pane creation",
+      at: "2026-08-19T12:00:00.000Z",
+      accountId: "claude-test",
+      engine: "claude",
+    }],
+    createdAt: "2026-08-19T12:00:00.000Z",
+    updatedAt: "2026-08-19T12:00:00.000Z",
+  }];
+  let launchedModel: string | null | undefined;
+  const dependencies = {
+    registry: () => registry,
+    loadTasks: () => tasks,
+    mutateTasks: (mutator: (current: BoardTask[]) => { tasks?: BoardTask[]; result: unknown }) => {
+      const mutation = mutator(tasks);
+      if (mutation.tasks) tasks = mutation.tasks;
+      return mutation.result;
+    },
+    resolveSpawnAccount: () => ({
+      engine: "claude" as const,
+      accountId: "claude-test",
+      kind: "managed" as const,
+      home: cwd,
+      transcriptRoot: cwd,
+      env: { NODE_ENV: "test" },
+    }),
+    resolveSpawnedTranscriptPath: async () => null,
+    spawnAgentWithPrompt: async (spec: { launchProfile?: { model?: string | null } }) => {
+      launchedModel = spec.launchProfile?.model;
+      throw new Error("retry reached the launch seam");
+    },
+  } as Parameters<typeof POST.withDependencies>[2];
+  const response = await POST.withDependencies(new NextRequest(
+    `http://127.0.0.1/api/tasks/${tasks[0]!.id}/spawn`,
+    {
+      method: "POST",
+      headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json" },
+      body: JSON.stringify({ retryOfLaunchId: begun.receipt.launchId }),
+    },
+  ), { params: Promise.resolve({ id: tasks[0]!.id }) }, dependencies);
+
+  expect(response.status).toBe(500);
+  expect(launchedModel).toBe(historicalModel);
+});
 
 test("task attribution failure replays one launched pane into one durable assignment", async () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "llv-task-spawn-282-"));
