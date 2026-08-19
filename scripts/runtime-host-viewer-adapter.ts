@@ -31,7 +31,7 @@ import {
   viewerComposeServiceUid,
   viewerRegistryBackendMode,
 } from "../src/runtime-host/candidateContainer";
-import { ensureCanonicalMirror } from "../src/runtime-host/canonicalMirror";
+import { ensureCanonicalMirror, resolveCanonicalRevision } from "../src/runtime-host/canonicalMirror";
 import { allocateBuiltCandidatePort, candidatePortsFromEnvironmentLists, isCandidatePortAvailable } from "../src/runtime-host/candidatePort";
 import { withBootstrapMcpHealthProbeAdmission } from "../src/runtime-host/bootstrapMcpHealthProbeAdmission";
 import { viewerCandidateContainerName, viewerCandidateImageName, viewerComposeSnapshotName } from "../src/runtime-host/deploymentArtifacts";
@@ -125,11 +125,7 @@ async function ensureMirror(): Promise<void> {
 }
 
 async function resolveRevision(requested: string): Promise<string> {
-  await ensureMirror();
-  const value = requested === "origin/main" ? "refs/heads/main^{commit}" : `${requested}^{commit}`;
-  const revision = await command(["git", "--git-dir", mirrorDir, "rev-parse", "--verify", value]);
-  if (!/^[0-9a-f]{40}$/.test(revision)) throw new Error("canonical repository returned an invalid revision");
-  return revision;
+  return resolveCanonicalRevision(requested, { mirrorDir, remote: canonicalRemote }, { run: command, ensureMirror });
 }
 
 function composeConfigFile(container: string): string {

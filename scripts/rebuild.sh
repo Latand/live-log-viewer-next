@@ -3,6 +3,7 @@
 set -euo pipefail
 
 PORT="${PORT:-8898}"
+CANONICAL_REMOTE="${LLV_VIEWER_CANONICAL_REMOTE:-https://github.com/Latand/live-log-viewer-next.git}"
 if [ "$#" -gt 1 ]; then
   echo "usage: rebuild.sh [origin/main|full-commit-sha]" >&2
   exit 1
@@ -24,6 +25,22 @@ esac
 if [ "${#IDEMPOTENCY_KEY}" -gt 200 ]; then
   echo "invalid deployment idempotency key" >&2
   exit 1
+fi
+
+# No SHA is ever carried by hand into a deploy (#1033): the default request
+# reads the canonical main tip machine-to-machine and posts the exact commit it
+# read. An explicit SHA argument stays a pinned redeploy or rollback.
+if [ "$REVISION" = "origin/main" ]; then
+  if ! ls_remote="$(GIT_TERMINAL_PROMPT=0 git ls-remote "$CANONICAL_REMOTE" refs/heads/main)"; then
+    echo "could not read refs/heads/main from $CANONICAL_REMOTE" >&2
+    exit 1
+  fi
+  REVISION="$(printf '%s\n' "$ls_remote" | head -n 1 | cut -f1)"
+  if [[ ! "$REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "could not resolve refs/heads/main at $CANONICAL_REMOTE" >&2
+    exit 1
+  fi
+  echo "resolved refs/heads/main at $CANONICAL_REMOTE: $REVISION"
 fi
 
 BASE="http://127.0.0.1:${PORT}"

@@ -8,9 +8,15 @@ Production application releases are admitted by the durable runtime host:
 scripts/rebuild.sh
 ```
 
-The default request resolves `origin/main` in the adapter's canonical mirror. A full lowercase commit SHA can be selected with `LLV_DEPLOY_REVISION`. Reuse `LLV_DEPLOY_IDEMPOTENCY_KEY` after a client timeout to receive the original receipt.
+The default invocation carries no revision at all. `scripts/rebuild.sh` reads the canonical `refs/heads/main` tip itself with `git ls-remote` against the canonical remote and posts that exact commit, so no SHA is ever retyped between a note and a deploy — a mangled tail deployed a revision that never existed for six hours (#1032, #1033). It prints the resolved SHA before requesting admission.
 
-The canonical mirror defaults to `https://github.com/Latand/live-log-viewer-next.git`. Set `LLV_VIEWER_CANONICAL_REMOTE` when a different public or private mirror is required.
+A pinned redeploy or rollback still names its commit: `scripts/rebuild.sh <full lowercase commit SHA>`, or `LLV_DEPLOY_REVISION`. A revision the canonical repository does not carry is refused at admission with `revision <sha> not found in the canonical repository (fetched from <remote>)`.
+
+Reuse `LLV_DEPLOY_IDEMPOTENCY_KEY` after a client timeout to receive the original receipt.
+
+`POST /api/runtime/deployments` takes the same target two ways: `{"revision": "<full commit SHA>", "idempotencyKey": "..."}` pins a commit, and `{"ref": "refs/heads/<branch>", "idempotencyKey": "..."}` names a branch of the canonical repository, which the host adapter resolves in the canonical mirror. A request carrying both is refused. Only `refs/heads/*` of the canonical repository is accepted — no tags, no remote-tracking refs, no revision expressions. Whichever way the request named its target, the deployment ledger records the requested target and the exact resolved SHA that was built and promoted.
+
+The canonical remote defaults to `https://github.com/Latand/live-log-viewer-next.git` for both the adapter's mirror and `scripts/rebuild.sh`. Set `LLV_VIEWER_CANONICAL_REMOTE` when a different public or private mirror is required.
 
 The runtime host serializes deployment requests and journals every phase before invoking the host adapter. Its stable listener reads `state/viewer-release.json` for each new connection, so promotion and rollback use an atomic target-file rename. Candidate and previous Viewer containers stay under Docker ownership on alternate loopback ports.
 
@@ -27,7 +33,7 @@ the Docker socket GID as a supplementary group. `LLV_UID`, `LLV_GID`,
 candidate containers preserve supported host overrides. The Docker namespace
 shim restores the complete credential set before invoking the host CLI.
 
-The built-in host adapter lives at `/app/scripts/runtime-host-viewer-adapter.ts`. It maintains a clean canonical Git mirror under the durable state directory, resolves a commit SHA, creates a detached source worktree, builds a versioned Docker image, starts a distinct candidate container with the runtime-host socket configured, checks process readiness plus remote authorized/unauthorized behavior and every referenced CSS/JavaScript asset, and atomically changes the listener target. Post-promotion failure restores the journaled previous target. Successful cleanup retains the serving and immediate rollback containers; failed and superseded managed candidates are retired.
+The built-in host adapter lives at `/app/scripts/runtime-host-viewer-adapter.ts`. It maintains a clean canonical Git mirror under the durable state directory, resolves the requested branch ref or SHA to an exact commit (peeling `^{commit}`, which is what proves the object is actually present), creates a detached source worktree, builds a versioned Docker image, starts a distinct candidate container with the runtime-host socket configured, checks process readiness plus remote authorized/unauthorized behavior and every referenced CSS/JavaScript asset, and atomically changes the listener target. Post-promotion failure restores the journaled previous target. Successful cleanup retains the serving and immediate rollback containers; failed and superseded managed candidates are retired.
 
 Each adapter action has a fixed deadline. Runtime-host records the adapter PID
 and process-start identity durably, launches it with a parent-death signal, and
@@ -49,7 +55,7 @@ recovery can replay it.
 
 | Action | JSON input |
 | --- | --- |
-| `resolve-revision` | `{ "revision": string }` |
+| `resolve-revision` | `{ "revision": string }` — `origin/main`, `refs/heads/<branch>`, or a full commit SHA |
 | `build-candidate` | `{ "deploymentId": string, "revision": string }` |
 | `start-candidate` | `{ "candidate": ViewerReleaseIdentity }` |
 | `current-release` | `{}` |
