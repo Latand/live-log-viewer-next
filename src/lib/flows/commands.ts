@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 
 import { isEngineEffort } from "@/lib/agent/efforts";
-import { isCodexLaunchModel, normalizeClaudeLaunchModel } from "@/lib/agent/models";
+import { validateLaunchModel } from "@/lib/agent/models";
 import { agentRegistry } from "@/lib/agent/registry";
 import { headCwd } from "@/lib/agent/transcript";
 import { livePaneTarget } from "@/lib/delivery";
@@ -41,32 +41,39 @@ function validateRole(value: unknown): RoleConfig | null {
  * model/effort blank out to the engine default. Returns null on an invalid
  * engine so the caller can 400 instead of silently keeping the old value.
  */
-export function applyRoleOverride(current: RoleConfig, patch: unknown): RoleConfig | null {
-  if (!patch || typeof patch !== "object" || Array.isArray(patch)) return null;
+function roleOverrideFromRequest(
+  current: RoleConfig,
+  patch: unknown,
+): { role: RoleConfig } | { error: string } {
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) return { error: "invalid reviewer role override" };
   const p = patch as Partial<RoleConfig>;
   const next: RoleConfig = { ...current };
   if (p.engine !== undefined) {
-    if (p.engine !== "claude" && p.engine !== "codex") return null;
+    if (p.engine !== "claude" && p.engine !== "codex") return { error: "invalid reviewer role override" };
     next.engine = p.engine;
   }
   if (p.model !== undefined) {
-    if (p.model !== null && typeof p.model !== "string") return null;
+    if (p.model !== null && typeof p.model !== "string") return { error: "invalid reviewer role override" };
     next.model = typeof p.model === "string" && p.model.trim() ? p.model.trim() : null;
   }
   if (p.effort !== undefined) {
-    if (p.effort !== null && typeof p.effort !== "string") return null;
+    if (p.effort !== null && typeof p.effort !== "string") return { error: "invalid reviewer role override" };
     next.effort = typeof p.effort === "string" && p.effort.trim() ? p.effort.trim() : null;
   }
-  /* Validate the MERGED config through the canonical launch validators, not just
-     primitive shapes (issue #118 Finding 3): a claude+gpt / codex+fable / bad
-     effort combination must be rejected here rather than persisting and failing at
-     the next reviewer launch. */
+  /* This override controls a future reviewer launch. Frozen round snapshots do
+     not pass through here when they resume or replay. */
   if (next.model) {
-    if (next.engine === "claude" && !normalizeClaudeLaunchModel(next.model)) return null;
-    if (next.engine === "codex" && !isCodexLaunchModel(next.model)) return null;
+    const validation = validateLaunchModel(next.engine, next.model);
+    if ("error" in validation) return validation;
+    next.model = validation.model;
   }
-  if (next.effort && !isEngineEffort(next.engine, next.effort)) return null;
-  return next;
+  if (next.effort && !isEngineEffort(next.engine, next.effort)) return { error: "invalid reviewer role override" };
+  return { role: next };
+}
+
+export function applyRoleOverride(current: RoleConfig, patch: unknown): RoleConfig | null {
+  const result = roleOverrideFromRequest(current, patch);
+  return "role" in result ? result.role : null;
 }
 
 export function rolesFromRequest(req: CreateFlowRequest): Record<"implementer" | "reviewer", RoleConfig> | null {
@@ -128,6 +135,11 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
   }
   const roles = rolesFromRequest(req);
   if (!roles) return { error: "invalid flow roles or preset", status: 400 };
+  if (roles.reviewer.model) {
+    const validation = validateLaunchModel(roles.reviewer.engine, roles.reviewer.model);
+    if ("error" in validation) return { error: validation.error, status: 400 };
+    roles.reviewer.model = validation.model;
+  }
   const registry = agentRegistry();
   const requestedConversationId = req.implementerConversationId?.startsWith("conversation_")
     ? req.implementerConversationId as `conversation_${string}`
@@ -489,8 +501,9 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
        reseated in place, so it is not overridable here (see PatchFlowRequest). */
     const patch = req.roles && typeof req.roles === "object" && !Array.isArray(req.roles) ? req.roles.reviewer : undefined;
     if (patch === undefined) return { error: "reviewer role override is required", status: 400 };
-    const merged = applyRoleOverride(flow.roles.reviewer, patch);
-    if (!merged) return { error: "invalid reviewer role override", status: 400 };
+    const override = roleOverrideFromRequest(flow.roles.reviewer, patch);
+    if ("error" in override) return { error: override.error, status: 400 };
+    const merged = override.role;
     flow.roles = { ...flow.roles, reviewer: merged };
     /* Manual mode parks a created-but-unspawned round at spawn_pending with its
        role already frozen (newRound/retry snapshot it). The override must reach

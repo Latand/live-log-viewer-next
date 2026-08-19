@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { validateLaunchModel } from "@/lib/agent/models";
 import { statePath } from "@/lib/configDir";
 import { canonicalProject } from "@/lib/projects/aliases";
 import { agentRegistry, type ConversationLookup } from "@/lib/agent/registry";
@@ -276,6 +277,24 @@ export function normalizeStages(value: unknown): { stages: WorkflowStage[] } | {
   const reviewCount = stages.filter((stage) => stage.kind === "review-loop").length;
   if (reviewCount !== 1 || stages.at(-1)?.kind !== "review-loop") {
     return { error: "stages must be implement+ followed by exactly one review-loop last" };
+  }
+  return { stages };
+}
+
+/** Validate only a workflow being admitted for a new run. Persisted workflow
+    snapshots keep bypassing this helper so restart/replay can retain historical
+    provider model ids. */
+export function validateWorkflowLaunchModels(stages: WorkflowStage[]): { stages: WorkflowStage[] } | { error: string } {
+  for (const stage of stages) {
+    const roles = stage.kind === "implement"
+      ? [stage.agent]
+      : [stage.reviewer, stage.fixer];
+    for (const role of roles) {
+      if (!role.model) continue;
+      const validation = validateLaunchModel(role.engine, role.model);
+      if ("error" in validation) return validation;
+      role.model = validation.model;
+    }
   }
   return { stages };
 }

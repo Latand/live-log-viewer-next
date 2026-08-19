@@ -3,6 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { ENGINE_MODELS } from "@/lib/agent/models";
+
 const previousStateDir = process.env.LLV_STATE_DIR;
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-durable-create-"));
 process.env.LLV_STATE_DIR = sandbox;
@@ -53,6 +55,33 @@ test("durable implementer identity creates a flow without scanner or live-host e
     targetSha: "12ad73656844d3583d44ae718d003c7f2f2c6ace",
     state: "waiting_ready",
   });
+});
+
+test("flow creation returns the catalog error before persisting an unknown reviewer model", async () => {
+  saveFlows([]);
+  const transcript = path.join(import.meta.dir, "fixtures", "codex-review-2026-07-12.jsonl");
+  const implementer = registry.ensureConversation("codex", transcript, null);
+
+  const result = await createFlowFromRequest({
+    implementerPath: transcript,
+    implementerConversationId: implementer.id,
+    deliverKickoff: false,
+    roles: {
+      implementer: { engine: "codex", model: "gpt-5.6-sol", effort: "high" },
+      reviewer: { engine: "codex", model: "gpt-fabricated", effort: "high" },
+    },
+    baseMode: "head",
+    baseRef: "12ad73656844d3583d44ae718d003c7f2f2c6ace",
+    mode: "auto",
+    reviewerMode: "headless",
+    roundLimit: 5,
+  }, []);
+
+  expect(result).toEqual({
+    error: `invalid codex model id "gpt-fabricated"; valid codex model ids: ${ENGINE_MODELS.codex.map((option) => option.id).join(", ")}`,
+    status: 400,
+  });
+  expect(loadFlows()).toEqual([]);
 });
 
 test("closeFlow rejects a replacement reviewer binding while preserving concurrent flows", async () => {
