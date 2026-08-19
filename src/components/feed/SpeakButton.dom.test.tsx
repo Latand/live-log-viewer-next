@@ -161,6 +161,30 @@ function alertNode(): HTMLElement | null {
   return document.querySelector("[data-tts-alert]") as HTMLElement | null;
 }
 
+/* Where the trigger sits on screen. happy-dom lays nothing out — every rect is
+   zeros — so the tests that care where the anchored popovers land, and whether
+   their trigger is still on screen at all, say so themselves. */
+function placeTrigger(button: HTMLButtonElement, top: number): void {
+  button.getBoundingClientRect = () =>
+    ({ top, bottom: top + 24, left: 400, right: 500, width: 100, height: 24, x: 400, y: top, toJSON: () => ({}) }) as DOMRect;
+}
+
+/** A scroll anywhere in the page, which every anchored popover re-measures on. */
+async function scrollPage(): Promise<void> {
+  flushSync(() => {
+    document.body.dispatchEvent(new dom.Event("scroll", { bubbles: true }) as unknown as Event);
+  });
+  await drainUpdates();
+}
+
+/** Escape, from wherever the focus happens to be. */
+async function pressEscape(): Promise<void> {
+  flushSync(() => {
+    document.body.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }) as unknown as Event);
+  });
+  await drainUpdates();
+}
+
 /* The TTS configuration is one module-level singleton shared by every control
    on the page (one fetch, all controls in step), and only a right-click menu
    re-reads it. So the two tests that change the active provider come LAST in
@@ -442,6 +466,100 @@ test("a message past the ceiling refuses out loud instead of being cut short", a
   view.host.remove();
 });
 
+/* #1030: portalling the refusal to `fixed` coordinates took away the only exit
+   it had — scrolling out of sight with its message — and the placement math
+   clamps a scrolled-away anchor back on screen, so the red box parked itself at
+   the top of the viewport for the rest of the session. The only thing that
+   cleared it was clicking Speak again, i.e. buying another synthesis. */
+test("a refusal is dismissed by Escape or a click away, with nothing bought", async () => {
+  let posts = 0;
+  globalThis.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
+    if (!init?.method) return Response.json(backendInfo);
+    posts += 1;
+    return new Response(new Blob(["audio"]));
+  }) as unknown as typeof fetch;
+  useFakeAudio();
+
+  const view = await mount("word ".repeat(MAX_TTS_MESSAGE_LENGTH / 4));
+  await speak(view);
+  expect(alertNode()).not.toBeNull();
+
+  await pressEscape();
+  expect(alertNode()).toBeNull();
+
+  /* Refused again, and this time dismissed by a click elsewhere — but not by a
+     pointerdown inside the alert itself, which is how the key path it names
+     stays selectable. */
+  await speak(view);
+  const alert = alertNode()!;
+  flushSync(() => {
+    alert.dispatchEvent(new dom.MouseEvent("pointerdown", { bubbles: true }) as unknown as Event);
+  });
+  await drainUpdates();
+  expect(alertNode()).not.toBeNull();
+  flushSync(() => {
+    document.body.dispatchEvent(new dom.MouseEvent("pointerdown", { bubbles: true }) as unknown as Event);
+  });
+  await drainUpdates();
+  expect(alertNode()).toBeNull();
+
+  /* Nothing above was a synthesis: a refusal now ends for free. */
+  expect(posts).toBe(0);
+  expect(playing()).toBeUndefined();
+
+  /* And the menu still owns Escape while it is open: the first press closes the
+     menu and hands focus back — the refusal it was carrying as its notice is
+     untouched, and reappears as its own popover — and only the next press
+     dismisses that. */
+  await speak(view);
+  expect(alertNode()).not.toBeNull();
+  await openMenu(view);
+  expect(alertNode()).toBeNull();
+  await pressEscape();
+  expect(menuOpen()).toBe(false);
+  expect(document.activeElement).toBe(view.button);
+  expect(alertNode()!.textContent).toContain("Too long to read aloud");
+  await pressEscape();
+  expect(alertNode()).toBeNull();
+
+  flushSync(() => { view.root.unmount(); });
+  view.host.remove();
+});
+
+/* The other half of #1030: the alert is anchored to the trigger, so it follows
+   the trigger while the feed scrolls and leaves with it — rather than being
+   clamped back onto the viewport edge over whatever the operator scrolls to. */
+test("the refusal alert tracks its trigger on scroll and leaves the screen with it", async () => {
+  globalThis.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
+    if (!init?.method) return Response.json(backendInfo);
+    throw new Error("unexpected synthesis");
+  }) as unknown as typeof fetch;
+  useFakeAudio();
+
+  const view = await mount("word ".repeat(MAX_TTS_MESSAGE_LENGTH / 4));
+  placeTrigger(view.button, 300);
+  await speak(view);
+  await scrollPage();
+  /* Under the trigger, right edges aligned: the same placement as the menu. */
+  expect(alertNode()!.style.top).toBe("332px");
+  expect(alertNode()!.style.left).toBe("276px");
+
+  /* Scrolled 2000px above the fold, the anchor is gone — and so is the alert,
+     instead of clamping to `top: 8`. */
+  placeTrigger(view.button, -2000);
+  await scrollPage();
+  expect(alertNode()).toBeNull();
+
+  /* Scrolled back to it, the refusal is still there to read. */
+  placeTrigger(view.button, 200);
+  await scrollPage();
+  expect(alertNode()!.textContent).toContain("Too long to read aloud");
+  expect(alertNode()!.style.top).toBe("232px");
+
+  flushSync(() => { view.root.unmount(); });
+  view.host.remove();
+});
+
 test("a chunk failure mid-sequence surfaces the provider error and stops cleanly", async () => {
   let posts = 0;
   globalThis.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
@@ -652,6 +770,10 @@ test("a provider with no key refuses out loud and names the file to drop it into
      the provider changed under it without a round trip on the play path. */
   const menu = await openMenu(view);
   expect(menu.textContent).toContain("Add the elevenlabs API key at /keys/elevenlabs");
+  /* And the tooltip, the surface that has to be right BEFORE the click, names
+     the missing key instead of promising a paid read it cannot perform
+     (#1030). */
+  expect(view.button.getAttribute("title")).toBe("Add the elevenlabs API key at /keys/elevenlabs");
   flushSync(() => {
     document.body.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }) as unknown as Event);
   });
