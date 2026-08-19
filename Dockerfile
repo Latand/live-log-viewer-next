@@ -89,7 +89,10 @@ case "\$wd" in
   "\$HOME"|"\$HOME"/*) ;;
   *) wd=\$HOME ;;
 esac
-exec nsenter -t 1 -m -p --setgid="\$(id -g)" --setuid="\$(id -u)" -- /bin/sh -c 'cd "\$1" || exit; shift; exec "\$@"' sh "\$wd" "$host_path" "\$@"
+uid=\$(id -u)
+gid=\$(id -g)
+groups=\$(id -G | tr ' ' ',')
+exec nsenter -t 1 -m -p -- /usr/bin/setpriv --reuid="\$uid" --regid="\$gid" --groups="\$groups" -- /bin/sh -c 'cd "\$1" || exit; shift; exec "\$@"' sh "\$wd" "$host_path" "\$@"
 WRAPPER
   chmod +x "/usr/local/bin/$name"
 }
@@ -128,11 +131,14 @@ host_wd() {
 
 run_host_tmux() {
   wd=$(host_wd)
+  uid=$(id -u)
+  gid=$(id -g)
+  groups=$(id -G | tr ' ' ',')
   # LC_ALL: without a UTF-8 locale tmux sanitizes control bytes in `-F` output,
   # turning the TAB field separators panePidMap relies on into "_" — which left
   # the viewer unable to see (or kill) any tmux session. Force UTF-8 so tabs
   # survive regardless of whether the container env propagates through nsenter.
-  nsenter -t 1 -m -p --setgid="$(id -g)" --setuid="$(id -u)" -- /bin/sh -c 'cd "$1" || exit; shift; exec "$@"' sh "$wd" env LC_ALL=C.UTF-8 /usr/bin/tmux "$@"
+  nsenter -t 1 -m -p -- /usr/bin/setpriv --reuid="$uid" --regid="$gid" --groups="$groups" -- /bin/sh -c 'cd "$1" || exit; shift; exec "$@"' sh "$wd" env LC_ALL=C.UTF-8 /usr/bin/tmux "$@"
 }
 
 target_key() {

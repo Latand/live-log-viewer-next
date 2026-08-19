@@ -41,6 +41,7 @@ const composeService = {
     HF_HOME: "/home/user/.cache/huggingface",
     GIT_SSH_COMMAND: "ssh compose-config",
   },
+  group_add: ["957"],
   image: "agent-log-viewer:node22",
   labels: { "compose.viewer": "production" },
   network_mode: "host",
@@ -70,6 +71,7 @@ function environmentFromArgs(args: string[]): Record<string, string> {
 interface ResolvedComposeService {
   command: string[] | null;
   environment: Record<string, string>;
+  group_add?: string[];
   profiles?: string[];
   "user": string;
   volumes: Array<{ source: string; target: string }>;
@@ -127,9 +129,24 @@ test("promoted candidate derives its runtime contract from Compose", () => {
   expect(args[args.indexOf("--restart") + 1]).toBe("unless-stopped");
   expect(args[args.indexOf("--network") + 1]).toBe("host");
   expect(args[args.indexOf("--pid") + 1]).toBe("host");
+  expect(valuesAfter(args, "--group-add")).toEqual(["957"]);
   expect(args[args.indexOf("--user") + 1]).toBe("1000:1000");
   expect(args[args.indexOf("--workdir") + 1]).toBe("/app");
   expect(args).toContain("--privileged");
+});
+
+test("candidate accepts an older Compose snapshot without supplementary groups", () => {
+  const legacyViewer = JSON.parse(JSON.stringify(composeService)) as Record<string, unknown>;
+  delete legacyViewer.group_add;
+  const service = viewerComposeServiceFromConfig(JSON.stringify({ services: { viewer: legacyViewer } }));
+  const args = viewerCandidateDockerArgs(candidate, service, {
+    runtimeSocket: "/state/runtime-host.sock",
+    legacyTmuxExternal: "1",
+    tmuxTmpdir: "/run/user/1000/agent-log-viewer",
+  });
+
+  expect(service.group_add).toEqual([]);
+  expect(valuesAfter(args, "--group-add")).toEqual([]);
 });
 
 test("promoted candidate validates and pins the operator registry backend mode", () => {
@@ -206,6 +223,8 @@ test("actual Viewer Compose keys remain covered by the candidate generator", () 
     tmuxTmpdir: "/run/user/1000/agent-log-viewer",
   });
   const environment = environmentFromArgs(args);
+  expect(service.group_add).toEqual(["957"]);
+  expect(valuesAfter(args, "--group-add")).toEqual(service.group_add);
   expect(Object.keys(environment).sort()).toEqual([
     ...new Set([
       ...Object.keys(service.environment),
@@ -235,15 +254,18 @@ test("runtime-host propagates every Viewer Compose interpolation input", () => {
   const config = resolvedCompose({
     LLV_UID: "1201",
     LLV_GID: "1202",
+    LLV_DOCKER_GID: "1203",
     LLV_TMUX_TMPDIR: "/run/user/1201/agent-log-viewer",
   });
   expect(config.services["runtime-host"].environment).toMatchObject({
     LLV_UID: "1201",
     LLV_GID: "1202",
+    LLV_DOCKER_GID: "1203",
     LLV_TMUX_TMPDIR: "/run/user/1201/agent-log-viewer",
     LLV_ENV_FILE: expect.any(String),
   });
   expect(config.services.viewer.user).toBe("1201:1202");
+  expect(config.services.viewer.group_add).toEqual(["1203"]);
   expect(config.services.viewer.environment.TMUX_TMPDIR).toBe("/run/user/1201/agent-log-viewer");
   expect(config.services.viewer.volumes.map((volume) => volume.source)).toContain("/tmp/tmux-1201");
 });
