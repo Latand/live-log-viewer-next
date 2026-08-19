@@ -10,19 +10,20 @@ test("the manager draft defaults to Claude Opus 5 on low effort through the role
   expect(ORCHESTRATOR_SPAWN_CONFIG).toMatchObject({ engine: "claude", model: "opus", effort: "low", role: "orchestrator" });
 });
 
-test("system prompt carries the draft-only pipeline contract", () => {
-  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("NEVER auto-start pipelines");
+test("system prompt carries the start-by-default pipeline contract", () => {
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("## Start-by-default pipeline contract");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("autoStart: true");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("put the work in motion without a confirmation step or draft");
   expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("autoStart: false");
-  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("presses Start himself");
-  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("explicitly asked to start it in the same request");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("explicitly asks for a draft or to review the plan first in that request");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("press Start on the board");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).not.toContain("NEVER auto-start");
 });
 
-/* #982 — the auto-start exception used to require the request to arrive "relayed
-   through the gateway", which made an explicit start asked in the manager's own
-   conversation carry less authority than the same words spoken to the gateway. Under
-   PRD #976 decision 7 both channels are equal; the draft-by-default rule above is
-   untouched, only the channel qualifier is gone. */
-test("the auto-start exception treats direct chat and the gateway as equal channels", () => {
+/* #982 — pipeline requests used to carry different authority depending on whether
+   they arrived in the manager's own conversation or through the gateway. Under PRD
+   #976 decision 7 both channels are equal, including an explicit request for a draft. */
+test("the explicit draft request treats direct chat and the gateway as equal channels", () => {
   expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("asked in your own conversation or relayed through the gateway");
   expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("both channels carry the same authority");
   expect(ORCHESTRATOR_SYSTEM_PROMPT).not.toContain("same request, relayed through the gateway");
@@ -70,8 +71,8 @@ test("bridge reports survive as the second channel, for the operator away from t
 
 /* Seats record the mandate version they were spawned on; `get_orchestrator` reports
    this constant as defaultPromptVersion, so a v3 seat reads as stale without a diff. */
-test("the default mandate is at version 6", () => {
-  expect(ORCHESTRATOR_PROMPT_VERSION).toBe(6);
+test("the default mandate is at version 7", () => {
+  expect(ORCHESTRATOR_PROMPT_VERSION).toBe(7);
 });
 
 /* #1016 — the seat had the attention tool and never used it: nothing it read said
