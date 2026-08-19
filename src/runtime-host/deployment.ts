@@ -1,4 +1,9 @@
 import { procBackend } from "@/lib/proc";
+import {
+  isCanonicalBranchRef,
+  isExactRevision,
+  REQUESTED_REVISION_REFUSAL,
+} from "@/lib/runtime/canonicalRevision";
 import type {
   ViewerDeploymentOwner,
   ViewerDeploymentReceipt,
@@ -73,7 +78,7 @@ export interface ViewerDeploymentCoordinatorOptions {
 }
 
 function validRequestedRevision(revision: string): boolean {
-  return revision === "origin/main" || /^[0-9a-f]{40}$/.test(revision);
+  return revision === "origin/main" || isExactRevision(revision) || isCanonicalBranchRef(revision);
 }
 
 function safeError(error: unknown): string {
@@ -137,8 +142,11 @@ export class ViewerDeploymentCoordinator {
     if (!request.idempotencyKey || request.idempotencyKey.length > 200 || /[\r\n]/.test(request.idempotencyKey)) {
       throw new Error("deployment idempotencyKey is invalid");
     }
-    const requestedRevision = request.revision?.trim() || this.defaultRevision;
-    if (!validRequestedRevision(requestedRevision)) throw new Error("deployment revision must be origin/main or a full commit SHA");
+    /* #1033: a caller may name a canonical branch instead of carrying a SHA.
+       Either way the adapter resolves it, and the journal below records the
+       exact commit that was resolved. */
+    const requestedRevision = request.ref?.trim() || request.revision?.trim() || this.defaultRevision;
+    if (!validRequestedRevision(requestedRevision)) throw new Error(REQUESTED_REVISION_REFUSAL);
     /* Replay first: a retry after a lost response presents the same idempotency
        key, and the original receipt is the record that this key was admitted
        once. */

@@ -532,6 +532,10 @@ export interface ViewerDeploymentStatus {
 
 export interface ViewerDeploymentRequest {
   revision?: string;
+  /** A branch of the canonical repository (`refs/heads/<branch>`), resolved to
+      its exact commit by the host adapter (#1033). Takes precedence over
+      `revision` when both are present. */
+  ref?: string;
   idempotencyKey: string;
 }
 
