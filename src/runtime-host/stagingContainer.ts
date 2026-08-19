@@ -122,6 +122,7 @@ function stagingDockerArgs(
     "--network", context.service.network_mode,
     "--pid", context.service.pid,
     ...(context.service.privileged ? ["--privileged"] : []),
+    ...context.service.group_add.flatMap((group) => ["--group-add", group]),
     "--user", context.service.user,
     "--workdir", context.service.working_dir,
     ...Object.entries(environment).sort(([left], [right]) => left.localeCompare(right)).flatMap(([key, value]) => ["-e", `${key}=${value}`]),

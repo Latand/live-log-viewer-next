@@ -11,6 +11,8 @@ x-viewer-common: &viewer-common
   pid: host
   privileged: true
   "user": "${LLV_UID:-1000}:${LLV_GID:-1000}"
+  group_add:
+    - "${LLV_DOCKER_GID:-957}"
   working_dir: /app
   env_file:
     - ${LLV_ENV_FILE:-${HOME:-/home/user}/.config/agent-log-viewer/service.env}
@@ -38,8 +40,6 @@ services:
   # lifecycle after the listener migration.
   runtime-host:
     <<: *viewer-common
-    group_add:
-      - "${LLV_DOCKER_GID:-957}"
     restart: unless-stopped
     profiles:
       - runtime-host
@@ -54,6 +54,7 @@ services:
       # that produced this runtime-host container.
       LLV_UID: ${LLV_UID:-1000}
       LLV_GID: ${LLV_GID:-1000}
+      LLV_DOCKER_GID: ${LLV_DOCKER_GID:-957}
       LLV_ENV_FILE: ${LLV_ENV_FILE:-${HOME:-/home/user}/.config/agent-log-viewer/service.env}
       LLV_TMUX_TMPDIR: ${LLV_TMUX_TMPDIR:-/tmp}
       LLV_LEGACY_TMUX_EXTERNAL: ${LLV_LEGACY_TMUX_EXTERNAL:-0}
