@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 
+import { FOCUS_TARGET_KINDS } from "@/lib/attention/targets";
 import { BRIDGE_REPORT_CLASSES } from "@/lib/bridge/types";
 
 import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SPAWN_CONFIG, ORCHESTRATOR_SYSTEM_PROMPT } from "./prompt";
@@ -69,8 +70,48 @@ test("bridge reports survive as the second channel, for the operator away from t
 
 /* Seats record the mandate version they were spawned on; `get_orchestrator` reports
    this constant as defaultPromptVersion, so a v3 seat reads as stale without a diff. */
-test("the default mandate is at version 5", () => {
-  expect(ORCHESTRATOR_PROMPT_VERSION).toBe(5);
+test("the default mandate is at version 6", () => {
+  expect(ORCHESTRATOR_PROMPT_VERSION).toBe(6);
+});
+
+/* #1016 — the seat had the attention tool and never used it: nothing it read said
+   when moving the operator was the right thing to do, and the tool published no
+   target shape, so the one seat that tried gave up after five guesses. The mandate
+   now carries both halves — the occasions, and the shapes to call them with. */
+test("the mandate teaches proactive attention steering with the occasions for it", () => {
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("## Steering the operator's attention (request_attention)");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("you just spawned or resumed a worker for something they asked for");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("a review verdict, merge or deploy lands");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("a lane blocks on THEM");
+  /* Sparingly and tied to concrete work — the failure mode on the other side is a
+     seat that yanks the view on every poll. */
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("Do not move them for polling, routine status");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("One move per real outcome");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("NO_ACTIVE_VIEW");
+});
+
+/* Verbatim shapes, so a seat following only the mandate reaches the operator's
+   screen on its FIRST call. Each is parsed here as the tool would receive it. */
+test("the mandate carries working target shapes for every surface it names", () => {
+  for (const shape of [
+    '{"kind":"conversation","conversationId":"conversation_..."}',
+    '{"kind":"conversation","path":"/.../transcript.jsonl"}',
+    '{"kind":"stage","pipelineId":"pipeline_...","stageId":"review"}',
+    '{"kind":"pipeline","pipelineId":"pipeline_..."}',
+    '{"kind":"flowRound","flowId":"flow_...","round":2}',
+    '{"kind":"task","taskId":"task_..."}',
+    '{"kind":"draft","draftId":"draft_..."}',
+  ]) {
+    expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain(shape);
+    const target = JSON.parse(shape) as { kind: string };
+    /* Each printed shape is a real target of a real kind, discriminated the way
+       the tool discriminates it. */
+    expect(FOCUS_TARGET_KINDS).toContain(target.kind as never);
+  }
+  /* The two facts a first call also needs: the draft's extra argument, and that
+     intent decides framing versus opening. */
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("plus a top-level project");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain('intent "show" frames and highlights the card; intent "open" also opens it');
 });
 
 /* #1026 — a fresh seat composed its first pipeline through seven sequential

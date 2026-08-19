@@ -29,6 +29,15 @@ describe("speakMenuPlacement (#1024: the menu is never clipped)", () => {
     expect(place.top + tall.height).toBeLessThanOrEqual(viewport.height - 8);
   });
 
+  /* #1030: the flip branch carried only a lower bound, so a trigger scrolled
+     far below the fold — the `scroll` re-measure keeps an open menu on it —
+     placed the menu below the fold with it, off screen entirely. */
+  test("clamps a flip against the bottom edge when the trigger is below the fold", () => {
+    const place = speakMenuPlacement({ top: 5000, bottom: 5024, right: 900 }, menu, viewport);
+    expect(place.top).toBe(532);
+    expect(place.top + menu.height).toBeLessThanOrEqual(viewport.height - 8);
+  });
+
   test("clamps against the right edge instead of spilling off it", () => {
     const place = speakMenuPlacement({ top: 100, bottom: 124, right: 1198 }, menu, viewport);
     expect(place.left).toBe(892);

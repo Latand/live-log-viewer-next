@@ -17,7 +17,14 @@ import {
   resolveDirectedAttentionView,
 } from "@/lib/attention/service";
 import { readAttentionFile } from "@/lib/attention/store";
-import { geometricFrameRect, isFocusTarget, isGeometricTarget } from "@/lib/attention/targets";
+import {
+  CONVERSATION_PATH_EXAMPLE,
+  describeFocusTargetRejection,
+  focusTargetExample,
+  geometricFrameRect,
+  isFocusTarget,
+  isGeometricTarget,
+} from "@/lib/attention/targets";
 import type { AttentionRequestV1, FocusIntent, FocusTarget, ZoomIntent } from "@/lib/attention/types";
 import { boardFor } from "@/lib/board/store";
 import { applyConversationAction } from "@/lib/conversation/actions";
@@ -2020,6 +2027,44 @@ async function lifecycleEvents(
 }
 
 /**
+ * The caller's target, read into the ONE shape the record stores (#1016).
+ *
+ * Two things happen here and nothing else does. A conversation named by its
+ * durable `conversationId` — the name the rest of this MCP surface speaks, and
+ * the only one that survives a resume or a migration — is resolved to that
+ * conversation's CURRENT generation transcript, which is exactly what a caller
+ * who already knew the path would have sent. And a value that is no target at
+ * all is refused in words that name the discriminator, the fields its kind
+ * expects and an example that works, instead of the bare "target must be a
+ * typed focus target" that cost the reported caller five guesses.
+ *
+ * A usable `path` is honoured untouched, so every call that works today writes
+ * byte-identical records: the id is the way in for callers that have no path,
+ * never a second interpretation of calls that have one.
+ */
+function focusTargetFromArgs(value: unknown, dependencies: ViewerMcpDomainDependencies): FocusTarget {
+  const named = value && typeof value === "object" && !Array.isArray(value)
+    ? value as { kind?: unknown; path?: unknown; conversationId?: unknown }
+    : null;
+  const conversationId = named?.kind === "conversation" && !text(named.path) ? text(named.conversationId) : "";
+  if (conversationId) {
+    /* The registry's own keyed lookup, alias walk included, so an id that was
+       chained through a rollover still names its newest transcript. */
+    const lookup = readOnlyConversationLookupFromSnapshot(dependencies.registrySnapshot());
+    const path = lookup.conversation(conversationId as `conversation_${string}`)?.generations.at(-1)?.path;
+    if (!path) {
+      throw new Error(
+        `no registered conversation has id "${conversationId}" — a conversation target accepts `
+        + `${focusTargetExample("conversation")} or ${CONVERSATION_PATH_EXAMPLE}`,
+      );
+    }
+    return { kind: "conversation", path };
+  }
+  if (!isFocusTarget(value)) throw new Error(describeFocusTargetRejection(value));
+  return value;
+}
+
+/**
  * Which project a target lives in, so the request can record one.
  *
  * Only the project is derived here — never a rect. The server has no board
@@ -2105,8 +2150,7 @@ async function requestAttention(
   }
   const raisedBy = attributionOf(dependencies);
 
-  const target = args.target;
-  if (!isFocusTarget(target)) throw new Error("target must be a typed focus target");
+  const target = focusTargetFromArgs(args.target, dependencies);
   const intent = (text(args.intent) || "show") as FocusIntent;
   if (intent !== "show" && intent !== "open") throw new Error("intent must be show or open");
   const zoom = text(args.zoom) as ZoomIntent | "";

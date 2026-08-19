@@ -8,6 +8,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
+import { FOCUS_TARGET_SHAPES } from "@/lib/attention/targets";
 import { statePath } from "@/lib/configDir";
 import { DeadlineExceededError, deadlineSignal } from "@/lib/deadline";
 import { DEFAULT_STALL_AFTER_MS } from "@/lib/lifecycle/liveness";
@@ -1637,7 +1638,12 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   conversation_migration: "Reseat, retry, or roll back a conversation account migration.",
   agent_activity: "Read agent liveness: last transcript record, turn state, whether the host is alive or gone, and how long a stalled conversation has been silent.",
   lifecycle_events: "Query the durable lifecycle event journal by lineage and cursor, or poll a bounded relay digest of what changed since the last one.",
-  request_attention: "Move the operator's one active Viewer to a typed target immediately and verify the arrival — no confirmation prompt, no pending offer. Execution is gated on server-derived authority: only the operator's root/gateway session or the target project's designated orchestrator seat may direct it; workers and unidentified callers are refused (ATTENTION_NOT_PERMITTED) with nothing recorded. The latest-interaction active view is chosen deterministically (down to the one executing browser tab); success is returned only after that view's camera/focus actually landed, and a missing view, lost target, or timeout is an explicit bounded failure. Durably attributed to the calling session, idempotent by clientRequestId across restarts, and the operator keeps a one-action Return control that restores exactly where they were.",
+  request_attention: [
+    "Move the operator's one active Viewer to a typed target immediately and verify the arrival — no confirmation prompt, no pending offer. Execution is gated on server-derived authority: only the operator's root/gateway session or the target project's designated orchestrator seat may direct it; workers and unidentified callers are refused (ATTENTION_NOT_PERMITTED) with nothing recorded. The latest-interaction active view is chosen deterministically (down to the one executing browser tab); success is returned only after that view's camera/focus actually landed, and a missing view, lost target, or timeout is an explicit bounded failure. Durably attributed to the calling session, idempotent by clientRequestId across restarts, and the operator keeps a one-action Return control that restores exactly where they were.",
+    `Targets are typed and discriminated by \`kind\`, one shape per kind: ${FOCUS_TARGET_SHAPES.map((shape) => `${shape.kind} — ${shape.example}`).join("; ")}.`,
+    "A conversation target takes either its durable conversationId (resolved server-side to that conversation's current transcript, and the form to prefer because it survives resume and migration) or that transcript's path.",
+    "A draft target also needs the top-level project argument; region and point accept intent \"show\" only. A rejected target names the kind it read and the fields that kind expects.",
+  ].join(" "),
   bridge_report: "Append one bounded report to the durable bridge log for the voice gateway to relay. Callable from any session; the origin is labeled server-side and a non-orchestrator report is visibly attributed to its own session.",
   bridge_directive: "Relay the user's intent to the designated manager. The recipient and the delivery id are derived server-side, so a retry of the same root turn is one instruction, never two.",
   get_orchestrator: "Read a project's designated orchestrator: designation, health and activity, model and prompt version, transcript size, message/tool/compaction counts, context usage against its model's configured window (clearly labelled when estimated), predecessor lineage, and a bounded rotation recommendation — STRONGLY_RECOMMEND_ROTATION once usage reaches the configured threshold. Words only: it never rotates, creates, or interrupts anything itself.",
@@ -1713,6 +1719,63 @@ const pipelineStageSchema = z.object({
   access: z.enum(["read-only", "read-write"]).optional()
     .describe("Stage-level access override. A review-loop stage is always read-only."),
 }).passthrough();
+
+/* #1016: the typed target contract, published rather than guessed. `target` was
+   declared as a free-form record with a prose list of kind names, so the
+   discriminator and every per-kind field lived only in `FocusTarget` — five
+   plausible guesses in a row were rejected with one undifferentiated sentence.
+   Each branch here is exactly as wide as `isFocusTarget`, and each stays open
+   (`passthrough`) so the binding, not the protocol boundary, answers a
+   mis-shaped target with the sentence that names the way through. The
+   conversation branch is the one that carries two accepted forms, so both its
+   fields are optional here and the binding requires one of them. */
+const focusTargetSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("conversation"),
+    conversationId: z.string().min(1).optional()
+      .describe('Durable "conversation_…" id, resolved server-side to that conversation\'s current transcript. The form to prefer: it survives resume and migration, which a path does not.'),
+    path: z.string().min(1).optional()
+      .describe("Transcript .jsonl path of the conversation. Accepted alongside conversationId; supply at least one."),
+  }).passthrough().describe("A conversation card, named by durable id or by transcript path."),
+  z.object({
+    kind: z.literal("pipeline"),
+    pipelineId: z.string().min(1).describe("Pipeline id; the request frames that pipeline's group on the board."),
+  }).passthrough(),
+  z.object({
+    kind: z.literal("stage"),
+    pipelineId: z.string().min(1).describe("Pipeline the stage belongs to."),
+    stageId: z.string().min(1).describe("Stage id within that pipeline. Resolves to the stage slot before it materializes and to the running agent's conversation afterwards."),
+  }).passthrough(),
+  z.object({
+    kind: z.literal("flowRound"),
+    flowId: z.string().min(1).describe("Review flow id; the request frames that flow's deck."),
+    round: z.number().int().min(0).describe("Round number within the flow, from 0."),
+  }).passthrough(),
+  z.object({
+    kind: z.literal("task"),
+    taskId: z.string().min(1).describe("Board task id."),
+  }).passthrough(),
+  z.object({
+    kind: z.literal("draft"),
+    draftId: z.string().min(1).describe("Board draft id. A draft exists only on the operator's canvas, so this target also needs the top-level project argument."),
+  }).passthrough(),
+  z.object({
+    kind: z.literal("region"),
+    project: z.string().min(1).describe("Project whose board the rect is in."),
+    rect: z.object({
+      x: z.number(), y: z.number(),
+      w: z.number().min(0), h: z.number().min(0),
+    }).passthrough().describe("World-space box, in the board's own geometry."),
+  }).passthrough().describe("A board area. Geometric targets accept intent \"show\" only."),
+  z.object({
+    kind: z.literal("point"),
+    project: z.string().min(1).describe("Project whose board the point is in."),
+    x: z.number(), y: z.number(),
+    zoom: z.number().gt(0).optional().describe("Optional explicit zoom; otherwise the point frames a card's worth of context around itself."),
+  }).passthrough().describe("A board coordinate. Geometric targets accept intent \"show\" only."),
+]).describe(
+  `Typed focus target, discriminated by "kind": ${FOCUS_TARGET_SHAPES.map((shape) => `${shape.kind} — ${shape.example}`).join("; ")}.`,
+);
 
 function boundedNumericInput(toolName: McpToolName, fieldPath: string): z.ZodType {
   const spec = MCP_BOUNDED_NUMERIC_ARGS[toolName]?.find((candidate) => candidate.path.join(".") === fieldPath);
@@ -1938,7 +2001,7 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
   }).passthrough(),
   request_attention: z.object({
     clientRequestId: clientRequestIdSchema,
-    target: z.record(z.string(), z.unknown()).describe("Typed focus target: conversation | pipeline | stage | flowRound | task | draft | region | point."),
+    target: focusTargetSchema,
     reason: z.string().min(1).describe("One operator-safe sentence saying why it is worth looking at. Never the target's contents."),
     intent: z.enum(["show", "open"]).optional().describe("show frames and highlights; open also opens the target's own surface. Default show."),
     zoom: z.enum(["inspect", "situate"]).optional(),

@@ -64,6 +64,15 @@ function stopActive(): void {
   stop?.();
 }
 
+/* The page-wide "only one control speaks at a time" latch. Assigned through a
+   module function like `stopActive` above rather than from the component body,
+   where the React Compiler reads a bare `activeStop = stop` as a global mutated
+   during render — `begin` is only ever called from a click, but nothing in the
+   source says so. */
+function claimActive(stop: () => void): void {
+  activeStop = stop;
+}
+
 function messageKey(info: BackendInfo, text: string): string {
   const option = info.options.find((candidate) => candidate.id === info.backend)!;
   return voiceKey(option, text);
@@ -128,6 +137,12 @@ export function SpeakButton({ text }: { text: string }) {
     setMenuOpen(false);
     if (restoreFocus) queueMicrotask(() => triggerRef.current?.focus());
   }, []);
+
+  /* The refusal alert's way out (#1030): the same click-away and Escape the
+     menu installs, so a refusal that nothing else clears does not have to be
+     bought off with another synthesis. Stable, or the alert would rebind its
+     listeners on every render. */
+  const dismissError = useCallback(() => setError(null), []);
 
   if (!info || !text) return null;
   const option = info.options.find((candidate) => candidate.id === info.backend);
@@ -246,7 +261,7 @@ export function SpeakButton({ text }: { text: string }) {
     });
 
     ownedStop.current = stop;
-    activeStop = stop;
+    claimActive(stop);
     setPhase("loading");
     setAnnouncement(t("tts.generating"));
     setError(null);
@@ -335,12 +350,18 @@ export function SpeakButton({ text }: { text: string }) {
   const active = phase !== "idle";
   const Icon = active ? Square : replayable ? RotateCw : Volume2;
   /* The tooltip is where the paid/free truth lives now, next to the hint that
-     the menu is a right-click away — the same split MicButton uses. */
+     the menu is a right-click away — the same split MicButton uses. It runs the
+     click's own order of refusals, so it says what the click will actually do:
+     a provider with no key cannot read anything, paid or otherwise, and
+     promising a paid read there was the last place this control oversold
+     itself (#1030). */
   const title = active
     ? t("tts.stop")
     : tooLong
       ? t("tts.tooLong", { count: MAX_TTS_MESSAGE_LENGTH.toLocaleString() })
-      : t("tts.triggerTitle", { action: replayable ? t("tts.replayFree") : t("tts.readPaid") });
+      : !option.available
+        ? t("tts.missingKey", { provider: option.id, path: option.keyPath })
+        : t("tts.triggerTitle", { action: replayable ? t("tts.replayFree") : t("tts.readPaid") });
   return (
     <span className="relative">
       <button ref={triggerRef} data-tts-trigger type="button" onClick={toggle} onContextMenu={(event) => { event.preventDefault(); toggleMenu(); }} aria-haspopup="menu" aria-expanded={menuOpen} className={`inline-flex items-center justify-center rounded-md text-muted transition-opacity hover:bg-sunken hover:text-primary focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${isMobile ? "h-11 w-11" : "p-1"} opacity-70 hover:opacity-100 group-hover/msg:opacity-100`} aria-label={active ? t("tts.stop") : replayable ? t("tts.replay") : t("tts.read")} title={title}>
@@ -367,7 +388,7 @@ export function SpeakButton({ text }: { text: string }) {
           onClose={closeMenu}
         />
       ) : null}
-      {error && !menuOpen ? <SpeakAlert anchorRef={triggerRef}>{error}</SpeakAlert> : null}
+      {error && !menuOpen ? <SpeakAlert anchorRef={triggerRef} onDismiss={dismissError}>{error}</SpeakAlert> : null}
     </span>
   );
 }
