@@ -167,9 +167,12 @@ export function paginateConversationCatalog(
   };
 }
 
-/** Minimal inactive FileEntry used by list/search results before a pin hydrates
- * the conversation through the full scheme scanner. */
-export function catalogEntryToFileEntry(entry: ConversationCatalogEntry): FileEntry {
+/** Minimal FileEntry used by list/search results before a pin hydrates the
+ * conversation through the full scheme scanner. Activity carries only the
+ * scanner's own no-process-evidence tier (mtime_recent, activity.ts): a fresh
+ * transcript reads "recent", never a false "idle"; "live"/"stalled" need
+ * process and tail evidence the lightweight catalog deliberately skips. */
+export function catalogEntryToFileEntry(entry: ConversationCatalogEntry, nowMs: number = Date.now()): FileEntry {
   return {
     path: entry.path,
     root: entry.root,
@@ -183,7 +186,7 @@ export function catalogEntryToFileEntry(entry: ConversationCatalogEntry): FileEn
     parent: null,
     mtime: entry.mtime,
     size: entry.size,
-    activity: "idle",
+    activity: nowMs / 1000 - entry.mtime < 900 ? "recent" : "idle",
     proc: null,
     pid: null,
     model: null,

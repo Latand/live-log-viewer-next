@@ -448,6 +448,10 @@ function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function objectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function integer(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isInteger(value) ? value : fallback;
 }
@@ -999,20 +1003,47 @@ async function entryForPath(
 
 async function listConversations(
   args: McpToolArgs,
-  dependencies: Pick<ViewerMcpDomainDependencies, "completedFileScan">,
+  control: ViewerControlDependencies,
 ): Promise<McpToolPayload> {
   const project = text(args.project);
-  const query = text(args.query).toLocaleLowerCase();
+  const query = text(args.query).trim();
   const limit = Math.max(1, Math.min(100, integer(args.limit, 50)));
-  /* The COMPLETED generation, not a private fresh scan (#845). This is a listing:
-     it reads what the process already knows, the same corpus `board_snapshot`
-     reads. Forcing a full fresh scan per call meant every agent asking "what is
-     running" started another full-corpus walk beside the coordinator's own. */
-  const files = (await dependencies.completedFileScan()).snapshot.files;
-  const conversations = files
+  const params = new URLSearchParams();
+  if (project) params.set("project", project);
+  if (query) params.set("q", query);
+  params.set("limit", String(limit));
+  /* The Viewer's conversation endpoint projects the uncapped catalog published
+     by the scanner worker. Its scheme feed can omit projects beyond the board's
+     recent-project window even while their catalog rows remain current. */
+  const source = await readViewerControl(control, `/api/conversations?${params}`);
+  if (!Array.isArray(source.items) || typeof source.total !== "number") {
+    throw new ViewerControlResponseError("Viewer control returned a malformed conversation catalog page");
+  }
+  if (project && source.total === 0) {
+    let knownProject = false;
+    if (query) {
+      const validation = await readViewerControl(
+        control,
+        `/api/conversations?project=${encodeURIComponent(project)}&limit=1`,
+      );
+      if (!Array.isArray(validation.items) || typeof validation.total !== "number") {
+        throw new ViewerControlResponseError("Viewer control returned a malformed conversation catalog page");
+      }
+      knownProject = validation.total > 0;
+    }
+    if (!knownProject) {
+      return redactPayload({
+        count: 0,
+        conversations: [],
+        code: "UNKNOWN_PROJECT",
+        hint: "The requested project does not match a canonical project key in the conversation catalog.",
+      });
+    }
+  }
+  const conversations = source.items
+    .filter(objectRecord) as unknown as FileEntry[];
+  const rows = conversations
     .filter((entry) => entry.engine === "claude" || entry.engine === "codex")
-    .filter((entry) => !project || entry.project === project)
-    .filter((entry) => !query || `${entry.title}\n${entry.project}\n${entry.path}`.toLocaleLowerCase().includes(query))
     .slice(0, limit)
     .map((entry) => ({
       conversationId: entry.conversationId ?? null,
@@ -1022,7 +1053,7 @@ async function listConversations(
       engine: entry.engine,
       activity: entry.activity,
     }));
-  return redactPayload({ count: conversations.length, conversations });
+  return redactPayload({ count: rows.length, conversations: rows });
 }
 
 async function getConversation(
@@ -2311,7 +2342,7 @@ export function viewerMcpBindings(
     create_pipeline: createPipeline,
     pipeline_action: (args) => pipelineAction(args, domainDependencies),
     link_task_to_pipeline: (args) => linkTaskToPipeline(args, linkTaskDependencies),
-    list_conversations: (args) => listConversations(args, domainDependencies),
+    list_conversations: (args) => listConversations(args, controlDependencies),
     get_conversation: (args, context) => getConversation(args, domainDependencies, context),
     deploy_exact_sha: (args) => deployExactSha(args, controlDependencies, domainDependencies),
     get_pipeline: getPipeline,

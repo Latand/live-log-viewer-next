@@ -510,10 +510,13 @@ export async function discoverFilesWithProjectCatalog(
     hosted?: ReadonlySet<string>;
     resourceBaseline?: ResourceScopeSnapshot;
     onResourceSnapshot?: (snapshot: ResourceScopeSnapshot) => void;
+    /** Carries the uncapped catalog across the file-scanner process boundary. */
+    transportConversationCatalog?: boolean;
   } = {},
 ): Promise<{
   files: FileEntry[];
   projectCatalog: ProjectCatalogEntry[];
+  conversationCatalog?: ConversationCatalogEntry[];
   pinOverlayPaths?: string[];
   complete: boolean;
 }> {
@@ -551,7 +554,12 @@ export async function discoverFilesWithProjectCatalog(
     canonicalizePath,
     canonicalizeTranscriptPaths(options.hosted, canonicalizePath),
   );
-  return { ...entries, projectCatalog, complete: snapshot.complete };
+  return {
+    ...entries,
+    projectCatalog,
+    ...(options.transportConversationCatalog ? { conversationCatalog: snapshot.conversationCatalog } : {}),
+    complete: snapshot.complete,
+  };
 }
 
 export async function discoverFiles(

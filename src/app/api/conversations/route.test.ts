@@ -229,3 +229,67 @@ test("a primitive JSON line in one transcript does not break global search", asy
   expect(response.status).toBe(200);
   expect(body.items.map((item) => item.path)).toEqual([target]);
 });
+
+test("a just-written transcript surfaces as recent, not idle, in the route rows (#1038 review)", async () => {
+  const transcript = path.join(sandbox, "live-row.jsonl");
+  fs.writeFileSync(transcript, JSON.stringify({ type: "user", message: { content: "still talking" } }) + "\n");
+  const stat = fs.statSync(transcript);
+  replaceConversationCatalog([{
+    path: transcript,
+    root: "claude-projects",
+    name: "live-row.jsonl",
+    project: "quiet-project",
+    title: "Live row",
+    firstPrompt: "",
+    engine: "claude",
+    kind: "session",
+    fmt: "claude",
+    mtime: stat.mtimeMs / 1000,
+    size: stat.size,
+  }]);
+
+  const response = await GET(new Request("http://127.0.0.1/api/conversations?project=quiet-project"));
+  const body = await response.json() as { items: Array<{ path: string; activity: string }> };
+
+  expect(response.status).toBe(200);
+  expect(body.items[0]?.path).toBe(transcript);
+  expect(body.items[0]?.activity).toBe("recent");
+});
+
+test("query results keep the registry-overlaid durable conversation id (#1040 review)", async () => {
+  const transcript = path.join(sandbox, "durable-id.jsonl");
+  fs.writeFileSync(transcript, JSON.stringify({ type: "user", message: { content: "durable cinnabar quay" } }) + "\n");
+  const stat = fs.statSync(transcript);
+  replaceConversationCatalog([{
+    path: transcript,
+    root: "claude-projects",
+    name: "durable-id.jsonl",
+    project: "quiet-project",
+    title: "Durable id row",
+    firstPrompt: "durable cinnabar quay",
+    engine: "claude",
+    kind: "session",
+    fmt: "claude",
+    mtime: stat.mtimeMs / 1000,
+    size: stat.size,
+  }]);
+  registry.reconcileConversations([{
+    engine: "claude",
+    path: transcript,
+    accountId: null,
+    launchProfile: emptyLaunchProfile({ cwd: sandbox, title: "Durable id row", project: "launch-project" }),
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-13T00:00:00.000Z",
+  }]);
+
+  const unfiltered = await GET(new Request("http://127.0.0.1/api/conversations?project=" + encodeURIComponent(projectForCwd(sandbox) ?? "")));
+  const unfilteredBody = await unfiltered.json() as { items: Array<{ path: string; conversationId: string | null }> };
+  const filtered = await GET(new Request("http://127.0.0.1/api/conversations?q=cinnabar%20quay"));
+  const filteredBody = await filtered.json() as { items: Array<{ path: string; conversationId: string | null }> };
+
+  expect(filtered.status).toBe(200);
+  const unfilteredRow = unfilteredBody.items.find((item) => item.path === transcript);
+  const filteredRow = filteredBody.items.find((item) => item.path === transcript);
+  expect(unfilteredRow?.conversationId).toStartWith("conversation_");
+  expect(filteredRow?.conversationId ?? null).toEqual(unfilteredRow?.conversationId ?? null);
+});
