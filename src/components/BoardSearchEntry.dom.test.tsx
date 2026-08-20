@@ -121,7 +121,7 @@ function dashboard(): HTMLElement {
       workflows={[]}
       tasks={[]}
       project="atlas"
-      projectCwd="/home/user/Projects/atlas"
+      projectCwd="/repo/atlas"
       loaded
       openNonce={0}
       archived={false}

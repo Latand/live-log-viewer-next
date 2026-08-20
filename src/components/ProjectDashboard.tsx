@@ -1,6 +1,6 @@
 "use client";
 
-import { Layers, List, ListTodo, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus, Redo2, Search } from "lucide-react";
+import { Layers, List, ListTodo, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus, Redo2, Search, Undo2 } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 
 import { useBoardActionHistory } from "@/hooks/useBoardActionHistory";
@@ -110,8 +110,11 @@ interface Props {
   openNonce: number;
   /** Attention-queue jump: glide the board to this node and ring it. The nonce
       re-flashes repeated jumps to the same path; prefs stay untouched — a
-      read-only jump must not mutate manual column state. */
-  focusRequest?: { path: string; nonce: number } | null;
+      read-only jump must not mutate manual column state.
+      `catalog` marks the RESOLVER's opens — a global-search selection, an `#f=`
+      / `#c=` deep link, a catalog row — which name one conversation and must
+      land on it (see `openedConversation` below). */
+  focusRequest?: { path: string; nonce: number; catalog?: boolean } | null;
   /** Put this node in the layout and DO NOT move the camera to it. The focus
       handoff frames its own destination through the board controller, so the
       card only has to exist; arming the glide channel too would race that move
@@ -451,6 +454,17 @@ function ProjectDashboardView({
      reload — the queue can route to its quietest members while the manual
      column state stays untouched. */
   const [ephemeral, setEphemeral] = useState<string[]>([]);
+  /* The conversation a RESOLVER open just landed (issue #1054 review): a global
+     search selection, an `#f=`/`#c=` deep link, a catalog row. Such an open
+     names one conversation, so the board must show that conversation — but a
+     saved «Список» preference won the view resolution below and answered with
+     the catalog list instead: no card, no composer, and the operator was
+     dropped back on the very surface they searched to leave. "Find, open,
+     continue" stopped at open. Holding the path here forces the conversation
+     surface for that landing on both form factors, WITHOUT writing the durable
+     preference — the operator's saved view returns with one tap on the
+     Схема/Список control, which is what clears this. */
+  const [openedConversation, setOpenedConversation] = useState<string | null>(null);
   /* Wall clock for the worker auto-collapse idle window (issue #112). Starts at
      0 so the server render and first client render agree (no hydration skew);
      the first tick lands the real time, and reviewer verdicts collapse without
@@ -895,6 +909,9 @@ function ProjectDashboardView({
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     setEphemeral([]);
+    /* Another project is another board with its own saved view: the landing
+       that forced this one's conversation surface does not travel with it. */
+    setOpenedConversation(null);
   }, [project]);
 
   /* An attention jump rides the same channel as switchboard opens: the ref is
@@ -920,6 +937,11 @@ function ProjectDashboardView({
       || compactPipelinePaths.has(focusRequest.path);
     if (!placeable || !focusEdge.current.consume(focusRequest)) return;
     const { path } = focusRequest;
+    /* Armed on the same edge that performs the move, so the override is exactly
+       as one-shot as the navigation: a poll re-running this effect observes a
+       consumed nonce and cannot re-force the view after the operator has gone
+       back to their list. */
+    if (focusRequest.catalog) setOpenedConversation(path);
     pendingFocusRef.current = path;
     setEphemeral((prev) => compactPipelinePaths.has(path)
       ? replaceCompactPipelineEphemeral(prev, path, pipelines, deckFlows, files)
@@ -1030,7 +1052,13 @@ function ProjectDashboardView({
     sessionStorage.setItem(draftsKey(project), JSON.stringify(next));
   };
 
-  const chooseEmptyView = (next: ProjectView) => board.setViewMode(next);
+  /* The operator picking a face is the authority again: it retires the landing
+     override above, so «Список» goes back to the list even while the board is
+     standing on a conversation a search opened. */
+  const chooseEmptyView = (next: ProjectView) => {
+    setOpenedConversation(null);
+    board.setViewMode(next);
+  };
 
   /* randomUUID needs a secure context; LAN http access gets the fallback. */
   const newDraftId = () =>
@@ -1143,6 +1171,10 @@ function ProjectDashboardView({
   };
 
   const closeNode = (path: string) => {
+    /* Closing the conversation a search/deep-link landed on ends that landing,
+       so the saved view is the authority again — the same retirement the
+       Схема/Список control performs, from the other end of the gesture. */
+    if (path === openedConversation) setOpenedConversation(null);
     /* Record the close in the undo log before applying it, capturing the current
        title for the undo tooltip. Redo replays through `applyClose` directly, so
        it never re-records and the log stays a single linear trail. */
@@ -1441,7 +1473,13 @@ function ProjectDashboardView({
     originOf: spawnerRootOf,
   });
   const listAvailable = catalogKnown || historyRows.length > 0;
-  const projectView = resolveProjectView({
+  /* A landing from the resolver outranks the saved preference for as long as it
+     stands (see `openedConversation`). It cannot conjure a surface that has
+     nothing to show: with no scheme available the branches below fall back to
+     the list exactly as before, and the landing's own node is what makes the
+     scheme available in the first place. */
+  const landedOnConversation = openedConversation !== null && schemeAvailable;
+  const projectView = landedOnConversation ? "scheme" : resolveProjectView({
     preferredView: board.prefs.viewMode,
     hasNodes,
     hasArchiveNodes,
@@ -1527,17 +1565,23 @@ function ProjectDashboardView({
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
       {/* The phone header fits 390px BY CONSTRUCTION (issue #613, where it
           measured 422px and hung «More actions» off the screen). Its budget: at
-          most five fixed 44px targets (projects, undo, shelf, create, more) plus
-          the bounded attention pill — ~326px with the gaps and padding — and the
-          project name as the ONE elastic cell, which truncates into whatever is
-          left. 390px is the narrowest viewport this layout supports — a fully
-          populated row leaves the name ~73px there, ~43px at 360px, a sliver at
-          320px, and at 280px the fixed targets alone overflow the row by ~29px.
-          That collapse below 390px is a documented limit, not a defect: a
-          narrower phone would need a further fold into the «⋯» menu. Any control
-          added later either fits the budget as a 44px target or folds into that
-          menu, the way the scheme/list switch did — and the way «Keep screen
-          awake» does (issue #712). */}
+          most FIVE fixed 44px targets (projects, search, shelf, create, more)
+          plus the bounded attention pill — ~326px with the gaps and padding —
+          and the project name as the ONE elastic cell, which truncates into
+          whatever is left. 390px is the narrowest viewport this layout supports
+          — a fully populated row leaves the name ~73px there, ~43px at 360px, a
+          sliver at 320px, and at 280px the fixed targets alone overflow the row
+          by ~29px. That collapse below 390px is a documented limit, not a
+          defect: a narrower phone would need a further fold into the «⋯» menu.
+          Any control added later either fits the budget as a 44px target or
+          folds into that menu, the way the scheme/list switch did — and the way
+          «Keep screen awake» does (issue #712).
+          Global search (issue #1054) is the fifth target, and it kept the count
+          at five by folding the one it displaced: undo joined the redo already
+          in the «⋯» menu. It rode the row as a SIXTH target for one round and
+          the measured cost was exact — the project name fell to 25px, an
+          unreadable stub, which is why the count is a budget and not a habit.
+          issue613Evidence.browser.test.tsx now measures that name width. */}
       <div
         data-testid={isMobile ? "mobile-project-header" : undefined}
         className={
@@ -1565,15 +1609,19 @@ function ProjectDashboardView({
             held its 45vw and pushed «More actions» off a 390px screen instead).
             Desktop keeps its natural width. */}
         <h1 className={`truncate text-[13.5px] font-bold ${isMobile ? "min-w-0 max-w-[45vw]" : ""}`} title={projectName}>{projectName}</h1>
-        <BoardHistoryControls
-          canUndo={history.canUndo}
-          canRedo={history.canRedo}
-          undoEntry={history.undoEntry}
-          redoEntry={history.redoEntry}
-          onUndo={onUndo}
-          onRedo={onRedo}
-          isMobile={isMobile}
-        />
+        {/* Desktop only. On the phone the whole history island — undo and redo
+            together — rides the «⋯» menu, which is how search bought its 44px
+            slot without breaking the budget above (issue #1054 review). */}
+        {!isMobile ? (
+          <BoardHistoryControls
+            canUndo={history.canUndo}
+            canRedo={history.canRedo}
+            undoEntry={history.undoEntry}
+            redoEntry={history.redoEntry}
+            onUndo={onUndo}
+            onRedo={onRedo}
+          />
+        ) : null}
         {isMobile ? (
           <>
             {/* Toolbar folds to a single row (findings 1, 7): all create actions
@@ -1660,11 +1708,28 @@ function ProjectDashboardView({
                       <span aria-hidden className="my-0.5 h-px shrink-0 bg-border" />
                     </>
                   ) : null}
-                  {/* Redo lives here on mobile — the header shows only a single
-                      undo button, so its counterpart rides the «⋯» menu (and
-                      Ctrl+Shift+Z), shown only while a redo is possible. */}
-                  {history.canRedo ? (
-                    <HeaderMenuItem icon={<Redo2 className="h-4 w-4" aria-hidden />} label={t("board.redo")} onSelect={() => { close(); onRedo(); }} />
+                  {/* Board history lives here on the phone, both directions
+                      together. Undo held a 44px slot in the row until the global
+                      search button needed one (issue #1054 review): the row's
+                      budget is five targets, and the rule the header comment
+                      states is that a later control either fits it or folds into
+                      this menu. Undo folded — it is the corrective half of a
+                      gesture the operator just made, one tap away here beside
+                      the redo that already lived in this menu, while search is
+                      the surface the operator reaches for cold. Each item shows
+                      only while that direction is possible. */}
+                  {history.canUndo || history.canRedo ? (
+                    <>
+                      <div role="group" aria-label={t("board.historyGroup")} className="flex flex-col gap-0.5">
+                        {history.canUndo ? (
+                          <HeaderMenuItem icon={<Undo2 className="h-4 w-4" aria-hidden />} label={t("board.undo")} onSelect={() => { close(); onUndo(); }} />
+                        ) : null}
+                        {history.canRedo ? (
+                          <HeaderMenuItem icon={<Redo2 className="h-4 w-4" aria-hidden />} label={t("board.redo")} onSelect={() => { close(); onRedo(); }} />
+                        ) : null}
+                      </div>
+                      <span aria-hidden className="my-0.5 h-px shrink-0 bg-border" />
+                    </>
                   ) : null}
                   <div className="flex min-h-11 items-center gap-2 px-1.5"><span className="text-[13px] font-semibold text-primary">{t("dash.soundMenu")}</span><SoundToggle /></div>
                   {/* Device-local comfort settings sit together here. «Keep

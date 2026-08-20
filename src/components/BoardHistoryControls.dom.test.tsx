@@ -49,7 +49,6 @@ test("desktop: the island stays hidden until the log has something to act on", a
       redoEntry={null}
       onUndo={() => {}}
       onRedo={() => {}}
-      isMobile={false}
     />,
   );
   /* Resting chrome hygiene (finding 2): no disabled two-button box before the
@@ -67,7 +66,6 @@ test("desktop: undo enabled, the label names the card and discloses the shortcut
       redoEntry={null}
       onUndo={() => clicks.push("undo")}
       onRedo={() => clicks.push("redo")}
-      isMobile={false}
     />,
   );
   expect(buttons).toHaveLength(2);
@@ -89,7 +87,14 @@ test("desktop: undo enabled, the label names the card and discloses the shortcut
   expect(clicks).toEqual(["undo"]);
 });
 
-test("mobile: a single undo button, only while an undo is possible, at a 44px target", async () => {
+/*
+ * The phone has no island (issue #1054 review). Its 390px header budget is five
+ * 44px targets, and global search took the slot undo used to hold; both history
+ * directions moved into the «⋯» menu, where redo already lived. The row's side
+ * of that fold is asserted in mobile/mobileHeaderFit.dom.test.tsx — here the
+ * component simply has no mobile face left to render.
+ */
+test("the island is desktop chrome: the redo half is always present beside undo", async () => {
   const clicks: string[] = [];
   const { buttons } = await mount(
     <BoardHistoryControls
@@ -99,33 +104,17 @@ test("mobile: a single undo button, only while an undo is possible, at a 44px ta
       redoEntry={close("Beta")}
       onUndo={() => clicks.push("undo")}
       onRedo={() => clicks.push("redo")}
-      isMobile
     />,
   );
-  /* Finding 1: redo lives on Ctrl+Shift+Z / the «⋯» menu, so the toolbar spends
-     one 44px slot, not two. */
-  expect(buttons).toHaveLength(1);
-  const [undo] = buttons;
-  expect(undo!.className).toContain("h-11");
-  expect(undo!.className).toContain("w-11");
-  expect(undo!.getAttribute("aria-label")).toBe("Undo — reopen “Alpha” (Ctrl+Z)");
+  expect(buttons).toHaveLength(2);
+  const [undo, redo] = buttons;
+  /* Compact desktop sizing — the 44px coarse-pointer face is gone with the
+     mobile branch, so nothing here can be mistaken for a phone target. */
+  expect(undo!.className).toContain("h-7");
+  expect(undo!.className).not.toContain("h-11");
+  expect(redo!.getAttribute("aria-label")).toBe("Redo — close “Beta” again (Ctrl+Shift+Z)");
   act(() => {
-    undo!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as MouseEvent);
+    redo!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as MouseEvent);
   });
-  expect(clicks).toEqual(["undo"]);
-});
-
-test("mobile: nothing renders when there is no undo", async () => {
-  const { buttons } = await mount(
-    <BoardHistoryControls
-      canUndo={false}
-      canRedo
-      undoEntry={null}
-      redoEntry={close("Beta")}
-      onUndo={() => {}}
-      onRedo={() => {}}
-      isMobile
-    />,
-  );
-  expect(buttons).toHaveLength(0);
+  expect(clicks).toEqual(["redo"]);
 });

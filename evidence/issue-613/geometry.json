@@ -14,17 +14,17 @@
         "height": 44
       },
       {
-        "label": "Undo — reopen “Closed card” (Ctrl+Z)",
-        "left": 133.171875,
-        "right": 177.171875,
+        "label": "Search your messages",
+        "left": 137.09375,
+        "right": 181.09375,
         "width": 44,
         "height": 44
       },
       {
         "label": "3 waiting",
-        "left": 186.171875,
+        "left": 186.09375,
         "right": 237,
-        "width": 50.828125,
+        "width": 50.90625,
         "height": 44
       },
       {
@@ -50,6 +50,7 @@
       }
     ],
     "titleText": "live-log-viewer-next-mobile",
+    "titleWidth": 73.09375,
     "paneControls": [
       {
         "label": "Rename “Builder · keep the conversation header inside a 390px viewp…”",
@@ -106,17 +107,17 @@
         "height": 44
       },
       {
-        "label": "Undo — reopen “Closed card” (Ctrl+Z)",
-        "left": 133.171875,
-        "right": 177.171875,
+        "label": "Search your messages",
+        "left": 137.09375,
+        "right": 181.09375,
         "width": 44,
         "height": 44
       },
       {
         "label": "3 waiting",
-        "left": 186.171875,
+        "left": 186.09375,
         "right": 237,
-        "width": 50.828125,
+        "width": 50.90625,
         "height": 44
       },
       {
@@ -155,7 +156,21 @@
         "height": 44
       },
       {
+        "label": "Undo",
+        "left": 179,
+        "right": 375,
+        "width": 196,
+        "height": 44
+      },
+      {
         "label": "Mute sound notifications",
+        "left": 277,
+        "right": 321,
+        "width": 44,
+        "height": 44
+      },
+      {
+        "label": "Sound levels",
         "left": 325,
         "right": 369,
         "width": 44,
@@ -163,6 +178,7 @@
       }
     ],
     "titleText": "live-log-viewer-next-mobile",
+    "titleWidth": 73.09375,
     "paneControls": [
       {
         "label": "Rename “Builder · keep the conversation header inside a 390px viewp…”",

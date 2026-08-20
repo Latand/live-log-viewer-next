@@ -163,6 +163,9 @@ function searchPage() {
 
 const originalFetch = globalThis.fetch;
 const requestLog: string[] = [];
+/** Non-empty only where a test needs «Список» to be an available face: the
+    dashboard offers the catalog list when the project is in this catalog. */
+let projectCatalog: Array<{ project: string; smt: number; conversations: number }> = [];
 let historyWrites: string[] = [];
 let boards: Record<string, BoardProjectStateV1> = {};
 
@@ -190,6 +193,7 @@ beforeEach(() => {
   historyWrites = [];
   boards = {};
   searchHits = [];
+  projectCatalog = [];
 });
 
 afterEach(() => {
@@ -209,7 +213,7 @@ function stubFetch(filesByPin: (pin: string) => FileEntry[]) {
     if (url.startsWith("/api/files")) {
       const pin = new URL(url, "http://localhost").searchParams.get("path") ?? "";
       return new Response(
-        JSON.stringify({ files: filesByPin(pin), projectCatalog: [] }),
+        JSON.stringify({ files: filesByPin(pin), projectCatalog }),
         { headers: { "content-type": "application/json" } },
       );
     }
@@ -361,6 +365,38 @@ test("a search selection opens the conversation even when the tab already sits o
   expect(await waitFor(() => host.querySelector(`[data-scheme-node="${PATH_ONLY_PATH}"]`) !== null)).toBe(true);
   expect(document.querySelector("[data-global-search]")).toBeNull();
   expect(dom.location.hash).toBe(hash);
+});
+
+test("a saved «Список» preference does not swallow a search selection — it opens ready to continue", async () => {
+  /* The defect this pins (#1054 review, HIGH): the selection reached the
+     resolver, the node materialized, the project was selected — and the board
+     still rendered the catalog list, because the saved view preference won view
+     resolution. The operator searched to LEAVE that list and was handed it back
+     with no card and no composer. */
+  const searchRow = fileEntry({
+    path: PATH_ONLY_PATH,
+    name: "path-only-conversation.jsonl",
+    project: TARGET_PROJECT,
+    title: "The conversation the operator went looking for",
+  });
+  stubFetch((pin) => (pin === PATH_ONLY_PATH ? [otherRow, searchRow] : [otherRow]));
+  searchHits = [PATH_ONLY_PATH];
+  /* «Список» is a real face for this project (it has a catalog) AND it is the
+     face the operator saved. */
+  projectCatalog = [{ project: TARGET_PROJECT, smt: 9_000, conversations: 4 }];
+  boards[TARGET_PROJECT] = { ...emptyBoard(), prefs: { ...emptyBoard().prefs, viewMode: "list" } };
+
+  const host = await mountViewer();
+  await findAndSelect(host, "heliotrope");
+
+  /* The conversation is on the standard surface, with the composer that makes
+     "continue" possible. */
+  expect(await waitFor(() => host.querySelector(`[data-scheme-node="${PATH_ONLY_PATH}"]`) !== null)).toBe(true);
+  expect(await waitFor(() => host.querySelector("textarea") !== null)).toBe(true);
+  expect(dom.localStorage.getItem("llvProject")).toBe(TARGET_PROJECT);
+  expect(document.querySelector("[data-global-search]")).toBeNull();
+  /* And the operator's saved preference was never rewritten on their behalf. */
+  expect(boards[TARGET_PROJECT]!.prefs.viewMode).toBe("list");
 });
 
 test("#c= to a conversation whose only present generation is an archived predecessor opens it", async () => {
