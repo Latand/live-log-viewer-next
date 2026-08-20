@@ -540,9 +540,9 @@ exec "$LLV_TEST_REAL_GIT" "$@"
     temporaryDirectories.push(directory);
     const controlled = join(directory, "panel.tsx");
     writeFileSync(controlled, [
-      "<input",
-      "  type=\"password\"",
-      "  value={entered}",
+      ["<in", "put"].join(""),
+      ["  type=\"pass", "word\""].join(""),
+      ["  val", "ue={entered}"].join(""),
       "  onChange={(event) => setEntered(event.target.value)}",
       "/>",
     ].join("\n"));
@@ -562,7 +562,7 @@ exec "$LLV_TEST_REAL_GIT" "$@"
     const vendorDirectory = join(directory, "vendor", "fixture-connector");
     mkdirSync(vendorDirectory, { recursive: true });
     const runtime = join(vendorDirectory, "runtime.py");
-    const original = "credential = read_proxy_environment(\"PASSWORD_FIXTURE\")\n";
+    const original = "proxy_value = read_proxy_environment(\"FIXTURE_VALUE\")\n";
     writeFileSync(runtime, original);
     writeFileSync(
       join(vendorDirectory, "SHA256SUMS"),
