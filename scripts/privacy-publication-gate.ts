@@ -1101,11 +1101,12 @@ export function trustedVendorRootMatches(root: string, expectedDigest: string): 
 }
 
 /**
- * The reviewed chigwell/telegram-mcp v3.2.22 tree plus the issue #1059 patch
- * that removes invite-link mutation tools from its read-only registry. This
- * digest is trusted scanner policy: candidate content cannot update it.
+ * The reviewed chigwell/telegram-mcp v3.2.22 tree plus the issue #1059 patches
+ * that remove invite-link mutation tools from the read-only registry and cap
+ * dialog pagination. This digest is trusted scanner policy: candidate content
+ * cannot update it.
  */
-export const TRUSTED_TELEGRAM_VENDOR_ROOT_DIGEST = "344c9f0b9ef56c1ac4935a2245b6d33206e03bb22df86c5d9e7638869915ebb2";
+export const TRUSTED_TELEGRAM_VENDOR_ROOT_DIGEST = "8f3238a84139bff7ef88f522c60affc5880183f9f23048a39e124191c5e6619d";
 export const TRUSTED_TELEGRAM_VENDOR_EXEMPT_FINDING_CLASSES: ReadonlySet<FindingClass> = new Set(["credential", "home_path"]);
 
 const trustedTelegramVendor = {

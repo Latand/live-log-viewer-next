@@ -569,7 +569,7 @@ exec "$LLV_TEST_REAL_GIT" "$@"
     const fixture = createVendorDigestFixture();
     expect(trustedVendorRootDigest(fixture.root)).toBe(FIXED_VENDOR_FIXTURE_DIGEST);
     expect(trustedVendorRootMatches(fixture.root, FIXED_VENDOR_FIXTURE_DIGEST)).toBe(true);
-    expect(TRUSTED_TELEGRAM_VENDOR_ROOT_DIGEST).toBe("344c9f0b9ef56c1ac4935a2245b6d33206e03bb22df86c5d9e7638869915ebb2");
+    expect(TRUSTED_TELEGRAM_VENDOR_ROOT_DIGEST).toBe("8f3238a84139bff7ef88f522c60affc5880183f9f23048a39e124191c5e6619d");
     expect([...TRUSTED_TELEGRAM_VENDOR_EXEMPT_FINDING_CLASSES]).toEqual(["credential", "home_path"]);
     expect(TRUSTED_TELEGRAM_VENDOR_EXEMPT_FINDING_CLASSES.has("known_value")).toBe(false);
   });
