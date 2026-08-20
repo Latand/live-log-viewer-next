@@ -3,10 +3,15 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { systemScheduler, type DeadlineScheduler } from "@/lib/deadline";
+import { scheduleTranscriptIndex, type TranscriptIndexFeed } from "@/lib/search/transcriptFeed";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 
 import type { FileCatalogScan, FileScanOptions } from "./index";
-import { beginProjectCatalogScan, publishConversationCatalogForScan } from "./projectCatalog";
+import {
+  beginProjectCatalogScan,
+  isProjectCatalogScanCurrent,
+  publishConversationCatalogForScan,
+} from "./projectCatalog";
 
 const FILE_SCAN_WORKER_TIMEOUT_MS = 5 * 60_000;
 const FILE_SCAN_WORKER_OUTPUT_MAX_BYTES = 32 * 1024 * 1024;
@@ -25,6 +30,7 @@ export interface FileScanWorkerRuntime {
   timeoutMs?: number;
   signal?: AbortSignal | null;
   scheduler?: DeadlineScheduler;
+  transcriptIndexScheduler?: (feed: TranscriptIndexFeed) => void;
 }
 
 function abortError(): Error {
@@ -194,7 +200,20 @@ export function collectFileScanInWorker(
         return;
       }
       if (completedConversationCatalog) {
+        const currentScan = isProjectCatalogScanCurrent(catalogScanToken);
         publishConversationCatalogForScan(completedConversationCatalog, catalogScanToken, completed.complete);
+        if (currentScan) {
+          (runtime.transcriptIndexScheduler ?? scheduleTranscriptIndex)({
+            complete: completed.complete,
+            sources: completedConversationCatalog.map((entry) => ({
+              path: entry.path,
+              project: entry.project,
+              engine: entry.engine,
+              size: entry.size,
+              mtimeMs: entry.mtime * 1_000,
+            })),
+          });
+        }
       }
       finish(undefined, completed);
     });

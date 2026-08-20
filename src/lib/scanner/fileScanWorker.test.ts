@@ -3,6 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { scheduleTranscriptIndex, waitForTranscriptIndexIdleForTests } from "@/lib/search/transcriptFeed";
+import { searchTranscripts } from "@/lib/search/transcriptSearch";
+
 import { conversationCatalogSnapshot, replaceConversationCatalog } from "./conversationCatalog";
 import { collectFileScanInWorker, fileScanWorkerEnabled } from "./fileScanWorker";
 
@@ -63,6 +66,150 @@ test("worker scan streams the resource scope, keeps the caller event loop live, 
     expect(ticks).toBeGreaterThan(2);
   } finally {
     clearInterval(timer);
+  }
+});
+
+test("a current incomplete worker scan schedules a non-deleting transcript feed", async () => {
+  const transcript = {
+    path: "/sessions/indexed.jsonl",
+    root: "codex-sessions",
+    name: "indexed.jsonl",
+    project: "repo-indexed",
+    title: "indexed",
+    firstPrompt: "",
+    engine: "codex",
+    kind: "session",
+    fmt: "codex",
+    mtime: 1_780_000_000,
+    size: 100,
+  };
+  const completion = JSON.stringify({
+    type: "complete",
+    snapshot: { files: [], projectCatalog: [], conversationCatalog: [transcript], complete: false },
+  });
+  const { directory, workerPath } = fixtureWorker(`
+    process.stdin.resume();
+    process.stdin.on("end", () => process.stdout.write(${JSON.stringify(`${completion}\n`)}));
+  `);
+  const feeds: unknown[] = [];
+
+  await collectFileScanInWorker(
+    { persist: false, persistIndex: false },
+    undefined,
+    {
+      launch: { executable: process.execPath, workerPath },
+      cwd: directory,
+      timeoutMs: 2_000,
+      transcriptIndexScheduler: (feed) => { feeds.push(feed); },
+    },
+  );
+
+  expect(feeds).toEqual([{
+    complete: false,
+    sources: [{
+      path: transcript.path,
+      project: transcript.project,
+      engine: transcript.engine,
+      size: transcript.size,
+      mtimeMs: transcript.mtime * 1_000,
+    }],
+  }]);
+});
+
+test("an obsolete worker scan finishing last cannot delete newer transcript index results", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-file-scan-worker-overlap-"));
+  directories.push(directory);
+  const previousEnvironment = {
+    HOME: process.env.HOME,
+    XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+    LLV_STATE_DIR: process.env.LLV_STATE_DIR,
+    TMPDIR: process.env.TMPDIR,
+  };
+  process.env.HOME = path.join(directory, "home");
+  process.env.XDG_CONFIG_HOME = path.join(directory, "config");
+  process.env.LLV_STATE_DIR = path.join(directory, "state");
+  process.env.TMPDIR = path.join(directory, "tmp");
+  fs.mkdirSync(process.env.TMPDIR, { recursive: true });
+
+  const transcript = (name: string, body: string) => {
+    const pathname = path.join(directory, `${name}.jsonl`);
+    fs.writeFileSync(pathname, `${JSON.stringify({
+      type: "user",
+      timestamp: "2026-08-20T09:00:00.000Z",
+      message: { content: body },
+    })}\n`);
+    const stat = fs.statSync(pathname);
+    return {
+      path: pathname,
+      root: "claude-projects",
+      name: path.basename(pathname),
+      project: "repo-overlap",
+      title: name,
+      firstPrompt: "",
+      engine: "claude",
+      kind: "session",
+      fmt: "claude",
+      mtime: stat.mtimeMs / 1_000,
+      size: stat.size,
+    };
+  };
+  const older = transcript("older", "obsoleteinventorymarker");
+  const newer = transcript("newer", "newerinventorymarker");
+  const completion = (entry: ReturnType<typeof transcript>) => `${JSON.stringify({
+    type: "complete",
+    snapshot: { files: [], projectCatalog: [], conversationCatalog: [entry], complete: true },
+  })}\n`;
+  const worker = (entry: ReturnType<typeof transcript>, delayMs: number) => fixtureWorker(`
+    process.stdin.resume();
+    process.stdin.on("end", () => setTimeout(() => {
+      process.stdout.write(${JSON.stringify(completion(entry))});
+    }, ${delayMs}));
+  `);
+  const olderWorker = worker(older, 250);
+  const newerWorker = worker(newer, 0);
+  const scheduledPaths: string[][] = [];
+  const schedule = (feed: Parameters<typeof scheduleTranscriptIndex>[0]) => {
+    scheduledPaths.push(feed.sources.map((entry) => entry.path));
+    scheduleTranscriptIndex(feed, { force: true });
+  };
+
+  try {
+    await waitForTranscriptIndexIdleForTests();
+    const olderScan = collectFileScanInWorker(
+      { persist: false, persistIndex: false },
+      undefined,
+      {
+        launch: { executable: process.execPath, workerPath: olderWorker.workerPath },
+        cwd: olderWorker.directory,
+        timeoutMs: 2_000,
+        transcriptIndexScheduler: schedule,
+      },
+    );
+    const newerScan = collectFileScanInWorker(
+      { persist: false, persistIndex: false },
+      undefined,
+      {
+        launch: { executable: process.execPath, workerPath: newerWorker.workerPath },
+        cwd: newerWorker.directory,
+        timeoutMs: 2_000,
+        transcriptIndexScheduler: schedule,
+      },
+    );
+
+    await newerScan;
+    await waitForTranscriptIndexIdleForTests();
+    expect(searchTranscripts({ query: "newerinventorymarker" }).items).toHaveLength(1);
+
+    await olderScan;
+    await waitForTranscriptIndexIdleForTests();
+    expect(scheduledPaths).toEqual([[newer.path]]);
+    expect(searchTranscripts({ query: "newerinventorymarker" }).items).toHaveLength(1);
+  } finally {
+    await waitForTranscriptIndexIdleForTests();
+    for (const [key, value] of Object.entries(previousEnvironment)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 });
 
@@ -147,6 +294,7 @@ test("a completion frame followed by worker failure preserves the published conv
     });
   `);
   replaceConversationCatalog([retained]);
+  let transcriptIndexFeeds = 0;
 
   await expect(collectFileScanInWorker(
     { persist: false, persistIndex: false },
@@ -155,10 +303,12 @@ test("a completion frame followed by worker failure preserves the published conv
       launch: { executable: process.execPath, workerPath },
       cwd: directory,
       timeoutMs: 2_000,
+      transcriptIndexScheduler: () => { transcriptIndexFeeds += 1; },
     },
   )).rejects.toThrow("file scanner worker exited before completion");
 
   expect(conversationCatalogSnapshot()).toEqual([retained]);
+  expect(transcriptIndexFeeds).toBe(0);
 });
 
 test("aborting a worker scan kills the child and releases its timer and listener", async () => {

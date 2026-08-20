@@ -42,6 +42,7 @@ export const MCP_TOOL_NAMES = [
   "pipeline_action",
   "link_task_to_pipeline",
   "list_conversations",
+  "search_transcripts",
   "get_conversation",
   "deploy_exact_sha",
   "get_pipeline",
@@ -156,6 +157,9 @@ export const MCP_BOUNDED_NUMERIC_ARGS: Partial<Record<McpToolName, readonly McpB
   ],
   list_conversations: [
     { path: ["limit"], min: 1, max: 100, fallback: 50 },
+  ],
+  search_transcripts: [
+    { path: ["limit"], min: 1, max: 100, fallback: 20 },
   ],
   get_conversation: [
     { path: ["maxRecords"], min: 1, max: 500, fallback: 100 },
@@ -1621,6 +1625,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   pipeline_action: "Apply a supported action to an existing pipeline.",
   link_task_to_pipeline: "Attach a board task to a conversation owned by a pipeline.",
   list_conversations: "List scanned Viewer conversations with durable ids and transcript paths.",
+  search_transcripts: "Search indexed user and assistant message bodies across every scanned transcript store. Returns match snippets with speaker, timestamp, transcript path and byte offset; project is optional, and empty pages include corpus statistics. Queries never read transcript files.",
   get_conversation: "Read a conversation summary and its recent messages and tools. With tailLines, conversationId or selectedContext uses the bounded identity path, while transcriptPath uses the validated pinned reader; both return a bounded raw tail without a corpus scan.",
   deploy_exact_sha: "Deploy one full commit SHA. The designated orchestrator decides when to deploy and calls this directly; authority is the server-attributed designated seat, and nobody asks the operator for a confirmation, a phrase, or a SHA. Idempotent by clientRequestId; deployments serialize at the runtime host.",
   get_pipeline: "Read one pipeline by durable id.",
@@ -1858,6 +1863,13 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     project: z.string().optional(),
     query: z.string().optional(),
     limit: boundedNumericInput("list_conversations", "limit"),
+  }).passthrough(),
+  search_transcripts: z.object({
+    clientRequestId: clientRequestIdSchema,
+    query: z.string().trim().min(1).describe("Terms to match in indexed user and assistant message bodies."),
+    project: z.string().trim().min(1).optional().describe("Canonical project key. Omit to search every indexed project."),
+    cursor: z.string().min(1).optional().describe("Opaque cursor returned by the preceding page for this query and project."),
+    limit: boundedNumericInput("search_transcripts", "limit"),
   }).passthrough(),
   get_conversation: z.object({
     clientRequestId: clientRequestIdSchema,

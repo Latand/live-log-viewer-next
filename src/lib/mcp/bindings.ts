@@ -1079,6 +1079,34 @@ async function listConversations(
   return redactPayload({ count: rows.length, conversations: rows });
 }
 
+async function searchTranscripts(
+  args: McpToolArgs,
+  control: ViewerControlDependencies,
+): Promise<McpToolPayload> {
+  const query = text(args.query).trim();
+  if (!query) throw new Error("query is required");
+  const project = text(args.project).trim();
+  const cursor = text(args.cursor).trim();
+  const limit = Math.max(1, Math.min(100, integer(args.limit, 20)));
+  const params = new URLSearchParams({ q: query });
+  if (project) params.set("project", project);
+  if (cursor) params.set("cursor", cursor);
+  params.set("limit", String(limit));
+  const source = await readViewerControl(control, `/api/search/transcripts?${params}`);
+  const stats = objectRecord(source.stats) ? source.stats : null;
+  if (!Array.isArray(source.items)
+    || typeof source.total !== "number"
+    || (source.nextCursor !== null && typeof source.nextCursor !== "string")
+    || !stats
+    || typeof stats.conversationsIndexed !== "number"
+    || typeof stats.messagesIndexed !== "number"
+    || !Array.isArray(stats.fieldsSearched)
+    || typeof stats.tokenizer !== "string") {
+    throw new ViewerControlResponseError("Viewer control returned a malformed transcript search page");
+  }
+  return redactPayload(source);
+}
+
 async function getConversation(
   args: McpToolArgs,
   dependencies: Pick<ViewerMcpDomainDependencies, "listFiles" | "completedFileScan" | "targetedFileEntry" | "selectedContext">,
@@ -2367,6 +2395,7 @@ export function viewerMcpBindings(
     pipeline_action: (args) => pipelineAction(args, domainDependencies),
     link_task_to_pipeline: (args) => linkTaskToPipeline(args, linkTaskDependencies),
     list_conversations: (args) => listConversations(args, controlDependencies),
+    search_transcripts: (args) => searchTranscripts(args, controlDependencies),
     get_conversation: (args, context) => getConversation(args, domainDependencies, context),
     deploy_exact_sha: (args) => deployExactSha(args, controlDependencies, domainDependencies),
     get_pipeline: getPipeline,

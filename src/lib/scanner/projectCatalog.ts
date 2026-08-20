@@ -92,13 +92,16 @@ export function beginProjectCatalogScan(persist: boolean): ProjectCatalogScanTok
   return { publication, persistence };
 }
 
+export function isProjectCatalogScanCurrent(scanToken: ProjectCatalogScanToken): boolean {
+  return projectCatalogRuntime.__llvProjectCatalogPublicationGeneration === scanToken.publication;
+}
+
 export function publishConversationCatalogForScan(
   entries: ConversationCatalogEntry[],
   scanToken: ProjectCatalogScanToken,
   complete: boolean,
 ): boolean {
-  const current = projectCatalogRuntime.__llvProjectCatalogPublicationGeneration === scanToken.publication;
-  if (!current || !complete) return false;
+  if (!isProjectCatalogScanCurrent(scanToken) || !complete) return false;
   replaceConversationCatalog(entries);
   return true;
 }
