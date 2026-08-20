@@ -34,6 +34,28 @@ export function isTopModalLayer(id: symbol): boolean {
 
 const FOCUSABLE_SELECTOR = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
 
+/**
+ * Is this element in the browser's Tab order at all?
+ *
+ * The selector's `:not([tabindex="-1"])` guard only qualifies the `[tabindex]`
+ * clause — `button`, `input` and friends match even when explicitly untabbable.
+ * That matters for a combobox whose `role="option"` rows are driven by
+ * `aria-activedescendant` and therefore carry `tabIndex={-1}` (issue #1054): as
+ * raw matches they became the trap's `last` boundary, so Tab from the last
+ * genuinely tabbable control compared against an element the browser skips,
+ * declined to wrap, and let focus walk straight out of the open dialog.
+ *
+ * Read from the attribute rather than the `tabIndex` property so the answer
+ * does not depend on a DOM implementation's default for each tag.
+ */
+function isTabbable(el: HTMLElement): boolean {
+  const tabindex = el.getAttribute("tabindex");
+  if (tabindex === null) return true;
+  const parsed = Number.parseInt(tabindex, 10);
+  /* An unparseable value leaves the element's default behaviour intact. */
+  return Number.isNaN(parsed) || parsed >= 0;
+}
+
 export interface ModalLayerOptions {
   /** The dialog container: Tab is trapped within it and (when `manageFocus`)
       focus lands here on open. */
@@ -92,7 +114,7 @@ export function useModalLayer({ containerRef, onClose, lockScroll = true, manage
       const container = containerRef.current;
       if (!container) return;
       const focusables = [...container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)].filter(
-        (el) => !el.hasAttribute("disabled"),
+        (el) => !el.hasAttribute("disabled") && isTabbable(el),
       );
       if (!focusables.length) {
         event.preventDefault();

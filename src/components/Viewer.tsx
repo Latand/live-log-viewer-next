@@ -35,7 +35,7 @@ import { resolveFavoriteRows, type FavoriteRow } from "./favorites/favoriteRows"
 import { KeepAwakeProvider } from "./KeepAwakeControl";
 import { OrchestratorDock, OPEN_KEY as ORCHESTRATOR_OPEN_KEY } from "./orchestrator/OrchestratorDock";
 import { OverviewBoard } from "./OverviewBoard";
-import { GlobalSearch } from "./search/GlobalSearch";
+import { GlobalSearch, transcriptFocusHash } from "./search/GlobalSearch";
 import { ProjectDashboard, queueColumnOpen } from "./ProjectDashboard";
 import { isChildConversation, OVERVIEW, projectKey } from "./projectModel";
 import { ProjectRail } from "./ProjectRail";
@@ -460,6 +460,28 @@ export function Viewer() {
     const hash = formatConversationHash(file);
     setPendingHash(parseConversationHash(hash));
   }, [openPinnedFile]);
+
+  /* Opening a global-search result (issue #1054). A selection carries only the
+     transcript path, so it enters the SAME resolver a deep link uses: the hash
+     assignment records the history entry and its hashchange drives resolution.
+     But the tab can already be standing on that exact `#f=` while the
+     conversation is NOT on screen, because plenty happens here without touching
+     the hash — the transcript ages out of the capped feed, the card is closed,
+     the board switches to List view. Assigning an unchanged hash fires no
+     hashchange, so in that case the intent is set directly; without it the
+     palette closed over a selection that never reopened, and "find, open,
+     continue" stopped at find. */
+  const openSearchResult = useCallback((transcriptPath: string) => {
+    const hash = transcriptFocusHash(transcriptPath);
+    if (location.hash !== hash) {
+      location.hash = hash;
+      return;
+    }
+    setStaleFocusNotice(false);
+    dispatchCatalogPin({ kind: "release" });
+    setFocusRequest(null);
+    setPendingHash(parseConversationHash(hash));
+  }, []);
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
@@ -1017,7 +1039,7 @@ export function Viewer() {
           until the header button or `/` opens it, and a selected row leaves
           through the app's own `#f=` deep link so the conversation opens in the
           standard surface with its composer. */}
-      {searchOpen ? <GlobalSearch mobile={isMobile} onClose={closeSearch} /> : null}
+      {searchOpen ? <GlobalSearch mobile={isMobile} onClose={closeSearch} onOpen={openSearchResult} /> : null}
       {/* #875: the ONE document preview surface. Transcript artifact links
           publish to its bus from anywhere in the feed; it renders nothing until
           one opens, and its state is pure same-document React state — no hash,

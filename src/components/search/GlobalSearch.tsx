@@ -16,6 +16,12 @@ interface Props {
       44px target. */
   mobile: boolean;
   onClose: () => void;
+  /** Hands the chosen transcript to the shell, which owns navigation. The
+      palette deliberately does NOT assign the hash itself: the tab can already
+      be standing on the target's `#f=`, and an unchanged hash fires no
+      hashchange, so a palette that navigated by assignment alone would close
+      over a selection that never opened. */
+  onOpen: (transcriptPath: string) => void;
 }
 
 const LIST_ID = "llv-search-results";
@@ -72,7 +78,7 @@ function Snippet({ snippet }: { snippet: string }) {
  * selected row straight to the app's existing deep-link resolver — no second
  * navigation mechanism, and the conversation lands ready to continue.
  */
-export function GlobalSearch({ mobile, onClose }: Props) {
+export function GlobalSearch({ mobile, onClose, onOpen }: Props) {
   const { t } = useLocale();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -109,12 +115,9 @@ export function GlobalSearch({ mobile, onClose }: Props) {
   }, [activeIndex]);
 
   const openResult = useCallback((item: TranscriptSearchRow) => {
-    const hash = transcriptFocusHash(item.transcriptPath);
     onClose();
-    /* Selecting the conversation already on screen fires no hashchange, so
-       closing the overlay IS the whole action. */
-    if (location.hash !== hash) location.hash = hash;
-  }, [onClose]);
+    onOpen(item.transcriptPath);
+  }, [onClose, onOpen]);
 
   const onInputKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.metaKey || event.ctrlKey || event.altKey) return;
@@ -144,6 +147,33 @@ export function GlobalSearch({ mobile, onClose }: Props) {
   const trimmed = query.trim();
   const target = mobile ? "min-h-11" : "";
   const rowActive = (index: number) => index === activeIndex;
+
+  /* One control, two homes: the design note's header slot on desktop, its own
+     row on the phone (see below). Declared once so the two placements cannot
+     drift apart. */
+  const speakerToggle = (
+    <div
+      role="radiogroup"
+      aria-label={t("search.speakerAria")}
+      className="flex shrink-0 items-center gap-0.5 rounded-full border border-border bg-canvas p-0.5"
+    >
+      {([true, false] as const).map((value) => (
+        <button
+          key={String(value)}
+          type="button"
+          role="radio"
+          aria-checked={mine === value}
+          data-search-scope={value ? "mine" : "everything"}
+          onClick={() => setMine(value)}
+          className={`rounded-full px-2.5 text-[11.5px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+            mine === value ? "bg-accent/10 text-accent" : "text-muted hover:text-primary"
+          } ${mobile ? "min-h-11" : "h-7"}`}
+        >
+          {value ? t("search.mine") : t("search.everything")}
+        </button>
+      ))}
+    </div>
+  );
 
   return (
     <div
@@ -183,6 +213,7 @@ export function GlobalSearch({ mobile, onClose }: Props) {
             data-search-input
             className={`min-w-0 flex-1 rounded-[8px] border border-border bg-canvas px-3 text-[13px] outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${mobile ? "h-11" : "h-9"}`}
           />
+          {mobile ? null : speakerToggle}
           <button
             type="button"
             aria-label={t("search.close")}
@@ -194,33 +225,14 @@ export function GlobalSearch({ mobile, onClose }: Props) {
           </button>
         </header>
 
-        <div className="flex shrink-0 items-center gap-2 border-b border-border bg-card px-3 py-1.5">
-          <div
-            role="radiogroup"
-            aria-label={t("search.speakerAria")}
-            className="flex shrink-0 items-center gap-0.5 rounded-full border border-border bg-canvas p-0.5"
-          >
-            {([true, false] as const).map((value) => (
-              <button
-                key={String(value)}
-                type="button"
-                role="radio"
-                aria-checked={mine === value}
-                data-search-scope={value ? "mine" : "everything"}
-                onClick={() => setMine(value)}
-                className={`rounded-full px-2.5 text-[11.5px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-                  mine === value ? "bg-accent/10 text-accent" : "text-muted hover:text-primary"
-                } ${mobile ? "min-h-11" : "h-7"}`}
-              >
-                {value ? t("search.mine") : t("search.everything")}
-              </button>
-            ))}
-          </div>
-          <span aria-hidden className="min-w-0 flex-1" />
-          {trimmed && search.loading && search.items.length ? (
-            <span className="shrink-0 text-[11px] font-semibold text-muted" data-search-updating>{t("search.updating")}</span>
-          ) : null}
-        </div>
+        {/* The phone is the one deviation from the design note's single header
+            row: at 390px the header already spends 44px on the field and 44px
+            on close, and a two-segment scope control beside them leaves the
+            input unusable. It gets its own full-width row so both segments keep
+            their 44px targets. */}
+        {mobile ? (
+          <div className="flex shrink-0 items-center border-b border-border bg-card px-3 py-1.5">{speakerToggle}</div>
+        ) : null}
 
         <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
           {!trimmed ? (
@@ -240,6 +252,11 @@ export function GlobalSearch({ mobile, onClose }: Props) {
             <div className="mb-2 flex items-baseline gap-2">
               <h2 className="text-[13px] font-bold">{t("search.results")}</h2>
               <span className="text-[11px] font-semibold text-muted" data-search-total>{search.total}</span>
+              {/* A refinement holds the rows already on screen, so the header
+                  is what says a newer answer is coming. */}
+              {search.loading ? (
+                <span className="text-[11px] font-semibold text-muted" data-search-updating>{t("search.updating")}</span>
+              ) : null}
             </div>
           ) : null}
 

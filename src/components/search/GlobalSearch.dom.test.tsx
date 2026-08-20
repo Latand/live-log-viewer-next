@@ -82,6 +82,9 @@ let answer: (url: string) => Promise<Response> = async () => Response.json(page(
 let host: HTMLDivElement | null = null;
 let root: Root | null = null;
 let closed = 0;
+/* What the palette handed the shell to open. The palette does not navigate
+   itself, so this — not `location.hash` — is the selection's observable. */
+let opened: string[] = [];
 
 /* Scoped to this endpoint on purpose: modules loaded by neighbouring test files
    keep their own pollers alive (the runtime bus hits `/api/runtime/snapshot`),
@@ -104,7 +107,13 @@ async function mount(mobile = false) {
   const mounted = createRoot(host);
   root = mounted;
   await act(async () => {
-    mounted.render(<GlobalSearch mobile={mobile} onClose={() => { closed += 1; }} />);
+    mounted.render(
+      <GlobalSearch
+        mobile={mobile}
+        onClose={() => { closed += 1; }}
+        onOpen={(path) => { opened.push(path); }}
+      />,
+    );
   });
 }
 
@@ -159,6 +168,7 @@ function click(selector: string) {
 beforeEach(() => {
   requests = [];
   closed = 0;
+  opened = [];
   answer = async () => Response.json(page());
   dom.location.hash = "";
   stubFetch();
@@ -242,7 +252,7 @@ test("arrows and Enter open the conversation through the app's own deep link", a
     .toBe("llv-search-option-1");
   press("Enter");
 
-  expect(dom.location.hash).toBe(transcriptFocusHash("/sessions/beta.jsonl"));
+  expect(opened).toEqual(["/sessions/beta.jsonl"]);
   expect(closed).toBe(1);
 });
 
@@ -254,11 +264,17 @@ test("clicking a row opens that conversation and closes the palette", async () =
   await settle();
   click("[data-search-result]");
 
-  expect(dom.location.hash).toBe(transcriptFocusHash("/sessions/alpha.jsonl"));
+  expect(opened).toEqual(["/sessions/alpha.jsonl"]);
   expect(closed).toBe(1);
 });
 
-test("selecting the conversation already open just closes, since no hashchange would fire", async () => {
+test("a selection is handed over even when the tab already sits on that hash", async () => {
+  /* The tab can be standing on a stale `#f=` while the conversation is NOT on
+     screen: a path-only conversation keeps that entry after the board switches
+     to List view, which changes no hash. If the palette navigated by assigning
+     the hash, this selection would fire no hashchange and open nothing — the
+     operator would be dropped back on the surface they searched from. So the
+     handoff is unconditional and the shell decides how to re-enter. */
   answer = async () => Response.json(page({ items: [row()], total: 1 }));
   dom.location.hash = transcriptFocusHash("/sessions/alpha.jsonl");
   await mount();
@@ -267,7 +283,7 @@ test("selecting the conversation already open just closes, since no hashchange w
   await settle();
   click("[data-search-result]");
 
-  expect(dom.location.hash).toBe(transcriptFocusHash("/sessions/alpha.jsonl"));
+  expect(opened).toEqual(["/sessions/alpha.jsonl"]);
   expect(closed).toBe(1);
 });
 
@@ -358,7 +374,8 @@ test("a paginated answer appends the next page and Enter on the last option fetc
   expect(titles.some((title) => title?.includes("Heliotrope rollout"))).toBe(true);
   expect(titles.some((title) => title?.includes("Page two"))).toBe(true);
   expect(view().querySelector("[data-search-more]")).toBeNull();
-  /* Opening the palette never navigated; only a selection does. */
+  /* Paging is not selecting: nothing was handed over to open. */
+  expect(opened).toEqual([]);
   expect(dom.location.hash).toBe("");
 });
 
@@ -375,6 +392,48 @@ test("Escape and the backdrop both dismiss the palette", async () => {
     dispatch(backdrop, new dom.MouseEvent("mousedown", { bubbles: true, cancelable: true }));
   });
   expect(closed).toBe(2);
+});
+
+test("Tab cannot walk out of the dialog while results are on screen", async () => {
+  answer = async () => Response.json(page({ items: [row()], nextCursor: "cursor-2", total: 2 }));
+  await mount();
+
+  type("heliotrope");
+  await settle();
+  expect(view().querySelector("[data-search-result]")).not.toBeNull();
+  expect(view().querySelector("[data-search-more]")).not.toBeNull();
+
+  /* Rows and Load more are `role="option"` driven by aria-activedescendant, so
+     they carry tabIndex={-1} and the browser skips them. The trap has to wrap
+     at the last GENUINELY tabbable control — counting a row as the boundary let
+     Tab past the real last control and out of the open dialog. */
+  const input = view().querySelector<HTMLInputElement>("[data-search-input]")!;
+  const close = view().querySelector<HTMLElement>("[data-search-close]")!;
+
+  act(() => { close.focus(); });
+  const forward = new dom.KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
+  act(() => { dispatch(dom as unknown as EventTarget, forward); });
+  expect(forward.defaultPrevented).toBe(true);
+  expect(document.activeElement).toBe(input);
+
+  const backward = new dom.KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true, cancelable: true });
+  act(() => { dispatch(dom as unknown as EventTarget, backward); });
+  expect(backward.defaultPrevented).toBe(true);
+  expect(document.activeElement).toBe(close);
+});
+
+test("the scope toggle rides the header on desktop and its own row on a phone", async () => {
+  await mount();
+  expect(view().querySelector("header [data-search-scope]")).not.toBeNull();
+
+  await act(async () => root?.unmount());
+  root = null;
+  host?.remove();
+  await mount(true);
+  /* The phone's one deviation: at 390px the header cannot hold the field, the
+     scope pair and close at 44px each. */
+  expect(view().querySelector("header [data-search-scope]")).toBeNull();
+  expect(view().querySelector("[data-search-scope]")).not.toBeNull();
 });
 
 test("in Everything mode every row says who wrote it", async () => {
