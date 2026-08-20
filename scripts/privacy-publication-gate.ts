@@ -72,6 +72,7 @@ const singleQuotedValuePattern = String.raw`'(?:\\.|[^'\\]){4,}'`;
 const templateQuotedValuePattern = "`(?:\\\\.|[^`\\\\]){4,}`";
 const jsxStringLiteralValuePattern = String.raw`\{\s*(?:${doubleQuotedValuePattern}|${singleQuotedValuePattern})\s*\}`;
 const jsxTemplateLiteralValuePattern = String.raw`\{\s*${templateQuotedValuePattern}\s*\}`;
+const genericBraceValuePattern = String.raw`\{[^}]{4,}\}`;
 const literalCredentialValuePattern = [
   doubleQuotedValuePattern,
   singleQuotedValuePattern,
@@ -82,7 +83,7 @@ const literalCredentialValuePattern = [
 function credentialInputPattern(allowControlledJsx: boolean): RegExp {
   const unquotedValuePattern = allowControlledJsx
     ? String.raw`(?!${controlledJsxValuePattern})[^\s"'=<>]{4,}`
-    : String.raw`[^\s"'=<>]{4,}`;
+    : String.raw`(?:${genericBraceValuePattern}|[^\s"'=<>]{4,})`;
   return new RegExp([
     String.raw`<in`,
     String.raw`put\b(?=[^>]*(?:type\s*=\s*["']?password|name\s*=\s*["']?(?:api[_-]?key|password|secret|token)))`,

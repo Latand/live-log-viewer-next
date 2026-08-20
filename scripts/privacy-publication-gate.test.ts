@@ -617,22 +617,28 @@ exec "$LLV_TEST_REAL_GIT" "$@"
       ">",
     ].join("");
 
+    const controlledBindings = ["{ entered }", "{ form.password }", "{ store?.password }", "{\nform.password\n}"];
     for (const extension of ["jsx", "tsx"]) {
-      const controlled = join(directory, `controlled.${extension}`);
-      writeFileSync(controlled, passwordMarkup("{form?.password}"));
-      expect(runGate([controlled]).stdout.toString()).toBe("PRIVACY GATE: PASS\n");
+      for (const [index, binding] of controlledBindings.entries()) {
+        const controlled = join(directory, `controlled-${index}.${extension}`);
+        writeFileSync(controlled, passwordMarkup(binding));
+        expect(runGate([controlled]).stdout.toString()).toBe("PRIVACY GATE: PASS\n");
+      }
     }
 
-    const genericMarkup = passwordMarkup("{hunter2fixture}");
-    for (const extension of ["html", "md"]) {
-      const publication = join(directory, `publication.${extension}`);
-      writeFileSync(publication, genericMarkup);
-      const result = runGate([publication]);
-      expect(result.exitCode).toBe(1);
-      expect(result.stdout.toString()).toBe("PRIVACY GATE: FAIL\ncredential: 1\n");
+    for (const [index, binding] of controlledBindings.entries()) {
+      const genericMarkup = passwordMarkup(binding);
+      for (const extension of ["html", "md"]) {
+        const publication = join(directory, `publication-${index}.${extension}`);
+        writeFileSync(publication, genericMarkup);
+        const result = runGate([publication]);
+        expect(result.exitCode).toBe(1);
+        expect(result.stdout.toString()).toBe("PRIVACY GATE: FAIL\ncredential: 1\n");
+      }
+      /* Issue/PR bodies and tracker fields reach sensitiveClasses as raw,
+         generic publication text. */
+      expect(sensitiveClasses(genericMarkup).has("credential")).toBe(true);
     }
-    /* Issue and pull-request bodies reach sensitiveClasses as generic text. */
-    expect(sensitiveClasses(genericMarkup).has("credential")).toBe(true);
   });
 
   test("matches a fixed independently derived vendor digest vector", () => {
