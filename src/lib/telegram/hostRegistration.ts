@@ -3,8 +3,10 @@ import os from "node:os";
 import path from "node:path";
 
 import { legacyClaudeHome, listClaudeAccounts } from "@/lib/accounts/claude";
+import { statePath } from "@/lib/configDir";
 
 import { telegramMcpUrl } from "./packaging";
+import { ensureTelegramStateDir } from "./sessionStore";
 
 /**
  * Host registration of the shared connector as `telegram` (issue #1059).
@@ -21,6 +23,13 @@ import { telegramMcpUrl } from "./packaging";
  * and surgical: they touch only the `telegram` entry the Viewer manages. The
  * separately configured legacy transport (`telegram-readonly`) is a different
  * name and is never read or written here.
+ *
+ * OWNERSHIP. The Codex block carries its own markers, so ownership is in the
+ * file. Claude JSON has no such place, so the Viewer records what it wrote
+ * (path → url) in `<state>/telegram/registrations.json` and refuses to touch
+ * anything else: a pre-existing `telegram` entry the Viewer did not write —
+ * whatever its shape — is the operator's, registration backs off from it, and
+ * removal deletes only an entry that still matches the Viewer's own record.
  */
 
 const CLAUDE_ENTRY_NAME = "telegram";
@@ -80,38 +89,77 @@ function claudeState(pathname: string): Record<string, unknown> | null {
   }
 }
 
+function isViewerEntry(entry: unknown, url: string | null): boolean {
+  if (url === null || !entry || typeof entry !== "object") return false;
+  const record = entry as { type?: unknown; url?: unknown };
+  return record.type === "http" && record.url === url
+    && Object.keys(record).length === 2;
+}
+
+export type ClaudeRegistrationResult = "registered" | "conflict" | "unwritable";
+
 /** Upserts `mcpServers.telegram` in one Claude state file. Corrupt or
-    symlinked files are left alone — registration must never destroy state. */
-export function registerTelegramInClaudeState(pathname: string, url: string): boolean {
-  if (!safeToRewrite(pathname)) return false;
+    symlinked files are left alone ("unwritable") — registration must never
+    destroy state. A pre-existing entry that is NOT the Viewer's own — proven
+    by `previousUrl`, the url this Viewer recorded for this exact file — is
+    the operator's configuration and is refused ("conflict"), never
+    overwritten, whatever its shape. */
+export function registerTelegramInClaudeState(pathname: string, url: string, previousUrl: string | null = null): ClaudeRegistrationResult {
+  if (!safeToRewrite(pathname)) return "unwritable";
   const state = claudeState(pathname);
-  if (!state) return false;
+  if (!state) return "unwritable";
   const servers = state.mcpServers && typeof state.mcpServers === "object" && !Array.isArray(state.mcpServers)
     ? { ...state.mcpServers as Record<string, unknown> }
     : {};
-  const entry = { type: "http", url };
-  const existing = servers[CLAUDE_ENTRY_NAME] as { type?: unknown; url?: unknown } | undefined;
-  if (existing && existing.type === "http" && existing.url === url) return true;
-  servers[CLAUDE_ENTRY_NAME] = entry;
+  const existing = servers[CLAUDE_ENTRY_NAME];
+  if (existing !== undefined) {
+    /* Identical bytes prove configuration equality, not Viewer ownership.
+       Only the separately persisted record may authorize update/removal. */
+    if (!isViewerEntry(existing, previousUrl)) return "conflict";
+    if (isViewerEntry(existing, url)) return "registered";
+  }
+  servers[CLAUDE_ENTRY_NAME] = { type: "http", url };
   atomicWrite(pathname, JSON.stringify({ ...state, mcpServers: servers }, null, 2) + "\n", 0o600);
-  return true;
+  return "registered";
 }
 
-/** Removes the Viewer-managed `telegram` entry. Only an `http` entry is ours
-    to remove; an operator's hand-written stdio entry under the same name is
-    not touched. */
-export function removeTelegramFromClaudeState(pathname: string): boolean {
+/** Removes the Viewer's `telegram` entry. Only an entry still matching the
+    Viewer's own record (`ownedUrl`) is removed; anything else — including an
+    entry the operator edited after registration — is left exactly as found. */
+export function removeTelegramFromClaudeState(pathname: string, ownedUrl: string | null): boolean {
   if (!safeToRewrite(pathname) || !fs.existsSync(pathname)) return true;
   const state = claudeState(pathname);
   if (!state) return false;
   const servers = state.mcpServers && typeof state.mcpServers === "object" && !Array.isArray(state.mcpServers)
     ? { ...state.mcpServers as Record<string, unknown> }
     : {};
-  const existing = servers[CLAUDE_ENTRY_NAME] as { type?: unknown } | undefined;
-  if (!existing || existing.type !== "http") return true;
+  if (!isViewerEntry(servers[CLAUDE_ENTRY_NAME], ownedUrl)) return true;
   delete servers[CLAUDE_ENTRY_NAME];
   atomicWrite(pathname, JSON.stringify({ ...state, mcpServers: servers }, null, 2) + "\n", 0o600);
   return true;
+}
+
+/* What this Viewer wrote, per Claude state file. Removal consults it, so an
+   operator-replaced entry is never deleted as if it were still ours. */
+type RegistrationRecords = { version: 1; claude: Record<string, string> };
+
+function registrationRecordsPath(): string {
+  return statePath("telegram", "registrations.json");
+}
+
+function readRegistrationRecords(): RegistrationRecords {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(registrationRecordsPath(), "utf8")) as Partial<RegistrationRecords>;
+    if (parsed.version === 1 && parsed.claude && typeof parsed.claude === "object") {
+      return { version: 1, claude: { ...parsed.claude as Record<string, string> } };
+    }
+  } catch { /* absent or corrupt records start empty */ }
+  return { version: 1, claude: {} };
+}
+
+function writeRegistrationRecords(records: RegistrationRecords): void {
+  ensureTelegramStateDir(true);
+  atomicWrite(registrationRecordsPath(), JSON.stringify(records) + "\n", 0o600);
 }
 
 function codexManagedBlock(url: string): string {
@@ -159,11 +207,24 @@ export function removeTelegramFromCodexConfig(pathname: string): boolean {
 }
 
 export function registerTelegramHosts(targets: TelegramRegistrationTargets = telegramRegistrationTargets(), url: string = telegramMcpUrl()): void {
-  for (const pathname of targets.claudeStatePaths) registerTelegramInClaudeState(pathname, url);
+  const records = readRegistrationRecords();
+  for (const pathname of targets.claudeStatePaths) {
+    const result = registerTelegramInClaudeState(pathname, url, records.claude[pathname] ?? null);
+    if (result === "registered") records.claude[pathname] = url;
+    /* A conflict is the operator's entry — nothing of ours exists there. */
+    else if (result === "conflict") delete records.claude[pathname];
+  }
+  writeRegistrationRecords(records);
   for (const pathname of targets.codexConfigPaths) registerTelegramInCodexConfig(pathname, url);
 }
 
 export function unregisterTelegramHosts(targets: TelegramRegistrationTargets = telegramRegistrationTargets()): void {
-  for (const pathname of targets.claudeStatePaths) removeTelegramFromClaudeState(pathname);
+  const records = readRegistrationRecords();
+  /* Recorded paths outside the current target list (a managed home removed
+     since registration) still get their Viewer entry cleaned up. */
+  for (const pathname of new Set([...targets.claudeStatePaths, ...Object.keys(records.claude)])) {
+    if (removeTelegramFromClaudeState(pathname, records.claude[pathname] ?? null)) delete records.claude[pathname];
+  }
+  writeRegistrationRecords(records);
   for (const pathname of targets.codexConfigPaths) removeTelegramFromCodexConfig(pathname);
 }

@@ -11,8 +11,8 @@ process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 process.env.LLV_TELEGRAM_API_ID = "12345";
 process.env.LLV_TELEGRAM_API_HASH = "0123456789abcdef0123456789abcdef";
 
-const { ensureTelegramConnector, stopTelegramConnector, verifyReadOnlyTools } = await import("./connector");
-const { telegramMcpUrl } = await import("./packaging");
+const { TELEGRAM_READ_TOOL_ALLOWLIST, ensureTelegramConnector, stopTelegramConnector, verifyReadOnlyTools } = await import("./connector");
+const { telegramMcpUrl, vendoredConnectorDir } = await import("./packaging");
 
 import type { ConnectorProbe, TelegramConnectorPorts } from "./connector";
 
@@ -57,7 +57,7 @@ afterAll(() => {
   fs.rmSync(SANDBOX, { recursive: true, force: true });
 });
 
-test("every advertised tool must carry an affirmative readOnlyHint", () => {
+test("every advertised tool must carry an affirmative readOnlyHint AND be on the audited allowlist", () => {
   expect(verifyReadOnlyTools([{ name: "get_me", readOnly: true }]).ok).toBe(true);
   const mixed = verifyReadOnlyTools([
     { name: "get_me", readOnly: true },
@@ -65,8 +65,42 @@ test("every advertised tool must carry an affirmative readOnlyHint", () => {
   ]);
   expect(mixed.ok).toBe(false);
   expect(mixed.offending).toEqual(["send_message"]);
+  /* The annotation alone is NOT sufficient: a tool CLAIMING readOnly whose
+     name is outside the audited allowlist is refused — this is exactly the
+     upstream get_invite_link failure (a read-annotated invite-link mint). */
+  const claimed = verifyReadOnlyTools([
+    { name: "get_me", readOnly: true },
+    { name: "get_invite_link", readOnly: true },
+  ]);
+  expect(claimed.ok).toBe(false);
+  expect(claimed.offending).toEqual(["get_invite_link"]);
+  expect(verifyReadOnlyTools([{ name: "export_chat_invite", readOnly: true }]).ok).toBe(false);
   /* An empty tool list proves nothing and fails closed. */
   expect(verifyReadOnlyTools([]).ok).toBe(false);
+});
+
+test("the allowlist equals the vendored registry's read-only surface, minus nothing", () => {
+  /* Re-derive the read-annotated tool set from the ACTUAL vendored source, so
+     a vendor bump that adds or re-annotates a tool cannot silently diverge
+     from the audited allowlist — parity failure forces a fresh audit. */
+  const toolsDir = path.join(vendoredConnectorDir(), "telegram_mcp", "tools");
+  const registry = new Set<string>();
+  for (const file of fs.readdirSync(toolsDir).filter((name) => name.endsWith(".py"))) {
+    const text = fs.readFileSync(path.join(toolsDir, file), "utf8");
+    for (const chunk of text.split(/(?=@mcp\.tool\()/)) {
+      const head = chunk.split("async def")[0]!;
+      if (!head.includes("readOnlyHint=True")) continue;
+      const name = chunk.match(/async def (\w+)\(/)?.[1];
+      if (name) registry.add(name);
+    }
+  }
+  expect([...registry].sort()).toEqual([...TELEGRAM_READ_TOOL_ALLOWLIST].sort());
+  /* The two disproven upstream annotations stay patched off the read surface
+     (vendor/telegram-mcp/PROVENANCE.md) and off the allowlist. */
+  for (const disproven of ["get_invite_link", "export_chat_invite"]) {
+    expect(registry.has(disproven)).toBe(false);
+    expect(TELEGRAM_READ_TOOL_ALLOWLIST.has(disproven)).toBe(false);
+  }
 });
 
 test("an already-listening read-only connector is adopted, never duplicated", async () => {
@@ -82,9 +116,12 @@ test("spawns once, waits for readiness, records the pid for later generations", 
   expect(result.ok).toBe(true);
   expect(calls.spawns).toBe(1);
   const pidFile = path.join(process.env.LLV_STATE_DIR!, "telegram", "connector.json");
-  const recorded = JSON.parse(fs.readFileSync(pidFile, "utf8")) as { pid: number; startToken: string };
+  const recorded = JSON.parse(fs.readFileSync(pidFile, "utf8")) as { pid: number; identity: string };
   expect(recorded.pid).toBe(process.pid);
-  expect(typeof recorded.startToken).toBe("string");
+  /* The portable backend's identity token, not a raw /proc read — the same
+     value works on Linux and macOS. */
+  expect(typeof recorded.identity).toBe("string");
+  expect(recorded.identity.length).toBeGreaterThan(0);
 
   /* Stop clears the record; the fenced kill skips this non-connector pid. */
   stopTelegramConnector();

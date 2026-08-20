@@ -44,12 +44,16 @@ class FakeAdapter implements TelegramAdapter {
 
 function harness() {
   const adapter = new FakeAdapter();
-  const calls = { ensure: [] as string[], stop: 0, register: 0, unregister: 0 };
+  const calls = { ensure: [] as string[], stop: 0, register: 0, unregister: 0, order: [] as string[] };
   const ports: TelegramServicePorts = {
     adapter,
-    ensureConnector: async (sessionString) => { calls.ensure.push(sessionString); return { ok: true, url: "http://127.0.0.1:8809/mcp" }; },
+    ensureConnector: async (sessionString) => {
+      calls.ensure.push(sessionString);
+      calls.order.push("ensure");
+      return { ok: true, url: "http://127.0.0.1:8809/mcp" };
+    },
     stopConnector: () => { calls.stop += 1; },
-    registerHosts: () => { calls.register += 1; },
+    registerHosts: () => { calls.register += 1; calls.order.push("register"); },
     unregisterHosts: () => { calls.unregister += 1; },
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
   };
@@ -91,17 +95,21 @@ test("the full QR login without 2FA: scan refresh, verify, connect", async () =>
   expect(service.status().phase).toBe("verifying");
 
   adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: "account_a" } });
+  /* Authorization alone does NOT publish connected — the operation stays in
+     verifying until the connector's read-only surface stands verified. */
+  expect(service.status().phase).toBe("verifying");
   await settle();
   status = service.status();
   expect(status.phase).toBe("connected");
   expect(status.identity?.name).toBe("Account A");
   expect(status.credentialRef).toMatch(/^[0-9a-f-]{36}$/);
 
-  /* The credential landed owner-only; hosts registered; connector ensured. */
+  /* The credential landed owner-only; the connector was verified BEFORE any
+     host registration happened. */
   expect(readTelegramSession()?.sessionString).toBe(PLACEHOLDER_SESSION);
   expect(fs.statSync(telegramSessionPath()).mode & 0o777).toBe(0o600);
-  expect(calls.register).toBe(1);
   expect(calls.ensure).toEqual([PLACEHOLDER_SESSION]);
+  expect(calls.order).toEqual(["ensure", "register"]);
 });
 
 test("the session string never appears in any status payload", async () => {
@@ -250,13 +258,14 @@ test("local deletion works directly from connected", async () => {
   expect(calls.unregister).toBe(1);
 });
 
-test("a connector refusing the read-only bound surfaces as an explicit error", async () => {
+test("a connector refusing the read-only bound blocks connected and never registers hosts", async () => {
   const { adapter } = harness();
+  let registered = 0;
   const refusing = new TelegramConnectionService({
     adapter,
     ensureConnector: async () => ({ ok: false, code: "not_read_only" }),
     stopConnector: () => {},
-    registerHosts: () => {},
+    registerHosts: () => { registered += 1; },
     unregisterHosts: () => {},
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
   });
@@ -266,6 +275,49 @@ test("a connector refusing the read-only bound surfaces as an explicit error", a
   const status = refusing.status();
   expect(status.phase).toBe("error");
   expect(status.error?.code).toBe("not_read_only");
+  expect(registered).toBe(0);
+  /* The authorized credential survives the refusal. */
+  expect(readTelegramSession()?.sessionString).toBe(PLACEHOLDER_SESSION);
+});
+
+test("a connector bring-up that THROWS surfaces too, instead of leaving connected published", async () => {
+  const { adapter } = harness();
+  let registered = 0;
+  const throwing = new TelegramConnectionService({
+    adapter,
+    ensureConnector: async () => { throw new Error("boom"); },
+    stopConnector: () => {},
+    registerHosts: () => { registered += 1; },
+    unregisterHosts: () => {},
+    now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+  });
+  throwing.startLogin();
+  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null } });
+  await settle();
+  const status = throwing.status();
+  expect(status.phase).toBe("error");
+  expect(status.error?.code).toBe("connector_failed");
+  expect(registered).toBe(0);
+  expect(readTelegramSession()?.sessionString).toBe(PLACEHOLDER_SESSION);
+});
+
+test("health over a healthy account still refuses connected when the connector fails", async () => {
+  const { adapter } = harness();
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  const failing = new TelegramConnectionService({
+    adapter,
+    ensureConnector: async () => ({ ok: false, code: "connector_failed" }),
+    stopConnector: () => {},
+    registerHosts: () => {},
+    unregisterHosts: () => {},
+    now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+  });
+  const status = await failing.checkHealth();
+  expect(status.phase).toBe("error");
+  expect(status.error?.code).toBe("connector_failed");
+  /* The account is fine, so its identity and session survive for the retry. */
+  expect(status.identity?.username).toBe("account_a");
+  expect(readTelegramSession()).not.toBeNull();
 });
 
 test("an unsafe session file (symlink) reads as an explicit session_unsafe error", async () => {

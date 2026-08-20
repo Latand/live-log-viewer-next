@@ -78,8 +78,39 @@ function assertSafeSecretFile(pathname: string): void {
   }
 }
 
+/**
+ * The same fence for the directory HOLDING the secrets — mkdir's mode applies
+ * only on creation, so a pre-existing telegram dir is validated every time:
+ * it must be a real directory (never a symlink pointing the secret write
+ * elsewhere), owned by this uid, with no group/other bits. Every mismatch is
+ * refused so reads and overwrites share the same fail-closed boundary. The
+ * state-dir root above it stays the app-wide boundary it already is — this
+ * fences the component this module creates.
+ */
+export function ensureTelegramStateDir(create = true): string | null {
+  const dir = statePath(DIR_NAME);
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(dir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if (!create) return null;
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    stat = fs.lstatSync(dir);
+  }
+  if (stat.isSymbolicLink()) throw new UnsafeTelegramSessionError("telegram directory is a symlink");
+  if (!stat.isDirectory()) throw new UnsafeTelegramSessionError("telegram directory is not a directory");
+  if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+    throw new UnsafeTelegramSessionError("telegram directory is not owned by this user");
+  }
+  if ((stat.mode & 0o077) !== 0) {
+    throw new UnsafeTelegramSessionError("telegram directory permissions are wider than owner-only");
+  }
+  return dir;
+}
+
 function atomicSecretWrite(pathname: string, contents: string): void {
-  fs.mkdirSync(path.dirname(pathname), { recursive: true, mode: 0o700 });
+  ensureTelegramStateDir(true);
   try {
     assertSafeSecretFile(pathname);
   } catch (error) {
@@ -98,6 +129,7 @@ function atomicSecretWrite(pathname: string, contents: string): void {
 }
 
 function readSafeJson(pathname: string): unknown | null {
+  if (ensureTelegramStateDir(false) === null) return null;
   try {
     assertSafeSecretFile(pathname);
   } catch (error) {
@@ -110,6 +142,18 @@ function readSafeJson(pathname: string): unknown | null {
   } catch {
     return null;
   }
+}
+
+function removeSafeFile(pathname: string): void {
+  if (ensureTelegramStateDir(false) === null) return;
+  try {
+    assertSafeSecretFile(pathname);
+  } catch (error) {
+    if (error instanceof UnsafeTelegramSessionError) throw error;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  fs.rmSync(pathname);
 }
 
 /** Persists the enrolled session and returns the opaque reference every other
@@ -135,7 +179,7 @@ export function readTelegramSession(): StoredTelegramSession | null {
 }
 
 export function deleteTelegramSession(): void {
-  fs.rmSync(telegramSessionPath(), { force: true });
+  removeSafeFile(telegramSessionPath());
 }
 
 const DISCONNECTED: StoredTelegramConnection = {
@@ -169,5 +213,5 @@ export function writeTelegramConnection(connection: StoredTelegramConnection): v
 }
 
 export function clearTelegramConnection(): void {
-  fs.rmSync(telegramConnectionPath(), { force: true });
+  removeSafeFile(telegramConnectionPath());
 }

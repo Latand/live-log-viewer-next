@@ -62,12 +62,39 @@ test("refuses a symlinked session file instead of following it", () => {
   expect(() => readTelegramSession()).toThrow(UnsafeTelegramSessionError);
   /* And refuses to overwrite through it. */
   expect(() => saveTelegramSession(PLACEHOLDER_SESSION)).toThrow(UnsafeTelegramSessionError);
+  expect(() => deleteTelegramSession()).toThrow(UnsafeTelegramSessionError);
+  expect(fs.existsSync(target)).toBe(true);
 });
 
 test("refuses a session file with group/other permission bits", () => {
   saveTelegramSession(PLACEHOLDER_SESSION);
   fs.chmodSync(telegramSessionPath(), 0o644);
   expect(() => readTelegramSession()).toThrow(UnsafeTelegramSessionError);
+});
+
+test("a symlinked telegram DIRECTORY is refused for reads and writes alike", () => {
+  const outside = path.join(SANDBOX, "outside-dir");
+  fs.mkdirSync(outside, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(outside, "session.json"), JSON.stringify({ version: 1, credentialRef: "x", sessionString: "planted" }), { mode: 0o600 });
+  const dir = path.dirname(telegramSessionPath());
+  fs.mkdirSync(path.dirname(dir), { recursive: true });
+  fs.symlinkSync(outside, dir);
+  /* Read, write, and deletion all refuse the redirected directory. */
+  expect(() => saveTelegramSession(PLACEHOLDER_SESSION)).toThrow(UnsafeTelegramSessionError);
+  expect(() => readTelegramSession()).toThrow(UnsafeTelegramSessionError);
+  expect(() => deleteTelegramSession()).toThrow(UnsafeTelegramSessionError);
+  expect(fs.readdirSync(outside)).toEqual(["session.json"]);
+});
+
+test("a pre-existing group-readable telegram directory is refused", () => {
+  const dir = path.dirname(telegramSessionPath());
+  /* mkdir mode only applies on creation — a pre-existing 0755 boundary must
+     fail closed instead of being silently accepted or rewritten. */
+  fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
+  fs.chmodSync(dir, 0o755);
+  expect(() => saveTelegramSession(PLACEHOLDER_SESSION)).toThrow(UnsafeTelegramSessionError);
+  expect(() => readTelegramSession()).toThrow(UnsafeTelegramSessionError);
+  expect(fs.statSync(dir).mode & 0o777).toBe(0o755);
 });
 
 test("deletion is idempotent and leaves nothing behind", () => {

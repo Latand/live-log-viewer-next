@@ -125,8 +125,12 @@ export class TelegramConnectionService {
           current.qr = null;
           return;
         case "authorized":
-          this.login = null;
-          this.completeEnrollment(event.sessionString, event.identity);
+          /* The operation stays live (as "verifying") until the connector's
+             read-only surface is verified — connected is never published on
+             the authorization alone. */
+          current.phase = "verifying";
+          current.qr = null;
+          void this.completeEnrollment(event.sessionString, event.identity);
           return;
         case "failed":
           this.login = null;
@@ -138,12 +142,31 @@ export class TelegramConnectionService {
     return this.status();
   }
 
-  private completeEnrollment(sessionString: string, identity: TelegramIdentity): void {
+  /** Persist → verify → publish, in that order: the credential is saved first
+      (Telegram authorized it; losing it would force a rescan), then the
+      shared connector must come up AND pass the read-only verification before
+      the connection reads as connected or any host registration happens.
+      EVERY failure — refusal, timeout, thrown error — lands in an explicit
+      error state over the preserved session. A cancel racing this tail does
+      not undo it: the account authorized, so the outcome is reported. */
+  private async completeEnrollment(sessionString: string, identity: TelegramIdentity): Promise<void> {
     let credentialRef: string;
     try {
       credentialRef = saveTelegramSession(sessionString).credentialRef;
     } catch {
+      this.login = null;
       this.recordError("session_unsafe");
+      return;
+    }
+    let connector: Awaited<ReturnType<TelegramServicePorts["ensureConnector"]>>;
+    try {
+      connector = await this.ports.ensureConnector(sessionString);
+    } catch {
+      connector = { ok: false, code: "connector_failed" };
+    }
+    this.login = null;
+    if (!connector.ok) {
+      writeTelegramConnection({ version: 1, status: "error", credentialRef, identity, lastHealthCheckAt: null, errorCode: connector.code });
       return;
     }
     writeTelegramConnection({
@@ -155,12 +178,6 @@ export class TelegramConnectionService {
       errorCode: null,
     });
     this.ports.registerHosts();
-    /* Connector bring-up is not part of the login transaction: the session is
-       saved and the account is connected even if the process needs another
-       attempt; a definite refusal (non-read-only surface) does surface. */
-    void this.ports.ensureConnector(sessionString).then((result) => {
-      if (!result.ok && result.code === "not_read_only") this.recordError(result.code);
-    }).catch(() => undefined);
   }
 
   private recordError(code: TelegramErrorCode): void {
@@ -229,8 +246,21 @@ export class TelegramConnectionService {
     const result = await this.ports.adapter.checkSession(session.sessionString);
     const checkedAt = new Date(this.ports.now()).toISOString();
     if (result.status === "connected") {
+      /* A healthy account only reads as connected once the shared connector
+         also stands verified — the same gate enrollment applies. A failure
+         here keeps the session (the account is fine) and surfaces the code;
+         the next fresh health check retries without a rescan. */
+      let connector: Awaited<ReturnType<TelegramServicePorts["ensureConnector"]>>;
+      try {
+        connector = await this.ports.ensureConnector(session.sessionString);
+      } catch {
+        connector = { ok: false, code: "connector_failed" };
+      }
+      if (!connector.ok) {
+        writeTelegramConnection({ version: 1, status: "error", credentialRef: session.credentialRef, identity: result.identity, lastHealthCheckAt: checkedAt, errorCode: connector.code });
+        return;
+      }
       writeTelegramConnection({ version: 1, status: "connected", credentialRef: session.credentialRef, identity: result.identity, lastHealthCheckAt: checkedAt, errorCode: null });
-      void this.ports.ensureConnector(session.sessionString).catch(() => undefined);
       return;
     }
     if (result.status === "expired") {

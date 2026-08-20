@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
-import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
+import { procBackend } from "@/lib/proc";
 
 import type { TelegramErrorCode } from "./contracts";
 import { connectorLaunchSpec, telegramApiCredentials, telegramMcpUrl, type ProcessSpec } from "./packaging";
+import { ensureTelegramStateDir } from "./sessionStore";
 
 /**
  * Supervisor for the ONE shared loopback connector process (issue #1059).
@@ -14,17 +15,46 @@ import { connectorLaunchSpec, telegramApiCredentials, telegramMcpUrl, type Proce
  * candidates never start their own copy — they reach the registered
  * streamable-HTTP URL. Before a spawned process is considered ready (and
  * before an already-listening one is adopted), its advertised tool surface is
- * verified: every tool must carry `readOnlyHint: true`, or the process is
- * refused and reported as `not_read_only`. The read-only claim is proven at
- * the boundary, never assumed from the env var that requested it.
+ * verified against TWO independent bounds:
  *
- * The spawned pid and its /proc start token persist in
+ *  - every tool must carry `readOnlyHint: true`; and
+ *  - every tool name must be on {@link TELEGRAM_READ_TOOL_ALLOWLIST}, the
+ *    reviewed list of tools whose implementations were audited to perform no
+ *    server-side mutation. The annotation alone is NOT trusted: upstream
+ *    shipped `get_invite_link`/`export_chat_invite` annotated read-only while
+ *    minting invite links (see vendor/telegram-mcp/PROVENANCE.md), which is
+ *    exactly the failure an annotation-only check cannot catch.
+ *
+ * A surface violating either bound is refused and reported `not_read_only`.
+ *
+ * The spawned pid and its portable process identity persist in
  * `<state>/telegram/connector.json`, so a LATER Viewer generation — the one
  * actually handling the logout or local deletion — can stop the connector it
- * adopted rather than only one it spawned itself. The token plus a command
- * line check fence the kill to the exact process that was started (the
- * claudeLogin.ts pattern): a recycled pid is never signaled.
+ * adopted rather than only one it spawned itself. Identity comes from the
+ * platform `procBackend` (kernel start token on Linux, the darwin identity on
+ * macOS), plus an argv check, so a recycled pid is never signaled.
  */
+
+/** The audited read surface: every `readOnlyHint=True` tool in the vendored
+    tree (post-patch), each verified to perform no server-side write. The
+    parity test in `connector.test.ts` re-derives this set from the vendored
+    registry, so a vendor bump cannot silently widen it. */
+export const TELEGRAM_READ_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
+  "export_contacts", "get_admins", "get_banned_users", "get_blocked_users",
+  "get_bot_info", "get_chat", "get_chats", "get_common_chats",
+  "get_contact_chats", "get_contact_ids", "get_direct_chat_by_contact",
+  "get_drafts", "get_folder", "get_full_chat", "get_full_user",
+  "get_gif_search", "get_history", "get_last_interaction", "get_me",
+  "get_media_info", "get_message_context", "get_message_link",
+  "get_message_reactions", "get_message_read_by", "get_messages",
+  "get_participants", "get_pinned_messages", "get_privacy_settings",
+  "get_recent_actions", "get_scheduled_messages", "get_sticker_sets",
+  "get_user_photos", "get_user_status", "incoming_feed_status",
+  "list_accounts", "list_chats", "list_contact_aliases", "list_contacts",
+  "list_folders", "list_inline_buttons", "list_messages", "list_topics",
+  "resolve_username", "search_contacts", "search_global", "search_messages",
+  "search_public_chats", "wait_for_new_message", "wait_for_settled_message",
+]);
 
 export type ConnectorProbe =
   | { ok: true; serverName: string; tools: Array<{ name: string; readOnly: boolean }> }
@@ -43,10 +73,16 @@ const READY_DEADLINE_MS = 30_000;
 const PROBE_INTERVAL_MS = 500;
 const PID_FILE = "connector.json";
 
-/** The read-only gate, pure so it is directly provable: one tool without an
-    affirmative readOnlyHint fails the whole surface. */
-export function verifyReadOnlyTools(tools: Array<{ name: string; readOnly: boolean }>): { ok: boolean; offending: string[] } {
-  const offending = tools.filter((tool) => !tool.readOnly).map((tool) => tool.name);
+/** The read-only gate, pure so it is directly provable: one tool that lacks
+    an affirmative readOnlyHint OR falls outside the audited allowlist fails
+    the whole surface; an empty surface proves nothing and fails too. */
+export function verifyReadOnlyTools(
+  tools: Array<{ name: string; readOnly: boolean }>,
+  allowlist: ReadonlySet<string> = TELEGRAM_READ_TOOL_ALLOWLIST,
+): { ok: boolean; offending: string[] } {
+  const offending = tools
+    .filter((tool) => !tool.readOnly || !allowlist.has(tool.name))
+    .map((tool) => tool.name);
   return { ok: tools.length > 0 && offending.length === 0, offending };
 }
 
@@ -96,36 +132,33 @@ function pidFilePath(): string {
   return statePath("telegram", PID_FILE);
 }
 
-function procStartToken(pid: number): string | null {
-  try { return fs.readFileSync(`/proc/${pid}/stat`, "utf8").split(" ")[21] ?? null; } catch { return null; }
-}
-
 function looksLikeConnector(pid: number): boolean {
-  try { return /python/.test(fs.readFileSync(`/proc/${pid}/cmdline`, "utf8")) || /main\.py/.test(fs.readFileSync(`/proc/${pid}/cmdline`, "utf8")); }
-  catch { return false; }
+  const argv = procBackend.readArgv(pid);
+  return argv.some((part) => /python/.test(part) || /main\.py$/.test(part));
 }
 
 function recordConnectorPid(pid: number | undefined): void {
   if (!pid) return;
-  const token = procStartToken(pid);
-  if (!token) return;
+  const identity = procBackend.processIdentity(pid);
+  if (!identity) return;
   try {
-    fs.mkdirSync(path.dirname(pidFilePath()), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(pidFilePath(), JSON.stringify({ pid, startToken: token }), { mode: 0o600 });
+    ensureTelegramStateDir(true);
+    fs.writeFileSync(pidFilePath(), JSON.stringify({ pid, identity }), { mode: 0o600 });
   } catch { /* an unrecorded pid only weakens cross-generation stop */ }
 }
 
 function killRecordedConnector(): void {
-  let recorded: { pid?: unknown; startToken?: unknown };
-  try { recorded = JSON.parse(fs.readFileSync(pidFilePath(), "utf8")) as { pid?: unknown; startToken?: unknown }; }
+  let recorded: { pid?: unknown; identity?: unknown };
+  try { recorded = JSON.parse(fs.readFileSync(pidFilePath(), "utf8")) as { pid?: unknown; identity?: unknown }; }
   catch { return; }
   fs.rmSync(pidFilePath(), { force: true });
   const pid = recorded.pid;
-  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 1) return;
-  if (procStartToken(pid) !== recorded.startToken || !looksLikeConnector(pid)) return;
+  const identity = recorded.identity;
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 1 || typeof identity !== "string") return;
+  if (procBackend.processIdentity(pid) !== identity || !looksLikeConnector(pid)) return;
   try { process.kill(pid, "SIGTERM"); } catch { return; }
   setTimeout(() => {
-    if (procStartToken(pid) === recorded.startToken) {
+    if (procBackend.processIdentity(pid) === identity) {
       try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
     }
   }, 2_000).unref?.();
