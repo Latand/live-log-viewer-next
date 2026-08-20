@@ -107,18 +107,18 @@ test("matches Cyrillic hashtags and underscore tags as exact FTS tokens", async 
     JSON.stringify({
       type: "user",
       timestamp: "2026-08-20T11:00:00.000Z",
-      message: { role: "user", content: "Підготуй #звіт за правилом cron_work_daily" },
+      message: { role: "user", content: "Підготуй #тег за правилом cron_tag_sample" },
     }),
     JSON.stringify({
       type: "assistant",
       timestamp: "2026-08-20T11:00:01.000Z",
-      message: { role: "assistant", content: "Окрема #звітність використовує cron_work_daily_extra" },
+      message: { role: "assistant", content: "Окрема #тегування використовує cron_tag_sample_extra" },
     }),
   ].join("\n") + "\n");
   await indexTranscriptSources([source(transcript, "claude", "reports")], { complete: true });
 
-  const hashtag = searchTranscripts({ query: "#звіт" });
-  const underscore = searchTranscripts({ query: "cron_work_daily" });
+  const hashtag = searchTranscripts({ query: "#тег" });
+  const underscore = searchTranscripts({ query: "cron_tag_sample" });
 
   expect(hashtag.items).toHaveLength(1);
   expect(hashtag.items[0]).toMatchObject({ speaker: "user", transcriptPath: transcript });
@@ -213,7 +213,7 @@ test("indexes Codex event messages while collapsing their response-item mirrors"
     JSON.stringify({
       type: "event_msg",
       timestamp: "2026-08-20T13:00:01.000Z",
-      payload: { type: "agent_message", message: "event-only answer with #звіт" },
+      payload: { type: "agent_message", message: "event-only answer with #тег" },
     }),
     JSON.stringify({
       type: "response_item",
@@ -231,7 +231,7 @@ test("indexes Codex event messages while collapsing their response-item mirrors"
 
   expect(searchTranscripts({ query: "duplicate" }).items).toHaveLength(1);
   expect(searchTranscripts({ query: "duplicated" }).items).toHaveLength(1);
-  expect(searchTranscripts({ query: "#звіт" }).items)
+  expect(searchTranscripts({ query: "#тег" }).items)
     .toEqual([expect.objectContaining({ speaker: "assistant", lineNumber: 3 })]);
   expect(searchTranscripts({ query: "body" }).stats.messagesIndexed).toBe(3);
 });

@@ -6,7 +6,7 @@ test("search_transcripts reads the HTTP body index with cross-project pagination
   const reads: string[] = [];
   const indexedPage = {
     items: [{
-      snippet: "matched #звіт body",
+      snippet: "matched #тег body",
       speaker: "user",
       timestamp: 1_780_000_000,
       transcriptPath: "/sessions/report.jsonl",
@@ -35,14 +35,14 @@ test("search_transcripts reads the HTTP body index with cross-project pagination
 
   const result = await bindings.search_transcripts({
     clientRequestId: "search-body-1",
-    query: "#звіт",
+    query: "#тег",
     project: "reports",
     cursor: "cursor-a",
     limit: 25,
   });
 
   expect(reads).toEqual([
-    "/api/search/transcripts?q=%23%D0%B7%D0%B2%D1%96%D1%82&project=reports&cursor=cursor-a&limit=25",
+    "/api/search/transcripts?q=%23%D1%82%D0%B5%D0%B3&project=reports&cursor=cursor-a&limit=25",
   ]);
   expect(result).toEqual(indexedPage);
 });

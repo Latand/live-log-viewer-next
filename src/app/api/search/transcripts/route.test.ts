@@ -37,7 +37,7 @@ test("returns indexed snippets without reopening the transcript", async () => {
   fs.writeFileSync(transcript, JSON.stringify({
     type: "user",
     timestamp: "2026-08-20T14:00:00.000Z",
-    message: { content: "HTTP finds #звіт in the persisted body index" },
+    message: { content: "HTTP finds #тег in the persisted body index" },
   }) + "\n");
   const stat = fs.statSync(transcript);
   await indexTranscriptSources([{
@@ -49,7 +49,7 @@ test("returns indexed snippets without reopening the transcript", async () => {
   }], { complete: true });
   fs.rmSync(transcript);
 
-  const response = await GET(new Request("http://127.0.0.1/api/search/transcripts?q=%23%D0%B7%D0%B2%D1%96%D1%82&limit=5"));
+  const response = await GET(new Request("http://127.0.0.1/api/search/transcripts?q=%23%D1%82%D0%B5%D0%B3&limit=5"));
   const body = await response.json() as {
     items: Array<{ transcriptPath: string; speaker: string; snippet: string }>;
     total: number;
@@ -60,7 +60,7 @@ test("returns indexed snippets without reopening the transcript", async () => {
   expect(body.items).toEqual([expect.objectContaining({
     transcriptPath: transcript,
     speaker: "user",
-    snippet: expect.stringContaining("звіт"),
+    snippet: expect.stringContaining("тег"),
   })]);
 });
 
