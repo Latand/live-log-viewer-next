@@ -316,6 +316,120 @@ test("a query in flight shows loading, and a refinement keeps the rows already o
   expect(view().querySelector("[data-search-updating]")).toBeNull();
 });
 
+test("a held row cannot be opened while a refinement is still in flight", async () => {
+  /* The rows stay on screen through a refinement so the list never blanks —
+     but they answer the PREVIOUS query. Enter is this palette's primary
+     action, so a held row that is still activatable opens a conversation the
+     operator has already typed past. */
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  answer = async (url) => {
+    if (url.includes("q=heliotropes")) {
+      await gate;
+      return Response.json(page({
+        items: [row({ transcriptPath: "/sessions/refined.jsonl", title: "Refined match" })],
+        total: 1,
+      }));
+    }
+    return Response.json(page({ items: [row()], total: 1 }));
+  };
+  await mount();
+
+  type("heliotrope");
+  await settle();
+  expect(view().querySelector("[data-search-result]")).not.toBeNull();
+
+  type("heliotropes");
+  /* Inside the debounce window: the newer query has not even been asked yet. */
+  await settle(50);
+  expect(view().querySelector("[data-search-result]")?.textContent).toContain("Heliotrope rollout");
+  expect(view().querySelector<HTMLElement>("[data-search-result]")?.getAttribute("aria-disabled")).toBe("true");
+  expect(view().querySelector("[data-search-stale]")).not.toBeNull();
+  click("[data-search-result]");
+  press("Enter");
+  expect(opened).toEqual([]);
+  expect(closed).toBe(0);
+
+  /* Past the debounce, with the request in flight: same refusal. */
+  await settle();
+  expect(view().querySelector("[data-search-stale]")).not.toBeNull();
+  click("[data-search-result]");
+  expect(opened).toEqual([]);
+
+  release();
+  await settle(50);
+  /* The answer lands and the list is trustworthy again. */
+  expect(view().querySelectorAll("[data-search-stale]")).toHaveLength(0);
+  expect(view().querySelector<HTMLElement>("[data-search-result]")?.getAttribute("aria-disabled")).toBeNull();
+  click("[data-search-result]");
+  expect(opened).toEqual(["/sessions/refined.jsonl"]);
+  expect(closed).toBe(1);
+});
+
+test("flipping Everything → My holds the agent's rows honestly and refuses to open one", async () => {
+  /* The narrowing flip is the sharper case: the toggle already reads «my
+     messages» while the rows on screen are still the agent's. They must keep
+     saying whose they are, and none of them may be opened under a scope that
+     no longer includes it. */
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  answer = async (url) => {
+    if (url.includes("speaker=user")) {
+      await gate;
+      return Response.json(page({ items: [row()], total: 1 }));
+    }
+    return Response.json(page({
+      items: [row({ speaker: "assistant", transcriptPath: "/sessions/gamma.jsonl", byteOffset: 90, title: "Agent reply" })],
+      total: 1,
+    }));
+  };
+  await mount();
+
+  click('[data-search-scope="everything"]');
+  type("heliotrope");
+  await settle();
+  expect(view().querySelector("[data-search-result]")?.textContent).toContain("agent");
+
+  click('[data-search-scope="mine"]');
+  await settle(50);
+
+  const held = view().querySelector<HTMLElement>("[data-search-result]")!;
+  expect(held.getAttribute("data-search-result")).toBe("/sessions/gamma.jsonl");
+  /* Still labelled the agent's — the chip follows the answer on screen, not
+     the toggle that has moved ahead of it. */
+  expect(held.textContent).toContain("agent");
+  expect(held.getAttribute("aria-disabled")).toBe("true");
+  click("[data-search-result]");
+  press("Enter");
+  expect(opened).toEqual([]);
+  expect(closed).toBe(0);
+
+  release();
+  await settle(50);
+  const fresh = view().querySelector<HTMLElement>("[data-search-result]")!;
+  expect(fresh.getAttribute("data-search-result")).toBe("/sessions/alpha.jsonl");
+  /* In «my messages» every row is the operator's, so no chip claims otherwise. */
+  expect(fresh.textContent).not.toContain("agent");
+  click("[data-search-result]");
+  expect(opened).toEqual(["/sessions/alpha.jsonl"]);
+});
+
+test("clearing the query returns the palette to its opening state", async () => {
+  /* The empty-query state is a designed one: it must not keep the last
+     answer's rows underneath the hint. */
+  answer = async () => Response.json(page({ items: [row()], total: 1 }));
+  await mount();
+
+  type("heliotrope");
+  await settle();
+  expect(view().querySelector("[data-search-result]")).not.toBeNull();
+
+  type("");
+  await settle(50);
+  expect(view().querySelectorAll("[data-search-result]")).toHaveLength(0);
+  expect(view().querySelector("[data-search-hint]")).not.toBeNull();
+});
+
 test("a zero answer names the corpus it searched and offers the wider scope", async () => {
   answer = async () => Response.json(page({ items: [], total: 0 }));
   await mount();

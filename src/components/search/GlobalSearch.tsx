@@ -115,9 +115,17 @@ export function GlobalSearch({ mobile, onClose, onOpen }: Props) {
   }, [activeIndex]);
 
   const openResult = useCallback((item: TranscriptSearchRow) => {
+    /* Held rows stay readable through a refinement, but they answer the
+       PREVIOUS query or scope. Opening one would leave the search in progress
+       for a conversation the operator did not ask for — and just after an
+       Everything → My flip, a held row can be the agent's message rather than
+       one of their own. The rows say so (`aria-disabled`, dimmed) and the
+       header says a newer answer is coming; this is the one gate that makes
+       the refusal true for both the click and the Enter path. */
+    if (search.stale) return;
     onClose();
     onOpen(item.transcriptPath);
-  }, [onClose, onOpen]);
+  }, [search.stale, onClose, onOpen]);
 
   const onInputKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.metaKey || event.ctrlKey || event.altKey) return;
@@ -260,7 +268,14 @@ export function GlobalSearch({ mobile, onClose, onOpen }: Props) {
             </div>
           ) : null}
 
-          <div id={LIST_ID} role="listbox" aria-label={t("search.title")} className="space-y-1.5">
+          <div
+            id={LIST_ID}
+            role="listbox"
+            aria-label={t("search.title")}
+            aria-busy={search.stale || undefined}
+            data-search-stale={search.stale ? "" : undefined}
+            className={`space-y-1.5 ${search.stale ? "opacity-60" : ""}`}
+          >
             {search.items.map((item, index) => {
               const badge = engineBadgeFor(item.engine);
               return (
@@ -270,12 +285,13 @@ export function GlobalSearch({ mobile, onClose, onOpen }: Props) {
                   type="button"
                   role="option"
                   aria-selected={rowActive(index)}
+                  aria-disabled={search.stale || undefined}
                   tabIndex={-1}
                   data-search-result={item.transcriptPath}
                   onClick={() => openResult(item)}
-                  className={`flex w-full min-w-0 flex-col gap-1 rounded-[8px] border bg-card px-3 py-2 text-left shadow-1 hover:border-accent/40 hover:bg-canvas focus-visible:outline-none ${target} ${
-                    rowActive(index) ? "border-accent/40 bg-canvas ring-2 ring-accent/40" : "border-border"
-                  }`}
+                  className={`flex w-full min-w-0 flex-col gap-1 rounded-[8px] border bg-card px-3 py-2 text-left shadow-1 focus-visible:outline-none ${target} ${
+                    search.stale ? "cursor-default" : "hover:border-accent/40 hover:bg-canvas"
+                  } ${rowActive(index) ? "border-accent/40 bg-canvas ring-2 ring-accent/40" : "border-border"}`}
                 >
                   <span className="flex min-w-0 items-center gap-2">
                     <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-primary">
@@ -293,7 +309,12 @@ export function GlobalSearch({ mobile, onClose, onOpen }: Props) {
                     )}
                   </span>
                   <span className="line-clamp-2 text-[11.5px] text-muted">
-                    {mine ? null : (
+                    {/* Keyed to the scope these rows were ANSWERED under: the
+                        toggle can already have moved to «my messages» while
+                        the agent's rows are still the ones on screen, and a
+                        row that drops its chip in that window claims to be
+                        the operator's own message. */}
+                    {search.answeredSpeaker ? null : (
                       <span className="mr-1 rounded-[3px] border border-border px-1 text-[10px] font-bold text-muted">
                         {item.speaker === "user" ? t("search.speaker.you") : t("search.speaker.agent")}
                       </span>

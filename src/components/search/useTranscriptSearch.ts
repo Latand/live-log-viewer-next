@@ -24,6 +24,13 @@ export interface TranscriptSearchPage {
 export interface TranscriptSearchData extends TranscriptSearchPage {
   loading: boolean;
   error: boolean;
+  /** The rows on screen answer an EARLIER question than the one typed. They
+      stay rendered — a list that blanks between keystrokes reads as broken —
+      but the caller must not let one be activated. */
+  stale: boolean;
+  /** The speaker scope the rows on screen were actually answered under, which
+      the live toggle can already have left behind. */
+  answeredSpeaker: TranscriptSpeaker | undefined;
   loadMore: () => void;
   retry: () => void;
 }
@@ -32,6 +39,7 @@ const EMPTY_PAGE: TranscriptSearchPage = { items: [], nextCursor: null, total: 0
 
 interface SettledRequest {
   key: string;
+  speaker: TranscriptSpeaker | undefined;
   page: TranscriptSearchPage;
   error: boolean;
 }
@@ -74,6 +82,13 @@ export function transcriptSearchUrl(
   return `/api/search/transcripts?${params}`;
 }
 
+/** Identity of one search: the speaker scope plus the trimmed query. Two
+    requests with the same key ask the same question, and an answer is only
+    ever shown as current for the key it was asked under. */
+function searchKey(speaker: TranscriptSpeaker | undefined, trimmedQuery: string): string {
+  return `${speaker ?? ""}\u0000${trimmedQuery}`;
+}
+
 /** Identity of one result row: a single message inside one transcript. Two
     matches in the same conversation are two rows, so the key carries the
     offset as well as the path. */
@@ -114,8 +129,11 @@ async function fetchTranscriptSearchPage(
  * refinement is in flight the rows already on screen STAY. A palette that
  * blanks between keystrokes reads as broken on a corpus this size, so the
  * previous answer holds until the next one lands — the caller renders the
- * in-flight state beside the stale rows. A cursor is only ever offered for the
- * request it was minted under, so a refinement can never page the wrong scope.
+ * in-flight state beside the stale rows. Holding them is not trusting them:
+ * `stale` says the rows no longer answer the typed question, so the caller can
+ * keep them readable while refusing to open one. A cursor is only ever offered
+ * for the request it was minted under, so a refinement can never page the wrong
+ * scope.
  */
 export function useTranscriptSearch({
   query,
@@ -135,9 +153,20 @@ export function useTranscriptSearch({
   }, [query, speaker, request.query, request.speaker]);
 
   const trimmed = request.query.trim();
-  const requestKey = `${request.speaker ?? ""}\u0000${trimmed}`;
+  const requestKey = searchKey(request.speaker, trimmed);
   const active = enabled && Boolean(trimmed);
-  const [settled, setSettled] = useState<SettledRequest>({ key: "", page: EMPTY_PAGE, error: false });
+  /* What the operator is asking RIGHT NOW. The request in flight trails it by
+     up to one debounce window, so every answer the caller renders is judged
+     against this key rather than against the request that produced it. */
+  const liveTrimmed = query.trim();
+  const liveKey = searchKey(speaker, liveTrimmed);
+  const live = enabled && Boolean(liveTrimmed);
+  const [settled, setSettled] = useState<SettledRequest>({
+    key: "",
+    speaker: undefined,
+    page: EMPTY_PAGE,
+    error: false,
+  });
   const [moreRequest, setMoreRequest] = useState<MoreRequest | null>(null);
   const [retryNonce, setRetryNonce] = useState(0);
 
@@ -145,10 +174,10 @@ export function useTranscriptSearch({
     if (!active) return;
     const controller = new AbortController();
     void fetchTranscriptSearchPage(request.query, request.speaker, null, controller.signal)
-      .then((page) => setSettled({ key: requestKey, page, error: false }))
+      .then((page) => setSettled({ key: requestKey, speaker: request.speaker, page, error: false }))
       .catch((cause: unknown) => {
         if ((cause as { name?: string }).name !== "AbortError") {
-          setSettled({ key: requestKey, page: EMPTY_PAGE, error: true });
+          setSettled({ key: requestKey, speaker: request.speaker, page: EMPTY_PAGE, error: true });
         }
       });
     return () => controller.abort();
@@ -161,7 +190,7 @@ export function useTranscriptSearch({
       .then((page) => {
         setSettled((current) =>
           current.key === moreRequest.key
-            ? { key: current.key, page: mergeTranscriptSearchPage(current.page, page), error: false }
+            ? { ...current, page: mergeTranscriptSearchPage(current.page, page), error: false }
             : current,
         );
       })
@@ -184,15 +213,27 @@ export function useTranscriptSearch({
      cannot describe it yet, so this counts as in flight. Without it the palette
      spent every debounce window claiming "nothing found" for a query it had not
      asked about. */
-  const settling = enabled && Boolean(query.trim()) && (query !== request.query || speaker !== request.speaker);
+  const settling = live && (query !== request.query || speaker !== request.speaker);
   const matched = active && settled.key === requestKey;
   /* A settled answer for an EARLIER request keeps rendering while the next one
      is in flight (no blank list between keystrokes) — but its cursor belongs to
-     that older scope, so Load more is withheld until the answer catches up. */
-  const settledPage = active && settled.key ? settled.page : EMPTY_PAGE;
+     that older scope, so Load more is withheld until the answer catches up. An
+     emptied query drops the held rows at once: the empty-query state is a
+     designed one and must not carry the last answer underneath it. */
+  const settledPage = live && settled.key ? settled.page : EMPTY_PAGE;
   const page = matched ? settledPage : { ...settledPage, nextCursor: null };
-  const loading = settling || (active && (!matched || moreRequest?.key === requestKey));
+  const loading = live && (settling || (active && (!matched || moreRequest?.key === requestKey)));
   const error = matched ? settled.error : false;
+  /* Held rows answer a question the operator has already moved on from: a
+     refinement is mid-flight, or the scope was just flipped. They keep their
+     place on screen, but the caller must not let one be ACTIVATED — Enter or a
+     click would open a conversation from outside the search in progress, and
+     right after an Everything → My flip the held rows can be the agent's
+     messages rather than the operator's own. */
+  const stale = settledPage.items.length > 0 && settled.key !== liveKey;
+  /* Which scope those rows were answered under, so the caller can label them
+     truthfully while the toggle sits ahead of the answer. */
+  const answeredSpeaker = settledPage.items.length ? settled.speaker : speaker;
 
   const loadMore = useCallback(() => {
     if (!matched || loading || !page.nextCursor) return;
@@ -204,5 +245,5 @@ export function useTranscriptSearch({
     setRetryNonce((value) => value + 1);
   }, []);
 
-  return { ...page, loading, error, loadMore, retry };
+  return { ...page, loading, error, stale, answeredSpeaker, loadMore, retry };
 }
