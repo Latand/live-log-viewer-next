@@ -108,6 +108,7 @@ function sqliteDatabase(): typeof import("bun:sqlite").Database {
 }
 
 const TRANSCRIPT_SEARCH_SCHEMA_VERSION = 2;
+const TRANSCRIPT_SEARCH_MIGRATION_BATCH_SIZE = 256;
 
 function normalizedBodyHash(body: string): string {
   const normalized = body.trim().replace(/\s+/gu, " ");
@@ -129,11 +130,19 @@ function migrateSearchSchema(db: Database): void {
   db.exec("BEGIN IMMEDIATE");
   try {
     if (!hasBodyHashColumn(db)) db.exec("ALTER TABLE transcript_messages ADD COLUMN body_hash TEXT");
-    const messages = db.query<{ id: number; body: string }, []>(
-      "SELECT id, body FROM transcript_messages WHERE body_hash IS NULL",
-    ).all();
+    const pendingMessages = db.query<{ id: number; body: string }, [number, number]>(`
+      SELECT id, body FROM transcript_messages WHERE body_hash IS NULL AND id > ?
+      ORDER BY id
+      LIMIT ?
+    `);
     const update = db.query("UPDATE transcript_messages SET body_hash = ? WHERE id = ?");
-    for (const message of messages) update.run(normalizedBodyHash(message.body), message.id);
+    let lastId = 0;
+    while (true) {
+      const messages = pendingMessages.all(lastId, TRANSCRIPT_SEARCH_MIGRATION_BATCH_SIZE);
+      for (const message of messages) update.run(normalizedBodyHash(message.body), message.id);
+      if (messages.length < TRANSCRIPT_SEARCH_MIGRATION_BATCH_SIZE) break;
+      lastId = messages.at(-1)!.id;
+    }
     db.exec(`
       CREATE INDEX IF NOT EXISTS transcript_messages_body_hash
         ON transcript_messages(speaker, body_hash);

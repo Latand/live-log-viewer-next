@@ -215,8 +215,11 @@ test("collapses resume-replayed bodies after whitespace normalization and keeps 
   expect(first.stats).toMatchObject({ conversationsIndexed: 3, messagesIndexed: 6 });
 });
 
-test("migrates a version-one on-disk index before serving collapsed rows", () => {
+test("migrates a version-one index in bounded batches without reopening unchanged files", async () => {
   const filename = statePath("transcript-search.sqlite");
+  const transcript = path.join(sandbox, "legacy-migration.jsonl");
+  fs.writeFileSync(transcript, JSON.stringify({ type: "user", message: { content: "legacy cobalt body" } }) + "\n");
+  const legacySource = source(transcript, "codex", "legacy");
   fs.mkdirSync(path.dirname(filename), { recursive: true });
   const db = new Database(filename, { create: true, strict: true });
   db.exec(`
@@ -245,22 +248,64 @@ test("migrates a version-one on-disk index before serving collapsed rows", () =>
       body,
       tokenize = "unicode61 remove_diacritics 0 tokenchars '#_'"
     );
-    INSERT INTO transcript_files VALUES ('/fixtures/legacy.jsonl', 10, 1000, 'legacy', 'codex', 1, 1);
-    INSERT INTO transcript_messages VALUES (1, '/fixtures/legacy.jsonl', 0, 'user', 1, 0, 1, 'legacy cobalt body');
-    INSERT INTO transcript_messages_fts(rowid, body) VALUES (1, 'legacy cobalt body');
     PRAGMA user_version = 1;
   `);
+  db.query("INSERT INTO transcript_files VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+    legacySource.path,
+    legacySource.size,
+    legacySource.mtimeMs,
+    legacySource.project,
+    legacySource.engine,
+    513,
+    1,
+  );
+  const insertMessage = db.query(
+    "INSERT INTO transcript_messages VALUES (?, ?, ?, 'user', ?, ?, ?, ?)",
+  );
+  const insertFts = db.query("INSERT INTO transcript_messages_fts(rowid, body) VALUES (?, ?)");
+  for (let index = 0; index < 513; index += 1) {
+    const body = `legacy cobalt body ${index}`;
+    insertMessage.run(index + 1, legacySource.path, index, index + 1, index, index + 1, body);
+    insertFts.run(index + 1, body);
+  }
   db.close();
 
-  expect(searchTranscripts({ query: "cobalt" }).items).toEqual([
-    expect.objectContaining({ transcriptPath: "/fixtures/legacy.jsonl", duplicateCount: 1 }),
-  ]);
+  const migrationReadSizes: number[] = [];
+  const originalQuery = Database.prototype.query;
+  Database.prototype.query = function query(this: Database, sql: string) {
+    const statement = originalQuery.call(this, sql);
+    if (!sql.includes("SELECT id, body FROM transcript_messages WHERE body_hash IS NULL")) return statement;
+    const originalAll = statement.all.bind(statement);
+    statement.all = ((...bindings: Parameters<typeof statement.all>) => {
+      const rows = originalAll(...bindings);
+      migrationReadSizes.push(rows.length);
+      return rows;
+    }) as typeof statement.all;
+    return statement;
+  } as typeof Database.prototype.query;
+  try {
+    expect(searchTranscripts({ query: "cobalt" }).total).toBe(513);
+  } finally {
+    Database.prototype.query = originalQuery;
+  }
 
   const migrated = new Database(filename, { readonly: true, strict: true });
   expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(2);
-  expect(migrated.query<{ body_hash: string }, []>("SELECT body_hash FROM transcript_messages").get()?.body_hash)
-    .toMatch(/^[0-9a-f]{64}$/);
+  expect(migrated.query<{ count: number }, []>(
+    "SELECT COUNT(*) AS count FROM transcript_messages WHERE body_hash IS NULL OR length(body_hash) != 64",
+  ).get()?.count).toBe(0);
   migrated.close();
+
+  let opens = 0;
+  const readMessages = async function* () {
+    opens += 1;
+    yield { body: "unexpected", speaker: "user" as const, timestamp: null, byteOffset: 0, lineNumber: 1 };
+  };
+  const indexed = await indexTranscriptSources([legacySource], { complete: true, readMessages });
+
+  expect(migrationReadSizes).toEqual([256, 256, 1]);
+  expect(indexed).toMatchObject({ filesRead: 0, filesSkipped: 1, failures: [] });
+  expect(opens).toBe(0);
 });
 
 test("searches all projects by default and explains a scoped empty result", async () => {
