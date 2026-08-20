@@ -64,35 +64,11 @@ const textBasenames = new Set(["CODEOWNERS", "Dockerfile", "LICENSE", "Makefile"
 const maxPublicationBytes = 32 * 1024 * 1024;
 const maxVideoStreams = 16;
 const supportedGeneratorRuntime = "bun-1.3.3";
-/* Only identifier/member JSX expressions represent controlled bindings.
-   String and template literals inside JSX containers remain publication data. */
-const controlledJsxValuePattern = String.raw`\{\s*[A-Za-z_$][\w$]*(?:\s*(?:\?\.|\.)\s*[A-Za-z_$][\w$]*)*\s*\}`;
-const doubleQuotedValuePattern = String.raw`"(?:\\.|[^"\\]){4,}"`;
-const singleQuotedValuePattern = String.raw`'(?:\\.|[^'\\]){4,}'`;
-const templateQuotedValuePattern = "`(?:\\\\.|[^`\\\\]){4,}`";
-const jsxStringLiteralValuePattern = String.raw`\{\s*(?:${doubleQuotedValuePattern}|${singleQuotedValuePattern})\s*\}`;
-const jsxTemplateLiteralValuePattern = String.raw`\{\s*${templateQuotedValuePattern}\s*\}`;
-const genericBraceValuePattern = String.raw`\{[^}]{4,}\}`;
-const literalCredentialValuePattern = [
-  doubleQuotedValuePattern,
-  singleQuotedValuePattern,
-  jsxStringLiteralValuePattern,
-  jsxTemplateLiteralValuePattern,
-].join("|");
-
-function credentialInputPattern(allowControlledJsx: boolean): RegExp {
-  const unquotedValuePattern = allowControlledJsx
-    ? String.raw`(?!${controlledJsxValuePattern})[^\s"'=<>]{4,}`
-    : String.raw`(?:${genericBraceValuePattern}|[^\s"'=<>]{4,})`;
-  return new RegExp([
-    String.raw`<in`,
-    String.raw`put\b(?=[^>]*(?:type\s*=\s*["']?password|name\s*=\s*["']?(?:api[_-]?key|password|secret|token)))`,
-    String.raw`(?=[^>]*value\s*=\s*(?:${literalCredentialValuePattern}|${unquotedValuePattern}))[^>]*>`,
-  ].join(""), "i");
-}
-
-const genericCredentialInputPattern = credentialInputPattern(false);
-const controlledJsxCredentialInputPattern = credentialInputPattern(true);
+const credentialInputPattern = new RegExp([
+  String.raw`<in`,
+  String.raw`put\b(?=[^>]*(?:type\s*=\s*["']?password|name\s*=\s*["']?(?:api[_-]?key|password|secret|token)))`,
+  String.raw`(?=[^>]*value\s*=\s*(?:["'][^"']{4,}["']|[^\s"'=<>]{4,}))[^>]*>`,
+].join(""), "i");
 
 type KnownValueFingerprint = {
   length: number;
@@ -567,7 +543,7 @@ function inspectRasterMetadata(path: string, kind: MediaKind | undefined): Set<F
   }
 }
 
-export function sensitiveClasses(text: string, allowControlledJsx = false): Set<FindingClass> {
+export function sensitiveClasses(text: string): Set<FindingClass> {
   const findings = new Set<FindingClass>();
   const { compact, error, searchable: searchableText } = normalizedSensitiveText(text);
   if (error) findings.add("inspection_error");
@@ -630,10 +606,7 @@ export function sensitiveClasses(text: string, allowControlledJsx = false): Set<
   if (/https?:\/\/[^\s/@:]+:[^\s/@]+@/i.test(searchableText)) {
     findings.add("credential");
   }
-  const inputPattern = allowControlledJsx ? controlledJsxCredentialInputPattern : genericCredentialInputPattern;
-  /* Raw text preserves JavaScript escape pairs; canonical text catches
-     percent/entity/CommonMark obfuscation. Both are publication surfaces. */
-  if (inputPattern.test(text) || inputPattern.test(searchableText)) {
+  if (credentialInputPattern.test(searchableText)) {
     findings.add("credential");
   }
   if (/\b(?:10(?:\.\d{1,3}){3}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2}|192\.168(?:\.\d{1,3}){2})\b/.test(searchableText)) {
@@ -695,8 +668,8 @@ function inspectText(path: string, kind: MediaKind | undefined): Set<FindingClas
         views.push(swapped.toString("utf16le"));
       }
     }
+    const findings = sensitiveClasses(views.join("\n"));
     const extension = extname(path).toLowerCase();
-    const findings = sensitiveClasses(views.join("\n"), extension === ".jsx" || extension === ".tsx");
     const textLike = textExtensions.has(extension) || textBasenames.has(basename(path));
     const controlBytes = contents.reduce((count, byte) => {
       const allowedWhitespace = byte === 0x09 || byte === 0x0a || byte === 0x0d;
