@@ -1073,14 +1073,14 @@ function provenanceFor(path: string, inspectionRoot = repositoryRoot, trustedBas
 
 /**
  * Hashes a complete vendor directory as an ordered stream of relative paths,
- * byte lengths, and file bytes. The directory is rejected when any entry is a
- * symlink or a non-file/non-directory node, so a trusted digest authenticates
- * the complete tree shape as well as every file's contents.
+ * portable executable-bit state, byte lengths, and file bytes. The directory
+ * is rejected when any entry is a symlink or a non-file/non-directory node,
+ * so a trusted digest authenticates the complete tree shape and contents.
  */
 export function trustedVendorRootDigest(root: string): string | null {
   const rootResult = safePath(root);
   if (rootResult.status !== "safe" || !rootResult.metadata?.isDirectory()) return null;
-  const files: string[] = [];
+  const files: Array<{ executable: boolean; relativePath: string }> = [];
   const pending = [""];
   try {
     while (pending.length > 0) {
@@ -1094,7 +1094,7 @@ export function trustedVendorRootDigest(root: string): string | null {
         if (entry.isDirectory() && entryResult.metadata?.isDirectory()) {
           pending.push(relativeEntry);
         } else if (entry.isFile() && entryResult.metadata?.isFile()) {
-          files.push(relativeEntry);
+          files.push({ executable: (Number(entryResult.metadata.mode) & 0o111) !== 0, relativePath: relativeEntry });
         } else {
           return null;
         }
@@ -1102,11 +1102,14 @@ export function trustedVendorRootDigest(root: string): string | null {
     }
     if (files.length === 0) return null;
     const digest = createHash("sha256");
-    for (const relativeFile of files.sort()) {
-      const bytes = readFileSync(join(root, relativeFile));
-      const portablePath = relativeFile.split(sep).join("/");
+    files.sort((left, right) => left.relativePath < right.relativePath ? -1 : left.relativePath > right.relativePath ? 1 : 0);
+    for (const file of files) {
+      const bytes = readFileSync(join(root, file.relativePath));
+      const portablePath = file.relativePath.split(sep).join("/");
       digest.update("file\0");
       digest.update(portablePath);
+      digest.update("\0");
+      digest.update(file.executable ? "x" : "-");
       digest.update("\0");
       digest.update(String(bytes.length));
       digest.update("\0");
@@ -1129,7 +1132,7 @@ export function trustedVendorRootMatches(root: string, expectedDigest: string): 
  * that removes invite-link mutation tools from its read-only registry. This
  * digest is trusted scanner policy: candidate content cannot update it.
  */
-export const TRUSTED_TELEGRAM_VENDOR_ROOT_DIGEST = "07d80cafa0b508ec8a7e0c24e9df2a4ca74472edbd91d43924b44bdcb27d4728";
+export const TRUSTED_TELEGRAM_VENDOR_ROOT_DIGEST = "344c9f0b9ef56c1ac4935a2245b6d33206e03bb22df86c5d9e7638869915ebb2";
 export const TRUSTED_TELEGRAM_VENDOR_EXEMPT_FINDING_CLASSES: ReadonlySet<FindingClass> = new Set(["credential", "home_path"]);
 
 const trustedTelegramVendor = {

@@ -284,7 +284,8 @@ function writeFingerprintCatalog(path: string, value: string): void {
   }));
 }
 
-const FIXED_VENDOR_FIXTURE_DIGEST = "11536785a413ef4b9e6a983edb3f56f956f0aa8b28358d98e2a7fc4fd9ea655b";
+const FIXED_VENDOR_FIXTURE_DIGEST = "6f86679e7321bb68b4a370cc5c419e0a593568c45982e63887ef82232cc70342";
+const FIXED_EXECUTABLE_VENDOR_FIXTURE_DIGEST = "e4a542b697441803c4bc2f48f02158758fd7d853345474e6d7d2babd561fc051";
 
 function createVendorDigestFixture(): { manifest: string; readme: string; root: string; runtime: string } {
   const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-vendor-root-"));
@@ -645,7 +646,7 @@ exec "$LLV_TEST_REAL_GIT" "$@"
     const fixture = createVendorDigestFixture();
     expect(trustedVendorRootDigest(fixture.root)).toBe(FIXED_VENDOR_FIXTURE_DIGEST);
     expect(trustedVendorRootMatches(fixture.root, FIXED_VENDOR_FIXTURE_DIGEST)).toBe(true);
-    expect(TRUSTED_TELEGRAM_VENDOR_ROOT_DIGEST).toBe("07d80cafa0b508ec8a7e0c24e9df2a4ca74472edbd91d43924b44bdcb27d4728");
+    expect(TRUSTED_TELEGRAM_VENDOR_ROOT_DIGEST).toBe("344c9f0b9ef56c1ac4935a2245b6d33206e03bb22df86c5d9e7638869915ebb2");
     expect([...TRUSTED_TELEGRAM_VENDOR_EXEMPT_FINDING_CLASSES]).toEqual(["credential", "home_path"]);
     expect(TRUSTED_TELEGRAM_VENDOR_EXEMPT_FINDING_CLASSES.has("known_value")).toBe(false);
   });
@@ -658,6 +659,19 @@ exec "$LLV_TEST_REAL_GIT" "$@"
     const changedLength = createVendorDigestFixture();
     writeFileSync(changedLength.runtime, "bravo extended\n");
     expect(trustedVendorRootMatches(changedLength.root, FIXED_VENDOR_FIXTURE_DIGEST)).toBe(false);
+  });
+
+  test("authenticates both executable-bit transitions", () => {
+    const fixture = createVendorDigestFixture();
+    expect(trustedVendorRootDigest(fixture.root)).toBe(FIXED_VENDOR_FIXTURE_DIGEST);
+
+    chmodSync(fixture.runtime, 0o755);
+    expect(trustedVendorRootDigest(fixture.root)).toBe(FIXED_EXECUTABLE_VENDOR_FIXTURE_DIGEST);
+    expect(trustedVendorRootMatches(fixture.root, FIXED_VENDOR_FIXTURE_DIGEST)).toBe(false);
+
+    chmodSync(fixture.runtime, 0o644);
+    expect(trustedVendorRootDigest(fixture.root)).toBe(FIXED_VENDOR_FIXTURE_DIGEST);
+    expect(trustedVendorRootMatches(fixture.root, FIXED_EXECUTABLE_VENDOR_FIXTURE_DIGEST)).toBe(false);
   });
 
   test("rejects vendor root path, addition, deletion, and rename changes", () => {
