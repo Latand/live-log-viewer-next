@@ -72,17 +72,19 @@ type ConnectorBinding = Pick<StoredTelegramSession, "credentialRef" | "connector
 
 export interface TelegramConnectorPorts {
   spawn(spec: ProcessSpec): ConnectorChild | null;
-  probe(url: string, connectorToken: string): Promise<ConnectorProbe>;
+  probe(url: string, connectorToken: string, signal?: AbortSignal): Promise<ConnectorProbe>;
   sleep(ms: number): Promise<void>;
   now(): number;
   ownsProcess?(binding: ConnectorBinding): boolean;
   recordProcess?(child: ConnectorChild, spec: ProcessSpec, binding: ConnectorBinding): boolean;
   stop?(): void;
   beginOperation?(): () => boolean;
+  probeTimeoutMs?: number;
 }
 
 const READY_DEADLINE_MS = 30_000;
 const PROBE_INTERVAL_MS = 500;
+const PROBE_TIMEOUT_MS = 5_000;
 const PID_FILE = "connector.json";
 
 /** The read-only gate, pure so it is directly provable: one tool that lacks
@@ -104,13 +106,13 @@ export function connectorServerName(connectorToken: string): string {
   return `telegram-${crypto.createHash("sha256").update(connectorToken).digest("hex")}`;
 }
 
-async function proveConnectorOwnership(url: string, connectorToken: string): Promise<boolean> {
+async function proveConnectorOwnership(url: string, connectorToken: string, signal?: AbortSignal): Promise<boolean> {
   const nonce = crypto.randomBytes(32).toString("base64url");
   const proofUrl = new URL(url);
   proofUrl.pathname = "/llv-telegram-proof";
   proofUrl.search = "";
   try {
-    const response = await fetch(proofUrl, { headers: { "x-llv-telegram-nonce": nonce } });
+    const response = await fetch(proofUrl, { headers: { "x-llv-telegram-nonce": nonce }, signal });
     if (!response.ok) return false;
     const supplied = Buffer.from((await response.text()).trim(), "hex");
     const expected = Buffer.from(crypto.createHmac("sha256", connectorToken).update(nonce).digest("hex"), "hex");
@@ -120,14 +122,14 @@ async function proveConnectorOwnership(url: string, connectorToken: string): Pro
   }
 }
 
-export async function probeTelegramConnector(url: string, connectorToken: string): Promise<ConnectorProbe> {
+export async function probeTelegramConnector(url: string, connectorToken: string, signal?: AbortSignal): Promise<ConnectorProbe> {
   try {
-    if (!await proveConnectorOwnership(url, connectorToken)) return { ok: false };
+    if (!await proveConnectorOwnership(url, connectorToken, signal)) return { ok: false };
     const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
     const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
     const client = new Client({ name: "agent-log-viewer", version: "1.0.0" });
     const transport = new StreamableHTTPClientTransport(new URL(url), {
-      requestInit: { headers: { Authorization: `Bearer ${connectorToken}` } },
+      requestInit: { headers: { Authorization: `Bearer ${connectorToken}` }, signal },
     });
     try {
       await client.connect(transport);
@@ -293,8 +295,27 @@ function stopRealConnector(): void {
   killRecordedConnector();
 }
 
-async function verifiedProbe(url: string, connectorToken: string, ports: TelegramConnectorPorts): Promise<ConnectorEnsureResult | null> {
-  const probe = await ports.probe(url, connectorToken);
+async function verifiedProbe(
+  url: string,
+  connectorToken: string,
+  ports: TelegramConnectorPorts,
+  timeoutLimitMs = Number.POSITIVE_INFINITY,
+): Promise<ConnectorEnsureResult | null | "timeout"> {
+  const controller = new AbortController();
+  const timeoutMs = Math.max(1, Math.min(ports.probeTimeoutMs ?? PROBE_TIMEOUT_MS, timeoutLimitMs));
+  const probePromise = ports.probe(url, connectorToken, controller.signal).catch((): ConnectorProbe => ({ ok: false }));
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve("timeout");
+    }, timeoutMs);
+    timer.unref?.();
+  });
+  const probe = await Promise.race([probePromise, timeoutPromise]);
+  if (timer) clearTimeout(timer);
+  if (probe === "timeout") return "timeout";
+  controller.abort();
   if (!probe.ok) return null;
   if (probe.serverName !== connectorServerName(connectorToken)) return { ok: false, code: "connector_failed" };
   const readOnly = verifyReadOnlyTools(probe.tools);
@@ -321,7 +342,7 @@ export async function ensureTelegramConnector(
   if (ownsProcess(binding)) {
     const adopted = await verifiedProbe(url, session.connectorToken, ports);
     if (!isCurrent()) return { ok: false, code: "connector_failed" };
-    if (adopted) {
+    if (adopted && adopted !== "timeout") {
       if (!adopted.ok) stop();
       return adopted;
     }
@@ -344,8 +365,12 @@ export async function ensureTelegramConnector(
   }
   const deadline = ports.now() + READY_DEADLINE_MS;
   while (ports.now() < deadline) {
-    const ready = await verifiedProbe(url, session.connectorToken, ports);
+    const ready = await verifiedProbe(url, session.connectorToken, ports, deadline - ports.now());
     if (!isCurrent()) return { ok: false, code: "connector_failed" };
+    if (ready === "timeout") {
+      stop();
+      return { ok: false, code: "connector_failed" };
+    }
     if (ready) {
       if (!ready.ok) stop();
       return ready;

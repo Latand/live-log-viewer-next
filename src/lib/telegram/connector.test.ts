@@ -237,3 +237,26 @@ test("stop invalidates an in-flight connector operation", async () => {
   expect(await pending).toEqual({ ok: false, code: "connector_failed" });
   expect(spawns).toBe(0);
 });
+
+test("a stalled readiness probe is bounded and terminates the spawned child", async () => {
+  const kills: Array<NodeJS.Signals | undefined> = [];
+  let probeSignal: AbortSignal | undefined;
+  const child = { pid: process.pid, kill: (signal?: NodeJS.Signals) => { kills.push(signal); return true; } };
+  const ports: TelegramConnectorPorts = {
+    spawn: () => child,
+    probe: async (_url, _token, signal) => {
+      probeSignal = signal;
+      return await new Promise<ConnectorProbe>(() => {});
+    },
+    sleep: async () => {},
+    now: () => 0,
+    ownsProcess: () => false,
+    recordProcess: () => true,
+    stop: () => { child.kill("SIGTERM"); },
+    probeTimeoutMs: 10,
+  };
+
+  expect(await ensureTelegramConnector(CONNECTOR_SESSION, ports)).toEqual({ ok: false, code: "connector_failed" });
+  expect(probeSignal?.aborted).toBe(true);
+  expect(kills).toContain("SIGTERM");
+}, 1_000);

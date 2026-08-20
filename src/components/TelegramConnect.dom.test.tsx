@@ -102,3 +102,22 @@ test("leaving and re-entering the password phase never restores the old value", 
   const nextInput = host.querySelector('input[type="password"]') as HTMLInputElement;
   expect(nextInput.value).toBe("");
 });
+
+test("Retry uses the stored credential for recovery when one exists", async () => {
+  const calls = { connect: 0, refresh: [] as boolean[] };
+  const state = stateFor({
+    phase: "error",
+    credentialRef: "credential-ref",
+    error: { code: "connector_failed" },
+  }, async () => {});
+  state.connect = async () => { calls.connect += 1; };
+  state.refresh = async (fresh = false) => { calls.refresh.push(fresh); };
+  const host = await renderPanel(state);
+  const retry = [...host.querySelectorAll("button")].find((button) => button.textContent === "Retry");
+  expect(retry).toBeDefined();
+
+  await act(async () => { retry!.click(); });
+
+  expect(calls.refresh).toEqual([true]);
+  expect(calls.connect).toBe(0);
+});

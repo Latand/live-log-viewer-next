@@ -81,11 +81,19 @@ export function useTelegramConnection(): TelegramConnectionState {
     await load(fresh);
   }, [load]);
 
+  const liveLogin = status?.login != null && NONTERMINAL_TELEGRAM_LOGIN_PHASES.has(status.phase);
+  const credentialRecovery = status?.phase === "connected"
+    || (status?.phase === "error" && status.credentialRef !== null);
+  const pollingMode = liveLogin ? "login" : credentialRecovery ? "health" : "idle";
+
   useEffect(() => {
     let disposed = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const tick = async () => {
-      const payload = (await load(false)) ?? statusRef.current;
+      const current = statusRef.current;
+      const fresh = current?.phase === "connected"
+        || (current?.phase === "error" && current.credentialRef !== null);
+      const payload = (await load(fresh)) ?? statusRef.current;
       if (disposed) return;
       const live = payload?.login != null && NONTERMINAL_TELEGRAM_LOGIN_PHASES.has(payload.phase);
       timer = setTimeout(() => void tick(), live ? LOGIN_POLL_MS : IDLE_POLL_MS);
@@ -95,7 +103,7 @@ export function useTelegramConnection(): TelegramConnectionState {
       disposed = true;
       if (timer) clearTimeout(timer);
     };
-  }, [load]);
+  }, [load, pollingMode]);
 
   const act = useCallback(async (body: Record<string, string>) => {
     /* A mutation response is the authoritative state transition. Invalidate

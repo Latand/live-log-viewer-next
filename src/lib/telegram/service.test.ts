@@ -197,6 +197,28 @@ test("health: connected refreshes identity and re-ensures the connector", async 
   expect(calls.ensure).toEqual([PLACEHOLDER_SESSION]);
 });
 
+test("health recovery registers hosts after a prior connector failure", async () => {
+  const { adapter } = harness();
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  let attempts = 0;
+  let registrations = 0;
+  const recovering = new TelegramConnectionService({
+    adapter,
+    ensureConnector: async () => (++attempts === 1
+      ? { ok: false, code: "connector_failed" }
+      : { ok: true, url: "http://127.0.0.1:8809/mcp" }),
+    stopConnector: () => {},
+    registerHosts: () => { registrations += 1; },
+    unregisterHosts: () => {},
+    now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+  });
+
+  expect((await recovering.checkHealth()).phase).toBe("error");
+  expect(registrations).toBe(0);
+  expect((await recovering.checkHealth()).phase).toBe("connected");
+  expect(registrations).toBe(1);
+});
+
 test("health: a session Telegram revoked reads as expired and stops the connector", async () => {
   const { adapter, calls, service } = harness();
   saveTelegramSession(PLACEHOLDER_SESSION);

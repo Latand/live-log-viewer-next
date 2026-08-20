@@ -324,7 +324,11 @@ export function TelegramPanel({ state, onClose }: { state: TelegramConnectionSta
               <p role="alert" className="text-[10.5px] font-semibold leading-snug text-danger">
                 {t(telegramErrKey(status?.error?.code ?? "bridge_failed"))}
               </p>
-              <ActionButton label={t("telegram.retry")} onClick={() => void state.connect()} disabled={busy} />
+              <ActionButton
+                label={t("telegram.retry")}
+                onClick={() => void (status?.credentialRef ? state.refresh(true) : state.connect())}
+                disabled={busy}
+              />
             </>
           ) : null}
 

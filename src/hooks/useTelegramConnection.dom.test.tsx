@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
-import { act } from "react";
+import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 import { installActEnv } from "@/test-helpers/actEnv";
@@ -22,7 +22,8 @@ let root: Root | null = null;
 let latest: TelegramConnectionState | null = null;
 
 function Harness() {
-  latest = useTelegramConnection();
+  const state = useTelegramConnection();
+  useEffect(() => { latest = state; }, [state]);
   return null;
 }
 
@@ -49,6 +50,15 @@ const telegram = (phase: "disconnected" | "connected") => ({
   login: null,
   identity: phase === "connected" ? { name: "Account A", username: null } : null,
   credentialRef: phase === "connected" ? "credential-ref" : null,
+  lastHealthCheckAt: null,
+  error: null,
+});
+
+const startingTelegram = () => ({
+  phase: "starting" as const,
+  login: { operationId: "op-1", qr: null, passwordError: false },
+  identity: null,
+  credentialRef: null,
   lastHealthCheckAt: null,
   error: null,
 });
@@ -117,4 +127,37 @@ test("an in-flight poll cannot overwrite a later mutation response", async () =>
   resolvePoll(new Response(JSON.stringify({ telegram: telegram("disconnected") }), { status: 200 }));
   await act(async () => { await pendingPoll; });
   expect(latest?.status?.phase).toBe("connected");
+});
+
+test("Connect immediately rearms polling for the live login", async () => {
+  const requests: Array<{ url: string; method: string }> = [];
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    requests.push({ url, method });
+    const payload = method === "POST" ? startingTelegram() : requests.length === 1 ? telegram("disconnected") : startingTelegram();
+    return new Response(JSON.stringify({ telegram: payload }), { status: 200 });
+  }) as unknown as typeof fetch;
+  await mount();
+
+  await act(async () => {
+    await latest!.connect();
+    await Bun.sleep(0);
+  });
+
+  expect(requests.filter((request) => request.method === "GET").length).toBe(2);
+  expect(requests.at(-1)).toEqual({ url: "/api/telegram", method: "GET" });
+});
+
+test("a persisted connected status immediately triggers fresh health recovery", async () => {
+  const urls: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    urls.push(String(input));
+    return new Response(JSON.stringify({ telegram: telegram("connected") }), { status: 200 });
+  }) as unknown as typeof fetch;
+
+  await mount();
+  await act(async () => { await Bun.sleep(0); });
+
+  expect(urls).toEqual(["/api/telegram", "/api/telegram?fresh=1"]);
 });

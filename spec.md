@@ -29,7 +29,9 @@ every tool name must also belong to the audited read allowlist. A surface that
 violates either bound is refused and reported as `not_read_only`. The HTTP
 endpoint requires a per-credential bearer token. Adoption also proves the PID,
 portable start identity, exact executable/entrypoint, credential generation,
-pre-auth challenge response, and token-derived server identity.
+pre-auth challenge response, and token-derived server identity. Each readiness
+probe has its own bounded timeout inside the overall startup deadline; a
+stalled probe terminates the spawned connector.
 
 AC3: The login operation follows the account-login pattern: at most one
 operation at a time, phases `disconnected → starting → awaiting_scan →
@@ -69,7 +71,8 @@ operator-authored `telegram` definition. Disconnect removes exactly the
 managed entry, so the next dispatch materializes nothing. Managed Claude and
 Codex HTTP definitions obtain bearer authorization from an environment
 variable present only in granted operator-root launches. Existing corrupt
-Codex TOML is byte-unchanged.
+Codex TOML is byte-unchanged. Successful health recovery re-registers both
+hosts before publishing `connected`.
 
 AC7: The #739 boundary extends by exactly one name: `telegram` joins
 `GRANTABLE_MCP_SERVERS` and the operator-root default; the delegated default
@@ -84,14 +87,17 @@ client-rendered QR via the existing `qrcode` dependency, Cancel / Retry /
 Reconnect, an uncontrolled password input cleared before submission and across
 phase changes, inline destructive confirmations, an `aria-live` status region,
 connected identity (name and username only), last health check time, and
-human-readable sanitized errors in en and uk.
+human-readable sanitized errors in en and uk. Retry uses fresh health recovery
+when an existing credential is available and starts QR enrollment otherwise.
 
 AC9: Health checks report connected / expired / error explicitly: `expired`
 stops the connector and keeps Reconnect plus local deletion available;
 transient probe failures are an error state, never a silent disconnect; an
 unsafe session file reads as `session_unsafe`. Initial and fresh polling
 failures are visible, and request sequencing prevents slow responses from
-overwriting newer status.
+overwriting newer status. Entering a live login phase immediately switches to
+the 1.5-second cadence; connected and credential-backed error polling performs
+fresh health and connector recovery on the idle cadence and at client startup.
 
 AC10: Focused tests run with isolated `LLV_STATE_DIR` (and temp homes where
 paths matter) and a fake Telegram adapter — no test reaches a real account,

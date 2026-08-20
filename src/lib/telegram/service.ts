@@ -292,6 +292,7 @@ export class TelegramConnectionService {
         writeTelegramConnection({ version: 1, status: "error", credentialRef: session.credentialRef, identity: result.identity, lastHealthCheckAt: checkedAt, errorCode: connector.code });
         return;
       }
+      this.ports.registerHosts();
       writeTelegramConnection({ version: 1, status: "connected", credentialRef: session.credentialRef, identity: result.identity, lastHealthCheckAt: checkedAt, errorCode: null });
       return;
     }
