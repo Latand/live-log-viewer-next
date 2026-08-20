@@ -25,7 +25,8 @@ AC2: One shared streamable-HTTP connector runs on loopback with
 `TELEGRAM_EXPOSED_TOOLS=read-only`. Before the connector is treated as ready —
 whether newly spawned or adopted from a previous Viewer generation via the
 persisted pid record — every advertised tool must carry `readOnlyHint: true`;
-a surface with any other tool is refused and reported as `not_read_only`.
+every tool name must also belong to the audited read allowlist. A surface that
+violates either bound is refused and reported as `not_read_only`.
 
 AC3: The login operation follows the account-login pattern: at most one
 operation at a time, phases `disconnected → starting → awaiting_scan →
@@ -36,8 +37,9 @@ that allows retry. Cancellation terminates the enrollment process and clears
 temporary state.
 
 AC4: The session persists server-side only: an owner-only (0600, dir 0700)
-regular non-symlinked file written atomically under Viewer state. Reads and
-overwrites refuse symlinks, widened modes, and foreign ownership. Status
+regular non-symlinked file written atomically under Viewer state. Reads,
+overwrites, and deletion refuse symlinks, widened file/directory modes, and
+foreign ownership. Status
 surfaces carry an opaque `credentialRef` only. The session string appears in no
 API payload, log line, process argument, transcript, fixture, or served client
 payload; focused secret-leak tests prove the API and argv paths with a
@@ -68,9 +70,10 @@ tranche 2.
 AC8: The UI is a Telegram row in the left-rail footer beside the account
 controls, opening the accounts-style flyout (desktop) / bottom sheet (mobile):
 client-rendered QR via the existing `qrcode` dependency, Cancel / Retry /
-Reconnect, password input, inline destructive confirmations, an `aria-live`
-status region, connected identity (name and username only), last health check
-time, and human-readable sanitized errors in en and uk.
+Reconnect, an uncontrolled password input cleared before submission and across
+phase changes, inline destructive confirmations, an `aria-live` status region,
+connected identity (name and username only), last health check time, and
+human-readable sanitized errors in en and uk.
 
 AC9: Health checks report connected / expired / error explicitly: `expired`
 stops the connector and keeps Reconnect plus local deletion available;
@@ -82,11 +85,12 @@ paths matter) and a fake Telegram adapter — no test reaches a real account,
 the operator registry, or live runtime state. Typecheck and the
 privacy-publication gate pass. Desktop and 390 px screenshots of the mocked
 disconnected, QR, password, connected, expired, error, and destructive
-confirmation states carry no real identity.
+confirmation states carry no real identity. Focused DOM tests prove the 2FA
+field never stores its value in React state and clears at the required seams.
 
 AC11: Scope holds to `src/lib/telegram/*`, `src/app/api/telegram/*`,
 `src/components/TelegramConnect.tsx`, the footer row mount, the tranche-2
 allowlist change with its test updates, i18n keys, packaging manifest entries,
-`bin/telegram-login-bridge.py`, `scripts/provision-telegram-connector.ts`,
+`bin/telegram-login-bridge.py`, `bin/provision-telegram-connector.mjs`,
 `vendor/telegram-mcp/`, evidence, and this spec. No VPS, OpenClaw,
 morning-digest, or real Telegram credential/session is touched; no deploy.
