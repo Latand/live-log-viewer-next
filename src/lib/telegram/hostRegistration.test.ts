@@ -107,6 +107,20 @@ test("high-level registration aggregates every required host failure", () => {
   });
 });
 
+test("ownership persistence failure rolls back newly published Claude registrations", () => {
+  fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
+  const telegramState = path.join(process.env.LLV_STATE_DIR!, "telegram");
+  fs.mkdirSync(path.join(telegramState, "registrations.json"), { recursive: true, mode: 0o700 });
+  const claudeFile = tempPath(".claude.json");
+  const original = JSON.stringify({ theme: "dark", mcpServers: { viewer: { type: "stdio", command: "viewer-mcp" } } }, null, 2) + "\n";
+  fs.writeFileSync(claudeFile, original, { mode: 0o600 });
+
+  expect(() => registerTelegramHosts({ claudeStatePaths: [claudeFile], codexConfigPaths: [] }, URL)).toThrow();
+
+  expect(fs.readFileSync(claudeFile, "utf8")).toBe(original);
+  expect((JSON.parse(fs.readFileSync(claudeFile, "utf8")) as { mcpServers: Record<string, unknown> }).mcpServers.telegram).toBeUndefined();
+});
+
 test("the Viewer's own stale entry (a changed port) is updated, proven by its record", () => {
   const file = tempPath(".claude.json");
   const staleUrl = "http://127.0.0.1:8700/mcp";

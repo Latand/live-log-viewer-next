@@ -29,12 +29,19 @@ afterAll(() => {
   fs.rmSync(SANDBOX, { recursive: true, force: true });
 });
 
+function replaceCodexLaunch(command: string, replacement: string): string {
+  const start = command.indexOf("env -u LLV_TOKEN");
+  if (start === -1) throw new Error("Codex launch boundary is missing");
+  const suffix = command.slice(start).match(/(?:\s+\))+\s*$/)?.[0] ?? "";
+  return command.slice(0, start) + replacement + suffix;
+}
+
 test("fresh Codex commands fix CODEX_HOME in the typed shell command", () => {
   const home = path.join(SANDBOX, "account with space");
   fs.mkdirSync(home, { recursive: true });
   const spec = freshSpecFor("codex", SANDBOX, { codexHome: home });
 
-  expect(spec.command).toStartWith(`env -u LLV_TOKEN -u LLV_TELEGRAM_MCP_TOKEN CODEX_HOME='${home}' `);
+  expect(spec.command).toStartWith(`( unset LLV_TELEGRAM_MCP_TOKEN; env -u LLV_TOKEN -u LLV_TELEGRAM_MCP_TOKEN CODEX_HOME='${home}' `);
   expect(spec.command).toContain("codex");
   expect(spec.command).toContain("'--disable' 'multi_agent'");
   expect(spec.launchProfile?.allowSubagents).toBe(false);
@@ -80,12 +87,12 @@ test("Telegram grants load the connector token only into granted CLI processes",
       expect(spec.launchProfile?.mcpServers).toEqual(["viewer", "telegram"]);
     }
     for (const spec of [codexDelegated, claudeDelegated]) {
-      expect(spec.command).toContain("-u LLV_TELEGRAM_MCP_TOKEN");
+      expect(spec.command).toContain("unset LLV_TELEGRAM_MCP_TOKEN");
       expect(spec.command).not.toContain("telegram-session-reader.mjs");
       expect(spec.launchProfile?.mcpServers).toEqual(["viewer"]);
     }
 
-    const tokenPrefix = codexGranted.command.replace(/env -u LLV_TOKEN[\s\S]*$/, "true");
+    const tokenPrefix = replaceCodexLaunch(codexGranted.command, "true");
     const beforeEnrollment = Bun.spawnSync(["sh", "-c", tokenPrefix], {
       cwd: SANDBOX,
       env: process.env,
@@ -97,7 +104,7 @@ test("Telegram grants load the connector token only into granted CLI processes",
 
     const tokenIsExported = () => {
       const probe = `${JSON.stringify(process.execPath)} -e 'process.exit(process.env.LLV_TELEGRAM_MCP_TOKEN ? 42 : 0)'`;
-      const command = codexGranted.command.replace(/env -u LLV_TOKEN[\s\S]*$/, probe);
+      const command = replaceCodexLaunch(codexGranted.command, probe);
       return Bun.spawnSync(["sh", "-c", command], { cwd: SANDBOX, env: process.env, stdout: "pipe", stderr: "pipe" }).exitCode === 42;
     };
 
@@ -105,16 +112,19 @@ test("Telegram grants load the connector token only into granted CLI processes",
     const capability = "D".repeat(43);
     const wrapped = withSpawnCapability(codexGranted, capability);
     const capabilityOnlyProbe = `${JSON.stringify(process.execPath)} -e 'process.exit(!process.env.LLV_TELEGRAM_MCP_TOKEN && process.env.LLV_SPAWN_CAPABILITY === ${JSON.stringify(capability)} ? 0 : 1)'`;
-    const capabilityOnlyCommand = wrapped.command.replace(/env -u LLV_TOKEN[\s\S]*$/, capabilityOnlyProbe);
+    const capabilityOnlyCommand = replaceCodexLaunch(wrapped.command, capabilityOnlyProbe);
     expect(Bun.spawnSync(["sh", "-c", capabilityOnlyCommand], { cwd: SANDBOX, env: {}, stdout: "pipe", stderr: "pipe" }).exitCode).toBe(0);
 
     saveTelegramSession("1ApWapzMBu4placeholder-not-a-real-session");
     expect(tokenIsExported()).toBe(true);
 
     const environmentProbe = `${JSON.stringify(process.execPath)} -e 'process.exit(process.env.LLV_TELEGRAM_MCP_TOKEN && process.env.LLV_SPAWN_CAPABILITY === ${JSON.stringify(capability)} ? 0 : 1)'`;
-    const wrappedCommand = wrapped.command.replace(/env -u LLV_TOKEN[\s\S]*$/, environmentProbe);
+    const wrappedCommand = replaceCodexLaunch(wrapped.command, environmentProbe);
     const wrappedResult = Bun.spawnSync(["sh", "-c", wrappedCommand], { cwd: SANDBOX, env: {}, stdout: "pipe", stderr: "pipe" });
     expect(wrappedResult.exitCode).toBe(0);
+    const clearedProbe = `${JSON.stringify(process.execPath)} -e 'process.exit(!process.env.LLV_TELEGRAM_MCP_TOKEN && !process.env.LLV_SPAWN_CAPABILITY ? 0 : 1)'`;
+    const scopedResult = Bun.spawnSync(["sh", "-c", `${wrappedCommand}; ${clearedProbe}`], { cwd: SANDBOX, env: {}, stdout: "pipe", stderr: "pipe" });
+    expect(scopedResult.exitCode).toBe(0);
 
     const validSession = fs.readFileSync(telegramSessionPath());
     fs.rmSync(telegramSessionPath());
@@ -410,7 +420,7 @@ test("Viewer spawn capability is scoped into the launched agent command", () => 
   const capability = "A".repeat(43);
   const spec = withSpawnCapability(freshSpecFor("claude", SANDBOX), capability);
 
-  expect(spec.command).toStartWith(`LLV_SPAWN_CAPABILITY='${capability}'; export LLV_SPAWN_CAPABILITY; `);
+  expect(spec.command).toStartWith(`( LLV_SPAWN_CAPABILITY='${capability}'; export LLV_SPAWN_CAPABILITY; `);
   expect(spec.launchProfile?.cwd).toBe(SANDBOX);
 });
 
@@ -443,7 +453,7 @@ test("Codex resume derives its owning account home from the transcript path", ()
   const spec = resumeSpecFor("codex-sessions", transcript);
 
   expect(spec?.command).toStartWith(
-    `env -u LLV_TOKEN -u LLV_TELEGRAM_MCP_TOKEN CODEX_HOME='${path.join(SANDBOX, "legacy")}' `,
+    `( unset LLV_TELEGRAM_MCP_TOKEN; env -u LLV_TOKEN -u LLV_TELEGRAM_MCP_TOKEN CODEX_HOME='${path.join(SANDBOX, "legacy")}' `,
   );
   expect(spec?.command).toContain("'mcp_servers.viewer.enabled=true'");
   expect(spec?.command).toContain("'mcp_servers.unrelated.enabled=false'");

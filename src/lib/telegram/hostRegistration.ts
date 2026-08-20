@@ -155,6 +155,7 @@ export function removeTelegramFromClaudeState(pathname: string, ownedUrl: string
 /* What this Viewer wrote, per Claude state file. Removal consults it, so an
    operator-replaced entry is never deleted as if it were still ours. */
 type RegistrationRecords = { version: 1; claude: Record<string, string> };
+type ClaudeStateSnapshot = { pathname: string; existed: boolean; contents: string; mode: number };
 
 function registrationRecordsPath(): string {
   return statePath("telegram", "registrations.json");
@@ -173,6 +174,24 @@ function readRegistrationRecords(): RegistrationRecords {
 function writeRegistrationRecords(records: RegistrationRecords): void {
   ensureTelegramStateDir(true);
   atomicWrite(registrationRecordsPath(), JSON.stringify(records) + "\n", 0o600);
+}
+
+function snapshotClaudeState(pathname: string): ClaudeStateSnapshot | null {
+  try {
+    const stat = fs.lstatSync(pathname);
+    if (stat.isSymbolicLink() || !stat.isFile()) return null;
+    return { pathname, existed: true, contents: fs.readFileSync(pathname, "utf8"), mode: stat.mode & 0o777 };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { pathname, existed: false, contents: "", mode: 0o600 };
+    }
+    return null;
+  }
+}
+
+function restoreClaudeState(snapshot: ClaudeStateSnapshot): void {
+  if (snapshot.existed) atomicWrite(snapshot.pathname, snapshot.contents, snapshot.mode);
+  else if (safeToRewrite(snapshot.pathname)) fs.rmSync(snapshot.pathname, { force: true });
 }
 
 function codexManagedBlock(url: string): string {
@@ -271,14 +290,26 @@ export function registerTelegramHosts(
     claude: { registered: 0, conflict: 0, unwritable: 0 },
     codex: { registered: 0, failed: 0 },
   };
+  const publishedClaude: ClaudeStateSnapshot[] = [];
   for (const pathname of targets.claudeStatePaths) {
+    const snapshot = snapshotClaudeState(pathname);
     const registration = registerTelegramInClaudeState(pathname, url, records.claude[pathname] ?? null);
     result.claude[registration] += 1;
-    if (registration === "registered") records.claude[pathname] = url;
+    if (registration === "registered") {
+      records.claude[pathname] = url;
+      if (snapshot) publishedClaude.push(snapshot);
+    }
     /* A conflict is the operator's entry — nothing of ours exists there. */
     else if (registration === "conflict") delete records.claude[pathname];
   }
-  writeRegistrationRecords(records);
+  try {
+    writeRegistrationRecords(records);
+  } catch (error) {
+    for (const snapshot of publishedClaude.reverse()) {
+      try { restoreClaudeState(snapshot); } catch { /* keep rolling back other targets */ }
+    }
+    throw error;
+  }
   for (const pathname of targets.codexConfigPaths) {
     if (registerTelegramInCodexConfig(pathname, url)) result.codex.registered += 1;
     else result.codex.failed += 1;

@@ -89,7 +89,9 @@ registration returns one aggregate result; every required definition must be
 installed before `connected` is published. Successful health recovery
 re-registers both hosts. Codex ownership markers are recognized only as one
 exact full-line managed block; unmatched, duplicate, reversed, or malformed
-markers fail closed and remain byte-unchanged.
+markers fail closed and remain byte-unchanged. Claude files changed during
+registration are snapshotted and rolled back if durable ownership persistence
+fails, preventing an unowned managed entry.
 
 AC7: The #739 boundary extends by exactly one name: `telegram` joins
 `GRANTABLE_MCP_SERVERS` and the operator-root default; the delegated default
@@ -102,7 +104,9 @@ enrollment state leaves operator-root launches usable with Telegram unavailable.
 The packaged tmux reader and server-side session store share the complete
 directory/file ownership, mode, symlink, schema, and token-digest validator.
 Spawn-capability export and Telegram token validation execute in one shell
-scope, preserving both capabilities for a granted root launch.
+scope, preserving both capabilities for a granted root launch. The complete
+launch is contained in a subshell, so neither capability remains in the pane's
+surviving login shell after the child exits.
 
 AC8: The UI is a Telegram row in the left-rail footer beside the account
 controls, opening the accounts-style flyout (desktop) / bottom sheet (mobile):
