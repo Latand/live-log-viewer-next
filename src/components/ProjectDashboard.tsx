@@ -1,6 +1,6 @@
 "use client";
 
-import { Layers, List, ListTodo, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus, Redo2 } from "lucide-react";
+import { Layers, List, ListTodo, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus, Redo2, Search } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 
 import { useBoardActionHistory } from "@/hooks/useBoardActionHistory";
@@ -127,6 +127,9 @@ interface Props {
   onUnarchive: (project: string) => void;
   /** Mobile shell: the rail hides behind a drawer, this opens it. */
   onMenu?: () => void;
+  /** Opens the global message search (issue #1054) — the same affordance the
+      overview header carries, so the search is one target away from anywhere. */
+  onOpenSearch?: () => void;
   /** Mobile shell: the attention badge lives in the header row instead of the
       fixed corner, so it never covers the header's own controls. */
   attention?: React.ReactNode;
@@ -345,6 +348,7 @@ function ProjectDashboardView({
   onArchive,
   onUnarchive,
   onMenu,
+  onOpenSearch,
   attention,
   orchestratorPanelOpen = false,
   onToggleOrchestratorPanel,
@@ -1582,6 +1586,21 @@ function ProjectDashboardView({
                 natural width (issue #419 finding 2). It collapses to nothing
                 first, before the name starts truncating. */}
             <span aria-hidden className="min-w-0 flex-1" />
+            {/* Global message search (issue #1054). It spends one of the
+                header's 44px slots rather than folding into «⋯», because the
+                requirement it serves is speed — the operator types and gets
+                their own message back. */}
+            {onOpenSearch ? (
+              <button
+                type="button"
+                data-testid="dash-search"
+                aria-label={t("search.openMobile")}
+                onClick={onOpenSearch}
+                className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              >
+                <Search className="h-5 w-5" aria-hidden />
+              </button>
+            ) : null}
             {/* The attention queue badge is an ACTION (it opens the queue), not
                 decoration, so it holds its own bounded pill width — riding the
                 elastic filler squeezed it to zero px at 390px, which hid it
@@ -1700,6 +1719,18 @@ function ProjectDashboardView({
             {/* One elastic cell absorbs the slack so the whole control cluster
                 stays right-aligned — the same rule the phone header follows. */}
             <span aria-hidden className="min-w-0 flex-1" />
+            {onOpenSearch ? (
+              <button
+                type="button"
+                data-testid="dash-search"
+                aria-label={t("search.open")}
+                title={t("search.open")}
+                onClick={onOpenSearch}
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              >
+                <Search className="h-4 w-4" aria-hidden />
+              </button>
+            ) : null}
             {/* The orchestrator dock's switch opens the left-hand column: first
                 in the right-aligned control cluster, because the panel it opens
                 is the leftmost thing on screen (PRD #976 decision 6). */}

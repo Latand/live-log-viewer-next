@@ -3,9 +3,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { replaceConversationCatalog } from "@/lib/scanner/conversationCatalog";
 import { indexTranscriptSources } from "@/lib/search/transcriptSearch";
 
-import { GET } from "./route";
+import { GET, type TranscriptSearchRow } from "./route";
+
+interface Page {
+  items: TranscriptSearchRow[];
+  nextCursor: string | null;
+  total: number;
+  stats: { conversationsIndexed: number; messagesIndexed: number };
+}
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-transcript-route-"));
 const previousEnvironment = {
@@ -68,4 +76,106 @@ test("rejects a missing query instead of returning an ambiguous empty page", asy
   const response = await GET(new Request("http://127.0.0.1/api/search/transcripts"));
   expect(response.status).toBe(400);
   expect(await response.json()).toEqual({ error: "q is required" });
+});
+
+test("speaker=user narrows the page to the operator's own messages", async () => {
+  const transcript = path.join(sandbox, "route-speaker.jsonl");
+  fs.writeFileSync(transcript, [
+    JSON.stringify({
+      type: "user",
+      timestamp: "2026-08-20T14:10:00.000Z",
+      message: { content: "chase the periwinkle rollout" },
+    }),
+    JSON.stringify({
+      type: "assistant",
+      timestamp: "2026-08-20T14:10:05.000Z",
+      message: { content: "the periwinkle rollout is queued" },
+    }),
+  ].join("\n") + "\n");
+  const stat = fs.statSync(transcript);
+  await indexTranscriptSources([{
+    path: transcript,
+    project: "reports",
+    engine: "claude",
+    size: stat.size,
+    mtimeMs: stat.mtimeMs,
+  }], { complete: true });
+
+  const mine = await (await GET(new Request("http://127.0.0.1/api/search/transcripts?q=periwinkle&speaker=user"))).json() as Page;
+  const everything = await (await GET(new Request("http://127.0.0.1/api/search/transcripts?q=periwinkle"))).json() as Page;
+
+  expect(mine.total).toBe(1);
+  expect(mine.items.map((item) => item.speaker)).toEqual(["user"]);
+  expect(everything.total).toBe(2);
+  /* Zero under the filter still reports the whole indexed corpus, so the
+     operator can trust an empty answer. */
+  const none = await (await GET(new Request("http://127.0.0.1/api/search/transcripts?q=absent&speaker=user"))).json() as Page;
+  expect(none.items).toEqual([]);
+  expect(none.stats.messagesIndexed).toBe(2);
+});
+
+test("an unrecognised speaker is rejected instead of silently searching everything", async () => {
+  const response = await GET(new Request("http://127.0.0.1/api/search/transcripts?q=periwinkle&speaker=operator"));
+
+  expect(response.status).toBe(400);
+  expect(await response.json()).toEqual({ error: "speaker must be user or assistant" });
+});
+
+test("rows name the conversation they open, using the catalog title", async () => {
+  const transcript = path.join(sandbox, "route-title.jsonl");
+  fs.writeFileSync(transcript, JSON.stringify({
+    type: "user",
+    timestamp: "2026-08-20T14:20:00.000Z",
+    message: { content: "collect the marigold numbers" },
+  }) + "\n");
+  const stat = fs.statSync(transcript);
+  await indexTranscriptSources([{
+    path: transcript,
+    project: "reports",
+    engine: "claude",
+    size: stat.size,
+    mtimeMs: stat.mtimeMs,
+  }], { complete: true });
+  replaceConversationCatalog([{
+    path: transcript,
+    root: "claude-projects",
+    name: "route-title.jsonl",
+    project: "reports",
+    title: "Marigold weekly numbers",
+    firstPrompt: "collect the marigold numbers",
+    engine: "claude",
+    kind: "session",
+    fmt: "claude",
+    mtime: 1,
+    size: stat.size,
+  }]);
+
+  const page = await (await GET(new Request("http://127.0.0.1/api/search/transcripts?q=marigold"))).json() as Page;
+
+  expect(page.items).toEqual([expect.objectContaining({
+    transcriptPath: transcript,
+    title: "Marigold weekly numbers",
+  })]);
+});
+
+test("a transcript the catalog has no title for still returns a row", async () => {
+  const transcript = path.join(sandbox, "route-untitled.jsonl");
+  fs.writeFileSync(transcript, JSON.stringify({
+    type: "user",
+    timestamp: "2026-08-20T14:30:00.000Z",
+    message: { content: "note the amaranth deadline" },
+  }) + "\n");
+  const stat = fs.statSync(transcript);
+  await indexTranscriptSources([{
+    path: transcript,
+    project: "reports",
+    engine: "claude",
+    size: stat.size,
+    mtimeMs: stat.mtimeMs,
+  }], { complete: true });
+  replaceConversationCatalog([]);
+
+  const page = await (await GET(new Request("http://127.0.0.1/api/search/transcripts?q=amaranth"))).json() as Page;
+
+  expect(page.items).toEqual([expect.objectContaining({ transcriptPath: transcript, title: null })]);
 });

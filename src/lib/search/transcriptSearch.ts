@@ -5,6 +5,7 @@ import path from "node:path";
 import type { Database as BunDatabase } from "bun:sqlite";
 
 import { statePath } from "@/lib/configDir";
+import { SNIPPET_MATCH_CLOSE, SNIPPET_MATCH_OPEN } from "./snippet";
 
 export const TRANSCRIPT_SEARCH_TOKENIZER = "FTS5 unicode61, remove_diacritics=0, tokenchars=#_";
 export const TRANSCRIPT_SEARCH_FIELDS = ["message.body"] as const;
@@ -17,9 +18,12 @@ export interface TranscriptIndexSource {
   mtimeMs: number;
 }
 
+/** Who authored an indexed message. The operator's own prompts are `user`. */
+export type TranscriptSpeaker = "user" | "assistant";
+
 export interface TranscriptSearchItem {
   snippet: string;
-  speaker: "user" | "assistant";
+  speaker: TranscriptSpeaker;
   /** Unix seconds, or null when the transcript record carried no valid timestamp. */
   timestamp: number | null;
   transcriptPath: string;
@@ -85,7 +89,7 @@ type FileIdentityRow = {
 
 type SearchRow = {
   snippet: string;
-  speaker: "user" | "assistant";
+  speaker: TranscriptSpeaker;
   timestamp: number | null;
   transcript_path: string;
   byte_offset: number;
@@ -412,8 +416,20 @@ function ftsQuery(query: string): string | null {
   return terms.map((term) => `"${term.replaceAll('"', '""')}"`).join(" AND ");
 }
 
-function cursorScope(query: string, project: string | undefined): string {
-  return crypto.createHash("sha256").update(query).update("\0").update(project ?? "").digest("base64url").slice(0, 16);
+/* Every filter that changes WHICH rows the ordered result set contains is part
+   of the cursor's scope: an offset minted against "my messages" addresses a
+   different row sequence than the same offset over every speaker, so replaying
+   one cursor under the other scope would silently page through the wrong
+   corpus. A scope mismatch is rejected, not reinterpreted. */
+function cursorScope(query: string, project: string | undefined, speaker: TranscriptSpeaker | undefined): string {
+  return crypto.createHash("sha256")
+    .update(query)
+    .update("\0")
+    .update(project ?? "")
+    .update("\0")
+    .update(speaker ?? "")
+    .digest("base64url")
+    .slice(0, 16);
 }
 
 function encodeCursor(offset: number, scope: string): string {
@@ -453,6 +469,8 @@ function corpusStats(db: Database): TranscriptCorpusStats {
 export function searchTranscripts(options: {
   query: string;
   project?: string;
+  /** Restrict to one side of the conversation; omitted searches both. */
+  speaker?: TranscriptSpeaker;
   limit?: number;
   cursor?: string | null;
 }): TranscriptSearchResult {
@@ -462,20 +480,25 @@ export function searchTranscripts(options: {
     const stats = corpusStats(db);
     if (!query) return { items: [], nextCursor: null, total: 0, stats };
     const limit = Math.max(1, Math.min(100, Math.floor(options.limit ?? 20)));
-    const scope = cursorScope(query, options.project);
+    const scope = cursorScope(query, options.project, options.speaker);
     const offset = decodeCursor(options.cursor, scope);
-    const whereProject = options.project ? " AND f.project = ?" : "";
-    const bindings = options.project ? [query, options.project] : [query];
+    /* Filter clause and bindings are built from one list so the two queries
+       below can never disagree about parameter order. */
+    const filters: Array<{ clause: string; binding: string }> = [];
+    if (options.project) filters.push({ clause: " AND f.project = ?", binding: options.project });
+    if (options.speaker) filters.push({ clause: " AND m.speaker = ?", binding: options.speaker });
+    const where = filters.map((filter) => filter.clause).join("");
+    const bindings = [query, ...filters.map((filter) => filter.binding)];
     const total = (db.query(`
       SELECT COUNT(*) AS count
       FROM transcript_messages_fts
       JOIN transcript_messages AS m ON m.id = transcript_messages_fts.rowid
       JOIN transcript_files AS f ON f.path = m.transcript_path
-      WHERE transcript_messages_fts MATCH ?${whereProject}
+      WHERE transcript_messages_fts MATCH ?${where}
     `).get(...bindings) as { count: number } | null)?.count ?? 0;
     const rows = db.query(`
       SELECT
-        snippet(transcript_messages_fts, 0, '[', ']', '…', 24) AS snippet,
+        snippet(transcript_messages_fts, 0, '${SNIPPET_MATCH_OPEN}', '${SNIPPET_MATCH_CLOSE}', '…', 24) AS snippet,
         m.speaker,
         m.timestamp,
         m.transcript_path,
@@ -486,7 +509,7 @@ export function searchTranscripts(options: {
       FROM transcript_messages_fts
       JOIN transcript_messages AS m ON m.id = transcript_messages_fts.rowid
       JOIN transcript_files AS f ON f.path = m.transcript_path
-      WHERE transcript_messages_fts MATCH ?${whereProject}
+      WHERE transcript_messages_fts MATCH ?${where}
       ORDER BY bm25(transcript_messages_fts), COALESCE(m.timestamp, 0) DESC, m.id DESC
       LIMIT ? OFFSET ?
     `).all(...bindings, limit, offset) as SearchRow[];

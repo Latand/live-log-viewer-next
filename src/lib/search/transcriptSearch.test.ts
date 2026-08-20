@@ -3,8 +3,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { snippetSegments } from "./snippet";
 import {
   indexTranscriptSources,
+  InvalidTranscriptSearchCursorError,
   searchTranscripts,
   type TranscriptIndexSource,
 } from "./transcriptSearch";
@@ -297,4 +299,78 @@ test("continues the backfill when one discovered transcript becomes unreadable",
   expect(indexed.failures).toEqual([{ path: vanished, error: "transcript disappeared" }]);
   expect(searchTranscripts({ query: "periwinkle" }).items)
     .toEqual([expect.objectContaining({ transcriptPath: readable })]);
+});
+
+test("speaker=user searches only the operator's own messages", async () => {
+  const transcript = path.join(sandbox, "speaker-session.jsonl");
+  fs.writeFileSync(transcript, [
+    JSON.stringify({
+      type: "user",
+      timestamp: "2026-08-20T15:00:00.000Z",
+      message: { content: "find the marigold invoice I sent" },
+    }),
+    JSON.stringify({
+      type: "assistant",
+      timestamp: "2026-08-20T15:00:04.000Z",
+      message: { content: "the marigold invoice is attached" },
+    }),
+  ].join("\n") + "\n");
+  await indexTranscriptSources([source(transcript, "claude", "speakers")], { complete: true });
+
+  const mine = searchTranscripts({ query: "marigold", speaker: "user" });
+  const theirs = searchTranscripts({ query: "marigold", speaker: "assistant" });
+  const both = searchTranscripts({ query: "marigold" });
+
+  expect(mine.total).toBe(1);
+  expect(mine.items).toEqual([expect.objectContaining({ speaker: "user" })]);
+  expect(theirs.total).toBe(1);
+  expect(theirs.items).toEqual([expect.objectContaining({ speaker: "assistant" })]);
+  expect(both.total).toBe(2);
+  /* The zero answer stays trustworthy: the corpus line reports the whole
+     index, not the filtered slice. */
+  expect(searchTranscripts({ query: "absent", speaker: "user" }).stats.messagesIndexed).toBe(2);
+});
+
+test("a cursor minted for one speaker scope cannot replay under another", async () => {
+  const transcript = path.join(sandbox, "speaker-pages.jsonl");
+  fs.writeFileSync(transcript, Array.from({ length: 4 }, (_value, index) => JSON.stringify({
+    type: index % 2 ? "assistant" : "user",
+    timestamp: `2026-08-20T16:00:0${index}.000Z`,
+    message: { content: `periwinkle page ${index}` },
+  })).join("\n") + "\n");
+  await indexTranscriptSources([source(transcript, "claude", "speaker-pages")], { complete: true });
+
+  const first = searchTranscripts({ query: "periwinkle", speaker: "user", limit: 1 });
+  expect(first.total).toBe(2);
+  expect(first.nextCursor).not.toBeNull();
+
+  const second = searchTranscripts({ query: "periwinkle", speaker: "user", limit: 1, cursor: first.nextCursor });
+  expect(second.items).toEqual([expect.objectContaining({ speaker: "user" })]);
+  expect(second.nextCursor).toBeNull();
+
+  expect(() => searchTranscripts({ query: "periwinkle", limit: 1, cursor: first.nextCursor }))
+    .toThrow(InvalidTranscriptSearchCursorError);
+  expect(() => searchTranscripts({ query: "periwinkle", speaker: "assistant", limit: 1, cursor: first.nextCursor }))
+    .toThrow(InvalidTranscriptSearchCursorError);
+});
+
+test("snippets mark matched terms with sentinels a message body cannot contain", async () => {
+  const transcript = path.join(sandbox, "snippet-markers.jsonl");
+  fs.writeFileSync(transcript, JSON.stringify({
+    type: "user",
+    timestamp: "2026-08-20T17:00:00.000Z",
+    message: { content: "read rows[0] then log the cobalt totals" },
+  }) + "\n");
+  await indexTranscriptSources([source(transcript, "claude", "markers")], { complete: true });
+
+  const snippet = searchTranscripts({ query: "cobalt" }).items[0]!.snippet;
+
+  expect(snippetSegments(snippet)).toEqual(expect.arrayContaining([
+    { text: "cobalt", match: true },
+  ]));
+  /* The brackets the operator typed stay plain text — the defect the sentinel
+     delimiters exist to kill. */
+  expect(snippet).toContain("rows[0]");
+  expect(snippetSegments(snippet).filter((segment) => segment.match))
+    .toEqual([{ text: "cobalt", match: true }]);
 });
