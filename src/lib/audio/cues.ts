@@ -41,14 +41,26 @@ export type CueTier = "priority" | "salient" | "routine";
 
 export const CUE_ASSET_DIR = "/audio/cues";
 
-/** cue → bundled asset + playback tier. The one table. */
-export const CUES: Record<AudioCue, { file: string; tier: CueTier }> = {
+/** cue → bundled asset + playback tier. The one table.
+ *
+ * `variants` lists equal slices of ONE master take; playback draws one at
+ * random so a dense tool stream reads as live typing instead of a stuck
+ * sampler. Slices ship byte-for-byte like every other master — the loudness
+ * rules above apply to the whole set. */
+export const CUES: Record<AudioCue, { file: string; variants?: readonly string[]; tier: CueTier }> = {
   attention: { file: "attention.mp3", tier: "priority" },
   failure: { file: "failure.mp3", tier: "priority" },
   launch: { file: "launch.mp3", tier: "salient" },
   success: { file: "success.mp3", tier: "salient" },
   "viewer-mcp": { file: "viewer-mcp.mp3", tier: "routine" },
-  "tool-tick": { file: "tool-tick.mp3", tier: "routine" },
+  "tool-tick": {
+    file: "tool-tick-1.mp3",
+    variants: [
+      "tool-tick-1.mp3", "tool-tick-2.mp3", "tool-tick-3.mp3", "tool-tick-4.mp3",
+      "tool-tick-5.mp3", "tool-tick-6.mp3", "tool-tick-7.mp3", "tool-tick-8.mp3",
+    ],
+    tier: "routine",
+  },
 };
 
 /** The documented tier table, layered on top of the masters' own levels. */
@@ -69,8 +81,19 @@ export function cueTier(cue: AudioCue): CueTier {
   return CUES[cue].tier;
 }
 
-export function cueAsset(cue: AudioCue): string {
-  return `${CUE_ASSET_DIR}/${CUES[cue].file}`;
+export function cueAsset(cue: AudioCue, pick: () => number = Math.random): string {
+  const entry = CUES[cue];
+  const file = entry.variants?.length
+    ? entry.variants[Math.min(entry.variants.length - 1, Math.floor(pick() * entry.variants.length))]!
+    : entry.file;
+  return `${CUE_ASSET_DIR}/${file}`;
+}
+
+/** Every bundled asset URL of one cue — variants included — for warming. */
+export function cueAssetAll(cue: AudioCue): string[] {
+  const entry = CUES[cue];
+  const files = entry.variants?.length ? entry.variants : [entry.file];
+  return files.map((file) => `${CUE_ASSET_DIR}/${file}`);
 }
 
 /** A priority cue is the only thing allowed to duck the ambient loop. */
