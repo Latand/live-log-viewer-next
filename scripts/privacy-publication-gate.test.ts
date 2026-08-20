@@ -20,6 +20,7 @@ import { auditGithubPublication, shouldFailGithubAudit } from "./privacy-github-
 import {
   commitMessageFindings,
   formatPrivacyReport,
+  sensitiveClasses,
   TRUSTED_TELEGRAM_VENDOR_EXEMPT_FINDING_CLASSES,
   TRUSTED_TELEGRAM_VENDOR_ROOT_DIGEST,
   trustedVendorRootDigest,
@@ -587,15 +588,51 @@ exec "$LLV_TEST_REAL_GIT" "$@"
       fixtureValue,
       `{\"${fixtureValue}\"}`,
       `{'${fixtureValue}'}`,
+      `{\"${fixtureValue} with a 'single quote'\"}`,
+      `{'${fixtureValue} with a "double quote"'}`,
+      `{\"${fixtureValue} with an \\"escaped double quote\\"\"}`,
+      `{'${fixtureValue} with an \\'escaped single quote\\''}`,
+      `{\"${fixtureValue} with whitespace\"}`,
       "{`" + fixtureValue + "`}",
+      "{`" + fixtureValue + " with an \\`escaped backtick\\``}",
     ];
     for (const [index, valueSource] of literals.entries()) {
       const baked = join(directory, `literal-${index}.tsx`);
       writeFileSync(baked, passwordMarkup(valueSource));
       const result = runGate([baked]);
+      if (result.exitCode !== 1) throw new Error(`credential literal form ${index} was not detected`);
       expect(result.exitCode).toBe(1);
       expect(result.stdout.toString()).toBe("PRIVACY GATE: FAIL\ncredential: 1\n");
     }
+  });
+
+  test("scopes controlled binding recognition to JSX and TSX source files", () => {
+    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-jsx-scope-"));
+    temporaryDirectories.push(directory);
+    const passwordMarkup = (valueSource: string) => [
+      ["<in", "put"].join(""),
+      [" type=\"pass", "word\""].join(""),
+      [" val", "ue="].join(""),
+      valueSource,
+      ">",
+    ].join("");
+
+    for (const extension of ["jsx", "tsx"]) {
+      const controlled = join(directory, `controlled.${extension}`);
+      writeFileSync(controlled, passwordMarkup("{form?.password}"));
+      expect(runGate([controlled]).stdout.toString()).toBe("PRIVACY GATE: PASS\n");
+    }
+
+    const genericMarkup = passwordMarkup("{hunter2fixture}");
+    for (const extension of ["html", "md"]) {
+      const publication = join(directory, `publication.${extension}`);
+      writeFileSync(publication, genericMarkup);
+      const result = runGate([publication]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout.toString()).toBe("PRIVACY GATE: FAIL\ncredential: 1\n");
+    }
+    /* Issue and pull-request bodies reach sensitiveClasses as generic text. */
+    expect(sensitiveClasses(genericMarkup).has("credential")).toBe(true);
   });
 
   test("matches a fixed independently derived vendor digest vector", () => {
