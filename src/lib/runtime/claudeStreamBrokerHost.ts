@@ -23,6 +23,7 @@ import {
   type RuntimeEventStore,
 } from "./eventStore";
 import { MAX_STRUCTURED_IMAGE_ENCODED_BYTES, runtimeImageStore } from "./runtimeImageStore";
+import { withTelegramConnectorGrant } from "./telegramConnectorEnv";
 import {
   STRUCTURED_IMAGE_CAPABILITY,
   normalizeStructuredImageMime,
@@ -586,7 +587,11 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     if (options.tools) args.push("--tools", options.tools.join(","));
     const spawnProcess = options.spawnProcess ?? ((command, childArgs, spawnOptions) =>
       spawn(command, childArgs, { ...spawnOptions, stdio: ["pipe", "pipe", "pipe"] }));
-    const child = spawnProcess(binary, args, { cwd: options.cwd, env, detached: true });
+    const child = spawnProcess(binary, args, {
+      cwd: options.cwd,
+      env: withTelegramConnectorGrant(env, options.mcpServers),
+      detached: true,
+    });
     const host = new ClaudeStreamBrokerHost(child, { sessionId }, auth, options);
     try {
       host.restore();

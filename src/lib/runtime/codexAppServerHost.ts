@@ -12,6 +12,7 @@ import { decodeCodexStructuredUserText, encodeCodexStructuredUserText } from "./
 import { CodexReplayFrameReducer, ReplayFrameOverflowError, sanitizeCodexImageFrame, shrinkReducedReplayFrame, type ImageSink, type ReplayFrameBudgets } from "./codexImageFrames";
 import { MAX_STRUCTURED_IMAGE_ENCODED_BYTES, runtimeImageStore } from "./runtimeImageStore";
 import { STRUCTURED_IMAGE_CAPABILITY, type StructuredImageRef } from "./structuredContent";
+import { withTelegramConnectorGrant } from "./telegramConnectorEnv";
 import {
   normalizeVoiceDeliveries,
   streamingVoiceDelivery,
@@ -751,7 +752,10 @@ export class CodexAppServerHost implements EngineHost {
     const granted = grantedPlugins(options.plugins);
     const child = spawnProcess(options.binary ?? process.env.LLV_CODEX_BINARY ?? "codex", args, {
       cwd: options.cwd,
-      env: subscriptionEnv(options.env ?? process.env, options.codexHome, granted.length > 0),
+      env: withTelegramConnectorGrant(
+        subscriptionEnv(options.env ?? process.env, options.codexHome, granted.length > 0),
+        options.mcpServers,
+      ),
       detached: true,
     });
     const provisional = new CodexAppServerHost(child, { threadId: threadId ?? "pending", path: null }, options);

@@ -1,0 +1,187 @@
+{
+  "issue": 1059,
+  "capturedAt": "2100-01-02T12:00:00.000Z",
+  "identityFixture": "Account A/@account_a",
+  "checks": [
+    {
+      "state": "disconnected",
+      "viewport": "desktop",
+      "rendered": true,
+      "qrDrawnClientSide": null,
+      "passwordFieldMasked": null,
+      "rowTapTargetPx": 36,
+      "horizontalOverflow": false,
+      "sessionStringAbsent": true
+    },
+    {
+      "state": "qr",
+      "viewport": "desktop",
+      "rendered": true,
+      "qrDrawnClientSide": true,
+      "passwordFieldMasked": null,
+      "rowTapTargetPx": 36,
+      "horizontalOverflow": false,
+      "sessionStringAbsent": true
+    },
+    {
+      "state": "password",
+      "viewport": "desktop",
+      "rendered": true,
+      "qrDrawnClientSide": null,
+      "passwordFieldMasked": true,
+      "rowTapTargetPx": 36,
+      "horizontalOverflow": false,
+      "sessionStringAbsent": true
+    },
+    {
+      "state": "password-invalid",
+      "viewport": "desktop",
+      "rendered": true,
+      "qrDrawnClientSide": null,
+      "passwordFieldMasked": true,
+      "rowTapTargetPx": 36,
+      "horizontalOverflow": false,
+      "sessionStringAbsent": true
+    },
+    {
+      "state": "connected",
+      "viewport": "desktop",
+      "rendered": true,
+      "qrDrawnClientSide": null,
+      "passwordFieldMasked": null,
+      "rowTapTargetPx": 36,
+      "horizontalOverflow": false,
+      "sessionStringAbsent": true
+    },
+    {
+      "state": "logout-confirm",
+      "viewport": "desktop",
+      "rendered": true,
+      "qrDrawnClientSide": null,
+      "passwordFieldMasked": null,
+      "rowTapTargetPx": 36,
+      "horizontalOverflow": false,
+      "sessionStringAbsent": true
+    },
+    {
+      "state": "delete-confirm",
+      "viewport": "desktop",
+      "rendered": true,
+      "qrDrawnClientSide": null,
+      "passwordFieldMasked": null,
+      "rowTapTargetPx": 36,
+      "horizontalOverflow": false,
+      "sessionStringAbsent": true
+    },
+    {
+      "state": "expired",
+      "viewport": "desktop",
+      "rendered": true,
+      "qrDrawnClientSide": null,
+      "passwordFieldMasked": null,
+      "rowTapTargetPx": 36,
+      "horizontalOverflow": false,
+      "sessionStringAbsent": true
+    },
+    {
+      "state": "error",
+      "viewport": "desktop",
+      "rendered": true,
+      "qrDrawnClientSide": null,
+      "passwordFieldMasked": null,
+      "rowTapTargetPx": 36,
+      "horizontalOverflow": false,
+      "sessionStringAbsent": true
+    },
+    {
+      "state": "disconnected",
+      "viewport": "phone",
+      "rendered": true,
+      "qrDrawnClientSide": null,
+      "passwordFieldMasked": null,
+      "rowTapTargetPx": 44,
+      "horizontalOverflow": false,
+      "sessionStringAbsent": true
+    },
+    {
+      "state": "qr",
+      "viewport": "phone",
+      "rendered": true,
+      "qrDrawnClientSide": true,
+      "passwordFieldMasked": null,
+      "rowTapTargetPx": 44,
+      "horizontalOverflow": false,
+      "sessionStringAbsent": true
+    },
+    {
+      "state": "password",
+      "viewport": "phone",
+      "rendered": true,
+      "qrDrawnClientSide": null,
+      "passwordFieldMasked": true,
+      "rowTapTargetPx": 44,
+      "horizontalOverflow": false,
+      "sessionStringAbsent": true
+    },
+    {
+      "state": "password-invalid",
+      "viewport": "phone",
+      "rendered": true,
+      "qrDrawnClientSide": null,
+      "passwordFieldMasked": true,
+      "rowTapTargetPx": 44,
+      "horizontalOverflow": false,
+      "sessionStringAbsent": true
+    },
+    {
+      "state": "connected",
+      "viewport": "phone",
+      "rendered": true,
+      "qrDrawnClientSide": null,
+      "passwordFieldMasked": null,
+      "rowTapTargetPx": 44,
+      "horizontalOverflow": false,
+      "sessionStringAbsent": true
+    },
+    {
+      "state": "logout-confirm",
+      "viewport": "phone",
+      "rendered": true,
+      "qrDrawnClientSide": null,
+      "passwordFieldMasked": null,
+      "rowTapTargetPx": 44,
+      "horizontalOverflow": false,
+      "sessionStringAbsent": true
+    },
+    {
+      "state": "delete-confirm",
+      "viewport": "phone",
+      "rendered": true,
+      "qrDrawnClientSide": null,
+      "passwordFieldMasked": null,
+      "rowTapTargetPx": 44,
+      "horizontalOverflow": false,
+      "sessionStringAbsent": true
+    },
+    {
+      "state": "expired",
+      "viewport": "phone",
+      "rendered": true,
+      "qrDrawnClientSide": null,
+      "passwordFieldMasked": null,
+      "rowTapTargetPx": 44,
+      "horizontalOverflow": false,
+      "sessionStringAbsent": true
+    },
+    {
+      "state": "error",
+      "viewport": "phone",
+      "rendered": true,
+      "qrDrawnClientSide": null,
+      "passwordFieldMasked": null,
+      "rowTapTargetPx": 44,
+      "horizontalOverflow": false,
+      "sessionStringAbsent": true
+    }
+  ]
+}

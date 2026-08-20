@@ -255,13 +255,37 @@ function resolveServer(packageRoot) {
   };
 }
 
-function buildChildEnv(options, runtime) {
+function buildChildEnv(options, runtime, packageRoot) {
   const env = {
     ...withoutWakatimeCredential(process.env),
     PORT: String(options.port),
     // zsh exports HOSTNAME with the machine name on this user's machine; setting it here keeps standalone bound to the requested address.
     HOSTNAME: options.hostname,
   };
+
+  // The standalone server runs with cwd inside dist/standalone, so the
+  // Telegram connector assets (issue #1059) are pinned to the package root
+  // explicitly; a pre-set override always wins.
+  const telegramVendor = join(packageRoot, "vendor", "telegram-mcp");
+  if (!env.LLV_TELEGRAM_VENDOR_DIR && existsSync(telegramVendor)) {
+    env.LLV_TELEGRAM_VENDOR_DIR = telegramVendor;
+  }
+  const telegramBridge = join(packageRoot, "bin", "telegram-login-bridge.py");
+  if (!env.LLV_TELEGRAM_BRIDGE && existsSync(telegramBridge)) {
+    env.LLV_TELEGRAM_BRIDGE = telegramBridge;
+  }
+  const telegramServerBridge = join(packageRoot, "bin", "telegram-mcp-server.py");
+  if (!env.LLV_TELEGRAM_SERVER_BRIDGE && existsSync(telegramServerBridge)) {
+    env.LLV_TELEGRAM_SERVER_BRIDGE = telegramServerBridge;
+  }
+  const telegramSessionReader = join(packageRoot, "bin", "telegram-session-reader.mjs");
+  if (!env.LLV_TELEGRAM_SESSION_READER && existsSync(telegramSessionReader)) {
+    env.LLV_TELEGRAM_SESSION_READER = telegramSessionReader;
+  }
+  const telegramProvisioner = join(packageRoot, "bin", "provision-telegram-connector.mjs");
+  if (!env.LLV_TELEGRAM_PROVISIONER && existsSync(telegramProvisioner)) {
+    env.LLV_TELEGRAM_PROVISIONER = telegramProvisioner;
+  }
 
   if (runtime.llvToken) {
     env.LLV_TOKEN = runtime.llvToken;
@@ -282,10 +306,10 @@ function buildChildEnv(options, runtime) {
   return env;
 }
 
-function startServer(server, options, runtime, tailscaleProcessRef) {
+function startServer(server, options, runtime, tailscaleProcessRef, packageRoot) {
   const child = spawn(server.command, server.args, viewerChildProcessOptions({
     cwd: server.cwd,
-    env: buildChildEnv(options, runtime),
+    env: buildChildEnv(options, runtime, packageRoot),
     stdio: ["ignore", "inherit", "pipe"],
   }));
 
@@ -603,7 +627,7 @@ async function main() {
 
   const server = resolveServer(packageRoot);
   const tailscaleProcessRef = { current: null };
-  const serverProcess = startServer(server, options, runtime, tailscaleProcessRef);
+  const serverProcess = startServer(server, options, runtime, tailscaleProcessRef, packageRoot);
   installSignalHandlers(serverProcess, tailscaleProcessRef);
 
   if (options.tailscale && runtime.tailscalePath) {
