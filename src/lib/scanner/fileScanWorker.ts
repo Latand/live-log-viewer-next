@@ -7,7 +7,11 @@ import { scheduleTranscriptIndex, type TranscriptIndexFeed } from "@/lib/search/
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 
 import type { FileCatalogScan, FileScanOptions } from "./index";
-import { beginProjectCatalogScan, publishConversationCatalogForScan } from "./projectCatalog";
+import {
+  beginProjectCatalogScan,
+  isProjectCatalogScanCurrent,
+  publishConversationCatalogForScan,
+} from "./projectCatalog";
 
 const FILE_SCAN_WORKER_TIMEOUT_MS = 5 * 60_000;
 const FILE_SCAN_WORKER_OUTPUT_MAX_BYTES = 32 * 1024 * 1024;
@@ -196,17 +200,20 @@ export function collectFileScanInWorker(
         return;
       }
       if (completedConversationCatalog) {
+        const currentScan = isProjectCatalogScanCurrent(catalogScanToken);
         publishConversationCatalogForScan(completedConversationCatalog, catalogScanToken, completed.complete);
-        (runtime.transcriptIndexScheduler ?? scheduleTranscriptIndex)({
-          complete: completed.complete,
-          sources: completedConversationCatalog.map((entry) => ({
-            path: entry.path,
-            project: entry.project,
-            engine: entry.engine,
-            size: entry.size,
-            mtimeMs: entry.mtime * 1_000,
-          })),
-        });
+        if (currentScan) {
+          (runtime.transcriptIndexScheduler ?? scheduleTranscriptIndex)({
+            complete: completed.complete,
+            sources: completedConversationCatalog.map((entry) => ({
+              path: entry.path,
+              project: entry.project,
+              engine: entry.engine,
+              size: entry.size,
+              mtimeMs: entry.mtime * 1_000,
+            })),
+          });
+        }
       }
       finish(undefined, completed);
     });

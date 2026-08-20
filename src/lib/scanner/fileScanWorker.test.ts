@@ -3,6 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { scheduleTranscriptIndex, waitForTranscriptIndexIdleForTests } from "@/lib/search/transcriptFeed";
+import { searchTranscripts } from "@/lib/search/transcriptSearch";
+
 import { conversationCatalogSnapshot, replaceConversationCatalog } from "./conversationCatalog";
 import { collectFileScanInWorker, fileScanWorkerEnabled } from "./fileScanWorker";
 
@@ -66,7 +69,7 @@ test("worker scan streams the resource scope, keeps the caller event loop live, 
   }
 });
 
-test("a successful worker exit schedules the transported transcript catalog in the parent", async () => {
+test("a current incomplete worker scan schedules a non-deleting transcript feed", async () => {
   const transcript = {
     path: "/sessions/indexed.jsonl",
     root: "codex-sessions",
@@ -82,7 +85,7 @@ test("a successful worker exit schedules the transported transcript catalog in t
   };
   const completion = JSON.stringify({
     type: "complete",
-    snapshot: { files: [], projectCatalog: [], conversationCatalog: [transcript], complete: true },
+    snapshot: { files: [], projectCatalog: [], conversationCatalog: [transcript], complete: false },
   });
   const { directory, workerPath } = fixtureWorker(`
     process.stdin.resume();
@@ -102,7 +105,7 @@ test("a successful worker exit schedules the transported transcript catalog in t
   );
 
   expect(feeds).toEqual([{
-    complete: true,
+    complete: false,
     sources: [{
       path: transcript.path,
       project: transcript.project,
@@ -111,6 +114,103 @@ test("a successful worker exit schedules the transported transcript catalog in t
       mtimeMs: transcript.mtime * 1_000,
     }],
   }]);
+});
+
+test("an obsolete worker scan finishing last cannot delete newer transcript index results", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-file-scan-worker-overlap-"));
+  directories.push(directory);
+  const previousEnvironment = {
+    HOME: process.env.HOME,
+    XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+    LLV_STATE_DIR: process.env.LLV_STATE_DIR,
+    TMPDIR: process.env.TMPDIR,
+  };
+  process.env.HOME = path.join(directory, "home");
+  process.env.XDG_CONFIG_HOME = path.join(directory, "config");
+  process.env.LLV_STATE_DIR = path.join(directory, "state");
+  process.env.TMPDIR = path.join(directory, "tmp");
+  fs.mkdirSync(process.env.TMPDIR, { recursive: true });
+
+  const transcript = (name: string, body: string) => {
+    const pathname = path.join(directory, `${name}.jsonl`);
+    fs.writeFileSync(pathname, `${JSON.stringify({
+      type: "user",
+      timestamp: "2026-08-20T09:00:00.000Z",
+      message: { content: body },
+    })}\n`);
+    const stat = fs.statSync(pathname);
+    return {
+      path: pathname,
+      root: "claude-projects",
+      name: path.basename(pathname),
+      project: "repo-overlap",
+      title: name,
+      firstPrompt: "",
+      engine: "claude",
+      kind: "session",
+      fmt: "claude",
+      mtime: stat.mtimeMs / 1_000,
+      size: stat.size,
+    };
+  };
+  const older = transcript("older", "obsoleteinventorymarker");
+  const newer = transcript("newer", "newerinventorymarker");
+  const completion = (entry: ReturnType<typeof transcript>) => `${JSON.stringify({
+    type: "complete",
+    snapshot: { files: [], projectCatalog: [], conversationCatalog: [entry], complete: true },
+  })}\n`;
+  const worker = (entry: ReturnType<typeof transcript>, delayMs: number) => fixtureWorker(`
+    process.stdin.resume();
+    process.stdin.on("end", () => setTimeout(() => {
+      process.stdout.write(${JSON.stringify(completion(entry))});
+    }, ${delayMs}));
+  `);
+  const olderWorker = worker(older, 250);
+  const newerWorker = worker(newer, 0);
+  const scheduledPaths: string[][] = [];
+  const schedule = (feed: Parameters<typeof scheduleTranscriptIndex>[0]) => {
+    scheduledPaths.push(feed.sources.map((entry) => entry.path));
+    scheduleTranscriptIndex(feed, { force: true });
+  };
+
+  try {
+    await waitForTranscriptIndexIdleForTests();
+    const olderScan = collectFileScanInWorker(
+      { persist: false, persistIndex: false },
+      undefined,
+      {
+        launch: { executable: process.execPath, workerPath: olderWorker.workerPath },
+        cwd: olderWorker.directory,
+        timeoutMs: 2_000,
+        transcriptIndexScheduler: schedule,
+      },
+    );
+    const newerScan = collectFileScanInWorker(
+      { persist: false, persistIndex: false },
+      undefined,
+      {
+        launch: { executable: process.execPath, workerPath: newerWorker.workerPath },
+        cwd: newerWorker.directory,
+        timeoutMs: 2_000,
+        transcriptIndexScheduler: schedule,
+      },
+    );
+
+    await newerScan;
+    await waitForTranscriptIndexIdleForTests();
+    expect(searchTranscripts({ query: "newerinventorymarker" }).items).toHaveLength(1);
+
+    await olderScan;
+    await waitForTranscriptIndexIdleForTests();
+    expect(scheduledPaths).toEqual([[newer.path]]);
+    expect(searchTranscripts({ query: "newerinventorymarker" }).items).toHaveLength(1);
+  } finally {
+    await waitForTranscriptIndexIdleForTests();
+    for (const [key, value] of Object.entries(previousEnvironment)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 });
 
 test("worker scans publish a Claude transcript that appears in a previously sessionless project directory", async () => {

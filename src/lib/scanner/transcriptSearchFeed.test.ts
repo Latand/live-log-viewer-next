@@ -82,3 +82,44 @@ test("feeds every configured Codex and Claude transcript store into one backgrou
   expect(feed?.sources.filter((entry) => entry.engine === "codex")).toHaveLength(2);
   expect(feed?.sources.filter((entry) => entry.engine === "claude")).toHaveLength(2);
 });
+
+test("a direct scan invalidated by a newer generation does not publish its stale inventory", async () => {
+  const workspace = path.join(sandbox, "overlap-workspace");
+  fs.mkdirSync(workspace, { recursive: true });
+  const olderRoot = path.join(sandbox, "overlap-older");
+  const newerRoot = path.join(sandbox, "overlap-newer");
+  const olderPath = writeCodex(olderRoot, "rollout-older.jsonl", workspace);
+  const newerPath = writeCodex(newerRoot, "rollout-newer.jsonl", workspace);
+  let olderFeed: TranscriptIndexFeed | undefined;
+  let newerFeed: TranscriptIndexFeed | undefined;
+  let newerScan: ReturnType<typeof discoverFilesWithProjectCatalog> | undefined;
+  let markNewerStarted: (() => void) | undefined;
+  const newerStarted = new Promise<void>((resolve) => { markNewerStarted = resolve; });
+
+  const olderScan = discoverFilesWithProjectCatalog(
+    [["codex-sessions", olderRoot]],
+    undefined,
+    {
+      persist: false,
+      onResourceSnapshot: () => {
+        newerScan = discoverFilesWithProjectCatalog(
+          [["codex-sessions", newerRoot]],
+          undefined,
+          {
+            persist: false,
+            transcriptIndexScheduler: (feed) => { newerFeed = feed; },
+          },
+        );
+        markNewerStarted?.();
+      },
+      transcriptIndexScheduler: (feed) => { olderFeed = feed; },
+    },
+  );
+
+  await newerStarted;
+  await Promise.all([olderScan, newerScan!]);
+
+  expect(olderFeed).toBeUndefined();
+  expect(newerFeed?.sources.map((entry) => entry.path)).toEqual([newerPath]);
+  expect(newerFeed?.sources.map((entry) => entry.path)).not.toContain(olderPath);
+});

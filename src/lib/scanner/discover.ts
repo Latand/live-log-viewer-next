@@ -10,7 +10,13 @@ import { isClaudeWorkflowBookkeeping } from "./claudeNative";
 import { codexThreadIdFromPath, nativeCodexParentThreadId } from "./codexNative";
 import { describe } from "./describe";
 import type { ConversationCatalogEntry } from "./conversationCatalog";
-import { beginProjectCatalogScan, projectCatalogSnapshotFromRaw, type ParsedFileSummary } from "./projectCatalog";
+import {
+  beginProjectCatalogScan,
+  isProjectCatalogScanCurrent,
+  projectCatalogSnapshotFromRaw,
+  type ParsedFileSummary,
+  type ProjectCatalogScanToken,
+} from "./projectCatalog";
 import { projectResolutionStateKey } from "./projectState";
 import { EXTS, ROOTS, scanRootEntries } from "./roots";
 import { selectSchemeWindow } from "./schemeWindow";
@@ -191,9 +197,11 @@ function transcriptIndexFeed(
 function publishTranscriptIndexFeed(
   catalog: readonly ConversationCatalogEntry[],
   complete: boolean,
+  scanToken: ProjectCatalogScanToken,
   projectByPath?: ReadonlyMap<string, string>,
   scheduler?: TranscriptIndexScheduler,
 ): void {
+  if (!isProjectCatalogScanCurrent(scanToken)) return;
   const publish = scheduler
     ?? (process.env.LLV_FILE_SCANNER_WORKER === "1" ? undefined : scheduleTranscriptIndex);
   publish?.(transcriptIndexFeed(catalog, complete, projectByPath));
@@ -589,6 +597,7 @@ export async function discoverFilesWithProjectCatalog(
   publishTranscriptIndexFeed(
     snapshot.conversationCatalog,
     snapshot.complete,
+    scanToken,
     projectByPath,
     options.transcriptIndexScheduler,
   );
@@ -634,7 +643,7 @@ export async function discoverFiles(
     canonicalizePath,
     canonicalizeTranscriptPaths(hosted, canonicalizePath),
   );
-  publishTranscriptIndexFeed(snapshot.conversationCatalog, snapshot.complete, projectByPath);
+  publishTranscriptIndexFeed(snapshot.conversationCatalog, snapshot.complete, scanToken, projectByPath);
   return entries.files;
 }
 
@@ -644,5 +653,5 @@ export async function refreshConversationCatalog(roots: Roots | RootEntries = sc
   const scanToken = beginProjectCatalogScan(false);
   const discovery = await discoverRaw(roots, createLimiter(48));
   const snapshot = await projectCatalogSnapshotFromRaw(discovery.raw, { persist: false, scanToken, complete: discovery.complete });
-  publishTranscriptIndexFeed(snapshot.conversationCatalog, snapshot.complete, snapshot.projectByPath);
+  publishTranscriptIndexFeed(snapshot.conversationCatalog, snapshot.complete, scanToken, snapshot.projectByPath);
 }
