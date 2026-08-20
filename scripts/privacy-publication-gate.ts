@@ -64,12 +64,21 @@ const textBasenames = new Set(["CODEOWNERS", "Dockerfile", "LICENSE", "Makefile"
 const maxPublicationBytes = 32 * 1024 * 1024;
 const maxVideoStreams = 16;
 const supportedGeneratorRuntime = "bun-1.3.3";
-/* A `{`-leading unquoted value starts a JSX expression container, including
-   the controlled binding form `value={entered}`. */
+/* Only identifier/member JSX expressions represent controlled bindings.
+   String and template literals inside JSX containers remain publication data. */
+const controlledJsxValuePattern = String.raw`\{\s*[A-Za-z_$][\w$]*(?:\s*(?:\?\.|\.)\s*[A-Za-z_$][\w$]*)*\s*\}`;
+const jsxStringLiteralValuePattern = String.raw`\{\s*["'][^"']{4,}["']\s*\}`;
+const jsxTemplateLiteralValuePattern = String.raw`\{\s*` + "`[^`]{4,}`" + String.raw`\s*\}`;
+const credentialValuePattern = [
+  String.raw`["'][^"']{4,}["']`,
+  jsxStringLiteralValuePattern,
+  jsxTemplateLiteralValuePattern,
+  String.raw`(?!${controlledJsxValuePattern})[^\s"'=<>]{4,}`,
+].join("|");
 const credentialInputPattern = new RegExp([
   String.raw`<in`,
   String.raw`put\b(?=[^>]*(?:type\s*=\s*["']?password|name\s*=\s*["']?(?:api[_-]?key|password|secret|token)))`,
-  String.raw`(?=[^>]*value\s*=\s*(?:["'][^"']{4,}["']|[^\s"'=<>{][^\s"'=<>]{3,}))[^>]*>`,
+  String.raw`(?=[^>]*value\s*=\s*(?:${credentialValuePattern}))[^>]*>`,
 ].join(""), "i");
 
 type KnownValueFingerprint = {
@@ -1104,9 +1113,12 @@ export function trustedVendorRootMatches(root: string, expectedDigest: string): 
  * that removes invite-link mutation tools from its read-only registry. This
  * digest is trusted scanner policy: candidate content cannot update it.
  */
+export const TRUSTED_TELEGRAM_VENDOR_ROOT_DIGEST = "07d80cafa0b508ec8a7e0c24e9df2a4ca74472edbd91d43924b44bdcb27d4728";
+export const TRUSTED_TELEGRAM_VENDOR_EXEMPT_FINDING_CLASSES: ReadonlySet<FindingClass> = new Set(["credential", "home_path"]);
+
 const trustedTelegramVendor = {
-  digest: "9df9b54c12ce17f8d1a581cb39e46cd54319b36662c1f316bd2c69909dc94500",
-  exemptFindingClasses: new Set<FindingClass>(["credential", "home_path"]),
+  digest: TRUSTED_TELEGRAM_VENDOR_ROOT_DIGEST,
+  exemptFindingClasses: TRUSTED_TELEGRAM_VENDOR_EXEMPT_FINDING_CLASSES,
   relativeRoot: "vendor/telegram-mcp",
 };
 

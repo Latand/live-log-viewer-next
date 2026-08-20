@@ -1,6 +1,17 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deflateSync } from "node:zlib";
@@ -9,6 +20,8 @@ import { auditGithubPublication, shouldFailGithubAudit } from "./privacy-github-
 import {
   commitMessageFindings,
   formatPrivacyReport,
+  TRUSTED_TELEGRAM_VENDOR_EXEMPT_FINDING_CLASSES,
+  TRUSTED_TELEGRAM_VENDOR_ROOT_DIGEST,
   trustedVendorRootDigest,
   trustedVendorRootMatches,
 } from "./privacy-publication-gate";
@@ -268,6 +281,22 @@ function writeFingerprintCatalog(path: string, value: string): void {
       sha256: createHash("sha256").update(compact).digest("hex"),
     }],
   }));
+}
+
+const FIXED_VENDOR_FIXTURE_DIGEST = "11536785a413ef4b9e6a983edb3f56f956f0aa8b28358d98e2a7fc4fd9ea655b";
+
+function createVendorDigestFixture(): { manifest: string; readme: string; root: string; runtime: string } {
+  const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-vendor-root-"));
+  temporaryDirectories.push(directory);
+  const root = join(directory, "vendor", "fixture-connector");
+  const runtime = join(root, "nested", "runtime.py");
+  const readme = join(root, "README.md");
+  const manifest = join(root, "SHA256SUMS");
+  mkdirSync(join(root, "nested"), { recursive: true });
+  writeFileSync(readme, "alpha\n");
+  writeFileSync(manifest, "fixture manifest\n");
+  writeFileSync(runtime, "bravo\n");
+  return { manifest, readme, root, runtime };
 }
 
 describe("privacy publication gate", () => {
@@ -535,53 +564,101 @@ exec "$LLV_TEST_REAL_GIT" "$@"
     expect(result.stderr.toString()).toBe("");
   });
 
-  test("allows a JSX controlled password binding and flags a literal value", () => {
+  test("allows identifier and member JSX bindings while flagging credential literals", () => {
     const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
     temporaryDirectories.push(directory);
-    const controlled = join(directory, "panel.tsx");
-    writeFileSync(controlled, [
+    const fixtureValue = ["synthetic", "fixture", "123456"].join("-");
+    const passwordMarkup = (valueSource: string) => [
       ["<in", "put"].join(""),
-      ["  type=\"pass", "word\""].join(""),
-      ["  val", "ue={entered}"].join(""),
-      "  onChange={(event) => setEntered(event.target.value)}",
-      "/>",
-    ].join("\n"));
-    const baked = join(directory, "page.html");
-    const literal = ["synthetic", "fixture", "123456"].join("-");
-    writeFileSync(baked, ["<in", "put type=\"pass", "word\" value=\"", literal, "\">"].join(""));
+      [" type=\"pass", "word\""].join(""),
+      [" val", "ue="].join(""),
+      valueSource,
+      ">",
+    ].join("");
 
-    expect(runGate([controlled]).stdout.toString()).toBe("PRIVACY GATE: PASS\n");
-    const result = runGate([baked]);
-    expect(result.exitCode).toBe(1);
-    expect(result.stdout.toString()).toBe("PRIVACY GATE: FAIL\ncredential: 1\n");
+    for (const [index, valueSource] of ["{entered}", "{form.password}", "{store?.password}"].entries()) {
+      const controlled = join(directory, `controlled-${index}.tsx`);
+      writeFileSync(controlled, passwordMarkup(valueSource));
+      expect(runGate([controlled]).stdout.toString()).toBe("PRIVACY GATE: PASS\n");
+    }
+
+    const literals = [
+      `"${fixtureValue}"`,
+      fixtureValue,
+      `{\"${fixtureValue}\"}`,
+      `{'${fixtureValue}'}`,
+      "{`" + fixtureValue + "`}",
+    ];
+    for (const [index, valueSource] of literals.entries()) {
+      const baked = join(directory, `literal-${index}.tsx`);
+      writeFileSync(baked, passwordMarkup(valueSource));
+      const result = runGate([baked]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout.toString()).toBe("PRIVACY GATE: FAIL\ncredential: 1\n");
+    }
   });
 
-  test("a trusted vendor root rejects a simultaneous file and manifest update", () => {
-    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-vendor-root-"));
-    temporaryDirectories.push(directory);
-    const vendorDirectory = join(directory, "vendor", "fixture-connector");
-    mkdirSync(vendorDirectory, { recursive: true });
-    const runtime = join(vendorDirectory, "runtime.py");
-    const original = "proxy_value = read_proxy_environment(\"FIXTURE_VALUE\")\n";
-    writeFileSync(runtime, original);
-    writeFileSync(
-      join(vendorDirectory, "SHA256SUMS"),
-      `${createHash("sha256").update(original).digest("hex")}  runtime.py\n`,
-    );
+  test("matches a fixed independently derived vendor digest vector", () => {
+    const fixture = createVendorDigestFixture();
+    expect(trustedVendorRootDigest(fixture.root)).toBe(FIXED_VENDOR_FIXTURE_DIGEST);
+    expect(trustedVendorRootMatches(fixture.root, FIXED_VENDOR_FIXTURE_DIGEST)).toBe(true);
+    expect(TRUSTED_TELEGRAM_VENDOR_ROOT_DIGEST).toBe("07d80cafa0b508ec8a7e0c24e9df2a4ca74472edbd91d43924b44bdcb27d4728");
+    expect([...TRUSTED_TELEGRAM_VENDOR_EXEMPT_FINDING_CLASSES]).toEqual(["credential", "home_path"]);
+    expect(TRUSTED_TELEGRAM_VENDOR_EXEMPT_FINDING_CLASSES.has("known_value")).toBe(false);
+  });
 
-    const trustedDigest = trustedVendorRootDigest(vendorDirectory);
-    expect(trustedDigest).toMatch(/^[a-f0-9]{64}$/);
-    expect(trustedVendorRootMatches(vendorDirectory, trustedDigest!)).toBe(true);
+  test("rejects vendor content and length changes", () => {
+    const sameLength = createVendorDigestFixture();
+    writeFileSync(sameLength.runtime, "bravx\n");
+    expect(trustedVendorRootMatches(sameLength.root, FIXED_VENDOR_FIXTURE_DIGEST)).toBe(false);
 
-    const changed = `${original}# candidate update\n`;
-    writeFileSync(runtime, changed);
-    writeFileSync(
-      join(vendorDirectory, "SHA256SUMS"),
-      `${createHash("sha256").update(changed).digest("hex")}  runtime.py\n`,
-    );
+    const changedLength = createVendorDigestFixture();
+    writeFileSync(changedLength.runtime, "bravo extended\n");
+    expect(trustedVendorRootMatches(changedLength.root, FIXED_VENDOR_FIXTURE_DIGEST)).toBe(false);
+  });
 
-    expect(trustedVendorRootMatches(vendorDirectory, trustedDigest!)).toBe(false);
-    expect(trustedVendorRootDigest(vendorDirectory)).not.toBe(trustedDigest);
+  test("rejects vendor root path, addition, deletion, and rename changes", () => {
+    const changedPath = createVendorDigestFixture();
+    expect(trustedVendorRootMatches(join(changedPath.root, "nested"), FIXED_VENDOR_FIXTURE_DIGEST)).toBe(false);
+
+    const addition = createVendorDigestFixture();
+    writeFileSync(join(addition.root, "added.py"), "added\n");
+    expect(trustedVendorRootMatches(addition.root, FIXED_VENDOR_FIXTURE_DIGEST)).toBe(false);
+
+    const deletion = createVendorDigestFixture();
+    unlinkSync(deletion.runtime);
+    expect(trustedVendorRootMatches(deletion.root, FIXED_VENDOR_FIXTURE_DIGEST)).toBe(false);
+
+    const rename = createVendorDigestFixture();
+    renameSync(rename.runtime, join(rename.root, "nested", "renamed.py"));
+    expect(trustedVendorRootMatches(rename.root, FIXED_VENDOR_FIXTURE_DIGEST)).toBe(false);
+  });
+
+  test("rejects simultaneous vendor file and manifest updates", () => {
+    const fixture = createVendorDigestFixture();
+    writeFileSync(fixture.runtime, "changed runtime\n");
+    writeFileSync(fixture.manifest, "candidate-updated manifest\n");
+    expect(trustedVendorRootMatches(fixture.root, FIXED_VENDOR_FIXTURE_DIGEST)).toBe(false);
+  });
+
+  test("rejects symlink, special-node, and unreadable vendor trees", () => {
+    const symlink = createVendorDigestFixture();
+    symlinkSync(symlink.readme, join(symlink.root, "linked-readme"));
+    expect(trustedVendorRootDigest(symlink.root)).toBeNull();
+
+    const special = createVendorDigestFixture();
+    const fifo = join(special.root, "special-node");
+    const mkfifo = Bun.spawnSync({ cmd: ["mkfifo", fifo], stderr: "pipe", stdout: "pipe" });
+    expect(mkfifo.exitCode).toBe(0);
+    expect(trustedVendorRootDigest(special.root)).toBeNull();
+
+    const unreadable = createVendorDigestFixture();
+    chmodSync(unreadable.runtime, 0o000);
+    try {
+      expect(trustedVendorRootDigest(unreadable.root)).toBeNull();
+    } finally {
+      chmodSync(unreadable.runtime, 0o600);
+    }
   });
 
   test("detects UUIDv7 session identifiers with class-only diagnostics", () => {
