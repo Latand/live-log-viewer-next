@@ -40,13 +40,14 @@ token refreshes automatically within the same operation. The 2FA password is
 requested only when Telegram asks; an invalid password is an explicit state
 that allows retry. Cancellation terminates the enrollment process and clears
 temporary state, including a credential written before connector verification.
-Lifecycle generations prevent stale enrollment/health results from restoring
-state or processes after cancel, logout, or local deletion. Enrollment,
-health, and logout share the vendored per-session process lock; health/logout
-release the shared connector before their short-lived bridge connects. Logout
-advances the generation again when remote revocation settles, invalidating
-health checks that began during the revocation wait, and always performs a
-terminal connector stop in case one of those checks restarted it.
+One service-owned single-flight queue serializes login events, cancel, health,
+logout, local deletion, connector lifecycle, host registration, credential
+changes, and durable status writes. Destructive requests advance the lifecycle
+generation when enqueued; the queue's one admission check discards stale jobs,
+and long-running work checks that same generation helper before committing its
+result. Enrollment, health, and logout also share the vendored per-session
+process lock; health/logout release the shared connector before their
+short-lived bridge connects.
 
 AC4: The session persists server-side only: an owner-only (0600, dir 0700)
 regular non-symlinked file written atomically under Viewer state. Reads,
@@ -67,7 +68,9 @@ stops the connector, and unregisters the host definition. A failed remote
 logout preserves the local session and reports a sanitized code. `Delete local
 session` removes local credentials and stops the connector without the remote
 side, and its inline confirmation states that the remote authorization may
-remain. Both actions require inline confirmation.
+remain. Both actions require inline confirmation. Teardown attempts connector
+stop, host unregistration, credential deletion, and durable status publication
+independently, so a host-config failure cannot retain local credentials.
 
 AC6: On connect, the shared URL is registered idempotently as `telegram` for
 Claude (legacy and managed `.claude.json` state files) and Codex (a
@@ -93,6 +96,8 @@ only for a proven `telegram` grant; delegated hosts scrub it. Missing local
 enrollment state leaves operator-root launches usable with Telegram unavailable.
 The packaged tmux reader and server-side session store share the complete
 directory/file ownership, mode, symlink, schema, and token-digest validator.
+Spawn-capability export and Telegram token validation execute in one shell
+scope, preserving both capabilities for a granted root launch.
 
 AC8: The UI is a Telegram row in the left-rail footer beside the account
 controls, opening the accounts-style flyout (desktop) / bottom sheet (mobile):
@@ -113,6 +118,8 @@ failures are visible, and request sequencing prevents slow responses from
 overwriting newer status. Entering a live login phase immediately switches to
 the 1.5-second cadence; connected and credential-backed error polling performs
 fresh health and connector recovery on the idle cadence and at client startup.
+Missing session state revokes any adopted connector and managed host
+registrations before the queue publishes `disconnected`.
 Stateful `fresh=1` health requests enforce the same-origin gate before service
 access; the observational status GET remains read-only.
 

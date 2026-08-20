@@ -42,21 +42,21 @@ export async function POST(req: NextRequest) {
   try {
     switch (body.action) {
       case "start":
-        return NextResponse.json({ telegram: service.startLogin() }, { status: 202 });
+        return NextResponse.json({ telegram: await service.startLogin() }, { status: 202 });
       case "password": {
         if (typeof body.operationId !== "string" || typeof body.password !== "string") {
           return failure(400, "invalid_request", "Operation id and password are required");
         }
-        return NextResponse.json({ telegram: service.submitPassword(body.operationId, body.password) });
+        return NextResponse.json({ telegram: await service.submitPassword(body.operationId, body.password) });
       }
       case "cancel": {
         if (typeof body.operationId !== "string") return failure(400, "invalid_request", "Operation id is required");
-        return NextResponse.json({ telegram: service.cancelLogin(body.operationId) });
+        return NextResponse.json({ telegram: await service.cancelLogin(body.operationId) });
       }
       case "logout":
         return NextResponse.json({ telegram: await service.logout() });
       case "delete":
-        return NextResponse.json({ telegram: service.deleteLocalSession() });
+        return NextResponse.json({ telegram: await service.deleteLocalSession() });
       default:
         return failure(400, "invalid_action", "Unknown Telegram action");
     }

@@ -102,8 +102,19 @@ test("Telegram grants load the connector token only into granted CLI processes",
     };
 
     fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
+    const capability = "D".repeat(43);
+    const wrapped = withSpawnCapability(codexGranted, capability);
+    const capabilityOnlyProbe = `${JSON.stringify(process.execPath)} -e 'process.exit(!process.env.LLV_TELEGRAM_MCP_TOKEN && process.env.LLV_SPAWN_CAPABILITY === ${JSON.stringify(capability)} ? 0 : 1)'`;
+    const capabilityOnlyCommand = wrapped.command.replace(/env -u LLV_TOKEN[\s\S]*$/, capabilityOnlyProbe);
+    expect(Bun.spawnSync(["sh", "-c", capabilityOnlyCommand], { cwd: SANDBOX, env: {}, stdout: "pipe", stderr: "pipe" }).exitCode).toBe(0);
+
     saveTelegramSession("1ApWapzMBu4placeholder-not-a-real-session");
     expect(tokenIsExported()).toBe(true);
+
+    const environmentProbe = `${JSON.stringify(process.execPath)} -e 'process.exit(process.env.LLV_TELEGRAM_MCP_TOKEN && process.env.LLV_SPAWN_CAPABILITY === ${JSON.stringify(capability)} ? 0 : 1)'`;
+    const wrappedCommand = wrapped.command.replace(/env -u LLV_TOKEN[\s\S]*$/, environmentProbe);
+    const wrappedResult = Bun.spawnSync(["sh", "-c", wrappedCommand], { cwd: SANDBOX, env: {}, stdout: "pipe", stderr: "pipe" });
+    expect(wrappedResult.exitCode).toBe(0);
 
     const validSession = fs.readFileSync(telegramSessionPath());
     fs.rmSync(telegramSessionPath());
@@ -397,9 +408,9 @@ test("allowSubagents enables Codex multi-agent for fresh and resumed launches", 
 
 test("Viewer spawn capability is scoped into the launched agent command", () => {
   const capability = "A".repeat(43);
-  const spec = withSpawnCapability(freshSpecFor("codex", SANDBOX), capability);
+  const spec = withSpawnCapability(freshSpecFor("claude", SANDBOX), capability);
 
-  expect(spec.command).toStartWith(`env LLV_SPAWN_CAPABILITY='${capability}' `);
+  expect(spec.command).toStartWith(`LLV_SPAWN_CAPABILITY='${capability}'; export LLV_SPAWN_CAPABILITY; `);
   expect(spec.launchProfile?.cwd).toBe(SANDBOX);
 });
 

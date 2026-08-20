@@ -113,7 +113,7 @@ export function withSpawnCapability(spec: ResumeSpec, capability: string): Resum
   if (!/^[A-Za-z0-9_-]{43}$/.test(capability)) throw new Error("Viewer spawn capability is invalid");
   return {
     ...spec,
-    command: `env ${VIEWER_SPAWN_CAPABILITY_ENV}=${shellQuote(capability)} ${spec.command}`,
+    command: `${VIEWER_SPAWN_CAPABILITY_ENV}=${shellQuote(capability)}; export ${VIEWER_SPAWN_CAPABILITY_ENV}; ${spec.command}`,
   };
 }
 

@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-import { processTelegramAdapter, type TelegramAdapter, type TelegramEnrollmentHandle } from "./adapter";
+import { processTelegramAdapter, type TelegramAdapter, type TelegramEnrollmentEvent, type TelegramEnrollmentHandle } from "./adapter";
 import { ensureTelegramConnector, stopTelegramConnector, type ConnectorEnsureResult } from "./connector";
 import type { TelegramErrorCode, TelegramIdentity, TelegramStatusPayload } from "./contracts";
 import { registerTelegramHosts, unregisterTelegramHosts, type TelegramHostRegistrationResult } from "./hostRegistration";
@@ -55,12 +55,69 @@ type LiveLogin = {
   stored: StoredTelegramSession | null;
 };
 
+type LifecycleJob = {
+  generation: number;
+  skip(): void;
+  run(generation: number): Promise<void>;
+};
+
 export class TelegramConnectionService {
   private login: LiveLogin | null = null;
-  private healthInFlight: Promise<void> | null = null;
   private lifecycleGeneration = 0;
+  private lifecycleActive = false;
+  private readonly lifecycleQueue: LifecycleJob[] = [];
 
   constructor(private readonly ports: TelegramServicePorts = productionPorts) {}
+
+  /** The single mutation chokepoint. Destructive jobs advance the generation
+      when enqueued; queued events carrying an older generation are
+      discarded before they can touch connector, host, credential, or status
+      state. The queue holds across awaits, so lifecycle side effects never
+      interleave. */
+  private enqueueLifecycle<T>(
+    operation: (generation: number) => Promise<T> | T,
+    options: { supersede?: boolean; expectedGeneration?: number; stale?: () => T } = {},
+  ): Promise<T> {
+    const generation = options.supersede
+      ? ++this.lifecycleGeneration
+      : options.expectedGeneration ?? this.lifecycleGeneration;
+    return new Promise<T>((resolve, reject) => {
+      this.lifecycleQueue.push({
+        generation,
+        skip: () => {
+          try { resolve((options.stale ?? (() => this.status() as T))()); }
+          catch (error) { reject(error); }
+        },
+        run: async (generation) => {
+          try { resolve(await operation(generation)); }
+          catch (error) { reject(error); }
+        },
+      });
+      void this.drainLifecycleQueue();
+    });
+  }
+
+  private async drainLifecycleQueue(): Promise<void> {
+    if (this.lifecycleActive) return;
+    this.lifecycleActive = true;
+    try {
+      while (this.lifecycleQueue.length > 0) {
+        const job = this.lifecycleQueue.shift()!;
+        if (job.generation !== this.lifecycleGeneration) {
+          job.skip();
+          continue;
+        }
+        await job.run(job.generation);
+      }
+    } finally {
+      this.lifecycleActive = false;
+      if (this.lifecycleQueue.length > 0) void this.drainLifecycleQueue();
+    }
+  }
+
+  private lifecycleIsCurrent(generation: number): boolean {
+    return generation === this.lifecycleGeneration;
+  }
 
   status(): TelegramStatusPayload {
     if (this.login) {
@@ -100,9 +157,12 @@ export class TelegramConnectionService {
 
   /** Starts the QR login. One operation at a time — a second start while one
       is live is refused, exactly like the account-login supervisor. */
-  startLogin(): TelegramStatusPayload {
+  startLogin(): Promise<TelegramStatusPayload> {
+    return this.enqueueLifecycle((generation) => this.startLoginLocked(generation));
+  }
+
+  private startLoginLocked(generation: number): TelegramStatusPayload {
     if (this.login) throw new Error("a Telegram login operation is already running");
-    const generation = ++this.lifecycleGeneration;
     const unavailable = this.ports.adapter.unavailableReason();
     if (unavailable) {
       this.recordError(unavailable);
@@ -110,43 +170,46 @@ export class TelegramConnectionService {
     }
     const operationId = crypto.randomUUID();
     const handle = this.ports.adapter.startEnrollment((event) => {
-      const current = this.login;
-      if (!current || current.operationId !== operationId) return;
-      switch (event.type) {
-        case "qr":
-          current.phase = "awaiting_scan";
-          current.qr = { url: event.url, expiresAt: event.expiresAt };
-          return;
-        case "password_required":
-          current.phase = "awaiting_password";
-          current.qr = null;
-          return;
-        case "password_invalid":
-          current.phase = "awaiting_password";
-          current.passwordError = true;
-          return;
-        case "verifying":
-          current.phase = "verifying";
-          current.qr = null;
-          return;
-        case "authorized":
-          /* The operation stays live (as "verifying") until the connector's
-             read-only surface is verified — connected is never published on
-             the authorization alone. */
-          current.phase = "verifying";
-          current.qr = null;
-          void this.completeEnrollment(current, event.sessionString, event.identity);
-          return;
-        case "failed":
-          this.lifecycleGeneration += 1;
-          this.login = null;
-          this.cleanupCanceledLogin(current);
-          if (event.code !== "canceled") this.recordError(event.code);
-          return;
-      }
+      void this.enqueueLifecycle(
+        (eventGeneration) => this.applyEnrollmentEvent(operationId, event, eventGeneration),
+        { expectedGeneration: generation, stale: () => undefined },
+      );
     });
     this.login = { operationId, generation, phase: "starting", qr: null, passwordError: false, handle, stored: null };
     return this.status();
+  }
+
+  private async applyEnrollmentEvent(operationId: string, event: TelegramEnrollmentEvent, generation: number): Promise<void> {
+    const current = this.login;
+    if (!current || current.operationId !== operationId) return;
+    switch (event.type) {
+      case "qr":
+        current.phase = "awaiting_scan";
+        current.qr = { url: event.url, expiresAt: event.expiresAt };
+        return;
+      case "password_required":
+        current.phase = "awaiting_password";
+        current.qr = null;
+        return;
+      case "password_invalid":
+        current.phase = "awaiting_password";
+        current.passwordError = true;
+        return;
+      case "verifying":
+        current.phase = "verifying";
+        current.qr = null;
+        return;
+      case "authorized":
+        current.phase = "verifying";
+        current.qr = null;
+        await this.completeEnrollment(current, event.sessionString, event.identity, generation);
+        return;
+      case "failed":
+        this.login = null;
+        this.cleanupCanceledLogin(current);
+        if (event.code !== "canceled") this.recordError(event.code);
+        return;
+    }
   }
 
   /** Persist → verify → publish, in that order: the credential is saved first
@@ -156,7 +219,7 @@ export class TelegramConnectionService {
       EVERY failure — refusal, timeout, thrown error — lands in an explicit
       error state over the preserved session. Cancellation invalidates the
       generation and removes a credential that authorization already wrote. */
-  private async completeEnrollment(operation: LiveLogin, sessionString: string, identity: TelegramIdentity): Promise<void> {
+  private async completeEnrollment(operation: LiveLogin, sessionString: string, identity: TelegramIdentity, generation: number): Promise<void> {
     let stored: StoredTelegramSession;
     try {
       stored = saveTelegramSession(sessionString);
@@ -172,9 +235,7 @@ export class TelegramConnectionService {
     } catch {
       connector = { ok: false, code: "connector_failed" };
     }
-    if (this.lifecycleGeneration !== operation.generation || this.login !== operation) {
-      return;
-    }
+    if (!this.lifecycleIsCurrent(generation) || this.login !== operation) return;
     this.login = null;
     if (!connector.ok) {
       writeTelegramConnection({ version: 1, status: "error", credentialRef: stored.credentialRef, identity, lastHealthCheckAt: null, errorCode: connector.code });
@@ -201,8 +262,27 @@ export class TelegramConnectionService {
   }
 
   private cleanupFailedRegistration(): void {
-    this.ports.stopConnector();
-    try { this.ports.unregisterHosts(); } catch { /* inaccessible host state stays fail-closed */ }
+    this.teardownConnectorAndHosts();
+  }
+
+  private teardownConnectorAndHosts(): void {
+    try { this.ports.stopConnector(); } catch { /* continue revocation */ }
+    try { this.ports.unregisterHosts(); } catch { /* continue credential cleanup */ }
+  }
+
+  private deleteCredentialsAndPublishDisconnected(): void {
+    let deleted = false;
+    try {
+      deleteTelegramSession();
+      deleted = true;
+    } catch { /* unsafe credential remains explicit below */ }
+    try {
+      if (deleted) {
+        writeTelegramConnection({ version: 1, status: "disconnected", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: null });
+      } else {
+        this.recordError("session_unsafe");
+      }
+    } catch { /* durable status cleanup was still attempted independently */ }
   }
 
   private recordError(code: TelegramErrorCode): void {
@@ -220,7 +300,15 @@ export class TelegramConnectionService {
     }
   }
 
-  submitPassword(operationId: string, password: string): TelegramStatusPayload {
+  submitPassword(operationId: string, password: string): Promise<TelegramStatusPayload> {
+    const expectedGeneration = this.login?.generation;
+    return this.enqueueLifecycle(
+      () => this.submitPasswordLocked(operationId, password),
+      { expectedGeneration, stale: () => this.status() },
+    );
+  }
+
+  private submitPasswordLocked(operationId: string, password: string): TelegramStatusPayload {
     const current = this.login;
     if (!current || current.operationId !== operationId) throw new Error("Telegram login operation is unavailable");
     if (current.phase !== "awaiting_password") throw new Error("Telegram login is not awaiting a password");
@@ -233,10 +321,14 @@ export class TelegramConnectionService {
 
   /** Terminates the enrollment process and clears temporary login state. The
       stored connection (a previous session, if any) is untouched. */
-  cancelLogin(operationId: string): TelegramStatusPayload {
+  cancelLogin(operationId: string): Promise<TelegramStatusPayload> {
+    const supersede = this.login?.operationId === operationId;
+    return this.enqueueLifecycle(() => this.cancelLoginLocked(operationId), { supersede });
+  }
+
+  private cancelLoginLocked(operationId: string): TelegramStatusPayload {
     const current = this.login;
     if (current && current.operationId === operationId) {
-      this.lifecycleGeneration += 1;
       this.login = null;
       current.handle.cancel();
       this.cleanupCanceledLogin(current);
@@ -246,24 +338,22 @@ export class TelegramConnectionService {
 
   private cleanupCanceledLogin(operation: LiveLogin): void {
     if (!operation.stored) return;
-    this.ports.stopConnector();
-    this.ports.unregisterHosts();
+    this.teardownConnectorAndHosts();
     try {
-      if (readTelegramSession()?.credentialRef !== operation.stored.credentialRef) return;
-      deleteTelegramSession();
-      writeTelegramConnection({ version: 1, status: "disconnected", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: null });
-    } catch { /* unsafe replacement remains for the explicit local-delete path */ }
+      const current = readTelegramSession();
+      if (current && current.credentialRef !== operation.stored.credentialRef) return;
+    } catch { /* still attempt the safe deletion boundary */ }
+    this.deleteCredentialsAndPublishDisconnected();
   }
 
   /** Health check against the stored session; updates the durable status. */
-  async checkHealth(): Promise<TelegramStatusPayload> {
-    if (this.login) return this.status();
-    if (!this.healthInFlight) {
-      const generation = this.lifecycleGeneration;
-      this.healthInFlight = this.runHealthCheck(generation).finally(() => { this.healthInFlight = null; });
-    }
-    await this.healthInFlight;
-    return this.status();
+  checkHealth(): Promise<TelegramStatusPayload> {
+    const expectedGeneration = this.lifecycleGeneration;
+    return this.enqueueLifecycle(async (generation) => {
+      if (this.login) return this.status();
+      await this.runHealthCheck(generation);
+      return this.status();
+    }, { expectedGeneration, stale: () => this.status() });
   }
 
   private async runHealthCheck(generation: number): Promise<void> {
@@ -272,14 +362,13 @@ export class TelegramConnectionService {
       session = readTelegramSession();
     } catch (error) {
       if (!(error instanceof UnsafeTelegramSessionError)) throw error;
-      if (generation !== this.lifecycleGeneration) return;
-      this.ports.stopConnector();
-      this.ports.unregisterHosts();
+      this.teardownConnectorAndHosts();
       this.recordError("session_unsafe");
       return;
     }
     const connection = this.safeConnection();
     if (!session) {
+      this.teardownConnectorAndHosts();
       if (connection.status !== "disconnected") {
         writeTelegramConnection({ version: 1, status: "disconnected", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: null });
       }
@@ -290,7 +379,7 @@ export class TelegramConnectionService {
        vendored per-session lock and connects. */
     this.ports.stopConnector();
     const result = await this.ports.adapter.checkSession(session.sessionString);
-    if (generation !== this.lifecycleGeneration) return;
+    if (!this.lifecycleIsCurrent(generation)) return;
     const checkedAt = new Date(this.ports.now()).toISOString();
     if (result.status === "connected") {
       /* A healthy account only reads as connected once the shared connector
@@ -303,9 +392,7 @@ export class TelegramConnectionService {
       } catch {
         connector = { ok: false, code: "connector_failed" };
       }
-      if (generation !== this.lifecycleGeneration) {
-        return;
-      }
+      if (!this.lifecycleIsCurrent(generation)) return;
       if (!connector.ok) {
         writeTelegramConnection({ version: 1, status: "error", credentialRef: session.credentialRef, identity: result.identity, lastHealthCheckAt: checkedAt, errorCode: connector.code });
         return;
@@ -328,16 +415,18 @@ export class TelegramConnectionService {
   /** Remote logout. Success removes the local session too; failure PRESERVES
       the local session (the operator can retry or fall back to local-only
       deletion) and reports why. */
-  async logout(): Promise<TelegramStatusPayload> {
+  logout(): Promise<TelegramStatusPayload> {
+    return this.enqueueLifecycle((generation) => this.logoutLocked(generation), { supersede: this.login === null });
+  }
+
+  private async logoutLocked(generation: number): Promise<TelegramStatusPayload> {
     if (this.login) throw new Error("a Telegram login operation is running");
-    const generation = ++this.lifecycleGeneration;
     let session: ReturnType<typeof readTelegramSession>;
     try {
       session = readTelegramSession();
     } catch (error) {
       if (!(error instanceof UnsafeTelegramSessionError)) throw error;
-      this.ports.stopConnector();
-      this.ports.unregisterHosts();
+      this.teardownConnectorAndHosts();
       this.recordError("session_unsafe");
       return this.status();
     }
@@ -350,37 +439,32 @@ export class TelegramConnectionService {
        waits for process exit before it contacts Telegram. */
     this.ports.stopConnector();
     const result = await this.ports.adapter.logout(session.sessionString);
-    if (generation !== this.lifecycleGeneration) return this.status();
-    /* Health may start while remote revocation is in flight and capture the
-       logout's generation. Advance again before publishing either terminal
-       outcome so that late health result cannot overwrite it. */
-    this.lifecycleGeneration += 1;
+    if (!this.lifecycleIsCurrent(generation)) return this.status();
     if (!result.ok) {
       this.recordError(result.code ?? "logout_failed");
       return this.status();
     }
-    /* Health may have restarted the shared connector while revocation was in
-       flight. The terminal transition always stops it again. */
+    /* The terminal transition runs the complete teardown even though logout
+       already stopped the connector before the bridge call. */
     this.disconnectLocally();
     return this.status();
   }
 
   /** Local-only deletion: removes the credential and stops the connector. The
       remote Telegram authorization may remain — the UI says so. */
-  deleteLocalSession(): TelegramStatusPayload {
+  deleteLocalSession(): Promise<TelegramStatusPayload> {
+    return this.enqueueLifecycle(() => this.deleteLocalSessionLocked(), { supersede: this.login === null });
+  }
+
+  private deleteLocalSessionLocked(): TelegramStatusPayload {
     if (this.login) throw new Error("a Telegram login operation is running");
-    this.lifecycleGeneration += 1;
     this.disconnectLocally();
     return this.status();
   }
 
   private disconnectLocally(): void {
-    /* Revoke runtime access first. Even an unsafe status/credential path must
-       never leave the credential-bearing connector alive after this action. */
-    this.ports.stopConnector();
-    this.ports.unregisterHosts();
-    deleteTelegramSession();
-    writeTelegramConnection({ version: 1, status: "disconnected", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: null });
+    this.teardownConnectorAndHosts();
+    this.deleteCredentialsAndPublishDisconnected();
   }
 }
 
