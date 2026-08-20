@@ -37,10 +37,25 @@ export function telegramMcpUrl(): string {
   return `http://${TELEGRAM_MCP_HOST}:${telegramMcpPort()}/mcp`;
 }
 
-/** The vendored upstream tree. The env override exists for packaged installs
-    whose working directory is not the package root. */
+/** Resolves a package asset (the vendored tree, the login bridge) from where
+    the server actually runs. A repo checkout serves with cwd at the repo
+    root; a PUBLISHED install serves `dist/standalone/server.js` (and a repo
+    production run `.next/standalone/server.js`) with cwd inside that
+    standalone directory — two levels below the package root, where the asset
+    really lives. The CLI launcher also pins the explicit env override, which
+    always wins. */
+function packageAssetPath(envOverride: string | undefined, ...segments: string[]): string {
+  if (envOverride) return envOverride;
+  const direct = path.join(process.cwd(), ...segments);
+  if (fs.existsSync(direct)) return direct;
+  const fromStandalone = path.join(process.cwd(), "..", "..", ...segments);
+  if (fs.existsSync(fromStandalone)) return fromStandalone;
+  return direct;
+}
+
+/** The vendored upstream tree. */
 export function vendoredConnectorDir(): string {
-  return process.env.LLV_TELEGRAM_VENDOR_DIR || path.join(process.cwd(), "vendor", "telegram-mcp");
+  return packageAssetPath(process.env.LLV_TELEGRAM_VENDOR_DIR, "vendor", "telegram-mcp");
 }
 
 export function telegramVenvDir(): string {
@@ -52,7 +67,7 @@ export function telegramVenvPython(): string {
 }
 
 export function loginBridgePath(): string {
-  return process.env.LLV_TELEGRAM_BRIDGE || path.join(process.cwd(), "bin", "telegram-login-bridge.py");
+  return packageAssetPath(process.env.LLV_TELEGRAM_BRIDGE, "bin", "telegram-login-bridge.py");
 }
 
 export type TelegramApiCredentials = { apiId: string; apiHash: string };
