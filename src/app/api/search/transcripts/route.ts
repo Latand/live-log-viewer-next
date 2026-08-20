@@ -13,7 +13,9 @@ export const dynamic = "force-dynamic";
 /** A search result carries the conversation's own title so a row can name the
     conversation it will open, not just the file it was cut from. Null when the
     catalog knows no title for that transcript. */
-export interface TranscriptSearchRow extends TranscriptSearchItem {
+export interface TranscriptSearchRow extends Omit<TranscriptSearchItem, "duplicateCount"> {
+  /** Added in schema v2; current responses always include it. */
+  duplicateCount?: number;
   title: string | null;
 }
 

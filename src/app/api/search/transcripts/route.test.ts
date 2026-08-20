@@ -72,6 +72,32 @@ test("returns indexed snippets without reopening the transcript", async () => {
   })]);
 });
 
+test("returns one newest row with duplicateCount for replayed messages", async () => {
+  const older = path.join(sandbox, "route-replay-older.jsonl");
+  const newer = path.join(sandbox, "route-replay-newer.jsonl");
+  const body = (message: string) => JSON.stringify({
+    type: "event_msg",
+    timestamp: "2026-08-20T14:05:00.000Z",
+    payload: { type: "user_message", message },
+  }) + "\n";
+  fs.writeFileSync(older, body("replayed   saffron message"));
+  fs.writeFileSync(newer, body(" replayed saffron\nmessage "));
+  await indexTranscriptSources([
+    { path: older, project: "reports", engine: "codex", size: fs.statSync(older).size, mtimeMs: 1_000 },
+    { path: newer, project: "reports", engine: "codex", size: fs.statSync(newer).size, mtimeMs: 2_000 },
+  ], { complete: true });
+
+  const response = await GET(new Request("http://127.0.0.1/api/search/transcripts?q=saffron"));
+  const page = await response.json() as Page;
+
+  expect(response.status).toBe(200);
+  expect(page.total).toBe(1);
+  expect(page.items).toEqual([
+    expect.objectContaining({ transcriptPath: newer, speaker: "user", duplicateCount: 2 }),
+  ]);
+  expect(page.stats).toMatchObject({ conversationsIndexed: 2, messagesIndexed: 2 });
+});
+
 test("rejects a missing query instead of returning an ambiguous empty page", async () => {
   const response = await GET(new Request("http://127.0.0.1/api/search/transcripts"));
   expect(response.status).toBe(400);

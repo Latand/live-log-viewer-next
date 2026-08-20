@@ -1,8 +1,10 @@
 import { afterAll, beforeEach, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { statePath } from "@/lib/configDir";
 import { snippetSegments } from "./snippet";
 import {
   indexTranscriptSources,
@@ -146,6 +148,119 @@ test("returns bounded non-overlapping result pages", async () => {
   expect(second.items).toHaveLength(1);
   expect(second.nextCursor).toBeNull();
   expect(new Set([...first.items, ...second.items].map((item) => item.byteOffset)).size).toBe(3);
+});
+
+test("collapses resume-replayed bodies after whitespace normalization and keeps the newest rollout", async () => {
+  const oldest = path.join(sandbox, "rollout-oldest.jsonl");
+  const middle = path.join(sandbox, "rollout-middle.jsonl");
+  const newest = path.join(sandbox, "rollout-newest.jsonl");
+  fs.writeFileSync(oldest, JSON.stringify({
+    type: "event_msg",
+    timestamp: "2026-08-20T08:00:00.000Z",
+    payload: { type: "user_message", message: "  resume   cobalt\nrequest  " },
+  }) + "\n");
+  fs.writeFileSync(middle, [
+    JSON.stringify({
+      type: "event_msg",
+      timestamp: "2026-08-20T08:00:00.000Z",
+      payload: { type: "user_message", message: "resume cobalt\trequest" },
+    }),
+    JSON.stringify({
+      type: "event_msg",
+      timestamp: "2026-08-20T08:01:00.000Z",
+      payload: { type: "agent_message", message: "resume cobalt request" },
+    }),
+  ].join("\n") + "\n");
+  fs.writeFileSync(newest, [
+    JSON.stringify({
+      type: "event_msg",
+      timestamp: "2026-08-20T08:00:00.000Z",
+      payload: { type: "user_message", message: "resume cobalt request" },
+    }),
+    JSON.stringify({
+      type: "event_msg",
+      timestamp: "2026-08-20T08:02:00.000Z",
+      payload: { type: "user_message", message: "Resume cobalt request" },
+    }),
+    JSON.stringify({
+      type: "event_msg",
+      timestamp: "2026-08-20T08:03:00.000Z",
+      payload: { type: "user_message", message: "cobalt follow-up" },
+    }),
+  ].join("\n") + "\n");
+  const sources = [
+    { ...source(oldest, "codex", "resume"), mtimeMs: 1_000 },
+    { ...source(middle, "codex", "resume"), mtimeMs: 2_000 },
+    { ...source(newest, "codex", "resume"), mtimeMs: 3_000 },
+  ];
+  await indexTranscriptSources(sources, { complete: true });
+
+  const first = searchTranscripts({ query: "cobalt", limit: 2 });
+  const second = searchTranscripts({ query: "cobalt", limit: 2, cursor: first.nextCursor });
+  const items = [...first.items, ...second.items];
+  const replay = items.find((item) => item.duplicateCount === 3);
+
+  expect(first.total).toBe(4);
+  expect(second.total).toBe(4);
+  expect(first.items).toHaveLength(2);
+  expect(second.items).toHaveLength(2);
+  expect(second.nextCursor).toBeNull();
+  expect(replay).toMatchObject({
+    speaker: "user",
+    transcriptPath: newest,
+    duplicateCount: 3,
+  });
+  expect(items.filter((item) => item.duplicateCount === 1)).toHaveLength(3);
+  expect(new Set(items.map((item) => `${item.speaker}:${item.transcriptPath}:${item.lineNumber}`)).size).toBe(4);
+  expect(first.stats).toMatchObject({ conversationsIndexed: 3, messagesIndexed: 6 });
+});
+
+test("migrates a version-one on-disk index before serving collapsed rows", () => {
+  const filename = statePath("transcript-search.sqlite");
+  fs.mkdirSync(path.dirname(filename), { recursive: true });
+  const db = new Database(filename, { create: true, strict: true });
+  db.exec(`
+    CREATE TABLE transcript_files (
+      path TEXT PRIMARY KEY,
+      size INTEGER NOT NULL,
+      mtime_ms REAL NOT NULL,
+      project TEXT NOT NULL,
+      engine TEXT NOT NULL CHECK(engine IN ('claude', 'codex')),
+      messages_count INTEGER NOT NULL,
+      indexed_at INTEGER NOT NULL
+    );
+    CREATE TABLE transcript_messages (
+      id INTEGER PRIMARY KEY,
+      transcript_path TEXT NOT NULL,
+      message_index INTEGER NOT NULL,
+      speaker TEXT NOT NULL CHECK(speaker IN ('user', 'assistant')),
+      timestamp INTEGER,
+      byte_offset INTEGER NOT NULL,
+      line_number INTEGER NOT NULL,
+      body TEXT NOT NULL,
+      UNIQUE(transcript_path, message_index),
+      FOREIGN KEY(transcript_path) REFERENCES transcript_files(path) ON DELETE CASCADE
+    );
+    CREATE VIRTUAL TABLE transcript_messages_fts USING fts5(
+      body,
+      tokenize = "unicode61 remove_diacritics 0 tokenchars '#_'"
+    );
+    INSERT INTO transcript_files VALUES ('/fixtures/legacy.jsonl', 10, 1000, 'legacy', 'codex', 1, 1);
+    INSERT INTO transcript_messages VALUES (1, '/fixtures/legacy.jsonl', 0, 'user', 1, 0, 1, 'legacy cobalt body');
+    INSERT INTO transcript_messages_fts(rowid, body) VALUES (1, 'legacy cobalt body');
+    PRAGMA user_version = 1;
+  `);
+  db.close();
+
+  expect(searchTranscripts({ query: "cobalt" }).items).toEqual([
+    expect.objectContaining({ transcriptPath: "/fixtures/legacy.jsonl", duplicateCount: 1 }),
+  ]);
+
+  const migrated = new Database(filename, { readonly: true, strict: true });
+  expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(2);
+  expect(migrated.query<{ body_hash: string }, []>("SELECT body_hash FROM transcript_messages").get()?.body_hash)
+    .toMatch(/^[0-9a-f]{64}$/);
+  migrated.close();
 });
 
 test("searches all projects by default and explains a scoped empty result", async () => {

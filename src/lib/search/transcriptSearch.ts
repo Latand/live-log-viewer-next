@@ -24,6 +24,8 @@ export type TranscriptSpeaker = "user" | "assistant";
 export interface TranscriptSearchItem {
   snippet: string;
   speaker: TranscriptSpeaker;
+  /** Number of indexed occurrences collapsed into this result. */
+  duplicateCount: number;
   /** Unix seconds, or null when the transcript record carried no valid timestamp. */
   timestamp: number | null;
   transcriptPath: string;
@@ -90,6 +92,7 @@ type FileIdentityRow = {
 type SearchRow = {
   snippet: string;
   speaker: TranscriptSpeaker;
+  duplicate_count: number;
   timestamp: number | null;
   transcript_path: string;
   byte_offset: number;
@@ -102,6 +105,45 @@ function sqliteDatabase(): typeof import("bun:sqlite").Database {
   const sqlite = process.getBuiltinModule?.("bun:sqlite") as typeof import("bun:sqlite") | undefined;
   if (!sqlite) throw new Error("Transcript search requires the Bun runtime");
   return sqlite.Database;
+}
+
+const TRANSCRIPT_SEARCH_SCHEMA_VERSION = 2;
+
+function normalizedBodyHash(body: string): string {
+  const normalized = body.trim().replace(/\s+/gu, " ");
+  return crypto.createHash("sha256").update(normalized).digest("hex");
+}
+
+function schemaVersion(db: Database): number {
+  return db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0;
+}
+
+function hasBodyHashColumn(db: Database): boolean {
+  return db.query<{ name: string }, []>("PRAGMA table_info(transcript_messages)").all()
+    .some((column) => column.name === "body_hash");
+}
+
+function migrateSearchSchema(db: Database): void {
+  const currentVersion = schemaVersion(db);
+  if (currentVersion >= TRANSCRIPT_SEARCH_SCHEMA_VERSION && hasBodyHashColumn(db)) return;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    if (!hasBodyHashColumn(db)) db.exec("ALTER TABLE transcript_messages ADD COLUMN body_hash TEXT");
+    const messages = db.query<{ id: number; body: string }, []>(
+      "SELECT id, body FROM transcript_messages WHERE body_hash IS NULL",
+    ).all();
+    const update = db.query("UPDATE transcript_messages SET body_hash = ? WHERE id = ?");
+    for (const message of messages) update.run(normalizedBodyHash(message.body), message.id);
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS transcript_messages_body_hash
+        ON transcript_messages(speaker, body_hash);
+      PRAGMA user_version = ${Math.max(currentVersion, TRANSCRIPT_SEARCH_SCHEMA_VERSION)};
+      COMMIT;
+    `);
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch { /* transaction did not open */ }
+    throw error;
+  }
 }
 
 function openWriterDatabase(): Database {
@@ -130,6 +172,7 @@ function openWriterDatabase(): Database {
         byte_offset INTEGER NOT NULL,
         line_number INTEGER NOT NULL,
         body TEXT NOT NULL,
+        body_hash TEXT NOT NULL,
         UNIQUE(transcript_path, message_index),
         FOREIGN KEY(transcript_path) REFERENCES transcript_files(path) ON DELETE CASCADE
       );
@@ -139,8 +182,8 @@ function openWriterDatabase(): Database {
         body,
         tokenize = "unicode61 remove_diacritics 0 tokenchars '#_'"
       );
-      PRAGMA user_version = 1;
     `);
+    migrateSearchSchema(db);
     secureDatabaseFiles(filename);
     return db;
   } catch (error) {
@@ -153,6 +196,14 @@ function openQueryDatabase(): Database {
   const filename = statePath("transcript-search.sqlite");
   if (!fs.existsSync(filename)) return openWriterDatabase();
   const Database = sqliteDatabase();
+  const probe = new Database(filename, { readonly: true, strict: true });
+  let needsMigration: boolean;
+  try {
+    needsMigration = schemaVersion(probe) < TRANSCRIPT_SEARCH_SCHEMA_VERSION || !hasBodyHashColumn(probe);
+  } finally {
+    probe.close();
+  }
+  if (needsMigration) openWriterDatabase().close();
   const db = new Database(filename, { readonly: true, strict: true });
   try {
     db.exec("PRAGMA busy_timeout = 250; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;");
@@ -366,7 +417,7 @@ export async function indexTranscriptSources(
         let messageIndex = 0;
         for await (const message of readMessages(source)) {
           const inserted = db.query(
-            "INSERT INTO transcript_messages(transcript_path, message_index, speaker, timestamp, byte_offset, line_number, body) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
+            "INSERT INTO transcript_messages(transcript_path, message_index, speaker, timestamp, byte_offset, line_number, body, body_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
           ).get(
             source.path,
             messageIndex,
@@ -375,6 +426,7 @@ export async function indexTranscriptSources(
             message.byteOffset,
             message.lineNumber,
             message.body,
+            normalizedBodyHash(message.body),
           ) as { id: number };
           db.query("INSERT INTO transcript_messages_fts(rowid, body) VALUES (?, ?)").run(inserted.id, message.body);
           messageIndex += 1;
@@ -491,33 +543,62 @@ export function searchTranscripts(options: {
     const bindings = [query, ...filters.map((filter) => filter.binding)];
     const total = (db.query(`
       SELECT COUNT(*) AS count
-      FROM transcript_messages_fts
-      JOIN transcript_messages AS m ON m.id = transcript_messages_fts.rowid
-      JOIN transcript_files AS f ON f.path = m.transcript_path
-      WHERE transcript_messages_fts MATCH ?${where}
+      FROM (
+        SELECT m.speaker, m.body_hash
+        FROM transcript_messages_fts
+        JOIN transcript_messages AS m ON m.id = transcript_messages_fts.rowid
+        JOIN transcript_files AS f ON f.path = m.transcript_path
+        WHERE transcript_messages_fts MATCH ?${where}
+        GROUP BY m.speaker, m.body_hash
+      ) AS collapsed
     `).get(...bindings) as { count: number } | null)?.count ?? 0;
     const rows = db.query(`
+      WITH ranked AS (
+        SELECT
+          m.id,
+          m.speaker,
+          m.timestamp,
+          m.transcript_path,
+          m.byte_offset,
+          m.line_number,
+          f.project,
+          f.engine,
+          f.mtime_ms,
+          COUNT(*) OVER (PARTITION BY m.speaker, m.body_hash) AS duplicate_count,
+          ROW_NUMBER() OVER (
+            PARTITION BY m.speaker, m.body_hash
+            /* Replayed records retain their original message timestamp. The
+               transcript mtime identifies the newest rollout generation. */
+            ORDER BY f.mtime_ms DESC, COALESCE(m.timestamp, 0) DESC, m.id DESC
+          ) AS duplicate_rank
+        FROM transcript_messages_fts
+        JOIN transcript_messages AS m ON m.id = transcript_messages_fts.rowid
+        JOIN transcript_files AS f ON f.path = m.transcript_path
+        WHERE transcript_messages_fts MATCH ?${where}
+      )
       SELECT
         snippet(transcript_messages_fts, 0, '${SNIPPET_MATCH_OPEN}', '${SNIPPET_MATCH_CLOSE}', '…', 24) AS snippet,
-        m.speaker,
-        m.timestamp,
-        m.transcript_path,
-        m.byte_offset,
-        m.line_number,
-        f.project,
-        f.engine
-      FROM transcript_messages_fts
-      JOIN transcript_messages AS m ON m.id = transcript_messages_fts.rowid
-      JOIN transcript_files AS f ON f.path = m.transcript_path
-      WHERE transcript_messages_fts MATCH ?${where}
-      ORDER BY bm25(transcript_messages_fts), COALESCE(m.timestamp, 0) DESC, m.id DESC
+        ranked.speaker,
+        ranked.duplicate_count,
+        ranked.timestamp,
+        ranked.transcript_path,
+        ranked.byte_offset,
+        ranked.line_number,
+        ranked.project,
+        ranked.engine
+      FROM ranked
+      JOIN transcript_messages_fts ON transcript_messages_fts.rowid = ranked.id
+      WHERE ranked.duplicate_rank = 1 AND transcript_messages_fts MATCH ?
+      ORDER BY bm25(transcript_messages_fts), ranked.mtime_ms DESC,
+        COALESCE(ranked.timestamp, 0) DESC, ranked.id DESC
       LIMIT ? OFFSET ?
-    `).all(...bindings, limit, offset) as SearchRow[];
+    `).all(...bindings, query, limit, offset) as SearchRow[];
     const nextOffset = offset + rows.length;
     return {
       items: rows.map((row) => ({
         snippet: row.snippet,
         speaker: row.speaker,
+        duplicateCount: row.duplicate_count,
         timestamp: row.timestamp,
         transcriptPath: row.transcript_path,
         byteOffset: row.byte_offset,
