@@ -64,10 +64,12 @@ const textBasenames = new Set(["CODEOWNERS", "Dockerfile", "LICENSE", "Makefile"
 const maxPublicationBytes = 32 * 1024 * 1024;
 const maxVideoStreams = 16;
 const supportedGeneratorRuntime = "bun-1.3.3";
+/* A `{`-leading unquoted value starts a JSX expression container, including
+   the controlled binding form `value={entered}`. */
 const credentialInputPattern = new RegExp([
   String.raw`<in`,
   String.raw`put\b(?=[^>]*(?:type\s*=\s*["']?password|name\s*=\s*["']?(?:api[_-]?key|password|secret|token)))`,
-  String.raw`(?=[^>]*value\s*=\s*(?:["'][^"']{4,}["']|[^\s"'=<>]{4,}))[^>]*>`,
+  String.raw`(?=[^>]*value\s*=\s*(?:["'][^"']{4,}["']|[^\s"'=<>{][^\s"'=<>]{3,}))[^>]*>`,
 ].join(""), "i");
 
 type KnownValueFingerprint = {
@@ -1044,6 +1046,79 @@ function provenanceFor(path: string, inspectionRoot = repositoryRoot, trustedBas
   }
 }
 
+/**
+ * Hashes a complete vendor directory as an ordered stream of relative paths,
+ * byte lengths, and file bytes. The directory is rejected when any entry is a
+ * symlink or a non-file/non-directory node, so a trusted digest authenticates
+ * the complete tree shape as well as every file's contents.
+ */
+export function trustedVendorRootDigest(root: string): string | null {
+  const rootResult = safePath(root);
+  if (rootResult.status !== "safe" || !rootResult.metadata?.isDirectory()) return null;
+  const files: string[] = [];
+  const pending = [""];
+  try {
+    while (pending.length > 0) {
+      const relativeDirectory = pending.pop()!;
+      const directory = join(root, relativeDirectory);
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const relativeEntry = join(relativeDirectory, entry.name);
+        const absoluteEntry = join(root, relativeEntry);
+        const entryResult = safePath(absoluteEntry);
+        if (entryResult.status !== "safe") return null;
+        if (entry.isDirectory() && entryResult.metadata?.isDirectory()) {
+          pending.push(relativeEntry);
+        } else if (entry.isFile() && entryResult.metadata?.isFile()) {
+          files.push(relativeEntry);
+        } else {
+          return null;
+        }
+      }
+    }
+    if (files.length === 0) return null;
+    const digest = createHash("sha256");
+    for (const relativeFile of files.sort()) {
+      const bytes = readFileSync(join(root, relativeFile));
+      const portablePath = relativeFile.split(sep).join("/");
+      digest.update("file\0");
+      digest.update(portablePath);
+      digest.update("\0");
+      digest.update(String(bytes.length));
+      digest.update("\0");
+      digest.update(bytes);
+      digest.update("\0");
+    }
+    return digest.digest("hex");
+  } catch {
+    return null;
+  }
+}
+
+export function trustedVendorRootMatches(root: string, expectedDigest: string): boolean {
+  if (!/^[a-f0-9]{64}$/.test(expectedDigest)) return false;
+  return trustedVendorRootDigest(root) === expectedDigest;
+}
+
+/**
+ * The reviewed chigwell/telegram-mcp v3.2.22 tree plus the issue #1059 patch
+ * that removes invite-link mutation tools from its read-only registry. This
+ * digest is trusted scanner policy: candidate content cannot update it.
+ */
+const trustedTelegramVendor = {
+  digest: "9df9b54c12ce17f8d1a581cb39e46cd54319b36662c1f316bd2c69909dc94500",
+  exemptFindingClasses: new Set<FindingClass>(["credential", "home_path"]),
+  relativeRoot: "vendor/telegram-mcp",
+};
+
+function trustedVendorExemptions(path: string, inspectionRoot: string | undefined): ReadonlySet<FindingClass> {
+  if (!inspectionRoot) return new Set();
+  const vendorRoot = join(inspectionRoot, ...trustedTelegramVendor.relativeRoot.split("/"));
+  if (!canonicalPathIsWithin(vendorRoot, path)) return new Set();
+  return trustedVendorRootMatches(vendorRoot, trustedTelegramVendor.digest)
+    ? trustedTelegramVendor.exemptFindingClasses
+    : new Set();
+}
+
 export function inspectPaths(
   paths: string[],
   configurationError = false,
@@ -1090,6 +1165,8 @@ export function inspectPaths(
         }
       }
     }
+    const vendorExemptions = trustedVendorExemptions(path, inspectionRoot);
+    for (const finding of vendorExemptions) pathFindings.delete(finding);
     for (const finding of pathFindings) addFinding(findings, finding);
   }
   return findings;

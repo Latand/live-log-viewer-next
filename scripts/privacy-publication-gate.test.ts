@@ -6,7 +6,12 @@ import { join } from "node:path";
 import { deflateSync } from "node:zlib";
 
 import { auditGithubPublication, shouldFailGithubAudit } from "./privacy-github-audit";
-import { commitMessageFindings, formatPrivacyReport } from "./privacy-publication-gate";
+import {
+  commitMessageFindings,
+  formatPrivacyReport,
+  trustedVendorRootDigest,
+  trustedVendorRootMatches,
+} from "./privacy-publication-gate";
 
 const gate = join(import.meta.dir, "privacy-publication-gate.ts");
 const temporaryDirectories: string[] = [];
@@ -528,6 +533,55 @@ exec "$LLV_TEST_REAL_GIT" "$@"
     expect(output).not.toContain(credential);
     expect(output).not.toContain(directory);
     expect(result.stderr.toString()).toBe("");
+  });
+
+  test("allows a JSX controlled password binding and flags a literal value", () => {
+    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(directory);
+    const controlled = join(directory, "panel.tsx");
+    writeFileSync(controlled, [
+      "<input",
+      "  type=\"password\"",
+      "  value={entered}",
+      "  onChange={(event) => setEntered(event.target.value)}",
+      "/>",
+    ].join("\n"));
+    const baked = join(directory, "page.html");
+    const literal = ["synthetic", "fixture", "123456"].join("-");
+    writeFileSync(baked, ["<in", "put type=\"pass", "word\" value=\"", literal, "\">"].join(""));
+
+    expect(runGate([controlled]).stdout.toString()).toBe("PRIVACY GATE: PASS\n");
+    const result = runGate([baked]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout.toString()).toBe("PRIVACY GATE: FAIL\ncredential: 1\n");
+  });
+
+  test("a trusted vendor root rejects a simultaneous file and manifest update", () => {
+    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-vendor-root-"));
+    temporaryDirectories.push(directory);
+    const vendorDirectory = join(directory, "vendor", "fixture-connector");
+    mkdirSync(vendorDirectory, { recursive: true });
+    const runtime = join(vendorDirectory, "runtime.py");
+    const original = "credential = read_proxy_environment(\"PASSWORD_FIXTURE\")\n";
+    writeFileSync(runtime, original);
+    writeFileSync(
+      join(vendorDirectory, "SHA256SUMS"),
+      `${createHash("sha256").update(original).digest("hex")}  runtime.py\n`,
+    );
+
+    const trustedDigest = trustedVendorRootDigest(vendorDirectory);
+    expect(trustedDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(trustedVendorRootMatches(vendorDirectory, trustedDigest!)).toBe(true);
+
+    const changed = `${original}# candidate update\n`;
+    writeFileSync(runtime, changed);
+    writeFileSync(
+      join(vendorDirectory, "SHA256SUMS"),
+      `${createHash("sha256").update(changed).digest("hex")}  runtime.py\n`,
+    );
+
+    expect(trustedVendorRootMatches(vendorDirectory, trustedDigest!)).toBe(false);
+    expect(trustedVendorRootDigest(vendorDirectory)).not.toBe(trustedDigest);
   });
 
   test("detects UUIDv7 session identifiers with class-only diagnostics", () => {
