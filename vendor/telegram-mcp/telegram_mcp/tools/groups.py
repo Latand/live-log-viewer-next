@@ -1012,7 +1012,10 @@ async def get_banned_users(chat_id: Union[int, str], account: str = None) -> str
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Get Invite Link", openWorldHint=True, readOnlyHint=True)
+    # LLV vendor patch (see PROVENANCE.md): ExportChatInviteRequest /
+    # export_chat_invite_link CREATE an invite link on the server, so this
+    # tool is not read-only and must not ship on the read-only surface.
+    annotations=ToolAnnotations(title="Get Invite Link", openWorldHint=True, readOnlyHint=False)
 )
 @with_account(readonly=True)
 @validate_id("chat_id")
@@ -1111,7 +1114,9 @@ async def join_chat_by_link(link: str, account: str = None) -> str:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Export Chat Invite", openWorldHint=True, readOnlyHint=True)
+    # LLV vendor patch (see PROVENANCE.md): same mutation as get_invite_link —
+    # exporting a chat invite mints a link server-side; not read-only.
+    annotations=ToolAnnotations(title="Export Chat Invite", openWorldHint=True, readOnlyHint=False)
 )
 @with_account(readonly=True)
 @validate_id("chat_id")

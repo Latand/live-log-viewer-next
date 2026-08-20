@@ -32,6 +32,22 @@ relies on — `TELEGRAM_EXPOSED_TOOLS=read-only`, `MCP_TRANSPORT=http`,
 selected by `src/lib/telegram/packaging.ts`). `SHA256SUMS` lists the digest of
 every vendored file.
 
+## Local patches (deviations from upstream)
+
+Every vendored file is byte-identical to the file at the pinned commit,
+EXCEPT the patch below. Do not add further patches without documenting them
+here and regenerating `SHA256SUMS`.
+
+1. `telegram_mcp/tools/groups.py` — `get_invite_link` and `export_chat_invite`
+   are annotated `readOnlyHint=False` (upstream says `True`). Both tools call
+   `functions.messages.ExportChatInviteRequest` / `export_chat_invite_link`,
+   which CREATE an invite link on Telegram's servers — a state mutation.
+   Upstream's `TELEGRAM_EXPOSED_TOOLS=read-only` mode filters by exactly this
+   annotation (`telegram_mcp/runtime.py`), so the corrected annotation removes
+   both tools from the read-only surface. The Viewer additionally enforces an
+   explicit tool-name allowlist at connector readiness
+   (`src/lib/telegram/connector.ts`), so the annotation is not the only line.
+
 ## Verifying against upstream
 
 ```sh
@@ -39,9 +55,9 @@ git ls-remote https://github.com/chigwell/telegram-mcp refs/tags/v3.2.22
 # a61294362226bd93052f5a40b4a1b1269a99ce69
 
 sha256sum -c SHA256SUMS
+git diff --no-index <upstream-checkout> .   # expect only the patch above
 ```
 
-Every vendored file is byte-identical to the file at that commit. Do not patch
-files in this directory; connector behavior the Viewer needs (read-only tool
-exposure, loopback binding) is selected through environment variables by
+Connector behavior the Viewer needs (read-only tool exposure, loopback
+binding) is otherwise selected through environment variables by
 `src/lib/telegram/packaging.ts`.
