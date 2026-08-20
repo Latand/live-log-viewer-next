@@ -66,6 +66,53 @@ test("worker scan streams the resource scope, keeps the caller event loop live, 
   }
 });
 
+test("a successful worker exit schedules the transported transcript catalog in the parent", async () => {
+  const transcript = {
+    path: "/sessions/indexed.jsonl",
+    root: "codex-sessions",
+    name: "indexed.jsonl",
+    project: "repo-indexed",
+    title: "indexed",
+    firstPrompt: "",
+    engine: "codex",
+    kind: "session",
+    fmt: "codex",
+    mtime: 1_780_000_000,
+    size: 100,
+  };
+  const completion = JSON.stringify({
+    type: "complete",
+    snapshot: { files: [], projectCatalog: [], conversationCatalog: [transcript], complete: true },
+  });
+  const { directory, workerPath } = fixtureWorker(`
+    process.stdin.resume();
+    process.stdin.on("end", () => process.stdout.write(${JSON.stringify(`${completion}\n`)}));
+  `);
+  const feeds: unknown[] = [];
+
+  await collectFileScanInWorker(
+    { persist: false, persistIndex: false },
+    undefined,
+    {
+      launch: { executable: process.execPath, workerPath },
+      cwd: directory,
+      timeoutMs: 2_000,
+      transcriptIndexScheduler: (feed) => { feeds.push(feed); },
+    },
+  );
+
+  expect(feeds).toEqual([{
+    complete: true,
+    sources: [{
+      path: transcript.path,
+      project: transcript.project,
+      engine: transcript.engine,
+      size: transcript.size,
+      mtimeMs: transcript.mtime * 1_000,
+    }],
+  }]);
+});
+
 test("worker scans publish a Claude transcript that appears in a previously sessionless project directory", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-file-scan-worker-late-session-"));
   directories.push(directory);
@@ -147,6 +194,7 @@ test("a completion frame followed by worker failure preserves the published conv
     });
   `);
   replaceConversationCatalog([retained]);
+  let transcriptIndexFeeds = 0;
 
   await expect(collectFileScanInWorker(
     { persist: false, persistIndex: false },
@@ -155,10 +203,12 @@ test("a completion frame followed by worker failure preserves the published conv
       launch: { executable: process.execPath, workerPath },
       cwd: directory,
       timeoutMs: 2_000,
+      transcriptIndexScheduler: () => { transcriptIndexFeeds += 1; },
     },
   )).rejects.toThrow("file scanner worker exited before completion");
 
   expect(conversationCatalogSnapshot()).toEqual([retained]);
+  expect(transcriptIndexFeeds).toBe(0);
 });
 
 test("aborting a worker scan kills the child and releases its timer and listener", async () => {

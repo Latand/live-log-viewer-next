@@ -86,6 +86,7 @@ function boundedArgs(
       roleParams: {},
     });
   }
+  if (toolName === "search_transcripts") args.query = "fixture";
   return args;
 }
 
@@ -251,6 +252,26 @@ test("get_conversation listTools publishes every bounded tail target", async () 
     }
     expect(tool?.description).toContain("validated pinned reader");
     expect(tailSchema?.description).toContain("validated pinned reader");
+  });
+});
+
+test("search_transcripts publishes its body-query, project, cursor, and bounded page schema", async () => {
+  await withProtocolClient(inertBindings(), async (client) => {
+    const listed = await client.listTools();
+    const tool = listed.tools.find((candidate) => candidate.name === "search_transcripts");
+
+    expect(tool?.description).toContain("message bodies");
+    expect(tool?.inputSchema.required).toEqual(expect.arrayContaining(["clientRequestId", "query"]));
+    expect(Object.keys(tool?.inputSchema.properties ?? {})).toEqual(expect.arrayContaining([
+      "clientRequestId",
+      "query",
+      "project",
+      "cursor",
+      "limit",
+    ]));
+    expect(tool?.inputSchema.properties?.limit).toMatchObject({
+      description: expect.stringContaining("Integer 1..100"),
+    });
   });
 });
 

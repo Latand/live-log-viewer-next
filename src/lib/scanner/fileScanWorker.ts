@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { systemScheduler, type DeadlineScheduler } from "@/lib/deadline";
+import { scheduleTranscriptIndex, type TranscriptIndexFeed } from "@/lib/search/transcriptFeed";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 
 import type { FileCatalogScan, FileScanOptions } from "./index";
@@ -25,6 +26,7 @@ export interface FileScanWorkerRuntime {
   timeoutMs?: number;
   signal?: AbortSignal | null;
   scheduler?: DeadlineScheduler;
+  transcriptIndexScheduler?: (feed: TranscriptIndexFeed) => void;
 }
 
 function abortError(): Error {
@@ -195,6 +197,16 @@ export function collectFileScanInWorker(
       }
       if (completedConversationCatalog) {
         publishConversationCatalogForScan(completedConversationCatalog, catalogScanToken, completed.complete);
+        (runtime.transcriptIndexScheduler ?? scheduleTranscriptIndex)({
+          complete: completed.complete,
+          sources: completedConversationCatalog.map((entry) => ({
+            path: entry.path,
+            project: entry.project,
+            engine: entry.engine,
+            size: entry.size,
+            mtimeMs: entry.mtime * 1_000,
+          })),
+        });
       }
       finish(undefined, completed);
     });
