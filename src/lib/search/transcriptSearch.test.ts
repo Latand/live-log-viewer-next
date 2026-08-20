@@ -1,8 +1,10 @@
 import { afterAll, beforeEach, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { statePath } from "@/lib/configDir";
 import { snippetSegments } from "./snippet";
 import {
   indexTranscriptSources,
@@ -146,6 +148,164 @@ test("returns bounded non-overlapping result pages", async () => {
   expect(second.items).toHaveLength(1);
   expect(second.nextCursor).toBeNull();
   expect(new Set([...first.items, ...second.items].map((item) => item.byteOffset)).size).toBe(3);
+});
+
+test("collapses resume-replayed bodies after whitespace normalization and keeps the newest rollout", async () => {
+  const oldest = path.join(sandbox, "rollout-oldest.jsonl");
+  const middle = path.join(sandbox, "rollout-middle.jsonl");
+  const newest = path.join(sandbox, "rollout-newest.jsonl");
+  fs.writeFileSync(oldest, JSON.stringify({
+    type: "event_msg",
+    timestamp: "2026-08-20T08:00:00.000Z",
+    payload: { type: "user_message", message: "  resume   cobalt\nrequest  " },
+  }) + "\n");
+  fs.writeFileSync(middle, [
+    JSON.stringify({
+      type: "event_msg",
+      timestamp: "2026-08-20T08:00:00.000Z",
+      payload: { type: "user_message", message: "resume cobalt\trequest" },
+    }),
+    JSON.stringify({
+      type: "event_msg",
+      timestamp: "2026-08-20T08:01:00.000Z",
+      payload: { type: "agent_message", message: "resume cobalt request" },
+    }),
+  ].join("\n") + "\n");
+  fs.writeFileSync(newest, [
+    JSON.stringify({
+      type: "event_msg",
+      timestamp: "2026-08-20T08:00:00.000Z",
+      payload: { type: "user_message", message: "resume cobalt request" },
+    }),
+    JSON.stringify({
+      type: "event_msg",
+      timestamp: "2026-08-20T08:02:00.000Z",
+      payload: { type: "user_message", message: "Resume cobalt request" },
+    }),
+    JSON.stringify({
+      type: "event_msg",
+      timestamp: "2026-08-20T08:03:00.000Z",
+      payload: { type: "user_message", message: "cobalt follow-up" },
+    }),
+  ].join("\n") + "\n");
+  const sources = [
+    { ...source(oldest, "codex", "resume"), mtimeMs: 1_000 },
+    { ...source(middle, "codex", "resume"), mtimeMs: 2_000 },
+    { ...source(newest, "codex", "resume"), mtimeMs: 3_000 },
+  ];
+  await indexTranscriptSources(sources, { complete: true });
+
+  const first = searchTranscripts({ query: "cobalt", limit: 2 });
+  const second = searchTranscripts({ query: "cobalt", limit: 2, cursor: first.nextCursor });
+  const items = [...first.items, ...second.items];
+  const replay = items.find((item) => item.duplicateCount === 3);
+
+  expect(first.total).toBe(4);
+  expect(second.total).toBe(4);
+  expect(first.items).toHaveLength(2);
+  expect(second.items).toHaveLength(2);
+  expect(second.nextCursor).toBeNull();
+  expect(replay).toMatchObject({
+    speaker: "user",
+    transcriptPath: newest,
+    duplicateCount: 3,
+  });
+  expect(items.filter((item) => item.duplicateCount === 1)).toHaveLength(3);
+  expect(new Set(items.map((item) => `${item.speaker}:${item.transcriptPath}:${item.lineNumber}`)).size).toBe(4);
+  expect(first.stats).toMatchObject({ conversationsIndexed: 3, messagesIndexed: 6 });
+});
+
+test("migrates a version-one index in bounded batches without reopening unchanged files", async () => {
+  const filename = statePath("transcript-search.sqlite");
+  const transcript = path.join(sandbox, "legacy-migration.jsonl");
+  fs.writeFileSync(transcript, JSON.stringify({ type: "user", message: { content: "legacy cobalt body" } }) + "\n");
+  const legacySource = source(transcript, "codex", "legacy");
+  fs.mkdirSync(path.dirname(filename), { recursive: true });
+  const db = new Database(filename, { create: true, strict: true });
+  db.exec(`
+    CREATE TABLE transcript_files (
+      path TEXT PRIMARY KEY,
+      size INTEGER NOT NULL,
+      mtime_ms REAL NOT NULL,
+      project TEXT NOT NULL,
+      engine TEXT NOT NULL CHECK(engine IN ('claude', 'codex')),
+      messages_count INTEGER NOT NULL,
+      indexed_at INTEGER NOT NULL
+    );
+    CREATE TABLE transcript_messages (
+      id INTEGER PRIMARY KEY,
+      transcript_path TEXT NOT NULL,
+      message_index INTEGER NOT NULL,
+      speaker TEXT NOT NULL CHECK(speaker IN ('user', 'assistant')),
+      timestamp INTEGER,
+      byte_offset INTEGER NOT NULL,
+      line_number INTEGER NOT NULL,
+      body TEXT NOT NULL,
+      UNIQUE(transcript_path, message_index),
+      FOREIGN KEY(transcript_path) REFERENCES transcript_files(path) ON DELETE CASCADE
+    );
+    CREATE VIRTUAL TABLE transcript_messages_fts USING fts5(
+      body,
+      tokenize = "unicode61 remove_diacritics 0 tokenchars '#_'"
+    );
+    PRAGMA user_version = 1;
+  `);
+  db.query("INSERT INTO transcript_files VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+    legacySource.path,
+    legacySource.size,
+    legacySource.mtimeMs,
+    legacySource.project,
+    legacySource.engine,
+    513,
+    1,
+  );
+  const insertMessage = db.query(
+    "INSERT INTO transcript_messages VALUES (?, ?, ?, 'user', ?, ?, ?, ?)",
+  );
+  const insertFts = db.query("INSERT INTO transcript_messages_fts(rowid, body) VALUES (?, ?)");
+  for (let index = 0; index < 513; index += 1) {
+    const body = `legacy cobalt body ${index}`;
+    insertMessage.run(index + 1, legacySource.path, index, index + 1, index, index + 1, body);
+    insertFts.run(index + 1, body);
+  }
+  db.close();
+
+  const migrationReadSizes: number[] = [];
+  const originalQuery = Database.prototype.query;
+  Database.prototype.query = function query(this: Database, sql: string) {
+    const statement = originalQuery.call(this, sql);
+    if (!sql.includes("SELECT id, body FROM transcript_messages WHERE body_hash IS NULL")) return statement;
+    const originalAll = statement.all.bind(statement);
+    statement.all = ((...bindings: Parameters<typeof statement.all>) => {
+      const rows = originalAll(...bindings);
+      migrationReadSizes.push(rows.length);
+      return rows;
+    }) as typeof statement.all;
+    return statement;
+  } as typeof Database.prototype.query;
+  try {
+    expect(searchTranscripts({ query: "cobalt" }).total).toBe(513);
+  } finally {
+    Database.prototype.query = originalQuery;
+  }
+
+  const migrated = new Database(filename, { readonly: true, strict: true });
+  expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(2);
+  expect(migrated.query<{ count: number }, []>(
+    "SELECT COUNT(*) AS count FROM transcript_messages WHERE body_hash IS NULL OR length(body_hash) != 64",
+  ).get()?.count).toBe(0);
+  migrated.close();
+
+  let opens = 0;
+  const readMessages = async function* () {
+    opens += 1;
+    yield { body: "unexpected", speaker: "user" as const, timestamp: null, byteOffset: 0, lineNumber: 1 };
+  };
+  const indexed = await indexTranscriptSources([legacySource], { complete: true, readMessages });
+
+  expect(migrationReadSizes).toEqual([256, 256, 1]);
+  expect(indexed).toMatchObject({ filesRead: 0, filesSkipped: 1, failures: [] });
+  expect(opens).toBe(0);
 });
 
 test("searches all projects by default and explains a scoped empty result", async () => {

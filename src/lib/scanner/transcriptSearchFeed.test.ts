@@ -83,6 +83,30 @@ test("feeds every configured Codex and Claude transcript store into one backgrou
   expect(feed?.sources.filter((entry) => entry.engine === "claude")).toHaveLength(2);
 });
 
+test("feeds a dual-root Codex rollout once and keeps the account-root copy", async () => {
+  const workspace = path.join(sandbox, "dual-root-workspace");
+  fs.mkdirSync(workspace, { recursive: true });
+  const codexNative = path.join(sandbox, "dual-root-native");
+  const codexAccount = path.join(sandbox, "dual-root-account");
+  const rollout = "rollout-dual-root-fixture.jsonl";
+  const nativePath = writeCodex(codexNative, rollout, workspace);
+  const accountPath = writeCodex(codexAccount, rollout, workspace);
+  let feed: TranscriptIndexFeed | undefined;
+
+  await discoverFilesWithProjectCatalog([
+    ["codex-sessions", codexNative],
+    ["codex-sessions", codexAccount],
+  ], undefined, {
+    persist: false,
+    transcriptIndexScheduler: (next) => { feed = next; },
+  });
+
+  expect(feed?.complete).toBeTrue();
+  expect(feed?.sources).toHaveLength(1);
+  expect(feed?.sources[0]?.path).toBe(accountPath);
+  expect(feed?.sources[0]?.path).not.toBe(nativePath);
+});
+
 test("a direct scan invalidated by a newer generation does not publish its stale inventory", async () => {
   const workspace = path.join(sandbox, "overlap-workspace");
   fs.mkdirSync(workspace, { recursive: true });
