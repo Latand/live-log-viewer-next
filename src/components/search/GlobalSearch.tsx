@@ -197,10 +197,16 @@ export function GlobalSearch({ mobile, onClose, onOpen }: Props) {
         aria-label={t("search.aria")}
         data-global-search
         onMouseDown={(event) => event.stopPropagation()}
+        /* The desktop dialog hangs from a fixed top edge (`mt-[10vh]` +
+           `self-start`), never from its centre: its height is content-driven,
+           so centring would slide the header — the input being typed into —
+           up when the first results grow the body to the cap and down when a
+           zero answer collapses it. The phone is full-viewport and cannot
+           drift. */
         className={
           mobile
             ? "flex h-full w-full flex-col overflow-hidden bg-canvas outline-none"
-            : "m-auto flex max-h-[min(72vh,720px)] w-full max-w-[720px] flex-col overflow-hidden rounded-[8px] border border-border bg-canvas shadow-2 outline-none"
+            : "mx-auto mt-[10vh] flex max-h-[min(72vh,720px)] w-full max-w-[720px] flex-col self-start overflow-hidden rounded-[8px] border border-border bg-canvas shadow-2 outline-none"
         }
       >
         <header className="flex h-14 shrink-0 items-center gap-2 border-b border-border bg-card px-3">

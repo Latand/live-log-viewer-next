@@ -580,3 +580,42 @@ test("the phone layout keeps every control at a 44px target", async () => {
   expect(view().querySelector<HTMLElement>('[data-search-scope="mine"]')!.className).toContain("min-h-11");
   expect(view().querySelector<HTMLElement>("[data-search-result]")!.className).toContain("min-h-11");
 });
+
+test("the desktop palette hangs from a fixed top edge, so the input never moves under the caret", async () => {
+  /* The dialog's height is content-driven: short on the opening hint, at its
+     cap once results land, short again on a zero answer. Centred, it would
+     drag the header — and the caret in the input the operator is typing into —
+     up and down at exactly those transitions. happy-dom runs no layout engine,
+     so the anchor is asserted where it is expressed: geometry classes that are
+     the same whatever the answer is. */
+  let items: TranscriptSearchRow[] = [];
+  answer = async () => Response.json(page({ items, total: items.length }));
+  await mount();
+
+  const geometry = () => view().querySelector<HTMLElement>("[data-global-search]")!.className;
+  const opening = geometry();
+  expect(opening).toContain("mt-[10vh]");
+  expect(opening).toContain("self-start");
+  /* `m-auto` is what centred it. */
+  expect(opening.split(" ")).not.toContain("m-auto");
+
+  items = [row()];
+  type("heliotrope");
+  await settle();
+  expect(view().querySelector("[data-search-result]")).not.toBeNull();
+  expect(geometry()).toBe(opening);
+
+  items = [];
+  type("nothingmatchesthis");
+  await settle();
+  expect(view().querySelector("[data-search-empty]")).not.toBeNull();
+  expect(geometry()).toBe(opening);
+
+  /* The phone keeps the whole viewport, so it has nothing to anchor. */
+  await act(async () => root?.unmount());
+  root = null;
+  host?.remove();
+  await mount(true);
+  expect(geometry()).toContain("h-full");
+  expect(geometry()).not.toContain("mt-[");
+});
