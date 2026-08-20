@@ -251,7 +251,9 @@ test("an ungranted server in a stored allowlist never reaches the Claude MCP con
   }));
 
   /* A launch profile hand-edited to name an ungranted server is re-bounded
-     where the command materializes it, not trusted from storage (issue #739). */
+     where the command materializes it, not trusted from storage (issue #739).
+     The grantable `telegram` (tranche 2, #1059) is copied; `agent-browser`
+     stays outside the bound and is not. */
   const installed = applyClaudeSpawnPolicy(accountHome, {
     profileId: "rebounded",
     cwd: "/repo",
@@ -261,7 +263,7 @@ test("an ungranted server in a stored allowlist never reaches the Claude MCP con
     mcpServers: Record<string, unknown>;
   };
 
-  expect(Object.keys(mcpConfig.mcpServers)).toEqual(["viewer"]);
+  expect(Object.keys(mcpConfig.mcpServers).sort()).toEqual(["telegram", "viewer"]);
 });
 
 test("allowSubagents uses an isolated profile while the denied profile stays enforced", () => {

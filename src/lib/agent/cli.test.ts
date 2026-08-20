@@ -271,14 +271,14 @@ test("a resume rebuilds its command from the re-bounded grant, not the stored li
   fs.writeFileSync(path.join(path.dirname(home), ".claude.json"), JSON.stringify({
     mcpServers: {
       viewer: { type: "stdio", command: "viewer-mcp" },
-      telegram: { type: "stdio", command: "telegram-mcp" },
+      slack: { type: "stdio", command: "slack-mcp" },
     },
   }));
 
   /* Launch profiles are durable and editable by hand, so a resume renders from
      the re-validated grant instead of throwing or trusting storage (#739). */
   const resumed = resumeSpecFor("claude-projects", transcript, {
-    mcpServers: ["viewer", "telegram"],
+    mcpServers: ["viewer", "slack"],
   });
   const mcpConfigPath = resumed!.command.match(/'--mcp-config' '([^']+)'/)![1]!;
 

@@ -1,44 +1,92 @@
-# Issue #1018: Reconcile sidebar quota provenance
+# Issue #1059: QR account connection and packaged read-only Telegram MCP
 
-The sidebar limits strip must present one coherent quota observation for each account and window. The reported failure combined an account-check capacity chip with transcript-derived 5h/Week rows, producing contradictory remaining percentages inside one engine block and inside the Accounts panel. A provider `usage_limit_exceeded` rejection establishes active exhaustion through its reset even when a newer app-server quota probe reports available capacity.
-
-The implementation must reconcile structured account checks and transcript observations per account and window, derive every compact summary from the selected rows, preserve stale-age disclosure, keep reset ETA rounding consistent, and retain the active-account ownership mask. Product changes stay inside the assigned limits surfaces and payload merge helpers. Deployment is outside this task.
+The Viewer ships a first-class personal Telegram connector. The operator scans
+a QR code from the left-rail footer, enters a 2FA password only when Telegram
+asks for it, and sees explicit connected / expired / error states with remote
+logout and local session deletion. The resulting MCP surface (`telegram`) is
+read-only, served by one shared loopback process packaged with the Viewer from
+the pinned `chigwell/telegram-mcp` v3.2.22 source, and granted only through the
+existing #739 operator-root grant boundary. The separately configured legacy
+transport (`telegram-readonly`) stays untouched. Daily Reports, write tools,
+phone login, multi-account, chat rendering, a generic connector marketplace,
+and legacy-credential migration are out of scope. No deployment in this task.
 
 ## Acceptance criteria
 
-AC1: For one account and quota window, ordinary conflicting observations select the newer observation using the full-precision window observation timestamp. Events within the same second retain their millisecond ordering. Every rendered consumer receives that selected value and per-window provenance, including after payload serialization and client parsing.
+AC1: The pinned upstream source (release `v3.2.22`, commit
+`a61294362226bd93052f5a40b4a1b1269a99ce69`, Apache-2.0) is vendored with its
+dependency lock, license, provenance record, and per-file checksums, and ships
+with the package (`files` includes `vendor`). Provisioning builds the connector
+environment from that vendored tree with a frozen lock; no path resolves the
+`telegram-mcp` name through a package index, and a clean installation needs no
+manually cloned checkout.
 
-AC2: An active exhausted observation (`usedPercent >= 100` with an unknown or future reset) governs a conflicting available-capacity observation through its reset. After the reset, ordinary timestamp ordering resumes.
+AC2: One shared streamable-HTTP connector runs on loopback with
+`TELEGRAM_EXPOSED_TOOLS=read-only`. Before the connector is treated as ready —
+whether newly spawned or adopted from a previous Viewer generation via the
+persisted pid record — every advertised tool must carry `readOnlyHint: true`;
+a surface with any other tool is refused and reported as `not_read_only`.
 
-AC3: A newly observed `usage_limit_exceeded` transcript rejection immediately marks the governing window as 100% used and records the rejection time as that window's observation time. A standalone rejection can use the live or cached window shape when its preceding transcript quota event is outside the readable tail, and only while the rejection falls inside that window's declared interval: a rejection from a previous cycle is stale evidence and leaves the live or cached reading standing. If its preceding reset already passed before the rejection, the reset becomes unknown so the fresh rejection remains authoritative. Both the root and nested Codex rejection envelopes are accepted. The account-wide transcript scan selects rejection and quota observations globally by event timestamp across a bounded candidate index. Recent history keeps active long-running sessions discoverable across start-date directories.
+AC3: The login operation follows the account-login pattern: at most one
+operation at a time, phases `disconnected → starting → awaiting_scan →
+(awaiting_password) → verifying → connected | expired | error`. An expired QR
+token refreshes automatically within the same operation. The 2FA password is
+requested only when Telegram asks; an invalid password is an explicit state
+that allows retry. Cancellation terminates the enrollment process and clears
+temporary state.
 
-AC4: The meter diagnosis is explicit: the Codex app-server probe reads `account/rateLimits/read`, whose response carries the same 10,080-minute weekly quota horizon and pro-lite tier as the Codex transcript rate-limit event. Credit balance events are a separate event family with no quota windows. The app-server quota observation can therefore conflict with the provider rejection for the same weekly meter.
+AC4: The session persists server-side only: an owner-only (0600, dir 0700)
+regular non-symlinked file written atomically under Viewer state. Reads and
+overwrites refuse symlinks, widened modes, and foreign ownership. Status
+surfaces carry an opaque `credentialRef` only. The session string appears in no
+API payload, log line, process argument, transcript, fixture, or served client
+payload; focused secret-leak tests prove the API and argv paths with a
+placeholder session.
 
-AC5: Each engine header capacity chip is derived from the reconciled window rows. Its rounded percentage equals a percentage visible in the same engine block.
+AC5: `Log out` performs remote revocation and then removes the local session,
+stops the connector, and unregisters the host definition. A failed remote
+logout preserves the local session and reports a sanitized code. `Delete local
+session` removes local credentials and stops the connector without the remote
+side, and its inline confirmation states that the remote authorization may
+remain. Both actions require inline confirmation.
 
-AC6: The Accounts panel derives each account chip from its own rendered window rows. When opened from the limits footer, the active account receives the footer's exact reconciled quota model, preventing the modal from reviving a conflicting account snapshot.
+AC6: On connect, the shared URL is registered idempotently as `telegram` for
+Claude (legacy and managed `.claude.json` state files) and Codex (a
+marker-delimited block in the legacy `config.toml`, which managed homes
+symlink). Registration never rewrites corrupt or symlinked targets, never
+touches the legacy `telegram-readonly` entry, and backs off from an
+operator-authored `telegram` definition. Disconnect removes exactly the
+managed entry, so the next dispatch materializes nothing.
 
-AC7: Any rendered quota observation older than the 20-minute freshness threshold has a visible `as of HH:MM` hint. Distinct stale window timestamps remain visible beside their own rows, and timestamp-less stale rows retain a visible last-known label. Cached payloads preserve their original `staleSince` time when `capturedAt` is unavailable. Per-window observation times survive server payload serialization and client account parsing. Presentation time advances after failed polls and while either Accounts panel entry path remains mounted; payload receipt time remains fixed, so stale thresholds and elapsed resets still take effect.
+AC7: The #739 boundary extends by exactly one name: `telegram` joins
+`GRANTABLE_MCP_SERVERS` and the operator-root default; the delegated default
+stays `["viewer"]`. Builders, reviewers, pipeline stages, delegated children,
+and unproven adopted sessions cannot obtain the grant, and hand-edited
+profiles are re-bounded — proven by the existing #739 test walls updated for
+tranche 2.
 
-AC8: Reset ETA formatting uses one shared upward-rounding rule in the strip and modal for minute, hour, and day scales.
+AC8: The UI is a Telegram row in the left-rail footer beside the account
+controls, opening the accounts-style flyout (desktop) / bottom sheet (mobile):
+client-rendered QR via the existing `qrcode` dependency, Cancel / Retry /
+Reconnect, password input, inline destructive confirmations, an `aria-live`
+status region, connected identity (name and username only), last health check
+time, and human-readable sanitized errors in en and uk.
 
-AC9: Invariant 19 remains intact for Claude and Codex: limits payload values render only when the payload account ID equals the active account ID. A payload for account B cannot override account A at the rendered merge seam.
+AC9: Health checks report connected / expired / error explicitly: `expired`
+stops the connector and keeps Reconnect plus local deletion available;
+transient probe failures are an error state, never a silent disconnect; an
+unsafe session file reads as `session_unsafe`.
 
-AC10: Focused regression coverage proves newer-source selection, sub-second ordering, provider-exhaustion precedence, post-reset behavior through failed polls, direct rejection handling, bounded transcript discovery, chip/row equality, per-window stale hints, reset rounding, and account masking.
+AC10: Focused tests run with isolated `LLV_STATE_DIR` (and temp homes where
+paths matter) and a fake Telegram adapter — no test reaches a real account,
+the operator registry, or live runtime state. Typecheck and the
+privacy-publication gate pass. Desktop and 390 px screenshots of the mocked
+disconnected, QR, password, connected, expired, error, and destructive
+confirmation states carry no real identity.
 
-AC11: Scope holds to `LimitsFooter.tsx`, `AccountsPanel.tsx`, shared rate-limit formatting/reconciliation, the limits payload types and server read, their focused tests, and this spec. No `src/lib/{flows,agent,runtime}` source, API route behavior, dependency, or deployment changes are included.
-
-AC12: Every touched test file passes independently, TypeScript type checking passes, scoped ESLint passes, and the publication privacy gate passes. No suite that sweeps the operator's live runtime or registry state is run.
-
-## Validation gates
-
-- `bun test src/lib/rateLimit.test.ts`
-- `bun test src/lib/limits.test.ts`
-- `bun test src/hooks/useEngineAccounts.test.ts`
-- `bun test src/components/rateLimit.test.ts`
-- `bun test src/components/AccountsPanel.dom.test.tsx`
-- `bun test src/components/LimitsFooter.dom.test.tsx`
-- `bun test src/components/LimitsFooter.test.ts`
-- `bunx tsc --noEmit`
-- `bunx eslint` over the touched TypeScript files
-- `bun scripts/privacy-publication-gate.ts --base $(git merge-base HEAD origin/main)`
+AC11: Scope holds to `src/lib/telegram/*`, `src/app/api/telegram/*`,
+`src/components/TelegramConnect.tsx`, the footer row mount, the tranche-2
+allowlist change with its test updates, i18n keys, packaging manifest entries,
+`bin/telegram-login-bridge.py`, `scripts/provision-telegram-connector.ts`,
+`vendor/telegram-mcp/`, evidence, and this spec. No VPS, OpenClaw,
+morning-digest, or real Telegram credential/session is touched; no deploy.

@@ -32,13 +32,14 @@ export const DEFAULT_SPAWN_MCP_SERVERS: readonly string[] = Object.freeze(["view
     all. Everything else the operator has configured stays off for every
     session, whoever asks.
 
-    Tranche 1 deliberately ships this bound EMPTY of connectors — `viewer` is
-    the baseline every session holds, not a grant. No MCP server can be enabled
-    for any session until a connector is added here, which is what tranche 2
-    does for `telegram`. Adding a name here grants it to the operator-root
-    session class by default, so a name belongs here only once its credential
-    boundary and revocation path exist. */
-export const GRANTABLE_MCP_SERVERS: readonly string[] = Object.freeze(["viewer"]);
+    Tranche 2 (issue #1059) adds `telegram`: the packaged read-only connector,
+    whose credential boundary (owner-only session store), health surface, and
+    revocation path (logout / local deletion unregister the host definition,
+    so the next dispatch materializes nothing) ship with it. `viewer` remains
+    the baseline every session holds, not a grant. Adding a name here grants
+    it to the operator-root session class by default, so a name belongs here
+    only once its credential boundary and revocation path exist. */
+export const GRANTABLE_MCP_SERVERS: readonly string[] = Object.freeze(["viewer", "telegram"]);
 
 /** What an operator-launched root session receives when it does not opt out.
     The operator's own root conversation is the session class the grantable

@@ -64,10 +64,13 @@ const textBasenames = new Set(["CODEOWNERS", "Dockerfile", "LICENSE", "Makefile"
 const maxPublicationBytes = 32 * 1024 * 1024;
 const maxVideoStreams = 16;
 const supportedGeneratorRuntime = "bun-1.3.3";
+/* A `{`-leading unquoted value is a JSX expression container — a controlled
+   binding (`value={entered}`), not a literal baked into the markup, which is
+   the leak this class exists to catch. */
 const credentialInputPattern = new RegExp([
   String.raw`<in`,
   String.raw`put\b(?=[^>]*(?:type\s*=\s*["']?password|name\s*=\s*["']?(?:api[_-]?key|password|secret|token)))`,
-  String.raw`(?=[^>]*value\s*=\s*(?:["'][^"']{4,}["']|[^\s"'=<>]{4,}))[^>]*>`,
+  String.raw`(?=[^>]*value\s*=\s*(?:["'][^"']{4,}["']|[^\s"'=<>{][^\s"'=<>]{3,}))[^>]*>`,
 ].join(""), "i");
 
 type KnownValueFingerprint = {
@@ -1044,6 +1047,44 @@ function provenanceFor(path: string, inspectionRoot = repositoryRoot, trustedBas
   }
 }
 
+/**
+ * Vendored third-party source (issue #1059) legitimately reads its own proxy
+ * secrets into locals and shows placeholder home paths in docstrings, and it
+ * must stay byte-identical to what upstream published — it cannot be
+ * rewritten to satisfy this gate. The exemption is therefore bound to
+ * content, not location: only a file under `vendor/<name>/` whose sha256
+ * matches that vendor's committed `SHA256SUMS` manifest sheds exactly these
+ * two idiom classes. Editing a vendored file to smuggle anything changes its
+ * digest and re-arms the gate; every other class — operator known-value
+ * fingerprints above all — stays armed even for verified vendor files.
+ */
+const vendorExemptFindingClasses = new Set<FindingClass>(["credential", "home_path"]);
+
+export function vendoredManifestVerified(path: string, inspectionRoot: string | undefined): boolean {
+  if (!inspectionRoot) return false;
+  const relativePath = relative(inspectionRoot, resolve(path));
+  const segments = relativePath.split(sep);
+  if (segments.length < 3 || segments[0] !== "vendor" || segments.includes("..")) return false;
+  const manifestPath = join(inspectionRoot, segments[0], segments[1], "SHA256SUMS");
+  const manifestResult = safePath(manifestPath);
+  if (manifestResult.status !== "safe" || !manifestResult.metadata?.isFile()) return false;
+  const inner = segments.slice(2).join("/");
+  let manifest: string;
+  try {
+    manifest = readFileSync(manifestPath, "utf8");
+  } catch {
+    return false;
+  }
+  const row = manifest.split("\n").find((line) => line.slice(64).trim() === inner);
+  const expected = row?.slice(0, 64).toLowerCase();
+  if (!expected || !/^[0-9a-f]{64}$/.test(expected)) return false;
+  try {
+    return createHash("sha256").update(readFileSync(path)).digest("hex") === expected;
+  } catch {
+    return false;
+  }
+}
+
 export function inspectPaths(
   paths: string[],
   configurationError = false,
@@ -1089,6 +1130,10 @@ export function inspectPaths(
           pathFindings.add("provenance_invalid");
         }
       }
+    }
+    if ([...pathFindings].some((finding) => vendorExemptFindingClasses.has(finding))
+      && vendoredManifestVerified(path, inspectionRoot)) {
+      for (const finding of vendorExemptFindingClasses) pathFindings.delete(finding);
     }
     for (const finding of pathFindings) addFinding(findings, finding);
   }

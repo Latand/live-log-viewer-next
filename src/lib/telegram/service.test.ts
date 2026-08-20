@@ -1,0 +1,280 @@
+import { afterAll, beforeEach, expect, test } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-telegram-service-"));
+const OLD_STATE = process.env.LLV_STATE_DIR;
+process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
+
+const { TelegramConnectionService } = await import("./service");
+const { readTelegramSession, saveTelegramSession, telegramSessionPath } = await import("./sessionStore");
+
+import type { TelegramAdapter, TelegramEnrollmentEvent, TelegramHealthResult } from "./adapter";
+import type { TelegramErrorCode } from "./contracts";
+import type { TelegramServicePorts } from "./service";
+
+/* A placeholder with the string-session shape; never a real credential. */
+const PLACEHOLDER_SESSION = "1ApWapzMBu4placeholder-not-a-real-session";
+
+/** The fake Telegram: scripted events in, recorded calls out. No test in this
+    repo ever reaches a real account. */
+class FakeAdapter implements TelegramAdapter {
+  emit: ((event: TelegramEnrollmentEvent) => void) | null = null;
+  started = 0;
+  canceled = 0;
+  passwords: string[] = [];
+  unavailable: TelegramErrorCode | null = null;
+  health: TelegramHealthResult = { status: "connected", identity: { name: "Account A", username: "account_a" } };
+  logoutResult: { ok: boolean; code: TelegramErrorCode | null } = { ok: true, code: null };
+  logoutCalls = 0;
+
+  unavailableReason() { return this.unavailable; }
+  startEnrollment(onEvent: (event: TelegramEnrollmentEvent) => void) {
+    this.started += 1;
+    this.emit = onEvent;
+    return {
+      submitPassword: (password: string) => { this.passwords.push(password); },
+      cancel: () => { this.canceled += 1; },
+    };
+  }
+  checkSession() { return Promise.resolve(this.health); }
+  logout() { this.logoutCalls += 1; return Promise.resolve(this.logoutResult); }
+}
+
+function harness() {
+  const adapter = new FakeAdapter();
+  const calls = { ensure: [] as string[], stop: 0, register: 0, unregister: 0 };
+  const ports: TelegramServicePorts = {
+    adapter,
+    ensureConnector: async (sessionString) => { calls.ensure.push(sessionString); return { ok: true, url: "http://127.0.0.1:8809/mcp" }; },
+    stopConnector: () => { calls.stop += 1; },
+    registerHosts: () => { calls.register += 1; },
+    unregisterHosts: () => { calls.unregister += 1; },
+    now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+  };
+  return { adapter, calls, service: new TelegramConnectionService(ports) };
+}
+
+async function settle() {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+beforeEach(() => {
+  fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
+});
+afterAll(() => {
+  if (OLD_STATE === undefined) delete process.env.LLV_STATE_DIR;
+  else process.env.LLV_STATE_DIR = OLD_STATE;
+  fs.rmSync(SANDBOX, { recursive: true, force: true });
+});
+
+test("the full QR login without 2FA: scan refresh, verify, connect", async () => {
+  const { adapter, calls, service } = harness();
+  expect(service.status().phase).toBe("disconnected");
+
+  const started = service.startLogin();
+  expect(started.phase).toBe("starting");
+  expect(adapter.started).toBe(1);
+
+  adapter.emit!({ type: "qr", url: "tg://login?token=first", expiresAt: "2026-08-20T12:00:30.000Z" });
+  let status = service.status();
+  expect(status.phase).toBe("awaiting_scan");
+  expect(status.login?.qr?.url).toBe("tg://login?token=first");
+
+  /* An expired token refreshes in place — same operation, new QR. */
+  adapter.emit!({ type: "qr", url: "tg://login?token=second", expiresAt: "2026-08-20T12:01:00.000Z" });
+  status = service.status();
+  expect(status.login?.qr?.url).toBe("tg://login?token=second");
+
+  adapter.emit!({ type: "verifying" });
+  expect(service.status().phase).toBe("verifying");
+
+  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: "account_a" } });
+  await settle();
+  status = service.status();
+  expect(status.phase).toBe("connected");
+  expect(status.identity?.name).toBe("Account A");
+  expect(status.credentialRef).toMatch(/^[0-9a-f-]{36}$/);
+
+  /* The credential landed owner-only; hosts registered; connector ensured. */
+  expect(readTelegramSession()?.sessionString).toBe(PLACEHOLDER_SESSION);
+  expect(fs.statSync(telegramSessionPath()).mode & 0o777).toBe(0o600);
+  expect(calls.register).toBe(1);
+  expect(calls.ensure).toEqual([PLACEHOLDER_SESSION]);
+});
+
+test("the session string never appears in any status payload", async () => {
+  const { adapter, service } = harness();
+  service.startLogin();
+  adapter.emit!({ type: "qr", url: "tg://login?token=x", expiresAt: "2026-08-20T12:00:30.000Z" });
+  expect(JSON.stringify(service.status())).not.toContain(PLACEHOLDER_SESSION);
+  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null } });
+  await settle();
+  expect(JSON.stringify(service.status())).not.toContain(PLACEHOLDER_SESSION);
+});
+
+test("2FA: password phase, invalid retry, then success", async () => {
+  const { adapter, service } = harness();
+  const { login } = service.startLogin();
+  adapter.emit!({ type: "qr", url: "tg://login?token=x", expiresAt: "2026-08-20T12:00:30.000Z" });
+  adapter.emit!({ type: "password_required" });
+  let status = service.status();
+  expect(status.phase).toBe("awaiting_password");
+  expect(status.login?.qr).toBeNull();
+
+  service.submitPassword(login!.operationId, "first-guess");
+  expect(service.status().phase).toBe("verifying");
+  expect(adapter.passwords).toEqual(["first-guess"]);
+
+  /* Telegram rejects it: explicit invalid-password state, still in the op. */
+  adapter.emit!({ type: "password_invalid" });
+  status = service.status();
+  expect(status.phase).toBe("awaiting_password");
+  expect(status.login?.passwordError).toBe(true);
+
+  service.submitPassword(login!.operationId, "correct");
+  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null } });
+  await settle();
+  expect(service.status().phase).toBe("connected");
+});
+
+test("one login operation at a time", () => {
+  const { adapter, service } = harness();
+  service.startLogin();
+  expect(() => service.startLogin()).toThrow("already running");
+  expect(adapter.started).toBe(1);
+});
+
+test("cancel terminates the enrollment and clears temporary state", () => {
+  const { adapter, service } = harness();
+  const { login } = service.startLogin();
+  adapter.emit!({ type: "qr", url: "tg://login?token=x", expiresAt: "2026-08-20T12:00:30.000Z" });
+  const status = service.cancelLogin(login!.operationId);
+  expect(adapter.canceled).toBe(1);
+  expect(status.phase).toBe("disconnected");
+  expect(status.login).toBeNull();
+  /* Canceled is not an error: a retry starts clean. */
+  expect(service.startLogin().phase).toBe("starting");
+});
+
+test("a network failure lands in an explicit error state with a sanitized code", () => {
+  const { adapter, service } = harness();
+  service.startLogin();
+  adapter.emit!({ type: "failed", code: "network_failed" });
+  const status = service.status();
+  expect(status.phase).toBe("error");
+  expect(status.error?.code).toBe("network_failed");
+  /* Retry is a fresh start. */
+  expect(service.startLogin().phase).toBe("starting");
+});
+
+test("unconfigured host credentials refuse the login with an explicit code", () => {
+  const { adapter, service } = harness();
+  adapter.unavailable = "credentials_missing";
+  const status = service.startLogin();
+  expect(status.phase).toBe("error");
+  expect(status.error?.code).toBe("credentials_missing");
+});
+
+test("health: connected refreshes identity and re-ensures the connector", async () => {
+  const { calls, service } = harness();
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  const status = await service.checkHealth();
+  expect(status.phase).toBe("connected");
+  expect(status.identity?.username).toBe("account_a");
+  expect(status.lastHealthCheckAt).toBe("2026-08-20T12:00:00.000Z");
+  await settle();
+  expect(calls.ensure).toEqual([PLACEHOLDER_SESSION]);
+});
+
+test("health: a session Telegram revoked reads as expired and stops the connector", async () => {
+  const { adapter, calls, service } = harness();
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  adapter.health = { status: "expired" };
+  const status = await service.checkHealth();
+  expect(status.phase).toBe("expired");
+  expect(calls.stop).toBe(1);
+  /* The stored session survives — Reconnect and local deletion stay offered. */
+  expect(readTelegramSession()).not.toBeNull();
+});
+
+test("health: a probe failure is an explicit error, not a silent disconnect", async () => {
+  const { adapter, service } = harness();
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  adapter.health = { status: "error", code: "network_failed" };
+  const status = await service.checkHealth();
+  expect(status.phase).toBe("error");
+  expect(status.error?.code).toBe("network_failed");
+  expect(readTelegramSession()).not.toBeNull();
+});
+
+test("remote logout removes the local session, stops the connector, unregisters hosts", async () => {
+  const { adapter, calls, service } = harness();
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  const status = await service.logout();
+  expect(adapter.logoutCalls).toBe(1);
+  expect(status.phase).toBe("disconnected");
+  expect(readTelegramSession()).toBeNull();
+  expect(calls.stop).toBe(1);
+  expect(calls.unregister).toBe(1);
+});
+
+test("a failed remote logout PRESERVES the local session and reports why", async () => {
+  const { adapter, calls, service } = harness();
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  adapter.logoutResult = { ok: false, code: "network_failed" };
+  const status = await service.logout();
+  expect(status.phase).toBe("error");
+  expect(status.error?.code).toBe("network_failed");
+  expect(readTelegramSession()).not.toBeNull();
+  expect(calls.unregister).toBe(0);
+
+  /* Local deletion remains available and works without the remote side. */
+  const deleted = service.deleteLocalSession();
+  expect(deleted.phase).toBe("disconnected");
+  expect(readTelegramSession()).toBeNull();
+  expect(calls.stop).toBe(1);
+  expect(calls.unregister).toBe(1);
+});
+
+test("local deletion works directly from connected", async () => {
+  const { adapter, calls, service } = harness();
+  service.startLogin();
+  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null } });
+  await settle();
+  const status = service.deleteLocalSession();
+  expect(status.phase).toBe("disconnected");
+  expect(status.credentialRef).toBeNull();
+  expect(readTelegramSession()).toBeNull();
+  expect(calls.unregister).toBe(1);
+});
+
+test("a connector refusing the read-only bound surfaces as an explicit error", async () => {
+  const { adapter } = harness();
+  const refusing = new TelegramConnectionService({
+    adapter,
+    ensureConnector: async () => ({ ok: false, code: "not_read_only" }),
+    stopConnector: () => {},
+    registerHosts: () => {},
+    unregisterHosts: () => {},
+    now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+  });
+  refusing.startLogin();
+  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null } });
+  await settle();
+  const status = refusing.status();
+  expect(status.phase).toBe("error");
+  expect(status.error?.code).toBe("not_read_only");
+});
+
+test("an unsafe session file (symlink) reads as an explicit session_unsafe error", async () => {
+  const { service } = harness();
+  const outside = path.join(SANDBOX, "planted.json");
+  fs.writeFileSync(outside, JSON.stringify({ version: 1, credentialRef: "x", sessionString: "planted" }));
+  fs.mkdirSync(path.dirname(telegramSessionPath()), { recursive: true, mode: 0o700 });
+  fs.symlinkSync(outside, telegramSessionPath());
+  const status = await service.checkHealth();
+  expect(status.phase).toBe("error");
+  expect(status.error?.code).toBe("session_unsafe");
+});

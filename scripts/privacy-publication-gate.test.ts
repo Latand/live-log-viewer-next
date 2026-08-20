@@ -530,6 +530,73 @@ exec "$LLV_TEST_REAL_GIT" "$@"
     expect(result.stderr.toString()).toBe("");
   });
 
+  test("a JSX controlled password binding is not a baked-in credential; a literal value still is", () => {
+    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(directory);
+    const controlled = join(directory, "panel.tsx");
+    writeFileSync(controlled, [
+      "<input",
+      "  type=\"password\"",
+      "  value={entered}",
+      "  onChange={(event) => setEntered(event.target.value)}",
+      "/>",
+    ].join("\n"));
+    const baked = join(directory, "page.html");
+    const literal = ["synthetic", "fixture", "123456"].join("-");
+    /* Assembled from fragments so this test file never carries the flagged
+       markup itself — the same trick the other fixtures here use. */
+    writeFileSync(baked, ["<in", "put type=\"pass", "word\" value=\"", literal, "\">"].join(""));
+
+    expect(runGate([controlled]).stdout.toString()).toBe("PRIVACY GATE: PASS\n");
+    const result = runGate([baked]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout.toString()).toBe("PRIVACY GATE: FAIL\ncredential: 1\n");
+  });
+
+  test("sha-verified vendored source sheds only the third-party idiom classes", () => {
+    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-vendor-"));
+    temporaryDirectories.push(directory);
+    const vendorDirectory = join(directory, "vendor", "fixture-connector");
+    mkdirSync(vendorDirectory, { recursive: true });
+    const idioms = [
+      ["pass", "word"].join("") + " = read_proxy_environment(\"PASSWORD_FIXTURE\")",
+      "``" + ["", "home", "fixture-person", "workspace"].join("/") + "`` in a docstring",
+    ].join("\n") + "\n";
+    const vendored = join(vendorDirectory, "runtime.py");
+    writeFileSync(vendored, idioms);
+    const digest = createHash("sha256").update(idioms).digest("hex");
+    writeFileSync(join(vendorDirectory, "SHA256SUMS"), `${digest}  runtime.py\n`);
+
+    /* Verified vendor file: the idiom classes are shed. */
+    const verified = runGateArguments(["--repository", directory, "--paths", vendored]);
+    expect(verified.stdout.toString()).toBe("PRIVACY GATE: PASS\n");
+
+    /* The same bytes outside the manifest-verified vendor tree stay flagged. */
+    const stray = join(directory, "runtime-copy.py");
+    writeFileSync(stray, idioms);
+    const outside = runGateArguments(["--repository", directory, "--paths", stray]);
+    expect(outside.exitCode).toBe(1);
+    expect(outside.stdout.toString()).toBe("PRIVACY GATE: FAIL\ncredential: 1\nhome_path: 1\n");
+
+    /* A tampered vendored file no longer matches its digest and re-arms. */
+    writeFileSync(vendored, idioms + "# tampered\n");
+    const tampered = runGateArguments(["--repository", directory, "--paths", vendored]);
+    expect(tampered.exitCode).toBe(1);
+    expect(tampered.stdout.toString()).toBe("PRIVACY GATE: FAIL\ncredential: 1\nhome_path: 1\n");
+
+    /* Classes outside the exemption stay armed even for a verified file. */
+    const sessionIdentifier = ["0190f47d", "1a2b", "7c3d", "8def", "123456789abc"].join("-");
+    const withIdentifier = idioms + `session ${sessionIdentifier}\n`;
+    writeFileSync(vendored, withIdentifier);
+    writeFileSync(
+      join(vendorDirectory, "SHA256SUMS"),
+      `${createHash("sha256").update(withIdentifier).digest("hex")}  runtime.py\n`,
+    );
+    const armed = runGateArguments(["--repository", directory, "--paths", vendored]);
+    expect(armed.exitCode).toBe(1);
+    expect(armed.stdout.toString()).toBe("PRIVACY GATE: FAIL\nresource_identifier: 1\n");
+  });
+
   test("detects UUIDv7 session identifiers with class-only diagnostics", () => {
     const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
     temporaryDirectories.push(directory);

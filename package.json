@@ -11,7 +11,8 @@
   },
   "files": [
     "bin",
-    "dist"
+    "dist",
+    "vendor"
   ],
   "engines": {
     "node": ">=20.9.0",
@@ -35,6 +36,7 @@
     "privacy:fingerprints": "bun scripts/generate-privacy-known-value-fingerprints.ts",
     "privacy:github-audit": "LLV_PRIVACY_KNOWN_VALUE_FINGERPRINTS_FILE=scripts/privacy-known-value-fingerprints.json bun scripts/privacy-github-audit.ts",
     "privacy:placeholders": "bun scripts/generate-privacy-placeholders.ts",
+    "telegram:provision": "bun scripts/provision-telegram-connector.ts",
     "test": "bun test"
   },
   "dependencies": {
