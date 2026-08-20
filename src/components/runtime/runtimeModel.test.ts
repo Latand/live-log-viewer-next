@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import type { Flow } from "@/lib/flows/types";
 import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
+import { projectEngineHostEvent } from "@/lib/runtime/engineHostEvents";
 import { streamingVoiceDelivery } from "@/lib/runtime/voiceDelivery";
 
 import {
@@ -66,13 +67,13 @@ function snapshot(overrides: Partial<RuntimeSnapshot> = {}): RuntimeSnapshot {
 }
 
 let seq = 1000;
-function env<P>(kind: string, scope: { type: string; id: string }, revision: number, payload: P): RuntimeEnvelope<P> {
+function env<P>(kind: string, scope: RuntimeEnvelope["scope"], revision: number, payload: P): RuntimeEnvelope<P> {
   seq += 1;
   return {
     schemaVersion: 1,
     seq,
     eventId: `evt_${seq}`,
-    scope: scope as RuntimeEnvelope["scope"],
+    scope,
     revision,
     kind,
     payload,
@@ -170,12 +171,104 @@ describe("live turn delta buffering", () => {
     expect(store.sessions["conv_a"]?.liveTurn?.items).toHaveLength(2);
   });
 
-  test("a started item leaves the live buffer alone", () => {
+  test("a started assistant item leaves the streamed prose alone", () => {
     let store = installSnapshot(snapshot());
     store = apply(store, env("turn-started", { type: "session", id: "conv_a" }, 4, { conversationId: "conv_a", turnId: "t1" }));
     store = apply(store, env("delta", { type: "session", id: "conv_a" }, 5, { conversationId: "conv_a", turnId: "t1", text: "streaming" }));
-    store = apply(store, env("item", { type: "session", id: "conv_a" }, 6, { conversationId: "conv_a", turnId: "t1", phase: "started", item: {} }));
+    store = apply(store, env("item", { type: "session", id: "conv_a" }, 6, {
+      conversationId: "conv_a",
+      turnId: "t1",
+      phase: "started",
+      item: { type: "agentMessage", id: "assistant-start", text: "draft" },
+    }));
     expect(store.sessions["conv_a"]?.liveTurn?.text).toBe("streaming");
+  });
+
+  test("a Codex tool lifecycle projects one live row from start through completion", () => {
+    let store = installSnapshot(snapshot());
+    store = apply(store, env("turn-started", { type: "session", id: "conv_a" }, 4, {
+      conversationId: "conv_a",
+      turnId: "t1",
+    }));
+    store = apply(store, env("item", { type: "session", id: "conv_a" }, 5, {
+      conversationId: "conv_a",
+      turnId: "t1",
+      phase: "started",
+      item: {
+        type: "commandExecution",
+        id: "command-live",
+        command: "bun test src/components/runtime/runtimeModel.test.ts",
+        cwd: "/repo",
+      },
+    }));
+    expect(store.sessions["conv_a"]?.liveTurn?.items).toEqual([
+      expect.objectContaining({
+        kind: "tool",
+        itemId: "command-live",
+        toolName: "exec_command",
+        phase: "streaming",
+      }),
+    ]);
+
+    store = apply(store, env("item", { type: "session", id: "conv_a" }, 6, {
+      conversationId: "conv_a",
+      turnId: "t1",
+      phase: "completed",
+      item: {
+        type: "commandExecution",
+        id: "command-live",
+        command: "bun test src/components/runtime/runtimeModel.test.ts",
+        cwd: "/repo",
+      },
+    }));
+    expect(store.sessions["conv_a"]?.liveTurn?.items).toEqual([
+      expect.objectContaining({
+        kind: "tool",
+        itemId: "command-live",
+        phase: "awaiting-echo",
+      }),
+    ]);
+  });
+
+  test("the production event bound preserves a started tool summary through a large completion", () => {
+    let store = installSnapshot(snapshot());
+    store = apply(store, env("turn-started", { type: "session", id: "conv_a" }, 4, {
+      conversationId: "conv_a",
+      turnId: "t1",
+    }));
+    const project = (phase: "started" | "completed", item: unknown, seq: number) => {
+      const projected = projectEngineHostEvent("conv_a", "codex:thread-tool", {
+        kind: "item",
+        turnId: "t1",
+        item,
+        phase,
+        seq,
+      });
+      if (!projected) throw new Error("expected a projected runtime event");
+      if (typeof projected.scope === "string") throw new Error("expected an object runtime scope");
+      store = apply(store, env(projected.kind, projected.scope, phase === "started" ? 5 : 6, projected.payload));
+    };
+    project("started", {
+      type: "commandExecution",
+      id: "bounded-command",
+      command: "bun test src/components/runtime/runtimeModel.test.ts",
+      cwd: "/repo",
+    }, 17);
+    project("completed", {
+      type: "commandExecution",
+      id: "bounded-command",
+      aggregatedOutput: "x".repeat(32 * 1024),
+    }, 18);
+    expect(store.sessions["conv_a"]?.liveTurn?.items).toEqual([
+      expect.objectContaining({
+        itemId: "bounded-command",
+        phase: "awaiting-echo",
+        text: JSON.stringify({
+          cmd: "bun test src/components/runtime/runtimeModel.test.ts",
+          workdir: "/repo",
+        }),
+      }),
+    ]);
   });
 
   test("issue 626: authoritative completion replaces streamed prefixes and divergent drafts while empty completion preserves the stream", () => {

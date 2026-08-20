@@ -1,6 +1,7 @@
 "use client";
 
 import type { FeedEntry } from "@/components/feed/parse";
+import { summarizeTool } from "@/components/feed/tools";
 import { newestTranscriptInstant } from "@/components/feed/transcriptOrder";
 import type { RuntimeTurnAxis } from "@/lib/runtime/contracts";
 import { useSyncExternalStore } from "react";
@@ -12,23 +13,115 @@ import {
   type RuntimeLiveTurnItem,
 } from "@/lib/runtime/liveTurn";
 
-interface CanonicalAssistantItem {
+interface CanonicalLiveItem {
   sourceId: string | null;
   text: string;
   at: number | null;
 }
 
-const CLAIM_LIMIT = LIVE_TURN_ITEM_LIMIT + LIVE_TURN_OVERFLOW_LIMIT;
+interface CanonicalToolItem {
+  sourceId: string;
+  family: string;
+  summary: string;
+  at: number | null;
+}
+
+const CLAIM_LIMIT = 2 * (LIVE_TURN_ITEM_LIMIT + LIVE_TURN_OVERFLOW_LIMIT);
 const claims = new Map<string, ReadonlySet<string>>();
 const claimListeners = new Set<() => void>();
 const EMPTY_CLAIMS: ReadonlySet<string> = new Set();
 
 const storageKey = (conversationId: string) => `llvAssistantClaims:${conversationId}`;
 
-function sourceIdOf({ item }: FeedEntry): string | null {
+function sourceIdsOf({ item }: FeedEntry): string[] {
+  if (item.kind === "tool" && item.id) return [item.id];
+  if (item.kind === "cmd-group") {
+    return [...new Set(item.ids.filter((id) => typeof id === "string" && id.length > 0))];
+  }
   return "sourceId" in item && typeof item.sourceId === "string" && item.sourceId
-    ? item.sourceId
-    : null;
+    ? [item.sourceId]
+    : [];
+}
+
+function canonicalToolItems(feed: readonly FeedEntry[]): CanonicalToolItem[] {
+  return feed.flatMap(({ item }) => {
+    if (item.kind === "tool") {
+      return [{
+        sourceId: item.id,
+        family: item.family,
+        summary: item.summary,
+        at: timestamp(item.ts),
+      }];
+    }
+    if (item.kind === "cmd-group") {
+      return item.calls.map((call) => ({
+        sourceId: call.id,
+        family: call.family,
+        summary: call.summary,
+        at: timestamp(call.ts),
+      }));
+    }
+    return [];
+  });
+}
+
+function liveToolArguments(item: RuntimeLiveTurnItem): Record<string, unknown> {
+  try {
+    const value: unknown = JSON.parse(item.text);
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+/** App-server item ids (`exec-*`) and rollout call ids (`call_*`) come from
+    different protocol layers. Pair their tool projections by response order
+    and the same readable family/summary, then persist the live-side alias. */
+function canonicalLiveToolAliases(
+  liveTurn: RuntimeLiveTurn | null | undefined,
+  feed: readonly FeedEntry[],
+): string[] {
+  const candidates = canonicalToolItems(feed);
+  if (!candidates.length) return [];
+  const liveTools = runtimeLiveTurnItems(liveTurn).flatMap((live) => {
+    if (live.kind !== "tool" || !live.itemId) return [];
+    const toolName = live.toolName || "tool";
+    return [{
+      itemId: live.itemId,
+      summary: summarizeTool(
+        toolName,
+        liveToolArguments(live),
+        live.toolEngine === "claude" ? "claude" : "codex",
+      ),
+      at: timestamp(live.startedAt) ?? timestamp(live.completedAt),
+    }];
+  });
+  const consumed = new Set<number>();
+  const matched = new Set<number>();
+  for (const [liveIndex, live] of liveTools.entries()) {
+    const owner = candidates.findIndex((candidate, index) =>
+      !consumed.has(index) && candidate.sourceId === live.itemId);
+    if (owner >= 0) {
+      consumed.add(owner);
+      matched.add(liveIndex);
+    }
+  }
+  for (const [liveIndex, live] of liveTools.entries()) {
+    if (matched.has(liveIndex)) continue;
+    const owner = candidates.findIndex((candidate, index) =>
+        !consumed.has(index)
+        && candidate.family === live.summary.family
+        && candidate.summary === live.summary.summary
+        && live.at !== null
+        && candidate.at !== null
+        && candidate.at >= live.at);
+    if (owner < 0) continue;
+    consumed.add(owner);
+    matched.add(liveIndex);
+  }
+  return liveTools.flatMap((live, index) => matched.has(index) ? [live.itemId] : []);
 }
 
 export function readCanonicalAssistantClaims(conversationId: string): ReadonlySet<string> {
@@ -65,13 +158,11 @@ function writeClaims(conversationId: string, next: ReadonlySet<string>): void {
 export function publishCanonicalAssistantClaims(
   conversationId: string,
   feed: readonly FeedEntry[],
+  liveTurn?: RuntimeLiveTurn | null,
 ): void {
   if (!conversationId) return;
   const previous = readCanonicalAssistantClaims(conversationId);
-  const discovered = feed.flatMap((entry) => {
-    const sourceId = sourceIdOf(entry);
-    return sourceId ? [sourceId] : [];
-  });
+  const discovered = [...feed.flatMap(sourceIdsOf), ...canonicalLiveToolAliases(liveTurn, feed)];
   if (!discovered.some((sourceId) => !previous.has(sourceId))) return;
   const merged = new Set(previous);
   for (const sourceId of discovered) {
@@ -124,23 +215,22 @@ function timestamp(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function canonicalAssistantItems(feed: readonly FeedEntry[]): CanonicalAssistantItem[] {
+function canonicalLiveItems(feed: readonly FeedEntry[]): CanonicalLiveItem[] {
   return feed.flatMap((entry) => {
     const { item } = entry;
-    const sourceId = sourceIdOf(entry);
+    const sourceIds = sourceIdsOf(entry);
     if (item.kind === "prose") {
       return [{
-        sourceId,
+        sourceId: sourceIds[0] ?? null,
         text: item.text.trim(),
         at: timestamp(item.ts),
       }];
     }
-    if (!sourceId) return [];
-    return [{
+    return sourceIds.map((sourceId) => ({
       sourceId,
       text: "",
       at: item.kind === "review" ? timestamp(item.ts) : null,
-    }];
+    }));
   });
 }
 
@@ -180,8 +270,11 @@ export function visibleRuntimeLiveTurnItems(
 ): RuntimeLiveTurnItem[] {
   const overlay = runtimeLiveTurnItems(liveTurn);
   if (!overlay.length) return overlay;
-  const canonical = canonicalAssistantItems(feed);
-  const currentClaims = new Set(canonical.flatMap((item) => item.sourceId ? [item.sourceId] : []));
+  const canonical = canonicalLiveItems(feed);
+  const currentClaims = new Set([
+    ...canonical.flatMap((item) => item.sourceId ? [item.sourceId] : []),
+    ...canonicalLiveToolAliases(liveTurn, feed),
+  ]);
   const transcriptAt = newestTranscriptInstant(feed);
   const claimed = new Set<number>();
   /** The transcript has moved past this item, so the tail must not show it. */
@@ -190,8 +283,8 @@ export function visibleRuntimeLiveTurnItems(
     return transcriptAt !== null && liveAt !== null && liveAt <= transcriptAt;
   };
   return overlay.filter((live) => {
-    if (live.phase === "streaming") return sessionTurn !== "idle" || !transcriptMovedPast(live);
     if (live.itemId && (persistedClaims.has(live.itemId) || currentClaims.has(live.itemId))) return false;
+    if (live.phase === "streaming") return sessionTurn !== "idle" || !transcriptMovedPast(live);
     let owner = live.itemId
       ? canonical.findIndex((item, index) => !claimed.has(index) && item.sourceId === live.itemId)
       : -1;

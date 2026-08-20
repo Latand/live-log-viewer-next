@@ -127,6 +127,21 @@ describe("feed session parity with one-shot parse", () => {
     expect(item.mcp).toBeUndefined();
   });
 
+  test("keeps a Claude SendMessage tool identity on its canonical message row", () => {
+    const item = buildFeed(
+      claudeFile,
+      [claudeSend("send-message-live", "worker-1", "check the branch")],
+      false,
+      "",
+    ).items[0];
+    expect(item).toMatchObject({
+      kind: "tmsg",
+      dir: "out",
+      peer: "worker-1",
+      sourceId: "send-message-live",
+    });
+  });
+
   test("claude transcript: tools, results, grouping, tmsg delivery, compaction", () => {
     const lines = [
       claudeUser("take the first step"),
