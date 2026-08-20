@@ -241,6 +241,25 @@ test("a quoted Codex Telegram table is a semantic conflict and remains byte-unch
   expect(() => Bun.TOML.parse(fs.readFileSync(file, "utf8"))).not.toThrow();
 });
 
+test("malformed or duplicate managed markers never rewrite Codex configuration", () => {
+  const malformed = [
+    `model = "gpt-5.6-codex"\n# >>> agent-log-viewer telegram >>>\nreasoning_effort = "high"\n`,
+    `# >>> agent-log-viewer telegram >>>\nmodel = "gpt-5.6-codex"\n# <<< agent-log-viewer telegram <<<\n`,
+    `# >>> agent-log-viewer telegram >>>\n# >>> agent-log-viewer telegram >>>\nmodel = "gpt-5.6-codex"\n# <<< agent-log-viewer telegram <<<\n`,
+  ];
+  for (const original of malformed) {
+    const registerFile = tempPath("config.toml");
+    fs.writeFileSync(registerFile, original);
+    expect(registerTelegramInCodexConfig(registerFile, URL)).toBe(false);
+    expect(fs.readFileSync(registerFile, "utf8")).toBe(original);
+
+    const removeFile = tempPath("config.toml");
+    fs.writeFileSync(removeFile, original);
+    expect(removeTelegramFromCodexConfig(removeFile)).toBe(false);
+    expect(fs.readFileSync(removeFile, "utf8")).toBe(original);
+  }
+});
+
 test("a corrupt Codex config is byte-unchanged", () => {
   const file = tempPath("config.toml");
   const corrupt = "[mcp_servers.telegram\nurl = broken\n";

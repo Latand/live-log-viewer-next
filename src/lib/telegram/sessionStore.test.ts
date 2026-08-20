@@ -71,6 +71,18 @@ test("a refused overwrite preserves the existing session and connector token byt
   expect(fs.readFileSync(telegramConnectorTokenPath())).toEqual(tokenBefore);
 });
 
+test("a mismatched existing pair remains preserved until explicit deletion", () => {
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  fs.writeFileSync(telegramConnectorTokenPath(), "C".repeat(43) + "\n", { mode: 0o600 });
+  const sessionBefore = fs.readFileSync(telegramSessionPath());
+  const tokenBefore = fs.readFileSync(telegramConnectorTokenPath());
+
+  expect(() => saveTelegramSession(PLACEHOLDER_SESSION + "-replacement")).toThrow(UnsafeTelegramSessionError);
+
+  expect(fs.readFileSync(telegramSessionPath())).toEqual(sessionBefore);
+  expect(fs.readFileSync(telegramConnectorTokenPath())).toEqual(tokenBefore);
+});
+
 test("a session write failure rolls the connector token back byte-for-byte", () => {
   saveTelegramSession(PLACEHOLDER_SESSION);
   const sessionBefore = fs.readFileSync(telegramSessionPath());

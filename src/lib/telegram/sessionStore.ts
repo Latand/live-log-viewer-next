@@ -193,8 +193,14 @@ export function saveTelegramSession(sessionString: string): StoredTelegramSessio
   /* Validate and read BOTH existing files before committing either new value.
      A refused session overwrite therefore cannot rotate or delete the token
      that its preserved JSON still references. */
-  existingSafeSecretContents(telegramSessionPath());
+  const previousSession = existingSafeSecretContents(telegramSessionPath());
   const previousToken = existingSafeSecretContents(telegramConnectorTokenPath());
+  if (previousSession !== null || previousToken !== null) {
+    const existing = readValidatedTelegramSessionFiles(telegramDir());
+    if (existing.status !== "valid") {
+      throw new UnsafeTelegramSessionError(existing.status === "unsafe" ? existing.detail : "existing session pair is incomplete");
+    }
+  }
   const connectorToken = crypto.randomBytes(32).toString("base64url");
   const stored: StoredTelegramSession = {
     version: 1,

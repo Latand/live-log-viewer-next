@@ -61,7 +61,10 @@ rotates with `credentialRef`, and appears in no config file, argv, or API body.
 Corrupt/unreadable session data reports `session_unsafe`, remains preserved for
 explicit local deletion, and never produces a successful remote logout.
 An overwrite preflights both credential files and restores the previous token
-if the second write fails, preserving the existing pair byte-for-byte.
+if the second write fails, preserving the existing pair byte-for-byte. Any
+pre-existing pair must also pass the complete shared validator before
+overwrite; corrupt, incomplete, or digest-mismatched state remains preserved
+until explicit local deletion.
 
 AC5: `Log out` performs remote revocation and then removes the local session,
 stops the connector, and unregisters the host definition. A failed remote
@@ -84,7 +87,9 @@ variable present only in granted operator-root launches. Existing corrupt
 Codex TOML is byte-unchanged, including valid quoted-key conflicts. Host
 registration returns one aggregate result; every required definition must be
 installed before `connected` is published. Successful health recovery
-re-registers both hosts.
+re-registers both hosts. Codex ownership markers are recognized only as one
+exact full-line managed block; unmatched, duplicate, reversed, or malformed
+markers fail closed and remain byte-unchanged.
 
 AC7: The #739 boundary extends by exactly one name: `telegram` joins
 `GRANTABLE_MCP_SERVERS` and the operator-root default; the delegated default

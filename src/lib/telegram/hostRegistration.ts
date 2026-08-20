@@ -179,18 +179,33 @@ function codexManagedBlock(url: string): string {
   return `${CODEX_BLOCK_BEGIN}\n[mcp_servers.telegram]\nurl = "${url}"\nbearer_token_env_var = "${TELEGRAM_CONNECTOR_TOKEN_ENV}"\n${CODEX_BLOCK_END}\n`;
 }
 
-function withoutCodexManagedBlock(contents: string): string {
-  const begin = contents.indexOf(CODEX_BLOCK_BEGIN);
-  if (begin === -1) return contents;
-  const end = contents.indexOf(CODEX_BLOCK_END, begin);
-  if (end === -1) return contents;
-  const after = end + CODEX_BLOCK_END.length;
+type CodexManagedBlockState =
+  | { status: "none" | "valid"; contents: string }
+  | { status: "invalid" };
+
+function codexManagedBlockState(contents: string): CodexManagedBlockState {
+  const begins = [...contents.matchAll(/^# >>> agent-log-viewer telegram >>>\r?$/gm)];
+  const ends = [...contents.matchAll(/^# <<< agent-log-viewer telegram <<<\r?$/gm)];
+  if (begins.length === 0 && ends.length === 0) return { status: "none", contents };
+  if (begins.length !== 1 || ends.length !== 1) return { status: "invalid" };
+  const begin = begins[0]!;
+  const end = ends[0]!;
+  if (begin.index >= end.index) return { status: "invalid" };
+  const block = contents.slice(begin.index, end.index + end[0].length).replaceAll("\r\n", "\n");
+  const lines = block.split("\n");
+  if (lines.length !== 5
+    || lines[0] !== CODEX_BLOCK_BEGIN
+    || lines[1] !== "[mcp_servers.telegram]"
+    || !/^url = "[^"\r\n]+"$/.test(lines[2]!)
+    || lines[3] !== `bearer_token_env_var = "${TELEGRAM_CONNECTOR_TOKEN_ENV}"`
+    || lines[4] !== CODEX_BLOCK_END) return { status: "invalid" };
+  const after = end.index + end[0].length;
   /* Registration separates the block with one blank line; removal collapses
      exactly that back, so register → remove restores the original bytes. */
-  const prefix = contents.slice(0, begin).replace(/\n+$/, "\n");
+  const prefix = contents.slice(0, begin.index).replace(/\n+$/, "\n");
   const tail = contents.slice(after).replace(/^\n+/, "");
-  if (prefix === "" || prefix === "\n") return tail || "\n";
-  return prefix + tail;
+  const stripped = prefix === "" || prefix === "\n" ? tail || "\n" : prefix + tail;
+  return { status: "valid", contents: stripped };
 }
 
 function validCodexToml(contents: string): boolean {
@@ -222,7 +237,9 @@ export function registerTelegramInCodexConfig(pathname: string, url: string): bo
   if (!safeToRewrite(pathname)) return false;
   const contents = fs.existsSync(pathname) ? fs.readFileSync(pathname, "utf8") : "";
   if (!validCodexToml(contents)) return false;
-  const stripped = withoutCodexManagedBlock(contents);
+  const managed = codexManagedBlockState(contents);
+  if (managed.status === "invalid") return false;
+  const stripped = managed.contents;
   if (hasCodexTelegramTable(stripped)) return false;
   const block = codexManagedBlock(url);
   if (contents.includes(block)) return true;
@@ -237,9 +254,10 @@ export function removeTelegramFromCodexConfig(pathname: string): boolean {
   if (!safeToRewrite(pathname) || !fs.existsSync(pathname)) return true;
   const contents = fs.readFileSync(pathname, "utf8");
   if (!validCodexToml(contents)) return false;
-  const stripped = withoutCodexManagedBlock(contents);
-  if (stripped === contents) return true;
-  atomicWrite(pathname, stripped, 0o600);
+  const managed = codexManagedBlockState(contents);
+  if (managed.status === "invalid") return false;
+  if (managed.status === "none") return true;
+  atomicWrite(pathname, managed.contents, 0o600);
   return true;
 }
 

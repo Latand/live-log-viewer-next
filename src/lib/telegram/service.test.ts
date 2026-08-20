@@ -625,3 +625,19 @@ test("corrupt session blocks remote logout and health without deleting credentia
   expect((await service.deleteLocalSession()).phase).toBe("disconnected");
   expect(fs.existsSync(telegramSessionPath())).toBe(false);
 });
+
+test("retry authorization cannot overwrite a preserved unsafe session", async () => {
+  const { adapter, service } = harness();
+  fs.mkdirSync(path.dirname(telegramSessionPath()), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(telegramSessionPath(), "{broken", { mode: 0o600 });
+  const before = fs.readFileSync(telegramSessionPath());
+
+  await service.startLogin();
+  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null } });
+  await settle();
+
+  expect(service.status().phase).toBe("error");
+  expect(service.status().error?.code).toBe("session_unsafe");
+  expect(fs.readFileSync(telegramSessionPath())).toEqual(before);
+  expect(fs.existsSync(path.join(path.dirname(telegramSessionPath()), "connector-token"))).toBe(false);
+});
