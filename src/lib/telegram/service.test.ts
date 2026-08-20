@@ -16,6 +16,11 @@ import type { TelegramServicePorts } from "./service";
 
 /* A placeholder with the string-session shape; never a real credential. */
 const PLACEHOLDER_SESSION = "1ApWapzMBu4placeholder-not-a-real-session";
+const HOSTS_REGISTERED = {
+  ok: true,
+  claude: { registered: 1, conflict: 0, unwritable: 0 },
+  codex: { registered: 1, failed: 0 },
+};
 
 /** The fake Telegram: scripted events in, recorded calls out. No test in this
     repo ever reaches a real account. */
@@ -54,7 +59,7 @@ function harness() {
       return { ok: true, url: "http://127.0.0.1:8809/mcp" };
     },
     stopConnector: () => { calls.stop += 1; },
-    registerHosts: () => { calls.register += 1; calls.order.push("register"); },
+    registerHosts: () => { calls.register += 1; calls.order.push("register"); return HOSTS_REGISTERED; },
     unregisterHosts: () => { calls.unregister += 1; },
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
   };
@@ -208,7 +213,7 @@ test("health recovery registers hosts after a prior connector failure", async ()
       ? { ok: false, code: "connector_failed" }
       : { ok: true, url: "http://127.0.0.1:8809/mcp" }),
     stopConnector: () => {},
-    registerHosts: () => { registrations += 1; },
+    registerHosts: () => { registrations += 1; return HOSTS_REGISTERED; },
     unregisterHosts: () => {},
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
   });
@@ -217,6 +222,27 @@ test("health recovery registers hosts after a prior connector failure", async ()
   expect(registrations).toBe(0);
   expect((await recovering.checkHealth()).phase).toBe("connected");
   expect(registrations).toBe(1);
+});
+
+test("health releases the shared connector before the session bridge connects", async () => {
+  const adapter = new FakeAdapter();
+  const order: string[] = [];
+  adapter.checkSession = async () => {
+    order.push("health");
+    return { status: "connected", identity: { name: "Account A", username: null } };
+  };
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  const service = new TelegramConnectionService({
+    adapter,
+    stopConnector: () => { order.push("stop"); },
+    ensureConnector: async () => { order.push("ensure"); return { ok: true, url: "http://127.0.0.1:8809/mcp" }; },
+    registerHosts: () => { order.push("register"); return HOSTS_REGISTERED; },
+    unregisterHosts: () => {},
+    now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+  });
+
+  expect((await service.checkHealth()).phase).toBe("connected");
+  expect(order).toEqual(["stop", "health", "ensure", "register"]);
 });
 
 test("health: a session Telegram revoked reads as expired and stops the connector", async () => {
@@ -251,6 +277,25 @@ test("remote logout removes the local session, stops the connector, unregisters 
   expect(calls.unregister).toBe(1);
 });
 
+test("remote logout releases the shared connector before the session bridge connects", async () => {
+  const adapter = new FakeAdapter();
+  const order: string[] = [];
+  adapter.logout = async () => { order.push("logout"); return { ok: true, code: null }; };
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  const service = new TelegramConnectionService({
+    adapter,
+    stopConnector: () => { order.push("stop"); },
+    ensureConnector: async () => ({ ok: true, url: "http://127.0.0.1:8809/mcp" }),
+    registerHosts: () => HOSTS_REGISTERED,
+    unregisterHosts: () => { order.push("unregister"); },
+    now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+  });
+
+  expect((await service.logout()).phase).toBe("disconnected");
+  expect(order[0]).toBe("stop");
+  expect(order.indexOf("stop")).toBeLessThan(order.indexOf("logout"));
+});
+
 test("a failed remote logout PRESERVES the local session and reports why", async () => {
   const { adapter, calls, service } = harness();
   saveTelegramSession(PLACEHOLDER_SESSION);
@@ -265,7 +310,7 @@ test("a failed remote logout PRESERVES the local session and reports why", async
   const deleted = service.deleteLocalSession();
   expect(deleted.phase).toBe("disconnected");
   expect(readTelegramSession()).toBeNull();
-  expect(calls.stop).toBe(1);
+  expect(calls.stop).toBe(2);
   expect(calls.unregister).toBe(1);
 });
 
@@ -288,7 +333,7 @@ test("a connector refusing the read-only bound blocks connected and never regist
     adapter,
     ensureConnector: async () => ({ ok: false, code: "not_read_only" }),
     stopConnector: () => {},
-    registerHosts: () => { registered += 1; },
+    registerHosts: () => { registered += 1; return HOSTS_REGISTERED; },
     unregisterHosts: () => {},
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
   });
@@ -310,7 +355,7 @@ test("a connector bring-up that THROWS surfaces too, instead of leaving connecte
     adapter,
     ensureConnector: async () => { throw new Error("boom"); },
     stopConnector: () => {},
-    registerHosts: () => { registered += 1; },
+    registerHosts: () => { registered += 1; return HOSTS_REGISTERED; },
     unregisterHosts: () => {},
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
   });
@@ -324,6 +369,30 @@ test("a connector bring-up that THROWS surfaces too, instead of leaving connecte
   expect(readTelegramSession()?.sessionString).toBe(PLACEHOLDER_SESSION);
 });
 
+test("host registration failure blocks connected after connector verification", async () => {
+  const adapter = new FakeAdapter();
+  let stopped = 0;
+  const service = new TelegramConnectionService({
+    adapter,
+    ensureConnector: async () => ({ ok: true, url: "http://127.0.0.1:8809/mcp" }),
+    stopConnector: () => { stopped += 1; },
+    registerHosts: () => ({
+      ok: false,
+      claude: { registered: 0, conflict: 1, unwritable: 0 },
+      codex: { registered: 0, failed: 1 },
+    }),
+    unregisterHosts: () => {},
+    now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+  });
+  service.startLogin();
+  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null } });
+  await settle();
+
+  expect(service.status().phase).toBe("error");
+  expect(service.status().error?.code).toBe("host_registration_failed");
+  expect(stopped).toBe(1);
+});
+
 test("health over a healthy account still refuses connected when the connector fails", async () => {
   const { adapter } = harness();
   saveTelegramSession(PLACEHOLDER_SESSION);
@@ -331,7 +400,7 @@ test("health over a healthy account still refuses connected when the connector f
     adapter,
     ensureConnector: async () => ({ ok: false, code: "connector_failed" }),
     stopConnector: () => {},
-    registerHosts: () => {},
+    registerHosts: () => HOSTS_REGISTERED,
     unregisterHosts: () => {},
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
   });
@@ -341,6 +410,29 @@ test("health over a healthy account still refuses connected when the connector f
   /* The account is fine, so its identity and session survive for the retry. */
   expect(status.identity?.username).toBe("account_a");
   expect(readTelegramSession()).not.toBeNull();
+});
+
+test("health recovery reports host registration failure instead of connected", async () => {
+  const adapter = new FakeAdapter();
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  let unregistered = 0;
+  const service = new TelegramConnectionService({
+    adapter,
+    ensureConnector: async () => ({ ok: true, url: "http://127.0.0.1:8809/mcp" }),
+    stopConnector: () => {},
+    registerHosts: () => ({
+      ok: false,
+      claude: { registered: 0, conflict: 0, unwritable: 1 },
+      codex: { registered: 1, failed: 0 },
+    }),
+    unregisterHosts: () => { unregistered += 1; },
+    now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+  });
+
+  const status = await service.checkHealth();
+  expect(status.phase).toBe("error");
+  expect(status.error?.code).toBe("host_registration_failed");
+  expect(unregistered).toBe(1);
 });
 
 test("an unsafe session file (symlink) reads as an explicit session_unsafe error", async () => {
@@ -378,7 +470,7 @@ test("cancel during connector verification cannot publish the authorized session
     adapter,
     ensureConnector: async () => await connector,
     stopConnector: () => { calls.stop += 1; },
-    registerHosts: () => { calls.register += 1; },
+    registerHosts: () => { calls.register += 1; return HOSTS_REGISTERED; },
     unregisterHosts: () => { calls.unregister += 1; },
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
   });

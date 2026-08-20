@@ -723,6 +723,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "telegram.err.canceled": "Вхід скасовано.",
   "telegram.err.session_unsafe": "Локальне сховище сесії не пройшло перевірку безпеки.",
   "telegram.err.connector_failed": "Не вдалося запустити конектор Telegram.",
+  "telegram.err.host_registration_failed": "Не вдалося зареєструвати Telegram у локальних хостах агентів.",
   "telegram.err.not_read_only": "Відмовлено: конектор оголосив інструменти, що не є лише для читання.",
   "telegram.err.logout_failed": "Віддалений вихід не вдався. Можна видалити локальну сесію.",
   "telegram.err.health_failed": "Не вдалося перевірити підключення.",

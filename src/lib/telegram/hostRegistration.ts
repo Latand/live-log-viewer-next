@@ -41,6 +41,12 @@ export type TelegramRegistrationTargets = {
   codexConfigPaths: string[];
 };
 
+export type TelegramHostRegistrationResult = {
+  ok: boolean;
+  claude: Record<ClaudeRegistrationResult, number>;
+  codex: { registered: number; failed: number };
+};
+
 /** Claude: the legacy `~/.claude.json` plus each managed account home's own
     `.claude.json` (the exact files the spawn paths read definitions from).
     Codex: the legacy `~/.codex/config.toml` only — managed Codex homes symlink
@@ -196,6 +202,17 @@ function validCodexToml(contents: string): boolean {
   }
 }
 
+function hasCodexTelegramTable(contents: string): boolean {
+  try {
+    const parsed = Bun.TOML.parse(contents) as Record<string, unknown>;
+    const servers = parsed.mcp_servers;
+    return Boolean(servers && typeof servers === "object" && !Array.isArray(servers)
+      && Object.prototype.hasOwnProperty.call(servers, CLAUDE_ENTRY_NAME));
+  } catch {
+    return false;
+  }
+}
+
 /** Upserts a marker-delimited `[mcp_servers.telegram]` block in config.toml.
     Markers keep the edit reversible and byte-surgical without a TOML rewriter;
     everything outside the block is preserved verbatim. An operator-authored
@@ -206,11 +223,13 @@ export function registerTelegramInCodexConfig(pathname: string, url: string): bo
   const contents = fs.existsSync(pathname) ? fs.readFileSync(pathname, "utf8") : "";
   if (!validCodexToml(contents)) return false;
   const stripped = withoutCodexManagedBlock(contents);
-  if (/^\s*\[mcp_servers\.telegram(\.|])/m.test(stripped)) return true;
+  if (hasCodexTelegramTable(stripped)) return false;
   const block = codexManagedBlock(url);
   if (contents.includes(block)) return true;
   const base = stripped === "" ? "" : stripped.replace(/\n*$/, "\n\n");
-  atomicWrite(pathname, base + block, 0o600);
+  const candidate = base + block;
+  if (!validCodexToml(candidate)) return false;
+  atomicWrite(pathname, candidate, 0o600);
   return true;
 }
 
@@ -224,16 +243,32 @@ export function removeTelegramFromCodexConfig(pathname: string): boolean {
   return true;
 }
 
-export function registerTelegramHosts(targets: TelegramRegistrationTargets = telegramRegistrationTargets(), url: string = telegramMcpUrl()): void {
+export function registerTelegramHosts(
+  targets: TelegramRegistrationTargets = telegramRegistrationTargets(),
+  url: string = telegramMcpUrl(),
+): TelegramHostRegistrationResult {
   const records = readRegistrationRecords();
+  const result: TelegramHostRegistrationResult = {
+    ok: false,
+    claude: { registered: 0, conflict: 0, unwritable: 0 },
+    codex: { registered: 0, failed: 0 },
+  };
   for (const pathname of targets.claudeStatePaths) {
-    const result = registerTelegramInClaudeState(pathname, url, records.claude[pathname] ?? null);
-    if (result === "registered") records.claude[pathname] = url;
+    const registration = registerTelegramInClaudeState(pathname, url, records.claude[pathname] ?? null);
+    result.claude[registration] += 1;
+    if (registration === "registered") records.claude[pathname] = url;
     /* A conflict is the operator's entry — nothing of ours exists there. */
-    else if (result === "conflict") delete records.claude[pathname];
+    else if (registration === "conflict") delete records.claude[pathname];
   }
   writeRegistrationRecords(records);
-  for (const pathname of targets.codexConfigPaths) registerTelegramInCodexConfig(pathname, url);
+  for (const pathname of targets.codexConfigPaths) {
+    if (registerTelegramInCodexConfig(pathname, url)) result.codex.registered += 1;
+    else result.codex.failed += 1;
+  }
+  result.ok = result.claude.conflict === 0
+    && result.claude.unwritable === 0
+    && result.codex.failed === 0;
+  return result;
 }
 
 export function unregisterTelegramHosts(targets: TelegramRegistrationTargets = telegramRegistrationTargets()): void {

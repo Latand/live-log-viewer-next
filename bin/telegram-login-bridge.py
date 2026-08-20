@@ -43,6 +43,7 @@ from telethon.errors import (
     SessionRevokedError,
 )
 from telethon.sessions import StringSession
+from telegram_mcp.singleton import SessionLock, session_identity
 
 # The whole enrollment self-terminates even if the supervisor dies: an orphaned
 # bridge holding a half-done QR login must not linger with a live connection.
@@ -50,6 +51,7 @@ ENROLL_DEADLINE_S = 15 * 60
 CONNECT_TIMEOUT_S = 30
 
 DEVICE_MODEL = "Agent Log Viewer"
+SESSION_LOCK_GRACE_S = 20.0
 
 
 def emit(payload: dict) -> None:
@@ -73,6 +75,13 @@ def make_client(session: str | None) -> TelegramClient:
         device_model=DEVICE_MODEL,
         app_version="1.0",
     )
+
+
+async def acquire_session_lock(client: TelegramClient) -> SessionLock:
+    """Share the connector's exact per-session exclusion boundary."""
+    lock = SessionLock("default", session_identity(client))
+    await asyncio.to_thread(lock.acquire, grace_seconds=SESSION_LOCK_GRACE_S)
+    return lock
 
 
 def identity_of(user) -> dict:
@@ -110,6 +119,7 @@ async def sign_in_with_password(client: TelegramClient) -> object | None:
 
 async def enroll() -> None:
     client = make_client(None)
+    lock = None
     await client.connect()
     try:
         qr = await client.qr_login()
@@ -129,6 +139,7 @@ async def enroll() -> None:
                     return
         emit({"event": "verifying"})
         me = await client.get_me()
+        lock = await acquire_session_lock(client)
         emit({
             "event": "authorized",
             "session": client.session.save(),
@@ -136,6 +147,8 @@ async def enroll() -> None:
         })
     finally:
         await client.disconnect()
+        if lock is not None:
+            lock.release()
 
 
 async def health() -> None:
@@ -145,7 +158,9 @@ async def health() -> None:
         emit({"event": "health", "status": "error", "code": "bridge_failed"})
         return
     client = make_client(session)
+    lock = None
     try:
+        lock = await acquire_session_lock(client)
         await asyncio.wait_for(client.connect(), timeout=CONNECT_TIMEOUT_S)
         try:
             if not await client.is_user_authorized():
@@ -164,6 +179,9 @@ async def health() -> None:
         emit({"event": "health", "status": "error", "code": "network_failed"})
     except Exception:
         emit({"event": "health", "status": "error", "code": "bridge_failed"})
+    finally:
+        if lock is not None:
+            lock.release()
 
 
 async def logout() -> None:
@@ -173,7 +191,9 @@ async def logout() -> None:
         emit({"event": "logout", "ok": False, "code": "bridge_failed"})
         return
     client = make_client(session)
+    lock = None
     try:
+        lock = await acquire_session_lock(client)
         await asyncio.wait_for(client.connect(), timeout=CONNECT_TIMEOUT_S)
         ok = bool(await client.log_out())
         emit({"event": "logout", "ok": ok, "code": None if ok else "logout_failed"})
@@ -184,6 +204,12 @@ async def logout() -> None:
         emit({"event": "logout", "ok": False, "code": "network_failed"})
     except Exception:
         emit({"event": "logout", "ok": False, "code": "bridge_failed"})
+    finally:
+        try:
+            await client.disconnect()
+        finally:
+            if lock is not None:
+                lock.release()
 
 
 async def run(command: str) -> None:

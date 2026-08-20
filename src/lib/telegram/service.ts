@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import { processTelegramAdapter, type TelegramAdapter, type TelegramEnrollmentHandle } from "./adapter";
 import { ensureTelegramConnector, stopTelegramConnector, type ConnectorEnsureResult } from "./connector";
 import type { TelegramErrorCode, TelegramIdentity, TelegramStatusPayload } from "./contracts";
-import { registerTelegramHosts, unregisterTelegramHosts } from "./hostRegistration";
+import { registerTelegramHosts, unregisterTelegramHosts, type TelegramHostRegistrationResult } from "./hostRegistration";
 import {
   deleteTelegramSession,
   readTelegramConnection,
@@ -31,7 +31,7 @@ export interface TelegramServicePorts {
   adapter: TelegramAdapter;
   ensureConnector(session: StoredTelegramSession): Promise<ConnectorEnsureResult>;
   stopConnector(): void;
-  registerHosts(): void;
+  registerHosts(): TelegramHostRegistrationResult;
   unregisterHosts(): void;
   now(): number;
 }
@@ -180,6 +180,11 @@ export class TelegramConnectionService {
       writeTelegramConnection({ version: 1, status: "error", credentialRef: stored.credentialRef, identity, lastHealthCheckAt: null, errorCode: connector.code });
       return;
     }
+    if (!this.registerVerifiedHosts()) {
+      this.cleanupFailedRegistration();
+      writeTelegramConnection({ version: 1, status: "error", credentialRef: stored.credentialRef, identity, lastHealthCheckAt: null, errorCode: "host_registration_failed" });
+      return;
+    }
     writeTelegramConnection({
       version: 1,
       status: "connected",
@@ -188,7 +193,16 @@ export class TelegramConnectionService {
       lastHealthCheckAt: new Date(this.ports.now()).toISOString(),
       errorCode: null,
     });
-    this.ports.registerHosts();
+  }
+
+  private registerVerifiedHosts(): boolean {
+    try { return this.ports.registerHosts().ok; }
+    catch { return false; }
+  }
+
+  private cleanupFailedRegistration(): void {
+    this.ports.stopConnector();
+    try { this.ports.unregisterHosts(); } catch { /* inaccessible host state stays fail-closed */ }
   }
 
   private recordError(code: TelegramErrorCode): void {
@@ -271,6 +285,10 @@ export class TelegramConnectionService {
       }
       return;
     }
+    /* The bridge uses the same StringSession as the shared connector. Release
+       the long-lived owner before the short health client acquires the
+       vendored per-session lock and connects. */
+    this.ports.stopConnector();
     const result = await this.ports.adapter.checkSession(session.sessionString);
     if (generation !== this.lifecycleGeneration) return;
     const checkedAt = new Date(this.ports.now()).toISOString();
@@ -292,12 +310,15 @@ export class TelegramConnectionService {
         writeTelegramConnection({ version: 1, status: "error", credentialRef: session.credentialRef, identity: result.identity, lastHealthCheckAt: checkedAt, errorCode: connector.code });
         return;
       }
-      this.ports.registerHosts();
+      if (!this.registerVerifiedHosts()) {
+        this.cleanupFailedRegistration();
+        writeTelegramConnection({ version: 1, status: "error", credentialRef: session.credentialRef, identity: result.identity, lastHealthCheckAt: checkedAt, errorCode: "host_registration_failed" });
+        return;
+      }
       writeTelegramConnection({ version: 1, status: "connected", credentialRef: session.credentialRef, identity: result.identity, lastHealthCheckAt: checkedAt, errorCode: null });
       return;
     }
     if (result.status === "expired") {
-      this.ports.stopConnector();
       writeTelegramConnection({ version: 1, status: "expired", credentialRef: session.credentialRef, identity: connection.identity, lastHealthCheckAt: checkedAt, errorCode: null });
       return;
     }
@@ -324,13 +345,17 @@ export class TelegramConnectionService {
       this.disconnectLocally();
       return this.status();
     }
+    /* Remote revocation uses a short-lived client with this exact session.
+       Release the shared connector first; the bridge's session lock then
+       waits for process exit before it contacts Telegram. */
+    this.ports.stopConnector();
     const result = await this.ports.adapter.logout(session.sessionString);
     if (generation !== this.lifecycleGeneration) return this.status();
     if (!result.ok) {
       this.recordError(result.code ?? "logout_failed");
       return this.status();
     }
-    this.disconnectLocally();
+    this.disconnectLocally(true);
     return this.status();
   }
 
@@ -343,10 +368,10 @@ export class TelegramConnectionService {
     return this.status();
   }
 
-  private disconnectLocally(): void {
+  private disconnectLocally(connectorAlreadyStopped = false): void {
     /* Revoke runtime access first. Even an unsafe status/credential path must
        never leave the credential-bearing connector alive after this action. */
-    this.ports.stopConnector();
+    if (!connectorAlreadyStopped) this.ports.stopConnector();
     this.ports.unregisterHosts();
     deleteTelegramSession();
     writeTelegramConnection({ version: 1, status: "disconnected", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: null });

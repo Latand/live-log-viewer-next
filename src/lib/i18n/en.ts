@@ -737,6 +737,7 @@ export const en = {
   "telegram.err.canceled": "Sign-in was canceled.",
   "telegram.err.session_unsafe": "Local session storage failed safety checks.",
   "telegram.err.connector_failed": "The Telegram connector could not start.",
+  "telegram.err.host_registration_failed": "Telegram could not be registered with the local agent hosts.",
   "telegram.err.not_read_only": "Refused: the connector advertised tools that are not read-only.",
   "telegram.err.logout_failed": "Remote logout failed. You can delete the local session instead.",
   "telegram.err.health_failed": "Could not check the connection.",

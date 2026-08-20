@@ -45,7 +45,11 @@ function installService() {
     adapter,
     ensureConnector: async () => ({ ok: true, url: "http://127.0.0.1:8809/mcp" }),
     stopConnector: () => {},
-    registerHosts: () => {},
+    registerHosts: () => ({
+      ok: true,
+      claude: { registered: 1, conflict: 0, unwritable: 0 },
+      codex: { registered: 1, failed: 0 },
+    }),
     unregisterHosts: () => {},
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
   }));

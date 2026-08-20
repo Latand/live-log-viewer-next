@@ -242,6 +242,88 @@ test("the packaged MCP entrypoint enforces bearer auth and token-bound identity"
   expect(output.name).toMatch(/^telegram-[a-f0-9]{64}$/);
 });
 
+test("health and logout bridges acquire the vendored session lock before connecting", () => {
+  const python = Bun.which("python3");
+  expect(python).not.toBeNull();
+  const modules = path.join(SANDBOX, "bridge-lock-modules");
+  for (const directory of ["telegram_mcp", "telethon"]) {
+    fs.mkdirSync(path.join(modules, directory), { recursive: true });
+    fs.writeFileSync(path.join(modules, directory, "__init__.py"), "");
+  }
+  fs.writeFileSync(path.join(modules, "telegram_mcp", "singleton.py"), [
+    "LOCKED = False",
+    "class SessionLock:",
+    "    def __init__(self, label, identity): pass",
+    "    def acquire(self, **kwargs):",
+    "        global LOCKED",
+    "        LOCKED = True",
+    "    def release(self):",
+    "        global LOCKED",
+    "        LOCKED = False",
+    "class SessionLockError(RuntimeError): pass",
+    "def session_identity(client): return 'fixture-session'",
+    "",
+  ].join("\n"));
+  fs.writeFileSync(path.join(modules, "telethon", "sessions.py"), [
+    "class StringSession:",
+    "    def __init__(self, value=None): self.value = value",
+    "    def save(self): return self.value or 'fixture-session'",
+    "",
+  ].join("\n"));
+  fs.writeFileSync(path.join(modules, "telethon", "errors.py"), [
+    "class AuthKeyDuplicatedError(Exception): pass",
+    "class AuthKeyUnregisteredError(Exception): pass",
+    "class PasswordHashInvalidError(Exception): pass",
+    "class SessionPasswordNeededError(Exception): pass",
+    "class SessionRevokedError(Exception): pass",
+    "",
+  ].join("\n"));
+  fs.writeFileSync(path.join(modules, "telethon", "__init__.py"), [
+    "from .sessions import StringSession",
+    "class User:",
+    "    first_name, last_name, username = 'Account', 'A', None",
+    "class TelegramClient:",
+    "    def __init__(self, session, *args, **kwargs): self.session = session",
+    "    async def connect(self):",
+    "        from telegram_mcp import singleton",
+    "        if not singleton.LOCKED: raise RuntimeError('session lock missing')",
+    "    async def is_user_authorized(self): return True",
+    "    async def get_me(self): return User()",
+    "    async def log_out(self): return True",
+    "    async def disconnect(self): pass",
+    "",
+  ].join("\n"));
+  const result = Bun.spawnSync({
+    cmd: [python!, path.resolve(import.meta.dir, "..", "..", "..", "bin", "telegram-login-bridge.py"), "health"],
+    env: {
+      ...process.env,
+      PYTHONPATH: modules,
+      TELEGRAM_API_ID: "12345",
+      TELEGRAM_API_HASH: "0123456789abcdef0123456789abcdef",
+    },
+    stdin: Buffer.from(`${JSON.stringify({ session: "1ApWapzMBu4placeholder-not-a-real-session" })}\n`),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(result.exitCode).toBe(0);
+  expect(JSON.parse(result.stdout.toString())).toMatchObject({ event: "health", status: "connected" });
+
+  const logout = Bun.spawnSync({
+    cmd: [python!, path.resolve(import.meta.dir, "..", "..", "..", "bin", "telegram-login-bridge.py"), "logout"],
+    env: {
+      ...process.env,
+      PYTHONPATH: modules,
+      TELEGRAM_API_ID: "12345",
+      TELEGRAM_API_HASH: "0123456789abcdef0123456789abcdef",
+    },
+    stdin: Buffer.from(`${JSON.stringify({ session: "1ApWapzMBu4placeholder-not-a-real-session" })}\n`),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(logout.exitCode).toBe(0);
+  expect(JSON.parse(logout.stdout.toString())).toMatchObject({ event: "logout", ok: true });
+});
+
 test("bridge launches carry credentials in env only and no session anywhere", () => {
   const spec = bridgeLaunchSpec("enroll", { apiId: "12345", apiHash: "0123456789abcdef0123456789abcdef" });
   expect(spec.args.join(" ")).not.toContain("12345");

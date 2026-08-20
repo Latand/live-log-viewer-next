@@ -37,6 +37,7 @@ export function telegramErrKey(code: TelegramErrorCode): Parameters<TFunction>[0
     canceled: "telegram.err.canceled",
     session_unsafe: "telegram.err.session_unsafe",
     connector_failed: "telegram.err.connector_failed",
+    host_registration_failed: "telegram.err.host_registration_failed",
     not_read_only: "telegram.err.not_read_only",
     logout_failed: "telegram.err.logout_failed",
     health_failed: "telegram.err.health_failed",

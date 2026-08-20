@@ -48,6 +48,13 @@ here and regenerating `SHA256SUMS`.
    explicit tool-name allowlist at connector readiness
    (`src/lib/telegram/connector.ts`), so the annotation is not the only line.
 
+2. `telegram_mcp/tools/chats.py` — `get_chats` and `list_chats` enforce a hard
+   maximum of 100 returned dialogs per request. `get_chats` validates the
+   1-indexed page, caps it at 10, and uses a bounded Telegram `limit` of at most
+   1000 dialogs instead of downloading the complete dialog list. Invalid,
+   boolean, zero, negative, and oversized pagination values are rejected before
+   any Telegram call.
+
 ## Verifying against upstream
 
 ```sh

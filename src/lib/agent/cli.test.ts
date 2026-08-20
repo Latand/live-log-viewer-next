@@ -83,6 +83,16 @@ test("Telegram grants load the connector token only into granted CLI processes",
       expect(spec.command).not.toContain("connector-token");
       expect(spec.launchProfile?.mcpServers).toEqual(["viewer"]);
     }
+
+    const tokenPrefix = codexGranted.command.replace(/env -u LLV_TOKEN[\s\S]*$/, "true");
+    const beforeEnrollment = Bun.spawnSync(["sh", "-c", tokenPrefix], {
+      cwd: SANDBOX,
+      env: process.env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(beforeEnrollment.stderr.toString()).toBe("");
+    expect(beforeEnrollment.exitCode).toBe(0);
   } finally {
     if (previousBinary === undefined) delete process.env.LLV_CODEX_BINARY;
     else process.env.LLV_CODEX_BINARY = previousBinary;

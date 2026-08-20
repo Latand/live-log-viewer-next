@@ -30,6 +30,7 @@ export type TelegramErrorCode =
   | "canceled"
   | "session_unsafe"
   | "connector_failed"
+  | "host_registration_failed"
   | "not_read_only"
   | "logout_failed"
   | "health_failed";

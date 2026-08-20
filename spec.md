@@ -41,7 +41,9 @@ requested only when Telegram asks; an invalid password is an explicit state
 that allows retry. Cancellation terminates the enrollment process and clears
 temporary state, including a credential written before connector verification.
 Lifecycle generations prevent stale enrollment/health results from restoring
-state or processes after cancel, logout, or local deletion.
+state or processes after cancel, logout, or local deletion. Enrollment,
+health, and logout share the vendored per-session process lock; health/logout
+release the shared connector before their short-lived bridge connects.
 
 AC4: The session persists server-side only: an owner-only (0600, dir 0700)
 regular non-symlinked file written atomically under Viewer state. Reads,
@@ -71,15 +73,19 @@ operator-authored `telegram` definition. Disconnect removes exactly the
 managed entry, so the next dispatch materializes nothing. Managed Claude and
 Codex HTTP definitions obtain bearer authorization from an environment
 variable present only in granted operator-root launches. Existing corrupt
-Codex TOML is byte-unchanged. Successful health recovery re-registers both
-hosts before publishing `connected`.
+Codex TOML is byte-unchanged, including valid quoted-key conflicts. Host
+registration returns one aggregate result; every required definition must be
+installed before `connected` is published. Successful health recovery
+re-registers both hosts.
 
 AC7: The #739 boundary extends by exactly one name: `telegram` joins
 `GRANTABLE_MCP_SERVERS` and the operator-root default; the delegated default
 stays `["viewer"]`. Builders, reviewers, pipeline stages, delegated children,
 and unproven adopted sessions cannot obtain the grant, and hand-edited
 profiles are re-bounded — proven by the existing #739 test walls updated for
-tranche 2.
+tranche 2. Tmux and both structured host implementations load the bearer token
+only for a proven `telegram` grant; delegated hosts scrub it. Missing local
+enrollment state leaves operator-root launches usable with Telegram unavailable.
 
 AC8: The UI is a Telegram row in the left-rail footer beside the account
 controls, opening the accounts-style flyout (desktop) / bottom sheet (mobile):
@@ -98,6 +104,12 @@ failures are visible, and request sequencing prevents slow responses from
 overwriting newer status. Entering a live login phase immediately switches to
 the 1.5-second cadence; connected and credential-backed error polling performs
 fresh health and connector recovery on the idle cadence and at client startup.
+
+AC9a: The vendored `get_chats` and `list_chats` read tools reject boolean,
+zero, negative, and oversized pagination values before Telegram I/O. Dialog
+responses are capped at 100 results; `get_chats` accepts at most 10 pages and
+uses a bounded API limit of at most 1000 instead of downloading the full dialog
+list.
 
 AC10: Focused tests run with isolated `LLV_STATE_DIR` (and temp homes where
 paths matter) and a fake Telegram adapter — no test reaches a real account,

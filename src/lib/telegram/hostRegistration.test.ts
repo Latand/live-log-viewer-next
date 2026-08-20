@@ -91,6 +91,22 @@ test("an exact-url operator entry is never claimed or removed by high-level regi
   expect(state.mcpServers.telegram).toEqual(operatorEntry);
 });
 
+test("high-level registration aggregates every required host failure", () => {
+  fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
+  const claudeFile = tempPath(".claude.json");
+  const codexFile = tempPath("config.toml");
+  fs.writeFileSync(claudeFile, "{broken");
+  fs.writeFileSync(codexFile, `[mcp_servers."telegram"]\nurl = "http://127.0.0.1:9999/custom"\n`);
+
+  const result = registerTelegramHosts({ claudeStatePaths: [claudeFile], codexConfigPaths: [codexFile] }, URL);
+
+  expect(result).toEqual({
+    ok: false,
+    claude: { registered: 0, conflict: 0, unwritable: 1 },
+    codex: { registered: 0, failed: 1 },
+  });
+});
+
 test("the Viewer's own stale entry (a changed port) is updated, proven by its record", () => {
   const file = tempPath(".claude.json");
   const staleUrl = "http://127.0.0.1:8700/mcp";
@@ -211,8 +227,18 @@ test("an operator-authored [mcp_servers.telegram] table wins over the managed bl
   const file = tempPath("config.toml");
   const original = `[mcp_servers.telegram]\nurl = "http://127.0.0.1:9999/custom"\n`;
   fs.writeFileSync(file, original);
-  expect(registerTelegramInCodexConfig(file, URL)).toBe(true);
+  expect(registerTelegramInCodexConfig(file, URL)).toBe(false);
   expect(fs.readFileSync(file, "utf8")).toBe(original);
+});
+
+test("a quoted Codex Telegram table is a semantic conflict and remains byte-unchanged", () => {
+  const file = tempPath("config.toml");
+  const original = `[mcp_servers."telegram"]\nurl = "http://127.0.0.1:9999/custom"\n`;
+  fs.writeFileSync(file, original);
+
+  expect(registerTelegramInCodexConfig(file, URL)).toBe(false);
+  expect(fs.readFileSync(file, "utf8")).toBe(original);
+  expect(() => Bun.TOML.parse(fs.readFileSync(file, "utf8"))).not.toThrow();
 });
 
 test("a corrupt Codex config is byte-unchanged", () => {

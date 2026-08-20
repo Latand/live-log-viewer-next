@@ -141,8 +141,10 @@ const CLAUDE_SHADOWED_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUD
 
 function telegramTokenAssignment(mcpServers: readonly string[]): string {
   if (!mcpServers.includes("telegram")) return "";
-  return `${TELEGRAM_CONNECTOR_TOKEN_ENV}="$(tr -d '\\n' < ${shellQuote(telegramConnectorTokenPath())})"; `
-    + `[ "\${#${TELEGRAM_CONNECTOR_TOKEN_ENV}}" -eq 43 ] || exit 1; export ${TELEGRAM_CONNECTOR_TOKEN_ENV}; `;
+  return `unset ${TELEGRAM_CONNECTOR_TOKEN_ENV}; if [ -r ${shellQuote(telegramConnectorTokenPath())} ]; then `
+    + `${TELEGRAM_CONNECTOR_TOKEN_ENV}="$(tr -d '\\n' < ${shellQuote(telegramConnectorTokenPath())})"; `
+    + `if [ "\${#${TELEGRAM_CONNECTOR_TOKEN_ENV}}" -eq 43 ]; then export ${TELEGRAM_CONNECTOR_TOKEN_ENV}; `
+    + `else unset ${TELEGRAM_CONNECTOR_TOKEN_ENV}; fi; fi; `;
 }
 
 function telegramTokenCommandPrefix(mcpServers: readonly string[]): string {

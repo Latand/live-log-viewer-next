@@ -10,6 +10,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 
 import { AgentRegistry } from "@/lib/agent/registry";
 import { procBackend } from "@/lib/proc";
+import { saveTelegramSession, TELEGRAM_CONNECTOR_TOKEN_ENV } from "@/lib/telegram/sessionStore";
 
 import {
   claudeCliAuthStatus,
@@ -168,6 +169,46 @@ const IMAGE_REF: StructuredImageRef = {
 };
 
 describe("ClaudeStreamBrokerHost", () => {
+  test("structured Claude loads Telegram auth only for the granted root host", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-telegram-grant-"));
+    const previousState = process.env.LLV_STATE_DIR;
+    process.env.LLV_STATE_DIR = path.join(directory, "state");
+    try {
+      const stored = saveTelegramSession("1ApWapzMBu4placeholder-not-a-real-session");
+      const rootChild = new FakeClaude(new RecordingDeliveryLedger());
+      const rootCapture: { options?: SpawnOptionsWithoutStdio } = {};
+      const root = await ClaudeStreamBrokerHost.start({
+        cwd: "/repo",
+        mcpServers: ["viewer", "telegram"],
+        env: { NODE_ENV: "test", [TELEGRAM_CONNECTOR_TOKEN_ENV]: "B".repeat(43) },
+        eventStore: new MemoryEventStore(),
+        deliveryLedger: new RecordingDeliveryLedger(),
+        readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+        spawnProcess: fakeSpawn(rootChild, rootCapture),
+      });
+      expect(rootCapture.options?.env?.[TELEGRAM_CONNECTOR_TOKEN_ENV]).toBe(stored.connectorToken);
+      await root.release();
+
+      const delegatedChild = new FakeClaude(new RecordingDeliveryLedger());
+      const delegatedCapture: { options?: SpawnOptionsWithoutStdio } = {};
+      const delegated = await ClaudeStreamBrokerHost.start({
+        cwd: "/repo",
+        mcpServers: ["viewer"],
+        env: { NODE_ENV: "test", [TELEGRAM_CONNECTOR_TOKEN_ENV]: stored.connectorToken },
+        eventStore: new MemoryEventStore(),
+        deliveryLedger: new RecordingDeliveryLedger(),
+        readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+        spawnProcess: fakeSpawn(delegatedChild, delegatedCapture),
+      });
+      expect(delegatedCapture.options?.env?.[TELEGRAM_CONNECTOR_TOKEN_ENV]).toBeUndefined();
+      await delegated.release();
+    } finally {
+      if (previousState === undefined) delete process.env.LLV_STATE_DIR;
+      else process.env.LLV_STATE_DIR = previousState;
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   test("structured Claude hosts launch with an exclusive native MCP allowlist", async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-structured-mcp-"));
     fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({
