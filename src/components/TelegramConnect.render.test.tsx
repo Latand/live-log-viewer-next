@@ -6,7 +6,7 @@ import type { TelegramStatusPayload } from "@/lib/telegram/contracts";
 
 import { TelegramPanel } from "./TelegramConnect";
 
-function stateFor(status: Partial<TelegramStatusPayload>): TelegramConnectionState {
+function stateFor(status: Partial<TelegramStatusPayload>, failure: { code: string } | null = null): TelegramConnectionState {
   return {
     status: {
       phase: "disconnected",
@@ -18,7 +18,7 @@ function stateFor(status: Partial<TelegramStatusPayload>): TelegramConnectionSta
       ...status,
     },
     busy: false,
-    failed: false,
+    failure,
     refresh: async () => {},
     connect: async () => {},
     submitPassword: async () => {},
@@ -28,8 +28,8 @@ function stateFor(status: Partial<TelegramStatusPayload>): TelegramConnectionSta
   };
 }
 
-const render = (status: Partial<TelegramStatusPayload>) =>
-  renderToStaticMarkup(<TelegramPanel state={stateFor(status)} onClose={() => {}} />);
+const render = (status: Partial<TelegramStatusPayload>, failure: { code: string } | null = null) =>
+  renderToStaticMarkup(<TelegramPanel state={stateFor(status, failure)} onClose={() => {}} />);
 
 test("disconnected offers Connect and explains local-only storage", () => {
   const html = render({ phase: "disconnected" });
@@ -123,4 +123,25 @@ test("an error over a stored session keeps local deletion reachable", () => {
   });
   expect(html).toContain("Remote logout failed");
   expect(html).toContain("Delete local session");
+});
+
+test("a failed action renders an actionable alert instead of silence", () => {
+  /* A rejected request over a still-disconnected panel: without the alert the
+     screen would look untouched. */
+  const generic = render({ phase: "disconnected" }, { code: "action_failed" });
+  expect(generic).toContain('role="alert"');
+  expect(generic).toContain("Try again");
+  expect(generic).toContain("Connect Telegram");
+
+  /* Known backend codes keep their specific message. */
+  const busyHtml = render({ phase: "disconnected" }, { code: "login_busy" });
+  expect(busyHtml).toContain("already in progress");
+
+  /* A transport failure says the server was unreachable. (The static render
+     HTML-escapes apostrophes, so the fragment avoids one.) */
+  const transport = render({ phase: "connected", identity: { name: "Account A", username: null } }, { code: "transport" });
+  expect(transport).toContain("Check the connection and try again");
+
+  /* No failure, no alert chrome. */
+  expect(render({ phase: "disconnected" })).not.toContain('role="alert"');
 });

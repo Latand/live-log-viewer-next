@@ -44,6 +44,15 @@ export function telegramErrKey(code: TelegramErrorCode): Parameters<TFunction>[0
   return known[code] ?? "telegram.err.bridge_failed";
 }
 
+/** Copy for a failed ACTION (the request the operator just made), as opposed
+    to the durable connection error in `status.error`. Known backend codes get
+    their message; everything else gets the actionable generic. */
+function failureKey(code: string): Parameters<TFunction>[0] {
+  if (code === "login_busy") return "telegram.err.login_busy";
+  if (code === "transport") return "telegram.actionUnreachable";
+  return "telegram.actionFailed";
+}
+
 function phaseColor(phase: TelegramPhase): string {
   if (phase === "connected") return "var(--color-success)";
   if (phase === "expired") return "var(--color-warning)";
@@ -152,21 +161,20 @@ function ConfirmingAction({ label, prompt, onConfirm, disabled, icon }: { label:
 
 export function TelegramPanel({ state, onClose }: { state: TelegramConnectionState; onClose: () => void }) {
   const { t } = useLocale();
-  const { status, busy } = state;
+  const { status, busy, failure } = state;
   const phase = status?.phase ?? "disconnected";
   const closeRef = useRef<HTMLButtonElement>(null);
-  const [password, setPassword] = useState("");
+  const passwordRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     closeRef.current?.focus();
   }, []);
 
-  // The password field drops the moment the phase leaves awaiting_password —
-  // reset-on-prop-change, no effect (the ClaudeLoginRow pattern, C6).
-  const [seenPhase, setSeenPhase] = useState<TelegramPhase>(phase);
-  if (phase !== seenPhase) {
-    setSeenPhase(phase);
-    if (phase !== "awaiting_password") setPassword("");
-  }
+  /* Keep the credential outside React state. Phase transitions and an invalid
+     attempt clear the live field directly; submission clears it before the
+     async request starts. */
+  useEffect(() => {
+    if (passwordRef.current) passwordRef.current.value = "";
+  }, [phase, status?.login?.passwordError]);
 
   const cancelButton = (
     <ActionButton label={t("telegram.cancel")} onClick={() => void state.cancel()} disabled={busy} />
@@ -228,6 +236,15 @@ export function TelegramPanel({ state, onClose }: { state: TelegramConnectionSta
             <span className="text-[11.5px] font-semibold text-primary">{t(statusKey(phase))}</span>
           </div>
 
+          {/* A failed request never disappears silently: the backend's
+              sanitized code (or the transport failure) renders right here,
+              and the controls below stay available to try again. */}
+          {failure ? (
+            <p role="alert" className="rounded-[6px] bg-danger-soft px-2 py-1 text-[10.5px] font-semibold leading-snug text-danger">
+              {t(failureKey(failure.code))}
+            </p>
+          ) : null}
+
           {phase === "disconnected" ? (
             <>
               <p className="text-[10.5px] leading-snug text-muted">{t("telegram.connectHint")}</p>
@@ -254,15 +271,18 @@ export function TelegramPanel({ state, onClose }: { state: TelegramConnectionSta
               <form
                 onSubmit={(event) => {
                   event.preventDefault();
-                  if (busy || password === "") return;
-                  void state.submitPassword(password);
+                  const input = passwordRef.current;
+                  if (busy || !input || input.value === "") return;
+                  const entered = input.value;
+                  input.value = "";
+                  void state.submitPassword(entered);
                 }}
                 className="flex items-center gap-2"
               >
                 <input
+                  ref={passwordRef}
                   type="password"
-                  value={password}
-                  onChange={(event) => setPassword(event.target.value)}
+                  required
                   autoComplete="off"
                   aria-label={t("telegram.passwordLabel")}
                   placeholder={t("telegram.passwordPlaceholder")}
@@ -270,7 +290,7 @@ export function TelegramPanel({ state, onClose }: { state: TelegramConnectionSta
                 />
                 <button
                   type="submit"
-                  disabled={busy || password === ""}
+                  disabled={busy}
                   className="h-11 shrink-0 rounded-[8px] border border-border bg-canvas px-2.5 text-[11px] font-semibold hover:bg-sunken disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:h-8"
                 >
                   {t("telegram.passwordSubmit")}

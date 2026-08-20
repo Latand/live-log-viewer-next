@@ -15,12 +15,16 @@ import { NONTERMINAL_TELEGRAM_LOGIN_PHASES, type TelegramStatusPayload } from "@
 const IDLE_POLL_MS = 60_000;
 const LOGIN_POLL_MS = 1_500;
 
+/** Why the last action did not produce a payload: the server's sanitized
+    error code (`login_busy`, `action_failed`, …) or `"transport"` when the
+    request itself failed. Cleared by the next action or successful poll of a
+    changed phase — durable server-side errors ride in `status.error`. */
+export type TelegramActionFailure = { code: string };
+
 export type TelegramConnectionState = {
   status: TelegramStatusPayload | null;
   busy: boolean;
-  /** Transport-level failure of the last action (server errors ride in
-      `status.error` instead). */
-  failed: boolean;
+  failure: TelegramActionFailure | null;
   refresh(fresh?: boolean): Promise<void>;
   connect(): Promise<void>;
   submitPassword(password: string): Promise<void>;
@@ -29,16 +33,21 @@ export type TelegramConnectionState = {
   deleteLocal(): Promise<void>;
 };
 
-async function readPayload(response: Response): Promise<TelegramStatusPayload | null> {
-  if (!response.ok) return null;
-  const json = await response.json() as { telegram?: TelegramStatusPayload };
-  return json.telegram ?? null;
+type ActionOutcome =
+  | { payload: TelegramStatusPayload }
+  | { payload: null; code: string };
+
+async function readOutcome(response: Response): Promise<ActionOutcome> {
+  const json = await response.json().catch(() => null) as { telegram?: TelegramStatusPayload; code?: unknown } | null;
+  if (response.ok && json?.telegram) return { payload: json.telegram };
+  const code = typeof json?.code === "string" && /^[a-z_]{1,40}$/.test(json.code) ? json.code : "action_failed";
+  return { payload: null, code };
 }
 
 export function useTelegramConnection(): TelegramConnectionState {
   const [status, setStatus] = useState<TelegramStatusPayload | null>(null);
   const [busy, setBusy] = useState(false);
-  const [failed, setFailed] = useState(false);
+  const [failure, setFailure] = useState<TelegramActionFailure | null>(null);
   /* Latest payload for event handlers and the poll loop; written only where
      a payload actually arrives, never during render. */
   const statusRef = useRef<TelegramStatusPayload | null>(null);
@@ -50,9 +59,9 @@ export function useTelegramConnection(): TelegramConnectionState {
 
   const load = useCallback(async (fresh: boolean): Promise<TelegramStatusPayload | null> => {
     try {
-      const payload = await readPayload(await fetch(`/api/telegram${fresh ? "?fresh=1" : ""}`));
-      if (payload) apply(payload);
-      return payload;
+      const outcome = await readOutcome(await fetch(`/api/telegram${fresh ? "?fresh=1" : ""}`));
+      if (outcome.payload) apply(outcome.payload);
+      return outcome.payload;
     } catch {
       /* A failed poll keeps the last known status. */
       return null;
@@ -81,21 +90,23 @@ export function useTelegramConnection(): TelegramConnectionState {
 
   const act = useCallback(async (body: Record<string, string>) => {
     setBusy(true);
-    setFailed(false);
+    setFailure(null);
     try {
       const response = await fetch("/api/telegram", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      const payload = await readPayload(response);
-      if (payload) apply(payload);
+      const outcome = await readOutcome(response);
+      if (outcome.payload) apply(outcome.payload);
       else {
-        setFailed(true);
+        /* The backend's sanitized code survives to the panel, and the status
+           re-syncs so the phase on screen stays the server's. */
+        setFailure({ code: outcome.code });
         await refresh();
       }
     } catch {
-      setFailed(true);
+      setFailure({ code: "transport" });
     } finally {
       setBusy(false);
     }
@@ -108,7 +119,7 @@ export function useTelegramConnection(): TelegramConnectionState {
   return {
     status,
     busy,
-    failed,
+    failure,
     refresh,
     connect,
     logout,
