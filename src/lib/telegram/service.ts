@@ -12,6 +12,7 @@ import {
   writeTelegramConnection,
   UnsafeTelegramSessionError,
   type StoredTelegramConnection,
+  type StoredTelegramSession,
 } from "./sessionStore";
 
 /**
@@ -28,7 +29,7 @@ import {
 
 export interface TelegramServicePorts {
   adapter: TelegramAdapter;
-  ensureConnector(sessionString: string): Promise<ConnectorEnsureResult>;
+  ensureConnector(session: StoredTelegramSession): Promise<ConnectorEnsureResult>;
   stopConnector(): void;
   registerHosts(): void;
   unregisterHosts(): void;
@@ -37,7 +38,7 @@ export interface TelegramServicePorts {
 
 const productionPorts: TelegramServicePorts = {
   adapter: processTelegramAdapter,
-  ensureConnector: (sessionString) => ensureTelegramConnector(sessionString),
+  ensureConnector: (session) => ensureTelegramConnector(session),
   stopConnector: stopTelegramConnector,
   registerHosts: () => registerTelegramHosts(),
   unregisterHosts: () => unregisterTelegramHosts(),
@@ -46,15 +47,18 @@ const productionPorts: TelegramServicePorts = {
 
 type LiveLogin = {
   operationId: string;
+  generation: number;
   phase: "starting" | "awaiting_scan" | "awaiting_password" | "verifying";
   qr: { url: string; expiresAt: string } | null;
   passwordError: boolean;
   handle: TelegramEnrollmentHandle;
+  stored: StoredTelegramSession | null;
 };
 
 export class TelegramConnectionService {
   private login: LiveLogin | null = null;
   private healthInFlight: Promise<void> | null = null;
+  private lifecycleGeneration = 0;
 
   constructor(private readonly ports: TelegramServicePorts = productionPorts) {}
 
@@ -98,6 +102,7 @@ export class TelegramConnectionService {
       is live is refused, exactly like the account-login supervisor. */
   startLogin(): TelegramStatusPayload {
     if (this.login) throw new Error("a Telegram login operation is already running");
+    const generation = ++this.lifecycleGeneration;
     const unavailable = this.ports.adapter.unavailableReason();
     if (unavailable) {
       this.recordError(unavailable);
@@ -130,15 +135,17 @@ export class TelegramConnectionService {
              the authorization alone. */
           current.phase = "verifying";
           current.qr = null;
-          void this.completeEnrollment(event.sessionString, event.identity);
+          void this.completeEnrollment(current, event.sessionString, event.identity);
           return;
         case "failed":
+          this.lifecycleGeneration += 1;
           this.login = null;
+          this.cleanupCanceledLogin(current);
           if (event.code !== "canceled") this.recordError(event.code);
           return;
       }
     });
-    this.login = { operationId, phase: "starting", qr: null, passwordError: false, handle };
+    this.login = { operationId, generation, phase: "starting", qr: null, passwordError: false, handle, stored: null };
     return this.status();
   }
 
@@ -147,12 +154,13 @@ export class TelegramConnectionService {
       shared connector must come up AND pass the read-only verification before
       the connection reads as connected or any host registration happens.
       EVERY failure — refusal, timeout, thrown error — lands in an explicit
-      error state over the preserved session. A cancel racing this tail does
-      not undo it: the account authorized, so the outcome is reported. */
-  private async completeEnrollment(sessionString: string, identity: TelegramIdentity): Promise<void> {
-    let credentialRef: string;
+      error state over the preserved session. Cancellation invalidates the
+      generation and removes a credential that authorization already wrote. */
+  private async completeEnrollment(operation: LiveLogin, sessionString: string, identity: TelegramIdentity): Promise<void> {
+    let stored: StoredTelegramSession;
     try {
-      credentialRef = saveTelegramSession(sessionString).credentialRef;
+      stored = saveTelegramSession(sessionString);
+      operation.stored = stored;
     } catch {
       this.login = null;
       this.recordError("session_unsafe");
@@ -160,19 +168,22 @@ export class TelegramConnectionService {
     }
     let connector: Awaited<ReturnType<TelegramServicePorts["ensureConnector"]>>;
     try {
-      connector = await this.ports.ensureConnector(sessionString);
+      connector = await this.ports.ensureConnector(stored);
     } catch {
       connector = { ok: false, code: "connector_failed" };
     }
+    if (this.lifecycleGeneration !== operation.generation || this.login !== operation) {
+      return;
+    }
     this.login = null;
     if (!connector.ok) {
-      writeTelegramConnection({ version: 1, status: "error", credentialRef, identity, lastHealthCheckAt: null, errorCode: connector.code });
+      writeTelegramConnection({ version: 1, status: "error", credentialRef: stored.credentialRef, identity, lastHealthCheckAt: null, errorCode: connector.code });
       return;
     }
     writeTelegramConnection({
       version: 1,
       status: "connected",
-      credentialRef,
+      credentialRef: stored.credentialRef,
       identity,
       lastHealthCheckAt: new Date(this.ports.now()).toISOString(),
       errorCode: null,
@@ -211,28 +222,45 @@ export class TelegramConnectionService {
   cancelLogin(operationId: string): TelegramStatusPayload {
     const current = this.login;
     if (current && current.operationId === operationId) {
+      this.lifecycleGeneration += 1;
       this.login = null;
       current.handle.cancel();
+      this.cleanupCanceledLogin(current);
     }
     return this.status();
+  }
+
+  private cleanupCanceledLogin(operation: LiveLogin): void {
+    if (!operation.stored) return;
+    this.ports.stopConnector();
+    this.ports.unregisterHosts();
+    try {
+      if (readTelegramSession()?.credentialRef !== operation.stored.credentialRef) return;
+      deleteTelegramSession();
+      writeTelegramConnection({ version: 1, status: "disconnected", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: null });
+    } catch { /* unsafe replacement remains for the explicit local-delete path */ }
   }
 
   /** Health check against the stored session; updates the durable status. */
   async checkHealth(): Promise<TelegramStatusPayload> {
     if (this.login) return this.status();
     if (!this.healthInFlight) {
-      this.healthInFlight = this.runHealthCheck().finally(() => { this.healthInFlight = null; });
+      const generation = this.lifecycleGeneration;
+      this.healthInFlight = this.runHealthCheck(generation).finally(() => { this.healthInFlight = null; });
     }
     await this.healthInFlight;
     return this.status();
   }
 
-  private async runHealthCheck(): Promise<void> {
+  private async runHealthCheck(generation: number): Promise<void> {
     let session: ReturnType<typeof readTelegramSession>;
     try {
       session = readTelegramSession();
     } catch (error) {
       if (!(error instanceof UnsafeTelegramSessionError)) throw error;
+      if (generation !== this.lifecycleGeneration) return;
+      this.ports.stopConnector();
+      this.ports.unregisterHosts();
       this.recordError("session_unsafe");
       return;
     }
@@ -244,6 +272,7 @@ export class TelegramConnectionService {
       return;
     }
     const result = await this.ports.adapter.checkSession(session.sessionString);
+    if (generation !== this.lifecycleGeneration) return;
     const checkedAt = new Date(this.ports.now()).toISOString();
     if (result.status === "connected") {
       /* A healthy account only reads as connected once the shared connector
@@ -252,9 +281,12 @@ export class TelegramConnectionService {
          the next fresh health check retries without a rescan. */
       let connector: Awaited<ReturnType<TelegramServicePorts["ensureConnector"]>>;
       try {
-        connector = await this.ports.ensureConnector(session.sessionString);
+        connector = await this.ports.ensureConnector(session);
       } catch {
         connector = { ok: false, code: "connector_failed" };
+      }
+      if (generation !== this.lifecycleGeneration) {
+        return;
       }
       if (!connector.ok) {
         writeTelegramConnection({ version: 1, status: "error", credentialRef: session.credentialRef, identity: result.identity, lastHealthCheckAt: checkedAt, errorCode: connector.code });
@@ -264,8 +296,8 @@ export class TelegramConnectionService {
       return;
     }
     if (result.status === "expired") {
-      writeTelegramConnection({ version: 1, status: "expired", credentialRef: session.credentialRef, identity: connection.identity, lastHealthCheckAt: checkedAt, errorCode: null });
       this.ports.stopConnector();
+      writeTelegramConnection({ version: 1, status: "expired", credentialRef: session.credentialRef, identity: connection.identity, lastHealthCheckAt: checkedAt, errorCode: null });
       return;
     }
     writeTelegramConnection({ version: 1, status: "error", credentialRef: session.credentialRef, identity: connection.identity, lastHealthCheckAt: checkedAt, errorCode: result.code });
@@ -276,12 +308,23 @@ export class TelegramConnectionService {
       deletion) and reports why. */
   async logout(): Promise<TelegramStatusPayload> {
     if (this.login) throw new Error("a Telegram login operation is running");
-    const session = this.readSessionOrNull();
+    const generation = ++this.lifecycleGeneration;
+    let session: ReturnType<typeof readTelegramSession>;
+    try {
+      session = readTelegramSession();
+    } catch (error) {
+      if (!(error instanceof UnsafeTelegramSessionError)) throw error;
+      this.ports.stopConnector();
+      this.ports.unregisterHosts();
+      this.recordError("session_unsafe");
+      return this.status();
+    }
     if (!session) {
       this.disconnectLocally();
       return this.status();
     }
     const result = await this.ports.adapter.logout(session.sessionString);
+    if (generation !== this.lifecycleGeneration) return this.status();
     if (!result.ok) {
       this.recordError(result.code ?? "logout_failed");
       return this.status();
@@ -294,23 +337,18 @@ export class TelegramConnectionService {
       remote Telegram authorization may remain — the UI says so. */
   deleteLocalSession(): TelegramStatusPayload {
     if (this.login) throw new Error("a Telegram login operation is running");
+    this.lifecycleGeneration += 1;
     this.disconnectLocally();
     return this.status();
   }
 
-  private readSessionOrNull(): ReturnType<typeof readTelegramSession> {
-    try {
-      return readTelegramSession();
-    } catch {
-      return null;
-    }
-  }
-
   private disconnectLocally(): void {
-    deleteTelegramSession();
-    writeTelegramConnection({ version: 1, status: "disconnected", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: null });
+    /* Revoke runtime access first. Even an unsafe status/credential path must
+       never leave the credential-bearing connector alive after this action. */
     this.ports.stopConnector();
     this.ports.unregisterHosts();
+    deleteTelegramSession();
+    writeTelegramConnection({ version: 1, status: "disconnected", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: null });
   }
 }
 

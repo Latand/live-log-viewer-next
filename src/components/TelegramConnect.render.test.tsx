@@ -125,6 +125,13 @@ test("an error over a stored session keeps local deletion reachable", () => {
   expect(html).toContain("Delete local session");
 });
 
+test("an unsafe session always offers local deletion and suppresses remote logout", () => {
+  const html = render({ phase: "error", error: { code: "session_unsafe" }, credentialRef: null });
+    expect(html).toContain("Local session storage failed safety checks.");
+  expect(html).toContain("Delete local session");
+  expect(html).not.toContain("Log out<");
+});
+
 test("a failed action renders an actionable alert instead of silence", () => {
   /* A rejected request over a still-disconnected panel: without the alert the
      screen would look untouched. */

@@ -51,19 +51,28 @@ export function useTelegramConnection(): TelegramConnectionState {
   /* Latest payload for event handlers and the poll loop; written only where
      a payload actually arrives, never during render. */
   const statusRef = useRef<TelegramStatusPayload | null>(null);
+  const loadSequenceRef = useRef(0);
 
   const apply = useCallback((payload: TelegramStatusPayload) => {
     statusRef.current = payload;
     setStatus(payload);
   }, []);
 
-  const load = useCallback(async (fresh: boolean): Promise<TelegramStatusPayload | null> => {
+  const load = useCallback(async (fresh: boolean, preserveExistingFailure = false): Promise<TelegramStatusPayload | null> => {
+    const sequence = ++loadSequenceRef.current;
     try {
       const outcome = await readOutcome(await fetch(`/api/telegram${fresh ? "?fresh=1" : ""}`));
-      if (outcome.payload) apply(outcome.payload);
+      if (sequence !== loadSequenceRef.current) return null;
+      if (outcome.payload) {
+        apply(outcome.payload);
+        if (!preserveExistingFailure) setFailure(null);
+      } else {
+        setFailure({ code: outcome.code });
+      }
       return outcome.payload;
     } catch {
-      /* A failed poll keeps the last known status. */
+      if (sequence === loadSequenceRef.current) setFailure({ code: "transport" });
+      /* A failed poll keeps the last known status and surfaces the failure. */
       return null;
     }
   }, [apply]);
@@ -89,6 +98,10 @@ export function useTelegramConnection(): TelegramConnectionState {
   }, [load]);
 
   const act = useCallback(async (body: Record<string, string>) => {
+    /* A mutation response is the authoritative state transition. Invalidate
+       polls already in flight now, and again when the mutation resolves so a
+       GET started while the POST was pending cannot repaint older state. */
+    loadSequenceRef.current += 1;
     setBusy(true);
     setFailure(null);
     try {
@@ -98,19 +111,23 @@ export function useTelegramConnection(): TelegramConnectionState {
         body: JSON.stringify(body),
       });
       const outcome = await readOutcome(response);
-      if (outcome.payload) apply(outcome.payload);
+      if (outcome.payload) {
+        loadSequenceRef.current += 1;
+        apply(outcome.payload);
+      }
       else {
         /* The backend's sanitized code survives to the panel, and the status
            re-syncs so the phase on screen stays the server's. */
         setFailure({ code: outcome.code });
-        await refresh();
+        await load(true, true);
       }
     } catch {
+      loadSequenceRef.current += 1;
       setFailure({ code: "transport" });
     } finally {
       setBusy(false);
     }
-  }, [apply, refresh]);
+  }, [apply, load]);
 
   const connect = useCallback(() => act({ action: "start" }), [act]);
   const logout = useCallback(() => act({ action: "logout" }), [act]);

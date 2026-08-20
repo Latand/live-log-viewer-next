@@ -9,11 +9,13 @@ import type { TelegramErrorCode, TelegramIdentity } from "./contracts";
 /**
  * Owner-only persistence for the Telegram credential (issue #1059).
  *
- * Two files under `<state>/telegram/`, both 0600 in a 0700 directory:
+ * Three files under `<state>/telegram/`, all 0600 in a 0700 directory:
  *
  *  - `session.json` — the Telethon string session. The ONLY place the secret
  *    is at rest; nothing outside this module reads or writes it, and its value
  *    never appears in API JSON, logs, argv, or the registry.
+ *  - `connector-token` — per-credential bearer capability for the local MCP
+ *    endpoint. The session file stores only its digest.
  *  - `connection.json` — secret-free durable status (phase, opaque
  *    credentialRef, sanitized identity, last health check), which is what the
  *    status API projects from.
@@ -26,14 +28,19 @@ import type { TelegramErrorCode, TelegramIdentity } from "./contracts";
 
 const DIR_NAME = "telegram";
 const SESSION_FILE = "session.json";
+const CONNECTOR_TOKEN_FILE = "connector-token";
 const CONNECTION_FILE = "connection.json";
+export const TELEGRAM_CONNECTOR_TOKEN_ENV = "LLV_TELEGRAM_MCP_TOKEN";
 
 export type StoredTelegramSession = {
   version: 1;
   credentialRef: string;
+  connectorToken: string;
   sessionString: string;
   savedAt: string;
 };
+
+type StoredTelegramSessionFile = Omit<StoredTelegramSession, "connectorToken"> & { connectorTokenSha256: string };
 
 export type TelegramConnectionStatus = "disconnected" | "connected" | "expired" | "error";
 
@@ -63,6 +70,10 @@ export function telegramSessionPath(): string {
 
 export function telegramConnectionPath(): string {
   return path.join(telegramDir(), CONNECTION_FILE);
+}
+
+export function telegramConnectorTokenPath(): string {
+  return path.join(telegramDir(), CONNECTOR_TOKEN_FILE);
 }
 
 /** The fence every read and overwrite passes: regular file, not a symlink, no
@@ -128,7 +139,7 @@ function atomicSecretWrite(pathname: string, contents: string): void {
   }
 }
 
-function readSafeJson(pathname: string): unknown | null {
+function readSafeJson(pathname: string, corruptIsUnsafe = false): unknown | null {
   if (ensureTelegramStateDir(false) === null) return null;
   try {
     assertSafeSecretFile(pathname);
@@ -140,19 +151,40 @@ function readSafeJson(pathname: string): unknown | null {
   try {
     return JSON.parse(fs.readFileSync(pathname, "utf8"));
   } catch {
+    if (corruptIsUnsafe) throw new UnsafeTelegramSessionError(`cannot read ${path.basename(pathname)}`);
     return null;
   }
 }
 
-function removeSafeFile(pathname: string): void {
-  if (ensureTelegramStateDir(false) === null) return;
+function readSafeText(pathname: string): string | null {
+  if (ensureTelegramStateDir(false) === null) return null;
   try {
     assertSafeSecretFile(pathname);
   } catch (error) {
     if (error instanceof UnsafeTelegramSessionError) throw error;
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
   }
+  try {
+    return fs.readFileSync(pathname, "utf8");
+  } catch {
+    throw new UnsafeTelegramSessionError(`cannot read ${path.basename(pathname)}`);
+  }
+}
+
+function safeFileExists(pathname: string): boolean {
+  try {
+    assertSafeSecretFile(pathname);
+    return true;
+  } catch (error) {
+    if (error instanceof UnsafeTelegramSessionError) throw error;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function removeSafeFile(pathname: string): void {
+  if (ensureTelegramStateDir(false) === null || !safeFileExists(pathname)) return;
   fs.rmSync(pathname);
 }
 
@@ -160,26 +192,62 @@ function removeSafeFile(pathname: string): void {
     surface uses to talk about it. */
 export function saveTelegramSession(sessionString: string): StoredTelegramSession {
   if (!sessionString) throw new Error("Telegram session string is empty");
+  const connectorToken = crypto.randomBytes(32).toString("base64url");
   const stored: StoredTelegramSession = {
     version: 1,
     credentialRef: crypto.randomUUID(),
+    connectorToken,
     sessionString,
     savedAt: new Date().toISOString(),
   };
-  atomicSecretWrite(telegramSessionPath(), JSON.stringify(stored));
+  const persisted: StoredTelegramSessionFile = {
+    version: stored.version,
+    credentialRef: stored.credentialRef,
+    sessionString: stored.sessionString,
+    savedAt: stored.savedAt,
+    connectorTokenSha256: crypto.createHash("sha256").update(connectorToken).digest("hex"),
+  };
+  atomicSecretWrite(telegramConnectorTokenPath(), connectorToken + "\n");
+  try {
+    atomicSecretWrite(telegramSessionPath(), JSON.stringify(persisted));
+  } catch (error) {
+    removeSafeFile(telegramConnectorTokenPath());
+    throw error;
+  }
   return stored;
 }
 
+function readTelegramSessionUnchecked(): StoredTelegramSession | null {
+  const parsed = readSafeJson(telegramSessionPath(), true);
+  if (parsed === null) return null;
+  if (typeof parsed !== "object") throw new UnsafeTelegramSessionError("session data is invalid");
+  const row = parsed as Partial<StoredTelegramSessionFile>;
+  if (row.version !== 1 || typeof row.credentialRef !== "string" || typeof row.sessionString !== "string" || !row.sessionString
+    || typeof row.savedAt !== "string" || typeof row.connectorTokenSha256 !== "string") {
+    throw new UnsafeTelegramSessionError("session data is invalid");
+  }
+  const connectorToken = readSafeText(telegramConnectorTokenPath())?.trim() ?? "";
+  const tokenHash = crypto.createHash("sha256").update(connectorToken).digest("hex");
+  if (!/^[A-Za-z0-9_-]{43}$/.test(connectorToken) || tokenHash !== row.connectorTokenSha256) {
+    throw new UnsafeTelegramSessionError("connector token is invalid");
+  }
+  return { version: 1, credentialRef: row.credentialRef, connectorToken, sessionString: row.sessionString, savedAt: row.savedAt };
+}
+
 export function readTelegramSession(): StoredTelegramSession | null {
-  const parsed = readSafeJson(telegramSessionPath());
-  if (!parsed || typeof parsed !== "object") return null;
-  const row = parsed as Partial<StoredTelegramSession>;
-  if (row.version !== 1 || typeof row.credentialRef !== "string" || typeof row.sessionString !== "string" || !row.sessionString) return null;
-  return row as StoredTelegramSession;
+  try {
+    return readTelegramSessionUnchecked();
+  } catch (error) {
+    if (error instanceof UnsafeTelegramSessionError) throw error;
+    throw new UnsafeTelegramSessionError("cannot read session storage");
+  }
 }
 
 export function deleteTelegramSession(): void {
-  removeSafeFile(telegramSessionPath());
+  if (ensureTelegramStateDir(false) === null) return;
+  const paths = [telegramSessionPath(), telegramConnectorTokenPath()];
+  const existing = paths.filter((pathname) => safeFileExists(pathname));
+  for (const pathname of existing) fs.rmSync(pathname);
 }
 
 const DISCONNECTED: StoredTelegramConnection = {

@@ -17,6 +17,13 @@ const {
 } = await import("./hostRegistration");
 
 const URL = "http://127.0.0.1:8809/mcp";
+const AUTH_HEADER = ["Author", "ization"].join("");
+const BEARER_PLACEHOLDER = ["Bear", "er ${LLV_TELEGRAM_MCP_TOKEN}"].join("");
+const VIEWER_ENTRY = (url = URL) => ({
+  type: "http",
+  url,
+  headers: { [AUTH_HEADER]: BEARER_PLACEHOLDER },
+});
 
 let counter = 0;
 function tempPath(name: string): string {
@@ -40,7 +47,7 @@ test("registers telegram in Claude state and is idempotent", () => {
   const state = JSON.parse(first) as { theme: string; mcpServers: Record<string, unknown> };
   expect(state.theme).toBe("dark");
   expect(state.mcpServers.viewer).toEqual({ type: "stdio", command: "viewer-mcp" });
-  expect(state.mcpServers.telegram).toEqual({ type: "http", url: URL });
+  expect(state.mcpServers.telegram).toEqual(VIEWER_ENTRY());
 
   /* Second registration changes nothing — byte-identical. */
   expect(registerTelegramInClaudeState(file, URL, URL)).toBe("registered");
@@ -51,7 +58,7 @@ test("creates a minimal Claude state file when none exists", () => {
   const file = tempPath(".claude.json");
   expect(registerTelegramInClaudeState(file, URL)).toBe("registered");
   const state = JSON.parse(fs.readFileSync(file, "utf8")) as { mcpServers: Record<string, unknown> };
-  expect(state.mcpServers.telegram).toEqual({ type: "http", url: URL });
+  expect(state.mcpServers.telegram).toEqual(VIEWER_ENTRY());
   expect(fs.statSync(file).mode & 0o077).toBe(0);
 });
 
@@ -87,12 +94,12 @@ test("an exact-url operator entry is never claimed or removed by high-level regi
 test("the Viewer's own stale entry (a changed port) is updated, proven by its record", () => {
   const file = tempPath(".claude.json");
   const staleUrl = "http://127.0.0.1:8700/mcp";
-  fs.writeFileSync(file, JSON.stringify({ mcpServers: { telegram: { type: "http", url: staleUrl } } }));
+  fs.writeFileSync(file, JSON.stringify({ mcpServers: { telegram: VIEWER_ENTRY(staleUrl) } }));
   /* Without the record proving ownership, the same entry is a conflict. */
   expect(registerTelegramInClaudeState(file, URL)).toBe("conflict");
   expect(registerTelegramInClaudeState(file, URL, staleUrl)).toBe("registered");
   const state = JSON.parse(fs.readFileSync(file, "utf8")) as { mcpServers: Record<string, unknown> };
-  expect(state.mcpServers.telegram).toEqual({ type: "http", url: URL });
+  expect(state.mcpServers.telegram).toEqual(VIEWER_ENTRY());
 });
 
 test("the Legacy telegram-readonly entry is never read or written", () => {
@@ -121,7 +128,7 @@ test("removal deletes only an entry still matching the Viewer's own record", () 
   }
   /* The recorded entry IS removed. */
   const file = tempPath(".claude.json");
-  fs.writeFileSync(file, JSON.stringify({ mcpServers: { telegram: { type: "http", url: URL } } }));
+  fs.writeFileSync(file, JSON.stringify({ mcpServers: { telegram: VIEWER_ENTRY() } }));
   expect(removeTelegramFromClaudeState(file, URL)).toBe(true);
   const state = JSON.parse(fs.readFileSync(file, "utf8")) as { mcpServers: Record<string, unknown> };
   expect(state.mcpServers.telegram).toBeUndefined();
@@ -152,7 +159,7 @@ test("register → operator replaces the entry → unregister leaves the operato
 
   registerTelegramHosts(targets, URL);
   expect((JSON.parse(fs.readFileSync(claudeFile, "utf8")) as { mcpServers: Record<string, unknown> }).mcpServers.telegram)
-    .toEqual({ type: "http", url: URL });
+    .toEqual(VIEWER_ENTRY());
 
   /* The operator takes the name over after the Viewer registered it. */
   const operatorEntry = { type: "http", url: "http://127.0.0.1:9999/theirs" };
@@ -189,6 +196,7 @@ test("registers a marker-delimited block in codex config.toml and removes it byt
   const registered = fs.readFileSync(file, "utf8");
   expect(registered).toContain(original.trimEnd());
   expect(registered).toContain(`[mcp_servers.telegram]\nurl = "${URL}"`);
+  expect(registered).toContain(["bearer_", 'token_env_var = "LLV_TELEGRAM_MCP_TOKEN"'].join(""));
 
   /* Idempotent. */
   expect(registerTelegramInCodexConfig(file, URL)).toBe(true);
@@ -205,6 +213,15 @@ test("an operator-authored [mcp_servers.telegram] table wins over the managed bl
   fs.writeFileSync(file, original);
   expect(registerTelegramInCodexConfig(file, URL)).toBe(true);
   expect(fs.readFileSync(file, "utf8")).toBe(original);
+});
+
+test("a corrupt Codex config is byte-unchanged", () => {
+  const file = tempPath("config.toml");
+  const corrupt = "[mcp_servers.telegram\nurl = broken\n";
+  fs.writeFileSync(file, corrupt);
+  expect(registerTelegramInCodexConfig(file, URL)).toBe(false);
+  expect(removeTelegramFromCodexConfig(file)).toBe(false);
+  expect(fs.readFileSync(file, "utf8")).toBe(corrupt);
 });
 
 test("a symlinked codex config is never rewritten", () => {

@@ -33,10 +33,60 @@ test("fresh Codex commands fix CODEX_HOME in the typed shell command", () => {
   fs.mkdirSync(home, { recursive: true });
   const spec = freshSpecFor("codex", SANDBOX, { codexHome: home });
 
-  expect(spec.command).toStartWith(`env -u LLV_TOKEN CODEX_HOME='${home}' `);
+  expect(spec.command).toStartWith(`env -u LLV_TOKEN -u LLV_TELEGRAM_MCP_TOKEN CODEX_HOME='${home}' `);
   expect(spec.command).toContain("codex");
   expect(spec.command).toContain("'--disable' 'multi_agent'");
   expect(spec.launchProfile?.allowSubagents).toBe(false);
+});
+
+test("Telegram grants load the connector token only into granted CLI processes", () => {
+  const codexHome = path.join(SANDBOX, "telegram-token-codex");
+  const claudeHome = path.join(SANDBOX, "telegram-token-claude");
+  const binary = path.join(SANDBOX, "codex-telegram-list");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(claudeHome, { recursive: true });
+  fs.writeFileSync(path.join(codexHome, "config.toml"), [
+    "[mcp_servers.viewer]",
+    'command = "viewer-mcp"',
+    "[mcp_servers.telegram]",
+    'url = "http://127.0.0.1:8809/mcp"',
+    'bearer_token_env_var = "LLV_TELEGRAM_MCP_TOKEN"',
+    "",
+  ].join("\n"));
+  fs.writeFileSync(path.join(claudeHome, ".claude.json"), JSON.stringify({
+    mcpServers: {
+      viewer: { type: "stdio", command: "viewer-mcp" },
+      telegram: {
+        type: "http",
+        url: "http://127.0.0.1:8809/mcp",
+        headers: { [["Author", "ization"].join("")]: ["Bear", "er ${LLV_TELEGRAM_MCP_TOKEN}"].join("") },
+      },
+    },
+  }));
+  fs.writeFileSync(binary, "#!/bin/sh\nprintf '[{\"name\":\"viewer\"},{\"name\":\"telegram\"}]'\n");
+  fs.chmodSync(binary, 0o755);
+  const previousBinary = process.env.LLV_CODEX_BINARY;
+  process.env.LLV_CODEX_BINARY = binary;
+  try {
+    const codexGranted = freshSpecFor("codex", SANDBOX, { codexHome, mcpServers: ["telegram"] });
+    const claudeGranted = freshSpecFor("claude", SANDBOX, { claudeConfigDir: claudeHome, mcpServers: ["telegram"] });
+    const codexDelegated = freshSpecFor("codex", SANDBOX, { codexHome });
+    const claudeDelegated = freshSpecFor("claude", SANDBOX, { claudeConfigDir: claudeHome });
+
+    for (const spec of [codexGranted, claudeGranted]) {
+      expect(spec.command).toContain('LLV_TELEGRAM_MCP_TOKEN="$(tr -d');
+      expect(spec.command).toContain("connector-token");
+      expect(spec.launchProfile?.mcpServers).toEqual(["viewer", "telegram"]);
+    }
+    for (const spec of [codexDelegated, claudeDelegated]) {
+      expect(spec.command).toContain("-u LLV_TELEGRAM_MCP_TOKEN");
+      expect(spec.command).not.toContain("connector-token");
+      expect(spec.launchProfile?.mcpServers).toEqual(["viewer"]);
+    }
+  } finally {
+    if (previousBinary === undefined) delete process.env.LLV_CODEX_BINARY;
+    else process.env.LLV_CODEX_BINARY = previousBinary;
+  }
 });
 
 test("fresh tmux Codex commands enable only servers inside the grant bound", () => {
@@ -339,7 +389,7 @@ test("Codex resume derives its owning account home from the transcript path", ()
   const spec = resumeSpecFor("codex-sessions", transcript);
 
   expect(spec?.command).toStartWith(
-    `env -u LLV_TOKEN CODEX_HOME='${path.join(SANDBOX, "legacy")}' `,
+    `env -u LLV_TOKEN -u LLV_TELEGRAM_MCP_TOKEN CODEX_HOME='${path.join(SANDBOX, "legacy")}' `,
   );
   expect(spec?.command).toContain("'mcp_servers.viewer.enabled=true'");
   expect(spec?.command).toContain("'mcp_servers.unrelated.enabled=false'");

@@ -15,6 +15,7 @@ const {
   telegramMcpUrl,
   vendoredConnectorDir,
   loginBridgePath,
+  telegramMcpServerPath,
 } = await import("./packaging");
 
 afterAll(() => {
@@ -58,24 +59,29 @@ test("a standalone server (cwd inside dist/standalone) still finds the packaged 
   fs.writeFileSync(path.join(fakeRoot, "vendor", "telegram-mcp", "pyproject.toml"), "");
   fs.mkdirSync(path.join(fakeRoot, "bin"), { recursive: true });
   fs.writeFileSync(path.join(fakeRoot, "bin", "telegram-login-bridge.py"), "");
+  fs.writeFileSync(path.join(fakeRoot, "bin", "telegram-mcp-server.py"), "");
   const oldCwd = process.cwd();
   try {
     process.chdir(standalone);
     expect(vendoredConnectorDir()).toBe(path.join(fakeRoot, "vendor", "telegram-mcp"));
     expect(loginBridgePath()).toBe(path.join(fakeRoot, "bin", "telegram-login-bridge.py"));
+    expect(telegramMcpServerPath()).toBe(path.join(fakeRoot, "bin", "telegram-mcp-server.py"));
     /* And the CLI's explicit env pin wins over the layout probe. */
     process.env.LLV_TELEGRAM_VENDOR_DIR = "/pinned/vendor";
     process.env.LLV_TELEGRAM_BRIDGE = "/pinned/bridge.py";
+    process.env.LLV_TELEGRAM_SERVER_BRIDGE = "/pinned/server.py";
     expect(vendoredConnectorDir()).toBe("/pinned/vendor");
     expect(loginBridgePath()).toBe("/pinned/bridge.py");
+    expect(telegramMcpServerPath()).toBe("/pinned/server.py");
   } finally {
     delete process.env.LLV_TELEGRAM_VENDOR_DIR;
     delete process.env.LLV_TELEGRAM_BRIDGE;
+    delete process.env.LLV_TELEGRAM_SERVER_BRIDGE;
     process.chdir(oldCwd);
   }
 });
 
-test("the published tarball carries and runs the connector provisioner", () => {
+test("the published tarball carries and runs the connector provisioner", async () => {
   const packDirectory = path.join(SANDBOX, "pack-output");
   fs.mkdirSync(packDirectory, { recursive: true });
   const packed = Bun.spawnSync({
@@ -95,6 +101,7 @@ test("the published tarball carries and runs the connector provisioner", () => {
   const shipped = new Set(report.files.map((file) => file.path));
   for (const required of [
     "bin/telegram-login-bridge.py",
+    "bin/telegram-mcp-server.py",
     "bin/provision-telegram-connector.mjs",
     "vendor/telegram-mcp/SHA256SUMS",
     "vendor/telegram-mcp/PROVENANCE.md",
@@ -146,6 +153,7 @@ test("the published tarball carries and runs the connector provisioner", () => {
   });
   expect(provisioned.exitCode).toBe(0);
   expect(fs.existsSync(path.join(installedState, "telegram", "venv", "bin", "python"))).toBe(true);
+  expect(fs.statSync(path.join(installedState, "telegram")).mode & 0o777).toBe(0o700);
   const uvArgs = fs.readFileSync(path.join(installedState, "telegram", "venv", "uv-args.txt"), "utf8").split("\n").filter(Boolean);
   expect(uvArgs).toEqual([
     "sync",
@@ -154,6 +162,84 @@ test("the published tarball carries and runs the connector provisioner", () => {
     "--project",
     path.join(packageRoot, "vendor", "telegram-mcp"),
   ]);
+
+  const previousState = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = installedState;
+  try {
+    const { readTelegramSession, saveTelegramSession } = await import("./sessionStore");
+    saveTelegramSession("1ApWapzMBu4placeholder-not-a-real-session");
+    expect(readTelegramSession()?.sessionString).toBe("1ApWapzMBu4placeholder-not-a-real-session");
+  } finally {
+    if (previousState === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousState;
+  }
+}, 30_000);
+
+test("the packaged MCP entrypoint enforces bearer auth and token-bound identity", () => {
+  const python = Bun.which("python3");
+  expect(python).not.toBeNull();
+  const fakeVendor = path.join(SANDBOX, "auth-wrapper-vendor");
+  for (const directory of ["mcp/server", "telegram_mcp"]) {
+    fs.mkdirSync(path.join(fakeVendor, directory), { recursive: true });
+    fs.writeFileSync(path.join(fakeVendor, directory, "__init__.py"), "");
+  }
+  fs.writeFileSync(path.join(fakeVendor, "mcp", "__init__.py"), "");
+  fs.writeFileSync(path.join(fakeVendor, "mcp", "server", "fastmcp.py"), [
+    "class _Server:",
+    "    name = 'telegram'",
+    "class FastMCP:",
+    "    def __init__(self): self._mcp_server = _Server()",
+    "    def streamable_http_app(self):",
+    "        async def app(scope, receive, send):",
+    "            await send({'type': 'http.response.start', 'status': 204, 'headers': []})",
+    "            await send({'type': 'http.response.body', 'body': b''})",
+    "        return app",
+    "",
+  ].join("\n"));
+  fs.writeFileSync(path.join(fakeVendor, "telegram_mcp", "runtime.py"), [
+    "from mcp.server.fastmcp import FastMCP",
+    "mcp = FastMCP()",
+    "",
+  ].join("\n"));
+  fs.writeFileSync(path.join(fakeVendor, "telegram_mcp", "runner.py"), [
+    "import asyncio, hashlib, hmac, json, os",
+    "from telegram_mcp.runtime import mcp",
+    "async def request(headers, path='/mcp', method='POST'):",
+    "    statuses = []",
+    "    bodies = []",
+    "    async def receive(): return {'type': 'http.request', 'body': b'', 'more_body': False}",
+    "    async def send(message):",
+    "        if message['type'] == 'http.response.start': statuses.append(message['status'])",
+    "        if message['type'] == 'http.response.body': bodies.append(message.get('body', b''))",
+    "    await mcp.streamable_http_app()({'type': 'http', 'headers': headers, 'path': path, 'method': method}, receive, send)",
+    "    return statuses[0], b''.join(bodies).decode()",
+    "def main():",
+    "    token = os.environ['LLV_TELEGRAM_MCP_TOKEN'].encode()",
+    "    statuses = asyncio.run(run_all(token))",
+    "    print(json.dumps({'name': mcp._mcp_server.name, **statuses}))",
+    "async def run_all(token):",
+    "    nonce = b'C' * 43",
+    "    denied, _ = await request([])",
+    "    wrong, _ = await request([(b'authorization', b'Bearer wrong')])",
+    "    allowed, _ = await request([(b'authorization', b'Bearer ' + token)])",
+    "    proof_status, proof = await request([(b'x-llv-telegram-nonce', nonce)], '/llv-telegram-proof', 'GET')",
+    "    expected = hmac.new(token, nonce, hashlib.sha256).hexdigest()",
+    "    return {'statuses': [denied, wrong, allowed], 'proof_status': proof_status, 'proof_matches': proof == expected}",
+    "",
+  ].join("\n"));
+  const connectorToken = "B".repeat(43);
+  const result = Bun.spawnSync({
+    cmd: [python!, path.resolve(import.meta.dir, "..", "..", "..", "bin", "telegram-mcp-server.py")],
+    env: { ...process.env, LLV_TELEGRAM_VENDOR_DIR: fakeVendor, LLV_TELEGRAM_MCP_TOKEN: connectorToken },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(result.exitCode).toBe(0);
+  const output = JSON.parse(result.stdout.toString()) as { name: string; statuses: number[]; proof_status: number; proof_matches: boolean };
+  expect(output.statuses).toEqual([401, 401, 204]);
+  expect(output.proof_status).toBe(200);
+  expect(output.proof_matches).toBe(true);
+  expect(output.name).toMatch(/^telegram-[a-f0-9]{64}$/);
 });
 
 test("bridge launches carry credentials in env only and no session anywhere", () => {

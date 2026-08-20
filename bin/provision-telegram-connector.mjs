@@ -18,7 +18,7 @@
  *   LLV_TELEGRAM_PYTHON      expected venv python (default: <state>/telegram/venv/bin/python)
  */
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,9 +29,18 @@ const stateDir = process.env.LLV_STATE_DIR
   || join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "agent-log-viewer", "state");
 const venvDir = join(stateDir, "telegram", "venv");
 const venvPython = process.env.LLV_TELEGRAM_PYTHON || join(venvDir, "bin", "python");
+const telegramStateDir = dirname(venvDir);
 
 if (!existsSync(join(vendorDir, "pyproject.toml"))) {
   console.error(`vendored connector not found at ${vendorDir}`);
+  process.exit(1);
+}
+if (!existsSync(telegramStateDir)) mkdirSync(telegramStateDir, { recursive: true, mode: 0o700 });
+const telegramState = lstatSync(telegramStateDir);
+if (telegramState.isSymbolicLink() || !telegramState.isDirectory()
+  || (telegramState.mode & 0o077) !== 0
+  || (typeof process.getuid === "function" && telegramState.uid !== process.getuid())) {
+  console.error("telegram state directory is not owner-only");
   process.exit(1);
 }
 console.log(`provisioning telegram connector from ${vendorDir}`);

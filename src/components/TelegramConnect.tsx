@@ -328,9 +328,10 @@ export function TelegramPanel({ state, onClose }: { state: TelegramConnectionSta
             </>
           ) : null}
 
-          {(phase === "connected" || phase === "expired" || (phase === "error" && status?.credentialRef)) ? (
+          {(phase === "connected" || phase === "expired"
+            || (phase === "error" && (status?.credentialRef || status?.error?.code === "session_unsafe"))) ? (
             <div className="flex flex-col gap-1 border-t border-border pt-1.5">
-              {phase !== "expired" ? (
+              {phase !== "expired" && !(phase === "error" && status?.error?.code === "session_unsafe") ? (
                 <div className="flex items-center">
                   <ConfirmingAction
                     label={t("telegram.logout")}

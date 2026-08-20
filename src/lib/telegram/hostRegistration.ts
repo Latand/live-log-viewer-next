@@ -6,7 +6,7 @@ import { legacyClaudeHome, listClaudeAccounts } from "@/lib/accounts/claude";
 import { statePath } from "@/lib/configDir";
 
 import { telegramMcpUrl } from "./packaging";
-import { ensureTelegramStateDir } from "./sessionStore";
+import { ensureTelegramStateDir, TELEGRAM_CONNECTOR_TOKEN_ENV } from "./sessionStore";
 
 /**
  * Host registration of the shared connector as `telegram` (issue #1059).
@@ -91,9 +91,12 @@ function claudeState(pathname: string): Record<string, unknown> | null {
 
 function isViewerEntry(entry: unknown, url: string | null): boolean {
   if (url === null || !entry || typeof entry !== "object") return false;
-  const record = entry as { type?: unknown; url?: unknown };
+  const record = entry as { type?: unknown; url?: unknown; headers?: unknown };
   return record.type === "http" && record.url === url
-    && Object.keys(record).length === 2;
+    && record.headers !== null && typeof record.headers === "object" && !Array.isArray(record.headers)
+    && (record.headers as Record<string, unknown>).Authorization === `Bearer \${${TELEGRAM_CONNECTOR_TOKEN_ENV}}`
+    && Object.keys(record.headers as Record<string, unknown>).length === 1
+    && Object.keys(record).length === 3;
 }
 
 export type ClaudeRegistrationResult = "registered" | "conflict" | "unwritable";
@@ -118,7 +121,11 @@ export function registerTelegramInClaudeState(pathname: string, url: string, pre
     if (!isViewerEntry(existing, previousUrl)) return "conflict";
     if (isViewerEntry(existing, url)) return "registered";
   }
-  servers[CLAUDE_ENTRY_NAME] = { type: "http", url };
+  servers[CLAUDE_ENTRY_NAME] = {
+    type: "http",
+    url,
+    headers: { Authorization: `Bearer \${${TELEGRAM_CONNECTOR_TOKEN_ENV}}` },
+  };
   atomicWrite(pathname, JSON.stringify({ ...state, mcpServers: servers }, null, 2) + "\n", 0o600);
   return "registered";
 }
@@ -163,7 +170,7 @@ function writeRegistrationRecords(records: RegistrationRecords): void {
 }
 
 function codexManagedBlock(url: string): string {
-  return `${CODEX_BLOCK_BEGIN}\n[mcp_servers.telegram]\nurl = "${url}"\n${CODEX_BLOCK_END}\n`;
+  return `${CODEX_BLOCK_BEGIN}\n[mcp_servers.telegram]\nurl = "${url}"\nbearer_token_env_var = "${TELEGRAM_CONNECTOR_TOKEN_ENV}"\n${CODEX_BLOCK_END}\n`;
 }
 
 function withoutCodexManagedBlock(contents: string): string {
@@ -180,6 +187,15 @@ function withoutCodexManagedBlock(contents: string): string {
   return prefix + tail;
 }
 
+function validCodexToml(contents: string): boolean {
+  try {
+    Bun.TOML.parse(contents);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Upserts a marker-delimited `[mcp_servers.telegram]` block in config.toml.
     Markers keep the edit reversible and byte-surgical without a TOML rewriter;
     everything outside the block is preserved verbatim. An operator-authored
@@ -188,6 +204,7 @@ function withoutCodexManagedBlock(contents: string): string {
 export function registerTelegramInCodexConfig(pathname: string, url: string): boolean {
   if (!safeToRewrite(pathname)) return false;
   const contents = fs.existsSync(pathname) ? fs.readFileSync(pathname, "utf8") : "";
+  if (!validCodexToml(contents)) return false;
   const stripped = withoutCodexManagedBlock(contents);
   if (/^\s*\[mcp_servers\.telegram(\.|])/m.test(stripped)) return true;
   const block = codexManagedBlock(url);
@@ -200,6 +217,7 @@ export function registerTelegramInCodexConfig(pathname: string, url: string): bo
 export function removeTelegramFromCodexConfig(pathname: string): boolean {
   if (!safeToRewrite(pathname) || !fs.existsSync(pathname)) return true;
   const contents = fs.readFileSync(pathname, "utf8");
+  if (!validCodexToml(contents)) return false;
   const stripped = withoutCodexManagedBlock(contents);
   if (stripped === contents) return true;
   atomicWrite(pathname, stripped, 0o600);

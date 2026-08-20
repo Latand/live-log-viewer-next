@@ -26,6 +26,7 @@ class FakeAdapter implements TelegramAdapter {
   passwords: string[] = [];
   unavailable: TelegramErrorCode | null = null;
   health: TelegramHealthResult = { status: "connected", identity: { name: "Account A", username: "account_a" } };
+  healthPromise: Promise<TelegramHealthResult> | null = null;
   logoutResult: { ok: boolean; code: TelegramErrorCode | null } = { ok: true, code: null };
   logoutCalls = 0;
 
@@ -38,7 +39,7 @@ class FakeAdapter implements TelegramAdapter {
       cancel: () => { this.canceled += 1; },
     };
   }
-  checkSession() { return Promise.resolve(this.health); }
+  checkSession() { return this.healthPromise ?? Promise.resolve(this.health); }
   logout() { this.logoutCalls += 1; return Promise.resolve(this.logoutResult); }
 }
 
@@ -47,8 +48,8 @@ function harness() {
   const calls = { ensure: [] as string[], stop: 0, register: 0, unregister: 0, order: [] as string[] };
   const ports: TelegramServicePorts = {
     adapter,
-    ensureConnector: async (sessionString) => {
-      calls.ensure.push(sessionString);
+    ensureConnector: async (session) => {
+      calls.ensure.push(session.sessionString);
       calls.order.push("ensure");
       return { ok: true, url: "http://127.0.0.1:8809/mcp" };
     },
@@ -329,4 +330,67 @@ test("an unsafe session file (symlink) reads as an explicit session_unsafe error
   const status = await service.checkHealth();
   expect(status.phase).toBe("error");
   expect(status.error?.code).toBe("session_unsafe");
+});
+
+test("local deletion invalidates an in-flight health result", async () => {
+  const { adapter, calls, service } = harness();
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  let resolveHealth!: (value: TelegramHealthResult) => void;
+  adapter.healthPromise = new Promise((resolve) => { resolveHealth = resolve; });
+
+  const pending = service.checkHealth();
+  expect(service.deleteLocalSession().phase).toBe("disconnected");
+  resolveHealth({ status: "connected", identity: { name: "Account A", username: "account_a" } });
+  expect((await pending).phase).toBe("disconnected");
+  expect(readTelegramSession()).toBeNull();
+  expect(calls.ensure).toEqual([]);
+  expect(calls.register).toBe(0);
+});
+
+test("cancel during connector verification cannot publish the authorized session", async () => {
+  const adapter = new FakeAdapter();
+  let resolveConnector!: (value: { ok: true; url: string }) => void;
+  const connector = new Promise<{ ok: true; url: string }>((resolve) => { resolveConnector = resolve; });
+  const calls = { register: 0, stop: 0, unregister: 0 };
+  const service = new TelegramConnectionService({
+    adapter,
+    ensureConnector: async () => await connector,
+    stopConnector: () => { calls.stop += 1; },
+    registerHosts: () => { calls.register += 1; },
+    unregisterHosts: () => { calls.unregister += 1; },
+    now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+  });
+  const started = service.startLogin();
+  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null } });
+  expect(service.cancelLogin(started.login!.operationId).phase).toBe("disconnected");
+  resolveConnector({ ok: true, url: "http://127.0.0.1:8809/mcp" });
+  await settle();
+
+  expect(service.status().phase).toBe("disconnected");
+  expect(readTelegramSession()).toBeNull();
+  expect(calls.register).toBe(0);
+  expect(calls.stop).toBeGreaterThanOrEqual(1);
+  expect(calls.unregister).toBeGreaterThanOrEqual(1);
+});
+
+test("corrupt session blocks remote logout and health without deleting credentials", async () => {
+  const { adapter, calls, service } = harness();
+  fs.mkdirSync(path.dirname(telegramSessionPath()), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(telegramSessionPath(), "{broken", { mode: 0o600 });
+
+  const logout = await service.logout();
+  expect(logout.phase).toBe("error");
+  expect(logout.error?.code).toBe("session_unsafe");
+  expect(adapter.logoutCalls).toBe(0);
+  expect(fs.existsSync(telegramSessionPath())).toBe(true);
+
+  const health = await service.checkHealth();
+  expect(health.phase).toBe("error");
+  expect(health.error?.code).toBe("session_unsafe");
+  expect(fs.existsSync(telegramSessionPath())).toBe(true);
+  expect(calls.stop).toBeGreaterThanOrEqual(1);
+  expect(calls.unregister).toBeGreaterThanOrEqual(1);
+
+  expect(service.deleteLocalSession().phase).toBe("disconnected");
+  expect(fs.existsSync(telegramSessionPath())).toBe(false);
 });

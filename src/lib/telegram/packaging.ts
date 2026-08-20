@@ -70,6 +70,10 @@ export function loginBridgePath(): string {
   return packageAssetPath(process.env.LLV_TELEGRAM_BRIDGE, "bin", "telegram-login-bridge.py");
 }
 
+export function telegramMcpServerPath(): string {
+  return packageAssetPath(process.env.LLV_TELEGRAM_SERVER_BRIDGE, "bin", "telegram-mcp-server.py");
+}
+
 export type TelegramApiCredentials = { apiId: string; apiHash: string };
 
 /**
@@ -114,11 +118,11 @@ export function connectorProvisioned(): boolean {
     The session string travels ONLY as child environment (the upstream
     contract) — never as an argument, so it cannot surface in process listings,
     transcripts, or the activity journal. */
-export function connectorLaunchSpec(input: { sessionString: string; credentials: TelegramApiCredentials }): ProcessSpec {
+export function connectorLaunchSpec(input: { sessionString: string; connectorToken: string; credentials: TelegramApiCredentials }): ProcessSpec {
   const vendor = vendoredConnectorDir();
   return {
     command: telegramVenvPython(),
-    args: [path.join(vendor, "main.py")],
+    args: [telegramMcpServerPath()],
     cwd: vendor,
     env: {
       ...minimalChildEnv(),
@@ -126,6 +130,8 @@ export function connectorLaunchSpec(input: { sessionString: string; credentials:
       TELEGRAM_API_HASH: input.credentials.apiHash,
       TELEGRAM_SESSION_STRING: input.sessionString,
       TELEGRAM_EXPOSED_TOOLS: "read-only",
+      LLV_TELEGRAM_MCP_TOKEN: input.connectorToken,
+      LLV_TELEGRAM_VENDOR_DIR: vendor,
       MCP_TRANSPORT: "http",
       MCP_HOST: TELEGRAM_MCP_HOST,
       MCP_PORT: String(telegramMcpPort()),

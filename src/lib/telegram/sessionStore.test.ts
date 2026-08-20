@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, expect, test } from "bun:test";
+import { afterAll, beforeEach, expect, spyOn, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -13,6 +13,7 @@ const {
   readTelegramSession,
   saveTelegramSession,
   telegramConnectionPath,
+  telegramConnectorTokenPath,
   telegramSessionPath,
   writeTelegramConnection,
   UnsafeTelegramSessionError,
@@ -33,12 +34,15 @@ afterAll(() => {
 test("saves the session owner-only, atomically, and reads it back", () => {
   const stored = saveTelegramSession(PLACEHOLDER_SESSION);
   expect(stored.credentialRef).toMatch(/^[0-9a-f-]{36}$/);
+  expect(stored.connectorToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
 
   const file = telegramSessionPath();
   const stat = fs.statSync(file);
   expect(stat.isFile()).toBe(true);
   expect(stat.mode & 0o777).toBe(0o600);
   expect(fs.statSync(path.dirname(file)).mode & 0o777).toBe(0o700);
+  expect(fs.statSync(telegramConnectorTokenPath()).mode & 0o777).toBe(0o600);
+  expect(fs.readFileSync(file, "utf8")).not.toContain(stored.connectorToken);
   /* Atomic: no temp sibling survives the write. */
   expect(fs.readdirSync(path.dirname(file)).filter((name) => name.includes(".tmp"))).toEqual([]);
 
@@ -51,6 +55,7 @@ test("a fresh save rotates the opaque credentialRef", () => {
   const first = saveTelegramSession(PLACEHOLDER_SESSION);
   const second = saveTelegramSession(PLACEHOLDER_SESSION + "-again");
   expect(second.credentialRef).not.toBe(first.credentialRef);
+  expect(second.connectorToken).not.toBe(first.connectorToken);
   expect(readTelegramSession()?.sessionString).toBe(PLACEHOLDER_SESSION + "-again");
 });
 
@@ -125,4 +130,47 @@ test("a missing or corrupt connection file reads as disconnected", () => {
   fs.mkdirSync(path.dirname(telegramConnectionPath()), { recursive: true, mode: 0o700 });
   fs.writeFileSync(telegramConnectionPath(), "{not json", { mode: 0o600 });
   expect(readTelegramConnection().status).toBe("disconnected");
+});
+
+test("a corrupt session is unsafe and preserved for explicit local deletion", () => {
+  const file = telegramSessionPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(file, "{broken", { mode: 0o600 });
+
+  expect(() => readTelegramSession()).toThrow(UnsafeTelegramSessionError);
+  expect(fs.readFileSync(file, "utf8")).toBe("{broken");
+
+  deleteTelegramSession();
+  expect(fs.existsSync(file)).toBe(false);
+});
+
+test("a session read I/O failure is unsafe and preserves the credential", () => {
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  const originalRead = fs.readFileSync;
+  const read = spyOn(fs, "readFileSync").mockImplementation(((pathname: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+    if (pathname === telegramSessionPath()) {
+      const error = new Error("simulated session read failure") as NodeJS.ErrnoException;
+      error.code = "EIO";
+      throw error;
+    }
+    return originalRead(pathname, ...(args as Parameters<typeof fs.readFileSync> extends [unknown, ...infer Rest] ? Rest : never));
+  }) as typeof fs.readFileSync);
+  try {
+    expect(() => readTelegramSession()).toThrow(UnsafeTelegramSessionError);
+  } finally {
+    read.mockRestore();
+  }
+  expect(fs.existsSync(telegramSessionPath())).toBe(true);
+});
+
+test("local deletion preflights both credential files before removing either", () => {
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  const external = path.join(SANDBOX, "external-token");
+  fs.writeFileSync(external, "external", { mode: 0o600 });
+  fs.rmSync(telegramConnectorTokenPath());
+  fs.symlinkSync(external, telegramConnectorTokenPath());
+
+  expect(() => deleteTelegramSession()).toThrow(UnsafeTelegramSessionError);
+  expect(fs.existsSync(telegramSessionPath())).toBe(true);
+  expect(fs.readFileSync(external, "utf8")).toBe("external");
 });

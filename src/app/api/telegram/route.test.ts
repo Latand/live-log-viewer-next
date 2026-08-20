@@ -110,8 +110,10 @@ test("the login round trip over the narrow API, without a session string ever cr
   expect((connectedBody as { telegram: { phase: string } }).telegram.phase).toBe("connected");
   /* The secret-leak assertion: the session reached the store, and NOTHING the
      API returned along the way carried it. */
-  expect(readTelegramSession()?.sessionString).toBe(PLACEHOLDER_SESSION);
+  const stored = readTelegramSession();
+  expect(stored?.sessionString).toBe(PLACEHOLDER_SESSION);
   expect(text).not.toContain(PLACEHOLDER_SESSION);
+  expect(text).not.toContain(stored!.connectorToken);
   /* The password is spent, not echoed. */
   expect(text).not.toContain("2fa-pw");
 });

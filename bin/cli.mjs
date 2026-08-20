@@ -274,6 +274,10 @@ function buildChildEnv(options, runtime, packageRoot) {
   if (!env.LLV_TELEGRAM_BRIDGE && existsSync(telegramBridge)) {
     env.LLV_TELEGRAM_BRIDGE = telegramBridge;
   }
+  const telegramServerBridge = join(packageRoot, "bin", "telegram-mcp-server.py");
+  if (!env.LLV_TELEGRAM_SERVER_BRIDGE && existsSync(telegramServerBridge)) {
+    env.LLV_TELEGRAM_SERVER_BRIDGE = telegramServerBridge;
+  }
 
   if (runtime.llvToken) {
     env.LLV_TOKEN = runtime.llvToken;

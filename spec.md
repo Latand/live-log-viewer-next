@@ -26,7 +26,10 @@ AC2: One shared streamable-HTTP connector runs on loopback with
 whether newly spawned or adopted from a previous Viewer generation via the
 persisted pid record — every advertised tool must carry `readOnlyHint: true`;
 every tool name must also belong to the audited read allowlist. A surface that
-violates either bound is refused and reported as `not_read_only`.
+violates either bound is refused and reported as `not_read_only`. The HTTP
+endpoint requires a per-credential bearer token. Adoption also proves the PID,
+portable start identity, exact executable/entrypoint, credential generation,
+pre-auth challenge response, and token-derived server identity.
 
 AC3: The login operation follows the account-login pattern: at most one
 operation at a time, phases `disconnected → starting → awaiting_scan →
@@ -34,7 +37,9 @@ operation at a time, phases `disconnected → starting → awaiting_scan →
 token refreshes automatically within the same operation. The 2FA password is
 requested only when Telegram asks; an invalid password is an explicit state
 that allows retry. Cancellation terminates the enrollment process and clears
-temporary state.
+temporary state, including a credential written before connector verification.
+Lifecycle generations prevent stale enrollment/health results from restoring
+state or processes after cancel, logout, or local deletion.
 
 AC4: The session persists server-side only: an owner-only (0600, dir 0700)
 regular non-symlinked file written atomically under Viewer state. Reads,
@@ -43,7 +48,10 @@ foreign ownership. Status
 surfaces carry an opaque `credentialRef` only. The session string appears in no
 API payload, log line, process argument, transcript, fixture, or served client
 payload; focused secret-leak tests prove the API and argv paths with a
-placeholder session.
+placeholder session. The connector bearer token is a separate 0600 secret,
+rotates with `credentialRef`, and appears in no config file, argv, or API body.
+Corrupt/unreadable session data reports `session_unsafe`, remains preserved for
+explicit local deletion, and never produces a successful remote logout.
 
 AC5: `Log out` performs remote revocation and then removes the local session,
 stops the connector, and unregisters the host definition. A failed remote
@@ -58,7 +66,10 @@ marker-delimited block in the legacy `config.toml`, which managed homes
 symlink). Registration never rewrites corrupt or symlinked targets, never
 touches the legacy `telegram-readonly` entry, and backs off from an
 operator-authored `telegram` definition. Disconnect removes exactly the
-managed entry, so the next dispatch materializes nothing.
+managed entry, so the next dispatch materializes nothing. Managed Claude and
+Codex HTTP definitions obtain bearer authorization from an environment
+variable present only in granted operator-root launches. Existing corrupt
+Codex TOML is byte-unchanged.
 
 AC7: The #739 boundary extends by exactly one name: `telegram` joins
 `GRANTABLE_MCP_SERVERS` and the operator-root default; the delegated default
@@ -78,7 +89,9 @@ human-readable sanitized errors in en and uk.
 AC9: Health checks report connected / expired / error explicitly: `expired`
 stops the connector and keeps Reconnect plus local deletion available;
 transient probe failures are an error state, never a silent disconnect; an
-unsafe session file reads as `session_unsafe`.
+unsafe session file reads as `session_unsafe`. Initial and fresh polling
+failures are visible, and request sequencing prevents slow responses from
+overwriting newer status.
 
 AC10: Focused tests run with isolated `LLV_STATE_DIR` (and temp homes where
 paths matter) and a fake Telegram adapter — no test reaches a real account,
@@ -89,8 +102,10 @@ confirmation states carry no real identity. Focused DOM tests prove the 2FA
 field never stores its value in React state and clears at the required seams.
 
 AC11: Scope holds to `src/lib/telegram/*`, `src/app/api/telegram/*`,
-`src/components/TelegramConnect.tsx`, the footer row mount, the tranche-2
-allowlist change with its test updates, i18n keys, packaging manifest entries,
+`src/components/TelegramConnect.tsx`, `src/hooks/useTelegramConnection.ts`, the
+footer row mount, the tranche-2 allowlist and CLI grant propagation with their
+test updates, i18n keys, packaging manifest entries,
 `bin/telegram-login-bridge.py`, `bin/provision-telegram-connector.mjs`,
+`bin/telegram-mcp-server.py`,
 `vendor/telegram-mcp/`, evidence, and this spec. No VPS, OpenClaw,
 morning-digest, or real Telegram credential/session is touched; no deploy.
