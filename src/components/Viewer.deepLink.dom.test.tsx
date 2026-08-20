@@ -133,8 +133,39 @@ const predecessorRow = fileEntry({
   migratedTo: "/beyond-cap/successor-generation.jsonl",
 });
 
+/* Issue #1054: a conversation with no stable id, so its history entry — and
+   therefore the tab's hash — stays the `#f=<path>` form the search palette
+   produces for every result. */
+const PATH_ONLY_PATH = "/sessions/path-only-conversation.jsonl";
+
+/** What `/api/search/transcripts` answers. Empty unless a test sets it, so the
+    palette exists for every test here but only this one's traffic is served. */
+let searchHits: string[] = [];
+
+function searchPage() {
+  return {
+    items: searchHits.map((transcriptPath, index) => ({
+      snippet: "the \u0001heliotrope\u0002 rollout",
+      speaker: "user" as const,
+      timestamp: 1_000,
+      transcriptPath,
+      byteOffset: index * 40,
+      lineNumber: index + 1,
+      project: TARGET_PROJECT,
+      engine: "claude" as const,
+      title: "The conversation the operator went looking for",
+    })),
+    nextCursor: null,
+    total: searchHits.length,
+    stats: { conversationsIndexed: 9, messagesIndexed: 900, fieldsSearched: ["message.body"], tokenizer: "unicode61" },
+  };
+}
+
 const originalFetch = globalThis.fetch;
 const requestLog: string[] = [];
+/** Non-empty only where a test needs «Список» to be an available face: the
+    dashboard offers the catalog list when the project is in this catalog. */
+let projectCatalog: Array<{ project: string; smt: number; conversations: number }> = [];
 let historyWrites: string[] = [];
 let boards: Record<string, BoardProjectStateV1> = {};
 
@@ -161,6 +192,8 @@ beforeEach(() => {
   requestLog.length = 0;
   historyWrites = [];
   boards = {};
+  searchHits = [];
+  projectCatalog = [];
 });
 
 afterEach(() => {
@@ -180,10 +213,11 @@ function stubFetch(filesByPin: (pin: string) => FileEntry[]) {
     if (url.startsWith("/api/files")) {
       const pin = new URL(url, "http://localhost").searchParams.get("path") ?? "";
       return new Response(
-        JSON.stringify({ files: filesByPin(pin), projectCatalog: [] }),
+        JSON.stringify({ files: filesByPin(pin), projectCatalog }),
         { headers: { "content-type": "application/json" } },
       );
     }
+    if (url.startsWith("/api/search/transcripts")) return Response.json(searchPage());
     if (url.startsWith("/api/board")) {
       const method = (init?.method ?? "GET").toUpperCase();
       if (method === "GET") {
@@ -246,6 +280,124 @@ async function expectNavigationQuiescence(): Promise<void> {
   expect(historyWrites.length).toBe(settled);
   expect(dom.location.hash).toBe(hashAtSettle);
 }
+
+/** happy-dom's event classes do not structurally match lib.dom's, so the cast
+    lives in one place rather than at every dispatch site. */
+function dispatch(target: EventTarget, event: unknown): boolean {
+  return target.dispatchEvent(event as Event);
+}
+
+/** The app refetches `/api/files` on this event, so a feed change lands at once
+    instead of waiting out the 10s poll. */
+async function refreshFeed(): Promise<void> {
+  await act(async () => {
+    dispatch(dom as unknown as EventTarget, new dom.Event("llv:files-changed", { bubbles: false }));
+    await Bun.sleep(120);
+  });
+}
+
+/** Drives the real palette: `/` opens it, a keystroke lands in its field, and
+    the rendered row is clicked — the operator's own path to a selection. */
+async function findAndSelect(host: HTMLElement, query: string): Promise<void> {
+  await act(async () => {
+    dispatch(dom as unknown as EventTarget, new dom.KeyboardEvent("keydown", { key: "/", bubbles: true, cancelable: true }));
+  });
+  const input = host.ownerDocument.querySelector("[data-search-input]") as HTMLInputElement | null
+    ?? document.querySelector("[data-search-input]") as HTMLInputElement | null;
+  if (!input) throw new Error("the search palette did not open");
+  await act(async () => {
+    /* react-dom decided whether native `input` events drive onChange when it
+       was first imported — before any window existed here. Focusing and adding
+       the keydown makes the keystroke land under either decision. */
+    input.focus();
+    Object.getOwnPropertyDescriptor(dom.HTMLInputElement.prototype, "value")!.set!.call(input, query);
+    dispatch(input, new dom.Event("input", { bubbles: true }));
+    dispatch(input, new dom.KeyboardEvent("keydown", { key: "a", bubbles: true }));
+  });
+  /* Past the 250ms debounce and the answer. */
+  expect(await waitFor(() => document.querySelector("[data-search-result]") !== null)).toBe(true);
+  const row = document.querySelector("[data-search-result]") as HTMLElement;
+  await act(async () => {
+    dispatch(row, new dom.MouseEvent("click", { bubbles: true, cancelable: true }));
+  });
+}
+
+test("a search selection opens the conversation even when the tab already sits on its hash", async () => {
+  /* The defect this pins (#1054 review, HIGH): the palette navigated by
+     assigning `location.hash`, and assigning an UNCHANGED hash fires no
+     hashchange — so selecting a conversation the tab was already pointed at
+     closed the overlay and opened nothing. The hash outlives the conversation
+     being on screen, which is routine here: this transcript drops out of the
+     capped feed while the `#f=` entry that opened it stays put. "Find, open,
+     continue" stopped at find. */
+  const searchRow = fileEntry({
+    path: PATH_ONLY_PATH,
+    name: "path-only-conversation.jsonl",
+    project: TARGET_PROJECT,
+    title: "The conversation the operator went looking for",
+  });
+  /* Beyond the cap: served ONLY to a pinned request, and only while `inFeed`
+     holds. Nothing but a resolver entry can pin it, which is what makes the
+     final assertion discriminating. */
+  let inFeed = true;
+  stubFetch((pin) => (inFeed && pin === PATH_ONLY_PATH ? [otherRow, searchRow] : [otherRow]));
+  searchHits = [PATH_ONLY_PATH];
+
+  const hash = `#f=${encodeURIComponent(PATH_ONLY_PATH)}`;
+  dom.location.hash = hash;
+  const host = await mountViewer();
+  expect(await waitFor(() => host.querySelector(`[data-scheme-node="${PATH_ONLY_PATH}"]`) !== null)).toBe(true);
+
+  /* The transcript ages out of the feed. The card goes with it; the hash does
+     not — no navigation happened, so there is nothing to change it. */
+  inFeed = false;
+  await refreshFeed();
+  expect(await waitFor(() => host.querySelector(`[data-scheme-node="${PATH_ONLY_PATH}"]`) === null)).toBe(true);
+  expect(dom.location.hash).toBe(hash);
+
+  /* Now the operator searches for what they sent and picks that conversation —
+     the one the tab's hash still names. */
+  inFeed = true;
+  await findAndSelect(host, "heliotrope");
+
+  /* It opens on the board, the standard surface with its composer, and the
+     palette is gone. */
+  expect(await waitFor(() => host.querySelector(`[data-scheme-node="${PATH_ONLY_PATH}"]`) !== null)).toBe(true);
+  expect(document.querySelector("[data-global-search]")).toBeNull();
+  expect(dom.location.hash).toBe(hash);
+});
+
+test("a saved «Список» preference does not swallow a search selection — it opens ready to continue", async () => {
+  /* The defect this pins (#1054 review, HIGH): the selection reached the
+     resolver, the node materialized, the project was selected — and the board
+     still rendered the catalog list, because the saved view preference won view
+     resolution. The operator searched to LEAVE that list and was handed it back
+     with no card and no composer. */
+  const searchRow = fileEntry({
+    path: PATH_ONLY_PATH,
+    name: "path-only-conversation.jsonl",
+    project: TARGET_PROJECT,
+    title: "The conversation the operator went looking for",
+  });
+  stubFetch((pin) => (pin === PATH_ONLY_PATH ? [otherRow, searchRow] : [otherRow]));
+  searchHits = [PATH_ONLY_PATH];
+  /* «Список» is a real face for this project (it has a catalog) AND it is the
+     face the operator saved. */
+  projectCatalog = [{ project: TARGET_PROJECT, smt: 9_000, conversations: 4 }];
+  boards[TARGET_PROJECT] = { ...emptyBoard(), prefs: { ...emptyBoard().prefs, viewMode: "list" } };
+
+  const host = await mountViewer();
+  await findAndSelect(host, "heliotrope");
+
+  /* The conversation is on the standard surface, with the composer that makes
+     "continue" possible. */
+  expect(await waitFor(() => host.querySelector(`[data-scheme-node="${PATH_ONLY_PATH}"]`) !== null)).toBe(true);
+  expect(await waitFor(() => host.querySelector("textarea") !== null)).toBe(true);
+  expect(dom.localStorage.getItem("llvProject")).toBe(TARGET_PROJECT);
+  expect(document.querySelector("[data-global-search]")).toBeNull();
+  /* And the operator's saved preference was never rewritten on their behalf. */
+  expect(boards[TARGET_PROJECT]!.prefs.viewMode).toBe("list");
+});
 
 test("#c= to a conversation whose only present generation is an archived predecessor opens it", async () => {
   dom.location.hash = `#c=${encodeURIComponent(CONVERSATION_ID)}`;

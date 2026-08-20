@@ -35,6 +35,7 @@ import { resolveFavoriteRows, type FavoriteRow } from "./favorites/favoriteRows"
 import { KeepAwakeProvider } from "./KeepAwakeControl";
 import { OrchestratorDock, OPEN_KEY as ORCHESTRATOR_OPEN_KEY } from "./orchestrator/OrchestratorDock";
 import { OverviewBoard } from "./OverviewBoard";
+import { GlobalSearch, transcriptFocusHash } from "./search/GlobalSearch";
 import { ProjectDashboard, queueColumnOpen } from "./ProjectDashboard";
 import { isChildConversation, OVERVIEW, projectKey } from "./projectModel";
 import { ProjectRail } from "./ProjectRail";
@@ -209,6 +210,13 @@ export function Viewer() {
      first client render agree on «closed», and the mount effect below applies
      what was stored — the same shape the project restore uses. */
   const [orchestratorOpen, setOrchestratorOpen] = useState(false);
+  /* The ONE global message search (issue #1054). It is shell state, not board
+     state: the same overlay answers from the overview, from any project and on
+     the phone, and it unmounts on close so every open starts on «my messages»
+     with an empty query. */
+  const [searchOpen, setSearchOpen] = useState(false);
+  const openSearch = useCallback(() => setSearchOpen(true), []);
+  const closeSearch = useCallback(() => setSearchOpen(false), []);
   const [toastPath, setToastPath] = useState<string | null>(null);
   const seenQuestionsRef = useRef<Set<string> | null>(null);
   /* Reopening a file whose project is already selected does not change
@@ -452,6 +460,28 @@ export function Viewer() {
     const hash = formatConversationHash(file);
     setPendingHash(parseConversationHash(hash));
   }, [openPinnedFile]);
+
+  /* Opening a global-search result (issue #1054). A selection carries only the
+     transcript path, so it enters the SAME resolver a deep link uses: the hash
+     assignment records the history entry and its hashchange drives resolution.
+     But the tab can already be standing on that exact `#f=` while the
+     conversation is NOT on screen, because plenty happens here without touching
+     the hash — the transcript ages out of the capped feed, the card is closed,
+     the board switches to List view. Assigning an unchanged hash fires no
+     hashchange, so in that case the intent is set directly; without it the
+     palette closed over a selection that never reopened, and "find, open,
+     continue" stopped at find. */
+  const openSearchResult = useCallback((transcriptPath: string) => {
+    const hash = transcriptFocusHash(transcriptPath);
+    if (location.hash !== hash) {
+      location.hash = hash;
+      return;
+    }
+    setStaleFocusNotice(false);
+    dispatchCatalogPin({ kind: "release" });
+    setFocusRequest(null);
+    setPendingHash(parseConversationHash(hash));
+  }, []);
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
@@ -697,11 +727,16 @@ export function Viewer() {
         if (!queue.length) return;
         event.preventDefault();
         setAttentionFilter((value) => !value);
+      } else if (event.key === "/") {
+        /* No Ctrl/Cmd chord: this app has none, and the `typing()` guard above
+           already keeps the key quiet inside the search field itself. */
+        event.preventDefault();
+        openSearch();
       }
     };
     window.addEventListener("keydown", onDown);
     return () => window.removeEventListener("keydown", onDown);
-  }, [isMobile, projectQueue, queue.length, requestFocus]);
+  }, [isMobile, projectQueue, queue.length, requestFocus, openSearch]);
 
   /* A popover click is a deliberate act, so unlike the N hotkey it may switch
      the project; the focus hand-off glides the board to the node. */
@@ -951,6 +986,7 @@ export function Viewer() {
             onSelectProject={selectProject}
             onSelectFile={openFile}
             onMenu={isMobile ? () => setDrawerOpen(true) : undefined}
+            onOpenSearch={openSearch}
             attention={isMobile ? attentionBadge : undefined}
           />
         ) : (
@@ -978,6 +1014,7 @@ export function Viewer() {
             onArchive={archiveProject}
             onUnarchive={unarchiveProject}
             onMenu={isMobile ? () => setDrawerOpen(true) : undefined}
+            onOpenSearch={openSearch}
             attention={isMobile ? attentionBadge : undefined}
             orchestratorPanelOpen={orchestratorOpen}
             onToggleOrchestratorPanel={isMobile ? undefined : toggleOrchestrator}
@@ -997,6 +1034,12 @@ export function Viewer() {
           root agent's focus handoff when there is one to answer. Renders
           nothing at all the rest of the time. */}
       <AttentionHost mobile={isMobile} />
+      {/* #1054: the global "find my messages" palette. Mounted here so one
+          surface serves every board and both form factors; it renders nothing
+          until the header button or `/` opens it, and a selected row leaves
+          through the app's own `#f=` deep link so the conversation opens in the
+          standard surface with its composer. */}
+      {searchOpen ? <GlobalSearch mobile={isMobile} onClose={closeSearch} onOpen={openSearchResult} /> : null}
       {/* #875: the ONE document preview surface. Transcript artifact links
           publish to its bus from anywhere in the feed; it renders nothing until
           one opens, and its state is pure same-document React state — no hash,

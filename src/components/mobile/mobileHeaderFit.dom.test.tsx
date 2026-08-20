@@ -18,6 +18,13 @@ import type { BoardTask } from "@/lib/tasks/types";
  *   - the attention badge keeps its own width — it is an action, not filler;
  *   - the 94px scheme/list segmented pair no longer rides the row: both faces
  *     live in the «⋯» menu as radio options and still switch the board.
+ *
+ * Issue #1054 added global search to this row, so the props below are the
+ * COMPLETE mobile control combination — every optional control present at once.
+ * The budget is five 44px targets, so search's arrival folded board undo into
+ * the «⋯» menu beside the redo already there; a sixth target measured the
+ * project name down to 25px (issue613Evidence.browser.test.tsx holds the pixel
+ * floor).
  */
 
 const actualRuntimeHooks = await import("@/hooks/useRuntime");
@@ -149,14 +156,17 @@ const dashboardProps = () => ({
   catalogKnown: true, catalogConversationCount: 1,
   projectCwd: "/repo", onArchive: () => {}, onUnarchive: () => {},
   onMenu: () => {},
+  onOpenSearch: () => { searchOpens += 1; },
   attention: (
     <button type="button" className="inline-flex min-h-11 items-center px-3.5" aria-label={ATTENTION_LABEL}>3</button>
   ),
 });
 
 let roots: Root[] = [];
+let searchOpens = 0;
 beforeEach(() => {
   roots = [];
+  searchOpens = 0;
   boardRevision = 1;
   boardPrefs = {};
   dom.document.body.replaceChildren();
@@ -213,12 +223,22 @@ test("the 390px header row keeps one elastic cell — the project name — and f
     expect(`${trigger.className} `).toMatch(/(^|\s)(w-11|min-w-11|w-full)(\s|$)/);
   }
 
-  /* The controls the operator relies on are all still in the row. */
+  /* The controls the operator relies on are all still in the row — five 44px
+     targets, no more: the fifth is global search (#1054), which the operator
+     asked for by name and which must be one tap from anywhere. */
   const labels = triggers.map(label);
-  for (const key of ["dash.openProjects", "dash.hiddenShelf", "dash.createMenu", "dash.moreMenu"] as const) {
+  for (const key of ["dash.openProjects", "search.openMobile", "dash.hiddenShelf", "dash.createMenu", "dash.moreMenu"] as const) {
     expect(labels.some((entry) => entry.startsWith(translate("en", key)))).toBe(true);
   }
-  expect(labels.some((entry) => entry.startsWith(translate("en", "board.undo")))).toBe(true);
+  expect(triggers).toHaveLength(5);
+  /* Undo bought that slot by folding into «⋯» — it is no longer in the row. */
+  expect(labels.some((entry) => entry.startsWith(translate("en", "board.undo")))).toBe(false);
+
+  /* The search target is wired to the shell's palette, not decoration. */
+  const searchButton = row.querySelector('[data-testid="dash-search"]') as unknown as HTMLButtonElement;
+  expect(searchButton).not.toBeNull();
+  flushSync(() => searchButton.click());
+  expect(searchOpens).toBe(1);
 
   /* And the 94px segmented scheme/list pair is gone from the row. */
   expect(labels).not.toContain(translate("en", "dash.viewScheme"));
@@ -257,6 +277,34 @@ test("both board faces stay one tap away inside the «more» menu and still swit
   await settle();
   const reopened = Array.from(header(host).querySelectorAll('[role="menuitemradio"]'));
   expect(reopened[1]!.getAttribute("aria-checked")).toBe("true");
+});
+
+test("board undo folded into the «⋯» menu is still one tap and still undoes (#1054)", async () => {
+  const host = mount();
+  expect(await waitFor(() => shelfReady(host))).toBe(true);
+
+  const openMenu = () => {
+    const more = Array.from(header(host).querySelectorAll("button")).find(
+      (el) => label(el) === translate("en", "dash.moreMenu"),
+    ) as unknown as HTMLButtonElement;
+    flushSync(() => more.click());
+  };
+  openMenu();
+  await settle();
+
+  const undo = Array.from(header(host).querySelectorAll('[role="menuitem"]')).find(
+    (el) => label(el) === translate("en", "board.undo"),
+  ) as unknown as HTMLButtonElement | undefined;
+  expect(undo).toBeDefined();
+  /* The seeded log holds one close, so undo acts and the log empties — the item
+     is gone on the next open, exactly as the row button used to disappear. */
+  flushSync(() => undo!.click());
+  await settle();
+  openMenu();
+  await settle();
+  const afterwards = Array.from(header(host).querySelectorAll('[role="menuitem"]')).map(label);
+  expect(afterwards).not.toContain(translate("en", "board.undo"));
+  expect(afterwards).toContain(translate("en", "board.redo"));
 });
 
 /*
