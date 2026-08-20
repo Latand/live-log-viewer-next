@@ -273,7 +273,7 @@ test("remote logout removes the local session, stops the connector, unregisters 
   expect(adapter.logoutCalls).toBe(1);
   expect(status.phase).toBe("disconnected");
   expect(readTelegramSession()).toBeNull();
-  expect(calls.stop).toBe(1);
+  expect(calls.stop).toBe(2);
   expect(calls.unregister).toBe(1);
 });
 
@@ -313,6 +313,35 @@ test("a health check started during logout cannot overwrite completed deletion",
   resolveHealth({ status: "expired" });
   expect((await health).phase).toBe("disconnected");
   expect(service.status().phase).toBe("disconnected");
+});
+
+test("successful logout stops a connector that health restarted during revocation", async () => {
+  const adapter = new FakeAdapter();
+  let resolveLogout!: (result: { ok: boolean; code: TelegramErrorCode | null }) => void;
+  adapter.logout = async () => await new Promise((resolve) => { resolveLogout = resolve; });
+  let connectorRunning = true;
+  const service = new TelegramConnectionService({
+    adapter,
+    stopConnector: () => { connectorRunning = false; },
+    ensureConnector: async () => {
+      connectorRunning = true;
+      return { ok: true, url: "http://127.0.0.1:8809/mcp" };
+    },
+    registerHosts: () => HOSTS_REGISTERED,
+    unregisterHosts: () => {},
+    now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+  });
+  saveTelegramSession(PLACEHOLDER_SESSION);
+
+  const logout = service.logout();
+  expect(connectorRunning).toBe(false);
+  expect((await service.checkHealth()).phase).toBe("connected");
+  expect(connectorRunning).toBe(true);
+
+  resolveLogout({ ok: true, code: null });
+  expect((await logout).phase).toBe("disconnected");
+  expect(connectorRunning).toBe(false);
+  expect(readTelegramSession()).toBeNull();
 });
 
 test("a failed remote logout PRESERVES the local session and reports why", async () => {

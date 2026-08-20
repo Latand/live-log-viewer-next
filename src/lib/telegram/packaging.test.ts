@@ -16,6 +16,7 @@ const {
   vendoredConnectorDir,
   loginBridgePath,
   telegramMcpServerPath,
+  telegramSessionReaderPath,
 } = await import("./packaging");
 
 afterAll(() => {
@@ -60,23 +61,28 @@ test("a standalone server (cwd inside dist/standalone) still finds the packaged 
   fs.mkdirSync(path.join(fakeRoot, "bin"), { recursive: true });
   fs.writeFileSync(path.join(fakeRoot, "bin", "telegram-login-bridge.py"), "");
   fs.writeFileSync(path.join(fakeRoot, "bin", "telegram-mcp-server.py"), "");
+  fs.writeFileSync(path.join(fakeRoot, "bin", "telegram-session-reader.mjs"), "");
   const oldCwd = process.cwd();
   try {
     process.chdir(standalone);
     expect(vendoredConnectorDir()).toBe(path.join(fakeRoot, "vendor", "telegram-mcp"));
     expect(loginBridgePath()).toBe(path.join(fakeRoot, "bin", "telegram-login-bridge.py"));
     expect(telegramMcpServerPath()).toBe(path.join(fakeRoot, "bin", "telegram-mcp-server.py"));
+    expect(telegramSessionReaderPath()).toBe(path.join(fakeRoot, "bin", "telegram-session-reader.mjs"));
     /* And the CLI's explicit env pin wins over the layout probe. */
     process.env.LLV_TELEGRAM_VENDOR_DIR = "/pinned/vendor";
     process.env.LLV_TELEGRAM_BRIDGE = "/pinned/bridge.py";
     process.env.LLV_TELEGRAM_SERVER_BRIDGE = "/pinned/server.py";
+    process.env.LLV_TELEGRAM_SESSION_READER = "/pinned/session-reader.mjs";
     expect(vendoredConnectorDir()).toBe("/pinned/vendor");
     expect(loginBridgePath()).toBe("/pinned/bridge.py");
     expect(telegramMcpServerPath()).toBe("/pinned/server.py");
+    expect(telegramSessionReaderPath()).toBe("/pinned/session-reader.mjs");
   } finally {
     delete process.env.LLV_TELEGRAM_VENDOR_DIR;
     delete process.env.LLV_TELEGRAM_BRIDGE;
     delete process.env.LLV_TELEGRAM_SERVER_BRIDGE;
+    delete process.env.LLV_TELEGRAM_SESSION_READER;
     process.chdir(oldCwd);
   }
 });
@@ -102,6 +108,8 @@ test("the published tarball carries and runs the connector provisioner", async (
   for (const required of [
     "bin/telegram-login-bridge.py",
     "bin/telegram-mcp-server.py",
+    "bin/telegram-session-reader.mjs",
+    "bin/telegram-session-validator.mjs",
     "bin/provision-telegram-connector.mjs",
     "vendor/telegram-mcp/SHA256SUMS",
     "vendor/telegram-mcp/PROVENANCE.md",

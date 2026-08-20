@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import { readValidatedTelegramSessionFiles } from "../../../bin/telegram-session-validator.mjs";
+
 import { statePath } from "@/lib/configDir";
 
 import type { TelegramErrorCode, TelegramIdentity } from "./contracts";
@@ -156,22 +158,6 @@ function readSafeJson(pathname: string, corruptIsUnsafe = false): unknown | null
   }
 }
 
-function readSafeText(pathname: string): string | null {
-  if (ensureTelegramStateDir(false) === null) return null;
-  try {
-    assertSafeSecretFile(pathname);
-  } catch (error) {
-    if (error instanceof UnsafeTelegramSessionError) throw error;
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
-  }
-  try {
-    return fs.readFileSync(pathname, "utf8");
-  } catch {
-    throw new UnsafeTelegramSessionError(`cannot read ${path.basename(pathname)}`);
-  }
-}
-
 function safeFileExists(pathname: string): boolean {
   try {
     assertSafeSecretFile(pathname);
@@ -238,20 +224,11 @@ export function saveTelegramSession(sessionString: string): StoredTelegramSessio
 }
 
 function readTelegramSessionUnchecked(): StoredTelegramSession | null {
-  const parsed = readSafeJson(telegramSessionPath(), true);
-  if (parsed === null) return null;
-  if (typeof parsed !== "object") throw new UnsafeTelegramSessionError("session data is invalid");
-  const row = parsed as Partial<StoredTelegramSessionFile>;
-  if (row.version !== 1 || typeof row.credentialRef !== "string" || typeof row.sessionString !== "string" || !row.sessionString
-    || typeof row.savedAt !== "string" || typeof row.connectorTokenSha256 !== "string") {
-    throw new UnsafeTelegramSessionError("session data is invalid");
-  }
-  const connectorToken = readSafeText(telegramConnectorTokenPath())?.trim() ?? "";
-  const tokenHash = crypto.createHash("sha256").update(connectorToken).digest("hex");
-  if (!/^[A-Za-z0-9_-]{43}$/.test(connectorToken) || tokenHash !== row.connectorTokenSha256) {
-    throw new UnsafeTelegramSessionError("connector token is invalid");
-  }
-  return { version: 1, credentialRef: row.credentialRef, connectorToken, sessionString: row.sessionString, savedAt: row.savedAt };
+  const result = readValidatedTelegramSessionFiles(telegramDir());
+  if (result.status === "missing") return null;
+  if (result.status === "unsafe") throw new UnsafeTelegramSessionError(result.detail);
+  const row = result.sessionFile;
+  return { version: 1, credentialRef: row.credentialRef, connectorToken: result.connectorToken, sessionString: row.sessionString, savedAt: row.savedAt };
 }
 
 export function readTelegramSession(): StoredTelegramSession | null {

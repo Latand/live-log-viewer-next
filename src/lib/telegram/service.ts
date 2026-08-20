@@ -359,7 +359,9 @@ export class TelegramConnectionService {
       this.recordError(result.code ?? "logout_failed");
       return this.status();
     }
-    this.disconnectLocally(true);
+    /* Health may have restarted the shared connector while revocation was in
+       flight. The terminal transition always stops it again. */
+    this.disconnectLocally();
     return this.status();
   }
 
@@ -372,10 +374,10 @@ export class TelegramConnectionService {
     return this.status();
   }
 
-  private disconnectLocally(connectorAlreadyStopped = false): void {
+  private disconnectLocally(): void {
     /* Revoke runtime access first. Even an unsafe status/credential path must
        never leave the credential-bearing connector alive after this action. */
-    if (!connectorAlreadyStopped) this.ports.stopConnector();
+    this.ports.stopConnector();
     this.ports.unregisterHosts();
     deleteTelegramSession();
     writeTelegramConnection({ version: 1, status: "disconnected", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: null });

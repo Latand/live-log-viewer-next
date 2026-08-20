@@ -17,6 +17,7 @@ process.env.LLV_CLAUDE_HOME = path.join(SANDBOX, "legacy-claude");
 const { freshSpecFor, resumeSpecFor, withSpawnCapability } = await import("./cli");
 const { createManagedCodexAccount } = await import("@/lib/accounts/codex");
 const { createManagedClaudeAccount } = await import("@/lib/accounts/claude");
+const { saveTelegramSession, telegramConnectorTokenPath, telegramSessionPath } = await import("@/lib/telegram/sessionStore");
 
 afterAll(() => {
   if (OLD_STATE === undefined) delete process.env.LLV_STATE_DIR;
@@ -74,13 +75,13 @@ test("Telegram grants load the connector token only into granted CLI processes",
     const claudeDelegated = freshSpecFor("claude", SANDBOX, { claudeConfigDir: claudeHome });
 
     for (const spec of [codexGranted, claudeGranted]) {
-      expect(spec.command).toContain('LLV_TELEGRAM_MCP_TOKEN="$(tr -d');
-      expect(spec.command).toContain("connector-token");
+      expect(spec.command).toContain('LLV_TELEGRAM_MCP_TOKEN="$(');
+      expect(spec.command).toContain("telegram-session-reader.mjs");
       expect(spec.launchProfile?.mcpServers).toEqual(["viewer", "telegram"]);
     }
     for (const spec of [codexDelegated, claudeDelegated]) {
       expect(spec.command).toContain("-u LLV_TELEGRAM_MCP_TOKEN");
-      expect(spec.command).not.toContain("connector-token");
+      expect(spec.command).not.toContain("telegram-session-reader.mjs");
       expect(spec.launchProfile?.mcpServers).toEqual(["viewer"]);
     }
 
@@ -93,7 +94,39 @@ test("Telegram grants load the connector token only into granted CLI processes",
     });
     expect(beforeEnrollment.stderr.toString()).toBe("");
     expect(beforeEnrollment.exitCode).toBe(0);
+
+    const tokenIsExported = () => {
+      const probe = `${JSON.stringify(process.execPath)} -e 'process.exit(process.env.LLV_TELEGRAM_MCP_TOKEN ? 42 : 0)'`;
+      const command = codexGranted.command.replace(/env -u LLV_TOKEN[\s\S]*$/, probe);
+      return Bun.spawnSync(["sh", "-c", command], { cwd: SANDBOX, env: process.env, stdout: "pipe", stderr: "pipe" }).exitCode === 42;
+    };
+
+    fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
+    saveTelegramSession("1ApWapzMBu4placeholder-not-a-real-session");
+    expect(tokenIsExported()).toBe(true);
+
+    const validSession = fs.readFileSync(telegramSessionPath());
+    fs.rmSync(telegramSessionPath());
+    expect(tokenIsExported()).toBe(false);
+
+    fs.writeFileSync(telegramSessionPath(), "{broken", { mode: 0o600 });
+    expect(tokenIsExported()).toBe(false);
+
+    const externalSession = path.join(SANDBOX, "external-session.json");
+    fs.writeFileSync(externalSession, validSession, { mode: 0o600 });
+    fs.rmSync(telegramSessionPath());
+    fs.symlinkSync(externalSession, telegramSessionPath());
+    expect(tokenIsExported()).toBe(false);
+
+    fs.rmSync(telegramSessionPath());
+    fs.writeFileSync(telegramSessionPath(), validSession, { mode: 0o644 });
+    expect(tokenIsExported()).toBe(false);
+
+    fs.chmodSync(telegramSessionPath(), 0o600);
+    fs.writeFileSync(telegramConnectorTokenPath(), "C".repeat(43) + "\n", { mode: 0o600 });
+    expect(tokenIsExported()).toBe(false);
   } finally {
+    fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
     if (previousBinary === undefined) delete process.env.LLV_CODEX_BINARY;
     else process.env.LLV_CODEX_BINARY = previousBinary;
   }

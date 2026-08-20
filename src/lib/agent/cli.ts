@@ -7,7 +7,8 @@ import path from "node:path";
 import { accountForSpawn, codexHomeOwningSessionPath, isManagedCodexHome } from "@/lib/accounts/codex";
 import { claudeSettingsPath, claudeTranscriptOwnership, isManagedClaudeHome, legacyClaudeHome } from "@/lib/accounts/claude";
 import { isUnderClaudeSubagentsDir } from "@/lib/scanner/claudeNative";
-import { TELEGRAM_CONNECTOR_TOKEN_ENV, telegramConnectorTokenPath } from "@/lib/telegram/sessionStore";
+import { telegramSessionReaderPath } from "@/lib/telegram/packaging";
+import { TELEGRAM_CONNECTOR_TOKEN_ENV, telegramSessionPath } from "@/lib/telegram/sessionStore";
 
 import { claudeTranscriptPath, headCwd } from "./transcript";
 import { grantedMcpServers } from "./mcpAllowlist";
@@ -141,10 +142,11 @@ const CLAUDE_SHADOWED_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUD
 
 function telegramTokenAssignment(mcpServers: readonly string[]): string {
   if (!mcpServers.includes("telegram")) return "";
-  return `unset ${TELEGRAM_CONNECTOR_TOKEN_ENV}; if [ -r ${shellQuote(telegramConnectorTokenPath())} ]; then `
-    + `${TELEGRAM_CONNECTOR_TOKEN_ENV}="$(tr -d '\\n' < ${shellQuote(telegramConnectorTokenPath())})"; `
-    + `if [ "\${#${TELEGRAM_CONNECTOR_TOKEN_ENV}}" -eq 43 ]; then export ${TELEGRAM_CONNECTOR_TOKEN_ENV}; `
-    + `else unset ${TELEGRAM_CONNECTOR_TOKEN_ENV}; fi; fi; `;
+  const command = [process.execPath, telegramSessionReaderPath(), path.dirname(telegramSessionPath())].map(shellQuote).join(" ");
+  return `unset ${TELEGRAM_CONNECTOR_TOKEN_ENV}; `
+    + `if ${TELEGRAM_CONNECTOR_TOKEN_ENV}="$(${command} 2>/dev/null)" `
+    + `&& [ "\${#${TELEGRAM_CONNECTOR_TOKEN_ENV}}" -eq 43 ]; then export ${TELEGRAM_CONNECTOR_TOKEN_ENV}; `
+    + `else unset ${TELEGRAM_CONNECTOR_TOKEN_ENV}; fi; `;
 }
 
 function telegramTokenCommandPrefix(mcpServers: readonly string[]): string {

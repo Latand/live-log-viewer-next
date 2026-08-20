@@ -45,7 +45,8 @@ state or processes after cancel, logout, or local deletion. Enrollment,
 health, and logout share the vendored per-session process lock; health/logout
 release the shared connector before their short-lived bridge connects. Logout
 advances the generation again when remote revocation settles, invalidating
-health checks that began during the revocation wait.
+health checks that began during the revocation wait, and always performs a
+terminal connector stop in case one of those checks restarted it.
 
 AC4: The session persists server-side only: an owner-only (0600, dir 0700)
 regular non-symlinked file written atomically under Viewer state. Reads,
@@ -90,6 +91,8 @@ profiles are re-bounded — proven by the existing #739 test walls updated for
 tranche 2. Tmux and both structured host implementations load the bearer token
 only for a proven `telegram` grant; delegated hosts scrub it. Missing local
 enrollment state leaves operator-root launches usable with Telegram unavailable.
+The packaged tmux reader and server-side session store share the complete
+directory/file ownership, mode, symlink, schema, and token-digest validator.
 
 AC8: The UI is a Telegram row in the left-rail footer beside the account
 controls, opening the accounts-style flyout (desktop) / bottom sheet (mobile):

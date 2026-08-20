@@ -278,6 +278,10 @@ function buildChildEnv(options, runtime, packageRoot) {
   if (!env.LLV_TELEGRAM_SERVER_BRIDGE && existsSync(telegramServerBridge)) {
     env.LLV_TELEGRAM_SERVER_BRIDGE = telegramServerBridge;
   }
+  const telegramSessionReader = join(packageRoot, "bin", "telegram-session-reader.mjs");
+  if (!env.LLV_TELEGRAM_SESSION_READER && existsSync(telegramSessionReader)) {
+    env.LLV_TELEGRAM_SESSION_READER = telegramSessionReader;
+  }
 
   if (runtime.llvToken) {
     env.LLV_TOKEN = runtime.llvToken;

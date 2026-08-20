@@ -74,6 +74,10 @@ export function telegramMcpServerPath(): string {
   return packageAssetPath(process.env.LLV_TELEGRAM_SERVER_BRIDGE, "bin", "telegram-mcp-server.py");
 }
 
+export function telegramSessionReaderPath(): string {
+  return packageAssetPath(process.env.LLV_TELEGRAM_SESSION_READER, "bin", "telegram-session-reader.mjs");
+}
+
 export type TelegramApiCredentials = { apiId: string; apiHash: string };
 
 /**
