@@ -1,12 +1,30 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deflateSync } from "node:zlib";
 
 import { auditGithubPublication, shouldFailGithubAudit } from "./privacy-github-audit";
-import { commitMessageFindings, formatPrivacyReport } from "./privacy-publication-gate";
+import {
+  commitMessageFindings,
+  formatPrivacyReport,
+  TRUSTED_TELEGRAM_VENDOR_EXEMPT_FINDING_CLASSES,
+  TRUSTED_TELEGRAM_VENDOR_ROOT_DIGEST,
+  trustedVendorRootDigest,
+  trustedVendorRootMatches,
+} from "./privacy-publication-gate";
 
 const gate = join(import.meta.dir, "privacy-publication-gate.ts");
 const temporaryDirectories: string[] = [];
@@ -263,6 +281,23 @@ function writeFingerprintCatalog(path: string, value: string): void {
       sha256: createHash("sha256").update(compact).digest("hex"),
     }],
   }));
+}
+
+const FIXED_VENDOR_FIXTURE_DIGEST = "6f86679e7321bb68b4a370cc5c419e0a593568c45982e63887ef82232cc70342";
+const FIXED_EXECUTABLE_VENDOR_FIXTURE_DIGEST = "e4a542b697441803c4bc2f48f02158758fd7d853345474e6d7d2babd561fc051";
+
+function createVendorDigestFixture(): { manifest: string; readme: string; root: string; runtime: string } {
+  const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-vendor-root-"));
+  temporaryDirectories.push(directory);
+  const root = join(directory, "vendor", "fixture-connector");
+  const runtime = join(root, "nested", "runtime.py");
+  const readme = join(root, "README.md");
+  const manifest = join(root, "SHA256SUMS");
+  mkdirSync(join(root, "nested"), { recursive: true });
+  writeFileSync(readme, "alpha\n");
+  writeFileSync(manifest, "fixture manifest\n");
+  writeFileSync(runtime, "bravo\n");
+  return { manifest, readme, root, runtime };
 }
 
 describe("privacy publication gate", () => {
@@ -528,6 +563,82 @@ exec "$LLV_TEST_REAL_GIT" "$@"
     expect(output).not.toContain(credential);
     expect(output).not.toContain(directory);
     expect(result.stderr.toString()).toBe("");
+  });
+
+  test("matches a fixed independently derived vendor digest vector", () => {
+    const fixture = createVendorDigestFixture();
+    expect(trustedVendorRootDigest(fixture.root)).toBe(FIXED_VENDOR_FIXTURE_DIGEST);
+    expect(trustedVendorRootMatches(fixture.root, FIXED_VENDOR_FIXTURE_DIGEST)).toBe(true);
+    expect(TRUSTED_TELEGRAM_VENDOR_ROOT_DIGEST).toBe("344c9f0b9ef56c1ac4935a2245b6d33206e03bb22df86c5d9e7638869915ebb2");
+    expect([...TRUSTED_TELEGRAM_VENDOR_EXEMPT_FINDING_CLASSES]).toEqual(["credential", "home_path"]);
+    expect(TRUSTED_TELEGRAM_VENDOR_EXEMPT_FINDING_CLASSES.has("known_value")).toBe(false);
+  });
+
+  test("rejects vendor content and length changes", () => {
+    const sameLength = createVendorDigestFixture();
+    writeFileSync(sameLength.runtime, "bravx\n");
+    expect(trustedVendorRootMatches(sameLength.root, FIXED_VENDOR_FIXTURE_DIGEST)).toBe(false);
+
+    const changedLength = createVendorDigestFixture();
+    writeFileSync(changedLength.runtime, "bravo extended\n");
+    expect(trustedVendorRootMatches(changedLength.root, FIXED_VENDOR_FIXTURE_DIGEST)).toBe(false);
+  });
+
+  test("authenticates both executable-bit transitions", () => {
+    const fixture = createVendorDigestFixture();
+    expect(trustedVendorRootDigest(fixture.root)).toBe(FIXED_VENDOR_FIXTURE_DIGEST);
+
+    chmodSync(fixture.runtime, 0o755);
+    expect(trustedVendorRootDigest(fixture.root)).toBe(FIXED_EXECUTABLE_VENDOR_FIXTURE_DIGEST);
+    expect(trustedVendorRootMatches(fixture.root, FIXED_VENDOR_FIXTURE_DIGEST)).toBe(false);
+
+    chmodSync(fixture.runtime, 0o644);
+    expect(trustedVendorRootDigest(fixture.root)).toBe(FIXED_VENDOR_FIXTURE_DIGEST);
+    expect(trustedVendorRootMatches(fixture.root, FIXED_EXECUTABLE_VENDOR_FIXTURE_DIGEST)).toBe(false);
+  });
+
+  test("rejects vendor root path, addition, deletion, and rename changes", () => {
+    const changedPath = createVendorDigestFixture();
+    expect(trustedVendorRootMatches(join(changedPath.root, "nested"), FIXED_VENDOR_FIXTURE_DIGEST)).toBe(false);
+
+    const addition = createVendorDigestFixture();
+    writeFileSync(join(addition.root, "added.py"), "added\n");
+    expect(trustedVendorRootMatches(addition.root, FIXED_VENDOR_FIXTURE_DIGEST)).toBe(false);
+
+    const deletion = createVendorDigestFixture();
+    unlinkSync(deletion.runtime);
+    expect(trustedVendorRootMatches(deletion.root, FIXED_VENDOR_FIXTURE_DIGEST)).toBe(false);
+
+    const rename = createVendorDigestFixture();
+    renameSync(rename.runtime, join(rename.root, "nested", "renamed.py"));
+    expect(trustedVendorRootMatches(rename.root, FIXED_VENDOR_FIXTURE_DIGEST)).toBe(false);
+  });
+
+  test("rejects simultaneous vendor file and manifest updates", () => {
+    const fixture = createVendorDigestFixture();
+    writeFileSync(fixture.runtime, "changed runtime\n");
+    writeFileSync(fixture.manifest, "candidate-updated manifest\n");
+    expect(trustedVendorRootMatches(fixture.root, FIXED_VENDOR_FIXTURE_DIGEST)).toBe(false);
+  });
+
+  test("rejects symlink, special-node, and unreadable vendor trees", () => {
+    const symlink = createVendorDigestFixture();
+    symlinkSync(symlink.readme, join(symlink.root, "linked-readme"));
+    expect(trustedVendorRootDigest(symlink.root)).toBeNull();
+
+    const special = createVendorDigestFixture();
+    const fifo = join(special.root, "special-node");
+    const mkfifo = Bun.spawnSync({ cmd: ["mkfifo", fifo], stderr: "pipe", stdout: "pipe" });
+    expect(mkfifo.exitCode).toBe(0);
+    expect(trustedVendorRootDigest(special.root)).toBeNull();
+
+    const unreadable = createVendorDigestFixture();
+    chmodSync(unreadable.runtime, 0o000);
+    try {
+      expect(trustedVendorRootDigest(unreadable.root)).toBeNull();
+    } finally {
+      chmodSync(unreadable.runtime, 0o600);
+    }
   });
 
   test("detects UUIDv7 session identifiers with class-only diagnostics", () => {
