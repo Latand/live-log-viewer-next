@@ -296,6 +296,25 @@ test("remote logout releases the shared connector before the session bridge conn
   expect(order.indexOf("stop")).toBeLessThan(order.indexOf("logout"));
 });
 
+test("a health check started during logout cannot overwrite completed deletion", async () => {
+  const { adapter, service } = harness();
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  let resolveLogout!: (result: { ok: boolean; code: TelegramErrorCode | null }) => void;
+  let resolveHealth!: (result: TelegramHealthResult) => void;
+  adapter.logout = async () => await new Promise((resolve) => { resolveLogout = resolve; });
+  adapter.checkSession = async () => await new Promise((resolve) => { resolveHealth = resolve; });
+
+  const logout = service.logout();
+  const health = service.checkHealth();
+  resolveLogout({ ok: true, code: null });
+  expect((await logout).phase).toBe("disconnected");
+  expect(readTelegramSession()).toBeNull();
+
+  resolveHealth({ status: "expired" });
+  expect((await health).phase).toBe("disconnected");
+  expect(service.status().phase).toBe("disconnected");
+});
+
 test("a failed remote logout PRESERVES the local session and reports why", async () => {
   const { adapter, calls, service } = harness();
   saveTelegramSession(PLACEHOLDER_SESSION);

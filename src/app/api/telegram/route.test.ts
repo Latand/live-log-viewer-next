@@ -24,6 +24,7 @@ class FakeAdapter implements TelegramAdapter {
   canceled = 0;
   passwords: string[] = [];
   health: TelegramHealthResult = { status: "connected", identity: { name: "Account A", username: "account_a" } };
+  healthCalls = 0;
   logoutResult: { ok: boolean; code: TelegramErrorCode | null } = { ok: true, code: null };
   unavailableReason() { return null; }
   startEnrollment(onEvent: (event: TelegramEnrollmentEvent) => void) {
@@ -33,7 +34,7 @@ class FakeAdapter implements TelegramAdapter {
       cancel: () => { this.canceled += 1; },
     };
   }
-  checkSession() { return Promise.resolve(this.health); }
+  checkSession() { this.healthCalls += 1; return Promise.resolve(this.health); }
   logout() { return Promise.resolve(this.logoutResult); }
 }
 
@@ -55,8 +56,8 @@ function installService() {
   }));
 }
 
-function getRequest(query = ""): NextRequest {
-  return new NextRequest(`http://127.0.0.1/api/telegram${query}`, { headers: { host: "127.0.0.1" } });
+function getRequest(query = "", headers: Record<string, string> = {}): NextRequest {
+  return new NextRequest(`http://127.0.0.1/api/telegram${query}`, { headers: { host: "127.0.0.1", ...headers } });
 }
 
 function postRequest(body: Record<string, unknown>, headers: Record<string, string> = {}): NextRequest {
@@ -157,4 +158,10 @@ test("the API is narrow: unknown actions and malformed bodies are rejected", asy
 test("cross-origin mutation attempts are rejected", async () => {
   const response = await POST(postRequest({ action: "start" }, { origin: "https://evil.example" }));
   expect(response.status).toBe(403);
+});
+
+test("cross-origin fresh health is rejected before Telegram state changes", async () => {
+  const response = await GET(getRequest("?fresh=1", { origin: "https://example.test" }));
+  expect(response.status).toBe(403);
+  expect(adapter.healthCalls).toBe(0);
 });

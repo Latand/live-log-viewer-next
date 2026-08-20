@@ -20,8 +20,12 @@ function failure(status: number, code: string, message: string) {
 
 export async function GET(req: NextRequest) {
   try {
-    const service = telegramService();
     const fresh = new URL(req.url).searchParams.get("fresh") === "1";
+    if (fresh) {
+      const rejected = rejectCrossOrigin(req);
+      if (rejected) return rejected;
+    }
+    const service = telegramService();
     const telegram = fresh ? await service.checkHealth() : service.status();
     return NextResponse.json({ telegram });
   } catch {

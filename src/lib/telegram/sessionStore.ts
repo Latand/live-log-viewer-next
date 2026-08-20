@@ -188,10 +188,27 @@ function removeSafeFile(pathname: string): void {
   fs.rmSync(pathname);
 }
 
+function existingSafeSecretContents(pathname: string): string | null {
+  try {
+    assertSafeSecretFile(pathname);
+  } catch (error) {
+    if (error instanceof UnsafeTelegramSessionError) throw error;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  return fs.readFileSync(pathname, "utf8");
+}
+
 /** Persists the enrolled session and returns the opaque reference every other
     surface uses to talk about it. */
 export function saveTelegramSession(sessionString: string): StoredTelegramSession {
   if (!sessionString) throw new Error("Telegram session string is empty");
+  ensureTelegramStateDir(true);
+  /* Validate and read BOTH existing files before committing either new value.
+     A refused session overwrite therefore cannot rotate or delete the token
+     that its preserved JSON still references. */
+  existingSafeSecretContents(telegramSessionPath());
+  const previousToken = existingSafeSecretContents(telegramConnectorTokenPath());
   const connectorToken = crypto.randomBytes(32).toString("base64url");
   const stored: StoredTelegramSession = {
     version: 1,
@@ -211,7 +228,10 @@ export function saveTelegramSession(sessionString: string): StoredTelegramSessio
   try {
     atomicSecretWrite(telegramSessionPath(), JSON.stringify(persisted));
   } catch (error) {
-    removeSafeFile(telegramConnectorTokenPath());
+    try {
+      if (previousToken === null) removeSafeFile(telegramConnectorTokenPath());
+      else atomicSecretWrite(telegramConnectorTokenPath(), previousToken);
+    } catch { /* preserve the original session error; storage remains fail-closed */ }
     throw error;
   }
   return stored;

@@ -81,21 +81,45 @@ function formatCheckedAt(iso: string | null): string | null {
 
 /** Client-drawn QR for the tg://login token, keyed by url so a stale image
     never flashes for a refreshed token (the AccessQrButton pattern). */
-function QrImage({ url }: { url: string }) {
+async function renderQrDataUrl(url: string): Promise<string> {
+  const { toDataURL } = await import("qrcode");
+  return toDataURL(url, { margin: 1, width: 200 });
+}
+
+export function QrImage({ url, renderQr = renderQrDataUrl }: { url: string; renderQr?: (value: string) => Promise<string> }) {
   const { t } = useLocale();
   const [qr, setQr] = useState<{ url: string; dataUrl: string } | null>(null);
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let cancelled = false;
-    import("qrcode")
-      .then(({ toDataURL }) => toDataURL(url, { margin: 1, width: 200 }))
+    Promise.resolve()
+      .then(() => renderQr(url))
       .then((dataUrl) => {
         if (!cancelled) setQr({ url, dataUrl });
       })
-      .catch(() => {});
+      .catch(() => {
+        if (!cancelled) setFailedUrl(url);
+      });
     return () => {
       cancelled = true;
     };
-  }, [url]);
+  }, [attempt, renderQr, url]);
+  if (failedUrl === url) {
+    return (
+      <div className="mx-auto flex h-[200px] flex-col items-center justify-center gap-2 text-center">
+        <p role="alert" className="text-[11px] font-semibold text-danger">{t("telegram.qrFailed")}</p>
+        <ActionButton
+          label={t("telegram.qrRetry")}
+          onClick={() => {
+            setQr(null);
+            setFailedUrl(null);
+            setAttempt((value) => value + 1);
+          }}
+        />
+      </div>
+    );
+  }
   if (!qr || qr.url !== url) return <span className="mx-auto flex h-[200px] items-center text-[12px] text-primary">{t("telegram.qrGenerating")}</span>;
   // eslint-disable-next-line @next/next/no-img-element
   return <img src={qr.dataUrl} alt={t("telegram.qrAlt")} className="mx-auto h-[200px] w-[200px] rounded-[8px] bg-white p-1" />;

@@ -7,7 +7,7 @@ import type { TelegramConnectionState } from "@/hooks/useTelegramConnection";
 import type { TelegramStatusPayload } from "@/lib/telegram/contracts";
 import { installActEnv } from "@/test-helpers/actEnv";
 
-import { TelegramPanel } from "./TelegramConnect";
+import { QrImage, TelegramPanel } from "./TelegramConnect";
 
 const dom = new Window();
 installActEnv();
@@ -120,4 +120,33 @@ test("Retry uses the stored credential for recovery when one exists", async () =
 
   expect(calls.refresh).toEqual([true]);
   expect(calls.connect).toBe(0);
+});
+
+test("QR generation failure is visible and retries the current token", async () => {
+  let attempts = 0;
+  const renderQr = async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error("synthetic QR failure");
+    return "fixture-qr-data-url";
+  };
+  if (!container) {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  }
+  await act(async () => {
+    root!.render(<QrImage url="tg://login?token=fixture" renderQr={renderQr} />);
+    await Bun.sleep(0);
+  });
+
+  expect(container.querySelector('[role="alert"]')).not.toBeNull();
+  const retry = [...container.querySelectorAll("button")].find((button) => button.textContent === "Try QR again");
+  expect(retry).toBeDefined();
+  await act(async () => {
+    retry!.click();
+    await Bun.sleep(0);
+  });
+
+  expect(attempts).toBe(2);
+  expect(container.querySelector("img")?.getAttribute("src")).toBe("fixture-qr-data-url");
 });

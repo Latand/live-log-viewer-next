@@ -59,6 +59,41 @@ test("a fresh save rotates the opaque credentialRef", () => {
   expect(readTelegramSession()?.sessionString).toBe(PLACEHOLDER_SESSION + "-again");
 });
 
+test("a refused overwrite preserves the existing session and connector token bytes", () => {
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  const sessionBefore = fs.readFileSync(telegramSessionPath());
+  const tokenBefore = fs.readFileSync(telegramConnectorTokenPath());
+  fs.chmodSync(telegramSessionPath(), 0o644);
+
+  expect(() => saveTelegramSession(PLACEHOLDER_SESSION + "-replacement")).toThrow(UnsafeTelegramSessionError);
+
+  expect(fs.readFileSync(telegramSessionPath())).toEqual(sessionBefore);
+  expect(fs.readFileSync(telegramConnectorTokenPath())).toEqual(tokenBefore);
+});
+
+test("a session write failure rolls the connector token back byte-for-byte", () => {
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  const sessionBefore = fs.readFileSync(telegramSessionPath());
+  const tokenBefore = fs.readFileSync(telegramConnectorTokenPath());
+  const originalWrite = fs.writeFileSync;
+  const write = spyOn(fs, "writeFileSync").mockImplementation(((pathname: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+    if (typeof pathname === "string" && path.basename(pathname).startsWith(".session.json.")) {
+      const error = new Error("simulated session write failure") as NodeJS.ErrnoException;
+      error.code = "EIO";
+      throw error;
+    }
+    return originalWrite(pathname, ...(args as Parameters<typeof fs.writeFileSync> extends [unknown, ...infer Rest] ? Rest : never));
+  }) as typeof fs.writeFileSync);
+  try {
+    expect(() => saveTelegramSession(PLACEHOLDER_SESSION + "-replacement")).toThrow("simulated session write failure");
+  } finally {
+    write.mockRestore();
+  }
+
+  expect(fs.readFileSync(telegramSessionPath())).toEqual(sessionBefore);
+  expect(fs.readFileSync(telegramConnectorTokenPath())).toEqual(tokenBefore);
+});
+
 test("refuses a symlinked session file instead of following it", () => {
   const target = path.join(SANDBOX, "outside.json");
   fs.writeFileSync(target, JSON.stringify({ version: 1, credentialRef: "x", sessionString: "y" }));

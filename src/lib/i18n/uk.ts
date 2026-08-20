@@ -696,6 +696,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "telegram.cancel": "Скасувати",
   "telegram.qrAlt": "QR-код входу в Telegram",
   "telegram.qrGenerating": "генерую QR…",
+  "telegram.qrFailed": "Не вдалося згенерувати QR-код.",
+  "telegram.qrRetry": "Спробувати QR ще раз",
   "telegram.qrHint": "У Telegram на телефоні: Налаштування → Пристрої → Підключити пристрій, потім скануйте. Прострочений код оновлюється автоматично.",
   "telegram.passwordLabel": "Пароль двоетапної перевірки",
   "telegram.passwordPlaceholder": "Пароль 2FA Telegram",

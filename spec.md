@@ -43,7 +43,9 @@ temporary state, including a credential written before connector verification.
 Lifecycle generations prevent stale enrollment/health results from restoring
 state or processes after cancel, logout, or local deletion. Enrollment,
 health, and logout share the vendored per-session process lock; health/logout
-release the shared connector before their short-lived bridge connects.
+release the shared connector before their short-lived bridge connects. Logout
+advances the generation again when remote revocation settles, invalidating
+health checks that began during the revocation wait.
 
 AC4: The session persists server-side only: an owner-only (0600, dir 0700)
 regular non-symlinked file written atomically under Viewer state. Reads,
@@ -56,6 +58,8 @@ placeholder session. The connector bearer token is a separate 0600 secret,
 rotates with `credentialRef`, and appears in no config file, argv, or API body.
 Corrupt/unreadable session data reports `session_unsafe`, remains preserved for
 explicit local deletion, and never produces a successful remote logout.
+An overwrite preflights both credential files and restores the previous token
+if the second write fails, preserving the existing pair byte-for-byte.
 
 AC5: `Log out` performs remote revocation and then removes the local session,
 stops the connector, and unregisters the host definition. A failed remote
@@ -95,6 +99,8 @@ phase changes, inline destructive confirmations, an `aria-live` status region,
 connected identity (name and username only), last health check time, and
 human-readable sanitized errors in en and uk. Retry uses fresh health recovery
 when an existing credential is available and starts QR enrollment otherwise.
+Client-side QR rendering failures show a localized alert and retry the current
+Telegram token without restarting enrollment.
 
 AC9: Health checks report connected / expired / error explicitly: `expired`
 stops the connector and keeps Reconnect plus local deletion available;
@@ -104,6 +110,8 @@ failures are visible, and request sequencing prevents slow responses from
 overwriting newer status. Entering a live login phase immediately switches to
 the 1.5-second cadence; connected and credential-backed error polling performs
 fresh health and connector recovery on the idle cadence and at client startup.
+Stateful `fresh=1` health requests enforce the same-origin gate before service
+access; the observational status GET remains read-only.
 
 AC9a: The vendored `get_chats` and `list_chats` read tools reject boolean,
 zero, negative, and oversized pagination values before Telegram I/O. Dialog

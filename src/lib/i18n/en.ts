@@ -710,6 +710,8 @@ export const en = {
   "telegram.cancel": "Cancel",
   "telegram.qrAlt": "Telegram sign-in QR code",
   "telegram.qrGenerating": "generating QR…",
+  "telegram.qrFailed": "The QR code could not be generated.",
+  "telegram.qrRetry": "Try QR again",
   "telegram.qrHint": "In Telegram on your phone: Settings → Devices → Link Desktop Device, then scan. An expired code refreshes automatically.",
   "telegram.passwordLabel": "Two-step verification password",
   "telegram.passwordPlaceholder": "Telegram 2FA password",

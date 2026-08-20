@@ -351,6 +351,10 @@ export class TelegramConnectionService {
     this.ports.stopConnector();
     const result = await this.ports.adapter.logout(session.sessionString);
     if (generation !== this.lifecycleGeneration) return this.status();
+    /* Health may start while remote revocation is in flight and capture the
+       logout's generation. Advance again before publishing either terminal
+       outcome so that late health result cannot overwrite it. */
+    this.lifecycleGeneration += 1;
     if (!result.ok) {
       this.recordError(result.code ?? "logout_failed");
       return this.status();
