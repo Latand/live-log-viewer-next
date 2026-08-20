@@ -64,13 +64,10 @@ const textBasenames = new Set(["CODEOWNERS", "Dockerfile", "LICENSE", "Makefile"
 const maxPublicationBytes = 32 * 1024 * 1024;
 const maxVideoStreams = 16;
 const supportedGeneratorRuntime = "bun-1.3.3";
-/* A `{`-leading unquoted value is a JSX expression container — a controlled
-   binding (`value={entered}`), not a literal baked into the markup, which is
-   the leak this class exists to catch. */
 const credentialInputPattern = new RegExp([
   String.raw`<in`,
   String.raw`put\b(?=[^>]*(?:type\s*=\s*["']?password|name\s*=\s*["']?(?:api[_-]?key|password|secret|token)))`,
-  String.raw`(?=[^>]*value\s*=\s*(?:["'][^"']{4,}["']|[^\s"'=<>{][^\s"'=<>]{3,}))[^>]*>`,
+  String.raw`(?=[^>]*value\s*=\s*(?:["'][^"']{4,}["']|[^\s"'=<>]{4,}))[^>]*>`,
 ].join(""), "i");
 
 type KnownValueFingerprint = {
@@ -1048,41 +1045,82 @@ function provenanceFor(path: string, inspectionRoot = repositoryRoot, trustedBas
 }
 
 /**
- * Vendored third-party source (issue #1059) legitimately reads its own proxy
- * secrets into locals and shows placeholder home paths in docstrings, and it
- * must stay byte-identical to what upstream published — it cannot be
- * rewritten to satisfy this gate. The exemption is therefore bound to
- * content, not location: only a file under `vendor/<name>/` whose sha256
- * matches that vendor's committed `SHA256SUMS` manifest sheds exactly these
- * two idiom classes. Editing a vendored file to smuggle anything changes its
- * digest and re-arms the gate; every other class — operator known-value
- * fingerprints above all — stays armed even for verified vendor files.
+ * Hashes a complete vendor directory as an ordered stream of relative paths,
+ * portable executable-bit state, byte lengths, and file bytes. The directory
+ * is rejected when any entry is a symlink or a non-file/non-directory node,
+ * so a trusted digest authenticates the complete tree shape and contents.
  */
-const vendorExemptFindingClasses = new Set<FindingClass>(["credential", "home_path"]);
+export function trustedVendorRootDigest(root: string): string | null {
+  const rootResult = safePath(root);
+  if (rootResult.status !== "safe" || !rootResult.metadata?.isDirectory()) return null;
+  const files: Array<{ executable: boolean; relativePath: string }> = [];
+  const pending = [""];
+  try {
+    while (pending.length > 0) {
+      const relativeDirectory = pending.pop()!;
+      const directory = join(root, relativeDirectory);
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const relativeEntry = join(relativeDirectory, entry.name);
+        const absoluteEntry = join(root, relativeEntry);
+        const entryResult = safePath(absoluteEntry);
+        if (entryResult.status !== "safe") return null;
+        if (entry.isDirectory() && entryResult.metadata?.isDirectory()) {
+          pending.push(relativeEntry);
+        } else if (entry.isFile() && entryResult.metadata?.isFile()) {
+          files.push({ executable: (Number(entryResult.metadata.mode) & 0o111) !== 0, relativePath: relativeEntry });
+        } else {
+          return null;
+        }
+      }
+    }
+    if (files.length === 0) return null;
+    const digest = createHash("sha256");
+    files.sort((left, right) => left.relativePath < right.relativePath ? -1 : left.relativePath > right.relativePath ? 1 : 0);
+    for (const file of files) {
+      const bytes = readFileSync(join(root, file.relativePath));
+      const portablePath = file.relativePath.split(sep).join("/");
+      digest.update("file\0");
+      digest.update(portablePath);
+      digest.update("\0");
+      digest.update(file.executable ? "x" : "-");
+      digest.update("\0");
+      digest.update(String(bytes.length));
+      digest.update("\0");
+      digest.update(bytes);
+      digest.update("\0");
+    }
+    return digest.digest("hex");
+  } catch {
+    return null;
+  }
+}
 
-export function vendoredManifestVerified(path: string, inspectionRoot: string | undefined): boolean {
-  if (!inspectionRoot) return false;
-  const relativePath = relative(inspectionRoot, resolve(path));
-  const segments = relativePath.split(sep);
-  if (segments.length < 3 || segments[0] !== "vendor" || segments.includes("..")) return false;
-  const manifestPath = join(inspectionRoot, segments[0], segments[1], "SHA256SUMS");
-  const manifestResult = safePath(manifestPath);
-  if (manifestResult.status !== "safe" || !manifestResult.metadata?.isFile()) return false;
-  const inner = segments.slice(2).join("/");
-  let manifest: string;
-  try {
-    manifest = readFileSync(manifestPath, "utf8");
-  } catch {
-    return false;
-  }
-  const row = manifest.split("\n").find((line) => line.slice(64).trim() === inner);
-  const expected = row?.slice(0, 64).toLowerCase();
-  if (!expected || !/^[0-9a-f]{64}$/.test(expected)) return false;
-  try {
-    return createHash("sha256").update(readFileSync(path)).digest("hex") === expected;
-  } catch {
-    return false;
-  }
+export function trustedVendorRootMatches(root: string, expectedDigest: string): boolean {
+  if (!/^[a-f0-9]{64}$/.test(expectedDigest)) return false;
+  return trustedVendorRootDigest(root) === expectedDigest;
+}
+
+/**
+ * The reviewed chigwell/telegram-mcp v3.2.22 tree plus the issue #1059 patch
+ * that removes invite-link mutation tools from its read-only registry. This
+ * digest is trusted scanner policy: candidate content cannot update it.
+ */
+export const TRUSTED_TELEGRAM_VENDOR_ROOT_DIGEST = "344c9f0b9ef56c1ac4935a2245b6d33206e03bb22df86c5d9e7638869915ebb2";
+export const TRUSTED_TELEGRAM_VENDOR_EXEMPT_FINDING_CLASSES: ReadonlySet<FindingClass> = new Set(["credential", "home_path"]);
+
+const trustedTelegramVendor = {
+  digest: TRUSTED_TELEGRAM_VENDOR_ROOT_DIGEST,
+  exemptFindingClasses: TRUSTED_TELEGRAM_VENDOR_EXEMPT_FINDING_CLASSES,
+  relativeRoot: "vendor/telegram-mcp",
+};
+
+function trustedVendorExemptions(path: string, inspectionRoot: string | undefined): ReadonlySet<FindingClass> {
+  if (!inspectionRoot) return new Set();
+  const vendorRoot = join(inspectionRoot, ...trustedTelegramVendor.relativeRoot.split("/"));
+  if (!canonicalPathIsWithin(vendorRoot, path)) return new Set();
+  return trustedVendorRootMatches(vendorRoot, trustedTelegramVendor.digest)
+    ? trustedTelegramVendor.exemptFindingClasses
+    : new Set();
 }
 
 export function inspectPaths(
@@ -1131,10 +1169,8 @@ export function inspectPaths(
         }
       }
     }
-    if ([...pathFindings].some((finding) => vendorExemptFindingClasses.has(finding))
-      && vendoredManifestVerified(path, inspectionRoot)) {
-      for (const finding of vendorExemptFindingClasses) pathFindings.delete(finding);
-    }
+    const vendorExemptions = trustedVendorExemptions(path, inspectionRoot);
+    for (const finding of vendorExemptions) pathFindings.delete(finding);
     for (const finding of pathFindings) addFinding(findings, finding);
   }
   return findings;

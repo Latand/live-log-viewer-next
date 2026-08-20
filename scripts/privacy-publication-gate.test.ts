@@ -1,12 +1,30 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deflateSync } from "node:zlib";
 
 import { auditGithubPublication, shouldFailGithubAudit } from "./privacy-github-audit";
-import { commitMessageFindings, formatPrivacyReport } from "./privacy-publication-gate";
+import {
+  commitMessageFindings,
+  formatPrivacyReport,
+  TRUSTED_TELEGRAM_VENDOR_EXEMPT_FINDING_CLASSES,
+  TRUSTED_TELEGRAM_VENDOR_ROOT_DIGEST,
+  trustedVendorRootDigest,
+  trustedVendorRootMatches,
+} from "./privacy-publication-gate";
 
 const gate = join(import.meta.dir, "privacy-publication-gate.ts");
 const temporaryDirectories: string[] = [];
@@ -263,6 +281,23 @@ function writeFingerprintCatalog(path: string, value: string): void {
       sha256: createHash("sha256").update(compact).digest("hex"),
     }],
   }));
+}
+
+const FIXED_VENDOR_FIXTURE_DIGEST = "6f86679e7321bb68b4a370cc5c419e0a593568c45982e63887ef82232cc70342";
+const FIXED_EXECUTABLE_VENDOR_FIXTURE_DIGEST = "e4a542b697441803c4bc2f48f02158758fd7d853345474e6d7d2babd561fc051";
+
+function createVendorDigestFixture(): { manifest: string; readme: string; root: string; runtime: string } {
+  const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-vendor-root-"));
+  temporaryDirectories.push(directory);
+  const root = join(directory, "vendor", "fixture-connector");
+  const runtime = join(root, "nested", "runtime.py");
+  const readme = join(root, "README.md");
+  const manifest = join(root, "SHA256SUMS");
+  mkdirSync(join(root, "nested"), { recursive: true });
+  writeFileSync(readme, "alpha\n");
+  writeFileSync(manifest, "fixture manifest\n");
+  writeFileSync(runtime, "bravo\n");
+  return { manifest, readme, root, runtime };
 }
 
 describe("privacy publication gate", () => {
@@ -530,71 +565,80 @@ exec "$LLV_TEST_REAL_GIT" "$@"
     expect(result.stderr.toString()).toBe("");
   });
 
-  test("a JSX controlled password binding is not a baked-in credential; a literal value still is", () => {
-    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
-    temporaryDirectories.push(directory);
-    const controlled = join(directory, "panel.tsx");
-    writeFileSync(controlled, [
-      "<input",
-      "  type=\"password\"",
-      "  value={entered}",
-      "  onChange={(event) => setEntered(event.target.value)}",
-      "/>",
-    ].join("\n"));
-    const baked = join(directory, "page.html");
-    const literal = ["synthetic", "fixture", "123456"].join("-");
-    /* Assembled from fragments so this test file never carries the flagged
-       markup itself — the same trick the other fixtures here use. */
-    writeFileSync(baked, ["<in", "put type=\"pass", "word\" value=\"", literal, "\">"].join(""));
-
-    expect(runGate([controlled]).stdout.toString()).toBe("PRIVACY GATE: PASS\n");
-    const result = runGate([baked]);
-    expect(result.exitCode).toBe(1);
-    expect(result.stdout.toString()).toBe("PRIVACY GATE: FAIL\ncredential: 1\n");
+  test("matches a fixed independently derived vendor digest vector", () => {
+    const fixture = createVendorDigestFixture();
+    expect(trustedVendorRootDigest(fixture.root)).toBe(FIXED_VENDOR_FIXTURE_DIGEST);
+    expect(trustedVendorRootMatches(fixture.root, FIXED_VENDOR_FIXTURE_DIGEST)).toBe(true);
+    expect(TRUSTED_TELEGRAM_VENDOR_ROOT_DIGEST).toBe("344c9f0b9ef56c1ac4935a2245b6d33206e03bb22df86c5d9e7638869915ebb2");
+    expect([...TRUSTED_TELEGRAM_VENDOR_EXEMPT_FINDING_CLASSES]).toEqual(["credential", "home_path"]);
+    expect(TRUSTED_TELEGRAM_VENDOR_EXEMPT_FINDING_CLASSES.has("known_value")).toBe(false);
   });
 
-  test("sha-verified vendored source sheds only the third-party idiom classes", () => {
-    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-vendor-"));
-    temporaryDirectories.push(directory);
-    const vendorDirectory = join(directory, "vendor", "fixture-connector");
-    mkdirSync(vendorDirectory, { recursive: true });
-    const idioms = [
-      ["pass", "word"].join("") + " = read_proxy_environment(\"PASSWORD_FIXTURE\")",
-      "``" + ["", "home", "fixture-person", "workspace"].join("/") + "`` in a docstring",
-    ].join("\n") + "\n";
-    const vendored = join(vendorDirectory, "runtime.py");
-    writeFileSync(vendored, idioms);
-    const digest = createHash("sha256").update(idioms).digest("hex");
-    writeFileSync(join(vendorDirectory, "SHA256SUMS"), `${digest}  runtime.py\n`);
+  test("rejects vendor content and length changes", () => {
+    const sameLength = createVendorDigestFixture();
+    writeFileSync(sameLength.runtime, "bravx\n");
+    expect(trustedVendorRootMatches(sameLength.root, FIXED_VENDOR_FIXTURE_DIGEST)).toBe(false);
 
-    /* Verified vendor file: the idiom classes are shed. */
-    const verified = runGateArguments(["--repository", directory, "--paths", vendored]);
-    expect(verified.stdout.toString()).toBe("PRIVACY GATE: PASS\n");
+    const changedLength = createVendorDigestFixture();
+    writeFileSync(changedLength.runtime, "bravo extended\n");
+    expect(trustedVendorRootMatches(changedLength.root, FIXED_VENDOR_FIXTURE_DIGEST)).toBe(false);
+  });
 
-    /* The same bytes outside the manifest-verified vendor tree stay flagged. */
-    const stray = join(directory, "runtime-copy.py");
-    writeFileSync(stray, idioms);
-    const outside = runGateArguments(["--repository", directory, "--paths", stray]);
-    expect(outside.exitCode).toBe(1);
-    expect(outside.stdout.toString()).toBe("PRIVACY GATE: FAIL\ncredential: 1\nhome_path: 1\n");
+  test("authenticates both executable-bit transitions", () => {
+    const fixture = createVendorDigestFixture();
+    expect(trustedVendorRootDigest(fixture.root)).toBe(FIXED_VENDOR_FIXTURE_DIGEST);
 
-    /* A tampered vendored file no longer matches its digest and re-arms. */
-    writeFileSync(vendored, idioms + "# tampered\n");
-    const tampered = runGateArguments(["--repository", directory, "--paths", vendored]);
-    expect(tampered.exitCode).toBe(1);
-    expect(tampered.stdout.toString()).toBe("PRIVACY GATE: FAIL\ncredential: 1\nhome_path: 1\n");
+    chmodSync(fixture.runtime, 0o755);
+    expect(trustedVendorRootDigest(fixture.root)).toBe(FIXED_EXECUTABLE_VENDOR_FIXTURE_DIGEST);
+    expect(trustedVendorRootMatches(fixture.root, FIXED_VENDOR_FIXTURE_DIGEST)).toBe(false);
 
-    /* Classes outside the exemption stay armed even for a verified file. */
-    const sessionIdentifier = ["0190f47d", "1a2b", "7c3d", "8def", "123456789abc"].join("-");
-    const withIdentifier = idioms + `session ${sessionIdentifier}\n`;
-    writeFileSync(vendored, withIdentifier);
-    writeFileSync(
-      join(vendorDirectory, "SHA256SUMS"),
-      `${createHash("sha256").update(withIdentifier).digest("hex")}  runtime.py\n`,
-    );
-    const armed = runGateArguments(["--repository", directory, "--paths", vendored]);
-    expect(armed.exitCode).toBe(1);
-    expect(armed.stdout.toString()).toBe("PRIVACY GATE: FAIL\nresource_identifier: 1\n");
+    chmodSync(fixture.runtime, 0o644);
+    expect(trustedVendorRootDigest(fixture.root)).toBe(FIXED_VENDOR_FIXTURE_DIGEST);
+    expect(trustedVendorRootMatches(fixture.root, FIXED_EXECUTABLE_VENDOR_FIXTURE_DIGEST)).toBe(false);
+  });
+
+  test("rejects vendor root path, addition, deletion, and rename changes", () => {
+    const changedPath = createVendorDigestFixture();
+    expect(trustedVendorRootMatches(join(changedPath.root, "nested"), FIXED_VENDOR_FIXTURE_DIGEST)).toBe(false);
+
+    const addition = createVendorDigestFixture();
+    writeFileSync(join(addition.root, "added.py"), "added\n");
+    expect(trustedVendorRootMatches(addition.root, FIXED_VENDOR_FIXTURE_DIGEST)).toBe(false);
+
+    const deletion = createVendorDigestFixture();
+    unlinkSync(deletion.runtime);
+    expect(trustedVendorRootMatches(deletion.root, FIXED_VENDOR_FIXTURE_DIGEST)).toBe(false);
+
+    const rename = createVendorDigestFixture();
+    renameSync(rename.runtime, join(rename.root, "nested", "renamed.py"));
+    expect(trustedVendorRootMatches(rename.root, FIXED_VENDOR_FIXTURE_DIGEST)).toBe(false);
+  });
+
+  test("rejects simultaneous vendor file and manifest updates", () => {
+    const fixture = createVendorDigestFixture();
+    writeFileSync(fixture.runtime, "changed runtime\n");
+    writeFileSync(fixture.manifest, "candidate-updated manifest\n");
+    expect(trustedVendorRootMatches(fixture.root, FIXED_VENDOR_FIXTURE_DIGEST)).toBe(false);
+  });
+
+  test("rejects symlink, special-node, and unreadable vendor trees", () => {
+    const symlink = createVendorDigestFixture();
+    symlinkSync(symlink.readme, join(symlink.root, "linked-readme"));
+    expect(trustedVendorRootDigest(symlink.root)).toBeNull();
+
+    const special = createVendorDigestFixture();
+    const fifo = join(special.root, "special-node");
+    const mkfifo = Bun.spawnSync({ cmd: ["mkfifo", fifo], stderr: "pipe", stdout: "pipe" });
+    expect(mkfifo.exitCode).toBe(0);
+    expect(trustedVendorRootDigest(special.root)).toBeNull();
+
+    const unreadable = createVendorDigestFixture();
+    chmodSync(unreadable.runtime, 0o000);
+    try {
+      expect(trustedVendorRootDigest(unreadable.root)).toBeNull();
+    } finally {
+      chmodSync(unreadable.runtime, 0o600);
+    }
   });
 
   test("detects UUIDv7 session identifiers with class-only diagnostics", () => {
