@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import readline from "node:readline";
 
 import type { TelegramErrorCode, TelegramIdentity } from "./contracts";
-import { bridgeLaunchSpec, connectorProvisioned, telegramApiCredentials } from "./packaging";
+import { bridgeLaunchSpec, ensureConnectorProvisioned, telegramApiCredentials } from "./packaging";
 
 /**
  * The Telegram seam (issue #1059): everything that actually talks to Telegram
@@ -36,7 +36,7 @@ export type TelegramHealthResult =
   | { status: "error"; code: TelegramErrorCode };
 
 export interface TelegramAdapter {
-  /** `null` when the connector cannot run at all (missing credentials/venv). */
+  /** Host configuration failures known before product-owned provisioning. */
   unavailableReason(): TelegramErrorCode | null;
   startEnrollment(onEvent: (event: TelegramEnrollmentEvent) => void): TelegramEnrollmentHandle;
   checkSession(sessionString: string): Promise<TelegramHealthResult>;
@@ -79,7 +79,8 @@ function parseEvent(line: string): Record<string, unknown> | null {
 
 /** One short-lived bridge call (`health`/`logout`): session in via stdin, one
     event line out, always terminated, always resolved. */
-function bridgeCall(command: "health" | "logout", sessionString: string): Promise<Record<string, unknown> | null> {
+async function bridgeCall(command: "health" | "logout", sessionString: string): Promise<Record<string, unknown> | null> {
+  if (!await ensureConnectorProvisioned()) return null;
   return new Promise((resolve) => {
     const child = bridgeChild(command);
     if (!child) {
@@ -115,57 +116,66 @@ function bridgeCall(command: "health" | "logout", sessionString: string): Promis
 export const processTelegramAdapter: TelegramAdapter = {
   unavailableReason() {
     if (!telegramApiCredentials()) return "credentials_missing";
-    if (!connectorProvisioned()) return "start_failed";
     return null;
   },
 
   startEnrollment(onEvent) {
-    const child = bridgeChild("enroll");
-    if (!child) {
-      queueMicrotask(() => onEvent({ type: "failed", code: "start_failed" }));
-      return { submitPassword: () => undefined, cancel: () => undefined };
-    }
     let done = false;
+    let canceled = false;
+    let child: ChildProcessWithoutNullStreams | null = null;
     const emit = (event: TelegramEnrollmentEvent) => {
       if (done) return;
       if (event.type === "authorized" || event.type === "failed") done = true;
       onEvent(event);
     };
-    const lines = readline.createInterface({ input: child.stdout });
-    lines.on("line", (line) => {
-      const raw = parseEvent(line);
-      if (!raw) return;
-      switch (raw.event) {
-        case "qr":
-          if (typeof raw.url === "string" && raw.url.startsWith("tg://login")) {
-            emit({ type: "qr", url: raw.url, expiresAt: typeof raw.expiresAt === "string" ? raw.expiresAt : new Date(Date.now() + 30_000).toISOString() });
-          }
-          return;
-        case "password_required": emit({ type: "password_required" }); return;
-        case "password_invalid": emit({ type: "password_invalid" }); return;
-        case "verifying": emit({ type: "verifying" }); return;
-        case "authorized":
-          if (typeof raw.session === "string" && raw.session) {
-            emit({ type: "authorized", sessionString: raw.session, identity: identityOf(raw.identity) });
-          } else {
-            emit({ type: "failed", code: "bridge_failed" });
-          }
-          return;
-        case "failed": emit({ type: "failed", code: sanitizedCode(raw.code) }); return;
+    void ensureConnectorProvisioned().then((provisioned) => {
+      if (canceled || done) return;
+      if (!provisioned) {
+        emit({ type: "failed", code: "start_failed" });
+        return;
       }
-    });
-    child.stderr.on("data", () => undefined);
-    child.once("error", () => emit({ type: "failed", code: "start_failed" }));
-    child.once("close", () => emit({ type: "failed", code: "bridge_failed" }));
+      child = bridgeChild("enroll");
+      if (!child) {
+        emit({ type: "failed", code: "start_failed" });
+        return;
+      }
+      const lines = readline.createInterface({ input: child.stdout });
+      lines.on("line", (line) => {
+        const raw = parseEvent(line);
+        if (!raw) return;
+        switch (raw.event) {
+          case "qr":
+            if (typeof raw.url === "string" && raw.url.startsWith("tg://login")) {
+              emit({ type: "qr", url: raw.url, expiresAt: typeof raw.expiresAt === "string" ? raw.expiresAt : new Date(Date.now() + 30_000).toISOString() });
+            }
+            return;
+          case "password_required": emit({ type: "password_required" }); return;
+          case "password_invalid": emit({ type: "password_invalid" }); return;
+          case "verifying": emit({ type: "verifying" }); return;
+          case "authorized":
+            if (typeof raw.session === "string" && raw.session) {
+              emit({ type: "authorized", sessionString: raw.session, identity: identityOf(raw.identity) });
+            } else {
+              emit({ type: "failed", code: "bridge_failed" });
+            }
+            return;
+          case "failed": emit({ type: "failed", code: sanitizedCode(raw.code) }); return;
+        }
+      });
+      child.stderr.on("data", () => undefined);
+      child.once("error", () => emit({ type: "failed", code: "start_failed" }));
+      child.once("close", () => emit({ type: "failed", code: "bridge_failed" }));
+    }).catch(() => emit({ type: "failed", code: "start_failed" }));
     return {
       submitPassword(password: string) {
-        try { child.stdin.write(JSON.stringify({ password }) + "\n"); }
+        try { child?.stdin.write(JSON.stringify({ password }) + "\n"); }
         catch { emit({ type: "failed", code: "bridge_failed" }); }
       },
       cancel() {
+        canceled = true;
         done = true;
-        try { child.kill("SIGTERM"); } catch { /* already gone */ }
-        setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* already gone */ } }, 2_000).unref?.();
+        try { child?.kill("SIGTERM"); } catch { /* already gone */ }
+        setTimeout(() => { try { child?.kill("SIGKILL"); } catch { /* already gone */ } }, 2_000).unref?.();
       },
     };
   },

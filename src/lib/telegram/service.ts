@@ -30,7 +30,7 @@ import {
 export interface TelegramServicePorts {
   adapter: TelegramAdapter;
   ensureConnector(session: StoredTelegramSession): Promise<ConnectorEnsureResult>;
-  stopConnector(): void;
+  stopConnector(): Promise<void> | void;
   registerHosts(): TelegramHostRegistrationResult;
   unregisterHosts(): void;
   now(): number;
@@ -206,7 +206,7 @@ export class TelegramConnectionService {
         return;
       case "failed":
         this.login = null;
-        this.cleanupCanceledLogin(current);
+        await this.cleanupCanceledLogin(current);
         if (event.code !== "canceled") this.recordError(event.code);
         return;
     }
@@ -242,7 +242,7 @@ export class TelegramConnectionService {
       return;
     }
     if (!this.registerVerifiedHosts()) {
-      this.cleanupFailedRegistration();
+      await this.cleanupFailedRegistration();
       writeTelegramConnection({ version: 1, status: "error", credentialRef: stored.credentialRef, identity, lastHealthCheckAt: null, errorCode: "host_registration_failed" });
       return;
     }
@@ -261,16 +261,19 @@ export class TelegramConnectionService {
     catch { return false; }
   }
 
-  private cleanupFailedRegistration(): void {
-    this.teardownConnectorAndHosts();
+  private async cleanupFailedRegistration(): Promise<void> {
+    await this.teardownConnectorAndHosts();
   }
 
-  private teardownConnectorAndHosts(): void {
-    try { this.ports.stopConnector(); } catch { /* continue revocation */ }
+  private async teardownConnectorAndHosts(): Promise<boolean> {
+    let connectorStopped = true;
+    try { await this.ports.stopConnector(); }
+    catch { connectorStopped = false; }
     try { this.ports.unregisterHosts(); } catch { /* continue credential cleanup */ }
+    return connectorStopped;
   }
 
-  private deleteCredentialsAndPublishDisconnected(): void {
+  private deleteCredentialsAndPublishDisconnected(connectorStopped = true): void {
     let deleted = false;
     try {
       deleteTelegramSession();
@@ -278,7 +281,14 @@ export class TelegramConnectionService {
     } catch { /* unsafe credential remains explicit below */ }
     try {
       if (deleted) {
-        writeTelegramConnection({ version: 1, status: "disconnected", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: null });
+        writeTelegramConnection({
+          version: 1,
+          status: connectorStopped ? "disconnected" : "error",
+          credentialRef: null,
+          identity: null,
+          lastHealthCheckAt: null,
+          errorCode: connectorStopped ? null : "connector_failed",
+        });
       } else {
         this.recordError("session_unsafe");
       }
@@ -326,24 +336,24 @@ export class TelegramConnectionService {
     return this.enqueueLifecycle(() => this.cancelLoginLocked(operationId), { supersede });
   }
 
-  private cancelLoginLocked(operationId: string): TelegramStatusPayload {
+  private async cancelLoginLocked(operationId: string): Promise<TelegramStatusPayload> {
     const current = this.login;
     if (current && current.operationId === operationId) {
       this.login = null;
       current.handle.cancel();
-      this.cleanupCanceledLogin(current);
+      await this.cleanupCanceledLogin(current);
     }
     return this.status();
   }
 
-  private cleanupCanceledLogin(operation: LiveLogin): void {
+  private async cleanupCanceledLogin(operation: LiveLogin): Promise<void> {
     if (!operation.stored) return;
-    this.teardownConnectorAndHosts();
+    const connectorStopped = await this.teardownConnectorAndHosts();
     try {
       const current = readTelegramSession();
       if (current && current.credentialRef !== operation.stored.credentialRef) return;
     } catch { /* still attempt the safe deletion boundary */ }
-    this.deleteCredentialsAndPublishDisconnected();
+    this.deleteCredentialsAndPublishDisconnected(connectorStopped);
   }
 
   /** Health check against the stored session; updates the durable status. */
@@ -362,22 +372,33 @@ export class TelegramConnectionService {
       session = readTelegramSession();
     } catch (error) {
       if (!(error instanceof UnsafeTelegramSessionError)) throw error;
-      this.teardownConnectorAndHosts();
+      await this.teardownConnectorAndHosts();
       this.recordError("session_unsafe");
       return;
     }
     const connection = this.safeConnection();
     if (!session) {
-      this.teardownConnectorAndHosts();
-      if (connection.status !== "disconnected") {
-        writeTelegramConnection({ version: 1, status: "disconnected", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: null });
+      const connectorStopped = await this.teardownConnectorAndHosts();
+      if (!connectorStopped || connection.status !== "disconnected") {
+        writeTelegramConnection({
+          version: 1,
+          status: connectorStopped ? "disconnected" : "error",
+          credentialRef: null,
+          identity: null,
+          lastHealthCheckAt: null,
+          errorCode: connectorStopped ? null : "connector_failed",
+        });
       }
       return;
     }
     /* The bridge uses the same StringSession as the shared connector. Release
        the long-lived owner before the short health client acquires the
        vendored per-session lock and connects. */
-    this.ports.stopConnector();
+    try { await this.ports.stopConnector(); }
+    catch {
+      this.recordError("connector_failed");
+      return;
+    }
     const result = await this.ports.adapter.checkSession(session.sessionString);
     if (!this.lifecycleIsCurrent(generation)) return;
     const checkedAt = new Date(this.ports.now()).toISOString();
@@ -398,7 +419,7 @@ export class TelegramConnectionService {
         return;
       }
       if (!this.registerVerifiedHosts()) {
-        this.cleanupFailedRegistration();
+        await this.cleanupFailedRegistration();
         writeTelegramConnection({ version: 1, status: "error", credentialRef: session.credentialRef, identity: result.identity, lastHealthCheckAt: checkedAt, errorCode: "host_registration_failed" });
         return;
       }
@@ -426,18 +447,22 @@ export class TelegramConnectionService {
       session = readTelegramSession();
     } catch (error) {
       if (!(error instanceof UnsafeTelegramSessionError)) throw error;
-      this.teardownConnectorAndHosts();
+      await this.teardownConnectorAndHosts();
       this.recordError("session_unsafe");
       return this.status();
     }
     if (!session) {
-      this.disconnectLocally();
+      await this.disconnectLocally();
       return this.status();
     }
     /* Remote revocation uses a short-lived client with this exact session.
        Release the shared connector first; the bridge's session lock then
        waits for process exit before it contacts Telegram. */
-    this.ports.stopConnector();
+    try { await this.ports.stopConnector(); }
+    catch {
+      this.recordError("connector_failed");
+      return this.status();
+    }
     const result = await this.ports.adapter.logout(session.sessionString);
     if (!this.lifecycleIsCurrent(generation)) return this.status();
     if (!result.ok) {
@@ -446,7 +471,7 @@ export class TelegramConnectionService {
     }
     /* The terminal transition runs the complete teardown even though logout
        already stopped the connector before the bridge call. */
-    this.disconnectLocally();
+    await this.disconnectLocally();
     return this.status();
   }
 
@@ -456,15 +481,15 @@ export class TelegramConnectionService {
     return this.enqueueLifecycle(() => this.deleteLocalSessionLocked(), { supersede: this.login === null });
   }
 
-  private deleteLocalSessionLocked(): TelegramStatusPayload {
+  private async deleteLocalSessionLocked(): Promise<TelegramStatusPayload> {
     if (this.login) throw new Error("a Telegram login operation is running");
-    this.disconnectLocally();
+    await this.disconnectLocally();
     return this.status();
   }
 
-  private disconnectLocally(): void {
-    this.teardownConnectorAndHosts();
-    this.deleteCredentialsAndPublishDisconnected();
+  private async disconnectLocally(): Promise<void> {
+    const connectorStopped = await this.teardownConnectorAndHosts();
+    this.deleteCredentialsAndPublishDisconnected(connectorStopped);
   }
 }
 

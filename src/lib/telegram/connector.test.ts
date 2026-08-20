@@ -1,4 +1,5 @@
 import { afterAll, beforeEach, expect, test } from "bun:test";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -36,8 +37,9 @@ const READ_ONLY: ConnectorProbe = {
 };
 
 function fakePorts(script: Array<ConnectorProbe | null>, options: { spawnFails?: boolean; owned?: boolean; recordFails?: boolean } = {}) {
-  const calls = { spawns: 0, probes: 0, stops: 0, kills: [] as Array<NodeJS.Signals | undefined>, probeTokens: [] as string[] };
+  const calls = { spawns: 0, probes: 0, stops: 0, records: 0, kills: [] as Array<NodeJS.Signals | undefined>, probeTokens: [] as string[] };
   let clock = 0;
+  let owned = options.owned ?? false;
   const ports: TelegramConnectorPorts = {
     spawn: () => {
       calls.spawns += 1;
@@ -51,15 +53,20 @@ function fakePorts(script: Array<ConnectorProbe | null>, options: { spawnFails?:
     },
     sleep: async () => { clock += 10_000; },
     now: () => clock,
-    ownsProcess: () => options.owned ?? false,
-    stop: () => { calls.stops += 1; stopTelegramConnector(); },
-    ...(options.recordFails ? { recordProcess: () => false } : {}),
+    ownsProcess: () => owned,
+    stop: () => { calls.stops += 1; owned = false; },
+    recordProcess: () => {
+      calls.records += 1;
+      if (options.recordFails) return false;
+      owned = true;
+      return true;
+    },
   };
   return { ports, calls };
 }
 
-beforeEach(() => {
-  stopTelegramConnector();
+beforeEach(async () => {
+  await stopTelegramConnector();
   fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
 });
 afterAll(() => {
@@ -123,28 +130,13 @@ test("an already-listening read-only connector is adopted, never duplicated", as
   expect(calls.probeTokens).toEqual([CONNECTOR_SESSION.connectorToken]);
 });
 
-test("spawns once, waits for readiness, records the pid for later generations", async () => {
+test("spawns once, waits for readiness, and records the winner before probing", async () => {
   const { ports, calls } = fakePorts([null, null, READ_ONLY]);
   const result = await ensureTelegramConnector(CONNECTOR_SESSION, ports);
   expect(result.ok).toBe(true);
   expect(calls.spawns).toBe(1);
-  const pidFile = path.join(process.env.LLV_STATE_DIR!, "telegram", "connector.json");
-  const recorded = JSON.parse(fs.readFileSync(pidFile, "utf8")) as { pid: number; identity: string; credentialRef: string; connectorTokenSha256: string };
-  expect(recorded.pid).toBe(process.pid);
-  expect(recorded.credentialRef).toBe(CONNECTOR_SESSION.credentialRef);
-  expect(recorded.connectorTokenSha256).toMatch(/^[a-f0-9]{64}$/);
-  expect(fs.readFileSync(pidFile, "utf8")).not.toContain(CONNECTOR_SESSION.connectorToken);
-  /* The portable backend's identity token, not a raw /proc read — the same
-     value works on Linux and macOS. */
-  expect(typeof recorded.identity).toBe("string");
-  expect(recorded.identity.length).toBeGreaterThan(0);
-
-  /* Even if the durable record disappears later, the retained child handle
-     still makes local deletion able to terminate this generation. */
-  fs.rmSync(pidFile);
-  stopTelegramConnector();
-  expect(fs.existsSync(pidFile)).toBe(false);
-  expect(calls.kills).toContain("SIGTERM");
+  expect(calls.records).toBe(1);
+  expect(calls.probes).toBe(3);
 });
 
 test("a connector advertising a non-read-only tool is refused", async () => {
@@ -205,6 +197,86 @@ test("a credential-generation mismatch stops the old record before spawning", as
   expect(calls.spawns).toBe(1);
 });
 
+test("concurrent Viewer generations serialize adoption and spawn one recorded connector", async () => {
+  let owned = false;
+  let spawns = 0;
+  let records = 0;
+  const ports: TelegramConnectorPorts = {
+    ownsProcess: () => owned,
+    stop: async () => { await Promise.resolve(); owned = false; },
+    spawn: () => {
+      spawns += 1;
+      return { pid: process.pid, kill: () => true };
+    },
+    recordProcess: () => {
+      records += 1;
+      owned = true;
+      return true;
+    },
+    probe: async () => READ_ONLY,
+    sleep: async () => {},
+    now: () => Date.now(),
+  };
+
+  const [first, second] = await Promise.all([
+    ensureTelegramConnector(CONNECTOR_SESSION, ports),
+    ensureTelegramConnector(CONNECTOR_SESSION, ports),
+  ]);
+
+  expect(first.ok).toBe(true);
+  expect(second.ok).toBe(true);
+  expect(spawns).toBe(1);
+  expect(records).toBe(1);
+});
+
+test("an older failed readiness probe cannot stop a newer credential generation", async () => {
+  const newerSession = {
+    ...CONNECTOR_SESSION,
+    credentialRef: "credential-generation-b",
+    connectorToken: "B".repeat(43),
+  };
+  let binding: { credentialRef: string; connectorToken: string } | null = null;
+  let spawns = 0;
+  let stops = 0;
+  let clock = 0;
+  let firstProbeStarted!: () => void;
+  const firstStarted = new Promise<void>((resolve) => { firstProbeStarted = resolve; });
+  let resolveFirstProbe!: (probe: ConnectorProbe) => void;
+  const firstProbe = new Promise<ConnectorProbe>((resolve) => { resolveFirstProbe = resolve; });
+  const ports: TelegramConnectorPorts = {
+    ownsProcess: (candidate) => binding?.credentialRef === candidate.credentialRef
+      && binding.connectorToken === candidate.connectorToken,
+    stop: () => { stops += 1; binding = null; },
+    spawn: () => { spawns += 1; return { pid: process.pid, kill: () => true }; },
+    recordProcess: (_child, _spec, candidate) => { binding = { ...candidate }; return true; },
+    probe: async (_url, token) => {
+      if (token === CONNECTOR_SESSION.connectorToken) {
+        firstProbeStarted();
+        return await firstProbe;
+      }
+      return {
+        ok: true,
+        serverName: connectorServerName(token),
+        tools: [{ name: "get_me", readOnly: true }],
+      };
+    },
+    sleep: async () => { clock += 30_001; },
+    now: () => clock,
+  };
+
+  const older = ensureTelegramConnector(CONNECTOR_SESSION, ports);
+  await firstStarted;
+  const newer = await ensureTelegramConnector(newerSession, ports);
+  expect(newer.ok).toBe(true);
+  expect((binding as { credentialRef: string; connectorToken: string } | null)?.credentialRef).toBe(newerSession.credentialRef);
+
+  resolveFirstProbe({ ok: false });
+  expect(await older).toEqual({ ok: false, code: "connector_failed" });
+  expect((binding as { credentialRef: string; connectorToken: string } | null)?.credentialRef).toBe(newerSession.credentialRef);
+  expect(spawns).toBe(2);
+  expect(stops).toBe(2);
+});
+
 test("failed durable recording kills the live child before any probe", async () => {
   const { ports, calls } = fakePorts([READ_ONLY], { recordFails: true });
   const result = await ensureTelegramConnector(CONNECTOR_SESSION, ports);
@@ -241,6 +313,7 @@ test("stop invalidates an in-flight connector operation", async () => {
 test("a stalled readiness probe is bounded and terminates the spawned child", async () => {
   const kills: Array<NodeJS.Signals | undefined> = [];
   let probeSignal: AbortSignal | undefined;
+  let owned = false;
   const child = { pid: process.pid, kill: (signal?: NodeJS.Signals) => { kills.push(signal); return true; } };
   const ports: TelegramConnectorPorts = {
     spawn: () => child,
@@ -250,9 +323,9 @@ test("a stalled readiness probe is bounded and terminates the spawned child", as
     },
     sleep: async () => {},
     now: () => 0,
-    ownsProcess: () => false,
-    recordProcess: () => true,
-    stop: () => { child.kill("SIGTERM"); },
+    ownsProcess: () => owned,
+    recordProcess: () => { owned = true; return true; },
+    stop: () => { owned = false; child.kill("SIGTERM"); },
     probeTimeoutMs: 10,
   };
 
@@ -260,3 +333,54 @@ test("a stalled readiness probe is bounded and terminates the spawned child", as
   expect(probeSignal?.aborted).toBe(true);
   expect(kills).toContain("SIGTERM");
 }, 1_000);
+
+test("stop waits through SIGKILL escalation until a TERM-resistant connector exits", async () => {
+  const script = path.join(SANDBOX, "term-resistant-connector.mjs");
+  const readyFile = path.join(SANDBOX, "term-resistant-ready");
+  fs.writeFileSync(script, [
+    "import fs from 'node:fs';",
+    `fs.writeFileSync(${JSON.stringify(readyFile)}, 'ready');`,
+    "process.on('SIGTERM', () => undefined);",
+    "setInterval(() => undefined, 1000);",
+    "",
+  ].join("\n"));
+  process.env.LLV_TELEGRAM_PYTHON = process.execPath;
+  process.env.LLV_TELEGRAM_SERVER_BRIDGE = script;
+  let childPid = 0;
+  try {
+    const result = await ensureTelegramConnector(CONNECTOR_SESSION, {
+      spawn: (spec) => {
+        const child = spawn(spec.command, spec.args, { cwd: spec.cwd, env: spec.env, stdio: "ignore" });
+        childPid = child.pid ?? 0;
+        return child;
+      },
+      probe: async () => {
+        while (!fs.existsSync(readyFile)) await new Promise((resolve) => setTimeout(resolve, 5));
+        return READ_ONLY;
+      },
+      sleep: async () => {},
+      now: () => Date.now(),
+      ownsProcess: () => false,
+    });
+    expect(result.ok).toBe(true);
+    expect(childPid).toBeGreaterThan(1);
+    const pidFile = path.join(process.env.LLV_STATE_DIR!, "telegram", "connector.json");
+    const recorded = JSON.parse(fs.readFileSync(pidFile, "utf8")) as {
+      pid: number; identity: string; credentialRef: string; connectorTokenSha256: string;
+    };
+    expect(recorded.pid).toBe(childPid);
+    expect(recorded.credentialRef).toBe(CONNECTOR_SESSION.credentialRef);
+    expect(recorded.connectorTokenSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(fs.readFileSync(pidFile, "utf8")).not.toContain(CONNECTOR_SESSION.connectorToken);
+
+    await stopTelegramConnector();
+    expect(() => process.kill(childPid, 0)).toThrow();
+    expect(fs.existsSync(pidFile)).toBe(false);
+  } finally {
+    delete process.env.LLV_TELEGRAM_PYTHON;
+    delete process.env.LLV_TELEGRAM_SERVER_BRIDGE;
+    if (childPid > 1) {
+      try { process.kill(childPid, "SIGKILL"); } catch { /* already gone */ }
+    }
+  }
+}, 5_000);

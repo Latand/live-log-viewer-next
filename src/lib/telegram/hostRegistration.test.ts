@@ -77,6 +77,15 @@ test("a pre-existing operator entry is refused, never overwritten — whatever i
   }
 });
 
+test("an invalid Claude mcpServers shape is preserved byte-for-byte", () => {
+  const file = tempPath(".claude.json");
+  const original = JSON.stringify({ theme: "dark", mcpServers: [{ operator: "keep" }] }, null, 2) + "\n";
+  fs.writeFileSync(file, original, { mode: 0o600 });
+
+  expect(registerTelegramInClaudeState(file, URL)).toBe("unwritable");
+  expect(fs.readFileSync(file, "utf8")).toBe(original);
+});
+
 test("an exact-url operator entry is never claimed or removed by high-level registration", () => {
   fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
   const claudeFile = tempPath(".claude.json");

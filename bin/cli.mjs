@@ -282,6 +282,10 @@ function buildChildEnv(options, runtime, packageRoot) {
   if (!env.LLV_TELEGRAM_SESSION_READER && existsSync(telegramSessionReader)) {
     env.LLV_TELEGRAM_SESSION_READER = telegramSessionReader;
   }
+  const telegramProvisioner = join(packageRoot, "bin", "provision-telegram-connector.mjs");
+  if (!env.LLV_TELEGRAM_PROVISIONER && existsSync(telegramProvisioner)) {
+    env.LLV_TELEGRAM_PROVISIONER = telegramProvisioner;
+  }
 
   if (runtime.llvToken) {
     env.LLV_TOKEN = runtime.llvToken;

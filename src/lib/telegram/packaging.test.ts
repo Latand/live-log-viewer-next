@@ -1,4 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -13,11 +14,13 @@ const {
   provisionSpec,
   telegramApiCredentials,
   telegramMcpUrl,
+  telegramProvisionerPath,
   vendoredConnectorDir,
   loginBridgePath,
   telegramMcpServerPath,
   telegramSessionReaderPath,
 } = await import("./packaging");
+const { installPinnedUv, uvReleaseFor, UV_BOOTSTRAP_VERSION } = await import("../../../bin/provision-telegram-connector.mjs");
 
 afterAll(() => {
   if (OLD_STATE === undefined) delete process.env.LLV_STATE_DIR; else process.env.LLV_STATE_DIR = OLD_STATE;
@@ -48,6 +51,53 @@ test("provisioning uses the vendored tree and its frozen lock, never an index na
   expect(spec.env.UV_PROJECT_ENVIRONMENT).toContain(path.join("state", "telegram", "venv"));
 });
 
+test("clean-install uv bootstrap is platform-pinned and checksum-verified", async () => {
+  expect(UV_BOOTSTRAP_VERSION).toBe("0.7.13");
+  expect(uvReleaseFor("linux", "x64", true)).toMatchObject({
+    triple: "x86_64-unknown-linux-gnu",
+    sha256: "909278eb197c5ed0e9b5f16317d1255270d1f9ea4196e7179ce934d48c4c2545",
+  });
+  expect(uvReleaseFor("darwin", "arm64")).toMatchObject({
+    triple: "aarch64-apple-darwin",
+    sha256: "721f532b73171586574298d4311a91d5ea2c802ef4db3ebafc434239330090c6",
+  });
+
+  const triple = "fixture-platform";
+  const fixtureRoot = path.join(SANDBOX, `uv-${triple}`);
+  fs.mkdirSync(fixtureRoot, { recursive: true });
+  const fixtureUv = path.join(fixtureRoot, "uv");
+  fs.writeFileSync(fixtureUv, "#!/bin/sh\n[ \"${1:-}\" = \"--version\" ]\n", { mode: 0o700 });
+  const archive = path.join(SANDBOX, "uv-fixture.tar.gz");
+  const packed = Bun.spawnSync({
+    cmd: ["tar", "-czf", archive, "-C", SANDBOX, `uv-${triple}`],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(packed.exitCode).toBe(0);
+  const bytes = fs.readFileSync(archive);
+  const release = {
+    triple,
+    asset: "uv-fixture.tar.gz",
+    url: "https://example.invalid/uv-fixture.tar.gz",
+    sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
+  };
+  const fetcher = async () => new Response(bytes, {
+    status: 200,
+    headers: { "content-length": String(bytes.length) },
+  });
+  const toolsDir = path.join(SANDBOX, "bootstrapped-tools");
+  const installed = await installPinnedUv(toolsDir, { release, fetcher });
+  expect(installed).toBe(path.join(toolsDir, "uv"));
+  expect(fs.statSync(installed).mode & 0o777).toBe(0o700);
+
+  const rejectedTools = path.join(SANDBOX, "rejected-tools");
+  await expect(installPinnedUv(rejectedTools, {
+    release: { ...release, sha256: "0".repeat(64) },
+    fetcher,
+  })).rejects.toThrow("checksum mismatch");
+  expect(fs.existsSync(path.join(rejectedTools, "uv"))).toBe(false);
+});
+
 test("the shared URL is loopback and matches what hosts register", () => {
   expect(telegramMcpUrl()).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/mcp$/);
 });
@@ -62,6 +112,7 @@ test("a standalone server (cwd inside dist/standalone) still finds the packaged 
   fs.writeFileSync(path.join(fakeRoot, "bin", "telegram-login-bridge.py"), "");
   fs.writeFileSync(path.join(fakeRoot, "bin", "telegram-mcp-server.py"), "");
   fs.writeFileSync(path.join(fakeRoot, "bin", "telegram-session-reader.mjs"), "");
+  fs.writeFileSync(path.join(fakeRoot, "bin", "provision-telegram-connector.mjs"), "");
   const oldCwd = process.cwd();
   try {
     process.chdir(standalone);
@@ -69,20 +120,24 @@ test("a standalone server (cwd inside dist/standalone) still finds the packaged 
     expect(loginBridgePath()).toBe(path.join(fakeRoot, "bin", "telegram-login-bridge.py"));
     expect(telegramMcpServerPath()).toBe(path.join(fakeRoot, "bin", "telegram-mcp-server.py"));
     expect(telegramSessionReaderPath()).toBe(path.join(fakeRoot, "bin", "telegram-session-reader.mjs"));
+    expect(telegramProvisionerPath()).toBe(path.join(fakeRoot, "bin", "provision-telegram-connector.mjs"));
     /* And the CLI's explicit env pin wins over the layout probe. */
     process.env.LLV_TELEGRAM_VENDOR_DIR = "/pinned/vendor";
     process.env.LLV_TELEGRAM_BRIDGE = "/pinned/bridge.py";
     process.env.LLV_TELEGRAM_SERVER_BRIDGE = "/pinned/server.py";
     process.env.LLV_TELEGRAM_SESSION_READER = "/pinned/session-reader.mjs";
+    process.env.LLV_TELEGRAM_PROVISIONER = "/pinned/provisioner.mjs";
     expect(vendoredConnectorDir()).toBe("/pinned/vendor");
     expect(loginBridgePath()).toBe("/pinned/bridge.py");
     expect(telegramMcpServerPath()).toBe("/pinned/server.py");
     expect(telegramSessionReaderPath()).toBe("/pinned/session-reader.mjs");
+    expect(telegramProvisionerPath()).toBe("/pinned/provisioner.mjs");
   } finally {
     delete process.env.LLV_TELEGRAM_VENDOR_DIR;
     delete process.env.LLV_TELEGRAM_BRIDGE;
     delete process.env.LLV_TELEGRAM_SERVER_BRIDGE;
     delete process.env.LLV_TELEGRAM_SESSION_READER;
+    delete process.env.LLV_TELEGRAM_PROVISIONER;
     process.chdir(oldCwd);
   }
 });
@@ -141,13 +196,18 @@ test("the published tarball carries and runs the connector provisioner", async (
   fs.writeFileSync(fakeUv, [
     "#!/bin/sh",
     "set -eu",
+    "if [ \"${1:-}\" = \"--version\" ]; then exit 0; fi",
     "mkdir -p \"$UV_PROJECT_ENVIRONMENT/bin\"",
     "printf '%s\\n' \"$@\" > \"$UV_PROJECT_ENVIRONMENT/uv-args.txt\"",
     ": > \"$UV_PROJECT_ENVIRONMENT/bin/python\"",
     "",
   ].join("\n"));
-  fs.chmodSync(fakeUv, 0o755);
+  fs.chmodSync(fakeUv, 0o700);
   const installedState = path.join(SANDBOX, "installed-state");
+  const installedTools = path.join(installedState, "telegram", "tools");
+  fs.mkdirSync(installedTools, { recursive: true, mode: 0o700 });
+  fs.copyFileSync(fakeUv, path.join(installedTools, "uv"));
+  fs.chmodSync(path.join(installedTools, "uv"), 0o700);
   const provisioned = Bun.spawnSync({
     cmd: ["node", path.join(packageRoot, "bin", "provision-telegram-connector.mjs")],
     cwd: SANDBOX,

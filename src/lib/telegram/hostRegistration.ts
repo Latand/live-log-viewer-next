@@ -117,9 +117,13 @@ export function registerTelegramInClaudeState(pathname: string, url: string, pre
   if (!safeToRewrite(pathname)) return "unwritable";
   const state = claudeState(pathname);
   if (!state) return "unwritable";
-  const servers = state.mcpServers && typeof state.mcpServers === "object" && !Array.isArray(state.mcpServers)
-    ? { ...state.mcpServers as Record<string, unknown> }
-    : {};
+  if (state.mcpServers !== undefined
+    && (!state.mcpServers || typeof state.mcpServers !== "object" || Array.isArray(state.mcpServers))) {
+    return "unwritable";
+  }
+  const servers = state.mcpServers === undefined
+    ? {}
+    : { ...state.mcpServers as Record<string, unknown> };
   const existing = servers[CLAUDE_ENTRY_NAME];
   if (existing !== undefined) {
     /* Identical bytes prove configuration equality, not Viewer ownership.
@@ -143,9 +147,13 @@ export function removeTelegramFromClaudeState(pathname: string, ownedUrl: string
   if (!safeToRewrite(pathname) || !fs.existsSync(pathname)) return true;
   const state = claudeState(pathname);
   if (!state) return false;
-  const servers = state.mcpServers && typeof state.mcpServers === "object" && !Array.isArray(state.mcpServers)
-    ? { ...state.mcpServers as Record<string, unknown> }
-    : {};
+  if (state.mcpServers !== undefined
+    && (!state.mcpServers || typeof state.mcpServers !== "object" || Array.isArray(state.mcpServers))) {
+    return false;
+  }
+  const servers = state.mcpServers === undefined
+    ? {}
+    : { ...state.mcpServers as Record<string, unknown> };
   if (!isViewerEntry(servers[CLAUDE_ENTRY_NAME], ownedUrl)) return true;
   delete servers[CLAUDE_ENTRY_NAME];
   atomicWrite(pathname, JSON.stringify({ ...state, mcpServers: servers }, null, 2) + "\n", 0o600);

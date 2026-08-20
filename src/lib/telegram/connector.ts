@@ -4,6 +4,7 @@ import fs from "node:fs";
 
 import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
+import { withFileTransaction } from "@/lib/state/fileTransaction";
 
 import type { TelegramErrorCode } from "./contracts";
 import { connectorLaunchSpec, telegramApiCredentials, telegramMcpServerPath, telegramMcpUrl, telegramVenvPython, type ProcessSpec } from "./packaging";
@@ -77,7 +78,7 @@ export interface TelegramConnectorPorts {
   now(): number;
   ownsProcess?(binding: ConnectorBinding): boolean;
   recordProcess?(child: ConnectorChild, spec: ProcessSpec, binding: ConnectorBinding): boolean;
-  stop?(): void;
+  stop?(): Promise<void> | void;
   beginOperation?(): () => boolean;
   probeTimeoutMs?: number;
 }
@@ -85,6 +86,9 @@ export interface TelegramConnectorPorts {
 const READY_DEADLINE_MS = 30_000;
 const PROBE_INTERVAL_MS = 500;
 const PROBE_TIMEOUT_MS = 5_000;
+const TERMINATION_GRACE_MS = 2_000;
+const TERMINATION_KILL_MS = 2_000;
+const TERMINATION_POLL_MS = 25;
 const PID_FILE = "connector.json";
 
 /** The read-only gate, pure so it is directly provable: one tool that lacks
@@ -165,7 +169,7 @@ const realPorts: TelegramConnectorPorts = {
   now: () => Date.now(),
   ownsProcess: ownsRecordedConnector,
   recordProcess: recordConnectorProcess,
-  stop: stopRealConnector,
+  stop: stopRealConnectorUnlocked,
   beginOperation: beginConnectorOperation,
 };
 
@@ -183,7 +187,11 @@ type ConnectorRecord = {
   entrypoint: string;
 };
 
-let liveConnectorChild: { child: ConnectorChild; pid: number; identity: string } | null = null;
+let liveConnectorChild: {
+  child: ConnectorChild;
+  pid: number;
+  identity: string;
+} | null = null;
 let supervisorGeneration = 0;
 
 function beginConnectorOperation(): () => boolean {
@@ -268,31 +276,80 @@ function recordConnectorProcess(child: ConnectorChild, spec: ProcessSpec, bindin
   }
 }
 
-function killRecordedConnector(): void {
-  const recorded = readConnectorRecord();
+function removeConnectorRecord(): void {
   try {
     if (ensureTelegramStateDir(false) !== null) fs.rmSync(pidFilePath(), { force: true });
   } catch { /* unsafe/missing state */ }
-  if (!recorded || procBackend.processIdentity(recorded.pid) !== recorded.identity || !connectorArgvMatches(recorded)) return;
-  try { process.kill(recorded.pid, "SIGTERM"); } catch { return; }
-  setTimeout(() => {
-    if (procBackend.processIdentity(recorded.pid) === recorded.identity) {
-      try { process.kill(recorded.pid, "SIGKILL"); } catch { /* already gone */ }
-    }
-  }, 2_000).unref?.();
 }
 
-function stopRealConnector(): void {
-  supervisorGeneration += 1;
-  const child = liveConnectorChild;
-  liveConnectorChild = null;
-  if (child) {
-    try { child.child.kill("SIGTERM"); } catch { /* already gone */ }
-    setTimeout(() => {
-      if (procBackend.processIdentity(child.pid) === child.identity) terminateChildImmediately(child.child);
-    }, 2_000).unref?.();
+type TerminationTarget = {
+  pid: number;
+  identity: string;
+  term(): void;
+  kill(): void;
+};
+
+function targetIsAlive(target: Pick<TerminationTarget, "pid" | "identity">): boolean {
+  return procBackend.processIdentity(target.pid) === target.identity;
+}
+
+async function waitForTargetsToExit(targets: TerminationTarget[], timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (targets.some(targetIsAlive) && Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, TERMINATION_POLL_MS));
   }
-  killRecordedConnector();
+  return targets.every((target) => !targetIsAlive(target));
+}
+
+async function stopRealConnectorUnlocked(): Promise<void> {
+  supervisorGeneration += 1;
+  const targets = new Map<number, TerminationTarget>();
+  const child = liveConnectorChild;
+  if (child && targetIsAlive(child)) {
+    targets.set(child.pid, {
+      pid: child.pid,
+      identity: child.identity,
+      term: () => { try { child.child.kill("SIGTERM"); } catch { /* already gone */ } },
+      kill: () => terminateChildImmediately(child.child),
+    });
+  }
+  const recorded = readConnectorRecord();
+  let unverifiedRecordedProcess = false;
+  if (recorded && targetIsAlive(recorded) && !targets.has(recorded.pid)) {
+    if (connectorArgvMatches(recorded)) {
+      targets.set(recorded.pid, {
+        pid: recorded.pid,
+        identity: recorded.identity,
+        term: () => { try { process.kill(recorded.pid, "SIGTERM"); } catch { /* already gone */ } },
+        kill: () => { try { process.kill(recorded.pid, "SIGKILL"); } catch { /* already gone */ } },
+      });
+    } else {
+      /* Identity still matches but argv cannot prove the packaged connector.
+         Preserve the record and fail closed: deleting it here would orphan a
+         possibly credential-bearing process that a later retry could inspect. */
+      unverifiedRecordedProcess = true;
+    }
+  }
+  const active = [...targets.values()];
+  for (const target of active) target.term();
+  if (!await waitForTargetsToExit(active, TERMINATION_GRACE_MS)) {
+    for (const target of active.filter(targetIsAlive)) target.kill();
+    if (!await waitForTargetsToExit(active, TERMINATION_KILL_MS)) {
+      throw new Error("Telegram connector did not terminate");
+    }
+  }
+  if (unverifiedRecordedProcess) throw new Error("Telegram connector ownership could not be verified");
+  liveConnectorChild = null;
+  removeConnectorRecord();
+}
+
+async function withConnectorSupervisorLock<T>(operation: () => Promise<T>): Promise<T> {
+  ensureTelegramStateDir(true);
+  return await withFileTransaction(
+    statePath("telegram", "connector-supervisor"),
+    "Telegram connector supervisor is busy",
+    operation,
+  );
 }
 
 async function verifiedProbe(
@@ -336,53 +393,63 @@ export async function ensureTelegramConnector(
 ): Promise<ConnectorEnsureResult> {
   const url = telegramMcpUrl();
   const binding = { credentialRef: session.credentialRef, connectorToken: session.connectorToken };
-  const stop = ports.stop ?? stopRealConnector;
+  const stop = ports.stop ?? stopRealConnectorUnlocked;
   const ownsProcess = ports.ownsProcess ?? ownsRecordedConnector;
   let isCurrent = ports.beginOperation?.() ?? (() => true);
-  if (ownsProcess(binding)) {
-    const adopted = await verifiedProbe(url, session.connectorToken, ports);
-    if (!isCurrent()) return { ok: false, code: "connector_failed" };
-    if (adopted && adopted !== "timeout") {
-      if (!adopted.ok) stop();
-      return adopted;
+  const prepared = await withConnectorSupervisorLock(async (): Promise<ConnectorEnsureResult | "spawned"> => {
+    if (ownsProcess(binding)) {
+      const adopted = await verifiedProbe(url, session.connectorToken, ports);
+      if (!isCurrent()) return { ok: false, code: "connector_failed" };
+      if (adopted && adopted !== "timeout") {
+        if (!adopted.ok) await stop();
+        return adopted;
+      }
     }
-  }
-  /* Missing ownership or a credential-generation mismatch makes any current
-     listener ineligible for adoption. A recorded stale connector is stopped
-     before this generation starts its own process. */
-  stop();
-  isCurrent = ports.beginOperation?.() ?? (() => true);
-  const credentials = telegramApiCredentials();
-  if (!credentials) return { ok: false, code: "credentials_missing" };
-  const spec = connectorLaunchSpec({ sessionString: session.sessionString, connectorToken: session.connectorToken, credentials });
-  if (!isCurrent()) return { ok: false, code: "connector_failed" };
-  const child = ports.spawn(spec);
-  if (!child) return { ok: false, code: "connector_failed" };
-  const recordProcess = ports.recordProcess ?? recordConnectorProcess;
-  if (!recordProcess(child, spec, binding)) {
-    terminateChildImmediately(child);
-    return { ok: false, code: "connector_failed" };
-  }
+    /* Missing ownership or a credential-generation mismatch makes any current
+       listener ineligible for adoption. Stop and record the replacement while
+       holding the cross-process supervisor lock, so another Viewer generation
+       can only adopt the one durable winner. */
+    await stop();
+    isCurrent = ports.beginOperation?.() ?? (() => true);
+    const credentials = telegramApiCredentials();
+    if (!credentials) return { ok: false, code: "credentials_missing" };
+    const spec = connectorLaunchSpec({ sessionString: session.sessionString, connectorToken: session.connectorToken, credentials });
+    if (!isCurrent()) return { ok: false, code: "connector_failed" };
+    const child = ports.spawn(spec);
+    if (!child) return { ok: false, code: "connector_failed" };
+    const recordProcess = ports.recordProcess ?? recordConnectorProcess;
+    if (!recordProcess(child, spec, binding)) {
+      terminateChildImmediately(child);
+      return { ok: false, code: "connector_failed" };
+    }
+    return "spawned";
+  });
+  if (prepared !== "spawned") return prepared;
+  const stopThisGeneration = async (): Promise<void> => {
+    await withConnectorSupervisorLock(async () => {
+      if (ownsProcess(binding)) await stop();
+    });
+  };
   const deadline = ports.now() + READY_DEADLINE_MS;
   while (ports.now() < deadline) {
     const ready = await verifiedProbe(url, session.connectorToken, ports, deadline - ports.now());
     if (!isCurrent()) return { ok: false, code: "connector_failed" };
     if (ready === "timeout") {
-      stop();
+      await stopThisGeneration();
       return { ok: false, code: "connector_failed" };
     }
     if (ready) {
-      if (!ready.ok) stop();
+      if (!ready.ok) await stopThisGeneration();
       return ready;
     }
     await ports.sleep(PROBE_INTERVAL_MS);
   }
-  stop();
+  await stopThisGeneration();
   return { ok: false, code: "connector_failed" };
 }
 
 /** Stops the shared connector — the recorded process, whichever Viewer
     generation spawned it. Idempotent; a stale or recycled pid is ignored. */
-export function stopTelegramConnector(): void {
-  stopRealConnector();
+export async function stopTelegramConnector(): Promise<void> {
+  await withConnectorSupervisorLock(stopRealConnectorUnlocked);
 }

@@ -310,6 +310,7 @@ test("a health check started during logout cannot overwrite completed deletion",
 
   const logout = service.logout();
   const health = service.checkHealth();
+  await settle();
   resolveLogout({ ok: true, code: null });
   expect((await logout).phase).toBe("disconnected");
   expect(readTelegramSession()).toBeNull();
@@ -343,6 +344,7 @@ test("successful logout serializes health behind its terminal connector stop", a
 
   const logout = service.logout();
   const health = service.checkHealth();
+  await settle();
   expect(connectorRunning).toBe(false);
   expect(healthCalls).toBe(0);
 
@@ -382,6 +384,49 @@ test("local deletion works directly from connected", async () => {
   expect(status.credentialRef).toBeNull();
   expect(readTelegramSession()).toBeNull();
   expect(calls.unregister).toBe(1);
+});
+
+test("local deletion waits for confirmed connector exit before publishing disconnected", async () => {
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  let releaseStop!: () => void;
+  const stopped = new Promise<void>((resolve) => { releaseStop = resolve; });
+  let completed = false;
+  const service = new TelegramConnectionService({
+    adapter: new FakeAdapter(),
+    ensureConnector: async () => ({ ok: true, url: "http://127.0.0.1:8809/mcp" }),
+    stopConnector: async () => await stopped,
+    registerHosts: () => HOSTS_REGISTERED,
+    unregisterHosts: () => {},
+    now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+  });
+
+  const deletion = service.deleteLocalSession().then((status) => { completed = true; return status; });
+  await settle();
+  expect(completed).toBe(false);
+  expect(readTelegramSession()).not.toBeNull();
+
+  releaseStop();
+  expect((await deletion).phase).toBe("disconnected");
+  expect(readTelegramSession()).toBeNull();
+});
+
+test("a connector stop failure still deletes credentials and refuses a disconnected claim", async () => {
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  let unregistered = 0;
+  const service = new TelegramConnectionService({
+    adapter: new FakeAdapter(),
+    ensureConnector: async () => ({ ok: true, url: "http://127.0.0.1:8809/mcp" }),
+    stopConnector: async () => { throw new Error("connector still alive"); },
+    registerHosts: () => HOSTS_REGISTERED,
+    unregisterHosts: () => { unregistered += 1; },
+    now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+  });
+
+  const status = await service.deleteLocalSession();
+  expect(status.phase).toBe("error");
+  expect(status.error?.code).toBe("connector_failed");
+  expect(readTelegramSession()).toBeNull();
+  expect(unregistered).toBe(1);
 });
 
 test("host cleanup failure cannot preserve credentials during local deletion", async () => {

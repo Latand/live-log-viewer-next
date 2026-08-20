@@ -1,8 +1,12 @@
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { configFilePath, statePath } from "@/lib/configDir";
+import { configFilePath, stateDir, statePath } from "@/lib/configDir";
+import { withFileTransaction } from "@/lib/state/fileTransaction";
+
+import { ensureTelegramStateDir } from "./sessionStore";
 
 /**
  * Packaging of the pinned Telegram MCP connector (issue #1059).
@@ -78,6 +82,10 @@ export function telegramSessionReaderPath(): string {
   return packageAssetPath(process.env.LLV_TELEGRAM_SESSION_READER, "bin", "telegram-session-reader.mjs");
 }
 
+export function telegramProvisionerPath(): string {
+  return packageAssetPath(process.env.LLV_TELEGRAM_PROVISIONER, "bin", "provision-telegram-connector.mjs");
+}
+
 export type TelegramApiCredentials = { apiId: string; apiHash: string };
 
 /**
@@ -114,8 +122,59 @@ export function provisionSpec(): ProcessSpec {
   };
 }
 
+export function provisionLaunchSpec(): ProcessSpec {
+  return {
+    command: process.execPath,
+    args: [telegramProvisionerPath()],
+    cwd: vendoredConnectorDir(),
+    env: {
+      ...minimalChildEnv(),
+      LLV_STATE_DIR: stateDir(),
+      LLV_TELEGRAM_VENDOR_DIR: vendoredConnectorDir(),
+      LLV_TELEGRAM_PYTHON: telegramVenvPython(),
+    },
+  };
+}
+
 export function connectorProvisioned(): boolean {
   return fs.existsSync(telegramVenvPython());
+}
+
+let provisioningInFlight: Promise<boolean> | null = null;
+
+function runProvisioner(spec: ProcessSpec): Promise<boolean> {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(spec.command, spec.args, { cwd: spec.cwd, env: spec.env, stdio: "ignore" });
+    } catch {
+      resolve(false);
+      return;
+    }
+    child.once("error", () => resolve(false));
+    child.once("exit", (code) => resolve(code === 0));
+  });
+}
+
+/** Product-owned, idempotent provisioning. The first clean-install login
+    starts the packaged provisioner; concurrent Viewer generations share the
+    same process lock and re-check the venv after acquiring it. */
+export function ensureConnectorProvisioned(): Promise<boolean> {
+  if (connectorProvisioned()) return Promise.resolve(true);
+  if (provisioningInFlight) return provisioningInFlight;
+  provisioningInFlight = (async () => {
+    ensureTelegramStateDir(true);
+    return await withFileTransaction(
+      statePath("telegram", "connector-provision"),
+      "Telegram connector provisioning is busy",
+      async () => {
+        if (connectorProvisioned()) return true;
+        const succeeded = await runProvisioner(provisionLaunchSpec());
+        return succeeded && connectorProvisioned();
+      },
+    );
+  })().catch(() => false).finally(() => { provisioningInFlight = null; });
+  return provisioningInFlight;
 }
 
 /** Launch spec for the one shared read-only connector process.

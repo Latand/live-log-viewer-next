@@ -19,7 +19,11 @@ dependency lock, license, provenance record, and per-file checksums, and ships
 with the package (`files` includes `vendor`). Provisioning builds the connector
 environment from that vendored tree with a frozen lock; no path resolves the
 `telegram-mcp` name through a package index, and a clean installation needs no
-manually cloned checkout.
+manually cloned checkout. The first product login provisions a missing
+environment through the packaged provisioner. That provisioner bootstraps a
+platform-specific `uv` 0.7.13 archive from the official release under a fixed
+SHA-256 digest before applying the frozen vendor lock, so the operator does
+not need to discover a script or install `uv` separately.
 
 AC2: One shared streamable-HTTP connector runs on loopback with
 `TELEGRAM_EXPOSED_TOOLS=read-only`. Before the connector is treated as ready —
@@ -31,7 +35,10 @@ endpoint requires a per-credential bearer token. Adoption also proves the PID,
 portable start identity, exact executable/entrypoint, credential generation,
 pre-auth challenge response, and token-derived server identity. Each readiness
 probe has its own bounded timeout inside the overall startup deadline; a
-stalled probe terminates the spawned connector.
+stalled probe terminates the spawned connector. The
+ownership/adoption/stop/spawn/record transition holds one process-shared FIFO
+lock, so concurrent Viewer generations publish one durable winner. Readiness
+cleanup is bound to the credential generation it spawned.
 
 AC3: The login operation follows the account-login pattern: at most one
 operation at a time, phases `disconnected → starting → awaiting_scan →
@@ -74,6 +81,9 @@ side, and its inline confirmation states that the remote authorization may
 remain. Both actions require inline confirmation. Teardown attempts connector
 stop, host unregistration, credential deletion, and durable status publication
 independently, so a host-config failure cannot retain local credentials.
+Connector shutdown awaits process-identity disappearance after bounded
+`SIGTERM` and `SIGKILL` phases. A failed confirmation deletes local credentials
+and leaves the terminal status at `connector_failed`.
 
 AC6: On connect, the shared URL is registered idempotently as `telegram` for
 Claude (legacy and managed `.claude.json` state files) and Codex (a
@@ -91,7 +101,9 @@ re-registers both hosts. Codex ownership markers are recognized only as one
 exact full-line managed block; unmatched, duplicate, reversed, or malformed
 markers fail closed and remain byte-unchanged. Claude files changed during
 registration are snapshotted and rolled back if durable ownership persistence
-fails, preventing an unowned managed entry.
+fails, preventing an unowned managed entry. An existing Claude `mcpServers`
+value with any non-object shape is treated as unwritable and remains
+byte-identical.
 
 AC7: The #739 boundary extends by exactly one name: `telegram` joins
 `GRANTABLE_MCP_SERVERS` and the operator-root default; the delegated default
