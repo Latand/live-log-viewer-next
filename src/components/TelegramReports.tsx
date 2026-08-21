@@ -281,20 +281,6 @@ export function TelegramReportsSection({ state }: { state: TelegramReportsState 
               onChange={(event) => update({ time: event.target.value })}
               className="h-11 w-[116px] rounded-[8px] border border-border bg-canvas px-1.5 text-[11.5px] outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:h-8"
             />
-            {(["daily", "weekdays"] as const).map((option) => (
-              <button
-                key={option}
-                type="button"
-                aria-pressed={settings.days === option}
-                disabled={state.busy}
-                onClick={() => update({ days: option })}
-                className={`inline-flex min-h-[44px] shrink-0 items-center rounded-[6px] border px-1.5 text-[10px] font-semibold disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-[28px] ${
-                  settings.days === option ? "border-accent text-accent" : "border-border text-muted hover:bg-canvas"
-                }`}
-              >
-                {t(option === "daily" ? "telegram.report.daily" : "telegram.report.weekdays")}
-              </button>
-            ))}
             <span className="text-[9.5px] font-semibold text-secondary">{t("telegram.report.zone")}</span>
           </div>
 

@@ -14,7 +14,10 @@ const { DEFAULT_DAILY_REPORT_PROMPT } = await import("./reportPrompt");
    one, exactly as a real operator's own tag never appears in this repo. */
 const DAILY_REPORT_TAG = "#report_tag";
 
+import { mcpServersForScheduledReport } from "@/lib/agent/mcpAllowlist";
+
 import type { ReportRunnerPorts } from "./reportRunner";
+import type { ReportSpawnInput, ReportSpawnResult } from "./reportSpawn";
 import type { StoredTelegramConnection } from "./sessionStore";
 import type { TelegramChatSummary, TelegramReadPort } from "./reportSources";
 
@@ -39,7 +42,10 @@ class FakePorts implements ReportRunnerPorts {
   /** Holds the source pass open, to model a run still being planned. */
   listChatsGate: Promise<void> | null = null;
   spawns: Record<string, unknown>[] = [];
-  spawnResult: { status: number; body: Record<string, unknown> } = {
+  /** The grant each launch was admitted with — resolved the way admission
+      resolves it, by CALLING the launcher's callback. */
+  grants: string[][] = [];
+  spawnResult: ReportSpawnResult = {
     status: 202,
     body: { conversationId: "conversation_report", launchId: "launch_report", ok: true },
   };
@@ -54,15 +60,17 @@ class FakePorts implements ReportRunnerPorts {
         if (this.listChatsError) throw this.listChatsError;
         return this.chats;
       },
+      pageChats: async () => [],
       lastMessageAt: async () => this.lastMessage,
     };
   }
-  async spawn(body: Record<string, unknown>) {
-    this.spawns.push(body);
+  async spawn(input: ReportSpawnInput) {
+    this.spawns.push(input.body);
+    this.grants.push(mcpServersForScheduledReport({ grantActive: input.grantActive() }));
     return this.spawnResult;
   }
   async conversationLive() { return this.live; }
-  log(message: string) { this.logs.push(message); }
+  log(code: string) { this.logs.push(code); }
 }
 
 function activeRunId(): string {
@@ -103,18 +111,27 @@ test("Run now launches a board-visible Codex conversation holding exactly viewer
   expect(readTelegramReports().active?.conversationId).toBe("conversation_report");
   expect(ports.spawns.length).toBe(1);
   const body = ports.spawns[0];
-  expect(body.mcpServers).toEqual(["viewer", "telegram"]);
+  /* The grant is not in the body at all any more: admission resolves it from
+     the report session class, through the callback the launch carries. */
+  expect(body.mcpServers).toBeUndefined();
+  expect(ports.grants[0]).toEqual(["viewer", "telegram"]);
   expect(body.engine).toBe("codex");
   /* No role and no parent: a role preset or a lineage parent would classify
-     the launch as delegated and strip the grant. */
+     the launch as delegated and strip the grant. The durable link to the run
+     is the attempt id instead. */
   expect(body.role).toBeUndefined();
   expect(body.parentConversationId).toBeUndefined();
+  expect(body.src).toBeUndefined();
+  expect(body.clientAttemptId).toBe(`telegram-report-${launched.ok ? launched.runId : ""}`);
   expect(String(body.cwd)).toContain("report-workspace");
 
   const prompt = String(body.prompt);
   /* The Viewer's fixed preamble, then the operator's brief. */
   expect(prompt).toContain("get_me");
-  expect(prompt).toContain("@account_a");
+  /* The recorded NAME is the account check; the handle is a second copy of
+     the operator's identity in a durable launch record and is not written. */
+  expect(prompt).toContain("Account A");
+  expect(prompt).not.toContain("@account_a");
   expect(prompt).toContain(`run-${launched.ok ? launched.runId : ""}.sources.json`);
   expect(prompt).toContain(reportInboxPath(activeRunId()));
   expect(prompt).toContain(DEFAULT_DAILY_REPORT_PROMPT.split("\n")[0]);
@@ -196,16 +213,104 @@ test("a run whose conversation dies mid-read fails retryably, and the next run c
   const failed = readTelegramReports();
   expect(failed.history[0]).toMatchObject({ status: "failed", errorCode: "run_ended_without_report", hasReport: false });
   expect(failed.cursor.lastSuccessfulWindowEndAt).toBeNull();
+  /* The failure left its own window start behind as the boundary nobody has
+     reported yet. */
+  expect(failed.cursor.unreportedSinceAt).toBe(new Date(NOW - 24 * 3_600_000).toISOString());
 
-  /* The retry a day later still starts 24 h before the FAILED run, not 24 h
-     before the retry — the window the failure did not cover is still owed. */
+  /* The retry a day later starts where the FAILED run started, not 24 h before
+     the retry — the day the failure did not cover is still owed, so the retry's
+     window is 48 h wide. */
   ports.live = true;
   ports.clock = NOW + 24 * 3_600_000;
   await runner.runNow();
   await runner.settled();
   const retry = readTelegramReports().active!;
-  expect(Date.parse(retry.windowStart)).toBe(ports.clock - 24 * 3_600_000);
+  expect(Date.parse(retry.windowStart)).toBe(NOW - 24 * 3_600_000);
   expect(Date.parse(retry.windowEnd)).toBe(ports.clock);
+
+  /* And a success clears the debt: the run after it covers only new ground. */
+  agentWrites(`${DAILY_REPORT_TAG}\n👀 Worth attention — one item.\n`);
+  await runner.tick();
+  const settled = readTelegramReports();
+  expect(settled.cursor.unreportedSinceAt).toBeNull();
+  expect(settled.cursor.lastSuccessfulWindowEndAt).toBe(new Date(ports.clock).toISOString());
+});
+
+test("a failed first run never loses more than the 72 h cap", async () => {
+  const ports = new FakePorts();
+  enableReports();
+  const runner = new TelegramReportRunner(ports);
+  await runner.runNow();
+  await runner.settled();
+  ports.live = false;
+  ports.clock = NOW + 60_000;
+  await runner.tick();
+  expect(readTelegramReports().history[0].status).toBe("failed");
+
+  /* A Viewer that was off for a week owes more than a report can usefully
+     read, so the window still stops at the cap. */
+  ports.live = true;
+  ports.clock = NOW + 7 * 24 * 3_600_000;
+  await runner.runNow();
+  await runner.settled();
+  const retry = readTelegramReports().active!;
+  expect(Date.parse(retry.windowStart)).toBe(ports.clock - 72 * 3_600_000);
+});
+
+test("a run that writes prose instead of a report fails and keeps the window owed", async () => {
+  const ports = new FakePorts();
+  enableReports();
+  const runner = new TelegramReportRunner(ports);
+  await runner.runNow();
+  await runner.settled();
+  const runId = activeRunId();
+  /* No tag line: the model answered in prose instead of writing the format. */
+  agentWrites("I could not read the chats, so here is a summary of what I tried.\n");
+  await runner.tick();
+
+  const file = readTelegramReports();
+  expect(file.history[0]).toMatchObject({ status: "failed", errorCode: "invalid_report", hasReport: false });
+  expect(readReportText(runId)).toBeNull();
+  expect(file.cursor.lastSuccessfulWindowEndAt).toBeNull();
+  expect(file.cursor.unreportedSinceAt).toBe(new Date(NOW - 24 * 3_600_000).toISOString());
+});
+
+test("a logout during the source pass revokes the grant the launch is admitted with", async () => {
+  const ports = new FakePorts();
+  enableReports();
+  const runner = new TelegramReportRunner(ports);
+  let release = () => {};
+  ports.listChatsGate = new Promise<void>((resolve) => { release = resolve; });
+  const launched = await runner.runNow();
+  expect(launched.ok).toBe(true);
+  /* The operator logs out while the run is still listing chats. */
+  ports.connectionState = { ...CONNECTED, status: "disconnected", credentialRef: "credential-ref-placeholder", identity: null };
+  release();
+  await runner.settled();
+
+  /* The launch still happened — it is a board conversation either way — but
+     admission resolved the grant AFTER the logout, so it holds the baseline
+     and cannot reach the connector. */
+  expect(ports.spawns.length).toBe(1);
+  expect(ports.grants[0]).toEqual(["viewer"]);
+});
+
+test("the runner never logs anything but a code", async () => {
+  const ports = new FakePorts();
+  enableReports();
+  const runner = new TelegramReportRunner(ports);
+  /* Everything a connector error can carry: a chat title, a handle, a token. */
+  ports.listChatsError = new Error("list_chats failed for 'Dialog A' (@account_a) token=connector-token-value");
+  await runner.runNow();
+  await runner.settled();
+
+  expect(readTelegramReports().history[0]).toMatchObject({ status: "failed", errorCode: "sources_failed" });
+  expect(ports.logs).toEqual(["sources_failed"]);
+  for (const line of ports.logs) {
+    expect(line).not.toContain("Dialog A");
+    expect(line).not.toContain("account_a");
+    expect(line).not.toContain("connector-token-value");
+  }
 });
 
 test("a run that produces nothing at all times out into a failed row", async () => {

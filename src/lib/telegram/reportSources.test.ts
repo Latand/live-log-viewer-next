@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
 
 import {
+  CHAT_PAGE_LIMIT,
   MAX_PRIVATE_DIALOGS,
+  MAX_PROBES,
+  STALE_STREAK,
   planReportSources,
   type TelegramChatSummary,
   type TelegramReadPort,
@@ -11,6 +14,12 @@ import {
  * The fake connector: chats in the order the real one returns them (pinned and
  * folder order — NOT recency) plus a last-message date per chat. Nothing here
  * reaches a real account.
+ *
+ * `listChats` models the real ceiling faithfully: the connector takes its
+ * `limit` dialogs of EVERY kind first and filters by kind afterwards, so a
+ * private dialog sitting below a hundred groups is simply not in the answer.
+ * `pageChats` is the paged raw dialog list, which is how those dialogs are
+ * reached at all.
  */
 class FakeTelegram implements TelegramReadPort {
   readonly calls: string[] = [];
@@ -22,7 +31,12 @@ class FakeTelegram implements TelegramReadPort {
   ) {}
   async listChats(input: { kind: "user" | "group"; limit: number }): Promise<TelegramChatSummary[]> {
     this.calls.push(`listChats:${input.kind}:${input.limit}`);
-    return this.chats.filter((chat) => chat.kind === input.kind);
+    return this.chats.slice(0, input.limit).filter((chat) => chat.kind === input.kind);
+  }
+  async pageChats(input: { page: number; pageSize: number }): Promise<Array<{ id: string; title: string }>> {
+    this.calls.push(`pageChats:${input.page}:${input.pageSize}`);
+    const start = (input.page - 1) * input.pageSize;
+    return this.chats.slice(start, start + input.pageSize).map((chat) => ({ id: chat.id, title: chat.title }));
   }
   async lastMessageAt(chatId: string): Promise<string | null> {
     this.calls.push(`lastMessageAt:${chatId}`);
@@ -85,6 +99,44 @@ test("dialogs are ordered by last activity, bots are dropped, and reads never ov
   expect(port.maxConcurrent).toBe(1);
   expect(port.calls.filter((call) => call.startsWith("listChats")).length).toBe(1);
   expect(port.calls[0]).toBe("listChats:user:100");
+});
+
+test("an active dialog below the connector's pre-filter ceiling is still found", async () => {
+  /* The defect this covers: `list_chats` applies its 100-chat limit to the
+     dialog list BEFORE filtering by kind, so an operator whose first hundred
+     dialogs are groups has no private dialogs in that answer at all. */
+  const groups: TelegramChatSummary[] = Array.from({ length: CHAT_PAGE_LIMIT }, (_, index) => ({
+    id: `-100${1000 + index}`,
+    kind: "group",
+    title: `Group ${index}`,
+    username: null,
+    unread: 0,
+  }));
+  const buried = dialog("777", "Dialog buried past the ceiling");
+  const port = new FakeTelegram([...groups, buried], { "777": "2026-08-20T15:00:00.000Z" });
+
+  const plan = await planReportSources(port, { ...WINDOW, groups: [], promptVersion: "v1" });
+  expect(plan.privateDialogs.map((row) => row.id)).toEqual(["777"]);
+  /* The typed page contributed nothing, so the paged list is what reached it —
+     and it identified the dialog by its positive marked id, with no extra call
+     per chat. */
+  expect(port.calls).toContain("pageChats:1:100");
+  expect(port.calls.filter((call) => call.startsWith("lastMessageAt"))).toEqual(["lastMessageAt:777"]);
+});
+
+test("a very long dialog list stops at the stale streak instead of probing forever", async () => {
+  const many: TelegramChatSummary[] = Array.from({ length: 400 }, (_, index) => dialog(String(5000 + index), `Dialog ${index}`));
+  /* Only the first dialog is inside the window; everything after it is cold. */
+  const dates: Record<string, string> = { "5000": "2026-08-20T15:00:00.000Z" };
+  for (let index = 1; index < many.length; index += 1) dates[String(5000 + index)] = "2026-01-01T00:00:00.000Z";
+  const port = new FakeTelegram(many, dates);
+
+  const plan = await planReportSources(port, { ...WINDOW, groups: [], promptVersion: "v1" });
+  expect(plan.privateDialogs.map((row) => row.id)).toEqual(["5000"]);
+  /* The streak ends the walk long before the probe ceiling, and the ceiling is
+     never crossed either. */
+  expect(plan.probes).toBe(STALE_STREAK + 1);
+  expect(plan.probes).toBeLessThanOrEqual(MAX_PROBES);
 });
 
 test("the operator's groups ride along with their pass, and dialogs stay bounded", async () => {

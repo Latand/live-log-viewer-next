@@ -80,6 +80,9 @@ export interface HotStateCutoverBoundary {
 interface CurrentReleaseControllerLoaders {
   loadFlowPipelineController: () => Promise<{ startFlowPipelineController: () => void }>;
   loadAccountMigrationController: () => Promise<{ startAccountMigrationController: () => Promise<void> }>;
+  /** Optional so a test can supply the two controllers it exercises and get
+      nothing else. Production always passes it. */
+  loadTelegramReportScheduler?: () => Promise<{ ensureTelegramReportScheduler: () => void }>;
 }
 
 interface ViewerRuntimeActivationSteps {
@@ -321,10 +324,22 @@ export async function startCurrentReleaseControllers(
   loaders: CurrentReleaseControllerLoaders = {
     loadFlowPipelineController: () => import("@/lib/pipelines/controller"),
     loadAccountMigrationController: () => import("@/lib/accounts/migration/controller"),
+    loadTelegramReportScheduler: () => import("@/lib/telegram/reportRunner"),
   },
 ): Promise<void> {
   const { startFlowPipelineController } = await loaders.loadFlowPipelineController();
   startFlowPipelineController();
+  /* The Daily Report timer (#1086) belongs to the release that owns traffic,
+     like every other controller here. Starting it from the Telegram route
+     alone would mean a standalone Viewer nobody has opened in a browser runs
+     no report and catches up no missed slot. It is idempotent per process, and
+     a failure to start it must not take the other controllers down with it. */
+  try {
+    const telegram = await loaders.loadTelegramReportScheduler?.();
+    telegram?.ensureTelegramReportScheduler();
+  } catch (error) {
+    console.error("[telegram report] scheduler start failed", error instanceof Error ? error.name : "unknown");
+  }
   if (env.LLV_ACCOUNT_CONTROLLER_DISABLED === "1") return;
   const { startAccountMigrationController } = await loaders.loadAccountMigrationController();
   scheduleAccountMigrationController(startAccountMigrationController, accountControllerDelayMs(env));

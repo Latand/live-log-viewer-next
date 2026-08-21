@@ -424,6 +424,37 @@ test("current release starts flow and pipeline recovery and watchdog while accou
   expect(starts).toEqual(["startup", "watchdog"]);
 });
 
+test("the Telegram report scheduler starts with the release that owns traffic", async () => {
+  /* #1086: it used to start only when a browser polled /api/telegram, so a
+     standalone Viewer nobody had open ran no report and caught up no missed
+     slot. The controller lifecycle is what a cold start actually runs. */
+  const started: string[] = [];
+  await startCurrentReleaseControllers(
+    { LLV_ACCOUNT_CONTROLLER_DISABLED: "1" },
+    {
+      loadFlowPipelineController: async () => ({ startFlowPipelineController: () => { started.push("pipelines"); } }),
+      loadAccountMigrationController: async () => ({ startAccountMigrationController: async () => { started.push("account"); } }),
+      loadTelegramReportScheduler: async () => ({ ensureTelegramReportScheduler: () => { started.push("telegram-report"); } }),
+    },
+  );
+  expect(started).toEqual(["pipelines", "telegram-report"]);
+});
+
+test("a Telegram scheduler that cannot start does not take the other controllers down", async () => {
+  const started: string[] = [];
+  await startCurrentReleaseControllers(
+    {},
+    {
+      loadFlowPipelineController: async () => ({ startFlowPipelineController: () => { started.push("pipelines"); } }),
+      loadAccountMigrationController: async () => ({ startAccountMigrationController: async () => { started.push("account"); } }),
+      loadTelegramReportScheduler: async () => { throw new Error("telegram state unavailable"); },
+    },
+  );
+  await Promise.resolve();
+  expect(started).toContain("pipelines");
+});
+
+
 test("cold boot enables the controller while readiness receives the first runtime turn", async () => {
   let controllerStarts = 0;
   const startedAt = performance.now();

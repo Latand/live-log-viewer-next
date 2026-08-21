@@ -12,10 +12,20 @@ import type { TelegramReportGroup } from "./reportContracts";
  * as "the active chats": every candidate's LAST MESSAGE DATE decides, and the
  * listing is used only to enumerate candidates.
  *
- * The probing is deliberately dull: one `list_chats` page (the connector's own
- * 100-chat maximum), then one single-message read per candidate, sequentially.
- * The connector died once under three concurrent 120-message reads, so nothing
- * here runs in parallel and nothing asks for more than one message at a time.
+ * Enumeration cannot stop at one page either. `list_chats` applies its 100-chat
+ * ceiling to the dialog list BEFORE the `chat_type` filter, so an operator with
+ * a hundred groups above their private dialogs would have those dialogs simply
+ * not exist for this run. `get_chats` pages the same list (ids and titles only,
+ * `page` 1..10), so candidates come from `list_chats` for the typed head and
+ * from bounded `get_chats` pages beyond it, where a POSITIVE marked id is what
+ * identifies a private dialog.
+ *
+ * The probing is deliberately dull: one single-message read per candidate,
+ * sequentially. The connector died once under three concurrent 120-message
+ * reads, so nothing here runs in parallel and nothing asks for more than one
+ * message at a time. Two bounds keep that honest on a large account: the walk
+ * stops after {@link STALE_STREAK} consecutive candidates whose last message
+ * predates the window, and never exceeds {@link MAX_PROBES} probes in total.
  *
  * The resulting plan is written to owner-only state and READ by the run from
  * there — it never travels through the prompt — because it names the
@@ -37,12 +47,25 @@ export interface TelegramReadPort {
   /** One bounded page of chats of a kind, in whatever order the connector
       returns them — the caller must not treat it as recency. */
   listChats(input: { kind: TelegramChatKind; limit: number }): Promise<TelegramChatSummary[]>;
+  /** One page of the raw dialog list: ids and titles of every kind, which is
+      the only way past `list_chats`'s pre-filter ceiling. */
+  pageChats(input: { page: number; pageSize: number }): Promise<Array<{ id: string; title: string }>>;
   /** ISO instant of the chat's most recent message, or `null` when unknown. */
   lastMessageAt(chatId: string): Promise<string | null>;
 }
 
 /** The connector's own page ceiling; asking for more is refused upstream. */
 export const CHAT_PAGE_LIMIT = 100;
+/** How many `get_chats` pages the enumeration walks. Three pages of the
+    ceiling reach 300 dialogs, well past where an account's active private
+    conversations live, and the connector refuses a page above 10 anyway. */
+export const MAX_CHAT_PAGES = 3;
+/** Consecutive out-of-window candidates that end the walk. The dialog list is
+    not exact recency, so the walk tolerates a run of stale entries before it
+    accepts that the rest of the list is colder still. */
+export const STALE_STREAK = 25;
+/** Hard ceiling on single-message probes for one run. */
+export const MAX_PROBES = 150;
 /** Private dialogs carried into one report, newest activity first. */
 export const MAX_PRIVATE_DIALOGS = 25;
 
@@ -71,29 +94,77 @@ export function isBotDialog(chat: TelegramChatSummary): boolean {
   return (chat.username ?? "").toLowerCase().endsWith("bot");
 }
 
+/** Telegram marks user ids positive and every group/channel id negative, so a
+    raw dialog id identifies a private dialog with no extra call. */
+export function isPrivateChatId(id: string): boolean {
+  return /^\d+$/.test(id);
+}
+
+/**
+ * Candidate private dialogs, in dialog-list order, without the pre-filter
+ * ceiling.
+ *
+ * The typed page comes first because it carries usernames, which is what drops
+ * bots without a probe (and keeps them dropped: a bot recognised there is
+ * excluded from the untyped pages too, which carry no username). The paged
+ * remainder contributes ids that look like private dialogs and nothing more.
+ * Order here decides only what is PROBED first, never what is selected —
+ * selection is by last-message date.
+ */
+async function candidateDialogs(port: TelegramReadPort): Promise<Array<{ id: string; title: string }>> {
+  const typed = await port.listChats({ kind: "user", limit: CHAT_PAGE_LIMIT });
+  const seen = new Set<string>();
+  const candidates: Array<{ id: string; title: string }> = [];
+  for (const chat of typed) {
+    if (seen.has(chat.id)) continue;
+    /* A bot is marked seen and NOT added, so the untyped pages below — which
+       carry no username to recognise it by — cannot let it back in. */
+    seen.add(chat.id);
+    if (isBotDialog(chat)) continue;
+    candidates.push({ id: chat.id, title: chat.title });
+  }
+  for (let page = 1; page <= MAX_CHAT_PAGES; page += 1) {
+    /* Sequential on purpose: see the module comment. */
+    const rows = await port.pageChats({ page, pageSize: CHAT_PAGE_LIMIT });
+    if (rows.length === 0) break;
+    for (const row of rows) {
+      if (seen.has(row.id) || !isPrivateChatId(row.id)) continue;
+      seen.add(row.id);
+      candidates.push(row);
+    }
+    if (rows.length < CHAT_PAGE_LIMIT) break;
+  }
+  return candidates;
+}
+
 /**
  * Builds the source plan for one window.
  *
- * Private dialogs: every non-bot dialog whose last message falls inside the
- * window, newest first, capped. Groups: exactly what the operator picked, with
- * their full/light flag — a group is a source because the operator said so,
- * never because it was busy.
+ * Private dialogs: every candidate whose last message falls inside the window,
+ * newest first, capped. Groups: exactly what the operator picked, with their
+ * full/light flag — a group is a source because the operator said so, never
+ * because it was busy.
  */
 export async function planReportSources(
   port: TelegramReadPort,
   input: { windowStart: string; windowEnd: string; groups: readonly TelegramReportGroup[]; promptVersion: string },
 ): Promise<ReportSourcePlan> {
   const windowStart = Date.parse(input.windowStart);
-  const candidates = (await port.listChats({ kind: "user", limit: CHAT_PAGE_LIMIT }))
-    .filter((chat) => !isBotDialog(chat));
+  const candidates = await candidateDialogs(port);
   const active: ReportSourceDialog[] = [];
   let probes = 0;
+  let stale = 0;
   for (const chat of candidates) {
+    if (probes >= MAX_PROBES || stale >= STALE_STREAK) break;
     /* Sequential on purpose: see the module comment. */
     const at = await port.lastMessageAt(chat.id);
     probes += 1;
     const instant = at ? Date.parse(at) : Number.NaN;
-    if (!Number.isFinite(instant) || instant < windowStart) continue;
+    if (!Number.isFinite(instant) || instant < windowStart) {
+      stale += 1;
+      continue;
+    }
+    stale = 0;
     active.push({ id: chat.id, title: chat.title, lastMessageAt: new Date(instant).toISOString() });
   }
   active.sort((left, right) => Date.parse(right.lastMessageAt) - Date.parse(left.lastMessageAt));
@@ -170,6 +241,16 @@ export function connectorReadPort(): TelegramReadPort {
       return toolRecords(result)
         .map((record) => chatSummary(record, input.kind))
         .filter((chat): chat is TelegramChatSummary => chat !== null);
+    },
+    async pageChats(input) {
+      const result = await call("get_chats", { page: input.page, page_size: Math.min(input.pageSize, CHAT_PAGE_LIMIT) });
+      return toolRecords(result)
+        .map((record) => {
+          const id = record.chat_id;
+          if (typeof id !== "number" && typeof id !== "string") return null;
+          return { id: String(id), title: typeof record.title === "string" ? record.title : String(id) };
+        })
+        .filter((row): row is { id: string; title: string } => row !== null);
     },
     async lastMessageAt(chatId) {
       const result = await call("list_messages", { chat_id: Number(chatId), limit: 1 });

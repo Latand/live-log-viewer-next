@@ -67,15 +67,20 @@ export interface DailyReportPromptInput {
   instructions: string;
 }
 
+/** The account a run must find itself on. The recorded NAME alone: it is the
+    least that lets the run recognise a wrong account, and the handle would put
+    a second copy of the operator's identity into a durable launch record for
+    no extra check. */
 function identityLine(identity: TelegramIdentity | null): string {
-  if (!identity) return "the account recorded at connect time";
-  return identity.username ? `${identity.name} (@${identity.username})` : identity.name;
+  return identity?.name || "the account recorded at connect time";
 }
 
 /** The half the operator cannot edit: everything a run must do to be correct,
     safe for the connector, and readable by the Viewer afterwards. */
 export function reportPromptPreamble(input: Omit<DailyReportPromptInput, "instructions">): string {
-  return `Telegram daily report for the window ${input.windowStart} → ${input.windowEnd} (UTC).
+  /* The first line is the board card's title (#1086: the run is visible on the
+     board), so it names the run rather than opening with instructions. */
+  return `Telegram daily report — window ${input.windowStart} → ${input.windowEnd} (UTC).
 
 You have the read-only \`telegram\` MCP connector for the operator's own account. Work through it only; do not install anything and do not write to Telegram — the connector exposes no write tools.
 
@@ -91,11 +96,13 @@ ${ACCOUNT_MISMATCH_MARKER}
 
 4. If the connector stops answering, stop and write nothing. A missing report is a failed run the operator can retry; an invented one is worse than silence.
 
-5. If nothing in the window is worth reporting, the whole file is your tag line and then:
+5. The report's FIRST line is the hashtag line your instructions below specify, and nothing else. The Viewer refuses a file that does not start with one.
+
+6. If nothing in the window is worth reporting, the whole file is that hashtag line and then:
 
 ${QUIET_MARKER}
 
-6. Write the report to ${input.outputPath} — that exact path, plain UTF-8 text, nothing else in the file — and then stop. Do not print the report as your answer; the Viewer reads the file.
+7. Write the report to ${input.outputPath} — that exact path, plain UTF-8 text, nothing else in the file — and then stop. Do not print the report as your answer; the Viewer reads the file.
 
 YOUR INSTRUCTIONS (from the operator)`;
 }
@@ -118,14 +125,25 @@ export type DailyReportOutcome =
  * in whatever language — is skipped, and the markers are matched on what
  * follows. A report that merely mentions "quiet" in its body is still a
  * report, because `QUIET` only counts as the entire remaining body.
+ *
+ * Anything else is `invalid`, and the two shapes that matters for are the ones
+ * a confused run actually produces: an empty file, and prose that never got as
+ * far as the report format. The hashtag first line is the issue's own format
+ * rule and the only structural claim the Viewer can check without owning the
+ * operator's sections, so a file that does not open with one is refused rather
+ * than filed as the day's report — a bad report that ADVANCES the window would
+ * take the day with it. The mismatch marker is exempt: the preamble tells a run
+ * on the wrong account to write that word and nothing else, tag included.
  */
 export function classifyReportOutput(raw: string | null): DailyReportOutcome {
   const text = (raw ?? "").trim();
   if (!text) return { kind: "invalid" };
   const lines = text.split(/\r?\n/).map((line) => line.trim());
-  const body = (lines[0].startsWith("#") ? lines.slice(1) : lines).filter((line) => line !== "");
+  const tagged = lines[0].startsWith("#");
+  const body = (tagged ? lines.slice(1) : lines).filter((line) => line !== "");
   const first = body[0] ?? "";
   if (first.toUpperCase().startsWith(ACCOUNT_MISMATCH_MARKER)) return { kind: "account-mismatch" };
+  if (!tagged) return { kind: "invalid" };
   if (body.length === 1 && first.toUpperCase() === QUIET_MARKER) return { kind: "quiet" };
   if (body.length === 0) return { kind: "invalid" };
   return { kind: "ok", report: text };

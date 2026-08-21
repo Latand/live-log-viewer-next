@@ -4,7 +4,6 @@ import { DEFAULT_TELEGRAM_REPORT_SETTINGS, type TelegramReportSettings } from ".
 import {
   REPORT_WINDOW_CAP_MS,
   localDayKey,
-  localWeekday,
   nextScheduledRunAt,
   reportWindowFor,
   scheduledRunDue,
@@ -22,6 +21,7 @@ const settings = (over: Partial<TelegramReportSettings> = {}): TelegramReportSet
 });
 const cursor = (over: Partial<ReportScheduleCursor> = {}): ReportScheduleCursor => ({
   lastSuccessfulWindowEndAt: null,
+  unreportedSinceAt: null,
   lastScheduledDay: null,
   ...over,
 });
@@ -31,7 +31,6 @@ test("the schedule time is the operator's local time on both sides of DST", () =
   expect(slotInstant("2026-01-15", "10:00")).toBe(Date.parse("2026-01-15T08:00:00.000Z"));
   /* Late UTC evening is already the next Kyiv day. */
   expect(localDayKey(Date.parse("2026-08-21T22:30:00.000Z"))).toBe("2026-08-22");
-  expect(localWeekday(AUGUST_SLOT)).toBe(5);
 });
 
 test("a run is due once the local slot has passed, and only once that day", () => {
@@ -54,13 +53,6 @@ test("a slot missed while the Viewer was down is caught up on the next tick", ()
     cursor: cursor({ lastScheduledDay: "2026-08-18" }),
   });
   expect(due).toBe(true);
-});
-
-test("weekdays skips the weekend and lands on Monday", () => {
-  const saturday = Date.parse("2026-08-22T09:00:00.000Z");
-  expect(scheduledRunDue({ now: saturday, settings: settings({ days: "weekdays" }), cursor: cursor() })).toBe(false);
-  const next = nextScheduledRunAt({ now: saturday, settings: settings({ days: "weekdays" }), cursor: cursor() });
-  expect(next).toBe(slotInstant("2026-08-24", "10:00"));
 });
 
 test("the next run is tomorrow's slot once today's has been taken", () => {

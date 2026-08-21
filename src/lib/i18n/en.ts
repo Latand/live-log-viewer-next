@@ -760,8 +760,6 @@ export const en = {
   "telegram.report.enable": "Enable daily report",
   "telegram.report.disable": "Turn off",
   "telegram.report.at": "At",
-  "telegram.report.daily": "Daily",
-  "telegram.report.weekdays": "Weekdays",
   "telegram.report.zone": "Kyiv time",
   "telegram.report.sourcesSummary": {
     "one": "Sources: active private dialogs + {count} group",

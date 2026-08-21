@@ -746,8 +746,6 @@ export const uk: Record<keyof typeof en, Message> = {
   "telegram.report.enable": "Увімкнути щоденний звіт",
   "telegram.report.disable": "Вимкнути",
   "telegram.report.at": "О",
-  "telegram.report.daily": "Щодня",
-  "telegram.report.weekdays": "Будні",
   "telegram.report.zone": "за Києвом",
   "telegram.report.sourcesSummary": {
     "one": "Джерела: активні особисті діалоги + {count} група",

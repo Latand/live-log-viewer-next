@@ -1,8 +1,5 @@
 import crypto from "node:crypto";
 
-import type { NextRequest } from "next/server";
-
-import { mcpServersForScheduledReport } from "@/lib/agent/mcpAllowlist";
 import { CODEX_SOL_MODEL } from "@/lib/agent/models";
 
 import {
@@ -25,6 +22,7 @@ import {
   slotInstant,
 } from "./reportSchedule";
 import { connectorReadPort, planReportSources, type TelegramReadPort } from "./reportSources";
+import { launchReportConversation, type ReportSpawnInput, type ReportSpawnResult } from "./reportSpawn";
 import {
   clearTelegramReports,
   deleteReportArtifacts,
@@ -55,39 +53,38 @@ import { readTelegramConnection, type StoredTelegramConnection } from "./session
  *   plan sources → launch → (tick) ingest output OR observe the conversation
  *   ended OR time out → finalize the history row.
  *
- * Only `ok` and `quiet` advance the window cursor, so a failed day is covered
- * by the next run's window (capped at 72 h) instead of being lost.
+ * Only `ok` and `quiet` advance the window cursor, and a failed run records the
+ * boundary it did not reach, so the day it missed is covered by the next run's
+ * window (capped at 72 h) instead of being lost.
+ *
+ * Nothing here logs a value. {@link ReportRunnerPorts.log} takes a code from a
+ * closed vocabulary and nothing else: the errors this module catches come from
+ * the connector, the account store and the spawn lane, and any of them can
+ * carry a chat title, a handle or a token in its message. The history row is
+ * where a failure is explained, and it carries a sanitized code too.
  */
 
 /** A run that has produced nothing by then is over, whatever the board says. */
 export const RUN_TIMEOUT_MS = 45 * 60 * 1000;
 const TICK_MS = 60_000;
 
+/** Everything this module will ever write to the host log. */
+export type ReportRunnerLogCode =
+  | "tick_failed"
+  | "sources_failed"
+  | "launch_failed"
+  | "launch_rejected"
+  | "run_failed";
+
 export interface ReportRunnerPorts {
   now(): number;
   connection(): StoredTelegramConnection;
   readPort(): TelegramReadPort;
-  /** POST /api/spawn in-process, on the operator's own authority. */
-  spawn(body: Record<string, unknown>): Promise<{ status: number; body: Record<string, unknown> }>;
+  /** The operator's own spawn lane, in process and outside any request scope. */
+  spawn(input: ReportSpawnInput): Promise<ReportSpawnResult>;
   /** Whether the launched conversation is still able to produce a report. */
   conversationLive(conversationId: string): Promise<boolean>;
-  log(message: string, error?: unknown): void;
-}
-
-async function postSpawnInProcess(body: Record<string, unknown>): Promise<{ status: number; body: Record<string, unknown> }> {
-  const [{ executeSpawnRequest }, { ensureOperatorSpawnCapability }, { VIEWER_SPAWN_CAPABILITY_HEADER }] = await Promise.all([
-    import("@/lib/agent/spawnCommand"),
-    import("@/lib/agent/operatorCapability"),
-    import("@/lib/agent/spawnPolicy"),
-  ]);
-  /* The operator's own spawn lane, exactly as the orchestrator seat uses it:
-     the launch is the Viewer acting for the operator, not an agent asking. */
-  const request = {
-    headers: new Headers({ host: "127.0.0.1", [VIEWER_SPAWN_CAPABILITY_HEADER]: ensureOperatorSpawnCapability() }),
-    json: async () => body,
-  } as unknown as NextRequest;
-  const response = await executeSpawnRequest(request);
-  return { status: response.status, body: await response.json() as Record<string, unknown> };
+  log(code: ReportRunnerLogCode): void;
 }
 
 async function conversationLive(conversationId: string): Promise<boolean> {
@@ -110,9 +107,9 @@ export const productionReportRunnerPorts: ReportRunnerPorts = {
     catch { return { version: 1, status: "error", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: "session_unsafe" }; }
   },
   readPort: connectorReadPort,
-  spawn: postSpawnInProcess,
+  spawn: launchReportConversation,
   conversationLive,
-  log: (message, error) => console.error(message, error),
+  log: (code) => console.error(`[telegram report] ${code}`),
 };
 
 export type RunLaunchResult =
@@ -130,8 +127,10 @@ export class TelegramReportRunner {
   constructor(private readonly ports: ReportRunnerPorts = productionReportRunnerPorts) {}
 
   /** Whether a report run may hold the connector right now: the feature is on
-      and the account is connected. Both halves are re-read from durable state
-      at every launch, which is what makes logout revoke the grant. */
+      and the account is connected. It is passed to the launch as a CALLBACK,
+      not a value, so admission resolves it after the source pass rather than
+      before it — a logout during that minute must revoke the grant, not be
+      overtaken by state read before it happened. */
   grantActive(): boolean {
     return readTelegramReports().settings.enabled && this.ports.connection().status === "connected";
   }
@@ -171,8 +170,8 @@ export class TelegramReportRunner {
       updateTelegramReports((state) => { state.cursor.lastScheduledDay = day; });
       const begun = this.beginRun("scheduled");
       if (begun.ok) await this.execute(begun.runId);
-    } catch (error) {
-      this.ports.log("[telegram report] scheduler tick failed", error);
+    } catch {
+      this.ports.log("tick_failed");
     } finally {
       this.running = false;
     }
@@ -259,8 +258,8 @@ export class TelegramReportRunner {
   private async execute(runId: string): Promise<void> {
     try {
       await this.executeLocked(runId);
-    } catch (error) {
-      this.ports.log("[telegram report] run failed", error);
+    } catch {
+      this.ports.log("run_failed");
       this.settle(runId, "failed", "launch_failed", false);
     } finally {
       this.planning.delete(runId);
@@ -282,8 +281,8 @@ export class TelegramReportRunner {
         promptVersion: DAILY_REPORT_PROMPT_VERSION,
       });
       sourcesPath = writeReportSources(runId, plan);
-    } catch (error) {
-      this.ports.log("[telegram report] source discovery failed", error);
+    } catch {
+      this.ports.log("sources_failed");
       this.settle(runId, "failed", "sources_failed", false);
       return;
     }
@@ -306,29 +305,34 @@ export class TelegramReportRunner {
       identity: connection.identity,
       instructions: effectiveReportPrompt(readTelegramReports()),
     });
-    /* The grant is decided here, by the session class, from durable state —
-       never copied from the request or from a previous run. */
-    const mcpServers = mcpServersForScheduledReport({ grantActive: true });
-    let spawned: { status: number; body: Record<string, unknown> };
+    let spawned: ReportSpawnResult;
     try {
       spawned = await this.ports.spawn({
-        engine: "codex",
-        model: CODEX_SOL_MODEL,
-        effort: "medium",
-        cwd: reportWorkspaceDir(),
-        mcpServers,
-        clientAttemptId: `telegram-report-${runId}`,
-        ["prompt"]: prompt,
+        body: {
+          engine: "codex",
+          model: CODEX_SOL_MODEL,
+          effort: "medium",
+          cwd: reportWorkspaceDir(),
+          /* The durable marker that ties this conversation to this run, both
+             ways: the receipt carries it, and the history row carries the
+             conversation the receipt produced. No `src`, `parent` or role — see
+             the note on lineage at the bottom of this file. */
+          clientAttemptId: reportAttemptId(runId),
+          ["prompt"]: prompt,
+        },
+        /* The grant is decided by the report session class, inside admission,
+           from durable state read at that instant. */
+        grantActive: () => this.grantActive(),
       });
-    } catch (error) {
-      this.ports.log("[telegram report] launch failed", error);
+    } catch {
+      this.ports.log("launch_failed");
       this.settle(runId, "failed", "launch_failed", false);
       return;
     }
     const conversationId = typeof spawned.body.conversationId === "string" ? spawned.body.conversationId : null;
     const admitted = spawned.status >= 200 && spawned.status < 300 && spawned.body.ok !== false && conversationId !== null;
     if (!admitted) {
-      this.ports.log(`[telegram report] launch rejected with HTTP ${spawned.status}`);
+      this.ports.log("launch_rejected");
       this.settle(runId, "failed", "launch_failed", false);
       return;
     }
@@ -346,7 +350,8 @@ export class TelegramReportRunner {
   private async finalizeActiveRun(): Promise<void> {
     const active = readTelegramReports().active;
     if (!active) return;
-    const outcome = classifyReportOutput(ingestReportInbox(active.runId));
+    const ingested = ingestReportInbox(active.runId);
+    const outcome = classifyReportOutput(ingested);
     if (outcome.kind === "ok") {
       saveReportText(active.runId, outcome.report);
       this.settle(active.runId, "ok", null, true);
@@ -360,6 +365,13 @@ export class TelegramReportRunner {
       /* The window is NOT advanced: nothing was read, so the next run with the
          right account still covers this period. */
       this.settle(active.runId, "account-mismatch", null, false);
+      return;
+    }
+    if (outcome.kind === "invalid" && ingested !== null) {
+      /* The run wrote a file that is not a report: prose, a refusal, a half
+         format. Filing it as the day's report would advance the window over a
+         day nobody has actually read, so it fails and the window stays owed. */
+      this.settle(active.runId, "failed", "invalid_report", false);
       return;
     }
     const startedAt = Date.parse(active.startedAt);
@@ -406,9 +418,19 @@ export class TelegramReportRunner {
         hasReport,
         promptVersion: active.promptVersion,
       }, ...state.history];
-      /* Only a run that actually covered the window moves the cursor. */
-      if (status !== "ok" && status !== "quiet") return;
+      /* Only a run that actually covered the window moves the cursor. Every
+         other outcome records the boundary this run did NOT reach, so the next
+         run starts there instead of 24 h before itself. The earliest such
+         boundary wins; the 72 h cap is applied when the window is built. */
+      if (status !== "ok" && status !== "quiet") {
+        const owed = state.cursor.unreportedSinceAt;
+        if (!owed || Date.parse(active.windowStart) < Date.parse(owed)) {
+          state.cursor.unreportedSinceAt = active.windowStart;
+        }
+        return;
+      }
       state.cursor.lastSuccessfulWindowEndAt = active.windowEnd;
+      state.cursor.unreportedSinceAt = null;
       /* A successful run satisfies the day's slot whoever asked for it: a
          Run now at 10:05 must not be followed by the 10:00 scheduled run
          reporting the five minutes since. A run BEFORE the slot leaves the
@@ -447,6 +469,27 @@ export class TelegramReportRunner {
     });
     return { ok: false, code };
   }
+}
+
+/**
+ * The durable identity the launch carries into the registry (issue #1086).
+ *
+ * `clientAttemptId` is the spawn lane's own replay key: it is written on the
+ * receipt, resolvable through `spawnReceiptForClientAttempt`, and it survives a
+ * restart. Together with the `conversationId` the history row keeps, it is the
+ * two-way link between a report row and the board conversation that produced
+ * it.
+ *
+ * A lineage PARENT is deliberately not used, and the reason is mechanical: the
+ * registry re-decides every stored MCP grant from the row's own evidence
+ * (`mcpServersForStoredSession` at `registry.ts`, `decideStoredGrant` in
+ * `mcpAllowlist.ts`), and a `parentConversationId` classifies the row as
+ * delegated, whose grant is the baseline. A report run given a parent would
+ * therefore lose `telegram` at the moment its receipt is written. It is also
+ * true rather than convenient: no conversation spawns the 10:00 report.
+ */
+export function reportAttemptId(runId: string): string {
+  return `telegram-report-${runId}`;
 }
 
 function activeRow(active: NonNullable<ReturnType<typeof readTelegramReports>["active"]>): TelegramReportRow {

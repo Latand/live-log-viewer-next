@@ -101,7 +101,6 @@ export function reportWorkspaceDir(): string {
 const DEFAULT_STORED_SETTINGS: StoredReportSettings = {
   enabled: DEFAULT_TELEGRAM_REPORT_SETTINGS.enabled,
   time: DEFAULT_TELEGRAM_REPORT_SETTINGS.time,
-  days: DEFAULT_TELEGRAM_REPORT_SETTINGS.days,
   groups: [],
 };
 
@@ -109,7 +108,7 @@ const EMPTY: TelegramReportsFile = {
   version: 1,
   settings: DEFAULT_STORED_SETTINGS,
   ["prompt"]: null,
-  cursor: { lastSuccessfulWindowEndAt: null, lastScheduledDay: null },
+  cursor: { lastSuccessfulWindowEndAt: null, unreportedSinceAt: null, lastScheduledDay: null },
   active: null,
   history: [],
 };
@@ -138,7 +137,6 @@ export function sanitizeReportSettings(value: unknown): StoredReportSettings {
   return {
     enabled: row.enabled === true,
     time: validReportTime(row.time) ? row.time : DEFAULT_TELEGRAM_REPORT_SETTINGS.time,
-    days: row.days === "weekdays" ? "weekdays" : "daily",
     groups: sanitizeGroups(row.groups),
   };
 }
@@ -223,6 +221,7 @@ export function readTelegramReports(): TelegramReportsFile {
       : null,
     cursor: {
       lastSuccessfulWindowEndAt: text(cursor.lastSuccessfulWindowEndAt),
+      unreportedSinceAt: text(cursor.unreportedSinceAt),
       lastScheduledDay: text(cursor.lastScheduledDay),
     },
     active: sanitizeActive(row.active),

@@ -33,6 +33,7 @@ const ports: ReportRunnerPorts = {
   connection: () => CONNECTED,
   readPort: () => ({
     async listChats() { return [{ id: "101", kind: "user" as const, title: "Dialog A", username: null, unread: 0 }]; },
+    async pageChats() { return []; },
     async lastMessageAt() { return "2026-08-21T09:00:00.000Z"; },
   }),
   spawn: async () => ({ status: 202, body: { conversationId: "conversation_report", launchId: "launch_report", ok: true } }),
@@ -107,16 +108,16 @@ test("a report body is served only by explicit id, and an unknown id is a clean 
 });
 
 test("saving settings validates the time and never fires a run for a slot already past", async () => {
-  const invalid = await POST(post({ action: "settings", settings: { enabled: true, time: "25:00", days: "daily", groups: [] } }));
+  const invalid = await POST(post({ action: "settings", settings: { enabled: true, time: "25:00", groups: [] } }));
   expect(invalid.status).toBe(400);
 
   const saved = await POST(post({
     action: "settings",
-    settings: { enabled: true, time: "10:00", days: "weekdays", groups: [{ id: "-1001", title: "Team room", mode: "light" }] },
+    settings: { enabled: true, time: "10:00", groups: [{ id: "-1001", title: "Team room", mode: "light" }] },
   }));
   expect(saved.status).toBe(200);
   const state = readTelegramReports();
-  expect(state.settings).toEqual({ enabled: true, time: "10:00", days: "weekdays", groups: [{ id: "-1001", title: "Team room", mode: "light" }] });
+  expect(state.settings).toEqual({ enabled: true, time: "10:00", groups: [{ id: "-1001", title: "Team room", mode: "light" }] });
   /* Enabling at 15:00 with a 10:00 slot stamps the day: the first scheduled
      report is tomorrow's, not one fired on the spot. */
   expect(state.cursor.lastScheduledDay).toBe("2026-08-21");
@@ -126,13 +127,13 @@ test("saving settings validates the time and never fires a run for a slot alread
 test("a group id that is not a chat id is refused", async () => {
   const response = await POST(post({
     action: "settings",
-    settings: { enabled: true, time: "10:00", days: "daily", groups: [{ id: "../escape", title: "x", mode: "full" }] },
+    settings: { enabled: true, time: "10:00", groups: [{ id: "../escape", title: "x", mode: "full" }] },
   }));
   expect(response.status).toBe(400);
 });
 
 test("Run now launches a visible run and reports the conversation it opened", async () => {
-  await POST(post({ action: "settings", settings: { enabled: true, time: "10:00", days: "daily", groups: [] } }));
+  await POST(post({ action: "settings", settings: { enabled: true, time: "10:00", groups: [] } }));
   const response = await POST(post({ action: "run-now" }));
   expect(response.status).toBe(202);
   const body = await response.json() as { runId: string; reports: TelegramReportsPayload };
@@ -176,7 +177,7 @@ test("the analyst prompt is served by its own request and never in the polled pa
 
 test("an ordinary settings save leaves the stored prompt alone; sending one replaces it", async () => {
   updateTelegramReports((state) => { state.prompt = "Report in Ukrainian."; });
-  const settings = { enabled: true, time: "09:00", days: "daily", groups: [] };
+  const settings = { enabled: true, time: "09:00", groups: [] };
   await POST(post({ action: "settings", settings }));
   expect(readTelegramReports().prompt).toBe("Report in Ukrainian.");
 

@@ -11,7 +11,7 @@ import { emptyLaunchProfile, validExplicitProject } from "@/lib/accounts/migrati
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
 import { agentRegistry, SpawnChildLimitError, type SpawnRequest } from "@/lib/agent/registry";
 import { reasoningFromBody } from "@/lib/agent/efforts";
-import { mcpServersForSession, normalizeSpawnMcpServers } from "@/lib/agent/mcpAllowlist";
+import { grantedMcpServers, mcpServersForSession, normalizeSpawnMcpServers, SCHEDULED_REPORT_SESSION_CLASS, type McpSessionClass } from "@/lib/agent/mcpAllowlist";
 import { normalizeSpawnPlugins, pluginAllowlistForSession, sessionOriginFor } from "@/lib/agent/pluginAllowlist";
 import { codexModelSupportsImages, modelFromBody, validateLaunchModel } from "@/lib/agent/models";
 import { resolveSpawnRole } from "@/lib/roles/registry";
@@ -60,6 +60,19 @@ export interface SpawnCommandDependencies {
   storeImages(images: readonly RuntimeImageUpload[]): StructuredImageRef[];
   adoptPipelineAttemptFromSource?: typeof adoptPipelineAttemptFromSource;
   pipelineAttemptTargetForSource?: typeof pipelineAttemptTargetForSource;
+  /**
+   * A grant the VIEWER itself elects for a launch it makes on its own timer
+   * (issue #1086), rather than one derived from the request's session origin.
+   *
+   * It is a callback so it resolves here, at admission, from durable state at
+   * the instant the grant is decided. Only an in-process caller can supply
+   * one: `/api/spawn` calls {@link executeSpawnRequest} with no dependencies,
+   * so no request body, header or query reaches this seam. `sessionClass` is
+   * checked against the classes admission accepts internally, so a future
+   * caller cannot invent one, and the servers are re-bounded by the global
+   * grantable set before use — the seam can only narrow.
+   */
+  internalGrant?(): { sessionClass: McpSessionClass; mcpServers: readonly string[] } | null;
 }
 
 class RuntimeImageStorageError extends Error {}
@@ -356,8 +369,19 @@ export async function executeSpawnRequest(
       requested: requestedPlugins.value,
     });
     /* Same shape for MCP: a delegated launch holds the Viewer baseline whatever
-       it asked for, so a granted connector cannot travel down a spawn chain. */
-    const grantedServers = mcpServersForSession({ origin: sessionOrigin, requested: requestedMcpServers });
+       it asked for, so a granted connector cannot travel down a spawn chain.
+
+       The one exception is a Viewer-internal session class (#1086), which
+       REPLACES the origin default rather than adding to it: a report run whose
+       grant has been revoked gets the baseline even though its launch would
+       otherwise classify as an operator root. Only an in-process dependency can
+       name it, and only a class listed here is honoured. */
+    const internalGrant = dependencies.internalGrant?.() ?? null;
+    const internalServers = internalGrant?.sessionClass === SCHEDULED_REPORT_SESSION_CLASS
+      ? grantedMcpServers(internalGrant.mcpServers)
+      : null;
+    const grantedServers = internalServers
+      ?? mcpServersForSession({ origin: sessionOrigin, requested: requestedMcpServers });
     const requestDigestForAccount = (accountId: string) => spawnRequestDigest({
       engine,
       cwd,

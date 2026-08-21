@@ -54,16 +54,17 @@ afterAll(() => {
 
 test("settings, cursor and history survive a restart, and the file is owner-only", () => {
   updateTelegramReports((state) => {
-    state.settings = { enabled: true, time: "09:30", days: "weekdays", groups: [{ id: "-1001", title: "Team room", mode: "light" }] };
+    state.settings = { enabled: true, time: "09:30", groups: [{ id: "-1001", title: "Team room", mode: "light" }] };
     state.cursor.lastSuccessfulWindowEndAt = "2026-08-21T07:00:00.000Z";
+    state.cursor.unreportedSinceAt = "2026-08-20T07:00:00.000Z";
     state.history = [row("report-fixture-0001")];
   });
   /* A fresh read is what a restarted Viewer does. */
   const reread = readTelegramReports();
   expect(reread.settings.time).toBe("09:30");
-  expect(reread.settings.days).toBe("weekdays");
   expect(reread.settings.groups).toEqual([{ id: "-1001", title: "Team room", mode: "light" }]);
   expect(reread.cursor.lastSuccessfulWindowEndAt).toBe("2026-08-21T07:00:00.000Z");
+  expect(reread.cursor.unreportedSinceAt).toBe("2026-08-20T07:00:00.000Z");
   expect(reread.history.map((item) => item.id)).toEqual(["report-fixture-0001"]);
 
   const stat = fs.statSync(path.join(SANDBOX, "state", "telegram", "reports.json"));

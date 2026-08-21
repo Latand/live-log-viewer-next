@@ -12,9 +12,10 @@
  *    (a Viewer that was down at 10:00 finds the slot passed and the day
  *    unstamped) and the per-day idempotency (a second tick finds the day
  *    stamped), so neither needs its own mechanism;
- *  - the window runs from the last SUCCESSFUL report to now, capped at 72 h,
- *    and 24 h on a first run. A failed run never advances the cursor, so the
- *    next run's window still covers the day it missed.
+ *  - the window runs from the earliest period nobody has reported yet to now,
+ *    capped at 72 h, and 24 h on a first run. A failed run leaves that
+ *    boundary where it was, so the next run's window still covers the day it
+ *    missed instead of starting 24 h before itself.
  */
 
 import {
@@ -22,9 +23,9 @@ import {
   type TelegramReportSettings,
 } from "./reportContracts";
 
-/** Only the three fields a schedule is made of — so both the stored settings
+/** Only the two fields a schedule is made of — so both the stored settings
     and the payload's satisfy it. */
-export type ReportScheduleSettings = Pick<TelegramReportSettings, "enabled" | "time" | "days">;
+export type ReportScheduleSettings = Pick<TelegramReportSettings, "enabled" | "time">;
 
 export const REPORT_WINDOW_CAP_MS = 72 * 60 * 60 * 1000;
 export const REPORT_FIRST_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -34,7 +35,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 const formatters = new Map<string, Intl.DateTimeFormat>();
 
-function parts(instant: number, timeZone: string): { year: number; month: number; day: number; hour: number; minute: number; second: number; weekday: number } {
+function parts(instant: number, timeZone: string): { year: number; month: number; day: number; hour: number; minute: number; second: number } {
   let formatter = formatters.get(timeZone);
   if (!formatter) {
     formatter = new Intl.DateTimeFormat("en-US", {
@@ -46,13 +47,11 @@ function parts(instant: number, timeZone: string): { year: number; month: number
       hour: "2-digit",
       minute: "2-digit",
       second: "2-digit",
-      weekday: "short",
     });
     formatters.set(timeZone, formatter);
   }
   const found: Record<string, string> = {};
   for (const part of formatter.formatToParts(new Date(instant))) found[part.type] = part.value;
-  const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   return {
     year: Number(found.year),
     month: Number(found.month),
@@ -61,7 +60,6 @@ function parts(instant: number, timeZone: string): { year: number; month: number
     hour: Number(found.hour) % 24,
     minute: Number(found.minute),
     second: Number(found.second),
-    weekday: Math.max(0, weekdays.indexOf(found.weekday ?? "")),
   };
 }
 
@@ -70,11 +68,6 @@ function parts(instant: number, timeZone: string): { year: number; month: number
 export function localDayKey(instant: number, timeZone: string = REPORT_TIME_ZONE): string {
   const local = parts(instant, timeZone);
   return `${String(local.year).padStart(4, "0")}-${String(local.month).padStart(2, "0")}-${String(local.day).padStart(2, "0")}`;
-}
-
-/** 0 = Sunday … 6 = Saturday, in the operator's zone. */
-export function localWeekday(instant: number, timeZone: string = REPORT_TIME_ZONE): number {
-  return parts(instant, timeZone).weekday;
 }
 
 function zoneOffsetMs(instant: number, timeZone: string): number {
@@ -100,15 +93,19 @@ export function slotInstant(dayKey: string, time: string, timeZone: string = REP
   return second;
 }
 
-function allowedDay(instant: number, settings: ReportScheduleSettings, timeZone: string): boolean {
-  if (settings.days === "daily") return true;
-  const weekday = localWeekday(instant, timeZone);
-  return weekday >= 1 && weekday <= 5;
-}
-
 export interface ReportScheduleCursor {
   /** End of the last window a run reported successfully, or `null`. */
   lastSuccessfulWindowEndAt: string | null;
+  /**
+   * Start of the earliest window nobody has reported yet, or `null` when
+   * everything up to {@link lastSuccessfulWindowEndAt} is covered.
+   *
+   * A failed run writes its own window start here and a successful one clears
+   * it. Without it the day a failed run was meant to cover is simply lost: the
+   * next day's window would begin 24 h before ITSELF, not 24 h before the run
+   * that failed.
+   */
+  unreportedSinceAt: string | null;
   /** Day key of the last SCHEDULED run that fired (manual runs do not stamp
       it — a Run now must not swallow the day's scheduled report). */
   lastScheduledDay: string | null;
@@ -123,7 +120,6 @@ export function scheduledRunDue(input: {
 }): boolean {
   const timeZone = input.timeZone ?? REPORT_TIME_ZONE;
   if (!input.settings.enabled) return false;
-  if (!allowedDay(input.now, input.settings, timeZone)) return false;
   const today = localDayKey(input.now, timeZone);
   if (input.cursor.lastScheduledDay === today) return false;
   return input.now >= slotInstant(today, input.settings.time, timeZone);
@@ -145,7 +141,6 @@ export function nextScheduledRunAt(input: {
   for (let ahead = 0; ahead <= 8; ahead += 1) {
     const dayKey = localDayKey(noon + ahead * DAY_MS, timeZone);
     const slot = slotInstant(dayKey, input.settings.time, timeZone);
-    if (!allowedDay(slot, input.settings, timeZone)) continue;
     if (slot <= input.now || input.cursor.lastScheduledDay === dayKey) continue;
     return slot;
   }
@@ -158,17 +153,21 @@ export interface ReportWindow {
 }
 
 /**
- * The window a run about to start must cover: from the last successful report
- * to now, never longer than 72 h, and 24 h when there is no previous report.
- * A cursor in the future (a clock step back) collapses to the first-run
+ * The window a run about to start must cover.
+ *
+ * It begins at the earliest period nobody has reported — the boundary a failed
+ * run left behind, or else the end of the last successful report — and runs to
+ * now, never longer than 72 h, and 24 h when there is no previous report at
+ * all. A cursor in the future (a clock step back) collapses to the first-run
  * window rather than an inverted range.
  */
 export function reportWindowFor(now: number, cursor: ReportScheduleCursor): ReportWindow {
-  const previous = cursor.lastSuccessfulWindowEndAt ? Date.parse(cursor.lastSuccessfulWindowEndAt) : Number.NaN;
-  const fallback = now - REPORT_FIRST_WINDOW_MS;
-  const start = Number.isFinite(previous) && previous < now
-    ? Math.max(previous, now - REPORT_WINDOW_CAP_MS)
-    : fallback;
+  const owed = cursor.unreportedSinceAt ? Date.parse(cursor.unreportedSinceAt) : Number.NaN;
+  const reported = cursor.lastSuccessfulWindowEndAt ? Date.parse(cursor.lastSuccessfulWindowEndAt) : Number.NaN;
+  const boundary = Number.isFinite(owed) ? owed : reported;
+  const start = Number.isFinite(boundary) && boundary < now
+    ? Math.max(boundary, now - REPORT_WINDOW_CAP_MS)
+    : now - REPORT_FIRST_WINDOW_MS;
   return { startAt: new Date(start).toISOString(), endAt: new Date(now).toISOString() };
 }
 

@@ -17,6 +17,7 @@ import {
   defaultMcpServersForOrigin,
   grantedMcpServers,
   mcpServersForScheduledReport,
+  SCHEDULED_REPORT_SESSION_CLASS,
   mcpServersForSession,
   mcpServersForStoredSession,
   SCHEDULED_REPORT_MCP_SERVERS,
@@ -119,6 +120,32 @@ test("#1086: the report class is not reachable from a spawn request, so delegate
     .toEqual(["viewer"]);
   expect(mcpServersForSession({ origin: sessionOriginFor({ origin: { kind: "agent" } }), requested: ["viewer", "telegram"] }))
     .toEqual(["viewer"]);
+  /* Not even a body that names the class itself: it is not an origin, and an
+     origin nobody recognises is delegated. */
+  expect(sessionOriginFor({ origin: { kind: SCHEDULED_REPORT_SESSION_CLASS } })).toBe("delegated");
+  expect(mcpServersForSession({
+    origin: SCHEDULED_REPORT_SESSION_CLASS as unknown as ReturnType<typeof sessionOriginFor>,
+    requested: ["viewer", "telegram"],
+  })).toEqual(["viewer"]);
+});
+
+test("#1086: a settled report row is re-decided from its own evidence, not from the class", () => {
+  /* The class is a LAUNCH decision; the durable row is re-decided on every
+     registry read. A report run is a depth-0 root with no parent and no role,
+     so it keeps the grant — and the moment a row carries any delegation
+     evidence it drops to the baseline, which is why the launch carries no
+     lineage parent. */
+  expect(mcpServersForStoredSession({
+    origin: { kind: "operator" },
+    delegationDepth: 0,
+    requested: ["viewer", "telegram"],
+  })).toEqual(["viewer", "telegram"]);
+  expect(mcpServersForStoredSession({
+    origin: { kind: "operator" },
+    delegationDepth: 0,
+    parentConversationId: "conversation_parent",
+    requested: ["viewer", "telegram"],
+  })).toEqual(["viewer"]);
 });
 
 test("an empty selection stays the explicit opt-out and still yields Viewer", () => {

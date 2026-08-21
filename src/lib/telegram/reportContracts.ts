@@ -26,8 +26,6 @@ export type TelegramReportGroup = {
   mode: TelegramReportGroupMode;
 };
 
-export type TelegramReportDays = "daily" | "weekdays";
-
 /**
  * The settings the panel renders and polls.
  *
@@ -38,9 +36,9 @@ export type TelegramReportDays = "daily" | "weekdays";
  */
 export type TelegramReportSettings = {
   enabled: boolean;
-  /** `HH:MM` in {@link REPORT_TIME_ZONE}. */
+  /** `HH:MM` in {@link REPORT_TIME_ZONE}. One slot a day: the report is daily,
+      so a recurrence field would be a second schedule to keep correct. */
   time: string;
-  days: TelegramReportDays;
   /** Operator-picked groups. Private dialogs are discovered per run and are
       never listed here — they must not become durable Viewer state. */
   groups: TelegramReportGroup[];
@@ -96,7 +94,6 @@ export const REPORT_TIME_ZONE = "Europe/Kyiv";
 export const DEFAULT_TELEGRAM_REPORT_SETTINGS: TelegramReportSettings = {
   enabled: false,
   time: "10:00",
-  days: "daily",
   groups: [],
   promptIsDefault: true,
 };

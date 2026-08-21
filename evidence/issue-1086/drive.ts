@@ -22,9 +22,11 @@
  *  - the phone never grows a horizontal scrollbar with the sheet open, and the
  *    Telegram row keeps its 44px tap target.
  *
- * Output: evidence/issue-1086/report-states.json (booleans only) plus
- * screenshots under the capture directory printed at the end. No absolute path
- * and no identity appears in the JSON.
+ * Output: `.artifacts/issue-1086/` in the worktree — the PNGs plus
+ * `report-states.json` (booleans only). That directory is untracked and
+ * gitignored: this repository is public and its publication gate admits raster
+ * only with deterministic-generator provenance, so a browser capture is never
+ * committed. No absolute path and no identity appears in the JSON.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
@@ -47,11 +49,11 @@ const BASE = createCaptureDirectory({
 });
 const HOME = path.join(BASE, "home");
 const OUT_DIR = path.join(BASE, "out");
-/* Panel crops beside the full-page shots. Both stay in the ephemeral capture
-   dir: this repository is public and its publication gate admits raster only
-   with deterministic-generator provenance, so a browser capture is never
-   committed — the booleans below are the committed evidence. */
+/* Panel crops beside the full-page shots. */
 const PANEL_DIR = path.join(BASE, "panels");
+/* Where a reviewer looks: an untracked directory in the worktree, so the UI
+   critique stage can open the captures without them entering a commit. */
+const ARTIFACTS_DIR = path.join(REPO_ROOT, ".artifacts", "issue-1086");
 const REPO_DIR = path.join(HOME, "Projects", "atlas");
 const CAPTURE_MS = Date.parse("2100-01-02T12:00:00.000Z");
 const DESKTOP = { width: 1440, height: 900 };
@@ -64,6 +66,7 @@ function seedHome(): void {
   fs.mkdirSync(REPO_DIR, { recursive: true });
   fs.mkdirSync(OUT_DIR, { recursive: true });
   fs.mkdirSync(PANEL_DIR, { recursive: true });
+  fs.mkdirSync(ARTIFACTS_DIR, { recursive: true });
   fs.mkdirSync(path.join(BASE, "tmp", `claude-${process.getuid?.() ?? 1000}`), { recursive: true });
   fs.mkdirSync(path.join(HOME, ".config/agent-log-viewer/state"), { recursive: true });
   fs.mkdirSync(path.join(HOME, ".codex/sessions"), { recursive: true });
@@ -187,7 +190,6 @@ const ENABLED = {
   settings: {
     enabled: true,
     time: "10:00",
-    days: "daily" as const,
     groups: [{ id: GROUPS[0].id, title: GROUPS[0].title, mode: "full" as const }],
     promptIsDefault: true,
   },
@@ -234,14 +236,14 @@ interface StateSpec {
 const STATES: StateSpec[] = [
   {
     id: "settings-disabled",
-    reports: { settings: { enabled: false, time: "10:00", days: "daily", groups: [], promptIsDefault: true }, history: [], nextRunAt: null },
+    reports: { settings: { enabled: false, time: "10:00", groups: [], promptIsDefault: true }, history: [], nextRunAt: null },
     expectText: ["Daily report", "Enable daily report"],
     absentText: ["Run now"],
   },
   {
     id: "settings-enabled",
     reports: { ...ENABLED, history: [] },
-    expectText: ["Run now", "Kyiv time", "Weekdays", "Sources: active private dialogs + 1 group", "No runs yet.", "Next 10:00"],
+    expectText: ["Run now", "Kyiv time", "Sources: active private dialogs + 1 group", "No runs yet.", "Next 10:00"],
   },
   {
     id: "sources-picker",
@@ -424,12 +426,15 @@ async function main(): Promise<void> {
       for (const state of STATES) checks.push(await captureState(context, baseUrl, state, viewport));
       await context.close();
     }
+    for (const dir of [OUT_DIR, PANEL_DIR]) {
+      for (const name of fs.readdirSync(dir)) fs.copyFileSync(path.join(dir, name), path.join(ARTIFACTS_DIR, name));
+    }
     fs.writeFileSync(
-      path.join(import.meta.dir, "report-states.json"),
-      JSON.stringify({ issue: 1086, capturedAt: "2100-01-02T12:00:00.000Z", identityFixture: "Account A/@account_a", checks }, null, 2) + "\n",
+      path.join(ARTIFACTS_DIR, "report-states.json"),
+      JSON.stringify({ issue: 1086, capturedAt: "2100-01-02T12:00:00.000Z", identityFixture: "Account A", checks }, null, 2) + "\n",
     );
-    console.log(`screenshots: ${OUT_DIR}`);
-    console.log(`evidence: evidence/issue-1086/report-states.json (${checks.length} checks)`);
+    console.log(`screenshots: .artifacts/issue-1086/ (${fs.readdirSync(ARTIFACTS_DIR).filter((name) => name.endsWith(".png")).length} png)`);
+    console.log(`evidence: .artifacts/issue-1086/report-states.json (${checks.length} checks)`);
   } finally {
     await browser.close();
     server.kill("SIGTERM");
