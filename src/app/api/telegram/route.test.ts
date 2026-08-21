@@ -194,6 +194,45 @@ test("#1070: valid credentials persist owner-only into telegram.json and the pay
   expect((fresh.telegram as { credentialsConfigured: boolean }).credentialsConfigured).toBe(true);
 });
 
+test("#1070: a save clears a stale credentials_missing error and leaves no temp files or log leaks", async () => {
+  fs.rmSync(CREDS_FILE, { force: true });
+  /* The durable connection says the world lacks credentials. */
+  const { writeTelegramConnection } = await import("@/lib/telegram/sessionStore");
+  writeTelegramConnection({ version: 1, status: "error", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: "credentials_missing" });
+  const logged: string[] = [];
+  const originals = { log: console.log, warn: console.warn, error: console.error } as const;
+  console.log = console.warn = console.error = (...args: unknown[]) => { logged.push(args.map(String).join(" ")); };
+  let telegram: { phase: string; error: unknown };
+  try {
+    const response = await POST(postRequest({ action: "credentials", apiId: PLACEHOLDER_API_ID, apiHash: PLACEHOLDER_API_HASH }));
+    telegram = (await payload(response)).telegram as typeof telegram;
+  } finally {
+    console.log = originals.log; console.warn = originals.warn; console.error = originals.error;
+  }
+  /* The stale error yields to the normal Connect state. */
+  expect(telegram.phase).toBe("disconnected");
+  expect(telegram.error).toBeNull();
+  /* Nothing logged the hash, and no temp sibling survived the write. */
+  expect(logged.join("\n")).not.toContain(PLACEHOLDER_API_HASH);
+  const siblings = fs.readdirSync(path.dirname(CREDS_FILE)).filter((name) => name !== "telegram.json");
+  expect(siblings).toEqual([]);
+});
+
+test("#1070: a symlinked telegram.json is replaced, never written through", async () => {
+  fs.rmSync(CREDS_FILE, { force: true });
+  const outside = path.join(SANDBOX, "outside-target.json");
+  fs.writeFileSync(outside, "untouched");
+  fs.mkdirSync(path.dirname(CREDS_FILE), { recursive: true });
+  fs.symlinkSync(outside, CREDS_FILE);
+  const response = await POST(postRequest({ action: "credentials", apiId: PLACEHOLDER_API_ID, apiHash: PLACEHOLDER_API_HASH }));
+  expect(response.status).toBe(200);
+  /* The rename replaced the symlink with a regular owner-only file; the
+     symlink's target never received a byte. */
+  expect(fs.lstatSync(CREDS_FILE).isSymbolicLink()).toBe(false);
+  expect(fs.readFileSync(outside, "utf8")).toBe("untouched");
+  expect(fs.statSync(CREDS_FILE).mode & 0o777).toBe(0o600);
+});
+
 test("#1070: invalid credentials are rejected before any byte is written", async () => {
   fs.rmSync(CREDS_FILE, { force: true });
   for (const attempt of [

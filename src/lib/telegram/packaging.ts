@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -130,14 +131,16 @@ export function saveTelegramApiCredentials(apiId: string, apiHash: string): void
   }
   const target = configFilePath("telegram.json");
   fs.mkdirSync(path.dirname(target), { recursive: true });
-  const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tmp, `${JSON.stringify({ apiId, apiHash }, null, 2)}\n`, { mode: 0o600 });
+  /* Unpredictable sibling + exclusive creation ("wx"): a pre-planted file or
+     symlink at the temp path fails the write instead of receiving the hash
+     through the default truncating open (the session store's pattern). */
+  const tmp = path.join(path.dirname(target), `.${path.basename(target)}.${process.pid}.${crypto.randomUUID()}.tmp`);
   try {
+    fs.writeFileSync(tmp, `${JSON.stringify({ apiId, apiHash }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
     fs.renameSync(tmp, target);
     fs.chmodSync(target, 0o600);
-  } catch (error) {
-    try { fs.rmSync(tmp, { force: true }); } catch { /* best-effort cleanup */ }
-    throw error;
+  } finally {
+    fs.rmSync(tmp, { force: true });
   }
 }
 

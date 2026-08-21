@@ -162,6 +162,22 @@ export class TelegramConnectionService {
     };
   }
 
+  /** #1070: called after a successful credentials save. A durable
+      `credentials_missing` error described the world before the save; leaving
+      it standing would hide the Connect flow behind a stale error card. Any
+      other state (including an unsafe session) is left untouched. */
+  credentialsSaved(): TelegramStatusPayload {
+    if (!this.login) {
+      try {
+        const connection = readTelegramConnection();
+        if (connection.status === "error" && connection.errorCode === "credentials_missing") {
+          writeTelegramConnection({ version: 1, status: "disconnected", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: null });
+        }
+      } catch { /* an unsafe session keeps its explicit-deletion contract */ }
+    }
+    return this.status();
+  }
+
   /** Starts the QR login. One operation at a time — a second start while one
       is live is refused, exactly like the account-login supervisor. */
   startLogin(): Promise<TelegramStatusPayload> {

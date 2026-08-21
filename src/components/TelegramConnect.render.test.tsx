@@ -52,6 +52,9 @@ test("#1070: missing host credentials render the inline api_id/api_hash form ins
 test("#1070: the credentials_missing error also gets the form, and configured hosts keep plain Connect", () => {
   const errorHtml = render({ phase: "error", error: { code: "credentials_missing" }, credentialsConfigured: false });
   expect(errorHtml).toContain("Save credentials");
+  /* The error card's Retry would restart enrollment without credentials;
+     while the form is up it stays hidden. */
+  expect(errorHtml).not.toContain(">Retry<");
   const configured = render({ phase: "disconnected", credentialsConfigured: true });
   expect(configured).toContain("Connect Telegram");
   expect(configured).not.toContain("Save credentials");

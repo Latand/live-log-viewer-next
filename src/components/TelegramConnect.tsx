@@ -401,7 +401,10 @@ export function TelegramPanel({ state, onClose }: { state: TelegramConnectionSta
             </>
           ) : null}
 
-          {phase === "error" ? (
+          {/* #1070: while the credentials form is up, the error card and its
+              Retry would restart enrollment without credentials — the form's
+              own hint already explains the state, so they stay hidden. */}
+          {phase === "error" && !needsCredentials ? (
             <>
               <p role="alert" className="text-[10.5px] font-semibold leading-snug text-danger">
                 {t(telegramErrKey(status?.error?.code ?? "bridge_failed"))}

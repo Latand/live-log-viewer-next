@@ -9,10 +9,13 @@ export const dynamic = "force-dynamic";
 
 /**
  * The whole Telegram connection API (issue #1059), deliberately narrow:
- * status (GET, `?fresh=1` runs a health check) and five actions (POST):
- * start, password, cancel, logout, delete. Every payload is the sanitized
- * TelegramStatusPayload — no session string, no API credential, no raw
- * upstream error ever crosses this boundary.
+ * status (GET, `?fresh=1` runs a health check) and six actions (POST):
+ * start, password, credentials, cancel, logout, delete. The `credentials`
+ * action (#1070) is the one inbound path that carries an operator-entered
+ * secret (api_id + api_hash) — validated, then persisted owner-only. Every
+ * RESPONSE is the sanitized TelegramStatusPayload: no session string, no API
+ * credential, and no raw upstream error ever leaves this boundary, in a GET
+ * payload or otherwise.
  */
 
 function failure(status: number, code: string, message: string) {
@@ -63,7 +66,7 @@ export async function POST(req: NextRequest) {
           return failure(400, "invalid_credentials", "Telegram API credentials are invalid");
         }
         saveTelegramApiCredentials(body.apiId as string, body.apiHash as string);
-        return NextResponse.json({ telegram: service.status() });
+        return NextResponse.json({ telegram: service.credentialsSaved() });
       }
       case "logout":
         return NextResponse.json({ telegram: await service.logout() });
